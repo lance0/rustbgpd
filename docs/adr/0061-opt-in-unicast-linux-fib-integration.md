@@ -26,6 +26,20 @@ land.
 
 ## Decision
 
+The runtime projects intent incrementally from bounded ordered Loc-RIB pages.
+A reconcile owns one 30-second planning deadline; page, exact-prefix,
+peer-group, and final-seal exchanges each use the smaller of the remaining
+deadline and two seconds. Planning ends before the first kernel dump, and an
+incomplete plan publishes and mutates nothing.
+
+Before deleting a daemon-owned key absent from provisional intent, the actor
+queries that exact prefix (never longest-prefix match) and reuses the ordinary
+ECMP projection. Route churn freezes Add/Replace only for `max_routes` tables;
+uncapped tables continue and exact repairs, removals, and ownership release
+remain available. Peer-group churn likewise freezes Add/Replace for tables
+with `allowed_peer_groups`, and cannot by itself authorize deletion of a
+still-present route.
+
 ### 1. General unicast FIB install is explicit opt-in
 
 The default remains control-plane-only. Route reflectors, route

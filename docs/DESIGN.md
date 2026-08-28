@@ -59,6 +59,12 @@ For crate dependency graph, runtime model, ownership model, data flow, lifecycle
 
 **RIB snapshot model:** Snapshots are generation-based, not deep copies. The RIB stores immutable per-prefix route sets behind `Arc`. Paginated gRPC queries iterate a snapshot handle while the active RIB advances generations without blocking readers. This avoids O(n) cloning on every query.
 
+Linux dataplane reconcilers use a separate internal live-walk contract: an
+opt-in ordered prefix index serves bounded best-route and ECMP pages, exact
+key revalidation, and conservative route/peer-group version seals. The index
+is enabled only when BLACKHOLE enforcement or a general FIB table is active;
+control-plane-only processes keep the lazy RIB layout.
+
 **Redesign triggers (instrumented from day one):**
 - `bgp_rib_ingest_channel_depth` — queued `RibUpdate` messages sampled once per manager loop. Pegged at the channel capacity means producers are parked; evaluate sharding or batch coalescing. The `bgp_rib_outbound_prefix_limit_actor_duration_seconds` and `bgp_rib_route_refresh_actor_duration_seconds` histograms time the actor operations that hold the loop.
 - `bgp_inbound_rib_backpressure_total` — any non-zero sustained rate means session tasks are stalling on a full RIB channel (ADR-0078).

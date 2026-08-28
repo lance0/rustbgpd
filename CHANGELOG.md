@@ -38,6 +38,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Linux BLACKHOLE and general unicast FIB reconciliation now walks bounded,
+  ordered Loc-RIB pages instead of retaining a second full route snapshot.
+  Each pass has a 30-second planning ceiling and two-second query slices;
+  daemon-owned keys missing from the provisional walk receive an exact current
+  prefix check before removal. Route or peer-group churn freezes guarded new
+  programming while safe exact cleanup continues, and incomplete planning
+  leaves kernel, ownership, status, and replacement terminality unchanged.
+
 - EVPN UPDATE decoding now reports unrecognized or unsupported typed NLRIs
   without dropping supported routes in the same MP attribute. One bounded
   debug record preserves each route type and count, while

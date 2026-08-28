@@ -14,7 +14,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rustbgpd_rib::{FibInstallCandidate, RibUpdate, RouteOrigin};
+#[cfg(test)]
+use rustbgpd_rib::FibInstallCandidate;
+use rustbgpd_rib::{RibUpdate, RouteOrigin};
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix, Prefix};
 use serde::{Deserialize, Serialize};
@@ -24,10 +26,10 @@ use tracing::{debug, info, warn};
 
 use crate::config::FibTableConfig;
 use crate::fib::{
-    FibDrop, FibIntent, FibKernelProtocol, FibKernelRoute, FibKernelSnapshot, FibNextHop,
-    FibNextHopScope, FibOp, FibOwnedState, FibPlan, FibRoute, FibRouteKey, FibRouteTarget,
-    FibTableKey, compute_fib_diff, fib_next_hop_installable, is_ipv6_link_local,
-    project_fib_intent_with_peer_groups, record_fib_success,
+    FibDrop, FibIntent, FibIntentBuilder, FibKernelProtocol, FibKernelRoute, FibKernelSnapshot,
+    FibNextHop, FibNextHopScope, FibOp, FibOwnedState, FibPlan, FibRoute, FibRouteKey,
+    FibRouteTarget, FibTableKey, compute_fib_diff, fib_next_hop_installable, is_ipv6_link_local,
+    record_fib_success,
 };
 use crate::fib_common::{prefix_and_nexthop_same_family, table_allows_prefix};
 #[cfg(target_os = "linux")]
@@ -39,6 +41,7 @@ use crate::kernel_route_notify::{
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 const ROUTE_EVENT_DEBOUNCE: Duration = Duration::from_millis(200);
 const RIB_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
+const PLANNING_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Runtime config resolved from `[[fib_tables]]`.
@@ -645,6 +648,7 @@ async fn recv_route_event(
     }
 }
 
+#[cfg(test)]
 async fn query_fib_install_candidates(
     rib_tx: &mpsc::Sender<RibUpdate>,
     max_paths: u32,
@@ -691,6 +695,121 @@ async fn query_fib_install_candidates(
     }
 }
 
+fn planning_request_deadline(planning_deadline: tokio::time::Instant) -> tokio::time::Instant {
+    planning_deadline.min(tokio::time::Instant::now() + RIB_QUERY_TIMEOUT)
+}
+
+async fn query_fib_install_candidate_pages(
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    max_paths: u32,
+    relax: bool,
+    weighted: bool,
+    planning_deadline: tokio::time::Instant,
+    builder: &mut FibIntentBuilder,
+) -> Result<(rustbgpd_rib::RoutePageVersion, bool), &'static str> {
+    let mut after = None;
+    let mut first_version = None;
+    let mut churned = false;
+    loop {
+        let deadline = planning_request_deadline(planning_deadline);
+        if tokio::time::Instant::now() >= deadline {
+            return Err("timeout");
+        }
+        let (reply, rx) = oneshot::channel();
+        let query = async {
+            rib_tx
+                .send(RibUpdate::QueryFibInstallCandidatesPage {
+                    after,
+                    max_paths,
+                    relax,
+                    weighted,
+                    deadline,
+                    reply,
+                })
+                .await
+                .map_err(|_| "send_failed")?;
+            rx.await
+                .map_err(|_| "reply_dropped")?
+                .map_err(|_| "query_failed")
+        };
+        let page = tokio::time::timeout_at(deadline, query)
+            .await
+            .map_err(|_| "timeout")??;
+        if let Some(first) = first_version {
+            churned |= first != page.observed_version;
+        } else {
+            first_version = Some(page.observed_version);
+        }
+        if !builder.push_until(&page.candidates, planning_deadline) {
+            return Err("timeout");
+        }
+        match page.next_cursor {
+            Some(cursor) => after = Some(cursor),
+            None => return Ok((first_version.ok_or("query_failed")?, churned)),
+        }
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "bounded exact query carries ECMP policy and streaming projection sinks"
+)]
+async fn query_fib_exact(
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    prefixes: Vec<Prefix>,
+    max_paths: u32,
+    relax: bool,
+    weighted: bool,
+    planning_deadline: tokio::time::Instant,
+    builder: &mut FibIntentBuilder,
+    present: &mut BTreeSet<Prefix>,
+) -> Result<(rustbgpd_rib::RoutePageVersion, bool), &'static str> {
+    let mut first_version = None;
+    let mut churned = false;
+    let chunk_size =
+        (8_192usize / usize::try_from(max_paths.clamp(1, 256)).unwrap_or(256)).min(1_000);
+    for chunk in prefixes.chunks(chunk_size) {
+        let deadline = planning_request_deadline(planning_deadline);
+        let (reply, rx) = oneshot::channel();
+        let query = async {
+            rib_tx
+                .send(RibUpdate::QueryFibInstallCandidatesExact {
+                    prefixes: chunk.to_vec(),
+                    max_paths,
+                    relax,
+                    weighted,
+                    deadline,
+                    reply,
+                })
+                .await
+                .map_err(|_| "send_failed")?;
+            rx.await
+                .map_err(|_| "reply_dropped")?
+                .map_err(|_| "query_failed")
+        };
+        let exact = tokio::time::timeout_at(deadline, query)
+            .await
+            .map_err(|_| "timeout")??;
+        if let Some(first) = first_version {
+            churned |= first != exact.observed_version;
+        } else {
+            first_version = Some(exact.observed_version);
+        }
+        let candidates: Vec<_> = exact
+            .candidates
+            .into_iter()
+            .flatten()
+            .inspect(|candidate| {
+                present.insert(candidate.best.prefix);
+            })
+            .collect();
+        if !builder.push_until(&candidates, planning_deadline) {
+            return Err("timeout");
+        }
+    }
+    Ok((first_version.ok_or("query_failed")?, churned))
+}
+
 /// Widest ECMP fan-out any configured table wants. The RIB returns candidates
 /// capped at this width; projection re-caps per table. Unset / 1 ⇒ today's
 /// single-next-hop behavior: at width 1 the RIB handler short-circuits the
@@ -716,33 +835,50 @@ fn max_install_paths(config: &FibRuntimeConfig) -> u32 {
         .unwrap_or(1)
 }
 
-async fn query_peer_groups(
+async fn query_peer_groups_versioned(
     rib_tx: &mpsc::Sender<RibUpdate>,
-) -> Result<BTreeMap<IpAddr, String>, &'static str> {
+    planning_deadline: tokio::time::Instant,
+) -> Result<(BTreeMap<IpAddr, String>, rustbgpd_rib::RoutePageVersion), &'static str> {
+    let deadline = planning_request_deadline(planning_deadline);
     let (reply, rx) = oneshot::channel();
-    if rib_tx
-        .send(RibUpdate::QueryPeerGroups { reply })
+    let query = async {
+        rib_tx
+            .send(RibUpdate::QueryPeerGroupsVersioned { deadline, reply })
+            .await
+            .map_err(|_| "send_failed")?;
+        rx.await
+            .map_err(|_| "reply_dropped")?
+            .map_err(|_| "query_failed")
+    };
+    let groups = tokio::time::timeout_at(deadline, query)
         .await
-        .is_err()
-    {
-        warn!("general FIB task could not query peer-group map");
-        return Err("send_failed");
-    }
-    match tokio::time::timeout(RIB_QUERY_TIMEOUT, rx).await {
-        Ok(Ok(groups)) => Ok(groups.into_iter().collect()),
-        Ok(Err(_)) => {
-            warn!("general FIB task peer-group reply dropped");
-            Err("reply_dropped")
-        }
-        Err(_) => {
-            warn!("general FIB task peer-group query timed out");
-            Err("timeout")
-        }
-    }
+        .map_err(|_| "timeout")??;
+    Ok((groups.groups.into_iter().collect(), groups.observed_version))
+}
+
+async fn query_versions(
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    planning_deadline: tokio::time::Instant,
+) -> Result<rustbgpd_rib::DataplaneVersions, &'static str> {
+    let deadline = planning_request_deadline(planning_deadline);
+    let (reply, rx) = oneshot::channel();
+    let query = async {
+        rib_tx
+            .send(RibUpdate::QueryDataplaneVersions { deadline, reply })
+            .await
+            .map_err(|_| "send_failed")?;
+        rx.await
+            .map_err(|_| "reply_dropped")?
+            .map_err(|_| "query_failed")
+    };
+    tokio::time::timeout_at(deadline, query)
+        .await
+        .map_err(|_| "timeout")?
 }
 
 #[expect(
     clippy::too_many_arguments,
+    clippy::too_many_lines,
     reason = "single reconcile pass needs snapshots, metrics, status, events, and cancellation"
 )]
 /// Returns `true` when the reconcile reached the apply phase (a plan was
@@ -780,18 +916,8 @@ where
         return true;
     }
 
-    let candidates = tokio::select! {
-        biased;
-        () = shutdown.cancelled() => return false,
-        result = query_fib_install_candidates(rib_query_tx, max_install_paths(config), config.multipath_relax, config.link_bandwidth_weighted) => match result {
-            Ok(candidates) => candidates,
-            Err(reason) => {
-                status_tx.send_replace(failed_rib_query_statuses(owned, reason));
-                return false;
-            }
-        },
-    };
-    let peer_groups = if config
+    let planning_deadline = tokio::time::Instant::now() + PLANNING_TIMEOUT;
+    let (peer_groups, first_peer_group_version) = if config
         .tables
         .iter()
         .any(|table| !table.allowed_peer_groups.is_empty())
@@ -799,18 +925,96 @@ where
         match tokio::select! {
             biased;
             () = shutdown.cancelled() => return false,
-            result = query_peer_groups(rib_query_tx) => result,
+            result = query_peer_groups_versioned(rib_query_tx, planning_deadline) => result,
         } {
             Ok(groups) => groups,
-            Err(reason) => {
-                status_tx.send_replace(failed_rib_query_statuses(owned, reason));
-                return false;
-            }
+            Err(_) => return false,
         }
     } else {
-        BTreeMap::new()
+        (BTreeMap::new(), rustbgpd_rib::RoutePageVersion::default())
     };
-    let intent = project_fib_intent_with_peer_groups(&config.tables, &candidates, &peer_groups);
+    let mut builder = FibIntentBuilder::new(&config.tables, &peer_groups);
+    let (first_route_version, mut route_churn) = tokio::select! {
+        biased;
+        () = shutdown.cancelled() => return false,
+        result = query_fib_install_candidate_pages(
+            rib_query_tx, max_install_paths(config), config.multipath_relax,
+            config.link_bandwidth_weighted, planning_deadline, &mut builder,
+        ) => match result {
+            Ok(result) => result,
+            Err(_) => return false,
+        },
+    };
+    let mut intent = builder.finish();
+    let absent_prefixes: Vec<Prefix> = owned
+        .routes
+        .keys()
+        .filter(|key| {
+            !intent.routes.contains_key(key) && !intent.frozen_eligible_keys.contains(key)
+        })
+        .map(|key| key.prefix)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let mut exact_present = BTreeSet::new();
+    let mut exact_restored_keys = BTreeSet::new();
+    if !absent_prefixes.is_empty() {
+        let mut exact_builder = FibIntentBuilder::new(&config.tables, &peer_groups);
+        let Ok((exact_version, exact_churn)) = query_fib_exact(
+            rib_query_tx,
+            absent_prefixes,
+            max_install_paths(config),
+            config.multipath_relax,
+            config.link_bandwidth_weighted,
+            planning_deadline,
+            &mut exact_builder,
+            &mut exact_present,
+        )
+        .await
+        else {
+            return false;
+        };
+        route_churn |= exact_churn || exact_version != first_route_version;
+        let exact_intent = exact_builder.finish();
+        exact_restored_keys.extend(exact_intent.frozen_eligible_keys.iter().copied());
+        for (key, route) in exact_intent.routes {
+            exact_restored_keys.insert(key);
+            intent.routes.insert(key, route);
+        }
+        intent.drops.extend(exact_intent.drops);
+        intent.frozen_tables.extend(exact_intent.frozen_tables);
+        intent
+            .frozen_eligible_keys
+            .extend(exact_intent.frozen_eligible_keys);
+    }
+    let Ok(seal) = query_versions(rib_query_tx, planning_deadline).await else {
+        return false;
+    };
+    route_churn |= seal.routes != first_route_version;
+    let peer_group_churn = config
+        .tables
+        .iter()
+        .any(|table| !table.allowed_peer_groups.is_empty())
+        && seal.peer_groups != first_peer_group_version;
+    if peer_group_churn {
+        let group_tables: BTreeSet<FibTableKey> = config
+            .tables
+            .iter()
+            .filter(|table| !table.allowed_peer_groups.is_empty())
+            .map(|table| FibTableKey {
+                table_id: table.table_id,
+                metric: table.metric,
+            })
+            .collect();
+        for (key, route) in &owned.routes {
+            if group_tables.contains(&key.table_key())
+                && exact_present.contains(&key.prefix)
+                && !intent.routes.contains_key(key)
+            {
+                intent.routes.insert(*key, route.clone());
+            }
+        }
+    }
     let kernel = tokio::select! {
         biased;
         () = shutdown.cancelled() => return false,
@@ -825,7 +1029,41 @@ where
         }
     };
 
-    let plan = compute_fib_diff(&intent, owned, &kernel);
+    let mut plan = compute_fib_diff(&intent, owned, &kernel);
+    let capped_tables: BTreeSet<FibTableKey> = config
+        .tables
+        .iter()
+        .filter(|table| table.max_routes.is_some())
+        .map(|table| FibTableKey {
+            table_id: table.table_id,
+            metric: table.metric,
+        })
+        .collect();
+    let group_tables: BTreeSet<FibTableKey> = config
+        .tables
+        .iter()
+        .filter(|table| !table.allowed_peer_groups.is_empty())
+        .map(|table| FibTableKey {
+            table_id: table.table_id,
+            metric: table.metric,
+        })
+        .collect();
+    plan.ops.retain(|op| match op {
+        FibOp::Add(route) => {
+            let key = route.key;
+            let route_frozen = route_churn && capped_tables.contains(&key.table_key());
+            let group_frozen = peer_group_churn && group_tables.contains(&key.table_key());
+            !(route_frozen || group_frozen)
+                || (owned.routes.contains_key(&key) && exact_restored_keys.contains(&key))
+        }
+        FibOp::Replace { desired, .. } => {
+            let key = desired.key;
+            let route_frozen = route_churn && capped_tables.contains(&key.table_key());
+            let group_frozen = peer_group_churn && group_tables.contains(&key.table_key());
+            !(route_frozen || group_frozen) || exact_restored_keys.contains(&key)
+        }
+        _ => true,
+    });
     for drop in &plan.drops {
         metrics.record_fib_route_rejected(drop_reason(drop));
     }
@@ -2053,20 +2291,6 @@ fn failed_dump_statuses(
     out
 }
 
-fn failed_rib_query_statuses(owned: &FibOwnedState, reason: &str) -> Vec<FibRuntimeStatus> {
-    owned
-        .routes
-        .values()
-        .map(|route| {
-            status_for_route(
-                route,
-                FibRuntimeState::Failed,
-                format!("rib_query_failed:{reason}"),
-            )
-        })
-        .collect()
-}
-
 fn status_for_route(route: &FibRoute, state: FibRuntimeState, reason: String) -> FibRuntimeStatus {
     FibRuntimeStatus {
         table_name: route.table_name.clone(),
@@ -2937,11 +3161,39 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(8);
         tokio::spawn(async move {
             while let Some(update) = rx.recv().await {
-                if let RibUpdate::QueryFibInstallCandidates {
-                    max_paths, reply, ..
-                } = update
-                {
-                    let _ = reply.send(routes_to_candidates(&routes, max_paths));
+                match update {
+                    RibUpdate::QueryFibInstallCandidatesPage {
+                        max_paths, reply, ..
+                    } => {
+                        let _ = reply.send(Ok(rustbgpd_rib::FibInstallCandidatesPage {
+                            candidates: routes_to_candidates(&routes, max_paths),
+                            next_cursor: None,
+                            observed_version: rustbgpd_rib::RoutePageVersion::default(),
+                        }));
+                    }
+                    RibUpdate::QueryFibInstallCandidatesExact {
+                        prefixes,
+                        max_paths,
+                        reply,
+                        ..
+                    } => {
+                        let all = routes_to_candidates(&routes, max_paths);
+                        let aligned = prefixes
+                            .iter()
+                            .map(|prefix| all.iter().find(|c| c.best.prefix == *prefix).cloned())
+                            .collect();
+                        let _ = reply.send(Ok(rustbgpd_rib::ExactFibInstallCandidates {
+                            candidates: aligned,
+                            observed_version: rustbgpd_rib::RoutePageVersion::default(),
+                        }));
+                    }
+                    RibUpdate::QueryDataplaneVersions { reply, .. } => {
+                        let _ = reply.send(Ok(rustbgpd_rib::DataplaneVersions {
+                            routes: rustbgpd_rib::RoutePageVersion::default(),
+                            peer_groups: rustbgpd_rib::RoutePageVersion::default(),
+                        }));
+                    }
+                    _ => {}
                 }
             }
         });
@@ -2956,8 +3208,38 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(8);
         tokio::spawn(async move {
             while let Some(update) = rx.recv().await {
-                if let RibUpdate::QueryFibInstallCandidates { reply, .. } = update {
-                    let _ = reply.send(candidates.clone());
+                match update {
+                    RibUpdate::QueryFibInstallCandidatesPage { reply, .. } => {
+                        let _ = reply.send(Ok(rustbgpd_rib::FibInstallCandidatesPage {
+                            candidates: candidates.clone(),
+                            next_cursor: None,
+                            observed_version: rustbgpd_rib::RoutePageVersion::default(),
+                        }));
+                    }
+                    RibUpdate::QueryFibInstallCandidatesExact {
+                        prefixes, reply, ..
+                    } => {
+                        let aligned = prefixes
+                            .iter()
+                            .map(|prefix| {
+                                candidates
+                                    .iter()
+                                    .find(|c| c.best.prefix == *prefix)
+                                    .cloned()
+                            })
+                            .collect();
+                        let _ = reply.send(Ok(rustbgpd_rib::ExactFibInstallCandidates {
+                            candidates: aligned,
+                            observed_version: rustbgpd_rib::RoutePageVersion::default(),
+                        }));
+                    }
+                    RibUpdate::QueryDataplaneVersions { reply, .. } => {
+                        let _ = reply.send(Ok(rustbgpd_rib::DataplaneVersions {
+                            routes: rustbgpd_rib::RoutePageVersion::default(),
+                            peer_groups: rustbgpd_rib::RoutePageVersion::default(),
+                        }));
+                    }
+                    _ => {}
                 }
             }
         });
@@ -2972,13 +3254,42 @@ mod tests {
         tokio::spawn(async move {
             while let Some(update) = rx.recv().await {
                 match update {
-                    RibUpdate::QueryFibInstallCandidates {
+                    RibUpdate::QueryFibInstallCandidatesPage {
                         max_paths, reply, ..
                     } => {
-                        let _ = reply.send(routes_to_candidates(&routes, max_paths));
+                        let _ = reply.send(Ok(rustbgpd_rib::FibInstallCandidatesPage {
+                            candidates: routes_to_candidates(&routes, max_paths),
+                            next_cursor: None,
+                            observed_version: rustbgpd_rib::RoutePageVersion::default(),
+                        }));
                     }
-                    RibUpdate::QueryPeerGroups { reply } => {
-                        let _ = reply.send(peer_groups.clone().into_iter().collect());
+                    RibUpdate::QueryFibInstallCandidatesExact {
+                        prefixes,
+                        max_paths,
+                        reply,
+                        ..
+                    } => {
+                        let all = routes_to_candidates(&routes, max_paths);
+                        let candidates = prefixes
+                            .iter()
+                            .map(|prefix| all.iter().find(|c| c.best.prefix == *prefix).cloned())
+                            .collect();
+                        let _ = reply.send(Ok(rustbgpd_rib::ExactFibInstallCandidates {
+                            candidates,
+                            observed_version: rustbgpd_rib::RoutePageVersion::default(),
+                        }));
+                    }
+                    RibUpdate::QueryPeerGroupsVersioned { reply, .. } => {
+                        let _ = reply.send(Ok(rustbgpd_rib::VersionedPeerGroups {
+                            groups: peer_groups.clone().into_iter().collect(),
+                            observed_version: rustbgpd_rib::RoutePageVersion::default(),
+                        }));
+                    }
+                    RibUpdate::QueryDataplaneVersions { reply, .. } => {
+                        let _ = reply.send(Ok(rustbgpd_rib::DataplaneVersions {
+                            routes: rustbgpd_rib::RoutePageVersion::default(),
+                            peer_groups: rustbgpd_rib::RoutePageVersion::default(),
+                        }));
                     }
                     _ => {}
                 }
@@ -3002,11 +3313,37 @@ mod tests {
         tokio::spawn(async move {
             while let Some(update) = rx.recv().await {
                 match update {
-                    RibUpdate::QueryFibInstallCandidates {
+                    RibUpdate::QueryFibInstallCandidatesPage {
                         max_paths, reply, ..
                     } => {
                         query_count_task.fetch_add(1, Ordering::SeqCst);
-                        let _ = reply.send(routes_to_candidates(&routes, max_paths));
+                        let _ = reply.send(Ok(rustbgpd_rib::FibInstallCandidatesPage {
+                            candidates: routes_to_candidates(&routes, max_paths),
+                            next_cursor: None,
+                            observed_version: rustbgpd_rib::RoutePageVersion::default(),
+                        }));
+                    }
+                    RibUpdate::QueryFibInstallCandidatesExact {
+                        prefixes,
+                        max_paths,
+                        reply,
+                        ..
+                    } => {
+                        let all = routes_to_candidates(&routes, max_paths);
+                        let aligned = prefixes
+                            .iter()
+                            .map(|prefix| all.iter().find(|c| c.best.prefix == *prefix).cloned())
+                            .collect();
+                        let _ = reply.send(Ok(rustbgpd_rib::ExactFibInstallCandidates {
+                            candidates: aligned,
+                            observed_version: rustbgpd_rib::RoutePageVersion::default(),
+                        }));
+                    }
+                    RibUpdate::QueryDataplaneVersions { reply, .. } => {
+                        let _ = reply.send(Ok(rustbgpd_rib::DataplaneVersions {
+                            routes: rustbgpd_rib::RoutePageVersion::default(),
+                            peer_groups: rustbgpd_rib::RoutePageVersion::default(),
+                        }));
                     }
                     RibUpdate::SubscribeRouteEvents { reply } => {
                         let _ = reply.send(events_task.subscribe());
@@ -5393,7 +5730,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rib_query_failure_marks_owned_status_failed() {
+    async fn rib_query_failure_preserves_last_good_status() {
         let (rib_tx, rib_rx) = mpsc::channel(1);
         drop(rib_rx);
         let mut fib = FakeFib::default();
@@ -5423,9 +5760,7 @@ mod tests {
         .await;
 
         let statuses = status_rx.borrow().clone();
-        assert_eq!(statuses.len(), 1);
-        assert_eq!(statuses[0].state, FibRuntimeState::Failed);
-        assert_eq!(statuses[0].reason, "rib_query_failed:send_failed");
+        assert!(statuses.is_empty());
         assert!(fib.applied.is_empty(), "failed query must not reach apply");
         assert!(owned.routes.contains_key(&existing_key));
     }

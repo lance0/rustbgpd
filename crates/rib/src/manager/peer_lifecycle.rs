@@ -431,7 +431,7 @@ impl RibManager {
 
         self.clear_outbound_peer_state(peer);
         self.peer_asn.remove(&peer);
-        self.peer_group.remove(&peer);
+        self.set_peer_group(peer, None);
         self.peer_bgp_id.remove(&peer);
         self.peer_is_rr_client.remove(&peer);
         self.force_outbound_peers.remove(&peer);
@@ -1214,11 +1214,7 @@ impl RibManager {
         peer: IpAddr,
         peer_group: Option<String>,
     ) {
-        if let Some(peer_group) = peer_group {
-            self.peer_group.insert(peer, peer_group);
-        } else {
-            self.peer_group.remove(&peer);
-        }
+        self.set_peer_group(peer, peer_group);
     }
 
     /// Send the full Loc-RIB to a newly established peer (initial table dump).

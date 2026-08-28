@@ -3742,6 +3742,12 @@ async fn run<T>(
         metrics.clone(),
     )
     .with_readiness_queries(rib_readiness_rx);
+    #[cfg(target_os = "linux")]
+    if (config.global.honor_blackhole && config.global.install_blackhole_discard)
+        || !config.fib_tables.is_empty()
+    {
+        rib_manager = rib_manager.with_eager_dataplane_prefix_index();
+    }
     if let Some(deadline) = local_gr_restart_until {
         let waiters = peer_configs
             .iter()
@@ -4450,6 +4456,7 @@ async fn run<T>(
             install_burst: config.global.blackhole_discard_install_burst,
         },
         rib_tx.clone(),
+        rib_query_tx.clone(),
         metrics.clone(),
         blackhole_status_tx,
         blackhole_shutdown.clone(),

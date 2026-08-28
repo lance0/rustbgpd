@@ -681,6 +681,8 @@ pub struct RibManager {
     peer_asn: HashMap<IpAddr, u32>,
     /// Peer-group membership used for export policy neighbor-set matching.
     peer_group: HashMap<IpAddr, String>,
+    /// Process-local content version for exact peer-group planning seals.
+    peer_group_version: Option<RoutePageVersion>,
     /// Peer BGP router ID, tracked for MRT `PEER_INDEX_TABLE`.
     peer_bgp_id: HashMap<IpAddr, Ipv4Addr>,
     /// Families for which Add-Path Send/Both was negotiated per peer.
@@ -1471,6 +1473,7 @@ impl RibManager {
             selection_deferred_refresh: HashMap::new(),
             peer_asn: HashMap::new(),
             peer_group: HashMap::new(),
+            peer_group_version: Some(initial_route_page_version()),
             peer_bgp_id: HashMap::new(),
             update_groups: update_groups::UpdateGroupRegistry::default(),
             group_ribs: HashMap::new(),
@@ -1742,6 +1745,21 @@ impl RibManager {
 
     fn advance_table_pages(&mut self) {
         Self::advance_route_page_version(&mut self.route_page_table_version);
+    }
+
+    pub(super) fn set_peer_group(&mut self, peer: IpAddr, group: Option<String>) {
+        let changed = match group {
+            Some(group) => {
+                self.peer_group.get(&peer) != Some(&group) && {
+                    self.peer_group.insert(peer, group);
+                    true
+                }
+            }
+            None => self.peer_group.remove(&peer).is_some(),
+        };
+        if changed {
+            Self::advance_route_page_version(&mut self.peer_group_version);
+        }
     }
 
     pub(super) fn advance_advertised_pages(&mut self) {
@@ -2468,6 +2486,29 @@ impl RibManager {
                 reply,
             } => self.handle_query_fib_install_candidates_page(
                 after, max_paths, relax, weighted, deadline, reply,
+            ),
+            RibUpdate::QueryDataplaneVersions { deadline, reply } => {
+                self.handle_query_dataplane_versions(deadline, reply);
+            }
+            RibUpdate::QueryPeerGroupsVersioned { deadline, reply } => {
+                self.handle_query_peer_groups_versioned(deadline, reply);
+            }
+            RibUpdate::QueryBestRoutesExact {
+                prefixes,
+                deadline,
+                reply,
+            } => {
+                self.handle_query_best_routes_exact(prefixes, deadline, reply);
+            }
+            RibUpdate::QueryFibInstallCandidatesExact {
+                prefixes,
+                max_paths,
+                relax,
+                weighted,
+                deadline,
+                reply,
+            } => self.handle_query_fib_install_candidates_exact(
+                prefixes, max_paths, relax, weighted, deadline, reply,
             ),
             RibUpdate::QueryPeerGroups { reply } => self.handle_query_peer_groups(reply),
             RibUpdate::ExplainBestPath {

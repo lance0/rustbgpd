@@ -1430,6 +1430,43 @@ pub enum DataplanePageError {
     GenerationExhausted,
 }
 
+/// A bounded exact internal dataplane query could not be served.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataplaneExactQueryError {
+    /// The requested prefix/path budget exceeds the actor's bounded contract.
+    BudgetExceeded,
+    /// The process-local route-page version space was exhausted.
+    GenerationExhausted,
+}
+
+/// Current process-local versions used to seal dataplane planning walks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DataplaneVersions {
+    pub routes: RoutePageVersion,
+    pub peer_groups: RoutePageVersion,
+}
+
+/// Versioned snapshot of per-peer peer-group membership.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionedPeerGroups {
+    pub groups: HashMap<IpAddr, String>,
+    pub observed_version: RoutePageVersion,
+}
+
+/// Input-aligned exact Loc-RIB best-route results.
+#[derive(Debug, Clone)]
+pub struct ExactBestRoutes {
+    pub routes: Vec<Option<Route>>,
+    pub observed_version: RoutePageVersion,
+}
+
+/// Input-aligned exact FIB install-candidate results.
+#[derive(Debug, Clone)]
+pub struct ExactFibInstallCandidates {
+    pub candidates: Vec<Option<FibInstallCandidate>>,
+    pub observed_version: RoutePageVersion,
+}
+
 /// One bounded page of Loc-RIB best routes for internal dataplane consumers.
 #[derive(Debug, Clone)]
 pub struct BestRoutesPage {
@@ -1958,6 +1995,31 @@ pub enum RibUpdate {
         deadline: tokio::time::Instant,
         /// Response channel; a dropped receiver cancels the query.
         reply: oneshot::Sender<Result<FibInstallCandidatesPage, DataplanePageError>>,
+    },
+    /// Query current route and peer-group versions without materializing rows.
+    QueryDataplaneVersions {
+        deadline: tokio::time::Instant,
+        reply: oneshot::Sender<Result<DataplaneVersions, DataplaneExactQueryError>>,
+    },
+    /// Query the peer-group map and its process-local mutation version.
+    QueryPeerGroupsVersioned {
+        deadline: tokio::time::Instant,
+        reply: oneshot::Sender<Result<VersionedPeerGroups, DataplaneExactQueryError>>,
+    },
+    /// Query exact Loc-RIB prefixes, preserving input order and absence.
+    QueryBestRoutesExact {
+        prefixes: Vec<Prefix>,
+        deadline: tokio::time::Instant,
+        reply: oneshot::Sender<Result<ExactBestRoutes, DataplaneExactQueryError>>,
+    },
+    /// Query exact per-prefix FIB candidates, preserving input order and absence.
+    QueryFibInstallCandidatesExact {
+        prefixes: Vec<Prefix>,
+        max_paths: u32,
+        relax: bool,
+        weighted: bool,
+        deadline: tokio::time::Instant,
+        reply: oneshot::Sender<Result<ExactFibInstallCandidates, DataplaneExactQueryError>>,
     },
     /// Query: return the current per-peer peer-group map.
     QueryPeerGroups {

@@ -42,6 +42,7 @@ const RT_TABLE_MAIN: u32 = 254;
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 const ROUTE_EVENT_DEBOUNCE: Duration = Duration::from_millis(200);
 const RIB_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
+const PLANNING_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 // How long adopted-but-unclaimed rows keep discarding before the reap
 // (ADR-0079 rule 3: reap only after reconvergence). There is no explicit
@@ -58,6 +59,15 @@ const ADOPTION_REAP_DEFERRAL: Duration = Duration::from_secs(500);
 /// observe the reap inside a CI job. Unset or invalid values keep
 /// the production default of 500 s (FRR zebra `-K` parity).
 const ADOPTION_REAP_DEFERRAL_ENV: &str = "RUSTBGPD_BLACKHOLE_ADOPTION_REAP_DEFERRAL_SECS";
+
+fn non_spinning_limit_wake(wake: tokio::time::Instant) -> tokio::time::Instant {
+    let now = tokio::time::Instant::now();
+    if wake <= now {
+        now + RECONCILE_INTERVAL
+    } else {
+        wake
+    }
+}
 
 /// Pure core of the [`ADOPTION_REAP_DEFERRAL_ENV`] override with the
 /// environment value injected, so the parse rule (valid u64 seconds →
@@ -281,6 +291,7 @@ impl BlackholeHandle {
 pub(crate) fn spawn(
     config: BlackholeConfig,
     rib_tx: mpsc::Sender<RibUpdate>,
+    rib_query_tx: mpsc::Sender<RibUpdate>,
     metrics: BgpMetrics,
     status_tx: watch::Sender<Vec<BlackholeStatus>>,
     shutdown: CancellationToken,
@@ -296,6 +307,7 @@ pub(crate) fn spawn(
             Ok(fib) => Some(spawn_with_fib(
                 config,
                 rib_tx,
+                rib_query_tx,
                 fib,
                 metrics,
                 status_tx,
@@ -311,9 +323,14 @@ pub(crate) fn spawn(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "actor spawn keeps event and query RIB lanes distinct"
+)]
 fn spawn_with_fib<F>(
     config: BlackholeConfig,
     rib_tx: mpsc::Sender<RibUpdate>,
+    rib_query_tx: mpsc::Sender<RibUpdate>,
     fib: F,
     metrics: BgpMetrics,
     status_tx: watch::Sender<Vec<BlackholeStatus>>,
@@ -328,6 +345,7 @@ where
         run_loop(
             config,
             rib_tx,
+            rib_query_tx,
             fib,
             metrics,
             status_tx,
@@ -339,9 +357,14 @@ where
     BlackholeHandle { shutdown, task }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "actor loop keeps event and query RIB lanes distinct"
+)]
 async fn run_loop<F>(
     config: BlackholeConfig,
     rib_tx: mpsc::Sender<RibUpdate>,
+    rib_query_tx: mpsc::Sender<RibUpdate>,
     mut fib: F,
     metrics: BgpMetrics,
     status_tx: watch::Sender<Vec<BlackholeStatus>>,
@@ -364,9 +387,17 @@ async fn run_loop<F>(
 
     let mut route_events = subscribe_route_events(&rib_tx).await;
     let mut kernel_route_events = fib.take_kernel_route_events();
-    reconcile_once(config, &rib_tx, &mut fib, &metrics, &status_tx, &mut state).await;
+    reconcile_once(
+        config,
+        &rib_query_tx,
+        &mut fib,
+        &metrics,
+        &status_tx,
+        &mut state,
+    )
+    .await;
     if let Some(wake) = state.limits.next_wake {
-        limit_wake.as_mut().reset(wake);
+        limit_wake.as_mut().reset(non_spinning_limit_wake(wake));
     }
 
     loop {
@@ -382,17 +413,20 @@ async fn run_loop<F>(
                 return;
             }
             _ = interval.tick() => {
-                reconcile_once(config, &rib_tx, &mut fib, &metrics, &status_tx, &mut state).await;
-                if let Some(wake) = state.limits.next_wake { limit_wake.as_mut().reset(wake); }
+                reconcile_once(config, &rib_query_tx, &mut fib, &metrics, &status_tx, &mut state).await;
+                if let Some(wake) = state.limits.next_wake { limit_wake.as_mut().reset(non_spinning_limit_wake(wake)); }
             }
             () = &mut limit_wake, if state.limits.next_wake.is_some() => {
-                reconcile_once(config, &rib_tx, &mut fib, &metrics, &status_tx, &mut state).await;
-                limit_wake.as_mut().reset(state.limits.next_wake.unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_hours(8760)));
+                reconcile_once(config, &rib_query_tx, &mut fib, &metrics, &status_tx, &mut state).await;
+                limit_wake.as_mut().reset(state.limits.next_wake.map_or_else(
+                    || tokio::time::Instant::now() + Duration::from_hours(8760),
+                    non_spinning_limit_wake,
+                ));
             }
             () = &mut event_debounce, if route_event_dirty => {
                 route_event_dirty = false;
-                reconcile_once(config, &rib_tx, &mut fib, &metrics, &status_tx, &mut state).await;
-                if let Some(wake) = state.limits.next_wake { limit_wake.as_mut().reset(wake); }
+                reconcile_once(config, &rib_query_tx, &mut fib, &metrics, &status_tx, &mut state).await;
+                if let Some(wake) = state.limits.next_wake { limit_wake.as_mut().reset(non_spinning_limit_wake(wake)); }
             }
             maybe_event = recv_route_event(&mut route_events) => {
                 match maybe_event {
@@ -515,6 +549,11 @@ async fn recv_route_event(
     }
 }
 
+fn planning_request_deadline(planning_deadline: tokio::time::Instant) -> tokio::time::Instant {
+    planning_deadline.min(tokio::time::Instant::now() + RIB_QUERY_TIMEOUT)
+}
+
+#[cfg(test)]
 async fn query_best_routes(rib_tx: &mpsc::Sender<RibUpdate>) -> Option<Vec<Route>> {
     let deadline = tokio::time::Instant::now() + RIB_QUERY_TIMEOUT;
     let (reply, rx) = oneshot::channel();
@@ -522,32 +561,102 @@ async fn query_best_routes(rib_tx: &mpsc::Sender<RibUpdate>) -> Option<Vec<Route
         rib_tx
             .send(RibUpdate::QueryBestRoutes { deadline, reply })
             .await
-            .map_err(|_| "send_failed")?;
-        rx.await.map_err(|_| {
-            if tokio::time::Instant::now() >= deadline {
-                "timeout"
-            } else {
-                "reply_dropped"
-            }
-        })
+            .ok()?;
+        rx.await.ok()
     };
+    tokio::time::timeout_at(deadline, query)
+        .await
+        .ok()
+        .flatten()
+}
 
-    match tokio::time::timeout_at(deadline, query).await {
-        Ok(Ok(routes)) => Some(routes),
-        Ok(Err("send_failed")) => {
-            warn!("BLACKHOLE discard task could not query best routes");
-            None
+async fn query_best_route_pages(
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    config: BlackholeConfig,
+    planning_deadline: tokio::time::Instant,
+) -> Option<(Vec<Candidate>, rustbgpd_rib::RoutePageVersion, bool)> {
+    let mut after = None;
+    let mut derived = Vec::new();
+    let mut first_version = None;
+    let mut churned = false;
+    loop {
+        let deadline = planning_request_deadline(planning_deadline);
+        if tokio::time::Instant::now() >= deadline {
+            return None;
         }
-        Ok(Err("reply_dropped")) => {
-            warn!("BLACKHOLE discard task best-route reply dropped");
-            None
+        let (reply, rx) = oneshot::channel();
+        let query = async {
+            rib_tx
+                .send(RibUpdate::QueryBestRoutesPage {
+                    after,
+                    deadline,
+                    reply,
+                })
+                .await
+                .map_err(|_| ())?;
+            rx.await.map_err(|_| ())?.map_err(|_| ())
+        };
+        let page = tokio::time::timeout_at(deadline, query).await.ok()?.ok()?;
+        if let Some(first) = first_version {
+            churned |= first != page.observed_version;
+        } else {
+            first_version = Some(page.observed_version);
         }
-        Ok(Err("timeout")) | Err(_) => {
-            warn!("BLACKHOLE discard task best-route query timed out");
-            None
+        derived.extend(derive_desired(config, &page.routes));
+        match page.next_cursor {
+            Some(cursor) => after = Some(cursor),
+            None => return Some((derived, first_version?, churned)),
         }
-        Ok(Err(_)) => unreachable!("query uses only static classifications above"),
     }
+}
+
+async fn exact_best_routes(
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    prefixes: Vec<Prefix>,
+    planning_deadline: tokio::time::Instant,
+) -> Option<(Vec<Option<Route>>, rustbgpd_rib::RoutePageVersion, bool)> {
+    let mut routes = Vec::with_capacity(prefixes.len());
+    let mut version = None;
+    let mut churned = false;
+    for chunk in prefixes.chunks(1_000) {
+        let deadline = planning_request_deadline(planning_deadline);
+        let (reply, rx) = oneshot::channel();
+        let query = async {
+            rib_tx
+                .send(RibUpdate::QueryBestRoutesExact {
+                    prefixes: chunk.to_vec(),
+                    deadline,
+                    reply,
+                })
+                .await
+                .map_err(|_| ())?;
+            rx.await.map_err(|_| ())?.map_err(|_| ())
+        };
+        let exact = tokio::time::timeout_at(deadline, query).await.ok()?.ok()?;
+        if let Some(first) = version {
+            churned |= first != exact.observed_version;
+        } else {
+            version = Some(exact.observed_version);
+        }
+        routes.extend(exact.routes);
+    }
+    Some((routes, version?, churned))
+}
+
+async fn query_dataplane_versions(
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    planning_deadline: tokio::time::Instant,
+) -> Option<rustbgpd_rib::DataplaneVersions> {
+    let deadline = planning_request_deadline(planning_deadline);
+    let (reply, rx) = oneshot::channel();
+    let query = async {
+        rib_tx
+            .send(RibUpdate::QueryDataplaneVersions { deadline, reply })
+            .await
+            .map_err(|_| ())?;
+        rx.await.map_err(|_| ())?.map_err(|_| ())
+    };
+    tokio::time::timeout_at(deadline, query).await.ok()?.ok()
 }
 
 #[expect(
@@ -564,21 +673,61 @@ async fn reconcile_once<F>(
 ) where
     F: BlackholeFib,
 {
-    state.limits.begin_pass();
-    let Some(routes) = query_best_routes(rib_tx).await else {
+    let planning_deadline = tokio::time::Instant::now() + PLANNING_TIMEOUT;
+    let Some((mut derived, first_version, mut churned)) =
+        query_best_route_pages(rib_tx, config, planning_deadline).await
+    else {
         return;
     };
-    let mut derived = derive_desired(config, &routes);
+    let provisional_desired: HashSet<Prefix> = derived
+        .iter()
+        .filter(|candidate| candidate.installable)
+        .map(|candidate| candidate.prefix)
+        .collect();
+    let protected: Vec<Prefix> = state
+        .owned
+        .keys()
+        .chain(state.adoption.pending.iter())
+        .chain(state.ownership.prefixes.iter())
+        .copied()
+        .filter(|prefix| !provisional_desired.contains(prefix))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    if !protected.is_empty() {
+        let Some((exact, exact_version, exact_churn)) =
+            exact_best_routes(rib_tx, protected, planning_deadline).await
+        else {
+            return;
+        };
+        churned |= exact_churn || exact_version != first_version;
+        for route in exact.into_iter().flatten() {
+            if let Some(candidate) = derive_desired(config, std::slice::from_ref(&route))
+                .into_iter()
+                .next()
+                .filter(|candidate| candidate.installable)
+            {
+                derived.push(candidate);
+            }
+        }
+    }
+    let Some(seal) = query_dataplane_versions(rib_tx, planning_deadline).await else {
+        return;
+    };
+    churned |= seal.routes != first_version;
+    let guarded_churn = churned
+        && (config.max_active.is_some()
+            || config.install_rate_per_minute.is_some()
+            || config.install_burst.is_some());
+    if !guarded_churn {
+        state.limits.begin_pass();
+    }
     state
         .limits
         .order(&mut derived, |candidate| candidate.prefix);
-    let desired: HashMap<Prefix, &Route> = derived
+    let desired: HashSet<Prefix> = derived
         .iter()
-        .filter_map(|candidate| {
-            candidate
-                .installable
-                .then_some((candidate.prefix, candidate.route))
-        })
+        .filter_map(|candidate| candidate.installable.then_some(candidate.prefix))
         .collect();
 
     let mut statuses = Vec::with_capacity(derived.len() + state.owned.len());
@@ -622,7 +771,7 @@ async fn reconcile_once<F>(
     }
 
     for (prefix, installed) in state.owned.clone() {
-        if desired.contains_key(&prefix) {
+        if desired.contains(&prefix) {
             continue;
         }
         match release_then_remove(fib, metrics, &mut state.ownership, prefix).await {
@@ -676,6 +825,19 @@ async fn reconcile_once<F>(
             .get(&candidate.prefix)
             .copied()
             .unwrap_or(KernelRoutePresence::Absent);
+
+        if guarded_churn
+            && presence == KernelRoutePresence::Absent
+            && state.owned.contains_key(&candidate.prefix)
+        {
+            statuses.push(BlackholeStatus {
+                prefix: candidate.prefix,
+                peer: candidate.route.peer,
+                state: BlackholeState::Installed,
+                reason: "route_churn_deferred".to_string(),
+            });
+            continue;
+        }
 
         if state.owned.contains_key(&candidate.prefix) {
             match presence {
@@ -774,6 +936,16 @@ async fn reconcile_once<F>(
             }
         }
 
+        if guarded_churn {
+            statuses.push(BlackholeStatus {
+                prefix: candidate.prefix,
+                peer: candidate.route.peer,
+                state: BlackholeState::Rejected,
+                reason: "route_churn_deferred".to_string(),
+            });
+            continue;
+        }
+
         if let Err(reason) = state
             .limits
             .admit(state.active_count(), tokio::time::Instant::now())
@@ -858,7 +1030,7 @@ async fn reconcile_once<F>(
     status_tx.send_replace(statuses);
 }
 
-fn ownership_unavailable_status(candidate: &Candidate<'_>) -> BlackholeStatus {
+fn ownership_unavailable_status(candidate: &Candidate) -> BlackholeStatus {
     BlackholeStatus {
         prefix: candidate.prefix,
         peer: candidate.route.peer,
@@ -920,7 +1092,7 @@ async fn reap_or_report_adopted<F>(
     owned: &HashMap<Prefix, OwnedBlackhole>,
     adoption: &mut AdoptionSweep,
     ownership: &mut OwnershipState,
-    desired: &HashMap<Prefix, &Route>,
+    desired: &HashSet<Prefix>,
     presences: &HashMap<Prefix, KernelRoutePresence>,
     statuses: &mut Vec<BlackholeStatus>,
 ) where
@@ -931,7 +1103,7 @@ async fn reap_or_report_adopted<F>(
     }
     let reapable = tokio::time::Instant::now() >= adoption.reap_after;
     for prefix in adoption.pending.clone() {
-        if desired.contains_key(&prefix) || owned.contains_key(&prefix) {
+        if desired.contains(&prefix) || owned.contains_key(&prefix) {
             // Claimed (or about to be) — never reap a desired prefix.
             adoption.pending.remove(&prefix);
             continue;
@@ -1018,7 +1190,7 @@ async fn degraded_pass_without_dump<F>(
     metrics: &BgpMetrics,
     status_tx: &watch::Sender<Vec<BlackholeStatus>>,
     state: &mut ReconcilerState,
-    derived: Vec<Candidate<'_>>,
+    derived: Vec<Candidate>,
 ) where
     F: BlackholeFib,
 {
@@ -1106,14 +1278,14 @@ where
 }
 
 #[derive(Debug)]
-struct Candidate<'a> {
+struct Candidate {
     prefix: Prefix,
-    route: &'a Route,
+    route: Route,
     installable: bool,
     reason: &'static str,
 }
 
-fn derive_desired(config: BlackholeConfig, routes: &[Route]) -> Vec<Candidate<'_>> {
+fn derive_desired(config: BlackholeConfig, routes: &[Route]) -> Vec<Candidate> {
     let mut out = Vec::new();
     for route in routes {
         if !has_blackhole_community(route) {
@@ -1130,7 +1302,7 @@ fn derive_desired(config: BlackholeConfig, routes: &[Route]) -> Vec<Candidate<'_
         }
         out.push(Candidate {
             prefix: route.prefix,
-            route,
+            route: route.clone(),
             installable,
             reason,
         });
@@ -1592,8 +1764,40 @@ pub(super) mod tests {
         let (tx, mut rx) = mpsc::channel(8);
         tokio::spawn(async move {
             while let Some(update) = rx.recv().await {
-                if let RibUpdate::QueryBestRoutes { reply, .. } = update {
-                    let _ = reply.send(routes.clone());
+                match update {
+                    RibUpdate::QueryBestRoutesPage { after, reply, .. } => {
+                        let page_routes: Vec<_> = routes
+                            .iter()
+                            .filter(|route| after.is_none_or(|after| route.prefix > after))
+                            .cloned()
+                            .collect();
+                        let _ = reply.send(Ok(rustbgpd_rib::BestRoutesPage {
+                            routes: page_routes,
+                            next_cursor: None,
+                            observed_version: rustbgpd_rib::RoutePageVersion::default(),
+                        }));
+                    }
+                    RibUpdate::QueryBestRoutesExact {
+                        prefixes, reply, ..
+                    } => {
+                        let exact = prefixes
+                            .iter()
+                            .map(|prefix| {
+                                routes.iter().find(|route| route.prefix == *prefix).cloned()
+                            })
+                            .collect();
+                        let _ = reply.send(Ok(rustbgpd_rib::ExactBestRoutes {
+                            routes: exact,
+                            observed_version: rustbgpd_rib::RoutePageVersion::default(),
+                        }));
+                    }
+                    RibUpdate::QueryDataplaneVersions { reply, .. } => {
+                        let _ = reply.send(Ok(rustbgpd_rib::DataplaneVersions {
+                            routes: rustbgpd_rib::RoutePageVersion::default(),
+                            peer_groups: rustbgpd_rib::RoutePageVersion::default(),
+                        }));
+                    }
+                    _ => {}
                 }
             }
         });
@@ -1615,9 +1819,38 @@ pub(super) mod tests {
         tokio::spawn(async move {
             while let Some(update) = rx.recv().await {
                 match update {
-                    RibUpdate::QueryBestRoutes { reply, .. } => {
+                    RibUpdate::QueryBestRoutesPage { after, reply, .. } => {
                         query_count_task.fetch_add(1, Ordering::SeqCst);
-                        let _ = reply.send(routes.clone());
+                        let page_routes = routes
+                            .iter()
+                            .filter(|route| after.is_none_or(|after| route.prefix > after))
+                            .cloned()
+                            .collect();
+                        let _ = reply.send(Ok(rustbgpd_rib::BestRoutesPage {
+                            routes: page_routes,
+                            next_cursor: None,
+                            observed_version: rustbgpd_rib::RoutePageVersion::default(),
+                        }));
+                    }
+                    RibUpdate::QueryBestRoutesExact {
+                        prefixes, reply, ..
+                    } => {
+                        let exact = prefixes
+                            .iter()
+                            .map(|prefix| {
+                                routes.iter().find(|route| route.prefix == *prefix).cloned()
+                            })
+                            .collect();
+                        let _ = reply.send(Ok(rustbgpd_rib::ExactBestRoutes {
+                            routes: exact,
+                            observed_version: rustbgpd_rib::RoutePageVersion::default(),
+                        }));
+                    }
+                    RibUpdate::QueryDataplaneVersions { reply, .. } => {
+                        let _ = reply.send(Ok(rustbgpd_rib::DataplaneVersions {
+                            routes: rustbgpd_rib::RoutePageVersion::default(),
+                            peer_groups: rustbgpd_rib::RoutePageVersion::default(),
+                        }));
                     }
                     RibUpdate::SubscribeRouteEvents { reply } => {
                         let _ = reply.send(events_task.subscribe());
@@ -2077,6 +2310,7 @@ pub(super) mod tests {
                     allow_broad_prefixes: false,
                     ..BlackholeConfig::default()
                 },
+                rib_tx.clone(),
                 rib_tx,
                 FakeFib::default(),
                 metrics,
@@ -2140,6 +2374,7 @@ pub(super) mod tests {
                     allow_broad_prefixes: false,
                     ..BlackholeConfig::default()
                 },
+                rib_tx.clone(),
                 rib_tx,
                 FakeFib::default(),
                 metrics,
@@ -2323,6 +2558,7 @@ pub(super) mod tests {
                     allow_broad_prefixes: false,
                     ..BlackholeConfig::default()
                 },
+                rib_tx.clone(),
                 rib_tx,
                 FakeFib {
                     kernel_events: Some(drift_rx),
