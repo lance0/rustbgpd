@@ -143,10 +143,12 @@ This ADR records the decisions of that arc as shipped.
    reaches the wire (not mirroring it is what RFC 8671 requires) and
    the `Cease/8` teardown ends in an ordered reliable `PeerDown`
    (truthful reason 1 carrying that NOTIFICATION) followed by a
-   re-establish re-flood. The manager→collector fan-out stays lossy by
-   design — that layer's reset is the collector's own reconnect (state
-   discard + PeerUp replay), and `bmp_collector_drops_total` is its
-   alert signal.
+   re-establish re-flood. The manager→collector fan-out stays non-blocking. A
+   full or closed per-collector queue retires only that connection generation,
+   closes TCP without BMP Termination, and uses the existing one-second retry
+   to reconnect, discard session state, replay PeerUp, and rebuild Loc-RIB
+   through a fresh dump. `bmp_collector_drops_total` records the reset trigger;
+   healthy collectors continue independently.
 
 4. **BMPv4 is a per-collector framing decision at fan-out, not an
    internal representation.** Internal `BmpEvent`s stay

@@ -484,6 +484,8 @@ impl BmpManager {
         };
         let mut memo: [Option<Bytes>; 2] = [None, None];
         let mut overflowed = Vec::new();
+        let mut failed = Vec::new();
+        let mut tasks = Vec::new();
         for idx in 0..self.collectors.len() {
             if !self.collectors[idx].filter.loc_rib || self.loc_rib_suppressed.contains(&idx) {
                 continue;
@@ -492,6 +494,15 @@ impl BmpManager {
             let msg = memo[version.idx()]
                 .get_or_insert_with(|| encode(version))
                 .clone();
+            let current_generation = self.collectors[idx].phase.generation();
+            if self
+                .active_dumps
+                .get(&idx)
+                .is_some_and(|dump| Some(dump.generation) != current_generation)
+                && let Some(stale) = self.active_dumps.remove(&idx)
+            {
+                tasks.push(stale.task);
+            }
             let collector = &mut self.collectors[idx];
             let addr = collector.addr;
             let addr_label = collector.addr_label.as_str();
@@ -508,8 +519,12 @@ impl BmpManager {
                 CollectorPhase::Active {
                     generation, sender, ..
                 } => {
-                    if let Some(dump) = self.active_dumps.get_mut(&idx) {
-                        if *generation == dump.generation {
+                    if self
+                        .active_dumps
+                        .get(&idx)
+                        .is_some_and(|dump| *generation == dump.generation)
+                    {
+                        if let Some(dump) = self.active_dumps.get_mut(&idx) {
                             let overflow = buffer_loc_rib_message(&mut dump.buffered, msg);
                             self.metrics.observe_bmp_loc_rib_dump_live_buffer(
                                 addr_label,
@@ -523,18 +538,16 @@ impl BmpManager {
                         let reason = trysend_reason(&e);
                         self.metrics
                             .record_bmp_collector_drop(addr_label, "fan_out", reason, 1);
-                        warn!(collector = %addr, error = %e, "BMP collector channel full or closed, dropping message");
+                        failed.push((idx, *generation));
+                        warn!(collector = %addr, error = %e, "BMP collector channel full or closed, resetting generation");
                     }
                 }
             }
         }
-        if overflowed.is_empty() {
-            return;
-        }
+        tasks.extend(self.fence_collector_generations_now(failed));
 
         // Fence every affected generation before awaiting any forwarder. TCP
         // EOF invalidates all rows already observed for that BMP session.
-        let mut tasks = Vec::new();
         for idx in overflowed {
             self.collectors[idx]
                 .generation
@@ -583,12 +596,13 @@ impl BmpManager {
                     Self::encode_event(event, BmpVersion::V3),
                     Self::encode_event(event, BmpVersion::V4),
                 ];
-                self.fan_out(|version| encoded[version.idx()].clone());
+                self.fan_out(|version| encoded[version.idx()].clone()).await;
                 self.peer_up_cache.insert(peer_info.peer_addr, encoded);
             }
             BmpEvent::PeerDown { peer_info, .. } => {
                 self.peer_up_cache.remove(&peer_info.peer_addr);
-                self.fan_out(|version| Self::encode_event(event, version));
+                self.fan_out(|version| Self::encode_event(event, version))
+                    .await;
             }
             // Route monitoring is the only per-collector-filtered
             // message: rib-in RM only to `rib_in_pre` collectors,
@@ -604,10 +618,12 @@ impl BmpManager {
                         }
                     },
                     |version| Self::encode_event(event, version),
-                );
+                )
+                .await;
             }
             BmpEvent::StatsReport { .. } => {
-                self.fan_out(|version| Self::encode_event(event, version));
+                self.fan_out(|version| Self::encode_event(event, version))
+                    .await;
             }
         }
     }
@@ -1016,19 +1032,20 @@ impl BmpManager {
         );
     }
 
-    fn fan_out(&self, encode: impl Fn(BmpVersion) -> Bytes) {
-        self.fan_out_filtered(|_, _| true, encode);
+    async fn fan_out(&mut self, encode: impl Fn(BmpVersion) -> Bytes) {
+        self.fan_out_filtered(|_, _| true, encode).await;
     }
 
     /// Fan out one event, framing per collector version. `want` receives
     /// the collector index and filter; `encode` is called at most once
     /// per BMP version in use (two-slot memo).
-    fn fan_out_filtered(
-        &self,
+    async fn fan_out_filtered(
+        &mut self,
         want: impl Fn(usize, &BmpMonitorFilter) -> bool,
         encode: impl Fn(BmpVersion) -> Bytes,
     ) {
         let mut memo: [Option<Bytes>; 2] = [None, None];
+        let mut failed = Vec::new();
         for (idx, collector) in self.collectors.iter().enumerate() {
             if !want(idx, &collector.filter) {
                 continue;
@@ -1047,13 +1064,63 @@ impl BmpManager {
                     reason,
                     1,
                 );
+                if let Some(generation) = collector.phase.generation() {
+                    failed.push((idx, generation));
+                }
                 warn!(
                     collector = %collector.addr,
                     error = %e,
-                    "BMP collector channel full or closed, dropping message"
+                    "BMP collector channel full or closed, resetting generation"
                 );
             }
         }
+        self.fence_collector_generations(failed).await;
+    }
+
+    /// Atomically retire the listed current generations, dropping every
+    /// manager-owned sender clone before waiting for their dump tasks to stop.
+    /// Stale or duplicate requests are harmless.
+    async fn fence_collector_generations(
+        &mut self,
+        generations: impl IntoIterator<Item = (usize, u64)>,
+    ) {
+        let tasks = self.fence_collector_generations_now(generations);
+        for task in &tasks {
+            task.abort();
+        }
+        for task in tasks {
+            let _ = task.await;
+        }
+    }
+
+    fn fence_collector_generations_now(
+        &mut self,
+        generations: impl IntoIterator<Item = (usize, u64)>,
+    ) -> Vec<tokio::task::JoinHandle<()>> {
+        let mut tasks = Vec::new();
+        for (collector_id, generation) in generations {
+            let Some(collector) = self.collectors.get_mut(collector_id) else {
+                continue;
+            };
+            if collector.phase.generation() != Some(generation) {
+                continue;
+            }
+            collector.generation.fetch_add(1, Ordering::SeqCst);
+            collector.phase = CollectorPhase::Disconnected;
+            if collector.filter.loc_rib && self.loc_rib.is_some() {
+                self.metrics
+                    .clear_bmp_loc_rib_dump_live_buffer(&collector.addr_label);
+            }
+            if self
+                .active_dumps
+                .get(&collector_id)
+                .is_some_and(|dump| dump.generation == generation)
+                && let Some(dump) = self.active_dumps.remove(&collector_id)
+            {
+                tasks.push(dump.task);
+            }
+        }
+        tasks
     }
 }
 
@@ -1290,6 +1357,24 @@ mod tests {
 
     use super::*;
     use crate::types::{BmpPeerInfo, BmpPeerType, PeerDownReason};
+
+    struct FanOutCancelProbe {
+        healthy: mpsc::Sender<Bytes>,
+        later_generation: Arc<AtomicU64>,
+        later_old_generation: u64,
+        observed: Option<tokio::sync::oneshot::Sender<(bool, bool)>>,
+    }
+
+    impl Drop for FanOutCancelProbe {
+        fn drop(&mut self) {
+            if let Some(observed) = self.observed.take() {
+                let _ = observed.send((
+                    self.healthy.capacity() == 0,
+                    self.later_generation.load(Ordering::SeqCst) != self.later_old_generation,
+                ));
+            }
+        }
+    }
 
     fn collector_addr(id: u16) -> SocketAddr {
         SocketAddr::from(([127, 0, 0, 1], 11000 + id))
@@ -2143,57 +2228,310 @@ mod tests {
         ));
     }
 
-    /// Collector channel saturates during regular fan-out → manager
-    /// records a `bmp_collector_drops_total{phase=fan_out}` increment.
-    ///
-    /// We pre-fill a 1-deep channel before constructing the manager so
-    /// the next `try_send` in `fan_out` is guaranteed to fail with
-    /// `Full`.
+    /// Capacity-one Full and Closed failures retire only their current
+    /// generations, after both healthy BMP versions receive the event.
     #[tokio::test]
-    async fn fan_out_drop_increments_collector_drop_counter() {
-        let (event_tx, event_rx) = mpsc::channel(16);
-        let (control_tx, control_rx) = mpsc::channel(16);
-        let (c_tx, _c_rx) = mpsc::channel::<Bytes>(1);
-        // Pre-fill the collector channel so the manager's first
-        // try_send hits Full.
-        c_tx.try_send(Bytes::from_static(b"prefill")).unwrap();
-        let addr = collector_addr(7);
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one fixture proves fan-out ordering, generation fencing, dump cancellation, EOF, and metrics"
+    )]
+    async fn fan_out_full_and_closed_fence_affected_but_reach_healthy_v3_v4() {
+        let (_event_tx, event_rx) = mpsc::channel(16);
+        let (_control_tx, control_rx) = mpsc::channel(16);
+        let (full_tx, mut full_rx) = mpsc::channel::<Bytes>(1);
+        full_tx.try_send(Bytes::from_static(b"prefill")).unwrap();
+        let full_dump_tx = full_tx.clone();
+        let (closed_tx, closed_rx) = mpsc::channel::<Bytes>(1);
+        drop(closed_rx);
+        let (v3_tx, mut v3_rx) = mpsc::channel::<Bytes>(1);
+        let healthy_probe_tx = v3_tx.clone();
+        let (v4_tx, mut v4_rx) = mpsc::channel::<Bytes>(1);
+        let full_addr = collector_addr(7);
+        let closed_addr = collector_addr(8);
 
         let metrics = BgpMetrics::new();
-        let mgr = BmpManager::new_connected_for_test(
+        let mut manager = BmpManager::new_connected_for_test(
             event_rx,
             control_rx,
-            vec![(addr, c_tx, BmpMonitorFilter::default(), BmpVersion::V3)],
+            vec![
+                (
+                    full_addr,
+                    full_tx,
+                    BmpMonitorFilter::default(),
+                    BmpVersion::V3,
+                ),
+                (
+                    closed_addr,
+                    closed_tx,
+                    BmpMonitorFilter::default(),
+                    BmpVersion::V4,
+                ),
+                (
+                    collector_addr(9),
+                    v3_tx,
+                    BmpMonitorFilter::default(),
+                    BmpVersion::V3,
+                ),
+                (
+                    collector_addr(10),
+                    v4_tx,
+                    BmpMonitorFilter::default(),
+                    BmpVersion::V4,
+                ),
+            ],
             metrics.clone(),
         );
-        let handle = tokio::spawn(mgr.run());
-
-        event_tx
-            .send(BmpEvent::RouteMonitoring {
+        let full_generation = manager.collectors[0].phase.generation().unwrap();
+        let later_old_generation = manager.collectors[1].phase.generation().unwrap();
+        let later_generation = Arc::clone(&manager.collectors[1].generation);
+        let (cancel_sentinel_tx, mut cancel_sentinel_rx) = tokio::sync::oneshot::channel::<()>();
+        let (order_probe_tx, mut order_probe_rx) = tokio::sync::oneshot::channel();
+        let order_probe = FanOutCancelProbe {
+            healthy: healthy_probe_tx,
+            later_generation,
+            later_old_generation,
+            observed: Some(order_probe_tx),
+        };
+        manager.active_dumps.insert(
+            0,
+            ActiveDump {
+                generation: full_generation,
+                task: tokio::spawn(async move {
+                    let _held_until_cancel = (full_dump_tx, cancel_sentinel_tx, order_probe);
+                    std::future::pending::<()>().await;
+                }),
+                buffered: Vec::new(),
+            },
+        );
+        manager
+            .handle_event(&BmpEvent::RouteMonitoring {
                 peer_info: sample_peer_info(),
                 update_pdu: Bytes::from_static(&[0xAA; 23]),
             })
-            .await
-            .unwrap();
+            .await;
 
-        // Give the manager a moment to process and bump the counter.
-        for _ in 0..20 {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            if metric_family_sum(&metrics, "bmp_collector_drops_total") >= 1 {
-                break;
-            }
-        }
-
-        let dropped = metric_value_with_labels(
-            &metrics,
-            "bmp_collector_drops_total",
-            &[("phase", "fan_out")],
+        assert_eq!(
+            order_probe_rx.try_recv().unwrap(),
+            (true, true),
+            "healthy send and later affected fence must precede first dump-task drop"
         );
-        assert_eq!(dropped, 1, "fan-out drop should have incremented counter");
+        assert!(matches!(
+            cancel_sentinel_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+        ));
+        assert_eq!(v3_rx.recv().await.unwrap()[0], 3);
+        assert_eq!(v4_rx.recv().await.unwrap()[0], 4);
+        assert!(matches!(
+            manager.collectors[0].phase,
+            CollectorPhase::Disconnected
+        ));
+        assert_eq!(
+            manager.collectors[0].generation.load(Ordering::SeqCst),
+            full_generation + 1
+        );
+        assert!(!manager.active_dumps.contains_key(&0));
+        assert!(matches!(
+            manager.collectors[1].phase,
+            CollectorPhase::Disconnected
+        ));
+        assert!(matches!(
+            manager.collectors[2].phase,
+            CollectorPhase::Active { .. }
+        ));
+        assert!(matches!(
+            manager.collectors[3].phase,
+            CollectorPhase::Active { .. }
+        ));
+        assert_eq!(
+            full_rx.recv().await.unwrap(),
+            Bytes::from_static(b"prefill")
+        );
+        assert!(
+            full_rx.recv().await.is_none(),
+            "manager sender clone must be dropped"
+        );
+        for (addr, reason) in [(full_addr, "channel_full"), (closed_addr, "channel_closed")] {
+            assert_eq!(
+                metric_value_with_labels(
+                    &metrics,
+                    "bmp_collector_drops_total",
+                    &[
+                        ("collector", &addr.to_string()),
+                        ("phase", "fan_out"),
+                        ("reason", reason)
+                    ],
+                ),
+                1
+            );
+        }
+    }
 
-        drop(event_tx);
-        drop(control_tx);
-        handle.await.unwrap();
+    #[tokio::test]
+    async fn active_loc_rib_no_dump_full_and_closed_reset_idempotently() {
+        let (_event_tx, event_rx) = mpsc::channel(1);
+        let (_control_tx, control_rx) = mpsc::channel(1);
+        let (full_tx, mut full_rx) = mpsc::channel(1);
+        full_tx.try_send(Bytes::from_static(b"prefill")).unwrap();
+        let (closed_tx, closed_rx) = mpsc::channel(1);
+        drop(closed_rx);
+        let (dump_tx, _dump_rx) = mpsc::channel(1);
+        let metrics = BgpMetrics::new();
+        let mut manager = BmpManager::new_connected_for_test(
+            event_rx,
+            control_rx,
+            vec![
+                (collector_addr(0), full_tx, loc_rib_filter(), BmpVersion::V3),
+                (
+                    collector_addr(1),
+                    closed_tx,
+                    loc_rib_filter(),
+                    BmpVersion::V4,
+                ),
+            ],
+            metrics.clone(),
+        )
+        .with_loc_rib(loc_rib_config(), dump_tx);
+        let generations: Vec<_> = manager
+            .collectors
+            .iter()
+            .map(|collector| collector.phase.generation().unwrap())
+            .collect();
+
+        manager
+            .handle_loc_rib_event(&BmpEvent::LocRibStats {
+                per_family: vec![(1, 1, 1)],
+            })
+            .await;
+        manager
+            .fence_collector_generations([(0, generations[0]), (1, generations[1])])
+            .await;
+
+        assert!(
+            manager
+                .collectors
+                .iter()
+                .all(|collector| matches!(collector.phase, CollectorPhase::Disconnected))
+        );
+        assert_eq!(
+            full_rx.recv().await.unwrap(),
+            Bytes::from_static(b"prefill")
+        );
+        assert!(full_rx.recv().await.is_none());
+        for (addr, reason) in [
+            (collector_addr(0), "channel_full"),
+            (collector_addr(1), "channel_closed"),
+        ] {
+            assert_eq!(
+                metric_value_with_labels(
+                    &metrics,
+                    "bmp_collector_drops_total",
+                    &[
+                        ("collector", &addr.to_string()),
+                        ("phase", "fan_out"),
+                        ("reason", reason)
+                    ],
+                ),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_peer_events_update_cache_before_generation_reset() {
+        let (_event_tx, event_rx) = mpsc::channel(1);
+        let (_control_tx, control_rx) = mpsc::channel(1);
+        let (first_tx, _first_rx) = mpsc::channel(1);
+        first_tx.try_send(Bytes::from_static(b"prefill")).unwrap();
+        let addr = collector_addr(0);
+        let mut manager = BmpManager::new_connected_for_test(
+            event_rx,
+            control_rx,
+            vec![(addr, first_tx, BmpMonitorFilter::default(), BmpVersion::V3)],
+            BgpMetrics::new(),
+        );
+        let peer_up = BmpEvent::PeerUp {
+            peer_info: sample_peer_info(),
+            local_open: Bytes::from_static(&[0x11; 29]),
+            remote_open: Bytes::from_static(&[0x22; 29]),
+            local_addr: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            local_port: 179,
+            remote_port: 49152,
+        };
+        manager.handle_event(&peer_up).await;
+
+        let (second_tx, mut second_rx) = mpsc::channel(1);
+        second_tx
+            .try_send(Bytes::from_static(b"replacement prefill"))
+            .unwrap();
+        let (bootstrap_tx, bootstrap_rx) = tokio::sync::oneshot::channel();
+        manager.handle_collector_connected(0, addr, second_tx, bootstrap_tx);
+        let bootstrap = bootstrap_rx.await.unwrap();
+        assert_eq!(bootstrap.messages.len(), 1, "failed PeerUp must be cached");
+        manager.handle_bootstrap_complete(0, bootstrap.generation);
+        manager
+            .handle_event(&BmpEvent::PeerDown {
+                peer_info: sample_peer_info(),
+                reason: PeerDownReason::LocalNoNotification(0),
+            })
+            .await;
+        assert!(matches!(
+            manager.collectors[0].phase,
+            CollectorPhase::Disconnected
+        ));
+        assert_eq!(
+            second_rx.recv().await.unwrap(),
+            Bytes::from_static(b"replacement prefill")
+        );
+        assert!(second_rx.recv().await.is_none());
+
+        let (third_tx, _third_rx) = mpsc::channel(1);
+        let (bootstrap_tx, bootstrap_rx) = tokio::sync::oneshot::channel();
+        manager.handle_collector_connected(0, addr, third_tx, bootstrap_tx);
+        assert!(
+            bootstrap_rx.await.unwrap().messages.is_empty(),
+            "failed PeerDown must remove cache entry before reset"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_dump_entry_falls_through_to_live_send_and_is_cancelled() {
+        let (_event_tx, event_rx) = mpsc::channel(1);
+        let (_control_tx, control_rx) = mpsc::channel(1);
+        let (collector_tx, mut collector_rx) = mpsc::channel(1);
+        let (dump_tx, _dump_rx) = mpsc::channel(1);
+        let mut manager = BmpManager::new_connected_for_test(
+            event_rx,
+            control_rx,
+            vec![(
+                collector_addr(0),
+                collector_tx,
+                loc_rib_filter(),
+                BmpVersion::V3,
+            )],
+            BgpMetrics::new(),
+        )
+        .with_loc_rib(loc_rib_config(), dump_tx);
+        manager.active_dumps.insert(
+            0,
+            ActiveDump {
+                generation: 0,
+                task: tokio::spawn(std::future::pending()),
+                buffered: Vec::new(),
+            },
+        );
+
+        manager
+            .handle_loc_rib_event(&BmpEvent::LocRibStats {
+                per_family: vec![(1, 1, 1)],
+            })
+            .await;
+
+        assert!(manager.active_dumps.is_empty());
+        assert_eq!(collector_rx.recv().await.unwrap()[0], 3);
+        assert!(matches!(
+            manager.collectors[0].phase,
+            CollectorPhase::Active { .. }
+        ));
     }
 
     /// Production mutation: replaying cached Peer Ups through the one-deep
@@ -3461,7 +3799,7 @@ mod tests {
             BgpMetrics::new(),
         )
         .with_loc_rib(loc_rib_config(), dump_tx);
-        let (sender, receiver) = mpsc::channel(1);
+        let (sender, mut receiver) = mpsc::channel(1);
         manager.collectors[0].generation.store(5, Ordering::SeqCst);
         manager.collectors[0].phase = CollectorPhase::Active {
             generation: 5,
@@ -3483,7 +3821,15 @@ mod tests {
 
         assert_eq!(manager.collectors[0].phase.generation(), Some(5));
         assert!(!receiver.is_closed(), "replacement remains connected");
-        manager.active_dumps.remove(&0).unwrap().task.abort();
+        assert!(
+            !manager.active_dumps.contains_key(&0),
+            "stale dump is reaped"
+        );
+        assert_eq!(
+            receiver.recv().await.unwrap()[0],
+            3,
+            "live row falls through"
+        );
     }
 
     /// Load-bearing proof that the post-dump flush awaits collector-channel

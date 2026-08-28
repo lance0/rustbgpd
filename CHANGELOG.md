@@ -9,6 +9,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- BMP per-collector queue loss now resets only the affected connection
+  generation. A full or closed live fan-out queue closes that collector's TCP
+  session without BMP Termination; the existing one-second retry reconnects,
+  replays cached Peer Up state, and runs a fresh EoR-closed Loc-RIB dump when
+  configured. Healthy collectors still receive the triggering event, and
+  `bmp_collector_drops_total{phase="fan_out",reason}` records the reset trigger
+  exactly once.
+
 ### Added
 
 - The RIB memory harness now models the opposing costs of interned attribute
