@@ -728,6 +728,15 @@ pub struct NegotiatedSessionState {
     pub graceful_restart: Option<NegotiatedGracefulRestartState>,
 }
 
+/// Exact retained policy-rejection counts by supported unicast family.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PolicyRejectCounts {
+    /// Retained IPv4-unicast policy rejections.
+    pub ipv4_unicast: u64,
+    /// Retained IPv6-unicast policy rejections.
+    pub ipv6_unicast: u64,
+}
+
 /// Snapshot of a peer session's runtime state.
 #[derive(Debug, Clone)]
 pub struct PeerSessionState {
@@ -741,6 +750,10 @@ pub struct PeerSessionState {
     pub prefix_count: usize,
     /// Number of rejected routes retained by this peer session's bounded store.
     pub rejected_routes_retained: usize,
+    /// Exact retained policy-rejection counts while the bounded store remains
+    /// authoritative. Absent when retention is disabled or any entry has been
+    /// evicted since the current session began.
+    pub policy_reject_counts: Option<PolicyRejectCounts>,
     /// Family-local counts, effective finite limits, and remaining capacity.
     pub max_prefix: MaxPrefixState,
     /// Negotiated hold time (seconds), if session reached `OpenConfirm`.

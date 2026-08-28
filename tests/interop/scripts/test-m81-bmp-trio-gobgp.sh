@@ -74,6 +74,9 @@
 #       Loc-RIB stream)
 #   37  tshark: v3-port RM messages dissect as plain BGP UPDATEs
 #       (bmp.version == 3, no v4 TLV fields)
+#   38  raw: PE1 Stats Reports carry exactly one IPv4-unicast and one
+#       IPv6-unicast RFC 9972 policy-rejection row (type 22), both 1,
+#       with byte-equal v3 body / v4 Stats TLV value
 #
 # Deferred (documented, not asserted): Path Marking is unavailable
 # until its draft receives a non-colliding assignment; draft-21 uses
@@ -118,8 +121,9 @@ PE2_ADDR="10.0.1.2"
 UNI_PREFIX="10.10.1.0/24"        # pe1 unicast, later withdrawn (16)
 PE2_PREFIX="10.20.2.0/24"        # pe2 unique, withdrawn by peer down (21)
 CONTEST_PREFIX="10.99.0.0/24"    # pe2 LP=100 first, pe1 LP=200 wins (15/33)
-CONTEST_NLRI_HEX="180a6300"      # /24 NLRI wire encoding of 10.99.0.0
 V6_PREFIX="2001:db8:10::/48"
+REJECT_V4_PREFIX="198.18.81.0/24"
+REJECT_V6_PREFIX="2001:db8:81::/48"
 VPN_PREFIX="10.100.1.0/24"
 VPN_RD="65001:100"
 
@@ -379,6 +383,8 @@ test_route_streams() {
     gobgp "$PE1" global rib add "$CONTEST_PREFIX" nexthop "$PE1_ADDR" local-pref 200
     gobgp "$PE1" global rib add "$UNI_PREFIX" nexthop "$PE1_ADDR"
     gobgp "$PE1" global rib add -a ipv6 "$V6_PREFIX" nexthop "2001:db8::1"
+    gobgp "$PE1" global rib add "$REJECT_V4_PREFIX" nexthop "$PE1_ADDR"
+    gobgp "$PE1" global rib add -a ipv6 "$REJECT_V6_PREFIX" nexthop "2001:db8::1"
     gobgp "$PE1" vrf add blue rd "$VPN_RD" rt both "$VPN_RD"
     gobgp "$PE1" vrf blue rib add "$VPN_PREFIX" nexthop "$PE1_ADDR"
 
@@ -497,6 +503,8 @@ test_stats() {
                 and ([.msg_data.per_afi_loc_rib[]
                       | select(.afi == 1 and .safi == 128 and .count >= 1)] | length) > 0' \
         "(2) loc-rib per-AFI stats: ipv4-unicast + vpnv4 counts >= 1 (RFC 9069 type 10)" 40
+    raw_assert "(38) PE1 policy rejects: exact v4/v6 type-22 rows, v3/v4-equal body" \
+        stats_policy_reject_counts "$PE1_ADDR"
 }
 
 test_peer_down() {

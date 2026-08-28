@@ -14,6 +14,16 @@ fn named_rpol_reject_chain() -> PolicyChain {
     )])
 }
 
+async fn query_policy_reject_counts(
+    session: &mut PeerSession,
+) -> Option<crate::PolicyRejectCounts> {
+    let (reply, state) = oneshot::channel();
+    let _ = session
+        .handle_command(PeerCommand::QueryState { reply })
+        .await;
+    state.await.unwrap().policy_reject_counts
+}
+
 /// Clean permitted UPDATEs must not construct reject-only diagnostic state
 /// or allocate the rejected-route LRU.
 /// Break-to-red: restoring eager `LruCache::new` makes the structural
@@ -38,6 +48,15 @@ async fn reject_retention_permitted_update_stays_allocation_free() {
     );
     assert_eq!(session.known_prefix_count(), 2);
     assert_eq!(session.import_policy_routes_permitted, 2);
+    let (reply, state) = oneshot::channel();
+    let _ = session
+        .handle_command(PeerCommand::QueryState { reply })
+        .await;
+    assert_eq!(
+        state.await.unwrap().policy_reject_counts,
+        Some(crate::PolicyRejectCounts::default()),
+        "enabled empty retention is authoritatively zero"
+    );
 }
 
 /// Body and MP policy denies in one UPDATE share one bounded prototype and
@@ -142,6 +161,13 @@ async fn reject_retention_shares_prototype_across_body_and_mp_policy_denies() {
     assert_eq!(rejected_route_prototype_builds(&session), 2);
     assert_eq!(later_entry.1.as_path, "65002 65003");
     assert_eq!(later_entry.1.communities, vec![200]);
+    assert_eq!(
+        query_policy_reject_counts(&mut session).await,
+        Some(crate::PolicyRejectCounts {
+            ipv4_unicast: 2,
+            ipv6_unicast: 1,
+        })
+    );
 }
 
 /// LAN-472 pin: a policy deny retains the route with reason
@@ -178,7 +204,15 @@ async fn reject_retention_records_policy_deny_and_clears_on_withdraw() {
     let _ = session
         .handle_command(PeerCommand::QueryState { reply })
         .await;
-    assert_eq!(count.await.unwrap().rejected_routes_retained, 1);
+    let state = count.await.unwrap();
+    assert_eq!(state.rejected_routes_retained, 1);
+    assert_eq!(
+        state.policy_reject_counts,
+        Some(crate::PolicyRejectCounts {
+            ipv4_unicast: 1,
+            ipv6_unicast: 0,
+        })
+    );
 
     // Explicit withdrawal clears the retained reject — the question
     // "why isn't my route accepted?" is moot once the peer stops
@@ -195,7 +229,13 @@ async fn reject_retention_records_policy_deny_and_clears_on_withdraw() {
     let _ = session
         .handle_command(PeerCommand::QueryState { reply })
         .await;
-    assert_eq!(count.await.unwrap().rejected_routes_retained, 0);
+    let state = count.await.unwrap();
+    assert_eq!(state.rejected_routes_retained, 0);
+    assert_eq!(
+        state.policy_reject_counts,
+        Some(crate::PolicyRejectCounts::default()),
+        "removing the final reject restores authoritative zero"
+    );
 }
 
 /// LAN-472 pin: when a previously rejected identity is later accepted
@@ -374,6 +414,15 @@ async fn reject_retention_cap_evicts_oldest_reject() {
     assert_eq!(metrics.rejected_routes_retained("10.0.0.2"), 2);
     assert_eq!(session.rejected_routes.evictions_since_reset(), 1);
     assert_eq!(metrics.rejected_route_retention_evictions("10.0.0.2"), 1);
+    let (reply, state) = oneshot::channel();
+    let _ = session
+        .handle_command(PeerCommand::QueryState { reply })
+        .await;
+    assert_eq!(
+        state.await.unwrap().policy_reject_counts,
+        None,
+        "the first eviction makes retained policy-reject counts incomplete"
+    );
 
     session
         .process_update(retention_update(&[third], &[]))
@@ -416,6 +465,15 @@ async fn reject_retention_disabled_records_nothing_and_reports_disabled() {
     let reply = reply_rx.await.expect("session replied");
     assert!(!reply.enabled, "disabled state is a configuration fact");
     assert!(reply.entries.is_empty());
+    let (reply_tx, reply_rx) = oneshot::channel();
+    let _ = session
+        .handle_command(PeerCommand::QueryState { reply: reply_tx })
+        .await;
+    assert_eq!(
+        reply_rx.await.unwrap().policy_reject_counts,
+        None,
+        "disabled retention cannot authoritatively count policy rejects"
+    );
 }
 
 /// LAN-472 pin: an AS_PATH-loop rejection (which funnels through the
@@ -539,6 +597,15 @@ async fn session_down_flushes_reject_retention_and_gauge() {
         "the gauge follows the flush"
     );
     assert_eq!(session.rejected_routes.evictions_since_reset(), 0);
+    let (reply, state) = oneshot::channel();
+    let _ = session
+        .handle_command(PeerCommand::QueryState { reply })
+        .await;
+    assert_eq!(
+        state.await.unwrap().policy_reject_counts,
+        Some(crate::PolicyRejectCounts::default()),
+        "session reset restores enabled-store zero authority"
+    );
 }
 
 /// The crate README must expose the current completeness contract in

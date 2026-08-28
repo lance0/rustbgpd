@@ -36,6 +36,7 @@ topology:
       cmd: sleep infinity
       binds:
         - ./configs/rustbgpd-m81-bmp-rr.toml:/etc/rustbgpd/config.toml:ro
+        - ./configs/m81-bmp-policy-rejects.rpol:/etc/rustbgpd/m81-bmp-policy-rejects.rpol:ro
         - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
         - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
       exec:

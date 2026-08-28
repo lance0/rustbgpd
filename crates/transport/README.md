@@ -51,7 +51,10 @@ before forwarding to the RIB — the FSM sees only payloadless events.
   an empty result a configuration fact, zero evictions proves no retained
   rejection was displaced by capacity since the session reset, and a nonzero
   count means the bounded listing may be incomplete. Entries and the eviction
-  count are diagnostic state and reset with the session.
+  count are diagnostic state and reset with the session. The session snapshot
+  exposes exact IPv4/IPv6-unicast policy-reject counts for RFC 9972 BMP type 22
+  while retention is enabled and no eviction has occurred; otherwise the
+  counts are absent rather than partial.
 - **Private AS removal** — strip/replace private ASNs before eBGP export
 - **Route server transparency** — preserve original NEXT_HOP and skip
   local ASN prepend for route-server clients

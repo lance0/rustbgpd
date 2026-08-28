@@ -48,11 +48,11 @@ pub use event_sink::{
 pub use handle::PeerRuntimeConfigUpdate;
 pub use handle::{
     ImportPolicyTermHits, NegotiatedGracefulRestartState, NegotiatedSessionState, PeerCommand,
-    PeerCommandError, PeerHandle, PeerSessionState, PeerShutdownError, SessionIdentity,
-    SessionLifecycleNotification, SessionNotification, SessionNotificationDirection,
-    SessionNotificationEvent, SessionNotificationReceiver, SessionNotificationSender,
-    SessionQueryOutcome, SessionRole, StateQueryOutcome, WarmCheckpointSessionState,
-    session_notification_channel,
+    PeerCommandError, PeerHandle, PeerSessionState, PeerShutdownError, PolicyRejectCounts,
+    SessionIdentity, SessionLifecycleNotification, SessionNotification,
+    SessionNotificationDirection, SessionNotificationEvent, SessionNotificationReceiver,
+    SessionNotificationSender, SessionQueryOutcome, SessionRole, StateQueryOutcome,
+    WarmCheckpointSessionState, session_notification_channel,
 };
 pub use listener::{
     AcceptedConnection, BgpListener, ListenerSocketOptions, Md5ListenerKey,

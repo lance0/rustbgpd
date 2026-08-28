@@ -50,6 +50,10 @@ pub enum BmpEvent {
         /// unicast families. `None` omits types 20, 21, and 23, including
         /// when effective Add-Path receive makes unique-prefix gauges inexact.
         rfc9972_adj_rib_in_post: Option<Vec<(u16, u8, u64)>>,
+        /// RFC 9972 type 22: current pre-policy Adj-RIB-In routes rejected by
+        /// inbound policy, per negotiated IPv4/IPv6 unicast family. `None` means
+        /// retention is not authoritative and omits the statistic.
+        rfc9972_policy_rejects: Option<Vec<(u16, u8, u64)>>,
         /// RFC 8671 post-policy Adj-RIB-Out counts per `(afi, safi)`,
         /// encoded as stat type 17 entries plus their sum as type 15.
         /// `None` means the counts were unavailable this tick — types

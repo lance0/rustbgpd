@@ -399,6 +399,7 @@ impl BmpManager {
                 peer_info,
                 adj_rib_in_routes,
                 rfc9972_adj_rib_in_post,
+                rfc9972_policy_rejects,
                 adj_rib_out_post,
             } => {
                 let mut counters = vec![codec::StatCounter {
@@ -422,6 +423,18 @@ impl BmpManager {
                         });
                         afi_counters.push(codec::AfiStatCounter {
                             stat_type: 23,
+                            afi,
+                            safi,
+                            value,
+                        });
+                    }
+                }
+                if let Some(per_family) = rfc9972_policy_rejects {
+                    let mut sorted = per_family.iter().collect::<Vec<_>>();
+                    sorted.sort_by_key(|(afi, safi, _)| (*afi, *safi));
+                    for &&(afi, safi, value) in &sorted {
+                        afi_counters.push(codec::AfiStatCounter {
+                            stat_type: 22,
                             afi,
                             safi,
                             value,
@@ -1607,6 +1620,7 @@ mod tests {
                 peer_info: sample_peer_info(),
                 adj_rib_in_routes: 42,
                 rfc9972_adj_rib_in_post: None,
+                rfc9972_policy_rejects: None,
                 adj_rib_out_post: None,
             })
             .await
@@ -1848,6 +1862,7 @@ mod tests {
                 peer_info: sample_peer_info(),
                 adj_rib_in_routes: 42,
                 rfc9972_adj_rib_in_post: Some(vec![(2, 1, 7), (1, 1, 11)]),
+                rfc9972_policy_rejects: Some(vec![(2, 1, 3), (1, 1, 2)]),
                 adj_rib_out_post: Some(vec![(2, 1, 5), (1, 1, 10)]),
             })
             .await
@@ -1855,7 +1870,7 @@ mod tests {
 
         let msg = c_rx.recv().await.unwrap();
         let stats = decode_stats(&msg);
-        assert_eq!(stats.len(), 9);
+        assert_eq!(stats.len(), 11);
 
         let adj_rib_in_type = stats[0].0;
         let adj_rib_out_total_type = stats[1].0;
@@ -1874,18 +1889,22 @@ mod tests {
                 .iter()
                 .map(|(_, payload)| payload.len())
                 .collect::<Vec<_>>(),
-            vec![8, 8, 11, 11, 8, 11, 11, 11, 11]
+            vec![8, 8, 11, 11, 8, 11, 11, 11, 11, 11, 11]
         );
         assert_eq!(
             stats
                 .iter()
                 .map(|(stat_type, _)| *stat_type)
                 .collect::<Vec<_>>(),
-            vec![7, 15, 17, 17, 20, 21, 21, 23, 23]
+            vec![7, 15, 17, 17, 20, 21, 21, 22, 22, 23, 23]
         );
         assert_eq!(u64::from_be_bytes(stats[4].1.try_into().unwrap()), 18);
         assert_eq!(&stats[5].1[..3], &[0, 1, 1]);
         assert_eq!(&stats[6].1[..3], &[0, 2, 1]);
+        assert_eq!(&stats[7].1[..3], &[0, 1, 1]);
+        assert_eq!(u64::from_be_bytes(stats[7].1[3..].try_into().unwrap()), 2);
+        assert_eq!(&stats[8].1[..3], &[0, 2, 1]);
+        assert_eq!(u64::from_be_bytes(stats[8].1[3..].try_into().unwrap()), 3);
 
         assert_eq!(u64::from_be_bytes(stats[0].1.try_into().unwrap()), 42);
         assert_eq!(u64::from_be_bytes(stats[1].1.try_into().unwrap()), 15);
@@ -1899,6 +1918,7 @@ mod tests {
                 peer_info: sample_peer_info(),
                 adj_rib_in_routes: 0,
                 rfc9972_adj_rib_in_post: Some(vec![(1, 1, 0), (2, 1, 0)]),
+                rfc9972_policy_rejects: Some(vec![(1, 1, 0), (2, 1, 0)]),
                 adj_rib_out_post: None,
             })
             .await
@@ -1910,7 +1930,7 @@ mod tests {
                 .iter()
                 .map(|(stat_type, _)| *stat_type)
                 .collect::<Vec<_>>(),
-            vec![7, 20, 21, 21, 23, 23],
+            vec![7, 20, 21, 21, 22, 22, 23, 23],
             "available zero gauges remain present in legacy-then-RFC order"
         );
         assert_eq!(
@@ -1925,7 +1945,7 @@ mod tests {
                 .iter()
                 .all(|(stat_type, payload)| match stat_type {
                     7 | 20 => payload.len() == 8 && payload.iter().all(|byte| *byte == 0),
-                    21 | 23 => {
+                    21..=23 => {
                         payload.len() == 11
                             && matches!(&payload[..3], [0, 1 | 2, 1])
                             && payload[3..].iter().all(|byte| *byte == 0)
@@ -1933,7 +1953,7 @@ mod tests {
                     _ => false,
                 })
         );
-        for stat_type in [21, 23] {
+        for stat_type in [21, 22, 23] {
             let families = zero_stats
                 .iter()
                 .filter(|(candidate, _)| *candidate == stat_type)
@@ -1947,6 +1967,7 @@ mod tests {
                 peer_info: sample_peer_info(),
                 adj_rib_in_routes: 43,
                 rfc9972_adj_rib_in_post: None,
+                rfc9972_policy_rejects: None,
                 adj_rib_out_post: None,
             })
             .await
@@ -2003,7 +2024,10 @@ mod tests {
              {adj_rib_out_total_type}/{adj_rib_out_family_type} are omitted when unavailable \
              rather than reported as false zero. RFC 9972 post-policy Adj-RIB-In gauges \
              (types 20/21/23) cover negotiated IPv4/IPv6 unicast and are omitted when effective \
-             unicast Add-Path receive is active."
+             unicast Add-Path receive is active. Type 22 reports exact retained policy \
+             rejections for those negotiated families, including under Add-Path; it is omitted \
+             when rejected-route retention is disabled or a capacity eviction makes the \
+             retained set incomplete."
         );
         assert_eq!(
             actual,
@@ -2772,6 +2796,7 @@ mod tests {
                 peer_info: sample_peer_info(),
                 adj_rib_in_routes: 1,
                 rfc9972_adj_rib_in_post: None,
+                rfc9972_policy_rejects: None,
                 adj_rib_out_post: None,
             })
             .await
@@ -3495,6 +3520,7 @@ mod tests {
                 peer_info: sample_peer_info(),
                 adj_rib_in_routes: 7,
                 rfc9972_adj_rib_in_post: None,
+                rfc9972_policy_rejects: None,
                 adj_rib_out_post: None,
             })
             .await
@@ -3567,6 +3593,7 @@ mod tests {
                 peer_info: sample_peer_info(),
                 adj_rib_in_routes: 9,
                 rfc9972_adj_rib_in_post: None,
+                rfc9972_policy_rejects: None,
                 adj_rib_out_post: None,
             })
             .await
