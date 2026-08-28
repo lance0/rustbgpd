@@ -83,10 +83,18 @@ convention in `CONTRIBUTING.md`:
       docs, and tests all move together.
 - [ ] Process-only documentation changes intentionally omit CHANGELOG entries
       unless they affect users or operators.
-- [ ] Every README front-matter performance claim cites a receipt measured
-      within the last three releases, or carries an explicit measured-on date
-      in the claim text (e.g. "measured 2026-07-03"). Older numbers stay
-      quotable with their date; undated stale numbers do not ship.
+- [ ] Every front-door performance claim inventoried in
+      [`docs/perf/receipt-provenance.json`](perf/receipt-provenance.json) — in
+      `README.md`, `docs/BENCHMARKS.md`, `docs/COMPARISON.md`, or
+      `docs/ixp-evaluation.md` — cites a receipt measured within the last three
+      releases, or carries an explicit measured-on date in the claim text
+      (e.g. "measured 2026-07-03"). Older numbers stay quotable with their
+      date; undated stale numbers do not ship. The public-docs contract checks
+      every receipt link in those curated headline blocks against the manifest,
+      plus commit/tag provenance and this freshness rule. The manifest does not
+      catalog the whole performance corpus; the checker's sorted
+      zero-inbound-link inventory covers all top-level receipts as an advisory
+      so discoverability is not conflated with measurement validity.
 
 ## Narrow v1 RS/RR compatibility gate
 

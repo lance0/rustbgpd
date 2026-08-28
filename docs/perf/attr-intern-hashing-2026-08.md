@@ -16,6 +16,11 @@ values remain in the artifact for audit, but are explicitly marked
 This is a measurement receipt, not a performance claim. It changes no
 production code and measures no production speedup.
 
+*Post-publication note:* the same-source
+[noise-floor recheck](attr-intern-hashing-recheck-2026-08.md) left attribution
+not evaluated rather than renewing this measured NO-GO. This document's raw
+rows and original verdict remain unchanged.
+
 ## Question and decision rule
 
 The roadmap asks whether repeatedly hashing an already-shared
