@@ -610,7 +610,7 @@ bird_raw_tshark() {
 
 discard_metric_value() {
     prom_value "$RUSTBGPD" \
-        'bgp_path_attribute_discarded_total{peer="10.83.1.2",type_code="4"}'
+        "bgp_path_attribute_discarded_total{peer=\"${BIRD_ADDR}\",type_code=\"4\"}"
 }
 
 collect_failure_artifacts() {

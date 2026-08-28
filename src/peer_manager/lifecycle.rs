@@ -1369,6 +1369,10 @@ impl PeerManager {
             .iter()
             .map(|range| range.peer_group.as_str())
             .collect();
+        let purge_ranges: BTreeSet<_> = purge_ranges
+            .iter()
+            .map(|range| (range.addr, range.prefix_len, range.peer_group.as_str()))
+            .collect();
         for peer_group in peer_groups {
             self.sync_dynamic_max_prefix_restart_for_group(peer_group);
         }
@@ -1402,11 +1406,11 @@ impl PeerManager {
                 .accepted_dynamic_range
                 .as_ref()
                 .is_some_and(|accepted| {
-                    purge_ranges.iter().any(|range| {
-                        range.addr == accepted.addr
-                            && range.prefix_len == accepted.prefix_len
-                            && range.peer_group == accepted.peer_group
-                    })
+                    purge_ranges.contains(&(
+                        accepted.addr,
+                        accepted.prefix_len,
+                        accepted.peer_group.as_str(),
+                    ))
                 });
             let reason = rustbgpd_wire::notification::encode_shutdown_communication(
                 "peer-group configuration change",
