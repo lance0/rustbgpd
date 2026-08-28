@@ -2305,7 +2305,9 @@ message BlackholeDiscard {
   string peer_address = 3;
   BlackholeDiscardState state = 4;
   // Human-readable reason: installed/owned, broad_prefix, not_ebgp,
-  // active_limit_exceeded, install_rate_limited, or a kernel error summary.
+  // active_limit_exceeded, install_rate_limited, route_churn_deferred, or a
+  // kernel error summary. route_churn_deferred guards an install or repair;
+  // it is not proof that the row is installed in the kernel.
   string reason = 5;
 }
 

@@ -94,9 +94,18 @@ install_blackhole_discard = true
 The daemon starts a unicast BLACKHOLE reconciler at boot when both
 `honor_blackhole` and `install_blackhole_discard` are true. The
 reconciler subscribes to unicast best-path events, periodically
-re-queries the Loc-RIB as a level-triggered backstop, and installs
+re-queries the Loc-RIB through bounded ordered pages as a level-triggered
+backstop, and installs
 kernel `RTN_BLACKHOLE` routes only for accepted best routes that still
 carry the RFC 7999 community after import policy.
+
+Planning is fail-closed and finishes before the first kernel dump. The
+planning phase has a 30-second ceiling; every page, exact lookup, and final
+version seal has at most two seconds. An owned, adopted-pending, or receipt-backed prefix
+missing from the provisional walk is checked by exact Loc-RIB key before it
+may be released or removed. With an active count or rate guardrail, route
+churn defers new installs and repairs without consuming a token or advancing
+the fairness cursor; exact removals and existing-marker adoption remain safe.
 
 The first FIB slice is deliberately conservative:
 

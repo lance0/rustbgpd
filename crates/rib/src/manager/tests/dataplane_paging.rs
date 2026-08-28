@@ -15,7 +15,8 @@ use crate::adj_rib_in::AdjRibIn;
 use crate::manager::queries::{DATAPLANE_PAGE_MAX_NEXT_HOPS, DATAPLANE_PAGE_MAX_PREFIXES};
 use crate::route::{FibInstallCandidate, NextHopScope, Route};
 use crate::update::{
-    BestRoutesPage, DataplanePageError, FibInstallCandidatesPage, RoutePageVersion,
+    BestRoutesPage, DataplaneExactQueryError, DataplanePageError, FibInstallCandidatesPage,
+    RoutePageVersion,
 };
 
 fn manager(eager: bool) -> RibManager {
@@ -148,6 +149,120 @@ fn full_fib(
     response
         .try_recv()
         .expect("full FIB handler replies synchronously")
+}
+
+#[test]
+fn exact_best_is_input_aligned_and_budgeted() {
+    let mut manager = manager(true);
+    let present = prefix(1);
+    let absent = prefix(2);
+    apply_routes(
+        &mut manager,
+        peer(0),
+        vec![route(present, peer(0), IpAddr::V4(peer(0)), &[64512])],
+    );
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_query_best_routes_exact(
+        vec![absent, present, absent],
+        tokio::time::Instant::now() + Duration::from_secs(60),
+        reply,
+    );
+    let exact = response.try_recv().unwrap().unwrap();
+    assert!(exact.routes[0].is_none());
+    assert_eq!(exact.routes[1].as_ref().unwrap().prefix, present);
+    assert!(exact.routes[2].is_none());
+
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_query_best_routes_exact(
+        vec![present; DATAPLANE_PAGE_MAX_PREFIXES + 1],
+        tokio::time::Instant::now() + Duration::from_secs(60),
+        reply,
+    );
+    assert_eq!(
+        response.try_recv().unwrap().unwrap_err(),
+        DataplaneExactQueryError::BudgetExceeded
+    );
+}
+
+#[test]
+fn exact_fib_matches_page_and_rejects_path_budget() {
+    let mut manager = manager(true);
+    let present = prefix(1);
+    apply_routes(
+        &mut manager,
+        peer(0),
+        vec![route(present, peer(0), IpAddr::V4(peer(0)), &[64512])],
+    );
+    let page = fib_page(&mut manager, None, 1, false, false).unwrap();
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_query_fib_install_candidates_exact(
+        vec![present, prefix(9)],
+        1,
+        false,
+        false,
+        tokio::time::Instant::now() + Duration::from_secs(60),
+        reply,
+    );
+    let exact = response.try_recv().unwrap().unwrap();
+    assert_eq!(
+        exact.candidates[0].as_ref().unwrap().best.prefix,
+        page.candidates[0].best.prefix
+    );
+    assert!(exact.candidates[1].is_none());
+
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_query_fib_install_candidates_exact(
+        vec![present; 33],
+        256,
+        false,
+        false,
+        tokio::time::Instant::now() + Duration::from_secs(60),
+        reply,
+    );
+    assert_eq!(
+        response.try_recv().unwrap().unwrap_err(),
+        DataplaneExactQueryError::BudgetExceeded
+    );
+}
+
+#[test]
+fn peer_group_version_advances_only_on_content_change() {
+    let mut manager = manager(false);
+    let peer = IpAddr::V4(peer(0));
+    let initial = manager.peer_group_version;
+    manager.set_peer_group(peer, None);
+    assert_eq!(manager.peer_group_version, initial);
+    manager.set_peer_group(peer, Some("edge".to_string()));
+    let inserted = manager.peer_group_version;
+    assert_ne!(inserted, initial);
+    manager.set_peer_group(peer, Some("edge".to_string()));
+    assert_eq!(manager.peer_group_version, inserted);
+    manager.set_peer_group(peer, Some("transit".to_string()));
+    let changed = manager.peer_group_version;
+    assert_ne!(changed, inserted);
+    manager.set_peer_group(peer, None);
+    let removed = manager.peer_group_version;
+    assert_ne!(removed, changed);
+
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_query_peer_groups_versioned(
+        tokio::time::Instant::now() + Duration::from_secs(60),
+        reply,
+    );
+    let snapshot = response.try_recv().unwrap().unwrap();
+    assert!(snapshot.groups.is_empty());
+    assert_eq!(snapshot.observed_version, removed.unwrap());
+
+    manager.set_peer_group(peer, Some("customer".to_string()));
+    let inserted_again = manager.peer_group_version;
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_query_peer_groups_versioned(
+        tokio::time::Instant::now() + Duration::from_secs(60),
+        reply,
+    );
+    let snapshot = response.try_recv().unwrap().unwrap();
+    assert_eq!(snapshot.groups.get(&peer), Some(&"customer".to_string()));
+    assert_eq!(snapshot.observed_version, inserted_again.unwrap());
 }
 
 fn assert_route_field_equivalent(actual: &Route, expected: &Route) {
@@ -660,6 +775,123 @@ async fn expired_and_preclosed_pages_publish_nothing_then_light_query_runs() {
         max_paths: 2,
         relax: false,
         weighted: false,
+        deadline: full_snapshot_query_deadline(),
+        reply,
+    })
+    .await
+    .unwrap();
+
+    assert_lightweight_query_is_serviced(&tx).await;
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn expired_and_preclosed_exact_best_publish_nothing_then_light_query_runs() {
+    let (tx, rx) = mpsc::channel(8);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_eager_dataplane_prefix_index();
+    let handle = tokio::spawn(manager.run());
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::QueryBestRoutesExact {
+        prefixes: vec![prefix(1)],
+        deadline: tokio::time::Instant::now(),
+        reply,
+    })
+    .await
+    .unwrap();
+    assert!(response.await.is_err());
+
+    let (reply, response) = oneshot::channel();
+    drop(response);
+    tx.send(RibUpdate::QueryBestRoutesExact {
+        prefixes: vec![prefix(1)],
+        deadline: full_snapshot_query_deadline(),
+        reply,
+    })
+    .await
+    .unwrap();
+
+    assert_lightweight_query_is_serviced(&tx).await;
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn exact_fib_mid_sibling_cancellation_publishes_nothing_then_light_query_runs() {
+    let (tx, rx) = mpsc::channel(8);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new())
+        .with_eager_dataplane_prefix_index();
+    let target = prefix(77);
+    for index in 0..300 {
+        let source = peer(index);
+        apply_routes(
+            &mut manager,
+            source,
+            vec![route(target, source, IpAddr::V4(source), &[64512])],
+        );
+    }
+    manager
+        .dataplane_exact_cancel_after_visits
+        .store(512, Ordering::Relaxed);
+    let handle = tokio::spawn(manager.run());
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::QueryFibInstallCandidatesExact {
+        prefixes: vec![target],
+        max_paths: 256,
+        relax: false,
+        weighted: false,
+        deadline: full_snapshot_query_deadline(),
+        reply,
+    })
+    .await
+    .unwrap();
+    assert!(
+        response.await.is_err(),
+        "partial exact reply must be dropped"
+    );
+
+    assert_lightweight_query_is_serviced(&tx).await;
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn expired_and_preclosed_version_queries_publish_nothing_then_light_query_runs() {
+    let (tx, rx) = mpsc::channel(8);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::QueryDataplaneVersions {
+        deadline: tokio::time::Instant::now(),
+        reply,
+    })
+    .await
+    .unwrap();
+    assert!(response.await.is_err());
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::QueryPeerGroupsVersioned {
+        deadline: tokio::time::Instant::now(),
+        reply,
+    })
+    .await
+    .unwrap();
+    assert!(response.await.is_err());
+
+    let (reply, response) = oneshot::channel();
+    drop(response);
+    tx.send(RibUpdate::QueryDataplaneVersions {
+        deadline: full_snapshot_query_deadline(),
+        reply,
+    })
+    .await
+    .unwrap();
+    let (reply, response) = oneshot::channel();
+    drop(response);
+    tx.send(RibUpdate::QueryPeerGroupsVersioned {
         deadline: full_snapshot_query_deadline(),
         reply,
     })

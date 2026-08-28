@@ -26,6 +26,20 @@ land.
 
 ## Decision
 
+The runtime projects intent incrementally from bounded ordered Loc-RIB pages.
+A reconcile owns one 30-second planning deadline; page, exact-prefix,
+peer-group, and final-seal exchanges each use the smaller of the remaining
+deadline and two seconds. Planning ends before the first kernel dump, and an
+incomplete plan publishes and mutates nothing.
+
+Before deleting a daemon-owned key absent from provisional intent, the actor
+queries that exact prefix (never longest-prefix match) and reuses the ordinary
+ECMP projection. Route churn freezes Add/Replace only for `max_routes` tables;
+uncapped tables continue and exact repairs, removals, and ownership release
+remain available. Peer-group churn likewise freezes Add/Replace for tables
+with `allowed_peer_groups`, and cannot by itself authorize deletion of a
+still-present route.
+
 ### 1. General unicast FIB install is explicit opt-in
 
 The default remains control-plane-only. Route reflectors, route
@@ -97,15 +111,13 @@ tables. This intentionally avoids arbitrary "first N" installs during
 accidental full-table export while also avoiding a table-wide withdraw
 storm when a feed briefly crosses the cap.
 
-### 6. Initial route set is single-best
+### 6. Route set is bounded and ECMP-aware
 
 The runtime consumes `RibUpdate::SubscribeRouteEvents` as a wakeup and
-`RibUpdate::QueryBestRoutes` as the level-triggered snapshot, matching
-`src/blackhole.rs`.
-
-The existing unicast `RouteEvent` does not carry a full route, and the
-Loc-RIB exposes one best route per prefix. ECMP therefore remains a
-follow-up that needs a deliberate RIB query/view for install candidates.
+bounded ordered `QueryFibInstallCandidatesPage` replies as the
+level-triggered view. The install-candidate query applies the configured
+strict or relaxed multipath policy and returns the complete bounded ECMP
+set for each prefix.
 
 ### 7. Kernel route shape
 
@@ -203,7 +215,7 @@ Negative:
 
 - No main-table programming in the first tranche, even for operators who
   already want it.
-- ECMP is not part of the current runtime.
+- ECMP is supported through the bounded install-candidate view.
 - `[[fib_tables]]` is restart-required until a hot-swap actor exists.
 
 Neutral:
@@ -230,8 +242,8 @@ Neutral:
 - **Overwriting foreign routes by default.** Convenient, but unsafe on a
   host that may also run static routes, FRR, BIRD, NetworkManager, or
   systemd-networkd.
-- **ECMP in slice one.** The netlink crate can encode `RTA_MULTIPATH`,
-  but rustbgpd needs a deliberate RIB install-candidate view first.
+- **Deriving ECMP from route-event payloads.** Events remain wakeups; the
+  bounded install-candidate view is the authoritative level-triggered input.
 - **Treating FIB install as export policy.** Adj-RIB-Out answers "what
   would I send to a peer"; kernel install is local operator intent and
   must have its own policy/config surface.
@@ -239,7 +251,7 @@ Neutral:
 ## Cross-references
 
 - `src/blackhole.rs` — existing unicast kernel actor pattern.
-- `crates/rib/src/update.rs` — `QueryBestRoutes` and
+- `crates/rib/src/update.rs` — bounded install-candidate queries and
   `SubscribeRouteEvents`.
 - `crates/rib/src/event.rs` — unicast route event shape.
 - `crates/evpn-linux/src/l3_diff.rs` — value-aware owned-state diff

@@ -583,121 +583,187 @@ pub(crate) fn project_fib_intent_with_peer_groups(
     candidates: &[FibInstallCandidate],
     peer_groups: &BTreeMap<IpAddr, String>,
 ) -> FibIntent {
-    let mut intent = FibIntent::default();
+    let mut builder = FibIntentBuilder::new(tables, peer_groups);
+    builder.push(candidates);
+    builder.finish()
+}
 
-    for table in tables {
-        let table = FibProjectionTable::new(table);
-        let mut table_routes: BTreeMap<FibRouteKey, FibRoute> = BTreeMap::new();
-        let mut table_frozen = false;
-        let mut route_limit_drops = RouteLimitDropCounters::default();
-        let route_limit_drop_start = intent.drops.len();
-        for candidate in candidates {
-            let route = &candidate.best;
-            if !table.allows_prefix(route.prefix) {
-                continue;
-            }
-            if !table.allows_peer(route.peer, peer_groups) {
-                intent.drops.push(FibDrop::PeerNotAllowed {
-                    table_name: table.name.to_string(),
-                    prefix: route.prefix,
-                    peer: route.peer,
-                });
-                continue;
-            }
-            // Per-class ECMP width for this candidate (homogeneous group ⇒ the
-            // best route's class picks the cap). The RIB already gathered
-            // siblings at the widest of these, so this re-caps the best-first set.
-            let max_paths = table.max_paths(route.is_ebgp());
-            // Keep only equal-cost next-hops from allowed peers whose family
-            // matches the prefix, best-first, capped at the per-class width.
-            let eligible = eligible_next_hops(candidate, route.prefix, max_paths, |peer| {
-                table.allows_peer(peer, peer_groups)
-            });
-            let best_next_hop = match best_fib_next_hop(candidate, route.prefix) {
-                Ok(next_hop) => next_hop,
-                Err(reason) => {
-                    push_next_hop_ineligible_drop(&mut intent, table.name, route, reason);
-                    continue;
-                }
-            };
-            // Fail closed if the *selected best route's* own next-hop did not
-            // survive the eligibility filters (e.g. an IPv4 prefix advertised
-            // with an IPv6 best next-hop). Installing only the surviving
-            // siblings would leave the row's `peer` / `path_id` / `origin_type`
-            // (all best-route metadata) describing a path we never programmed —
-            // and matches today's single-path behavior, which drops a
-            // wrong-family best outright.
-            if !eligible.contains(&best_next_hop) {
-                intent.drops.push(FibDrop::NextHopFamilyUnsupported {
-                    table_name: table.name.to_string(),
-                    prefix: route.prefix,
-                    next_hop: route.next_hop,
-                });
-                continue;
-            }
+struct FibProjectionState {
+    table: FibTableConfig,
+    intent: FibIntent,
+    table_routes: BTreeMap<FibRouteKey, FibRoute>,
+    table_frozen: bool,
+    route_limit_drops: RouteLimitDropCounters,
+}
 
-            let key = FibRouteKey {
-                table_id: table.key.table_id,
-                metric: table.key.metric,
-                prefix: route.prefix,
-            };
-            if let Some(limit) = table.table.max_routes {
-                let projected_len =
-                    table_routes.len() + usize::from(!table_routes.contains_key(&key));
-                if table_frozen || projected_len > limit as usize {
-                    if !table_frozen {
-                        table_frozen = true;
-                        intent.frozen_tables.insert(table.key);
-                        for projected in table_routes.values() {
-                            intent.frozen_eligible_keys.insert(projected.key);
-                            push_route_limit_drop(
-                                &mut intent,
-                                table.name,
-                                projected,
-                                limit,
-                                &mut route_limit_drops,
-                            );
-                        }
-                        table_routes.clear();
-                    }
-                    intent.frozen_eligible_keys.insert(key);
-                    push_route_limit_drop_for_route(
-                        &mut intent,
-                        table.name,
-                        key,
-                        route.next_hop,
-                        route.peer,
-                        limit,
-                        &mut route_limit_drops,
-                    );
-                    continue;
-                }
-            }
-            let projected = FibRoute {
-                table_name: table.name.to_string(),
-                key,
-                // Pin `best` to the selected best route's next-hop (guaranteed
-                // present by the check above) so the scalar surface stays
-                // consistent with the row's best-route metadata.
-                target: FibRouteTarget::from_set_with_best_hop(best_next_hop, eligible),
-                peer: route.peer,
-                origin_type: route.origin_type,
-                path_id: route.path_id,
-            };
-            table_routes.insert(key, projected);
+/// Streaming projection state used by the runtime's bounded RIB page walk.
+pub(crate) struct FibIntentBuilder {
+    tables: Vec<FibProjectionState>,
+    peer_groups: BTreeMap<IpAddr, String>,
+}
+
+impl FibIntentBuilder {
+    pub(crate) fn new(tables: &[FibTableConfig], peer_groups: &BTreeMap<IpAddr, String>) -> Self {
+        Self {
+            tables: tables
+                .iter()
+                .cloned()
+                .map(|table| FibProjectionState {
+                    table,
+                    intent: FibIntent::default(),
+                    table_routes: BTreeMap::new(),
+                    table_frozen: false,
+                    route_limit_drops: RouteLimitDropCounters::default(),
+                })
+                .collect(),
+            peer_groups: peer_groups.clone(),
         }
-        if table_frozen {
-            annotate_route_limit_drops(
-                &mut intent.drops[route_limit_drop_start..],
-                route_limit_drops.sampled,
-                route_limit_drops.total,
-            );
-            continue;
-        }
-        intent.routes.extend(table_routes);
     }
 
-    intent
+    pub(crate) fn push(&mut self, candidates: &[FibInstallCandidate]) {
+        let _ = self.push_inner(candidates, None);
+    }
+
+    pub(crate) fn push_until(
+        &mut self,
+        candidates: &[FibInstallCandidate],
+        deadline: tokio::time::Instant,
+    ) -> bool {
+        self.push_inner(candidates, Some(deadline))
+    }
+
+    fn push_inner(
+        &mut self,
+        candidates: &[FibInstallCandidate],
+        deadline: Option<tokio::time::Instant>,
+    ) -> bool {
+        for state in &mut self.tables {
+            let table = FibProjectionTable::new(&state.table);
+            for (index, candidate) in candidates.iter().enumerate() {
+                if index.is_multiple_of(256)
+                    && deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
+                {
+                    return false;
+                }
+                let route = &candidate.best;
+                if !table.allows_prefix(route.prefix) {
+                    continue;
+                }
+                if !table.allows_peer(route.peer, &self.peer_groups) {
+                    state.intent.drops.push(FibDrop::PeerNotAllowed {
+                        table_name: table.name.to_string(),
+                        prefix: route.prefix,
+                        peer: route.peer,
+                    });
+                    continue;
+                }
+                // Per-class ECMP width for this candidate (homogeneous group ⇒ the
+                // best route's class picks the cap). The RIB already gathered
+                // siblings at the widest of these, so this re-caps the best-first set.
+                let max_paths = table.max_paths(route.is_ebgp());
+                // Keep only equal-cost next-hops from allowed peers whose family
+                // matches the prefix, best-first, capped at the per-class width.
+                let eligible = eligible_next_hops(candidate, route.prefix, max_paths, |peer| {
+                    table.allows_peer(peer, &self.peer_groups)
+                });
+                let best_next_hop = match best_fib_next_hop(candidate, route.prefix) {
+                    Ok(next_hop) => next_hop,
+                    Err(reason) => {
+                        push_next_hop_ineligible_drop(&mut state.intent, table.name, route, reason);
+                        continue;
+                    }
+                };
+                // Fail closed if the *selected best route's* own next-hop did not
+                // survive the eligibility filters (e.g. an IPv4 prefix advertised
+                // with an IPv6 best next-hop). Installing only the surviving
+                // siblings would leave the row's `peer` / `path_id` / `origin_type`
+                // (all best-route metadata) describing a path we never programmed —
+                // and matches today's single-path behavior, which drops a
+                // wrong-family best outright.
+                if !eligible.contains(&best_next_hop) {
+                    state.intent.drops.push(FibDrop::NextHopFamilyUnsupported {
+                        table_name: table.name.to_string(),
+                        prefix: route.prefix,
+                        next_hop: route.next_hop,
+                    });
+                    continue;
+                }
+
+                let key = FibRouteKey {
+                    table_id: table.key.table_id,
+                    metric: table.key.metric,
+                    prefix: route.prefix,
+                };
+                if let Some(limit) = table.table.max_routes {
+                    let projected_len = state.table_routes.len()
+                        + usize::from(!state.table_routes.contains_key(&key));
+                    if state.table_frozen || projected_len > limit as usize {
+                        if !state.table_frozen {
+                            state.table_frozen = true;
+                            state.intent.frozen_tables.insert(table.key);
+                            for projected in state.table_routes.values() {
+                                state.intent.frozen_eligible_keys.insert(projected.key);
+                                push_route_limit_drop(
+                                    &mut state.intent,
+                                    table.name,
+                                    projected,
+                                    limit,
+                                    &mut state.route_limit_drops,
+                                );
+                            }
+                            state.table_routes.clear();
+                        }
+                        state.intent.frozen_eligible_keys.insert(key);
+                        push_route_limit_drop_for_route(
+                            &mut state.intent,
+                            table.name,
+                            key,
+                            route.next_hop,
+                            route.peer,
+                            limit,
+                            &mut state.route_limit_drops,
+                        );
+                        continue;
+                    }
+                }
+                let projected = FibRoute {
+                    table_name: table.name.to_string(),
+                    key,
+                    // Pin `best` to the selected best route's next-hop (guaranteed
+                    // present by the check above) so the scalar surface stays
+                    // consistent with the row's best-route metadata.
+                    target: FibRouteTarget::from_set_with_best_hop(best_next_hop, eligible),
+                    peer: route.peer,
+                    origin_type: route.origin_type,
+                    path_id: route.path_id,
+                };
+                state.table_routes.insert(key, projected);
+            }
+        }
+        deadline.is_none_or(|deadline| tokio::time::Instant::now() < deadline)
+    }
+
+    pub(crate) fn finish(mut self) -> FibIntent {
+        let mut intent = FibIntent::default();
+        for mut state in self.tables.drain(..) {
+            if state.table_frozen {
+                annotate_route_limit_drops(
+                    &mut state.intent.drops,
+                    state.route_limit_drops.sampled,
+                    state.route_limit_drops.total,
+                );
+            } else {
+                state.intent.routes.extend(state.table_routes);
+            }
+            intent.routes.extend(state.intent.routes);
+            intent.drops.extend(state.intent.drops);
+            intent.frozen_tables.extend(state.intent.frozen_tables);
+            intent
+                .frozen_eligible_keys
+                .extend(state.intent.frozen_eligible_keys);
+        }
+        intent
+    }
 }
 
 fn push_next_hop_ineligible_drop(
@@ -1353,6 +1419,22 @@ mod tests {
                 ..
             } if table_name == "edge"
         )));
+    }
+
+    #[test]
+    fn streaming_projection_matches_static_projection_across_page_boundary() {
+        let mut table = table("edge", 1000, 200, &["ipv4_unicast"]);
+        table.max_routes = Some(2);
+        let candidates = candidates(vec![
+            route(v4_prefix(2, 24), ip("203.0.113.1"), RouteOrigin::Ebgp, 0),
+            route(v4_prefix(3, 24), ip("203.0.113.2"), RouteOrigin::Ebgp, 0),
+            route(v4_prefix(4, 24), ip("203.0.113.3"), RouteOrigin::Ebgp, 0),
+        ]);
+        let expected = project_fib_intent(&[table.clone()], &candidates);
+        let mut builder = FibIntentBuilder::new(&[table], &BTreeMap::new());
+        builder.push(&candidates[..1]);
+        builder.push(&candidates[1..]);
+        assert_eq!(builder.finish(), expected);
     }
 
     #[test]

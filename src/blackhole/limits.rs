@@ -148,6 +148,7 @@ mod tests {
                 install_burst: Some(1),
                 ..BlackholeConfig::default()
             },
+            rib.clone(),
             rib,
             fib,
             BgpMetrics::with_registry(Registry::new()),
@@ -263,10 +264,20 @@ mod tests {
                     RibUpdate::SubscribeRouteEvents { reply } => {
                         let _ = reply.send(events.subscribe());
                     }
-                    RibUpdate::QueryBestRoutes { reply, .. }
+                    RibUpdate::QueryBestRoutesPage { reply, .. }
                         if seen.fetch_add(1, Ordering::SeqCst) == 0 =>
                     {
-                        let _ = reply.send(vec![tagged(66), tagged(68)]);
+                        let _ = reply.send(Ok(rustbgpd_rib::BestRoutesPage {
+                            routes: vec![tagged(66), tagged(68)],
+                            next_cursor: None,
+                            observed_version: rustbgpd_rib::RoutePageVersion::default(),
+                        }));
+                    }
+                    RibUpdate::QueryDataplaneVersions { reply, .. } => {
+                        let _ = reply.send(Ok(rustbgpd_rib::DataplaneVersions {
+                            routes: rustbgpd_rib::RoutePageVersion::default(),
+                            peer_groups: rustbgpd_rib::RoutePageVersion::default(),
+                        }));
                     }
                     _ => {}
                 }

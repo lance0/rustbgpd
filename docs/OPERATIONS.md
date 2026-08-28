@@ -1465,6 +1465,11 @@ a snapshot or bounded history query.
 | `bgp_blackhole_discard_kernel_failures_total{action}` | Kernel-operation failure events; `action` is bounded to `setup`, `install`, `remove`, or `dump` |
 
 Use `rbgp rib blackholes` for the current per-prefix decision details.
+Reconcile planning is bounded to 30 seconds with two-second RIB query slices.
+If planning cannot complete, the previous status and all kernel and ownership
+state remain unchanged. Under configured install guardrails, observed route
+churn may surface `route_churn_deferred`; it consumes no install token and a
+later event or periodic pass retries it.
 
 ### General Unicast FIB
 
@@ -1501,6 +1506,12 @@ drift. Preserve the counter as incident evidence; `rbgp doctor` includes all
 three series in `system/metrics.prom`.
 
 Use `rbgp rib fib --json` as the per-route companion to these counters.
+The actor streams bounded Loc-RIB pages and exactly revalidates owned prefixes
+that disappear from provisional intent before any removal. A planning timeout
+or dropped query causes no kernel dump or state publication. Route churn
+freezes Add/Replace for capped tables, while uncapped tables and exact safe
+cleanup continue; peer-group churn similarly freezes programming for tables
+whose eligibility depends on `allowed_peer_groups`.
 The most important states to investigate are `foreign_route_exists` and
 `owned_route_drifted`. `foreign_route_exists` means rustbgpd never proved
 ownership of the live row; `owned_route_drifted` means rustbgpd previously

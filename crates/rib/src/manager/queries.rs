@@ -18,12 +18,14 @@ use crate::adj_rib_in::AdjRibIn;
 use crate::adj_rib_out::AdjRibOut;
 use crate::event::{RouteEvent, RouteEventType};
 use crate::update::{
-    BestPathCandidate, BestRoutesPage, DataplanePageError, ExactExportKey, ExplainAdvertisedRoute,
-    ExplainAdvertisedRouteError, ExplainBestPath, FibInstallCandidatesPage, MrtPeerEntry,
-    MrtSnapshotData, NeighborPolicyStats, NeighborRibSnapshot, NeighborRibSnapshotResponse,
-    RibRowFilter, RoutePage, RoutePageError, RoutePageVersion, RouteQueryFilter, RouteQueryKey,
-    RouteQueryScope, UpdateGroupPeerComparison, WarmMrtSnapshotBudget, WarmMrtSnapshotView,
-    ordered_route_query, route_query_key,
+    BestPathCandidate, BestRoutesPage, DataplaneExactQueryError, DataplanePageError,
+    DataplaneVersions, ExactBestRoutes, ExactExportKey, ExactFibInstallCandidates,
+    ExplainAdvertisedRoute, ExplainAdvertisedRouteError, ExplainBestPath, FibInstallCandidatesPage,
+    MrtPeerEntry, MrtSnapshotData, NeighborPolicyStats, NeighborRibSnapshot,
+    NeighborRibSnapshotResponse, RibRowFilter, RoutePage, RoutePageError, RoutePageVersion,
+    RouteQueryFilter, RouteQueryKey, RouteQueryScope, UpdateGroupPeerComparison,
+    VersionedPeerGroups, WarmMrtSnapshotBudget, WarmMrtSnapshotView, ordered_route_query,
+    route_query_key,
 };
 
 /// Full-snapshot queries check cancellation at bounded work intervals instead
@@ -1054,6 +1056,176 @@ impl RibManager {
         if reply.send(page).is_err() {
             warn!("query caller dropped before receiving response");
         }
+    }
+
+    pub(super) fn handle_query_dataplane_versions(
+        &self,
+        deadline: tokio::time::Instant,
+        reply: tokio::sync::oneshot::Sender<Result<DataplaneVersions, DataplaneExactQueryError>>,
+    ) {
+        if reply.is_closed() || tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        let result = match (self.route_page_table_version, self.peer_group_version) {
+            (Some(routes), Some(peer_groups)) => Ok(DataplaneVersions {
+                routes,
+                peer_groups,
+            }),
+            _ => Err(DataplaneExactQueryError::GenerationExhausted),
+        };
+        let _ = reply.send(result);
+    }
+
+    pub(super) fn handle_query_peer_groups_versioned(
+        &self,
+        deadline: tokio::time::Instant,
+        reply: tokio::sync::oneshot::Sender<Result<VersionedPeerGroups, DataplaneExactQueryError>>,
+    ) {
+        let mut visits = 0usize;
+        if reply.is_closed() || tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        let Some(observed_version) = self.peer_group_version else {
+            let _ = reply.send(Err(DataplaneExactQueryError::GenerationExhausted));
+            return;
+        };
+        let mut groups = HashMap::with_capacity(self.peer_group.len());
+        for (&peer, group) in &self.peer_group {
+            visits += 1;
+            if canceled_at_stride(visits, &mut || {
+                reply.is_closed() || tokio::time::Instant::now() >= deadline
+            }) {
+                return;
+            }
+            groups.insert(peer, group.clone());
+        }
+        if reply.is_closed() || tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        let _ = reply.send(Ok(VersionedPeerGroups {
+            groups,
+            observed_version,
+        }));
+    }
+
+    pub(super) fn handle_query_best_routes_exact(
+        &self,
+        prefixes: Vec<Prefix>,
+        deadline: tokio::time::Instant,
+        reply: tokio::sync::oneshot::Sender<Result<ExactBestRoutes, DataplaneExactQueryError>>,
+    ) {
+        if prefixes.len() > DATAPLANE_PAGE_MAX_PREFIXES {
+            let _ = reply.send(Err(DataplaneExactQueryError::BudgetExceeded));
+            return;
+        }
+        let Some(observed_version) = self.route_page_table_version else {
+            let _ = reply.send(Err(DataplaneExactQueryError::GenerationExhausted));
+            return;
+        };
+        let mut routes = Vec::with_capacity(prefixes.len());
+        for (index, prefix) in prefixes.into_iter().enumerate() {
+            if index.is_multiple_of(FULL_SNAPSHOT_CANCELLATION_STRIDE)
+                && (reply.is_closed() || tokio::time::Instant::now() >= deadline)
+            {
+                return;
+            }
+            routes.push(self.loc_rib.get(&prefix).cloned());
+        }
+        if reply.is_closed() || tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        let _ = reply.send(Ok(ExactBestRoutes {
+            routes,
+            observed_version,
+        }));
+    }
+
+    pub(super) fn handle_query_fib_install_candidates_exact(
+        &self,
+        prefixes: Vec<Prefix>,
+        max_paths: u32,
+        relax: bool,
+        weighted: bool,
+        deadline: tokio::time::Instant,
+        reply: tokio::sync::oneshot::Sender<
+            Result<ExactFibInstallCandidates, DataplaneExactQueryError>,
+        >,
+    ) {
+        use crate::best_path::multipath_equal;
+        if reply.is_closed() || tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        let cap = max_paths.clamp(1, DATAPLANE_PAGE_MAX_PATHS) as usize;
+        if prefixes.len() > DATAPLANE_PAGE_MAX_PREFIXES
+            || prefixes.len().saturating_mul(cap) > DATAPLANE_PAGE_MAX_NEXT_HOPS
+        {
+            let _ = reply.send(Err(DataplaneExactQueryError::BudgetExceeded));
+            return;
+        }
+        let Some(observed_version) = self.route_page_table_version else {
+            let _ = reply.send(Err(DataplaneExactQueryError::GenerationExhausted));
+            return;
+        };
+        let mut visits = 0usize;
+        #[cfg(test)]
+        let cancel_after = self
+            .dataplane_exact_cancel_after_visits
+            .load(std::sync::atomic::Ordering::Relaxed);
+        #[cfg(not(test))]
+        let cancel_after = 0usize;
+        let mut candidates = Vec::with_capacity(prefixes.len());
+        for prefix in prefixes {
+            visits += 1;
+            if canceled_at_stride(visits, &mut || {
+                reply.is_closed()
+                    || tokio::time::Instant::now() >= deadline
+                    || cfg!(test) && cancel_after != 0 && visits >= cancel_after
+            }) {
+                return;
+            }
+            let Some(best) = self.loc_rib.get(&prefix) else {
+                candidates.push(None);
+                continue;
+            };
+            let mut siblings = Vec::new();
+            if cap > 1 {
+                for _ in self.unicast_prefix_peers.peers(&prefix) {
+                    visits += 1;
+                    if canceled_at_stride(visits, &mut || {
+                        reply.is_closed()
+                            || tokio::time::Instant::now() >= deadline
+                            || cfg!(test) && cancel_after != 0 && visits >= cancel_after
+                    }) {
+                        return;
+                    }
+                }
+                for route in
+                    Self::unicast_candidates(&self.ribs, &self.unicast_prefix_peers, &prefix)
+                {
+                    visits += 1;
+                    if canceled_at_stride(visits, &mut || {
+                        reply.is_closed()
+                            || tokio::time::Instant::now() >= deadline
+                            || cfg!(test) && cancel_after != 0 && visits >= cancel_after
+                    }) {
+                        return;
+                    }
+                    if multipath_equal(best, route, relax) {
+                        siblings.push(route);
+                    }
+                }
+            }
+            candidates.push(Some(Self::finish_fib_install_candidate(
+                best, siblings, cap, weighted,
+            )));
+        }
+        if reply.is_closed() || tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        let _ = reply.send(Ok(ExactFibInstallCandidates {
+            candidates,
+            observed_version,
+        }));
     }
     pub(super) fn handle_query_peer_groups(
         &mut self,

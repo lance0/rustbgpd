@@ -22,6 +22,12 @@ gap.
 
 ## Decision
 
+Both paged and exact dataplane queries use the same candidate finalizer:
+best-first ordering, strict or relaxed equality, scoped-next-hop deduplication,
+the configured cap, and all-or-nothing link-bandwidth weighting. Exact replies
+are aligned with their requested prefixes so absence is explicit; request
+budgets cap both prefix count and the maximum possible next-hop rows.
+
 Install up to N equal-cost BGP paths per prefix as a kernel `RTA_MULTIPATH`
 route, **opt-in per table** via `[[fib_tables]].maximum_paths` (unset / `1` ==
 today's single-next-hop behavior). Both eBGP and iBGP paths are eligible, but a
