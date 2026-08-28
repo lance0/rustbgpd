@@ -33,6 +33,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Process-global `bgp_sighup_reload_outcomes_total{outcome}` and
+  `bgp_rib_policy_transition_total{outcome}` counters expose bounded terminal
+  results without peer, path, configuration, or error-text labels. The
+  overview dashboard groups SIGHUP results with config lifecycle activity and
+  pins policy-transition outcomes beside the existing transition state and
+  actor-duration panels.
+
 - Active-primary session telemetry now exports the exact one-hot
   `bgp_peer_session_state{peer,interface,state}` FSM vector and
   `bgp_session_down_total{peer,interface,reason}`. The down counter records

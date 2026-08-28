@@ -1403,6 +1403,23 @@ fn regroups_total(metrics: &BgpMetrics) -> f64 {
         .map_or(0.0, |family| family.metric[0].get_counter().value())
 }
 
+fn policy_transition_outcome_total(metrics: &BgpMetrics, outcome: &str) -> f64 {
+    metrics
+        .registry()
+        .gather()
+        .iter()
+        .find(|family| family.name() == "bgp_rib_policy_transition_total")
+        .and_then(|family| {
+            family.metric.iter().find(|metric| {
+                metric
+                    .label
+                    .iter()
+                    .any(|label| label.name() == "outcome" && label.value() == outcome)
+            })
+        })
+        .map_or(0.0, |metric| metric.get_counter().value())
+}
+
 /// Epsilon-compare a gauge/counter reading (clippy `float_cmp`).
 fn assert_metric(observed: f64, expected: f64, what: &str) {
     assert!(
@@ -2010,6 +2027,11 @@ async fn clean_policy_transition_builds_and_probes_once_per_wire_cohort() {
     assert_eq!(
         response.await.unwrap(),
         Ok(crate::update::ExportPolicyCohortOutcome::Committed)
+    );
+    assert_metric(
+        policy_transition_outcome_total(&metrics, "committed"),
+        1.0,
+        "committed transition records exactly one terminal outcome",
     );
     let transition_hits = (ROUTE_COUNT as u64, ROUTE_COUNT as u64);
     for &peer in &peers {
@@ -2721,6 +2743,47 @@ async fn rejected_policy_transition_batches_leave_observability_idle() {
         0.0,
         "non-started batches do not create a terminal duration",
     );
+    for outcome in ["committed", "fallback_handoff", "fallback_cleanup_error"] {
+        assert_metric(
+            policy_transition_outcome_total(&metrics, outcome),
+            0.0,
+            "non-started batches do not record a transition outcome",
+        );
+    }
+}
+
+#[test]
+fn cleanup_error_transition_outcome_records_once_and_resets_gauges() {
+    let (_tx, rx) = mpsc::channel(1);
+    let metrics = BgpMetrics::new();
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    metrics.set_rib_policy_transition_in_progress(true);
+
+    manager.finish_policy_transition_observability(
+        rustbgpd_telemetry::metrics::RibPolicyTransitionOutcome::FallbackCleanupError,
+        2,
+        std::time::Duration::from_millis(7),
+    );
+
+    assert_metric(
+        policy_transition_outcome_total(&metrics, "fallback_cleanup_error"),
+        1.0,
+        "cleanup error records exactly one terminal outcome",
+    );
+    assert_metric(
+        gauge_metric_value(&metrics, "bgp_rib_policy_transition_in_progress", &[]),
+        0.0,
+        "cleanup error clears transition ownership",
+    );
+    assert_metric(
+        gauge_metric_value(
+            &metrics,
+            "bgp_rib_policy_transition_last_duration_milliseconds",
+            &[],
+        ),
+        7.0,
+        "cleanup error retains terminal duration",
+    );
 }
 
 /// An authoritative replacement batch whose caller already abandoned
@@ -3108,6 +3171,11 @@ async fn clean_policy_transition_falls_back_wholesale_on_member_ceiling_rejectio
             &[],
         ) < 987_000.0,
         "fallback must replace the retained terminal-duration sample"
+    );
+    assert_metric(
+        policy_transition_outcome_total(&metrics, "fallback_handoff"),
+        1.0,
+        "fallback handoff records exactly one terminal outcome",
     );
     apply_authoritative_policy_handoff(&tx, &peers, Some(next_policy.clone()), outcome).await;
 

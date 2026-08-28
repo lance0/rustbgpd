@@ -33,6 +33,7 @@ use std::sync::Arc;
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rpki::VrpTable;
 use rustbgpd_telemetry::BgpMetrics;
+use rustbgpd_telemetry::metrics::RibPolicyTransitionOutcome;
 use rustbgpd_telemetry::metrics::StaleSessionMessageKind as Kind;
 use rustbgpd_telemetry::metrics::StaleSessionMessageKind::{
     BgpLs, Eor, Labeled, Orf, PolicyContext, Refresh, Routes, Rtc, Vpn,
@@ -2067,16 +2068,17 @@ impl RibManager {
 
     fn finish_policy_transition_observability(
         &self,
-        outcome: &'static str,
+        outcome: RibPolicyTransitionOutcome,
         member_count: usize,
         elapsed: std::time::Duration,
     ) {
         self.metrics.set_rib_policy_transition_in_progress(false);
         self.metrics
             .set_rib_policy_transition_last_duration(elapsed);
+        self.metrics.record_rib_policy_transition_outcome(outcome);
         let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
         info!(
-            outcome,
+            outcome = outcome.as_str(),
             member_count, elapsed_ms, "RIB export-policy transition completed"
         );
     }
@@ -3718,7 +3720,7 @@ impl RibManager {
                         let member_count = done.member_count();
                         Self::warn_if_policy_transition_slow(&mut done, member_count);
                         self.finish_policy_transition_observability(
-                            "committed",
+                            RibPolicyTransitionOutcome::Committed,
                             done.member_count(),
                             done.elapsed(),
                         );
@@ -3731,9 +3733,9 @@ impl RibManager {
                         let member_count = failed.member_count();
                         Self::warn_if_policy_transition_slow(&mut failed, member_count);
                         let outcome = if cleanup.is_ok() {
-                            "fallback_handoff"
+                            RibPolicyTransitionOutcome::FallbackHandoff
                         } else {
-                            "fallback_cleanup_error"
+                            RibPolicyTransitionOutcome::FallbackCleanupError
                         };
                         self.finish_policy_transition_observability(
                             outcome,

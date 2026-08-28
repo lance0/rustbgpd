@@ -326,6 +326,10 @@ TARGETS = {
     ("Peer administrative / session truth", "A"): (
         'bgp_peer_admin_enabled{instance=~"$instance",peer=~"$peer"}'
     ),
+    ("Config lifecycle outcomes", "B"): (
+        "sum by (outcome) (rate(bgp_sighup_reload_outcomes_total"
+        '{instance=~"$instance"}[$__rate_interval]))'
+    ),
     ("Peer administrative / session truth", "B"): (
         'bgp_peer_session_established{instance=~"$instance",peer=~"$peer"}'
     ),
@@ -365,6 +369,10 @@ TARGETS = {
         '{instance=~"$instance"}[15m]) - ignoring(le) '
         "increase(bgp_rib_policy_transition_actor_poll_duration_seconds_bucket"
         '{instance=~"$instance",le="0.2"}[15m])'
+    ),
+    ("Policy transition outcomes", "A"): (
+        "sum by (instance, outcome) (rate(bgp_rib_policy_transition_total"
+        '{instance=~"$instance"}[$__rate_interval]))'
     ),
     ("Accepted policy generation age", "A"): (
         "clamp_min(time() - bgp_policy_generation_loaded_timestamp_seconds"
