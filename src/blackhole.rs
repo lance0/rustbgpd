@@ -414,7 +414,11 @@ async fn run_loop<F>(
             }
             _ = interval.tick() => {
                 reconcile_once(config, &rib_query_tx, &mut fib, &metrics, &status_tx, &mut state).await;
-                if let Some(wake) = state.limits.next_wake { limit_wake.as_mut().reset(non_spinning_limit_wake(wake)); }
+                if let Some(wake) = state.limits.next_wake {
+                    limit_wake
+                        .as_mut()
+                        .reset(non_spinning_limit_wake(wake));
+                }
             }
             () = &mut limit_wake, if state.limits.next_wake.is_some() => {
                 reconcile_once(config, &rib_query_tx, &mut fib, &metrics, &status_tx, &mut state).await;
@@ -426,7 +430,11 @@ async fn run_loop<F>(
             () = &mut event_debounce, if route_event_dirty => {
                 route_event_dirty = false;
                 reconcile_once(config, &rib_query_tx, &mut fib, &metrics, &status_tx, &mut state).await;
-                if let Some(wake) = state.limits.next_wake { limit_wake.as_mut().reset(non_spinning_limit_wake(wake)); }
+                if let Some(wake) = state.limits.next_wake {
+                    limit_wake
+                        .as_mut()
+                        .reset(non_spinning_limit_wake(wake));
+                }
             }
             maybe_event = recv_route_event(&mut route_events) => {
                 match maybe_event {
@@ -732,6 +740,10 @@ async fn reconcile_once<F>(
 
     let mut statuses = Vec::with_capacity(derived.len() + state.owned.len());
     let mut current_rejected = HashSet::new();
+
+    if tokio::time::Instant::now() >= planning_deadline {
+        return;
+    }
 
     // One kernel dump per pass replaces the previous per-candidate
     // full-table lookups: presence for every candidate, the adoption
@@ -2080,6 +2092,72 @@ pub(super) mod tests {
             assert_eq!(*status_rx.borrow(), sentinel);
             assert!(gauge_value(&metrics, "bgp_blackhole_discard_active").abs() < f64::EPSILON);
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_after_seal_stops_before_blackhole_dump_and_publication() {
+        let prefix = v4(32);
+        let desired = route(
+            prefix,
+            RouteOrigin::Ebgp,
+            vec![rustbgpd_wire::COMMUNITY_BLACKHOLE],
+        );
+        let peer = desired.peer;
+        let (rib_tx, mut rib_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            while let Some(update) = rib_rx.recv().await {
+                match update {
+                    RibUpdate::QueryBestRoutesPage { reply, .. } => {
+                        let _ = reply.send(Ok(rustbgpd_rib::BestRoutesPage {
+                            routes: vec![desired.clone()],
+                            next_cursor: None,
+                            observed_version: rustbgpd_rib::RoutePageVersion::default(),
+                        }));
+                    }
+                    RibUpdate::QueryDataplaneVersions { reply, .. } => {
+                        let _ = reply.send(Ok(rustbgpd_rib::DataplaneVersions {
+                            routes: rustbgpd_rib::RoutePageVersion::default(),
+                            peer_groups: rustbgpd_rib::RoutePageVersion::default(),
+                        }));
+                        tokio::time::advance(PLANNING_TIMEOUT + Duration::from_secs(1)).await;
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let sentinel = vec![BlackholeStatus {
+            prefix,
+            peer,
+            state: BlackholeState::Installed,
+            reason: "last_good".to_string(),
+        }];
+        let (status_tx, status_rx) = watch::channel(sentinel.clone());
+        let mut fib = FakeFib::default();
+        let config = BlackholeConfig {
+            enabled: true,
+            ..BlackholeConfig::default()
+        };
+        let mut state = ReconcilerState::new(
+            config,
+            tokio::time::Instant::now() + Duration::from_hours(1),
+            OwnershipState::ephemeral([]),
+        );
+        let test_metrics = BgpMetrics::with_registry(Registry::new());
+
+        reconcile_once(
+            config,
+            &rib_tx,
+            &mut fib,
+            &test_metrics,
+            &status_tx,
+            &mut state,
+        )
+        .await;
+
+        assert_eq!(fib.dump_calls, 0);
+        assert!(fib.install_calls.is_empty() && fib.remove_calls.is_empty());
+        assert!(state.owned.is_empty() && state.ownership.prefixes.is_empty());
+        assert_eq!(*status_rx.borrow(), sentinel);
     }
 
     fn rib_with_routes(routes: Vec<Route>) -> mpsc::Sender<RibUpdate> {

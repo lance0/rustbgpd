@@ -1015,6 +1015,9 @@ where
             }
         }
     }
+    if tokio::time::Instant::now() >= planning_deadline {
+        return false;
+    }
     let kernel = tokio::select! {
         biased;
         () = shutdown.cancelled() => return false,
@@ -5267,6 +5270,71 @@ mod tests {
             assert_eq!(*status_rx.borrow(), sentinel);
             assert!(event_rx.try_recv().is_err());
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_after_seal_stops_before_fib_dump_and_publication() {
+        let prefix = v4(24);
+        let desired = route(prefix, ip("192.0.2.2"));
+        let (rib_tx, mut rib_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            while let Some(update) = rib_rx.recv().await {
+                match update {
+                    RibUpdate::QueryFibInstallCandidatesPage {
+                        max_paths, reply, ..
+                    } => {
+                        let _ = reply.send(Ok(rustbgpd_rib::FibInstallCandidatesPage {
+                            candidates: routes_to_candidates(
+                                std::slice::from_ref(&desired),
+                                max_paths,
+                            ),
+                            next_cursor: None,
+                            observed_version: rustbgpd_rib::RoutePageVersion::default(),
+                        }));
+                    }
+                    RibUpdate::QueryDataplaneVersions { reply, .. } => {
+                        let _ = reply.send(Ok(rustbgpd_rib::DataplaneVersions {
+                            routes: rustbgpd_rib::RoutePageVersion::default(),
+                            peer_groups: rustbgpd_rib::RoutePageVersion::default(),
+                        }));
+                        tokio::time::advance(PLANNING_TIMEOUT + Duration::from_secs(1)).await;
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let desired_fib = fib_route(prefix, ip("192.0.2.2"));
+        let sentinel = vec![status_for_route(
+            &desired_fib,
+            FibRuntimeState::Installed,
+            "last_good".to_string(),
+        )];
+        let (status_tx, status_rx) = watch::channel(sentinel.clone());
+        let (event_tx, mut event_rx) = broadcast::channel(16);
+        let mut fib = FakeFib::default();
+        let mut owned = FibOwnedState::default();
+        let mut unresolved = UnresolvedHolds::default();
+
+        assert!(
+            !reconcile_once_with_events(
+                &config(),
+                &rib_tx,
+                &mut fib,
+                &metrics(),
+                &status_tx,
+                &event_tx,
+                &mut owned,
+                &mut unresolved,
+                HeldRetry::All,
+                &CancellationToken::new(),
+            )
+            .await
+        );
+        assert_eq!(fib.dump_calls, 0);
+        assert!(fib.applied.is_empty());
+        assert!(owned.routes.is_empty() && unresolved.routes.is_empty());
+        assert_eq!(*status_rx.borrow(), sentinel);
+        assert!(event_rx.try_recv().is_err());
     }
 
     #[tokio::test]
