@@ -40,6 +40,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   use. Gated runs write the classification before returning a follow-up status
   and always recheck source, toolchain, affinity, and binary provenance first.
 
+- `bench/compare-rib-memory.sh --fail-on-regression` turns the existing
+  advisory RIB structural-memory comparison into a fixed fail-closed gate. A
+  +5% or +32 MiB increase, or a missing base/head row, exits 1 only after the
+  CSV, summary, and metadata record the result; the default invocation remains
+  advisory.
+
 - Nightly wire campaigns now seed all 12 targets, apply one reviewed BGP byte
   dictionary to the 11 binary targets, and carry a validated corpus forward on
   the `main` lineage. Restore happens in runner-temporary staging and accepts

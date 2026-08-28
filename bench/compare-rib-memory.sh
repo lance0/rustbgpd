@@ -13,6 +13,8 @@ Options:
   --head REF          Head ref to compare against baseline (default: HEAD)
   --profile NAME      Profile size set: quick or full (default: quick)
   --out-dir PATH      Output directory (default: target/rib-memory-compare)
+  --fail-on-regression
+                      Exit 1 when any row needs review or is missing
   --allow-dirty       Allow a dirty worktree; refs still resolve to commits
   --keep-worktrees    Leave temporary git worktrees in the output directory
   -h, --help          Show this help
@@ -36,6 +38,7 @@ profile="quick"
 out_root="target/rib-memory-compare"
 allow_dirty=0
 keep_worktrees=0
+fail_on_regression=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -54,6 +57,10 @@ while [[ $# -gt 0 ]]; do
     --out-dir)
       out_root="${2:?missing value for --out-dir}"
       shift 2
+      ;;
+    --fail-on-regression)
+      fail_on_regression=1
+      shift
       ;;
     --allow-dirty)
       allow_dirty=1
@@ -202,10 +209,12 @@ BASE_SHORT="$base_short" \
 HEAD_SHORT="$head_short" \
 PROFILE="$profile" \
 METADATA_FILE="$metadata_file" \
+FAIL_ON_REGRESSION="$fail_on_regression" \
 python3 - <<'PY'
 import csv
 import json
 import os
+import sys
 from pathlib import Path
 
 BASE_LOG = Path(os.environ["BASE_LOG"])
@@ -290,9 +299,8 @@ for key in keys:
     pct = delta_pct(int(base["live_bytes"]), int(head["live_bytes"]))
     review = (
         "review"
-        if pct is not None
-        and pct >= 5.0
-        and delta_bytes >= 32 * 1024 * 1024
+        if (pct is not None and pct >= 5.0)
+        or delta_bytes >= 32 * 1024 * 1024
         else "ok"
     )
     csv_rows.append({
@@ -352,6 +360,13 @@ with RESULTS_FILE.open("w", newline="") as fh:
     writer.writeheader()
     writer.writerows(csv_rows)
 
+review_rows = [row for row in csv_rows if row["review"] == "review"]
+missing_rows = [row for row in csv_rows if row["review"] == "missing-row"]
+fail_on_regression = os.environ["FAIL_ON_REGRESSION"] == "1"
+gate_failed = fail_on_regression and bool(review_rows or missing_rows)
+gate_result = "fail" if gate_failed else "pass" if fail_on_regression else "advisory"
+mode = "gated" if fail_on_regression else "advisory"
+
 lines = [
     "# RIB Memory Compare Summary",
     "",
@@ -361,6 +376,8 @@ lines = [
     f"- Head: `{os.environ['HEAD_SHORT']}` (`{os.environ['HEAD_SHA']}`)",
     f"- Metadata: `{os.environ['METADATA_FILE']}`",
     f"- Results CSV: `{RESULTS_FILE}`",
+    f"- Mode: `{mode}`",
+    f"- Gate result: `{gate_result}`",
     "",
     "| Shape | Prefixes | Base live | Head live | Delta | Base b/pfx | Head b/pfx | Route capacity | Review |",
     "|---|---:|---:|---:|---:|---:|---:|---:|---|",
@@ -378,20 +395,25 @@ for row in csv_rows:
         continue
     delta = int(head["live_bytes"]) - int(base["live_bytes"])
     pct = delta_pct(int(base["live_bytes"]), int(head["live_bytes"]))
+    delta_summary = (
+        f"{fmt_bytes(delta)} ({pct:+.2f}%)"
+        if pct is not None
+        else f"{fmt_bytes(delta)} (n/a)"
+    )
     route_capacity = (
         f"{row['base_route_capacity']} -> {row['head_route_capacity']}"
     )
     lines.append(
         f"| `{row['shape']}` | {row['prefixes']} | "
         f"{fmt_bytes(int(base['live_bytes']))} | {fmt_bytes(int(head['live_bytes']))} | "
-        f"{fmt_bytes(delta)} ({pct:+.2f}%) | "
+        f"{delta_summary} | "
         f"{base['bytes_per_prefix']} | {head['bytes_per_prefix']} | "
         f"{route_capacity} | {row['review']} |"
     )
 
 lines.extend([
     "",
-    "Review rule: `review` means head grew by at least +5% and +32 MiB for the same shape/size. Smaller movement is reported but treated as allocator/map-capacity noise unless the PR is explicitly memory-targeted.",
+    "Review rule: `review` means head grew by at least +5% **or** +32 MiB for the same shape/size. A missing base/head row is `missing-row`. In gated mode, either result fails the comparison after the artifacts are finalized. Smaller movement is reported but treated as allocator/map-capacity noise unless the PR is explicitly memory-targeted.",
     "",
     "## Attribute-container structural model",
     "",
@@ -414,7 +436,24 @@ for row in csv_rows:
     )
 
 SUMMARY_FILE.write_text("\n".join(lines) + "\n")
+with Path(os.environ["METADATA_FILE"]).open("a") as fh:
+    fh.write(f"fail_on_regression={int(fail_on_regression)}\n")
+    fh.write("review_threshold_percent=5\n")
+    fh.write(f"review_threshold_bytes={32 * 1024 * 1024}\n")
+    fh.write("review_rule=percentage_or_absolute\n")
+    fh.write(f"gate_result={gate_result}\n")
+    fh.write(f"review_count={len(review_rows)}\n")
+    fh.write(f"missing_row_count={len(missing_rows)}\n")
 print(SUMMARY_FILE.read_text())
+if gate_failed:
+    def labels(rows):
+        return ", ".join(f"{row['shape']}/{row['prefixes']}" for row in rows)
+
+    if review_rows:
+        print(f"regression gate failed; review rows: {labels(review_rows)}", file=sys.stderr)
+    if missing_rows:
+        print(f"regression gate failed; missing rows: {labels(missing_rows)}", file=sys.stderr)
+    raise SystemExit(1)
 PY
 
 echo "Summary written to ${summary_file}"
