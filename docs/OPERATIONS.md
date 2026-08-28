@@ -1156,9 +1156,12 @@ query with a new live watch.
 | `bmp_loc_rib_source_drops_total{event,reason}` | RFC 9069 Loc-RIB events dropped before they reached the BMP manager, at the internal RIB/PeerManager→BmpManager channel. `event` is `route_monitoring` (a Loc-RIB route install/withdraw that will never reach any collector's Loc-RIB view) or `stats` (one periodic Loc-RIB statistics report skipped; the next tick reports current totals). `reason` is `channel_full` (the BMP manager is not draining as fast as RIB churn produces events) or `channel_closed` (BMP teardown). Both label sets are bounded; the series is process-global, not per-collector. A dropped `route_monitoring` event silently diverges every connected Loc-RIB collector until its next reconnect-triggered table dump, so alert on any sustained `channel_full` increase and correlate with the per-collector `bmp_collector_drops_total` and the `bmp_loc_rib_dump_live_buffer_*` gauges to find the slow consumer; each increment also emits a warn log line |
 | `bmp_control_event_drops_total{collector,kind,reason}` | Collector lifecycle transitions that failed to reach the BMP manager. `kind` identifies connected, bootstrap-complete, or disconnected; `reason` is the bounded channel failure. Any increase means manager state may not match the collector connection lifecycle |
 
-The sibling `bmp_source_drops_total{peer,reason}` counts the same kind of
-loss on the per-peer PeerSession→BmpManager path (RFC 7854 Adj-RIB
-monitoring) with the same `reason` vocabulary.
+The sibling `bmp_source_drops_total{peer,reason}` counts per-peer loss before
+the BMP manager. `channel_full` / `channel_closed` cover the
+PeerSession/PeerManager→BmpManager path. `state_query_timeout` means the
+periodic statistics tick could not obtain a current session snapshot within
+its bounded deadline; the session may still be Established, so this is not a
+Peer Down signal and the report is retried on the next tick.
 The shipped alert pack
 ([`examples/prometheus/rustbgpd-alerts.yml`](../examples/prometheus/rustbgpd-alerts.yml))
 fires `BmpSourceDrops`, `BmpLocRibSourceDrops`, `BmpCollectorDrops`, and

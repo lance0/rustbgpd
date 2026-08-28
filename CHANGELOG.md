@@ -49,7 +49,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or non-Established session from a timed-out state query. Ambiguous queries
   fail the refresh and retain the pending import or export work for a later
   policy replay; RFC 8212 preflight and clean-convergence cohort selection use
-  the same closed three-way outcome model.
+  the same closed three-way outcome model. Periodic BMP statistics use that
+  distinction too: a timed-out snapshot is counted and logged as
+  `state_query_timeout`, not silently treated as a departed peer.
 
 - The nightly and hosted wire fuzz campaigns now exercise complete BGP
   messages through the 65,535-byte RFC 8654 limit and UPDATE bodies through
