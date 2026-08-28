@@ -71,6 +71,8 @@ struct JsonPeerGroupDetail {
     per_client_best: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     remove_private_as: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    discard_path_attributes: Vec<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     add_path_receive: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -110,6 +112,7 @@ fn json_peer_group_detail(
         route_server_client: def.route_server_client,
         per_client_best: def.per_client_best,
         remove_private_as: def.remove_private_as.clone(),
+        discard_path_attributes: def.discard_path_attributes.clone(),
         add_path_receive: def.add_path_receive,
         add_path_send: def.add_path_send,
         add_path_send_max: def.add_path_send_max,
@@ -245,6 +248,9 @@ pub async fn get(connection: Connection, name: &str, json: bool) -> Result<(), C
         }
         if let Some(r) = &def.remove_private_as {
             println!("Remove Private AS:     {r}");
+        }
+        if !def.discard_path_attributes.is_empty() {
+            println!("Discard Attributes:    {:?}", def.discard_path_attributes);
         }
         if let Some(b) = def.add_path_receive {
             println!("Add-Path Receive:      {b}");
@@ -431,6 +437,25 @@ mod tests {
             value["required_families"],
             serde_json::json!(["ipv6_unicast"])
         );
+    }
+
+    #[test]
+    fn detail_json_preserves_discard_attributes_and_omits_empty() {
+        let populated = crate::proto::PeerGroupDefinition {
+            discard_path_attributes: vec![4, 8],
+            ..Default::default()
+        };
+        let value =
+            serde_json::to_value(json_peer_group_detail("ix-members".to_string(), &populated))
+                .unwrap();
+        assert_eq!(value["discard_path_attributes"], serde_json::json!([4, 8]));
+
+        let empty = serde_json::to_value(json_peer_group_detail(
+            "ix-members".to_string(),
+            &crate::proto::PeerGroupDefinition::default(),
+        ))
+        .unwrap();
+        assert!(empty.get("discard_path_attributes").is_none());
     }
 
     #[tokio::test]

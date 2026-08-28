@@ -482,6 +482,7 @@ impl PeerManager {
             interpret_rfc1997: tc.interpret_rfc1997,
             rs_control_communities: tc.rs_control_communities,
             remove_private_as: tc.remove_private_as,
+            discard_path_attributes: tc.discard_path_attributes.clone(),
             add_path_receive: tc.peer.add_path_receive,
             add_path_send: tc.peer.add_path_send,
             add_path_send_max: tc.peer.add_path_send_max,
@@ -822,7 +823,7 @@ impl PeerManager {
         peer: PeerKey,
         sync_config_snapshot: bool,
     ) -> Result<PeerManagerNeighborConfig, PeerLifecycleError> {
-        self.delete_peer_checked(peer, sync_config_snapshot, None, true)
+        self.delete_peer_checked(peer, sync_config_snapshot, None, true, None)
             .await
     }
 
@@ -833,10 +834,17 @@ impl PeerManager {
         &mut self,
         peer: PeerKey,
         next_tcp_ao: Option<&TcpAoKeyring>,
+        next_discard_path_attributes: &[u8],
     ) -> Result<(), PeerLifecycleError> {
-        self.delete_peer_checked(peer, false, next_tcp_ao, false)
-            .await
-            .map(|_| ())
+        self.delete_peer_checked(
+            peer,
+            false,
+            next_tcp_ao,
+            false,
+            Some(next_discard_path_attributes),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Runtime (config-transaction) entry to [`Self::reconfigure_peer`].
@@ -893,7 +901,13 @@ impl PeerManager {
             .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?;
 
         let previous = self
-            .delete_peer_checked(peer.clone(), false, config.tcp_ao.as_ref(), false)
+            .delete_peer_checked(
+                peer.clone(),
+                false,
+                config.tcp_ao.as_ref(),
+                false,
+                Some(&config.discard_path_attributes),
+            )
             .await?;
         if let Err(add_error) = self
             .add_peer_with_admin_state(config, false, was_enabled)
@@ -1344,6 +1358,7 @@ impl PeerManager {
     pub(super) async fn bounce_dynamic_peers_for_ranges(
         &mut self,
         ranges: &[DynamicRangeTarget],
+        purge_ranges: &[DynamicRangeTarget],
     ) -> DynamicPeerBounceOutcome {
         let mut outcome = DynamicPeerBounceOutcome::default();
         if ranges.is_empty() {
@@ -1353,6 +1368,10 @@ impl PeerManager {
         let peer_groups: BTreeSet<_> = ranges
             .iter()
             .map(|range| range.peer_group.as_str())
+            .collect();
+        let purge_ranges: BTreeSet<_> = purge_ranges
+            .iter()
+            .map(|range| (range.addr, range.prefix_len, range.peer_group.as_str()))
             .collect();
         for peer_group in peer_groups {
             self.sync_dynamic_max_prefix_restart_for_group(peer_group);
@@ -1383,18 +1402,59 @@ impl PeerManager {
             let Some(managed) = self.peers.get(&peer_key) else {
                 continue;
             };
-            let reason = bytes::Bytes::from_static(b"peer-group configuration change");
+            let purge_routes = managed
+                .accepted_dynamic_range
+                .as_ref()
+                .is_some_and(|accepted| {
+                    purge_ranges.contains(&(
+                        accepted.addr,
+                        accepted.prefix_len,
+                        accepted.peer_group.as_str(),
+                    ))
+                });
+            let reason = rustbgpd_wire::notification::encode_shutdown_communication(
+                "peer-group configuration change",
+            );
             // Bounded send: the session command channel is small, so a
             // session task that has stopped draining commands would park
             // this whole post-persist sweep (and the peer-manager actor
             // behind it) on one wedged peer. The sweep is best-effort by
             // contract — a peer that can't be signaled keeps its running
             // config until it reconnects, same as a send error.
-            let signaled = managed
-                .handle
-                .stop_timeout(Some(reason), PEER_LIFECYCLE_COMMAND_TIMEOUT)
-                .await
-                .map_err(|e| e.to_string());
+            let signaled = if purge_routes {
+                // Collision generations can both have announced routes. Queue
+                // the purge on the pending candidate first and only then the
+                // primary. The peer-manager actor cannot process either
+                // BackToIdle while this method is awaiting command admission,
+                // so successful admission to both channels is the ownership
+                // fence; later ordinary Shutdown remains FIFO behind each
+                // PurgeReset. If pending admission fails, leave the primary
+                // untouched so it cannot retire and ordinary-shutdown the
+                // unpurged candidate.
+                let pending = if let Some(pending) = managed.pending_inbound.as_ref() {
+                    pending
+                        .handle
+                        .purge_reset_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
+                        .await
+                        .map_err(|error| format!("pending session: {error}"))
+                } else {
+                    Ok(())
+                };
+                match pending {
+                    Ok(()) => managed
+                        .handle
+                        .purge_reset_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
+                        .await
+                        .map_err(|error| format!("primary session: {error}")),
+                    Err(error) => Err(error),
+                }
+            } else {
+                managed
+                    .handle
+                    .stop_timeout(Some(reason), PEER_LIFECYCLE_COMMAND_TIMEOUT)
+                    .await
+                    .map_err(|error| error.to_string())
+            };
             match signaled {
                 Ok(()) => {
                     info!(
@@ -1426,8 +1486,14 @@ impl PeerManager {
         graceful_shutdown: bool,
     ) -> Result<(), PeerLifecycleError> {
         if self.peers.contains_key(&peer) {
-            self.delete_peer_checked(peer.clone(), false, previous.tcp_ao.as_ref(), false)
-                .await?;
+            self.delete_peer_checked(
+                peer.clone(),
+                false,
+                previous.tcp_ao.as_ref(),
+                false,
+                Some(&previous.discard_path_attributes),
+            )
+            .await?;
         }
         self.add_peer_with_admin_state(previous, false, was_enabled)
             .await?;
@@ -1459,12 +1525,17 @@ impl PeerManager {
     /// the peer's per-peer metric series — the peer ceases to exist)
     /// from reconfigure's delete-then-re-add (the peer continues to
     /// exist and keeps its series and counter history).
+    #[expect(
+        clippy::too_many_lines,
+        reason = "peer deletion keeps validation, purge-reset settlement, collision-generation retirement, and final ownership cleanup in one ordered lifecycle transaction"
+    )]
     pub(super) async fn delete_peer_checked(
         &mut self,
         peer: PeerKey,
         sync_config_snapshot: bool,
         next_tcp_ao: Option<&TcpAoKeyring>,
         reap_metric_series: bool,
+        next_discard_path_attributes: Option<&[u8]>,
     ) -> Result<PeerManagerNeighborConfig, PeerLifecycleError> {
         let address = peer.address;
         // Dynamic-range peers are not deletable through the static-neighbor
@@ -1500,9 +1571,10 @@ impl PeerManager {
         }
 
         // Build and validate the next actor-owned snapshot before the first
-        // teardown effect. This ordering is the proof used by the settlement-
-        // owned Neighbor4 envelope: every returned delete error is a no-effect
-        // rejection, never a partially removed live session.
+        // teardown effect. A discard-list change then has its own explicit
+        // settlement boundary below: purge commands may be observable before
+        // a later delivery failure, so those failures are reported rather
+        // than mislabeled as no-effect.
         let next_config = if sync_config_snapshot {
             let mut next_config = self.current_config.clone();
             apply_config_event(
@@ -1518,9 +1590,90 @@ impl PeerManager {
             None
         };
 
-        // Linearize any terminal signal already emitted by this generation
-        // before moving it out of the live ownership table.
+        // Linearize any terminal signal emitted before this operation, then
+        // fence both collision generations before enqueueing a purge. This
+        // prevents a fast BackToIdle from being handled as a live restart
+        // while reconfiguration still owns the generation.
         self.drain_ready_session_notifications().await;
+        let purge_reset = next_discard_path_attributes.is_some_and(|next| {
+            self.peers.get(&peer).is_some_and(|managed| {
+                managed.transport_config.discard_path_attributes.as_ref() != next
+            })
+        });
+        if purge_reset {
+            let (primary_session_id, pending_session_id) = self
+                .peers
+                .get(&peer)
+                .map(|managed| {
+                    (
+                        managed.session_id,
+                        managed
+                            .pending_inbound
+                            .as_ref()
+                            .map(|pending| pending.session_id),
+                    )
+                })
+                .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?;
+            self.retiring_sessions
+                .insert(primary_session_id, peer.clone());
+            if let Some(session_id) = pending_session_id {
+                self.retiring_sessions.insert(session_id, peer.clone());
+            }
+
+            let pending_result = if pending_session_id.is_some() {
+                self.peers
+                    .get(&peer)
+                    .and_then(|managed| managed.pending_inbound.as_ref())
+                    .expect("captured pending session remains owned before purge")
+                    .handle
+                    .purge_reset_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
+                    .await
+            } else {
+                Ok(())
+            };
+            if let Err(error) = pending_result {
+                self.retiring_sessions.remove(&primary_session_id);
+                if let Some(session_id) = pending_session_id {
+                    self.retiring_sessions.remove(&session_id);
+                }
+                return Err(PeerLifecycleError::Internal(format!(
+                    "failed to purge-reset pending session for {peer}: {error}"
+                )));
+            }
+
+            let primary_result = self
+                .peers
+                .get(&peer)
+                .expect("primary session remains owned before purge")
+                .handle
+                .purge_reset_timeout(PEER_LIFECYCLE_COMMAND_TIMEOUT)
+                .await;
+            if let Err(error) = primary_result {
+                // The pending purge may already have executed. Join and retire
+                // that generation deliberately, while leaving the old primary
+                // and config owned for an explicit retry.
+                let pending = self
+                    .peers
+                    .get_mut(&peer)
+                    .and_then(|managed| managed.pending_inbound.take());
+                if let Some(pending) = pending {
+                    let _ = self
+                        .quiesce_retiring_session(
+                            &peer,
+                            pending.session_id,
+                            pending.handle,
+                            "purge pending after primary delivery failure",
+                            false,
+                        )
+                        .await;
+                }
+                self.retiring_sessions.remove(&primary_session_id);
+                return Err(PeerLifecycleError::Internal(format!(
+                    "failed to purge-reset primary session for {peer}: {error}"
+                )));
+            }
+        }
+
         let mut managed = self
             .peers
             .remove(&peer)

@@ -55,6 +55,27 @@ fn dynamic_neighbor_effective_mode_validation_matrix() {
 }
 
 #[test]
+fn dynamic_discard_attributes_require_route_server_client_group_mode() {
+    let error = parse(&dynamic_modes_toml("discard_path_attributes = [4]", 65002))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("discard_path_attributes requires route_server_client"));
+
+    let accepted = parse(&dynamic_modes_toml(
+        "route_server_client = true\ndiscard_path_attributes = [4, 8]",
+        65002,
+    ))
+    .unwrap();
+    assert_eq!(
+        resolve_dynamic_modes(&accepted, 65002)
+            .transport_config
+            .discard_path_attributes
+            .as_ref(),
+        [4, 8]
+    );
+}
+
+#[test]
 fn valid_dynamic_peer_modes_resolve_cluster_and_transport() {
     // Load-bearing: removing the dynamic cluster scan loses both cluster
     // assertions; treating wildcard ASN 0 as iBGP or dropping group inheritance

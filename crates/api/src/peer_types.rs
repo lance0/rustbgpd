@@ -880,6 +880,8 @@ pub enum PeerManagerCommand {
     BounceDynamicRangePeers {
         /// Dynamic-range selectors to expand against live dynamic peers.
         ranges: Vec<DynamicRangeTarget>,
+        /// Subset that must purge GR-retained routes rather than gracefully stop.
+        purge_ranges: Vec<DynamicRangeTarget>,
         /// Reply returns the per-peer signaling outcome.
         reply: oneshot::Sender<DynamicPeerBounceOutcome>,
     },
@@ -1788,6 +1790,8 @@ pub struct PeerGroupDefinition {
     pub per_client_best: Option<bool>,
     /// Optional private-AS removal mode.
     pub remove_private_as: Option<String>,
+    /// Canonical inbound attribute type codes discarded by group members.
+    pub discard_path_attributes: Vec<u8>,
     /// Optional Add-Path override.
     pub add_path: Option<AddPathDefinition>,
     /// Inline import policy.
@@ -1856,6 +1860,8 @@ pub struct PresenceAwareNeighborCreate {
     pub max_prefix_restart_seconds: Option<u32>,
     /// Explicit private-AS removal mode.
     pub remove_private_as: Option<String>,
+    /// Masked canonical inbound attribute discard replacement; absence inherits.
+    pub discard_path_attributes: Option<Vec<u8>>,
     /// Explicit local BGP role.
     pub local_role: Option<BgpRole>,
     /// Masked family replacement; absence inherits.
@@ -1959,6 +1965,8 @@ pub struct PeerManagerNeighborConfig {
     pub rs_control_communities: bool,
     /// Private AS removal mode for eBGP outbound `AS_PATH`.
     pub remove_private_as: RemovePrivateAs,
+    /// Canonical inbound attribute type codes discarded for route-server clients.
+    pub discard_path_attributes: std::sync::Arc<[u8]>,
     /// Enable Add-Path receive capability.
     pub add_path_receive: bool,
     /// Enable Add-Path send capability.
@@ -2412,6 +2420,8 @@ pub struct PeerInfo {
     pub negotiated_session: Option<NegotiatedSessionState>,
     /// Private AS removal mode.
     pub remove_private_as: RemovePrivateAs,
+    /// Effective canonical inbound path-attribute discard list.
+    pub discard_path_attributes: std::sync::Arc<[u8]>,
     /// Whether this eBGP peer is a transparent route-server client.
     pub route_server_client: bool,
     /// RFC 7947 §2.3.2 per-client best-path enabled for this

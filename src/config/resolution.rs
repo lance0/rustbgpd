@@ -888,6 +888,14 @@ impl Config {
             })
             .transpose()?;
         transport.remove_private_as = Self::resolved_remove_private_as(neighbor, group);
+        transport.discard_path_attributes = neighbor
+            .discard_path_attributes
+            .as_ref()
+            .or_else(|| group.and_then(|group| group.discard_path_attributes.as_ref()))
+            .map_or_else(
+                || std::sync::Arc::from([]),
+                |codes| std::sync::Arc::from(codes.iter().copied().collect::<Vec<_>>()),
+            );
         // RFC 4456: thread the local cluster-id just like
         // `PeerManager::build_transport_config`. Without it a runtime-added
         // iBGP client (this path backs the snapshot-sync gRPC peer adds)
@@ -986,6 +994,7 @@ impl Config {
             prefix_orf_receive: None,
             disable_ipv4_unicast: None,
             remove_private_as: None,
+            discard_path_attributes: None,
             add_path: None,
             log_level: None,
             import_policy: Vec::new(),

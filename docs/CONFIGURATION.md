@@ -867,6 +867,13 @@ disabled Add-Path block remain explicit across restart. Requests require the
 intent, inner config, and FieldMask; field 1/name `config` are reserved, and
 missing components or invalid masks are rejected before mutation.
 
+For `discard_path_attributes`, omission from the FieldMask preserves
+peer-group inheritance, a masked empty list explicitly clears inheritance, and
+a masked non-empty list replaces it. A non-empty unmasked value is rejected as
+contradictory input. The read-side `NeighborConfig` always reports the effective
+canonical list; this is intentionally a read-only addition to the existing CLI
+neighbor-add surface.
+
 The bundled `rbgp neighbor add` command sends only the presence-aware wrapper,
 including an empty mask when every inheritable option is omitted. Its explicit
 `--no-route-server-client`, `--no-per-client-best`, `--no-strict-role`, and
@@ -914,6 +921,7 @@ complete atomic block. There is no probe or automatic legacy fallback.
 | `prefix_orf_receive`   | bool     | no       | false   | Advertise receive-side Address-Prefix ORF (RFC 5291/5292); peer-pushed prefix filters constrain outbound advertisements |
 | `disable_ipv4_unicast` | bool     | no       | false   | True IPv6-only peering: never negotiate IPv4 unicast on this session (suppresses the RFC 4760 §8 implicit-IPv4 fallback; see below) |
 | `remove_private_as`   | string   | no       | --      | Remove private ASNs from AS_PATH: `"remove"`, `"all"`, or `"replace"` (eBGP only) |
+| `discard_path_attributes` | [u8] | no | `[]` | Route-server-client-only inbound attribute filter. Canonicalized by numeric type code; a neighbor `[]` clears an inherited group list. See [Inbound path-attribute discard](#inbound-path-attribute-discard) |
 | `route_reflector_client` | bool   | no       | false   | Mark this iBGP peer as a route reflector client (RFC 4456) |
 | `orr_vantage`          | string   | no       | --      | RFC 9107 Optimal Route Reflection IGP location: either an IP identifying a node in the BGP-LS-sourced topology, or the literal `"peer_address"` (alias `"peer-address"`) meaning this peer's own peering address — on a `[[dynamic_neighbors]]` peer group that gives every accepted peer its own vantage. This client's best paths use the interior-cost tiebreak from that node's SPF. Requires `route_reflector_client = true` + iBGP; inherits from the peer-group; an unresolved vantage falls back silently to the standard best (see `rbgp orr`). ADR-0095 |
 | `local_ipv6_nexthop`   | string   | no       | --      | Override IPv6 next-hop for eBGP exports (must be valid non-link-local IPv6) |
@@ -1402,6 +1410,24 @@ receive-side Prefix ORF, private-AS handling, MD5/GTSM,
 (`slow_peer_threshold_pct`, `slow_peer_duration`, `slow_peer_isolation`),
 and import/export inline policy or named chains. TCP-AO is intentionally not inherited through peer groups; static
 neighbors and dynamic ranges configure their startup key directly.
+
+`discard_path_attributes` is inherited too. A peer-group replacement supplies
+the complete list (an empty or omitted list clears the group value); a neighbor
+can replace it or use an explicit empty list to clear that inheritance.
+
+### Inbound path-attribute discard
+
+For route-server clients, `discard_path_attributes = [4, 8]` removes MED and
+Communities from accepted routes. The filter runs after decode and RFC 7606
+fault handling, and after first-AS, OTC, next-hop ownership, AS-loop, and
+route-reflector-loop safety checks. It runs before import policy, import explain
+caching, and every RIB route view. The RFC 7854 pre-policy BMP tap is earlier
+and retains the byte-exact UPDATE.
+
+Type code 0 and route-safety/framing attributes 1, 2, 3, 6, 7, 14, 15, 17,
+18, 33, and 35 are protected and rejected at config validation. The feature
+requires effective `route_server_client = true`. Malformed attributes already
+removed by RFC 7606 do not count as configured discards.
 
 ```toml
 # IPv4 peer with dual-stack
@@ -4360,6 +4386,7 @@ starting:
 | `disable_ipv4_unicast = true` requires at least one non-`ipv4_unicast` effective family | `invalid neighbor config` |
 | `role` is only valid on eBGP neighbors; `strict_role = true` requires `role` | `invalid neighbor config` |
 | `remove_private_as` must be `"remove"`, `"all"`, or `"replace"` (eBGP only) | `invalid remove_private_as` |
+| Non-empty `discard_path_attributes` requires effective `route_server_client = true`; type 0 and protected types 1/2/3/6/7/14/15/17/18/33/35 are rejected | `invalid neighbor config ... discard_path_attributes` / `invalid route server config` |
 | MRT `output_dir` must not be empty | `output_dir must not be empty` |
 | MRT `dump_interval` must be > 0 | `dump_interval must be > 0` |
 | BMP collector `address` must be a valid `ip:port` | `invalid BMP collector address` |
@@ -4405,4 +4432,5 @@ starting:
 | `disable_ipv4_unicast` | `false` |
 | `role` / `strict_role` | disabled / `false` |
 | `remove_private_as` | disabled (absent) |
+| `discard_path_attributes` | empty (disabled) |
 | Policy default action | permit (when no entry matches) |

@@ -144,6 +144,10 @@ description = "member-alpha"
 hold_time = 90
 families = ["ipv4_unicast"]
 route_server_client = true     # transparent: no AS prepend, NEXT_HOP preserved
+# Optional member-compatibility boundary: discard MED after safety checks and
+# before import policy. Watch bgp_path_attribute_discarded_total{type_code="4"};
+# a config change purge-resets the session so no old-normalized route survives.
+# discard_path_attributes = [4]
 role = "route_server"          # RFC 9234: attach OTC on egress
 # RFC 7948 §4.8 / ADR-0107: reject announcements whose NEXT_HOP is not the
 # member's own session address (pre-policy, fail-closed). Leave unset for

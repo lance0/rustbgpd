@@ -308,6 +308,81 @@ async fn bfd_down_command_sends_direct_or_hard_reset_and_retains_inner_cause() {
 }
 
 #[tokio::test]
+async fn purge_reset_sends_administrative_reset_or_hard_reset_and_forces_peer_down() {
+    for notification_gr in [false, true] {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        let (client, mut server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        establish_test_session(&mut session, 65002).await;
+        while rib_rx.try_recv().is_ok() {}
+        Arc::make_mut(session.negotiated.as_mut().expect("negotiated")).peer_notification_gr =
+            notification_gr;
+
+        assert_eq!(
+            session.handle_command(PeerCommand::PurgeReset).await,
+            ControlFlow::Break(())
+        );
+
+        let notification = read_until_notification(&mut server).await;
+        assert_eq!(notification.code, NotificationCode::Cease);
+        let (subcode, reason_data) = if notification_gr {
+            assert_eq!(notification.subcode, cease_subcode::HARD_RESET);
+            assert_eq!(
+                notification.data.get(..2),
+                Some(
+                    &[
+                        NotificationCode::Cease.as_u8(),
+                        cease_subcode::ADMINISTRATIVE_RESET,
+                    ][..]
+                )
+            );
+            (notification.data[1], &notification.data[2..])
+        } else {
+            assert_eq!(notification.subcode, cease_subcode::ADMINISTRATIVE_RESET);
+            (notification.subcode, notification.data.as_ref())
+        };
+        assert_eq!(subcode, cease_subcode::ADMINISTRATIVE_RESET);
+        assert_eq!(
+            rustbgpd_wire::notification::decode_shutdown_communication(reason_data).unwrap(),
+            "path-attribute discard configuration changed"
+        );
+        assert!(matches!(rib_rx.try_recv(), Ok(RibUpdate::PeerDown { .. })));
+        assert!(
+            !matches!(rib_rx.try_recv(), Ok(RibUpdate::PeerGracefulRestart { .. })),
+            "purge reset must never retain routes under GR"
+        );
+    }
+}
+
+#[tokio::test]
+async fn purge_reset_in_idle_clears_routes_retained_by_a_prior_gr_down() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.peer_gr_capable = true;
+    negotiated.peer_restart_time = 120;
+    negotiated.peer_gr_families = vec![rustbgpd_wire::GracefulRestartFamily {
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        forwarding_preserved: false,
+    }];
+    session.config.peer.graceful_restart = true;
+    session.negotiated = Some(Arc::new(negotiated));
+
+    session.execute_actions(vec![Action::SessionDown]).await;
+    assert!(matches!(
+        rib_rx.try_recv(),
+        Ok(RibUpdate::PeerGracefulRestart { .. })
+    ));
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+
+    assert_eq!(
+        session.handle_command(PeerCommand::PurgeReset).await,
+        ControlFlow::Break(())
+    );
+    assert!(matches!(rib_rx.try_recv(), Ok(RibUpdate::PeerDown { .. })));
+}
+
+#[tokio::test]
 async fn open_sent_bfd_down_clears_a_stale_down_reason() {
     let mut session = make_test_session(65001, 65002);
     session.last_down_reason = Some(PeerDownReason::RemoteNoNotification);

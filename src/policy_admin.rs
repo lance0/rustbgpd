@@ -229,6 +229,8 @@ pub(crate) fn api_peer_group_to_config(definition: PeerGroupDefinition) -> PeerG
         prefix_orf_receive: None,
         disable_ipv4_unicast: None,
         remove_private_as: definition.remove_private_as,
+        discard_path_attributes: (!definition.discard_path_attributes.is_empty())
+            .then(|| definition.discard_path_attributes.into_iter().collect()),
         add_path: api_add_path_to_config(definition.add_path),
         import_policy: definition
             .import_policy
@@ -271,6 +273,11 @@ pub(crate) fn config_peer_group_to_api(definition: &PeerGroupConfig) -> PeerGrou
         route_server_client: definition.route_server_client,
         per_client_best: definition.per_client_best,
         remove_private_as: definition.remove_private_as.clone(),
+        discard_path_attributes: definition
+            .discard_path_attributes
+            .as_ref()
+            .map(|codes| codes.iter().copied().collect())
+            .unwrap_or_default(),
         add_path: config_add_path_to_api(definition.add_path.as_ref()),
         import_policy: definition
             .import_policy
@@ -522,6 +529,10 @@ fn raw_neighbor(raw: &PresenceAwareNeighborCreate) -> Result<Neighbor, ConfigErr
         prefix_orf_receive: None,
         disable_ipv4_unicast: None,
         remove_private_as: raw.remove_private_as.clone(),
+        discard_path_attributes: raw
+            .discard_path_attributes
+            .as_ref()
+            .map(|codes| codes.iter().copied().collect()),
         add_path: raw.add_path.as_ref().map(|add_path| AddPathConfig {
             receive: add_path.receive,
             send: add_path.send,
@@ -623,6 +634,8 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                         rustbgpd_transport::RemovePrivateAs::All => Some("all".to_string()),
                         rustbgpd_transport::RemovePrivateAs::Replace => Some("replace".to_string()),
                     },
+                    discard_path_attributes: (!cfg.discard_path_attributes.is_empty())
+                        .then(|| cfg.discard_path_attributes.iter().copied().collect()),
                     add_path: if cfg.add_path_receive || cfg.add_path_send {
                         Some(crate::config::AddPathConfig {
                             receive: cfg.add_path_receive,
@@ -958,6 +971,7 @@ remote_asn = 65002
             max_prefixes: None,
             max_prefix_restart_seconds: None,
             remove_private_as: None,
+            discard_path_attributes: None,
             local_role: None,
             families: Some(families.clone()),
             required_families: Some(families),
@@ -1161,6 +1175,7 @@ peer_group = "fabric"
             interpret_rfc1997: true,
             rs_control_communities: false,
             remove_private_as: rustbgpd_transport::RemovePrivateAs::Disabled,
+            discard_path_attributes: std::sync::Arc::from([]),
             add_path_receive: false,
             add_path_send: false,
             add_path_send_max: 0,

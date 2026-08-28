@@ -435,6 +435,9 @@ pub enum PeerCommand {
     BfdDown,
     /// Shut down the task entirely.
     Shutdown,
+    /// Tear down the task with an administrative reset that cannot retain
+    /// stale routes under Graceful Restart.
+    PurgeReset,
     /// Query the current session state.
     QueryState {
         /// Oneshot channel to receive the session state snapshot.
@@ -1473,6 +1476,17 @@ impl PeerHandle {
                 })
             }
         }
+    }
+
+    /// Request a purge reset with a bounded command-channel deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session task exited or cannot accept the
+    /// command before `deadline`.
+    pub async fn purge_reset_timeout(&self, deadline: Duration) -> Result<(), PeerCommandError> {
+        self.send_simple_command_timeout(PeerCommand::PurgeReset, "purge reset", deadline)
+            .await
     }
 
     /// Send a `CollisionDump` command (Cease/7 and tear down).

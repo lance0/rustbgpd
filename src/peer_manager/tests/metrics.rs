@@ -413,6 +413,7 @@ async fn session_flap_does_not_reap_metric_series() {
     );
     seed_peer_metric_series(&metrics_view, "10.0.0.2");
     metrics_view.record_state_transition("10.0.0.2", "established", "idle");
+    metrics_view.record_path_attribute_discarded("10.0.0.2", 4, 3);
     let before = peer_metric_series_count(&metrics_view, "10.0.0.2");
 
     // A static peer's session flap (BackToIdle) must keep its history.
@@ -425,6 +426,13 @@ async fn session_flap_does_not_reap_metric_series() {
 
     assert!(mgr.peers.contains_key(&key(peer_addr)));
     assert_eq!(peer_metric_series_count(&metrics_view, "10.0.0.2"), before);
+    let discard = metrics_view
+        .registry()
+        .gather()
+        .into_iter()
+        .find(|family| family.name() == "bgp_path_attribute_discarded_total")
+        .expect("discard family remains registered across an ordinary reset");
+    assert!((discard.get_metric()[0].get_counter().value() - 3.0).abs() < f64::EPSILON);
     assert!(rib_rx.try_recv().is_err(), "no PeerDeleted on a flap");
 }
 

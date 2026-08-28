@@ -200,6 +200,8 @@ pub struct JsonPeerGroupDefinition {
     #[serde(default)]
     pub remove_private_as: Option<String>,
     #[serde(default)]
+    pub discard_path_attributes: Vec<u32>,
+    #[serde(default)]
     pub add_path_receive: Option<bool>,
     #[serde(default)]
     pub add_path_send: Option<bool>,
@@ -244,6 +246,7 @@ impl From<JsonPeerGroupDefinition> for proto::PeerGroupDefinition {
             route_server_client: j.route_server_client,
             per_client_best: j.per_client_best,
             remove_private_as: j.remove_private_as,
+            discard_path_attributes: j.discard_path_attributes,
             add_path_receive: j.add_path_receive,
             add_path_send: j.add_path_send,
             add_path_send_max: j.add_path_send_max,

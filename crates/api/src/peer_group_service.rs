@@ -158,6 +158,17 @@ fn proto_definition_to_input(
                 })
         })
         .transpose()?;
+    let discard_path_attributes = definition
+        .discard_path_attributes
+        .into_iter()
+        .map(|code| {
+            u8::try_from(code).map_err(|_| {
+                Status::invalid_argument("discard_path_attributes values must be <= 255")
+            })
+        })
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()?
+        .into_iter()
+        .collect();
 
     Ok(PeerGroupDefinition {
         hold_time,
@@ -185,6 +196,7 @@ fn proto_definition_to_input(
         } else {
             Some(remove_private_as)
         },
+        discard_path_attributes,
         add_path: definition
             .add_path_receive
             .map(|receive| AddPathDefinition {
@@ -244,6 +256,12 @@ fn input_definition_to_proto(definition: &PeerGroupDefinition) -> proto::PeerGro
         route_server_client: definition.route_server_client,
         per_client_best: definition.per_client_best,
         remove_private_as: definition.remove_private_as.clone(),
+        discard_path_attributes: definition
+            .discard_path_attributes
+            .iter()
+            .copied()
+            .map(u32::from)
+            .collect(),
         add_path_receive: definition
             .add_path
             .as_ref()
@@ -907,6 +925,35 @@ mod tests {
             assert_eq!(error.code(), tonic::Code::InvalidArgument);
             assert!(error.message().contains("between 1 and 255"));
         }
+    }
+
+    #[test]
+    fn discard_attributes_round_trip_canonicalize_clear_and_reject_overflow() {
+        let populated = proto_definition_to_input(proto::PeerGroupDefinition {
+            discard_path_attributes: vec![8, 4, 8],
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(populated.discard_path_attributes, vec![4, 8]);
+        assert_eq!(
+            input_definition_to_proto(&populated).discard_path_attributes,
+            vec![4, 8]
+        );
+
+        let cleared = proto_definition_to_input(proto::PeerGroupDefinition::default()).unwrap();
+        assert!(cleared.discard_path_attributes.is_empty());
+        assert!(
+            input_definition_to_proto(&cleared)
+                .discard_path_attributes
+                .is_empty()
+        );
+
+        let error = proto_definition_to_input(proto::PeerGroupDefinition {
+            discard_path_attributes: vec![256],
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
     }
 
     /// `orr_vantage` round-trips proto string → definition → proto string

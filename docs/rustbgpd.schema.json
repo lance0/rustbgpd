@@ -1843,6 +1843,20 @@
             "null"
           ]
         },
+        "discard_path_attributes": {
+          "description": "Path-attribute type codes to discard from accepted inbound routes\nafter route-safety validation and before import policy. Route-server\nclients only; an explicit empty list clears an inherited group list.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0
+          },
+          "uniqueItems": true
+        },
         "export_policy": {
           "description": "Inline export policy statements for this neighbor.",
           "type": "array",
@@ -2307,6 +2321,20 @@
             "boolean",
             "null"
           ]
+        },
+        "discard_path_attributes": {
+          "description": "Inbound path-attribute type codes discarded by route-server clients.\nSee the neighbor-level `discard_path_attributes`.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0
+          },
+          "uniqueItems": true
         },
         "export_policy": {
           "description": "Inline export policy statements for peers in this group.",

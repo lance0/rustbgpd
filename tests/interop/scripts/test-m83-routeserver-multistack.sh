@@ -27,56 +27,63 @@
 #    9  BIRD: large community 65002:2:2 verbatim
 #   10  FRR: 203.0.113.0/24 AS_PATH = "65001", no 65500
 #   11  FRR: NEXT_HOP = 10.83.1.2 (BIRD's address)
-#   12  FRR: MED 120 verbatim
+#   12  FRR: MED absent after the BIRD neighbor's type-4 discard
 #   13  FRR: standard community 65001:111 verbatim
 #   14  FRR: large community 65001:1:1 verbatim
-#   15  GoBGP: 100.67.0.0/24 AS_PATH = [65003], no 65500
-#   16  GoBGP: NEXT_HOP = 10.83.3.2 (FRR's address)
+#   --- configured inbound path-attribute discard ---
+#   15  pre-SIGHUP raw BIRD→RS UPDATE carries MED 120
+#   16  pre-SIGHUP raw BIRD→RS UPDATE carries community 65001:111
+#   17  normalized RIB + GoBGP downstream omit MED while preserving
+#       community type 8 value 4259905647 and large 65001:1:1
+#   18  bgp_path_attribute_discarded_total delta is positive for the
+#       BIRD peer and decimal type code 4
+#   19  GoBGP: 100.67.0.0/24 AS_PATH = [65003], no 65500
+#   20  GoBGP: NEXT_HOP = 10.83.3.2 (FRR's address)
 #   --- RFC 9234 OTC toward clients (role = route_server) ---
-#   17  FRR reports OTC on a reflected route
-#   18  BIRD reports BGP.otc: 65500 on a reflected route
+#   21  FRR reports OTC on a reflected route
+#   22  BIRD reports BGP.otc: 65500 on a reflected route
 #   --- per-member policy views ---
-#   19  FRR lacks 100.69.0.0/24 (member-scoped deny chain)
-#   20  GoBGP holds 100.69.0.0/24 (deny is scoped to FRR only)
-#   21  `rbgp rib advertised` to FRR agrees (prefix absent)
-#   22  `rbgp rib advertised` to GoBGP agrees (prefix present)
+#   23  FRR lacks 100.69.0.0/24 (member-scoped deny chain)
+#   24  GoBGP holds 100.69.0.0/24 (deny is scoped to FRR only)
+#   25  `rbgp rib advertised` to FRR agrees (prefix absent)
+#   26  `rbgp rib advertised` to GoBGP agrees (prefix present)
 #   --- ROV at import (RTR fixture) ---
-#   23  RPKI-invalid 100.68.0.0/24 absent on BIRD
-#   24  RPKI-invalid 100.68.0.0/24 absent on GoBGP
-#   25  import explain names the reject-rpki-invalid deny
+#   27  RPKI-invalid 100.68.0.0/24 absent on BIRD
+#   28  RPKI-invalid 100.68.0.0/24 absent on GoBGP
+#   29  import explain names the reject-rpki-invalid deny
 #   --- RFC 7947 §2.3 path-hiding contrast (ADR-0101) ---
-#   26  (a) FRR single-best: 100.65.0.0/24 absent (the best is denied
+#   30  (a) FRR single-best: 100.65.0.0/24 absent (the best is denied
 #       toward FRR by community 65001:666 — path hidden, pinned)
-#   27  (a) GoBGP holds BIRD's best for the same prefix (sanity)
-#   28  (a) export explain toward FRR: Deny, naming deny-to-frr
-#   29  (b) after per_client_best flip (sed + SIGHUP + session bounce):
+#   31  (a) GoBGP holds BIRD's best for the same prefix (sanity)
+#   32  (a) export explain toward FRR: Deny, naming deny-to-frr
+#   33  (b) after per_client_best flip (sed + SIGHUP + session bounce):
 #       `rbgp neighbor` shows Distribution Mode per-client-best
-#   30  (b) FRR receives the runner-up: AS_PATH 65002
-#   31  (b) FRR runner-up NEXT_HOP = 10.83.2.2 (still the originator's)
-#   32  (b) export explain: per-client ladder — candidate 1 of 2 denied
+#   34  (b) FRR receives the runner-up: AS_PATH 65002
+#   35  (b) FRR runner-up NEXT_HOP = 10.83.2.2 (still the originator's)
+#   36  (b) export explain: per-client ladder — candidate 1 of 2 denied
 #       by deny-to-frr, runner-up advertised
-#   33  (b) export explain decision Advertise with route peer = GoBGP
-#   34  (c) withdrawing the runner-up's source converges FRR to nothing
+#   37  (b) export explain decision Advertise with route peer = GoBGP
+#   38  (c) withdrawing the runner-up's source converges FRR to nothing
 #       (best still denied — no stale runner-up)
-#   35  (d) Add-Path member: GoBGP holds BOTH paths for 100.70.0.0/24
+#   39  (d) Add-Path member: GoBGP holds BOTH paths for 100.70.0.0/24
 #       (from AS 65001 and AS 65003)
 #   --- byte-level wire assertions (tshark, RS→BIRD) ---
-#   36  no RS→BIRD UPDATE carries 65500 in any AS_PATH segment
-#   37  wire NEXT_HOP 10.83.2.2 on the 100.66.0.0/24 UPDATE
-#   38  wire MED 77 verbatim
-#   39  wire community 65002:222 verbatim
-#   40  wire large community 65002:2:2 verbatim
-#   41  wire OTC path attribute (type code 35) present on RS→BIRD
-#       announcements (value pinned as 65500 by assertion 18)
-#   42  EoR: on the final RS→BIRD TCP stream, the exact snapshotted
+#   40  no RS→BIRD UPDATE carries 65500 in any AS_PATH segment
+#   41  wire NEXT_HOP 10.83.2.2 on the 100.66.0.0/24 UPDATE
+#   42  wire MED 77 verbatim
+#   43  wire community 65002:222 verbatim
+#   44  wire large community 65002:2:2 verbatim
+#   45  wire OTC path attribute (type code 35) present on RS→BIRD
+#       announcements (value pinned as 65500 by assertion 22)
+#   46  EoR: on the final RS→BIRD TCP stream, the exact snapshotted
 #       nonempty initial prefix set precedes one IPv4-unicast End-of-RIB
 #       (later live deltas do not redefine the initial update)
 #   --- withdraw propagation + reload stability ---
-#   43  BIRD withdraws 203.0.113.0/24 → gone on FRR
-#   44  BIRD withdraws 203.0.113.0/24 → gone on GoBGP
-#   45  policy reload changes still-present FRR route 100.67.0.0/24
+#   47  BIRD withdraws 203.0.113.0/24 → gone on FRR
+#   48  BIRD withdraws 203.0.113.0/24 → gone on GoBGP
+#   49  policy reload changes still-present FRR route 100.67.0.0/24
 #       from LP 100→110 and bumps its import-chain install generation
-#   46  FRR remains authoritatively Established/non-stale with unchanged
+#   50  FRR remains authoritatively Established/non-stale with unchanged
 #       flap count, nondecreasing uptime, and cumulative session marker
 #
 # Prerequisites:
@@ -498,8 +505,11 @@ M83_ADVERTISED_PREFIXES="$M83_WORK_DIR/advertised-prefixes.txt"
 M83_FINAL_PDML="$M83_WORK_DIR/final-rs-to-bird.pdml"
 M83_STREAM_EVENTS="$M83_WORK_DIR/final-rs-to-bird-events.txt"
 M83_ARTIFACT_ROOT="${M83_ARTIFACT_ROOT:-${RUNNER_TEMP:-/tmp}/m83-failure-artifacts}"
+M83_CAPTURE_PATH=""
+M83_CAPTURE_LOG=""
 M83_CAPTURE_RUNNING=0
 M83_ARTIFACTS_COLLECTED=0
+M83_DISCARD_METRIC_BEFORE=0
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -588,9 +598,19 @@ wait_for() {
     return 1
 }
 
-# tshark over the RS→BIRD capture (runs inside the BIRD container).
+# tshark over the post-baseline RS→BIRD capture (runs inside BIRD).
 bird_tshark() {
     docker exec "$BIRD" tshark -r /tmp/m83.pcap "$@" 2>/dev/null
+}
+
+# tshark over the untouched startup exchange, closed before the first SIGHUP.
+bird_raw_tshark() {
+    docker exec "$BIRD" tshark -r /tmp/m83-raw-inbound.pcap "$@" 2>/dev/null
+}
+
+discard_metric_value() {
+    prom_value "$RUSTBGPD" \
+        "bgp_path_attribute_discarded_total{peer=\"${BIRD_ADDR}\",type_code=\"4\"}"
 }
 
 collect_failure_artifacts() {
@@ -620,7 +640,11 @@ collect_failure_artifacts() {
     fi
 
     cp -f "$M83_WORK_DIR"/* "$artifact_dir"/ 2>/dev/null || true
+    docker cp "$BIRD:/tmp/m83-raw-inbound.pcap" \
+        "$artifact_dir/m83-raw-inbound.pcap" 2>/dev/null || true
     docker cp "$BIRD:/tmp/m83.pcap" "$artifact_dir/m83.pcap" 2>/dev/null || true
+    docker cp "$BIRD:/tmp/tshark-raw.log" \
+        "$artifact_dir/tshark-raw.log" 2>/dev/null || true
     docker cp "$BIRD:/tmp/tshark.log" "$artifact_dir/tshark.log" 2>/dev/null || true
     docker cp "$BIRD:/tmp/bird.log" "$artifact_dir/bird.log" 2>/dev/null || true
     docker cp "$RUSTBGPD:/tmp/rustbgpd.log" \
@@ -676,10 +700,26 @@ fi
 # ---------------------------------------------------------------------------
 
 start_capture() {
-    log "Starting tshark capture on the RS↔BIRD link (inside $BIRD)..."
-    docker exec "$BIRD" sh -c 'rm -f /tmp/m83.pcap' || true
+    local phase=${1:?}
+    case "$phase" in
+        raw)
+            M83_CAPTURE_PATH=/tmp/m83-raw-inbound.pcap
+            M83_CAPTURE_LOG=/tmp/tshark-raw.log
+            ;;
+        final)
+            M83_CAPTURE_PATH=/tmp/m83.pcap
+            M83_CAPTURE_LOG=/tmp/tshark.log
+            ;;
+        *)
+            echo "ERROR: unknown M83 capture phase: $phase" >&2
+            return 1
+            ;;
+    esac
+    log "Starting $phase tshark capture on the RS↔BIRD link (inside $BIRD)..."
+    docker exec "$BIRD" rm -f "$M83_CAPTURE_PATH" "$M83_CAPTURE_LOG" || true
     docker exec -d "$BIRD" sh -c \
-        'tshark -i eth1 -w /tmp/m83.pcap port 179 >/tmp/tshark.log 2>&1'
+        'tshark -i eth1 -w "$1" port 179 >"$2" 2>&1' \
+        sh "$M83_CAPTURE_PATH" "$M83_CAPTURE_LOG"
     M83_CAPTURE_RUNNING=1
     sleep 2
 }
@@ -713,13 +753,14 @@ stop_capture() {
     for _ in $(seq 1 10); do
         if ! docker exec "$BIRD" sh -c 'cat /proc/[0-9]*/comm 2>/dev/null' \
             | grep -x tshark >/dev/null; then
-            if docker exec "$BIRD" test -s /tmp/m83.pcap \
-                && docker exec "$BIRD" tshark -r /tmp/m83.pcap -c 1 >/dev/null 2>&1; then
-                log "tshark capture $signaled terminated; pcap is nonempty and readable"
+            if docker exec "$BIRD" test -s "$M83_CAPTURE_PATH" \
+                && docker exec "$BIRD" tshark -r "$M83_CAPTURE_PATH" -c 1 \
+                    >/dev/null 2>&1; then
+                log "tshark capture $signaled terminated; $M83_CAPTURE_PATH is nonempty and readable"
                 M83_CAPTURE_RUNNING=0
                 return 0
             fi
-            fail "tshark terminated without a nonempty readable /tmp/m83.pcap"
+            fail "tshark terminated without a nonempty readable $M83_CAPTURE_PATH"
             return 1
         fi
         sleep 1
@@ -729,7 +770,14 @@ stop_capture() {
 }
 
 start_bird() {
-    log "Starting BIRD..."
+    log "Checking and starting BIRD..."
+    if ! docker exec "$BIRD" sh -c \
+        'bird -p -c /etc/bird/bird.conf >/dev/null 2>/tmp/m83-bird-preflight.log'; then
+        echo "ERROR: BIRD configuration preflight failed" >&2
+        docker exec "$BIRD" cat /tmp/m83-bird-preflight.log >&2 || true
+        return 1
+    fi
+    log "BIRD configuration preflight passed (bird -p)"
     docker exec "$BIRD" sh -c \
         'mkdir -p /run/bird && (bird -d -c /etc/bird/bird.conf >/tmp/bird.log 2>&1 &)'
 }
@@ -856,10 +904,10 @@ assert_frr_probe() {
     fi
     local med
     med=$(frr_prefix_json 203.0.113.0/24 | jq -r '.paths[0].med // .paths[0].metric // empty')
-    if [ "$med" = "120" ]; then
-        ok "FRR MED = 120 verbatim"
+    if [ -z "$med" ] || [ "$med" = "0" ]; then
+        ok "FRR has no MED after the BIRD neighbor's type-4 discard"
     else
-        fail "FRR MED = '$med' (want 120)"
+        fail "FRR MED = '$med' (want absent after type-4 discard)"
     fi
     if frr_prefix_json 203.0.113.0/24 | jq -e '.paths[0].community.string | test("65001:111")' >/dev/null 2>&1; then
         ok "FRR standard community 65001:111 verbatim"
@@ -873,8 +921,79 @@ assert_frr_probe() {
     fi
 }
 
+assert_bird_discard_boundary() {
+    log "Assertions 15-18: BIRD-only MED discard boundary and telemetry"
+
+    # Close the startup capture before any config mutation or SIGHUP. This is
+    # the raw pre-normalization evidence; all later wire/EoR checks use a fresh
+    # capture so the two boundaries cannot be conflated.
+    stop_capture
+    local inbound="ip.src == ${BIRD_ADDR} && ip.dst == ${RS_BIRD_ADDR} && bgp.type == 2 && bgp.nlri_prefix == 203.0.113.0"
+    if bird_raw_tshark \
+        -Y "$inbound && bgp.update.path_attribute.multi_exit_disc == 120" \
+        -T fields -e frame.number | grep . >/dev/null; then
+        ok "raw pre-SIGHUP BIRD→RS UPDATE carries MED 120"
+    else
+        fail "raw pre-SIGHUP BIRD→RS UPDATE does not carry MED 120"
+    fi
+    if bird_raw_tshark \
+        -Y "$inbound && bgp.update.path_attribute.community_as == 65001 && bgp.update.path_attribute.community_value == 111" \
+        -T fields -e frame.number | grep . >/dev/null; then
+        ok "raw pre-SIGHUP BIRD→RS UPDATE carries community 65001:111"
+    else
+        fail "raw pre-SIGHUP BIRD→RS UPDATE does not carry community 65001:111"
+    fi
+
+    start_capture final
+
+    local rib_json gobgp_json
+    rib_json=$(grpcurl_call \
+        -d '{"prefixFilter":"203.0.113.0","prefixFilterLength":24}' \
+        "$GRPC_ADDR" rustbgpd.v1.RibService/ListBestRoutes 2>/dev/null) \
+        || rib_json='{}'
+    gobgp_json=$(gobgp_prefix_json 203.0.113.0/24)
+    if printf '%s\n' "$rib_json" | jq -e '
+            [.routes[]? | select(
+                .prefix == "203.0.113.0"
+                and .prefixLength == 24
+                and .peerAddress == "10.83.1.2"
+                and (has("medAttr") | not)
+                and ((.communities // []) | index(4259905647) != null)
+                and ((.largeCommunities // []) | index("65001:1:1") != null)
+            )] | length == 1
+        ' >/dev/null 2>&1 \
+        && printf '%s\n' "$gobgp_json" | jq -e '
+            .["203.0.113.0/24"][0].attrs as $attrs
+            | ([$attrs[] | select(.type == 4)] | length) == 0
+              and ([$attrs[] | select(.type == 8) | .communities[]?]
+                   | index(4259905647) != null)
+              and ([$attrs[] | select(.type == 32) | .value[]?
+                    | select(
+                        .ASN == 65001
+                        and .LocalData1 == 1
+                        and .LocalData2 == 1
+                    )] | length) == 1
+        ' >/dev/null 2>&1; then
+        ok "normalized RIB + GoBGP omit MED and preserve type-8 4259905647 + large 65001:1:1"
+    else
+        fail "normalized RIB or GoBGP discard boundary is wrong"
+        printf '%s\n' "$rib_json" >&2
+        printf '%s\n' "$gobgp_json" >&2
+    fi
+
+    local metric_after
+    metric_after=$(discard_metric_value)
+    metric_after=${metric_after:-0}
+    if awk -v before="$M83_DISCARD_METRIC_BEFORE" -v after="$metric_after" \
+        'BEGIN { exit !(after > before) }'; then
+        ok "discard metric peer=$BIRD_ADDR type_code=4 increased $M83_DISCARD_METRIC_BEFORE→$metric_after"
+    else
+        fail "discard metric peer=$BIRD_ADDR type_code=4 did not increase ($M83_DISCARD_METRIC_BEFORE→$metric_after)"
+    fi
+}
+
 assert_gobgp_probe() {
-    log "Assertions 15-16: GoBGP's view of FRR's probe 100.67.0.0/24"
+    log "Assertions 19-20: GoBGP's view of FRR's probe 100.67.0.0/24"
     wait_for "100.67.0.0/24 on GoBGP" 30 gobgp_has_prefix 100.67.0.0/24 || true
 
     if gobgp_prefix_json 100.67.0.0/24 | jq -e '
@@ -894,7 +1013,7 @@ assert_gobgp_probe() {
 }
 
 assert_otc_client_views() {
-    log "Assertions 17-18: RFC 9234 OTC toward clients (role = route_server)"
+    log "Assertions 21-22: RFC 9234 OTC toward clients (role = route_server)"
     if frr_prefix_json 203.0.113.0/24 \
         | grep -Ei 'only[ -]?to[ -]?customer|"otc"|onlyToCustomer' >/dev/null; then
         ok "FRR reports OTC on the reflected route"
@@ -910,7 +1029,7 @@ assert_otc_client_views() {
 }
 
 assert_member_scoped_deny() {
-    log "Assertions 19-22: member-scoped export view (100.69.0.0/24 denied to FRR only)"
+    log "Assertions 23-26: member-scoped export view (100.69.0.0/24 denied to FRR only)"
     wait_for "100.69.0.0/24 on GoBGP" 30 gobgp_has_prefix 100.69.0.0/24 || true
 
     if frr_has_prefix 100.69.0.0/24; then
@@ -936,7 +1055,7 @@ assert_member_scoped_deny() {
 }
 
 assert_rov() {
-    log "Assertions 23-25: ROV — RPKI-invalid rejected at import, explain names the term"
+    log "Assertions 27-29: ROV — RPKI-invalid rejected at import, explain names the term"
     # 100.67.0.0/24 (same member, not-found) already propagated, so the
     # absence of the invalid twin is convergence-safe to assert now.
     if birdc_route_all 100.68.0.0/24 | grep -F "BGP.as_path" >/dev/null; then
@@ -960,7 +1079,7 @@ assert_rov() {
 }
 
 assert_path_hiding_single_best() {
-    log "Assertions 26-28: path hiding pinned (FRR single-best, best denied)"
+    log "Assertions 30-32: path hiding pinned (FRR single-best, best denied)"
     wait_for "100.65.0.0/24 on GoBGP" 30 \
         sh -c "docker exec $GOBGP gobgp global rib -a ipv4 100.65.0.0/24 -j 2>/dev/null \
             | jq -e '.\"100.65.0.0/24\" | length >= 1'" || true
@@ -1003,7 +1122,7 @@ flip_frr_per_client_best() {
 }
 
 assert_per_client_best() {
-    log "Assertions 29-33: per-client best-path (RFC 7947 §2.3.2, ADR-0101)"
+    log "Assertions 33-37: per-client best-path (RFC 7947 §2.3.2, ADR-0101)"
     if rs_ctl neighbor "$FRR_ADDR" | grep "per-client-best" >/dev/null; then
         ok "rbgp neighbor shows Distribution Mode per-client-best"
     else
@@ -1046,7 +1165,7 @@ assert_per_client_best() {
 }
 
 assert_runner_up_withdraw_converges() {
-    log "Assertion 34: withdrawing the runner-up's source converges FRR"
+    log "Assertion 38: withdrawing the runner-up's source converges FRR"
     docker exec "$GOBGP" gobgp global rib del -a ipv4 100.65.0.0/24 >/dev/null 2>&1 \
         || log "gobgp rib del returned non-zero"
     local gone=0
@@ -1066,7 +1185,7 @@ assert_runner_up_withdraw_converges() {
 }
 
 assert_add_path_both() {
-    log "Assertion 35: Add-Path member sees BOTH paths for 100.70.0.0/24"
+    log "Assertion 39: Add-Path member sees BOTH paths for 100.70.0.0/24"
     wait_for "2 paths for 100.70.0.0/24 on GoBGP" 30 \
         sh -c "docker exec $GOBGP gobgp global rib -a ipv4 100.70.0.0/24 -j 2>/dev/null \
             | jq -e '.\"100.70.0.0/24\" | length == 2'" || true
@@ -1081,7 +1200,7 @@ assert_add_path_both() {
 }
 
 assert_wire() {
-    log "Assertions 36-42: byte-level wire pins (tshark on the RS→BIRD capture)"
+    log "Assertions 40-46: byte-level wire pins (tshark on the RS→BIRD capture)"
     # RS→BIRD BGP UPDATEs regardless of which side initiated TCP.
     local base="ip.src == ${RS_BIRD_ADDR} && bgp.type == 2"
 
@@ -1218,7 +1337,7 @@ bounce_bird_session() {
 }
 
 assert_withdraw_propagation() {
-    log "Assertions 43-44: withdraw propagation (BIRD withdraws 203.0.113.0/24)"
+    log "Assertions 47-48: withdraw propagation (BIRD withdraws 203.0.113.0/24)"
     docker exec "$BIRD" birdc disable statics_uniq >/dev/null 2>&1 || true
     local gone_frr=0 gone_gobgp=0
     for _ in $(seq 1 30); do
@@ -1240,7 +1359,7 @@ assert_withdraw_propagation() {
 }
 
 assert_reload_stability() {
-    log "Assertions 45-46: live route change and session stability through a policy reload"
+    log "Assertions 49-50: live route change and session stability through a policy reload"
     local marker_before marker_after state_before state_after
     local flaps_before flaps_after uptime_before uptime_after
     local lp_before lp_after generation_before generation_after
@@ -1335,12 +1454,14 @@ main() {
     log "Topology: $TOPO"
 
     resolve_grpc_addr
-    start_capture
-    start_bird
+    start_capture raw
     start_gobgpd
     patch_rs_config
     start_rustbgpd \
         "/usr/local/bin/rustbgpd /tmp/config.toml >/tmp/rustbgpd.log 2>&1"
+    M83_DISCARD_METRIC_BEFORE=$(discard_metric_value)
+    M83_DISCARD_METRIC_BEFORE=${M83_DISCARD_METRIC_BEFORE:-0}
+    start_bird
 
     test_rtr_vrps
     wait_bird_established
@@ -1351,6 +1472,7 @@ main() {
 
     assert_bird_probe
     assert_frr_probe
+    assert_bird_discard_boundary
     assert_gobgp_probe
     assert_otc_client_views
     assert_member_scoped_deny

@@ -905,6 +905,7 @@ impl PeerManager {
         // parsed and validated but never enforced.
         transport.rs_control_communities = config.rs_control_communities;
         transport.remove_private_as = config.remove_private_as;
+        transport.discard_path_attributes = config.discard_path_attributes.clone();
         transport.cluster_id = self.cluster_id;
         // ADR-0073: per-session import-decision explain cache wiring.
         // Both the enable flag and the capacity must be threaded — a
@@ -1283,8 +1284,14 @@ impl PeerManager {
                             let result = self.apply_peer_reshape_snapshot(targets).await;
                             let _ = reply.send(result);
                         }
-                        PeerManagerCommand::BounceDynamicRangePeers { ranges, reply } => {
-                            let outcome = self.bounce_dynamic_peers_for_ranges(&ranges).await;
+                        PeerManagerCommand::BounceDynamicRangePeers {
+                            ranges,
+                            purge_ranges,
+                            reply,
+                        } => {
+                            let outcome = self
+                                .bounce_dynamic_peers_for_ranges(&ranges, &purge_ranges)
+                                .await;
                             let _ = reply.send(outcome);
                         }
                         PeerManagerCommand::StageFibTables { tables, reply } => {

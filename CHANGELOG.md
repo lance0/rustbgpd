@@ -21,6 +21,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Route-server clients can configure `discard_path_attributes = [TYPE, ...]`
+  on a neighbor or inherited peer group. Surviving decoded attributes are
+  removed after RFC 7606 handling and route-safety checks but before import
+  policy, explain caching, and RIB admission; pre-policy BMP retains the exact
+  wire UPDATE. Effective-list changes purge-reset every static or accepted
+  dynamic session generation, bypassing GR retention (RFC 8538 Hard Reset when
+  Notification GR is negotiated), and
+  `bgp_path_attribute_discarded_total{peer,type_code}` counts removed
+  occurrences once per UPDATE.
+
 - Periodic BMP peer statistics now include RFC 9972 post-policy Adj-RIB-In
   gauges: global type 20 and negotiated IPv4/IPv6-unicast family types 21 and
   23. These gauges are omitted when effective unicast Add-Path receive is active,

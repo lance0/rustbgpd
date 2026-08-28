@@ -1136,6 +1136,21 @@ impl PeerSession {
                 self.timers.stop_all();
                 ControlFlow::Break(())
             }
+            PeerCommand::PurgeReset => {
+                self.stop_requested = true;
+                self.reconnect_timer = None;
+                info!(peer = %self.peer_label, "purge reset requested");
+                let reason = rustbgpd_wire::notification::encode_shutdown_communication(
+                    "path-attribute discard configuration changed",
+                );
+                self.drive_fsm(Event::AdministrativeReset {
+                    reason: Some(reason),
+                })
+                .await;
+                self.close_tcp();
+                self.timers.stop_all();
+                ControlFlow::Break(())
+            }
             PeerCommand::QueryState { reply } => {
                 // TCP_AO_INFO is cumulative for this socket. Its in-actor
                 // getsockopt is a bounded, nonblocking kernel-memory read, so

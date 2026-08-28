@@ -487,6 +487,8 @@ pub struct TransportConfig {
     pub rs_control_communities: bool,
     /// Private AS removal mode for eBGP outbound `AS_PATH`.
     pub remove_private_as: RemovePrivateAs,
+    /// Canonical inbound attribute type codes discarded after safety checks.
+    pub discard_path_attributes: std::sync::Arc<[u8]>,
     /// Local cluster ID for route reflection. `Some` means this speaker is a
     /// route reflector; used for `CLUSTER_LIST` prepend and loop detection.
     pub cluster_id: Option<Ipv4Addr>,
@@ -578,6 +580,7 @@ impl TransportConfig {
             interpret_rfc1997: true,
             rs_control_communities: false,
             remove_private_as: RemovePrivateAs::Disabled,
+            discard_path_attributes: std::sync::Arc::from([]),
             cluster_id: None,
             explain_enabled: false,
             explain_cache_size: crate::session::import_decision_cache::DEFAULT_EXPLAIN_CACHE_SIZE,

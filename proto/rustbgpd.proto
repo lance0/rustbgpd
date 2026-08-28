@@ -536,6 +536,9 @@ message NeighborConfig {
   // Minimum hold time accepted from the peer. Valid range 3..65535.
   // When set, a peer proposal of zero is rejected.
   optional uint32 min_hold_time = 21;
+  // Effective canonical inbound path-attribute type codes discarded for this
+  // route-server client. Empty means no configured discard.
+  repeated uint32 discard_path_attributes = 22;
 }
 
 message PathsLimitState {
@@ -1184,6 +1187,9 @@ message PeerGroupDefinition {
   repeated string required_families = 28;
   // Minimum hold time accepted from group members. Valid range 3..65535.
   optional uint32 min_hold_time = 29;
+  // Canonical inbound path-attribute type codes inherited by route-server
+  // clients. Full replacement: an empty list clears the group setting.
+  repeated uint32 discard_path_attributes = 31;
 }
 
 message NamedPeerGroup {

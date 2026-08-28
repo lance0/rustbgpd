@@ -776,6 +776,30 @@ impl Config {
             )
             .map_err(|violation| violation.into_static_error(&neighbor.address))?;
 
+            let discard_path_attributes = neighbor
+                .discard_path_attributes
+                .as_ref()
+                .or_else(|| group.and_then(|group| group.discard_path_attributes.as_ref()));
+            if let Some(codes) = discard_path_attributes
+                && !codes.is_empty()
+            {
+                validate_discard_path_attributes(codes).map_err(|reason| {
+                    ConfigError::InvalidNeighborConfig {
+                        address: neighbor.address.clone(),
+                        field: "discard_path_attributes".to_string(),
+                        reason,
+                    }
+                })?;
+                if !modes.route_server_client {
+                    return Err(ConfigError::InvalidNeighborConfig {
+                        address: neighbor.address.clone(),
+                        field: "discard_path_attributes".to_string(),
+                        reason: "discard_path_attributes requires route_server_client = true"
+                            .to_string(),
+                    });
+                }
+            }
+
             if let Some(mode) = neighbor
                 .remove_private_as
                 .as_deref()
@@ -1137,8 +1161,9 @@ impl Config {
                 });
             };
 
+            let dynamic_modes = EffectivePeerModes::for_dynamic(dn.remote_asn, group);
             validate_effective_peer_modes(
-                EffectivePeerModes::for_dynamic(dn.remote_asn, group),
+                dynamic_modes,
                 self.global.asn,
                 &self.global.router_id,
                 &dn.prefix,
@@ -1151,6 +1176,20 @@ impl Config {
                     violation.reason()
                 ),
             })?;
+            if group
+                .discard_path_attributes
+                .as_ref()
+                .is_some_and(|codes| !codes.is_empty())
+                && !dynamic_modes.route_server_client
+            {
+                return Err(ConfigError::InvalidDynamicNeighbor {
+                    reason: format!(
+                        "dynamic_neighbors[{i}] prefix {:?} via peer_group {:?}: \
+                         discard_path_attributes requires route_server_client = true",
+                        dn.prefix, dn.peer_group
+                    ),
+                });
+            }
 
             if !group.required_families.is_empty() {
                 let required = parse_families(&group.required_families).map_err(|err| {
@@ -2695,6 +2734,13 @@ fn validate_peer_group(
     if let Some(mode) = group.remove_private_as.as_deref() {
         validate_remove_private_as_mode(mode, Some(name))?;
     }
+    if let Some(codes) = group.discard_path_attributes.as_ref() {
+        validate_discard_path_attributes(codes).map_err(|reason| {
+            ConfigError::InvalidRouteServerConfig {
+                reason: format!("peer_group {name:?}: {reason}"),
+            }
+        })?;
+    }
 
     validate_log_level(group.log_level.as_deref())?;
 
@@ -3020,6 +3066,19 @@ fn validate_grpc_principal(principal: Option<&str>, field_name: &str) -> Result<
                 ),
             });
         }
+    }
+    Ok(())
+}
+
+fn validate_discard_path_attributes(codes: &std::collections::BTreeSet<u8>) -> Result<(), String> {
+    const PROTECTED: [u8; 11] = [1, 2, 3, 6, 7, 14, 15, 17, 18, 33, 35];
+    if codes.contains(&0) {
+        return Err("attribute type code 0 is reserved".to_string());
+    }
+    if let Some(code) = PROTECTED.into_iter().find(|code| codes.contains(code)) {
+        return Err(format!(
+            "attribute type code {code} is protected and cannot be discarded"
+        ));
     }
     Ok(())
 }

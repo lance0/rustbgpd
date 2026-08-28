@@ -128,6 +128,7 @@ impl Session {
                 actions.push(self.transition_to(SessionState::Connect));
                 actions
             }
+            Event::AdministrativeReset { .. } => vec![Action::SessionDown],
             // RFC 4271: In Idle, no timers should be running. Late timer
             // ticks indicate a daemon-side bug (timer not stopped on the
             // last transition into Idle) — surface them through the
@@ -147,6 +148,11 @@ impl Session {
     )]
     fn handle_connect(&mut self, event: Event) -> Vec<Action> {
         match event {
+            Event::AdministrativeReset { .. } => {
+                let mut actions = vec![Action::SessionDown];
+                actions.extend(self.enter_idle_silent());
+                actions
+            }
             Event::ManualStop { .. } | Event::BfdDown | Event::DecodeError(_) => {
                 self.enter_idle_silent()
             }
@@ -199,6 +205,11 @@ impl Session {
     )]
     fn handle_active(&mut self, event: Event) -> Vec<Action> {
         match event {
+            Event::AdministrativeReset { .. } => {
+                let mut actions = vec![Action::SessionDown];
+                actions.extend(self.enter_idle_silent());
+                actions
+            }
             Event::ManualStop { .. } | Event::BfdDown | Event::DecodeError(_) => {
                 self.enter_idle_silent()
             }
@@ -251,6 +262,7 @@ impl Session {
                 cease_subcode::ADMINISTRATIVE_SHUTDOWN,
                 reason.unwrap_or_default(),
             ),
+            Event::AdministrativeReset { reason } => self.enter_idle_administrative_reset(reason),
             Event::BfdDown => self.enter_idle_bfd_down(),
 
             Event::HoldTimerExpires => self.enter_idle_with_notification(
@@ -348,6 +360,7 @@ impl Session {
                 cease_subcode::ADMINISTRATIVE_SHUTDOWN,
                 reason.unwrap_or_default(),
             ),
+            Event::AdministrativeReset { reason } => self.enter_idle_administrative_reset(reason),
             Event::BfdDown => self.enter_idle_bfd_down(),
 
             Event::HoldTimerExpires => self.enter_idle_with_notification(
@@ -431,17 +444,30 @@ impl Session {
         actions
     }
 
+    fn enter_idle_administrative_reset(&mut self, reason: Option<Bytes>) -> Vec<Action> {
+        let mut actions = self.enter_idle_with_notification(
+            NotificationCode::Cease,
+            cease_subcode::ADMINISTRATIVE_RESET,
+            reason.unwrap_or_default(),
+        );
+        actions.insert(1, Action::SessionDown);
+        actions
+    }
+
+    fn enter_idle_manual_stop_established(&mut self, reason: Option<Bytes>) -> Vec<Action> {
+        let mut actions = vec![Action::SessionDown];
+        actions.extend(self.enter_idle_with_notification(
+            NotificationCode::Cease,
+            cease_subcode::ADMINISTRATIVE_SHUTDOWN,
+            reason.unwrap_or_default(),
+        ));
+        actions
+    }
+
     fn handle_established(&mut self, event: Event) -> Vec<Action> {
         match event {
-            Event::ManualStop { reason } => {
-                let mut actions = vec![Action::SessionDown];
-                actions.extend(self.enter_idle_with_notification(
-                    NotificationCode::Cease,
-                    cease_subcode::ADMINISTRATIVE_SHUTDOWN,
-                    reason.unwrap_or_default(),
-                ));
-                actions
-            }
+            Event::ManualStop { reason } => self.enter_idle_manual_stop_established(reason),
+            Event::AdministrativeReset { reason } => self.enter_idle_administrative_reset(reason),
             Event::BfdDown => self.enter_idle_bfd_down(),
 
             Event::HoldTimerExpires => {
@@ -1557,6 +1583,51 @@ mod tests {
         s.handle_event(Event::KeepaliveReceived);
         assert_eq!(s.state(), SessionState::Established);
         s
+    }
+
+    #[test]
+    fn administrative_reset_is_authoritative_in_every_state() {
+        for state in [
+            SessionState::Idle,
+            SessionState::Connect,
+            SessionState::Active,
+            SessionState::OpenSent,
+            SessionState::OpenConfirm,
+            SessionState::Established,
+        ] {
+            let mut session = drive_to(state);
+            let actions = session.handle_event(Event::AdministrativeReset {
+                reason: Some(Bytes::from_static(b"\x04test")),
+            });
+            assert_eq!(
+                session.state(),
+                SessionState::Idle,
+                "starting from {state:?}"
+            );
+            let down = actions
+                .iter()
+                .position(|action| matches!(action, Action::SessionDown))
+                .expect("administrative reset always emits authoritative SessionDown");
+            let notification = actions.iter().position(|action| {
+                matches!(
+                    action,
+                    Action::SendNotification(notification)
+                        if notification.code == NotificationCode::Cease
+                            && notification.subcode == cease_subcode::ADMINISTRATIVE_RESET
+                )
+            });
+            if matches!(
+                state,
+                SessionState::OpenSent | SessionState::OpenConfirm | SessionState::Established
+            ) {
+                assert!(
+                    notification.is_some_and(|notification| notification < down),
+                    "{state:?} must send the exact reset reason before SessionDown"
+                );
+            } else {
+                assert_eq!(notification, None, "{state:?} has no open BGP session");
+            }
+        }
     }
 
     // -- Idle (none of the timers should be running) --

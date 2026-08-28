@@ -148,6 +148,10 @@ async fn rfc9774_as_set_without_reachable_nlri_resets_session() {
 #[tokio::test]
 async fn rfc7606_attribute_discard_keeps_announcement_and_session() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    // Directly seed the runtime list to pin ordering: the config validator
+    // rejects protected type 7, but even a defensive impossible-state test
+    // must not double-count an attribute RFC 7606 already removed.
+    session.config.discard_path_attributes = Arc::from([7]);
     let (client, _server) = connected_stream_pair().await;
     session.test_install_stream(client);
     establish_test_session(&mut session, 65002).await;
@@ -167,6 +171,10 @@ async fn rfc7606_attribute_discard_keeps_announcement_and_session() {
     assert_eq!(announced[0].prefix, Prefix::V4(prefix));
     assert_eq!(session.fsm.state(), SessionState::Established);
     assert_single_malformed_disposition(&session, "attribute_discard");
+    assert!(
+        counter_samples(&session.metrics, "bgp_path_attribute_discarded_total").is_empty(),
+        "RFC 7606-removed attributes are absent before configured-discard accounting"
+    );
 }
 
 /// RFC 4271 section 5: an unrecognized optional non-transitive attribute is

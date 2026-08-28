@@ -165,6 +165,13 @@ impl PeerSession {
                     .as_deref()
                     .or(self.fsm.negotiated())
                     .is_some_and(|negotiated| negotiated.peer_notification_gr);
+            let administrative_reset_notification_gr =
+                matches!(&event, Event::AdministrativeReset { .. })
+                    && self
+                        .negotiated
+                        .as_deref()
+                        .or(self.fsm.negotiated())
+                        .is_some_and(|negotiated| negotiated.peer_notification_gr);
             let mut actions = self.fsm.handle_event(event.clone());
             if bfd_notification_gr {
                 for action in &mut actions {
@@ -179,6 +186,24 @@ impl PeerSession {
                                 NotificationCode::Cease.as_u8(),
                                 cease_subcode::BFD_DOWN,
                             ]),
+                        );
+                    }
+                }
+            }
+            if administrative_reset_notification_gr {
+                for action in &mut actions {
+                    if let Action::SendNotification(notification) = action
+                        && notification.code == NotificationCode::Cease
+                        && notification.subcode == cease_subcode::ADMINISTRATIVE_RESET
+                    {
+                        let mut hard_reset_data = Vec::with_capacity(notification.data.len() + 2);
+                        hard_reset_data.push(NotificationCode::Cease.as_u8());
+                        hard_reset_data.push(cease_subcode::ADMINISTRATIVE_RESET);
+                        hard_reset_data.extend_from_slice(&notification.data);
+                        *notification = rustbgpd_wire::NotificationMessage::new(
+                            NotificationCode::Cease,
+                            cease_subcode::HARD_RESET,
+                            Bytes::from(hard_reset_data),
                         );
                     }
                 }

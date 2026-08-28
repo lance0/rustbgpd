@@ -113,7 +113,9 @@ enabled = true
 
 # --- IXP members ---
 
-# BIRD 2: plain transparent client, tshark capture rides this link.
+# BIRD 2: transparent client with one explicit inbound exception. M83 proves
+# the raw UPDATE still carries MED while normalized and downstream views do
+# not; the standard and Large Communities alongside it must survive.
 [[neighbors]]
 address = "10.83.1.2"
 remote_asn = 65001
@@ -121,6 +123,7 @@ description = "member-bird"
 hold_time = 90
 route_server_client = true
 role = "route_server"
+discard_path_attributes = [4]
 
 # GoBGP: Add-Path member (the preferred RFC 7948 mitigation).
 [[neighbors]]

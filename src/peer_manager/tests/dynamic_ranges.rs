@@ -157,6 +157,7 @@ async fn runtime_create_peer_rejects_listener_enforced_group_auth() {
                 max_prefixes: None,
                 max_prefix_restart_seconds: None,
                 remove_private_as: None,
+                discard_path_attributes: None,
                 local_role: None,
                 families: None,
                 required_families: None,

@@ -903,6 +903,99 @@ peer_group = "rs-clients"
 }
 
 #[test]
+fn discard_attributes_inherit_canonicalize_and_explicit_empty_clears() {
+    let toml_str = format!(
+        r#"
+{GLOBAL_HEADER}
+
+[peer_groups.rs-clients]
+route_server_client = true
+discard_path_attributes = [8, 4, 8]
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+peer_group = "rs-clients"
+
+[[neighbors]]
+address = "10.0.0.4"
+remote_asn = 65004
+peer_group = "rs-clients"
+discard_path_attributes = []
+"#,
+        GLOBAL_HEADER = valid_toml()
+    );
+    let config = parse(&toml_str).unwrap();
+    let inherited = config.resolve_neighbor(&config.neighbors[1]).unwrap();
+    let cleared = config.resolve_neighbor(&config.neighbors[2]).unwrap();
+    assert_eq!(
+        inherited.transport_config.discard_path_attributes.as_ref(),
+        [4, 8]
+    );
+    assert!(cleared.transport_config.discard_path_attributes.is_empty());
+}
+
+#[test]
+fn discard_attributes_require_route_server_client_and_reject_protected_codes() {
+    let missing_role = format!(
+        r#"
+{GLOBAL_HEADER}
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+discard_path_attributes = [4]
+"#,
+        GLOBAL_HEADER = valid_toml()
+    );
+    assert!(
+        parse(&missing_role)
+            .unwrap_err()
+            .to_string()
+            .contains("requires route_server_client")
+    );
+
+    for code in [0, 1, 2, 3, 6, 7, 14, 15, 17, 18, 33, 35] {
+        let toml_str = format!(
+            r#"
+{GLOBAL_HEADER}
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+route_server_client = true
+discard_path_attributes = [{code}]
+"#,
+            GLOBAL_HEADER = valid_toml()
+        );
+        let error = parse(&toml_str).unwrap_err().to_string();
+        let expected = if code == 0 { "reserved" } else { "protected" };
+        assert!(
+            error.contains(expected),
+            "code {code}: unexpected error: {error}"
+        );
+    }
+
+    let accepted = format!(
+        r#"
+{GLOBAL_HEADER}
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+route_server_client = true
+discard_path_attributes = [8, 16, 32, 255]
+"#,
+        GLOBAL_HEADER = valid_toml()
+    );
+    let resolved = parse(&accepted).unwrap().to_peer_configs().unwrap();
+    assert_eq!(
+        resolved[1].0.discard_path_attributes.as_ref(),
+        [8, 16, 32, 255]
+    );
+}
+
+#[test]
 fn neighbor_values_override_peer_group_defaults() {
     let toml_str = format!(
         r#"

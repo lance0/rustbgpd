@@ -125,6 +125,7 @@ pub(super) fn build_peer_info(
         required_families: managed.transport_config.peer.required_families.clone(),
         negotiated_session: session_state.and_then(|state| state.negotiated_session.clone()),
         remove_private_as: managed.transport_config.remove_private_as,
+        discard_path_attributes: managed.transport_config.discard_path_attributes.clone(),
         route_server_client: managed.transport_config.route_server_client,
         per_client_best: managed.transport_config.per_client_best,
         next_hop_ownership_strict_peer: managed.transport_config.next_hop_ownership_strict_peer,

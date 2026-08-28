@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::net::IpAddr;
 use std::num::{NonZeroU8, NonZeroU32};
@@ -1606,6 +1606,17 @@ define_neighbor_and_peer_group_configs! {
                 /// `"all"`, or `"replace"`). See the neighbor-level `remove_private_as`.
             }
         }
+        discard_path_attributes: Option<BTreeSet<u8>> {
+            neighbor {
+                /// Path-attribute type codes to discard from accepted inbound routes
+                /// after route-safety validation and before import policy. Route-server
+                /// clients only; an explicit empty list clears an inherited group list.
+            }
+            peer_group {
+                /// Inbound path-attribute type codes discarded by route-server clients.
+                /// See the neighbor-level `discard_path_attributes`.
+            }
+        }
         add_path: Option<AddPathConfig> {
             neighbor {
                 /// Add-Path (RFC 7911) configuration for this neighbor.
@@ -1724,6 +1735,7 @@ impl fmt::Debug for Neighbor {
             .field("prefix_orf_receive", &self.prefix_orf_receive)
             .field("disable_ipv4_unicast", &self.disable_ipv4_unicast)
             .field("remove_private_as", &self.remove_private_as)
+            .field("discard_path_attributes", &self.discard_path_attributes)
             .field("add_path", &self.add_path)
             .field("log_level", &self.log_level)
             .field("import_policy", &self.import_policy)
@@ -1905,6 +1917,7 @@ impl fmt::Debug for PeerGroupConfig {
             .field("prefix_orf_receive", &self.prefix_orf_receive)
             .field("disable_ipv4_unicast", &self.disable_ipv4_unicast)
             .field("remove_private_as", &self.remove_private_as)
+            .field("discard_path_attributes", &self.discard_path_attributes)
             .field("add_path", &self.add_path)
             .field("log_level", &self.log_level)
             .field("import_policy", &self.import_policy)

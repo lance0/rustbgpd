@@ -886,6 +886,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
             prefix_orf_receive: None,
             disable_ipv4_unicast: None,
             remove_private_as: None,
+            discard_path_attributes: None,
             add_path: None,
             log_level: None,
             import_policy: Vec::new(),
@@ -948,6 +949,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         prefix_orf_receive: None,
         disable_ipv4_unicast: None,
         remove_private_as: None,
+        discard_path_attributes: None,
         add_path: None,
         import_policy: Vec::new(),
         export_policy: Vec::new(),
@@ -999,6 +1001,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         prefix_orf_receive: None,
         disable_ipv4_unicast: None,
         remove_private_as: None,
+        discard_path_attributes: None,
         add_path: None,
         import_policy: Vec::new(),
         export_policy: Vec::new(),
@@ -1079,6 +1082,7 @@ fn diff_config_does_not_mark_tcp_ao_neighbor_add_as_reload_applied() {
         prefix_orf_receive: None,
         disable_ipv4_unicast: None,
         remove_private_as: None,
+        discard_path_attributes: None,
         add_path: None,
         import_policy: Vec::new(),
         export_policy: Vec::new(),
@@ -1185,6 +1189,7 @@ fn config_field_impact_surfaces_reload_matrix_classes() {
     // session resets in the diff annotations.
     assert_eq!(class("remote_asn"), Some(SessionReset));
     assert_eq!(class("peer_group"), Some(SessionReset));
+    assert_eq!(class("discard_path_attributes"), Some(SessionReset));
 
     let old = test_neighbor("10.0.0.2", 65002);
     let mut new = old.clone();
@@ -1203,6 +1208,13 @@ fn config_field_impact_surfaces_reload_matrix_classes() {
     assert_eq!(group_changes[0].impact, Some(SessionReset));
 
     let mut new_group = old_group.clone();
+    new_group.discard_path_attributes = Some(BTreeSet::from([4, 8]));
+    let group_changes = super::describe_peer_group_changes(&old_group, &new_group);
+    assert_eq!(group_changes.len(), 1);
+    assert_eq!(group_changes[0].field, "discard_path_attributes");
+    assert_eq!(group_changes[0].impact, Some(SessionReset));
+
+    let mut new_group = old_group.clone();
     new_group.send_non_transitive_extended_communities = Some(true);
     let group_changes = super::describe_peer_group_changes(&old_group, &new_group);
     assert_eq!(group_changes.len(), 1);
@@ -1211,6 +1223,21 @@ fn config_field_impact_surfaces_reload_matrix_classes() {
         "send_non_transitive_extended_communities"
     );
     assert_eq!(group_changes[0].impact, Some(SessionReset));
+}
+
+#[test]
+fn discard_attribute_purge_normalization_treats_none_and_empty_as_equal() {
+    let omitted = None;
+    let explicit_empty = Some(BTreeSet::new());
+    let med = Some(BTreeSet::from([4]));
+    assert_eq!(
+        super::normalized_discard_path_attributes(omitted.as_ref()),
+        super::normalized_discard_path_attributes(explicit_empty.as_ref())
+    );
+    assert_ne!(
+        super::normalized_discard_path_attributes(explicit_empty.as_ref()),
+        super::normalized_discard_path_attributes(med.as_ref())
+    );
 }
 
 // ── LAN-341: hot-applicable partition predicate ───────────────────────

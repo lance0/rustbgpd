@@ -48,6 +48,15 @@ pub use resolution::{
 pub use schema::*;
 pub(crate) use validation::{effective_prefix, effective_prefix_str};
 
+/// Normalize the raw optional representation used by config inheritance.
+/// An explicit empty set clears inheritance and is therefore effective-empty,
+/// exactly like an omitted peer-group value once the group itself is resolved.
+pub(crate) fn normalized_discard_path_attributes(
+    value: Option<&BTreeSet<u8>>,
+) -> Option<&BTreeSet<u8>> {
+    value.filter(|codes| !codes.is_empty())
+}
+
 use self::schema::DEFAULT_HOLD_TIME;
 
 #[cfg(test)]
@@ -1547,6 +1556,10 @@ fn config_field_impact(field: &str) -> Option<(ConfigFieldImpact, &'static str)>
             ConfigFieldImpact::SessionReset,
             "session reset: peer re-established with new ASN",
         ),
+        "discard_path_attributes" => (
+            ConfigFieldImpact::SessionReset,
+            "session reset: inbound path-attribute discard set changed",
+        ),
         "peer_group" => (
             ConfigFieldImpact::SessionReset,
             "session reset: reassignment rebuilds the session",
@@ -1738,6 +1751,7 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<FieldCha
     cmp_field!(prefix_orf_receive);
     cmp_field!(disable_ipv4_unicast);
     cmp_field!(remove_private_as);
+    cmp_field!(discard_path_attributes);
     cmp_field!(add_path);
     cmp_field!(log_level);
 
@@ -1871,6 +1885,7 @@ fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
         && old.prefix_orf_receive == new.prefix_orf_receive
         && old.disable_ipv4_unicast == new.disable_ipv4_unicast
         && old.remove_private_as == new.remove_private_as
+        && old.discard_path_attributes == new.discard_path_attributes
         && old.add_path == new.add_path
         && old.log_level == new.log_level
         && old.import_policy == new.import_policy
@@ -4903,6 +4918,7 @@ pub fn describe_peer_group_changes(
     cmp_field!(prefix_orf_receive);
     cmp_field!(disable_ipv4_unicast);
     cmp_field!(remove_private_as);
+    cmp_field!(discard_path_attributes);
     cmp_field!(add_path);
     cmp_field!(log_level);
 

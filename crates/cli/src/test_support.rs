@@ -1004,6 +1004,7 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
                 families: vec!["ipv4_unicast".to_string()],
                 required_families: Vec::new(),
                 remove_private_as: String::new(),
+                discard_path_attributes: Vec::new(),
                 peer_group: String::new(),
                 route_server_client: true,
                 role: "rs".to_string(),

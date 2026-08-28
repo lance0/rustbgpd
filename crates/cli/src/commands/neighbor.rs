@@ -415,6 +415,9 @@ pub async fn show(
             send_hold_time: cfg.and_then(|c| c.send_hold_time).unwrap_or(0),
             families: cfg.map(|c| c.families.clone()).unwrap_or_default(),
             required_families: cfg.map(|c| c.required_families.clone()).unwrap_or_default(),
+            discard_path_attributes: cfg
+                .map(|config| config.discard_path_attributes.clone())
+                .unwrap_or_default(),
             negotiation_available,
             negotiated_session,
             peer_group: cfg.map(|c| c.peer_group.clone()).unwrap_or_default(),
@@ -560,6 +563,12 @@ pub async fn show(
             "Route Server Client:   {}",
             cfg.map(|c| c.route_server_client).unwrap_or(false)
         );
+        if let Some(codes) = cfg
+            .map(|config| config.discard_path_attributes.as_slice())
+            .filter(|codes| !codes.is_empty())
+        {
+            println!("Discard Attributes:    {codes:?}");
+        }
         if cfg.map(|c| c.per_client_best).unwrap_or(false) {
             println!("Per-Client Best:       true");
         }
@@ -1119,6 +1128,7 @@ fn add_neighbor_request(address: &str, opts: AddNeighborOpts) -> AddNeighborRequ
                 required_families: opts.required_families,
                 peer_group: opts.peer_group.unwrap_or_default(),
                 remove_private_as: String::new(),
+                discard_path_attributes: Vec::new(),
                 route_server_client: opts.route_server_client.unwrap_or(false),
                 per_client_best: opts.per_client_best.unwrap_or(false),
                 role: opts.role.unwrap_or_default(),

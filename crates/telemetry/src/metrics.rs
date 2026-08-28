@@ -393,6 +393,7 @@ struct BgpMetricsInner {
     as_path_loop_detected: IntCounterVec,
     rr_loop_detected: IntCounterVec,
     bgpls_nlri_discarded: IntCounterVec,
+    path_attribute_discarded: IntCounterVec,
     evpn_nlri_discarded: IntCounterVec,
     update_malformed: IntCounterVec,
     otc_routes_blocked: IntCounterVec,
@@ -1468,6 +1469,15 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let path_attribute_discarded = IntCounterVec::new(
+            Opts::new(
+                "bgp_path_attribute_discarded_total",
+                "Inbound path-attribute occurrences discarded by configured route-server policy",
+            ),
+            &["peer", "type_code"],
+        )
+        .expect("valid metric definition");
+
         let evpn_nlri_discarded = IntCounterVec::new(
             Opts::new(
                 "bgp_evpn_nlri_discarded_total",
@@ -2493,6 +2503,9 @@ impl BgpMetrics {
             .register(Box::new(bgpls_nlri_discarded.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(path_attribute_discarded.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(evpn_nlri_discarded.clone()))
             .expect("metric not already registered");
         registry
@@ -2851,6 +2864,7 @@ impl BgpMetrics {
             as_path_loop_detected,
             rr_loop_detected,
             bgpls_nlri_discarded,
+            path_attribute_discarded,
             evpn_nlri_discarded,
             update_malformed,
             otc_routes_blocked,
@@ -3061,6 +3075,7 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.0.as_path_loop_detected, peer);
         Self::reap_peer_series_from_vec(&self.0.rr_loop_detected, peer);
         Self::reap_peer_series_from_vec(&self.0.bgpls_nlri_discarded, peer);
+        Self::reap_peer_series_from_vec(&self.0.path_attribute_discarded, peer);
         Self::reap_peer_series_from_vec(&self.0.evpn_nlri_discarded, peer);
         Self::reap_peer_series_from_vec(&self.0.update_malformed, peer);
         Self::reap_peer_series_from_vec(&self.0.otc_routes_blocked, peer);
@@ -4157,6 +4172,14 @@ impl BgpMetrics {
         self.0
             .bgpls_nlri_discarded
             .with_label_values(&[peer])
+            .inc_by(count);
+    }
+
+    /// Record configured inbound path-attribute discards by wire type code.
+    pub fn record_path_attribute_discarded(&self, peer: &str, type_code: u8, count: u64) {
+        self.0
+            .path_attribute_discarded
+            .with_label_values(&[peer, &type_code.to_string()])
             .inc_by(count);
     }
 
@@ -7520,6 +7543,7 @@ mod tests {
         m.record_as_path_loop_detected(peer, 3);
         m.record_rr_loop_detected(peer);
         m.record_bgpls_nlri_discarded(peer, 2);
+        m.record_path_attribute_discarded(peer, 4, 1);
         m.record_evpn_nlri_discarded(peer, 3);
         m.record_update_malformed(
             peer,
@@ -7568,8 +7592,8 @@ mod tests {
         let m = BgpMetrics::new();
         populate_all_peer_families(&m, "10.0.0.1");
         populate_all_peer_families(&m, "10.0.0.2");
-        // 55 peer-labeled series; state transitions hold two series.
-        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 55);
+        // 56 peer-labeled series; state transitions hold two series.
+        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 56);
 
         m.reap_peer_series("10.0.0.1");
 
@@ -7579,7 +7603,7 @@ mod tests {
             "peer-labeled families not reaped: {leftovers:?}"
         );
         // The other peer's series are untouched.
-        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 55);
+        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 56);
     }
 
     /// Load-bearing finite/unlimited proof: removing either finite gauge
@@ -7823,7 +7847,7 @@ mod tests {
     // `gather()`, so no runtime check can catch one that is added and
     // left unpopulated; this list plus the struct doc comment is the
     // practical ceiling.
-    const PEER_LABELED_FAMILIES: [&str; 54] = [
+    const PEER_LABELED_FAMILIES: [&str; 55] = [
         "bfd_session_flaps_total",
         "bfd_session_up",
         "bgp_as_path_loop_detected_total",
@@ -7851,6 +7875,7 @@ mod tests {
         "bgp_outbound_prefix_limit",
         "bgp_outbound_prefix_usage",
         "bgp_outbound_route_drops_total",
+        "bgp_path_attribute_discarded_total",
         "bgp_peer_admin_enabled",
         "bgp_peer_outbound_queue_depth",
         "bgp_peer_session_established",
