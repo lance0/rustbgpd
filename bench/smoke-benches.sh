@@ -13,7 +13,7 @@
 # timing it happens to produce is meaningless and is not reported.
 #
 # The target list comes from `cargo metadata`, so a bench target is covered the
-# day it lands rather than when someone remembers to register it here. The three
+# day it lands rather than when someone remembers to register it here. The five
 # non-criterion harnesses are excluded by name; renaming one drops its
 # exclusion and this script then fails loudly instead of skipping it silently.
 
@@ -47,9 +47,12 @@ done
 #                        harness's own `--smoke` bound.
 #   route_paging         CSV receipt harness; one complete traversal per
 #                        process, driven by --route-count/--output.
+#   dataplane_prefix_paging
+#                        CSV-to-stdout receipt harness; one complete traversal
+#                        per process, driven by prefix/path/index-mode flags.
 #   vpn_query_*          are one-cell timing/allocation executables. CI runs
 #                        their exact 256-route smoke separately.
-EXCLUDED=(snapshot_allocation route_paging vpn_query_timing vpn_query_allocation)
+EXCLUDED=(snapshot_allocation route_paging dataplane_prefix_paging vpn_query_timing vpn_query_allocation)
 
 mapfile -t targets < <(
   cargo metadata "${locked_args[@]}" --no-deps --format-version 1 | python3 -c '

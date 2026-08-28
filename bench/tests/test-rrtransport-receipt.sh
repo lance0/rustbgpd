@@ -173,6 +173,39 @@ if "$runner" --classify-rss 2097153 "$tmp/rss-over"; then echo "false green: rss
 grep -q '"root_failure":"rss_ceiling"' "$tmp/rss-over/failure.json"
 expect_red malformed-commit mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/"provenance.json";d=json.loads(p.read_text());d["commit"]="main";p.write_text(json.dumps(d))'
 "$runner" --check-seam "$runner"
+cp "$runner" "$tmp/no-host-lock-call"
+# shellcheck disable=SC2016 # Exact production source text for destructive proof.
+mutate -c 'import pathlib,sys;p=pathlib.Path(sys.argv[1]);s=p.read_text();seam="acquire_rustbgpd_host_lock\n";assert s.count(seam)==1;p.write_text(s.replace(seam,"",1))' \
+  "$tmp/no-host-lock-call"
+if "$runner" --check-seam "$tmp/no-host-lock-call" \
+  >"$tmp/no-host-lock-call.stdout" 2>"$tmp/no-host-lock-call.stderr"; then
+  echo "false green: production host-lock call removed" >&2
+  exit 1
+fi
+grep -Fxq "runner lacks production verifier/completion/RSS/host-lock seam" \
+  "$tmp/no-host-lock-call.stderr"
+
+shared_host_lock="$tmp/rustbgpd-host.lock"
+exec {held_host_lock_fd}>"$shared_host_lock"
+flock -n "$held_host_lock_fd"
+lock_status=0
+(
+  # If the contention guard regresses, stop at the next production preflight
+  # instead of entering a campaign on a test host.
+  ulimit -n 1024
+  RUSTBGPD_HOST_LOCK="$shared_host_lock" \
+    "$runner" "$tmp/held-host-lock-output" \
+    >"$tmp/held-host-lock.stdout" 2>"$tmp/held-host-lock.stderr"
+) || lock_status=$?
+exec {held_host_lock_fd}>&-
+if [[ $lock_status != 75 ]]; then
+  echo "production runner did not propagate EX_TEMPFAIL for host contention" >&2
+  cat "$tmp/held-host-lock.stdout" "$tmp/held-host-lock.stderr" >&2
+  exit 1
+fi
+grep -Fq "$shared_host_lock is held by another process (soak or bench)" \
+  "$tmp/held-host-lock.stderr"
+[[ ! -e $tmp/held-host-lock-output ]]
 [[ $("$runner" --classify-child-exe /expected /expected R) == sample ]]
 [[ $("$runner" --classify-child-exe /expected /foreign R) == reject ]]
 [[ $("$runner" --classify-child-exe /expected /foreign X) == reject ]]

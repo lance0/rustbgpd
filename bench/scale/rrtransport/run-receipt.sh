@@ -2,6 +2,8 @@
 set -euo pipefail
 
 root=$(git rev-parse --show-toplevel)
+# shellcheck disable=SC1091 # root is resolved dynamically above
+source "$root/tests/soak/host-lock.sh"
 verifier="$root/bench/scale/rrtransport/verify_receipt.py"
 manifest="$root/bench/scale/rrtransport/Cargo.toml"
 binary="$root/bench/scale/target/release/rrtransport"
@@ -599,7 +601,7 @@ stop_reap_fixture() {
 
 check_seam() {
   local script=$1 outer verify_call completion
-  local direct_rss_call direct_rss_exit direct_rss_resolver
+  local direct_rss_call direct_rss_exit direct_rss_resolver host_lock_source
   outer="timeout -k 10 1200 \"\$scr"
   outer+="ipt\" --campaign-inner \"\$output\""
   verify_call="full_ver"
@@ -609,12 +611,15 @@ check_seam() {
   direct_rss_exit="[[ \$direct_rss_action != exited ]] || break"
   direct_rss_resolver='resolve_direct_'
   direct_rss_resolver+="rss \"\$process\" \"\$expected_start\""
+  host_lock_source="source \"\$root/tests/soak/host-lock.sh\""
   if ! grep -Fq "$outer" "$script" || ! grep -Fq "$verify_call" "$script" ||
     ! grep -Fq "$completion" "$script" ||
     ! grep -Fq "$direct_rss_call" "$script" ||
     ! grep -Fq "$direct_rss_exit" "$script" ||
-    ! grep -Fq "$direct_rss_resolver" "$script"; then
-    echo "runner lacks production verifier/completion/RSS seam" >&2
+    ! grep -Fq "$direct_rss_resolver" "$script" ||
+    ! grep -Fxq "$host_lock_source" "$script" ||
+    ! grep -Fxq 'acquire_rustbgpd_host_lock' "$script"; then
+    echo "runner lacks production verifier/completion/RSS/host-lock seam" >&2
     return 1
   fi
 }
@@ -813,8 +818,7 @@ if [[ -z ${campaign_inner:-} ]]; then
 fi
 [[ $output = /* && $output != "$root"/* ]] || { echo "output must be absolute and outside repo" >&2; exit 1; }
 [[ ! -e $output ]] || { echo "output must not already exist" >&2; exit 1; }
-exec 9>/tmp/rustbgpd-rrtransport-rr1000.lock
-flock -n 9 || { echo "rr1000 host lock busy" >&2; exit 1; }
+acquire_rustbgpd_host_lock
 [[ $(ulimit -n) -ge 4096 ]] || { echo "need at least 4096 FDs" >&2; exit 1; }
 available=$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)
 (( available >= 16 * 1024 * 1024 )) || { echo "need 16 GiB available" >&2; exit 1; }
