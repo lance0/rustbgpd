@@ -94,7 +94,8 @@ peer, RFC 8212 missing import/export policy, sustained outbound-prefix blocking,
 dynamic-neighbor admission near-limit and rejection,
 actor polls above 200ms, exact-export rejection, malformed UPDATE disposition,
 selection-deferral timeout and ledger overflow, outbound route loss, RFC 9687
-send-hold teardown, live event-stream lag/desynchronization, BMP feed loss,
+send-hold teardown, session lifecycle source loss, live event-stream
+lag/desynchronization, BMP feed loss,
 stale MRT dumps, and daemon down)
 ships at
 [`examples/prometheus/rustbgpd-alerts.yml`](../examples/prometheus/rustbgpd-alerts.yml),
@@ -120,6 +121,12 @@ the last increment ages out:
   incremental events. Treat that consumer's local view as desynchronized:
   take a fresh authoritative snapshot for the named service and source, then
   restart the live watch. Use a durable cursor only when that API supports one.
+- `BgpSessionLifecycleSourceDrops` is warning severity because a session state
+  change was lost before process-local, live, and durable event history. The
+  `reason` label distinguishes a full source channel from a closed receiver.
+  Treat all incremental session history as potentially incomplete and
+  resnapshot current neighbor state. The alert clears after the last source
+  drop ages out of its 10-minute window; a flat historical counter stays quiet.
 - `BmpSourceDrops`, `BmpLocRibSourceDrops`, and `BmpCollectorDrops` are
   warning severity because routing is unaffected, but the BMP mirror is now
   lossy: a dropped per-peer event forces a synthetic PeerDown/PeerUp so

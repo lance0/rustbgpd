@@ -213,6 +213,121 @@ fn make_test_session_with_metrics_and_identity(
     )
 }
 
+fn make_test_session_with_lifecycle(
+    metrics: BgpMetrics,
+    lifecycle_tx: Option<mpsc::Sender<SessionLifecycleNotification>>,
+) -> PeerSession {
+    let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (rib_tx, _rib_rx) = mpsc::channel(8);
+    PeerSession::new_with_identity_and_lifecycle(
+        config,
+        metrics,
+        cmd_rx,
+        rib_tx,
+        None,
+        None,
+        None,
+        None,
+        lifecycle_tx,
+        None,
+        None,
+        false,
+        SessionIdentity::default(),
+    )
+}
+
+fn lifecycle_source_drop_value(metrics: &BgpMetrics, reason: &str) -> f64 {
+    counter_samples(metrics, "bgp_session_lifecycle_source_dropped_total")
+        .into_iter()
+        .find_map(|(labels, value)| {
+            (labels.get("reason").map(String::as_str) == Some(reason)).then_some(value)
+        })
+        .expect("preinitialized lifecycle source-drop series")
+}
+
+fn assert_lifecycle_source_drop_value(metrics: &BgpMetrics, reason: &str, expected: f64) {
+    let actual = lifecycle_source_drop_value(metrics, reason);
+    assert!(
+        (actual - expected).abs() < f64::EPSILON,
+        "expected lifecycle source-drop reason {reason} to equal {expected}, got {actual}"
+    );
+}
+
+#[tokio::test]
+async fn lifecycle_source_channel_full_records_one_drop() {
+    let metrics = BgpMetrics::new();
+    let (tx, _rx) = mpsc::channel(1);
+    tx.try_send(SessionLifecycleNotification::StateChanged {
+        session_id: 1,
+        role: SessionRole::Primary,
+        peer_addr: "192.0.2.1".parse().unwrap(),
+        peer_asn: None,
+        old: SessionState::Idle,
+        new: SessionState::Connect,
+    })
+    .unwrap();
+    let session = make_test_session_with_lifecycle(metrics.clone(), Some(tx));
+
+    session.try_send_lifecycle_state_changed(SessionState::Idle, SessionState::Connect);
+
+    assert_lifecycle_source_drop_value(&metrics, "channel_full", 1.0);
+    assert_lifecycle_source_drop_value(&metrics, "channel_closed", 0.0);
+}
+
+#[tokio::test]
+async fn lifecycle_source_channel_closed_records_one_drop() {
+    let metrics = BgpMetrics::new();
+    let (tx, rx) = mpsc::channel(1);
+    drop(rx);
+    let session = make_test_session_with_lifecycle(metrics.clone(), Some(tx));
+
+    session.try_send_lifecycle_state_changed(SessionState::Idle, SessionState::Connect);
+
+    assert_lifecycle_source_drop_value(&metrics, "channel_full", 0.0);
+    assert_lifecycle_source_drop_value(&metrics, "channel_closed", 1.0);
+}
+
+#[tokio::test]
+async fn lifecycle_source_success_delivers_exact_event_without_drop() {
+    let metrics = BgpMetrics::new();
+    let (tx, mut rx) = mpsc::channel(1);
+    let session = make_test_session_with_lifecycle(metrics.clone(), Some(tx));
+
+    session.try_send_lifecycle_state_changed(SessionState::Idle, SessionState::Connect);
+
+    let event = rx.recv().await.expect("StateChanged delivered");
+    let SessionLifecycleNotification::StateChanged {
+        session_id,
+        role,
+        peer_addr,
+        peer_asn,
+        old,
+        new,
+    } = event;
+    assert_eq!(session_id, 0);
+    assert_eq!(role, SessionRole::Primary);
+    assert_eq!(peer_addr, "10.0.0.2".parse::<IpAddr>().unwrap());
+    assert_eq!(peer_asn, None);
+    assert_eq!(old, SessionState::Idle);
+    assert_eq!(new, SessionState::Connect);
+    assert_lifecycle_source_drop_value(&metrics, "channel_full", 0.0);
+    assert_lifecycle_source_drop_value(&metrics, "channel_closed", 0.0);
+}
+
+#[test]
+fn absent_lifecycle_source_records_no_drop() {
+    let metrics = BgpMetrics::new();
+    let session = make_test_session_with_lifecycle(metrics.clone(), None);
+
+    session.try_send_lifecycle_state_changed(SessionState::Idle, SessionState::Connect);
+
+    assert_lifecycle_source_drop_value(&metrics, "channel_full", 0.0);
+    assert_lifecycle_source_drop_value(&metrics, "channel_closed", 0.0);
+}
+
 fn make_test_session_with_channels(
     local_asn: u32,
     remote_asn: u32,

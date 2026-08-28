@@ -44,6 +44,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   deployment guide now distinguishes Docker bridge low-port behavior from host
   networking and explains the uid 999 capability and state-owner traps.
 
+- `bgp_session_lifecycle_source_dropped_total{reason}` exposes session state
+  changes dropped before process-local, live, and durable event history. Its
+  preinitialized `channel_full` and `channel_closed` series feed the shipped
+  warning alert, which directs operators to resnapshot current neighbor state.
+
 - Periodic BMP peer statistics now include RFC 9972 type 22 for exact counts of
   current pre-policy IPv4/IPv6-unicast Adj-RIB-In routes rejected by inbound
   policy. Rows are emitted only for negotiated families while rejected-route

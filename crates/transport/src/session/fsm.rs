@@ -857,7 +857,7 @@ impl PeerSession {
         follow_up
     }
 
-    fn try_send_lifecycle_state_changed(&self, old: SessionState, new: SessionState) {
+    pub(super) fn try_send_lifecycle_state_changed(&self, old: SessionState, new: SessionState) {
         if let Some(ref lifecycle_tx) = self.session_lifecycle_tx {
             let negotiated = self.fsm.negotiated().or(self.negotiated.as_deref());
             match lifecycle_tx.try_send(SessionLifecycleNotification::StateChanged {
@@ -870,12 +870,15 @@ impl PeerSession {
             }) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(_)) => {
+                    self.metrics.record_session_lifecycle_source_channel_full();
                     debug!(
                         peer = %self.peer_label,
                         "dropped StateChanged lifecycle event because channel is full"
                     );
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
+                    self.metrics
+                        .record_session_lifecycle_source_channel_closed();
                     debug!(
                         peer = %self.peer_label,
                         "dropped StateChanged lifecycle event because channel is closed"

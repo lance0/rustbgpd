@@ -1447,6 +1447,52 @@ tests:
         alertname: BgpSendHoldExpired
         exp_alerts: []
 
+  # ── BgpSessionLifecycleSourceDrops ────────────────────────
+  - interval: 1m
+    input_series:
+      - series: 'bgp_session_lifecycle_source_dropped_total{reason="channel_full", instance="edge1:9179"}'
+        values: "0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_session_lifecycle_source_dropped_total{reason="channel_closed", instance="edge2:9179"}'
+        values: "0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_session_lifecycle_source_dropped_total{reason="channel_full", instance="edge3:9179"}'
+        values: "7x22"
+      - series: 'bgp_event_stream_lagged_total{service="watch_events", source="session", instance="edge4:9179"}'
+        values: "0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BgpSessionLifecycleSourceDrops
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: BgpSessionLifecycleSourceDrops
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              reason: channel_full
+              instance: edge1:9179
+            exp_annotations:
+              summary: "Session lifecycle source dropped events (channel_full)"
+              description: >-
+                bgp_session_lifecycle_source_dropped_total for reason
+                channel_full on edge1:9179 increased by 1 in the last 10
+                minutes. Session event history, live delivery, and durable
+                history may be incomplete; resnapshot current neighbor state
+                before consuming further incremental session events.
+          - exp_labels:
+              severity: warning
+              reason: channel_closed
+              instance: edge2:9179
+            exp_annotations:
+              summary: "Session lifecycle source dropped events (channel_closed)"
+              description: >-
+                bgp_session_lifecycle_source_dropped_total for reason
+                channel_closed on edge2:9179 increased by 1 in the last 10
+                minutes. Session event history, live delivery, and durable
+                history may be incomplete; resnapshot current neighbor state
+                before consuming further incremental session events.
+      - eval_time: 21m
+        alertname: BgpSessionLifecycleSourceDrops
+        exp_alerts: []
+
   # ── BgpEventStreamLagged ──────────────────────────────────
   # Load-bearing: the old increment pins 10m versus 5m, the reset then
   # increment pins reset-safe increase versus delta, and the same-evaluation
