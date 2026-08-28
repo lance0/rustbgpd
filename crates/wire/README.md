@@ -406,7 +406,7 @@ cargo run -p rustbgpd-wire --features tokio-codec --example tokio_codec
   arm and later registry additions are not breaking. `CONFIGURED_FAMILIES`,
   `parse_family`, and `family_label` provide the canonical configuration and
   control-plane vocabulary for the twelve AFI/SAFI pairs rustbgpd supports;
-  BGP-LS uses `linkstate` / `linkstate_vpn` there
+  BGP-LS uses `linkstate` / `linkstate_vpn` there.
 - **Well-known community constants** — `u32` values for matching and setting
   standard communities: `COMMUNITY_NO_EXPORT` / `COMMUNITY_NO_ADVERTISE` /
   `COMMUNITY_NO_EXPORT_SUBCONFED` (RFC 1997), `COMMUNITY_BLACKHOLE` (RFC 7999),

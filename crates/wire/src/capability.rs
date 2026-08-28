@@ -84,7 +84,7 @@ impl Safi {
 /// BGP-LS deliberately uses the operator-facing `linkstate` spelling here.
 /// Metrics retain their existing `bgpls` labels independently so dashboards
 /// and alerts do not acquire a label-cardinality fork.
-pub const CONFIGURED_FAMILIES: [(&str, Afi, Safi); 12] = [
+pub const CONFIGURED_FAMILIES: &[(&str, Afi, Safi)] = &[
     ("ipv4_unicast", Afi::Ipv4, Safi::Unicast),
     ("ipv6_unicast", Afi::Ipv6, Safi::Unicast),
     ("ipv4_flowspec", Afi::Ipv4, Safi::FlowSpec),
@@ -102,7 +102,7 @@ pub const CONFIGURED_FAMILIES: [(&str, Afi, Safi); 12] = [
 /// Parse a canonical configuration or control-plane family label.
 #[must_use]
 pub fn parse_family(label: &str) -> Option<(Afi, Safi)> {
-    for &(candidate, afi, safi) in &CONFIGURED_FAMILIES {
+    for &(candidate, afi, safi) in CONFIGURED_FAMILIES {
         if candidate == label {
             return Some((afi, safi));
         }
@@ -114,7 +114,7 @@ pub fn parse_family(label: &str) -> Option<(Afi, Safi)> {
 /// pair supported by rustbgpd.
 #[must_use]
 pub fn family_label(afi: Afi, safi: Safi) -> Option<&'static str> {
-    for &(label, candidate_afi, candidate_safi) in &CONFIGURED_FAMILIES {
+    for &(label, candidate_afi, candidate_safi) in CONFIGURED_FAMILIES {
         if candidate_afi == afi && candidate_safi == safi {
             return Some(label);
         }
@@ -1032,7 +1032,7 @@ mod tests {
 
     #[test]
     fn configured_family_labels_round_trip_canonically() {
-        for &(label, afi, safi) in &CONFIGURED_FAMILIES {
+        for &(label, afi, safi) in CONFIGURED_FAMILIES {
             assert_eq!(parse_family(label), Some((afi, safi)), "label {label}");
             assert_eq!(family_label(afi, safi), Some(label), "label {label}");
         }
