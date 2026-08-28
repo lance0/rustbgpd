@@ -253,8 +253,8 @@ mod tests {
         let addr = start_server(CoreReadinessProbe::new(peer_tx, rib_tx)).await;
 
         tokio::spawn(async move {
-            if let Some(PeerManagerCommand::ListPeers { reply }) = peer_rx.recv().await {
-                let _ = reply.send(Vec::new());
+            if let Some(PeerManagerCommand::Ping { reply }) = peer_rx.recv().await {
+                let _ = reply.send(());
             }
         });
         tokio::spawn(async move {
@@ -275,7 +275,7 @@ mod tests {
         let addr = start_server(CoreReadinessProbe::new(peer_tx, rib_tx)).await;
 
         tokio::spawn(async move {
-            if let Some(PeerManagerCommand::ListPeers { reply }) = peer_rx.recv().await {
+            if let Some(PeerManagerCommand::Ping { reply }) = peer_rx.recv().await {
                 drop(reply);
             }
         });
@@ -292,8 +292,8 @@ mod tests {
         let addr = start_server(CoreReadinessProbe::new(peer_tx, rib_tx)).await;
 
         tokio::spawn(async move {
-            if let Some(PeerManagerCommand::ListPeers { reply }) = peer_rx.recv().await {
-                let _ = reply.send(Vec::new());
+            if let Some(PeerManagerCommand::Ping { reply }) = peer_rx.recv().await {
+                let _ = reply.send(());
             }
         });
         tokio::spawn(async move {
@@ -329,8 +329,8 @@ mod tests {
         let addr = start_server(CoreReadinessProbe::new(peer_tx, rib_tx)).await;
 
         tokio::spawn(async move {
-            if let Some(PeerManagerCommand::ListPeers { reply }) = peer_rx.recv().await {
-                let _ = reply.send(Vec::new());
+            if let Some(PeerManagerCommand::Ping { reply }) = peer_rx.recv().await {
+                let _ = reply.send(());
             }
         });
         tokio::spawn(async move {
@@ -397,8 +397,8 @@ mod tests {
         // Answer the peer half, then hold the RIB reply until the wedge is
         // in place so it is already queued when the runtime unparks well
         // past the deadline.
-        if let Some(PeerManagerCommand::ListPeers { reply }) = peer_rx.recv().await {
-            let _ = reply.send(Vec::new());
+        if let Some(PeerManagerCommand::Ping { reply }) = peer_rx.recv().await {
+            let _ = reply.send(());
         }
         let Some(RibUpdate::QueryLocRibCount { reply }) = rib_rx.recv().await else {
             panic!("expected QueryLocRibCount");

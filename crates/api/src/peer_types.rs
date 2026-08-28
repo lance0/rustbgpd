@@ -677,6 +677,12 @@ pub struct WarmCheckpointCapture {
 }
 
 pub enum PeerManagerCommand {
+    /// Confirm that the peer-manager actor can service its ordinary command
+    /// lane without collecting per-peer session state.
+    Ping {
+        /// Reply channel acknowledging actor responsiveness.
+        reply: oneshot::Sender<()>,
+    },
     /// Add a new peer with the given configuration.
     AddPeer {
         /// Neighbor configuration.
@@ -1528,6 +1534,12 @@ pub enum OwnedHotUpdatePeerOutcome {
 /// ordered on [`PeerManagerCommand`] and cannot observe or alter a partially
 /// applied transaction.
 pub enum PeerManagerReadinessQuery {
+    /// Confirm that the peer-manager actor can service the dedicated readiness
+    /// lane without collecting per-peer session state.
+    Ping {
+        /// Reply channel acknowledging actor responsiveness.
+        reply: oneshot::Sender<()>,
+    },
     /// Return a live snapshot of all configured peers.
     ListPeers {
         /// Reply channel returning all peer snapshots.

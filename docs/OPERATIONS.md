@@ -39,9 +39,12 @@ The daemon exits with code 1 — it never starts with an invalid config.
 
 On success, structured JSON logs go to stdout. If `prometheus_addr` is
 configured, use `GET /readyz` on that listener as the orchestrator readiness
-signal; it returns ready once the PeerManager and RIB actors answer their
-bounded probes. The `starting rustbgpd` log line means process startup reached
-runtime wiring, not that every actor has answered a readiness probe yet.
+signal; it returns ready once the PeerManager answers an O(1) actor ping and
+the RIB actor answers its O(1) Loc-RIB count query within one shared 200 ms
+deadline. The readiness ping does not collect peer inventory or query session
+state; `GetHealth` continues to return that detailed snapshot. The `starting
+rustbgpd` log line means process startup reached runtime wiring, not that every
+actor has answered a readiness probe yet.
 
 ### Runtime-config settlement fail-stop
 
@@ -1026,9 +1029,10 @@ bounded polls from one long O(table) snapshot or finalization poll; the
 retained terminal duration still describes the previous completed transition
 while one is active.
 A readiness request that arrives after general queries have queued can overtake
-them on its dedicated lane. It cannot preempt an O(table) general query that
-was already executing when the request arrived; that actor call must return
-before either the transition or readiness probe can advance.
+them on its dedicated lane. The PeerManager half is a constant-time actor ping
+and does not fan out session-state queries. It cannot preempt an O(table)
+general query that was already executing when the request arrived; that actor
+call must return before either the transition or readiness probe can advance.
 
 ### Policy artifact freshness
 

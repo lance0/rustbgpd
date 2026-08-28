@@ -148,7 +148,13 @@ impl CoreReadinessProbe {
     /// drops its reply channel, or does not respond before the readiness
     /// deadline, or when the RIB reports a stalled export-policy transition.
     pub async fn check(&self) -> Result<(), CoreReadinessError> {
-        self.snapshot().await.map(|_| ())
+        if let Some(reason) = self.gate.as_ref().and_then(DaemonGate::not_ready_reason) {
+            return Err(CoreReadinessError::DaemonUnavailable(reason));
+        }
+        let deadline = Instant::now() + CORE_READINESS_DEADLINE;
+        self.ping_peer_manager(deadline).await?;
+        self.query_rib(deadline).await?;
+        Ok(())
     }
 
     /// Return the same core actor snapshot used by `GetHealth`.
@@ -185,6 +191,27 @@ impl CoreReadinessProbe {
             } else {
                 self.peer_mgr_tx
                     .send(PeerManagerCommand::ListPeers { reply: reply_tx })
+                    .await
+                    .map_err(|_| CoreReadinessError::PeerManagerUnavailable)?;
+            }
+            reply_rx
+                .await
+                .map_err(|_| CoreReadinessError::PeerManagerDroppedReply)
+        })
+        .await
+    }
+
+    async fn ping_peer_manager(&self, deadline: Instant) -> Result<(), CoreReadinessError> {
+        timeout_until(deadline, CoreReadinessError::PeerManagerTimedOut, async {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            if let Some(readiness_tx) = &self.peer_mgr_readiness_tx {
+                readiness_tx
+                    .send(PeerManagerReadinessQuery::Ping { reply: reply_tx })
+                    .await
+                    .map_err(|_| CoreReadinessError::PeerManagerUnavailable)?;
+            } else {
+                self.peer_mgr_tx
+                    .send(PeerManagerCommand::Ping { reply: reply_tx })
                     .await
                     .map_err(|_| CoreReadinessError::PeerManagerUnavailable)?;
             }
@@ -316,6 +343,14 @@ mod tests {
         reply.send(peers).expect("peer reply receiver is alive");
     }
 
+    async fn reply_to_peer_manager_ping(peer_rx: &mut mpsc::Receiver<PeerManagerCommand>) {
+        let command = peer_rx.recv().await.expect("peer manager command");
+        let PeerManagerCommand::Ping { reply } = command else {
+            panic!("expected Ping command");
+        };
+        reply.send(()).expect("peer reply receiver is alive");
+    }
+
     async fn reply_to_rib(rib_rx: &mut mpsc::Receiver<RibUpdate>, total_routes: usize) {
         let command = rib_rx.recv().await.expect("RIB command");
         let RibUpdate::QueryLocRibCount { reply } = command else {
@@ -334,6 +369,17 @@ mod tests {
     ) {
         tokio::join!(
             reply_to_peer_manager(peer_rx, peers),
+            reply_to_rib(rib_rx, total_routes)
+        );
+    }
+
+    async fn reply_to_core_check(
+        peer_rx: &mut mpsc::Receiver<PeerManagerCommand>,
+        rib_rx: &mut mpsc::Receiver<RibUpdate>,
+        total_routes: usize,
+    ) {
+        tokio::join!(
+            reply_to_peer_manager_ping(peer_rx),
             reply_to_rib(rib_rx, total_routes)
         );
     }
@@ -400,20 +446,14 @@ mod tests {
     /// widens the blast radius of a local mistake to the whole node. Adding
     /// any RFC 8212 gate to this probe makes the test red.
     #[tokio::test]
-    async fn readiness_stays_green_for_a_peer_under_the_reserved_deny() {
-        use crate::peer_types::Rfc8212PolicyStatus;
-
+    async fn readiness_does_not_inventory_peers_for_policy_gating() {
         let (peer_tx, mut peer_rx) = mpsc::channel(1);
         let (rib_tx, mut rib_rx) = mpsc::channel(1);
         let probe = CoreReadinessProbe::new(peer_tx, rib_tx);
 
-        let mut peer = crate::test_support::peer_info("10.0.0.2".parse().unwrap());
-        peer.rfc8212_import_policy = Rfc8212PolicyStatus::Missing;
-        peer.rfc8212_export_policy = Rfc8212PolicyStatus::Missing;
-
         let result = tokio::join!(
             probe.check(),
-            reply_to_core_probe(&mut peer_rx, vec![peer], &mut rib_rx, 0)
+            reply_to_core_check(&mut peer_rx, &mut rib_rx, 0)
         )
         .0;
 
@@ -433,7 +473,10 @@ mod tests {
 
         let (result, ()) = tokio::join!(probe.snapshot(), async {
             let PeerManagerReadinessQuery::ListPeers { reply } =
-                readiness_rx.recv().await.expect("readiness query");
+                readiness_rx.recv().await.expect("readiness query")
+            else {
+                panic!("expected ListPeers readiness query");
+            };
             reply.send(Vec::new()).unwrap();
             reply_to_rib(&mut rib_rx, 9).await;
         });
@@ -494,17 +537,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn check_succeeds_when_snapshot_succeeds() {
+    async fn check_uses_ping_on_the_ordinary_peer_manager_lane() {
         let (peer_tx, mut peer_rx) = mpsc::channel(1);
         let (rib_tx, mut rib_rx) = mpsc::channel(1);
         let probe = CoreReadinessProbe::new(peer_tx, rib_tx);
 
         let (result, ()) = tokio::join!(
             probe.check(),
-            reply_to_core_probe(&mut peer_rx, Vec::new(), &mut rib_rx, 0)
+            reply_to_core_check(&mut peer_rx, &mut rib_rx, 0)
         );
 
         result.expect("check should succeed");
+    }
+
+    #[tokio::test]
+    async fn check_uses_ping_on_the_dedicated_peer_manager_lane() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (readiness_tx, mut readiness_rx) = mpsc::channel(1);
+        let (rib_query_tx, mut rib_query_rx) = mpsc::channel(1);
+        let (rib_readiness_tx, mut rib_readiness_rx) = mpsc::channel(1);
+        let probe = CoreReadinessProbe::new(peer_tx, rib_query_tx)
+            .with_peer_manager_readiness(readiness_tx)
+            .with_rib_readiness(rib_readiness_tx);
+
+        let (result, ()) = tokio::join!(probe.check(), async {
+            let query = readiness_rx.recv().await.expect("readiness query");
+            let PeerManagerReadinessQuery::Ping { reply } = query else {
+                panic!("expected Ping readiness query");
+            };
+            reply.send(()).unwrap();
+            let RibReadinessQuery::LocRibCount { reply } =
+                rib_readiness_rx.recv().await.expect("RIB readiness query");
+            reply.send(Ok(0)).unwrap();
+        });
+
+        result.expect("check should succeed");
+        assert!(
+            peer_rx.try_recv().is_err(),
+            "ordinary peer-manager command lane must remain untouched"
+        );
+        assert!(
+            rib_query_rx.try_recv().is_err(),
+            "ordinary RIB query lane must remain untouched"
+        );
     }
 
     #[tokio::test]
@@ -638,7 +713,7 @@ mod tests {
 
         let (result, ()) = tokio::join!(
             probe.check(),
-            reply_to_core_probe(&mut peer_rx, Vec::new(), &mut rib_rx, 0)
+            reply_to_core_check(&mut peer_rx, &mut rib_rx, 0)
         );
 
         result.expect("untripped gate must not affect readiness");
