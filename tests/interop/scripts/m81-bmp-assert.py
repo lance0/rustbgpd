@@ -249,13 +249,30 @@ def cmd_stats_v4_wrap():
 
 def _stat_types(body):
     """Stat type codes in an RFC 7854 stats body (count + TLVs)."""
+    return [stat_type for stat_type, _payload in _stats(body)]
+
+
+def _stats(body):
+    """(type, payload) entries in an RFC 7854 stats body."""
+    if len(body) < 4:
+        fail(f"truncated stats count: need 4 bytes, have {len(body)}")
     count = u32(body, 0)
-    off, types = 4, []
-    for _ in range(count):
+    off, entries = 4, []
+    for index in range(count):
+        if off + 4 > len(body):
+            fail(f"truncated stats entry {index} header at offset {off}: "
+                 f"need 4 bytes, have {len(body) - off}")
         t, ln = u16(body, off), u16(body, off + 2)
-        types.append(t)
-        off += 4 + ln
-    return types
+        value_start, value_end = off + 4, off + 4 + ln
+        if value_end > len(body):
+            fail(f"truncated stats entry {index} type {t} value at offset "
+                 f"{value_start}: need {ln} bytes, have {len(body) - value_start}")
+        payload = body[value_start:value_end]
+        entries.append((t, payload))
+        off = value_end
+    if off != len(body):
+        fail(f"stats body has {len(body) - off} trailing bytes")
+    return entries
 
 
 def cmd_stats_locrib_counts():
@@ -272,8 +289,38 @@ def cmd_stats_locrib_counts():
     ptypes = _stat_types(peer[-1]["raw"][6 + PER_PEER_LEN :])
     if 7 not in ptypes:
         fail(f"peer stats types {ptypes} missing 7 (Adj-RIB-In)")
+    for required in (20, 21, 23):
+        if required not in ptypes:
+            fail(f"peer stats types {ptypes} missing RFC 9972 type {required}")
+    legacy_end = max(i for i, t in enumerate(ptypes) if t in (7, 15, 17))
+    rfc_start = min(i for i, t in enumerate(ptypes) if t >= 18)
+    if legacy_end >= rfc_start:
+        fail(f"peer stats types {ptypes}: RFC 9972 block precedes legacy block")
+    rfc_types = ptypes[rfc_start:]
+    if rfc_types != sorted(rfc_types):
+        fail(f"peer RFC 9972 stats block is not sorted by type: {rfc_types}")
+    if ptypes.count(20) != 1 or ptypes.count(21) != 2 or ptypes.count(23) != 2:
+        fail(f"peer stats types {ptypes}: expected one global and two family gauges")
+    entries = _stats(peer[-1]["raw"][6 + PER_PEER_LEN :])
+    global_rows = [payload for stat_type, payload in entries if stat_type == 20]
+    family_21 = [payload for stat_type, payload in entries if stat_type == 21]
+    family_23 = [payload for stat_type, payload in entries if stat_type == 23]
+    if len(global_rows[0]) != 8:
+        fail(f"RFC 9972 type 20 length {len(global_rows[0])} != 8")
+    for stat_type, rows in ((21, family_21), (23, family_23)):
+        if any(len(row) != 11 for row in rows):
+            fail(f"RFC 9972 type {stat_type} rows do not all have length 11")
+        families = [(u16(row, 0), row[2]) for row in rows]
+        if families != [(1, 1), (2, 1)]:
+            fail(f"RFC 9972 type {stat_type} families {families} != v4/v6 unicast")
+    if family_21 != family_23:
+        fail("RFC 9972 accepted-route type 21/23 family payloads differ")
+    total = int.from_bytes(global_rows[0], "big")
+    family_total = sum(int.from_bytes(row[3:], "big") for row in family_21)
+    if total != family_total:
+        fail(f"RFC 9972 type 20 value {total} != family sum {family_total}")
     ok(f"stats: loc-rib peer carries types 8+10 ({types}); regular peer "
-       f"carries type 7 ({ptypes})")
+       f"carries legacy and RFC 9972 Adj-RIB-In gauges ({ptypes})")
 
 
 def cmd_no_path_marking():

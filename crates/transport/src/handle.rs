@@ -708,6 +708,8 @@ pub struct NegotiatedSessionState {
     pub four_octet_as: bool,
     /// Address families mutually negotiated in the OPEN exchange.
     pub families: Vec<(Afi, Safi)>,
+    /// Families for which this session negotiated Add-Path receive/both.
+    pub add_path_receive_families: Vec<(Afi, Safi)>,
     /// Whether the peer advertised the RFC 2918 Route Refresh capability, so a
     /// `SendRouteRefresh` command against this session can be delivered rather
     /// than rejected as `RouteRefreshUnsupported`.

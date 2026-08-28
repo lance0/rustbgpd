@@ -398,6 +398,7 @@ impl BmpManager {
             BmpEvent::StatsReport {
                 peer_info,
                 adj_rib_in_routes,
+                rfc9972_adj_rib_in_post,
                 adj_rib_out_post,
             } => {
                 let mut counters = vec![codec::StatCounter {
@@ -405,6 +406,28 @@ impl BmpManager {
                     value: *adj_rib_in_routes,
                 }];
                 let mut afi_counters = Vec::new();
+                if let Some(per_family) = rfc9972_adj_rib_in_post {
+                    counters.push(codec::StatCounter {
+                        stat_type: 20,
+                        value: per_family.iter().map(|(_, _, count)| count).sum(),
+                    });
+                    let mut sorted = per_family.iter().collect::<Vec<_>>();
+                    sorted.sort_by_key(|(afi, safi, _)| (*afi, *safi));
+                    for &&(afi, safi, value) in &sorted {
+                        afi_counters.push(codec::AfiStatCounter {
+                            stat_type: 21,
+                            afi,
+                            safi,
+                            value,
+                        });
+                        afi_counters.push(codec::AfiStatCounter {
+                            stat_type: 23,
+                            afi,
+                            safi,
+                            value,
+                        });
+                    }
+                }
                 // RFC 8671: type 15 = post-policy Adj-RIB-Out total,
                 // type 17 = its per-AFI/SAFI breakdown. Omitted when
                 // the counts were unavailable this tick.
@@ -413,7 +436,9 @@ impl BmpManager {
                         stat_type: 15,
                         value: per_family.iter().map(|(_, _, count)| count).sum(),
                     });
-                    for &(afi, safi, value) in per_family {
+                    let mut sorted = per_family.iter().collect::<Vec<_>>();
+                    sorted.sort_by_key(|(afi, safi, _)| (*afi, *safi));
+                    for &&(afi, safi, value) in &sorted {
                         afi_counters.push(codec::AfiStatCounter {
                             stat_type: 17,
                             afi,
@@ -1581,6 +1606,7 @@ mod tests {
             .send(BmpEvent::StatsReport {
                 peer_info: sample_peer_info(),
                 adj_rib_in_routes: 42,
+                rfc9972_adj_rib_in_post: None,
                 adj_rib_out_post: None,
             })
             .await
@@ -1821,14 +1847,15 @@ mod tests {
             .send(BmpEvent::StatsReport {
                 peer_info: sample_peer_info(),
                 adj_rib_in_routes: 42,
-                adj_rib_out_post: Some(vec![(1, 1, 10), (2, 1, 5)]),
+                rfc9972_adj_rib_in_post: Some(vec![(2, 1, 7), (1, 1, 11)]),
+                adj_rib_out_post: Some(vec![(2, 1, 5), (1, 1, 10)]),
             })
             .await
             .unwrap();
 
         let msg = c_rx.recv().await.unwrap();
         let stats = decode_stats(&msg);
-        assert_eq!(stats.len(), 4);
+        assert_eq!(stats.len(), 9);
 
         let adj_rib_in_type = stats[0].0;
         let adj_rib_out_total_type = stats[1].0;
@@ -1847,8 +1874,18 @@ mod tests {
                 .iter()
                 .map(|(_, payload)| payload.len())
                 .collect::<Vec<_>>(),
-            vec![8, 8, 11, 11]
+            vec![8, 8, 11, 11, 8, 11, 11, 11, 11]
         );
+        assert_eq!(
+            stats
+                .iter()
+                .map(|(stat_type, _)| *stat_type)
+                .collect::<Vec<_>>(),
+            vec![7, 15, 17, 17, 20, 21, 21, 23, 23]
+        );
+        assert_eq!(u64::from_be_bytes(stats[4].1.try_into().unwrap()), 18);
+        assert_eq!(&stats[5].1[..3], &[0, 1, 1]);
+        assert_eq!(&stats[6].1[..3], &[0, 2, 1]);
 
         assert_eq!(u64::from_be_bytes(stats[0].1.try_into().unwrap()), 42);
         assert_eq!(u64::from_be_bytes(stats[1].1.try_into().unwrap()), 15);
@@ -1860,7 +1897,56 @@ mod tests {
         event_tx
             .send(BmpEvent::StatsReport {
                 peer_info: sample_peer_info(),
+                adj_rib_in_routes: 0,
+                rfc9972_adj_rib_in_post: Some(vec![(1, 1, 0), (2, 1, 0)]),
+                adj_rib_out_post: None,
+            })
+            .await
+            .unwrap();
+        let zero = c_rx.recv().await.unwrap();
+        let zero_stats = decode_stats(&zero);
+        assert_eq!(
+            zero_stats
+                .iter()
+                .map(|(stat_type, _)| *stat_type)
+                .collect::<Vec<_>>(),
+            vec![7, 20, 21, 21, 23, 23],
+            "available zero gauges remain present in legacy-then-RFC order"
+        );
+        assert_eq!(
+            zero_stats
+                .iter()
+                .filter(|(stat_type, payload)| *stat_type == 20 && payload.len() == 8)
+                .count(),
+            1
+        );
+        assert!(
+            zero_stats
+                .iter()
+                .all(|(stat_type, payload)| match stat_type {
+                    7 | 20 => payload.len() == 8 && payload.iter().all(|byte| *byte == 0),
+                    21 | 23 => {
+                        payload.len() == 11
+                            && matches!(&payload[..3], [0, 1 | 2, 1])
+                            && payload[3..].iter().all(|byte| *byte == 0)
+                    }
+                    _ => false,
+                })
+        );
+        for stat_type in [21, 23] {
+            let families = zero_stats
+                .iter()
+                .filter(|(candidate, _)| *candidate == stat_type)
+                .map(|(_, payload)| &payload[..3])
+                .collect::<Vec<_>>();
+            assert_eq!(families, vec![&[0, 1, 1], &[0, 2, 1]]);
+        }
+
+        event_tx
+            .send(BmpEvent::StatsReport {
+                peer_info: sample_peer_info(),
                 adj_rib_in_routes: 43,
+                rfc9972_adj_rib_in_post: None,
                 adj_rib_out_post: None,
             })
             .await
@@ -1915,7 +2001,9 @@ mod tests {
              Adj-RIB-Out total (type {adj_rib_out_total_type}) and per-(AFI, SAFI) counts \
              (type {adj_rib_out_family_type}); types \
              {adj_rib_out_total_type}/{adj_rib_out_family_type} are omitted when unavailable \
-             rather than reported as false zero."
+             rather than reported as false zero. RFC 9972 post-policy Adj-RIB-In gauges \
+             (types 20/21/23) cover negotiated IPv4/IPv6 unicast and are omitted when effective \
+             unicast Add-Path receive is active."
         );
         assert_eq!(
             actual,
@@ -2683,6 +2771,7 @@ mod tests {
             .send(BmpEvent::StatsReport {
                 peer_info: sample_peer_info(),
                 adj_rib_in_routes: 1,
+                rfc9972_adj_rib_in_post: None,
                 adj_rib_out_post: None,
             })
             .await
@@ -3405,6 +3494,7 @@ mod tests {
             .send(BmpEvent::StatsReport {
                 peer_info: sample_peer_info(),
                 adj_rib_in_routes: 7,
+                rfc9972_adj_rib_in_post: None,
                 adj_rib_out_post: None,
             })
             .await
@@ -3476,6 +3566,7 @@ mod tests {
             .send(BmpEvent::StatsReport {
                 peer_info: sample_peer_info(),
                 adj_rib_in_routes: 9,
+                rfc9972_adj_rib_in_post: None,
                 adj_rib_out_post: None,
             })
             .await

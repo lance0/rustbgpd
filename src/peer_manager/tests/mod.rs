@@ -1221,6 +1221,7 @@ fn test_negotiated_session(route_refresh: bool) -> rustbgpd_transport::Negotiate
         remote_router_id: Ipv4Addr::new(192, 0, 2, 1),
         four_octet_as: true,
         families: vec![(Afi::Ipv4, Safi::Unicast)],
+        add_path_receive_families: Vec::new(),
         peer_route_refresh: route_refresh,
         peer_enhanced_route_refresh: false,
         peer_extended_message: false,

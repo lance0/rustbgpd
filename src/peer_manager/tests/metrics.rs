@@ -598,6 +598,36 @@ async fn dynamic_peer_auto_removal_reaps_metric_series() {
 /// The 60s BMP stats tick sources RFC 8671 types 15/17 from the RIB's
 /// per-peer Adj-RIB-Out family counts via one `QueryAdjRibOutCounts`
 /// round-trip, converting `(Afi, Safi)` to raw wire codes.
+fn rfc9972_stats_peer_handle(peer_addr: IpAddr) -> PeerHandle {
+    use rustbgpd_transport::PeerCommand;
+
+    let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
+    let task = tokio::spawn(async move {
+        while let Some(command) = session_rx.recv().await {
+            match command {
+                PeerCommand::QueryState { reply } => {
+                    let mut state = policy_test_peer_state(peer_addr, SessionState::Established);
+                    state.peer_asn = Some(65002);
+                    state.remote_router_id = Some(Ipv4Addr::new(10, 0, 0, 2));
+                    state.four_octet_as = Some(true);
+                    state.prefix_count = 22;
+                    state.max_prefix.prefix_count_ipv4 = 12;
+                    state.max_prefix.prefix_count_ipv6 = 7;
+                    let mut negotiated = test_negotiated_session(true);
+                    negotiated.families =
+                        vec![(Afi::Ipv6, Safi::Unicast), (Afi::Ipv4, Safi::Unicast)];
+                    state.negotiated_session = Some(negotiated);
+                    let _ = reply.send(state);
+                }
+                PeerCommand::Shutdown => break,
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(session_tx, task)
+}
+
 #[tokio::test]
 async fn periodic_bmp_stats_carry_adj_rib_out_counts() {
     let (_tx, rx) = mpsc::channel(16);
@@ -614,18 +644,7 @@ async fn periodic_bmp_stats_carry_adj_rib_out_counts() {
         Some(bmp_tx),
     );
     let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-    let counters = Arc::new(FakePeerCounters::default());
-    insert_test_managed_peer(
-        &mut mgr,
-        addr,
-        fake_peer_handle(
-            addr,
-            SessionState::Established,
-            Some(Ipv4Addr::new(10, 0, 0, 2)),
-            counters,
-        ),
-        false,
-    );
+    insert_test_managed_peer(&mut mgr, addr, rfc9972_stats_peer_handle(addr), false);
 
     // Answer the single RIB-wide Adj-RIB-Out counts query.
     let rib_task = tokio::spawn(async move {
@@ -653,10 +672,12 @@ async fn periodic_bmp_stats_carry_adj_rib_out_counts() {
         rustbgpd_bmp::BmpEvent::StatsReport {
             peer_info,
             adj_rib_in_routes,
+            rfc9972_adj_rib_in_post,
             adj_rib_out_post,
         } => {
             assert_eq!(peer_info.peer_addr, addr);
-            assert_eq!(adj_rib_in_routes, 0);
+            assert_eq!(adj_rib_in_routes, 22);
+            assert_eq!(rfc9972_adj_rib_in_post, Some(vec![(1, 1, 12), (2, 1, 7)]));
             assert_eq!(
                 adj_rib_out_post,
                 Some(vec![(1, 1, 12), (1, 128, 3)]),
@@ -665,6 +686,50 @@ async fn periodic_bmp_stats_carry_adj_rib_out_counts() {
         }
         other => panic!("expected StatsReport, got {other:?}"),
     }
+}
+
+#[test]
+fn rfc9972_stats_use_exact_unicast_counts_and_omit_for_effective_add_path() {
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let mut state = policy_test_peer_state(addr, SessionState::Established);
+    state.prefix_count = 99;
+    state.max_prefix.prefix_count_ipv4 = 12;
+    state.max_prefix.prefix_count_ipv6 = 7;
+    let mut negotiated = test_negotiated_session(true);
+    negotiated.families = vec![
+        (Afi::Ipv6, Safi::Unicast),
+        (Afi::Ipv4, Safi::MplsVpn),
+        (Afi::Ipv4, Safi::Unicast),
+    ];
+    state.negotiated_session = Some(negotiated);
+
+    assert_eq!(
+        super::super::snapshot::rfc9972_adj_rib_in_counts(&state),
+        Some(vec![(1, 1, 12), (2, 1, 7)]),
+        "only exact IPv4/IPv6-unicast gauges are emitted in wire-family order"
+    );
+
+    state
+        .negotiated_session
+        .as_mut()
+        .unwrap()
+        .add_path_receive_families = vec![(Afi::Ipv4, Safi::MplsVpn)];
+    assert_eq!(
+        super::super::snapshot::rfc9972_adj_rib_in_counts(&state),
+        Some(vec![(1, 1, 12), (2, 1, 7)]),
+        "non-unicast Add-Path does not make the unicast gauges inexact"
+    );
+
+    state
+        .negotiated_session
+        .as_mut()
+        .unwrap()
+        .add_path_receive_families = vec![(Afi::Ipv4, Safi::Unicast)];
+    assert_eq!(
+        super::super::snapshot::rfc9972_adj_rib_in_counts(&state),
+        None,
+        "any effective unicast Add-Path receive family suppresses the whole gauge set"
+    );
 }
 
 #[tokio::test]
@@ -736,6 +801,7 @@ async fn periodic_bmp_stats_channel_full_records_the_source_drop() {
                 timestamp: std::time::SystemTime::now(),
             },
             adj_rib_in_routes: 0,
+            rfc9972_adj_rib_in_post: None,
             adj_rib_out_post: None,
         })
         .unwrap();

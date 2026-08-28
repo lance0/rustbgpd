@@ -59,25 +59,25 @@ const PEER_FLAG_O: u8 = 0x10; // Adj-RIB-Out (RFC 8671)
 
 /// Stat counter for Stats Report messages.
 ///
-/// RFC 7854 numeric stat types (4-byte or 8-byte `Stat Data`):
+/// RFC 7854 and RFC 9972 numeric stat types (4-byte or 8-byte `Stat Data`):
 /// - 32-bit: 0-6, 11-13
 /// - 64-bit: 7-8, plus RFC 8671 Adj-RIB-Out gauges 14-15
 ///
-/// AFI/SAFI-qualified stat types 9-10 and 16-17 must use
+/// AFI/SAFI-qualified stat types 9-10, 16-17, and the RFC 9972 family
+/// types must use
 /// [`AfiStatCounter`].
 #[derive(Debug, Clone)]
 pub struct StatCounter {
-    /// RFC 7854 stat type code (0-8, 11-13).
+    /// Numeric stat type code.
     pub stat_type: u16,
     /// Counter or gauge value.
     pub value: u64,
 }
 
-/// AFI/SAFI-qualified stat counter (RFC 7854 stat types 9-10,
-/// RFC 8671 types 16-17). Payload: AFI(2) + SAFI(1) + count(8).
+/// AFI/SAFI-qualified stat counter. Payload: AFI(2) + SAFI(1) + count(8).
 #[derive(Debug, Clone)]
 pub struct AfiStatCounter {
-    /// Stat type code (9, 10, 16, or 17).
+    /// AFI/SAFI-qualified stat type code.
     pub stat_type: u16,
     /// Address Family Identifier.
     pub afi: u16,
@@ -87,14 +87,57 @@ pub struct AfiStatCounter {
     pub value: u64,
 }
 
-/// Returns the value size for RFC 7854 numeric stat types.
+enum EncodedStat<'a> {
+    Numeric(&'a StatCounter),
+    Afi(&'a AfiStatCounter),
+}
+
+impl EncodedStat<'_> {
+    fn sort_key(&self) -> (u16, u16, u8) {
+        match self {
+            Self::Numeric(counter) => (counter.stat_type, 0, 0),
+            Self::Afi(counter) => (counter.stat_type, counter.afi, counter.safi),
+        }
+    }
+}
+
+fn put_encoded_stat(buf: &mut BytesMut, entry: &EncodedStat<'_>) {
+    match entry {
+        EncodedStat::Numeric(counter) => {
+            let Some(sz) = numeric_stat_size(counter.stat_type) else {
+                return;
+            };
+            buf.put_u16(counter.stat_type);
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "BMP 4-octet stat counters are encoded in their declared protocol field width"
+            )]
+            if sz == 4 {
+                buf.put_u16(4);
+                buf.put_u32(counter.value as u32);
+            } else {
+                buf.put_u16(8);
+                buf.put_u64(counter.value);
+            }
+        }
+        EncodedStat::Afi(counter) => {
+            buf.put_u16(counter.stat_type);
+            buf.put_u16(11); // AFI(2) + SAFI(1) + value(8) = 11
+            buf.put_u16(counter.afi);
+            buf.put_u8(counter.safi);
+            buf.put_u64(counter.value);
+        }
+    }
+}
+
+/// Returns the value size for RFC 7854, RFC 8671, and RFC 9972 numeric stat types.
 /// Returns `None` for AFI/SAFI-qualified or unknown types.
 fn numeric_stat_size(stat_type: u16) -> Option<usize> {
     match stat_type {
         // 4-byte counters: types 0-6, 11-13
         0..=6 | 11..=13 => Some(4),
-        // 64-bit gauges: types 7-8, RFC 8671 Adj-RIB-Out types 14-15
-        7 | 8 | 14 | 15 => Some(8),
+        // 64-bit gauges: RFC 7854/8671 plus RFC 9972 global types.
+        7 | 8 | 14 | 15 | 18 | 20 | 29 | 31 | 33 | 39 => Some(8),
         // AFI/SAFI-qualified and unknown type formats are not encoded
         // by this numeric-only helper.
         _ => None,
@@ -102,7 +145,19 @@ fn numeric_stat_size(stat_type: u16) -> Option<usize> {
 }
 
 fn is_afi_stat(stat_type: u16) -> bool {
-    matches!(stat_type, 9 | 10 | 16 | 17)
+    matches!(
+        stat_type,
+        9 | 10
+            | 16
+            | 17
+            | 19
+            | 21..=23
+            | 26..=28
+            | 30
+            | 32
+            | 34..=38
+            | 40..=43
+    )
 }
 
 /// Encode the per-peer header (42 bytes, RFC 7854 §4.2).
@@ -396,8 +451,8 @@ pub fn encode_route_monitoring(
 
 /// Encode BMP Statistics Report (Type 1, RFC 7854 §4.8).
 ///
-/// `counters` are RFC 7854 numeric stat types (0-8, 11-13).
-/// `afi_counters` are AFI/SAFI-qualified stat types (9-10).
+/// `counters` are numeric stat types and `afi_counters` are
+/// AFI/SAFI-qualified stat types defined by RFC 7854, RFC 8671, and RFC 9972.
 /// Stat types placed in the wrong list are silently skipped.
 ///
 /// In v4 the Stats Count and stats data are enclosed in the mandatory
@@ -451,31 +506,32 @@ pub fn encode_stats_report(
     )]
     buf.put_u32(num_valid as u32);
 
-    for counter in counters {
-        if let Some(sz) = numeric_stat_size(counter.stat_type) {
-            buf.put_u16(counter.stat_type);
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "BMP 4-octet stat counters are encoded in their declared protocol field width"
-            )]
-            if sz == 4 {
-                buf.put_u16(4);
-                buf.put_u32(counter.value as u32);
-            } else {
-                buf.put_u16(8);
-                buf.put_u64(counter.value);
-            }
-        }
+    for counter in counters
+        .iter()
+        .filter(|counter| counter.stat_type < 18 && numeric_stat_size(counter.stat_type).is_some())
+    {
+        put_encoded_stat(&mut buf, &EncodedStat::Numeric(counter));
     }
-
-    for counter in afi_counters {
-        if is_afi_stat(counter.stat_type) {
-            buf.put_u16(counter.stat_type);
-            buf.put_u16(11); // AFI(2) + SAFI(1) + value(8) = 11
-            buf.put_u16(counter.afi);
-            buf.put_u8(counter.safi);
-            buf.put_u64(counter.value);
-        }
+    for counter in afi_counters
+        .iter()
+        .filter(|counter| counter.stat_type < 18 && is_afi_stat(counter.stat_type))
+    {
+        put_encoded_stat(&mut buf, &EncodedStat::Afi(counter));
+    }
+    let mut rfc9972_entries = counters
+        .iter()
+        .filter(|counter| counter.stat_type >= 18 && numeric_stat_size(counter.stat_type).is_some())
+        .map(EncodedStat::Numeric)
+        .chain(
+            afi_counters
+                .iter()
+                .filter(|counter| counter.stat_type >= 18 && is_afi_stat(counter.stat_type))
+                .map(EncodedStat::Afi),
+        )
+        .collect::<Vec<_>>();
+    rfc9972_entries.sort_by_key(EncodedStat::sort_key);
+    for entry in rfc9972_entries {
+        put_encoded_stat(&mut buf, &entry);
     }
 
     write_common_header(&mut buf, BMP_MSG_STATS_REPORT, version);
@@ -785,6 +841,135 @@ mod tests {
             stats_body,
             "value = the exact v3 count + stats bytes"
         );
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one table-driven proof covers every final RFC 9972 numeric shape and exclusion"
+    )]
+    fn rfc9972_final_stat_shapes_and_order_are_exact() {
+        let numeric_types = [18, 20, 29, 31, 33, 39];
+        let afi_types = [
+            19, 21, 22, 23, 26, 27, 28, 30, 32, 34, 35, 36, 37, 38, 40, 41, 42, 43,
+        ];
+        let counters = numeric_types
+            .into_iter()
+            .rev()
+            .map(|stat_type| StatCounter {
+                stat_type,
+                value: u64::from(stat_type),
+            })
+            .chain([
+                StatCounter {
+                    stat_type: 15,
+                    value: 15,
+                },
+                StatCounter {
+                    stat_type: 7,
+                    value: 7,
+                },
+                StatCounter {
+                    stat_type: 24,
+                    value: 24,
+                },
+                StatCounter {
+                    stat_type: 25,
+                    value: 25,
+                },
+                StatCounter {
+                    stat_type: 21,
+                    value: 21,
+                },
+            ])
+            .collect::<Vec<_>>();
+        let afi_counters = afi_types
+            .into_iter()
+            .rev()
+            .map(|stat_type| AfiStatCounter {
+                stat_type,
+                afi: 2,
+                safi: 1,
+                value: u64::from(stat_type),
+            })
+            .chain([
+                AfiStatCounter {
+                    stat_type: 17,
+                    afi: 2,
+                    safi: 1,
+                    value: 17,
+                },
+                AfiStatCounter {
+                    stat_type: 17,
+                    afi: 1,
+                    safi: 1,
+                    value: 17,
+                },
+                AfiStatCounter {
+                    stat_type: 25,
+                    afi: 1,
+                    safi: 1,
+                    value: 25,
+                },
+                AfiStatCounter {
+                    stat_type: 24,
+                    afi: 1,
+                    safi: 1,
+                    value: 24,
+                },
+                AfiStatCounter {
+                    stat_type: 20,
+                    afi: 1,
+                    safi: 1,
+                    value: 20,
+                },
+            ])
+            .collect::<Vec<_>>();
+
+        let v3 = encode_stats_report(
+            &sample_peer_info(),
+            &counters,
+            &afi_counters,
+            BmpVersion::V3,
+        );
+        let mut cursor = BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN;
+        let count = u32::from_be_bytes(v3[cursor..cursor + 4].try_into().unwrap()) as usize;
+        cursor += 4;
+        let mut seen = Vec::new();
+        for _ in 0..count {
+            let stat_type = u16::from_be_bytes(v3[cursor..cursor + 2].try_into().unwrap());
+            let len = u16::from_be_bytes(v3[cursor + 2..cursor + 4].try_into().unwrap());
+            seen.push((stat_type, len));
+            cursor += 4 + usize::from(len);
+        }
+        let mut expected = vec![(15, 8), (7, 8), (17, 11), (17, 11)];
+        for stat_type in 18..=43 {
+            if numeric_types.contains(&stat_type) {
+                expected.push((stat_type, 8));
+            } else if afi_types.contains(&stat_type) {
+                expected.push((stat_type, 11));
+            }
+        }
+        assert_eq!(
+            seen, expected,
+            "legacy input order, then sorted RFC 9972 block"
+        );
+        assert_eq!(cursor, v3.len());
+        assert!(
+            !seen
+                .iter()
+                .any(|(stat_type, _)| matches!(stat_type, 24 | 25))
+        );
+
+        let v4 = encode_stats_report(
+            &sample_peer_info(),
+            &counters,
+            &afi_counters,
+            BmpVersion::V4,
+        );
+        let v4_body = &v4[BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN + 4..];
+        let v3_body = &v3[BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN..];
+        assert_eq!(v4_body, v3_body, "v3/v4 statistics bodies must match");
     }
 
     /// draft-ietf-grow-bmp-tlv-21 §3 + §5.5: message types that already

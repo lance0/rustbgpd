@@ -319,6 +319,7 @@ async fn query_state_projects_established_negotiation_and_capped_gr_runtime() {
     let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
     peer_config.connect_retry_secs = 30;
     peer_config.families = vec![(Afi::Ipv6, Safi::Unicast), (Afi::Ipv4, Safi::Unicast)];
+    peer_config.add_path_receive = true;
     peer_config.graceful_restart = true;
     peer_config.gr_restart_time = 120;
     let mut session = make_test_session_with_peer_config(peer_config);
@@ -341,6 +342,11 @@ async fn query_state_projects_established_negotiation_and_capped_gr_runtime() {
                 Capability::RouteRefresh,
                 Capability::EnhancedRouteRefresh,
                 Capability::ExtendedMessage,
+                Capability::AddPath(vec![rustbgpd_wire::AddPathFamily {
+                    afi: Afi::Ipv4,
+                    safi: Safi::Unicast,
+                    send_receive: rustbgpd_wire::AddPathMode::Send,
+                }]),
                 Capability::GracefulRestart {
                     restart_state: false,
                     notification: false,
@@ -392,6 +398,10 @@ async fn query_state_projects_established_negotiation_and_capped_gr_runtime() {
     assert_eq!(negotiated.remote_router_id, Ipv4Addr::new(192, 0, 2, 7));
     assert!(negotiated.four_octet_as);
     assert_eq!(negotiated.families, vec![(Afi::Ipv4, Safi::Unicast)]);
+    assert_eq!(
+        negotiated.add_path_receive_families,
+        vec![(Afi::Ipv4, Safi::Unicast)]
+    );
     assert!(negotiated.peer_route_refresh);
     assert!(negotiated.peer_enhanced_route_refresh);
     assert!(negotiated.peer_extended_message);

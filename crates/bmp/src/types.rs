@@ -46,6 +46,10 @@ pub enum BmpEvent {
         peer_info: BmpPeerInfo,
         /// RFC 7854 type 7: routes in Adj-RIB-In.
         adj_rib_in_routes: u64,
+        /// RFC 9972 post-policy Adj-RIB-In counts for negotiated IPv4/IPv6
+        /// unicast families. `None` omits types 20, 21, and 23, including
+        /// when effective Add-Path receive makes unique-prefix gauges inexact.
+        rfc9972_adj_rib_in_post: Option<Vec<(u16, u8, u64)>>,
         /// RFC 8671 post-policy Adj-RIB-Out counts per `(afi, safi)`,
         /// encoded as stat type 17 entries plus their sum as type 15.
         /// `None` means the counts were unavailable this tick — types
