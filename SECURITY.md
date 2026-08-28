@@ -136,8 +136,12 @@ compilation and explain-walk agreement, MRT snapshot and warm-bundle
 readers, EVPN parsing, the BFD control-packet decoder, and the RTR PDU
 decoder. A nightly CI campaign (`.github/workflows/fuzz.yml`) runs every
 target in each crate against tracked seed corpora and fails loudly if
-target enumeration returns nothing. A ClusterFuzzLite workflow builds all
-targets with AddressSanitizer for on-demand campaigns. The target
+target enumeration returns nothing. In both nightly and hosted campaigns,
+the complete-message wire target accepts 65,535-byte RFC 8654 messages and
+the body-only UPDATE and ROUTE-REFRESH targets accept the corresponding
+65,516-byte bodies. Pre-negotiation OPEN bodies remain capped at the legacy
+4,077-byte body boundary. A ClusterFuzzLite workflow builds all targets with
+AddressSanitizer for on-demand campaigns. The target
 inventory is fail-closed: `scripts/check_fuzz_target_inventory.py` runs
 in CI and fails when the inventory drifts from the reviewed list.
 

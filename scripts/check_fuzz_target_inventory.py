@@ -35,6 +35,53 @@ EXPECTED_TARGETS: dict[str, tuple[str, ...]] = {
     ),
 }
 EXPECTED_COUNT = 21
+WIRE_NIGHTLY_MAX_LENS = {
+    "decode_bgpls": 4_096,
+    "decode_evpn": 4_096,
+    "decode_flowspec": 4_096,
+    "decode_labeled": 4_096,
+    "decode_message": 65_535,
+    "decode_open": 4_077,
+    "decode_route_refresh": 65_516,
+    "decode_rtc": 4_096,
+    "decode_update": 65_516,
+    "decode_vpn": 4_096,
+    "encode_evpn": 4_096,
+    "parse_rd": 4_096,
+}
+WIRE_HOSTED_CONTRACTS = {
+    "decode_message": (
+        65_535,
+        "decode_message(&mut buf, rustbgpd_wire::EXTENDED_MAX_MESSAGE_LEN)",
+    ),
+    "decode_open": (
+        4_077,
+        "if data.len()\n"
+        "        > usize::from(rustbgpd_wire::MAX_MESSAGE_LEN)\n"
+        "            - rustbgpd_wire::constants::HEADER_LEN\n"
+        "    {\n"
+        "        return;\n"
+        "    }",
+    ),
+    "decode_route_refresh": (
+        65_516,
+        "if data.len()\n"
+        "        > usize::from(rustbgpd_wire::EXTENDED_MAX_MESSAGE_LEN)\n"
+        "            - rustbgpd_wire::constants::HEADER_LEN\n"
+        "    {\n"
+        "        return;\n"
+        "    }",
+    ),
+    "decode_update": (
+        65_516,
+        "if data.len()\n"
+        "        > usize::from(rustbgpd_wire::EXTENDED_MAX_MESSAGE_LEN)\n"
+        "            - rustbgpd_wire::constants::HEADER_LEN\n"
+        "    {\n"
+        "        return;\n"
+        "    }",
+    ),
+}
 CAMPAIGN_BOUNDS: dict[str, tuple[str, int]] = {
     "crates/bfd": ("decode_bfd_control", 256),
     "crates/rpki": ("decode_rtr_pdu", 65_535),
@@ -188,6 +235,63 @@ def validate_pipeline_enrollment(builder: str, workflow: str) -> None:
 
     if 'cp "fuzz/$name.options" "$OUT/$name.options"' not in builder:
         raise InventoryError("shared hosted builder does not copy target options")
+
+    wire_block = re.search(
+        r"(?ms)^      - name: [^\n]+\n        run: \|\n(?P<body>.*?cd crates/wire.*?)(?=^      - name:|\Z)",
+        workflow,
+    )
+    if wire_block is None:
+        raise InventoryError("nightly workflow has no crates/wire campaign")
+    wire_body = wire_block.group("body")
+    bound_rows = re.findall(
+        r"(?m)^\s+(?P<target>[a-z][a-z0-9_]*)\) max_len=(?P<max_len>[0-9]+) ;;$",
+        wire_body,
+    )
+    bound_targets = [target for target, _ in bound_rows]
+    if len(bound_targets) != len(set(bound_targets)):
+        raise InventoryError("nightly wire max_len dispatch has duplicate targets")
+    actual_bounds = {target: int(max_len) for target, max_len in bound_rows}
+    if actual_bounds != WIRE_NIGHTLY_MAX_LENS:
+        raise InventoryError(
+            "nightly wire target-specific max_len dispatch differs: "
+            f"expected {WIRE_NIGHTLY_MAX_LENS}, got {actual_bounds}"
+        )
+    if 'case "$t" in' not in wire_body:
+        raise InventoryError("nightly wire max_len dispatch has no case statement")
+    if (
+        '*) echo "wire fuzz target has no reviewed max_len: $t" >&2; exit 1 ;;'
+        not in wire_body
+    ):
+        raise InventoryError("nightly wire max_len dispatch has no fail-closed default")
+    if '-max_len="$max_len"' not in wire_body:
+        raise InventoryError("nightly wire campaign does not use its selected max_len")
+
+    if tuple(sorted(WIRE_NIGHTLY_MAX_LENS)) != EXPECTED_TARGETS["crates/wire"]:
+        raise InventoryError("nightly wire max_len map differs from target inventory")
+
+    for target, (hosted_max_len, required_source) in WIRE_HOSTED_CONTRACTS.items():
+        options = ROOT / "crates/wire/fuzz" / f"{target}.options"
+        expected_options = f"[libfuzzer]\nmax_len = {hosted_max_len}\n"
+        try:
+            actual_options = options.read_text()
+        except OSError as error:
+            raise InventoryError(f"cannot read {options.relative_to(ROOT)}: {error}")
+        if actual_options != expected_options:
+            raise InventoryError(
+                f"{options.relative_to(ROOT)} must set max_len = "
+                f"{hosted_max_len}"
+            )
+
+        harness = ROOT / f"crates/wire/fuzz/fuzz_targets/{target}.rs"
+        try:
+            harness_text = harness.read_text()
+        except OSError as error:
+            raise InventoryError(f"cannot read {harness.relative_to(ROOT)}: {error}")
+        if required_source not in harness_text:
+            raise InventoryError(
+                f"{harness.relative_to(ROOT)} must enforce its "
+                "reviewed max_len contract"
+            )
 
     for crate, (target, max_len) in CAMPAIGN_BOUNDS.items():
         crate_block = re.search(

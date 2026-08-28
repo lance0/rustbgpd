@@ -49,10 +49,28 @@ jobs:
             exit 1
           fi
           for t in $targets; do
+            # Full messages carry their header; body-only decoders must use
+            # the corresponding framed body ceiling. Substrate, constructor,
+            # and text targets retain the reviewed 4096-byte campaign bound.
+            case "$t" in
+              decode_bgpls) max_len=4096 ;;
+              decode_evpn) max_len=4096 ;;
+              decode_flowspec) max_len=4096 ;;
+              decode_labeled) max_len=4096 ;;
+              decode_message) max_len=65535 ;;
+              decode_open) max_len=4077 ;;
+              decode_route_refresh) max_len=65516 ;;
+              decode_rtc) max_len=4096 ;;
+              decode_update) max_len=65516 ;;
+              decode_vpn) max_len=4096 ;;
+              encode_evpn) max_len=4096 ;;
+              parse_rd) max_len=4096 ;;
+              *) echo "wire fuzz target has no reviewed max_len: $t" >&2; exit 1 ;;
+            esac
             mkdir -p "fuzz/corpus/$t"
             seeds=""
             [ -d "fuzz/seeds/$t" ] && seeds="fuzz/seeds/$t"
-            cargo fuzz run "$t" "fuzz/corpus/$t" $seeds -- -max_total_time=120 -max_len=4096
+            cargo fuzz run "$t" "fuzz/corpus/$t" $seeds -- -max_total_time=120 -max_len="$max_len"
           done
       - name: Fuzz rpol policy frontend (2 minutes per target)
         run: |

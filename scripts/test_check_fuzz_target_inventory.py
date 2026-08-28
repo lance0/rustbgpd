@@ -168,6 +168,125 @@ class FuzzTargetInventoryTests(unittest.TestCase):
         with self.assertRaisesRegex(inventory.InventoryError, "target options"):
             inventory.validate_pipeline_enrollment(mutated, workflow)
 
+    def test_wire_nightly_target_specific_bound_drift_is_rejected(self) -> None:
+        builder = (inventory.ROOT / "fuzz/build-fuzzers.sh").read_text()
+        workflow = (inventory.ROOT / ".github/workflows/fuzz.yml").read_text()
+        for target, max_len in inventory.WIRE_NIGHTLY_MAX_LENS.items():
+            with self.subTest(target=target, mutation="changed"):
+                mutated = workflow.replace(
+                    f"{target}) max_len={max_len} ;;",
+                    f"{target}) max_len={max_len + 1} ;;",
+                    1,
+                )
+                with self.assertRaisesRegex(
+                    inventory.InventoryError, "target-specific max_len"
+                ):
+                    inventory.validate_pipeline_enrollment(builder, mutated)
+
+            with self.subTest(target=target, mutation="omitted"):
+                mutated = workflow.replace(
+                    f"              {target}) max_len={max_len} ;;\n", "", 1
+                )
+                with self.assertRaisesRegex(
+                    inventory.InventoryError, "target-specific max_len"
+                ):
+                    inventory.validate_pipeline_enrollment(builder, mutated)
+
+    def test_wire_nightly_bound_dispatch_is_fail_closed(self) -> None:
+        builder = (inventory.ROOT / "fuzz/build-fuzzers.sh").read_text()
+        workflow = (inventory.ROOT / ".github/workflows/fuzz.yml").read_text()
+        mutations = (
+            (
+                'case "$t" in',
+                'case "$omitted" in',
+                "case statement",
+            ),
+            (
+                '*) echo "wire fuzz target has no reviewed max_len: $t" >&2; exit 1 ;;',
+                "*) max_len=4096 ;;",
+                "fail-closed default",
+            ),
+            (
+                '-max_len="$max_len"',
+                "-max_len=4096",
+                "selected max_len",
+            ),
+        )
+        for old, new, error in mutations:
+            with self.subTest(error=error):
+                mutated = workflow.replace(old, new, 1)
+                with self.assertRaisesRegex(inventory.InventoryError, error):
+                    inventory.validate_pipeline_enrollment(builder, mutated)
+
+    def test_wire_extended_message_target_options_are_load_bearing(self) -> None:
+        builder = (inventory.ROOT / "fuzz/build-fuzzers.sh").read_text()
+        workflow = (inventory.ROOT / ".github/workflows/fuzz.yml").read_text()
+        read_text = Path.read_text
+
+        for target, (hosted_max_len, _) in inventory.WIRE_HOSTED_CONTRACTS.items():
+            options = inventory.ROOT / "crates/wire/fuzz" / f"{target}.options"
+
+            def changed_options(path, *args, **kwargs):
+                if path == options:
+                    return f"[libfuzzer]\nmax_len = {hosted_max_len - 1}\n"
+                return read_text(path, *args, **kwargs)
+
+            with self.subTest(target=target):
+                with mock.patch.object(Path, "read_text", changed_options):
+                    with self.assertRaisesRegex(inventory.InventoryError, "must set"):
+                        inventory.validate_pipeline_enrollment(builder, workflow)
+
+    def test_wire_hosted_harness_limits_are_load_bearing(self) -> None:
+        builder = (inventory.ROOT / "fuzz/build-fuzzers.sh").read_text()
+        workflow = (inventory.ROOT / ".github/workflows/fuzz.yml").read_text()
+        read_text = Path.read_text
+
+        for target, (_, required_source) in inventory.WIRE_HOSTED_CONTRACTS.items():
+            harness = (
+                inventory.ROOT / f"crates/wire/fuzz/fuzz_targets/{target}.rs"
+            )
+
+            def removed_hosted_limit(path, *args, **kwargs):
+                text = read_text(path, *args, **kwargs)
+                if path == harness:
+                    return text.replace(
+                        required_source, "/* reviewed bound omitted */", 1
+                    )
+                return text
+
+            with self.subTest(target=target):
+                with mock.patch.object(Path, "read_text", removed_hosted_limit):
+                    with self.assertRaisesRegex(
+                        inventory.InventoryError, "reviewed max_len contract"
+                    ):
+                        inventory.validate_pipeline_enrollment(builder, workflow)
+
+    def test_body_decoder_full_guard_is_load_bearing(self) -> None:
+        builder = (inventory.ROOT / "fuzz/build-fuzzers.sh").read_text()
+        workflow = (inventory.ROOT / ".github/workflows/fuzz.yml").read_text()
+        read_text = Path.read_text
+        mutations = (
+            ("            - rustbgpd_wire::constants::HEADER_LEN\n", ""),
+            ("rustbgpd_wire::constants::HEADER_LEN", "19"),
+        )
+
+        for target in ("decode_open", "decode_route_refresh", "decode_update"):
+            harness = inventory.ROOT / f"crates/wire/fuzz/fuzz_targets/{target}.rs"
+            for old, new in mutations:
+
+                def changed_guard(path, *args, **kwargs):
+                    text = read_text(path, *args, **kwargs)
+                    if path == harness:
+                        return text.replace(old, new, 1)
+                    return text
+
+                with self.subTest(target=target, replacement=new or "removed"):
+                    with mock.patch.object(Path, "read_text", changed_guard):
+                        with self.assertRaisesRegex(
+                            inventory.InventoryError, "reviewed max_len contract"
+                        ):
+                            inventory.validate_pipeline_enrollment(builder, workflow)
+
     def test_new_nightly_campaign_omission_is_rejected(self) -> None:
         builder = (inventory.ROOT / "fuzz/build-fuzzers.sh").read_text()
         workflow = (inventory.ROOT / ".github/workflows/fuzz.yml").read_text()
