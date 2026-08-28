@@ -680,7 +680,7 @@ def emit_rustbgpd(args, members: list[Member], out: pathlib.Path) -> list[str]:
             )
         policy_manifest, policy_manifest_digest = write_policy_manifest(out, a_roster)
         changed_by_kind = {"asn-set": 0, "prefix-set": 0}
-        for name, (kind, relative) in a_shape.items():
+        for _name, (kind, relative) in a_shape.items():
             if (a_dir / relative).read_bytes() != (b_dir / relative).read_bytes():
                 changed_by_kind[kind] += 1
         expected_changed = sum(member.changed for member in members)

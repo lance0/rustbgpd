@@ -15,7 +15,6 @@ import hashlib
 import math
 from pathlib import Path
 import re
-import sys
 
 from classify_cpu import OUTPUT_PHASES
 

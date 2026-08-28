@@ -227,13 +227,13 @@ def main():
         for table_count in table_counts:
             expected_global, expected_filtered = fixed_count + foreign_size, table_count * 2
 
-            def global_dump():
+            def global_dump(expected_global=expected_global):
                 count, _, _ = strict.dump()
                 if count != expected_global:
                     raise RuntimeError(f"global route count {count} != {expected_global}")
                 return count
 
-            def filtered_dump():
+            def filtered_dump(table_count=table_count, expected_filtered=expected_filtered):
                 count = 0
                 for table in range(1000, 1000 + table_count):
                     got, tables, flags = strict.dump(table)

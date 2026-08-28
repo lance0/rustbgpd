@@ -1,0 +1,13 @@
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E9", "F", "B"]
+# Temporary migration boundary: existing raise chaining and zip strictness are
+# unchanged while the initial lint gate lands. Remove these by semantic cleanup.
+ignore = ["B904", "B905"]
+
+[tool.ruff.lint.per-file-ignores]
+"docs/perf/artifacts/v0.61.0-final-performance-2026-07/verify.py" = ["F401"]
+"scripts/test_check_fuzz_target_inventory.py" = ["B023"]
