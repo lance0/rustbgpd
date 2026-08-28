@@ -32,6 +32,8 @@ FUZZ_FILES = frozenset(
         "fuzz/rust-nightly.txt",
         "scripts/check_fuzz_target_inventory.py",
         "scripts/test_check_fuzz_target_inventory.py",
+        "scripts/fuzz_corpus_cache.py",
+        "scripts/test_fuzz_corpus_cache.py",
         "scripts/check_fuzz_toolchain_pin.py",
         "scripts/test_check_fuzz_toolchain_pin.py",
     }

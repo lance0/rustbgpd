@@ -48,7 +48,8 @@ reachable input space: decode → encode → decode must reproduce the value.
 
 ## Running locally
 
-Requires nightly and cargo-fuzz (`cargo install cargo-fuzz`).
+Requires the reviewed nightly and cargo-fuzz release
+(`cargo install cargo-fuzz --version 0.13.2 --locked`).
 
 ```sh
 cd crates/wire
@@ -70,13 +71,32 @@ A crash writes a reproducer under `fuzz/artifacts/<target>/`; replay it with
   configs). Fix any fuzzer-found bug by adding its minimized reproducer here
   as a regression seed.
 - `fuzz/corpus/<target>/` — the growing machine-generated corpus,
-  **gitignored**; local and nightly runs grow their own from the seeds.
+  **gitignored**; local runs grow their own from the seeds. The nightly wire
+  campaign installs either a validated prior `main` bundle or an exact copy of
+  the tracked wire seeds before running.
+- `crates/wire/fuzz/bgp.dict` — reviewed BGP marker, message, attribute, and
+  AFI/SAFI byte tokens. Nightly and hosted builders pass it to the 11 binary
+  wire targets; the textual `parse_rd` target does not use it.
+
+The nightly wire bundle is an availability optimization, not a source of
+truth. `scripts/fuzz_corpus_cache.py` restores it into runner-temporary staging
+and accepts only the exact 12 target directories, one level of regular files,
+each target's reviewed `max_len`, a byte-matching sorted SHA-256 manifest, at
+most 20,000 files, and at most 16 MiB. A miss or cache-service outage is
+reported and falls back to tracked seeds. If a matched bundle is incomplete,
+unexpected, over a bound, or does not match its manifest, the campaign stops
+before installing it. After a successful run, the same helper seals a fresh
+staging bundle; a corpus crossing either aggregate cap simply skips saving.
+Only scheduled or manually dispatched runs on `main` can save, and save-service
+availability does not change the result of the completed test campaign.
 
 ## CI
 
 `.github/workflows/fuzz.yml` runs nightly (04:00 UTC) and on manual
 dispatch: every target in all six fuzz crates for 120 seconds each, starting
-from the tracked seeds. Crash artifacts upload on failure. Budget choice:
+from tracked seeds or the validated prior wire corpus. The job has a 90-minute
+bound, does not cancel an older lineage writer, and retains failure artifacts
+for 14 days. Budget choice:
 all targets briefly rather than a rotating subset — every surface gets
 nightly coverage and the whole job stays bounded by per-target timers.
 
@@ -117,7 +137,10 @@ and again inside the shared fuzzer build path. It compares cargo metadata and
 both MRT targets. Its mutation tests remove every manifest target and every
 source target one at a time and inject empty, failed, and source-redirected
 enumeration, an unexpected fuzz crate, and a cross-crate target-name collision,
-so the fail-closed behavior is itself CI-proved.
+so the fail-closed behavior is itself CI-proved. The same gate pins the complete
+wire seed path and byte inventory, dictionary bytes and target enrollment, and
+the cache's branch guard, staging, versioned keys, caps, manifest validation,
+step order, and outage behavior.
 
 ## OSS-Fuzz eligibility outcome and shared build
 
@@ -137,9 +160,10 @@ Rust builder does not bundle it.
 The shared build uses one explicit Cargo target directory for all six fuzz
 crates and fails unless every expected executable exists before copying it to
 the integration output. Per-target libFuzzer options travel with the binaries,
-so hosted campaigns enforce the same input bounds as the in-repository
-harnesses and nightly commands. This is a build-layout invariant, not a
-wall-clock performance claim; this change carries no retained benchmark
+and the reviewed BGP dictionary travels with all 11 binary wire targets, so
+hosted campaigns enforce the same input bounds and token set as the
+in-repository harnesses and nightly commands. This is a build-layout invariant,
+not a wall-clock performance claim; this change carries no retained benchmark
 harness or quantitative build-speed assertion.
 
 [google/oss-fuzz#15874](https://github.com/google/oss-fuzz/pull/15874) was

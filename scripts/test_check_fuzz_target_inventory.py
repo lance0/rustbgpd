@@ -95,9 +95,7 @@ class FuzzTargetInventoryTests(unittest.TestCase):
         wire_targets[0] = "parse_rt"
         mutated["crates/wire"] = tuple(sorted(wire_targets))
         with mock.patch.object(inventory, "EXPECTED_TARGETS", mutated):
-            with self.assertRaisesRegex(
-                inventory.InventoryError, "globally unique"
-            ):
+            with self.assertRaisesRegex(inventory.InventoryError, "globally unique"):
                 inventory.validate_inventory(mutated, mutated, tuple(mutated))
 
     def test_empty_enumeration_is_rejected(self) -> None:
@@ -167,6 +165,43 @@ class FuzzTargetInventoryTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(inventory.InventoryError, "target options"):
             inventory.validate_pipeline_enrollment(mutated, workflow)
+
+    def test_wire_dictionary_enrollment_is_exact_on_both_build_paths(self) -> None:
+        builder = (inventory.ROOT / "fuzz/build-fuzzers.sh").read_text()
+        workflow = (inventory.ROOT / ".github/workflows/fuzz.yml").read_text()
+        self.assertEqual(
+            inventory.WIRE_DICTIONARY_TARGETS,
+            tuple(
+                target
+                for target in inventory.EXPECTED_TARGETS["crates/wire"]
+                if target != "parse_rd"
+            ),
+        )
+        mutations = (
+            (
+                builder.replace(
+                    'cp "fuzz/bgp.dict" "$OUT/$name.dict"', "cp omitted", 1
+                ),
+                workflow,
+                "hosted",
+            ),
+            (
+                builder,
+                workflow.replace(
+                    '[ "$t" != parse_rd ] && dict_args+=("-dict=fuzz/bgp.dict")',
+                    "dict_args=()",
+                    1,
+                ),
+                "nightly",
+            ),
+        )
+        for changed_builder, changed_workflow, path in mutations:
+            with self.subTest(path=path), self.assertRaisesRegex(
+                inventory.InventoryError, "dictionary enrollment"
+            ):
+                inventory.validate_pipeline_enrollment(
+                    changed_builder, changed_workflow
+                )
 
     def test_wire_nightly_target_specific_bound_drift_is_rejected(self) -> None:
         builder = (inventory.ROOT / "fuzz/build-fuzzers.sh").read_text()
@@ -242,9 +277,7 @@ class FuzzTargetInventoryTests(unittest.TestCase):
         read_text = Path.read_text
 
         for target, (_, required_source) in inventory.WIRE_HOSTED_CONTRACTS.items():
-            harness = (
-                inventory.ROOT / f"crates/wire/fuzz/fuzz_targets/{target}.rs"
-            )
+            harness = inventory.ROOT / f"crates/wire/fuzz/fuzz_targets/{target}.rs"
 
             def removed_hosted_limit(path, *args, **kwargs):
                 text = read_text(path, *args, **kwargs)
@@ -295,7 +328,9 @@ class FuzzTargetInventoryTests(unittest.TestCase):
                 mutated = workflow.replace(
                     f"grep -Fxq {target}", "grep -Fxq omitted", 1
                 )
-                with self.assertRaisesRegex(inventory.InventoryError, "does not require"):
+                with self.assertRaisesRegex(
+                    inventory.InventoryError, "does not require"
+                ):
                     inventory.validate_pipeline_enrollment(builder, mutated)
 
     def test_new_campaign_bound_drift_is_rejected(self) -> None:
@@ -315,7 +350,9 @@ class FuzzTargetInventoryTests(unittest.TestCase):
         for crate in inventory.CAMPAIGN_BOUNDS:
             with self.subTest(crate=crate):
                 mutated = workflow.replace(f"{crate}/fuzz/artifacts/", "omitted/", 1)
-                with self.assertRaisesRegex(inventory.InventoryError, "failure artifacts"):
+                with self.assertRaisesRegex(
+                    inventory.InventoryError, "failure artifacts"
+                ):
                     inventory.validate_pipeline_enrollment(builder, mutated)
 
     def test_new_campaign_options_and_harness_bounds_are_load_bearing(self) -> None:
@@ -345,21 +382,162 @@ class FuzzTargetInventoryTests(unittest.TestCase):
 
             with self.subTest(crate=crate, guard="harness-bound"):
                 with mock.patch.object(Path, "read_text", removed_harness_guard):
-                    with self.assertRaisesRegex(inventory.InventoryError, "must reject"):
+                    with self.assertRaisesRegex(
+                        inventory.InventoryError, "must reject"
+                    ):
                         inventory.validate_pipeline_enrollment(builder, workflow)
 
     def test_every_pinned_seed_omission_and_byte_change_is_rejected(self) -> None:
-        for path, expected in inventory.EXPECTED_SEEDS.items():
+        contents = inventory.repository_seed_contents()
+        self.assertEqual(set(contents), set(inventory.EXPECTED_SEED_SHA256))
+        self.assertEqual(
+            tuple(
+                sorted(
+                    path
+                    for path in contents
+                    if path.startswith("crates/wire/fuzz/seeds/")
+                )
+            ),
+            inventory.EXPECTED_WIRE_SEED_PATHS,
+        )
+        self.assertEqual(
+            {Path(path).parts[-2] for path in inventory.EXPECTED_WIRE_SEED_PATHS},
+            set(inventory.EXPECTED_TARGETS["crates/wire"]),
+        )
+        for path, expected in contents.items():
             with self.subTest(path=path, mutation="omitted"):
-                mutated = dict(inventory.EXPECTED_SEEDS)
+                mutated = dict(contents)
                 del mutated[path]
-                with self.assertRaisesRegex(inventory.InventoryError, "missing"):
+                with self.assertRaisesRegex(
+                    inventory.InventoryError, "tracked seed paths differ"
+                ):
                     inventory.validate_seed_corpus(mutated)
             with self.subTest(path=path, mutation="changed"):
-                mutated = dict(inventory.EXPECTED_SEEDS)
+                mutated = dict(contents)
                 mutated[path] = expected + b"changed"
-                with self.assertRaisesRegex(inventory.InventoryError, "bytes differ"):
+                with self.assertRaisesRegex(
+                    inventory.InventoryError, "bytes differ|digest differs"
+                ):
                     inventory.validate_seed_corpus(mutated)
+
+    def test_unexpected_tracked_seed_is_rejected(self) -> None:
+        mutated = inventory.repository_seed_contents()
+        mutated["crates/wire/fuzz/seeds/decode_message/unreviewed"] = b"extra"
+        with self.assertRaisesRegex(
+            inventory.InventoryError, "tracked seed paths differ"
+        ):
+            inventory.validate_seed_corpus(mutated)
+
+    def test_wire_dictionary_bytes_and_cache_helper_contract_are_load_bearing(
+        self,
+    ) -> None:
+        workflow = (inventory.ROOT / ".github/workflows/fuzz.yml").read_text()
+        helper = (inventory.ROOT / "scripts/fuzz_corpus_cache.py").read_text()
+        dictionary = (inventory.ROOT / "crates/wire/fuzz/bgp.dict").read_bytes()
+        inventory.validate_wire_corpus_cache_contract(workflow, helper, dictionary)
+
+        with self.assertRaisesRegex(inventory.InventoryError, "dictionary bytes"):
+            inventory.validate_wire_corpus_cache_contract(
+                workflow, helper, dictionary + b"changed"
+            )
+
+        for name, old, new in (
+            ("file cap", "MAX_FILES = 20_000", "MAX_FILES = 20_001"),
+            ("byte cap", "MAX_BYTES = 16_777_216", "MAX_BYTES = 16_777_217"),
+            ("schema", "SCHEMA = 1", "SCHEMA = 2"),
+            ("target map", '"decode_bgpls": 4_096', '"decode_bgpls": 4_095'),
+        ):
+            with self.subTest(contract=name), self.assertRaisesRegex(
+                inventory.InventoryError, "corpus cache helper"
+            ):
+                inventory.validate_wire_corpus_cache_contract(
+                    workflow, helper.replace(old, new, 1), dictionary
+                )
+
+    def test_wire_cache_workflow_mutations_are_rejected(self) -> None:
+        workflow = (inventory.ROOT / ".github/workflows/fuzz.yml").read_text()
+        helper = (inventory.ROOT / "scripts/fuzz_corpus_cache.py").read_text()
+        dictionary = (inventory.ROOT / "crates/wire/fuzz/bgp.dict").read_bytes()
+        mutations = (
+            ("main guard", "github.ref == 'refs/heads/main'", "true"),
+            ("restore action", "actions/cache/restore@v6", "actions/cache/restore@v5"),
+            ("save action", "actions/cache/save@v6", "actions/cache/save@v5"),
+            (
+                "cargo-fuzz version",
+                "cargo install cargo-fuzz --version 0.13.2 --locked",
+                "cargo install cargo-fuzz --locked",
+            ),
+            (
+                "staging",
+                "${{ runner.temp }}/wire-corpus-cache",
+                "crates/wire/fuzz/corpus",
+            ),
+            ("file lineage", "wire-fuzz-corpus-v1-main-", "wire-corpus-"),
+            ("run key", "${{ github.run_id }}-${{ github.run_attempt }}", "static"),
+            (
+                "matched-key receipt",
+                'echo "wire corpus cache matched key: $RESTORE_MATCHED_KEY"',
+                "echo cache-hit",
+            ),
+            ("manifest validation", '--cache-hit "$cache_hit"', "--cache-hit false"),
+            ("timeout", "timeout-minutes: 90", "timeout-minutes: 0"),
+            ("retention", "retention-days: 14", "retention-days: 90"),
+            (
+                "post-install cleanup",
+                'rm -rf -- "$WIRE_CACHE_BUNDLE"',
+                "true # staging cleanup removed",
+            ),
+        )
+        for name, old, new in mutations:
+            with self.subTest(contract=name), self.assertRaisesRegex(
+                inventory.InventoryError, "nightly wire corpus cache"
+            ):
+                inventory.validate_wire_corpus_cache_contract(
+                    workflow.replace(old, new, 1), helper, dictionary
+                )
+
+    def test_wire_cache_outage_and_step_order_are_load_bearing(self) -> None:
+        workflow = (inventory.ROOT / ".github/workflows/fuzz.yml").read_text()
+        helper = (inventory.ROOT / "scripts/fuzz_corpus_cache.py").read_text()
+        dictionary = (inventory.ROOT / "crates/wire/fuzz/bgp.dict").read_bytes()
+        restore_start = workflow.index("- name: Restore bounded wire corpus cache")
+        restore_continue = workflow.index("continue-on-error: true", restore_start)
+        save_start = workflow.index("- name: Save bounded wire corpus cache")
+        save_continue = workflow.index("continue-on-error: true", save_start)
+        save_path = workflow.index("path: ${{ env.WIRE_CACHE_BUNDLE }}", save_start)
+        for name, position in (
+            ("restore", restore_continue),
+            ("save", save_continue),
+        ):
+            mutated = (
+                workflow[:position]
+                + "continue-on-error: false"
+                + workflow[position + len("continue-on-error: true") :]
+            )
+            with self.subTest(path=name), self.assertRaisesRegex(
+                inventory.InventoryError, "outage"
+            ):
+                inventory.validate_wire_corpus_cache_contract(
+                    mutated, helper, dictionary
+                )
+
+        distinct_save_path = (
+            workflow[:save_path]
+            + "path: ${{ runner.temp }}/wire-corpus-save"
+            + workflow[save_path + len("path: ${{ env.WIRE_CACHE_BUNDLE }}") :]
+        )
+        with self.assertRaisesRegex(inventory.InventoryError, "action paths differ"):
+            inventory.validate_wire_corpus_cache_contract(
+                distinct_save_path, helper, dictionary
+            )
+
+        reordered = workflow.replace(
+            "python3 scripts/fuzz_corpus_cache.py seal",
+            "python3 scripts/fuzz_corpus_cache.py restore",
+            1,
+        )
+        with self.assertRaisesRegex(inventory.InventoryError, "order differs"):
+            inventory.validate_wire_corpus_cache_contract(reordered, helper, dictionary)
 
 
 if __name__ == "__main__":

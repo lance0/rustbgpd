@@ -8,9 +8,17 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: fuzz-wire-corpus-main
+  cancel-in-progress: false
+
 jobs:
   fuzz:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      WIRE_CORPUS_WRITER: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+      WIRE_CACHE_BUNDLE: ${{ runner.temp }}/wire-corpus-cache
     steps:
       - uses: actions/checkout@v7
       # fuzz/rust-nightly.txt holds the single reviewed nightly, shared with
@@ -34,10 +42,40 @@ jobs:
         with:
           toolchain: ${{ steps.nightly.outputs.toolchain }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo install cargo-fuzz --locked
+      - run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: Restore bounded wire corpus cache
+        id: wire-corpus-restore
+        if: env.WIRE_CORPUS_WRITER == 'true'
+        continue-on-error: true
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ env.WIRE_CACHE_BUNDLE }}
+          key: wire-fuzz-corpus-v1-main-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            wire-fuzz-corpus-v1-main-
+      - name: Validate and install wire corpus
+        env:
+          RESTORE_MATCHED_KEY: ${{ steps.wire-corpus-restore.outputs.cache-matched-key }}
+          RESTORE_OUTCOME: ${{ steps.wire-corpus-restore.outcome }}
+        run: |
+          cache_hit=false
+          if [ "$WIRE_CORPUS_WRITER" = true ] && [ "$RESTORE_OUTCOME" = success ] && [ -n "$RESTORE_MATCHED_KEY" ]; then
+            cache_hit=true
+            echo "wire corpus cache matched key: $RESTORE_MATCHED_KEY"
+          elif [ -e "$WIRE_CACHE_BUNDLE" ]; then
+            python3 -c 'import os, shutil; p=os.environ["WIRE_CACHE_BUNDLE"]; shutil.rmtree(p, ignore_errors=True)'
+            echo "wire corpus restore unavailable; cleaned staging and falling back to tracked seeds"
+          fi
+          python3 scripts/fuzz_corpus_cache.py restore \
+            --cache-bundle "$WIRE_CACHE_BUNDLE" \
+            --seeds crates/wire/fuzz/seeds \
+            --live crates/wire/fuzz/corpus \
+            --cache-hit "$cache_hit"
+          rm -rf -- "$WIRE_CACHE_BUNDLE"
+          echo "wire corpus restore staging cleared before campaign"
       # Every target in each fuzz crate, 2 minutes apiece. Seed corpora are
       # tracked under fuzz/seeds/<target>/ (fuzz/corpus/ is gitignored, so a
-      # CI run starts from the seeds).
+      # CI run starts from a validated prior bundle or the tracked seeds).
       - name: Fuzz wire decoders (2 minutes per target)
         run: |
           cd crates/wire
@@ -70,7 +108,9 @@ jobs:
             mkdir -p "fuzz/corpus/$t"
             seeds=""
             [ -d "fuzz/seeds/$t" ] && seeds="fuzz/seeds/$t"
-            cargo fuzz run "$t" "fuzz/corpus/$t" $seeds -- -max_total_time=120 -max_len="$max_len"
+            dict_args=()
+            [ "$t" != parse_rd ] && dict_args+=("-dict=fuzz/bgp.dict")
+            cargo fuzz run "$t" "fuzz/corpus/$t" $seeds -- -max_total_time=120 -max_len="$max_len" "${dict_args[@]}"
           done
       - name: Fuzz rpol policy frontend (2 minutes per target)
         run: |
@@ -167,6 +207,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: fuzz-crashes
+          retention-days: 14
           path: |
             crates/wire/fuzz/artifacts/
             crates/policy/fuzz/artifacts/
@@ -174,3 +215,26 @@ jobs:
             crates/mrt/fuzz/artifacts/
             crates/bfd/fuzz/artifacts/
             crates/rpki/fuzz/artifacts/
+      - name: Seal bounded wire corpus cache
+        id: wire-corpus-seal
+        if: success() && env.WIRE_CORPUS_WRITER == 'true'
+        run: |
+          set +e
+          python3 scripts/fuzz_corpus_cache.py seal \
+            --live crates/wire/fuzz/corpus \
+            --output "$WIRE_CACHE_BUNDLE"
+          status=$?
+          set -e
+          if [ "$status" -eq 3 ]; then
+            echo "save=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          [ "$status" -eq 0 ] || exit "$status"
+          echo "save=true" >> "$GITHUB_OUTPUT"
+      - name: Save bounded wire corpus cache
+        if: steps.wire-corpus-seal.outputs.save == 'true' && env.WIRE_CORPUS_WRITER == 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.WIRE_CACHE_BUNDLE }}
+          key: wire-fuzz-corpus-v1-main-${{ github.run_id }}-${{ github.run_attempt }}

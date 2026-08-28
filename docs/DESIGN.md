@@ -617,6 +617,16 @@ Run them per crate — `cd` into the owning crate and use `cargo fuzz list` /
 under each crate's `fuzz/seeds/<target>/`. The repo-root `fuzz/` directory is
 OSS-Fuzz build scaffolding, not a runnable target set.
 
+All 12 wire targets have tracked roots. The scheduled workflow can reuse one
+versioned `main`-lineage corpus, but cached bytes are staged outside the
+checkout and must pass the exact target layout, regular-file, per-target
+`max_len`, sorted SHA-256 manifest, 20,000-file, and 16 MiB checks before they
+enter the live corpus. A cache miss or service outage falls back to the tracked
+roots; invalid matched content stops before the campaign. Successful runs seal
+a fresh staging tree, and only `main` schedule/manual runs write the lineage.
+This preserves deterministic tracked inputs while allowing nightly discovery
+to accumulate within explicit bounds.
+
 Fuzz runs on a nightly CI schedule (`fuzz.yml`, all targets); PRs gate on the unit/property/interop suites.
 
 ### Property Tests
