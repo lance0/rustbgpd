@@ -1,6 +1,7 @@
 # Interned attribute-container layout receipt (August 2026)
 
-Status: preregistered evidence campaign; no production representation change.
+Status: completed negative evidence campaign; no production representation
+change.
 
 ## Question
 
@@ -95,7 +96,7 @@ bench/compare-rib-memory.sh \
   --profile full
 ```
 
-The measured section will record the exact harness commit, quiet-host/lock
+The measured section records the exact harness commit, quiet-host/lock
 preconditions, output checksums, all structural rows, and the sanitized DHAT
 derivative. Raw DHAT JSON, host paths, process IDs, and mutable image tags do
 not enter the repository.
@@ -109,8 +110,8 @@ calibrated one-set-per-seven ratio, the full-RIB shape has 2,700,000 Route
 copies and 128,572 attribute sets. A slice Arc adds 20.6 MiB of pointer storage
 and removes 2.9 MiB of Vec headers: a net **17.7 MiB increase**. The
 route-reflector fanout shape has 4,500,000 Route copies at the same set count,
-for a net **31.4 MiB increase**. Even the deliberately favorable one-unique-
-set-per-prefix bound only breaks even before allocator overhead.
+for a net **31.4 MiB increase**. Even the deliberately favorable full-RIB
+bound of one unique set per prefix only breaks even before allocator overhead.
 
 The baseline revision predates the two representative rows, so their observed
 live-byte columns are intentionally absent rather than presented as an A/B.
