@@ -35,17 +35,53 @@ EXPECTED_TARGETS: dict[str, tuple[str, ...]] = {
     ),
 }
 EXPECTED_COUNT = 21
-WIRE_EXTENDED_TARGETS = {
+WIRE_NIGHTLY_MAX_LENS = {
+    "decode_bgpls": 4_096,
+    "decode_evpn": 4_096,
+    "decode_flowspec": 4_096,
+    "decode_labeled": 4_096,
+    "decode_message": 65_535,
+    "decode_open": 4_077,
+    "decode_route_refresh": 65_516,
+    "decode_rtc": 4_096,
+    "decode_update": 65_516,
+    "decode_vpn": 4_096,
+    "encode_evpn": 4_096,
+    "parse_rd": 4_096,
+}
+WIRE_HOSTED_CONTRACTS = {
     "decode_message": (
         65_535,
         "decode_message(&mut buf, rustbgpd_wire::EXTENDED_MAX_MESSAGE_LEN)",
     ),
+    "decode_open": (
+        4_077,
+        "if data.len()\n"
+        "        > usize::from(rustbgpd_wire::MAX_MESSAGE_LEN)\n"
+        "            - rustbgpd_wire::constants::HEADER_LEN\n"
+        "    {\n"
+        "        return;\n"
+        "    }",
+    ),
+    "decode_route_refresh": (
+        65_516,
+        "if data.len()\n"
+        "        > usize::from(rustbgpd_wire::EXTENDED_MAX_MESSAGE_LEN)\n"
+        "            - rustbgpd_wire::constants::HEADER_LEN\n"
+        "    {\n"
+        "        return;\n"
+        "    }",
+    ),
     "decode_update": (
         65_516,
-        "usize::from(rustbgpd_wire::EXTENDED_MAX_MESSAGE_LEN)",
+        "if data.len()\n"
+        "        > usize::from(rustbgpd_wire::EXTENDED_MAX_MESSAGE_LEN)\n"
+        "            - rustbgpd_wire::constants::HEADER_LEN\n"
+        "    {\n"
+        "        return;\n"
+        "    }",
     ),
 }
-WIRE_EXTENDED_MAX_LEN = 65_535
 CAMPAIGN_BOUNDS: dict[str, tuple[str, int]] = {
     "crates/bfd": ("decode_bfd_control", 256),
     "crates/rpki": ("decode_rtr_pdu", 65_535),
@@ -206,12 +242,34 @@ def validate_pipeline_enrollment(builder: str, workflow: str) -> None:
     )
     if wire_block is None:
         raise InventoryError("nightly workflow has no crates/wire campaign")
-    if f"-max_len={WIRE_EXTENDED_MAX_LEN}" not in wire_block.group("body"):
+    wire_body = wire_block.group("body")
+    bound_rows = re.findall(
+        r"(?m)^\s+(?P<target>[a-z][a-z0-9_]*)\) max_len=(?P<max_len>[0-9]+) ;;$",
+        wire_body,
+    )
+    bound_targets = [target for target, _ in bound_rows]
+    if len(bound_targets) != len(set(bound_targets)):
+        raise InventoryError("nightly wire max_len dispatch has duplicate targets")
+    actual_bounds = {target: int(max_len) for target, max_len in bound_rows}
+    if actual_bounds != WIRE_NIGHTLY_MAX_LENS:
         raise InventoryError(
-            "nightly workflow does not enforce the RFC 8654 wire max_len="
-            f"{WIRE_EXTENDED_MAX_LEN}"
+            "nightly wire target-specific max_len dispatch differs: "
+            f"expected {WIRE_NIGHTLY_MAX_LENS}, got {actual_bounds}"
         )
-    for target, (hosted_max_len, required_source) in WIRE_EXTENDED_TARGETS.items():
+    if 'case "$t" in' not in wire_body:
+        raise InventoryError("nightly wire max_len dispatch has no case statement")
+    if (
+        '*) echo "wire fuzz target has no reviewed max_len: $t" >&2; exit 1 ;;'
+        not in wire_body
+    ):
+        raise InventoryError("nightly wire max_len dispatch has no fail-closed default")
+    if '-max_len="$max_len"' not in wire_body:
+        raise InventoryError("nightly wire campaign does not use its selected max_len")
+
+    if tuple(sorted(WIRE_NIGHTLY_MAX_LENS)) != EXPECTED_TARGETS["crates/wire"]:
+        raise InventoryError("nightly wire max_len map differs from target inventory")
+
+    for target, (hosted_max_len, required_source) in WIRE_HOSTED_CONTRACTS.items():
         options = ROOT / "crates/wire/fuzz" / f"{target}.options"
         expected_options = f"[libfuzzer]\nmax_len = {hosted_max_len}\n"
         try:
@@ -232,7 +290,7 @@ def validate_pipeline_enrollment(builder: str, workflow: str) -> None:
         if required_source not in harness_text:
             raise InventoryError(
                 f"{harness.relative_to(ROOT)} must enforce its "
-                "EXTENDED_MAX_MESSAGE_LEN contract"
+                "reviewed max_len contract"
             )
 
     for crate, (target, max_len) in CAMPAIGN_BOUNDS.items():

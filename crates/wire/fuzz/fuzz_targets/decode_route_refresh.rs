@@ -14,7 +14,10 @@ fuzz_target!(|data: &[u8]| {
     // In the real session path the body length comes from a header already
     // bounded by the negotiated maximum message size; mirror that bound so
     // the re-encoded message stays decodable (RFC 8654 extended limit).
-    if data.len() > usize::from(rustbgpd_wire::EXTENDED_MAX_MESSAGE_LEN) - 19 {
+    if data.len()
+        > usize::from(rustbgpd_wire::EXTENDED_MAX_MESSAGE_LEN)
+            - rustbgpd_wire::constants::HEADER_LEN
+    {
         return;
     }
     let mut buf = Bytes::copy_from_slice(data);

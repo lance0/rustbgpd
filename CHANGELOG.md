@@ -47,7 +47,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The nightly and hosted wire fuzz campaigns now exercise complete BGP
   messages through the 65,535-byte RFC 8654 limit and UPDATE bodies through
   the corresponding 65,516-byte framing boundary instead of stopping at the
-  legacy 4,096-byte ceiling.
+  legacy 4,096-byte ceiling. ROUTE-REFRESH bodies use that same extended
+  framing boundary, while pre-negotiation OPEN bodies retain their exact
+  4,077-byte legacy boundary.
 
 - Policy mutation preflight failures now preserve `NOT_FOUND`, `INVALID_ARGUMENT`, and
   `FAILED_PRECONDITION` while retaining the closed `policy_preflight_rejected` diagnostic.
