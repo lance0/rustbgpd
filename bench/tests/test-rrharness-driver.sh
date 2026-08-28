@@ -69,6 +69,24 @@ expect_rc 2 '--diff-path without --pin' "$driver" --validate-only \
 expect_rc 2 'pinned diff drift' "$driver" --validate-only \
   --base "$base" --head "$head" --pin "$pin" --diff-path bench/scale/rrharness/README.md
 
+"$driver" --validate-only --base "$base" --head "$head" --max-regression 10 >/dev/null
+"$driver" --validate-only --base "$base" --head "$head" \
+  --pin "$pin" --diff-path "$diff_path" --max-regression 2.5 >/dev/null
+expect_rc 2 'zero max-regression' "$driver" --validate-only \
+  --base "$base" --head "$head" --max-regression 0
+expect_rc 2 'zero-decimal max-regression' "$driver" --validate-only \
+  --base "$base" --head "$head" --max-regression 0.00
+expect_rc 2 'non-numeric max-regression' "$driver" --validate-only \
+  --base "$base" --head "$head" --max-regression fast
+rg -F -- 'gate_args+=(--max-regression "$max_regression")' "$driver" >/dev/null || {
+  printf 'rrharness driver does not thread --max-regression into the gate arguments\n' >&2
+  exit 1
+}
+rg -F 'receipt_status=regression-gate-passed' "$driver" >/dev/null || {
+  printf 'rrharness driver does not report the regression-gate receipt status\n' >&2
+  exit 1
+}
+
 cp "$driver" "$external_driver"
 chmod +x "$external_driver"
 expect_rc 2 'external driver' "$external_driver" --validate-only --base "$base" --head "$head"

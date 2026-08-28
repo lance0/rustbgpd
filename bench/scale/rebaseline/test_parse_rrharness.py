@@ -342,6 +342,88 @@ rss_end_mib 210
             self.assertEqual({row["head_improvement_percent_mean"] for row in rungs}, {"14.000"})
             self.assertIn("head-faster", result.stdout)
 
+    def test_max_regression_passes_flat_matrix_on_every_rung(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_text:
+            directory = Path(directory_text)
+            matrix = directory / "matrix.csv"
+            raw_dir = directory / "raw"
+            comparison = directory / "comparison.csv"
+            # Flat head misses the pinned 15% gates; the uniform regression
+            # gate replaces them, so a flat matrix passes.
+            self.write_matrix(matrix, raw_dir, head_multiplier=1.0)
+            self.run_parser(
+                "compare",
+                "--input",
+                str(matrix),
+                "--raw-dir",
+                str(raw_dir),
+                "--output",
+                str(comparison),
+                "--max-regression",
+                "10",
+            )
+            with comparison.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(len(rows), 8)
+            self.assertEqual({row["verdict"] for row in rows}, {"pass"})
+            self.assertEqual({row["maximum_regression_percent"] for row in rows}, {"10.0"})
+            self.assertEqual({row["required_improvement_percent"] for row in rows}, {"0.0"})
+
+    def test_max_regression_fails_regressing_matrix_on_1000_client_rungs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_text:
+            directory = Path(directory_text)
+            matrix = directory / "matrix.csv"
+            raw_dir = directory / "raw"
+            comparison = directory / "comparison.csv"
+            # A 31% head regression: exactly the shape the pinned gates gave
+            # 1000-client rungs no budget to fail on.
+            self.write_matrix(matrix, raw_dir, head_multiplier=0.69)
+            self.run_parser(
+                "compare",
+                "--input",
+                str(matrix),
+                "--raw-dir",
+                str(raw_dir),
+                "--output",
+                str(comparison),
+                "--max-regression",
+                "10",
+                success=False,
+            )
+            with comparison.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual({row["verdict"] for row in rows}, {"fail-regression"})
+            self.assertIn("1000", {row["clients"] for row in rows})
+
+    def test_max_regression_rejects_no_gates_combo_and_bad_values(self) -> None:
+        with tempfile.TemporaryDirectory() as directory_text:
+            directory = Path(directory_text)
+            matrix = directory / "matrix.csv"
+            raw_dir = directory / "raw"
+            comparison = directory / "comparison.csv"
+            self.write_matrix(matrix, raw_dir)
+            invalid = (
+                ("--no-gates", "--max-regression", "10"),
+                ("--max-regression", "0"),
+                ("--max-regression", "-5"),
+                ("--max-regression", "NaN"),
+                ("--max-regression", "fast"),
+            )
+            for extra in invalid:
+                with self.subTest(extra=extra):
+                    self.run_parser(
+                        "compare",
+                        "--input",
+                        str(matrix),
+                        "--raw-dir",
+                        str(raw_dir),
+                        "--output",
+                        str(comparison),
+                        *extra,
+                        success=False,
+                    )
+                    self.assertFalse(comparison.exists())
+
     def test_matrix_rejects_tampered_numeric_and_hash_evidence(self) -> None:
         mutations = {
             "nonfinite rate": ("rate", "NaN"),

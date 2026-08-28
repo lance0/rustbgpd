@@ -2,7 +2,9 @@
 """Parse, summarise, and optionally gate the rrharness comparison matrix.
 
 `compare` applies the pinned throughput gates by default; `--no-gates` keeps
-every row advisory and `--summary PATH` adds a per-rung table.
+every row advisory, `--max-regression PCT` replaces the pinned gates with one
+uniform regression ceiling on every rung, and `--summary PATH` adds a per-rung
+table.
 """
 
 from __future__ import annotations
@@ -132,6 +134,16 @@ def finite_number(text: str, field: str) -> float:
         raise ValueError(f"{field} is not a number: {text!r}") from error
     if not math.isfinite(value) or value < 0:
         raise ValueError(f"{field} must be finite and nonnegative")
+    return value
+
+
+def positive_percentage(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(f"not a number: {text!r}") from error
+    if not math.isfinite(value) or value <= 0:
+        raise argparse.ArgumentTypeError("must be a positive percentage")
     return value
 
 
@@ -421,8 +433,12 @@ def compare_command(args: argparse.Namespace) -> None:
             maximum_regression = 0.0
             verdict = "advisory"
         else:
-            required_improvement = 15.0 if mode == "churn" or clients == 1000 else 0.0
-            maximum_regression = 5.0 if clients == 256 else 0.0
+            if args.max_regression is not None:
+                required_improvement = 0.0
+                maximum_regression = args.max_regression
+            else:
+                required_improvement = 15.0 if mode == "churn" or clients == 1000 else 0.0
+                maximum_regression = 5.0 if clients == 256 else 0.0
             verdict = "pass"
             if required_improvement and improvement + 1e-9 < required_improvement:
                 verdict = "fail-improvement"
@@ -453,7 +469,8 @@ def compare_command(args: argparse.Namespace) -> None:
     if args.summary is not None:
         write_summary(args.summary, comparisons)
     if failed:
-        raise ValueError("one or more LAN-395 throughput gates failed")
+        gate_set = "max-regression" if args.max_regression is not None else "LAN-395"
+        raise ValueError(f"one or more {gate_set} throughput gates failed")
 
 
 def write_summary(path: Path, comparisons: list[dict[str, object]]) -> None:
@@ -534,10 +551,18 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("--raw-dir", type=Path, required=True)
     compare.add_argument("--output", type=Path, required=True)
     compare.add_argument("--summary", type=Path, help="per-rung summary CSV (also printed)")
-    compare.add_argument(
+    gates = compare.add_mutually_exclusive_group()
+    gates.add_argument(
         "--no-gates",
         action="store_true",
         help="keep every row advisory instead of applying the pinned throughput gates",
+    )
+    gates.add_argument(
+        "--max-regression",
+        type=positive_percentage,
+        metavar="PCT",
+        help="gate every rung on one uniform maximum regression of PCT percent "
+        "instead of the pinned throughput gates",
     )
     compare.set_defaults(run=compare_command)
     return parser
