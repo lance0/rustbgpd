@@ -28,6 +28,7 @@ network — so it has no fuzz surface.
 | `decode_flowspec` | wire | RFC 8955/8956 FlowSpec NLRI, both AFIs | never panics |
 | `decode_evpn` | wire | RFC 7432 EVPN route types 1–5 | value round-trip |
 | `encode_evpn` | wire | Constructor-space EVPN encode (inputs the decoder alone cannot reach) | encode is a function |
+| `encode_update` | wire | Bounded canonical structured IPv4 UPDATEs with encoder-admitted path attributes and NLRI | full encode length is exact; decode consumes all bytes with no malformed attributes; canonical value and re-encoding are stable |
 | `decode_bgpls` | wire | RFC 9552 BGP-LS NLRI (+ VPN flavor) and attr-29 TLVs | value round-trip (the M73 byte-fidelity promise, generalized) |
 | `decode_vpn` | wire | VPNv4/VPNv6 NLRI: RD, label stacks, RFC 8277 §2.4 withdraw compatibility parsing | value round-trip (preserve-verbatim promise) |
 | `decode_labeled` | wire | RFC 8277 labeled-unicast (SAFI 4), announce + withdraw, legacy + Add-Path | announce: lossless round-trip; withdraw: second-generation idempotence (the encoder normalizes to the 0x800000 compatibility field by design) |
@@ -54,7 +55,7 @@ Requires the reviewed nightly and cargo-fuzz release
 ```sh
 cd crates/wire
 cargo +nightly fuzz list
-cargo +nightly fuzz run decode_update fuzz/corpus/decode_update fuzz/seeds/decode_update -- -max_total_time=300 -max_len=4096
+cargo +nightly fuzz run encode_update fuzz/corpus/encode_update fuzz/seeds/encode_update -- -max_total_time=300 -max_len=4096
 ```
 
 Run the same `list`/`run` flow from `crates/bfd`, `crates/policy`,
@@ -75,12 +76,12 @@ A crash writes a reproducer under `fuzz/artifacts/<target>/`; replay it with
   campaign installs either a validated prior `main` bundle or an exact copy of
   the tracked wire seeds before running.
 - `crates/wire/fuzz/bgp.dict` — reviewed BGP marker, message, attribute, and
-  AFI/SAFI byte tokens. Nightly and hosted builders pass it to the 11 binary
+  AFI/SAFI byte tokens. Nightly and hosted builders pass it to the 12 binary
   wire targets; the textual `parse_rd` target does not use it.
 
 The nightly wire bundle is an availability optimization, not a source of
 truth. `scripts/fuzz_corpus_cache.py` restores it into runner-temporary staging
-and accepts only the exact 12 target directories, one level of regular files,
+and accepts only the exact 13 target directories, one level of regular files,
 each target's reviewed `max_len`, a byte-matching sorted SHA-256 manifest, at
 most 20,000 files, and at most 16 MiB. A miss or cache-service outage is
 reported and falls back to tracked seeds. If a matched bundle is incomplete,
@@ -130,7 +131,7 @@ which cannot meet rustbgpd's fail-closed corpus-reuse rule. ClusterFuzzLite's
 Rust integration also documents AddressSanitizer as the only supported
 sanitizer, so the manual workflow does not claim unsupported coverage mode.
 
-`scripts/check_fuzz_target_inventory.py` gates the exact 21-target inventory in
+`scripts/check_fuzz_target_inventory.py` gates the exact 22-target inventory in
 the ordinary PR/push `CI / check` job, before a manual ClusterFuzzLite build,
 and again inside the shared fuzzer build path. It compares cargo metadata and
 `fuzz_targets/*.rs` against an explicit globally-unique inventory, including
@@ -160,7 +161,7 @@ Rust builder does not bundle it.
 The shared build uses one explicit Cargo target directory for all six fuzz
 crates and fails unless every expected executable exists before copying it to
 the integration output. Per-target libFuzzer options travel with the binaries,
-and the reviewed BGP dictionary travels with all 11 binary wire targets, so
+and the reviewed BGP dictionary travels with all 12 binary wire targets, so
 hosted campaigns enforce the same input bounds and token set as the
 in-repository harnesses and nightly commands. This is a build-layout invariant,
 not a wall-clock performance claim; this change carries no retained benchmark

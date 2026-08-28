@@ -600,12 +600,12 @@ containerlab is the test harness — not "where feasible," but the default. Ever
 
 ### Fuzzing
 
-21 libFuzzer targets across six crates, each with its own `fuzz/` workspace:
+22 libFuzzer targets across six crates, each with its own `fuzz/` workspace:
 
-- `crates/wire/fuzz` (12) — OPEN / UPDATE / message and Route Refresh
+- `crates/wire/fuzz` (13) — OPEN / UPDATE / message and Route Refresh
   decoding, Route Distinguisher parsing, and per-family NLRI decoders
   (FlowSpec, EVPN, BGP-LS, MPLS-VPN, labeled-unicast, RT-Constrain) plus an
-  EVPN encode target.
+  EVPN encode target and a canonical structured UPDATE encoder target.
 - `crates/policy/fuzz` (4) — `.rpol` compilation, dataset parsing, mixed-chain compilation, and mixed-chain explain/live-walk agreement.
 - `crates/mrt/fuzz` (2) — snapshot-reader drain and warm-bundle manifest.
 - `crates/bfd/fuzz` (1) — BFD control-packet decoding.
@@ -617,7 +617,7 @@ Run them per crate — `cd` into the owning crate and use `cargo fuzz list` /
 under each crate's `fuzz/seeds/<target>/`. The repo-root `fuzz/` directory is
 OSS-Fuzz build scaffolding, not a runnable target set.
 
-All 12 wire targets have tracked roots. The scheduled workflow can reuse one
+All 13 wire targets have tracked roots. The scheduled workflow can reuse one
 versioned `main`-lineage corpus, but cached bytes are staged outside the
 checkout and must pass the exact target layout, regular-file, per-target
 `max_len`, sorted SHA-256 manifest, 20,000-file, and 16 MiB checks before they

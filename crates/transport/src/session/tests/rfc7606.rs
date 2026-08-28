@@ -58,6 +58,122 @@ async fn rfc7606_treat_as_withdraw_removes_routes_and_keeps_session() {
     assert_single_malformed_disposition(&session, "treat_as_withdraw");
 }
 
+/// RFC 9234 / RFC 7606 field regression from the 2025 Qrator incident: the
+/// captured OTC attribute set Extended Length but supplied the ordinary
+/// one-octet length first, so `04 00` declared 1024 bytes while only the
+/// four-byte ASN `0000fe4c` remained. The affected route is withdrawn without
+/// resetting the session or admitting the malformed replacement to the RIB.
+/// Source: <https://radar.qrator.net/blog/articles/226>.
+#[tokio::test]
+async fn qrator_malformed_extended_length_otc_withdraws_route_without_reset() {
+    const CAPTURED_OTC: [u8; 8] = [0xf0, 0x23, 0x04, 0x00, 0x00, 0x00, 0xfe, 0x4c];
+
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    rfc7606_drain(&mut rib_rx);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 35), 32);
+
+    session
+        .process_update(rfc7606_update(rfc7606_attr_bytes(&[]), &[prefix]))
+        .await;
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected initial clean route");
+    };
+    assert_eq!(announced.len(), 1);
+
+    session
+        .process_update(rfc7606_update(rfc7606_attr_bytes(&CAPTURED_OTC), &[prefix]))
+        .await;
+    let RibUpdate::RoutesReceived {
+        announced,
+        withdrawn,
+        ..
+    } = rib_rx
+        .try_recv()
+        .expect("treat-as-withdraw must reach the RIB")
+    else {
+        panic!("expected withdrawal for malformed OTC replacement");
+    };
+    assert!(
+        announced.is_empty(),
+        "the malformed OTC announcement must not reach the RIB"
+    );
+    assert_eq!(withdrawn, vec![(Prefix::V4(prefix), 0)]);
+    assert!(rib_rx.try_recv().is_err());
+    assert_eq!(session.known_prefix_count(), 0);
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert_single_malformed_disposition(&session, "treat_as_withdraw");
+}
+
+/// RFC 8669 field regression from the 2025 Junos/Arista Prefix-SID incident.
+/// The captured type-40 body contains nine complete reserved type-0/length-0
+/// TLVs followed by one byte of a tenth TLV header. The trailing truncation is
+/// Attribute Length Error / attribute-discard: the route and session survive,
+/// while type 40 cannot cross the RIB-to-outbound boundary.
+/// Source: <https://blog.benjojo.co.uk/post/bgp-attr-40-junos-arista-session-reset-incident>.
+#[tokio::test]
+async fn captured_truncated_prefix_sid_is_discarded_before_readvertisement() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    assert!(matches!(
+        read_single_bgp_message(&mut server).await,
+        Message::Open(_)
+    ));
+    assert!(matches!(
+        read_single_bgp_message(&mut server).await,
+        Message::Keepalive
+    ));
+    rfc7606_drain(&mut rib_rx);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 40), 32);
+    let mut captured_prefix_sid = vec![0xe0, 0x28, 0x1c];
+    captured_prefix_sid.extend([0_u8; 28]);
+
+    session
+        .process_update(rfc7606_update(
+            rfc7606_attr_bytes(&captured_prefix_sid),
+            &[prefix],
+        ))
+        .await;
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("attribute-discard route must reach the RIB");
+    };
+    assert_eq!(announced.len(), 1);
+    assert_eq!(announced[0].prefix, Prefix::V4(prefix));
+    assert!(
+        announced[0]
+            .attributes
+            .iter()
+            .all(|attribute| attribute.type_code() != 40),
+        "malformed Prefix-SID must be absent at the RIB boundary"
+    );
+
+    session.send_route_update(OutboundRouteUpdate {
+        exact_export_snapshot: Some(session.publish_export_profile()),
+        announce: vec![announced[0].clone()].into(),
+        next_hop_override: vec![None].into(),
+        ..empty_outbound_update()
+    });
+    let Message::Update(egress) = read_single_bgp_message(&mut server).await else {
+        panic!("expected outbound UPDATE");
+    };
+    let parsed = egress.parse(true, false, &[]).unwrap();
+    assert_eq!(parsed.announced.len(), 1);
+    assert_eq!(parsed.announced[0].prefix, prefix);
+    assert!(
+        parsed
+            .attributes
+            .iter()
+            .all(|attribute| attribute.type_code() != 40),
+        "discarded Prefix-SID must not be re-advertised"
+    );
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert_single_malformed_disposition(&session, "attribute_discard");
+}
+
 /// Load-bearing RFC 9774 proof: deleting the raw `AS_SET` inspection admits
 /// both announcements, so the exact mixed-withdrawal and prefix-state
 /// assertions fail. The explicit/replacement overlap also proves one output.

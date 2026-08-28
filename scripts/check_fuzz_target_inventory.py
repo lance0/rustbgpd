@@ -33,10 +33,11 @@ EXPECTED_TARGETS: dict[str, tuple[str, ...]] = {
         "decode_update",
         "decode_vpn",
         "encode_evpn",
+        "encode_update",
         "parse_rd",
     ),
 }
-EXPECTED_COUNT = 21
+EXPECTED_COUNT = 22
 WIRE_NIGHTLY_MAX_LENS = {
     "decode_bgpls": 4_096,
     "decode_evpn": 4_096,
@@ -49,6 +50,7 @@ WIRE_NIGHTLY_MAX_LENS = {
     "decode_update": 65_516,
     "decode_vpn": 4_096,
     "encode_evpn": 4_096,
+    "encode_update": 4_096,
     "parse_rd": 4_096,
 }
 WIRE_HOSTED_CONTRACTS = {
@@ -82,6 +84,10 @@ WIRE_HOSTED_CONTRACTS = {
         "    {\n"
         "        return;\n"
         "    }",
+    ),
+    "encode_update": (
+        4_096,
+        "if data.len() > 4_096 {\n        return;\n    }",
     ),
 }
 CAMPAIGN_BOUNDS: dict[str, tuple[str, int]] = {
@@ -134,6 +140,7 @@ EXPECTED_WIRE_SEED_PATHS = (
     "crates/wire/fuzz/seeds/decode_update/malformed_next_hop_length",
     "crates/wire/fuzz/seeds/decode_vpn/vpnv4_single_label",
     "crates/wire/fuzz/seeds/encode_evpn/imet_v4_constructor",
+    "crates/wire/fuzz/seeds/encode_update/canonical_update_constructor",
     "crates/wire/fuzz/seeds/parse_rd/type0",
 )
 EXPECTED_SEEDS: dict[str, bytes] = {
@@ -194,6 +201,7 @@ EXPECTED_SEED_SHA256 = {
     "crates/wire/fuzz/seeds/decode_update/malformed_next_hop_length": "2dba0dd0f3cfa2b63cb9406db9298b1bb6b0008419aa6591cf213b522263ff70",
     "crates/wire/fuzz/seeds/decode_vpn/vpnv4_single_label": "c0c5cea7a721e0e1e7348b62d5d079968beec6c739f72e2fd80c7ca0a2efec2b",
     "crates/wire/fuzz/seeds/encode_evpn/imet_v4_constructor": "46c8256c29f509d9aef3209750fcdf935cd0cbb2936692b65a5f85bf2897cf20",
+    "crates/wire/fuzz/seeds/encode_update/canonical_update_constructor": "befd0d99b0d5dd5847cb1af164c8ff004472ac8631727ae268fb4fd60887fbd4",
     "crates/wire/fuzz/seeds/parse_rd/type0": "32d1dcb763d1b36497a4993e088047e25be3dedb9068ec718a531f397bd2372d",
 }
 
@@ -571,7 +579,7 @@ def validate_wire_corpus_cache_contract(
         "uses: actions/cache/restore@v6",
         "python3 scripts/fuzz_corpus_cache.py restore",
         'rm -rf -- "$WIRE_CACHE_BUNDLE"',
-        "- name: Fuzz wire decoders",
+        "- name: Fuzz wire codecs",
         "python3 scripts/fuzz_corpus_cache.py seal",
         "uses: actions/cache/save@v6",
     )

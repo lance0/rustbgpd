@@ -14,7 +14,8 @@ jobs:
     runs-on: ubuntu-latest
     # A cold run without stored corpus artifacts spent about 6m42s per target
     # waiting for each missing artifact before fuzzing. Leave enough room for
-    # all 21 targets plus the observed 14-minute ASan build.
+    # all 22 targets plus the observed 14-minute ASan build. Per-target
+    # `.options` files carry reviewed input bounds into this hosted lane.
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v7

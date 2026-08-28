@@ -8,7 +8,7 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
-libfuzzer-sys = "0.4"
+libfuzzer-sys = { version = "0.4", features = ["arbitrary-derive"] }
 bytes = "1"
 
 [dependencies.rustbgpd-wire]
@@ -41,6 +41,12 @@ doc = false
 [[bin]]
 name = "encode_evpn"
 path = "fuzz_targets/encode_evpn.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "encode_update"
+path = "fuzz_targets/encode_update.rs"
 test = false
 doc = false
 
