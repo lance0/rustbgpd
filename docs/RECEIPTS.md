@@ -190,6 +190,7 @@ covered by later CI receipts). Procedures and results:
 | Session-notification flapstorm depth | One host and one 700-session, 400,400-prefix run across three 50-session flap rounds. Ten phase checkpoints drain the notification accounting population to zero with zero parse/send/correctness errors; daemon-lifetime high-water rises from 8 to 30. This proves dequeue accounting only, not a per-round peak, capacity, latency, memory, bound, or optimization | [`artifacts`](perf/artifacts/session-notification-flapstorm-2026-08/README.md) |
 | End-to-end bgperf2 | Same-host convergence/CPU/peak raw cgroup-usage comparison vs BIRD, GoBGP, and FRR | [`BENCHMARKS.md`](BENCHMARKS.md#end-to-end-system-benchmarks) |
 | High-N RIB memory | Structural memory at 100k/500k/900k prefixes; A/B via `bench/compare-rib-memory.sh` under the shared host lock | [`BENCHMARKS.md`](BENCHMARKS.md#memory-footprint), [`../bench/README.md`](../bench/README.md) |
+| Interned attribute-container layout | Pinned negative structural + DHAT receipt: at one unique set per seven prefixes, a slice Arc would add 17.7 MiB at 900k full RIB and 31.4 MiB at RR fanout, so the production migration is rejected | [`perf/attribute-layout-2026-08.md`](perf/attribute-layout-2026-08.md) |
 | EVPN M33 load gate | 50k reflected Type 2 routes + 60 s of 1k-rps churn | [`BENCHMARKS.md`](BENCHMARKS.md#evpn-rr-scale-m33) |
 
 ## Soak receipts

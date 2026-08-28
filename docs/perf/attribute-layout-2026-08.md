@@ -102,4 +102,35 @@ not enter the repository.
 
 ## Measured result
 
-Pending the resource-exclusive run at the committed harness SHA.
+**Rejected.** The full structural campaign measured harness revision
+`73380e1cdc0519a4af5b4c3559bb4922b14582f7` against
+`f822fd2ba407117dcf8a6d7faa32018b77dae250`. At 900,000 prefixes and the
+calibrated one-set-per-seven ratio, the full-RIB shape has 2,700,000 Route
+copies and 128,572 attribute sets. A slice Arc adds 20.6 MiB of pointer storage
+and removes 2.9 MiB of Vec headers: a net **17.7 MiB increase**. The
+route-reflector fanout shape has 4,500,000 Route copies at the same set count,
+for a net **31.4 MiB increase**. Even the deliberately favorable one-unique-
+set-per-prefix bound only breaks even before allocator overhead.
+
+The baseline revision predates the two representative rows, so their observed
+live-byte columns are intentionally absent rather than presented as an A/B.
+The rejection comes from compiler-reported 64-bit pointer/header sizes and the
+exact Route-copy/set counts. Every pre-existing shape was byte-identical
+between revisions, confirming that the evidence-only harness changed no
+production representation.
+
+The structural run held the shared benchmark mutex and began at a one-minute
+load of 1.91. A separate production-daemon DHAT attribution reran from the
+same source at 2026-08-28T02:36:38Z with load `0.04 0.66 1.56`, bgperf2
+revision `ad8a7deba21e8ffa1aed609b86e0d0236b0489cd`, and immutable image digest
+`sha256:7411c6562dacc4ec1c6153562bed9a087d47d8a387f6713c14d3347feb69db6a`.
+It converged 200,000 of 200,000 routes with zero tester errors/timeouts and
+classified 163,438,128 live bytes. The low-diversity fixture attributed zero
+live bytes to the outer interned attribute backing and 792 bytes to nested
+payloads, which is useful ownership evidence but, as preregistered, is not the
+migration gate.
+
+No production prototype or throughput campaign is warranted: the necessary
+structural gate fails in the wrong direction. The sanitized rows, bounded DHAT
+derivative, structural matrix, provenance, and checksums are retained in the
+[`attribute-layout-2026-08` artifacts](artifacts/attribute-layout-2026-08/README.md).

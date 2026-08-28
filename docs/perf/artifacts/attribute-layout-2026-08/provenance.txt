@@ -1,0 +1,22 @@
+campaign=interned-attribute-container-layout-2026-08
+decision=reject-production-migration
+baseline_sha=f822fd2ba407117dcf8a6d7faa32018b77dae250
+measurement_source_sha=73380e1cdc0519a4af5b4c3559bb4922b14582f7
+structural_run_id=20260828T022058Z-f822fd2ba407-vs-73380e1cdc05-rib-memory-full
+structural_profile=full
+structural_preflight_load_1m=1.91
+structural_command=bench/compare-rib-memory.sh --base origin/main --head 73380e1cdc0519a4af5b4c3559bb4922b14582f7 --profile full
+dhat_preflight_utc=2026-08-28T02:36:38Z
+dhat_preflight_load=0.04 0.66 1.56
+dhat_host_lock=held
+dhat_source_sha=73380e1cdc0519a4af5b4c3559bb4922b14582f7
+bgperf2_sha=ad8a7deba21e8ffa1aed609b86e0d0236b0489cd
+dhat_image_digest=sha256:7411c6562dacc4ec1c6153562bed9a087d47d8a387f6713c14d3347feb69db6a
+dhat_command=RUSTBGPD_EVENT_HISTORY=disabled bgperf2.py bench -t rustbgpd -i bgperf/rustbgpd:lan1344-dhat -n 2 -p 100000
+kernel=Linux 6.17.0-35-generic x86_64
+cpu=AMD Ryzen Threadripper 7970X 32-Cores
+logical_cpus=64
+memory_gb=125.29
+rustc=1.98.0 (88d9e12ae 2026-08-18)
+cargo=1.98.0 (797e8a9bc 2026-08-05)
+raw_dhat_retained=false

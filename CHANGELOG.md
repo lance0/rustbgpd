@@ -11,6 +11,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The RIB memory harness now models the opposing costs of interned attribute
+  container layouts at live-table-calibrated diversity and route-reflector
+  fanout. Its pinned full campaign rejects an `Arc<[PathAttribute]>` migration
+  that would add 17.7 MiB at 900k full RIB and 31.4 MiB at fanout, while the
+  DHAT receipt sanitizer accepts both historical and provenance-rich bgperf2
+  row schemas without admitting unbounded host identity.
+
 - Prepare `rustbgpd-rpki 0.1.0` as the third independently published library
   crate, with its current root and module API documented as the complete
   `0.1.x` compatibility boundary. The package includes a compiled origin
