@@ -651,30 +651,43 @@ async fn query_fib_install_candidates(
     relax: bool,
     weighted: bool,
 ) -> Result<Vec<FibInstallCandidate>, &'static str> {
+    let deadline = tokio::time::Instant::now() + RIB_QUERY_TIMEOUT;
     let (reply, rx) = oneshot::channel();
-    if rib_tx
-        .send(RibUpdate::QueryFibInstallCandidates {
-            max_paths,
-            relax,
-            weighted,
-            reply,
+    let query = async {
+        rib_tx
+            .send(RibUpdate::QueryFibInstallCandidates {
+                max_paths,
+                relax,
+                weighted,
+                deadline,
+                reply,
+            })
+            .await
+            .map_err(|_| "send_failed")?;
+        rx.await.map_err(|_| {
+            if tokio::time::Instant::now() >= deadline {
+                "timeout"
+            } else {
+                "reply_dropped"
+            }
         })
-        .await
-        .is_err()
-    {
-        warn!("general FIB task could not query install candidates");
-        return Err("send_failed");
-    }
-    match tokio::time::timeout(RIB_QUERY_TIMEOUT, rx).await {
+    };
+
+    match tokio::time::timeout_at(deadline, query).await {
         Ok(Ok(candidates)) => Ok(candidates),
-        Ok(Err(_)) => {
+        Ok(Err("send_failed")) => {
+            warn!("general FIB task could not query install candidates");
+            Err("send_failed")
+        }
+        Ok(Err("reply_dropped")) => {
             warn!("general FIB task install-candidate reply dropped");
             Err("reply_dropped")
         }
-        Err(_) => {
+        Ok(Err("timeout")) | Err(_) => {
             warn!("general FIB task install-candidate query timed out");
             Err("timeout")
         }
+        Ok(Err(_)) => unreachable!("query uses only static classifications above"),
     }
 }
 
@@ -2858,6 +2871,66 @@ mod tests {
             }
         }
         candidates
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn install_candidate_query_times_out_while_rib_send_is_blocked() {
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let (filler_reply, _filler_response) = oneshot::channel();
+        rib_tx
+            .send(RibUpdate::QueryPeerGroups {
+                reply: filler_reply,
+            })
+            .await
+            .unwrap();
+
+        let started = tokio::time::Instant::now();
+        assert!(matches!(
+            query_fib_install_candidates(&rib_tx, 1, false, false).await,
+            Err("timeout")
+        ));
+        assert_eq!(
+            tokio::time::Instant::now() - started,
+            RIB_QUERY_TIMEOUT,
+            "blocked send consumes the same two-second query budget"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn install_candidate_query_uses_one_deadline_for_send_and_reply() {
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let (filler_reply, _filler_response) = oneshot::channel();
+        rib_tx
+            .send(RibUpdate::QueryPeerGroups {
+                reply: filler_reply,
+            })
+            .await
+            .unwrap();
+
+        let started = tokio::time::Instant::now();
+        let query =
+            tokio::spawn(
+                async move { query_fib_install_candidates(&rib_tx, 1, false, false).await },
+            );
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let _filler = rib_rx.recv().await.unwrap();
+        tokio::task::yield_now().await;
+        let RibUpdate::QueryFibInstallCandidates {
+            deadline, reply, ..
+        } = rib_rx.recv().await.unwrap()
+        else {
+            panic!("expected install-candidate query after freeing channel capacity");
+        };
+        assert_eq!(deadline, started + RIB_QUERY_TIMEOUT);
+
+        tokio::time::advance(Duration::from_millis(999)).await;
+        tokio::task::yield_now().await;
+        assert!(!query.is_finished());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(matches!(query.await.unwrap(), Err("timeout")));
+        assert_eq!(tokio::time::Instant::now() - started, RIB_QUERY_TIMEOUT);
+        drop(reply);
     }
 
     fn rib_with_routes(routes: Vec<Route>) -> mpsc::Sender<RibUpdate> {
@@ -5332,8 +5405,9 @@ mod tests {
             origin_type: RouteOrigin::Ebgp,
             path_id: 0,
         };
+        let existing_key = existing.key;
         let mut owned = FibOwnedState {
-            routes: BTreeMap::from([(existing.key, existing)]),
+            routes: BTreeMap::from([(existing_key, existing)]),
         };
         let (status_tx, status_rx) = watch::channel(Vec::new());
 
@@ -5352,6 +5426,8 @@ mod tests {
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].state, FibRuntimeState::Failed);
         assert_eq!(statuses[0].reason, "rib_query_failed:send_failed");
+        assert!(fib.applied.is_empty(), "failed query must not reach apply");
+        assert!(owned.routes.contains_key(&existing_key));
     }
 
     #[tokio::test]

@@ -2249,9 +2249,12 @@ async fn best_routes_returns_winner() {
     .unwrap();
 
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::QueryBestRoutes {
+        deadline: full_snapshot_query_deadline(),
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
 
     let best = reply_rx.await.unwrap();
     assert_eq!(best.len(), 1);
@@ -2306,9 +2309,12 @@ async fn peer_down_promotes_second_best() {
     .unwrap();
 
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::QueryBestRoutes {
+        deadline: full_snapshot_query_deadline(),
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
 
     let best = reply_rx.await.unwrap();
     assert_eq!(best.len(), 1);
@@ -2369,9 +2375,12 @@ async fn withdrawal_updates_best() {
     .unwrap();
 
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::QueryBestRoutes {
+        deadline: full_snapshot_query_deadline(),
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
 
     let best = reply_rx.await.unwrap();
     assert_eq!(best.len(), 1);
@@ -2426,9 +2435,12 @@ async fn different_best_per_prefix() {
     .unwrap();
 
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::QueryBestRoutes {
+        deadline: full_snapshot_query_deadline(),
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
 
     let best = reply_rx.await.unwrap();
     assert_eq!(best.len(), 2);
@@ -2663,9 +2675,12 @@ async fn split_horizon_prevents_echo() {
 
     // Force a query to serialize the event loop
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::QueryBestRoutes {
+        deadline: full_snapshot_query_deadline(),
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
     let _ = reply_rx.await;
 
     // Channel should be empty (no outbound update sent)
@@ -2972,9 +2987,12 @@ async fn ibgp_split_horizon_withdraw_on_best_change() {
 
     // Force serialization
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::QueryBestRoutes {
+        deadline: full_snapshot_query_deadline(),
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
     let _ = reply_rx.await;
 
     // iBGP-learned route should NOT be sent to iBGP peer
@@ -3229,9 +3247,12 @@ async fn inject_route_enters_loc_rib_and_distributes() {
 
     // Should be in Loc-RIB
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::QueryBestRoutes {
+        deadline: full_snapshot_query_deadline(),
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
     let best = reply_rx.await.unwrap();
     assert_eq!(best.len(), 1);
     assert_eq!(best[0].prefix, Prefix::V4(prefix));

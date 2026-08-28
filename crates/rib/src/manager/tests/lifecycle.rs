@@ -99,9 +99,12 @@ async fn channel_full_marks_dirty_and_resyncs() {
 
     // Force serialization
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::QueryBestRoutes {
+        deadline: full_snapshot_query_deadline(),
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
     let _ = reply_rx.await;
 
     // After channel-full failure, AdjRibOut preserves last successfully
@@ -248,9 +251,12 @@ async fn dirty_resync_not_starved_by_query_traffic() {
 
     // Force serialization
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::QueryBestRoutes {
+        deadline: full_snapshot_query_deadline(),
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
     let _ = reply_rx.await;
 
     // Drain the outbound channel to allow resync
@@ -264,9 +270,12 @@ async fn dirty_resync_not_starved_by_query_traffic() {
     // would reset the 1s countdown, starving the timer.
     for _ in 0..5 {
         let (reply_tx, reply_rx) = oneshot::channel();
-        tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
-            .await
-            .unwrap();
+        tx.send(RibUpdate::QueryBestRoutes {
+            deadline: full_snapshot_query_deadline(),
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
         let _ = reply_rx.await;
     }
 

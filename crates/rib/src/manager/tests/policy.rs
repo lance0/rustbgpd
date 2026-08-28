@@ -299,9 +299,12 @@ async fn export_policy_blocks_denied() {
 
     // Force serialization
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::QueryBestRoutes {
+        deadline: full_snapshot_query_deadline(),
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
     let _ = reply_rx.await;
 
     // Should NOT have received the denied route

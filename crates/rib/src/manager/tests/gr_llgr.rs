@@ -67,11 +67,7 @@ async fn gr_marks_stale_and_demotes_routes() {
     .unwrap();
 
     // Route should still be in Loc-RIB (stale but present)
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
-        .await
-        .unwrap();
-    let best = reply_rx.await.unwrap();
+    let best = query_best_routes(&tx).await;
     assert_eq!(best.len(), 1);
     assert!(best[0].is_stale, "route should be marked stale");
 
@@ -310,11 +306,7 @@ async fn gr_timer_sweeps_stale_routes() {
     .unwrap();
 
     // Route is stale but still in Loc-RIB
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
-        .await
-        .unwrap();
-    let best = reply_rx.await.unwrap();
+    let best = query_best_routes(&tx).await;
     assert_eq!(best.len(), 1);
     assert!(best[0].is_stale);
 
@@ -324,11 +316,7 @@ async fn gr_timer_sweeps_stale_routes() {
     tokio::task::yield_now().await;
 
     // Route should have been swept
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
-        .await
-        .unwrap();
-    let best = reply_rx.await.unwrap();
+    let best = query_best_routes(&tx).await;
     assert!(best.is_empty(), "stale routes should be swept after timer");
 
     drop(tx);
@@ -371,11 +359,7 @@ async fn gr_peer_up_defers_stale_to_eor() {
     .unwrap();
 
     // Verify route is stale
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
-        .await
-        .unwrap();
-    let best = reply_rx.await.unwrap();
+    let best = query_best_routes(&tx).await;
     assert!(best[0].is_stale);
 
     // Source re-establishes — route should STILL be stale
@@ -402,11 +386,7 @@ async fn gr_peer_up_defers_stale_to_eor() {
     .unwrap();
     drain_eor(&mut out_rx).await;
 
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
-        .await
-        .unwrap();
-    let best = reply_rx.await.unwrap();
+    let best = query_best_routes(&tx).await;
     assert_eq!(best.len(), 1);
     assert!(best[0].is_stale, "route should still be stale after PeerUp");
 
@@ -436,11 +416,7 @@ async fn gr_peer_up_defers_stale_to_eor() {
     .await
     .unwrap();
 
-    let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
-        .await
-        .unwrap();
-    let best = reply_rx.await.unwrap();
+    let best = query_best_routes(&tx).await;
     assert_eq!(best.len(), 1);
     assert!(
         !best[0].is_stale,
@@ -516,9 +492,12 @@ async fn gr_peer_up_timer_expires_sweeps_stale() {
 
     // Route still stale (no EoR yet)
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::QueryBestRoutes {
+        deadline: full_snapshot_query_deadline(),
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
     let best = reply_rx.await.unwrap();
     assert_eq!(best.len(), 1);
     assert!(best[0].is_stale);
@@ -528,9 +507,12 @@ async fn gr_peer_up_timer_expires_sweeps_stale() {
     tokio::task::yield_now().await;
 
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::QueryBestRoutes {
+        deadline: full_snapshot_query_deadline(),
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
     let best = reply_rx.await.unwrap();
     assert!(best.is_empty(), "stale routes should be swept after timer");
 
@@ -583,9 +565,12 @@ async fn gr_peer_down_aborts_gr() {
 
     // Routes should be gone
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::QueryBestRoutes {
+        deadline: full_snapshot_query_deadline(),
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
     let best = reply_rx.await.unwrap();
     assert!(best.is_empty(), "routes cleared after PeerDown aborts GR");
 
@@ -636,9 +621,12 @@ async fn gr_withdraws_non_gr_family_routes() {
 
     // Verify both routes present
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::QueryBestRoutes {
+        deadline: full_snapshot_query_deadline(),
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
     let best = reply_rx.await.unwrap();
     assert_eq!(best.len(), 2);
 
@@ -658,9 +646,12 @@ async fn gr_withdraws_non_gr_family_routes() {
 
     // IPv4 route should be stale, IPv6 route should be gone
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::QueryBestRoutes {
+        deadline: full_snapshot_query_deadline(),
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
     let best = reply_rx.await.unwrap();
     assert_eq!(best.len(), 1, "only IPv4 route should remain");
     assert!(

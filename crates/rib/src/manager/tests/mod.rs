@@ -277,9 +277,12 @@ async fn drain_eor(out_rx: &mut mpsc::Receiver<OutboundRouteUpdate>) {
 
 async fn query_best_routes(tx: &mpsc::Sender<RibUpdate>) -> Vec<Route> {
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::QueryBestRoutes {
+        deadline: full_snapshot_query_deadline(),
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
     reply_rx.await.unwrap()
 }
 
@@ -317,11 +320,118 @@ async fn query_fib_install_candidates_opts(
         max_paths,
         relax,
         weighted,
+        deadline: full_snapshot_query_deadline(),
         reply: reply_tx,
     })
     .await
     .unwrap();
     reply_rx.await.unwrap()
+}
+
+fn full_snapshot_query_deadline() -> tokio::time::Instant {
+    tokio::time::Instant::now() + Duration::from_secs(60)
+}
+
+async fn assert_lightweight_query_is_serviced(tx: &mpsc::Sender<RibUpdate>) {
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::QueryPeerGroups { reply }).await.unwrap();
+    let groups = tokio::time::timeout(Duration::from_secs(1), response)
+        .await
+        .expect("lightweight query was serviced")
+        .unwrap();
+    assert!(groups.is_empty());
+}
+
+#[tokio::test]
+async fn expired_best_routes_query_publishes_nothing_and_releases_actor() {
+    let (tx, rx) = mpsc::channel(8);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::QueryBestRoutes {
+        deadline: tokio::time::Instant::now(),
+        reply,
+    })
+    .await
+    .unwrap();
+    assert!(
+        response.await.is_err(),
+        "expired query must publish no vector"
+    );
+    assert_lightweight_query_is_serviced(&tx).await;
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn preclosed_best_routes_query_skips_snapshot_and_releases_actor() {
+    let (tx, rx) = mpsc::channel(8);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let (reply, response) = oneshot::channel();
+    drop(response);
+    tx.send(RibUpdate::QueryBestRoutes {
+        deadline: full_snapshot_query_deadline(),
+        reply,
+    })
+    .await
+    .unwrap();
+    assert_lightweight_query_is_serviced(&tx).await;
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn expired_fib_candidates_query_publishes_nothing_and_releases_actor() {
+    let (tx, rx) = mpsc::channel(8);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let (reply, response) = oneshot::channel();
+    tx.send(RibUpdate::QueryFibInstallCandidates {
+        max_paths: 2,
+        relax: false,
+        weighted: false,
+        deadline: tokio::time::Instant::now(),
+        reply,
+    })
+    .await
+    .unwrap();
+    assert!(
+        response.await.is_err(),
+        "expired query must publish no vector"
+    );
+    assert_lightweight_query_is_serviced(&tx).await;
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn preclosed_fib_candidates_query_skips_snapshot_and_releases_actor() {
+    let (tx, rx) = mpsc::channel(8);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let (reply, response) = oneshot::channel();
+    drop(response);
+    tx.send(RibUpdate::QueryFibInstallCandidates {
+        max_paths: 2,
+        relax: false,
+        weighted: false,
+        deadline: full_snapshot_query_deadline(),
+        reply,
+    })
+    .await
+    .unwrap();
+    assert_lightweight_query_is_serviced(&tx).await;
+
+    drop(tx);
+    handle.await.unwrap();
 }
 
 async fn query_received_routes(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> Vec<Route> {

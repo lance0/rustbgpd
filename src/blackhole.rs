@@ -516,25 +516,37 @@ async fn recv_route_event(
 }
 
 async fn query_best_routes(rib_tx: &mpsc::Sender<RibUpdate>) -> Option<Vec<Route>> {
+    let deadline = tokio::time::Instant::now() + RIB_QUERY_TIMEOUT;
     let (reply, rx) = oneshot::channel();
-    if rib_tx
-        .send(RibUpdate::QueryBestRoutes { reply })
-        .await
-        .is_err()
-    {
-        warn!("BLACKHOLE discard task could not query best routes");
-        return None;
-    }
-    match tokio::time::timeout(RIB_QUERY_TIMEOUT, rx).await {
+    let query = async {
+        rib_tx
+            .send(RibUpdate::QueryBestRoutes { deadline, reply })
+            .await
+            .map_err(|_| "send_failed")?;
+        rx.await.map_err(|_| {
+            if tokio::time::Instant::now() >= deadline {
+                "timeout"
+            } else {
+                "reply_dropped"
+            }
+        })
+    };
+
+    match tokio::time::timeout_at(deadline, query).await {
         Ok(Ok(routes)) => Some(routes),
-        Ok(Err(_)) => {
+        Ok(Err("send_failed")) => {
+            warn!("BLACKHOLE discard task could not query best routes");
+            None
+        }
+        Ok(Err("reply_dropped")) => {
             warn!("BLACKHOLE discard task best-route reply dropped");
             None
         }
-        Err(_) => {
+        Ok(Err("timeout")) | Err(_) => {
             warn!("BLACKHOLE discard task best-route query timed out");
             None
         }
+        Ok(Err(_)) => unreachable!("query uses only static classifications above"),
     }
 }
 
@@ -1492,11 +1504,95 @@ pub(super) mod tests {
             .is_some_and(|content| content.contains(&format!("\"{prefix}\"")))
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn best_route_query_times_out_while_rib_send_is_blocked() {
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let (filler_reply, _filler_response) = oneshot::channel();
+        rib_tx
+            .send(RibUpdate::QueryPeerGroups {
+                reply: filler_reply,
+            })
+            .await
+            .unwrap();
+
+        let started = tokio::time::Instant::now();
+        assert!(query_best_routes(&rib_tx).await.is_none());
+        assert_eq!(
+            tokio::time::Instant::now() - started,
+            RIB_QUERY_TIMEOUT,
+            "blocked send consumes the same two-second query budget"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn best_route_query_uses_one_deadline_for_send_and_reply() {
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let (filler_reply, _filler_response) = oneshot::channel();
+        rib_tx
+            .send(RibUpdate::QueryPeerGroups {
+                reply: filler_reply,
+            })
+            .await
+            .unwrap();
+
+        let started = tokio::time::Instant::now();
+        let query = tokio::spawn(async move { query_best_routes(&rib_tx).await });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let _filler = rib_rx.recv().await.unwrap();
+        tokio::task::yield_now().await;
+        let RibUpdate::QueryBestRoutes { deadline, reply } = rib_rx.recv().await.unwrap() else {
+            panic!("expected best-route query after freeing channel capacity");
+        };
+        assert_eq!(deadline, started + RIB_QUERY_TIMEOUT);
+
+        tokio::time::advance(Duration::from_millis(999)).await;
+        tokio::task::yield_now().await;
+        assert!(!query.is_finished());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(query.await.unwrap().is_none());
+        assert_eq!(tokio::time::Instant::now() - started, RIB_QUERY_TIMEOUT);
+        drop(reply);
+    }
+
+    #[tokio::test]
+    async fn failed_best_route_query_performs_no_kernel_work() {
+        let (rib_tx, rib_rx) = mpsc::channel(1);
+        drop(rib_rx);
+        let prefix = v4(32);
+        let peer = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
+        let mut fib = FakeFib::default();
+        fib.installed.insert(prefix);
+        let config = BlackholeConfig::default();
+        let (status_tx, _status_rx) = watch::channel(Vec::new());
+        let mut state = ReconcilerState::new(
+            config,
+            tokio::time::Instant::now() + Duration::from_hours(1),
+            OwnershipState::ephemeral([prefix]),
+        );
+        state.owned.insert(prefix, OwnedBlackhole { peer });
+
+        reconcile_once(
+            config,
+            &rib_tx,
+            &mut fib,
+            &BgpMetrics::with_registry(Registry::new()),
+            &status_tx,
+            &mut state,
+        )
+        .await;
+
+        assert_eq!(fib.dump_calls, 0);
+        assert!(fib.install_calls.is_empty() && fib.remove_calls.is_empty());
+        assert!(fib.installed.contains(&prefix));
+        assert_eq!(state.owned.get(&prefix), Some(&OwnedBlackhole { peer }));
+    }
+
     fn rib_with_routes(routes: Vec<Route>) -> mpsc::Sender<RibUpdate> {
         let (tx, mut rx) = mpsc::channel(8);
         tokio::spawn(async move {
             while let Some(update) = rx.recv().await {
-                if let RibUpdate::QueryBestRoutes { reply } = update {
+                if let RibUpdate::QueryBestRoutes { reply, .. } = update {
                     let _ = reply.send(routes.clone());
                 }
             }
@@ -1519,7 +1615,7 @@ pub(super) mod tests {
         tokio::spawn(async move {
             while let Some(update) = rx.recv().await {
                 match update {
-                    RibUpdate::QueryBestRoutes { reply } => {
+                    RibUpdate::QueryBestRoutes { reply, .. } => {
                         query_count_task.fetch_add(1, Ordering::SeqCst);
                         let _ = reply.send(routes.clone());
                     }

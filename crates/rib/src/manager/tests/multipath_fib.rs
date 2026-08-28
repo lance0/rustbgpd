@@ -1686,9 +1686,12 @@ async fn multipath_policy_filtered_events_for_denied_candidates() {
 
     // Force serialization — query to ensure all RoutesReceived processed
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::QueryBestRoutes {
+        deadline: full_snapshot_query_deadline(),
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
     let _ = reply_rx.await;
 
     // No outbound updates should have been sent (all denied)

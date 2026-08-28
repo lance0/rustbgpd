@@ -25,6 +25,34 @@ use crate::update::{
     WarmMrtSnapshotBudget, WarmMrtSnapshotView, ordered_route_query, route_query_key,
 };
 
+/// Full-snapshot queries check cancellation at bounded work intervals instead
+/// of adding a branch and clock read to every route on the normal path.
+const FULL_SNAPSHOT_CANCELLATION_STRIDE: usize = 256;
+
+fn canceled_at_stride(completed: usize, canceled: &mut impl FnMut() -> bool) -> bool {
+    completed.is_multiple_of(FULL_SNAPSHOT_CANCELLATION_STRIDE) && canceled()
+}
+
+fn collect_full_snapshot<'a, T: Clone + 'a>(
+    capacity: usize,
+    rows: impl Iterator<Item = &'a T>,
+    canceled: &mut impl FnMut() -> bool,
+) -> Option<Vec<T>> {
+    if canceled() {
+        return None;
+    }
+
+    let mut out = Vec::with_capacity(capacity);
+    for (index, row) in rows.enumerate() {
+        if index != 0 && canceled_at_stride(index, canceled) {
+            return None;
+        }
+        out.push(row.clone());
+    }
+
+    (!canceled()).then_some(out)
+}
+
 /// Copy the rows of one non-unicast Loc-RIB table that match the caller's
 /// pushed-down predicate.
 ///
@@ -44,19 +72,6 @@ pub(super) fn filter_rows<'a, T: Clone + 'a>(
     match filter {
         Some(matches) => rows.filter(|row| matches(row)).cloned().collect(),
         None => rows.cloned().collect(),
-    }
-}
-
-fn send_materialized_rows<T>(
-    reply: tokio::sync::oneshot::Sender<Vec<T>>,
-    materialize: impl FnOnce() -> Vec<T>,
-) {
-    if reply.is_closed() {
-        debug!("route query canceled before materialization");
-        return;
-    }
-    if reply.send(materialize()).is_err() {
-        warn!("query caller dropped before receiving response");
     }
 }
 
@@ -685,9 +700,19 @@ impl RibManager {
     }
     pub(super) fn handle_query_best_routes(
         &mut self,
+        deadline: tokio::time::Instant,
         reply: tokio::sync::oneshot::Sender<Vec<crate::route::Route>>,
     ) {
-        send_materialized_rows(reply, || self.loc_rib.iter().cloned().collect());
+        let routes = collect_full_snapshot(self.loc_rib.len(), self.loc_rib.iter(), &mut || {
+            reply.is_closed() || tokio::time::Instant::now() >= deadline
+        });
+        let Some(routes) = routes else {
+            debug!("best-route query canceled during materialization");
+            return;
+        };
+        if reply.send(routes).is_err() {
+            warn!("query caller dropped before receiving response");
+        }
     }
     /// Build the per-prefix FIB install-candidate view: each Loc-RIB best plus
     /// the equal-cost (ECMP) next-hop set, bounded by `max_paths`. Loc-RIB holds
@@ -697,19 +722,30 @@ impl RibManager {
     /// best route's next-hop is always index 0; the remaining equal-cost siblings
     /// follow ordered by `(next_hop, peer, path_id)`. Deduped by next-hop *before*
     /// the `max_paths` cap.
-    pub(super) fn handle_query_fib_install_candidates(
-        &mut self,
+    fn materialize_fib_install_candidates(
+        &self,
         max_paths: u32,
         relax: bool,
         weighted: bool,
-        reply: tokio::sync::oneshot::Sender<Vec<crate::route::FibInstallCandidate>>,
-    ) {
+        canceled: &mut impl FnMut() -> bool,
+    ) -> Option<Vec<crate::route::FibInstallCandidate>> {
         use crate::best_path::{link_bandwidth_weights, multipath_equal};
         use crate::route::{FibInstallCandidate, FibInstallNextHop};
 
+        if canceled() {
+            debug!("FIB install-candidate query canceled before materialization");
+            return None;
+        }
+
         let cap = max_paths.max(1) as usize;
         let mut out = Vec::with_capacity(self.loc_rib.len());
-        for best in self.loc_rib.iter() {
+        let mut peer_rib_work = 0;
+        let mut sibling_work = 0;
+        for (best_index, best) in self.loc_rib.iter().enumerate() {
+            if best_index != 0 && canceled_at_stride(best_index, &mut *canceled) {
+                debug!("FIB install-candidate query canceled during Loc-RIB materialization");
+                return None;
+            }
             let mut next_hops: Vec<FibInstallNextHop> = Vec::new();
             if cap <= 1 {
                 // ECMP off (the default `maximum_paths` of 1): skip the
@@ -725,12 +761,26 @@ impl RibManager {
                     weight: 1,
                 });
             } else {
-                let mut siblings: Vec<&crate::route::Route> = self
-                    .ribs
-                    .values()
-                    .flat_map(|rib| rib.iter_prefix(&best.prefix))
-                    .filter(|r| multipath_equal(best, r, relax))
-                    .collect();
+                let mut siblings: Vec<&crate::route::Route> = Vec::new();
+                for rib in self.ribs.values() {
+                    peer_rib_work += 1;
+                    if canceled_at_stride(peer_rib_work, &mut *canceled) {
+                        debug!("FIB install-candidate query canceled during ECMP peer-RIB walk");
+                        return None;
+                    }
+                    for route in rib.iter_prefix(&best.prefix) {
+                        sibling_work += 1;
+                        if canceled_at_stride(sibling_work, &mut *canceled) {
+                            debug!(
+                                "FIB install-candidate query canceled during ECMP sibling gathering"
+                            );
+                            return None;
+                        }
+                        if multipath_equal(best, route, relax) {
+                            siblings.push(route);
+                        }
+                    }
+                }
                 siblings.sort_by(|a, b| {
                     a.next_hop
                         .cmp(&b.next_hop)
@@ -778,7 +828,28 @@ impl RibManager {
                 next_hops,
             });
         }
-        if reply.send(out).is_err() {
+        if canceled() {
+            debug!("FIB install-candidate query canceled after materialization");
+            return None;
+        }
+        Some(out)
+    }
+    pub(super) fn handle_query_fib_install_candidates(
+        &mut self,
+        max_paths: u32,
+        relax: bool,
+        weighted: bool,
+        deadline: tokio::time::Instant,
+        reply: tokio::sync::oneshot::Sender<Vec<crate::route::FibInstallCandidate>>,
+    ) {
+        let candidates =
+            self.materialize_fib_install_candidates(max_paths, relax, weighted, &mut || {
+                reply.is_closed() || tokio::time::Instant::now() >= deadline
+            });
+        let Some(candidates) = candidates else {
+            return;
+        };
+        if reply.send(candidates).is_err() {
             warn!("query caller dropped before receiving response");
         }
     }
@@ -2282,6 +2353,24 @@ impl RibManager {
 mod cancellation_tests {
     use super::*;
 
+    fn manager_with_best(best: &crate::route::Route) -> RibManager {
+        let (_tx, rx) = tokio::sync::mpsc::channel(1);
+        let (_query_tx, query_rx) = tokio::sync::mpsc::channel(1);
+        let mut manager = RibManager::new(
+            rx,
+            query_rx,
+            None,
+            None,
+            rustbgpd_telemetry::BgpMetrics::new(),
+        );
+        assert!(
+            manager
+                .loc_rib
+                .recompute(best.prefix, std::iter::once(best))
+        );
+        manager
+    }
+
     #[test]
     fn family_continuation_starts_at_cursor_and_reads_one_lookahead() {
         let peer = Ipv4Addr::new(192, 0, 2, 1);
@@ -2363,10 +2452,93 @@ mod cancellation_tests {
     }
 
     #[test]
-    fn canceled_materialized_rows_does_not_invoke_builder() {
-        let (reply, receiver) = tokio::sync::oneshot::channel::<Vec<crate::route::Route>>();
+    fn preclosed_full_snapshot_does_not_advance_iterator() {
+        let (reply, receiver) = tokio::sync::oneshot::channel::<Vec<usize>>();
         drop(receiver);
-        send_materialized_rows(reply, || panic!("canceled query materialized"));
+        let rows =
+            std::iter::once_with(|| -> &'static usize { panic!("canceled query materialized") });
+        assert!(collect_full_snapshot(1, rows, &mut || reply.is_closed()).is_none());
+    }
+
+    #[test]
+    fn full_snapshot_cancels_at_fixed_stride_without_returning_partial_rows() {
+        let visited = std::cell::Cell::new(0);
+        let checks = std::cell::Cell::new(0);
+        let source = (0..FULL_SNAPSHOT_CANCELLATION_STRIDE * 3).collect::<Vec<_>>();
+        let rows = source.iter().inspect(|_| {
+            visited.set(visited.get() + 1);
+        });
+        let result =
+            collect_full_snapshot(FULL_SNAPSHOT_CANCELLATION_STRIDE * 3, rows, &mut || {
+                checks.set(checks.get() + 1);
+                checks.get() == 2
+            });
+
+        assert!(result.is_none(), "partial full snapshot must not escape");
+        assert_eq!(checks.get(), 2, "start plus one stride boundary");
+        assert_eq!(
+            visited.get(),
+            FULL_SNAPSHOT_CANCELLATION_STRIDE + 1,
+            "materialization stops at the chosen stride"
+        );
+    }
+
+    #[test]
+    fn fib_snapshot_cancels_inside_peer_rib_walk() {
+        let prefix = rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
+        let best = crate::test_support::make_route(prefix, Ipv4Addr::new(192, 0, 2, 1));
+        let mut manager = manager_with_best(&best);
+        for index in 0..=FULL_SNAPSHOT_CANCELLATION_STRIDE {
+            let peer = IpAddr::V4(Ipv4Addr::new(
+                198,
+                18,
+                u8::try_from(index / 256).unwrap(),
+                u8::try_from(index % 256).unwrap(),
+            ));
+            manager.ribs.insert(peer, AdjRibIn::new(peer));
+        }
+
+        let checks = std::cell::Cell::new(0);
+        let result = manager.materialize_fib_install_candidates(2, false, false, &mut || {
+            checks.set(checks.get() + 1);
+            checks.get() == 2
+        });
+
+        assert!(result.is_none(), "partial FIB snapshot must not escape");
+        assert_eq!(checks.get(), 2, "start plus one peer-RIB stride");
+    }
+
+    #[test]
+    fn fib_snapshot_cancels_inside_high_fanout_sibling_gathering() {
+        let prefix = rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
+        let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let best = crate::test_support::make_route(prefix, Ipv4Addr::new(192, 0, 2, 1));
+        let mut manager = manager_with_best(&best);
+        let mut rib = AdjRibIn::new(peer);
+        for index in 0..=FULL_SNAPSHOT_CANCELLATION_STRIDE {
+            let mut route = crate::test_support::make_route(
+                prefix,
+                Ipv4Addr::new(
+                    203,
+                    0,
+                    u8::try_from(index / 256).unwrap(),
+                    u8::try_from(index % 256).unwrap(),
+                ),
+            );
+            route.peer = peer;
+            route.path_id = u32::try_from(index + 1).unwrap();
+            rib.insert(route);
+        }
+        manager.ribs.insert(peer, rib);
+
+        let checks = std::cell::Cell::new(0);
+        let result = manager.materialize_fib_install_candidates(2, false, false, &mut || {
+            checks.set(checks.get() + 1);
+            checks.get() == 2
+        });
+
+        assert!(result.is_none(), "partial FIB snapshot must not escape");
+        assert_eq!(checks.get(), 2, "start plus one sibling stride");
     }
 
     #[test]

@@ -916,7 +916,10 @@ impl Oracle {
     pub(super) async fn best_routes(&mut self) -> Vec<Route> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
-            .send(RibUpdate::QueryBestRoutes { reply: reply_tx })
+            .send(RibUpdate::QueryBestRoutes {
+                deadline: full_snapshot_query_deadline(),
+                reply: reply_tx,
+            })
             .await
             .unwrap();
         reply_rx.await.unwrap()
