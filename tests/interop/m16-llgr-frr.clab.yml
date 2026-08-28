@@ -21,6 +21,7 @@ topology:
         - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
       exec:
         - ip addr add 10.0.0.1/24 dev eth1
+        - ip -6 addr add fd00:16::1/64 dev eth1
         - ip link set eth1 up
       env:
         RUST_LOG: info
@@ -33,10 +34,11 @@ topology:
         - ./configs/frr-bgpd-m16-llgr.conf:/etc/frr/frr.conf:ro
       exec:
         - ip addr add 10.0.0.2/24 dev eth1
+        - ip -6 addr add fd00:16::2/64 dev eth1
         - ip link set eth1 up
 
   links:
     - endpoints: ["rustbgpd:eth1", "frr:eth1"]
 
-# rustbgpd: 10.0.0.1, AS 65001 (GR + LLGR helper)
-# FRR:      10.0.0.2, AS 65002 (GR + LLGR enabled, stale-time 30s)
+# rustbgpd: 10.0.0.1 / fd00:16::1, AS 65001 (GR + LLGR helper)
+# FRR:      10.0.0.2 / fd00:16::2, AS 65002 (GR + LLGR, stale-time 30s)

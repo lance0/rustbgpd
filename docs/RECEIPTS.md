@@ -56,6 +56,7 @@ id matches the milestone. Full procedures: [`INTEROP.md`](INTEROP.md).
 | M13 | Policy engine: import chains, export deny/MED/prepend (3-node) | FRR 10.3.1 |
 | M14 | Route reflector (RFC 4456): ORIGINATOR_ID, CLUSTER_LIST, reflection | FRR 10.3.1 |
 | M15 | Route Refresh (RFC 2918) via gRPC SoftResetIn | FRR 10.3.1 |
+| M16 | Dual-stack LLGR (RFC 9494): exact IPv4/IPv6 fresh → GR-stale → LLGR-stale → fresh lifecycle, both-family capability/timer/EoR proof, one restart and exact counters | FRR 10.3.1 |
 | M17 | Add-Path (RFC 7911) multi-path send with distinct path ids | FRR 10.3.1 |
 | M22 | FlowSpec inject + distribute + withdraw | FRR 10.3.1 |
 | M24 | BMP Initiation, PeerUp, RouteMonitoring ordering | FRR + BMP receiver |
@@ -139,7 +140,6 @@ covered by later CI receipts). Procedures and results:
 | M4 | Route-server mode: 10-peer static + dynamic neighbor management | FRR 10.3.1 |
 | M11 | Graceful Restart (RFC 4724): stale marking, EoR, timer sweep | FRR 10.3.1 |
 | M12 | Extended Communities (RFC 4360) receive + inject | FRR 10.3.1 |
-| M16 | LLGR (RFC 9494): GR→LLGR transition, stale clearing | FRR 10.3.1 |
 | M18 | Extended Next-Hop (RFC 8950): IPv6 next hop for IPv4 NLRI | FRR 10.3.1 |
 | M20 | Private AS removal (remove/all/replace) | FRR 10.3.1 |
 | M21 | RPKI origin validation via RTR | FRR + StayRTR |

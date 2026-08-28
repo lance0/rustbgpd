@@ -28,6 +28,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The M16 FRR receipt now gates dual-stack LLGR in hosted interop CI. Exact
+  two-route IPv4 and one-route IPv6 inventories cross fresh, GR-stale,
+  LLGR-stale, and fresh states around one controlled restart; structured views
+  pin both-family MP/GR/LLGR timer negotiation and EoR, while cumulative flap
+  and GR-expiry counters each advance exactly once.
+
 - The Enhanced Route Refresh 100k real-session receipt now applies always-on
   adjacent-operation ceilings to its actor-duration histogram: 25 ms for each
   accepted BoRR begin and 250 ms for EoRR or timeout completion. Every phase

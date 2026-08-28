@@ -21,6 +21,7 @@ graceful_restart = true
 gr_restart_time = 15
 gr_stale_routes_time = 20
 llgr_stale_time = 60
+families = ["ipv4_unicast", "ipv6_unicast"]
 
 [security.grpc]
 enforcement = "tier"
