@@ -33,6 +33,22 @@ pub use session::export::{
 };
 #[cfg(feature = "bench-internals")]
 pub use session::inbound::{RouteAttrBundle, materialize_attrs};
+#[cfg(feature = "bench-internals")]
+pub struct ExplainSnapshotBenchCache(session::import_decision_cache::ImportDecisionCache);
+
+#[cfg(feature = "bench-internals")]
+impl ExplainSnapshotBenchCache {
+    /// Build the real bounded import-decision cache for the explain benchmark.
+    #[must_use]
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self(session::import_decision_cache::ImportDecisionCache::with_capacity(capacity))
+    }
+
+    /// Exercise the real import-decision insertion seam.
+    pub fn insert(&mut self, key: ImportDecisionKey, decision: CachedDecision) {
+        self.0.insert(key, decision);
+    }
+}
 
 pub use config::{
     DEFAULT_SLOW_PEER_DURATION_SECS, DEFAULT_SLOW_PEER_THRESHOLD_PCT, RemovePrivateAs,
