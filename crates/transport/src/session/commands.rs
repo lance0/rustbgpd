@@ -1217,6 +1217,16 @@ impl PeerSession {
                     peer_asn: neg.map(|n| n.peer_asn),
                     prefix_count,
                     rejected_routes_retained: self.rejected_routes.len(),
+                    policy_reject_counts: (self.reject_retention_enabled
+                        && self.rejected_routes.evictions_since_reset() == 0)
+                        .then(|| {
+                            let (ipv4_unicast, ipv6_unicast) =
+                                self.rejected_routes.policy_reject_counts();
+                            crate::PolicyRejectCounts {
+                                ipv4_unicast,
+                                ipv6_unicast,
+                            }
+                        }),
                     max_prefix: MaxPrefixState {
                         prefix_count_ipv4,
                         prefix_count_ipv6,

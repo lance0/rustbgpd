@@ -621,6 +621,10 @@ fn rfc9972_stats_peer_handle(peer_addr: IpAddr) -> PeerHandle {
                     state.prefix_count = 22;
                     state.max_prefix.prefix_count_ipv4 = 12;
                     state.max_prefix.prefix_count_ipv6 = 7;
+                    state.policy_reject_counts = Some(rustbgpd_transport::PolicyRejectCounts {
+                        ipv4_unicast: 2,
+                        ipv6_unicast: 3,
+                    });
                     let mut negotiated = test_negotiated_session(true);
                     negotiated.families =
                         vec![(Afi::Ipv6, Safi::Unicast), (Afi::Ipv4, Safi::Unicast)];
@@ -681,11 +685,13 @@ async fn periodic_bmp_stats_carry_adj_rib_out_counts() {
             peer_info,
             adj_rib_in_routes,
             rfc9972_adj_rib_in_post,
+            rfc9972_policy_rejects,
             adj_rib_out_post,
         } => {
             assert_eq!(peer_info.peer_addr, addr);
             assert_eq!(adj_rib_in_routes, 22);
             assert_eq!(rfc9972_adj_rib_in_post, Some(vec![(1, 1, 12), (2, 1, 7)]));
+            assert_eq!(rfc9972_policy_rejects, Some(vec![(1, 1, 2), (2, 1, 3)]));
             assert_eq!(
                 adj_rib_out_post,
                 Some(vec![(1, 1, 12), (1, 128, 3)]),
@@ -710,11 +716,20 @@ fn rfc9972_stats_use_exact_unicast_counts_and_omit_for_effective_add_path() {
         (Afi::Ipv4, Safi::Unicast),
     ];
     state.negotiated_session = Some(negotiated);
+    state.policy_reject_counts = Some(rustbgpd_transport::PolicyRejectCounts {
+        ipv4_unicast: 4,
+        ipv6_unicast: 5,
+    });
 
     assert_eq!(
         super::super::snapshot::rfc9972_adj_rib_in_counts(&state),
         Some(vec![(1, 1, 12), (2, 1, 7)]),
         "only exact IPv4/IPv6-unicast gauges are emitted in wire-family order"
+    );
+    assert_eq!(
+        super::super::snapshot::rfc9972_policy_reject_counts(&state),
+        Some(vec![(1, 1, 4), (2, 1, 5)]),
+        "policy-reject counts follow negotiated unicast families in wire order"
     );
 
     state
@@ -737,6 +752,39 @@ fn rfc9972_stats_use_exact_unicast_counts_and_omit_for_effective_add_path() {
         super::super::snapshot::rfc9972_adj_rib_in_counts(&state),
         None,
         "any effective unicast Add-Path receive family suppresses the whole gauge set"
+    );
+    assert_eq!(
+        super::super::snapshot::rfc9972_policy_reject_counts(&state),
+        Some(vec![(1, 1, 4), (2, 1, 5)]),
+        "path-aware reject identity remains exact under Add-Path"
+    );
+
+    state.policy_reject_counts = Some(rustbgpd_transport::PolicyRejectCounts::default());
+    assert_eq!(
+        super::super::snapshot::rfc9972_policy_reject_counts(&state),
+        Some(vec![(1, 1, 0), (2, 1, 0)]),
+        "authoritative zero rows remain present"
+    );
+    state.negotiated_session.as_mut().unwrap().families =
+        vec![(Afi::Ipv4, Safi::MplsVpn), (Afi::Ipv6, Safi::Unicast)];
+    assert_eq!(
+        super::super::snapshot::rfc9972_policy_reject_counts(&state),
+        Some(vec![(2, 1, 0)]),
+        "unnegotiated unicast families are omitted"
+    );
+    state.negotiated_session.as_mut().unwrap().families = vec![(Afi::Ipv4, Safi::MplsVpn)];
+    assert_eq!(
+        super::super::snapshot::rfc9972_policy_reject_counts(&state),
+        None,
+        "no negotiated IPv4/IPv6 unicast family omits type 22"
+    );
+
+    state.negotiated_session.as_mut().unwrap().families = vec![(Afi::Ipv4, Safi::Unicast)];
+    state.policy_reject_counts = None;
+    assert_eq!(
+        super::super::snapshot::rfc9972_policy_reject_counts(&state),
+        None,
+        "unavailable retention authority omits type 22"
     );
 }
 
@@ -810,6 +858,7 @@ async fn periodic_bmp_stats_channel_full_records_the_source_drop() {
             },
             adj_rib_in_routes: 0,
             rfc9972_adj_rib_in_post: None,
+            rfc9972_policy_rejects: None,
             adj_rib_out_post: None,
         })
         .unwrap();

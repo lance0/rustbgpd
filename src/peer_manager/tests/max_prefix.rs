@@ -467,8 +467,6 @@ async fn readiness_straddle_cannot_accept_a_late_max_prefix_start() {
 /// - failing to clear on explicit enable leaves the peer permanently latched.
 #[tokio::test]
 async fn promoted_dynamic_max_prefix_latch_survives_idle_until_explicit_enable() {
-    use rustbgpd_transport::PeerCommand;
-
     let mut mgr = test_peer_manager();
     let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 32));
     let counters = Arc::new(FakePeerCounters::default());
@@ -484,6 +482,7 @@ async fn promoted_dynamic_max_prefix_latch_survives_idle_until_explicit_enable()
                         peer_asn: Some(65002),
                         prefix_count: 0,
                         rejected_routes_retained: 0,
+                        policy_reject_counts: None,
                         max_prefix: MaxPrefixState::default(),
                         negotiated_hold_time: None,
                         four_octet_as: None,
@@ -533,8 +532,7 @@ async fn promoted_dynamic_max_prefix_latch_survives_idle_until_explicit_enable()
 
     mgr.handle_session_notification(SessionNotification::MaxPrefixExceeded {
         session_id: 1,
-        // Promoted inbound tasks retain this spawn role even though session_id
-        // 1 is now the primary owner in ManagedPeer.
+        // A promoted inbound task keeps its candidate role while owning session 1.
         role: rustbgpd_transport::SessionRole::InboundCandidate,
         peer_addr: addr,
         count: 501,

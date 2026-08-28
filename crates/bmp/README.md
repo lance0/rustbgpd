@@ -20,6 +20,10 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
   are omitted when unavailable rather than reported as false zero. RFC 9972
   post-policy Adj-RIB-In gauges (types 20/21/23) cover negotiated IPv4/IPv6
   unicast and are omitted when effective unicast Add-Path receive is active.
+  Type 22 reports exact retained policy rejections for those negotiated
+  families, including under Add-Path; it is omitted when rejected-route
+  retention is disabled or a capacity eviction makes the retained set
+  incomplete.
 - RFC 8671 post-policy Adj-RIB-Out route monitoring (O=1/L=1)
 - RFC 9069 Loc-RIB route monitoring + Loc-RIB Stats Report (peer type 3),
   with a resumable cursor-based Loc-RIB dump

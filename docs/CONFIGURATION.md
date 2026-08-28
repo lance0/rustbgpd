@@ -2695,6 +2695,14 @@ fields are **restart-required per-peer** on reload; see
 [`reload-matrix.md`](reload-matrix.md) and the "Answer a member's 'why
 is my route filtered?'" runbook in [`OPERATIONS.md`](OPERATIONS.md).
 
+The same bounded store is the authority for RFC 9972 BMP policy-rejection
+statistics (type 22). With retention enabled and zero evictions since the
+session reset, each negotiated IPv4/IPv6-unicast family is reported with its
+exact count, including an explicit zero and including when Add-Path receive is
+negotiated (the retained identity includes `path_id`). Disabled retention or
+the first capacity eviction makes the count unavailable, so type 22 is omitted
+until the next session reset rather than exported as a false lower bound.
+
 ---
 
 ## Policy entries
@@ -3079,7 +3087,7 @@ BMP messages sent to collectors:
 | **Peer Up** (Type 3) | BGP session reaches Established (includes raw OPEN PDUs) |
 | **Peer Down** (Type 2) | BGP session leaves Established |
 | **Route Monitoring** (Type 0) | Inbound UPDATE received (pre-policy, raw PDU); with `rib_out_post`, also every outbound UPDATE (post-policy Adj-RIB-Out, RFC 8671); with `loc_rib`, every Loc-RIB best-path change plus the connect-time table dump (RFC 9069) |
-| **Stats Report** (Type 1) | Periodic per-peer export every 60s (Adj-RIB-In count type 7; RFC 9972 post-policy Adj-RIB-In gauges type 20 + negotiated IPv4/IPv6-unicast types 21/23, omitted under effective unicast Add-Path receive; post-policy Adj-RIB-Out gauges type 15 + per-AFI/SAFI type 17; with `loc_rib`, Loc-RIB gauges type 8 + per-AFI/SAFI type 10) |
+| **Stats Report** (Type 1) | Periodic per-peer export every 60s (Adj-RIB-In count type 7; RFC 9972 post-policy Adj-RIB-In gauges type 20 + negotiated IPv4/IPv6-unicast types 21/23, omitted under effective unicast Add-Path receive; exact retained policy-rejection type 22 per negotiated IPv4/IPv6-unicast family, omitted when retention is disabled or has evicted an entry; post-policy Adj-RIB-Out gauges type 15 + per-AFI/SAFI type 17; with `loc_rib`, Loc-RIB gauges type 8 + per-AFI/SAFI type 10) |
 | **Termination** (Type 5) | On coordinated daemon shutdown (and on client channel shutdown) |
 
 Route Monitoring messages carry the original raw BGP UPDATE PDU bytes

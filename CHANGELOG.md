@@ -21,6 +21,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Periodic BMP peer statistics now include RFC 9972 type 22 for exact counts of
+  current pre-policy IPv4/IPv6-unicast Adj-RIB-In routes rejected by inbound
+  policy. Rows are emitted only for negotiated families while rejected-route
+  retention remains authoritative; disabled retention or any capacity eviction
+  omits them rather than reporting a false lower bound. Path-aware retained
+  identities keep the counts exact when Add-Path receive is negotiated.
+
 - Nightly wire campaigns now seed all 12 targets, apply one reviewed BGP byte
   dictionary to the 11 binary targets, and carry a validated corpus forward on
   the `main` lineage. Restore happens in runner-temporary staging and accepts

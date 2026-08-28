@@ -68,6 +68,29 @@ pub(super) fn rfc9972_adj_rib_in_counts(state: &PeerSessionState) -> Option<Vec<
     (!counts.is_empty()).then_some(counts)
 }
 
+pub(super) fn rfc9972_policy_reject_counts(
+    state: &PeerSessionState,
+) -> Option<Vec<(u16, u8, u64)>> {
+    let session = state.negotiated_session.as_ref()?;
+    let policy_rejects = state.policy_reject_counts?;
+    let mut counts = Vec::new();
+    if session.families.contains(&(Afi::Ipv4, Safi::Unicast)) {
+        counts.push((
+            Afi::Ipv4 as u16,
+            Safi::Unicast as u8,
+            policy_rejects.ipv4_unicast,
+        ));
+    }
+    if session.families.contains(&(Afi::Ipv6, Safi::Unicast)) {
+        counts.push((
+            Afi::Ipv6 as u16,
+            Safi::Unicast as u8,
+            policy_rejects.ipv6_unicast,
+        ));
+    }
+    (!counts.is_empty()).then_some(counts)
+}
+
 /// Build a `PeerInfo` snapshot from config + an optional fresh
 /// `PeerSessionState`. `session_state = None` means the bounded
 /// `query_state` either timed out (peer parked on TCP write) or its task
@@ -658,6 +681,7 @@ impl PeerManager {
 
             let prefix_count = u64::try_from(state.prefix_count).unwrap_or(u64::MAX);
             let rfc9972_adj_rib_in_post = rfc9972_adj_rib_in_counts(state);
+            let rfc9972_policy_rejects = rfc9972_policy_reject_counts(state);
             let remote_asn = effective_remote_asn(managed, Some(state));
             // RFC 8671 types 15/17: a peer absent from the RIB's
             // Adj-RIB-Out map simply has nothing advertised — report
@@ -682,6 +706,7 @@ impl PeerManager {
                 ),
                 adj_rib_in_routes: prefix_count,
                 rfc9972_adj_rib_in_post,
+                rfc9972_policy_rejects,
                 adj_rib_out_post,
             };
 

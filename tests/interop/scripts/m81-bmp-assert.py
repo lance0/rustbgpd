@@ -323,6 +323,51 @@ def cmd_stats_locrib_counts():
        f"carries legacy and RFC 9972 Adj-RIB-In gauges ({ptypes})")
 
 
+def cmd_stats_policy_reject_counts(peer_ip):
+    def v3_body(m):
+        return m["raw"][6 + PER_PEER_LEN :]
+
+    def v4_body(m):
+        b = m["raw"]
+        off = 6 + PER_PEER_LEN
+        if u16(b, off) != STATS_TLV_STATS:
+            return None
+        length = u16(b, off + 2)
+        value = b[off + 4 :]
+        return value if len(value) == length else None
+
+    def exact_type22(body):
+        rows = [payload for stat_type, payload in _stats(body) if stat_type == 22]
+        if len(rows) != 2 or any(len(row) != 11 for row in rows):
+            return False
+        decoded = [
+            (u16(row, 0), row[2], int.from_bytes(row[3:], "big"))
+            for row in rows
+        ]
+        return decoded == [(1, 1, 1), (2, 1, 1)] and len(set(decoded)) == 2
+
+    v3 = [
+        v3_body(m)
+        for m in load(V3_FILE)
+        if m["type"] == STATS and peer_hdr(m)[2] == peer_ip
+    ]
+    v4 = [
+        body
+        for m in load(V4_FILE)
+        if m["type"] == STATS and peer_hdr(m)[2] == peer_ip
+        if (body := v4_body(m)) is not None
+    ]
+    exact_v3 = [body for body in v3 if exact_type22(body)]
+    exact_v4 = [body for body in v4 if exact_type22(body)]
+    if not exact_v3 or not exact_v4:
+        fail(f"peer {peer_ip}: no v3/v4 Stats pair with exact type-22 "
+             "IPv4/IPv6-unicast value-1 rows")
+    if not set(exact_v3).intersection(exact_v4):
+        fail(f"peer {peer_ip}: exact type-22 Stats bodies differ across v3/v4")
+    ok(f"peer {peer_ip}: exactly two unique type-22 length-11 rows "
+       "[(1,1,1), (2,1,1)] with byte-equal v3/v4 Stats body")
+
+
 def cmd_no_path_marking():
     msgs = [m for m in load(V4_FILE) if m["type"] == RM]
     checked = 0
@@ -401,6 +446,7 @@ def main():
         "rm_pdu_equality": cmd_rm_pdu_equality,
         "stats_v4_wrap": cmd_stats_v4_wrap,
         "stats_locrib_counts": cmd_stats_locrib_counts,
+        "stats_policy_reject_counts": cmd_stats_policy_reject_counts,
         "no_path_marking": cmd_no_path_marking,
         "dump": cmd_dump,
         "term": cmd_term,

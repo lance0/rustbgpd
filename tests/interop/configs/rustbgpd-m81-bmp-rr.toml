@@ -22,6 +22,12 @@ principal = "rustbgpd://operator/test-only"
 sys_name = "rustbgpd-m81"
 sys_descr = "m81 bmp trio receipt"
 
+[policy]
+# Bound only to PE1 below: two dedicated announcements exercise RFC 9972
+# type 22 without changing the accepted-route receipt. This is absolute
+# because the driver copies the placeholder-patched TOML to /tmp.
+rpol_files = ["/etc/rustbgpd/m81-bmp-policy-rejects.rpol"]
+
 # Collector A — pmacct pmbmpd (bleeding-edge), v3 semantic oracle for
 # all three streams. Phase 0 pinned pmacct to v3: it accepts version-4
 # common headers but expects the pre-tlv-20 BGP PDU TLV code point 4,
@@ -61,6 +67,7 @@ description = "gobgp-pe1"
 hold_time = 90
 route_reflector_client = true
 families = ["ipv4_unicast", "ipv6_unicast", "l3vpn_ipv4_unicast"]
+import_policy_chain = ["m81-bmp-policy-rejects"]
 
 [[neighbors]]
 address = "10.0.1.2"

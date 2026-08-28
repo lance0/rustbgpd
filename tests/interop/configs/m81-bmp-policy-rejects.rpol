@@ -1,0 +1,33 @@
+# M81 policy-rejection statistics fixture. This policy is bound only to PE1,
+# and its two dedicated prefixes do not overlap the existing accepted-route
+# assertions.
+
+policy m81-bmp-policy-rejects {
+    term reject-v4 {
+        if route.prefix == 198.18.81.0/24 { reject }
+    }
+    term reject-v6 {
+        if route.prefix == 2001:db8:81::/48 { reject }
+    }
+    term accept-existing-receipt { accept }
+}
+
+test rejects-dedicated-v4 {
+    route { prefix 198.18.81.0/24 }
+    expect m81-bmp-policy-rejects == reject
+}
+
+test rejects-dedicated-v6 {
+    route { prefix 2001:db8:81::/48; family ipv6-unicast }
+    expect m81-bmp-policy-rejects == reject
+}
+
+test preserves-existing-v4 {
+    route { prefix 10.10.1.0/24 }
+    expect m81-bmp-policy-rejects == accept
+}
+
+test preserves-existing-v6 {
+    route { prefix 2001:db8:10::/48; family ipv6-unicast }
+    expect m81-bmp-policy-rejects == accept
+}
