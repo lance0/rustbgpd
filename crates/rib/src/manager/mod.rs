@@ -465,6 +465,10 @@ pub struct RibManager {
     dataplane_page_announcer_visits: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     dataplane_page_sibling_visits: std::sync::atomic::AtomicUsize,
+    /// Deterministic exact-FIB cancellation injection after N visits. Zero
+    /// disables the test hook.
+    #[cfg(test)]
+    dataplane_exact_cancel_after_visits: std::sync::atomic::AtomicUsize,
     adj_ribs_out: HashMap<IpAddr, AdjRibOut>,
     /// Per-peer outbound unicast prefix admission state (ADR-0113). An entry
     /// exists only for a peer whose resolved `max_prefixes_out_ipv4` /
@@ -1405,6 +1409,8 @@ impl RibManager {
             dataplane_page_announcer_visits: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             dataplane_page_sibling_visits: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            dataplane_exact_cancel_after_visits: std::sync::atomic::AtomicUsize::new(0),
             adj_ribs_out: HashMap::new(),
             outbound_prefix_limits: HashMap::new(),
             outbound_limit_control: outbound_prefix_limits::OutboundLimitControl::default(),

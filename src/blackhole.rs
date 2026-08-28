@@ -1750,6 +1750,189 @@ pub(super) mod tests {
     #[tokio::test]
     async fn guarded_churn_cleans_absent_owned_before_deferring_repair() {
         let prefix = v4(32);
+        let new_prefix = v4_host(2);
+        let withdrawn = v4_host(3);
+        let adopted = v4_host(4);
+        let announced = |prefix| {
+            route(
+                prefix,
+                RouteOrigin::Ebgp,
+                vec![rustbgpd_wire::COMMUNITY_BLACKHOLE],
+            )
+        };
+        let candidates = vec![announced(prefix), announced(new_prefix), announced(adopted)];
+        let peer = candidates[0].peer;
+        let (rib_tx, mut rib_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            while let Some(update) = rib_rx.recv().await {
+                match update {
+                    RibUpdate::QueryBestRoutesPage { reply, .. } => {
+                        let _ = reply.send(Ok(rustbgpd_rib::BestRoutesPage {
+                            routes: candidates.clone(),
+                            next_cursor: None,
+                            observed_version: rustbgpd_rib::RoutePageVersion {
+                                epoch: 0,
+                                generation: 1,
+                            },
+                        }));
+                    }
+                    RibUpdate::QueryBestRoutesExact {
+                        prefixes, reply, ..
+                    } => {
+                        let _ = reply.send(Ok(rustbgpd_rib::ExactBestRoutes {
+                            routes: vec![None; prefixes.len()],
+                            observed_version: rustbgpd_rib::RoutePageVersion {
+                                epoch: 0,
+                                generation: 1,
+                            },
+                        }));
+                    }
+                    RibUpdate::QueryDataplaneVersions { reply, .. } => {
+                        let _ = reply.send(Ok(rustbgpd_rib::DataplaneVersions {
+                            routes: rustbgpd_rib::RoutePageVersion {
+                                epoch: 0,
+                                generation: 2,
+                            },
+                            peer_groups: rustbgpd_rib::RoutePageVersion::default(),
+                        }));
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let metrics = BgpMetrics::with_registry(Registry::new());
+        let (status_tx, status_rx) = watch::channel(Vec::new());
+        let mut fib = FakeFib::default();
+        fib.installed.extend([withdrawn, adopted]);
+        let config = capped(10);
+        let mut state = ReconcilerState::new(
+            config,
+            tokio::time::Instant::now() + Duration::from_hours(1),
+            OwnershipState::ephemeral([prefix, withdrawn, adopted]),
+        );
+        state.owned.insert(prefix, OwnedBlackhole { peer });
+        state.owned.insert(withdrawn, OwnedBlackhole { peer });
+        state.adoption.pending.insert(adopted);
+        state.adoption.swept = true;
+
+        reconcile_once(config, &rib_tx, &mut fib, &metrics, &status_tx, &mut state).await;
+
+        assert_eq!(
+            state.owned.keys().copied().collect::<HashSet<_>>(),
+            HashSet::from([adopted])
+        );
+        assert!(!state.ownership.prefixes.contains(&prefix));
+        assert!(!state.ownership.prefixes.contains(&withdrawn));
+        assert!(state.ownership.prefixes.contains(&adopted));
+        assert!(state.adoption.pending.is_empty());
+        assert!(fib.install_calls.is_empty());
+        assert_eq!(fib.remove_calls, vec![withdrawn]);
+        let statuses = status_rx.borrow();
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|status| status.reason == "route_churn_deferred")
+                .count(),
+            2
+        );
+        assert!(statuses.iter().any(|status| {
+            status.prefix == adopted
+                && status.state == BlackholeState::Installed
+                && status.reason == "adopted"
+        }));
+        assert!((gauge_value(&metrics, "bgp_blackhole_discard_active") - 1.0).abs() < f64::EPSILON);
+        assert!(
+            counter_value(
+                &metrics,
+                "bgp_blackhole_discard_rejected_total",
+                "reason",
+                "route_churn_deferred"
+            )
+            .abs()
+                < f64::EPSILON
+        );
+    }
+
+    #[tokio::test]
+    async fn multipage_skip_exact_present_protects_owned_route() {
+        let protected = v4_host(99);
+        let cursor = v4_host(1);
+        let protected_route = route(
+            protected,
+            RouteOrigin::Ebgp,
+            vec![rustbgpd_wire::COMMUNITY_BLACKHOLE],
+        );
+        let peer = protected_route.peer;
+        let cursor_route = route(cursor, RouteOrigin::Ebgp, Vec::new());
+        let (rib_tx, mut rib_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            while let Some(update) = rib_rx.recv().await {
+                match update {
+                    RibUpdate::QueryBestRoutesPage { after, reply, .. } => {
+                        let (routes, next_cursor) = if after.is_none() {
+                            (vec![cursor_route.clone()], Some(cursor))
+                        } else {
+                            (Vec::new(), None)
+                        };
+                        let _ = reply.send(Ok(rustbgpd_rib::BestRoutesPage {
+                            routes,
+                            next_cursor,
+                            observed_version: rustbgpd_rib::RoutePageVersion::default(),
+                        }));
+                    }
+                    RibUpdate::QueryBestRoutesExact {
+                        prefixes, reply, ..
+                    } => {
+                        let routes = prefixes
+                            .iter()
+                            .map(|prefix| (*prefix == protected).then(|| protected_route.clone()))
+                            .collect();
+                        let _ = reply.send(Ok(rustbgpd_rib::ExactBestRoutes {
+                            routes,
+                            observed_version: rustbgpd_rib::RoutePageVersion::default(),
+                        }));
+                    }
+                    RibUpdate::QueryDataplaneVersions { reply, .. } => {
+                        let _ = reply.send(Ok(rustbgpd_rib::DataplaneVersions {
+                            routes: rustbgpd_rib::RoutePageVersion::default(),
+                            peer_groups: rustbgpd_rib::RoutePageVersion::default(),
+                        }));
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let metrics = BgpMetrics::with_registry(Registry::new());
+        let (status_tx, status_rx) = watch::channel(Vec::new());
+        let mut fib = FakeFib::default();
+        fib.installed.insert(protected);
+        let config = BlackholeConfig {
+            enabled: true,
+            ..BlackholeConfig::default()
+        };
+        let mut state = ReconcilerState::new(
+            config,
+            tokio::time::Instant::now() + Duration::from_hours(1),
+            OwnershipState::ephemeral([protected]),
+        );
+        state.owned.insert(protected, OwnedBlackhole { peer });
+        state.adoption.swept = true;
+
+        reconcile_once(config, &rib_tx, &mut fib, &metrics, &status_tx, &mut state).await;
+
+        assert!(state.owned.contains_key(&protected));
+        assert!(state.ownership.prefixes.contains(&protected));
+        assert!(fib.remove_calls.is_empty() && fib.install_calls.is_empty());
+        assert!(status_rx.borrow().iter().any(|status| {
+            status.prefix == protected
+                && status.state == BlackholeState::Installed
+                && status.reason == "owned"
+        }));
+    }
+
+    #[tokio::test]
+    async fn unguarded_page_seal_churn_reinstalls_absent_owned_route() {
+        let prefix = v4(32);
         let candidate = route(
             prefix,
             RouteOrigin::Ebgp,
@@ -1786,7 +1969,10 @@ pub(super) mod tests {
         let metrics = BgpMetrics::with_registry(Registry::new());
         let (status_tx, status_rx) = watch::channel(Vec::new());
         let mut fib = FakeFib::default();
-        let config = capped(1);
+        let config = BlackholeConfig {
+            enabled: true,
+            ..BlackholeConfig::default()
+        };
         let mut state = ReconcilerState::new(
             config,
             tokio::time::Instant::now() + Duration::from_hours(1),
@@ -1797,23 +1983,103 @@ pub(super) mod tests {
 
         reconcile_once(config, &rib_tx, &mut fib, &metrics, &status_tx, &mut state).await;
 
-        assert!(state.owned.is_empty());
-        assert!(!state.ownership.prefixes.contains(&prefix));
-        assert!(fib.install_calls.is_empty() && fib.remove_calls.is_empty());
-        let statuses = status_rx.borrow();
-        assert_eq!(statuses[0].state, BlackholeState::Rejected);
-        assert_eq!(statuses[0].reason, "route_churn_deferred");
-        assert!(gauge_value(&metrics, "bgp_blackhole_discard_active").abs() < f64::EPSILON);
-        assert!(
-            counter_value(
-                &metrics,
-                "bgp_blackhole_discard_rejected_total",
-                "reason",
-                "route_churn_deferred"
-            )
-            .abs()
-                < f64::EPSILON
-        );
+        assert_eq!(fib.install_calls, vec![prefix]);
+        assert!(state.owned.contains_key(&prefix));
+        assert!(state.ownership.prefixes.contains(&prefix));
+        assert!(status_rx.borrow().iter().any(|status| {
+            status.prefix == prefix && status.state == BlackholeState::Installed
+        }));
+    }
+
+    #[tokio::test]
+    async fn page_exact_and_seal_failures_leave_blackhole_state_unpublished_and_untouched() {
+        #[derive(Clone, Copy)]
+        enum Failure {
+            Page,
+            Exact,
+            Seal,
+        }
+        for failure in [Failure::Page, Failure::Exact, Failure::Seal] {
+            let prefix = v4(32);
+            let desired = route(
+                prefix,
+                RouteOrigin::Ebgp,
+                vec![rustbgpd_wire::COMMUNITY_BLACKHOLE],
+            );
+            let peer = desired.peer;
+            let cursor = v4_host(1);
+            let cursor_route = route(cursor, RouteOrigin::Ebgp, Vec::new());
+            let (rib_tx, mut rib_rx) = mpsc::channel(8);
+            tokio::spawn(async move {
+                let mut page_calls = 0usize;
+                while let Some(update) = rib_rx.recv().await {
+                    match update {
+                        RibUpdate::QueryBestRoutesPage { reply, .. } => {
+                            page_calls += 1;
+                            if matches!(failure, Failure::Page) && page_calls == 2 {
+                                drop(reply);
+                            } else {
+                                let (routes, next_cursor) = if matches!(failure, Failure::Page) {
+                                    (vec![cursor_route.clone()], Some(cursor))
+                                } else if matches!(failure, Failure::Seal) {
+                                    (vec![desired.clone()], None)
+                                } else {
+                                    (Vec::new(), None)
+                                };
+                                let _ = reply.send(Ok(rustbgpd_rib::BestRoutesPage {
+                                    routes,
+                                    next_cursor,
+                                    observed_version: rustbgpd_rib::RoutePageVersion::default(),
+                                }));
+                            }
+                        }
+                        RibUpdate::QueryBestRoutesExact { reply, .. } => {
+                            if matches!(failure, Failure::Exact) {
+                                drop(reply);
+                            }
+                        }
+                        RibUpdate::QueryDataplaneVersions { reply, .. } => {
+                            if matches!(failure, Failure::Seal) {
+                                drop(reply);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            });
+            let metrics = BgpMetrics::with_registry(Registry::new());
+            let sentinel = vec![BlackholeStatus {
+                prefix,
+                peer,
+                state: BlackholeState::Installed,
+                reason: "last_good".to_string(),
+            }];
+            let (status_tx, status_rx) = watch::channel(sentinel.clone());
+            let mut fib = FakeFib::default();
+            fib.installed.insert(prefix);
+            let config = capped(1);
+            let mut state = ReconcilerState::new(
+                config,
+                tokio::time::Instant::now() + Duration::from_hours(1),
+                OwnershipState::ephemeral([prefix]),
+            );
+            state.owned.insert(prefix, OwnedBlackhole { peer });
+            state.adoption.swept = true;
+            let owned_before = state.owned.clone();
+            let receipt_before = state.ownership.prefixes.clone();
+            let rejected_before = state.rejected.clone();
+
+            reconcile_once(config, &rib_tx, &mut fib, &metrics, &status_tx, &mut state).await;
+
+            assert_eq!(fib.dump_calls, 0);
+            assert!(fib.install_calls.is_empty() && fib.remove_calls.is_empty());
+            assert_eq!(state.owned, owned_before);
+            assert_eq!(state.ownership.prefixes, receipt_before);
+            assert_eq!(state.rejected, rejected_before);
+            assert!(state.adoption.swept && state.adoption.pending.is_empty());
+            assert_eq!(*status_rx.borrow(), sentinel);
+            assert!(gauge_value(&metrics, "bgp_blackhole_discard_active").abs() < f64::EPSILON);
+        }
     }
 
     fn rib_with_routes(routes: Vec<Route>) -> mpsc::Sender<RibUpdate> {

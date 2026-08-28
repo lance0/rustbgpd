@@ -1786,6 +1786,14 @@ fn accepted_peer_add_path_limits_advance_advertised_after_two_path_replay() {
 #[test]
 fn stale_peer_down_leaves_real_route_state_and_page_versions_unchanged() {
     let mut fixture = lifecycle_page_fixture(true);
+    fixture
+        .manager
+        .handle_update(RibUpdate::SetPeerPolicyContext {
+            peer: fixture.departing,
+            session_id: 1,
+            peer_group: Some("edge".to_string()),
+        });
+    let group_before = fixture.manager.peer_group_version;
     let before = route_page_versions(&fixture.manager);
 
     fixture.manager.handle_update(RibUpdate::PeerDown {
@@ -1794,6 +1802,11 @@ fn stale_peer_down_leaves_real_route_state_and_page_versions_unchanged() {
     });
 
     assert_eq!(route_page_versions(&fixture.manager), before);
+    assert_eq!(fixture.manager.peer_group_version, group_before);
+    assert_eq!(
+        fixture.manager.peer_group.get(&fixture.departing),
+        Some(&"edge".to_string())
+    );
     assert_eq!(fixture.manager.ribs[&fixture.departing].len(), 1);
     assert_eq!(
         best_peer(&fixture.manager, fixture.shared),
@@ -1807,6 +1820,14 @@ fn stale_peer_down_leaves_real_route_state_and_page_versions_unchanged() {
 #[test]
 fn accepted_peer_down_advances_all_with_route_removal_and_fallback() {
     let mut fixture = lifecycle_page_fixture(false);
+    fixture
+        .manager
+        .handle_update(RibUpdate::SetPeerPolicyContext {
+            peer: fixture.departing,
+            session_id: 0,
+            peer_group: Some("edge".to_string()),
+        });
+    let group_before = fixture.manager.peer_group_version;
     let before = route_page_versions(&fixture.manager);
 
     fixture.manager.handle_update(RibUpdate::PeerDown {
@@ -1816,6 +1837,8 @@ fn accepted_peer_down_advances_all_with_route_removal_and_fallback() {
 
     let after = route_page_versions(&fixture.manager);
     assert!((0..3).all(|index| before[index] != after[index]));
+    assert_ne!(fixture.manager.peer_group_version, group_before);
+    assert!(!fixture.manager.peer_group.contains_key(&fixture.departing));
     assert!(!fixture.manager.ribs.contains_key(&fixture.departing));
     let updates = drain_outbound(&mut fixture.target_rx);
     assert!(

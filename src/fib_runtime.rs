@@ -2961,6 +2961,7 @@ mod tests {
     #[derive(Default)]
     struct FakeFib {
         kernel: FibKernelSnapshot,
+        dump_calls: usize,
         fail_dump: Option<String>,
         fail_apply: Vec<FibApplyError>,
         fail_apply_signal: Option<Arc<std::sync::atomic::AtomicBool>>,
@@ -2973,6 +2974,7 @@ mod tests {
             &'a mut self,
             _tables: &'a [FibTableConfig],
         ) -> Pin<Box<dyn Future<Output = Result<FibKernelSnapshot, String>> + Send + 'a>> {
+            self.dump_calls += 1;
             Box::pin(async move {
                 if let Some(error) = &self.fail_dump {
                     Err(error.clone())
@@ -4984,6 +4986,463 @@ mod tests {
                 &exact,
             ));
         }
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "scripted actor keeps the full reconcile proof local"
+    )]
+    async fn reconcile_peer_group_churn_defers_exact_add_replace_but_unaffected_table_runs() {
+        let add_prefix = v4(24);
+        let replace_prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 114, 0), 24));
+        let add_route = route(add_prefix, ip("192.0.2.2"));
+        let replace_route = route(replace_prefix, ip("192.0.2.3"));
+        let routes = vec![add_route.clone(), replace_route.clone()];
+        let peer = add_route.peer;
+        let version_one = rustbgpd_rib::RoutePageVersion {
+            epoch: 0,
+            generation: 1,
+        };
+        let version_two = rustbgpd_rib::RoutePageVersion {
+            epoch: 0,
+            generation: 2,
+        };
+        let (rib_tx, mut rib_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            while let Some(update) = rib_rx.recv().await {
+                match update {
+                    RibUpdate::QueryPeerGroupsVersioned { reply, .. } => {
+                        let _ = reply.send(Ok(rustbgpd_rib::VersionedPeerGroups {
+                            groups: [(peer, "edge".to_string())].into(),
+                            observed_version: version_one,
+                        }));
+                    }
+                    RibUpdate::QueryFibInstallCandidatesPage { reply, .. } => {
+                        let _ = reply.send(Ok(rustbgpd_rib::FibInstallCandidatesPage {
+                            candidates: Vec::new(),
+                            next_cursor: None,
+                            observed_version: version_one,
+                        }));
+                    }
+                    RibUpdate::QueryFibInstallCandidatesExact {
+                        prefixes,
+                        max_paths,
+                        reply,
+                        ..
+                    } => {
+                        let all = routes_to_candidates(&routes, max_paths);
+                        let candidates = prefixes
+                            .iter()
+                            .map(|prefix| all.iter().find(|c| c.best.prefix == *prefix).cloned())
+                            .collect();
+                        let _ = reply.send(Ok(rustbgpd_rib::ExactFibInstallCandidates {
+                            candidates,
+                            observed_version: version_one,
+                        }));
+                    }
+                    RibUpdate::QueryDataplaneVersions { reply, .. } => {
+                        let _ = reply.send(Ok(rustbgpd_rib::DataplaneVersions {
+                            routes: version_one,
+                            peer_groups: version_two,
+                        }));
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let mut group_table = table("group", 1000, 200, &["ipv4_unicast"]);
+        group_table.allowed_peer_groups = vec!["edge".to_string()];
+        group_table.max_routes = Some(100);
+        let unaffected = table("plain", 1001, 201, &["ipv4_unicast"]);
+        let config = config_with(vec![group_table, unaffected]);
+        let group_add = fib_route_in("group", 1000, 200, add_prefix, ip("192.0.2.2"));
+        let group_old = fib_route_in("group", 1000, 200, replace_prefix, ip("192.0.2.4"));
+        let group_desired = fib_route_in("group", 1000, 200, replace_prefix, ip("192.0.2.3"));
+        let mut owned = FibOwnedState {
+            routes: BTreeMap::from([
+                (group_add.key, group_add.clone()),
+                (group_old.key, group_old.clone()),
+            ]),
+        };
+        let mut fib = FakeFib::default();
+        fib.kernel.routes.insert(
+            group_old.key,
+            FibKernelRoute {
+                target: group_old.target,
+                protocol: FibKernelProtocol::Bgp,
+            },
+        );
+        let (status_tx, status_rx) = watch::channel(Vec::new());
+        let (event_tx, mut event_rx) = broadcast::channel(16);
+        let mut unresolved = UnresolvedHolds {
+            routes: BTreeMap::from([
+                (
+                    group_add.key,
+                    UnresolvedHold {
+                        route: group_add.clone(),
+                        op_kind: UnresolvedOpKind::Add,
+                    },
+                ),
+                (
+                    group_desired.key,
+                    UnresolvedHold {
+                        route: group_desired,
+                        op_kind: UnresolvedOpKind::Replace,
+                    },
+                ),
+            ]),
+        };
+        let test_metrics = metrics();
+        assert!(
+            reconcile_once_with_events(
+                &config,
+                &rib_tx,
+                &mut fib,
+                &test_metrics,
+                &status_tx,
+                &event_tx,
+                &mut owned,
+                &mut unresolved,
+                HeldRetry::All,
+                &CancellationToken::new(),
+            )
+            .await
+        );
+
+        assert!(
+            fib.applied
+                .iter()
+                .all(|op| op_route(op).key.table_id != 1000)
+        );
+        assert_eq!(
+            fib.applied
+                .iter()
+                .filter(|op| matches!(op, FibOp::Add(route) if route.key.table_id == 1001))
+                .count(),
+            2
+        );
+        assert_eq!(unresolved.routes.len(), 2);
+        assert_eq!(
+            status_rx
+                .borrow()
+                .iter()
+                .filter(|status| status.reason == "next_hop_unresolved")
+                .count(),
+            2
+        );
+        assert_eq!(
+            metric_value_bits(test_metrics.registry(), "bgp_fib_routes_unresolved"),
+            2.0f64.to_bits()
+        );
+        while let Ok(event) = event_rx.try_recv() {
+            assert_ne!(event.table_id, 1000);
+        }
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "table-driven failure fixture keeps every no-effect assertion identical"
+    )]
+    async fn rib_planning_failures_leave_fib_state_unpublished_and_untouched() {
+        #[derive(Clone, Copy)]
+        enum Failure {
+            Groups,
+            Page,
+            Exact,
+            Seal,
+        }
+        for failure in [
+            Failure::Groups,
+            Failure::Page,
+            Failure::Exact,
+            Failure::Seal,
+        ] {
+            let prefix = v4(24);
+            let desired = route(prefix, ip("192.0.2.2"));
+            let peer = desired.peer;
+            let cursor_route = route(
+                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24)),
+                ip("192.0.2.9"),
+            );
+            let cursor = cursor_route.prefix;
+            let version = rustbgpd_rib::RoutePageVersion::default();
+            let (rib_tx, mut rib_rx) = mpsc::channel(8);
+            tokio::spawn(async move {
+                let mut page_calls = 0usize;
+                while let Some(update) = rib_rx.recv().await {
+                    match update {
+                        RibUpdate::QueryPeerGroupsVersioned { reply, .. } => {
+                            if matches!(failure, Failure::Groups) {
+                                drop(reply);
+                            } else {
+                                let _ = reply.send(Ok(rustbgpd_rib::VersionedPeerGroups {
+                                    groups: [(peer, "edge".to_string())].into(),
+                                    observed_version: version,
+                                }));
+                            }
+                        }
+                        RibUpdate::QueryFibInstallCandidatesPage {
+                            max_paths, reply, ..
+                        } => {
+                            page_calls += 1;
+                            if matches!(failure, Failure::Page) && page_calls == 2 {
+                                drop(reply);
+                            } else {
+                                let (routes, next_cursor) = if matches!(failure, Failure::Page) {
+                                    (vec![cursor_route.clone()], Some(cursor))
+                                } else if matches!(failure, Failure::Seal) {
+                                    (vec![desired.clone()], None)
+                                } else {
+                                    (Vec::new(), None)
+                                };
+                                let _ = reply.send(Ok(rustbgpd_rib::FibInstallCandidatesPage {
+                                    candidates: routes_to_candidates(&routes, max_paths),
+                                    next_cursor,
+                                    observed_version: version,
+                                }));
+                            }
+                        }
+                        RibUpdate::QueryFibInstallCandidatesExact { reply, .. } => {
+                            if matches!(failure, Failure::Exact) {
+                                drop(reply);
+                            }
+                        }
+                        RibUpdate::QueryDataplaneVersions { reply, .. } => {
+                            if matches!(failure, Failure::Seal) {
+                                drop(reply);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            });
+            let mut group_table = table("edge", 1000, 200, &["ipv4_unicast"]);
+            group_table.allowed_peer_groups = vec!["edge".to_string()];
+            let config = config_with(vec![group_table]);
+            let owned_route = fib_route(prefix, ip("192.0.2.2"));
+            let mut owned = FibOwnedState {
+                routes: BTreeMap::from([(owned_route.key, owned_route.clone())]),
+            };
+            let mut unresolved = unresolved_with(owned_route.clone());
+            let owned_before = owned.clone();
+            let unresolved_before = unresolved.clone();
+            let sentinel = vec![status_for_route(
+                &owned_route,
+                FibRuntimeState::Installed,
+                "last_good".to_string(),
+            )];
+            let (status_tx, status_rx) = watch::channel(sentinel.clone());
+            let (event_tx, mut event_rx) = broadcast::channel(16);
+            let mut fib = FakeFib::default();
+            fib.kernel.routes.insert(
+                owned_route.key,
+                FibKernelRoute {
+                    target: owned_route.target,
+                    protocol: FibKernelProtocol::Bgp,
+                },
+            );
+
+            assert!(
+                !reconcile_once_with_events(
+                    &config,
+                    &rib_tx,
+                    &mut fib,
+                    &metrics(),
+                    &status_tx,
+                    &event_tx,
+                    &mut owned,
+                    &mut unresolved,
+                    HeldRetry::All,
+                    &CancellationToken::new(),
+                )
+                .await
+            );
+            assert_eq!(fib.dump_calls, 0);
+            assert!(fib.applied.is_empty());
+            assert_eq!(owned, owned_before);
+            assert_eq!(unresolved, unresolved_before);
+            assert_eq!(*status_rx.borrow(), sentinel);
+            assert!(event_rx.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn capped_route_churn_allows_exact_repair_and_exact_absence_removal() {
+        let repair_prefix = v4(24);
+        let remove_prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 114, 0), 24));
+        let desired = route(repair_prefix, ip("192.0.2.2"));
+        let version_one = rustbgpd_rib::RoutePageVersion {
+            epoch: 0,
+            generation: 1,
+        };
+        let version_two = rustbgpd_rib::RoutePageVersion {
+            epoch: 0,
+            generation: 2,
+        };
+        let (rib_tx, mut rib_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            while let Some(update) = rib_rx.recv().await {
+                match update {
+                    RibUpdate::QueryFibInstallCandidatesPage { reply, .. } => {
+                        let _ = reply.send(Ok(rustbgpd_rib::FibInstallCandidatesPage {
+                            candidates: Vec::new(),
+                            next_cursor: None,
+                            observed_version: version_one,
+                        }));
+                    }
+                    RibUpdate::QueryFibInstallCandidatesExact {
+                        prefixes,
+                        max_paths,
+                        reply,
+                        ..
+                    } => {
+                        let candidate =
+                            routes_to_candidates(std::slice::from_ref(&desired), max_paths)
+                                .pop()
+                                .unwrap();
+                        let candidates = prefixes
+                            .iter()
+                            .map(|prefix| (*prefix == repair_prefix).then(|| candidate.clone()))
+                            .collect();
+                        let _ = reply.send(Ok(rustbgpd_rib::ExactFibInstallCandidates {
+                            candidates,
+                            observed_version: version_two,
+                        }));
+                    }
+                    RibUpdate::QueryDataplaneVersions { reply, .. } => {
+                        let _ = reply.send(Ok(rustbgpd_rib::DataplaneVersions {
+                            routes: version_two,
+                            peer_groups: rustbgpd_rib::RoutePageVersion::default(),
+                        }));
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let mut capped = table("edge", 1000, 200, &["ipv4_unicast"]);
+        capped.max_routes = Some(100);
+        let config = config_with(vec![capped]);
+        let old_repair = fib_route(repair_prefix, ip("192.0.2.1"));
+        let old_remove = fib_route(remove_prefix, ip("192.0.2.3"));
+        let mut owned = FibOwnedState {
+            routes: BTreeMap::from([
+                (old_repair.key, old_repair.clone()),
+                (old_remove.key, old_remove.clone()),
+            ]),
+        };
+        let mut fib = FakeFib::default();
+        for route in [&old_repair, &old_remove] {
+            fib.kernel.routes.insert(
+                route.key,
+                FibKernelRoute {
+                    target: route.target.clone(),
+                    protocol: FibKernelProtocol::Bgp,
+                },
+            );
+        }
+        let (status_tx, _) = watch::channel(Vec::new());
+        let (event_tx, _) = broadcast::channel(16);
+        let mut unresolved = UnresolvedHolds::default();
+        assert!(
+            reconcile_once_with_events(
+                &config,
+                &rib_tx,
+                &mut fib,
+                &metrics(),
+                &status_tx,
+                &event_tx,
+                &mut owned,
+                &mut unresolved,
+                HeldRetry::All,
+                &CancellationToken::new(),
+            )
+            .await
+        );
+        assert!(fib.applied.iter().any(|op| {
+            matches!(op, FibOp::Replace { desired, .. } if desired.key.prefix == repair_prefix)
+        }));
+        assert!(
+            fib.applied.iter().any(|op| {
+                matches!(op, FibOp::Remove(route) if route.key.prefix == remove_prefix)
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn route_churn_freezes_capped_add_while_uncapped_table_converges() {
+        let prefix = v4(24);
+        let desired = route(prefix, ip("192.0.2.2"));
+        let version_one = rustbgpd_rib::RoutePageVersion {
+            epoch: 0,
+            generation: 1,
+        };
+        let version_two = rustbgpd_rib::RoutePageVersion {
+            epoch: 0,
+            generation: 2,
+        };
+        let (rib_tx, mut rib_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            while let Some(update) = rib_rx.recv().await {
+                match update {
+                    RibUpdate::QueryFibInstallCandidatesPage {
+                        max_paths, reply, ..
+                    } => {
+                        let _ = reply.send(Ok(rustbgpd_rib::FibInstallCandidatesPage {
+                            candidates: routes_to_candidates(
+                                std::slice::from_ref(&desired),
+                                max_paths,
+                            ),
+                            next_cursor: None,
+                            observed_version: version_one,
+                        }));
+                    }
+                    RibUpdate::QueryDataplaneVersions { reply, .. } => {
+                        let _ = reply.send(Ok(rustbgpd_rib::DataplaneVersions {
+                            routes: version_two,
+                            peer_groups: rustbgpd_rib::RoutePageVersion::default(),
+                        }));
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let mut capped = table("capped", 1000, 200, &["ipv4_unicast"]);
+        capped.max_routes = Some(100);
+        let uncapped = table("uncapped", 1001, 201, &["ipv4_unicast"]);
+        let config = config_with(vec![capped, uncapped]);
+        let mut fib = FakeFib::default();
+        let mut owned = FibOwnedState::default();
+        let (status_tx, _) = watch::channel(Vec::new());
+        let (event_tx, _) = broadcast::channel(16);
+        let mut unresolved = UnresolvedHolds::default();
+        assert!(
+            reconcile_once_with_events(
+                &config,
+                &rib_tx,
+                &mut fib,
+                &metrics(),
+                &status_tx,
+                &event_tx,
+                &mut owned,
+                &mut unresolved,
+                HeldRetry::All,
+                &CancellationToken::new(),
+            )
+            .await
+        );
+        assert!(
+            fib.applied
+                .iter()
+                .all(|op| op_route(op).key.table_id != 1000)
+        );
+        assert!(
+            fib.applied
+                .iter()
+                .any(|op| { matches!(op, FibOp::Add(route) if route.key.table_id == 1001) })
+        );
     }
 
     #[test]

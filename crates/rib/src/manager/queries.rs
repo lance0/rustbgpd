@@ -1167,11 +1167,19 @@ impl RibManager {
             return;
         };
         let mut visits = 0usize;
+        #[cfg(test)]
+        let cancel_after = self
+            .dataplane_exact_cancel_after_visits
+            .load(std::sync::atomic::Ordering::Relaxed);
+        #[cfg(not(test))]
+        let cancel_after = 0usize;
         let mut candidates = Vec::with_capacity(prefixes.len());
         for prefix in prefixes {
             visits += 1;
             if canceled_at_stride(visits, &mut || {
-                reply.is_closed() || tokio::time::Instant::now() >= deadline
+                reply.is_closed()
+                    || tokio::time::Instant::now() >= deadline
+                    || cfg!(test) && cancel_after != 0 && visits >= cancel_after
             }) {
                 return;
             }
@@ -1184,7 +1192,9 @@ impl RibManager {
                 for _ in self.unicast_prefix_peers.peers(&prefix) {
                     visits += 1;
                     if canceled_at_stride(visits, &mut || {
-                        reply.is_closed() || tokio::time::Instant::now() >= deadline
+                        reply.is_closed()
+                            || tokio::time::Instant::now() >= deadline
+                            || cfg!(test) && cancel_after != 0 && visits >= cancel_after
                     }) {
                         return;
                     }
@@ -1194,7 +1204,9 @@ impl RibManager {
                 {
                     visits += 1;
                     if canceled_at_stride(visits, &mut || {
-                        reply.is_closed() || tokio::time::Instant::now() >= deadline
+                        reply.is_closed()
+                            || tokio::time::Instant::now() >= deadline
+                            || cfg!(test) && cancel_after != 0 && visits >= cancel_after
                     }) {
                         return;
                     }
