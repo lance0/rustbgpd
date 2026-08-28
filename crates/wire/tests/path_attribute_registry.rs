@@ -82,8 +82,65 @@ fn community_type_one(subtypes: &[u8]) -> Vec<u8> {
     community_container(1, &body)
 }
 
+fn tunnel_sub_tlv(kind: u8, value: &[u8]) -> Vec<u8> {
+    let mut bytes = vec![kind];
+    if kind < 128 {
+        bytes.push(u8::try_from(value.len()).unwrap());
+    } else {
+        bytes.extend_from_slice(&u16::try_from(value.len()).unwrap().to_be_bytes());
+    }
+    bytes.extend_from_slice(value);
+    bytes
+}
+
+fn tunnel_tlv(kind: u16, value: &[u8]) -> Vec<u8> {
+    let mut bytes = kind.to_be_bytes().to_vec();
+    bytes.extend_from_slice(&u16::try_from(value.len()).unwrap().to_be_bytes());
+    bytes.extend_from_slice(value);
+    bytes
+}
+
+fn attr_set(origin_as: u32, embedded: &[u8]) -> Vec<u8> {
+    let mut bytes = origin_as.to_be_bytes().to_vec();
+    bytes.extend_from_slice(embedded);
+    bytes
+}
+
+fn assert_opaque_round_trip(code: u8, value: &[u8]) {
+    let input = attribute(0xe0, code, value);
+    let strict = decode_path_attributes(&input, true, &[]).unwrap();
+    let revised = decode_path_attributes_revised(&input, true, false, &[]).unwrap();
+    assert!(revised.malformed.is_empty());
+    assert!(matches!(
+        strict.as_slice(),
+        [PathAttribute::Unknown(raw)]
+            if raw.type_code == code && raw.data.as_ref() == value
+    ));
+    let mut emitted = Vec::new();
+    encode_path_attributes(&revised.attributes, &mut emitted, true, false).unwrap();
+    assert_eq!(emitted, input);
+}
+
+fn assert_length_error_treat_as_withdraw(code: u8, value: &[u8]) {
+    let input = attribute(0xc0, code, value);
+    assert!(matches!(
+        decode_path_attributes(&input, true, &[]),
+        Err(DecodeError::UpdateAttributeError { subcode, data, .. })
+            if subcode == update_subcode::ATTRIBUTE_LENGTH_ERROR && data == input
+    ));
+    let revised = decode_path_attributes_revised(&input, true, false, &[]).unwrap();
+    assert!(revised.attributes.is_empty());
+    assert_eq!(revised.malformed.len(), 1);
+    assert_eq!(revised.malformed[0].type_code, code);
+    assert_eq!(
+        revised.malformed[0].disposition,
+        ErrorDisposition::TreatAsWithdraw
+    );
+}
+
 fn assigned_value(code: u8) -> Vec<u8> {
     match code {
+        23 => tunnel_tlv(1, &[]),
         25 => (0_u8..20).collect(),
         34 => community_container(2, &[]),
         36 => vec![1, 0, 0, 0, 0, 0, 0, 0],
@@ -99,6 +156,7 @@ fn assigned_value(code: u8) -> Vec<u8> {
 
 fn assigned_malformed(code: u8) -> Option<(Vec<u8>, ErrorDisposition)> {
     match code {
+        23 => Some((Vec::new(), ErrorDisposition::TreatAsWithdraw)),
         36 => Some((vec![0; 8], ErrorDisposition::TreatAsWithdraw)),
         37 => Some((vec![2, 0, 1, 1], ErrorDisposition::TreatAsWithdraw)),
         38 => Some((vec![1, 0, 0, 0, 1], ErrorDisposition::AttributeDiscard)),
@@ -111,12 +169,16 @@ fn assigned_malformed(code: u8) -> Option<(Vec<u8>, ErrorDisposition)> {
             vec![0, 1, 0, 8, 0, 0, 0, 0, 0, 2, 0, 1],
             ErrorDisposition::AttributeDiscard,
         )),
+        128 => Some((vec![0; 3], ErrorDisposition::TreatAsWithdraw)),
         _ => None,
     }
 }
 
 fn assigned_payload_contract(code: u8) -> &'static str {
     match code {
+        23 => {
+            "one or more exact two-octet-type/two-octet-length Tunnel TLVs; each body is an exact sub-TLV stream with one-octet lengths for types 0-127 and two-octet lengths for types 128-255; values remain opaque"
+        }
         36 => "non-empty sequence of nonzero-count domain segments, each exactly `1 + 7*n` octets",
         37 => {
             "exact one-octet-type/two-octet-length TLVs, at least one Hop TLV, and at least one exactly framed sub-TLV after every Hop service index"
@@ -134,6 +196,9 @@ fn assigned_payload_contract(code: u8) -> &'static str {
             "non-empty exact two-octet-type/length TLV stream; known containers consume nested length framing only when their four-octet fixed prefix is present; semantic field shapes remain opaque"
         }
         42 => "no payload validation; exact registered class is dropped before value decoding",
+        128 => {
+            "four-octet Origin AS followed by an exact embedded path-attribute stream using each inner Extended Length bit; embedded MP_REACH_NLRI and MP_UNREACH_NLRI are rejected; inner values remain opaque"
+        }
         _ => panic!("no assigned framing contract for code {code}"),
     }
 }
@@ -403,6 +468,105 @@ fn assigned_and_unknown_behavior_fences_are_explicit() {
         decode_path_attributes_revised(&attribute(0x40, 200, &[0xaa]), true, false, &[]).unwrap();
     let error = validate_update_attributes(&unknown.attributes, false, false, true).unwrap_err();
     assert_eq!(error.disposition, ErrorDisposition::TreatAsWithdraw);
+}
+
+#[test]
+fn tunnel_encapsulation_enforces_tlv_and_sub_tlv_framing_only() {
+    let one_tlv = tunnel_tlv(65_000, &tunnel_sub_tlv(127, &[0xaa, 0xbb]));
+    let two_tlvs = [
+        tunnel_tlv(1, &tunnel_sub_tlv(128, &[0xcc])),
+        tunnel_tlv(65_001, &[]),
+    ]
+    .concat();
+    let width_boundary = tunnel_tlv(
+        2,
+        &[tunnel_sub_tlv(127, &[0x7f]), tunnel_sub_tlv(128, &[0x80])].concat(),
+    );
+    for value in [one_tlv, two_tlvs, width_boundary, tunnel_tlv(3, &[])] {
+        assert_opaque_round_trip(23, &value);
+    }
+
+    let malformed = [
+        Vec::new(),
+        vec![0],
+        vec![0, 1],
+        vec![0, 1, 0],
+        vec![0, 1, 0, 1],
+        tunnel_tlv(1, &[127]),
+        tunnel_tlv(1, &[128]),
+        tunnel_tlv(1, &[128, 0]),
+        tunnel_tlv(1, &[127, 1]),
+        tunnel_tlv(1, &[128, 0, 1]),
+    ];
+    for value in malformed {
+        assert_length_error_treat_as_withdraw(23, &value);
+    }
+}
+
+#[test]
+fn attr_set_enforces_embedded_attribute_framing_without_recursive_decode() {
+    let origin_only = attr_set(65_000, &[]);
+    assert_opaque_round_trip(128, &origin_only);
+
+    let embedded = [
+        attribute(0x40, 1, &[0xff]),
+        extended_attribute(0x80, 200, &[0xde, 0xad, 0xbe, 0xef]),
+    ]
+    .concat();
+    assert_opaque_round_trip(128, &attr_set(65_001, &embedded));
+
+    // The nested value would fail if interpreted as another ATTR_SET because
+    // it is shorter than an Origin AS. This tranche treats it as opaque.
+    let nested = attribute(0xc0, 128, &[0xc0, 14, 0]);
+    assert_opaque_round_trip(128, &attr_set(65_002, &nested));
+
+    let origin = 65_003_u32.to_be_bytes();
+    let malformed = [
+        Vec::new(),
+        vec![0],
+        vec![0, 0],
+        vec![0, 0, 0],
+        [origin.as_slice(), &[0x40]].concat(),
+        [origin.as_slice(), &[0x40, 1]].concat(),
+        [origin.as_slice(), &[0x50, 1]].concat(),
+        [origin.as_slice(), &[0x50, 1, 0]].concat(),
+        [origin.as_slice(), &[0x40, 1, 1]].concat(),
+        [origin.as_slice(), &[0x50, 1, 0, 1]].concat(),
+        [origin.as_slice(), &[0x80, 14, 0]].concat(),
+        [origin.as_slice(), &[0x80, 15, 0]].concat(),
+    ];
+    for value in malformed {
+        assert_length_error_treat_as_withdraw(128, &value);
+    }
+}
+
+#[test]
+fn bgpsec_path_remains_ignored_without_payload_parsing_or_egress() {
+    for value in [&[][..], &[0xff][..], &[0x80, 0, 1][..]] {
+        let input = attribute(0x80, 33, value);
+        assert!(
+            decode_path_attributes(&input, true, &[])
+                .unwrap()
+                .is_empty()
+        );
+        let revised = decode_path_attributes_revised(&input, true, false, &[]).unwrap();
+        assert!(revised.attributes.is_empty());
+        assert!(revised.malformed.is_empty());
+    }
+
+    let mut emitted = Vec::new();
+    encode_path_attributes(
+        &[PathAttribute::Unknown(rustbgpd_wire::RawAttribute {
+            flags: 0x80,
+            type_code: 33,
+            data: bytes::Bytes::from_static(&[0xde, 0xad]),
+        })],
+        &mut emitted,
+        true,
+        false,
+    )
+    .unwrap();
+    assert!(emitted.is_empty());
 }
 
 #[test]
@@ -966,9 +1130,9 @@ fn assigned_framing_documentation_matches_executable_cases() {
         ),
         4,
     );
-    assert_eq!(framing.len(), 7);
-    for (index, row) in framing.iter().enumerate() {
-        let code = u8::try_from(index + 36).unwrap();
+    let codes = [23_u8, 36, 37, 38, 39, 40, 41, 42, 128];
+    assert_eq!(framing.len(), codes.len());
+    for (row, code) in framing.iter().zip(codes) {
         assert_eq!(row[0], code.to_string());
         let canonical = if code == 42 { 0x80 } else { 0xc0 };
         assert!(row[1].contains(&format!("flags `{canonical:#04x}`")));

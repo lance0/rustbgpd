@@ -1,11 +1,12 @@
 //! Structural framing checks for assigned attributes retained opaquely.
 
-use crate::constants::attr_type;
+use crate::constants::{attr_flags, attr_type};
 
 /// Called unconditionally from attribute decode; type codes without a
 /// framing check here fall through to `Ok(())`.
 pub(crate) fn validate(type_code: u8, value: &[u8]) -> Result<(), &'static str> {
     match type_code {
+        attr_type::TUNNEL_ENCAPSULATION => tunnel_encapsulation(value),
         attr_type::COMMUNITY_CONTAINER => community_container(value),
         attr_type::IPV6_ADDRESS_SPECIFIC_EXTENDED_COMMUNITY => {
             ipv6_address_specific_extended_community(value)
@@ -16,8 +17,90 @@ pub(crate) fn validate(type_code: u8, value: &[u8]) -> Result<(), &'static str> 
         attr_type::NHC => nhc(value),
         attr_type::PREFIX_SID => prefix_sid(value),
         attr_type::BIER => bier(value),
+        attr_type::ATTR_SET => attr_set(value),
         _ => Ok(()),
     }
+}
+
+fn tunnel_encapsulation(mut value: &[u8]) -> Result<(), &'static str> {
+    if value.is_empty() {
+        return Err("Tunnel Encapsulation attribute contains no Tunnel TLVs");
+    }
+    while !value.is_empty() {
+        if value.len() < 4 {
+            return Err("Tunnel TLV header is truncated");
+        }
+        let length = usize::from(u16::from_be_bytes([value[2], value[3]]));
+        if value.len() < 4 + length {
+            return Err("Tunnel TLV overruns attribute");
+        }
+        tunnel_subtlvs(&value[4..4 + length])?;
+        value = &value[4 + length..];
+    }
+    Ok(())
+}
+
+fn tunnel_subtlvs(mut value: &[u8]) -> Result<(), &'static str> {
+    while !value.is_empty() {
+        let extended = value[0] >= 128;
+        let header_length = if extended { 3 } else { 2 };
+        if value.len() < header_length {
+            return Err(if extended {
+                "Tunnel sub-TLV two-octet length is truncated"
+            } else {
+                "Tunnel sub-TLV header is truncated"
+            });
+        }
+        let length = if extended {
+            usize::from(u16::from_be_bytes([value[1], value[2]]))
+        } else {
+            usize::from(value[1])
+        };
+        if value.len() < header_length + length {
+            return Err("Tunnel sub-TLV overruns Tunnel TLV");
+        }
+        value = &value[header_length + length..];
+    }
+    Ok(())
+}
+
+fn attr_set(value: &[u8]) -> Result<(), &'static str> {
+    if value.len() < 4 {
+        return Err("ATTR_SET Origin AS is truncated");
+    }
+    let mut attributes = &value[4..];
+    while !attributes.is_empty() {
+        if attributes.len() < 2 {
+            return Err("ATTR_SET embedded attribute header is truncated");
+        }
+        let flags = attributes[0];
+        let type_code = attributes[1];
+        if matches!(
+            type_code,
+            attr_type::MP_REACH_NLRI | attr_type::MP_UNREACH_NLRI
+        ) {
+            return Err("ATTR_SET embeds an MP_REACH_NLRI or MP_UNREACH_NLRI attribute");
+        }
+        let extended = flags & attr_flags::EXTENDED_LENGTH != 0;
+        let header_length = if extended { 4 } else { 3 };
+        if attributes.len() < header_length {
+            return Err(if extended {
+                "ATTR_SET embedded extended length is truncated"
+            } else {
+                "ATTR_SET embedded attribute length is truncated"
+            });
+        }
+        let length = if extended {
+            usize::from(u16::from_be_bytes([attributes[2], attributes[3]]))
+        } else {
+            usize::from(attributes[2])
+        };
+        if attributes.len() < header_length + length {
+            return Err("ATTR_SET embedded attribute overruns ATTR_SET");
+        }
+        attributes = &attributes[header_length + length..];
+    }
+    Ok(())
 }
 
 fn community_container(mut value: &[u8]) -> Result<(), &'static str> {

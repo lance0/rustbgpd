@@ -5,6 +5,12 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+- Added bounded, allocation-free framing validation for opaque Tunnel
+  Encapsulation and ATTR_SET attributes. Tunnel TLVs and their variable-width
+  sub-TLV lengths must consume their declared values exactly; ATTR_SET must
+  contain its Origin AS and an exactly framed embedded attribute stream without
+  MP_REACH_NLRI or MP_UNREACH_NLRI. Both remain semantically opaque, propagate
+  with Partial, and use treat-as-withdraw for malformed input.
 - Added one canonical address-family label table plus `parse_family` and
   `family_label` helpers for the twelve AFI/SAFI pairs accepted by rustbgpd's
   configuration and control-plane APIs.

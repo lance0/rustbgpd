@@ -38,6 +38,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Tunnel Encapsulation and ATTR_SET attributes now receive bounded structural
+  validation before opaque re-advertisement. Tunnel TLV/sub-TLV boundaries and
+  ATTR_SET's Origin AS/embedded-attribute stream must be complete; embedded MP
+  reachability attributes are rejected. The change adds no semantic decoding,
+  and malformed input remains treat-as-withdraw.
+
 - Plain eBGP export now removes non-transitive Extended Communities after
   export policy by default, while iBGP and transparent route-server-client
   sessions preserve them. A peer-group-inheritable

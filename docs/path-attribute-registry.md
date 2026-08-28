@@ -11,7 +11,7 @@ codec claim.
 - CSV: `https://www.iana.org/assignments/bgp-parameters/bgp-parameters-2.csv`
 - Registry snapshot: 2026-08-18 (live-verified 2026-08-23)
 - SHA-256: `691f147f5c9ef9dbde82febe339f5691a1bfc4d83f63e3ed0d224676ebe68886`
-- Normative anchors: [RFC 4271 §§4.3, 5](https://www.rfc-editor.org/rfc/rfc4271), [RFC 7606 §§2, 3, 5.2, 7.1-7.10](https://www.rfc-editor.org/rfc/rfc7606), [RFC 9234 §§5](https://www.rfc-editor.org/rfc/rfc9234), [RFC 7311](https://www.rfc-editor.org/rfc/rfc7311), [RFC 9552](https://www.rfc-editor.org/rfc/rfc9552), and [RFC 8669 §3](https://www.rfc-editor.org/rfc/rfc8669).
+- Normative anchors: [RFC 4271 §§4.3, 5](https://www.rfc-editor.org/rfc/rfc4271), [RFC 7606 §§2, 3, 5.2, 7.1-7.10, 7.16](https://www.rfc-editor.org/rfc/rfc7606), [RFC 9012 §§2, 13](https://www.rfc-editor.org/rfc/rfc9012), [RFC 6368 §5](https://www.rfc-editor.org/rfc/rfc6368), [RFC 9234 §§5](https://www.rfc-editor.org/rfc/rfc9234), [RFC 7311](https://www.rfc-editor.org/rfc/rfc7311), [RFC 9552](https://www.rfc-editor.org/rfc/rfc9552), and [RFC 8669 §3](https://www.rfc-editor.org/rfc/rfc8669).
 
 Manual live comparison (never run by normal CI): download the CSV with
 `curl -fsSL https://www.iana.org/assignments/bgp-parameters/bgp-parameters-2.csv -o /tmp/bgp-parameters-2.csv`, run
@@ -51,7 +51,7 @@ octet from 0 through 255 to appear exactly once with no blank cell.
 | 20 | Connector Attribute (deprecated) | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 21 | AS_PATHLIMIT (deprecated) | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 22 | PMSI_TUNNEL | optional transitive; flags `0xc0`; RFC 6514 §5 / RFC 7385 | typed canonical + Partial round-trip; Extended Length and reserved low bits canonicalize; malformed tunnel type or identifier is treat-as-withdraw | typed-Partial and PMSI tunnel-type matrices |
-| 23 | Tunnel Encapsulation | optional transitive; flags `0xc0`; RFC 9012 | payload semantics unsupported; correct class retained opaque and emitted with Partial; wrong class is treat-as-withdraw | assigned-class matrix below |
+| 23 | Tunnel Encapsulation | optional transitive; flags `0xc0`; RFC 9012 | opaque retention with exact Tunnel TLV and variable-width sub-TLV framing; malformed framing or class is treat-as-withdraw | assigned class and framing matrices below |
 | 24 | Traffic Engineering | optional non-transitive; flags `0x80`; RFC 5543 §3 / RFC 7606 §7.13 | payload semantics unsupported; correct class ignored and never emitted; class or Partial conflict is treat-as-withdraw | assigned-class matrix below |
 | 25 | IPv6 Address Specific Extended Community | optional transitive; flags `0xc0`; values are non-empty multiples of 20 octets; RFC 5701 §2 / RFC 7606 §7.15 | opaque retention with Partial on egress; zero or non-multiple-of-20 length and class conflicts are treat-as-withdraw | assigned-class and IPv6-community length matrices below |
 | 26 | AIGP | optional non-transitive; flags `0x80`; RFC 7311 §3 | payload semantics unsupported; correct class ignored; Transitive-set conflicts are attribute-discard, other class conflicts are treat-as-withdraw | assigned-class matrix below |
@@ -72,7 +72,7 @@ octet from 0 through 255 to appear exactly once with no blank cell.
 | 41 | BIER | optional transitive; flags `0xc0`; RFC 9793 §§3-4 | opaque retention with exact TLV/sub-TLV length-boundary framing; boundary failure is attribute-discard | assigned framing matrix below |
 | 42 | Edge Metadata Path Attribute (TEMPORARY - registered 2025-04-23, extension registered 2026-04-03, expires 2027-04-23) | optional non-transitive; flags `0x80`; draft-ietf-idr-5g-edge-service-metadata-27 | payload unsupported; correct class ignored and never emitted; every class or Partial conflict is treat-as-withdraw | assigned framing matrix below |
 | 43-127 | Unassigned | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
-| 128 | ATTR_SET | optional transitive; flags `0xc0`; RFC 6368 | payload semantics unsupported; correct class retained opaque and emitted with Partial; wrong class is treat-as-withdraw | assigned-class matrix below |
+| 128 | ATTR_SET | optional transitive; flags `0xc0`; RFC 6368 / RFC 7606 §7.16 | opaque retention with Origin AS and embedded attribute framing; embedded MP attributes, malformed framing, or wrong class are treat-as-withdraw | assigned class and framing matrices below |
 | 129 | Deprecated | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 130-240 | Unassigned | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
 | 241 | Deprecated | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
@@ -107,10 +107,11 @@ disposition shown.
 
 ## Assigned class fence
 
-This matrix audits only the registered Optional/Transitive class. It does not
-claim payload parsing, semantic validation, policy support, or feature
-negotiation. "Wrong O" toggles Optional, "wrong T" toggles Transitive, and
-"both" toggles both bits from the canonical class.
+This matrix audits only the registered Optional/Transitive class; bounded
+payload framing is documented separately below. It does not claim semantic
+validation, policy support, or feature negotiation. "Wrong O" toggles
+Optional, "wrong T" toggles Transitive, and "both" toggles both bits from the
+canonical class.
 
 | Codes | Class | Correct-class retention and egress | Wrong O | Wrong T | Both wrong | Legacy decoder |
 |---|---|---|---|---|---|---|
@@ -142,14 +143,16 @@ framing; they do not expose a typed model or claim stable standards support.
 | Known subtypes 1-3 | empty or an exact atom stream; unknown subtypes opaque | atom framing error or reserved atom type 0/255 |
 | Atom values | types 1/4/5/6/7: positive multiples of four; types 2/3: complete IPv4/IPv6 prefix sequences; type 8 and types 9-254 opaque | fixed-width mismatch, prefix length above 32/128, or truncated prefix octets |
 
-## Assigned framing matrix (36-42)
+## Assigned framing matrix (23, 36-42, 128)
 
 These checks are syntax-only. They do not implement route-family applicability,
-stateful lookup, policy, or attribute semantics. Unknown TLVs remain opaque.
+stateful lookup, policy, or attribute semantics. Unknown types and their values
+remain opaque.
 
 <!-- assigned-framing:start -->
 | Code | Registered class | Bounded structural fence | Revised malformed action |
 |---|---|---|---|
+| 23 | optional transitive; flags `0xc0` | one or more exact two-octet-type/two-octet-length Tunnel TLVs; each body is an exact sub-TLV stream with one-octet lengths for types 0-127 and two-octet lengths for types 128-255; values remain opaque | treat-as-withdraw |
 | 36 | optional transitive; flags `0xc0` | non-empty sequence of nonzero-count domain segments, each exactly `1 + 7*n` octets | treat-as-withdraw |
 | 37 | optional transitive; flags `0xc0` | exact one-octet-type/two-octet-length TLVs, at least one Hop TLV, and at least one exactly framed sub-TLV after every Hop service index | treat-as-withdraw |
 | 38 | optional transitive; flags `0xc0` | five-octet base, exact one-octet-type/length optional TLVs, and a Source IP TLV of length 4 or 16 | attribute-discard |
@@ -157,6 +160,7 @@ stateful lookup, policy, or attribute semantics. Unknown TLVs remain opaque.
 | 40 | optional transitive; flags `0xc0` | exact one-octet-type/two-octet-length TLVs; Label-Index length 7; Originator SRGB length `2 + nonzero*6` | attribute-discard |
 | 41 | optional transitive; flags `0xc0` | non-empty exact two-octet-type/length TLV stream; known containers consume nested length framing only when their four-octet fixed prefix is present; semantic field shapes remain opaque | attribute-discard |
 | 42 | optional non-transitive; flags `0x80` | no payload validation; exact registered class is dropped before value decoding | class conflict is treat-as-withdraw |
+| 128 | optional transitive; flags `0xc0` | four-octet Origin AS followed by an exact embedded path-attribute stream using each inner Extended Length bit; embedded MP_REACH_NLRI and MP_UNREACH_NLRI are rejected; inner values remain opaque | treat-as-withdraw |
 <!-- assigned-framing:end -->
 
 ## PMSI tunnel-type matrix
