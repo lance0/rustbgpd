@@ -14,7 +14,7 @@
 # provably silent at GR entry.
 #
 # graceful-restart + long-lived-enabled make the client advertise the LLGR
-# capability for both families: rustbgpd strips the LLGR_STALE community
+# capability for both VPN families and RTC: rustbgpd strips the LLGR_STALE community
 # toward LLGR-incapable peers (strip_llgr_stale_if_needed), so observing
 # the community on the client's copy during the LLGR phase requires the
 # capability. The client itself never restarts in this test.
@@ -40,6 +40,15 @@ long-lived-enabled = true
 [[neighbors.afi-safis]]
 [neighbors.afi-safis.config]
 afi-safi-name = "l3vpn-ipv4-unicast"
+[neighbors.afi-safis.mp-graceful-restart.config]
+enabled = true
+[neighbors.afi-safis.long-lived-graceful-restart.config]
+enabled = true
+restart-time = 120
+
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "l3vpn-ipv6-unicast"
 [neighbors.afi-safis.mp-graceful-restart.config]
 enabled = true
 [neighbors.afi-safis.long-lived-graceful-restart.config]

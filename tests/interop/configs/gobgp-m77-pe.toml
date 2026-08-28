@@ -4,7 +4,7 @@
 # the daemon — exactly the state the GR receipt manipulates.
 #
 # GR: restart-time 60 drives the RR's helper stale window. mp-graceful-restart
-# per family puts l3vpn-ipv4-unicast and rtc into the GR capability;
+# per family puts both VPN SAFI-128 families and rtc into the GR capability;
 # long-lived-graceful-restart per family (restart-time 30) puts them into the
 # LLGR capability, so the RR's GR-expiry promotes to a 30 s LLGR stale phase.
 # connect-retry 5 keeps re-establishment fast after the link-down relaunch
@@ -31,6 +31,15 @@ long-lived-enabled = true
 [[neighbors.afi-safis]]
 [neighbors.afi-safis.config]
 afi-safi-name = "l3vpn-ipv4-unicast"
+[neighbors.afi-safis.mp-graceful-restart.config]
+enabled = true
+[neighbors.afi-safis.long-lived-graceful-restart.config]
+enabled = true
+restart-time = 30
+
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "l3vpn-ipv6-unicast"
 [neighbors.afi-safis.mp-graceful-restart.config]
 enabled = true
 [neighbors.afi-safis.long-lived-graceful-restart.config]

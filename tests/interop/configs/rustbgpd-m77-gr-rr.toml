@@ -1,7 +1,7 @@
 # M77 — GR/LLGR RR-family stale-preservation receipt.
 #
-# iBGP route reflector with three clients: a restartable VPNv4+RTC PE, a
-# VPNv4+RTC client bound to an ORR vantage, and a linkstate-only BGP-LS
+# iBGP route reflector with three clients: a restartable VPNv4/VPNv6+RTC PE, a
+# VPNv4/VPNv6+RTC client bound to an ORR vantage, and a linkstate-only BGP-LS
 # source. GR helper timers:
 #   - The GR stale window uses the PEER's advertised restart-time
 #     (RFC 4724 §4.2): 60 s on the PE, 30 s on the LS source.
@@ -29,10 +29,10 @@ principal = "rustbgpd://operator/test-only"
 [[neighbors]]
 address = "10.0.1.2"
 remote_asn = 65001
-description = "vpnv4-rtc-pe"
+description = "vpnv4-vpnv6-rtc-pe"
 hold_time = 90
 route_reflector_client = true
-families = ["l3vpn_ipv4_unicast", "rtc"]
+families = ["l3vpn_ipv4_unicast", "l3vpn_ipv6_unicast", "rtc"]
 graceful_restart = true
 gr_stale_routes_time = 60
 llgr_stale_time = 120
@@ -40,10 +40,10 @@ llgr_stale_time = 120
 [[neighbors]]
 address = "10.0.0.2"
 remote_asn = 65001
-description = "vpnv4-rtc-client"
+description = "vpnv4-vpnv6-rtc-client"
 hold_time = 90
 route_reflector_client = true
-families = ["l3vpn_ipv4_unicast", "rtc"]
+families = ["l3vpn_ipv4_unicast", "l3vpn_ipv6_unicast", "rtc"]
 orr_vantage = "10.0.8.1"
 
 [[neighbors]]

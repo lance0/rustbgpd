@@ -28,6 +28,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   omits them rather than reporting a false lower bound. Path-aware retained
   identities keep the counts exact when Add-Path receive is negotiated.
 
+- The M77 GoBGP 4.6.0 receipt now peer-proves VPNv6 graceful restart and
+  long-lived graceful restart over the existing IPv4 sessions. Deterministic
+  blue/red VPNv6 routes are retained stale without client churn, reconciled
+  exactly at End-of-RIB after a selective re-injection, promoted with the
+  LLGR_STALE community, and withdrawn exactly at LLGR expiry; the RR keeps its
+  MPLS and IPv6 dataplanes untouched.
+
 - Nightly wire campaigns now seed all 12 targets, apply one reviewed BGP byte
   dictionary to the 11 binary targets, and carry a validated corpus forward on
   the `main` lineage. Restore happens in runner-temporary staging and accepts

@@ -1,5 +1,13 @@
 use super::*;
 
+fn make_llgr_vpn6_route(peer: Ipv4Addr, segment: u16, local_pref: u32) -> VpnRibRoute {
+    let mut route = make_vpn6_rib_route_with_rts(peer, segment, vec![]);
+    let attributes = Arc::make_mut(&mut route.attributes);
+    attributes.retain(|attribute| !matches!(attribute, PathAttribute::LocalPref(_)));
+    attributes.push(PathAttribute::LocalPref(local_pref));
+    route
+}
+
 /// Bring up an iBGP route-reflector client negotiating `sendable`, for
 /// observing typed-family re-exports.
 async fn llgr_target_peer_up(
@@ -31,10 +39,10 @@ async fn llgr_target_peer_up(
     out_rx
 }
 
-/// GR-timer expiry with LLGR negotiated promotes GR-stale VPN routes to
-/// LLGR-stale: flag flip, locally-injected `LLGR_STALE` community, and a
-/// DEEPER tiebreak demotion — an LLGR-stale candidate loses to a GR-stale
-/// one regardless of `LOCAL_PREF` (RFC 9494 §4.3).
+/// GR-timer expiry with IPv6/MPLS-VPN LLGR negotiated promotes GR-stale `VPNv6`
+/// routes to LLGR-stale: flag flip, locally-injected `LLGR_STALE` community,
+/// and a DEEPER tiebreak demotion — an LLGR-stale candidate loses to a
+/// GR-stale one regardless of `LOCAL_PREF` (RFC 9494 §4.3).
 #[tokio::test]
 async fn vpn_llgr_gr_timer_promotes_to_llgr_stale() {
     tokio::time::pause();
@@ -49,7 +57,7 @@ async fn vpn_llgr_gr_timer_promotes_to_llgr_stale() {
     tx.send(RibUpdate::VpnRoutesReceived {
         session_id: 0,
         peer: peer_a,
-        announced: vec![make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 1), 31, 100, 200)],
+        announced: vec![make_llgr_vpn6_route(Ipv4Addr::new(10, 0, 0, 1), 31, 200)],
         withdrawn: vec![],
     })
     .await
@@ -57,13 +65,13 @@ async fn vpn_llgr_gr_timer_promotes_to_llgr_stale() {
     tx.send(RibUpdate::VpnRoutesReceived {
         session_id: 0,
         peer: peer_b,
-        announced: vec![make_vpn_rib_route(Ipv4Addr::new(10, 0, 0, 3), 31, 100, 100)],
+        announced: vec![make_llgr_vpn6_route(Ipv4Addr::new(10, 0, 0, 3), 31, 100)],
         withdrawn: vec![],
     })
     .await
     .unwrap();
 
-    let family = vec![(Afi::Ipv4, Safi::MplsVpn)];
+    let family = vec![(Afi::Ipv6, Safi::MplsVpn)];
     tx.send(gr_with_llgr(
         peer_a,
         2,
@@ -79,6 +87,7 @@ async fn vpn_llgr_gr_timer_promotes_to_llgr_stale() {
 
     let best = query_vpn_routes(&tx).await;
     assert_eq!(best.len(), 1);
+    assert_eq!(best[0].afi_safi(), (Afi::Ipv6, Safi::MplsVpn));
     assert_eq!(best[0].peer, peer_a, "both GR-stale: LOCAL_PREF tiebreak");
     assert!(best[0].is_stale);
     assert!(!best[0].is_llgr_stale);
