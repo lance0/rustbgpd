@@ -33,6 +33,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Active-primary session telemetry now exports the exact one-hot
+  `bgp_peer_session_state{peer,interface,state}` FSM vector and
+  `bgp_session_down_total{peer,interface,reason}`. The down counter records
+  each Established epoch once under bounded local/remote notification,
+  no-notification, transport-error, or defensive unknown reasons; collision
+  candidates remain silent until promotion.
+
 - The M99 FRR receipt now proves RFC 9072 extended OPEN framing at raw-byte
   level. One pinned FRR 10.3.1 process forces a small extended OPEN on one
   link while a second link stays classic; rustbgpd emits its exact 342-byte,

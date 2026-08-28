@@ -425,6 +425,9 @@ impl PeerSession {
             return;
         }
         self.pending_outbound_teardown_cause = Some(cause);
+        self.session_telemetry_metric_lease.latch_down_reason(
+            rustbgpd_telemetry::reason_labels::SessionDownReason::LocalNotification,
+        );
         let notif = rustbgpd_wire::NotificationMessage::new(
             NotificationCode::Cease,
             cease_subcode::OUT_OF_RESOURCES,
@@ -432,9 +435,10 @@ impl PeerSession {
         );
         self.record_notification_cause(SessionNotificationDirection::Sent, &notif);
         self.last_error = cause.to_string();
-        // Classify the upcoming BMP Peer Down truthfully: reason 1
-        // (local system sent NOTIFICATION) carrying the Cease/8 PDU,
-        // instead of the reason-4 "remote closed" default.
+        // Classify the upcoming BMP Peer Down as the locally initiated
+        // NOTIFICATION teardown, carrying the attempted Cease/8 PDU instead
+        // of the reason-4 "remote closed" default. The following enqueue is
+        // best-effort and does not change that initiating cause.
         if self.bmp_tx.is_some()
             && let Ok(pdu) = rustbgpd_wire::encode_message(&Message::Notification(notif.clone()))
         {

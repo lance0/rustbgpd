@@ -1962,6 +1962,7 @@ mod inbound_update;
 mod labeled;
 mod loop_detection;
 mod max_prefix;
+mod metrics;
 mod next_hop;
 mod notification;
 mod orf;

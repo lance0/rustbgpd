@@ -937,11 +937,13 @@ dashboards see no negative-rate artifacts. Process-global counters and
 families keyed by other identities (AFI/SAFI, VRF, VNI, BMP collector) are
 never removed.
 
-The exact `bgp_peer_admin_enabled{peer,interface}` and
-`bgp_peer_session_established{peer,interface}` identity is removed after its
-session actor terminates, including abort-on-timeout teardown. If a scoped
-sibling shares the bare address, its exact gauge rows and the shared
-bare-address history remain.
+The exact `bgp_peer_admin_enabled{peer,interface}`,
+`bgp_peer_session_established{peer,interface}`, and
+`bgp_peer_session_state{peer,interface,state}` identity is removed after its
+session actor terminates, including abort-on-timeout teardown. Its matching
+`bgp_session_down_total{peer,interface,reason}` history is reaped at the same
+identity boundary. If a scoped sibling shares the bare address, its exact rows
+and the shared bare-address history remain.
 
 ### Health
 
@@ -949,8 +951,10 @@ bare-address history remain.
 |--------|-------------------|
 | `bgp_peer_admin_enabled{peer,interface}` | Authoritative configured administrative intent: 1 enabled, 0 disabled |
 | `bgp_peer_session_established{peer,interface}` | Current active-primary session truth: 1 Established, 0 otherwise |
+| `bgp_peer_session_state{peer,interface,state}` | Exact active-primary one-hot FSM state; `state` is `idle`, `connect`, `active`, `open_sent`, `open_confirm`, or `established` |
 | `bgp_session_established_total` | Cumulative sessions that reached Established (per-process counter; resets on restart) |
 | `bgp_session_flaps_total` | Cumulative session flaps |
+| `bgp_session_down_total{peer,interface,reason}` | Established active-primary sessions that ended. `local_notification` means a locally initiated NOTIFICATION teardown even if best-effort delivery failed; `remote_notification` means a received NOTIFICATION; `local_no_notification` includes forced local close such as send-hold expiry; `remote_no_notification` means remote TCP close without a NOTIFICATION; the remaining bounded values are `transport_error` and defensive `unknown`. |
 | `bgp_session_state_transitions_total` | FSM state transitions |
 
 The shipped `BgpSessionNotEstablished` alert requires administrative intent 1
@@ -960,6 +964,20 @@ without paging on disabled peers. Flap-rate alerting remains based on
 `bgp_session_flaps_total`. Aggregate Established counts and daemon uptime are
 also available via `ControlService.GetHealth` / `rbgp health`; that RPC uses
 the same 200 ms core-actor deadline as `/readyz`.
+
+For a current state view that also catches a broken one-hot invariant:
+
+```promql
+sum by (instance, peer, interface) (bgp_peer_session_state) == 1
+```
+
+To break recent Established-session losses down by their bounded cause:
+
+```promql
+sum by (instance, peer, interface, reason) (
+  increase(bgp_session_down_total[5m])
+)
+```
 
 ### Routing
 

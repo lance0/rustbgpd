@@ -26,7 +26,7 @@ use rustbgpd_rib::{
     LabeledRibRoute, LabeledRibRouteKey, NextHopScope, OutboundRouteUpdate, RibUpdate, Route,
     RtcRibRoute, RtcRibRouteKey, VpnRibRoute, VpnRibRouteKey,
 };
-use rustbgpd_telemetry::BgpMetrics;
+use rustbgpd_telemetry::{BgpMetrics, reason_labels::SessionDownReason};
 use rustbgpd_wire::notification::{NotificationCode, cease_subcode};
 use rustbgpd_wire::{
     AddPathMode, Afi, AsPath, AsPathSegment, BgpRole, Capability, EvpnRoute, EvpnRouteKey,
@@ -93,43 +93,100 @@ impl Drop for MaxPrefixMetricLease {
     }
 }
 
-/// Ownership guard for the current-session truth gauge.
+/// Ownership guard for active-primary session telemetry.
 ///
 /// Collision candidates remain inactive until the manager has quiesced the
-/// retiring primary. Dropping an active owner publishes a final zero but keeps
-/// the configured identity present; peer deletion is reaped by `PeerManager`.
-struct SessionEstablishedMetricLease {
+/// retiring primary. It owns the exact FSM one-hot vector, the Established
+/// compatibility gauge, and one classified down event per Established epoch.
+/// Dropping an active owner publishes Idle; peer deletion is reaped later by
+/// `PeerManager`.
+struct SessionTelemetryMetricLease {
     metrics: BgpMetrics,
     peer: String,
     interface: String,
     active: bool,
-    published: bool,
+    state: SessionState,
+    established_epoch_open: bool,
+    down_reason: Option<SessionDownReason>,
 }
 
-impl SessionEstablishedMetricLease {
+impl SessionTelemetryMetricLease {
     fn new(metrics: BgpMetrics, peer: String, interface: String, active: bool) -> Self {
         Self {
             metrics,
             peer,
             interface,
             active,
-            published: false,
+            state: SessionState::Idle,
+            established_epoch_open: false,
+            down_reason: None,
         }
     }
 
-    fn set(&mut self, established: bool) {
+    fn publish(&self) {
         if self.active {
             self.metrics
-                .set_peer_session_established(&self.peer, &self.interface, established);
-            self.published = true;
+                .set_peer_session_state(&self.peer, &self.interface, self.state.as_str());
+            self.metrics.set_peer_session_established(
+                &self.peer,
+                &self.interface,
+                self.state == SessionState::Established,
+            );
         }
+    }
+
+    fn set_state(&mut self, state: SessionState) {
+        let entering_established =
+            state == SessionState::Established && self.state != SessionState::Established;
+        self.state = state;
+        if entering_established {
+            self.established_epoch_open = true;
+            self.down_reason = None;
+        }
+        self.publish();
+    }
+
+    fn activate(&mut self, state: SessionState) {
+        self.active = true;
+        self.state = state;
+        self.established_epoch_open = state == SessionState::Established;
+        self.down_reason = None;
+        self.publish();
+    }
+
+    /// Latch the first classified cause for the current teardown. Follow-up
+    /// `TcpConnectionFails` events must not overwrite a preceding local or
+    /// remote NOTIFICATION classification.
+    fn latch_down_reason(&mut self, reason: SessionDownReason) {
+        if self.down_reason.is_none() {
+            self.down_reason = Some(reason);
+        }
+    }
+
+    /// Close the current Established epoch. Inactive collision candidates
+    /// consume their latch without emitting shared active-primary telemetry.
+    fn record_down(&mut self) {
+        let reason = self
+            .down_reason
+            .take()
+            .unwrap_or(SessionDownReason::Unknown);
+        if self.active && self.established_epoch_open {
+            self.metrics
+                .record_session_down(&self.peer, &self.interface, reason);
+        }
+        self.established_epoch_open = false;
     }
 }
 
-impl Drop for SessionEstablishedMetricLease {
+impl Drop for SessionTelemetryMetricLease {
     fn drop(&mut self) {
-        if self.published {
-            self.set(false);
+        if self.active {
+            // An Established actor that disappears without its ordinary
+            // SessionDown action is the sole defensive `unknown` path. A
+            // preclassified cause survives here and remains truthful.
+            self.record_down();
+            self.state = SessionState::Idle;
+            self.publish();
         }
     }
 }
@@ -284,8 +341,8 @@ pub(crate) struct PeerSession {
     /// quiesced the old primary, preventing either loser from erasing the
     /// surviving actor's values.
     max_prefix_metric_lease: MaxPrefixMetricLease,
-    /// Active-primary ownership for `bgp_peer_session_established`.
-    session_established_metric_lease: SessionEstablishedMetricLease,
+    /// Active-primary ownership for exact FSM state and classified downs.
+    session_telemetry_metric_lease: SessionTelemetryMetricLease,
     /// Optional BMP event sender (None when BMP not configured).
     bmp_tx: Option<mpsc::Sender<BmpEvent>>,
     /// A `RouteMonitoring` event for this session was dropped on a full
@@ -1072,7 +1129,7 @@ impl PeerSession {
             peer_label.clone(),
             session_identity.role == SessionRole::Primary,
         );
-        let session_established_metric_lease = SessionEstablishedMetricLease::new(
+        let session_telemetry_metric_lease = SessionTelemetryMetricLease::new(
             metrics.clone(),
             peer_label.clone(),
             config.peer_interface.clone().unwrap_or_default(),
@@ -1118,7 +1175,7 @@ impl PeerSession {
             session_event_tx,
             session_identity,
             max_prefix_metric_lease,
-            session_established_metric_lease,
+            session_telemetry_metric_lease,
             bmp_tx,
             bmp_stream_diverged: false,
             bmp_repair_timer: None,
@@ -1228,7 +1285,7 @@ impl PeerSession {
             peer_label.clone(),
             session_identity.role == SessionRole::Primary,
         );
-        let session_established_metric_lease = SessionEstablishedMetricLease::new(
+        let session_telemetry_metric_lease = SessionTelemetryMetricLease::new(
             metrics.clone(),
             peer_label.clone(),
             config.peer_interface.clone().unwrap_or_default(),
@@ -1286,7 +1343,7 @@ impl PeerSession {
             session_event_tx,
             session_identity,
             max_prefix_metric_lease,
-            session_established_metric_lease,
+            session_telemetry_metric_lease,
             bmp_tx,
             bmp_stream_diverged: false,
             bmp_repair_timer: None,
@@ -1627,6 +1684,8 @@ impl PeerSession {
                 self.last_down_reason = Some(PeerDownReason::LocalNoNotification(
                     SEND_HOLD_TIMER_EXPIRES_FSM_EVENT,
                 ));
+                self.session_telemetry_metric_lease
+                    .latch_down_reason(SessionDownReason::LocalNoNotification);
                 if pending_outbound_cause.is_none() {
                     self.last_error = format!(
                         "send hold timer expired after {}s (RFC 9687)",
@@ -1654,6 +1713,8 @@ impl PeerSession {
                 // `TcpConnectionFails` and the RIB gets its
                 // PeerDown/deregistration from this run-loop path.
                 debug!(peer = %self.peer_label, "writer task completed local hard teardown");
+                self.session_telemetry_metric_lease
+                    .latch_down_reason(SessionDownReason::TransportError);
             }
             Ok(Err(writer::WriterExit::Io(e))) => {
                 let cause = crate::handle::SessionFailureCause::WriterIo(e.kind());
@@ -1661,6 +1722,8 @@ impl PeerSession {
                 if pending_outbound_cause.is_none() {
                     self.last_error = cause.to_string();
                 }
+                self.session_telemetry_metric_lease
+                    .latch_down_reason(SessionDownReason::TransportError);
             }
             Err(e) => {
                 let cause = if e.is_cancelled() {
@@ -1672,6 +1735,8 @@ impl PeerSession {
                 if pending_outbound_cause.is_none() {
                     self.last_error = cause.to_string();
                 }
+                self.session_telemetry_metric_lease
+                    .latch_down_reason(SessionDownReason::TransportError);
             }
         }
         self.handle_tcp_disconnect();
@@ -1681,6 +1746,8 @@ impl PeerSession {
     async fn handle_tcp_read_result(&mut self, result: std::io::Result<usize>) {
         match result {
             Ok(0) => {
+                self.session_telemetry_metric_lease
+                    .latch_down_reason(SessionDownReason::RemoteNoNotification);
                 self.handle_tcp_disconnect();
                 self.drive_fsm(Event::TcpConnectionFails).await;
             }
@@ -1691,6 +1758,8 @@ impl PeerSession {
                 if self.pending_outbound_teardown_cause.is_none() {
                     self.last_error = cause.to_string();
                 }
+                self.session_telemetry_metric_lease
+                    .latch_down_reason(SessionDownReason::TransportError);
                 self.handle_tcp_disconnect();
                 self.drive_fsm(Event::TcpConnectionFails).await;
             }
