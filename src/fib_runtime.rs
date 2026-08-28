@@ -3,8 +3,8 @@
 //! This actor is deliberately separate from the EVPN dataplane crates:
 //! it consumes ordinary unicast Loc-RIB best routes and writes only the
 //! explicit `[[fib_tables]]` route tables the operator configured. RIB
-//! events are wakeups; every pass re-queries the full best-route view
-//! and runs the pure [`crate::fib`] projection/diff model.
+//! events are wakeups; every pass streams bounded, ordered install-candidate
+//! pages and runs the pure [`crate::fib`] projection/diff model.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
@@ -1048,21 +1048,22 @@ where
             metric: table.metric,
         })
         .collect();
-    plan.ops.retain(|op| match op {
-        FibOp::Add(route) => {
-            let key = route.key;
-            let route_frozen = route_churn && capped_tables.contains(&key.table_key());
-            let group_frozen = peer_group_churn && group_tables.contains(&key.table_key());
-            !(route_frozen || group_frozen)
-                || (owned.routes.contains_key(&key) && exact_restored_keys.contains(&key))
+    let mut deferred_holds = BTreeMap::new();
+    plan.ops.retain(|op| {
+        let keep = keep_churn_op(
+            op,
+            route_churn,
+            peer_group_churn,
+            &capped_tables,
+            &group_tables,
+            &owned.routes,
+            &exact_restored_keys,
+        );
+        if !keep && let Some(kind) = unresolved_op_kind(op) {
+            let route = op_route(op);
+            deferred_holds.insert(route.key, (route.clone(), kind));
         }
-        FibOp::Replace { desired, .. } => {
-            let key = desired.key;
-            let route_frozen = route_churn && capped_tables.contains(&key.table_key());
-            let group_frozen = peer_group_churn && group_tables.contains(&key.table_key());
-            !(route_frozen || group_frozen) || exact_restored_keys.contains(&key)
-        }
-        _ => true,
+        keep
     });
     for drop in &plan.drops {
         metrics.record_fib_route_rejected(drop_reason(drop));
@@ -1073,6 +1074,7 @@ where
         owned,
         unresolved,
         &plan,
+        &deferred_holds,
         &retry_held,
         event_tx,
         shutdown,
@@ -1092,6 +1094,28 @@ where
     statuses.extend(outcome.failures);
     status_tx.send_replace(statuses);
     true
+}
+
+fn keep_churn_op(
+    op: &FibOp,
+    route_churn: bool,
+    peer_group_churn: bool,
+    capped_tables: &BTreeSet<FibTableKey>,
+    group_tables: &BTreeSet<FibTableKey>,
+    owned: &BTreeMap<FibRouteKey, FibRoute>,
+    exact_restored_keys: &BTreeSet<FibRouteKey>,
+) -> bool {
+    let (key, exact_repair) = match op {
+        FibOp::Add(route) => (
+            route.key,
+            owned.contains_key(&route.key) && exact_restored_keys.contains(&route.key),
+        ),
+        FibOp::Replace { desired, .. } => (desired.key, exact_restored_keys.contains(&desired.key)),
+        FibOp::Adopt(_) | FibOp::Remove(_) | FibOp::Forget(_) => return true,
+    };
+    let group_frozen = peer_group_churn && group_tables.contains(&key.table_key());
+    let route_frozen = route_churn && capped_tables.contains(&key.table_key());
+    !group_frozen && (!route_frozen || exact_repair)
 }
 
 #[cfg(test)]
@@ -1176,6 +1200,7 @@ async fn apply_plan<F>(
     owned: &mut FibOwnedState,
     unresolved: &mut UnresolvedHolds,
     plan: &FibPlan,
+    deferred_holds: &BTreeMap<FibRouteKey, (FibRoute, UnresolvedOpKind)>,
     retry_held: &HeldRetry,
     event_tx: &broadcast::Sender<FibRuntimeEvent>,
     shutdown: &CancellationToken,
@@ -1184,7 +1209,7 @@ where
     F: UnicastFib,
 {
     let mut outcome = ApplyPlanOutcome::default();
-    refresh_unresolved_holds(unresolved, plan);
+    refresh_unresolved_holds(unresolved, plan, deferred_holds);
     for op in &plan.ops {
         if shutdown.is_cancelled() {
             break;
@@ -1317,7 +1342,11 @@ where
     outcome
 }
 
-fn refresh_unresolved_holds(unresolved: &mut UnresolvedHolds, plan: &FibPlan) {
+fn refresh_unresolved_holds(
+    unresolved: &mut UnresolvedHolds,
+    plan: &FibPlan,
+    deferred_holds: &BTreeMap<FibRouteKey, (FibRoute, UnresolvedOpKind)>,
+) {
     if unresolved.routes.is_empty() {
         return;
     }
@@ -1339,13 +1368,17 @@ fn refresh_unresolved_holds(unresolved: &mut UnresolvedHolds, plan: &FibPlan) {
         })
         .collect();
     unresolved.routes.retain(|key, held| {
-        let Some((desired, op_kind)) = planned.get(key) else {
+        let Some((desired, op_kind)) = planned
+            .get(key)
+            .copied()
+            .or_else(|| deferred_holds.get(key).map(|(route, kind)| (route, *kind)))
+        else {
             return false;
         };
-        if held.route.target != desired.target || held.op_kind != *op_kind {
+        if held.route.target != desired.target || held.op_kind != op_kind {
             return false;
         }
-        held.route = (*desired).clone();
+        held.route = desired.clone();
         true
     });
 }
@@ -4921,6 +4954,64 @@ mod tests {
                 },
             )]),
         }
+    }
+
+    #[test]
+    fn peer_group_churn_always_defers_exact_restored_add_and_replace() {
+        let old = fib_route(v4(24), ip("192.0.2.1"));
+        let desired = fib_route(v4(24), ip("192.0.2.2"));
+        let table_key = desired.key.table_key();
+        let tables = BTreeSet::from([table_key]);
+        let owned = BTreeMap::from([(old.key, old.clone())]);
+        let exact = BTreeSet::from([desired.key]);
+        for op in [
+            FibOp::Add(desired.clone()),
+            FibOp::Replace {
+                previous: old.clone(),
+                desired: desired.clone(),
+            },
+        ] {
+            assert!(!keep_churn_op(
+                &op, true, true, &tables, &tables, &owned, &exact
+            ));
+            assert!(keep_churn_op(
+                &op,
+                true,
+                false,
+                &tables,
+                &BTreeSet::new(),
+                &owned,
+                &exact,
+            ));
+        }
+    }
+
+    #[test]
+    fn churn_deferred_unresolved_hold_requires_same_kind_and_target() {
+        let old = fib_route(v4(24), ip("192.0.2.1"));
+        let desired = fib_route(v4(24), ip("192.0.2.2"));
+        for kind in [UnresolvedOpKind::Add, UnresolvedOpKind::Replace] {
+            let mut unresolved = UnresolvedHolds::default();
+            unresolved.routes.insert(
+                desired.key,
+                UnresolvedHold {
+                    route: desired.clone(),
+                    op_kind: kind,
+                },
+            );
+            let deferred = BTreeMap::from([(desired.key, (desired.clone(), kind))]);
+            refresh_unresolved_holds(&mut unresolved, &FibPlan::default(), &deferred);
+            assert!(unresolved.routes.contains_key(&desired.key));
+
+            let changed = fib_route(v4(24), ip("192.0.2.3"));
+            let deferred = BTreeMap::from([(changed.key, (changed, kind))]);
+            refresh_unresolved_holds(&mut unresolved, &FibPlan::default(), &deferred);
+            assert!(unresolved.routes.is_empty());
+        }
+
+        let mut unresolved = unresolved_with(old);
+        refresh_unresolved_holds(&mut unresolved, &FibPlan::default(), &BTreeMap::new());
+        assert!(unresolved.routes.is_empty(), "withdrawal clears the hold");
     }
 
     #[test]

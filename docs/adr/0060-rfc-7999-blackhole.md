@@ -99,9 +99,9 @@ backstop, and installs
 kernel `RTN_BLACKHOLE` routes only for accepted best routes that still
 carry the RFC 7999 community after import policy.
 
-Planning is fail-closed and finishes before the first kernel dump. One pass
-has a 30-second ceiling and every page, exact lookup, and final version seal
-has at most two seconds. An owned, adopted-pending, or receipt-backed prefix
+Planning is fail-closed and finishes before the first kernel dump. The
+planning phase has a 30-second ceiling; every page, exact lookup, and final
+version seal has at most two seconds. An owned, adopted-pending, or receipt-backed prefix
 missing from the provisional walk is checked by exact Loc-RIB key before it
 may be released or removed. With an active count or rate guardrail, route
 churn defers new installs and repairs without consuming a token or advancing
