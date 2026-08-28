@@ -345,11 +345,24 @@ def verify(directory):
     return classify(manifest, selected_timings, allocation)
 
 
-def main():
-    parser = argparse.ArgumentParser()
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description=(
+            "Verify a VPN query campaign. Classification is advisory unless "
+            "--fail-on-regression is selected."
+        )
+    )
     parser.add_argument("campaign", type=pathlib.Path)
     parser.add_argument("--output", type=pathlib.Path)
-    args = parser.parse_args()
+    parser.add_argument(
+        "--fail-on-regression",
+        action="store_true",
+        help=(
+            "exit 2 after emitting a valid classification other than "
+            "no_redesign (default: advisory exit 0)"
+        ),
+    )
+    args = parser.parse_args(argv)
     try:
         result = verify(args.campaign)
     except Invalid as error:
@@ -360,6 +373,8 @@ def main():
         args.output.write_text(encoded, encoding="utf-8")
     else:
         print(encoded, end="")
+    if args.fail_on_regression and result["classification"] != "no_redesign":
+        return 2
     return 0
 
 

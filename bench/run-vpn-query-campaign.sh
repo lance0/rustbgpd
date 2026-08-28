@@ -151,10 +151,14 @@ for attempt in $(seq 1 "$attempts"); do
                         "$ordinal" "$repetition" 120 "$attempt"
                     rm "$raw"
                     check_provenance
+                    set +e
                     python3 "$root/bench/verify-vpn-query-campaign.py" "$output" \
-                        --output "$output/classification.json"
+                        --output "$output/classification.json" \
+                        --fail-on-regression
+                    verifier_status=$?
+                    set -e
                     check_provenance
-                    exit
+                    exit "$verifier_status"
                 elif ((rc != 0)); then
                     exit "$rc"
                 fi
@@ -177,16 +181,25 @@ if ((rc == 75)); then
         "$allocation_hash" 49 1 120 "$attempts"
     rm "$output/allocation-raw.json"
     check_provenance
+    set +e
     python3 "$root/bench/verify-vpn-query-campaign.py" "$output" \
-        --output "$output/classification.json"
+        --output "$output/classification.json" \
+        --fail-on-regression
+    verifier_status=$?
+    set -e
     check_provenance
-    exit
+    exit "$verifier_status"
 elif ((rc != 0)); then
     exit "$rc"
 fi
 decorate "$output/allocation-raw.json" "$output/allocation.json" \
     "$allocation_hash" 49 1 120 "$attempts"
 rm "$output/allocation-raw.json"
+set +e
 python3 "$root/bench/verify-vpn-query-campaign.py" "$output" \
-    --output "$output/classification.json"
+    --output "$output/classification.json" \
+    --fail-on-regression
+verifier_status=$?
+set -e
 check_provenance
+exit "$verifier_status"

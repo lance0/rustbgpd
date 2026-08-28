@@ -264,7 +264,12 @@ invocation; `--retry` allows a second attempt. Its paired verifier,
 `verify-vpn-query-campaign.py`, is a fail-closed classifier for the
 retained receipts: it pins the expected sizes, case matrix, and
 workload checksums, and rejects any missing, malformed, or
-inconsistent row. Guard tests live in
+inconsistent row. Direct verifier use remains advisory for every valid
+classification; `--fail-on-regression` emits the same JSON first, then exits
+zero only for `no_redesign` and exits 2 for every retained follow-up or
+unusable classification. The full runner enables that gate at each of its
+three completion paths and rechecks provenance before returning the captured
+status. Guard tests live in
 `bench/tests/test-vpn-query-campaign.sh`,
 `bench/tests/test-vpn-query-receipt.sh`, and
 `bench/tests/test_verify_vpn_query_campaign.py`.

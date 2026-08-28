@@ -35,6 +35,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   LLGR_STALE community, and withdrawn exactly at LLGR expiry; the RR keeps its
   MPLS and IPv6 dataplanes untouched.
 
+- The retained VPN RIB query campaign now gates all three full-run completion
+  paths on its unchanged classifier while preserving advisory direct verifier
+  use. Gated runs write the classification before returning a follow-up status
+  and always recheck source, toolchain, affinity, and binary provenance first.
+
 - Nightly wire campaigns now seed all 12 targets, apply one reviewed BGP byte
   dictionary to the 11 binary targets, and carry a validated corpus forward on
   the `main` lineage. Restore happens in runner-temporary staging and accepts
