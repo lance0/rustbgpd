@@ -649,6 +649,19 @@ impl EvpnRouteKey {
     }
 }
 
+/// Whether an EVPN route-type byte names a route the kernel dataplane
+/// consumes.
+///
+/// Types 1 (Ethernet A-D per-ES/per-EVI), 2 (MAC/IP Advertisement), and 5
+/// (IP Prefix) carry forwarding state — MAC/IP bindings, per-ES mass
+/// withdraw and local bias, and IP prefixes — and may reach the FDB/VXLAN
+/// programmer. Types 3 (IMET) and 4 (Ethernet Segment) drive BGP-side
+/// flooding and DF election only and must never reach it.
+#[must_use]
+pub const fn is_dataplane_route_type(route_type: u8) -> bool {
+    matches!(route_type, 1 | 2 | 5)
+}
+
 // ---------------------------------------------------------------------------
 // Decode helpers
 // ---------------------------------------------------------------------------
@@ -1260,6 +1273,16 @@ pub fn encode_evpn_nlri(routes: &[EvpnRoute], buf: &mut Vec<u8>) -> Result<(), E
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dataplane_route_type_truth_table() {
+        for route_type in [1u8, 2, 5] {
+            assert!(is_dataplane_route_type(route_type), "type {route_type}");
+        }
+        for route_type in [0u8, 3, 4, 6, 255] {
+            assert!(!is_dataplane_route_type(route_type), "type {route_type}");
+        }
+    }
 
     fn sample_rd() -> RouteDistinguisher {
         // Type 0: 2-byte ASN 65000 + 4-byte assigned 100

@@ -339,7 +339,7 @@ with open(sys.argv[1], encoding="utf-8") as stream:
     value = json.load(stream)
 assert value["decision"] == "advertise", value
 assert value.get("update_group_id") is not None, value
-assert any(g["verdict"] == "pass" for g in value["gates"]), value
+assert all(g["verdict"] != "stop" for g in value["gates"]), value
 assert any(g["gate"] == "export_policy" and g["verdict"] == "pass" for g in value["gates"]), value
 PY
 [[ $(git -C "$REPO" rev-parse HEAD) == "$COMMIT" ]] || { echo "HEAD changed during run" >&2; exit 1; }

@@ -444,7 +444,7 @@ impl RibManager {
                 };
                 let previous_peer = previous_best.as_ref().map(|r| r.peer);
                 let peer = new_best.as_ref().map(|r| r.peer);
-                if matches!(key.route_type(), 1 | 2 | 5) {
+                if rustbgpd_wire::is_dataplane_route_type(key.route_type()) {
                     match (previous_best.is_some(), new_best.is_some()) {
                         (false, true) => {
                             self.evpn_dataplane_route_count = self
@@ -480,7 +480,7 @@ impl RibManager {
         // projection and therefore do not invalidate its snapshot.
         if changed_keys
             .iter()
-            .any(|key| matches!(key.route_type(), 1 | 2 | 5))
+            .any(|key| rustbgpd_wire::is_dataplane_route_type(key.route_type()))
         {
             self.evpn_dataplane_generation = self.evpn_dataplane_generation.wrapping_add(1);
         }
@@ -489,7 +489,7 @@ impl RibManager {
             self.evpn_dataplane_route_count,
             self.loc_rib
                 .iter_evpn()
-                .filter(|route| matches!(route.route_type(), 1 | 2 | 5))
+                .filter(|route| rustbgpd_wire::is_dataplane_route_type(route.route_type()))
                 .count(),
             "EVPN dataplane relevant-row cardinality drifted from the Loc-RIB"
         );
