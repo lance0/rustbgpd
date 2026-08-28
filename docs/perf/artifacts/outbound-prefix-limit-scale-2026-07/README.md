@@ -28,10 +28,9 @@ Verify from this directory:
 sha256sum -c SHA256SUMS
 ```
 
-The source driver is
-[`bench/scale/outbound-prefix-limit-scale/`](../../../../bench/scale/outbound-prefix-limit-scale/).
-Regenerate the receipt rather than treating these compact derivatives as a
-replayable raw run.
+The one-off source driver is not retained in the repository. Use the method
+and provenance recorded in the report to run a fresh campaign rather than
+treating these compact derivatives as a replayable raw run.
 
 ## Scope and variance
 

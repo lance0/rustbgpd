@@ -1,0 +1,2 @@
+# Reserved example hosts are documentation literals, not live dependencies.
+^https?://([^.]+\.)*example\.(com|net|org)(:[0-9]+)?(/|$)
