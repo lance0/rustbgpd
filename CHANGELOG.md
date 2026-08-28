@@ -36,6 +36,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sums remain unchanged, preventing cumulative averages from masking one slow
   operation.
 
+- A runnable `rustbgpd-container.service` example now supervises the production
+  image with Docker host networking, a fail-closed image selection, a
+  root-owned state bind, and a read-only config bind. The root container drops
+  all capabilities except `NET_BIND_SERVICE`; Docker gets the full 32-minute
+  stop grace inside a 33-minute systemd margin, and reload maps to SIGHUP. The
+  deployment guide now distinguishes Docker bridge low-port behavior from host
+  networking and explains the uid 999 capability and state-owner traps.
+
 - Periodic BMP peer statistics now include RFC 9972 type 22 for exact counts of
   current pre-policy IPv4/IPv6-unicast Adj-RIB-In routes rejected by inbound
   policy. Rows are emitted only for negotiated families while rejected-route

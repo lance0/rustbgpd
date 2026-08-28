@@ -610,7 +610,16 @@ docker compose down
 
 For your own deployment:
 
-- **State**: mount a volume at the daemon's `runtime_state_dir` so the
+- **Image name and command**: published GHCR version tags have **no leading
+  `v`**: use `ghcr.io/lance0/rustbgpd:0.67.0`, not
+  `ghcr.io/lance0/rustbgpd:v0.67.0`. The production image runs as uid/gid 999
+  and its default command is exactly
+  `rustbgpd /etc/rustbgpd/config.toml`. If the config is mounted under another
+  container filename, pass that filename explicitly after the image, for
+  example `rustbgpd /etc/rustbgpd/router.toml`.
+
+- **Bridge networking and state**: mount a volume at the daemon's
+  `runtime_state_dir` so the
   GR restart marker and FIB and BLACKHOLE ownership receipts survive container
   restarts. The daemon runs as uid/gid 999 and rewrites its config in
   place, so both host directories must be owned by that uid and the
@@ -627,21 +636,162 @@ For your own deployment:
 
   docker run --rm -d \
     --name rustbgpd \
+    --network=bridge \
     --stop-timeout=1920 \
     -v /etc/rustbgpd:/etc/rustbgpd \
     -v /var/lib/rustbgpd:/var/lib/rustbgpd \
     -p 179:179 \
     -p 9179:9179 \
     --ulimit nofile=65536:524288 \
-    --cap-add=NET_BIND_SERVICE \
-    --cap-add=NET_ADMIN \
     ghcr.io/lance0/rustbgpd:latest
   ```
+
+  This recipe succeeds because Docker sets
+  `net.ipv4.ip_unprivileged_port_start=0` inside its default bridge network
+  namespace. Port 179 is therefore not privileged there; no capability flag is
+  responsible for the bind. Add `NET_ADMIN` only when the container actually
+  programs its network namespace. The bridge path is the supported choice when
+  the daemon does not need to bind a particular host/peering-LAN address.
 
   The `edge` profile is used because its `runtime_state_dir`,
   `grpc_uds` path, and `0.0.0.0` metrics bind are already the container
   forms; the `lab` profile's `/tmp` state directory and `127.0.0.1`
   metrics bind both need editing first.
+
+### Host networking and privileged BGP ports
+
+Host networking is the second supported container path, and is required when
+`listen_addresses` must name a host/peering-LAN address, a multihop session
+pins its source, or the daemon must program the host network namespace. It does
+not inherit Docker's bridge-netns low-port setting:
+
+| Docker network mode | Effective `net.ipv4.ip_unprivileged_port_start` | Image uid 999 can bind `:179` |
+|---|---:|---|
+| default bridge | `0` in the container namespace | yes |
+| `--network=host` | the host value (commonly `1024`) | no when the host value is above `179` |
+
+`--cap-add=NET_BIND_SERVICE` is **not sufficient** for the image's uid 999 in
+host mode. Docker does not provide that capability as an ambient capability to
+the non-root image process, so it is unavailable after the uid 999 exec. This
+differs from the bare-binary systemd unit above, whose
+`AmbientCapabilities=CAP_NET_BIND_SERVICE` is effective and remains correct.
+
+Use exactly one of these deployment paths:
+
+1. Keep the default bridge network and published ports when address pinning is
+   unnecessary; the image continues to run as uid 999.
+2. Use `--network=host` with `--user=root` and bind a root-owned host state
+   directory at `/var/lib/rustbgpd`:
+
+   ```sh
+   sudo install -d -o root -g root -m 0755 /etc/rustbgpd
+   sudo install -d -o root -g root -m 0700 /var/lib/rustbgpd
+   sudo install -o root -g root -m 0600 config.toml /etc/rustbgpd/config.toml
+
+   docker run --rm -d \
+     --name rustbgpd \
+     --network=host \
+     --user=root \
+     --cap-drop=ALL \
+     --cap-add=NET_BIND_SERVICE \
+     --stop-timeout=1920 \
+     --ulimit nofile=65536:524288 \
+     --mount=type=bind,source=/etc/rustbgpd,target=/etc/rustbgpd,readonly \
+     --mount=type=bind,source=/var/lib/rustbgpd,target=/var/lib/rustbgpd \
+     ghcr.io/lance0/rustbgpd:0.67.0
+   ```
+
+Do not omit the host state bind when overriding the image user. The directory
+baked into the image is owned by uid 999; a root daemon expects uid 0. The
+runtime-state owner guard treats that mismatch as unsafe, logs
+`runtime-state marker/checkpoint storage unavailable`, and continues with the
+graceful-restart marker and warm checkpoint storage disabled. A root-owned,
+non-group/world-writable bind mount makes the authority match the running uid.
+
+Adding `NET_BIND_SERVICE` to uid 999 is not a third supported host-network
+recipe. If changing the host's low-port sysctl is part of a separately managed
+host policy, validate that policy outside this unit; the shipped container
+guidance does not mutate the host sysctl.
+
+The root host-network path drops Docker's entire default capability set, then
+adds back only `NET_BIND_SERVICE` for port 179. Root makes that explicitly
+granted capability usable; applying the same add-cap flag to uid 999 remains
+ineffective because Docker supplies no ambient capability to that non-root
+exec.
+
+The command above and the systemd unit below are control-plane defaults. A
+configuration that programs the host FIB or interfaces also needs
+`--cap-add=NET_ADMIN` on the same root host-network path, as described in
+[kernel dataplane privileges](#kernel-dataplane-opt-in-privilege-drop-in); that
+opt-in does not replace the root-user and root-owned-state requirements.
+
+### systemd-supervised host-network container
+
+[`examples/systemd/rustbgpd-container.service`](../examples/systemd/rustbgpd-container.service)
+generalizes the host-network recipe above. It keeps `docker run` attached so
+the daemon's exit status drives `Restart=on-failure`, maps `systemctl reload`
+to SIGHUP, gives Docker the full 32-minute settlement grace and systemd a
+33-minute outer margin, and makes the registry pull best-effort so an
+explicitly selected cached image remains usable during a registry outage. A
+missing or empty `RUSTBGPD_IMAGE` fails closed before any Docker command runs.
+
+Install the unit and its required image environment file after creating the
+root-owned state directory:
+
+```sh
+sudo install -d -o root -g root -m 0755 /etc/rustbgpd
+sudo install -d -o root -g root -m 0700 /var/lib/rustbgpd
+sudo install -o root -g root -m 0600 config.toml /etc/rustbgpd/config.toml
+sudo install -m 0644 examples/systemd/rustbgpd-container.service \
+  /etc/systemd/system/rustbgpd-container.service
+sudo tee /etc/rustbgpd/rustbgpd-container.env >/dev/null <<'EOF'
+RUSTBGPD_IMAGE=ghcr.io/lance0/rustbgpd:0.67.0
+EOF
+sudo chmod 0644 /etc/rustbgpd/rustbgpd-container.env
+sudo systemctl daemon-reload
+```
+
+The overridable host defaults are `RUSTBGPD_CONFIG_DIR=/etc/rustbgpd` and
+`RUSTBGPD_STATE_DIR=/var/lib/rustbgpd`; both are bind-mounted at their standard
+container paths. `RUSTBGPD_CONFIG_FILE=/etc/rustbgpd/config.toml` selects the
+file inside the read-only config mount. Put any overrides beside
+`RUSTBGPD_IMAGE` in the environment file. An upgrade is one image-tag edit
+followed by `systemctl restart rustbgpd-container`; version tags still omit the
+leading `v`. `RUSTBGPD_IMAGE` is required and must be non-empty; the unit
+checks it before its best-effort pull.
+
+The unit deliberately mounts the config directory read-only. Runtime mutation
+(`rbgp neighbor add`, policy edits, gNMI `Set`, and `rbgp config apply`) is
+therefore excluded: those calls cannot persist and are rejected. Supporting
+them requires an explicit change to the mount and root-owned config-directory
+write contract; the shipped unit is for externally managed config plus SIGHUP.
+
+Before the first start, and before restarting after an image or config change,
+validate the exact externally managed config directory and selected image
+without touching the running container:
+
+```sh
+docker run --rm \
+  --user=root \
+  --cap-drop=ALL \
+  --mount=type=bind,source=/etc/rustbgpd,target=/etc/rustbgpd,readonly \
+  ghcr.io/lance0/rustbgpd:0.67.0 \
+  rustbgpd --check --strict /etc/rustbgpd/config.toml
+```
+
+Only enable the service after that check succeeds:
+
+```sh
+sudo systemctl enable --now rustbgpd-container
+```
+
+The image's declared healthcheck remains active under systemd supervision and
+runs `rbgp --json health` against the default state-directory UDS. An
+`unhealthy` result remains observable with
+`docker inspect --format '{{.State.Health.Status}}' rustbgpd`, but Docker health
+status does not terminate the attached process and therefore does not drive
+systemd's `Restart=on-failure`. If the config moves the socket, set
+`RUSTBGPD_ADDR` for the container by extending the unit's `docker run` command.
 
 - **File descriptors**: `--ulimit nofile` is required, not tuning. The
   Docker default soft limit is 1024, well under the 4096 floor
@@ -656,9 +806,10 @@ For your own deployment:
   RPC is rejected without it. Mount it `:ro` only when the config is
   managed entirely from outside and reloaded with SIGHUP.
 
-- **Settlement fail-stop**: `--stop-timeout=1920` gives an explicit stop the
-  same 32-minute grace as the shipped systemd unit. A failure to create the
-  initial persistence stage rejects cleanly before runtime mutation. After
+- **Settlement fail-stop**: `--stop-timeout=1920` gives the daemon a 32-minute
+  Docker stop grace; the shipped container unit's `TimeoutStopSec=33min` is the
+  supervisor margin around that operation. A failure to create the initial
+  persistence stage rejects cleanly before runtime mutation. After
   runtime mutation begins, a failed rename is `NotPublished`: only complete
   acknowledged compensation returns cleanly; otherwise known divergence fences
   recovery. A post-rename directory-fsync failure is `PublicationAmbiguous`:
@@ -681,11 +832,13 @@ For your own deployment:
 - **Logs**: structured JSON when `[global.telemetry] log_format =
   "json"` is set; pipe to your log aggregator.
 
-- **Networking**: Linux FIB integration and BFD require the container
-  to share the host network namespace (or otherwise have access to
-  the routing table you intend to program). The interop suite runs
-  rustbgpd as a containerlab `kind: linux` node, which is the cleanest
-  reference setup.
+- **Networking**: Linux FIB integration and BFD require access to the network
+  namespace they operate on. For host addresses, use the [root host-network
+  path](#host-networking-and-privileged-bgp-ports) above; if the configuration
+  also programs the host FIB or interfaces, add its documented `NET_ADMIN`
+  opt-in. A bridge container affects only its own namespace. The interop suite
+  runs rustbgpd as a containerlab `kind: linux` node, which is the cleanest
+  reference setup for an isolated lab namespace.
 
 ## Containerlab quick start
 

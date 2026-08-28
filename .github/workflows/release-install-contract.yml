@@ -21,6 +21,7 @@ on:
       - examples/docker-compose/README.md
       - examples/systemd/rustbgpd.service
       - examples/systemd/rustbgpd@.service
+      - examples/systemd/rustbgpd-container.service
       - examples/prometheus/rustbgpd-alerts.yml
       - examples/prometheus/rustbgpd-alerts_test.yml
       - tests/birdwatcher_adapter_smoke.rs
@@ -52,6 +53,7 @@ on:
       - examples/docker-compose/README.md
       - examples/systemd/rustbgpd.service
       - examples/systemd/rustbgpd@.service
+      - examples/systemd/rustbgpd-container.service
       - examples/prometheus/rustbgpd-alerts.yml
       - examples/prometheus/rustbgpd-alerts_test.yml
       - tests/birdwatcher_adapter_smoke.rs
@@ -79,6 +81,8 @@ jobs:
         run: python3 scripts/test_check_release_install_contract.py
       - name: Check repository release install contract
         run: python3 scripts/check_release_install_contract.py
+      - name: Verify container systemd unit
+        run: systemd-analyze verify examples/systemd/rustbgpd-container.service
       - name: Test Birdwatcher endpoint parser
         run: cargo test --locked -p birdwatcher-adapter
       - name: Test Birdwatcher UDS startup and recovery
