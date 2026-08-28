@@ -41,6 +41,15 @@ record agree at every boundary.
 
 **Measured commit:** `6a49f0963c9d30a7866ebf5a413090a5fb4090b5`
 
+**Measured on:** 2026-07-25 UTC
+
+**Receipt tag:** `receipt/config-persistence-2026-07`
+
+**Source-equivalent landed squash:**
+`6ff4fb03e6f3c12fb5086ffd6e57310a6f300aef`. The measurement-relevant
+source and harness landed unchanged; the measurement occurred at the measured
+commit above, not at the landed squash.
+
 **Result:** 109 of 109 precommitted checks pass (105 harness checks, 0 failed;
 4 driver log gates, 0 failed). Zero stub decode errors on daemon UPDATEs. Wall
 clock 27 s.

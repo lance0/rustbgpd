@@ -33,6 +33,15 @@ edit, including the one made on the peer group.
 
 **Measured commit:** `e2e66fb75e0565c6b3282bef0020744f05b160dc`
 
+**Measured on:** 2026-07-24 UTC
+
+**Receipt tag:** `receipt/outbound-prefix-limits-2026-07`
+
+**Source-equivalent landed squash:**
+`4eb75aa045467fb0676293888ea404f3bbbca1d6`. The measurement-relevant
+source and harness landed unchanged; the measurement occurred at the measured
+commit above, not at the landed squash.
+
 **Result:** 96 of 96 precommitted checks pass (91 harness checks, 0 failed;
 5 driver log gates, 0 failed). Zero stub decode errors on daemon UPDATEs.
 

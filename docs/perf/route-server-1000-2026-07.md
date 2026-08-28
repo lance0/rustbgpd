@@ -11,6 +11,15 @@ describe this disclosed fleet rather than a universal deployment forecast.
 
 **Measured commit:** `cb2c924f117fe264991f12b24ea44c2b15b132e2`
 
+**Measured on:** 2026-07-20 UTC
+
+**Receipt tag:** `receipt/route-server-1000-2026-07`
+
+**Source-equivalent landed squash:**
+`651923720925f85c9000a8e6907fb1b599767803`. The measurement-relevant
+source and harness landed unchanged; the measurement occurred at the measured
+commit above, not at the landed squash.
+
 > **Default drift since this run.** The scenario config declares a bare
 > `[policy]` with no `[policy.explain]` override, so this campaign ran
 > with the import-decision explain cache **enabled** — the default at the

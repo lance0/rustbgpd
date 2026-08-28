@@ -12,7 +12,18 @@ the receiver, under churn, against a pre-committed gate:
 > **Gate: UPDATE-delivery stall < 1 s during a full import+export
 > policy swap at 700 clients × 400k routes, with live churn.**
 
-**Commit measured:** `61efe075`
+**Commit measured:** `1f519a5bcfb11503d65d23fc9480f821acce1838`
+
+**Measured on:** 2026-07-11 UTC
+
+**Receipt tag:** `receipt/reload-stall-2026-07`
+
+**Source-equivalent landed squash:**
+`cd03ca61a84291d3f6fe4c3e7f5084488cf690a0`. The measurement-relevant
+source and harness landed unchanged; the measurement occurred at the measured
+commit above, not at the landed squash.
+
+The measured tree contains daemon-change commit `61efe075`
 (`fix/outbound-oversized-group-truncation`; main `25979227` plus the
 outbound size-chunking fix described in
 [Why this supersedes the earlier run](#why-this-supersedes-the-earlier-run),
@@ -46,8 +57,9 @@ over-count was not.
 ## Current numbers — 2026-07-16 campaign
 
 **Commit measured:** `a25ad76b`. The section below replaces the
-`61efe075` headline as the current receipt; the historical numbers and
-the interim regression are kept further down for the record.
+`1f519a5b` receipt headline (whose daemon-change commit was `61efe075`) as the
+current receipt; the historical numbers and the interim regression are kept
+further down for the record.
 
 The same 700-client x 400,400-route campaign now runs in BOTH reload
 shapes — the historical full import+export swap, and the export-only
