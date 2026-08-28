@@ -483,6 +483,7 @@ fn empty_neighbor(address: IpAddr) -> Neighbor {
         prefix_orf_receive: None,
         disable_ipv4_unicast: None,
         remove_private_as: None,
+        discard_path_attributes: None,
         add_path: None,
         log_level: None,
         import_policy: Vec::new(),

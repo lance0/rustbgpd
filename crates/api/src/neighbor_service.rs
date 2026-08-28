@@ -587,12 +587,13 @@ fn parse_bgp_role_proto(role: &str) -> Result<Option<BgpRole>, Status> {
     }
 }
 
-const CREATE_OVERRIDE_PATHS: [&str; 9] = [
+const CREATE_OVERRIDE_PATHS: [&str; 10] = [
     "families",
     "required_families",
     "route_server_client",
     "per_client_best",
     "strict_role",
+    "discard_path_attributes",
     "add_path_receive",
     "add_path_send",
     "add_path_send_max",
@@ -643,6 +644,10 @@ fn parse_presence_aware_create(
         ("route_server_client", config.route_server_client),
         ("per_client_best", config.per_client_best),
         ("strict_role", config.strict_role),
+        (
+            "discard_path_attributes",
+            !config.discard_path_attributes.is_empty(),
+        ),
         ("add_path_receive", config.add_path_receive),
         ("add_path_send", config.add_path_send),
         ("add_path_send_max", config.add_path_send_max != 0),
@@ -751,6 +756,22 @@ fn parse_presence_aware_create(
                 })?,
         })
     };
+    let discard_path_attributes = selected
+        .contains("discard_path_attributes")
+        .then(|| {
+            config
+                .discard_path_attributes
+                .iter()
+                .copied()
+                .map(|code| {
+                    u8::try_from(code).map_err(|_| {
+                        Status::invalid_argument("discard_path_attributes values must be <= 255")
+                    })
+                })
+                .collect::<Result<BTreeSet<_>, _>>()
+                .map(|codes| codes.into_iter().collect())
+        })
+        .transpose()?;
 
     Ok(Box::new(PresenceAwareNeighborCreate {
         address,
@@ -764,6 +785,7 @@ fn parse_presence_aware_create(
         max_prefixes: (config.max_prefixes > 0).then_some(config.max_prefixes),
         max_prefix_restart_seconds: config.max_prefix_restart_seconds,
         remove_private_as,
+        discard_path_attributes,
         local_role,
         families,
         required_families,
@@ -811,6 +833,12 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
             .map(|(afi, safi)| family_to_string(*afi, *safi))
             .collect(),
         remove_private_as: remove_private_as_to_string(info.remove_private_as),
+        discard_path_attributes: info
+            .discard_path_attributes
+            .iter()
+            .copied()
+            .map(u32::from)
+            .collect(),
         peer_group: info.peer_group.clone().unwrap_or_default(),
         route_server_client: info.route_server_client,
         per_client_best: info.per_client_best,
@@ -1559,6 +1587,7 @@ mod tests {
     use crate::test_support::peer_info;
     use prost::Message;
     use proto::neighbor_service_server::NeighborService as _;
+    use std::sync::Arc;
     use tokio::sync::mpsc::error::TryRecvError;
     use tokio::sync::oneshot;
 
@@ -2015,6 +2044,7 @@ mod tests {
                 "route_server_client",
                 "per_client_best",
                 "strict_role",
+                "discard_path_attributes",
                 "add_path_receive",
                 "add_path_send",
                 "add_path_send_max",
@@ -2064,6 +2094,76 @@ mod tests {
             .intent
             .unwrap();
         assert!(parse_presence_aware_create(intent).is_err());
+    }
+
+    #[test]
+    fn create_discard_attributes_preserves_presence_and_canonicalizes_values() {
+        let base = proto::NeighborConfig {
+            address: "10.0.0.9".into(),
+            remote_asn: 65009,
+            ..Default::default()
+        };
+
+        let omitted = parse_presence_aware_create(
+            intent_request(Some(base.clone()), Some(Vec::new()))
+                .intent
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(omitted.discard_path_attributes, None);
+
+        let masked_empty = parse_presence_aware_create(
+            intent_request(Some(base.clone()), Some(vec!["discard_path_attributes"]))
+                .intent
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(masked_empty.discard_path_attributes, Some(Vec::new()));
+
+        let canonical = parse_presence_aware_create(
+            intent_request(
+                Some(proto::NeighborConfig {
+                    discard_path_attributes: vec![8, 4, 8],
+                    ..base.clone()
+                }),
+                Some(vec!["discard_path_attributes"]),
+            )
+            .intent
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(canonical.discard_path_attributes, Some(vec![4, 8]));
+
+        let unmasked = intent_request(
+            Some(proto::NeighborConfig {
+                discard_path_attributes: vec![4],
+                ..base.clone()
+            }),
+            Some(Vec::new()),
+        )
+        .intent
+        .unwrap();
+        assert!(parse_presence_aware_create(unmasked).is_err());
+
+        let overflow = intent_request(
+            Some(proto::NeighborConfig {
+                discard_path_attributes: vec![256],
+                ..base
+            }),
+            Some(vec!["discard_path_attributes"]),
+        )
+        .intent
+        .unwrap();
+        let error = parse_presence_aware_create(overflow).unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn neighbor_read_projects_effective_discard_attributes() {
+        let mut info = peer_info("192.0.2.1".parse().unwrap());
+        info.discard_path_attributes = Arc::from([4, 8]);
+        let output = peer_info_to_proto(&info);
+        assert_eq!(output.config.unwrap().discard_path_attributes, vec![4, 8]);
     }
 
     #[test]

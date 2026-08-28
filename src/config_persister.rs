@@ -431,6 +431,7 @@ log_format = "json"
             prefix_orf_receive: None,
             disable_ipv4_unicast: None,
             remove_private_as: None,
+            discard_path_attributes: None,
             add_path: None,
             import_policy: Vec::new(),
             export_policy: Vec::new(),

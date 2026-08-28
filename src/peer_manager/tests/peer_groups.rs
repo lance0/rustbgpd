@@ -23,6 +23,7 @@ fn edge_group_definition(hold_time: Option<u16>) -> rustbgpd_api::peer_types::Pe
         route_server_client: None,
         per_client_best: None,
         remove_private_as: None,
+        discard_path_attributes: Vec::new(),
         add_path: None,
         import_policy: Vec::new(),
         export_policy: Vec::new(),
@@ -265,6 +266,79 @@ async fn peer_group_reshape_applies_to_all_members_and_advances_config() {
         .find(|event| event.target_type == "peer_group")
         .expect("peer-group policy event");
     assert_eq!(event.affected_peer_count, 3);
+}
+
+#[tokio::test]
+async fn peer_group_discard_change_purge_resets_every_static_inheritor() {
+    let config = load_test_config(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.edge]
+route_server_client = true
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "edge"
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+peer_group = "edge"
+"#,
+    );
+    let mut mgr = peer_group_reshape_manager(config);
+    let a1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let a2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let c1 = Arc::new(FakePeerCounters::default());
+    let c2 = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer(
+        &mut mgr,
+        a1,
+        fake_peer_handle(a1, SessionState::Established, None, c1.clone()),
+        false,
+    );
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        a2,
+        65003,
+        fake_peer_handle(a2, SessionState::Established, None, c2.clone()),
+        false,
+    );
+
+    let mut definition =
+        crate::policy_admin::config_peer_group_to_api(&mgr.current_config.peer_groups["edge"]);
+    definition.discard_path_attributes = vec![4];
+    mgr.apply_peer_group_change(
+        rustbgpd_api::peer_types::ConfigEvent::SetPeerGroup {
+            name: "edge".to_string(),
+            definition,
+            ack: None,
+        },
+        vec![a1, a2],
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(c1.purge_reset.load(Ordering::SeqCst), 1);
+    assert_eq!(c2.purge_reset.load(Ordering::SeqCst), 1);
+    for addr in [a1, a2] {
+        assert_eq!(
+            mgr.peers[&key(addr)]
+                .transport_config
+                .discard_path_attributes
+                .as_ref(),
+            &[4]
+        );
+    }
 }
 
 /// ADR-0081: a mid-fanout reconfigure failure on the targeted peer-group
@@ -637,6 +711,76 @@ async fn peer_group_reshape_skips_dynamic_peers_without_bouncing() {
             .hold_time,
         Some(45),
         "the definition edit itself still commits"
+    );
+}
+
+#[tokio::test]
+async fn peer_group_discard_change_purges_dynamic_member_and_reaccepts_new_effective_list() {
+    let config = load_test_config(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.ix-members]
+route_server_client = true
+
+[[dynamic_neighbors]]
+prefix = "10.30.0.0/16"
+peer_group = "ix-members"
+remote_asn = 65030
+"#,
+    );
+    let mut mgr = peer_group_reshape_manager(config);
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 30, 0, 5));
+    let counters = Arc::new(FakePeerCounters::default());
+    insert_test_dynamic_managed_peer(
+        &mut mgr,
+        addr,
+        11,
+        fake_peer_handle(addr, SessionState::Established, None, counters.clone()),
+        true,
+        IpAddr::V4(Ipv4Addr::new(10, 30, 0, 0)),
+        16,
+        "ix-members",
+    );
+
+    let mut definition = crate::policy_admin::config_peer_group_to_api(
+        &mgr.current_config.peer_groups["ix-members"],
+    );
+    definition.discard_path_attributes = vec![4];
+    mgr.apply_peer_group_change(
+        rustbgpd_api::peer_types::ConfigEvent::SetPeerGroup {
+            name: "ix-members".to_string(),
+            definition,
+            ack: None,
+        },
+        vec![addr],
+    )
+    .await
+    .unwrap();
+
+    wait_counter(&counters.purge_reset, 1).await;
+    assert_eq!(counters.stop.load(Ordering::SeqCst), 0);
+    let reconnect = mgr
+        .current_config
+        .resolve_dynamic_neighbor(
+            addr,
+            65030,
+            "reconnect",
+            &mgr.current_config.peer_groups["ix-members"],
+            "ix-members",
+            false,
+        )
+        .unwrap();
+    assert_eq!(
+        reconnect.transport_config.discard_path_attributes.as_ref(),
+        &[4]
     );
 }
 

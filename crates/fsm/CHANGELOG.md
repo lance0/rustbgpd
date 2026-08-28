@@ -5,6 +5,12 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+- **Additive FSM API:** Added `Event::AdministrativeReset`, which sends
+  Cease/Administrative Reset before authoritative `SessionDown` when a BGP
+  session exists and emits `SessionDown` in every earlier state. The daemon
+  transport may wrap that notification as RFC 8538 Hard Reset when Notification
+  GR was negotiated; the pure FSM event itself emits Cease/4.
+
 ## 0.5.0 - 2026-08-26
 
 - **Additive FSM API:** Added `Event::BfdDown`. A BFD-triggered teardown in

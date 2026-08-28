@@ -256,6 +256,107 @@ import_policy_chain = ["edge-in"]
 }
 
 #[tokio::test]
+async fn ingress_discard_reshape_keeps_update_group_identity_unchanged() {
+    let current = load_test_config(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "192.0.2.1"
+remote_asn = 65002
+route_server_client = true
+"#,
+    );
+    let resolved = current.resolved_neighbors().unwrap();
+    let neighbor = &resolved[0];
+    let live_input = rustbgpd_rib::UpdateGroupClassifierInput {
+        policy_fingerprint: None,
+        policy_provenance: None,
+        policy_requires_peer_context: false,
+        target_is_ebgp: true,
+        target_is_rr_client: neighbor.transport_config.route_reflector_client,
+        target_local_role: neighbor
+            .transport_config
+            .peer
+            .local_role
+            .map(rustbgpd_wire::BgpRole::to_u8),
+        sendable_families: vec![(1, 1)],
+        llgr_families: Vec::new(),
+        add_path_send: false,
+        per_client_best: neighbor.transport_config.per_client_best,
+        interpret_rfc1997: neighbor.transport_config.interpret_rfc1997,
+        orr_vantage: neighbor.transport_config.orr_vantage,
+        orf_installed: false,
+    };
+    let live_classification = rustbgpd_rib::classify_update_group(live_input.clone());
+    let mut candidate = current.clone();
+    candidate.neighbors[0].discard_path_attributes = Some(std::collections::BTreeSet::from([4]));
+    let candidate = toml::to_string_pretty(&candidate).unwrap();
+
+    let (_tx, rx) = mpsc::channel(4);
+    let (_internal_tx, internal_rx) = mpsc::channel(1);
+    let (rib_tx, mut rib_rx) = mpsc::channel(4);
+    let mut mgr = PeerManager::new_with_config(
+        rx,
+        internal_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+        None,
+        current,
+    );
+    let responder = tokio::spawn(async move {
+        let Some(RibUpdate::QueryUpdateGroupSnapshot { reply }) = rib_rx.recv().await else {
+            panic!("plan snapshot query missing");
+        };
+        reply
+            .send(rustbgpd_rib::UpdateGroupSnapshot {
+                peers: vec![rustbgpd_rib::UpdateGroupPeerSnapshot {
+                    peer: "192.0.2.1".parse().unwrap(),
+                    input: live_input,
+                    classification: live_classification,
+                    runtime_membership: "group:0".to_string(),
+                }],
+            })
+            .unwrap();
+    });
+
+    let plan = mgr.plan_config_transaction(&candidate, None).await.unwrap();
+
+    assert_eq!(
+        plan.status,
+        rustbgpd_api::peer_types::RuntimeConfigTransactionStatus::Committable
+    );
+    assert_eq!(plan.supported_sections, vec!["[[neighbors]] modify"]);
+    let diff_json: serde_json::Value = serde_json::from_str(&plan.diff.diff_json).unwrap();
+    let changes = diff_json["reload_applied"]["neighbors"]["changed"][0]["changes"]
+        .as_array()
+        .unwrap();
+    let discard_change = changes
+        .iter()
+        .find(|change| change["field"] == "discard_path_attributes")
+        .expect("discard field is present in the config plan");
+    assert_eq!(discard_change["impact"], "session_reset");
+    assert_eq!(plan.update_group_impact.entries.len(), 1);
+    assert_eq!(plan.update_group_impact.entries[0].transition, "no_op");
+    assert!(!plan.update_group_impact.entries[0].local_resync);
+    assert_eq!(plan.update_group_impact.rollup.no_op, 1);
+    assert_eq!(plan.update_group_impact.rollup.local_resyncs, 0);
+    responder.await.unwrap();
+}
+
+#[tokio::test]
 #[expect(
     clippy::too_many_lines,
     reason = "keeps the external dataset, real peer snapshot, and both planner verdicts in one load-bearing scenario"

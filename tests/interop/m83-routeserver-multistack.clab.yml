@@ -5,9 +5,10 @@
 # Validates the RFC 7947 route-server profile against three member
 # stacks at once:
 #   - transparency at byte level (no 65500 in AS_PATH, NEXT_HOP =
-#     originator, MED + standard/large communities verbatim) — client
-#     views on all three stacks plus a tshark capture on the RS↔BIRD
-#     link;
+#     originator, unfiltered MED + standard/large communities verbatim) —
+#     client views on all three stacks plus a tshark capture on the RS↔BIRD
+#     link; and one explicit BIRD-only inbound exception that removes MED
+#     after raw capture while preserving both community attributes;
 #   - RFC 9234 OTC attached toward clients (role = route_server);
 #   - per-member export policy views (a deny chain scoped to one
 #     member) + ROV reject-at-import via the StayRTR RTR fixture;
@@ -120,8 +121,9 @@ topology:
 # RS: AS 65500, 10.83.1.1 / 10.83.2.1 / 10.83.3.1 (router-id 10.83.0.1)
 # StayRTR: management network only (RTR over TCP, no L2 link needed)
 # Prefix plan:
-#   BIRD  65001: 203.0.113.0/24 (RPKI-valid probe: MED 120, 65001:111,
-#                large 65001:1:1), 100.65.0.0/24 (overlap best, tagged
+#   BIRD  65001: 203.0.113.0/24 (RPKI-valid discard-boundary probe: raw
+#                MED 120, 65001:111, large 65001:1:1; normalized MED
+#                removed), 100.65.0.0/24 (overlap best, tagged
 #                65001:666 = denied toward FRR), 100.69.0.0/24
 #                (member-scoped deny toward FRR), 100.70.0.0/24
 #                (Add-Path pair)

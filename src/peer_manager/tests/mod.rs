@@ -91,6 +91,7 @@ fn make_config(addr: IpAddr, asn: u32) -> PeerManagerNeighborConfig {
         interpret_rfc1997: true,
         rs_control_communities: false,
         remove_private_as: rustbgpd_transport::RemovePrivateAs::Disabled,
+        discard_path_attributes: std::sync::Arc::from([]),
         add_path_receive: false,
         add_path_send: false,
         add_path_send_max: 0,
@@ -741,6 +742,7 @@ struct FakePeerCounters {
     activate_max_prefix_metrics: AtomicU32,
     shutdown: AtomicU32,
     stop: AtomicU32,
+    purge_reset: AtomicU32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -972,12 +974,50 @@ fn fake_peer_handle_with_route_refresh_reply(
                     counters.stop.fetch_add(1, Ordering::SeqCst);
                     break;
                 }
+                PeerCommand::PurgeReset => {
+                    counters.purge_reset.fetch_add(1, Ordering::SeqCst);
+                    break;
+                }
                 _ => {}
             }
         }
         Ok(())
     });
     PeerHandle::from_parts(session_tx, task)
+}
+
+fn purge_back_to_idle_peer_handle(
+    peer_addr: IpAddr,
+    session_id: u64,
+    role: rustbgpd_transport::SessionRole,
+    notify_tx: rustbgpd_transport::SessionNotificationSender,
+    counters: Arc<FakePeerCounters>,
+) -> PeerHandle {
+    let (commands, mut command_rx) = mpsc::channel(8);
+    let task = tokio::spawn(async move {
+        while let Some(command) = command_rx.recv().await {
+            match command {
+                PeerCommand::PurgeReset => {
+                    notify_tx
+                        .send(SessionNotification::BackToIdle {
+                            session_id,
+                            role,
+                            peer_addr,
+                        })
+                        .unwrap();
+                    counters.purge_reset.fetch_add(1, Ordering::SeqCst);
+                    break;
+                }
+                PeerCommand::Shutdown => {
+                    counters.shutdown.fetch_add(1, Ordering::SeqCst);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(commands, task)
 }
 
 fn eligible_warm_checkpoint_state() -> WarmCheckpointSessionState {
@@ -1061,6 +1101,7 @@ fn config_neighbor(addr: IpAddr, remote_asn: u32) -> crate::config::Neighbor {
         prefix_orf_receive: None,
         disable_ipv4_unicast: None,
         remove_private_as: None,
+        discard_path_attributes: None,
         add_path: None,
         log_level: None,
         import_policy: Vec::new(),

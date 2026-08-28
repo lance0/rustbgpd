@@ -324,6 +324,9 @@ pub struct JsonNeighborDetail {
     pub families: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub required_families: Vec<String>,
+    /// Effective inbound path-attribute discard list. Empty is omitted.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub discard_path_attributes: Vec<u32>,
     /// Presence distinguishes an older daemon from a current daemon that has
     /// no Established-session negotiation snapshot.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1652,6 +1655,7 @@ mod tests {
             send_hold_time: 480,
             families: vec!["ipv4_unicast".to_string()],
             required_families: vec!["ipv4_unicast".to_string()],
+            discard_path_attributes: vec![4, 8],
             negotiation_available: Some(true),
             negotiated_session: Some(JsonNegotiatedSession {
                 hold_time_seconds: Some(0),

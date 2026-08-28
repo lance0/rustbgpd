@@ -258,6 +258,8 @@ async fn legacy_as4_suffix_reaches_loop_detection_after_raw_bmp_tap() {
 #[tokio::test]
 async fn ebgp_local_pref_is_ignored_after_pre_policy_bmp_tap() {
     let (mut session, mut rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+    session.config.route_server_client = true;
+    session.config.discard_path_attributes = Arc::from([4]);
     let negotiated = negotiated_session(65002, false);
     session.negotiated = Some(Arc::new(negotiated));
     let update = UpdateMessage::build(
@@ -273,6 +275,7 @@ async fn ebgp_local_pref_is_ignored_after_pre_policy_bmp_tap() {
             }),
             PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
             PathAttribute::LocalPref(500),
+            PathAttribute::Med(77),
         ],
         true,
         false,
@@ -290,6 +293,11 @@ async fn ebgp_local_pref_is_ignored_after_pre_policy_bmp_tap() {
         announced[0].local_pref_attr(),
         None,
         "peer-supplied eBGP LOCAL_PREF must not reach the RIB"
+    );
+    assert_eq!(
+        announced[0].med_attr(),
+        None,
+        "configured MED discard must apply only after the raw BMP tap"
     );
     match bmp_rx.recv().await.unwrap() {
         BmpEvent::RouteMonitoring { update_pdu, .. } => {

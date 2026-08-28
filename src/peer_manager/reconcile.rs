@@ -14,6 +14,10 @@ use crate::policy_admin::fib_table_snapshot_to_config;
 use super::PeerManager;
 
 impl PeerManager {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "peer reconciliation keeps remove, purge-aware replacement, runtime-state replay, add, and typed outcome accounting in one ordered pass"
+    )]
     pub(super) async fn reconcile_peers(
         &mut self,
         added: Vec<PeerManagerNeighborConfig>,
@@ -57,7 +61,11 @@ impl PeerManager {
         for cfg in &changed {
             let addr = PeerKey::new(cfg.address, cfg.interface.clone());
             if let Err(e) = self
-                .delete_peer_for_reconfigure(addr.clone(), cfg.tcp_ao.as_ref())
+                .delete_peer_for_reconfigure(
+                    addr.clone(),
+                    cfg.tcp_ao.as_ref(),
+                    &cfg.discard_path_attributes,
+                )
                 .await
             {
                 warn!(peer = %addr, error = %e, "reconcile: failed to remove changed peer");

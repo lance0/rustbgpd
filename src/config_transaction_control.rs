@@ -43,7 +43,7 @@ use tracing::{error, info, warn};
 
 use crate::config::{
     AcceptedConfigSnapshot, Config, EffectiveNeighborImpactKind, Neighbor, diff_config,
-    diff_neighbors,
+    diff_neighbors, normalized_discard_path_attributes,
 };
 use crate::fib_table_control::{
     FibTableControlDeps, FibTransactionReplaceOutcome, read_current_tables,
@@ -3258,8 +3258,12 @@ async fn commit_peer_session_reshape_locked(
     // LAN-277 window (a): candidate durable on disk from here on.
     commit_config_snapshot_stage(peer_mgr_tx).await?;
 
-    let dynamic_bounce =
-        send_bounce_dynamic_range_peers(peer_mgr_tx, targets.dynamic_bounce_ranges).await;
+    let dynamic_bounce = send_bounce_dynamic_range_peers(
+        peer_mgr_tx,
+        targets.dynamic_bounce_ranges,
+        targets.dynamic_purge_ranges,
+    )
+    .await;
     Ok(PeerSessionReshapeCommit {
         reconfigured,
         dynamic_bounce,
@@ -3273,6 +3277,7 @@ async fn commit_peer_session_reshape_locked(
 async fn send_bounce_dynamic_range_peers(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     ranges: Vec<DynamicRangeTarget>,
+    purge_ranges: Vec<DynamicRangeTarget>,
 ) -> DynamicPeerBounceOutcome {
     if ranges.is_empty() {
         return DynamicPeerBounceOutcome::default();
@@ -3294,6 +3299,7 @@ async fn send_bounce_dynamic_range_peers(
     if peer_mgr_tx
         .send(PeerManagerCommand::BounceDynamicRangePeers {
             ranges: ranges.clone(),
+            purge_ranges,
             reply: reply_tx,
         })
         .await
@@ -3313,8 +3319,13 @@ async fn send_bounce_dynamic_range_peers(
 struct PeerSessionReshapeTargets {
     static_targets: Vec<PeerManagerNeighborConfig>,
     dynamic_bounce_ranges: Vec<DynamicRangeTarget>,
+    dynamic_purge_ranges: Vec<DynamicRangeTarget>,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the reshape target resolver keeps its closed-world validation and static/dynamic target construction in one auditable pass"
+)]
 fn resolve_peer_session_reshape_targets(
     previous: &Config,
     candidate: &Config,
@@ -3355,6 +3366,7 @@ fn resolve_peer_session_reshape_targets(
     let mut targets = PeerSessionReshapeTargets {
         static_targets: Vec::new(),
         dynamic_bounce_ranges: Vec::new(),
+        dynamic_purge_ranges: Vec::new(),
     };
     for impact in &diff.effective_neighbor_impact {
         if impact.kind != EffectiveNeighborImpactKind::SessionReshape {
@@ -3379,11 +3391,29 @@ fn resolve_peer_session_reshape_targets(
                     impact.address
                 )));
             };
-            targets.dynamic_bounce_ranges.push(DynamicRangeTarget {
+            let target = DynamicRangeTarget {
                 addr,
                 prefix_len,
                 peer_group: range.peer_group.clone(),
-            });
+            };
+            let previous_discard = previous
+                .peer_groups
+                .get(&range.peer_group)
+                .and_then(|group| {
+                    normalized_discard_path_attributes(group.discard_path_attributes.as_ref())
+                });
+            let candidate_discard =
+                candidate
+                    .peer_groups
+                    .get(&range.peer_group)
+                    .and_then(|group| {
+                        normalized_discard_path_attributes(group.discard_path_attributes.as_ref())
+                    });
+            let purge_routes = previous_discard != candidate_discard;
+            targets.dynamic_bounce_ranges.push(target.clone());
+            if purge_routes {
+                targets.dynamic_purge_ranges.push(target);
+            }
             continue;
         }
         let mut matches = candidate
@@ -5707,11 +5737,30 @@ peer_group = "edge"
     /// `BounceDynamicRangePeers` selectors. The fake reports one signaled
     /// session per targeted range and no failures.
     async fn fake_snapshot_peer_manager_recording_bounces(
+        rx: mpsc::Receiver<PeerManagerCommand>,
+        plan: RuntimeConfigTransactionPlan,
+        snapshot_toml: Arc<Mutex<String>>,
+        peers: Arc<Mutex<Vec<PeerManagerNeighborConfig>>>,
+        bounce_calls: Arc<Mutex<Vec<Vec<DynamicRangeTarget>>>>,
+    ) {
+        fake_snapshot_peer_manager_recording_bounces_and_purges(
+            rx,
+            plan,
+            snapshot_toml,
+            peers,
+            bounce_calls,
+            Arc::new(Mutex::new(Vec::new())),
+        )
+        .await;
+    }
+
+    async fn fake_snapshot_peer_manager_recording_bounces_and_purges(
         mut rx: mpsc::Receiver<PeerManagerCommand>,
         plan: RuntimeConfigTransactionPlan,
         snapshot_toml: Arc<Mutex<String>>,
         peers: Arc<Mutex<Vec<PeerManagerNeighborConfig>>>,
         bounce_calls: Arc<Mutex<Vec<Vec<DynamicRangeTarget>>>>,
+        purge_calls: Arc<Mutex<Vec<Vec<DynamicRangeTarget>>>>,
     ) {
         while let Some(cmd) = rx.recv().await {
             match cmd {
@@ -5766,9 +5815,14 @@ peer_group = "edge"
                     let mut peers = peers.lock().await;
                     let _ = reply.send(fake_apply_peer_reshape_snapshot(&mut peers, targets));
                 }
-                PeerManagerCommand::BounceDynamicRangePeers { ranges, reply } => {
+                PeerManagerCommand::BounceDynamicRangePeers {
+                    ranges,
+                    purge_ranges,
+                    reply,
+                } => {
                     let signaled = ranges.len();
                     bounce_calls.lock().await.push(ranges);
+                    purge_calls.lock().await.push(purge_ranges);
                     let _ = reply.send(DynamicPeerBounceOutcome {
                         signaled,
                         failures: Vec::new(),
@@ -5964,6 +6018,35 @@ prefix = "10.30.0.0/16"
 peer_group = "ix"
 remote_asn = 65030
 "#
+        ))
+    }
+
+    fn dynamic_discard_reshape_toml(discard_med: bool) -> String {
+        let discard = if discard_med {
+            "discard_path_attributes = [4]"
+        } else {
+            ""
+        };
+        tier_transaction_test_config(&format!(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.ix]
+route_server_client = true
+{discard}
+
+[[dynamic_neighbors]]
+prefix = "10.30.0.0/16"
+peer_group = "ix"
+remote_asn = 65030
+"#,
         ))
     }
 
@@ -9437,6 +9520,65 @@ default_action = "permit"
             "{}",
             response.human_text
         );
+    }
+
+    #[tokio::test]
+    async fn dynamic_discard_transaction_marks_the_range_for_purge_reset() {
+        let previous_toml = dynamic_discard_reshape_toml(false);
+        let candidate_toml = dynamic_discard_reshape_toml(true);
+        let snapshot_toml = Arc::new(Mutex::new(previous_toml));
+        let internal_tx =
+            spawn_typed_transaction_manager(snapshot_toml.clone(), peer_session_reshape_plan());
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let bounce_calls = Arc::new(Mutex::new(Vec::new()));
+        let purge_calls = Arc::new(Mutex::new(Vec::new()));
+        let (peer_tx, peer_rx) = mpsc::channel(8);
+        tokio::spawn(fake_snapshot_peer_manager_recording_bounces_and_purges(
+            peer_rx,
+            peer_session_reshape_plan(),
+            snapshot_toml.clone(),
+            peers,
+            bounce_calls.clone(),
+            purge_calls.clone(),
+        ));
+        let (config_tx, mut config_rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            if let Some(ConfigEvent::ConfigTransactionCommitted {
+                candidate_toml,
+                ack: Some(ack),
+            }) = config_rx.recv().await
+            {
+                assert!(candidate_toml.contains("discard_path_attributes = [4]"));
+                ack.accept().await;
+            }
+        });
+
+        let response = apply_config_transaction_with_internal(
+            deps(None, peer_tx, Some(config_tx), Vec::new()),
+            proto::ApplyConfigTransactionRequest {
+                candidate_toml: candidate_toml.clone(),
+                expected_runtime_snapshot_token: "kv1:old:1".to_string(),
+                client_request_id: String::new(),
+                comment: String::new(),
+                confirm_id: String::new(),
+                confirm_timeout_seconds: 0,
+            },
+            internal_tx,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.status,
+            proto::ConfigTransactionPlanStatus::Committable as i32
+        );
+        assert_snapshot_matches_config(&snapshot_toml.lock().await, &candidate_toml);
+        let bounce_calls = bounce_calls.lock().await;
+        let purge_calls = purge_calls.lock().await;
+        assert_eq!(bounce_calls.len(), 1, "{bounce_calls:?}");
+        assert_eq!(purge_calls.len(), 1, "{purge_calls:?}");
+        assert_eq!(purge_calls[0], bounce_calls[0]);
+        assert_eq!(purge_calls[0][0].peer_group, "ix");
     }
 
     /// LAN-911: a peer-group field reshape whose only members are

@@ -29,6 +29,7 @@ async fn runtime_create_rejects_an_omitted_listen_family_before_mutation() {
         max_prefixes: None,
         max_prefix_restart_seconds: None,
         remove_private_as: None,
+        discard_path_attributes: None,
         local_role: None,
         families: None,
         required_families: None,
@@ -148,6 +149,37 @@ async fn reconfigure_peer_preserves_disabled_state_and_cancels_old_restart() {
     mgr.handle_due_max_prefix_restarts().await;
     assert!(!mgr.peers[&key(addr)].enabled);
     assert!(mgr.max_prefix_latches.contains_key(&key(addr)));
+}
+
+/// A change to the effective ingress-discard contract must retire the old
+/// generation with an authoritative purge before the replacement generation
+/// can be installed. The transport-side `PurgeReset` tests pin the resulting
+/// `PeerDown`; this manager proof pins the ordering at the reconfigure seam.
+#[tokio::test]
+async fn discard_change_purge_resets_old_generation_before_replacement() {
+    let mut mgr = test_peer_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 23));
+    let old = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        fake_peer_handle(addr, SessionState::Established, None, old.clone()),
+        false,
+    );
+
+    let mut replacement = make_config(addr, 65002);
+    replacement.route_server_client = true;
+    replacement.discard_path_attributes = Arc::from([4_u8]);
+    let previous = mgr.reconfigure_peer(replacement).await.unwrap();
+
+    assert!(previous.discard_path_attributes.is_empty());
+    assert_eq!(old.purge_reset.load(Ordering::SeqCst), 1);
+    assert_eq!(old.shutdown.load(Ordering::SeqCst), 0);
+    let managed = mgr.peers.get(&key(addr)).expect("replacement peer");
+    assert_eq!(
+        managed.transport_config.discard_path_attributes.as_ref(),
+        &[4]
+    );
 }
 
 /// Load-bearing reconcile recovery proof: if a changed peer's re-add failed,
@@ -1157,11 +1189,14 @@ async fn bounce_dynamic_peers_signals_only_matching_enabled_dynamic_sessions() {
 
     let dynamic_count_before = mgr.dynamic_peer_count;
     let outcome = mgr
-        .bounce_dynamic_peers_for_ranges(&[DynamicRangeTarget {
-            addr: IpAddr::V4(Ipv4Addr::new(10, 30, 0, 0)),
-            prefix_len: 16,
-            peer_group: "ix-members".to_string(),
-        }])
+        .bounce_dynamic_peers_for_ranges(
+            &[DynamicRangeTarget {
+                addr: IpAddr::V4(Ipv4Addr::new(10, 30, 0, 0)),
+                prefix_len: 16,
+                peer_group: "ix-members".to_string(),
+            }],
+            &[],
+        )
         .await;
 
     assert_eq!(outcome.signaled, 1, "{outcome:?}");
@@ -1227,11 +1262,14 @@ async fn bounce_dynamic_peers_reports_signaling_failures_per_peer() {
     );
 
     let outcome = mgr
-        .bounce_dynamic_peers_for_ranges(&[DynamicRangeTarget {
-            addr: IpAddr::V4(Ipv4Addr::new(10, 30, 0, 0)),
-            prefix_len: 16,
-            peer_group: "ix-members".to_string(),
-        }])
+        .bounce_dynamic_peers_for_ranges(
+            &[DynamicRangeTarget {
+                addr: IpAddr::V4(Ipv4Addr::new(10, 30, 0, 0)),
+                prefix_len: 16,
+                peer_group: "ix-members".to_string(),
+            }],
+            &[],
+        )
         .await;
 
     // One failure reported by peer, and the failure does not stop the sweep:
@@ -1247,6 +1285,145 @@ async fn bounce_dynamic_peers_reports_signaling_failures_per_peer() {
     // The unsignalable peer stays managed; it keeps its running config until
     // it reconnects (or its session-task exit drives BackToIdle).
     assert!(mgr.peers.contains_key(&key(dead_addr)));
+}
+
+#[tokio::test]
+async fn purge_dynamic_peers_signals_primary_and_pending_collision_generations() {
+    let mut mgr = dynamic_test_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 30, 0, 5));
+    let primary = Arc::new(FakePeerCounters::default());
+    let pending = Arc::new(FakePeerCounters::default());
+    insert_test_dynamic_managed_peer(
+        &mut mgr,
+        addr,
+        11,
+        fake_peer_handle(addr, SessionState::Established, None, primary.clone()),
+        true,
+        IpAddr::V4(Ipv4Addr::new(10, 30, 0, 0)),
+        16,
+        "ix-members",
+    );
+    attach_test_pending_inbound(
+        &mut mgr,
+        addr,
+        fake_peer_handle(addr, SessionState::Established, None, pending.clone()),
+        12,
+    );
+    let range = DynamicRangeTarget {
+        addr: IpAddr::V4(Ipv4Addr::new(10, 30, 0, 0)),
+        prefix_len: 16,
+        peer_group: "ix-members".to_string(),
+    };
+
+    let outcome = mgr
+        .bounce_dynamic_peers_for_ranges(std::slice::from_ref(&range), std::slice::from_ref(&range))
+        .await;
+
+    assert_eq!(outcome.signaled, 1, "{outcome:?}");
+    assert!(outcome.failures.is_empty(), "{outcome:?}");
+    wait_counter(&primary.purge_reset, 1).await;
+    wait_counter(&pending.purge_reset, 1).await;
+    assert_eq!(primary.stop.load(Ordering::SeqCst), 0);
+    assert_eq!(pending.stop.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn dynamic_purge_pending_admission_failure_leaves_primary_untouched() {
+    let mut mgr = dynamic_test_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 30, 0, 5));
+    let primary = Arc::new(FakePeerCounters::default());
+    insert_test_dynamic_managed_peer(
+        &mut mgr,
+        addr,
+        11,
+        fake_peer_handle(addr, SessionState::Established, None, primary.clone()),
+        true,
+        IpAddr::V4(Ipv4Addr::new(10, 30, 0, 0)),
+        16,
+        "ix-members",
+    );
+    let (dead_tx, dead_rx) = mpsc::channel(1);
+    drop(dead_rx);
+    attach_test_pending_inbound(
+        &mut mgr,
+        addr,
+        PeerHandle::from_parts(dead_tx, tokio::spawn(async { Ok(()) })),
+        12,
+    );
+    let range = DynamicRangeTarget {
+        addr: IpAddr::V4(Ipv4Addr::new(10, 30, 0, 0)),
+        prefix_len: 16,
+        peer_group: "ix-members".to_string(),
+    };
+
+    let outcome = mgr
+        .bounce_dynamic_peers_for_ranges(std::slice::from_ref(&range), std::slice::from_ref(&range))
+        .await;
+
+    assert_eq!(outcome.signaled, 0, "{outcome:?}");
+    assert_eq!(outcome.failures.len(), 1, "{outcome:?}");
+    assert!(outcome.failures[0].contains("pending session"));
+    assert_eq!(primary.purge_reset.load(Ordering::SeqCst), 0);
+    let managed = mgr.peers.get(&key(addr)).expect("primary remains owned");
+    assert_eq!(managed.session_id, 11);
+    assert_eq!(managed.pending_inbound.as_ref().unwrap().session_id, 12);
+}
+
+#[tokio::test]
+async fn dynamic_purge_primary_admission_failure_retires_purged_pending_generation() {
+    let mut mgr = dynamic_test_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 30, 0, 5));
+    let (dead_tx, dead_rx) = mpsc::channel(1);
+    drop(dead_rx);
+    insert_test_dynamic_managed_peer(
+        &mut mgr,
+        addr,
+        11,
+        PeerHandle::from_parts(dead_tx, tokio::spawn(async { Ok(()) })),
+        true,
+        IpAddr::V4(Ipv4Addr::new(10, 30, 0, 0)),
+        16,
+        "ix-members",
+    );
+    let pending = Arc::new(FakePeerCounters::default());
+    let notify_tx = mgr.session_notify_tx.clone();
+    attach_test_pending_inbound(
+        &mut mgr,
+        addr,
+        purge_back_to_idle_peer_handle(
+            addr,
+            12,
+            rustbgpd_transport::SessionRole::InboundCandidate,
+            notify_tx,
+            pending.clone(),
+        ),
+        12,
+    );
+    let range = DynamicRangeTarget {
+        addr: IpAddr::V4(Ipv4Addr::new(10, 30, 0, 0)),
+        prefix_len: 16,
+        peer_group: "ix-members".to_string(),
+    };
+
+    let outcome = mgr
+        .bounce_dynamic_peers_for_ranges(std::slice::from_ref(&range), std::slice::from_ref(&range))
+        .await;
+
+    assert_eq!(outcome.signaled, 0, "{outcome:?}");
+    assert_eq!(outcome.failures.len(), 1, "{outcome:?}");
+    assert!(outcome.failures[0].contains("primary session"));
+    wait_counter(&pending.purge_reset, 1).await;
+    mgr.drain_ready_session_notifications().await;
+    let managed = mgr
+        .peers
+        .get(&key(addr))
+        .expect("old primary remains owned");
+    assert_eq!(managed.session_id, 11);
+    assert!(
+        managed.pending_inbound.is_none(),
+        "purged candidate BackToIdle must settle instead of being promoted"
+    );
+    assert_eq!(mgr.dynamic_peer_count, 1);
 }
 
 #[tokio::test]
@@ -1371,6 +1548,7 @@ peer_group = "edge"
                 route_server_client: None,
                 per_client_best: None,
                 remove_private_as: None,
+                discard_path_attributes: Vec::new(),
                 add_path: None,
                 import_policy: Vec::new(),
                 export_policy: Vec::new(),

@@ -147,6 +147,206 @@ async fn ibgp_local_pref_is_preserved() {
     assert_eq!(announced[0].local_pref_attr(), Some(500));
 }
 
+#[tokio::test]
+async fn configured_route_server_attribute_discards_normalize_before_rib_and_count_occurrences() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
+    session.config.route_server_client = true;
+    session.config.discard_path_attributes = Arc::from([4, 8, 36]);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let second_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let update = UpdateMessage::build(
+        &[
+            Ipv4NlriEntry { path_id: 0, prefix },
+            Ipv4NlriEntry {
+                path_id: 0,
+                prefix: second_prefix,
+            },
+        ],
+        &[],
+        &[
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+            PathAttribute::Med(4),
+            PathAttribute::CommunitiesPartial(vec![0x000f_0001]),
+            PathAttribute::Unknown(RawAttribute {
+                flags: rustbgpd_wire::constants::attr_flags::OPTIONAL
+                    | rustbgpd_wire::constants::attr_flags::TRANSITIVE
+                    | rustbgpd_wire::constants::attr_flags::PARTIAL,
+                type_code: 36,
+                data: Bytes::from_static(&[1, 0, 0, 0, 0, 0, 0, 0]),
+            }),
+        ],
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+
+    session.process_update(update).await;
+
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(
+        announced.len(),
+        2,
+        "discarding attributes must not discard the route"
+    );
+    for type_code in [4, 8, 36] {
+        assert!(
+            announced[0]
+                .attributes
+                .iter()
+                .all(|attribute| attribute.type_code() != type_code),
+            "configured attribute {type_code} reached the normalized RIB view"
+        );
+    }
+    assert_eq!(
+        counter_samples(&session.metrics, "bgp_path_attribute_discarded_total"),
+        vec![
+            (
+                HashMap::from([
+                    ("peer".to_string(), session.peer_label.clone()),
+                    ("type_code".to_string(), "36".to_string()),
+                ]),
+                1.0,
+            ),
+            (
+                HashMap::from([
+                    ("peer".to_string(), session.peer_label.clone()),
+                    ("type_code".to_string(), "4".to_string()),
+                ]),
+                1.0,
+            ),
+            (
+                HashMap::from([
+                    ("peer".to_string(), session.peer_label.clone()),
+                    ("type_code".to_string(), "8".to_string()),
+                ]),
+                1.0,
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn configured_discard_is_the_import_policy_and_explain_view() {
+    use super::import_decision_cache::{ImportDecisionKey, LookupResult};
+
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.route_server_client = true;
+    session.config.discard_path_attributes = Arc::from([8]);
+    session.import_explain_enabled = true;
+    session.install_import_policy(Some(PolicyChain::new(vec![Policy {
+        entries: vec![PolicyStatement {
+            prefix: None,
+            ge: None,
+            le: None,
+            action: PolicyAction::Deny,
+            match_community: vec![CommunityMatch::Standard { value: 0x000f_0001 }],
+            match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_evpn_route_type: None,
+            match_rpki_validation: None,
+            match_aspa_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: None,
+            modifications: RouteModifications::default(),
+        }],
+        default_action: PolicyAction::Permit,
+    }])));
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let update = UpdateMessage::build(
+        &[Ipv4NlriEntry { path_id: 0, prefix }],
+        &[],
+        &[
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+            PathAttribute::Communities(vec![0x000f_0001]),
+        ],
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+
+    session.process_update(update).await;
+
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected configured discard to remove the deny match before policy")
+    };
+    assert_eq!(announced.len(), 1);
+    assert!(announced[0].communities().is_empty());
+    let key = ImportDecisionKey {
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        prefix: Prefix::V4(prefix),
+        path_id: 0,
+    };
+    match session
+        .import_decision_cache
+        .lookup(&key, session.import_policy_generation)
+    {
+        LookupResult::Hit(decision) => assert!(decision.policy_context.communities.is_empty()),
+        other => panic!("expected cached permit decision, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn configured_local_pref_discard_counts_before_ebgp_normalization() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
+    session.config.route_server_client = true;
+    session.config.discard_path_attributes = Arc::from([5]);
+    let update = UpdateMessage::build(
+        &[Ipv4NlriEntry {
+            path_id: 0,
+            prefix: Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24),
+        }],
+        &[],
+        &[
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+            PathAttribute::LocalPref(500),
+        ],
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+
+    session.process_update(update).await;
+
+    assert!(matches!(
+        rib_rx.try_recv(),
+        Ok(RibUpdate::RoutesReceived { .. })
+    ));
+    assert_eq!(
+        counter_samples(&session.metrics, "bgp_path_attribute_discarded_total"),
+        vec![(
+            HashMap::from([
+                ("peer".to_string(), session.peer_label.clone()),
+                ("type_code".to_string(), "5".to_string()),
+            ]),
+            1.0,
+        )]
+    );
+}
+
 /// Ignoring a wire-supplied eBGP value happens before import policy and
 /// explain caching, but a policy-set value is local intent and must survive.
 #[tokio::test]

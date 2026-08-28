@@ -16,6 +16,8 @@ async fn rr_loop_detected_update_still_applies_evpn_withdrawals() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65001);
     let local_cluster_id = Ipv4Addr::new(10, 0, 0, 9);
     session.config.cluster_id = Some(local_cluster_id);
+    session.config.route_server_client = true;
+    session.config.discard_path_attributes = Arc::from([10]);
     // Negotiate L2VPN/EVPN so the withdrawal isn't family-filtered.
     let mut negotiated = NegotiatedSession::default();
     negotiated.peer_asn = 65001;
@@ -100,7 +102,8 @@ async fn rr_loop_detected_update_still_applies_evpn_withdrawals() {
     assert_eq!(
         session.refresh_accounting_stale_count((Afi::L2Vpn, Safi::Evpn)),
         Some(0),
-        "RR-loop withdrawal must retire the exact stale identity"
+        "RR-loop withdrawal must retire the exact stale identity even when the operator list \
+         would discard CLUSTER_LIST after safety checks"
     );
     session.end_refresh_accounting(Afi::L2Vpn, Safi::Evpn);
     assert!(session.known_evpn.is_empty());

@@ -16,6 +16,11 @@ pub enum Event {
         /// Optional shutdown reason for RFC 8203 Cease NOTIFICATION.
         reason: Option<Bytes>,
     },
+    /// Configuration reset that must purge routes retained by Graceful Restart.
+    AdministrativeReset {
+        /// RFC 8203 shutdown communication carried in Cease/4.
+        reason: Option<Bytes>,
+    },
     /// A genuine BFD Down transition requests session teardown (RFC 9384).
     BfdDown,
 
@@ -64,6 +69,7 @@ impl Event {
         match self {
             Self::ManualStart => "ManualStart",
             Self::ManualStop { .. } => "ManualStop",
+            Self::AdministrativeReset { .. } => "AdministrativeReset",
             Self::BfdDown => "BfdDown",
             Self::ConnectRetryTimerExpires => "ConnectRetryTimerExpires",
             Self::HoldTimerExpires => "HoldTimerExpires",

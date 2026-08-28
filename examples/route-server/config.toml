@@ -153,6 +153,10 @@ description = "member-alpha"
 hold_time = 90
 families = ["ipv4_unicast", "ipv6_unicast"]
 route_server_client = true
+# Optional: remove MED from accepted routes after safety checks and before
+# policy/RIB. Changing this list purge-resets the session and bypasses GR stale
+# retention. Monitor bgp_path_attribute_discarded_total{type_code="4"}.
+# discard_path_attributes = [4]
 role = "route_server"
 max_prefixes = 50000
 

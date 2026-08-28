@@ -58,6 +58,7 @@ pub(crate) fn peer_info(address: IpAddr) -> PeerInfo {
         required_families: Vec::new(),
         negotiated_session: None,
         remove_private_as: RemovePrivateAs::Disabled,
+        discard_path_attributes: std::sync::Arc::from([]),
         route_server_client: false,
         per_client_best: false,
         next_hop_ownership_strict_peer: false,

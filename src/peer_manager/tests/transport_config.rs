@@ -261,6 +261,7 @@ fn build_transport_config_reflects_every_transport_field() {
         interpret_rfc1997: false,
         rs_control_communities: true,
         remove_private_as: rustbgpd_transport::RemovePrivateAs::All,
+        discard_path_attributes: std::sync::Arc::from([4, 8]),
         add_path_receive: true,
         add_path_send: true,
         add_path_send_max: 4,
@@ -322,6 +323,7 @@ fn build_transport_config_reflects_every_transport_field() {
         import_policy: _import_policy, // NON-TRANSPORT: RIB-side policy chain.
         export_policy: _export_policy, // NON-TRANSPORT: RIB-side policy chain.
         min_hold_time,
+        discard_path_attributes: _,
     } = &config;
 
     let t = mgr.build_transport_config(&config);

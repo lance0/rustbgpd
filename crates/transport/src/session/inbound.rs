@@ -1729,17 +1729,40 @@ impl PeerSession {
         // attribute: `process_read_buffer` emits its byte-exact raw UPDATE
         // before calling `process_update`, matching RFC 7854's unprocessed
         // Adj-RIB-In view.
+        let mut discarded_type_codes = std::collections::BTreeMap::<u8, u64>::new();
         let route_attrs: Vec<PathAttribute> = parsed
             .attributes
             .iter()
             .filter(|a| {
-                !(matches!(
+                let normalized_out = matches!(
                     a,
                     PathAttribute::MpReachNlri(_) | PathAttribute::MpUnreachNlri(_)
-                ) || is_ebgp && matches!(a, PathAttribute::LocalPref(_)))
+                ) || is_ebgp && matches!(a, PathAttribute::LocalPref(_));
+                let configured_out = self
+                    .config
+                    .discard_path_attributes
+                    .binary_search(&a.type_code())
+                    .is_ok();
+                if configured_out {
+                    *discarded_type_codes.entry(a.type_code()).or_default() += 1;
+                }
+                !(normalized_out || configured_out)
             })
             .cloned()
             .collect();
+        for (type_code, removed_occurrences) in discarded_type_codes {
+            self.metrics.record_path_attribute_discarded(
+                &self.peer_label,
+                type_code,
+                removed_occurrences,
+            );
+            debug!(
+                peer = %self.peer_label,
+                type_code,
+                removed_occurrences,
+                "discarded configured inbound path attribute"
+            );
+        }
         // Canonical per-family attribute sets, each behind an `Arc` so the
         // accepted-route loops below can share them (one `Arc` bump per
         // NLRI) instead of deep-cloning per route when policy makes no

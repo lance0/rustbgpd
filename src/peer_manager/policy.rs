@@ -20,7 +20,10 @@ use rustbgpd_transport::StateQueryOutcome;
 use tokio::sync::oneshot;
 use tracing::{info, warn};
 
-use crate::config::{Config, RFC8212_MISSING_IMPORT_POLICY, is_reserved_rfc8212_deny};
+use crate::config::{
+    Config, RFC8212_MISSING_IMPORT_POLICY, is_reserved_rfc8212_deny,
+    normalized_discard_path_attributes,
+};
 use crate::policy_admin::{
     api_peer_group_to_config, apply_config_event, catalog_config_error, neighbor_set_references,
     peer_group_references, policy_references,
@@ -3559,6 +3562,7 @@ impl PeerManager {
                 prefix_orf_receive: None,
                 disable_ipv4_unicast: None,
                 remove_private_as: None,
+                discard_path_attributes: None,
                 add_path: None,
                 log_level: None,
                 import_policy: Vec::new(),
@@ -3804,6 +3808,7 @@ impl PeerManager {
             interpret_rfc1997: tc.interpret_rfc1997,
             rs_control_communities: tc.rs_control_communities,
             remove_private_as: tc.remove_private_as,
+            discard_path_attributes: tc.discard_path_attributes.clone(),
             add_path_receive: tc.peer.add_path_receive,
             add_path_send: tc.peer.add_path_send,
             add_path_send_max: tc.peer.add_path_send_max,
@@ -3838,6 +3843,18 @@ impl PeerManager {
         if next_config == self.current_config {
             return Ok(());
         }
+        let purge_dynamic_group = match &event {
+            ConfigEvent::SetPeerGroup { name, .. } => {
+                let old = self.current_config.peer_groups.get(name).and_then(|group| {
+                    normalized_discard_path_attributes(group.discard_path_attributes.as_ref())
+                });
+                let new = next_config.peer_groups.get(name).and_then(|group| {
+                    normalized_discard_path_attributes(group.discard_path_attributes.as_ref())
+                });
+                (old != new).then(|| name.clone())
+            }
+            _ => None,
+        };
 
         // Inbound MD5 keys and GTSM selectors derived from a peer group
         // (static members' host keys, dynamic ranges' prefix keys and TTL
@@ -3931,6 +3948,11 @@ impl PeerManager {
             .map_err(CatalogMutationError::from)?;
 
         self.current_config = next_config;
+        if let Some(group) = purge_dynamic_group.as_deref() {
+            self.purge_dynamic_group_inheritors(group)
+                .await
+                .map_err(CatalogMutationError::internal)?;
+        }
         if let ConfigEvent::SetPeerGroup { name, .. } = &event {
             self.sync_dynamic_max_prefix_restart_for_group(name);
         }
@@ -3972,6 +3994,18 @@ impl PeerManager {
         if next_config == self.current_config {
             return OwnedCatalogMutationOutcome::Success;
         }
+        let purge_dynamic_group = match &event {
+            ConfigEvent::SetPeerGroup { name, .. } => {
+                let old = self.current_config.peer_groups.get(name).and_then(|group| {
+                    normalized_discard_path_attributes(group.discard_path_attributes.as_ref())
+                });
+                let new = next_config.peer_groups.get(name).and_then(|group| {
+                    normalized_discard_path_attributes(group.discard_path_attributes.as_ref())
+                });
+                (old != new).then(|| name.clone())
+            }
+            _ => None,
+        };
 
         if let ConfigEvent::SetPeerGroup { name, .. } = &event
             && let Some(old_group) = self.current_config.peer_groups.get(name)
@@ -4056,12 +4090,52 @@ impl PeerManager {
         };
 
         self.current_config = next_config;
+        if let Some(group) = purge_dynamic_group.as_deref()
+            && let Err(error) = self.purge_dynamic_group_inheritors(group).await
+        {
+            return OwnedCatalogMutationOutcome::CompensationAmbiguous(
+                CatalogMutationError::internal(error),
+            );
+        }
         if let ConfigEvent::SetPeerGroup { name, .. } = &event {
             self.sync_dynamic_max_prefix_restart_for_group(name);
         }
         self.reconcile_stale_dynamic_max_prefix_restarts();
         self.publish_policy_config_event(&event, priors.len());
         OwnedCatalogMutationOutcome::Success
+    }
+
+    /// Purge-reset every live dynamic session inheriting `group` after the
+    /// group's ingress discard list changed. Any failed signal is surfaced:
+    /// leaving a live session on the prior normalization contract is not a
+    /// successful catalog replacement.
+    async fn purge_dynamic_group_inheritors(&mut self, group: &str) -> Result<usize, String> {
+        let mut ranges = self
+            .current_config
+            .dynamic_neighbors
+            .iter()
+            .filter(|range| range.peer_group == group)
+            .filter_map(|range| {
+                crate::config::effective_prefix_str(&range.prefix).map(|(addr, prefix_len)| {
+                    rustbgpd_api::peer_types::DynamicRangeTarget {
+                        addr,
+                        prefix_len,
+                        peer_group: group.to_string(),
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        ranges.sort_by_key(|range| (range.addr, range.prefix_len));
+        let outcome = self.bounce_dynamic_peers_for_ranges(&ranges, &ranges).await;
+        if outcome.failures.is_empty() {
+            Ok(outcome.signaled)
+        } else {
+            Err(format!(
+                "failed to purge-reset {} dynamic peer-group inheritor(s): {}",
+                outcome.failures.len(),
+                outcome.failures.join("; ")
+            ))
+        }
     }
 
     /// The all-hot half of [`Self::apply_peer_group_change`]: apply the
