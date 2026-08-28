@@ -1115,14 +1115,13 @@ fn insert_routes(manager: &mut RibManager, peer: Ipv4Addr, routes: Vec<Route>) {
 }
 
 fn set_state(manager: &mut RibManager, peer: IpAddr, prefix: Prefix, state: RpkiValidation) {
-    manager
-        .ribs
-        .get_mut(&peer)
-        .unwrap()
-        .iter_mut()
-        .find(|r| r.prefix == prefix)
-        .unwrap()
-        .validation_state = state;
+    assert!(
+        manager
+            .ribs
+            .get_mut(&peer)
+            .unwrap()
+            .transition_rpki_validation(&prefix, 0, state)
+    );
 }
 
 fn state_of(manager: &RibManager, peer: IpAddr, prefix: Prefix) -> RpkiValidation {
@@ -1147,6 +1146,40 @@ fn rpki_states(manager: &RibManager) -> Vec<(IpAddr, Prefix, u32, RpkiValidation
         .collect();
     out.sort_unstable_by_key(|&(peer, prefix, path_id, _)| (peer, prefix, path_id));
     out
+}
+
+#[tokio::test]
+async fn bmp_peer_stats_distinguish_missing_vrp_authority_from_authoritative_counts() {
+    let mut manager = delta_manager();
+    let peer = Ipv4Addr::new(1, 0, 0, 1);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    insert_routes(
+        &mut manager,
+        peer,
+        vec![make_route_with_as_path(prefix, peer, vec![65001])],
+    );
+    let peer = IpAddr::V4(peer);
+
+    let (reply, receive) = tokio::sync::oneshot::channel();
+    manager.handle_query_bmp_peer_stats(reply);
+    let unavailable = receive.await.unwrap();
+    assert_eq!(unavailable.rpki_adj_rib_in_post, None);
+
+    manager.vrp_table = Some(delta_table(&[]));
+    let (reply, receive) = tokio::sync::oneshot::channel();
+    manager.handle_query_bmp_peer_stats(reply);
+    let authoritative = receive.await.unwrap();
+    assert_eq!(
+        authoritative.rpki_adj_rib_in_post.unwrap()[&peer],
+        vec![(
+            (Afi::Ipv4, Safi::Unicast),
+            crate::update::RpkiValidationCounts {
+                invalid: 0,
+                valid: 0,
+                not_found: 1,
+            },
+        )]
+    );
 }
 
 #[test]

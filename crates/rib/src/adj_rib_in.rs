@@ -21,7 +21,7 @@ use std::sync::Arc;
 // This matches the non-DoS-resistant internal hash tables FRR and BIRD use.
 // `BgpLsRouteKey` joins the same class once ADR-0077 receive wiring lands.
 // Aliased to the std names so the storage type declarations read unchanged.
-use rustbgpd_wire::{Afi, EvpnRouteKey, PathAttribute, Prefix, Safi};
+use rustbgpd_wire::{Afi, EvpnRouteKey, PathAttribute, Prefix, RpkiValidation, Safi};
 use rustc_hash::{FxBuildHasher, FxHashMap as HashMap, FxHashSet as HashSet};
 use smallvec::SmallVec;
 
@@ -32,6 +32,7 @@ use crate::route::{
     VpnRibRoute, VpnRibRouteKey,
 };
 use crate::slab::RouteSlab;
+use crate::update::RpkiValidationCounts;
 use crate::update::{RouteQueryKey, route_query_key};
 
 /// Per-peer Adj-RIB-In: stores the routes received from a single peer.
@@ -63,6 +64,10 @@ pub struct AdjRibIn {
     prefix_index: FamilyPrefixMap<SmallVec<[(u32, u32); 1]>>,
     /// Route keys where `LLGR_STALE` was injected locally by this daemon.
     llgr_stale_local_tags: HashSet<(Prefix, u32)>,
+    /// Exact `(prefix, path_id)` counts by RPKI state for IPv4 unicast.
+    rpki_counts_v4: RpkiValidationCounts,
+    /// Exact `(prefix, path_id)` counts by RPKI state for IPv6 unicast.
+    rpki_counts_v6: RpkiValidationCounts,
     /// `FlowSpec` routes keyed by AFI, rule, and Add-Path ID.
     flowspec_routes: HashMap<FlowSpecRouteKey, FlowSpecRoute>,
     /// `FlowSpec` route keys where `LLGR_STALE` was injected locally.
@@ -121,6 +126,8 @@ impl AdjRibIn {
             routes: RouteSlab::with_capacity(route_capacity),
             prefix_index: FamilyPrefixMap::default(),
             llgr_stale_local_tags: HashSet::default(),
+            rpki_counts_v4: RpkiValidationCounts::default(),
+            rpki_counts_v6: RpkiValidationCounts::default(),
             flowspec_routes: HashMap::with_capacity_and_hasher(flowspec_capacity, FxBuildHasher),
             flowspec_llgr_stale_local_tags: HashSet::default(),
             evpn_routes: HashMap::default(),
@@ -157,6 +164,11 @@ impl AdjRibIn {
     /// insert returned `true` (see the unicast announce path in the RIB
     /// manager). A first-time insert orphans nothing, so the initial-load
     /// flood skips the GC.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal prefix-index/slab invariant is violated or the
+    /// slab exhausts its `u32` handle space.
     pub fn insert(&mut self, route: Route) -> bool {
         // The tag set is populated only by `promote_to_llgr_stale`, i.e. only
         // while a down peer sits in its LLGR window, so it is empty for
@@ -169,12 +181,30 @@ impl AdjRibIn {
                 .remove(&(route.prefix, route.path_id));
         }
 
+        let prefix = route.prefix;
         let path_id = route.path_id;
-        let ids = self.prefix_index.entry_or_default(route.prefix);
+        let ids = self.prefix_index.entry_or_default(prefix);
         if let Some((_, handle)) = ids.iter().find(|(id, _)| *id == path_id) {
+            let previous_state = self
+                .routes
+                .get(*handle)
+                .expect("Adj-RIB-In prefix index references a live route")
+                .validation_state;
+            if previous_state != route.validation_state {
+                let counts = match prefix {
+                    Prefix::V4(_) => &mut self.rpki_counts_v4,
+                    Prefix::V6(_) => &mut self.rpki_counts_v6,
+                };
+                counts.decrement(previous_state);
+                counts.increment(route.validation_state);
+            }
             self.routes.set(*handle, route);
             true
         } else {
+            match prefix {
+                Prefix::V4(_) => self.rpki_counts_v4.increment(route.validation_state),
+                Prefix::V6(_) => self.rpki_counts_v6.increment(route.validation_state),
+            }
             let handle = self.routes.insert(route);
             ids.push((path_id, handle));
             false
@@ -208,7 +238,12 @@ impl AdjRibIn {
         if ids.is_empty() {
             self.prefix_index.remove(prefix);
         }
-        self.routes.remove(handle)
+        let route = self.routes.remove(handle)?;
+        match route.prefix {
+            Prefix::V4(_) => self.rpki_counts_v4.decrement(route.validation_state),
+            Prefix::V6(_) => self.rpki_counts_v6.decrement(route.validation_state),
+        }
+        Some(route)
     }
 
     /// Remove every route from this Adj-RIB-In — unicast, `FlowSpec`, EVPN,
@@ -220,6 +255,8 @@ impl AdjRibIn {
     pub fn clear(&mut self) {
         self.routes.clear();
         self.prefix_index.clear();
+        self.rpki_counts_v4 = RpkiValidationCounts::default();
+        self.rpki_counts_v6 = RpkiValidationCounts::default();
         self.flowspec_routes.clear();
         self.evpn_routes.clear();
         self.bgpls_routes.clear();
@@ -321,10 +358,131 @@ impl AdjRibIn {
         }
     }
 
+    /// Revalidate every unicast path covered by `covering`, maintaining the
+    /// exact RPKI state counters in the same mutation that updates the route.
+    ///
+    /// Returns the number of path identities visited. `on_changed` runs only
+    /// when the stored validation state changes.
+    pub fn revalidate_rpki_covered(
+        &mut self,
+        covering: &Prefix,
+        mut validate: impl FnMut(&Route) -> RpkiValidation,
+        mut on_changed: impl FnMut(Prefix),
+    ) -> u64 {
+        let Self {
+            routes,
+            prefix_index,
+            rpki_counts_v4,
+            rpki_counts_v6,
+            ..
+        } = self;
+        let mut visited = 0_u64;
+        for (_, ids) in prefix_index.children(covering) {
+            for &(_, handle) in ids {
+                let Some(route) = routes.get_mut(handle) else {
+                    continue;
+                };
+                visited = visited.saturating_add(1);
+                let old_state = route.validation_state;
+                let new_state = validate(route);
+                if old_state == new_state {
+                    continue;
+                }
+                let counts = match route.prefix {
+                    Prefix::V4(_) => &mut *rpki_counts_v4,
+                    Prefix::V6(_) => &mut *rpki_counts_v6,
+                };
+                counts.decrement(old_state);
+                counts.increment(new_state);
+                route.validation_state = new_state;
+                on_changed(route.prefix);
+            }
+        }
+        visited
+    }
+
+    /// Revalidate every unicast path while atomically maintaining exact RPKI
+    /// validation counters. Returns the number of path identities visited.
+    pub fn revalidate_rpki_all(
+        &mut self,
+        mut validate: impl FnMut(&Route) -> RpkiValidation,
+        mut on_changed: impl FnMut(Prefix),
+    ) -> u64 {
+        let Self {
+            routes,
+            rpki_counts_v4,
+            rpki_counts_v6,
+            ..
+        } = self;
+        let mut visited = 0_u64;
+        for route in routes.iter_mut() {
+            visited = visited.saturating_add(1);
+            let old_state = route.validation_state;
+            let new_state = validate(route);
+            if old_state == new_state {
+                continue;
+            }
+            let counts = match route.prefix {
+                Prefix::V4(_) => &mut *rpki_counts_v4,
+                Prefix::V6(_) => &mut *rpki_counts_v6,
+            };
+            counts.decrement(old_state);
+            counts.increment(new_state);
+            route.validation_state = new_state;
+            on_changed(route.prefix);
+        }
+        visited
+    }
+
+    /// Exact post-policy Adj-RIB-In RPKI path counts for non-empty unicast
+    /// families. Callers project negotiated zero rows from absent entries.
+    #[must_use]
+    pub fn rpki_validation_counts(&self) -> Vec<((Afi, Safi), RpkiValidationCounts)> {
+        let mut counts = Vec::with_capacity(2);
+        if !self.rpki_counts_v4.is_empty() {
+            counts.push(((Afi::Ipv4, Safi::Unicast), self.rpki_counts_v4));
+        }
+        if !self.rpki_counts_v6.is_empty() {
+            counts.push(((Afi::Ipv6, Safi::Unicast), self.rpki_counts_v6));
+        }
+        counts
+    }
+
     /// Look up a route by prefix and path ID.
     #[must_use]
     pub fn get(&self, prefix: &Prefix, path_id: u32) -> Option<&Route> {
         self.routes.get(self.route_handle(prefix, path_id)?)
+    }
+
+    /// Transition one stored path to a new RPKI validation state while
+    /// maintaining the exact per-family counters. Returns `false` when the
+    /// identity is absent or already has `new_state`.
+    #[cfg(test)]
+    pub(crate) fn transition_rpki_validation(
+        &mut self,
+        prefix: &Prefix,
+        path_id: u32,
+        new_state: RpkiValidation,
+    ) -> bool {
+        let Some(handle) = self.route_handle(prefix, path_id) else {
+            return false;
+        };
+        let route = self
+            .routes
+            .get_mut(handle)
+            .expect("Adj-RIB-In prefix index references a live route");
+        let old_state = route.validation_state;
+        if old_state == new_state {
+            return false;
+        }
+        let counts = match prefix {
+            Prefix::V4(_) => &mut self.rpki_counts_v4,
+            Prefix::V6(_) => &mut self.rpki_counts_v6,
+        };
+        counts.decrement(old_state);
+        counts.increment(new_state);
+        route.validation_state = new_state;
+        true
     }
 
     /// Iterate over all routes for a given prefix (all path IDs).
@@ -2385,6 +2543,81 @@ mod tests {
         rib.insert(route);
         assert_eq!(rib.len(), 1);
         assert!(rib.get(&Prefix::V4(prefix), 0).is_some());
+    }
+
+    #[test]
+    fn rpki_path_counts_follow_insert_replace_withdraw_clear_and_revalidation() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let v4 = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+        let v6 = Ipv6Prefix::new("2001:db8::".parse().unwrap(), 48);
+
+        let mut v4_path0 = make_route(v4, Ipv4Addr::new(10, 0, 0, 1));
+        v4_path0.validation_state = RpkiValidation::NotFound;
+        assert!(!rib.insert(v4_path0));
+
+        let mut v4_path1 = make_route(v4, Ipv4Addr::new(10, 0, 0, 1));
+        v4_path1.path_id = 1;
+        v4_path1.validation_state = RpkiValidation::Valid;
+        assert!(!rib.insert(v4_path1));
+
+        let mut v6_path = make_v6_route(v6, "2001:db8::1".parse().unwrap());
+        v6_path.validation_state = RpkiValidation::Invalid;
+        assert!(!rib.insert(v6_path));
+
+        assert_eq!(
+            rib.rpki_validation_counts(),
+            vec![
+                (
+                    (Afi::Ipv4, Safi::Unicast),
+                    RpkiValidationCounts {
+                        invalid: 0,
+                        valid: 1,
+                        not_found: 1,
+                    },
+                ),
+                (
+                    (Afi::Ipv6, Safi::Unicast),
+                    RpkiValidationCounts {
+                        invalid: 1,
+                        valid: 0,
+                        not_found: 0,
+                    },
+                ),
+            ]
+        );
+
+        let mut replacement = make_route(v4, Ipv4Addr::new(10, 0, 0, 1));
+        replacement.validation_state = RpkiValidation::Valid;
+        assert!(rib.insert(replacement));
+        assert_eq!(rib.rpki_counts_v4.valid, 2);
+        assert_eq!(rib.rpki_counts_v4.not_found, 0);
+
+        let mut changed = Vec::new();
+        assert_eq!(
+            rib.revalidate_rpki_covered(
+                &Prefix::V4(v4),
+                |_| RpkiValidation::Invalid,
+                |prefix| changed.push(prefix),
+            ),
+            2
+        );
+        assert_eq!(changed, vec![Prefix::V4(v4), Prefix::V4(v4)]);
+        assert_eq!(rib.rpki_counts_v4.invalid, 2);
+        assert!(rib.withdraw(&Prefix::V4(v4), 1));
+        assert_eq!(rib.rpki_counts_v4.invalid, 1);
+
+        changed.clear();
+        assert_eq!(
+            rib.revalidate_rpki_all(|_| RpkiValidation::Valid, |prefix| changed.push(prefix),),
+            2
+        );
+        assert_eq!(changed.len(), 2);
+        assert_eq!(rib.rpki_counts_v4.valid, 1);
+        assert_eq!(rib.rpki_counts_v6.valid, 1);
+
+        rib.clear();
+        assert!(rib.rpki_validation_counts().is_empty());
     }
 
     #[test]

@@ -9,7 +9,8 @@ use std::time::Instant;
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rpki::{AspaTable, VrpTable};
 use rustbgpd_wire::{
-    AddressPrefixOrf, Afi, BgpRole, EvpnRouteKey, Prefix, RouteRefreshSubtype, Safi, WhenToRefresh,
+    AddressPrefixOrf, Afi, BgpRole, EvpnRouteKey, Prefix, RouteRefreshSubtype, RpkiValidation,
+    Safi, WhenToRefresh,
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
 
@@ -782,6 +783,67 @@ pub trait ExactExportEncoder: Send + Sync {
 /// Per-peer post-policy Adj-RIB-Out route counts per AFI/SAFI —
 /// the RFC 8671 BMP stat type 15/17 source.
 pub type AdjRibOutCounts = HashMap<IpAddr, Vec<((Afi, Safi), u64)>>;
+
+/// Exact post-policy Adj-RIB-In path counts by RPKI origin-validation state.
+///
+/// Each stored `(prefix, path_id)` identity contributes one count, so these
+/// gauges remain exact when Add-Path receive is negotiated.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RpkiValidationCounts {
+    /// Routes whose origin is covered by RPKI data but is not authorized.
+    pub invalid: u64,
+    /// Routes whose origin and prefix length are authorized by RPKI data.
+    pub valid: u64,
+    /// Routes with no covering RPKI origin authorization.
+    pub not_found: u64,
+}
+
+impl RpkiValidationCounts {
+    /// Increment the bucket for one stored path identity.
+    pub(crate) fn increment(&mut self, state: RpkiValidation) {
+        let bucket = match state {
+            RpkiValidation::Invalid => &mut self.invalid,
+            RpkiValidation::Valid => &mut self.valid,
+            RpkiValidation::NotFound => &mut self.not_found,
+        };
+        *bucket = bucket
+            .checked_add(1)
+            .expect("Adj-RIB-In RPKI counter overflow");
+    }
+
+    /// Decrement the bucket for one removed or reclassified path identity.
+    pub(crate) fn decrement(&mut self, state: RpkiValidation) {
+        let bucket = match state {
+            RpkiValidation::Invalid => &mut self.invalid,
+            RpkiValidation::Valid => &mut self.valid,
+            RpkiValidation::NotFound => &mut self.not_found,
+        };
+        *bucket = bucket
+            .checked_sub(1)
+            .expect("Adj-RIB-In RPKI counter underflow");
+    }
+
+    /// Whether every RPKI validation bucket is empty.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.invalid == 0 && self.valid == 0 && self.not_found == 0
+    }
+}
+
+/// Exact post-policy Adj-RIB-In RPKI counts for every peer and family.
+pub type AdjRibInRpkiCounts = HashMap<IpAddr, Vec<((Afi, Safi), RpkiValidationCounts)>>;
+
+/// One actor-owned snapshot used by the periodic per-peer BMP statistics tick.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BmpPeerStats {
+    /// Post-policy Adj-RIB-Out counts for RFC 8671 stat types 15/17.
+    pub adj_rib_out_post: AdjRibOutCounts,
+    /// Post-policy Adj-RIB-In RPKI counts for RFC 9972 stat types 35/36/37.
+    /// `None` means no authoritative VRP table has been installed. An empty
+    /// map inside `Some` is authoritative and projects as zero for negotiated
+    /// IPv4/IPv6 unicast families.
+    pub rpki_adj_rib_in_post: Option<AdjRibInRpkiCounts>,
+}
 
 /// One peer's export-policy replacement inside a grouped RIB batch.
 ///
@@ -2172,11 +2234,12 @@ pub enum RibUpdate {
         /// Response channel.
         reply: oneshot::Sender<usize>,
     },
-    /// Query: return every peer's post-policy Adj-RIB-Out route counts
-    /// per AFI/SAFI — the source for RFC 8671 BMP stat types 15/17.
-    QueryAdjRibOutCounts {
-        /// Response channel: peer -> `((afi, safi), count)` entries.
-        reply: oneshot::Sender<AdjRibOutCounts>,
+    /// Query one actor-owned snapshot for the periodic per-peer BMP stats
+    /// report: post-policy Adj-RIB-Out counts plus exact post-policy
+    /// Adj-RIB-In RPKI validation counts.
+    QueryBmpPeerStats {
+        /// Response channel.
+        reply: oneshot::Sender<BmpPeerStats>,
     },
     /// Query: return the number of prefixes advertised to a specific peer.
     QueryAdvertisedCount {

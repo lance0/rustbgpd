@@ -75,7 +75,7 @@ id matches the milestone. Full procedures: [`INTEROP.md`](INTEROP.md).
 | M78 | Multi-cluster ORR + inter-RR Add-Path | GoBGP 4.6.0 ×5 + rustbgpd ×2 |
 | M79 | RFC 8277 labeled-unicast (SAFI 4) reflection + GR | GoBGP 4.6.0 ×2 |
 | M80 | ADR-0096 `.rpol` policy parity vs FRR route-maps (dual-family, asn-set origin-AS + `route.family` predicates), hot-apply under traffic | FRR 10.3.1 ×3 |
-| M81 | BMP trio (rib-in, rib-out, loc-rib) + RFC 9972 policy-rejection stats + BMPv4 against three independent decoders | GoBGP ×2 + pmacct + gobmp + tshark |
+| M81 | BMP trio (rib-in, rib-out, loc-rib) + RFC 9972 policy-rejection and RPKI validation-state stats + BMPv4 against three independent decoders | GoBGP ×2 + StayRTR + pmacct + gobmp + tshark |
 | M82 | ADR-0092 EVPN VLAN-Aware Bundle (non-zero Ethernet Tag) reflection: tag as route identity, same MAC under two tags uncollapsed, tag-verbatim NLRIs, tag-scoped withdraw — synthetic leg in CI plus the **first vendor-NOS receipt** (local lab) | GoBGP 3.37.0 ×2 (CI) + Nokia SR Linux 25.10.1 (local) |
 | M83 | RFC 7947 route-server profile, multi-stack: byte-level transparency, a BIRD-only inbound MED-discard boundary with raw-wire/RIB/downstream/metric proof, OTC, per-member views, ROV explain, and the §2.3 path-hiding contrast (single-best / per-client-best / Add-Path, ADR-0101) | BIRD 2.0.12 + GoBGP 3.37.0 + FRR 10.3.1 + StayRTR |
 | M84 | Multi-cache RTR/ASPA epoch conformance: per-cache load at validated EoD, v2→v1 fallback, restart retention + session rotation, ASPA replace / empty-provider withdrawal, serial-regression resync | FRR + Routinator 0.15.2 + StayRTR + RTR v2 mock |

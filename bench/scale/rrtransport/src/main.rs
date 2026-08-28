@@ -293,10 +293,11 @@ async fn wait_shared_group(
 async fn staged_counts(rib_query: &mpsc::Sender<RibUpdate>) -> Result<HashMap<IpAddr, u64>> {
     let (reply, receive) = oneshot::channel();
     rib_query
-        .send(RibUpdate::QueryAdjRibOutCounts { reply })
+        .send(RibUpdate::QueryBmpPeerStats { reply })
         .await?;
     Ok(tokio::time::timeout(DEADLINE, receive)
         .await??
+        .adj_rib_out_post
         .into_iter()
         .map(|(peer, families)| {
             let count = families

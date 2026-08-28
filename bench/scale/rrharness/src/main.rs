@@ -3,7 +3,7 @@
 //! ("ribmgr", current_thread runtime), N registered RR-client outbound peers
 //! whose bounded channels are drained by trivial consumer tasks, route
 //! injection via `RibUpdate::RoutesReceived`, staged gauge via
-//! `QueryAdjRibOutCounts`, drained gauge via per-message NLRI counting.
+//! `QueryBmpPeerStats`, drained gauge via per-message NLRI counting.
 //!
 //! Differences from the 2026-07-03 rrharness (documented in the receipt):
 //! transport sessions/TCP stubs are replaced by channel drains, so
@@ -379,10 +379,10 @@ impl Harness {
     async fn staged_counts(&self) -> HashMap<IpAddr, u64> {
         let (reply, rx) = oneshot::channel();
         self.qtx
-            .send(RibUpdate::QueryAdjRibOutCounts { reply })
+            .send(RibUpdate::QueryBmpPeerStats { reply })
             .await
             .unwrap();
-        let counts = rx.await.unwrap();
+        let counts = rx.await.unwrap().adj_rib_out_post;
         counts
             .into_iter()
             .map(|(peer, families)| {

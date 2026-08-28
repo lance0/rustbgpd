@@ -28,6 +28,13 @@ sys_descr = "m81 bmp trio receipt"
 # because the driver copies the placeholder-patched TOML to /tmp.
 rpol_files = ["/etc/rustbgpd/m81-bmp-policy-rejects.rpol"]
 
+[rpki]
+[[rpki.cache_servers]]
+address = "STAYRTR_ADDR:3323"
+refresh_interval = 30
+retry_interval = 5
+expire_interval = 600
+
 # Collector A — pmacct pmbmpd (bleeding-edge), v3 semantic oracle for
 # all three streams. Phase 0 pinned pmacct to v3: it accepts version-4
 # common headers but expects the pre-tlv-20 BGP PDU TLV code point 4,

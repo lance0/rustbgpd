@@ -6,6 +6,18 @@ use std::time::SystemTime;
 use bytes::Bytes;
 use tokio::sync::oneshot;
 
+/// Exact post-policy Adj-RIB-In path counts by RPKI validation state for one
+/// negotiated AFI/SAFI.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BmpRpkiValidationCounts {
+    /// RPKI origin-invalid paths (RFC 9972 stat type 35).
+    pub invalid: u64,
+    /// RPKI origin-valid paths (RFC 9972 stat type 36).
+    pub valid: u64,
+    /// RPKI origin-not-found paths (RFC 9972 stat type 37).
+    pub not_found: u64,
+}
+
 /// BMP event sent from transport to BMP manager.
 #[derive(Debug)]
 pub enum BmpEvent {
@@ -54,6 +66,10 @@ pub enum BmpEvent {
         /// inbound policy, per negotiated IPv4/IPv6 unicast family. `None` means
         /// retention is not authoritative and omits the statistic.
         rfc9972_policy_rejects: Option<Vec<(u16, u8, u64)>>,
+        /// RFC 9972 types 35/36/37: exact post-policy Adj-RIB-In RPKI
+        /// origin-validation path counts per negotiated IPv4/IPv6 unicast
+        /// family. `None` means no authoritative VRP table was available.
+        rfc9972_rpki_adj_rib_in_post: Option<Vec<(u16, u8, BmpRpkiValidationCounts)>>,
         /// RFC 8671 post-policy Adj-RIB-Out counts per `(afi, safi)`,
         /// encoded as stat type 17 entries plus their sum as type 15.
         /// `None` means the counts were unavailable this tick — types

@@ -91,6 +91,39 @@ pub(super) fn rfc9972_policy_reject_counts(
     (!counts.is_empty()).then_some(counts)
 }
 
+pub(super) fn rfc9972_rpki_validation_counts(
+    peer: IpAddr,
+    state: &PeerSessionState,
+    counts: Option<&rustbgpd_rib::AdjRibInRpkiCounts>,
+) -> Option<Vec<(u16, u8, rustbgpd_bmp::BmpRpkiValidationCounts)>> {
+    let session = state.negotiated_session.as_ref()?;
+    let counts = counts?;
+    let peer_counts = counts.get(&peer);
+    let mut projected = Vec::with_capacity(2);
+    for (afi, safi) in [(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)] {
+        if !session.families.contains(&(afi, safi)) {
+            continue;
+        }
+        let exact = peer_counts
+            .and_then(|families| {
+                families.iter().find_map(|&((row_afi, row_safi), counts)| {
+                    (row_afi == afi && row_safi == safi).then_some(counts)
+                })
+            })
+            .unwrap_or_default();
+        projected.push((
+            afi as u16,
+            safi as u8,
+            rustbgpd_bmp::BmpRpkiValidationCounts {
+                invalid: exact.invalid,
+                valid: exact.valid,
+                not_found: exact.not_found,
+            },
+        ));
+    }
+    (!projected.is_empty()).then_some(projected)
+}
+
 /// Build a `PeerInfo` snapshot from config + an optional fresh
 /// `PeerSessionState`. `session_state = None` means the bounded
 /// `query_state` either timed out (peer parked on TCP write) or its task
@@ -592,20 +625,21 @@ impl PeerManager {
         }
     }
 
-    /// One bounded RIB query for every peer's post-policy Adj-RIB-Out
-    /// counts per AFI/SAFI (RFC 8671 BMP stat types 15/17). `None` when
-    /// the RIB manager is unavailable or slow — the stats report then
-    /// omits types 15/17 rather than reporting a false zero.
-    async fn query_adj_rib_out_counts(&self) -> Option<rustbgpd_rib::AdjRibOutCounts> {
+    /// One bounded RIB query for all actor-owned per-peer BMP counts. Channel
+    /// admission and the reply share one absolute deadline so a full actor
+    /// mailbox cannot double the per-tick latency budget.
+    pub(super) async fn query_bmp_peer_stats(&self) -> Option<rustbgpd_rib::BmpPeerStats> {
         let (reply, rx) = tokio::sync::oneshot::channel();
-        self.rib_tx
-            .send(rustbgpd_rib::RibUpdate::QueryAdjRibOutCounts { reply })
-            .await
-            .ok()?;
-        tokio::time::timeout(PEER_QUERY_TIMEOUT, rx)
-            .await
-            .ok()?
-            .ok()
+        let deadline = tokio::time::Instant::now() + PEER_QUERY_TIMEOUT;
+        tokio::time::timeout_at(
+            deadline,
+            self.rib_tx
+                .send(rustbgpd_rib::RibUpdate::QueryBmpPeerStats { reply }),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        tokio::time::timeout_at(deadline, rx).await.ok()?.ok()
     }
 
     /// RFC 9069 Loc-RIB stats (types 8 + 10) for the emulated Loc-RIB
@@ -657,7 +691,7 @@ impl PeerManager {
         // any one TCP-back-pressured peer block the per-minute BMP tick and,
         // through it, every other admin command queued behind the BMP arm.
         let states = collect_session_states(&self.peers).await;
-        let rib_out_counts = self.query_adj_rib_out_counts().await;
+        let bmp_peer_stats = self.query_bmp_peer_stats().await;
         self.emit_loc_rib_bmp_stats(bmp_tx).await;
         for (peer, managed) in &self.peers {
             let peer_addr = peer.address;
@@ -682,12 +716,20 @@ impl PeerManager {
             let prefix_count = u64::try_from(state.prefix_count).unwrap_or(u64::MAX);
             let rfc9972_adj_rib_in_post = rfc9972_adj_rib_in_counts(state);
             let rfc9972_policy_rejects = rfc9972_policy_reject_counts(state);
+            let rfc9972_rpki_adj_rib_in_post = rfc9972_rpki_validation_counts(
+                peer_addr,
+                state,
+                bmp_peer_stats
+                    .as_ref()
+                    .and_then(|stats| stats.rpki_adj_rib_in_post.as_ref()),
+            );
             let remote_asn = effective_remote_asn(managed, Some(state));
             // RFC 8671 types 15/17: a peer absent from the RIB's
             // Adj-RIB-Out map simply has nothing advertised — report
             // an honest empty set (type 15 = 0) rather than omitting.
-            let adj_rib_out_post = rib_out_counts.as_ref().map(|counts| {
-                counts
+            let adj_rib_out_post = bmp_peer_stats.as_ref().map(|stats| {
+                stats
+                    .adj_rib_out_post
                     .get(&peer_addr)
                     .map(|families| {
                         families
@@ -707,6 +749,7 @@ impl PeerManager {
                 adj_rib_in_routes: prefix_count,
                 rfc9972_adj_rib_in_post,
                 rfc9972_policy_rejects,
+                rfc9972_rpki_adj_rib_in_post,
                 adj_rib_out_post,
             };
 

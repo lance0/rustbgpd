@@ -255,11 +255,10 @@ async fn arm_collectors(
 }
 async fn counts(query: &mpsc::Sender<RibUpdate>) -> Result<HashMap<IpAddr, u64>> {
     let (reply, receive) = oneshot::channel();
-    query
-        .send(RibUpdate::QueryAdjRibOutCounts { reply })
-        .await?;
+    query.send(RibUpdate::QueryBmpPeerStats { reply }).await?;
     Ok(receive
         .await?
+        .adj_rib_out_post
         .into_iter()
         .map(|(peer, families)| {
             let count = families

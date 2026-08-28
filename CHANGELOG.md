@@ -46,6 +46,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   CSV, summary, and metadata record the result; the default invocation remains
   advisory.
 
+- Periodic BMP peer statistics now include RFC 9972 types 35, 36, and 37 for
+  exact post-policy Adj-RIB-In RPKI Invalid, Valid, and NotFound path counts per
+  negotiated IPv4/IPv6-unicast family. The RIB maintains the gauges across
+  insert, replacement, withdrawal, clear, and VRP-driven revalidation, so
+  Add-Path identities remain exact. The rows are omitted until an authoritative
+  VRP table is installed; negotiated families with an authoritative zero remain
+  present.
+
 - Nightly wire campaigns now seed all 12 targets, apply one reviewed BGP byte
   dictionary to the 11 binary targets, and carry a validated corpus forward on
   the `main` lineage. Restore happens in runner-temporary staging and accepts

@@ -604,8 +604,8 @@ async fn dynamic_peer_auto_removal_reaps_metric_series() {
 }
 
 /// The 60s BMP stats tick sources RFC 8671 types 15/17 from the RIB's
-/// per-peer Adj-RIB-Out family counts via one `QueryAdjRibOutCounts`
-/// round-trip, converting `(Afi, Safi)` to raw wire codes.
+/// per-peer Adj-RIB-Out family counts and RFC 9972 types 35/36/37 from
+/// actor-owned Adj-RIB-In counters via one `QueryBmpPeerStats` round-trip.
 fn rfc9972_stats_peer_handle(peer_addr: IpAddr) -> PeerHandle {
     use rustbgpd_transport::PeerCommand;
 
@@ -658,10 +658,10 @@ async fn periodic_bmp_stats_carry_adj_rib_out_counts() {
     let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     insert_test_managed_peer(&mut mgr, addr, rfc9972_stats_peer_handle(addr), false);
 
-    // Answer the single RIB-wide Adj-RIB-Out counts query.
+    // Answer the single RIB-wide BMP peer-stats query.
     let rib_task = tokio::spawn(async move {
         while let Some(update) = rib_rx.recv().await {
-            if let RibUpdate::QueryAdjRibOutCounts { reply } = update {
+            if let RibUpdate::QueryBmpPeerStats { reply } = update {
                 let mut counts = std::collections::HashMap::new();
                 counts.insert(
                     addr,
@@ -670,11 +670,26 @@ async fn periodic_bmp_stats_carry_adj_rib_out_counts() {
                         ((Afi::Ipv4, Safi::MplsVpn), 3_u64),
                     ],
                 );
-                let _ = reply.send(counts);
+                let mut rpki_counts = std::collections::HashMap::new();
+                rpki_counts.insert(
+                    addr,
+                    vec![(
+                        (Afi::Ipv4, Safi::Unicast),
+                        rustbgpd_rib::RpkiValidationCounts {
+                            invalid: 2,
+                            valid: 7,
+                            not_found: 3,
+                        },
+                    )],
+                );
+                let _ = reply.send(rustbgpd_rib::BmpPeerStats {
+                    adj_rib_out_post: counts,
+                    rpki_adj_rib_in_post: Some(rpki_counts),
+                });
                 return;
             }
         }
-        panic!("QueryAdjRibOutCounts never arrived");
+        panic!("QueryBmpPeerStats never arrived");
     });
 
     mgr.emit_periodic_bmp_stats().await;
@@ -686,12 +701,29 @@ async fn periodic_bmp_stats_carry_adj_rib_out_counts() {
             adj_rib_in_routes,
             rfc9972_adj_rib_in_post,
             rfc9972_policy_rejects,
+            rfc9972_rpki_adj_rib_in_post,
             adj_rib_out_post,
         } => {
             assert_eq!(peer_info.peer_addr, addr);
             assert_eq!(adj_rib_in_routes, 22);
             assert_eq!(rfc9972_adj_rib_in_post, Some(vec![(1, 1, 12), (2, 1, 7)]));
             assert_eq!(rfc9972_policy_rejects, Some(vec![(1, 1, 2), (2, 1, 3)]));
+            assert_eq!(
+                rfc9972_rpki_adj_rib_in_post,
+                Some(vec![
+                    (
+                        1,
+                        1,
+                        rustbgpd_bmp::BmpRpkiValidationCounts {
+                            invalid: 2,
+                            valid: 7,
+                            not_found: 3,
+                        },
+                    ),
+                    (2, 1, rustbgpd_bmp::BmpRpkiValidationCounts::default(),),
+                ]),
+                "negotiated families include exact path counts and authoritative zero rows"
+            );
             assert_eq!(
                 adj_rib_out_post,
                 Some(vec![(1, 1, 12), (1, 128, 3)]),
@@ -700,6 +732,50 @@ async fn periodic_bmp_stats_carry_adj_rib_out_counts() {
         }
         other => panic!("expected StatsReport, got {other:?}"),
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn bmp_peer_stats_admission_and_reply_share_one_deadline() {
+    let (_tx, rx) = mpsc::channel(1);
+    let (rib_tx, mut rib_rx) = mpsc::channel(1);
+    let (blocker_reply, _blocker_rx) = tokio::sync::oneshot::channel();
+    rib_tx
+        .try_send(RibUpdate::QueryLocRibCount {
+            reply: blocker_reply,
+        })
+        .unwrap();
+    let mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+
+    let actor = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        assert!(matches!(
+            rib_rx.recv().await,
+            Some(RibUpdate::QueryLocRibCount { .. })
+        ));
+        let Some(RibUpdate::QueryBmpPeerStats { reply }) = rib_rx.recv().await else {
+            panic!("expected the admitted BMP peer-stats query");
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        drop(reply);
+    });
+
+    let started = tokio::time::Instant::now();
+    assert!(mgr.query_bmp_peer_stats().await.is_none());
+    assert_eq!(
+        started.elapsed(),
+        super::super::PEER_QUERY_TIMEOUT,
+        "reply wait must consume only the admission deadline remainder"
+    );
+    actor.abort();
 }
 
 #[test]
@@ -758,7 +834,6 @@ fn rfc9972_stats_use_exact_unicast_counts_and_omit_for_effective_add_path() {
         Some(vec![(1, 1, 4), (2, 1, 5)]),
         "path-aware reject identity remains exact under Add-Path"
     );
-
     state.policy_reject_counts = Some(rustbgpd_transport::PolicyRejectCounts::default());
     assert_eq!(
         super::super::snapshot::rfc9972_policy_reject_counts(&state),
@@ -788,6 +863,54 @@ fn rfc9972_stats_use_exact_unicast_counts_and_omit_for_effective_add_path() {
     );
 }
 
+#[test]
+fn rfc9972_rpki_counts_remain_exact_under_add_path_and_project_zero_rows() {
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let mut state = policy_test_peer_state(addr, SessionState::Established);
+    let mut negotiated = test_negotiated_session(true);
+    negotiated.families = vec![
+        (Afi::Ipv6, Safi::Unicast),
+        (Afi::Ipv4, Safi::MplsVpn),
+        (Afi::Ipv4, Safi::Unicast),
+    ];
+    negotiated.add_path_receive_families = vec![(Afi::Ipv4, Safi::Unicast)];
+    state.negotiated_session = Some(negotiated);
+
+    let mut rpki = std::collections::HashMap::new();
+    rpki.insert(
+        addr,
+        vec![(
+            (Afi::Ipv4, Safi::Unicast),
+            rustbgpd_rib::RpkiValidationCounts {
+                invalid: 1,
+                valid: 2,
+                not_found: 3,
+            },
+        )],
+    );
+    assert_eq!(
+        super::super::snapshot::rfc9972_rpki_validation_counts(addr, &state, Some(&rpki)),
+        Some(vec![
+            (
+                1,
+                1,
+                rustbgpd_bmp::BmpRpkiValidationCounts {
+                    invalid: 1,
+                    valid: 2,
+                    not_found: 3,
+                },
+            ),
+            (2, 1, rustbgpd_bmp::BmpRpkiValidationCounts::default()),
+        ]),
+        "path-aware RIB counters remain exact under Add-Path and project negotiated zero rows"
+    );
+    assert_eq!(
+        super::super::snapshot::rfc9972_rpki_validation_counts(addr, &state, None),
+        None,
+        "missing VRP authority omits types 35/36/37"
+    );
+}
+
 #[tokio::test]
 async fn periodic_bmp_stats_distinguish_state_timeout_from_departed_session() {
     let (_tx, rx) = mpsc::channel(16);
@@ -811,12 +934,12 @@ async fn periodic_bmp_stats_distinguish_state_timeout_from_departed_session() {
 
     let rib_task = tokio::spawn(async move {
         while let Some(update) = rib_rx.recv().await {
-            if let RibUpdate::QueryAdjRibOutCounts { reply } = update {
-                let _ = reply.send(std::collections::HashMap::new());
+            if let RibUpdate::QueryBmpPeerStats { reply } = update {
+                let _ = reply.send(rustbgpd_rib::BmpPeerStats::default());
                 return;
             }
         }
-        panic!("QueryAdjRibOutCounts never arrived");
+        panic!("QueryBmpPeerStats never arrived");
     });
 
     mgr.emit_periodic_bmp_stats().await;
@@ -859,6 +982,7 @@ async fn periodic_bmp_stats_channel_full_records_the_source_drop() {
             adj_rib_in_routes: 0,
             rfc9972_adj_rib_in_post: None,
             rfc9972_policy_rejects: None,
+            rfc9972_rpki_adj_rib_in_post: None,
             adj_rib_out_post: None,
         })
         .unwrap();
@@ -887,12 +1011,12 @@ async fn periodic_bmp_stats_channel_full_records_the_source_drop() {
 
     let rib_task = tokio::spawn(async move {
         while let Some(update) = rib_rx.recv().await {
-            if let RibUpdate::QueryAdjRibOutCounts { reply } = update {
-                let _ = reply.send(std::collections::HashMap::new());
+            if let RibUpdate::QueryBmpPeerStats { reply } = update {
+                let _ = reply.send(rustbgpd_rib::BmpPeerStats::default());
                 return;
             }
         }
-        panic!("QueryAdjRibOutCounts never arrived");
+        panic!("QueryBmpPeerStats never arrived");
     });
 
     mgr.emit_periodic_bmp_stats().await;

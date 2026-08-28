@@ -12,7 +12,7 @@ dedicated OS thread named `ribmgr` under a current-thread tokio runtime, with N
 registered route-reflector-client outbound peers whose bounded channels are
 drained by trivial consumer tasks. Route injection is via
 `RibUpdate::RoutesReceived`; the staged Adj-RIB-Out is polled via
-`RibUpdate::QueryAdjRibOutCounts`. Every synthetic session stages the same
+`RibUpdate::QueryBmpPeerStats`. Every synthetic session stages the same
 authoritative exact-export encoder used by the transport fanout benchmark, so
 the measured manager path includes production's fail-closed wire-size probe
 instead of relying on a permissive test stub. Because the manager task is alone

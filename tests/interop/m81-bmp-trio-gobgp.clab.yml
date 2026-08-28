@@ -89,6 +89,16 @@ topology:
         - ./scripts/bmp-raw-sink.py:/usr/local/bin/bmp-raw-sink.py:ro
         - ./scripts/m81-bmp-assert.py:/usr/local/bin/m81-bmp-assert.py:ro
 
+    stayrtr:
+      kind: linux
+      # StayRTR 0.6.4 (digest resolved from :latest on 2026-08-14).
+      image: rpki/stayrtr@sha256:cdb93c0b661d97179a5525e00caf7d9e693a04da3b9002f7e24bebb194d9a77b
+      binds:
+        - ./configs/rpki-vrps-m81.json:/data/vrps.json:ro
+      cmd: >-
+        -cache /data/vrps.json -bind :3323 -checktime=false -refresh 30
+        -rtr.refresh 15 -rtr.retry 5 -rtr.expire 600 -log.verbose
+
   links:
     - endpoints: ["rustbgpd:eth1", "gobgp-pe1:eth1"]
     - endpoints: ["rustbgpd:eth2", "gobgp-pe2:eth1"]
