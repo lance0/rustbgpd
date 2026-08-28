@@ -403,9 +403,10 @@ memory-safe-language row refers to.
 > was gcov-instrumented. No ranking, ratio, or sampler-derived correction is
 > assigned to these historical rows.
 
-Same host and harness, all targets run back to back on an idle machine,
-medians of 3 runs per cell (6 at 10×1k). "Converged" is bgperf2's
-elapsed-to-full-table figure; memory is peak raw container cgroup usage over
+Same host and harness; targets ran back to back after the phase's initial
+idle-host admission, with medians of 3 runs per cell (6 at 10×1k).
+"Converged" is bgperf2's elapsed-to-full-table figure; memory is peak raw
+container cgroup usage over
 the run, in MiB. The source is Docker's `memory_stats.usage`, not process-tree
 RSS or Docker working set, and may include anonymous, file/cache, kernel, and
 socket memory.

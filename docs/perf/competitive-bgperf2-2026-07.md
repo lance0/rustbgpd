@@ -53,9 +53,9 @@ than asserted.
 Linux 6.17, Docker. All four daemons, the BIRD tester fleet, and the GoBGP
 monitor ran in containers on this one host. **Same-host caveat:** every daemon
 therefore competes for the same cores, memory bandwidth, and Docker bridge as
-the load generators. This is a comparison under identical conditions, not an
-absolute performance figure for any of the four, and it does not forecast a
-different machine.
+the load generators. This is historical same-host output, not an
+equal-condition comparison, an absolute performance figure for any daemon, or
+a forecast for another machine.
 
 **Campaign window:** 2026-07-26 00:22–01:57 UTC. The harness `date` column
 records the host's local date, 2026-07-25.
