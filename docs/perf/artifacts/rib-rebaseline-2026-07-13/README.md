@@ -28,8 +28,10 @@ The capture-time classifier hash remains recorded in `manifest.json`. A later
 ownership-precedence correction reclassified six retained stacks totaling
 327,680 bytes from the import-decision cache to transport session
 buffers/scratch. The normalized stacks, per-stack byte counts, and total live
-heap did not change; the derivative's component labels/order and its generated
-summary did.
+heap did not change. The attribute-layout campaign later split two retained
+`RouteAttrBundle` stacks totaling 900 bytes from transport session
+buffers/scratch into nested path-attribute payloads. Both corrections changed
+only the derivative's component labels/order and its generated summary.
 
 Reviewer verification from the repository root:
 
