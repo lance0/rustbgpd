@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
-# Host mutex shared with bench/compare-criterion.sh.
+# Canonical host mutex for soak and production benchmark receipt runners.
 #
-# When the soak runner and the Criterion bench runner share a host,
-# letting them both touch CPU / memory / FIB at the same time would
-# corrupt every reading from both. Both workloads acquire an exclusive
-# `flock` on the same path before doing real work.
+# When soak and benchmark runners share a host, letting them touch CPU / memory
+# / FIB at the same time would corrupt every reading. Each workload acquires an
+# exclusive `flock` on the same path before doing real work.
 #
-# Source this file from a soak entrypoint and call
-# `acquire_rustbgpd_host_lock` after log redirection is set up
-# (so the success/failure line lands in soak.log) but before any
-# container, daemon, or churn driver starts.
+# Source this file from a production benchmark or soak entrypoint and call
+# `acquire_rustbgpd_host_lock` after log redirection is set up (so the
+# success/failure line is retained) but before any container, daemon, or churn
+# driver starts.
 #
-# Semantics (must stay byte-equivalent to the bench-side block in
-# bench/compare-criterion.sh):
+# The Criterion comparison runner inlines equivalent semantics; keep its block
+# behaviorally aligned with this helper.
 #
 #   - Path: ${RUSTBGPD_HOST_LOCK:-${HOME}/.local/state/rustbgpd-host.lock}.
 #   - Always lock; create the lock dir if missing. (An earlier

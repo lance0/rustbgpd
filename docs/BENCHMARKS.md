@@ -142,13 +142,13 @@ not a merge gate.
 
 ### Host coexistence: bench vs. soak
 
-Bench and soak workloads share the primary host. That coexistence is now
-the normal case rather than a plan: the 24h flagship soak receipts record
-the primary host, and benchmarking moved there when the VPS was retired.
-Both workloads acquire an exclusive `flock` on
+Criterion comparisons, the rrtransport production receipt, and soak workloads
+share the primary host. That coexistence is now the normal case rather than a
+plan: the 24h flagship soak receipts record the primary host, and benchmarking
+moved there when the VPS was retired. All three acquire an exclusive `flock` on
 `${RUSTBGPD_HOST_LOCK:-$HOME/.local/state/rustbgpd-host.lock}` before doing
-real work — the bench script via `bench/compare-criterion.sh` directly, the soak
-runners via the shared `tests/soak/host-lock.sh` helper. A bench
+real work — `bench/compare-criterion.sh` directly, and the rrtransport receipt
+runner and soak runners via the shared `tests/soak/host-lock.sh` helper. A bench
 dispatch refuses to start while a soak is active and a soak refuses to
 start while a bench is mid-attempt; either workload fails fast with a
 clear error rather than producing useless numbers next to a busy host.
@@ -168,25 +168,26 @@ workspace (`[package] rustbgpd` alongside `[workspace]`) with no
 `[[bench]]` target, `fib_projection`, is `bench-internals`-gated, which
 leaves the auto-discovered `src/lib.rs` libtest harness as the one thing that
 runs — and it declares no benchmarks. `cargo bench` at the root therefore
-measures nothing. `cargo bench --workspace` is not a substitute either: four
+measures nothing. `cargo bench --workspace` is not a substitute either: five
 targets are standalone CLIs rather than criterion harnesses and reject
 criterion's flags.
 
-Run each target explicitly with `-p <crate> --bench <name>`. Fourteen exist.
+Run each target explicitly with `-p <crate> --bench <name>`. Fifteen exist.
 Six build with default features (wire/`codec`, rib/`rib_ops`,
 policy/`policy_eval`, policy/`explain_snapshot`, rpki/`validate`,
-mrt/`snapshot_allocation`); eight are `bench-internals`-gated
+mrt/`snapshot_allocation`); nine are `bench-internals`-gated
 (transport/`fanout`, transport/`inbound_attrs`, rustbgpd/`fib_projection`,
-rib/`route_paging`, rib/`evpn_dataplane_query`, api/`event_history_producer`,
+rib/`route_paging`, rib/`evpn_dataplane_query`,
+rib/`dataplane_prefix_paging`, api/`event_history_producer`,
 api/`vpn_query_timing`, api/`vpn_query_allocation` — the last also requires
-the api crate's `vpn-query-allocation` feature). Four of the fourteen —
-`snapshot_allocation`, `route_paging`, `vpn_query_timing`, and
-`vpn_query_allocation` — are standalone measurement CLIs with their own
-argument contracts (`snapshot_allocation` hard-errors without a
+the api crate's `vpn-query-allocation` feature). Five of the fifteen —
+`snapshot_allocation`, `route_paging`, `dataplane_prefix_paging`,
+`vpn_query_timing`, and `vpn_query_allocation` — are standalone measurement
+CLIs with their own argument contracts (`snapshot_allocation` hard-errors without a
 `timing|diagnostic` mode), not criterion harnesses.
 
 `bench/smoke-benches.sh` enumerates the target list from `cargo metadata`,
-excludes those four by name, and runs every remaining criterion target once
+excludes those five by name, and runs every remaining criterion target once
 in `--test` mode — the cheapest proof that each still executes.
 
 ```bash
