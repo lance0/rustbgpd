@@ -58,11 +58,11 @@ name: Interop
 #     flip on a topology metric change (no churn to the unaffected
 #     client), and fall back to one standard best on withdrawal.
 #   - M77 (~4 min test): GR/LLGR stale preservation for the RR
-#     families (RFC 4724 / RFC 9494) — a GoBGP PE (VPNv4 + RTC) is
-#     kill -9'd: rustbgpd must hold its routes stale, keep serving
-#     the client, sweep exactly the not-re-advertised route at the
-#     relaunched (`gobgpd -r`) PE's End-of-RIB, promote to the LLGR
-#     stale phase (LLGR_STALE toward the client) when the PE never
+#     families (RFC 4724 / RFC 9494) — a GoBGP PE (VPNv4 + VPNv6 +
+#     RTC) is kill -9'd: rustbgpd must hold its routes stale, keep
+#     serving the client, sweep exactly the per-family routes omitted
+#     by the relaunched (`gobgpd -r`) PE's End-of-RIB, promote to the
+#     LLGR stale phase (LLGR_STALE toward the client) when the PE never
 #     returns, and keep the ORR vantage resolved through a BGP-LS
 #     source's GR window.
 #   - M78 (~60 s test): multi-cluster ORR — two rustbgpd RRs with
@@ -666,7 +666,7 @@ jobs:
 
   m77:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M77 — GR/LLGR RR-family stale preservation (GoBGP 4.6.0)
+    name: M77 — VPNv4/VPNv6/RTC GR+LLGR + BGP-LS GR (GoBGP 4.6.0)
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:

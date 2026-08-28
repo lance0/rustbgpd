@@ -2,17 +2,18 @@
 # (M77 — GR/LLGR stale preservation for the RR families, RFC 4724 / RFC 9494)
 #
 # Validates: rustbgpd (receiving speaker) preserves a restarting peer's
-# VPNv4 (SAFI 128), RT-Constrain (SAFI 132), and BGP-LS (AFI 16388) routes
-# as stale through the GR window, keeps reflecting them to the client (no
-# withdraws on the wire), sweeps exactly the not-re-advertised route at the
-# peer's End-of-RIB, promotes to the LLGR stale phase (LLGR_STALE community
+# VPNv4 and VPNv6 (SAFI 128), RT-Constrain (SAFI 132), and BGP-LS (AFI 16388)
+# routes as stale through the GR window, keeps reflecting them to the client
+# (no withdraws on the wire), sweeps exactly the per-family routes omitted at
+# the peer's End-of-RIB, promotes to the LLGR stale phase (LLGR_STALE community
 # toward the client) when the peer never returns, and keeps ORR vantages
-# resolved through the LS source's restart window.
+# resolved through the LS source's restart window. Both VPN families ride the
+# existing IPv4 sessions; the topology deliberately adds no IPv6 transport.
 #
 # gobgp-pe: VRFs blue (RD 65001:100) + red (RD 65001:200) from the CONFIG
 # FILE (so RTC membership survives a daemon relaunch); VPN routes are
 # CLI-injected. GR restart-time 60 + LLGR per-family restart-time 30 for
-# l3vpn-ipv4-unicast and rtc.
+# l3vpn-ipv4-unicast, l3vpn-ipv6-unicast, and rtc.
 # gobgp-client: VRF blue (RD 65001:101, RT 65001:100) + a red-import VRF
 # for the red RTC membership; receives the reflected VPN routes. It
 # advertises GR+LLGR (never restarts — the capability exists so rustbgpd
