@@ -340,6 +340,9 @@ pub enum CatalogMutationError {
     /// Operator supplied invalid catalog data (maps to gRPC
     /// `INVALID_ARGUMENT`).
     Invalid(String),
+    /// A valid mutation cannot be applied in the current runtime state
+    /// (maps to gRPC `FAILED_PRECONDITION`).
+    FailedPrecondition(String),
     /// Applying the mutation would reconfigure something only a daemon
     /// restart can change, e.g. a TCP-AO delta on a reshaped peer-group
     /// member (maps to gRPC `FAILED_PRECONDITION`).
@@ -361,6 +364,11 @@ impl CatalogMutationError {
     }
 
     #[must_use]
+    pub fn failed_precondition(message: impl Into<String>) -> Self {
+        Self::FailedPrecondition(message.into())
+    }
+
+    #[must_use]
     pub fn internal(message: impl Into<String>) -> Self {
         Self::Internal(message.into())
     }
@@ -371,6 +379,7 @@ impl std::fmt::Display for CatalogMutationError {
         match self {
             Self::NotFound(message)
             | Self::Invalid(message)
+            | Self::FailedPrecondition(message)
             | Self::RestartRequired(message)
             | Self::Internal(message) => f.write_str(message),
             Self::StillReferenced {

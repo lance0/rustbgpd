@@ -397,6 +397,71 @@ fn install_rfc8212_peer(
     managed.export_policy = Some(rfc8212_missing_export());
 }
 
+#[tokio::test]
+async fn owned_rfc8212_preflight_rejection_is_failed_precondition_without_mutation() {
+    use rustbgpd_api::peer_types::{
+        CatalogMutationError, ConfigEvent, NamedPolicyDefinition, OwnedCatalogMutationOutcome,
+        PolicyStatementDefinition,
+    };
+    use rustbgpd_api::runtime_config_settlement::RuntimeConfigPolicyFailureCode;
+
+    let (mut mgr, _rib_rx) = rfc8212_status_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+    mgr.current_config.global.ebgp_requires_policy = Some(true);
+    mgr.current_config.policy.import_chain.clear();
+    mgr.current_config.policy.export_chain.clear();
+    mgr.current_config.neighbors = vec![config_neighbor(addr, 65002)];
+    let setup = mgr
+        .apply_policy_change_owned(
+            ConfigEvent::SetPolicy {
+                name: "edge-in".to_string(),
+                definition: NamedPolicyDefinition {
+                    default_action: "deny".to_string(),
+                    statements: Vec::<PolicyStatementDefinition>::new(),
+                },
+                ack: None,
+            },
+            None,
+        )
+        .await;
+    assert!(
+        matches!(setup, OwnedCatalogMutationOutcome::Success),
+        "policy setup failed: {setup:?}"
+    );
+
+    let refreshes = Arc::new(AtomicUsize::new(0));
+    install_rfc8212_peer(
+        &mut mgr,
+        addr,
+        scripted_policy_handle(addr, false, usize::MAX, Arc::clone(&refreshes)),
+        Some(rfc8212_missing_import()),
+    );
+    let outcome = mgr
+        .apply_policy_change_owned(
+            ConfigEvent::SetGlobalImportChain {
+                policy_names: vec!["edge-in".to_string()],
+                ack: None,
+            },
+            None,
+        )
+        .await;
+    let OwnedCatalogMutationOutcome::RejectedNoEffect(error) = outcome else {
+        panic!("incapable live peer must reject the owned policy mutation")
+    };
+    assert!(matches!(
+        error,
+        CatalogMutationError::FailedPrecondition(ref message)
+            if message == RuntimeConfigPolicyFailureCode::PreflightRejected.as_str()
+                && !message.contains(&addr.to_string())
+    ));
+    assert!(mgr.current_config.policy.import_chain.is_empty());
+    assert_eq!(
+        mgr.peers[&key(addr)].import_policy,
+        Some(rfc8212_missing_import())
+    );
+    assert_eq!(refreshes.load(Ordering::SeqCst), 0);
+}
+
 /// ADR-0112 step 4: an Established peer that never negotiated Route Refresh
 /// cannot converge an import policy-presence change, so the edit is rejected
 /// with clear/reconnect guidance and its chains stay exactly where they were.

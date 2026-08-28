@@ -334,6 +334,7 @@ fn config_persist_error(error: ConfigPersistError) -> FibTableControlError {
                 FibTableControlError::InvalidArgument(message)
             }
             CatalogMutationError::StillReferenced { .. }
+            | CatalogMutationError::FailedPrecondition(_)
             | CatalogMutationError::RestartRequired(_) => {
                 FibTableControlError::FailedPrecondition(error.to_string())
             }
@@ -1126,6 +1127,12 @@ mod tests {
 
     #[tokio::test]
     async fn persistence_stage_rejection_and_ack_loss_are_typed_clean_failures() {
+        assert!(matches!(
+            config_persist_error(ConfigPersistError::Rejected(
+                CatalogMutationError::failed_precondition("runtime state blocks persistence")
+            )),
+            FibTableControlError::FailedPrecondition(_)
+        ));
         for drop_ack in [false, true] {
             let (tx, mut rx) = mpsc::channel(1);
             let permit = tx.clone().reserve_owned().await.unwrap();

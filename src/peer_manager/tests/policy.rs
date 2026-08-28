@@ -399,9 +399,15 @@ async fn sync_rpol_policies_rejection_keeps_old_registry_for_live_and_new_sessio
             rustbgpd_policy::datasets::DatasetBindings::default(),
         )
         .await;
+    let rustbgpd_api::peer_types::OwnedCatalogMutationOutcome::RejectedNoEffect(error) = outcome
+    else {
+        panic!("unresolvable static rpol chain must be rejected before mutation")
+    };
     assert!(matches!(
-        outcome,
-        rustbgpd_api::peer_types::OwnedCatalogMutationOutcome::RejectedNoEffect(_)
+        error,
+        CatalogMutationError::NotFound(ref message)
+            if message == RuntimeConfigPolicyFailureCode::PreflightRejected.as_str()
+                && !message.contains("edge-in")
     ));
 
     // Existing session: the live chain still evaluates the OLD decision.
