@@ -232,6 +232,16 @@ The API uses gRPC status codes consistently across services:
 | `UNIMPLEMENTED` | The RPC is reserved in the protobuf but runtime support has not shipped yet |
 | `INTERNAL` | An internal daemon actor, metrics encoder, or RIB boundary failed unexpectedly after the request passed validation |
 
+Runtime-config mutations that fail after transient runtime changes, but whose
+forward effects are then fully compensated, preserve the original gRPC status
+code and append the original message after this exact prefix:
+`runtime effects were fully compensated; retry may repeat transient runtime changes: `.
+Their trailing metadata also includes
+`rustbgpd-runtime-config-outcome: fully-compensated`. The staged persistent
+candidate is discarded, so the runtime and TOML remain at their prior state.
+The marker is a retry warning: repeating the request can repeat those transient
+runtime changes even though the reported attempt left no final-state change.
+
 ---
 
 ## gnmi.gNMI

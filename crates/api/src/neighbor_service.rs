@@ -24,7 +24,8 @@ use crate::runtime_config_settlement::{
 };
 use crate::server::{
     AccessMode, ConfigMutationGateFn, RuntimeConfigCoordinator, check_config_mutation_gate,
-    peer_manager_request, read_only_rejection, stage_runtime_config_event_typed,
+    fully_compensated_status, peer_manager_request, read_only_rejection,
+    stage_runtime_config_event_typed,
 };
 use rustbgpd_rib::{
     EffectiveDistributionMode, NeighborRibSnapshot, NeighborRibSnapshotResponse, RibUpdate,
@@ -334,12 +335,15 @@ where
             error,
             reason: crate::runtime_config_settlement::RuntimeConfigFenceReason::AcknowledgementLost,
         },
-        OwnedNeighborDispatch::Replied(
-            OwnedNeighborMutationOutcome::RejectedNoEffect(error)
-            | OwnedNeighborMutationOutcome::FullyCompensated(error),
-        ) => {
+        OwnedNeighborDispatch::Replied(OwnedNeighborMutationOutcome::RejectedNoEffect(error)) => {
             drop(staged);
             OwnedRuntimeConfigOutcome::CleanNoEffect(Err(owned_neighbor_error_status(error)))
+        }
+        OwnedNeighborDispatch::Replied(OwnedNeighborMutationOutcome::FullyCompensated(error)) => {
+            drop(staged);
+            OwnedRuntimeConfigOutcome::CleanNoEffect(Err(fully_compensated_status(
+                &owned_neighbor_error_status(error),
+            )))
         }
         OwnedNeighborDispatch::Replied(OwnedNeighborMutationOutcome::CompensationAmbiguous(
             error,
@@ -2534,11 +2538,23 @@ mod tests {
                 )),
             ))
             .unwrap();
+        let error = call.await.unwrap().unwrap_err();
+        assert_eq!(error.code(), tonic::Code::NotFound);
         assert_eq!(
-            call.await.unwrap().unwrap_err().code(),
-            tonic::Code::NotFound
+            error
+                .metadata()
+                .get("rustbgpd-runtime-config-outcome")
+                .unwrap(),
+            "fully-compensated"
         );
-        assert!(coordinator.acquire().await.is_ok());
+        assert_eq!(
+            error.message(),
+            "runtime effects were fully compensated; retry may repeat transient runtime changes: range disappeared before mutation"
+        );
+        let _released = tokio::time::timeout(Duration::from_secs(1), coordinator.acquire())
+            .await
+            .expect("compensated neighbor mutation must release the coordinator")
+            .expect("coordinator must remain open");
     }
 
     #[tokio::test]

@@ -24,8 +24,8 @@ use crate::runtime_config_settlement::{
 use crate::server::{
     AccessMode, ConfigMutationGateFn, OwnedCatalogDispatch, RuntimeConfigCoordinator,
     catalog_mutation_error_to_status, check_config_mutation_gate, dispatch_owned_catalog_mutation,
-    peer_manager_request, read_only_rejection, stage_runtime_config_event_typed,
-    with_catalog_persist_ack,
+    fully_compensated_status, peer_manager_request, read_only_rejection,
+    stage_runtime_config_event_typed, with_catalog_persist_ack,
 };
 
 const CONFIG_PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -547,12 +547,15 @@ async fn owned_peer_group_mutation_body(
             error,
             reason: crate::runtime_config_settlement::RuntimeConfigFenceReason::AcknowledgementLost,
         },
-        OwnedCatalogDispatch::Replied(
-            OwnedCatalogMutationOutcome::RejectedNoEffect(error)
-            | OwnedCatalogMutationOutcome::FullyCompensated(error),
-        ) => {
+        OwnedCatalogDispatch::Replied(OwnedCatalogMutationOutcome::RejectedNoEffect(error)) => {
             drop(staged);
             OwnedRuntimeConfigOutcome::CleanNoEffect(Err(catalog_mutation_error_to_status(&error)))
+        }
+        OwnedCatalogDispatch::Replied(OwnedCatalogMutationOutcome::FullyCompensated(error)) => {
+            drop(staged);
+            OwnedRuntimeConfigOutcome::CleanNoEffect(Err(fully_compensated_status(
+                &catalog_mutation_error_to_status(&error),
+            )))
         }
         OwnedCatalogDispatch::Replied(OwnedCatalogMutationOutcome::CompensationAmbiguous(
             error,
@@ -1732,7 +1735,14 @@ mod tests {
     async fn owned_rejected_no_effect_discards_stage_and_returns() {
         let (peer_tx, mut peer_rx) = mpsc::channel(4);
         let (config_tx, mut config_rx) = mpsc::channel(4);
-        let svc = PeerGroupService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx), None);
+        let coordinator = RuntimeConfigCoordinator::new();
+        let svc = PeerGroupService::with_runtime_config_coordinator(
+            AccessMode::ReadWrite,
+            peer_tx,
+            Some(config_tx),
+            None,
+            coordinator.clone(),
+        );
         let (call, ack) = staged_delete_call(svc, &mut config_rx).await;
         let staged = tokio::spawn(ack.accept());
         match peer_rx.recv().await.expect("expected owned delete") {
@@ -1753,17 +1763,43 @@ mod tests {
             !staged.await.unwrap(),
             "rejected mutation must discard stage"
         );
-        assert_eq!(
-            call.await.unwrap().unwrap_err().code(),
-            tonic::Code::NotFound
+        let error = call.await.unwrap().unwrap_err();
+        let expected = catalog_mutation_error_to_status(
+            &crate::peer_types::CatalogMutationError::not_found("missing group"),
         );
+        assert_eq!(error.code(), expected.code());
+        assert_eq!(error.message(), expected.message());
+        assert_eq!(error.details(), expected.details());
+        assert_eq!(error.metadata().len(), expected.metadata().len());
+        assert!(
+            !error
+                .message()
+                .starts_with("runtime effects were fully compensated")
+        );
+        assert!(
+            error
+                .metadata()
+                .get("rustbgpd-runtime-config-outcome")
+                .is_none()
+        );
+        let _released = tokio::time::timeout(Duration::from_secs(1), coordinator.acquire())
+            .await
+            .expect("rejected peer-group mutation must release the coordinator")
+            .expect("coordinator must remain open");
     }
 
     #[tokio::test]
     async fn owned_fully_compensated_discards_stage_and_returns() {
         let (peer_tx, mut peer_rx) = mpsc::channel(4);
         let (config_tx, mut config_rx) = mpsc::channel(4);
-        let svc = PeerGroupService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx), None);
+        let coordinator = RuntimeConfigCoordinator::new();
+        let svc = PeerGroupService::with_runtime_config_coordinator(
+            AccessMode::ReadWrite,
+            peer_tx,
+            Some(config_tx),
+            None,
+            coordinator.clone(),
+        );
         let (call, ack) = staged_delete_call(svc, &mut config_rx).await;
         let staged = tokio::spawn(ack.accept());
         match peer_rx.recv().await.expect("expected owned delete") {
@@ -1782,10 +1818,23 @@ mod tests {
             !staged.await.unwrap(),
             "compensated mutation must discard stage"
         );
+        let error = call.await.unwrap().unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Internal);
         assert_eq!(
-            call.await.unwrap().unwrap_err().code(),
-            tonic::Code::Internal
+            error
+                .metadata()
+                .get("rustbgpd-runtime-config-outcome")
+                .unwrap(),
+            "fully-compensated"
         );
+        assert_eq!(
+            error.message(),
+            "runtime effects were fully compensated; retry may repeat transient runtime changes: apply failed; prior runtime restored"
+        );
+        let _released = tokio::time::timeout(Duration::from_secs(1), coordinator.acquire())
+            .await
+            .expect("compensated peer-group mutation must release the coordinator")
+            .expect("coordinator must remain open");
     }
 
     #[tokio::test]
