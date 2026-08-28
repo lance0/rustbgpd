@@ -33,6 +33,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The M99 FRR receipt now proves RFC 9072 extended OPEN framing at raw-byte
+  level. One pinned FRR 10.3.1 process forces a small extended OPEN on one
+  link while a second link stays classic; rustbgpd emits its exact 342-byte,
+  307-capability-octet maximum production OPEN on the first and its exact
+  49-byte classic OPEN on the second. Host tshark exports raw TCP payload,
+  while an independent stream oracle permits identical retransmissions,
+  rejects gaps or conflicts, consumes every type-2 parameter exactly, requires
+  one OPEN per direction and no NOTIFICATION, and proves a non-empty common
+  capability inventory on both Established sessions.
+
 - The M16 FRR receipt now gates dual-stack LLGR in hosted interop CI. Exact
   two-route IPv4 and one-route IPv6 inventories cross fresh, GR-stale,
   LLGR-stale, and fresh states around one controlled restart; structured views

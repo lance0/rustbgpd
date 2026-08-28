@@ -1,0 +1,44 @@
+# M99 — RFC 9072 byte-level OPEN proof against stock FRR 10.3.1.
+#
+# One rustbgpd and one FRR container share two independent links. FRR forces
+# RFC 9072's extended Optional Parameters format only on link A; link B is the
+# classic-format control. The host enters rustbgpd's network namespace with
+# its own tshark binary and captures both links before the daemon starts.
+
+name: m99-rfc9072-extended-open-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m99-rfc9072.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
+      exec:
+        - ip addr add 10.99.0.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.99.1.1/24 dev eth2
+        - ip link set eth2 up
+      env:
+        RUST_LOG: info
+
+    frr:
+      kind: linux
+      # quay.io/frrouting/frr:10.3.1, immutable for the receipt.
+      image: quay.io/frrouting/frr@sha256:f90d26a9fd5c14fc5795a73b4254ac88bc3186c45bbeb220a225fb6182de812c
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m99-rfc9072.conf:/etc/frr/frr.conf:ro
+        - /dev/null:/etc/frr/vtysh.conf:ro
+      exec:
+        - ip addr add 10.99.0.2/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.99.1.2/24 dev eth2
+        - ip link set eth2 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr:eth1"]
+    - endpoints: ["rustbgpd:eth2", "frr:eth2"]

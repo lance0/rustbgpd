@@ -134,8 +134,9 @@ every lane on an empty diff, a malformed path, or any mixed diff, and only
 supports manual dispatch. Neither workflow has a scheduled trigger.
 
 - **Foundation** — wire-protocol + core RIB / refresh / policy (incl. the
-  ADR-0096 `.rpol` policy-parity receipt) and RFC 6793 legacy-AS migration:
-  **M1**, **M13**, **M15**, **M80**, **M94**.
+  ADR-0096 `.rpol` policy-parity receipt), RFC 6793 legacy-AS migration, and
+  RFC 9072 extended OPEN framing against real FRR: **M1**, **M13**, **M15**,
+  **M80**, **M94**, **M99**.
 - **Address-family + topology** — MP-BGP, RR, multi-path, BGP-LS reflection,
   VPNv4 reflection, RT-Constrain filtering, ORR divergent-best, RR-family
   GR/LLGR stale preservation, multi-cluster ORR, labeled-unicast reflection,
@@ -255,6 +256,7 @@ broader platform-diversity validation beyond the protected hosted matrix.
 | BIRD 2 + GoBGP ×3 + arouteserver | BIRD 2.0.12, GoBGP 3.37.0, arouteserver 1.23.2 | `tests/interop/m90-differential.clab.yml` | Tested (M90, local) | ADR-0110 route-server filtering differential | One site input drives arouteserver/BIRD and `rs-config-render`/rustbgpd; 11/11 accept/reject verdicts and rustbgpd explain terms agree | Pinned arouteserver digest; 65/65, with a rust-only policy mutation making the differential red |
 | Raw BGP fixture | in-tree Python | `tests/interop/m91-rfc7606-malformed.clab.yml` | Tested (M91, hosted CI) | RFC 7606 revised UPDATE error handling | Malformed MED and AGGREGATOR inputs pin treat-as-withdraw, attribute-discard, session-reset, counters, and the §6 DEBUG capture | Runs in the combined cheap-protocol job |
 | GoBGP ×3 + BIRD 2 | GoBGP 4.7.0, BIRD 2.0.12 | `tests/interop/m92-gobgp-v47-rs-differential.clab.yml` | Tested (M92, Hosted CI) | Dual-stack route-server semantic differential | Exact source/target inventories and per-PDU EoRs authorize baseline/mutant/restore diffs; normal and negative-completeness proofs use separate deployments | Official amd64 release hash pinned; synthetic evidence only |
+| FRR (bgpd) | 10.3.1 | `tests/interop/m99-rfc9072-extended-open-frr.clab.yml` | Tested (M99, hosted CI) | RFC 9072 extended Optional Parameters framing | Two links to one digest-pinned FRR process: forced-small extended versus classic control. Host tshark exports only raw TCP payload and sequence metadata; an independent reassembler proves four gap-free directions, exact 342-byte/307-capability-octet and 49-byte rustbgpd OPENs, exact type-2 parameter consumption, non-empty common capability inventories, one OPEN per stream, and no NOTIFICATION. | FRR is passive on both links so capture is armed before the only connection attempt; the proof runs exactly once. |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m18-extnexthop-frr.clab.yml` | Tested (M18) | Extended Next-Hop (RFC 8950) | Dual-stack, IPv6 NH for IPv4 | — |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m20-privateas-frr.clab.yml` | Tested (M20) | Private AS Removal | remove/all/replace modes | — |
 | FRR + StayRTR | 10.3.1 + latest | `tests/interop/m21-rpki-frr.clab.yml` | Tested (M21) | RPKI origin validation via RTR | StayRTR serves static VRP JSON | — |

@@ -14,7 +14,7 @@ from pathlib import Path
 INTEROP = (
     "m1 m13 m80 m15 m10 m14 m17 m73 m74 m75 m76 m77 m78 m79 m22 "
     "m24 m81 m82 m83 m85 m94 m86 m25 m29 m30 m34 m35 m35b m35c m41 "
-    "m44 m54 m55 m56 m45 m57 m63 m64 m26_m27_m28_m59_m91 m92 m84"
+    "m44 m54 m55 m56 m45 m57 m63 m64 m26_m27_m28_m59_m91 m92 m84 m99"
 ).split()
 KERNEL = (
     "m36 m37 m37-ip m38 m39 m39b m48 m60 m61 m62 m40 m42 m50 m52 "
@@ -136,17 +136,17 @@ PERMISSION_HASHES = {
     "kernel-dataplane.yml": "6f1d70d72bad231d43c575acef6946580e439c879794ed2ea1f4a40340245172",
 }
 CALL_HASHES = {
-    "interop.yml": "da64ebaf2c2e49b8ca54181d81777e4148586d80d385d93e1271cff38ec6b676",
+    "interop.yml": "ca3b362b262e9d285650bf5678646ff3ab3106ef17b10a500c8dcdfc5cb57a9b",
     "kernel-dataplane.yml": "310ed2344bd6ff3f766580f704cc77fec4be0a2103a943e2ad837f497af346c3",
 }
 PINS = collections.Counter(
     {
-        "actions/checkout@v7": 87,
+        "actions/checkout@v7": 88,
         "dtolnay/rust-toolchain@v1 # stable": 3,
         "Swatinem/rust-cache@v2": 5,
         "dtolnay/rust-toolchain@v1 # 1.95": 2,
-        "docker/setup-buildx-action@v4": 44,
-        "docker/build-push-action@v7": 45,
+        "docker/setup-buildx-action@v4": 45,
+        "docker/build-push-action@v7": 46,
         "actions/cache@v6": 5,
         "actions/upload-artifact@v7": 7,
         "actions/download-artifact@v8": 6,
@@ -787,6 +787,26 @@ def check(root: Path) -> list[str]:
     negative = m92.split("- name: Run M92 negative completeness proof", 1)
     if len(negative) != 2 or 'M92_COMPLETENESS_NEGATIVE: "1"' in negative[0]:
         errors.append("interop.yml:m92: negative environment scope drifted")
+    m99 = _jobs(texts["interop.yml"]).get("m99", "")
+    m99_required = {
+        GRPCURL_ACTION: 1,
+        "name: Ensure host raw-capture tools": 1,
+        "if ! command -v tshark >/dev/null || ! command -v nsenter >/dev/null": 1,
+        "|| ! command -v jq >/dev/null": 1,
+        "sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y tshark util-linux jq": 1,
+        "tshark --version": 1,
+        "nsenter --version": 1,
+        "uses: ./.github/actions/run-interop-test": 1,
+        "label: M99\n": 1,
+        "topology: tests/interop/m99-rfc9072-extended-open-frr.clab.yml": 1,
+        "script: tests/interop/scripts/test-m99-rfc9072-extended-open.sh": 1,
+        'max_attempts: "1"': 1,
+    }
+    if any(m99.count(seam) != count for seam, count in m99_required.items()):
+        errors.append("interop.yml:m99: RFC 9072 raw-capture job semantics drifted")
+    for forbidden in ("continue-on-error:", "docker exec", "max_attempts: \"2\""):
+        if forbidden in m99:
+            errors.append(f"interop.yml:m99: permits {forbidden}")
     interop_classifier = _jobs(texts["interop.yml"]).get("classify_changes", "")
     kernel_jobs = _jobs(texts["kernel-dataplane.yml"])
     interop_classifier = interop_classifier.replace("interop heavy-lab", "heavy-lab")

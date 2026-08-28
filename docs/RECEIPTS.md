@@ -94,6 +94,7 @@ id matches the milestone. Full procedures: [`INTEROP.md`](INTEROP.md).
 | M94 | RFC 6793 legacy ingress reconstruction, semantic loop rejection, exact type 2/17 + type 7/18 egress, withdrawal, and session continuity | ExaBGP 5.0.9 source + independent Python OLD-speaker sink |
 | M95 | ADR-0112 live RFC 8212 policy-presence transitions: Route Refresh qualification, whole-edit rejection with nothing mutated, real refresh convergence in both directions, and GR-stale deferral | FRR 10.3.1 + BIRD 2.0.12 (Route Refresh disabled) |
 | M98 | [IXP Manager Nagios monitoring](INTEROP.md#ixp-manager-v74-manual-configuration-oracle): the pinned v7.4 `birdseye-daemons` and `birdseye-bgp-sessions` generators include the rustbgpd route server (host, service, hostgroup, both client session services with rendered alias names), and the pinned Bird's Eye daemon plugin reports `OK` with `Last Reconfigure` against the live adapter; gated by `ixp-compat.yml` | IXP Manager v7.4.0 + Bird's Eye v2.1.0 plugin + live `birdwatcher-adapter` |
+| M99 | RFC 9072 forced-small extended OPEN plus classic control: host-tshark raw TCP payload, independent retransmission-aware stream reassembly, exact 342-byte/307-capability-octet and 49-byte rustbgpd OPENs, exact type-2 parameter consumption, non-empty common capability inventories, and no NOTIFICATION | Digest-pinned FRR 10.3.1 |
 
 ## Interop labs — kernel dataplane, PR + push + manual (`kernel-dataplane.yml`)
 
