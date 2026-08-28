@@ -1158,6 +1158,9 @@ impl PeerSession {
                         let negotiated = neg?;
                         let mut families = negotiated.negotiated_families.clone();
                         families.sort_by_key(|(afi, safi)| (*afi as u16, *safi as u8));
+                        let mut add_path_receive_families = self.add_path_receive_families.clone();
+                        add_path_receive_families
+                            .sort_by_key(|(afi, safi)| (*afi as u16, *safi as u8));
                         let graceful_restart = negotiated.peer_gr_capable.then(|| {
                             let mut peer_families = negotiated
                                 .peer_gr_families
@@ -1184,6 +1187,7 @@ impl PeerSession {
                             remote_router_id: negotiated.peer_router_id,
                             four_octet_as: negotiated.four_octet_as,
                             families,
+                            add_path_receive_families,
                             peer_route_refresh: negotiated.peer_route_refresh,
                             peer_enhanced_route_refresh: negotiated.peer_enhanced_route_refresh,
                             peer_extended_message: negotiated.peer_extended_message,

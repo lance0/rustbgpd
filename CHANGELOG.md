@@ -21,6 +21,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Periodic BMP peer statistics now include RFC 9972 post-policy Adj-RIB-In
+  gauges: global type 20 and negotiated IPv4/IPv6-unicast family types 21 and
+  23. These gauges are omitted when effective unicast Add-Path receive is active,
+  because the current prefix counters intentionally deduplicate paths.
+
 - The RIB memory harness now models the opposing costs of interned attribute
   container layouts at live-table-calibrated diversity and route-reflector
   fanout. Its pinned full campaign rejects an `Arc<[PathAttribute]>` migration

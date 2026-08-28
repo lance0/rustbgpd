@@ -739,6 +739,7 @@ async fn bmp_repair_timer_retries_until_channel_drains() {
         tx.try_send(BmpEvent::StatsReport {
             peer_info: session.build_bmp_peer_info(),
             adj_rib_in_routes: 0,
+            rfc9972_adj_rib_in_post: None,
             adj_rib_out_post: None,
         })
         .unwrap();
@@ -785,6 +786,7 @@ async fn bmp_peer_down_survives_full_channel() {
         tx.try_send(BmpEvent::StatsReport {
             peer_info: session.build_bmp_peer_info(),
             adj_rib_in_routes: 0,
+            rfc9972_adj_rib_in_post: None,
             adj_rib_out_post: None,
         })
         .unwrap();
@@ -837,6 +839,7 @@ async fn tcp_disconnect_clears_bmp_repair_latch() {
         tx.try_send(BmpEvent::StatsReport {
             peer_info: session.build_bmp_peer_info(),
             adj_rib_in_routes: 0,
+            rfc9972_adj_rib_in_post: None,
             adj_rib_out_post: None,
         })
         .unwrap();
@@ -888,6 +891,7 @@ async fn repair_partial_enqueue_duplicate_peer_down_is_acceptable() {
         tx.try_send(BmpEvent::StatsReport {
             peer_info: session.build_bmp_peer_info(),
             adj_rib_in_routes: 0,
+            rfc9972_adj_rib_in_post: None,
             adj_rib_out_post: None,
         })
         .unwrap();

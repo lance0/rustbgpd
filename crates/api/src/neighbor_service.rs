@@ -3760,6 +3760,7 @@ mod tests {
             remote_router_id: "192.0.2.7".parse().unwrap(),
             four_octet_as: false,
             families: vec![(Afi::Ipv6, Safi::Unicast)],
+            add_path_receive_families: Vec::new(),
             peer_route_refresh: false,
             peer_enhanced_route_refresh: false,
             peer_extended_message: false,

@@ -534,6 +534,7 @@ async fn negotiated_snapshot_uses_only_fresh_established_actor_state() {
         remote_router_id: Ipv4Addr::new(192, 0, 2, 7),
         four_octet_as: false,
         families: vec![(Afi::Ipv6, Safi::Unicast)],
+        add_path_receive_families: Vec::new(),
         peer_route_refresh: true,
         peer_enhanced_route_refresh: true,
         peer_extended_message: true,

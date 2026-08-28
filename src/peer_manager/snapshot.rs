@@ -9,6 +9,7 @@ use rustbgpd_bmp::{BmpEvent, BmpPeerInfo, BmpPeerType};
 use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_transport::{PeerHandle, PeerSessionState, StateQueryOutcome};
+use rustbgpd_wire::{Afi, Safi};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::warn;
 
@@ -38,6 +39,33 @@ fn authentication_snapshot(
     } else {
         "plaintext"
     }
+}
+
+pub(super) fn rfc9972_adj_rib_in_counts(state: &PeerSessionState) -> Option<Vec<(u16, u8, u64)>> {
+    let session = state.negotiated_session.as_ref()?;
+    if session
+        .add_path_receive_families
+        .iter()
+        .any(|family| matches!(family, (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast)))
+    {
+        return None;
+    }
+    let mut counts = Vec::new();
+    if session.families.contains(&(Afi::Ipv4, Safi::Unicast)) {
+        counts.push((
+            Afi::Ipv4 as u16,
+            Safi::Unicast as u8,
+            u64::try_from(state.max_prefix.prefix_count_ipv4).unwrap_or(u64::MAX),
+        ));
+    }
+    if session.families.contains(&(Afi::Ipv6, Safi::Unicast)) {
+        counts.push((
+            Afi::Ipv6 as u16,
+            Safi::Unicast as u8,
+            u64::try_from(state.max_prefix.prefix_count_ipv6).unwrap_or(u64::MAX),
+        ));
+    }
+    (!counts.is_empty()).then_some(counts)
 }
 
 /// Build a `PeerInfo` snapshot from config + an optional fresh
@@ -628,6 +656,7 @@ impl PeerManager {
             }
 
             let prefix_count = u64::try_from(state.prefix_count).unwrap_or(u64::MAX);
+            let rfc9972_adj_rib_in_post = rfc9972_adj_rib_in_counts(state);
             let remote_asn = effective_remote_asn(managed, Some(state));
             // RFC 8671 types 15/17: a peer absent from the RIB's
             // Adj-RIB-Out map simply has nothing advertised — report
@@ -651,6 +680,7 @@ impl PeerManager {
                     state.four_octet_as,
                 ),
                 adj_rib_in_routes: prefix_count,
+                rfc9972_adj_rib_in_post,
                 adj_rib_out_post,
             };
 
