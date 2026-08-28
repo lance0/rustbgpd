@@ -211,6 +211,13 @@ inside the bounded window does.
   during transitions, p99 is sparse and legitimately shows no data/NaN outside
   those windows. The >200ms view is an `increase` estimate above the exact
   `le="0.2"` histogram boundary.
+- **Policy transition outcomes** shows terminal committed, authoritative
+  fallback-handoff, and cleanup-error rates by instance. It excludes work that
+  never acquired transition ownership and non-terminal actor polls.
+- **Config lifecycle outcomes** combines config-transaction activity with the
+  bounded SIGHUP signal/task outcome rate. A recovery-fenced reload remains
+  owned rather than terminal; use the `bgp_runtime_config_settlement_*` series
+  for that state.
 - Accepted-policy age is informational and clamped at zero to tolerate clock
   correction. A static-policy deployment legitimately lets this age grow from
   boot; rejected reloads also leave the last accepted timestamp unchanged.

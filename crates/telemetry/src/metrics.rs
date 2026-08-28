@@ -170,6 +170,62 @@ const RIB_ACTOR_DURATION_BUCKETS: [f64; 13] = [
 /// Closed operation labels for outbound prefix-limit actor work.
 const OUTBOUND_PREFIX_LIMIT_ACTOR_OPERATIONS: [&str; 2] = ["apply", "recovery"];
 
+/// Closed outcome vocabulary for retained and dropped SIGHUP reload work.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SighupReloadOutcome {
+    Complete,
+    KnownPartial,
+    RejectedNoEffect,
+    IgnoredInFlight,
+    TaskFailed,
+}
+
+impl SighupReloadOutcome {
+    const ALL: [Self; 5] = [
+        Self::Complete,
+        Self::KnownPartial,
+        Self::RejectedNoEffect,
+        Self::IgnoredInFlight,
+        Self::TaskFailed,
+    ];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::KnownPartial => "known_partial",
+            Self::RejectedNoEffect => "rejected_no_effect",
+            Self::IgnoredInFlight => "ignored_in_flight",
+            Self::TaskFailed => "task_failed",
+        }
+    }
+}
+
+/// Closed outcome vocabulary for actor-owned RIB policy transitions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RibPolicyTransitionOutcome {
+    Committed,
+    FallbackHandoff,
+    FallbackCleanupError,
+}
+
+impl RibPolicyTransitionOutcome {
+    const ALL: [Self; 3] = [
+        Self::Committed,
+        Self::FallbackHandoff,
+        Self::FallbackCleanupError,
+    ];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Committed => "committed",
+            Self::FallbackHandoff => "fallback_handoff",
+            Self::FallbackCleanupError => "fallback_cleanup_error",
+        }
+    }
+}
+
 /// Closed subscriber vocabulary for `NETLINK_ROUTE` receive-buffer overruns.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NetlinkSubscriber {
@@ -343,6 +399,7 @@ struct BgpMetricsInner {
     session_lifecycle_source_dropped: IntCounterVec,
     grpc_authz_decisions: IntCounterVec,
     grpc_credential_reloads: IntCounterVec,
+    sighup_reload_outcomes: IntCounterVec,
     config_transaction_lifecycle: IntCounterVec,
 
     // ── Policy ──────────────────────────────────────────────────
@@ -373,6 +430,7 @@ struct BgpMetricsInner {
     rib_policy_transition_in_progress: IntGauge,
     rib_policy_transition_last_duration_milliseconds: IntGauge,
     rib_policy_transition_actor_poll_duration_seconds: HistogramVec,
+    rib_policy_transition_outcomes: IntCounterVec,
     rib_outbound_prefix_limit_actor_duration_seconds: HistogramVec,
     rib_route_refresh_actor_duration_seconds: HistogramVec,
 
@@ -992,6 +1050,17 @@ impl BgpMetrics {
             &["outcome"],
         )
         .expect("valid metric definition");
+        let sighup_reload_outcomes = IntCounterVec::new(
+            Opts::new(
+                "bgp_sighup_reload_outcomes_total",
+                "SIGHUP reload signals and retained tasks by bounded terminal outcome.",
+            ),
+            &["outcome"],
+        )
+        .expect("valid metric definition");
+        for outcome in SighupReloadOutcome::ALL {
+            sighup_reload_outcomes.with_label_values(&[outcome.as_str()]);
+        }
 
         let config_transaction_lifecycle = IntCounterVec::new(
             Opts::new(
@@ -1244,6 +1313,17 @@ impl BgpMetrics {
             &["poll_kind"],
         )
         .expect("valid metric definition");
+        let rib_policy_transition_outcomes = IntCounterVec::new(
+            Opts::new(
+                "bgp_rib_policy_transition_total",
+                "Actor-owned RIB export-policy transitions by bounded terminal outcome.",
+            ),
+            &["outcome"],
+        )
+        .expect("valid metric definition");
+        for outcome in RibPolicyTransitionOutcome::ALL {
+            rib_policy_transition_outcomes.with_label_values(&[outcome.as_str()]);
+        }
 
         let rib_outbound_prefix_limit_actor_duration_seconds = HistogramVec::new(
             HistogramOpts::new(
@@ -2390,6 +2470,9 @@ impl BgpMetrics {
             .register(Box::new(grpc_credential_reloads.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(sighup_reload_outcomes.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(config_transaction_lifecycle.clone()))
             .expect("metric not already registered");
         registry
@@ -2464,6 +2547,9 @@ impl BgpMetrics {
             .register(Box::new(
                 rib_policy_transition_actor_poll_duration_seconds.clone(),
             ))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(rib_policy_transition_outcomes.clone()))
             .expect("metric not already registered");
         registry
             .register(Box::new(
@@ -2868,6 +2954,7 @@ impl BgpMetrics {
             session_lifecycle_source_dropped,
             grpc_authz_decisions,
             grpc_credential_reloads,
+            sighup_reload_outcomes,
             config_transaction_lifecycle,
             max_prefix_usage,
             max_prefix_limit,
@@ -2892,6 +2979,7 @@ impl BgpMetrics {
             rib_policy_transition_in_progress,
             rib_policy_transition_last_duration_milliseconds,
             rib_policy_transition_actor_poll_duration_seconds,
+            rib_policy_transition_outcomes,
             rib_outbound_prefix_limit_actor_duration_seconds,
             rib_route_refresh_actor_duration_seconds,
             update_groups,
@@ -3769,6 +3857,14 @@ impl BgpMetrics {
             .inc();
     }
 
+    /// Record one SIGHUP signal disposition or retained task outcome.
+    pub fn record_sighup_reload_outcome(&self, outcome: SighupReloadOutcome) {
+        self.0
+            .sighup_reload_outcomes
+            .with_label_values(&[outcome.as_str()])
+            .inc();
+    }
+
     /// Record a confirmed config transaction lifecycle transition.
     ///
     /// Labels are deliberately bounded:
@@ -4141,6 +4237,14 @@ impl BgpMetrics {
             "unbounded dirty-resync outcome label: {outcome:?}"
         );
         self.0.rib_dirty_resync.with_label_values(&[outcome]).inc();
+    }
+
+    /// Record one terminal actor-owned RIB export-policy transition.
+    pub fn record_rib_policy_transition_outcome(&self, outcome: RibPolicyTransitionOutcome) {
+        self.0
+            .rib_policy_transition_outcomes
+            .with_label_values(&[outcome.as_str()])
+            .inc();
     }
 
     /// Set the sampled depth of the RIB manager ingest channel.
@@ -6333,6 +6437,26 @@ mod tests {
     }
 
     #[test]
+    fn sighup_reload_outcomes_preinitialize_and_increment_exact_rows() {
+        let m = BgpMetrics::new();
+        let initial = gather_text(&m);
+        for outcome in SighupReloadOutcome::ALL {
+            assert!(initial.contains(&format!(
+                "bgp_sighup_reload_outcomes_total{{outcome=\"{}\"}} 0",
+                outcome.as_str()
+            )));
+            m.record_sighup_reload_outcome(outcome);
+        }
+        let incremented = gather_text(&m);
+        for outcome in SighupReloadOutcome::ALL {
+            assert!(incremented.contains(&format!(
+                "bgp_sighup_reload_outcomes_total{{outcome=\"{}\"}} 1",
+                outcome.as_str()
+            )));
+        }
+    }
+
+    #[test]
     fn config_transaction_lifecycle_counter_uses_bounded_labels() {
         let m = BgpMetrics::new();
         m.record_config_transaction_lifecycle("confirm", "success");
@@ -6662,6 +6786,26 @@ mod tests {
         let text = gather_text(&m);
         assert!(text.contains("bgp_rib_policy_transition_in_progress 0"));
         assert!(text.contains("bgp_rib_policy_transition_last_duration_milliseconds 1234"));
+    }
+
+    #[test]
+    fn policy_transition_outcomes_preinitialize_and_increment_exact_rows() {
+        let m = BgpMetrics::new();
+        let initial = gather_text(&m);
+        for outcome in RibPolicyTransitionOutcome::ALL {
+            assert!(initial.contains(&format!(
+                "bgp_rib_policy_transition_total{{outcome=\"{}\"}} 0",
+                outcome.as_str()
+            )));
+            m.record_rib_policy_transition_outcome(outcome);
+        }
+        let incremented = gather_text(&m);
+        for outcome in RibPolicyTransitionOutcome::ALL {
+            assert!(incremented.contains(&format!(
+                "bgp_rib_policy_transition_total{{outcome=\"{}\"}} 1",
+                outcome.as_str()
+            )));
+        }
     }
 
     #[test]

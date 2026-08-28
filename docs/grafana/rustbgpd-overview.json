@@ -2291,8 +2291,8 @@
     {
       "id": 43,
       "type": "timeseries",
-      "title": "Config transactions",
-      "description": "bgp_config_transaction_lifecycle_total by operation/outcome as a rate: prepare/commit/confirm/rollback activity from gRPC and gNMI config sessions.",
+      "title": "Config lifecycle outcomes",
+      "description": "Config transaction lifecycle and bounded SIGHUP signal/task outcomes as rates.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -2335,6 +2335,15 @@
           "expr": "sum by (operation, outcome) (rate(bgp_config_transaction_lifecycle_total{instance=~\"$instance\"}[$__rate_interval]))",
           "legendFormat": "{{operation}}/{{outcome}}",
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "sum by (outcome) (rate(bgp_sighup_reload_outcomes_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "sighup/{{outcome}}",
+          "refId": "B"
         }
       ]
     },
@@ -2534,7 +2543,7 @@
       "title": "Policy transition in progress",
       "description": "Current ownership state only: 1 while the RIB actor owns an export-policy transition, otherwise 0.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 132 },
+      "gridPos": { "h": 6, "w": 4, "x": 0, "y": 132 },
       "fieldConfig": { "defaults": { "unit": "short", "min": 0, "max": 1 }, "overrides": [] },
       "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
       "targets": [
@@ -2551,7 +2560,7 @@
       "title": "Last completed policy transition",
       "description": "Terminal duration of the most recently completed transition. This retained sample is not the live elapsed time of an in-progress transition.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 132 },
+      "gridPos": { "h": 6, "w": 4, "x": 4, "y": 132 },
       "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
       "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
       "targets": [
@@ -2568,7 +2577,7 @@
       "title": "Policy-transition actor poll p99",
       "description": "Fifteen-minute p99 by instance, scrape job, and bounded poll kind. This is actor occupancy per poll, not total transition duration.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 132 },
+      "gridPos": { "h": 6, "w": 4, "x": 8, "y": 132 },
       "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [
@@ -2586,7 +2595,7 @@
       "title": "Policy-transition actor polls over 200ms",
       "description": "Fifteen-minute increase estimate for actor polls above the exact 200ms bucket boundary, preserving instance, scrape job, and poll kind.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 132 },
+      "gridPos": { "h": 6, "w": 4, "x": 12, "y": 132 },
       "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
       "targets": [
@@ -2594,6 +2603,24 @@
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "expr": "increase(bgp_rib_policy_transition_actor_poll_duration_seconds_count{instance=~\"$instance\"}[15m]) - ignoring(le) increase(bgp_rib_policy_transition_actor_poll_duration_seconds_bucket{instance=~\"$instance\",le=\"0.2\"}[15m])",
           "legendFormat": "{{instance}} {{job}} {{poll_kind}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 74,
+      "type": "timeseries",
+      "title": "Policy transition outcomes",
+      "description": "Terminal actor-owned policy transitions by instance and bounded outcome.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 132 },
+      "fieldConfig": { "defaults": { "unit": "ops", "min": 0 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum by (instance, outcome) (rate(bgp_rib_policy_transition_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{instance}} {{outcome}}",
           "refId": "A"
         }
       ]

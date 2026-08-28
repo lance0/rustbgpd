@@ -546,6 +546,18 @@ the daemon, makes `/readyz` fail, rejects another persisted mutation, and exits
 error text. Per-step operational detail remains in structured
 `bucket` / `target` / `error` logs.
 
+`bgp_sighup_reload_outcomes_total{outcome}` is process-global and
+preinitializes five bounded outcomes: `complete` includes a clean no-op;
+`known_partial` means the retained task settled with an authoritative partial
+receipt; `rejected_no_effect` means it rejected before any runtime effect;
+`ignored_in_flight` counts each concurrent signal dropped while another reload
+owns the lane; and `task_failed` means the retained Tokio task itself failed.
+Recovery-fenced ownership deliberately has no outcome row because it remains
+parked. Diagnose that state with `bgp_runtime_config_settlement_active`,
+`bgp_runtime_config_settlement_elapsed_seconds`,
+`bgp_runtime_config_settlement_budget_seconds`, and
+`bgp_runtime_config_settlement_fail_stops_total`.
+
 Coordinated shutdown closes new SIGHUP and runtime-mutation admission first.
 It does not abort an already-owned reload: the daemon waits for its typed
 settlement before taking the warm checkpoint or tearing down required actors.
@@ -1035,6 +1047,7 @@ exactly under the floods these drops account for.
 | `bgp_rib_policy_transition_in_progress` | Whether the RIB actor owns an atomic export-policy transition (`1` = in progress). General RIB queries and mutations remain fenced while the dedicated core-readiness lane remains responsive |
 | `bgp_rib_policy_transition_last_duration_milliseconds` | Monotonic elapsed duration of the most recently completed atomic export-policy transition; retained across idle periods for post-event diagnosis |
 | `bgp_rib_policy_transition_actor_poll_duration_seconds{poll_kind}` | Duration of each real RIB actor transition poll. Bounded `poll_kind` values are `bounded` (chunked phase work), `prefix_snapshot` (the two complete O(table) snapshot polls), `finalize` (atomic membership/emission commit plus the global dirty/forced retry opportunity), and `commit` (bounded `CommitMembers` batches — at most eight members flushed per poll) |
+| `bgp_rib_policy_transition_total{outcome}` | Terminal actor-owned policy transitions. `committed` means the atomic cohort transition committed; `fallback_handoff` means uncommitted cleanup succeeded and authoritative per-peer apply is required; `fallback_cleanup_error` means that cleanup failed. Empty, rejected, missing, in-progress, abandoned, continued, pre-ownership, and synthetic actor-exit paths do not increment it |
 | `bgp_rib_outbound_prefix_limit_actor_duration_seconds{operation}` | Duration of complete synchronous outbound prefix-limit work on the RIB actor. The closed `operation` set is `apply` (one active transaction after its identity/epoch gates, including the live-peer precondition recheck and any successful installation) and `recovery` (one non-empty scheduled batch that replays at least one live peer/family). An apply whose live precondition recheck rejects still contributes its real scan time; discarded, missing, superseded, idempotent, and empty paths do not contribute samples |
 | `bgp_orr_input_objects{classification}` | Inputs considered by the ORR default-topology builder before NLRI deduplication. Exactly five classifications exist: `included_default`, `excluded_nondefault`, `malformed_topology`, `malformed_attribute_29`, and `default_with_ignored_flex_algo`. The Flex series is a subset of included default objects: its base object and classic metric remain usable. All series reset to zero when no vantage is configured |
 

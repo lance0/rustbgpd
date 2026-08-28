@@ -65,6 +65,7 @@ use rustbgpd_mrt::{
     resolved_import_policy_digest_v1, write_warm_bundle_bounded,
 };
 use rustbgpd_rib::{RibManager, RibUpdate, WarmMrtSnapshotBudget, WarmMrtSnapshotView};
+use rustbgpd_telemetry::metrics::SighupReloadOutcome as SighupReloadMetricOutcome;
 use rustbgpd_telemetry::{BgpMetrics, init_logging};
 use rustbgpd_transport::{
     BgpListener, ListenerSocketOptions, Md5ListenerKey, TcpAoAlgorithm,
@@ -3102,6 +3103,21 @@ fn resolve_rib_channel_capacity_from(env: Option<&str>) -> usize {
     RIB_CHANNEL_CAPACITY
 }
 
+fn sighup_reload_metric_outcome(
+    outcome: &Result<Result<SighupAuthority, SighupReloadError>, tokio::task::JoinError>,
+) -> SighupReloadMetricOutcome {
+    match outcome {
+        Ok(Ok(authority)) => match authority.completion {
+            reload::SighupCompletion::Complete => SighupReloadMetricOutcome::Complete,
+            reload::SighupCompletion::KnownPartial { .. } => {
+                SighupReloadMetricOutcome::KnownPartial
+            }
+        },
+        Ok(Err(_)) => SighupReloadMetricOutcome::RejectedNoEffect,
+        Err(_) => SighupReloadMetricOutcome::TaskFailed,
+    }
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "runtime startup keeps listener, API, and shutdown wiring in one owner"
@@ -5270,6 +5286,7 @@ async fn run<T>(
             }
             _ = sighup.recv() => {
                 if reload_in_flight.is_some() {
+                    metrics.record_sighup_reload_outcome(SighupReloadMetricOutcome::IgnoredInFlight);
                     warn!("SIGHUP received while previous reload still in flight; ignoring");
                     continue;
                 }
@@ -5423,6 +5440,7 @@ async fn run<T>(
                 }
             } => {
                 reload_in_flight = None;
+                metrics.record_sighup_reload_outcome(sighup_reload_metric_outcome(&outcome));
                 match outcome {
                     Ok(Ok(authority)) => {
                         match &authority.completion {
@@ -5452,7 +5470,9 @@ async fn run<T>(
         .expect("runtime-config settlement wait task must not panic");
     runtime_config_lock.wait_until_drained().await;
     if let Some(handle) = reload_in_flight.take() {
-        match handle.await {
+        let outcome = handle.await;
+        metrics.record_sighup_reload_outcome(sighup_reload_metric_outcome(&outcome));
+        match outcome {
             Ok(Ok(authority)) => config = authority.runtime,
             Ok(Err(error)) => warn!(error = %error, "SIGHUP rejected during shutdown drain"),
             Err(error) => error!(error = %error, "SIGHUP task failed during shutdown drain"),
@@ -6124,6 +6144,41 @@ mod tests {
         }
         assert!(run.contains("_ = sigint.recv() => {"));
         assert!(!run.contains("tokio::signal::ctrl_c()"));
+    }
+
+    #[test]
+    fn sighup_outcome_metric_covers_every_terminal_and_drop_path_once() {
+        let source = include_str!("main.rs");
+        let production = source.split_once("\n#[cfg(test)]\nmod tests").unwrap().0;
+        let classifier = production
+            .split_once("fn sighup_reload_metric_outcome(")
+            .unwrap()
+            .1
+            .split_once("\n}\n")
+            .unwrap()
+            .0;
+        for outcome in ["Complete", "KnownPartial", "RejectedNoEffect", "TaskFailed"] {
+            assert_eq!(
+                classifier
+                    .matches(&format!("SighupReloadMetricOutcome::{outcome}"))
+                    .count(),
+                1
+            );
+        }
+        assert_eq!(
+            production
+                .matches("record_sighup_reload_outcome(sighup_reload_metric_outcome(&outcome))")
+                .count(),
+            2,
+            "normal completion and shutdown drain must each classify before consumption",
+        );
+        assert_eq!(
+            production
+                .matches("record_sighup_reload_outcome(SighupReloadMetricOutcome::IgnoredInFlight)")
+                .count(),
+            1,
+            "each dropped concurrent signal is counted at the drop site",
+        );
     }
 
     #[test]
