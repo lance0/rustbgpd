@@ -57,3 +57,8 @@ required-features = ["bench-internals"]
 name = "fanout"
 harness = false
 required-features = ["bench-internals"]
+
+[[bench]]
+name = "explain_snapshot"
+harness = false
+required-features = ["bench-internals"]

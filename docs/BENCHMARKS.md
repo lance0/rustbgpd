@@ -173,10 +173,10 @@ targets are standalone CLIs rather than criterion harnesses and reject
 criterion's flags.
 
 Run each target explicitly with `-p <crate> --bench <name>`. Fifteen exist.
-Six build with default features (wire/`codec`, rib/`rib_ops`,
-policy/`policy_eval`, policy/`explain_snapshot`, rpki/`validate`,
-mrt/`snapshot_allocation`); nine are `bench-internals`-gated
-(transport/`fanout`, transport/`inbound_attrs`, rustbgpd/`fib_projection`,
+Five build with default features (wire/`codec`, rib/`rib_ops`,
+policy/`policy_eval`, rpki/`validate`, mrt/`snapshot_allocation`); ten are
+`bench-internals`-gated (transport/`fanout`, transport/`inbound_attrs`,
+transport/`explain_snapshot`, rustbgpd/`fib_projection`,
 rib/`route_paging`, rib/`evpn_dataplane_query`,
 rib/`dataplane_prefix_paging`, api/`event_history_producer`,
 api/`vpn_query_timing`, api/`vpn_query_allocation` — the last also requires
@@ -212,9 +212,20 @@ cargo bench -p rustbgpd-transport --features bench-internals --bench fanout
 # RPKI origin-validation microbench (RFC 6811)
 cargo bench -p rustbgpd-rpki --bench validate
 
-# Policy chain eval + the explain-snapshot clone cost
+# Policy chain evaluation
 cargo bench -p rustbgpd-policy --bench policy_eval
-cargo bench -p rustbgpd-policy --bench explain_snapshot
+
+# Real import-explain context clones and bounded-cache writes (requires bench-internals)
+cargo bench -p rustbgpd-transport --features bench-internals --bench explain_snapshot
+
+# Standalone dataplane-prefix paging comparison (requires bench-internals).
+# Run both arms explicitly; there is no retained raw comparator.
+cargo bench -p rustbgpd-rib --features bench-internals \
+  --bench dataplane_prefix_paging -- --prefixes 100000 --announcers 1 \
+  --max-paths 1 --repetition 1 --mode eager
+cargo bench -p rustbgpd-rib --features bench-internals \
+  --bench dataplane_prefix_paging -- --prefixes 100000 --announcers 1 \
+  --max-paths 1 --repetition 1 --mode lazy-baseline
 
 # Specific group
 cargo bench -p rustbgpd-rib --bench rib_ops -- "adj_rib_in_insert"
