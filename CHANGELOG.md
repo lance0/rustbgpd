@@ -38,6 +38,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   self-assigns type 5, which now collides with Sequence Number; it will return
   only after a non-colliding assignment is available.
 
+- Validation-cache and generated-dataset refreshes now distinguish a departed
+  or non-Established session from a timed-out state query. Ambiguous queries
+  fail the refresh and retain the pending import or export work for a later
+  policy replay; RFC 8212 preflight and clean-convergence cohort selection use
+  the same closed three-way outcome model.
+
 - Policy mutation preflight failures now preserve `NOT_FOUND`, `INVALID_ARGUMENT`, and
   `FAILED_PRECONDITION` while retaining the closed `policy_preflight_rejected` diagnostic.
 

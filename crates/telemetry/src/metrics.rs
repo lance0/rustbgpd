@@ -6324,6 +6324,7 @@ mod tests {
         m.record_validation_import_refresh("rpki", "eligible", 3);
         m.record_validation_import_refresh("rpki", "refreshed", 2);
         m.record_validation_import_refresh("rpki", "skipped_not_established", 1);
+        m.record_validation_import_refresh("rpki", "skipped_state_unknown", 1);
         m.record_validation_import_refresh("aspa", "failed", 1);
 
         assert_eq!(
@@ -6346,6 +6347,12 @@ mod tests {
         );
         assert_eq!(
             m.0.validation_import_refreshes
+                .with_label_values(&["rpki", "skipped_state_unknown"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            m.0.validation_import_refreshes
                 .with_label_values(&["aspa", "failed"])
                 .get(),
             1
@@ -6355,6 +6362,7 @@ mod tests {
         assert!(text.contains("bgp_validation_import_refreshes_total"));
         assert!(text.contains(r#"dependency="rpki""#));
         assert!(text.contains(r#"outcome="skipped_not_established""#));
+        assert!(text.contains(r#"outcome="skipped_state_unknown""#));
     }
 
     #[test]
