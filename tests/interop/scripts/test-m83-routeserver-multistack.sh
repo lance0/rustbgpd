@@ -1566,7 +1566,7 @@ assert_reload_stability() {
 # ---------------------------------------------------------------------------
 
 main() {
-    log "M83 interop test: route-server profile, multi-stack (BIRD 2 + GoBGP + FRR + RTR)"
+    log "M83 interop test: route-server profile, multi-stack (BIRD 2.19.2 + GoBGP 4.8.0 + FRR + RTR)"
     log "Topology: $TOPO"
 
     resolve_grpc_addr

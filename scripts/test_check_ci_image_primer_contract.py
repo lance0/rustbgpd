@@ -1412,8 +1412,19 @@ class PrimerContractTests(unittest.TestCase):
 
     def test_m83_exact_incumbent_images_are_load_bearing(self):
         relative = ".github/workflows/interop.yml"
+        m83_needs = (
+            "  m83:\n"
+            "    needs: [grpcurl_archive, prime_dev_image]\n"
+        )
+        workflow = (ROOT / relative).read_text()
+        self.assertEqual(1, workflow.count(m83_needs), "M83 needs seam must be unique")
+        self.mutate(
+            relative,
+            m83_needs,
+            "  m83:\n    needs: [grpcurl_archive]\n",
+        )
+
         for old in (
-            "    needs: [grpcurl_archive, prime_dev_image]\n",
             "        run: docker build -t bird:v2.19.2-m83 -f tests/interop/Dockerfile.bird-v2192 tests/interop\n",
             "          --build-arg GOBGP_VERSION=4.8.0\n",
             "          --build-arg GOBGP_SHA256=43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03\n",
@@ -1422,8 +1433,7 @@ class PrimerContractTests(unittest.TestCase):
             with self.subTest(seam=old):
                 count = (ROOT / relative).read_text().count(old)
                 self.assertGreater(count, 0, f"missing M83 seam: {old}")
-                occurrence = count - 1 if old.startswith("    needs:") else 0
-                self.mutate(relative, old, occurrence=occurrence)
+                self.mutate(relative, old)
 
     def test_m99_rfc9072_raw_capture_job_is_load_bearing(self):
         relative = ".github/workflows/interop.yml"
