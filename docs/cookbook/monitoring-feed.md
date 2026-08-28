@@ -165,7 +165,7 @@ configured. Key series:
 | Metric | Meaning |
 |--------|---------|
 | `bgp_event_outbox_degraded` | 1 = latched durability-impacting loss, committed-event delivery skip, or DB open/recovery/quarantine failure; expected shutdown `reason=closed` drops are excluded. Inspect the drop reason and daemon log: replay can remain available |
-| `bmp_collector_drops_total` | messages dropped toward a slow/disconnected collector |
+| `bmp_collector_drops_total` | per-collector queue/dump failures; live fan-out Full/Closed automatically resets only that collector generation and replays state after the one-second reconnect |
 | `bmp_source_drops_total` | per-peer BMP events dropped at the source tap, including a periodic stats report whose session-state query timed out |
 | `bmp_replay_attempts_total` | PeerUp-cache replays on collector reconnect |
 | `bgp_rib_outbound_registered_peers` | feed coverage: peers whose routes the views carry |

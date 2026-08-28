@@ -234,11 +234,12 @@ byte counts.
   session→manager channel (counted in `bmp_source_drops_total`) forces
   a synthetic `PeerDown`/`PeerUp` peer-state reset on the stream so
   collectors discard the now-incomplete view and rebuild from live
-  traffic. The per-collector fan-out queue remains lossy by design
-  (`bmp_collector_drops_total`); a collector that saturates its own
-  channel diverges until its next reconnect, which per RFC 7854
-  discards all state and replays Peer Up; a configured Loc-RIB view then gets a
-  new EoR-closed dump. Alert on that counter.
+  traffic. The per-collector fan-out queue remains non-blocking
+  (`bmp_collector_drops_total`); a full or closed queue automatically fences
+  only that collector generation. The client closes TCP without BMP
+  Termination and retries after one second, which per RFC 7854 discards all
+  state and replays Peer Up; a configured Loc-RIB view then gets a new
+  EoR-closed dump. Alert on repeated resets through that counter.
 
 - **RFC 8326 receiver gating is scoped to non-confederation topologies.**
   When `[global] honor_graceful_shutdown = true`, the implicit chain-

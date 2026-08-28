@@ -2044,7 +2044,7 @@ impl BgpMetrics {
         let bmp_collector_drops = IntCounterVec::new(
             Opts::new(
                 "bmp_collector_drops_total",
-                "BMP messages dropped per collector, by phase (fan_out, loc_rib_dump) and bounded channel/buffer/request/reply failure reason",
+                "BMP per-collector failures by phase (fan_out, loc_rib_dump) and bounded channel/buffer/request/reply reason; fan_out channel failures automatically reset that collector generation",
             ),
             &["collector", "phase", "reason"],
         )
