@@ -110,13 +110,6 @@ impl From<FibTableControlError> for OwnedFibControlError {
     }
 }
 
-/// Build the `FibTableControlFn` the RIB service calls for FIB-table CRUD.
-#[must_use]
-#[cfg(test)]
-pub fn make_fib_table_control_fn(deps: FibTableControlDeps) -> FibTableControlFn {
-    make_fib_table_control_fn_inner(deps, None)
-}
-
 /// Build the daemon's fail-stop-owned FIB-table CRUD hook.
 #[must_use]
 pub fn make_owned_fib_table_control_fn(
@@ -124,14 +117,8 @@ pub fn make_owned_fib_table_control_fn(
     watchdog: RuntimeConfigSettlementWatchdog,
     daemon_gate: DaemonGate,
 ) -> FibTableControlFn {
-    make_fib_table_control_fn_inner(deps, Some((watchdog, daemon_gate)))
-}
-
-fn make_fib_table_control_fn_inner(
-    deps: FibTableControlDeps,
-    settlement: Option<(RuntimeConfigSettlementWatchdog, DaemonGate)>,
-) -> FibTableControlFn {
     let deps = Arc::new(deps);
+    let settlement = (watchdog, daemon_gate);
     Arc::new(move |request| {
         let deps = deps.clone();
         let settlement = settlement.clone();
@@ -141,7 +128,7 @@ fn make_fib_table_control_fn_inner(
 
 async fn handle(
     deps: Arc<FibTableControlDeps>,
-    settlement: Option<(RuntimeConfigSettlementWatchdog, DaemonGate)>,
+    settlement: (RuntimeConfigSettlementWatchdog, DaemonGate),
     request: FibTableControlRequest,
 ) -> Result<proto::ListFibTablesResponse, FibTableControlError> {
     match request {
@@ -200,7 +187,7 @@ impl Mutation {
 
 async fn mutate(
     deps: Arc<FibTableControlDeps>,
-    settlement: Option<(RuntimeConfigSettlementWatchdog, DaemonGate)>,
+    settlement: (RuntimeConfigSettlementWatchdog, DaemonGate),
     mutation: Mutation,
 ) -> Result<proto::ListFibTablesResponse, FibTableControlError> {
     // A mutation needs a running reconciler and a persistence sink. Resolve
@@ -236,38 +223,16 @@ async fn mutate(
         .await
     };
     let (context, attachment) = OwnedRuntimeConfigRequestContext::unary();
-    let result: Result<_, OwnedFibControlError> = if let Some((watchdog, daemon_gate)) = settlement
-    {
-        watchdog
-            .execute_owned(
-                kind,
-                deps.lock.clone(),
-                daemon_gate,
-                context.response_attached(),
-                move |operation| body(Some(operation)),
-            )
-            .await
-    } else {
-        let coordinator = deps.lock.clone();
-        let join = tokio::spawn(async move {
-            let _guard = coordinator.acquire().await?;
-            match body(None).await {
-                OwnedRuntimeConfigOutcome::CleanNoEffect(result) => result,
-                OwnedRuntimeConfigOutcome::PublishedDurable(value)
-                | OwnedRuntimeConfigOutcome::AcknowledgedAuthority(value) => Ok(value),
-                OwnedRuntimeConfigOutcome::Fenced { error, .. } => {
-                    let _ = error;
-                    std::future::pending().await
-                }
-            }
-        });
-        match join.await {
-            Ok(result) => result,
-            Err(_) => Err(OwnedFibControlError(FibTableControlError::Internal(
-                "FIB-table mutation task did not complete".to_string(),
-            ))),
-        }
-    };
+    let (watchdog, daemon_gate) = settlement;
+    let result: Result<_, OwnedFibControlError> = watchdog
+        .execute_owned(
+            kind,
+            deps.lock.clone(),
+            daemon_gate,
+            context.response_attached(),
+            move |operation| body(Some(operation)),
+        )
+        .await;
     drop(attachment);
     result.map_err(|error| error.0)
 }
@@ -912,17 +877,21 @@ mod tests {
                 "actor-read test unexpectedly reached persistence"
             );
         });
-        let control = make_fib_table_control_fn(FibTableControlDeps {
-            fib_cmd_tx,
-            peer_mgr_tx,
-            rib_tx: None,
-            config_tx: Some(config_tx),
-            lock: RuntimeConfigCoordinator::new(),
-            config_mutation_gate: None,
-            startup_tables,
-            confirm_journal_path: None,
-            config_history_dir: None,
-        });
+        let control = make_owned_fib_table_control_fn(
+            FibTableControlDeps {
+                fib_cmd_tx,
+                peer_mgr_tx,
+                rib_tx: None,
+                config_tx: Some(config_tx),
+                lock: RuntimeConfigCoordinator::new(),
+                config_mutation_gate: None,
+                startup_tables,
+                confirm_journal_path: None,
+                config_history_dir: None,
+            },
+            RuntimeConfigSettlementWatchdog::new(),
+            DaemonGate::new(),
+        );
         let (rib_tx, _rib_rx) = mpsc::channel(1);
         RibService::with_status_snapshots(rib_tx, Arc::new(Vec::new), Arc::new(Vec::new))
             .with_fib_table_control(AccessMode::ReadWrite, Some(control))
@@ -947,13 +916,18 @@ mod tests {
             config_history_dir: None,
         });
 
-        let list_error = handle(deps.clone(), None, FibTableControlRequest::List)
+        let settlement = || (RuntimeConfigSettlementWatchdog::new(), DaemonGate::new());
+        let list_error = handle(deps.clone(), settlement(), FibTableControlRequest::List)
             .await
             .unwrap_err();
         assert!(matches!(list_error, FibTableControlError::Unavailable(_)));
-        let set_error = mutate(deps.clone(), None, Mutation::Upsert(table("core", 1001)))
-            .await
-            .unwrap_err();
+        let set_error = mutate(
+            deps.clone(),
+            settlement(),
+            Mutation::Upsert(table("core", 1001)),
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(set_error, FibTableControlError::Unavailable(_)));
         assert!(matches!(
             fib_rx.try_recv(),
@@ -1094,9 +1068,13 @@ mod tests {
             confirm_journal_path: None,
             config_history_dir: None,
         });
-        let err = mutate(deps, None, Mutation::Upsert(table("core", 1001)))
-            .await
-            .expect_err("persistence rejection must fail the mutation");
+        let err = mutate(
+            deps,
+            (RuntimeConfigSettlementWatchdog::new(), DaemonGate::new()),
+            Mutation::Upsert(table("core", 1001)),
+        )
+        .await
+        .expect_err("persistence rejection must fail the mutation");
         assert!(
             matches!(err, FibTableControlError::FailedPrecondition(ref message) if message == "desired config validation failed"),
             "{err:?}"
