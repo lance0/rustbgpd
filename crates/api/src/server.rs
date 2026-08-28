@@ -67,6 +67,30 @@ use rustbgpd_telemetry::BgpMetrics;
 
 const MAX_CONCURRENT_GRPC_TLS_HANDSHAKES: usize = 64;
 const GRPC_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const FULLY_COMPENSATED_STATUS_PREFIX: &str =
+    "runtime effects were fully compensated; retry may repeat transient runtime changes:";
+const RUNTIME_CONFIG_OUTCOME_METADATA: &str = "rustbgpd-runtime-config-outcome";
+
+/// Mark a runtime-config error whose forward effects were fully compensated.
+///
+/// The original status code, details, metadata, and message remain available
+/// to clients. The added trailer distinguishes this retry-sensitive outcome
+/// from a rejection that produced no runtime effect.
+pub(crate) fn fully_compensated_status(status: &Status) -> Status {
+    let code = status.code();
+    let message = if status.message().is_empty() {
+        FULLY_COMPENSATED_STATUS_PREFIX.to_string()
+    } else {
+        format!("{FULLY_COMPENSATED_STATUS_PREFIX} {}", status.message())
+    };
+    let details = bytes::Bytes::copy_from_slice(status.details());
+    let mut metadata = status.metadata().clone();
+    metadata.insert(
+        RUNTIME_CONFIG_OUTCOME_METADATA,
+        tonic::metadata::MetadataValue::from_static("fully-compensated"),
+    );
+    Status::with_details_and_metadata(code, message, details, metadata)
+}
 
 /// Closeable, one-permit serializer for persisted runtime-config mutations.
 #[derive(Debug)]
@@ -2415,6 +2439,57 @@ mod tests {
         for (error, code) in cases {
             assert_eq!(catalog_mutation_error_to_status(&error).code(), code);
         }
+    }
+
+    #[test]
+    fn fully_compensated_status_preserves_original_status_and_adds_marker() {
+        let mut metadata = tonic::metadata::MetadataMap::new();
+        metadata.insert("existing-trailer", "kept".parse().unwrap());
+        let original = Status::with_details_and_metadata(
+            tonic::Code::FailedPrecondition,
+            "candidate could not settle",
+            bytes::Bytes::from_static(b"\0opaque-details\xff"),
+            metadata,
+        );
+
+        let marked = fully_compensated_status(&original);
+
+        assert_eq!(marked.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(
+            marked.message(),
+            "runtime effects were fully compensated; retry may repeat transient runtime changes: candidate could not settle"
+        );
+        assert!(marked.message().ends_with("candidate could not settle"));
+        assert_eq!(marked.details(), b"\0opaque-details\xff");
+        assert_eq!(marked.metadata().get("existing-trailer").unwrap(), "kept");
+        assert_eq!(
+            marked
+                .metadata()
+                .get("rustbgpd-runtime-config-outcome")
+                .unwrap(),
+            "fully-compensated"
+        );
+    }
+
+    #[test]
+    fn fully_compensated_status_has_no_trailing_space_for_empty_message() {
+        let original = Status::internal("");
+
+        let marked = fully_compensated_status(&original);
+
+        assert_eq!(marked.code(), tonic::Code::Internal);
+        assert_eq!(
+            marked.message(),
+            "runtime effects were fully compensated; retry may repeat transient runtime changes:"
+        );
+        assert!(!marked.message().ends_with(' '));
+        assert_eq!(
+            marked
+                .metadata()
+                .get("rustbgpd-runtime-config-outcome")
+                .unwrap(),
+            "fully-compensated"
+        );
     }
 
     #[test]

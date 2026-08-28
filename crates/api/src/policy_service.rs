@@ -27,7 +27,8 @@ use crate::runtime_config_settlement::{
 use crate::server::{
     AccessMode, ConfigMutationGateFn, OwnedCatalogDispatch, RuntimeConfigCoordinator,
     catalog_mutation_error_to_status, check_config_mutation_gate, dispatch_owned_catalog_mutation,
-    read_only_rejection, stage_runtime_config_event_typed, with_catalog_persist_ack,
+    fully_compensated_status, read_only_rejection, stage_runtime_config_event_typed,
+    with_catalog_persist_ack,
 };
 
 const CONFIG_PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -483,12 +484,15 @@ async fn owned_policy_mutation_body(
             error,
             reason: crate::runtime_config_settlement::RuntimeConfigFenceReason::AcknowledgementLost,
         },
-        OwnedCatalogDispatch::Replied(
-            OwnedCatalogMutationOutcome::RejectedNoEffect(error)
-            | OwnedCatalogMutationOutcome::FullyCompensated(error),
-        ) => {
+        OwnedCatalogDispatch::Replied(OwnedCatalogMutationOutcome::RejectedNoEffect(error)) => {
             drop(staged);
             OwnedRuntimeConfigOutcome::CleanNoEffect(Err(catalog_mutation_error_to_status(&error)))
+        }
+        OwnedCatalogDispatch::Replied(OwnedCatalogMutationOutcome::FullyCompensated(error)) => {
+            drop(staged);
+            OwnedRuntimeConfigOutcome::CleanNoEffect(Err(fully_compensated_status(
+                &catalog_mutation_error_to_status(&error),
+            )))
         }
         OwnedCatalogDispatch::Replied(OwnedCatalogMutationOutcome::CompensationAmbiguous(
             error,
@@ -4179,6 +4183,59 @@ policy customer-in(peer_lp: u32) {
             _ => panic!("expected DeletePolicy"),
         };
         (call, ack)
+    }
+
+    #[tokio::test]
+    async fn owned_policy_fully_compensated_discards_stage_and_returns_marker() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(4);
+        let (config_tx, mut config_rx) = mpsc::channel(4);
+        let coordinator = RuntimeConfigCoordinator::new();
+        let svc = PolicyService::with_runtime_config_coordinator(
+            AccessMode::ReadWrite,
+            peer_tx,
+            Some(config_tx),
+            None,
+            coordinator.clone(),
+        );
+        let (call, ack) = staged_policy_delete(svc, &mut config_rx).await;
+        let staged = tokio::spawn(ack.accept());
+        match peer_rx.recv().await.expect("expected owned policy delete") {
+            PeerManagerCommand::OwnedCatalogMutation {
+                mutation: OwnedCatalogMutation::DeletePolicy { name },
+                reply,
+            } => {
+                assert_eq!(name, "edge-policy");
+                reply
+                    .send(OwnedCatalogMutationOutcome::FullyCompensated(
+                        CatalogMutationError::failed_precondition(
+                            "policy fan-out failed; prior runtime restored",
+                        ),
+                    ))
+                    .unwrap();
+            }
+            _ => panic!("expected owned policy delete"),
+        }
+        assert!(
+            !staged.await.unwrap(),
+            "compensation must discard the stage"
+        );
+        let error = call.await.unwrap().unwrap_err();
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(
+            error
+                .metadata()
+                .get("rustbgpd-runtime-config-outcome")
+                .unwrap(),
+            "fully-compensated"
+        );
+        assert_eq!(
+            error.message(),
+            "runtime effects were fully compensated; retry may repeat transient runtime changes: policy fan-out failed; prior runtime restored"
+        );
+        let _released = tokio::time::timeout(Duration::from_secs(1), coordinator.acquire())
+            .await
+            .expect("compensated policy mutation must release the coordinator")
+            .expect("coordinator must remain open");
     }
 
     #[tokio::test]

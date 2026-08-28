@@ -38,6 +38,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Neighbor, peer-group, and policy gRPC mutations now mark a failed runtime
+  change whose effects were fully compensated, distinguishing it from a
+  rejection that made no change while preserving the original status code and
+  error details. The response trailer and message warn that retrying can repeat
+  transient runtime changes even though the staged persistent candidate was
+  discarded.
+
 - Tunnel Encapsulation and ATTR_SET attributes now receive bounded structural
   validation before opaque re-advertisement. Tunnel TLV/sub-TLV boundaries and
   ATTR_SET's Origin AS/embedded-attribute stream must be complete; embedded MP
