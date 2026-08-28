@@ -1585,6 +1585,8 @@ class HeavyLabPathClassifierTests(unittest.TestCase):
                     "fuzz/rust-nightly.txt",
                     "scripts/check_fuzz_target_inventory.py",
                     "scripts/test_check_fuzz_target_inventory.py",
+                    "scripts/fuzz_corpus_cache.py",
+                    "scripts/test_fuzz_corpus_cache.py",
                     "scripts/check_fuzz_toolchain_pin.py",
                     "scripts/test_check_fuzz_toolchain_pin.py",
                 }
@@ -1622,6 +1624,35 @@ class HeavyLabPathClassifierTests(unittest.TestCase):
                 ("fuzz/build-fuzzers.sh", "scripts/build-packages.sh")
             )[0]
         )
+
+    def test_fuzz_corpus_helpers_are_narrow_without_self_whitelisting(self):
+        helpers = (
+            "scripts/fuzz_corpus_cache.py",
+            "scripts/test_fuzz_corpus_cache.py",
+        )
+        for helper in helpers:
+            with self.subTest(helper=helper):
+                self.assertEqual(
+                    heavy.classify_paths((helper,)),
+                    (False, "standalone fuzz only"),
+                )
+                with mock.patch.object(
+                    heavy, "FUZZ_FILES", heavy.FUZZ_FILES - {helper}
+                ):
+                    self.assertEqual(
+                        heavy.classify_paths((helper,)),
+                        (True, "mixed or lab-relevant paths"),
+                    )
+
+        for governance_path in (
+            "scripts/classify_heavy_ci_paths.py",
+            "scripts/test_check_ci_image_primer_contract.py",
+        ):
+            with self.subTest(governance_path=governance_path):
+                self.assertEqual(
+                    heavy.classify_paths((governance_path,)),
+                    (True, "mixed or lab-relevant paths"),
+                )
 
     def test_empty_malformed_and_non_pull_events_run_labs(self):
         self.assertTrue(heavy.classify_paths(())[0])

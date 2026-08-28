@@ -53,6 +53,9 @@ for dir in crates/bfd crates/evpn crates/mrt crates/policy crates/rpki crates/wi
     if [ -f "fuzz/$name.options" ]; then
       cp "fuzz/$name.options" "$OUT/$name.options"
     fi
+    if [ "$dir" = "crates/wire" ] && [ "$name" != "parse_rd" ]; then
+      cp "fuzz/bgp.dict" "$OUT/$name.dict"
+    fi
   done <<<"$inventory"
   popd
 done

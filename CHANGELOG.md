@@ -21,6 +21,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Nightly wire campaigns now seed all 12 targets, apply one reviewed BGP byte
+  dictionary to the 11 binary targets, and carry a validated corpus forward on
+  the `main` lineage. Restore happens in runner-temporary staging and accepts
+  only the exact target layout, per-target input bounds, a matching SHA-256
+  manifest, at most 20,000 files, and at most 16 MiB; a miss or cache-service
+  outage falls back explicitly to tracked seeds, while invalid matched content
+  stops before the campaign. Successful bounded runs seal a fresh bundle for
+  the next nightly run, and hosted builders ship the same dictionary beside
+  each applicable target.
+
 - Route-server clients can configure `discard_path_attributes = [TYPE, ...]`
   on a neighbor or inherited peer group. Surviving decoded attributes are
   removed after RFC 7606 handling and route-safety checks but before import
