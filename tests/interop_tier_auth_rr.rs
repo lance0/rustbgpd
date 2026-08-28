@@ -107,6 +107,10 @@ fn rr_and_route_server_interop_is_tier_authenticated_end_to_end() {
         let materialized = source
             .replace(TOKEN, &token_host.display().to_string())
             .replace("policies/core.rpol", "rustbgpd-m80-policy.rpol")
+            .replace(
+                "/etc/rustbgpd/m81-bmp-policy-rejects.rpol",
+                "m81-bmp-policy-rejects.rpol",
+            )
             .replace("PMACCT_ADDR", "127.0.0.1")
             .replace("GOBMP_ADDR", "127.0.0.1")
             .replace("SINK_ADDR", "127.0.0.1")
