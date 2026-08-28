@@ -63,6 +63,11 @@ missing evidence fails closed. A zero post-actor duration is valid.
 Every setup/query timeout produces the typed `capacity_censored` process
 outcome. The driver catches only its exit status 75, stops all remaining cells,
 and verifies the censor receipt; every other nonzero exit is a hard failure.
+At every retained completion path the driver invokes the verifier with
+`--fail-on-regression`, captures its status with `errexit` disabled, restores
+`errexit`, and rechecks provenance before returning that status. This ensures a
+valid gated classification cannot hide source, toolchain, affinity, or binary
+drift discovered after verification.
 
 Peak delta must cover `actor_capacity * size_of::<VpnRibRoute>() + actor_rows *
 size_of::<MplsLabelEntry>()`; the label term is one-label deep clone and values agree.
@@ -105,9 +110,19 @@ with:
 python3 bench/verify-vpn-query-campaign.py /uncommitted/output-directory
 ```
 
+Direct verification is advisory: every valid classification is emitted and
+exits 0. Add `--fail-on-regression` to emit or write the identical JSON and then
+exit 0 only for `no_redesign`; `capacity_censored`, `inconclusive`,
+`instrumentation_suspect`, `urgent`, and `design_followup` exit 2. Invalid
+evidence remains a diagnostic on stderr with exit 1 and no classification.
+
 ## Load-bearing gates
 
 The tests demonstrate red outcomes for fixed-order mutation, receipt
 count/order/pair drift, a dual-case receipt, timing underflow, binary corruption,
 row/checksum corruption, and removal of the allocator seam. These are executable
-mutation proofs, not prose-only claims.
+mutation proofs, not prose-only claims. They also pin every default and gated
+classification exit, exact threshold and precedence boundaries, JSON identity
+before a gated exit, and the runner's three provenance-checked gate sites. A
+temporary mutated runner with one gate removed proves that structural guard can
+fail without editing the retained runner.

@@ -1,10 +1,13 @@
+import contextlib
 import hashlib
 import importlib.util
+import io
 import json
 import pathlib
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 SCRIPT = pathlib.Path(__file__).parents[1] / "verify-vpn-query-campaign.py"
 SPEC = importlib.util.spec_from_file_location("vpn_verify", SCRIPT)
@@ -104,6 +107,63 @@ class VerifyCampaign(unittest.TestCase):
         result = VERIFY.verify(self.root)
         self.assertEqual(result["classification"], "no_redesign")
 
+    def test_cli_default_and_gated_exit_matrix_preserve_json(self):
+        classifications = (
+            "capacity_censored",
+            "inconclusive",
+            "instrumentation_suspect",
+            "urgent",
+            "design_followup",
+            "no_redesign",
+        )
+        for classification in classifications:
+            with self.subTest(classification=classification):
+                result = {"classification": classification, "sentinel": 7}
+                expected = json.dumps(result, indent=2, sort_keys=True) + "\n"
+                advisory_stdout = io.StringIO()
+                gated_stdout = io.StringIO()
+                with mock.patch.object(VERIFY, "verify", return_value=result):
+                    with contextlib.redirect_stdout(advisory_stdout):
+                        advisory_status = VERIFY.main([str(self.root)])
+                    with contextlib.redirect_stdout(gated_stdout):
+                        gated_status = VERIFY.main([
+                            "--fail-on-regression", str(self.root)
+                        ])
+                self.assertEqual(advisory_status, 0)
+                self.assertEqual(
+                    gated_status, 0 if classification == "no_redesign" else 2
+                )
+                self.assertEqual(advisory_stdout.getvalue(), expected)
+                self.assertEqual(gated_stdout.getvalue(), expected)
+
+    def test_gated_output_is_written_before_exit_two(self):
+        result = {"classification": "urgent", "sentinel": 7}
+        expected = json.dumps(result, indent=2, sort_keys=True) + "\n"
+        output = self.root / "classification.json"
+        with mock.patch.object(VERIFY, "verify", return_value=result):
+            status = VERIFY.main([
+                str(self.root), "--output", str(output), "--fail-on-regression"
+            ])
+        self.assertEqual(status, 2)
+        self.assertEqual(output.read_text(encoding="utf-8"), expected)
+
+    def test_cli_invalid_evidence_exits_one_without_result(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        output = self.root / "classification.json"
+        with mock.patch.object(
+            VERIFY, "verify", side_effect=VERIFY.Invalid("broken fixture")
+        ):
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                status = VERIFY.main([str(self.root), "--output", str(output)])
+        self.assertEqual(status, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(
+            stderr.getvalue(),
+            "invalid VPN query campaign: broken fixture\n",
+        )
+        self.assertFalse(output.exists())
+
     def test_rejects_affinity_allocation_and_lower_bound_drift(self):
         mutations = [
             ("manifest.json", self.mutate_all_affinity),
@@ -199,6 +259,45 @@ class VerifyCampaign(unittest.TestCase):
         allocation["peak_live_requested_bytes"] = VERIFY.CAPACITY + 1
         self.assertEqual(VERIFY.classify({}, timings, allocation)["classification"],
                          "capacity_censored")
+
+    def test_classifier_exact_boundaries_remain_unchanged(self):
+        allocation = {"peak_live_requested_bytes": VERIFY.CAPACITY}
+        timings = {
+            (size, case): [value] * 8
+            for size, unfiltered in zip(VERIFY.SIZES, (5_000_000, 10_000_000, 25_000_000))
+            for case, value in (("U", unfiltered), ("F", unfiltered // 2))
+        }
+        self.assertEqual(
+            VERIFY.classify({}, timings, allocation)["classification"],
+            "no_redesign",
+        )
+        timings[(1_000_000, "U")] = [25_000_001] * 8
+        self.assertEqual(
+            VERIFY.classify({}, timings, allocation)["classification"],
+            "design_followup",
+        )
+
+        timings = {
+            (size, case): [value] * 8
+            for size, unfiltered in zip(
+                VERIFY.SIZES, (50_000_000, 100_000_000, 200_000_000)
+            )
+            for case, value in (("U", unfiltered), ("F", unfiltered // 2))
+        }
+        self.assertEqual(
+            VERIFY.classify({}, timings, allocation)["classification"],
+            "design_followup",
+        )
+        timings[(1_000_000, "U")] = [200_000_001] * 8
+        self.assertEqual(
+            VERIFY.classify({}, timings, allocation)["classification"],
+            "urgent",
+        )
+        allocation["peak_live_requested_bytes"] = VERIFY.CAPACITY + 1
+        self.assertEqual(
+            VERIFY.classify({}, timings, allocation)["classification"],
+            "capacity_censored",
+        )
 
     def test_filtered_actor_must_cost_less_than_unfiltered(self):
         """The pushdown gate: a campaign where filtering saves the actor
