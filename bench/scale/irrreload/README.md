@@ -326,9 +326,13 @@ exit, daemon process-tree RSS > 100 GiB (cell aborted), or cell timeout
 failed or interrupted root is preserved for inspection; reruns always choose a
 fresh directory and never resume, repair, or overwrite prior evidence.
 
-The root `provenance.json` is a compact context record: exact commit and tree,
+The root schema-2 `provenance.json` is a compact context record: exact commit and tree,
 the clean-worktree result, selected workload knobs, container image IDs, and
-plain tool/platform versions. Every cell retains its generator `manifest.json`,
+plain tool/platform versions. Its exact `binaries` map binds the rustbgpd,
+reloadstall, rbgp, and rs-config-render bytes used by the campaign; the runner
+rechecks those bytes before every selected cell and before `COMPLETED`. Older
+schema-1 roots have no binary-byte identity and must be attributed only to the
+originating commit, never treated as evidence for rebuilt binaries. Every cell retains its generator `manifest.json`,
 raw rows, RSS samples, daemon and harness logs, process identity, and semantic
 summaries. The common canonical dataset digest remains explicit at the root.
 

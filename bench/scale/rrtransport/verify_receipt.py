@@ -212,6 +212,9 @@ def verify(directory, tiny=False):
         fail("direct-PID RSS TSV checkpoints disagree")
 
     provenance = load(directory / "provenance.json")
+    binary_sha256 = provenance.get("rrtransport_binary_sha256")
+    if not isinstance(binary_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", binary_sha256):
+        fail("rrtransport binary digest is missing or malformed")
     for key in ("commit", "governors", "load_before", "load_after"):
         if not provenance.get(key):
             fail(f"provenance {key} is missing")

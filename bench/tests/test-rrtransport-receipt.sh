@@ -79,7 +79,7 @@ rows=[f"127.{2+i//254}.{1+i%254}.1\t100000\t100000\t391\t0\t0\t0\t0\t100000\t7c5
 (d/"rss.json").write_text(json.dumps({"schema":2,"checkpoints":checkpoints,"process_tree_sampler_max_rss_kib":125})+"\n")
 (d/"provenance.json").write_text(json.dumps({"commit":"a"*40,"governors":["performance"],"load_before":"0.1",
  "load_after":"0.1","pswpin_before":0,"pswpin_after":0,"pswpout_before":0,"pswpout_after":0,"rustc":"rustc fixture",
- "host":"fixture","competitors":[]})+"\n")
+ "host":"fixture","competitors":[],"rrtransport_binary_sha256":"b"*64})+"\n")
 PY
 
 expect_red() {
@@ -172,6 +172,8 @@ fi
 if "$runner" --classify-rss 2097153 "$tmp/rss-over"; then echo "false green: rss ceiling" >&2; exit 1; fi
 grep -q '"root_failure":"rss_ceiling"' "$tmp/rss-over/failure.json"
 expect_red malformed-commit mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/"provenance.json";d=json.loads(p.read_text());d["commit"]="main";p.write_text(json.dumps(d))'
+expect_red missing-binary-digest mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/"provenance.json";d=json.loads(p.read_text());del d["rrtransport_binary_sha256"];p.write_text(json.dumps(d))'
+expect_red malformed-binary-digest mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/"provenance.json";d=json.loads(p.read_text());d["rrtransport_binary_sha256"]="ABC";p.write_text(json.dumps(d))'
 "$runner" --check-seam "$runner"
 cp "$runner" "$tmp/no-host-lock-call"
 # shellcheck disable=SC2016 # Exact production source text for destructive proof.

@@ -41,6 +41,8 @@ REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
 source "$REPO/tests/soak/host-lock.sh"
 # shellcheck disable=SC1091 # REPO is resolved dynamically above
 source "$REPO/bench/scale/host-quiet.sh"
+# shellcheck disable=SC1091 # REPO is resolved dynamically above
+source "$REPO/bench/scale/provenance.sh"
 RSTALL="$REPO/bench/scale/reloadstall"
 HARNESS="$REPO/bench/scale/target/release/reloadstall"
 GEN="$RSTALL/gen-irr-scenario.py"
@@ -333,6 +335,24 @@ for bin in "$HARNESS" "$RBGP" "$RENDER" "$DAEMON"; do
         exit 1
     }
 done
+declare -A CAMPAIGN_BINARY_HASHES
+for relative in bench/scale/target/release/reloadstall target/release/rbgp \
+    target/release/rs-config-render target/release/rustbgpd; do
+    CAMPAIGN_BINARY_HASHES[$relative]=$(provenance_sha256_file "$REPO/$relative") || exit 1
+done
+recheck_campaign_binaries() {
+    local relative
+    for relative in "${!CAMPAIGN_BINARY_HASHES[@]}"; do
+        provenance_require_sha256 "$REPO/$relative" "${CAMPAIGN_BINARY_HASHES[$relative]}" || {
+            echo "campaign binary changed: $relative" >&2
+            return 1
+        }
+    done
+}
+COMMIT=$(git -C "$REPO" rev-parse HEAD) || exit 1
+COMMIT_TREE=$(git -C "$REPO" rev-parse 'HEAD^{tree}') || exit 1
+DIRTY=false
+[ -z "$(git -C "$REPO" status --porcelain=v1)" ] || DIRTY=true
 mkdir "$ART" || exit 1
 
 BIRD_IMAGE="bird:3.3.1"
@@ -352,11 +372,7 @@ BIRD_IMAGE_ID=$(image_id_for_cells bird "$BIRD_IMAGE") || exit 1
 OPENBGPD_IMAGE_ID=$(image_id_for_cells openbgpd "$OPENBGPD_IMAGE") || exit 1
 DOCKER_VERSION=$(docker --version)
 
-COMMIT=$(git -C "$REPO" rev-parse HEAD) || exit 1
-COMMIT_TREE=$(git -C "$REPO" rev-parse 'HEAD^{tree}') || exit 1
 CAMPAIGN_STARTED_EPOCH_NS=$(date +%s%N)
-DIRTY=false
-[ -z "$(git -C "$REPO" status --porcelain=v1)" ] || DIRTY=true
 CAMPAIGN_PROVENANCE=$(jq -cn \
     --arg commit "$COMMIT" --arg tree "$COMMIT_TREE" --argjson dirty "$DIRTY" \
     --argjson started_at_epoch_ns "$CAMPAIGN_STARTED_EPOCH_NS" \
@@ -378,7 +394,11 @@ CAMPAIGN_PROVENANCE=$(jq -cn \
     --arg cpu_model "$(awk -F: '/^model name/ { sub(/^[[:space:]]+/, "", $2); print $2; exit }' /proc/cpuinfo)" \
     --arg bird_image "$BIRD_IMAGE" --arg bird_image_id "$BIRD_IMAGE_ID" \
     --arg openbgpd_image "$OPENBGPD_IMAGE" --arg openbgpd_image_id "$OPENBGPD_IMAGE_ID" \
-    '{schema:1,started_at_epoch_ns:$started_at_epoch_ns,git:{commit:$commit,tree:$tree,dirty:$dirty},environment:{rustc:$rustc,cargo:$cargo,python:$python,jq:$jq,docker:$docker,kernel:$kernel,cpu_model:$cpu_model},inputs:{campaign_kind:$campaign_kind,cells:$cells,smoke:$smoke,n_members:$n_members,total_prefixes:$total_prefixes,min_list:$min_list,max_list:$max_list,seed:$seed,changed_fraction:$changed_fraction,overlap_fraction:$overlap_fraction,port:$port,reloads:$reloads,control_secs:$control_secs,txn_max_candidate_bytes:$txn_max_candidate_bytes,cell_timeout:$cell_timeout,start_timeout:$start_timeout,bird_threads:$bird_threads,skip_preflight:$skip_preflight,bird_image:$bird_image,bird_image_id:$bird_image_id,openbgpd_image:$openbgpd_image,openbgpd_image_id:$openbgpd_image_id}}') || exit 1
+    --arg reloadstall_sha "${CAMPAIGN_BINARY_HASHES[bench/scale/target/release/reloadstall]}" \
+    --arg rbgp_sha "${CAMPAIGN_BINARY_HASHES[target/release/rbgp]}" \
+    --arg render_sha "${CAMPAIGN_BINARY_HASHES[target/release/rs-config-render]}" \
+    --arg rustbgpd_sha "${CAMPAIGN_BINARY_HASHES[target/release/rustbgpd]}" \
+    '{schema:2,started_at_epoch_ns:$started_at_epoch_ns,git:{commit:$commit,tree:$tree,dirty:$dirty},environment:{rustc:$rustc,cargo:$cargo,python:$python,jq:$jq,docker:$docker,kernel:$kernel,cpu_model:$cpu_model},binaries:{"bench/scale/target/release/reloadstall":$reloadstall_sha,"target/release/rbgp":$rbgp_sha,"target/release/rs-config-render":$render_sha,"target/release/rustbgpd":$rustbgpd_sha},inputs:{campaign_kind:$campaign_kind,cells:$cells,smoke:$smoke,n_members:$n_members,total_prefixes:$total_prefixes,min_list:$min_list,max_list:$max_list,seed:$seed,changed_fraction:$changed_fraction,overlap_fraction:$overlap_fraction,port:$port,reloads:$reloads,control_secs:$control_secs,txn_max_candidate_bytes:$txn_max_candidate_bytes,cell_timeout:$cell_timeout,start_timeout:$start_timeout,bird_threads:$bird_threads,skip_preflight:$skip_preflight,bird_image:$bird_image,bird_image_id:$bird_image_id,openbgpd_image:$openbgpd_image,openbgpd_image_id:$openbgpd_image_id}}') || exit 1
 printf '%s\n' "$CAMPAIGN_PROVENANCE" | jq -cS . >"$ART/provenance.json" || exit 1
 if [ -n "$PREFLIGHT_LOG" ]; then
     mv "$PREFLIGHT_LOG" "$ART/preflight.log" || exit 1
@@ -615,6 +635,7 @@ run_cell() {
         gen_scenario rustbgpd "$run" --render-bin "$RENDER" \
             --path-hiding true --admit-churn true || return 1
         record_dataset "$run" || return 1
+        recheck_campaign_binaries || return 1
         setsid "$DAEMON" "$run/config.toml" >"$cdir/daemon.log" 2>&1 &
         daemon_pid=$!
         ACTIVE_DAEMON_PID=$daemon_pid
@@ -631,6 +652,7 @@ run_cell() {
         gen_scenario "$generator_cell" "$run" --render-bin "$RENDER" \
             --path-hiding false --admit-churn true || return 1
         record_dataset "$run" || return 1
+        recheck_campaign_binaries || return 1
         setsid "$DAEMON" "$run/config.toml" >"$cdir/daemon.log" 2>&1 &
         daemon_pid=$!
         ACTIVE_DAEMON_PID=$daemon_pid
@@ -659,6 +681,7 @@ run_cell() {
             fi
         done
         record_dataset "$run" || return 1
+        recheck_campaign_binaries || return 1
         setsid "$DAEMON" "$run/config.toml" >"$cdir/daemon.log" 2>&1 &
         daemon_pid=$!
         ACTIVE_DAEMON_PID=$daemon_pid
@@ -681,6 +704,7 @@ run_cell() {
         gen_scenario bird "$run" --threads "$BIRD_THREADS" \
             --path-hiding true --admit-churn true || return 1
         record_dataset "$run" || return 1
+        recheck_campaign_binaries || return 1
         container="irr-bird"
         docker rm -f "$container" >/dev/null 2>&1
         docker run -d --name "$container" --network=host -v "$run":/etc/bird \
@@ -692,6 +716,7 @@ run_cell() {
     openbgpd)
         gen_scenario openbgpd "$run" --path-hiding true --admit-churn true || return 1
         record_dataset "$run" || return 1
+        recheck_campaign_binaries || return 1
         container="irr-obgpd"
         docker rm -f "$container" >/dev/null 2>&1
         docker run -d --name "$container" --network=host -v "$run":/etc/bgpd \
@@ -886,7 +911,9 @@ run_cell() {
 overall=0
 for cell in "${CELLS[@]}"; do
     status_file="$ART/$cell/status"
+    recheck_campaign_binaries || exit 1
     load_gate "$cell" || exit $?
+    recheck_campaign_binaries || exit 1
     echo "=== cell $cell start $(date -Is) ==="
     if run_cell "$cell"; then
         printf 'pass\n' >"$status_file"
@@ -914,6 +941,7 @@ for cell in "${CELLS[@]}"; do
 done
 echo "measurement rows: $ART/rows.csv"
 if [ "$overall" -eq 0 ]; then
+    recheck_campaign_binaries || exit 1
     jq -n --argjson completed_at_epoch_ns "$(date +%s%N)" \
         --arg cells "$(IFS=,; echo "${CELLS[*]}")" \
         '{status:"pass",completed_at_epoch_ns:$completed_at_epoch_ns,cells:$cells}' \
