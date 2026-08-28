@@ -176,6 +176,90 @@ fn clean_state_test_manager(
     (manager, rib_rx, peer, queries)
 }
 
+#[derive(Default)]
+struct SharedCleanStateProbe {
+    queries: AtomicUsize,
+    import_installs: AtomicUsize,
+    export_installs: AtomicUsize,
+    refreshes: AtomicUsize,
+    retry_started: Mutex<Option<tokio::time::Instant>>,
+    rollback_query_started: Mutex<Option<tokio::time::Instant>>,
+}
+
+fn shared_clean_state_test_session(
+    addr: IpAddr,
+    retry_delay: Option<Duration>,
+    probe: Arc<SharedCleanStateProbe>,
+) -> PeerHandle {
+    use rustbgpd_transport::PeerCommand;
+
+    let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(16);
+    let task = tokio::spawn(async move {
+        while let Some(command) = session_rx.recv().await {
+            match command {
+                PeerCommand::UpdateImportPolicy { reply, .. } => {
+                    probe.import_installs.fetch_add(1, Ordering::SeqCst);
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::UpdateExportPolicy { reply, .. } => {
+                    probe.export_installs.fetch_add(1, Ordering::SeqCst);
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::SendRouteRefresh { reply, .. } => {
+                    probe.refreshes.fetch_add(1, Ordering::SeqCst);
+                    let _ = reply.send(Ok(()));
+                }
+                PeerCommand::QueryState { reply } => {
+                    let query = probe.queries.fetch_add(1, Ordering::SeqCst) + 1;
+                    match query {
+                        // Cohort admission sees every member Established.
+                        1 => {
+                            let _ =
+                                reply.send(policy_test_peer_state(addr, SessionState::Established));
+                        }
+                        // The deferred-refresh probe misses its ordinary
+                        // per-peer deadline and enters the shared retry window.
+                        2 => {
+                            tokio::spawn(async move {
+                                tokio::time::sleep(PEER_QUERY_TIMEOUT * 2).await;
+                                let _ = reply
+                                    .send(policy_test_peer_state(addr, SessionState::Established));
+                            });
+                        }
+                        // Healthy earlier peers consume part of the shared
+                        // window before replying. The final peer withholds its
+                        // retry past the shared deadline.
+                        3 => {
+                            *probe.retry_started.lock().unwrap() =
+                                Some(tokio::time::Instant::now());
+                            tokio::spawn(async move {
+                                tokio::time::sleep(
+                                    retry_delay.unwrap_or(CLEAN_STATE_QUERY_WINDOW * 2),
+                                )
+                                .await;
+                                let _ = reply
+                                    .send(policy_test_peer_state(addr, SessionState::Established));
+                            });
+                        }
+                        // Compensation rechecks each restored session through
+                        // the ordinary typed state-query path.
+                        _ => {
+                            *probe.rollback_query_started.lock().unwrap() =
+                                Some(tokio::time::Instant::now());
+                            let _ =
+                                reply.send(policy_test_peer_state(addr, SessionState::Established));
+                        }
+                    }
+                }
+                PeerCommand::Shutdown => break,
+                _ => {}
+            }
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(session_tx, task)
+}
+
 fn one_export_target(peer: IpAddr) -> Vec<rustbgpd_api::peer_types::ResolvedPeerPolicy> {
     vec![rustbgpd_api::peer_types::ResolvedPeerPolicy {
         address: peer,
@@ -286,6 +370,158 @@ async fn clean_state_retry_exhaustion_compensates_with_closed_code() {
         RuntimeConfigPolicyFailureCode::StateRetryExhausted
     );
     assert_eq!(queries.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test(start_paused = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the regression keeps shared-window timing, typed failure, and exact three-peer compensation in one scenario"
+)]
+async fn clean_state_cohort_shares_retry_window_and_compensates_on_late_exhaustion() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let peers = [
+        IpAddr::V4(Ipv4Addr::new(10, 43, 1, 1)),
+        IpAddr::V4(Ipv4Addr::new(10, 43, 1, 2)),
+        IpAddr::V4(Ipv4Addr::new(10, 43, 1, 3)),
+    ];
+    let probes = [
+        Arc::new(SharedCleanStateProbe::default()),
+        Arc::new(SharedCleanStateProbe::default()),
+        Arc::new(SharedCleanStateProbe::default()),
+    ];
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let (_command_tx, command_rx) = mpsc::channel(16);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    for (index, peer) in peers.iter().enumerate() {
+        let retry_delay = (index < 2).then_some(Duration::from_millis(650));
+        insert_test_managed_peer(
+            &mut manager,
+            *peer,
+            shared_clean_state_test_session(*peer, retry_delay, Arc::clone(&probes[index])),
+            false,
+        );
+    }
+
+    let changed_import = validation_policy_chain(ImportValidationDependency::Rpki);
+    let changed_export = deny_policy_chain();
+    let targets = peers
+        .iter()
+        .map(|&address| ResolvedPeerPolicy {
+            address,
+            interface: None,
+            import_policy: Some(changed_import.clone()),
+            export_policy: Some(changed_export.clone()),
+        })
+        .collect::<Vec<_>>();
+    let apply = manager.apply_resolved_policy_snapshot_classified(targets, true);
+    let drive_rib = async {
+        skip_destination_prestage(&mut rib_rx).await;
+        let RibUpdate::ReplacePeerExportPolicies {
+            replacements,
+            reply,
+        } = rib_rx.recv().await.unwrap()
+        else {
+            panic!("expected the three-peer cohort RIB transition");
+        };
+        assert_eq!(
+            replacements
+                .iter()
+                .map(|replacement| replacement.peer)
+                .collect::<Vec<_>>(),
+            peers
+        );
+        reply
+            .send(Ok(rustbgpd_rib::ExportPolicyCohortOutcome::Committed))
+            .unwrap();
+
+        let RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+            replacements,
+            reply,
+        } = rib_rx.recv().await.unwrap()
+        else {
+            panic!("expected exact cohort compensation after retry exhaustion");
+        };
+        assert_eq!(
+            replacements
+                .iter()
+                .map(|replacement| replacement.peer)
+                .collect::<Vec<_>>(),
+            peers
+        );
+        reply
+            .send(Ok(replacements
+                .into_iter()
+                .rev()
+                .map(
+                    |replacement| rustbgpd_rib::PeerExportPolicyRestoreReceipt::Restored {
+                        peer: replacement.peer,
+                    },
+                )
+                .collect()))
+            .unwrap();
+    };
+    let (result, ()) = tokio::join!(apply, drive_rib);
+
+    let failure = result.expect_err("the third peer must exhaust the shared retry window");
+    assert_eq!(
+        failure.code,
+        RuntimeConfigPolicyFailureCode::StateRetryExhausted
+    );
+    let first_retry_started = probes[0].retry_started.lock().unwrap().unwrap();
+    let third_retry_started = probes[2].retry_started.lock().unwrap().unwrap();
+    let third_rollback_query = probes[2].rollback_query_started.lock().unwrap().unwrap();
+    let first_retry_budget = CLEAN_STATE_QUERY_WINDOW;
+    let third_retry_budget = third_rollback_query.duration_since(third_retry_started);
+    assert!(
+        third_retry_started > first_retry_started,
+        "later cohort members must enter the already-running shared window"
+    );
+    assert!(
+        third_retry_budget < first_retry_budget,
+        "peer 3 must inherit less retry time ({third_retry_budget:?}) than peer 1 ({first_retry_budget:?})"
+    );
+
+    for (index, peer) in peers.iter().enumerate() {
+        let installed = manager.peers.get(&key(*peer)).unwrap();
+        assert_eq!(
+            installed.import_policy,
+            None,
+            "peer {} import restored",
+            index + 1
+        );
+        assert_eq!(
+            installed.export_policy,
+            None,
+            "peer {} export restored",
+            index + 1
+        );
+        assert!(
+            !installed.pending_refresh,
+            "peer {} refresh debt",
+            index + 1
+        );
+        assert!(
+            !installed.pending_export_apply,
+            "peer {} export debt",
+            index + 1
+        );
+        assert_eq!(probes[index].queries.load(Ordering::SeqCst), 4);
+        assert_eq!(probes[index].import_installs.load(Ordering::SeqCst), 2);
+        assert_eq!(probes[index].export_installs.load(Ordering::SeqCst), 2);
+    }
+    assert_eq!(probes[0].refreshes.load(Ordering::SeqCst), 2);
+    assert_eq!(probes[1].refreshes.load(Ordering::SeqCst), 2);
+    assert_eq!(probes[2].refreshes.load(Ordering::SeqCst), 1);
 }
 
 /// LAN-462: a reload that moves import AND export chains must still engage the
