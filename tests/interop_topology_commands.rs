@@ -132,8 +132,8 @@ fn m83_capture_and_reload_receipts_cannot_become_no_ops() {
     for required in [
         "/proc/[0-9]*/comm",
         "kill -INT \"$capture_pid\"",
-        "test -s /tmp/m83.pcap",
-        "tshark -r /tmp/m83.pcap -c 1",
+        "test -s \"$M83_CAPTURE_PATH\"",
+        "tshark -r \"$M83_CAPTURE_PATH\" -c 1",
     ] {
         assert!(
             source.contains(required),
