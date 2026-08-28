@@ -621,7 +621,7 @@ async fn dataset_refresh_stamps_swapped_and_freezes_failed() {
     const FAILURES: &str = "bgp_policy_dataset_refresh_errors_total";
     let (_tx, rx) = mpsc::channel(16);
     let (rib_tx, _rib_rx) = mpsc::channel(64);
-    let mgr = PeerManager::new(
+    let mut mgr = PeerManager::new(
         rx,
         65001,
         Ipv4Addr::new(10, 0, 0, 1),
@@ -650,6 +650,52 @@ async fn dataset_refresh_stamps_swapped_and_freezes_failed() {
         policy_metric_value(&mgr.metrics, FAILURES, Some("bogons")),
         Some(1)
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn dataset_state_timeout_arms_import_and_export_replay() {
+    use rustbgpd_policy::datasets::{DatasetBindings, DatasetData, DatasetHandle, DatasetKind};
+    use rustbgpd_policy::rpol::RpolFile;
+    use rustbgpd_policy::sets::{AsnSet, SetStore};
+
+    let mut bindings = DatasetBindings::new();
+    bindings.insert(Arc::new(DatasetHandle::new(
+        "customers",
+        DatasetKind::Asn,
+        DatasetData::Asn(AsnSet::new([64500])),
+    )));
+    let compiled = RpolFile::parse(
+        "dataset asn-set customers\npolicy p { term t { if route.origin-as in customers { accept } } }",
+    )
+    .expect("dataset policy parses")
+    .compile_policy_bound("p", &[], &mut SetStore::new(), &bindings)
+    .expect("policy compiles")
+    .expect("dataset binding is complete");
+    let chain = PolicyChain::from_named(vec![rustbgpd_policy::NamedPolicy::from_rpol(
+        "p".to_string(),
+        Arc::new(compiled),
+    )]);
+
+    let mut mgr = test_peer_manager();
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 17));
+    let handle = stalled_shutdown_peer_handle(Arc::new(AtomicU32::new(0))).await;
+    insert_test_managed_peer(&mut mgr, peer, handle, false);
+    let managed = mgr.peers.get_mut(&key(peer)).unwrap();
+    managed.import_policy = Some(chain.clone());
+    managed.export_policy = Some(chain);
+
+    let swapped = ["customers".to_string()];
+    let refresh = mgr.refresh_dataset_dependents(&swapped, &[]);
+    let advance = async {
+        tokio::time::advance(PEER_QUERY_TIMEOUT + Duration::from_millis(1)).await;
+    };
+    let (result, ()) = tokio::join!(refresh, advance);
+
+    let error = result.expect_err("an unknown session state must fail dataset refresh");
+    assert!(error.contains("state query timed out"), "{error}");
+    let managed = &mgr.peers[&key(peer)];
+    assert!(managed.pending_refresh);
+    assert!(managed.pending_export_apply);
 }
 
 /// ADR-0110 reap discipline: a dataset removed from config on a
@@ -1476,6 +1522,28 @@ async fn validation_cache_refresh_times_out_unresponsive_route_refresh() {
     assert_eq!(counters.route_refresh.load(Ordering::SeqCst), 1);
     assert_validation_import_refresh_metric(&mgr, "rpki", "eligible", 1.0);
     assert_validation_import_refresh_metric(&mgr, "rpki", "refreshed", 0.0);
+    assert_validation_import_refresh_metric(&mgr, "rpki", "failed", 1.0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn validation_cache_state_timeout_fails_and_arms_pending_refresh() {
+    let mut mgr = test_peer_manager();
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 16));
+    let handle = stalled_shutdown_peer_handle(Arc::new(AtomicU32::new(0))).await;
+    insert_test_managed_peer(&mut mgr, peer, handle, false);
+    mgr.peers.get_mut(&key(peer)).unwrap().import_policy =
+        Some(validation_policy_chain(ImportValidationDependency::Rpki));
+
+    let refresh = mgr.soft_reset_import_validation_dependents(ImportValidationDependency::Rpki);
+    let advance = async {
+        tokio::time::advance(PEER_QUERY_TIMEOUT + Duration::from_millis(1)).await;
+    };
+    let (result, ()) = tokio::join!(refresh, advance);
+
+    let error = result.expect_err("an unknown session state must fail the refresh");
+    assert!(error.contains("state query timed out"), "{error}");
+    assert!(mgr.peers[&key(peer)].pending_refresh);
+    assert_validation_import_refresh_metric(&mgr, "rpki", "skipped_state_unknown", 1.0);
     assert_validation_import_refresh_metric(&mgr, "rpki", "failed", 1.0);
 }
 

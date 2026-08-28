@@ -189,12 +189,26 @@ pub(super) struct PolicySnapshotFailure {
 }
 
 impl PolicySnapshotFailure {
+    #[cfg(test)]
+    pub(super) fn message(&self) -> &str {
+        &self.message
+    }
+
     fn rejected(error: &CatalogMutationError) -> Self {
         Self {
             kind: PolicySnapshotFailureKind::RejectedNoEffect,
             rejection_class: PolicySnapshotRejectionClass::from_error(error),
             code: RuntimeConfigPolicyFailureCode::PreflightRejected,
             message: error.to_string(),
+        }
+    }
+
+    fn rejected_code(code: RuntimeConfigPolicyFailureCode, message: impl Into<String>) -> Self {
+        Self {
+            kind: PolicySnapshotFailureKind::RejectedNoEffect,
+            rejection_class: PolicySnapshotRejectionClass::FailedPrecondition,
+            code,
+            message: message.into(),
         }
     }
 
@@ -310,6 +324,7 @@ fn record_import_validation_refresh_metrics(
     eligible: usize,
     refreshed: usize,
     skipped_not_established: usize,
+    skipped_state_unknown: usize,
     failed: usize,
 ) {
     let dependency_label = import_validation_dependency_label(dependency);
@@ -323,6 +338,11 @@ fn record_import_validation_refresh_metrics(
         dependency_label,
         "skipped_not_established",
         metric_count(skipped_not_established),
+    );
+    metrics.record_validation_import_refresh(
+        dependency_label,
+        "skipped_state_unknown",
+        metric_count(skipped_state_unknown),
     );
     metrics.record_validation_import_refresh(dependency_label, "failed", metric_count(failed));
 }
@@ -384,26 +404,43 @@ impl PeerManager {
     async fn qualify_rfc8212_import_transition(
         &mut self,
         peer_key: &PeerKey,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, PolicyApplyFailure> {
         let Some(managed) = self.peers.get(peer_key) else {
             return Ok(false);
         };
         let commands = managed.handle.commands_sender();
         let state = self
-            .await_with_readiness(rustbgpd_transport::PeerHandle::query_state_with(
+            .await_with_readiness(rustbgpd_transport::PeerHandle::query_state_outcome_with(
                 commands,
                 PEER_QUERY_TIMEOUT,
             ))
             .await;
         self.drain_readiness_queries().await;
 
-        let Some(state) = state else {
-            return Err(format!(
-                "{peer_key}: cannot apply an RFC 8212 import policy-presence change — the \
-                 session did not report its state within {PEER_QUERY_TIMEOUT:?}, so neither \
-                 its Route Refresh capability nor its retained routes can be confirmed; \
-                 retry the edit"
-            ));
+        let state = match state {
+            StateQueryOutcome::State(state) => state,
+            StateQueryOutcome::TimedOut => {
+                return Err(PolicyApplyFailure {
+                    code: RuntimeConfigPolicyFailureCode::StateRetryExhausted,
+                    message: format!(
+                        "{peer_key}: session state query timed out after {PEER_QUERY_TIMEOUT:?}"
+                    ),
+                    refresh_delivery_began: false,
+                });
+            }
+            StateQueryOutcome::SessionGone => {
+                let retained = self.query_peer_retained_stale(peer_key.address).await?;
+                if retained == 0 {
+                    return Ok(false);
+                }
+                return Err(PolicyApplyFailure {
+                    code: RuntimeConfigPolicyFailureCode::StateSessionGone,
+                    message: format!(
+                        "{peer_key}: session is gone while the RIB retains {retained} stale route(s)"
+                    ),
+                    refresh_delivery_began: false,
+                });
+            }
         };
         if state.fsm_state == SessionState::Established {
             if state
@@ -412,23 +449,31 @@ impl PeerManager {
             {
                 return Ok(true);
             }
-            return Err(format!(
-                "{peer_key}: cannot apply an RFC 8212 import policy-presence change — the \
+            return Err(PolicyApplyFailure {
+                code: RuntimeConfigPolicyFailureCode::PreflightRejected,
+                message: format!(
+                    "{peer_key}: cannot apply an RFC 8212 import policy-presence change — the \
                  Established session did not negotiate Route Refresh (RFC 2918), so already \
                  accepted routes cannot be re-evaluated against the new verdict; clear the \
                  session (rbgp neighbor clear) or let it reconnect, then reapply"
-            ));
+                ),
+                refresh_delivery_began: false,
+            });
         }
 
         let retained = self.query_peer_retained_stale(peer_key.address).await?;
         if retained > 0 {
-            return Err(format!(
-                "{peer_key}: cannot apply an RFC 8212 import policy-presence change — the \
+            return Err(PolicyApplyFailure {
+                code: RuntimeConfigPolicyFailureCode::StateNonEstablished,
+                message: format!(
+                    "{peer_key}: cannot apply an RFC 8212 import policy-presence change — the \
                  session is {:?} and the RIB still retains {retained} graceful-restart or \
                  long-lived-graceful-restart stale route(s) accepted under the current \
                  verdict; retry once retention expires, or purge them by clearing the peer",
-                state.fsm_state
-            ));
+                    state.fsm_state
+                ),
+                refresh_delivery_began: false,
+            });
         }
         Ok(false)
     }
@@ -436,7 +481,10 @@ impl PeerManager {
     /// One read-only RIB round trip for [`Self::qualify_rfc8212_import_transition`],
     /// bounded by the same reply deadline the export replacement uses and
     /// servicing the dedicated readiness lane throughout.
-    async fn query_peer_retained_stale(&mut self, peer: IpAddr) -> Result<usize, String> {
+    async fn query_peer_retained_stale(
+        &mut self,
+        peer: IpAddr,
+    ) -> Result<usize, PolicyApplyFailure> {
         let (reply_tx, reply_rx) = oneshot::channel();
         let rib_tx = self.rib_tx.clone();
         if self
@@ -447,10 +495,14 @@ impl PeerManager {
             .await
             .is_err()
         {
-            return Err(format!(
-                "{peer}: cannot apply an RFC 8212 import policy-presence change — the RIB \
+            return Err(PolicyApplyFailure {
+                code: RuntimeConfigPolicyFailureCode::StateRibQueryFailed,
+                message: format!(
+                    "{peer}: cannot apply an RFC 8212 import policy-presence change — the RIB \
                  manager is unavailable, so its retained stale routes cannot be confirmed"
-            ));
+                ),
+                refresh_delivery_began: false,
+            });
         }
         match tokio::time::timeout(
             super::RIB_REPLY_TIMEOUT,
@@ -458,15 +510,23 @@ impl PeerManager {
         )
         .await
         {
-            Err(_) => Err(format!(
-                "{peer}: cannot apply an RFC 8212 import policy-presence change — the RIB \
+            Err(_) => Err(PolicyApplyFailure {
+                code: RuntimeConfigPolicyFailureCode::StateRibQueryFailed,
+                message: format!(
+                    "{peer}: cannot apply an RFC 8212 import policy-presence change — the RIB \
                  manager did not report retained stale routes within {:?}",
-                super::RIB_REPLY_TIMEOUT
-            )),
-            Ok(Err(_)) => Err(format!(
-                "{peer}: cannot apply an RFC 8212 import policy-presence change — the RIB \
+                    super::RIB_REPLY_TIMEOUT
+                ),
+                refresh_delivery_began: false,
+            }),
+            Ok(Err(_)) => Err(PolicyApplyFailure {
+                code: RuntimeConfigPolicyFailureCode::StateRibQueryFailed,
+                message: format!(
+                    "{peer}: cannot apply an RFC 8212 import policy-presence change — the RIB \
                  manager dropped the retained-stale reply"
-            )),
+                ),
+                refresh_delivery_began: false,
+            }),
             Ok(Ok(retained)) => Ok(retained),
         }
     }
@@ -482,7 +542,7 @@ impl PeerManager {
     async fn preflight_rfc8212_import_transitions(
         &mut self,
         targets: &[ResolvedPeerPolicy],
-    ) -> Result<(), String> {
+    ) -> Result<(), PolicyApplyFailure> {
         let transitioning: Vec<PeerKey> = targets
             .iter()
             .map(|target| PeerKey::new(target.address, target.interface.clone()))
@@ -509,13 +569,32 @@ impl PeerManager {
             );
             return Ok(());
         }
-        Err(format!(
-            "rejected {} of {} RFC 8212 import policy-presence transition(s); no peer was \
+        let first_code = rejections[0].code;
+        let code = if rejections
+            .iter()
+            .all(|rejection| rejection.code == first_code)
+        {
+            first_code
+        } else {
+            RuntimeConfigPolicyFailureCode::PreflightRejected
+        };
+        Err(PolicyApplyFailure {
+            code,
+            message: format!(
+                "rejected {} of {} RFC 8212 import policy-presence transition(s); no peer was \
              modified: {}",
-            rejections.len(),
-            transitioning.len(),
-            rejections.join("; ")
-        ))
+                rejections.len(),
+                transitioning.len(),
+                rejections
+                    .iter()
+                    .map(|rejection| {
+                        format!("{}: {}", rejection.code.as_str(), rejection.message)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+            refresh_delivery_began: false,
+        })
     }
 
     pub(super) fn peer_group_policy_only_update(
@@ -672,9 +751,8 @@ impl PeerManager {
         let preflight_started = Instant::now();
         let preflight = self.preflight_rfc8212_import_transitions(&targets).await;
         phases.preflight_us = elapsed_us(preflight_started);
-        preflight.map_err(|error| {
-            PolicySnapshotFailure::rejected(&CatalogMutationError::failed_precondition(error))
-        })?;
+        preflight
+            .map_err(|error| PolicySnapshotFailure::rejected_code(error.code, error.message))?;
         let mut rollback_rib_budget = PolicyRollbackRibBudget::default();
         let total_targets = targets.len();
         let cohort_selection_started = Instant::now();
@@ -947,6 +1025,9 @@ impl PeerManager {
             .expect("winning cohort representative remains locally eligible");
         let winning_installed = winning_installed.clone();
         let winning_target = winning_target.clone();
+        let mut excluded_non_established = 0usize;
+        let mut excluded_session_gone = 0usize;
+        let mut excluded_state_timeout = 0usize;
 
         for (index, target) in targets.iter().enumerate() {
             let peer_key = PeerKey::new(target.address, target.interface.clone());
@@ -963,19 +1044,35 @@ impl PeerManager {
                 .handle
                 .commands_sender();
 
-            let established = self
-                .await_with_readiness(rustbgpd_transport::PeerHandle::query_state_with(
+            let outcome = self
+                .await_with_readiness(rustbgpd_transport::PeerHandle::query_state_outcome_with(
                     commands,
                     PEER_QUERY_TIMEOUT,
                 ))
-                .await
-                .is_some_and(|state| state.fsm_state == SessionState::Established);
+                .await;
             self.drain_readiness_queries().await;
-            if !established {
-                continue;
+            match outcome {
+                StateQueryOutcome::State(state) if state.fsm_state == SessionState::Established => {
+                    selected[index] = true;
+                }
+                StateQueryOutcome::State(_) => {
+                    excluded_non_established += 1;
+                }
+                StateQueryOutcome::SessionGone => {
+                    excluded_session_gone += 1;
+                }
+                StateQueryOutcome::TimedOut => {
+                    excluded_state_timeout += 1;
+                }
             }
-            selected[index] = true;
         }
+
+        info!(
+            excluded_non_established,
+            excluded_session_gone,
+            excluded_state_timeout,
+            "classified export policy cohort state exclusions"
+        );
 
         selected
     }
@@ -2263,8 +2360,12 @@ impl PeerManager {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the dependency-scoped refresh keeps candidate selection, typed state outcomes, delivery, and bounded metrics in one linear pass"
+    )]
     pub(super) async fn soft_reset_import_validation_dependents(
-        &self,
+        &mut self,
         dependency: ImportValidationDependency,
     ) -> Result<(), String> {
         let candidates: Vec<PeerKey> = self
@@ -2285,19 +2386,41 @@ impl PeerManager {
 
         let mut refreshed = 0usize;
         let mut skipped_not_established = 0usize;
+        let mut skipped_state_unknown = 0usize;
         let mut failures = Vec::new();
 
         for peer_key in &candidates {
-            let Some(managed) = self.peers.get(peer_key) else {
+            let Some(commands) = self
+                .peers
+                .get(peer_key)
+                .map(|managed| managed.handle.commands_sender())
+            else {
                 continue;
             };
-            let state = managed.handle.query_state_timeout(PEER_QUERY_TIMEOUT).await;
-            if !state
-                .as_ref()
-                .is_some_and(|s| s.fsm_state == SessionState::Established)
-            {
-                skipped_not_established += 1;
-                continue;
+            let state = self
+                .await_with_readiness(rustbgpd_transport::PeerHandle::query_state_outcome_with(
+                    commands,
+                    PEER_QUERY_TIMEOUT,
+                ))
+                .await;
+            self.drain_readiness_queries().await;
+            match state {
+                StateQueryOutcome::State(state) if state.fsm_state == SessionState::Established => {
+                }
+                StateQueryOutcome::State(_) | StateQueryOutcome::SessionGone => {
+                    skipped_not_established += 1;
+                    continue;
+                }
+                StateQueryOutcome::TimedOut => {
+                    skipped_state_unknown += 1;
+                    if let Some(managed) = self.peers.get_mut(peer_key) {
+                        managed.pending_refresh = true;
+                    }
+                    failures.push(format!(
+                        "{peer_key}: state query timed out after {PEER_QUERY_TIMEOUT:?}"
+                    ));
+                    continue;
+                }
             }
 
             let refresh_result = tokio::time::timeout(
@@ -2336,6 +2459,7 @@ impl PeerManager {
             candidates.len(),
             refreshed,
             skipped_not_established,
+            skipped_state_unknown,
             failures.len(),
         );
 
@@ -2344,6 +2468,7 @@ impl PeerManager {
             eligible = candidates.len(),
             refreshed,
             skipped_not_established,
+            skipped_state_unknown,
             failures = failures.len(),
             "processed validation-cache import-policy refresh"
         );
@@ -2377,7 +2502,7 @@ impl PeerManager {
         reason = "one linear pass: failure metrics, candidate scoping, then the import/export refresh legs"
     )]
     pub(super) async fn refresh_dataset_dependents(
-        &self,
+        &mut self,
         swapped: &[String],
         failed: &[(String, String)],
     ) -> Result<(), String> {
@@ -2416,19 +2541,46 @@ impl PeerManager {
         let mut failures = Vec::new();
         let mut refreshed = 0usize;
         let mut skipped_not_established = 0usize;
+        let mut skipped_state_unknown = 0usize;
         for (peer_key, import, export) in &candidates {
-            let Some(managed) = self.peers.get(peer_key) else {
+            let Some(commands) = self
+                .peers
+                .get(peer_key)
+                .map(|managed| managed.handle.commands_sender())
+            else {
                 continue;
             };
-            let state = managed.handle.query_state_timeout(PEER_QUERY_TIMEOUT).await;
-            if !state
-                .as_ref()
-                .is_some_and(|s| s.fsm_state == SessionState::Established)
-            {
-                // Nothing in AdjRibIn/Out yet; the session evaluates
-                // against the current generation when it comes up.
-                skipped_not_established += 1;
-                continue;
+            let state = self
+                .await_with_readiness(rustbgpd_transport::PeerHandle::query_state_outcome_with(
+                    commands,
+                    PEER_QUERY_TIMEOUT,
+                ))
+                .await;
+            self.drain_readiness_queries().await;
+            match state {
+                StateQueryOutcome::State(state) if state.fsm_state == SessionState::Established => {
+                }
+                StateQueryOutcome::State(_) | StateQueryOutcome::SessionGone => {
+                    // Nothing in AdjRibIn/Out yet; the session evaluates
+                    // against the current generation when it comes up.
+                    skipped_not_established += 1;
+                    continue;
+                }
+                StateQueryOutcome::TimedOut => {
+                    skipped_state_unknown += 1;
+                    if let Some(managed) = self.peers.get_mut(peer_key) {
+                        if *import {
+                            managed.pending_refresh = true;
+                        }
+                        if *export {
+                            managed.pending_export_apply = true;
+                        }
+                    }
+                    failures.push(format!(
+                        "{peer_key}: state query timed out after {PEER_QUERY_TIMEOUT:?}"
+                    ));
+                    continue;
+                }
             }
             if *import {
                 match tokio::time::timeout(
@@ -2477,6 +2629,7 @@ impl PeerManager {
             eligible = candidates.len(),
             refreshed,
             skipped_not_established,
+            skipped_state_unknown,
             failures = failures.len(),
             "processed dataset-swap dependency-scoped refresh"
         );

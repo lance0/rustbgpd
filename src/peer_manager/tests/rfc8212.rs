@@ -517,6 +517,105 @@ async fn rfc8212_import_presence_edit_rejects_a_peer_without_route_refresh() {
     rib.await.unwrap();
 }
 
+#[tokio::test(start_paused = true)]
+async fn rfc8212_state_timeout_uses_retry_exhausted_code() {
+    let (mut mgr, _rib_rx) = rfc8212_status_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 55));
+    let handle = stalled_shutdown_peer_handle(Arc::new(AtomicU32::new(0))).await;
+    install_rfc8212_peer(&mut mgr, addr, handle, Some(rfc8212_missing_import()));
+
+    let apply = mgr.apply_resolved_policy_snapshot_classified(
+        vec![rfc8212_target(addr, Some(deny_policy_chain()))],
+        true,
+    );
+    let advance = async {
+        tokio::time::advance(PEER_QUERY_TIMEOUT + Duration::from_millis(1)).await;
+    };
+    let (result, ()) = tokio::join!(apply, advance);
+    let failure = result.expect_err("state timeout must reject before mutation");
+    assert_eq!(
+        failure.code,
+        rustbgpd_api::runtime_config_settlement::RuntimeConfigPolicyFailureCode::StateRetryExhausted
+    );
+}
+
+#[tokio::test]
+async fn rfc8212_retained_state_query_failure_uses_closed_code() {
+    let (mut mgr, rib_rx) = rfc8212_status_manager();
+    drop(rib_rx);
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 56));
+    install_rfc8212_peer(
+        &mut mgr,
+        addr,
+        scripted_policy_handle(addr, true, 0, Arc::new(AtomicUsize::new(0))),
+        Some(rfc8212_missing_import()),
+    );
+
+    let failure = mgr
+        .apply_resolved_policy_snapshot_classified(
+            vec![rfc8212_target(addr, Some(deny_policy_chain()))],
+            true,
+        )
+        .await
+        .expect_err("RIB query failure must reject before mutation");
+    assert_eq!(
+        failure.code,
+        rustbgpd_api::runtime_config_settlement::RuntimeConfigPolicyFailureCode::StateRibQueryFailed
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn rfc8212_mixed_preflight_rejections_use_order_independent_code() {
+    use rustbgpd_api::runtime_config_settlement::RuntimeConfigPolicyFailureCode;
+
+    let (mut mgr, _rib_rx) = rfc8212_status_manager();
+    let timed_out = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 57));
+    let no_refresh = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 58));
+    install_rfc8212_peer(
+        &mut mgr,
+        timed_out,
+        stalled_shutdown_peer_handle(Arc::new(AtomicU32::new(0))).await,
+        Some(rfc8212_missing_import()),
+    );
+    install_rfc8212_peer(
+        &mut mgr,
+        no_refresh,
+        scripted_policy_handle(no_refresh, false, usize::MAX, Arc::new(AtomicUsize::new(0))),
+        Some(rfc8212_missing_import()),
+    );
+
+    let apply = mgr.apply_resolved_policy_snapshot_classified(
+        vec![
+            rfc8212_target(timed_out, Some(deny_policy_chain())),
+            rfc8212_target(no_refresh, Some(deny_policy_chain())),
+        ],
+        true,
+    );
+    let advance = async {
+        tokio::time::advance(PEER_QUERY_TIMEOUT + Duration::from_millis(1)).await;
+    };
+    let (result, ()) = tokio::join!(apply, advance);
+    let failure = result.expect_err("mixed rejection causes must reject before mutation");
+    assert_eq!(
+        failure.code,
+        RuntimeConfigPolicyFailureCode::PreflightRejected
+    );
+    assert!(
+        failure
+            .message()
+            .contains(RuntimeConfigPolicyFailureCode::StateRetryExhausted.as_str()),
+        "the aggregate must retain the timeout code: {}",
+        failure.message()
+    );
+    assert!(
+        failure
+            .message()
+            .contains(RuntimeConfigPolicyFailureCode::PreflightRejected.as_str()),
+        "the aggregate must retain the capability rejection code: {}",
+        failure.message()
+    );
+}
+
 /// ADR-0112 step 4: one incapable peer rejects the whole multi-peer edit before
 /// any peer is mutated.
 ///
