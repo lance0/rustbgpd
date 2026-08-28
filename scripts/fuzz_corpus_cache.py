@@ -60,7 +60,8 @@ def inventory(
 ) -> tuple[list[dict[str, object]], int]:
     _reject_non_directory(corpus, "corpus")
     expected = set(TARGET_MAX_LENS)
-    actual = {entry.name for entry in os.scandir(corpus)}
+    with os.scandir(corpus) as entries:
+        actual = {entry.name for entry in entries}
     if actual != expected:
         raise CorpusError(
             f"target directories differ: expected {sorted(expected)}, got {sorted(actual)}"
@@ -70,12 +71,15 @@ def inventory(
     for target in sorted(expected):
         target_dir = corpus / target
         _reject_non_directory(target_dir, "target")
-        for entry in sorted(os.scandir(target_dir), key=lambda item: item.name):
+        with os.scandir(target_dir) as entries:
+            target_entries = sorted(entries, key=lambda item: item.name)
+        for entry in target_entries:
             path = Path(entry.path)
-            mode = path.lstat().st_mode
+            metadata = entry.stat(follow_symlinks=False)
+            mode = metadata.st_mode
             if not stat.S_ISREG(mode) or stat.S_ISLNK(mode):
                 raise CorpusError(f"corpus entries must be regular files: {path}")
-            size = path.stat().st_size
+            size = metadata.st_size
             if size > TARGET_MAX_LENS[target]:
                 raise CorpusError(
                     f"{target}/{entry.name} is {size} bytes; max_len is {TARGET_MAX_LENS[target]}"
@@ -118,7 +122,8 @@ def _read_manifest(path: Path) -> dict[str, object]:
 
 def validate_bundle(bundle: Path) -> tuple[int, int, str]:
     _reject_non_directory(bundle, "cache bundle")
-    names = {entry.name for entry in os.scandir(bundle)}
+    with os.scandir(bundle) as entries:
+        names = {entry.name for entry in entries}
     if names != {MANIFEST, CORPUS}:
         raise CorpusError(f"cache bundle entries differ: {sorted(names)}")
     rows, total = inventory(bundle / CORPUS)
