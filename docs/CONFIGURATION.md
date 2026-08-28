@@ -2999,36 +2999,27 @@ monitor = ["rib_in_pre", "rib_out_post"]   # + RFC 8671 Adj-RIB-Out
 ### BMPv4 framing (`version = 4`)
 
 With `version = 4` on a collector, every BMP message carries common-header
-version 4 per draft-ietf-grow-bmp-tlv-20: Route Monitoring messages enclose
-the BGP UPDATE PDU in the mandatory BGP Message TLV (type 7, index 0) and
+version 4 per draft-ietf-grow-bmp-tlv-21: Route Monitoring messages enclose
+the BGP UPDATE PDU in the mandatory BGP Message TLV (type 4, index 0) and
 Stats Reports enclose the Stats Count + stats data in the mandatory Stats
 TLV (code point 1). Peer Up/Down, Initiation, and Termination already
 provision TLV data in v3 and differ only in the version byte. Framing is
 per collector — v3 and v4 collectors can be mixed freely, and v3 output is
 byte-identical to previous releases.
 
-**Path marking (automatic, no knob):** on `loc_rib` Route Monitoring
-messages a v4 collector also receives the Path Marking TLV
-(draft-ietf-grow-bmp-path-marking-tlv-05): a Path Status bitmap marking
-every announced Loc-RIB route `Best` (plus `Stale` when the GR/LLGR
-machinery holds it stale) and, when a competing path was compared, the
-optional Reason Code naming the decisive best-path step (local
-preference, AS path length, origin, MED, peer type, router ID, peer
-address). Bits a route reflector cannot attest to (Primary/Backup/
-Non-installed/Filtered/Suppressed — FIB, policy-drop, and damping
-concepts) are never set. `rib_in_pre` and `rib_out_post` streams carry
-no marking: the rib-in tap fires before best-path selection and rib-out
-is per-peer staged output, so neither has an honest decision status.
-Withdrawals carry no marking. v3 collectors are unaffected.
+**Path marking is temporarily unavailable.** The current Path Marking draft
+self-assigns Route Monitoring TLV type 5, while draft-21 assigns type 5 to
+Sequence Number. rustbgpd emits neither ambiguous type-5 form and will restore
+Path Marking only after the drafts provide a non-colliding assignment. v3
+collectors remain byte-identical to previous releases.
 
 **Pre-IANA caveat:** BMPv4 is an IETF draft. The TLV code points are not
 yet IANA-assigned and may be renumbered when the draft is published as an
 RFC; pick `4` only for collectors that track the same draft revision
 (e.g. bleeding-edge pmacct/gobmp builds). The default `3` is the stable
-RFC 7854 encoding. In particular the Path Marking TLV self-assigns type
-5, which collides with tlv-20's VRF/Table Name TLV (also type 5) —
-rustbgpd never emits the latter, so its own v4 output is unambiguous,
-but expect a renumber at RFC publication.
+RFC 7854 encoding. Draft-21's Route Monitoring registry is Group=1,
+VRF/Table Name=2, Stateless Parsing=3, BGP Message=4, Sequence Number=5,
+Extended Flags=6, and Timestamp=7.
 
 ### What is streamed
 

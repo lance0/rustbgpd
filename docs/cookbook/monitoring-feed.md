@@ -69,13 +69,11 @@ address = "10.20.0.10:1790"
 reconnect_interval = 5
 monitor = ["rib_in_pre", "rib_out_post", "loc_rib"]
 
-# Optional second collector with BMPv4 TLV framing + the Path Marking
-# TLV. Caveat, stated plainly: BMPv4 code points are pre-IANA drafts
-# (draft-ietf-grow-bmp-tlv / draft-ietf-grow-bmp-path-marking-tlv) and
-# may renumber; current pmacct releases discard tlv-20-framed v4 Route
-# Monitoring messages. Keep production collectors on v3 (the default);
-# point v4 only at tooling that tracks the drafts (M81 validated the
-# v4 bytes with tshark 4.4).
+# Optional second collector with BMPv4 TLV framing. Code points follow
+# draft-ietf-grow-bmp-tlv-21 and remain pre-IANA. Path Marking is temporarily
+# unavailable because its draft type 5 collides with Sequence Number. Keep
+# production collectors on v3 (the default); point v4 only at tooling that
+# tracks the draft (M81 validates the v4 bytes with a raw oracle and tshark).
 #[[bmp.collectors]]
 #address = "10.20.0.11:1790"
 #reconnect_interval = 5

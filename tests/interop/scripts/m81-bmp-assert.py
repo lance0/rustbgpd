@@ -2,8 +2,7 @@
 """M81 byte-level BMP assertions over the raw-sink JSONL captures.
 
 Each subcommand checks one wire property of the BMPv4 TLV framing
-(draft-ietf-grow-bmp-tlv-20) or the Path Marking TLV
-(draft-ietf-grow-bmp-path-marking-tlv-05) against the raw bytes
+(draft-ietf-grow-bmp-tlv-21) against the raw bytes
 recorded by bmp-raw-sink.py, and exits 0 (pass) / 1 (fail) with a
 one-line diagnostic. The v3 stream (port 11019) serves as the
 byte-reference for the "v4 differs only in framing" comparisons.
@@ -22,11 +21,8 @@ V4_FILE = "/tmp/bmp-raw-11020.jsonl"
 PER_PEER_LEN = 42
 RM, STATS, PEER_DOWN, PEER_UP, INIT, TERM = 0, 1, 2, 3, 4, 5
 
-TLV_BGP_MESSAGE = 7   # tlv-20 §5.2
-TLV_PATH_MARKING = 5  # path-marking-05 §7
-STATS_TLV_STATS = 1   # tlv-20 §5.4
-STATUS_BEST = 0x2     # path-marking-05 §3.1
-REASON_LOCAL_PREF = 0x0003  # path-marking-05 §3.2
+TLV_BGP_MESSAGE = 4   # tlv-21 §5.2
+STATS_TLV_STATS = 1   # tlv-21 §5.4
 
 
 def load(path):
@@ -89,7 +85,7 @@ def rm_pdu(m):
         for t, _idx, val in walk_rm_tlvs(m):
             if t == TLV_BGP_MESSAGE:
                 return val
-        raise ValueError("v4 RM without BGP Message TLV 7")
+        raise ValueError("v4 RM without BGP Message TLV 4")
     return m["raw"][6 + PER_PEER_LEN :]
 
 
@@ -184,7 +180,7 @@ def cmd_peerup_equal(peer_ip):
     ok(f"PeerUp for {peer_ip} v3/v4 byte-identical except version byte")
 
 
-def cmd_rm_tlv7():
+def cmd_rm_bgp_tlv():
     msgs = [m for m in load(V4_FILE) if m["type"] == RM]
     if not msgs:
         fail("no v4 RM messages")
@@ -201,7 +197,7 @@ def cmd_rm_tlv7():
             fail(f"RM seq {m['seq']}: TLV length {len(val)} != BGP PDU "
                  f"length field {pdu_len} (length must exclude the index)")
     ok(f"all {len(msgs)} v4 RM messages: exact TLV walk, single BGP Message "
-       f"TLV type 7 index 0, TLV length == PDU length (excludes index)")
+       f"TLV type 4 index 0, TLV length == PDU length (excludes index)")
 
 
 def cmd_rm_pdu_equality():
@@ -280,77 +276,25 @@ def cmd_stats_locrib_counts():
        f"carries type 7 ({ptypes})")
 
 
-def _marking_tlvs(m):
-    return [(idx, val) for t, idx, val in walk_rm_tlvs(m) if t == TLV_PATH_MARKING]
-
-
-def cmd_locrib_marking():
+def cmd_no_path_marking():
     msgs = [m for m in load(V4_FILE) if m["type"] == RM]
-    loc_ann = loc_wd = 0
+    checked = 0
     for m in msgs:
-        ptype, _f, _ip = peer_hdr(m)
-        kind = pdu_kind(rm_pdu(m))
-        marks = _marking_tlvs(m)
-        if ptype != 3:
-            continue
-        if kind == "announce":
-            loc_ann += 1
-            if len(marks) != 1:
-                fail(f"loc-rib announce seq {m['seq']} conn {m['conn']}: "
-                     f"{len(marks)} Path Marking TLVs (want 1)")
-            _idx, val = marks[0]
-            if len(val) not in (4, 6):
-                fail(f"loc-rib announce seq {m['seq']}: marking value len "
-                     f"{len(val)}")
-            status = u32(val, 0)
-            if not status & STATUS_BEST:
-                fail(f"loc-rib announce seq {m['seq']}: status {status:#x} "
-                     f"lacks Best (0x2)")
-        elif marks:
-            loc_wd += 1
-            fail(f"loc-rib {kind} seq {m['seq']}: carries a Path Marking "
-                 f"TLV but must not")
-    if loc_ann == 0:
-        fail("no loc-rib announces on the v4 stream")
-    ok(f"all {loc_ann} v4 loc-rib announces carry exactly one Path Marking "
-       f"TLV with Best set; withdraws/EoR carry none")
-
-
-def cmd_reason_local_pref(prefix_hex):
-    msgs = [m for m in load(V4_FILE) if m["type"] == RM]
-    for m in msgs:
-        if peer_hdr(m)[0] != 3:
-            continue
-        pdu = rm_pdu(m)
-        if prefix_hex not in pdu.hex() or pdu_kind(pdu) != "announce":
-            continue
-        for _idx, val in _marking_tlvs(m):
-            if len(val) == 6 and u16(val, 4) == REASON_LOCAL_PREF:
-                ok(f"loc-rib announce for NLRI {prefix_hex} carries reason "
-                   f"0x0003 (local preference), status {u32(val, 0):#x}")
-    fail(f"no loc-rib announce for NLRI {prefix_hex} with reason 0x0003")
-
-
-def cmd_no_marking_outside_locrib():
-    msgs = [m for m in load(V4_FILE) if m["type"] == RM]
-    n = 0
-    for m in msgs:
-        if peer_hdr(m)[0] == 3:
-            continue
-        n += 1
         tlv_types = [t for t, _i, _v in walk_rm_tlvs(m)]
         if tlv_types != [TLV_BGP_MESSAGE]:
-            fail(f"non-loc-rib RM seq {m['seq']}: TLVs {tlv_types} != [7]")
-    if n == 0:
-        fail("no rib-in/rib-out RM messages on the v4 stream")
-    ok(f"all {n} v4 rib-in/rib-out RM messages carry exactly the BGP "
-       f"Message TLV and no Path Marking")
+            fail(f"RM seq {m['seq']}: TLVs {tlv_types} != [4]; type 5 is "
+                 "reserved for Sequence Number in draft-21")
+        checked += 1
+    if checked == 0:
+        fail("no RM messages on the v4 stream")
+    ok(f"all {checked} v4 RM messages carry only BGP Message TLV type 4; "
+       "no ambiguous type-5 Path Marking is emitted")
 
 
 def cmd_dump(conn_arg):
     """Post-reconnect loc-rib dump on the v4 port: PeerUp, then
-    status-only Best markings on every dump announce, closed by exactly
-    4 End-of-RIB RMs (ipv4u/ipv6u/vpnv4/vpnv6)."""
+    unmarked announces closed by exactly 4 End-of-RIB RMs
+    (ipv4u/ipv6u/vpnv4/vpnv6)."""
     conn = int(conn_arg)
     msgs = [m for m in load(V4_FILE) if m["conn"] == conn]
     if not msgs:
@@ -371,18 +315,15 @@ def cmd_dump(conn_arg):
         if kind != "announce":
             fail(f"v4 conn {conn} dump: unexpected {kind} before EoR #4")
         dump_ann += 1
-        marks = _marking_tlvs(m)
-        if len(marks) != 1 or len(marks[0][1]) != 4:
-            fail(f"v4 conn {conn} dump announce seq {m['seq']}: want one "
-                 f"status-only (4-byte) Path Marking TLV, got {marks}")
-        if not u32(marks[0][1], 0) & STATUS_BEST:
-            fail(f"v4 conn {conn} dump announce seq {m['seq']}: Best unset")
+        if [t for t, _i, _v in walk_rm_tlvs(m)] != [TLV_BGP_MESSAGE]:
+            fail(f"v4 conn {conn} dump announce seq {m['seq']}: "
+                 "unexpected optional TLV")
     if eor != 4:
         fail(f"v4 conn {conn} dump: {eor} End-of-RIB markers (want 4)")
     if dump_ann == 0:
         fail(f"v4 conn {conn} dump: no announces before EoR")
     ok(f"v4 conn {conn} reconnect dump: loc-rib PeerUp, {dump_ann} "
-       f"status-only Best-marked announces, exactly 4 EoRs")
+       f"unmarked announces, exactly 4 EoRs")
 
 
 def cmd_term(port):
@@ -409,13 +350,11 @@ def main():
         "versions": cmd_versions,
         "init_equal": cmd_init_equal,
         "peerup_equal": cmd_peerup_equal,
-        "rm_tlv7": cmd_rm_tlv7,
+        "rm_bgp_tlv": cmd_rm_bgp_tlv,
         "rm_pdu_equality": cmd_rm_pdu_equality,
         "stats_v4_wrap": cmd_stats_v4_wrap,
         "stats_locrib_counts": cmd_stats_locrib_counts,
-        "locrib_marking": cmd_locrib_marking,
-        "reason_local_pref": cmd_reason_local_pref,
-        "no_marking_outside_locrib": cmd_no_marking_outside_locrib,
+        "no_path_marking": cmd_no_path_marking,
         "dump": cmd_dump,
         "term": cmd_term,
         "locrib_peerdown_reason6": cmd_locrib_peerdown_reason6,

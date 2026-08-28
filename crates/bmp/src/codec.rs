@@ -1,5 +1,5 @@
 //! BMP message encoding (RFC 7854, plus BMP version 4 framing per
-//! draft-ietf-grow-bmp-tlv-20).
+//! draft-ietf-grow-bmp-tlv-21).
 //!
 //! Encodes BMP messages for transmission to collectors.
 //! No decode is needed — BMP is unidirectional (router → collector).
@@ -357,26 +357,21 @@ pub fn encode_loc_rib_peer_down(
 ///
 /// Carries a raw BGP UPDATE PDU (including 19-byte header): bare
 /// after the per-peer header in v3; enclosed in the mandatory BGP
-/// Message TLV (type 7, index 0) in v4 (draft §5.2), followed by the
-/// Path Marking TLV (path-marking-05 §2) when `path_status` is
-/// present. The Path Marking TLV is an RM TLV and cannot be framed in
-/// v3 — a v3 collector's output is byte-identical whether or not a
-/// payload is attached. Index 0 (all NLRIs) is correct because every
-/// synthesized Loc-RIB UPDATE carries exactly one NLRI.
+/// Message TLV (type 4, index 0) in v4 (draft §5.2). Path Marking is
+/// temporarily not emitted: its current draft assignment collides
+/// with draft-21's Sequence Number TLV. A v3 collector's output stays
+/// byte-identical whether or not a path-status payload is attached.
 #[must_use]
 pub fn encode_route_monitoring(
     info: &BmpPeerInfo,
     update_pdu: &[u8],
-    path_status: Option<crate::types::BmpPathStatus>,
+    _path_status: Option<crate::types::BmpPathStatus>,
     version: BmpVersion,
 ) -> Bytes {
-    // v4 adds type(2) + length(2) + index(2) around the PDU, plus the
-    // Path Marking TLV (6 + status(4) [+ reason(2)]) when attached.
+    // v4 adds type(2) + length(2) + index(2) around the PDU.
     let tlv_overhead = match version {
         BmpVersion::V3 => 0,
-        BmpVersion::V4 => {
-            6 + path_status.map_or(0, |ps| 10 + if ps.reason.is_some() { 2 } else { 0 })
-        }
+        BmpVersion::V4 => 6,
     };
     let total = BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN + tlv_overhead + update_pdu.len();
 
@@ -392,9 +387,6 @@ pub fn encode_route_monitoring(
                 tlv::INDEX_ALL_NLRI,
                 update_pdu,
             );
-            if let Some(ps) = path_status {
-                tlv::put_path_marking_tlv(&mut buf, tlv::INDEX_ALL_NLRI, ps.status, ps.reason);
-            }
         }
     }
 
@@ -602,7 +594,7 @@ mod tests {
         })
     }
 
-    /// draft-ietf-grow-bmp-tlv-20 pin: v3 output stays byte-identical.
+    /// draft-ietf-grow-bmp-tlv-21 pin: v3 output stays byte-identical.
     /// Full-message hex fixtures captured from the pre-v4 encoders —
     /// any diff here is a v3 wire regression.
     #[test]
@@ -672,9 +664,9 @@ mod tests {
         );
     }
 
-    /// draft-ietf-grow-bmp-tlv-20 §5.2: v4 Route Monitoring golden
+    /// draft-ietf-grow-bmp-tlv-21 §5.2: v4 Route Monitoring golden
     /// bytes — version byte 4, per-peer header, then the mandatory BGP
-    /// Message TLV (type 7, index 0) whose value is the exact UPDATE
+    /// Message TLV (type 4, index 0) whose value is the exact UPDATE
     /// PDU.
     #[test]
     fn v4_route_monitoring_wraps_pdu_in_bgp_message_tlv() {
@@ -696,7 +688,7 @@ mod tests {
         assert_eq!(
             u16::from_be_bytes([tlv[0], tlv[1]]),
             crate::tlv::RM_TLV_BGP_MESSAGE,
-            "BGP Message TLV type 7 (§5.2, §9)"
+            "BGP Message TLV type 4 (§5.2, §10)"
         );
         assert_eq!(
             u16::from_be_bytes([tlv[2], tlv[3]]) as usize,
@@ -718,16 +710,15 @@ mod tests {
         );
     }
 
-    /// Path Marking is v4-only: a v3 Route Monitoring message is
-    /// byte-identical whether or not a path-status payload is attached
-    /// (the RM TLV cannot be framed in RFC 7854 v3).
+    /// Path status does not alter either wire version while Path
+    /// Marking's draft type 5 collides with draft-21 Sequence Number.
     #[test]
     fn v3_route_monitoring_unchanged_by_path_status() {
         let info = sample_peer_info();
         let pdu = [0xAB; 23];
         let ps = crate::types::BmpPathStatus {
-            status: tlv::PATH_STATUS_BEST | tlv::PATH_STATUS_STALE,
-            reason: Some(tlv::REASON_LOCAL_PREF),
+            status: 0x0000_0402,
+            reason: Some(0x0003),
         };
         assert_eq!(
             encode_route_monitoring(&info, &pdu, Some(ps), BmpVersion::V3),
@@ -735,58 +726,23 @@ mod tests {
         );
     }
 
-    /// draft-ietf-grow-bmp-path-marking-tlv-05 §2 golden bytes: the v4
-    /// Route Monitoring message appends the Path Marking TLV (type 5,
-    /// index 0 — every synthesized Loc-RIB UPDATE carries one NLRI)
-    /// after the BGP Message TLV, with the 4-byte status bitmap and
-    /// the Reason Code present only when one applies.
+    /// The same collision guard applies to v4: retaining the internal
+    /// path-status payload must not produce ambiguous type-5 bytes.
     #[test]
-    fn v4_route_monitoring_appends_path_marking_tlv() {
+    fn v4_route_monitoring_omits_path_marking_tlv() {
         let info = sample_peer_info();
         let pdu = [0xAB; 23];
 
-        // With reason: value = status(4) + reason(2).
         let ps = crate::types::BmpPathStatus {
-            status: tlv::PATH_STATUS_BEST,
-            reason: Some(tlv::REASON_LOCAL_PREF),
+            status: 0x0000_0002,
+            reason: Some(0x0003),
         };
         let msg = encode_route_monitoring(&info, &pdu, Some(ps), BmpVersion::V4);
         let unmarked = encode_route_monitoring(&info, &pdu, None, BmpVersion::V4);
-        let len = u32::from_be_bytes(msg[1..5].try_into().unwrap());
-        assert_eq!(len as usize, msg.len(), "common-header length");
-        assert_eq!(msg.len(), unmarked.len() + 12, "TLV adds 6 + 4 + 2 bytes");
-        assert_eq!(
-            &msg[5..unmarked.len()],
-            &unmarked[5..],
-            "everything before the Path Marking TLV is the plain v4 framing \
-             (common-header length field aside)"
-        );
-        let pm = &msg[unmarked.len()..];
-        assert_eq!(
-            pm,
-            &[
-                0x00, 0x05, // type 5 (path-marking-05 §7)
-                0x00, 0x06, // length: status(4) + reason(2), index excluded
-                0x00, 0x00, // index 0 = all NLRIs (single-NLRI UPDATE)
-                0x00, 0x00, 0x00, 0x02, // Best
-                0x00, 0x03, // reason: local preference
-            ]
-        );
-
-        // Without reason: the optional field is absent, not zeroed.
-        let ps = crate::types::BmpPathStatus {
-            status: tlv::PATH_STATUS_BEST | tlv::PATH_STATUS_STALE,
-            reason: None,
-        };
-        let msg = encode_route_monitoring(&info, &pdu, Some(ps), BmpVersion::V4);
-        let pm = &msg[unmarked.len()..];
-        assert_eq!(
-            pm,
-            &[0x00, 0x05, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x04, 0x02]
-        );
+        assert_eq!(msg, unmarked);
     }
 
-    /// draft-ietf-grow-bmp-tlv-20 §5.4: v4 Stats Report golden bytes —
+    /// draft-ietf-grow-bmp-tlv-21 §5.4: v4 Stats Report golden bytes —
     /// Stats Count + stats data enclosed in the mandatory Stats TLV
     /// (code point 1, not indexed — §4.3 scopes indexed TLVs to Route
     /// Monitoring only).
@@ -831,7 +787,7 @@ mod tests {
         );
     }
 
-    /// draft-ietf-grow-bmp-tlv-20 §3 + §5.5: message types that already
+    /// draft-ietf-grow-bmp-tlv-21 §3 + §5.5: message types that already
     /// provision TLV data in v3 (Peer Up/Down incl. the RFC 9069
     /// Loc-RIB variants, Initiation, Termination) change only the
     /// common-header version byte in v4.

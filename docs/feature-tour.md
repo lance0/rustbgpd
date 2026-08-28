@@ -54,10 +54,11 @@ RFC 7854/8671/9069 (ADR-0097): per-collector selectable Adj-RIB-In
 (pre-policy), Adj-RIB-Out (post-policy, byte-exact wire PDUs), and
 Loc-RIB views on one exporter. Loc-RIB collectors get a chunked table
 dump + End-of-RIB when they connect; Adj-RIB-In/Out are live streams by
-design. Optional per-collector BMPv4 TLV framing plus the Path Marking
-TLV (draft-ietf-grow-bmp-tlv / draft-ietf-grow-bmp-path-marking-tlv,
-pre-IANA — code points may renumber; default stays BMP v3). Validated
-against pmacct, gobmp, and tshark at once (M81).
+design. Optional per-collector BMPv4 framing follows
+draft-ietf-grow-bmp-tlv-21 (pre-IANA; default stays BMP v3). Path Marking is
+temporarily unavailable because its draft type 5 collides with the base
+draft's Sequence Number assignment. Validated against pmacct, gobmp, and
+tshark at once (M81).
 
 ## Operational visibility
 

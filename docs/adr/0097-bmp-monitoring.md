@@ -156,28 +156,25 @@ This ADR records the decisions of that arc as shipped.
    replay cache stores both encodings; the dump forwarder frames at its
    collector's version. Per-collector `version = 3 | 4`, **default 3**,
    and v3 output is byte-identical to prior releases, pinned by
-   golden-bytes tests. Under `version = 4` (draft-ietf-grow-bmp-tlv-20):
+   golden-bytes tests. Under `version = 4` (draft-ietf-grow-bmp-tlv-21):
    common-header version 4 everywhere, Route Monitoring wraps the UPDATE
-   in the mandatory BGP Message TLV (type 7, index 0), Stats Reports
+   in the mandatory BGP Message TLV (type 4, index 0), Stats Reports
    wrap in the Stats TLV (code 1); message types that already provision
    TLV data in v3 (Peer Up/Down, Initiation, Termination) change only
    their version byte.
 
    **Pre-IANA posture:** every draft code point lives in ONE module —
    `crates/bmp/src/tlv.rs` — with section citations, so a renumber at
-   RFC publication is a single-file change. The known collision is
-   annotated there: path-marking-05 self-assigns RM TLV type 5 against
-   an older base-draft registry, but tlv-20 §9 has since taken 5 for the
-   VRF/Table Name TLV. rustbgpd never emits the VRF/Table Name RM TLV,
-   so its own v4 output is self-consistent; a renumber is expected.
-   (tlv-20's Appendix A wire example contradicts its own normative
-   §5.2.1 on the Group TLV type; we follow the normative text.)
+   RFC publication is a single-file change. Draft-21 re-pins the Route
+   Monitoring registry to Group=1, VRF/Table Name=2, Stateless Parsing=3,
+   BGP Message=4, Sequence Number=5, Extended Flags=6, and Timestamp=7.
 
-5. **Path marking is scoped to what the daemon can honestly attest.**
-   The Path Marking TLV (draft-ietf-grow-bmp-path-marking-tlv-05) is an
-   RM TLV, so it is v4-gated by construction — v3 output is byte-
-   identical with or without a status payload (regression-pinned).
-   Three honesty boundaries, all deliberate:
+5. **Path marking waits for a non-colliding assignment.** The Path
+   Marking draft still self-assigns Route Monitoring type 5, which
+   draft-21 assigns to Sequence Number. rustbgpd therefore emits no
+   Path Marking TLV in v4. The internal status payload and its original
+   derivation boundaries remain in place so support can resume after
+   the drafts converge without changing the RIB seam:
 
    - **Loc-RIB stream only.** rib-in-pre taps fire at receive time,
      before best-path selection — any Best/Non-selected mark there would
@@ -224,10 +221,10 @@ This ADR records the decisions of that arc as shipped.
    dissects the v4 version byte, per-peer headers, and generic TLV
    headers but maps RM TLV *values* per older drafts. So pmacct + gobmp
    serve as independent **v3 semantic oracles** across all three RM
-   streams, while tlv-20 code points and the entire Path Marking payload
-   are asserted at **raw byte offsets against the drafts' wire
+   streams, while tlv-21 code points and the absence of ambiguous type-5
+   Path Marking are asserted at **raw byte offsets against the draft's wire
    figures**, with the v3 byte-stream as the cross-reference (RM PDU
-   sets byte-equal across v3/v4 framings). 50/50 assertions; no
+   sets byte-equal across v3/v4 framings). 47/47 assertions; no
    assertion rests on an oracle that Phase 0 showed cannot decode it.
    No product bugs found — every oracle agreed with rustbgpd everywhere
    it could decode.
@@ -249,8 +246,8 @@ Complementary, one observation layer, two egress formats.
 - **BMPv4 optional TLVs**: Timestamp, Sequence Number, Extended Flags,
   Stateless Parsing — collector demand; the indexed-TLV encode
   infrastructure is already in place.
-- **Path Marking Statistics** (path-marking-05 §4) — its stat type
-  codes are unassigned TBDs in the draft.
+- **Path Marking emission and statistics** — a non-colliding Route
+  Monitoring TLV assignment, plus assigned statistic codes.
 - **Nonselected / Add-Path marking** — needs a decision-aware rib-in
   seam that does not exist; today's rib-in tap is pre-decision by
   design (Decision 5).
@@ -269,11 +266,11 @@ Complementary, one observation layer, two egress formats.
 
 rustbgpd is the first open-source BGP daemon shipping the full BMP
 monitoring trio — rib-in-pre, rib-out-post, and loc-rib on one exporter,
-per-collector selectable — plus the first router-side BMPv4 TLV framing
-and Path Marking implementation anywhere (pre-IANA, default-off behind
-`version = 3`). The costs: a second encode path per BMP version at
+per-collector selectable — plus draft-21 BMPv4 TLV framing (pre-IANA,
+default-off behind `version = 3`). Path Marking is temporarily unavailable
+pending a non-colliding assignment. The costs: a second encode path per BMP version at
 fan-out (bounded by the two-slot memo), the loc-rib PDU synthesis and
 reason re-derivation on best-change (bounded by the perf note in
 Decision 5), and a standing draft-tracking obligation concentrated in
 one code-point module. The M81 receipt also seeded the collector
-ecosystem's tlv-20 catch-up with two concrete pmacct findings.
+ecosystem's BMPv4 catch-up with two concrete pmacct findings.

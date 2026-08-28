@@ -5,7 +5,7 @@
 //! including post-policy Adj-RIB-Out monitoring (RFC 8671) and
 //! Loc-RIB instance monitoring with collector-connect table sync
 //! (RFC 9069). Collectors are framed per configured [`BmpVersion`]:
-//! v3 (default) or v4 TLV framing per draft-ietf-grow-bmp-tlv-20
+//! v3 (default) or v4 TLV framing per draft-ietf-grow-bmp-tlv-21
 //! (pre-IANA; see [`tlv`]).
 
 #![deny(unsafe_code)]

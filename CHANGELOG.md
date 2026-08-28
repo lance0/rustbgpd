@@ -31,6 +31,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- BMPv4 Route Monitoring now follows draft-ietf-grow-bmp-tlv-21's registry:
+  Group=1, VRF/Table Name=2, Stateless Parsing=3, BGP Message=4, Sequence
+  Number=5, Extended Flags=6, and Timestamp=7. BMPv3 remains byte-identical.
+  Path Marking is temporarily not emitted because its active draft still
+  self-assigns type 5, which now collides with Sequence Number; it will return
+  only after a non-colliding assignment is available.
+
 - Policy mutation preflight failures now preserve `NOT_FOUND`, `INVALID_ARGUMENT`, and
   `FAILED_PRECONDITION` while retaining the closed `policy_preflight_rejected` diagnostic.
 
