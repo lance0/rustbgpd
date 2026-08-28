@@ -445,13 +445,27 @@ pub(crate) fn catalog_config_error(error: ConfigError) -> CatalogMutationError {
     }
 }
 
-fn raw_neighbor(raw: &PresenceAwareNeighborCreate) -> Neighbor {
-    let family_name = |(afi, safi): &(rustbgpd_wire::Afi, rustbgpd_wire::Safi)| {
-        rustbgpd_wire::family_label(*afi, *safi)
-            .unwrap_or("unsupported")
-            .to_string()
-    };
-    Neighbor {
+fn configured_family_labels(
+    address: IpAddr,
+    field: &str,
+    families: &[(rustbgpd_wire::Afi, rustbgpd_wire::Safi)],
+) -> Result<Vec<String>, ConfigError> {
+    families
+        .iter()
+        .map(|(afi, safi)| {
+            rustbgpd_wire::family_label(*afi, *safi)
+                .map(str::to_string)
+                .ok_or_else(|| ConfigError::InvalidNeighborConfig {
+                    address: address.to_string(),
+                    field: field.to_string(),
+                    reason: format!("unsupported AFI/SAFI pair {afi:?}/{safi:?}"),
+                })
+        })
+        .collect()
+}
+
+fn raw_neighbor(raw: &PresenceAwareNeighborCreate) -> Result<Neighbor, ConfigError> {
+    Ok(Neighbor {
         address: raw.address.to_string(),
         interface: raw.interface.clone(),
         remote_asn: raw.remote_asn,
@@ -479,12 +493,14 @@ fn raw_neighbor(raw: &PresenceAwareNeighborCreate) -> Neighbor {
         families: raw
             .families
             .as_ref()
-            .map(|families| families.iter().map(family_name).collect())
+            .map(|families| configured_family_labels(raw.address, "families", families))
+            .transpose()?
             .unwrap_or_default(),
         required_families: raw
             .required_families
             .as_ref()
-            .map(|families| families.iter().map(family_name).collect())
+            .map(|families| configured_family_labels(raw.address, "required_families", families))
+            .transpose()?
             .unwrap_or_default(),
         graceful_restart: None,
         gr_restart_time: None,
@@ -515,7 +531,7 @@ fn raw_neighbor(raw: &PresenceAwareNeighborCreate) -> Neighbor {
         export_policy: Vec::new(),
         import_policy_chain: Vec::new(),
         export_policy_chain: Vec::new(),
-    }
+    })
 }
 
 /// Apply a config event to a config snapshot and validate the result.
@@ -529,6 +545,12 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
             if !config.neighbors.iter().any(|neighbor| {
                 neighbor.address == cfg.address.to_string() && neighbor.interface == cfg.interface
             }) {
+                let families = configured_family_labels(cfg.address, "families", &cfg.families)?;
+                let required_families = configured_family_labels(
+                    cfg.address,
+                    "required_families",
+                    &cfg.required_families,
+                )?;
                 config.neighbors.push(Neighbor {
                     address: cfg.address.to_string(),
                     interface: cfg.interface.clone(),
@@ -563,38 +585,8 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                     bfd: None,
                     ttl_security: Some(cfg.ttl_security_hops.is_some()),
                     ttl_security_hops: cfg.ttl_security_hops,
-                    families: cfg
-                        .families
-                        .iter()
-                        .map(|(afi, safi)| match (afi, safi) {
-                            (rustbgpd_wire::Afi::Ipv4, rustbgpd_wire::Safi::Unicast) => {
-                                "ipv4_unicast".to_string()
-                            }
-                            (rustbgpd_wire::Afi::Ipv6, rustbgpd_wire::Safi::Unicast) => {
-                                "ipv6_unicast".to_string()
-                            }
-                            (rustbgpd_wire::Afi::Ipv4, rustbgpd_wire::Safi::FlowSpec) => {
-                                "ipv4_flowspec".to_string()
-                            }
-                            (rustbgpd_wire::Afi::Ipv6, rustbgpd_wire::Safi::FlowSpec) => {
-                                "ipv6_flowspec".to_string()
-                            }
-                            _ => format!("{afi:?}_{safi:?}"),
-                        })
-                        .collect(),
-                    required_families: cfg
-                        .required_families
-                        .iter()
-                        .map(|(afi, safi)| match (afi, safi) {
-                            (rustbgpd_wire::Afi::Ipv4, rustbgpd_wire::Safi::Unicast) => {
-                                "ipv4_unicast".to_string()
-                            }
-                            (rustbgpd_wire::Afi::Ipv6, rustbgpd_wire::Safi::Unicast) => {
-                                "ipv6_unicast".to_string()
-                            }
-                            _ => format!("{afi:?}_{safi:?}"),
-                        })
-                        .collect(),
+                    families,
+                    required_families,
                     graceful_restart: Some(cfg.graceful_restart),
                     gr_restart_time: Some(cfg.gr_restart_time),
                     gr_peer_restart_time_max: Some(cfg.gr_peer_restart_time_max),
@@ -653,7 +645,7 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
             }
         }
         ConfigEvent::PresenceAwareNeighborAdded { spec, .. } => {
-            let neighbor = raw_neighbor(spec);
+            let neighbor = raw_neighbor(spec)?;
             if !config.neighbors.iter().any(|configured| {
                 configured.address == neighbor.address && configured.interface == neighbor.interface
             }) {
@@ -974,7 +966,7 @@ remote_asn = 65002
             .map(|(label, _, _)| (*label).to_string())
             .collect::<Vec<_>>();
 
-        let neighbor = raw_neighbor(&raw);
+        let neighbor = raw_neighbor(&raw).unwrap();
         assert_eq!(neighbor.families, expected);
         assert_eq!(neighbor.required_families, expected);
     }
@@ -1113,6 +1105,138 @@ peer_group = "fabric"
         assert!(neighbor_policy_chains_from_config(&config, address).is_some());
     }
 
+    fn test_neighbor_config(
+        address: IpAddr,
+    ) -> rustbgpd_api::peer_types::PeerManagerNeighborConfig {
+        rustbgpd_api::peer_types::PeerManagerNeighborConfig {
+            min_hold_time: Some(30),
+            address,
+            interface: None,
+            scope_id: None,
+            remote_asn: 65003,
+            description: "protected".to_string(),
+            peer_group: None,
+            hold_time: None,
+            send_hold_time: None,
+            max_prefixes: None,
+            max_prefixes_ipv4: None,
+            max_prefixes_ipv6: None,
+            max_prefix_restart_seconds: None,
+            md5_password: None,
+            tcp_ao: Some(
+                rustbgpd_transport::TcpAoConfig {
+                    key: "ao-secret".into(),
+                    send_id: 7,
+                    recv_id: 9,
+                    algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,
+                    preferred: true,
+                    deprecated: false,
+                }
+                .into(),
+            ),
+            ttl_security_hops: None,
+            families: vec![(rustbgpd_wire::Afi::Ipv4, rustbgpd_wire::Safi::Unicast)],
+            required_families: Vec::new(),
+            graceful_restart: true,
+            gr_restart_time: 120,
+            gr_peer_restart_time_max: 4095,
+            gr_stale_routes_time: 360,
+            llgr_stale_time: 0,
+            gr_restart_eligible: false,
+            local_ipv6_nexthop: None,
+            route_reflector_client: false,
+            orr_vantage: None,
+            route_server_client: false,
+            per_client_best: false,
+            next_hop_ownership_strict_peer: false,
+            slow_peer_threshold_pct: rustbgpd_transport::DEFAULT_SLOW_PEER_THRESHOLD_PCT,
+            slow_peer_duration: rustbgpd_transport::DEFAULT_SLOW_PEER_DURATION_SECS,
+            slow_peer_isolation: false,
+            interpret_rfc1997: true,
+            rs_control_communities: false,
+            remove_private_as: rustbgpd_transport::RemovePrivateAs::Disabled,
+            add_path_receive: false,
+            add_path_send: false,
+            add_path_send_max: 0,
+            paths_limit_receive_max: 0,
+            local_role: None,
+            strict_role: false,
+            prefix_orf_receive: false,
+            disable_ipv4_unicast: false,
+            import_policy: None,
+            export_policy: None,
+        }
+    }
+
+    #[test]
+    fn neighbor_added_event_persists_canonical_family_labels_that_parse_back() {
+        let mut config = minimal_config();
+        let families = rustbgpd_wire::CONFIGURED_FAMILIES
+            .iter()
+            .map(|(_, afi, safi)| (*afi, *safi))
+            .collect::<Vec<_>>();
+        let expected_labels = rustbgpd_wire::CONFIGURED_FAMILIES
+            .iter()
+            .map(|(label, _, _)| (*label).to_string())
+            .collect::<Vec<_>>();
+        let mut neighbor_config = test_neighbor_config("10.0.0.3".parse().unwrap());
+        neighbor_config.families.clone_from(&families);
+        neighbor_config.required_families.clone_from(&families);
+
+        apply_config_event(
+            &mut config,
+            &ConfigEvent::NeighborAdded {
+                config: neighbor_config,
+                ack: None,
+            },
+        )
+        .unwrap();
+
+        let persisted = config
+            .neighbors
+            .iter()
+            .find(|neighbor| neighbor.address == "10.0.0.3")
+            .unwrap();
+        assert_eq!(persisted.families, expected_labels);
+        assert_eq!(persisted.required_families, expected_labels);
+        for labels in [&persisted.families, &persisted.required_families] {
+            assert_eq!(
+                labels
+                    .iter()
+                    .map(|label| rustbgpd_wire::parse_family(label).unwrap())
+                    .collect::<Vec<_>>(),
+                families
+            );
+        }
+    }
+
+    #[test]
+    fn neighbor_added_event_rejects_an_unconfigured_family_without_mutating() {
+        let mut config = minimal_config();
+        let mut neighbor_config = test_neighbor_config("10.0.0.3".parse().unwrap());
+        neighbor_config.families = vec![(rustbgpd_wire::Afi::Ipv4, rustbgpd_wire::Safi::Evpn)];
+
+        let error = apply_config_event(
+            &mut config,
+            &ConfigEvent::NeighborAdded {
+                config: neighbor_config,
+                ack: None,
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ConfigError::InvalidNeighborConfig { ref field, .. } if field == "families"
+        ));
+        assert!(
+            !config
+                .neighbors
+                .iter()
+                .any(|neighbor| neighbor.address == "10.0.0.3")
+        );
+    }
+
     #[test]
     fn neighbor_added_event_preserves_session_fields() {
         // Mutation-red for min_hold_time: deleting persistence projection
@@ -1122,64 +1246,7 @@ peer_group = "fabric"
         apply_config_event(
             &mut config,
             &ConfigEvent::NeighborAdded {
-                config: rustbgpd_api::peer_types::PeerManagerNeighborConfig {
-                    min_hold_time: Some(30),
-                    address: "10.0.0.3".parse().unwrap(),
-                    interface: None,
-                    scope_id: None,
-                    remote_asn: 65003,
-                    description: "protected".to_string(),
-                    peer_group: None,
-                    hold_time: None,
-                    send_hold_time: None,
-                    max_prefixes: None,
-                    max_prefixes_ipv4: None,
-                    max_prefixes_ipv6: None,
-                    max_prefix_restart_seconds: None,
-                    md5_password: None,
-                    tcp_ao: Some(
-                        rustbgpd_transport::TcpAoConfig {
-                            key: "ao-secret".into(),
-                            send_id: 7,
-                            recv_id: 9,
-                            algorithm: rustbgpd_transport::TcpAoAlgorithm::HmacSha256,
-                            preferred: true,
-                            deprecated: false,
-                        }
-                        .into(),
-                    ),
-                    ttl_security_hops: None,
-                    families: vec![(rustbgpd_wire::Afi::Ipv4, rustbgpd_wire::Safi::Unicast)],
-                    required_families: Vec::new(),
-                    graceful_restart: true,
-                    gr_restart_time: 120,
-                    gr_peer_restart_time_max: 4095,
-                    gr_stale_routes_time: 360,
-                    llgr_stale_time: 0,
-                    gr_restart_eligible: false,
-                    local_ipv6_nexthop: None,
-                    route_reflector_client: false,
-                    orr_vantage: None,
-                    route_server_client: false,
-                    per_client_best: false,
-                    next_hop_ownership_strict_peer: false,
-                    slow_peer_threshold_pct: rustbgpd_transport::DEFAULT_SLOW_PEER_THRESHOLD_PCT,
-                    slow_peer_duration: rustbgpd_transport::DEFAULT_SLOW_PEER_DURATION_SECS,
-                    slow_peer_isolation: false,
-                    interpret_rfc1997: true,
-                    rs_control_communities: false,
-                    remove_private_as: rustbgpd_transport::RemovePrivateAs::Disabled,
-                    add_path_receive: false,
-                    add_path_send: false,
-                    add_path_send_max: 0,
-                    paths_limit_receive_max: 0,
-                    local_role: None,
-                    strict_role: false,
-                    prefix_orf_receive: false,
-                    disable_ipv4_unicast: false,
-                    import_policy: None,
-                    export_policy: None,
-                },
+                config: test_neighbor_config("10.0.0.3".parse().unwrap()),
                 ack: None,
             },
         )
