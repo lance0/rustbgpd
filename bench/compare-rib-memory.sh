@@ -125,13 +125,15 @@ esac
 run_dir="${out_parent}/${run_id}"
 base_dir="${run_dir}/base"
 head_dir="${run_dir}/head"
-target_dir="${run_dir}/target"
+target_root="${run_dir}/target"
+base_target_dir="${target_root}/base"
+head_target_dir="${target_root}/head"
 log_dir="${run_dir}/logs"
 summary_file="${run_dir}/summary.md"
 results_file="${run_dir}/results.csv"
 metadata_file="${run_dir}/metadata.txt"
 
-mkdir -p "$log_dir" "$target_dir"
+mkdir -p "$log_dir" "$base_target_dir" "$head_target_dir"
 
 cleanup() {
   if [[ "$keep_worktrees" -eq 0 ]]; then
@@ -153,7 +155,8 @@ write_metadata() {
     echo "head_ref=${head_ref}"
     echo "head_sha=${head_sha}"
     echo "profile=${profile}"
-    echo "target_dir=${target_dir}"
+    echo "base_target_dir=${base_target_dir}"
+    echo "head_target_dir=${head_target_dir}"
     echo
     uname -a
     echo
@@ -169,7 +172,8 @@ write_metadata() {
 
 run_profile() {
   local worktree="$1"
-  local log_file="$2"
+  local target_dir="$2"
+  local log_file="$3"
   (
     cd "$worktree"
     export CARGO_TARGET_DIR="$target_dir"
@@ -183,9 +187,9 @@ run_profile() {
 write_metadata
 
 echo "Running base ${base_ref} (${base_short})"
-run_profile "$base_dir" "${log_dir}/base.log"
+run_profile "$base_dir" "$base_target_dir" "${log_dir}/base.log"
 echo "Running head ${head_ref} (${head_short})"
-run_profile "$head_dir" "${log_dir}/head.log"
+run_profile "$head_dir" "$head_target_dir" "${log_dir}/head.log"
 
 BASE_LOG="${log_dir}/base.log" \
 HEAD_LOG="${log_dir}/head.log" \
