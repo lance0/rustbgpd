@@ -186,13 +186,16 @@ PY
 
 check_driver_seam() {
     local driver=$1 name=$2 acquire_line quiet_line quiet_call workload workload_line
+    local prepare_call prepare_line helper_start helper_end resolve_call resolve_line
     grep -Fxq 'source "$REPO/tests/soak/host-lock.sh"' "$driver" || return 1
     grep -Fxq 'source "$REPO/bench/scale/host-quiet.sh"' "$driver" || return 1
     grep -Fxq 'acquire_rustbgpd_host_lock || exit $?' "$driver" || return 1
     case $name in
         matrix)
-            quiet_call='wait_for_rustbgpd_quiet_host "$ART/$cell/quiet.tsv" || exit $?'
-            workload_line='if run_cell "$cell"; then'
+            quiet_call='wait_for_rustbgpd_quiet_host "$quiet_file"'
+            resolve_call='PREPARED_IMAGE_ID=$(resolve_competitor_image "$PREPARED_IMAGE_REF") || return 1'
+            prepare_call='prepare_selected_cell "$cell" "$status_file" "$ART/$cell/quiet.tsv" || prepare_rc=$?'
+            workload_line='if run_cell "$cell" "$PREPARED_IMAGE_REF" "$PREPARED_IMAGE_ID"; then'
             ;;
         irrreload)
             grep -Fq 'wait_for_rustbgpd_quiet_host "$quiet"' "$driver" || return 1
@@ -210,6 +213,16 @@ check_driver_seam() {
     quiet_line=$(grep -nF "$quiet_call" "$driver" | cut -d: -f1)
     workload=$(grep -nF "$workload_line" "$driver" | head -n1 | cut -d: -f1)
     [[ -n $acquire_line && -n $quiet_line && -n $workload ]] || return 1
+    if [[ $name == matrix ]]; then
+        helper_start=$(grep -nF 'prepare_selected_cell() {' "$driver" | cut -d: -f1)
+        helper_end=$(awk -v start="$helper_start" 'NR > start && $0 == "}" { print NR; exit }' "$driver")
+        resolve_line=$(grep -nF "$resolve_call" "$driver" | cut -d: -f1)
+        prepare_line=$(grep -nF "$prepare_call" "$driver" | cut -d: -f1)
+        [[ -n $helper_start && -n $helper_end && -n $resolve_line && -n $prepare_line ]] || return 1
+        ((helper_start < resolve_line && resolve_line < quiet_line && quiet_line < helper_end &&
+            acquire_line < prepare_line && prepare_line < workload))
+        return
+    fi
     ((acquire_line < workload && quiet_line < workload))
 }
 
@@ -225,7 +238,9 @@ for spec in "$matrix:matrix" "$irrreload:irrreload" "$enhanced:enhanced"; do
             quiet-source) sed -i '\|source "$REPO/bench/scale/host-quiet.sh"|d' "$candidate" ;;
             acquire) sed -i '/acquire_rustbgpd_host_lock || exit \$?/d' "$candidate" ;;
             quiet-call)
-                if [[ $name == irrreload ]]; then
+                if [[ $name == matrix ]]; then
+                    sed -i '/wait_for_rustbgpd_quiet_host "$quiet_file"/d' "$candidate"
+                elif [[ $name == irrreload ]]; then
                     sed -i '/load_gate "$cell" || exit \$?/d' "$candidate"
                 else
                     sed -i '/wait_for_rustbgpd_quiet_host .* || exit \$?/d' "$candidate"
