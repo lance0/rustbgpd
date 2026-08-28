@@ -23,5 +23,5 @@ pub use manager::BmpManager;
 pub use types::{
     BmpClientConfig, BmpCollectorBootstrap, BmpControlEvent, BmpDumpChunk, BmpDumpCursor,
     BmpDumpRequest, BmpEvent, BmpLocRibConfig, BmpMonitorFilter, BmpPathStatus, BmpPeerInfo,
-    BmpPeerType, BmpVersion, LOC_RIB_TABLE_NAME, PeerDownReason,
+    BmpPeerType, BmpRpkiValidationCounts, BmpVersion, LOC_RIB_TABLE_NAME, PeerDownReason,
 };

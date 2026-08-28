@@ -23,7 +23,9 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
   Type 22 reports exact retained policy rejections for those negotiated
   families, including under Add-Path; it is omitted when rejected-route
   retention is disabled or a capacity eviction makes the retained set
-  incomplete.
+  incomplete. Types 35/36/37 report exact post-policy RPKI Invalid, Valid, and
+  NotFound path counts per negotiated IPv4/IPv6-unicast family, including
+  Add-Path identities; they are omitted until a VRP table is authoritative.
 - RFC 8671 post-policy Adj-RIB-Out route monitoring (O=1/L=1)
 - RFC 9069 Loc-RIB route monitoring + Loc-RIB Stats Report (peer type 3),
   with a resumable cursor-based Loc-RIB dump

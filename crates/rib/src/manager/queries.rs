@@ -2314,9 +2314,9 @@ impl RibManager {
         });
         let _ = reply.send(retained);
     }
-    pub(super) fn handle_query_adj_rib_out_counts(
+    pub(super) fn handle_query_bmp_peer_stats(
         &mut self,
-        reply: tokio::sync::oneshot::Sender<crate::update::AdjRibOutCounts>,
+        reply: tokio::sync::oneshot::Sender<crate::update::BmpPeerStats>,
     ) {
         let mut counts: crate::update::AdjRibOutCounts = self
             .adj_ribs_out
@@ -2338,7 +2338,16 @@ impl RibManager {
             }
             counts.entry(peer).or_default().extend(synthesized);
         }
-        let _ = reply.send(counts);
+        let rpki_adj_rib_in_post = self.vrp_table.is_some().then(|| {
+            self.ribs
+                .iter()
+                .map(|(&peer, rib)| (peer, rib.rpki_validation_counts()))
+                .collect()
+        });
+        let _ = reply.send(crate::update::BmpPeerStats {
+            adj_rib_out_post: counts,
+            rpki_adj_rib_in_post,
+        });
     }
     pub(super) fn handle_query_neighbor_policy_stats(
         &mut self,

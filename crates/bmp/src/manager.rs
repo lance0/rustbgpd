@@ -20,8 +20,30 @@ use tracing::{debug, info, warn};
 use crate::codec;
 use crate::types::{
     BmpCollectorBootstrap, BmpControlEvent, BmpDumpRequest, BmpEvent, BmpLocRibConfig,
-    BmpMonitorFilter, BmpVersion,
+    BmpMonitorFilter, BmpRpkiValidationCounts, BmpVersion,
 };
+
+fn append_rpki_validation_counters(
+    per_family: &[(u16, u8, BmpRpkiValidationCounts)],
+    afi_counters: &mut Vec<codec::AfiStatCounter>,
+) {
+    let mut sorted = per_family.iter().collect::<Vec<_>>();
+    sorted.sort_by_key(|(afi, safi, _)| (*afi, *safi));
+    for &&(afi, safi, counts) in &sorted {
+        for (stat_type, value) in [
+            (35, counts.invalid),
+            (36, counts.valid),
+            (37, counts.not_found),
+        ] {
+            afi_counters.push(codec::AfiStatCounter {
+                stat_type,
+                afi,
+                safi,
+                value,
+            });
+        }
+    }
+}
 
 /// Maximum time a dump request may wait for admission to the bounded
 /// RIB-manager request channel.
@@ -400,6 +422,7 @@ impl BmpManager {
                 adj_rib_in_routes,
                 rfc9972_adj_rib_in_post,
                 rfc9972_policy_rejects,
+                rfc9972_rpki_adj_rib_in_post,
                 adj_rib_out_post,
             } => {
                 let mut counters = vec![codec::StatCounter {
@@ -440,6 +463,9 @@ impl BmpManager {
                             value,
                         });
                     }
+                }
+                if let Some(per_family) = rfc9972_rpki_adj_rib_in_post {
+                    append_rpki_validation_counters(per_family, &mut afi_counters);
                 }
                 // RFC 8671: type 15 = post-policy Adj-RIB-Out total,
                 // type 17 = its per-AFI/SAFI breakdown. Omitted when
@@ -1621,6 +1647,7 @@ mod tests {
                 adj_rib_in_routes: 42,
                 rfc9972_adj_rib_in_post: None,
                 rfc9972_policy_rejects: None,
+                rfc9972_rpki_adj_rib_in_post: None,
                 adj_rib_out_post: None,
             })
             .await
@@ -1863,6 +1890,26 @@ mod tests {
                 adj_rib_in_routes: 42,
                 rfc9972_adj_rib_in_post: Some(vec![(2, 1, 7), (1, 1, 11)]),
                 rfc9972_policy_rejects: Some(vec![(2, 1, 3), (1, 1, 2)]),
+                rfc9972_rpki_adj_rib_in_post: Some(vec![
+                    (
+                        2,
+                        1,
+                        BmpRpkiValidationCounts {
+                            invalid: 5,
+                            valid: 7,
+                            not_found: 9,
+                        },
+                    ),
+                    (
+                        1,
+                        1,
+                        BmpRpkiValidationCounts {
+                            invalid: 2,
+                            valid: 3,
+                            not_found: 4,
+                        },
+                    ),
+                ]),
                 adj_rib_out_post: Some(vec![(2, 1, 5), (1, 1, 10)]),
             })
             .await
@@ -1870,7 +1917,7 @@ mod tests {
 
         let msg = c_rx.recv().await.unwrap();
         let stats = decode_stats(&msg);
-        assert_eq!(stats.len(), 11);
+        assert_eq!(stats.len(), 17);
 
         let adj_rib_in_type = stats[0].0;
         let adj_rib_out_total_type = stats[1].0;
@@ -1889,14 +1936,18 @@ mod tests {
                 .iter()
                 .map(|(_, payload)| payload.len())
                 .collect::<Vec<_>>(),
-            vec![8, 8, 11, 11, 8, 11, 11, 11, 11, 11, 11]
+            vec![
+                8, 8, 11, 11, 8, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11
+            ]
         );
         assert_eq!(
             stats
                 .iter()
                 .map(|(stat_type, _)| *stat_type)
                 .collect::<Vec<_>>(),
-            vec![7, 15, 17, 17, 20, 21, 21, 22, 22, 23, 23]
+            vec![
+                7, 15, 17, 17, 20, 21, 21, 22, 22, 23, 23, 35, 35, 36, 36, 37, 37,
+            ]
         );
         assert_eq!(u64::from_be_bytes(stats[4].1.try_into().unwrap()), 18);
         assert_eq!(&stats[5].1[..3], &[0, 1, 1]);
@@ -1912,6 +1963,12 @@ mod tests {
         assert_eq!(u64::from_be_bytes(stats[2].1[3..].try_into().unwrap()), 10);
         assert_eq!(&stats[3].1[..3], &[0, 2, 1]);
         assert_eq!(u64::from_be_bytes(stats[3].1[3..].try_into().unwrap()), 5);
+        assert_eq!(u64::from_be_bytes(stats[11].1[3..].try_into().unwrap()), 2);
+        assert_eq!(u64::from_be_bytes(stats[12].1[3..].try_into().unwrap()), 5);
+        assert_eq!(u64::from_be_bytes(stats[13].1[3..].try_into().unwrap()), 3);
+        assert_eq!(u64::from_be_bytes(stats[14].1[3..].try_into().unwrap()), 7);
+        assert_eq!(u64::from_be_bytes(stats[15].1[3..].try_into().unwrap()), 4);
+        assert_eq!(u64::from_be_bytes(stats[16].1[3..].try_into().unwrap()), 9);
 
         event_tx
             .send(BmpEvent::StatsReport {
@@ -1919,6 +1976,10 @@ mod tests {
                 adj_rib_in_routes: 0,
                 rfc9972_adj_rib_in_post: Some(vec![(1, 1, 0), (2, 1, 0)]),
                 rfc9972_policy_rejects: Some(vec![(1, 1, 0), (2, 1, 0)]),
+                rfc9972_rpki_adj_rib_in_post: Some(vec![
+                    (1, 1, BmpRpkiValidationCounts::default()),
+                    (2, 1, BmpRpkiValidationCounts::default()),
+                ]),
                 adj_rib_out_post: None,
             })
             .await
@@ -1930,7 +1991,7 @@ mod tests {
                 .iter()
                 .map(|(stat_type, _)| *stat_type)
                 .collect::<Vec<_>>(),
-            vec![7, 20, 21, 21, 22, 22, 23, 23],
+            vec![7, 20, 21, 21, 22, 22, 23, 23, 35, 35, 36, 36, 37, 37,],
             "available zero gauges remain present in legacy-then-RFC order"
         );
         assert_eq!(
@@ -1945,7 +2006,7 @@ mod tests {
                 .iter()
                 .all(|(stat_type, payload)| match stat_type {
                     7 | 20 => payload.len() == 8 && payload.iter().all(|byte| *byte == 0),
-                    21..=23 => {
+                    21..=23 | 35..=37 => {
                         payload.len() == 11
                             && matches!(&payload[..3], [0, 1 | 2, 1])
                             && payload[3..].iter().all(|byte| *byte == 0)
@@ -1953,7 +2014,7 @@ mod tests {
                     _ => false,
                 })
         );
-        for stat_type in [21, 22, 23] {
+        for stat_type in [21, 22, 23, 35, 36, 37] {
             let families = zero_stats
                 .iter()
                 .filter(|(candidate, _)| *candidate == stat_type)
@@ -1968,6 +2029,7 @@ mod tests {
                 adj_rib_in_routes: 43,
                 rfc9972_adj_rib_in_post: None,
                 rfc9972_policy_rejects: None,
+                rfc9972_rpki_adj_rib_in_post: None,
                 adj_rib_out_post: None,
             })
             .await
@@ -2027,7 +2089,9 @@ mod tests {
              unicast Add-Path receive is active. Type 22 reports exact retained policy \
              rejections for those negotiated families, including under Add-Path; it is omitted \
              when rejected-route retention is disabled or a capacity eviction makes the \
-             retained set incomplete."
+             retained set incomplete. Types 35/36/37 report exact post-policy RPKI Invalid, \
+             Valid, and NotFound path counts per negotiated IPv4/IPv6-unicast family, including \
+             Add-Path identities; they are omitted until a VRP table is authoritative."
         );
         assert_eq!(
             actual,
@@ -2797,6 +2861,7 @@ mod tests {
                 adj_rib_in_routes: 1,
                 rfc9972_adj_rib_in_post: None,
                 rfc9972_policy_rejects: None,
+                rfc9972_rpki_adj_rib_in_post: None,
                 adj_rib_out_post: None,
             })
             .await
@@ -3521,6 +3586,7 @@ mod tests {
                 adj_rib_in_routes: 7,
                 rfc9972_adj_rib_in_post: None,
                 rfc9972_policy_rejects: None,
+                rfc9972_rpki_adj_rib_in_post: None,
                 adj_rib_out_post: None,
             })
             .await
@@ -3594,6 +3660,7 @@ mod tests {
                 adj_rib_in_routes: 9,
                 rfc9972_adj_rib_in_post: None,
                 rfc9972_policy_rejects: None,
+                rfc9972_rpki_adj_rib_in_post: None,
                 adj_rib_out_post: None,
             })
             .await

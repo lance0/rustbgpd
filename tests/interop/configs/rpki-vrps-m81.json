@@ -1,0 +1,32 @@
+{
+  "metadata": {
+    "generated": 1710000000,
+    "valid": 1710086400
+  },
+  "roas": [
+    {
+      "asn": "AS65100",
+      "prefix": "203.0.113.0/24",
+      "maxLength": 24,
+      "ta": "m81-test-ta"
+    },
+    {
+      "asn": "AS65099",
+      "prefix": "203.0.114.0/24",
+      "maxLength": 24,
+      "ta": "m81-test-ta"
+    },
+    {
+      "asn": "AS65100",
+      "prefix": "2001:db8:82::/48",
+      "maxLength": 48,
+      "ta": "m81-test-ta"
+    },
+    {
+      "asn": "AS65099",
+      "prefix": "2001:db8:83::/48",
+      "maxLength": 48,
+      "ta": "m81-test-ta"
+    }
+  ]
+}

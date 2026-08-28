@@ -77,6 +77,10 @@
 #   38  raw: PE1 Stats Reports carry exactly one IPv4-unicast and one
 #       IPv6-unicast RFC 9972 policy-rejection row (type 22), both 1,
 #       with byte-equal v3 body / v4 Stats TLV value
+#   39  raw: PE1 Stats Reports carry exact RFC 9972 RPKI post-policy
+#       Adj-RIB-In rows (types 35/36/37) for IPv4/IPv6 unicast: one
+#       Invalid, one Valid, and one NotFound path in each family, with
+#       byte-equal v3 body / v4 Stats TLV value
 #
 # Deferred (documented, not asserted): Path Marking is unavailable
 # until its draft receives a non-colliding assignment; draft-21 uses
@@ -114,6 +118,7 @@ PE2="clab-${TOPO}-gobgp-pe2"
 PMACCT="clab-${TOPO}-pmacct"
 GOBMP="clab-${TOPO}-gobmp"
 SINK="clab-${TOPO}-bmpsink"
+STAYRTR="clab-${TOPO}-stayrtr"
 
 PE1_ADDR="10.0.0.2"
 PE2_ADDR="10.0.1.2"
@@ -124,6 +129,10 @@ CONTEST_PREFIX="10.99.0.0/24"    # pe2 LP=100 first, pe1 LP=200 wins (15/33)
 V6_PREFIX="2001:db8:10::/48"
 REJECT_V4_PREFIX="198.18.81.0/24"
 REJECT_V6_PREFIX="2001:db8:81::/48"
+RPKI_VALID_V4_PREFIX="203.0.113.0/24"
+RPKI_INVALID_V4_PREFIX="203.0.114.0/24"
+RPKI_VALID_V6_PREFIX="2001:db8:82::/48"
+RPKI_INVALID_V6_PREFIX="2001:db8:83::/48"
 VPN_PREFIX="10.100.1.0/24"
 VPN_RD="65001:100"
 
@@ -304,20 +313,37 @@ assert_tshark() {
     fi
 }
 
-patch_collector_addrs() {
-    local pmacct_ip gobmp_ip sink_ip
+patch_runtime_addrs() {
+    local pmacct_ip gobmp_ip sink_ip stayrtr_ip
     pmacct_ip=$(resolve_ip "$PMACCT")
     gobmp_ip=$(resolve_ip "$GOBMP")
     sink_ip=$(resolve_ip "$SINK")
-    if [ -z "$pmacct_ip" ] || [ -z "$gobmp_ip" ] || [ -z "$sink_ip" ]; then
-        echo "ERROR: cannot resolve collector management IPs" >&2
+    stayrtr_ip=$(resolve_ip "$STAYRTR")
+    if [ -z "$pmacct_ip" ] || [ -z "$gobmp_ip" ] || [ -z "$sink_ip" ] \
+        || [ -z "$stayrtr_ip" ]; then
+        echo "ERROR: cannot resolve collector or StayRTR management IPs" >&2
         exit 1
     fi
-    log "Collectors: pmacct=$pmacct_ip gobmp=$gobmp_ip sink=$sink_ip"
+    log "Runtime endpoints: pmacct=$pmacct_ip gobmp=$gobmp_ip sink=$sink_ip stayrtr=$stayrtr_ip"
     docker exec "$RUSTBGPD" sh -c \
         "sed -e 's/PMACCT_ADDR/${pmacct_ip}/' -e 's/GOBMP_ADDR/${gobmp_ip}/' \
-             -e 's/SINK_ADDR/${sink_ip}/' \
+             -e 's/SINK_ADDR/${sink_ip}/' -e 's/STAYRTR_ADDR/${stayrtr_ip}/' \
              /etc/rustbgpd/config.toml > /tmp/config.toml"
+}
+
+wait_rpki_vrps() {
+    local v4 v6
+    for i in $(seq 1 45); do
+        v4=$(prom_value "$RUSTBGPD" 'bgp_rpki_vrp_count{af="ipv4"}')
+        v6=$(prom_value "$RUSTBGPD" 'bgp_rpki_vrp_count{af="ipv6"}')
+        if [ "${v4:-}" = 2 ] && [ "${v6:-}" = 2 ]; then
+            ok "StayRTR VRP table loaded exactly (IPv4=2, IPv6=2; attempt $i)"
+            return 0
+        fi
+        sleep 1
+    done
+    fail "StayRTR VRP table not loaded exactly (IPv4=${v4:-missing}, IPv6=${v6:-missing})"
+    return 1
 }
 
 start_sink() {
@@ -385,6 +411,10 @@ test_route_streams() {
     gobgp "$PE1" global rib add -a ipv6 "$V6_PREFIX" nexthop "2001:db8::1"
     gobgp "$PE1" global rib add "$REJECT_V4_PREFIX" nexthop "$PE1_ADDR"
     gobgp "$PE1" global rib add -a ipv6 "$REJECT_V6_PREFIX" nexthop "2001:db8::1"
+    gobgp "$PE1" global rib add "$RPKI_VALID_V4_PREFIX" nexthop "$PE1_ADDR" aspath 65100
+    gobgp "$PE1" global rib add "$RPKI_INVALID_V4_PREFIX" nexthop "$PE1_ADDR" aspath 65100
+    gobgp "$PE1" global rib add -a ipv6 "$RPKI_VALID_V6_PREFIX" nexthop "2001:db8::1" aspath 65100
+    gobgp "$PE1" global rib add -a ipv6 "$RPKI_INVALID_V6_PREFIX" nexthop "2001:db8::1" aspath 65100
     gobgp "$PE1" vrf add blue rd "$VPN_RD" rt both "$VPN_RD"
     gobgp "$PE1" vrf blue rib add "$VPN_PREFIX" nexthop "$PE1_ADDR"
 
@@ -505,6 +535,8 @@ test_stats() {
         "(2) loc-rib per-AFI stats: ipv4-unicast + vpnv4 counts >= 1 (RFC 9069 type 10)" 40
     raw_assert "(38) PE1 policy rejects: exact v4/v6 type-22 rows, v3/v4-equal body" \
         stats_policy_reject_counts "$PE1_ADDR"
+    raw_assert "(39) PE1 RPKI states: exact v4/v6 type-35/36/37 rows, v3/v4-equal body" \
+        stats_rpki_counts "$PE1_ADDR"
 }
 
 test_peer_down() {
@@ -590,9 +622,10 @@ main() {
 
     preflight
     resolve_grpc_addr
-    patch_collector_addrs
+    patch_runtime_addrs
     start_sink
     start_rustbgpd "/usr/local/bin/rustbgpd /tmp/config.toml"
+    wait_rpki_vrps || exit 1
     start_gobgpd "$PE1"
     start_gobgpd "$PE2"
 

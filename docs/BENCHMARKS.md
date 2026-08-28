@@ -1052,7 +1052,7 @@ counts. The summary repeats the mode and result beside the row table.
 | `PathAttribute` | 208 bytes |
 | `AsPath` | 24 bytes |
 | `AsPathSegment` | 32 bytes |
-| `AdjRibIn` | 1336 bytes |
+| `AdjRibIn` | 1384 bytes |
 | `LocRib` | 1040 bytes |
 
 `PathAttribute` grew from 112 to 208 bytes since the last figures in this
@@ -1063,12 +1063,17 @@ BGP-LS). It is interned globally, across all peers, so the
 per-route impact is amortized to near zero (see below), but it does raise
 the per-unique-attribute-set heap cost.
 
-`AdjRibIn` (1032 → 1336 bytes) and `LocRib` (96 → 1040 bytes) grew the same
+`AdjRibIn` (1032 → 1384 bytes) and `LocRib` (96 → 1040 bytes) grew the same
 way — each struct picked up a route map and/or secondary index per added RIB
 family (VPN, labeled-unicast, RT-Constrain, EVPN, BGP-LS, FlowSpec; see
 `crates/rib/src/adj_rib_in.rs` and `crates/rib/src/loc_rib.rs`). Confirmed
 via `std::mem::size_of` against the current struct definitions; these two
 rows aren't in the allocator-tracked harness JSON.
+
+The final 48 bytes of `AdjRibIn` are two inline, allocation-free
+`RpkiValidationCounts` values, one for each unicast family. They keep the
+exact RPKI post-policy BMP counters on the route mutation path instead of
+requiring a periodic route-table scan.
 
 `Route.attributes` is `Arc<Vec<PathAttribute>>` — cloning a route between
 Adj-RIB-In, Loc-RIB, and Adj-RIB-Out shares the attribute allocation via

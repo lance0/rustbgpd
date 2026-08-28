@@ -439,7 +439,7 @@ impl RibManager {
         };
         let mode = if delta.is_some() { "delta" } else { "full" };
         self.vrp_table = Some(table);
-        let Some(table) = self.vrp_table.as_ref() else {
+        let Some(table) = self.vrp_table.as_ref().map(Arc::clone) else {
             return;
         };
         let vrps = table.len();
@@ -451,15 +451,6 @@ impl RibManager {
         let mut affected = HashSet::new();
         let mut routes_revalidated = 0_u64;
         let mut changed_routes = 0_u64;
-        let mut revalidate = |route: &mut crate::route::Route| {
-            routes_revalidated += 1;
-            let new_state = validate_route_rpki(route, table);
-            if route.validation_state != new_state {
-                route.validation_state = new_state;
-                changed_routes += 1;
-                affected.insert(route.prefix);
-            }
-        };
         if let Some(delta) = delta {
             // A route's RFC 6811 outcome depends only on the VRPs covering
             // its prefix, and coverage is by VRP prefix length (max_len only
@@ -477,14 +468,25 @@ impl RibManager {
                     let Some(covering) = super::helpers::vrp_covering_prefix(entry) else {
                         continue;
                     };
-                    rib.for_each_covered_mut(&covering, &mut revalidate);
+                    routes_revalidated += rib.revalidate_rpki_covered(
+                        &covering,
+                        |route| validate_route_rpki(route, &table),
+                        |prefix| {
+                            changed_routes += 1;
+                            affected.insert(prefix);
+                        },
+                    );
                 }
             }
         } else {
             for rib in self.ribs.values_mut() {
-                for route in rib.iter_mut() {
-                    revalidate(route);
-                }
+                routes_revalidated += rib.revalidate_rpki_all(
+                    |route| validate_route_rpki(route, &table),
+                    |prefix| {
+                        changed_routes += 1;
+                        affected.insert(prefix);
+                    },
+                );
             }
         }
 

@@ -2568,8 +2568,8 @@ impl RibManager {
                 );
             }
             RibUpdate::QueryLocRibCount { reply } => self.handle_query_loc_rib_count(reply),
-            RibUpdate::QueryAdjRibOutCounts { reply } => {
-                self.handle_query_adj_rib_out_counts(reply);
+            RibUpdate::QueryBmpPeerStats { reply } => {
+                self.handle_query_bmp_peer_stats(reply);
             }
             RibUpdate::QueryAdvertisedCount { peer, reply } => {
                 self.handle_query_advertised_count(peer, reply);

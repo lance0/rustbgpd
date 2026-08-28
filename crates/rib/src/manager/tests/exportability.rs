@@ -1486,10 +1486,10 @@ async fn grouped_classic_rejection_is_a_member_local_overlay_across_source_flip_
     assert_eq!(advertised_count(&tx, extended).await, 1);
 
     let (reply, result) = oneshot::channel();
-    tx.send(RibUpdate::QueryAdjRibOutCounts { reply })
+    tx.send(RibUpdate::QueryBmpPeerStats { reply })
         .await
         .unwrap();
-    let counts = result.await.unwrap();
+    let counts = result.await.unwrap().adj_rib_out_post;
     assert!(counts[&classic].is_empty());
     assert_eq!(counts[&extended], vec![((Afi::Ipv4, Safi::Unicast), 1)]);
 

@@ -110,10 +110,14 @@ established peer per view, the chunked table dump, End-of-RIB, then
 live RouteMonitoring deltas. From the daemon side the collector
 connection state is visible in the logs (`log_format = "json"`) and
 the BMP metrics below. Periodic peer Stats Reports also carry RFC 9972
-post-policy accepted-route gauges and exact type-22 IPv4/IPv6-unicast policy
-reject counts. Type 22 is present only while the default-on rejected-route
-store is authoritative: disabling retention or reaching its capacity omits
-the rows after the first eviction instead of publishing a partial count.
+post-policy accepted-route gauges, exact type-22 IPv4/IPv6-unicast policy
+reject counts, and exact per-path RPKI Invalid/Valid/NotFound types 35/36/37.
+The RPKI rows cover negotiated IPv4/IPv6-unicast families, count every
+Add-Path identity, and include authoritative zero rows; they are omitted when
+no VRP table is installed. Type 22 is present only while the default-on
+rejected-route store is authoritative: disabling retention or reaching its
+capacity omits the rows after the first eviction instead of publishing a
+partial count.
 
 During a Loc-RIB bootstrap or dump, watch
 `bmp_loc_rib_dump_live_buffer_depth{collector}` for the current queued live

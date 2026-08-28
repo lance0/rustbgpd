@@ -323,7 +323,7 @@ def cmd_stats_locrib_counts():
        f"carries legacy and RFC 9972 Adj-RIB-In gauges ({ptypes})")
 
 
-def cmd_stats_policy_reject_counts(peer_ip):
+def _stats_bodies_for_peer(peer_ip):
     def v3_body(m):
         return m["raw"][6 + PER_PEER_LEN :]
 
@@ -336,16 +336,6 @@ def cmd_stats_policy_reject_counts(peer_ip):
         value = b[off + 4 :]
         return value if len(value) == length else None
 
-    def exact_type22(body):
-        rows = [payload for stat_type, payload in _stats(body) if stat_type == 22]
-        if len(rows) != 2 or any(len(row) != 11 for row in rows):
-            return False
-        decoded = [
-            (u16(row, 0), row[2], int.from_bytes(row[3:], "big"))
-            for row in rows
-        ]
-        return decoded == [(1, 1, 1), (2, 1, 1)] and len(set(decoded)) == 2
-
     v3 = [
         v3_body(m)
         for m in load(V3_FILE)
@@ -357,6 +347,21 @@ def cmd_stats_policy_reject_counts(peer_ip):
         if m["type"] == STATS and peer_hdr(m)[2] == peer_ip
         if (body := v4_body(m)) is not None
     ]
+    return v3, v4
+
+
+def cmd_stats_policy_reject_counts(peer_ip):
+    def exact_type22(body):
+        rows = [payload for stat_type, payload in _stats(body) if stat_type == 22]
+        if len(rows) != 2 or any(len(row) != 11 for row in rows):
+            return False
+        decoded = [
+            (u16(row, 0), row[2], int.from_bytes(row[3:], "big"))
+            for row in rows
+        ]
+        return decoded == [(1, 1, 1), (2, 1, 1)] and len(set(decoded)) == 2
+
+    v3, v4 = _stats_bodies_for_peer(peer_ip)
     exact_v3 = [body for body in v3 if exact_type22(body)]
     exact_v4 = [body for body in v4 if exact_type22(body)]
     if not exact_v3 or not exact_v4:
@@ -366,6 +371,38 @@ def cmd_stats_policy_reject_counts(peer_ip):
         fail(f"peer {peer_ip}: exact type-22 Stats bodies differ across v3/v4")
     ok(f"peer {peer_ip}: exactly two unique type-22 length-11 rows "
        "[(1,1,1), (2,1,1)] with byte-equal v3/v4 Stats body")
+
+
+def cmd_stats_rpki_counts(peer_ip):
+    def exact_rpki_rows(body):
+        expected = {
+            35: [(1, 1, 1), (2, 1, 1)],
+            36: [(1, 1, 1), (2, 1, 1)],
+            37: [(1, 1, 1), (2, 1, 1)],
+        }
+        for stat_type, want in expected.items():
+            rows = [payload for candidate, payload in _stats(body)
+                    if candidate == stat_type]
+            if len(rows) != 2 or any(len(row) != 11 for row in rows):
+                return False
+            decoded = [
+                (u16(row, 0), row[2], int.from_bytes(row[3:], "big"))
+                for row in rows
+            ]
+            if decoded != want or len(set(decoded)) != 2:
+                return False
+        return True
+
+    v3, v4 = _stats_bodies_for_peer(peer_ip)
+    exact_v3 = [body for body in v3 if exact_rpki_rows(body)]
+    exact_v4 = [body for body in v4 if exact_rpki_rows(body)]
+    if not exact_v3 or not exact_v4:
+        fail(f"peer {peer_ip}: no v3/v4 Stats pair with exact type-35/36/37 "
+             "IPv4/IPv6-unicast value-1 rows")
+    if not set(exact_v3).intersection(exact_v4):
+        fail(f"peer {peer_ip}: exact RPKI Stats bodies differ across v3/v4")
+    ok(f"peer {peer_ip}: types 35/36/37 each carry exactly two unique "
+       "length-11 rows [(1,1,1), (2,1,1)] with byte-equal v3/v4 Stats body")
 
 
 def cmd_no_path_marking():
@@ -447,6 +484,7 @@ def main():
         "stats_v4_wrap": cmd_stats_v4_wrap,
         "stats_locrib_counts": cmd_stats_locrib_counts,
         "stats_policy_reject_counts": cmd_stats_policy_reject_counts,
+        "stats_rpki_counts": cmd_stats_rpki_counts,
         "no_path_marking": cmd_no_path_marking,
         "dump": cmd_dump,
         "term": cmd_term,
