@@ -17,6 +17,9 @@ Usage: bench/scale/compare-rrharness.sh [options]
                           pinned throughput gates are then applied
   --diff-path PATH        Repository-relative path hashed against --pin;
                           repeatable; required with --pin
+  --max-regression PCT    Gate every rung on one uniform maximum regression
+                          of PCT percent (a positive number); applies with or
+                          without --pin and replaces the pinned gate set
   --core N                CPU pinned with taskset (default: 5)
   --output-dir DIR        New, empty receipt directory
   --preflight-wait N      Per-cell idle wait in seconds (default: 120)
@@ -33,10 +36,13 @@ refs, the shared host lock, a performance-governor pinned CPU, load below
 cell. Both sides are built with `cargo build --release --locked` into
 separate target directories and launched as prebuilt binaries.
 
-Without --pin the receipt is advisory: comparison.csv (per cell) and
-summary.csv (per rung) report head-vs-base throughput with no pass/fail
-gate. With --pin the receipt is marked complete only if every pinned
-throughput gate passes.
+Without --pin or --max-regression the receipt is advisory: comparison.csv
+(per cell) and summary.csv (per rung) report head-vs-base throughput with no
+pass/fail gate. With --pin the receipt is marked complete only if every
+pinned throughput gate passes. With --max-regression the receipt is marked
+complete only if every rung holds its regression within PCT percent; when
+--pin and --max-regression are both given the uniform regression gate is the
+one applied and the receipt says so.
 EOF
 }
 
@@ -46,6 +52,7 @@ readonly required_governor=performance
 base_ref=
 head_ref=
 pin_path=
+max_regression=
 diff_paths=()
 core=5
 output_dir=
@@ -59,6 +66,10 @@ while (($#)); do
     --head) head_ref=${2:?--head requires a ref}; shift 2 ;;
     --pin) pin_path=${2:?--pin requires a path}; shift 2 ;;
     --diff-path) diff_paths+=("${2:?--diff-path requires a path}"); shift 2 ;;
+    --max-regression)
+      max_regression=${2:?--max-regression requires a value}
+      shift 2
+      ;;
     --core) core=${2:?--core requires a value}; shift 2 ;;
     --output-dir) output_dir=${2:?--output-dir requires a path}; shift 2 ;;
     --preflight-wait)
@@ -82,6 +93,12 @@ for value_name in preflight_wait_seconds cell_timeout_seconds; do
     exit 2
   }
 done
+if [[ -n $max_regression ]]; then
+  [[ $max_regression =~ ^[0-9]+(\.[0-9]+)?$ && $max_regression =~ [1-9] ]] || {
+    printf '%s must be a positive percentage\n' --max-regression >&2
+    exit 2
+  }
+fi
 if [[ -n $pin_path ]]; then
   ((${#diff_paths[@]})) || { printf '%s requires at least one --diff-path\n' --pin >&2; exit 2; }
 elif ((${#diff_paths[@]})); then
@@ -529,7 +546,8 @@ for repetition in 1 2; do
 done
 
 gate_args=()
-[[ -n $pin_path ]] || gate_args=(--no-gates)
+[[ -n $pin_path || -n $max_regression ]] || gate_args=(--no-gates)
+[[ -z $max_regression ]] || gate_args+=(--max-regression "$max_regression")
 python3 "$source_dir/parse_rrharness.py" compare \
   --input "$results" --raw-dir "$raw_dir" --output "$comparison" \
   --summary "$summary" "${gate_args[@]}"
@@ -559,7 +577,10 @@ python3 "$source_dir/parse_rrharness.py" compare \
 
 run_utc_finish=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 cpu_model=$(awk -F: '/^model name/ { sub(/^[[:space:]]+/, "", $2); print $2; exit }' /proc/cpuinfo)
-if [[ -n $pin_path ]]; then
+if [[ -n $max_regression ]]; then
+  receipt_status=regression-gate-passed
+  receipt_gates=max-regression
+elif [[ -n $pin_path ]]; then
   receipt_status=all-throughput-gates-passed
   receipt_gates=pinned
 else

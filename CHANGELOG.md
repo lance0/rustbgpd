@@ -22,6 +22,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `per_client_best` when two shared-staging group keys differ on the RFC 7947
   per-client-best axis; CLI human and JSON output use the same stable label.
 
+- `bench/scale/compare-rrharness.sh --max-regression PCT` turns an unpinned
+  rrharness comparison into a gated run: every rung — 1000-client rungs
+  included — fails when head regresses by more than PCT percent
+  (`parse_rrharness.py compare --max-regression`), and the receipt reports
+  `regression-gate-passed` / `max-regression` instead of the advisory or
+  pinned statuses it did not run under. (LAN-1316)
+
 ### Fixed
 
 - Policy mutation preflight failures now preserve `NOT_FOUND`, `INVALID_ARGUMENT`, and
