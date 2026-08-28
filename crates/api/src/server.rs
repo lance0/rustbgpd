@@ -78,7 +78,11 @@ const RUNTIME_CONFIG_OUTCOME_METADATA: &str = "rustbgpd-runtime-config-outcome";
 /// from a rejection that produced no runtime effect.
 pub(crate) fn fully_compensated_status(status: &Status) -> Status {
     let code = status.code();
-    let message = format!("{FULLY_COMPENSATED_STATUS_PREFIX} {}", status.message());
+    let message = if status.message().is_empty() {
+        FULLY_COMPENSATED_STATUS_PREFIX.to_string()
+    } else {
+        format!("{FULLY_COMPENSATED_STATUS_PREFIX} {}", status.message())
+    };
     let details = bytes::Bytes::copy_from_slice(status.details());
     let mut metadata = status.metadata().clone();
     metadata.insert(
@@ -2458,6 +2462,27 @@ mod tests {
         assert!(marked.message().ends_with("candidate could not settle"));
         assert_eq!(marked.details(), b"\0opaque-details\xff");
         assert_eq!(marked.metadata().get("existing-trailer").unwrap(), "kept");
+        assert_eq!(
+            marked
+                .metadata()
+                .get("rustbgpd-runtime-config-outcome")
+                .unwrap(),
+            "fully-compensated"
+        );
+    }
+
+    #[test]
+    fn fully_compensated_status_has_no_trailing_space_for_empty_message() {
+        let original = Status::internal("");
+
+        let marked = fully_compensated_status(&original);
+
+        assert_eq!(marked.code(), tonic::Code::Internal);
+        assert_eq!(
+            marked.message(),
+            "runtime effects were fully compensated; retry may repeat transient runtime changes:"
+        );
+        assert!(!marked.message().ends_with(' '));
         assert_eq!(
             marked
                 .metadata()
