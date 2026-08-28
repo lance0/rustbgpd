@@ -1,0 +1,17 @@
+# Keep link checks bounded and deterministic. Pull requests run offline; the
+# scheduled lane adds network requests using this same contract.
+timeout = 20
+max_retries = 2
+retry_wait_time = 2
+max_concurrency = 32
+host_concurrency = 4
+include_fragments = "none"
+exclude_loopback = true
+include_verbatim = false
+
+# HTTP 429 is the only non-success response accepted. Do not let rate limits or
+# server-side failures become durable cache entries.
+accept = ["100..=103", "200..=299", "429"]
+cache = true
+max_cache_age = "7d"
+cache_exclude_status = "429,500.."

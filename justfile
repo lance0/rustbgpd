@@ -6,6 +6,7 @@ default:
 
 # Run the broad local correctness baseline in diagnostic order.
 gate:
+    just links
     python3 scripts/check_developer_tooling.py --self-test
     python3 scripts/check_developer_tooling.py
     cargo fmt --all -- --check
@@ -24,6 +25,25 @@ gate:
     cargo clippy --locked --workspace --all-targets -- -D warnings
     cargo test --locked --workspace
     cargo doc --locked --workspace --lib --no-deps
+
+# Check links between tracked Markdown files without making network requests.
+links:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    expected="lychee 0.24.2"
+    if ! command -v lychee >/dev/null 2>&1; then
+        echo "${expected} is required; install it with:" >&2
+        echo "  cargo install lychee --version 0.24.2 --locked" >&2
+        exit 127
+    fi
+    actual="$(lychee --version)"
+    if [[ "${actual}" != "${expected}" ]]; then
+        echo "expected ${expected}, found ${actual}" >&2
+        echo "install the pinned version with:" >&2
+        echo "  cargo install lychee --version 0.24.2 --locked" >&2
+        exit 1
+    fi
+    git ls-files '*.md' | lychee --files-from - --offline --include-fragments=none --no-progress
 
 # Compile the feature-gated RIB, transport, and API bench surfaces.
 gate-rib:

@@ -222,6 +222,11 @@ pre-commit install --hook-type pre-commit --hook-type pre-push
 After install, hooks run automatically. To run them manually
 against staged files: `prek run` (or `pre-commit run`).
 
+Run `just links` to check links between tracked Markdown files without network
+access. It requires lychee 0.24.2 and prints the pinned install command when the
+binary is missing or has a different version. Hosted pull-request checks use
+the same offline boundary; a weekly lane checks external destinations.
+
 ### Conventions
 
 - No `unsafe` code without a `SAFETY` comment and strong justification

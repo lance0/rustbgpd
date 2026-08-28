@@ -1,0 +1,78 @@
+name: Documentation links
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**/*.md"
+      - ".github/workflows/docs-links.yml"
+      - ".lycheeignore"
+      - "lychee.toml"
+      - ".gitignore"
+      - "justfile"
+  pull_request:
+    paths:
+      - "**/*.md"
+      - ".github/workflows/docs-links.yml"
+      - ".lycheeignore"
+      - "lychee.toml"
+      - ".gitignore"
+      - "justfile"
+  workflow_dispatch:
+  schedule:
+    - cron: "17 7 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  internal:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - name: List tracked Markdown
+        run: git ls-files '*.md' > "${RUNNER_TEMP}/tracked-markdown.txt"
+      - name: Check internal links
+        uses: lycheeverse/lychee-action@v2.9.0
+        with:
+          args: >-
+            --files-from "${{ runner.temp }}/tracked-markdown.txt"
+            --offline
+            --include-fragments=none
+            --no-progress
+          fail: true
+          failIfEmpty: true
+          lycheeVersion: v0.24.2
+          output: ${{ runner.temp }}/lychee-internal.md
+
+  external:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: List tracked Markdown
+        run: git ls-files '*.md' > "${RUNNER_TEMP}/tracked-markdown.txt"
+      - name: Restore link cache
+        uses: actions/cache@v6
+        with:
+          path: .lycheecache
+          key: >-
+            docs-links-${{ runner.os }}-lychee-0.24.2-${{
+            hashFiles('**/*.md', 'lychee.toml', '.lycheeignore') }}
+          restore-keys: |
+            docs-links-${{ runner.os }}-lychee-0.24.2-
+      - name: Check external links
+        uses: lycheeverse/lychee-action@v2.9.0
+        with:
+          args: >-
+            --files-from "${{ runner.temp }}/tracked-markdown.txt"
+            --include-fragments=none
+            --no-progress
+          fail: true
+          failIfEmpty: true
+          lycheeVersion: v0.24.2
+          output: ${{ runner.temp }}/lychee-external.md
+          token: ${{ github.token }}
