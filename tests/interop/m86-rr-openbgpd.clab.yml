@@ -20,14 +20,15 @@
 # lesson: a tentative address at session establishment breaks the
 # initial v6 export).
 #
-# Image: openbgpd/openbgpd:9.1 (Docker Hub, OpenBGPD portable project;
-# pinned). The image entrypoint execs any non-bgpd command, so
+# Image: openbgpd/openbgpd at the reviewed 9.1 multi-platform index digest
+# (Docker Hub, OpenBGPD portable project). The image entrypoint execs any
+# non-bgpd command, so
 # `cmd: sleep infinity` holds the container and the driver launches
 # bgpd itself.
 #
 # Usage:
 #   docker build --target dev -t rustbgpd:dev .
-#   docker pull openbgpd/openbgpd:9.1
+#   docker pull openbgpd/openbgpd@sha256:b3d4413662098070d5643a0473a5a866f2922069ee9c75132c1cea3ac5914fa4
 #   containerlab deploy -t tests/interop/m86-rr-openbgpd.clab.yml
 #   bash tests/interop/scripts/test-m86-rr-openbgpd.sh
 #   containerlab destroy -t tests/interop/m86-rr-openbgpd.clab.yml
@@ -60,7 +61,7 @@ topology:
 
     obgp1:
       kind: linux
-      image: openbgpd/openbgpd:9.1
+      image: openbgpd/openbgpd@sha256:b3d4413662098070d5643a0473a5a866f2922069ee9c75132c1cea3ac5914fa4
       cmd: sleep infinity
       binds:
         - ./configs/bgpd-m86-c1.conf:/etc/bgpd/bgpd.conf:ro
@@ -79,7 +80,7 @@ topology:
 
     obgp2:
       kind: linux
-      image: openbgpd/openbgpd:9.1
+      image: openbgpd/openbgpd@sha256:b3d4413662098070d5643a0473a5a866f2922069ee9c75132c1cea3ac5914fa4
       cmd: sleep infinity
       binds:
         - ./configs/bgpd-m86-c2.conf:/etc/bgpd/bgpd.conf:ro

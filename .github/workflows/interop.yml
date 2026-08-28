@@ -1162,12 +1162,34 @@ jobs:
           target: dev
           cache-from: type=gha,scope=rustbgpd-dev
 
-      - name: Pull openbgpd/openbgpd:9.1
-        # Pinned upstream image from the OpenBGPD portable project; its
-        # entrypoint execs any non-bgpd command, so the topology holds
-        # the container with `sleep infinity` and the driver launches
-        # bgpd itself.
-        run: docker pull openbgpd/openbgpd:9.1
+      - name: Verify and pull digest-pinned OpenBGPD 9.1
+        # Pin the multi-platform index used by the topology, then prove the
+        # hosted linux/amd64 runner resolves the reviewed leaf and config.
+        # The OpenBGPD entrypoint execs any non-bgpd command; the topology
+        # therefore holds each container with sleep until the driver has
+        # preflighted its local image identity and exact runtime version.
+        env:
+          OPENBGPD_IMAGE: openbgpd/openbgpd@sha256:b3d4413662098070d5643a0473a5a866f2922069ee9c75132c1cea3ac5914fa4
+          OPENBGPD_AMD64_MANIFEST: sha256:85c443bcb16b1e1b2c6ea6bddcd540352d280f1eaed66b7a7cd0ea1122c866e6
+          OPENBGPD_CONFIG: sha256:b38add7d3ec1a0d3caea8eb5dc799fda1925e60fb7689dc532cbada6551ee1a8
+        run: |
+          index_json=$(docker buildx imagetools inspect --raw "$OPENBGPD_IMAGE")
+          amd64_manifest=$(jq -er '
+            [.manifests[]
+             | select(.platform.os == "linux"
+                      and .platform.architecture == "amd64"
+                      and ((.platform.variant // "") == ""))]
+            | if length == 1 then .[0].digest
+              else error("expected exactly one linux/amd64 manifest") end
+          ' <<<"$index_json")
+          test "$amd64_manifest" = "$OPENBGPD_AMD64_MANIFEST"
+
+          manifest_json=$(docker buildx imagetools inspect --raw \
+            "openbgpd/openbgpd@$amd64_manifest")
+          config_digest=$(jq -er '.config.digest' <<<"$manifest_json")
+          test "$config_digest" = "$OPENBGPD_CONFIG"
+
+          docker pull "$OPENBGPD_IMAGE"
 
       - name: Run M86 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test
