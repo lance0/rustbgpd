@@ -478,7 +478,7 @@ fn production_raw_and_token_roster_uses_only_bounded_rendering() {
     assert!(!reconciliation.contains(".token_with_context("));
 
     let controller = include_str!("../../config_transaction_control.rs")
-        .split("#[cfg(test)]\nmod tests {")
+        .split("#[cfg(test)]\nmod tests;")
         .next()
         .unwrap();
     assert_eq!(controller.matches("raw_config_document_bounded").count(), 1);
