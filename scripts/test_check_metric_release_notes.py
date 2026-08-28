@@ -31,6 +31,7 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
             {
                 "bgp_evpn_nlri_discarded_total",
                 "bgp_path_attribute_discarded_total",
+                "bgp_session_lifecycle_source_dropped_total",
             },
         )
         self.assertEqual(removed, set())
