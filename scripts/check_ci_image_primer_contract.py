@@ -455,7 +455,7 @@ def check(root: Path) -> list[str]:
             "needs: v064_validator",
             "uses: actions/download-artifact@v8",
             f"name: {V064_ARTIFACT}",
-            f"path: ${{{{ runner.temp }}}}/rustbgpd-v064-artifact",
+            "path: ${{ runner.temp }}/rustbgpd-v064-artifact",
             "--install-archive",
             f'"$RUNNER_TEMP/rustbgpd-v064-artifact/{V064_ARCHIVE}"',
             '"$RUNNER_TEMP/rustbgpd-v064"',

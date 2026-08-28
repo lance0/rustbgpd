@@ -168,6 +168,33 @@ workspace benchmark packages. Any `#[allow(clippy::...)]` or
 the escape hatch is intentional. New workspace packages are covered without
 maintaining a second crate list.
 
+### Developer lint gate
+
+The developer-tooling gate uses actionlint 1.7.12 and Ruff 0.16.0. On Linux
+amd64, install those exact binaries once into a new local directory, prove the
+negative fixtures, and run the live checks with:
+
+```bash
+tools="${XDG_DATA_HOME:-$HOME/.local/share}/rustbgpd/developer-linters-1.7.12-ruff-0.16.0"
+.github/scripts/install-developer-linters.sh "$tools"
+PATH="$tools:$PATH" python3 scripts/check_developer_tooling.py --self-test
+PATH="$tools:$PATH" python3 scripts/check_developer_tooling.py
+```
+
+The installer rejects an existing destination instead of partially updating
+it. After the first install, reuse the final two commands. The checker rejects
+any other tool versions, runs Ruff from the repository root, and lets
+actionlint discover every workflow under `.github/workflows/`.
+
+The initial Ruff boundary targets Python 3.11, keeps the 100-character line
+length setting, and enables only `E9`, `F`, and `B`. `B904` and `B905` are
+temporarily ignored so enabling lint does not bundle exception-chaining or
+`zip(strict=...)` behavior changes. The two exact per-file migration exceptions
+are recorded in `pyproject.toml`; new blanket or directory-wide exceptions are
+not part of this boundary. actionlint runs with its ShellCheck and Pyflakes
+integrations disabled; the existing explicitly scoped ShellCheck commands
+remain responsible for shell scripts.
+
 ### Pre-commit hooks
 
 We ship a `.pre-commit-config.yaml` that runs `cargo fmt` and

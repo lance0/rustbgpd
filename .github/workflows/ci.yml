@@ -85,6 +85,18 @@ jobs:
             echo "CI triggers must keep main-only pushes, all PRs, and Markdown ignores" >&2
             exit 1
           fi
+      - name: Install exact developer linters
+        shell: bash
+        run: |
+          bash -n .github/scripts/install-developer-linters.sh
+          shellcheck .github/scripts/install-developer-linters.sh
+          .github/scripts/install-developer-linters.sh \
+            "$RUNNER_TEMP/developer-linters"
+          echo "$RUNNER_TEMP/developer-linters" >> "$GITHUB_PATH"
+      - name: Prove developer-tooling lint failures are enforced
+        run: python3 scripts/check_developer_tooling.py --self-test
+      - name: Check Python and GitHub Actions developer tooling
+        run: python3 scripts/check_developer_tooling.py
       # The chooser's security link once pointed at a posture doc and a
       # nonexistent security email; keep it pinned to the private
       # vulnerability-reporting intake so it cannot silently drift again.

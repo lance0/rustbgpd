@@ -6,6 +6,8 @@ default:
 
 # Run the broad local correctness baseline in diagnostic order.
 gate:
+    python3 scripts/check_developer_tooling.py --self-test
+    python3 scripts/check_developer_tooling.py
     cargo fmt --all -- --check
     python3 -m unittest -v scripts/test_check_clippy_reasons.py
     python3 scripts/check-clippy-reasons.py

@@ -2145,7 +2145,7 @@ def make_fixture(root: Path, kind: str, started: int, identity_seed: int) -> Non
         if cell in ("rustbgpd-sighup", GROUPED_CELL):
             topology_mode = "private" if cell == "rustbgpd-sighup" else "grouped"
             (cdir / "topology.json").write_text(json.dumps({"status": "pass", "mode": topology_mode, "peers": 320, "scrape_epoch_ns": [1_000_000_000, 2_000_000_000, 3_000_000_000], "group_id": 7, "first_reload_wall_us": 4_000_000, "overlap_fraction": 0.0, "overlap_pairs": 0}))
-            received_rows = [f"received_view_v1\ttotal=183040\tpeers=320"]
+            received_rows = ["received_view_v1\ttotal=183040\tpeers=320"]
             for observer in range(320):
                 own = ",".join(str(index) for index in range(observer * 572, (observer + 1) * 572))
                 received_rows.append(f"{observer}\t572\t{own}")
