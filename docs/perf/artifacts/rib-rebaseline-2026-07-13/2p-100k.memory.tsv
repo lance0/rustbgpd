@@ -1,10 +1,12 @@
 component	live_at_t_gmax_bytes	share_percent
+Interned attribute-set backing	0	0.000000
+Nested path-attribute payloads	900	0.000428
 Group RIB-Out table	46399748	22.059521
 Loc-RIB best-path map	44302352	21.062370
 Adj-RIB-In route storage	33556528	15.953555
 Transport known-path memory	15204416	7.228533
 Announcing-peers index	14942224	7.103881
-Transport session buffers/scratch	3564671	1.694728
+Transport session buffers/scratch	3563771	1.694300
 Prefix-trie index - Adj-RIB-In	17219712	8.186652
 Prefix-trie index - group table	17215552	8.184674
 Daemon core	4632060	2.202189

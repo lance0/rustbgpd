@@ -1,0 +1,2 @@
+target,version,peers,prefixes_per_peer,required,received,monitor_seconds,elapsed_seconds,prefix_received_seconds,testers_seconds,total_time_seconds,max_cpu_percent,max_mem_gb,tester_errors,tester_timeouts
+rustbgpd,rustbgpd 0.67.0,2,100000,200000,200000,0,4,2,2,13.42,130,0.184,0,0

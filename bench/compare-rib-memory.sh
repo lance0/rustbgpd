@@ -125,13 +125,15 @@ esac
 run_dir="${out_parent}/${run_id}"
 base_dir="${run_dir}/base"
 head_dir="${run_dir}/head"
-target_dir="${run_dir}/target"
+target_root="${run_dir}/target"
+base_target_dir="${target_root}/base"
+head_target_dir="${target_root}/head"
 log_dir="${run_dir}/logs"
 summary_file="${run_dir}/summary.md"
 results_file="${run_dir}/results.csv"
 metadata_file="${run_dir}/metadata.txt"
 
-mkdir -p "$log_dir" "$target_dir"
+mkdir -p "$log_dir" "$base_target_dir" "$head_target_dir"
 
 cleanup() {
   if [[ "$keep_worktrees" -eq 0 ]]; then
@@ -153,7 +155,8 @@ write_metadata() {
     echo "head_ref=${head_ref}"
     echo "head_sha=${head_sha}"
     echo "profile=${profile}"
-    echo "target_dir=${target_dir}"
+    echo "base_target_dir=${base_target_dir}"
+    echo "head_target_dir=${head_target_dir}"
     echo
     uname -a
     echo
@@ -169,7 +172,8 @@ write_metadata() {
 
 run_profile() {
   local worktree="$1"
-  local log_file="$2"
+  local target_dir="$2"
+  local log_file="$3"
   (
     cd "$worktree"
     export CARGO_TARGET_DIR="$target_dir"
@@ -183,9 +187,9 @@ run_profile() {
 write_metadata
 
 echo "Running base ${base_ref} (${base_short})"
-run_profile "$base_dir" "${log_dir}/base.log"
+run_profile "$base_dir" "$base_target_dir" "${log_dir}/base.log"
 echo "Running head ${head_ref} (${head_short})"
-run_profile "$head_dir" "${log_dir}/head.log"
+run_profile "$head_dir" "$head_target_dir" "${log_dir}/head.log"
 
 BASE_LOG="${log_dir}/base.log" \
 HEAD_LOG="${log_dir}/head.log" \
@@ -252,6 +256,23 @@ for key in keys:
     base = base_rows.get(key)
     head = head_rows.get(key)
     shape, prefixes = key
+    model = head if head and "modeled_structural_delta_bytes" in head else base
+    model_fields = {
+        "route_copies": "" if model is None else model.get("route_copies", ""),
+        "attribute_sets": "" if model is None else model.get("attribute_sets", ""),
+        "modeled_slice_pointer_growth_bytes": ""
+        if model is None
+        else model.get("modeled_slice_pointer_growth_bytes", ""),
+        "modeled_vec_header_savings_bytes": ""
+        if model is None
+        else model.get("modeled_vec_header_savings_bytes", ""),
+        "modeled_structural_delta_bytes": ""
+        if model is None
+        else model.get("modeled_structural_delta_bytes", ""),
+        "modeled_break_even_attribute_sets": ""
+        if model is None
+        else model.get("modeled_break_even_attribute_sets", ""),
+    }
     if base is None or head is None:
         csv_rows.append({
             "shape": shape,
@@ -261,6 +282,7 @@ for key in keys:
             "delta_pct": "",
             "delta_mib": "",
             "review": "missing-row",
+            **model_fields,
         })
         continue
 
@@ -299,6 +321,7 @@ for key in keys:
             + head["adj_out_prefix_index_entries"]
         ),
         "review": review,
+        **model_fields,
     })
 
 fieldnames = [
@@ -316,6 +339,12 @@ fieldnames = [
     "head_route_capacity",
     "base_prefix_index_entries",
     "head_prefix_index_entries",
+    "route_copies",
+    "attribute_sets",
+    "modeled_slice_pointer_growth_bytes",
+    "modeled_vec_header_savings_bytes",
+    "modeled_structural_delta_bytes",
+    "modeled_break_even_attribute_sets",
     "review",
 ]
 with RESULTS_FILE.open("w", newline="") as fh:
@@ -363,7 +392,26 @@ for row in csv_rows:
 lines.extend([
     "",
     "Review rule: `review` means head grew by at least +5% and +32 MiB for the same shape/size. Smaller movement is reported but treated as allocator/map-capacity noise unless the PR is explicitly memory-targeted.",
+    "",
+    "## Attribute-container structural model",
+    "",
+    "Positive modeled delta means `Arc<[PathAttribute]>` is structurally larger before allocator size classes or locality. The model charges the wider slice pointer to every Route copy and credits one removed Vec header per unique interned set; nested attribute payload bytes are unchanged.",
+    "",
+    "| Shape | Prefixes | Route copies | Attribute sets | Slice pointer growth | Vec headers saved | Modeled delta | Break-even sets |",
+    "|---|---:|---:|---:|---:|---:|---:|---:|",
 ])
+
+for row in csv_rows:
+    if row["modeled_structural_delta_bytes"] == "":
+        continue
+    lines.append(
+        f"| `{row['shape']}` | {row['prefixes']} | {row['route_copies']} | "
+        f"{row['attribute_sets']} | "
+        f"{fmt_bytes(int(row['modeled_slice_pointer_growth_bytes']))} | "
+        f"{fmt_bytes(int(row['modeled_vec_header_savings_bytes']))} | "
+        f"{fmt_bytes(int(row['modeled_structural_delta_bytes']))} | "
+        f"{row['modeled_break_even_attribute_sets']} |"
+    )
 
 SUMMARY_FILE.write_text("\n".join(lines) + "\n")
 print(SUMMARY_FILE.read_text())

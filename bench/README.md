@@ -299,11 +299,23 @@ exact-export form are in `bench/scale/rrharness/README.md`).
 
 `compare-rib-memory.sh` runs the ignored high-N RIB structural memory profile
 at two git refs and writes a Markdown summary, CSV, logs, and metadata under
-`target/rib-memory-compare/`. It measures allocator-tracked live heap for four
+`target/rib-memory-compare/`. It measures allocator-tracked live heap for six
 RIB shapes: one-peer Adj-RIB-In (`adj_rib_in`), two-peer Adj-RIB-In + Loc-RIB
 (`full_rib`), the same two-peer shape with a distinct attribute set per prefix
-so attribute interning cannot dedupe (`full_rib_diverse`), and a route-server /
-route-reflector fanout shape with two Adj-RIB-Out peers (`rr_fanout`).
+so attribute interning cannot dedupe (`full_rib_diverse`), a calibrated
+one-set-per-seven-prefixes arm (`full_rib_representative`), and route-server /
+route-reflector fanout with degenerate (`rr_fanout`) and calibrated
+(`rr_fanout_representative`) attribute diversity. The seven-prefix grouping is
+the preregistered approximation of the measured IPv4 full-table ratio; it is
+checked in the schema test rather than inferred from a run.
+
+Every row also carries an attribute-container structural model. It compares
+the wider per-Route `Arc<[PathAttribute]>` fat pointer with the one-Vec-header
+per-unique-set saving from replacing `Arc<Vec<PathAttribute>>`. The model keeps
+nested `AS_PATH` and community payloads unchanged and reports modeled bytes
+separately from allocator-tracked live bytes. A positive modeled delta is a
+warning that the slice representation is larger before allocator size classes
+or locality effects.
 
 Requirements: `bash`, `git`, `cargo`, and `python3`. The compared refs must
 already include the structured `memory_profile_high_n` harness.
@@ -326,6 +338,12 @@ The summary flags a row for review only when head grows by at least **+5%**
 and **+32 MiB** for the same shape/size. Smaller movement is recorded but
 treated as allocator/map-capacity noise unless the PR is explicitly
 memory-targeted.
+
+The attribute-layout prototype gate is stricter and is not implied by a green
+generic summary: at the 900k calibrated shapes, a candidate must save more than
+both **5%** and **50 MiB**, while the degenerate and fanout bounds must not hit
+the existing review threshold. Transport/RIB throughput neutrality is a
+separate required gate; this structural harness cannot prove it.
 
 ## Multiple attempts (recommended on noisy hosts)
 

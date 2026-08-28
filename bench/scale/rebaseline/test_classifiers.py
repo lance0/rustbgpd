@@ -73,6 +73,11 @@ class ClassifierFixtures(unittest.TestCase):
         self.run_check(
             "sanitize_bgperf_csv.py", "bgperf.raw.csv", "bgperf.expected.csv"
         )
+        self.run_check(
+            "sanitize_bgperf_csv.py",
+            "bgperf.provenance.raw.csv",
+            "bgperf.provenance.expected.csv",
+        )
         subprocess.run(
             [
                 sys.executable,
@@ -132,6 +137,25 @@ class ClassifierFixtures(unittest.TestCase):
                         text=True,
                     )
                     self.assertNotEqual(result.returncode, 0)
+
+    def test_bgperf_provenance_schema_rejects_unbounded_identity(self) -> None:
+        raw = (FIXTURES / "bgperf.provenance.raw.csv").read_text(encoding="utf-8")
+        bad_inputs = (
+            raw.replace("bgperf/rustbgpd:receipt", "../rustbgpd"),
+            raw.replace("2.19.0+branch.master.639423360c80", "/tmp/tester"),
+            raw.replace("4.8.0", "deadbeefdeadbeef"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            for index, text in enumerate(bad_inputs):
+                path = Path(directory) / f"bad-provenance-{index}.csv"
+                path.write_text(text, encoding="utf-8")
+                result = subprocess.run(
+                    [sys.executable, str(HERE / "sanitize_bgperf_csv.py"), str(path)],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
 
     def test_dhat_fixture_and_sanitized_derivative(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -206,6 +230,41 @@ class ClassifierFixtures(unittest.TestCase):
                 ["<rustbgpd_rib::adj_rib_in::AdjRibIn>::insert"]
             ),
             "Adj-RIB-In route storage",
+        )
+
+    def test_dhat_separates_attribute_backing_from_nested_payloads(self) -> None:
+        stored_path = "<rustbgpd_transport::session::inbound::RouteAttrBundle>::new"
+        self.assertEqual(
+            classify_dhat.classify_stack(
+                [
+                    "<alloc::vec::Vec<rustbgpd_wire::attribute::PathAttribute>>::with_capacity",
+                    stored_path,
+                    "<rustbgpd_rib::adj_rib_in::AdjRibIn>::insert",
+                ]
+            ),
+            "Interned attribute-set backing",
+        )
+        self.assertEqual(
+            classify_dhat.classify_stack(
+                [
+                    "<rustbgpd_wire::attribute::AsPath as core::clone::Clone>::clone",
+                    "<rustbgpd_wire::attribute::PathAttribute as core::clone::Clone>::clone",
+                    stored_path,
+                    "<rustbgpd_rib::adj_rib_in::AdjRibIn>::insert",
+                ]
+            ),
+            "Nested path-attribute payloads",
+        )
+
+    def test_dhat_does_not_relabel_unowned_attribute_allocations(self) -> None:
+        self.assertEqual(
+            classify_dhat.classify_stack(
+                [
+                    "<alloc::vec::Vec<rustbgpd_wire::attribute::PathAttribute>>::with_capacity",
+                    "<rustbgpd_api::neighbor_service::NeighborService>::list_neighbors",
+                ]
+            ),
+            "API / peer-manager",
         )
 
     def test_dhat_current_demangled_loc_rib_owner(self) -> None:

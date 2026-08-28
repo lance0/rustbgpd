@@ -76,12 +76,18 @@ implementation; the classifier uses the owning stack to distinguish:
   `GroupRibOut`/`AdjRibOut` group-table commit;
 - `AdjRibOut` under `GroupRibOut` from a true per-peer Adj-RIB-Out;
 - `RouteSlab` under `AdjRibIn` from other RIB allocations.
+- the outer `Vec<PathAttribute>` owned by `RouteAttrBundle`/the intern path from
+  nested `AS_PATH` and community payload allocations cloned into that vector.
 
 The remaining direct owners are `LocRib`, `remember_known_path`,
 `register_unicast_announcer`, `ImportDecisionCache`, transport read/write
 buffers, daemon constructors, API/peer-manager, RIB, and telemetry/tokio/rest.
 Anything without a committed owner is reported as `other`; do not silently add
 it to the nearest-looking component.
+
+The two attribute rows are allocation ownership, not a claim that changing the
+outer container removes the nested bytes. Review them alongside the
+route-copy/unique-set structural model from `bench/compare-rib-memory.sh`.
 
 Raw DHAT JSON contains instruction addresses, command arguments, and source
 locations and must not be committed. `--derivative` aggregates every positive
@@ -149,6 +155,16 @@ sanitized derivative, and a sanitized same-run bgperf2 CSV. The CSV and DHAT
 derivative must describe the same daemon process/run; a nearby RSS run is not
 equivalent.
 
+That bgperf2 shape uses low attribute diversity and is an attribution arm, not
+the acceptance gate for attribute-container layout changes. Such a change must
+also run the calibrated `full_rib_representative` and
+`rr_fanout_representative` 900k rows, which hold one unique attribute set per
+seven prefixes. The candidate must save more than both 5% and 50 MiB on the
+calibrated full-RIB row, avoid the generic +5%/+32 MiB review threshold on the
+degenerate and fanout bounds, and separately prove neutral RIB/transport
+throughput. Keep modeled structural bytes separate from observed allocator and
+process measurements.
+
 Capture bgperf2's printed header plus result row to a temporary raw CSV, then
 reduce it to the fixed receipt schema:
 
@@ -163,11 +179,14 @@ The sanitizer accepts exactly one header and one result row (16 KiB input,
 4 KiB output), the pinned rustbgpd 2x100k shape, convergence with zero tester
 errors/timeouts, and an allowlisted set of numeric metrics. It rejects schema
 drift, extra fields, paths, process/container-like IDs, filters, and failed
-runs. The current bgperf2 schema emits an unlabeled `tester_timeouts` data
-column; the sanitizer pins the known 24-label/25-value shape from
-`jauderho/bgperf2` commit
-`17216483e779f1484ef38562fb8f6b5ea6ad4d8f` explicitly so an upstream fix
-cannot silently shift columns. Never commit the unsanitized temporary CSV.
+runs. The sanitizer accepts two exact bgperf2 schemas. The historical shape
+from `jauderho/bgperf2` commit
+`17216483e779f1484ef38562fb8f6b5ea6ad4d8f` emits an unlabeled
+`tester_timeouts` data column, so its 24-label/25-value row remains pinned
+explicitly. The row-local provenance adapter labels that column and appends
+bounded target-image, tester-version, and monitor-version fields; those fields
+are validated and omitted from the stable receipt. Any other schema still
+fails closed. Never commit the unsanitized temporary CSV.
 Review the committed artifact without the raw capture using:
 
 ```text

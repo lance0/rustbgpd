@@ -20,8 +20,11 @@ addresses or host paths. The capture-time classifier hashes remain recorded in
 six retained stacks, totaling 327,680 bytes in each profile, from the
 import-decision cache to transport session buffers/scratch. The normalized
 stacks, per-stack byte counts, total live heaps, and known-path comparison did
-not change; only the derivatives' component labels/order and generated
-summaries did.
+not change. The attribute-layout campaign later split two retained
+`RouteAttrBundle` stacks from transport scratch into nested path-attribute
+payloads: 936 bytes in the baseline and 900 bytes in the candidate. Both
+corrections changed only the derivatives' component labels/order and generated
+summaries.
 
 Reproduce the classified tables from the repository root:
 
