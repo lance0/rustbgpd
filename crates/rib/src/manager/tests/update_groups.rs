@@ -3844,11 +3844,7 @@ async fn residue_gauge_tracks_tombstones_and_clears_on_resync() {
 
     let residue = || gauge_metric_value(&metrics, "bgp_update_group_residue_entries", &[]);
     let quiesce = async || {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
-            .await
-            .unwrap();
-        let _ = reply_rx.await.unwrap();
+        let _ = query_best_routes(&tx).await;
     };
     let send_routes = async |announced: Vec<crate::route::Route>, withdrawn: Vec<(Prefix, u32)>| {
         tx.send(RibUpdate::RoutesReceived {
@@ -3944,11 +3940,7 @@ async fn residue_gauge_clears_after_dirty_leaver_moves_to_per_peer_path() {
 
     let residue = || gauge_metric_value(&metrics, "bgp_update_group_residue_entries", &[]);
     let quiesce = async || {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
-            .await
-            .unwrap();
-        let _ = reply_rx.await.unwrap();
+        let _ = query_best_routes(&tx).await;
     };
     let send_routes = async |announced: Vec<crate::route::Route>, withdrawn: Vec<(Prefix, u32)>| {
         tx.send(RibUpdate::RoutesReceived {

@@ -1323,9 +1323,12 @@ async fn rib_prefixes_gauge_tracks_adjribin() {
 
     // Serialize
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::QueryBestRoutes {
+        deadline: full_snapshot_query_deadline(),
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
     let _ = reply_rx.await;
 
     let families = metrics.registry().gather();
@@ -1344,9 +1347,12 @@ async fn rib_prefixes_gauge_tracks_adjribin() {
     .await
     .unwrap();
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::QueryBestRoutes {
+        deadline: full_snapshot_query_deadline(),
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
     let _ = reply_rx.await;
 
     let families = metrics.registry().gather();
@@ -1388,9 +1394,12 @@ async fn loc_rib_gauge_tracks_best() {
     .unwrap();
 
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::QueryBestRoutes {
+        deadline: full_snapshot_query_deadline(),
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
     let _ = reply_rx.await;
 
     let families = metrics.registry().gather();
@@ -1456,9 +1465,12 @@ async fn adj_rib_out_gauge_tracks_advertised() {
     .unwrap();
 
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::QueryBestRoutes {
+        deadline: full_snapshot_query_deadline(),
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
     let _ = reply_rx.await;
 
     let families = metrics.registry().gather();
@@ -1558,9 +1570,12 @@ async fn query_advertised_count() {
 
     // Serialize
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::QueryBestRoutes {
+        deadline: full_snapshot_query_deadline(),
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
     let _ = reply_rx.await;
 
     let (reply_tx, reply_rx) = oneshot::channel();

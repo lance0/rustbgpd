@@ -2409,14 +2409,19 @@ impl RibManager {
                     reply,
                 );
             }
-            RibUpdate::QueryBestRoutes { reply } => self.handle_query_best_routes(reply),
+            RibUpdate::QueryBestRoutes { deadline, reply } => {
+                self.handle_query_best_routes(deadline, reply);
+            }
             RibUpdate::QueryFibInstallCandidates {
                 max_paths,
                 relax,
                 weighted,
+                deadline,
                 reply,
             } => {
-                self.handle_query_fib_install_candidates(max_paths, relax, weighted, reply);
+                self.handle_query_fib_install_candidates(
+                    max_paths, relax, weighted, deadline, reply,
+                );
             }
             RibUpdate::QueryPeerGroups { reply } => self.handle_query_peer_groups(reply),
             RibUpdate::ExplainBestPath {

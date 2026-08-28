@@ -731,9 +731,12 @@ async fn rpki_cache_update_changes_best_path() {
 
     // Before RPKI: peer1 should be best (lower address)
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::QueryBestRoutes {
+        deadline: full_snapshot_query_deadline(),
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
     let best = reply_rx.await.unwrap();
     assert_eq!(best.len(), 1);
     assert_eq!(best[0].peer, peer1);
@@ -754,9 +757,12 @@ async fn rpki_cache_update_changes_best_path() {
     // peer2's route has origin 65002, covered with matching ASN → Valid.
     // Wait a moment for processing...
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::QueryBestRoutes {
+        deadline: full_snapshot_query_deadline(),
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
     let best = reply_rx.await.unwrap();
     assert_eq!(best.len(), 1);
     // peer2 wins: Valid beats NotFound
@@ -819,9 +825,12 @@ async fn rpki_cache_update_invalid_demotes_best_path() {
 
     // peer1 is now Invalid (VRP covers prefix but wrong origin), peer2 is Valid
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
-        .await
-        .unwrap();
+    tx.send(RibUpdate::QueryBestRoutes {
+        deadline: full_snapshot_query_deadline(),
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
     let best = reply_rx.await.unwrap();
     assert_eq!(best.len(), 1);
     assert_eq!(best[0].peer, peer2);

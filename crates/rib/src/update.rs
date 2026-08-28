@@ -1877,6 +1877,9 @@ pub enum RibUpdate {
     },
     /// Query: return best routes from the Loc-RIB.
     QueryBestRoutes {
+        /// Absolute deadline shared with the caller's complete send-and-reply
+        /// wait. The RIB actor cooperatively abandons materialization after it.
+        deadline: tokio::time::Instant,
         /// Response channel.
         reply: oneshot::Sender<Vec<Route>>,
     },
@@ -1893,6 +1896,9 @@ pub enum RibUpdate {
         /// Link Bandwidth Extended Community, weight next-hops in proportion to
         /// it; otherwise every next-hop stays weight 1 (equal cost).
         weighted: bool,
+        /// Absolute deadline shared with the caller's complete send-and-reply
+        /// wait. The RIB actor cooperatively abandons materialization after it.
+        deadline: tokio::time::Instant,
         /// Response channel.
         reply: oneshot::Sender<Vec<FibInstallCandidate>>,
     },

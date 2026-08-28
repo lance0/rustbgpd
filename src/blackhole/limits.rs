@@ -263,7 +263,7 @@ mod tests {
                     RibUpdate::SubscribeRouteEvents { reply } => {
                         let _ = reply.send(events.subscribe());
                     }
-                    RibUpdate::QueryBestRoutes { reply }
+                    RibUpdate::QueryBestRoutes { reply, .. }
                         if seen.fetch_add(1, Ordering::SeqCst) == 0 =>
                     {
                         let _ = reply.send(vec![tagged(66), tagged(68)]);
