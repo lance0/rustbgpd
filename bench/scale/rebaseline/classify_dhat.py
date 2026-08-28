@@ -13,6 +13,8 @@ from typing import Any
 
 
 COMPONENTS = (
+    "Interned attribute-set backing",
+    "Nested path-attribute payloads",
     "Group RIB-Out table",
     "Loc-RIB best-path map",
     "Adj-RIB-In route storage",
@@ -47,6 +49,36 @@ def classify_stack(stack: list[str]) -> str:
     is_group = has(stack, "GroupRibOut::", "GroupRibOut>::", "stage_group_prefixes")
     is_adj_in = has(stack, "AdjRibIn::", "AdjRibIn>::")
     is_adj_out = has(stack, "AdjRibOut::", "AdjRibOut>::")
+    is_stored_attribute_path = has(
+        stack,
+        "RouteAttrBundle::new",
+        "RouteAttrBundle>::new",
+        "materialize_attrs",
+        "AttrInternTable::intern",
+        "AttrInternTable>::intern",
+    )
+    is_attribute_vector = has(
+        stack,
+        "Vec<rustbgpd_wire::attribute::PathAttribute",
+        "Vec<rustbgpd_wire::PathAttribute",
+    )
+    is_nested_attribute_payload = has(
+        stack,
+        "PathAttribute::clone",
+        "PathAttribute as core::clone::Clone",
+        "AsPath::clone",
+        "AsPath as core::clone::Clone",
+        "AsPathSegment::clone",
+        "AsPathSegment as core::clone::Clone",
+    )
+
+    # Stored PathAttribute vectors and allocations owned by the values inside
+    # them must remain separate. The layout model removes one outer Vec
+    # allocation; it does not remove AS_PATH/community payload allocations.
+    if is_stored_attribute_path and is_nested_attribute_payload:
+        return "Nested path-attribute payloads"
+    if is_stored_attribute_path and is_attribute_vector:
+        return "Interned attribute-set backing"
 
     for frame in stack:  # DHAT/backtrace stores leaf to root.
         if "prefix_trie::" in frame or "FamilyPrefixMap" in frame:

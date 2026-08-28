@@ -208,6 +208,41 @@ class ClassifierFixtures(unittest.TestCase):
             "Adj-RIB-In route storage",
         )
 
+    def test_dhat_separates_attribute_backing_from_nested_payloads(self) -> None:
+        stored_path = "<rustbgpd_transport::session::inbound::RouteAttrBundle>::new"
+        self.assertEqual(
+            classify_dhat.classify_stack(
+                [
+                    "<alloc::vec::Vec<rustbgpd_wire::attribute::PathAttribute>>::with_capacity",
+                    stored_path,
+                    "<rustbgpd_rib::adj_rib_in::AdjRibIn>::insert",
+                ]
+            ),
+            "Interned attribute-set backing",
+        )
+        self.assertEqual(
+            classify_dhat.classify_stack(
+                [
+                    "<rustbgpd_wire::attribute::AsPath as core::clone::Clone>::clone",
+                    "<rustbgpd_wire::attribute::PathAttribute as core::clone::Clone>::clone",
+                    stored_path,
+                    "<rustbgpd_rib::adj_rib_in::AdjRibIn>::insert",
+                ]
+            ),
+            "Nested path-attribute payloads",
+        )
+
+    def test_dhat_does_not_relabel_unowned_attribute_allocations(self) -> None:
+        self.assertEqual(
+            classify_dhat.classify_stack(
+                [
+                    "<alloc::vec::Vec<rustbgpd_wire::attribute::PathAttribute>>::with_capacity",
+                    "<rustbgpd_api::neighbor_service::NeighborService>::list_neighbors",
+                ]
+            ),
+            "API / peer-manager",
+        )
+
     def test_dhat_current_demangled_loc_rib_owner(self) -> None:
         self.assertEqual(
             classify_dhat.classify_stack(

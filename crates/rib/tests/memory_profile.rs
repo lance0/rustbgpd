@@ -21,10 +21,18 @@ use rustbgpd_rib::adj_rib_in::AdjRibIn;
 use rustbgpd_rib::adj_rib_out::AdjRibOut;
 use rustbgpd_rib::attr_intern::AttrInternTable;
 use rustbgpd_rib::loc_rib::LocRib;
-use rustbgpd_rib::route::{Route, RouteOrigin};
-use rustbgpd_wire::{
-    AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute, Prefix, RpkiValidation,
+use rustbgpd_rib::route::{
+    BgpLsRibRoute, EvpnRibRoute, LabeledRibRoute, Route, RouteOrigin, RtcRibRoute, VpnRibRoute,
 };
+use rustbgpd_wire::{
+    AsPath, AsPathSegment, Ipv4Prefix, MpReachNlri, MpUnreachNlri, Origin, PathAttribute, Prefix,
+    RpkiValidation,
+};
+
+/// Live IPv4 sampling observed roughly one interned set for every seven
+/// prefixes. Keep the calibrated synthetic arm explicit rather than letting a
+/// fixture accidentally drift back to one set per prefix.
+const REPRESENTATIVE_PREFIXES_PER_ATTRIBUTE_SET: usize = 7;
 
 struct TrackingAllocator {
     inner: System,
@@ -127,6 +135,31 @@ impl MemoryRow {
         self.live_bytes / self.prefixes.max(1)
     }
 
+    fn arc_slice_pointer_growth_bytes(&self) -> usize {
+        let per_route = std::mem::size_of::<Arc<[PathAttribute]>>()
+            .saturating_sub(std::mem::size_of::<Arc<Vec<PathAttribute>>>());
+        self.route_copies.saturating_mul(per_route)
+    }
+
+    fn vec_header_savings_bytes(&self) -> usize {
+        self.stats
+            .adj_in_attr_intern_entries
+            .saturating_mul(std::mem::size_of::<Vec<PathAttribute>>())
+    }
+
+    fn modeled_structural_delta_bytes(&self) -> i128 {
+        i128::try_from(self.arc_slice_pointer_growth_bytes())
+            .expect("profile pointer-growth bytes fit i128")
+            - i128::try_from(self.vec_header_savings_bytes())
+                .expect("profile Vec-header bytes fit i128")
+    }
+
+    fn break_even_attribute_sets(&self) -> usize {
+        let header = std::mem::size_of::<Vec<PathAttribute>>();
+        let growth = self.arc_slice_pointer_growth_bytes();
+        growth.saturating_add(header - 1) / header
+    }
+
     fn to_json(&self) -> String {
         format!(
             concat!(
@@ -145,6 +178,24 @@ impl MemoryRow {
                 "\"route_size\":{},",
                 "\"prefix_size\":{},",
                 "\"path_attribute_size\":{},",
+                "\"bgp_ls_route_size\":{},",
+                "\"vpn_route_size\":{},",
+                "\"labeled_route_size\":{},",
+                "\"rtc_route_size\":{},",
+                "\"evpn_route_size\":{},",
+                "\"mp_reach_size\":{},",
+                "\"mp_unreach_size\":{},",
+                "\"boxed_mp_reach_size\":{},",
+                "\"boxed_mp_unreach_size\":{},",
+                "\"arc_vec_attribute_pointer_size\":{},",
+                "\"arc_slice_attribute_pointer_size\":{},",
+                "\"vec_attribute_header_size\":{},",
+                "\"attribute_sets\":{},",
+                "\"representative_prefixes_per_attribute_set\":{},",
+                "\"modeled_slice_pointer_growth_bytes\":{},",
+                "\"modeled_vec_header_savings_bytes\":{},",
+                "\"modeled_structural_delta_bytes\":{},",
+                "\"modeled_break_even_attribute_sets\":{},",
                 "\"adj_in_routes\":{},",
                 "\"adj_in_capacity\":{},",
                 "\"adj_in_prefix_index_entries\":{},",
@@ -172,6 +223,24 @@ impl MemoryRow {
             std::mem::size_of::<Route>(),
             std::mem::size_of::<Prefix>(),
             std::mem::size_of::<PathAttribute>(),
+            std::mem::size_of::<BgpLsRibRoute>(),
+            std::mem::size_of::<VpnRibRoute>(),
+            std::mem::size_of::<LabeledRibRoute>(),
+            std::mem::size_of::<RtcRibRoute>(),
+            std::mem::size_of::<EvpnRibRoute>(),
+            std::mem::size_of::<MpReachNlri>(),
+            std::mem::size_of::<MpUnreachNlri>(),
+            std::mem::size_of::<Box<MpReachNlri>>(),
+            std::mem::size_of::<Box<MpUnreachNlri>>(),
+            std::mem::size_of::<Arc<Vec<PathAttribute>>>(),
+            std::mem::size_of::<Arc<[PathAttribute]>>(),
+            std::mem::size_of::<Vec<PathAttribute>>(),
+            self.stats.adj_in_attr_intern_entries,
+            REPRESENTATIVE_PREFIXES_PER_ATTRIBUTE_SET,
+            self.arc_slice_pointer_growth_bytes(),
+            self.vec_header_savings_bytes(),
+            self.modeled_structural_delta_bytes(),
+            self.break_even_attribute_sets(),
             self.stats.adj_in_routes,
             self.stats.adj_in_capacity,
             self.stats.adj_in_prefix_index_entries,
@@ -227,6 +296,25 @@ fn diverse_attributes(idx: u32) -> Vec<PathAttribute> {
         PathAttribute::Med(idx % 16),
         PathAttribute::Communities(vec![0xFFFF_0001, idx]),
     ]
+}
+
+fn representative_attributes(idx: usize) -> Vec<PathAttribute> {
+    let set_idx = idx / REPRESENTATIVE_PREFIXES_PER_ATTRIBUTE_SET;
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the largest committed profile contains 900,000 prefixes"
+    )]
+    let set_idx = set_idx as u32;
+    diverse_attributes(set_idx)
+}
+
+fn excludes_mp_framing(attrs: &[PathAttribute]) -> bool {
+    attrs.iter().all(|attr| {
+        !matches!(
+            attr,
+            PathAttribute::MpReachNlri(_) | PathAttribute::MpUnreachNlri(_)
+        )
+    })
 }
 
 fn make_route(prefix: Prefix, peer_idx: u32, attrs: &[PathAttribute]) -> Route {
@@ -469,7 +557,13 @@ fn measure_full_rib(profile: &'static str, prefixes: &[Prefix]) -> MemoryRow {
 /// heap is a first-order cost and where cross-peer interning can act;
 /// the plain `full_rib` shape carries one attribute set per peer by
 /// construction, so its intern dimension is degenerate (2 entries).
-fn measure_full_rib_diverse(profile: &'static str, prefixes: &[Prefix]) -> MemoryRow {
+fn measure_full_rib_attribute_ratio(
+    profile: &'static str,
+    shape: &'static str,
+    prefixes: &[Prefix],
+    prefixes_per_attribute_set: usize,
+) -> MemoryRow {
+    assert!(prefixes_per_attribute_set > 0);
     let baseline = ALLOC.allocated();
     ALLOC.reset_peak();
     let start = Instant::now();
@@ -483,7 +577,8 @@ fn measure_full_rib_diverse(profile: &'static str, prefixes: &[Prefix]) -> Memor
 
     for (idx, prefix) in prefixes.iter().enumerate() {
         #[expect(clippy::cast_possible_truncation, reason = "profile sizes fit u32")]
-        let attrs = diverse_attributes(idx as u32);
+        let attrs = diverse_attributes((idx / prefixes_per_attribute_set) as u32);
+        assert!(excludes_mp_framing(&attrs));
         let mut r1 = make_route(*prefix, 1, &attrs);
         intern.intern(&mut r1.attributes);
         rib1.insert(r1);
@@ -508,7 +603,7 @@ fn measure_full_rib_diverse(profile: &'static str, prefixes: &[Prefix]) -> Memor
 
     MemoryRow {
         profile,
-        shape: "full_rib_diverse",
+        shape,
         prefixes: prefixes.len(),
         input_peers: 2,
         output_peers: 0,
@@ -518,6 +613,19 @@ fn measure_full_rib_diverse(profile: &'static str, prefixes: &[Prefix]) -> Memor
         elapsed_ms,
         stats,
     }
+}
+
+fn measure_full_rib_diverse(profile: &'static str, prefixes: &[Prefix]) -> MemoryRow {
+    measure_full_rib_attribute_ratio(profile, "full_rib_diverse", prefixes, 1)
+}
+
+fn measure_full_rib_representative(profile: &'static str, prefixes: &[Prefix]) -> MemoryRow {
+    measure_full_rib_attribute_ratio(
+        profile,
+        "full_rib_representative",
+        prefixes,
+        REPRESENTATIVE_PREFIXES_PER_ATTRIBUTE_SET,
+    )
 }
 
 fn measure_rr_fanout(profile: &'static str, prefixes: &[Prefix]) -> MemoryRow {
@@ -587,14 +695,83 @@ fn measure_rr_fanout(profile: &'static str, prefixes: &[Prefix]) -> MemoryRow {
     }
 }
 
+fn measure_rr_fanout_representative(profile: &'static str, prefixes: &[Prefix]) -> MemoryRow {
+    let baseline = ALLOC.allocated();
+    ALLOC.reset_peak();
+    let start = Instant::now();
+
+    let mut intern = AttrInternTable::new();
+    let mut rib1 =
+        AdjRibIn::with_capacity(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1)), prefixes.len(), 0);
+    let mut rib2 =
+        AdjRibIn::with_capacity(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)), prefixes.len(), 0);
+    let mut loc = LocRib::with_capacity(prefixes.len());
+
+    for (idx, prefix) in prefixes.iter().enumerate() {
+        let attrs = representative_attributes(idx);
+        assert!(excludes_mp_framing(&attrs));
+        let mut r1 = make_route(*prefix, 1, &attrs);
+        intern.intern(&mut r1.attributes);
+        rib1.insert(r1);
+        let mut r2 = make_route(*prefix, 2, &attrs);
+        intern.intern(&mut r2.attributes);
+        rib2.insert(r2);
+    }
+    for prefix in prefixes {
+        let candidates = rib1.iter_prefix(prefix).chain(rib2.iter_prefix(prefix));
+        loc.recompute(*prefix, candidates);
+    }
+
+    let mut out1 = AdjRibOut::with_capacity(IpAddr::V4(Ipv4Addr::new(10, 0, 11, 1)), loc.len());
+    let mut out2 = AdjRibOut::with_capacity(IpAddr::V4(Ipv4Addr::new(10, 0, 12, 1)), loc.len());
+    for prefix in prefixes {
+        let Some(best) = loc.get(prefix) else {
+            continue;
+        };
+        out1.insert(best.clone());
+        out2.insert(best.clone());
+    }
+
+    let elapsed_ms = start.elapsed().as_millis();
+    let live_bytes = ALLOC.allocated() - baseline;
+    let peak_bytes = ALLOC.peak() - baseline;
+    let stats = merge_stats(&[
+        adj_in_stats(&[&rib1, &rib2], &intern),
+        loc_stats(&loc),
+        adj_out_stats(&[&out1, &out2]),
+    ]);
+    let route_copies = stats.adj_in_routes + stats.loc_routes + stats.adj_out_routes;
+    drop(out1);
+    drop(out2);
+    drop(loc);
+    drop(rib1);
+    drop(rib2);
+    drop(intern);
+
+    MemoryRow {
+        profile,
+        shape: "rr_fanout_representative",
+        prefixes: prefixes.len(),
+        input_peers: 2,
+        output_peers: 2,
+        route_copies,
+        live_bytes,
+        peak_bytes,
+        elapsed_ms,
+        stats,
+    }
+}
+
 fn profile_rows(profile: &'static str, sizes: &[usize]) -> Vec<MemoryRow> {
-    let mut rows = Vec::with_capacity(sizes.len() * 4);
+    let mut rows = Vec::with_capacity(sizes.len() * 6);
     for &size in sizes {
         let prefixes = generate_prefixes(size);
         rows.push(measure_adj_rib_in(profile, &prefixes));
         rows.push(measure_full_rib(profile, &prefixes));
         rows.push(measure_full_rib_diverse(profile, &prefixes));
+        rows.push(measure_full_rib_representative(profile, &prefixes));
         rows.push(measure_rr_fanout(profile, &prefixes));
+        rows.push(measure_rr_fanout_representative(profile, &prefixes));
         drop(prefixes);
     }
     rows
@@ -631,7 +808,7 @@ fn configured_profile() -> (&'static str, Vec<usize>) {
 #[test]
 fn memory_profile_schema_quick() {
     let rows = profile_rows("schema", &[512]);
-    assert_eq!(rows.len(), 4);
+    assert_eq!(rows.len(), 6);
 
     let adj = rows.iter().find(|row| row.shape == "adj_rib_in").unwrap();
     assert_eq!(adj.prefixes, 512);
@@ -642,6 +819,18 @@ fn memory_profile_schema_quick() {
     assert!(adj.live_bytes > 0);
     assert!(adj.peak_bytes >= adj.live_bytes);
     assert!(adj.to_json().starts_with("{\"kind\":\"rib_memory\""));
+    assert_eq!(
+        std::mem::size_of::<Arc<Vec<PathAttribute>>>(),
+        std::mem::size_of::<usize>()
+    );
+    assert_eq!(
+        std::mem::size_of::<Arc<[PathAttribute]>>(),
+        std::mem::size_of::<usize>() * 2
+    );
+    assert_eq!(
+        std::mem::size_of::<Vec<PathAttribute>>(),
+        std::mem::size_of::<usize>() * 3
+    );
 
     let full = rows.iter().find(|row| row.shape == "full_rib").unwrap();
     assert_eq!(full.input_peers, 2);
@@ -657,12 +846,40 @@ fn memory_profile_schema_quick() {
     assert_eq!(diverse.input_peers, 2);
     assert_eq!(diverse.route_copies, 512 * 3);
     assert_eq!(diverse.stats.adj_in_routes, 512 * 2);
+    assert_eq!(diverse.stats.adj_in_attr_intern_entries, 512);
+
+    let representative = rows
+        .iter()
+        .find(|row| row.shape == "full_rib_representative")
+        .unwrap();
+    assert_eq!(representative.route_copies, 512 * 3);
+    assert_eq!(
+        representative.stats.adj_in_attr_intern_entries,
+        512_usize.div_ceil(REPRESENTATIVE_PREFIXES_PER_ATTRIBUTE_SET)
+    );
+    assert!(representative.modeled_structural_delta_bytes() > 0);
+    assert!(
+        representative.break_even_attribute_sets()
+            > representative.stats.adj_in_attr_intern_entries
+    );
 
     let rr = rows.iter().find(|row| row.shape == "rr_fanout").unwrap();
     assert_eq!(rr.input_peers, 2);
     assert_eq!(rr.output_peers, 2);
     assert_eq!(rr.route_copies, 512 * 5);
     assert_eq!(rr.stats.adj_out_routes, 512 * 2);
+
+    let rr_representative = rows
+        .iter()
+        .find(|row| row.shape == "rr_fanout_representative")
+        .unwrap();
+    assert_eq!(rr_representative.route_copies, 512 * 5);
+    assert_eq!(rr_representative.stats.adj_out_routes, 512 * 2);
+    assert_eq!(
+        rr_representative.stats.adj_in_attr_intern_entries,
+        512_usize.div_ceil(REPRESENTATIVE_PREFIXES_PER_ATTRIBUTE_SET)
+    );
+    assert!(rr_representative.modeled_structural_delta_bytes() > 0);
 }
 
 #[cfg(feature = "bench-internals")]
