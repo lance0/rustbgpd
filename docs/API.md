@@ -235,7 +235,8 @@ The API uses gRPC status codes consistently across services:
 Runtime-config mutations that fail after transient runtime changes, but whose
 forward effects are then fully compensated, preserve the original gRPC status
 code and append the original message after this exact prefix:
-`runtime effects were fully compensated; retry may repeat transient runtime changes: `.
+`runtime effects were fully compensated; retry may repeat transient runtime changes:`.
+Exactly one ASCII space separates that prefix from the original message.
 Their trailing metadata also includes
 `rustbgpd-runtime-config-outcome: fully-compensated`. The staged persistent
 candidate is discarded, so the runtime and TOML remain at their prior state.

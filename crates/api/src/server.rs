@@ -68,7 +68,7 @@ use rustbgpd_telemetry::BgpMetrics;
 const MAX_CONCURRENT_GRPC_TLS_HANDSHAKES: usize = 64;
 const GRPC_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const FULLY_COMPENSATED_STATUS_PREFIX: &str =
-    "runtime effects were fully compensated; retry may repeat transient runtime changes: ";
+    "runtime effects were fully compensated; retry may repeat transient runtime changes:";
 const RUNTIME_CONFIG_OUTCOME_METADATA: &str = "rustbgpd-runtime-config-outcome";
 
 /// Mark a runtime-config error whose forward effects were fully compensated.
@@ -78,7 +78,7 @@ const RUNTIME_CONFIG_OUTCOME_METADATA: &str = "rustbgpd-runtime-config-outcome";
 /// from a rejection that produced no runtime effect.
 pub(crate) fn fully_compensated_status(status: &Status) -> Status {
     let code = status.code();
-    let message = format!("{FULLY_COMPENSATED_STATUS_PREFIX}{}", status.message());
+    let message = format!("{FULLY_COMPENSATED_STATUS_PREFIX} {}", status.message());
     let details = bytes::Bytes::copy_from_slice(status.details());
     let mut metadata = status.metadata().clone();
     metadata.insert(
