@@ -76,7 +76,7 @@ jobs:
       # Every target in each fuzz crate, 2 minutes apiece. Seed corpora are
       # tracked under fuzz/seeds/<target>/ (fuzz/corpus/ is gitignored, so a
       # CI run starts from a validated prior bundle or the tracked seeds).
-      - name: Fuzz wire decoders (2 minutes per target)
+      - name: Fuzz wire codecs (2 minutes per target)
         run: |
           cd crates/wire
           # `$(cargo fuzz list)` inline would let an errored or empty
@@ -102,6 +102,7 @@ jobs:
               decode_update) max_len=65516 ;;
               decode_vpn) max_len=4096 ;;
               encode_evpn) max_len=4096 ;;
+              encode_update) max_len=4096 ;;
               parse_rd) max_len=4096 ;;
               *) echo "wire fuzz target has no reviewed max_len: $t" >&2; exit 1 ;;
             esac

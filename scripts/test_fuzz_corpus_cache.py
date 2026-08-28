@@ -40,7 +40,7 @@ class CorpusCacheTests(unittest.TestCase):
         live = self.root / "live"
         detail = cache.restore(self.root / "missing", self.seeds, live, False)
         self.assertIn("tracked seeds only", detail)
-        self.assertIn("12 files/", detail)
+        self.assertIn("13 files/", detail)
         self.assertEqual(cache.inventory(live), cache.inventory(self.seeds))
 
     def test_valid_bundle_round_trip_is_deterministic(self) -> None:

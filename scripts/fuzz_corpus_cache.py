@@ -24,6 +24,7 @@ TARGET_MAX_LENS = {
     "decode_update": 65_516,
     "decode_vpn": 4_096,
     "encode_evpn": 4_096,
+    "encode_update": 4_096,
     "parse_rd": 4_096,
 }
 MAX_BYTES = 16_777_216
