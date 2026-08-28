@@ -1,9 +1,13 @@
 #[cfg(feature = "codec-allocation-diagnostics")]
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::Ipv4Addr;
+#[cfg(not(feature = "codec-allocation-diagnostics"))]
+use std::net::{IpAddr, Ipv6Addr};
 #[cfg(feature = "codec-allocation-diagnostics")]
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+#[cfg(not(feature = "codec-allocation-diagnostics"))]
+use bytes::Bytes;
 #[cfg(not(feature = "codec-allocation-diagnostics"))]
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
@@ -12,14 +16,45 @@ use rustbgpd_wire::attribute::{decode_path_attributes, encode_path_attributes};
 #[cfg(not(feature = "codec-allocation-diagnostics"))]
 use rustbgpd_wire::nlri::{decode_nlri, encode_nlri};
 use rustbgpd_wire::validate::validate_update_attributes;
-use rustbgpd_wire::{
-    Afi, Ipv4UnicastMode, Ipv6Prefix, MpReachNlri, NlriEntry, Prefix, Safi, UpdateMessage,
-};
+#[cfg(not(feature = "codec-allocation-diagnostics"))]
+use rustbgpd_wire::{Afi, Ipv6Prefix, NlriEntry, Prefix, Safi};
 use rustbgpd_wire::{
     Aggregator, AsPath, AsPathSegment, ExtendedCommunity, LargeCommunity, Origin, PathAttribute,
 };
 #[cfg(not(feature = "codec-allocation-diagnostics"))]
-use rustbgpd_wire::{ErrorDisposition, Ipv4NlriEntry, Ipv4Prefix, MpUnreachNlri};
+use rustbgpd_wire::{ErrorDisposition, Ipv4NlriEntry, Ipv4Prefix};
+use rustbgpd_wire::{Ipv4UnicastMode, UpdateMessage};
+
+// ORIGIN, four-octet AS_PATH, IPv6-unicast MP_REACH_NLRI and
+// MP_UNREACH_NLRI. Both NLRI carry RFC 7911 path IDs. Keeping the parse
+// fixture on the wire makes the benchmark independent of how the two MP
+// variants store their decoded payloads.
+#[cfg(not(feature = "codec-allocation-diagnostics"))]
+const IPV6_MP_ADD_PATH_ATTRIBUTES_WIRE: &[u8] = &[
+    0x40, 0x01, 0x01, 0x00, // ORIGIN IGP
+    0x40, 0x02, 0x06, 0x02, 0x01, 0x00, 0x00, 0xfd, 0xe9, // AS_SEQUENCE 65001
+    0x80, 0x0e, 0x20, // MP_REACH_NLRI, 32-byte value
+    0x00, 0x02, 0x01, 0x10, // IPv6 unicast, 16-byte next hop
+    0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, // 2001:db8::1
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, // reserved byte
+    0x00, 0x00, 0x00, 0x07, 0x30, 0x20, 0x01, 0x0d, 0xb8, 0x01, 0x00, // path 7, /48
+    0x80, 0x0f, 0x0e, // MP_UNREACH_NLRI, 14-byte value
+    0x00, 0x02, 0x01, // IPv6 unicast
+    0x00, 0x00, 0x00, 0x0b, 0x30, 0x20, 0x01, 0x0d, 0xb8, 0x02, 0x00, // path 11, /48
+];
+
+// One IPv6-unicast MP_REACH_NLRI used by the allocation probe. The fixture
+// is decoded before measurement, then cloned where the caller would otherwise
+// construct an owned MP attribute. Raw decode setup therefore cannot leak
+// into the build/encode allocation window.
+#[cfg(feature = "codec-allocation-diagnostics")]
+const RICH_MP_REACH_ATTRIBUTE_WIRE: &[u8] = &[
+    0x80, 0x0e, 0x1e, // MP_REACH_NLRI, 30-byte value
+    0x00, 0x02, 0x01, 0x10, // IPv6 unicast, 16-byte next hop
+    0x20, 0x01, 0x0d, 0xb8, 0xff, 0xff, 0x00, 0x00, // 2001:db8:ffff::1
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, // reserved byte
+    0x40, 0x20, 0x01, 0x0d, 0xb8, 0x10, 0x00, 0x00, 0x00, // 2001:db8:1000::/64
+];
 
 #[cfg(not(feature = "codec-allocation-diagnostics"))]
 fn generate_ipv4_prefixes(count: usize) -> Vec<Ipv4Prefix> {
@@ -130,37 +165,14 @@ fn ipv6_mp_add_path_update() -> (
         )),
     };
     let next_hop = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
-    let attrs = vec![
-        PathAttribute::Origin(Origin::Igp),
-        PathAttribute::AsPath(AsPath {
-            segments: vec![AsPathSegment::AsSequence(vec![65001])],
-        }),
-        PathAttribute::MpReachNlri(MpReachNlri {
-            afi: Afi::Ipv6,
-            safi: Safi::Unicast,
-            next_hop,
-            link_local_next_hop: None,
-            announced: vec![announced],
-            flowspec_announced: vec![],
-            evpn_announced: vec![],
-            bgpls_announced: vec![],
-            vpn_announced: vec![],
-            labeled_announced: vec![],
-            rtc_announced: vec![],
-        }),
-        PathAttribute::MpUnreachNlri(MpUnreachNlri {
-            afi: Afi::Ipv6,
-            safi: Safi::Unicast,
-            withdrawn: vec![withdrawn],
-            flowspec_withdrawn: vec![],
-            evpn_withdrawn: vec![],
-            bgpls_withdrawn: vec![],
-            vpn_withdrawn: vec![],
-            labeled_withdrawn: vec![],
-            rtc_withdrawn: vec![],
-        }),
-    ];
-    let msg = UpdateMessage::build(&[], &[], &attrs, true, true, Ipv4UnicastMode::Body);
+    let add_path_families = [(Afi::Ipv6, Safi::Unicast)];
+    let attrs = decode_path_attributes(IPV6_MP_ADD_PATH_ATTRIBUTES_WIRE, true, &add_path_families)
+        .expect("raw IPv6 MP Add-Path fixture must decode");
+    let msg = UpdateMessage {
+        withdrawn_routes: Bytes::new(),
+        path_attributes: Bytes::from_static(IPV6_MP_ADD_PATH_ATTRIBUTES_WIRE),
+        nlri: Bytes::new(),
+    };
     (msg, attrs, announced, withdrawn, next_hop)
 }
 
@@ -272,6 +284,11 @@ fn bench_update_build(c: &mut Criterion) {
 
     let (msg, attrs, announced, withdrawn, next_hop) = ipv6_mp_add_path_update();
     assert_ipv6_mp_add_path_update(&msg, &attrs, announced, withdrawn, next_hop);
+    assert_eq!(
+        UpdateMessage::build(&[], &[], &attrs, true, true, Ipv4UnicastMode::Body),
+        msg,
+        "predecoded build fixture must reproduce the raw parse fixture"
+    );
     group.bench_function("ipv6_mp_add_path", |b| {
         b.iter(|| UpdateMessage::build(&[], &[], &attrs, true, true, Ipv4UnicastMode::Body));
     });
@@ -697,25 +714,16 @@ fn run_attr_encode_diagnostic() -> DiagnosticRow {
 
 #[cfg(feature = "codec-allocation-diagnostics")]
 fn rich_mp_tail() -> PathAttribute {
-    PathAttribute::MpReachNlri(MpReachNlri {
-        afi: Afi::Ipv6,
-        safi: Safi::Unicast,
-        next_hop: IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0xffff, 0, 0, 0, 0, 1)),
-        link_local_next_hop: None,
-        announced: vec![NlriEntry {
-            path_id: 0,
-            prefix: Prefix::V6(Ipv6Prefix::new(
-                Ipv6Addr::new(0x2001, 0xdb8, 0x1000, 0, 0, 0, 0, 0),
-                64,
-            )),
-        }],
-        flowspec_announced: Vec::new(),
-        evpn_announced: Vec::new(),
-        bgpls_announced: Vec::new(),
-        labeled_announced: Vec::new(),
-        vpn_announced: Vec::new(),
-        rtc_announced: Vec::new(),
-    })
+    let mut attrs = decode_path_attributes(RICH_MP_REACH_ATTRIBUTE_WIRE, true, &[])
+        .expect("raw rich MP_REACH_NLRI fixture must decode");
+    assert_eq!(
+        attrs.len(),
+        1,
+        "raw rich MP fixture must contain one attribute"
+    );
+    attrs
+        .pop()
+        .expect("raw rich MP fixture must retain its attribute")
 }
 
 #[cfg(feature = "codec-allocation-diagnostics")]
@@ -731,10 +739,13 @@ fn encoded_update(message: &UpdateMessage) -> Vec<u8> {
 fn run_mp_build_iterator_diagnostic() {
     const OPERATIONS: usize = 50;
     let base_attrs = rich_attributes();
-    let tail = rich_mp_tail();
+    // Decode the representation-neutral fixture before allocation tracking.
+    // The measured clones below model the owned attribute each caller needs,
+    // while raw fixture setup remains outside the build/encode window.
+    let tail_fixture = rich_mp_tail();
 
     let mut legacy_attrs = base_attrs.clone();
-    legacy_attrs.push(tail.clone());
+    legacy_attrs.push(tail_fixture.clone());
     let expected = UpdateMessage::try_build(
         &[],
         &[],
@@ -747,7 +758,7 @@ fn run_mp_build_iterator_diagnostic() {
     let iter_expected = UpdateMessage::try_build_from_attribute_iter(
         &[],
         &[],
-        base_attrs.iter().chain(std::iter::once(&tail)),
+        base_attrs.iter().chain(std::iter::once(&tail_fixture)),
         true,
         false,
         Ipv4UnicastMode::MpReach,
@@ -763,7 +774,7 @@ fn run_mp_build_iterator_diagnostic() {
     ALLOCATOR.reset();
     for _ in 0..OPERATIONS {
         ALLOCATOR.enable();
-        let tail = rich_mp_tail();
+        let tail = tail_fixture.clone();
         let mut attrs = base_attrs.clone();
         attrs.push(tail);
         let message =
@@ -779,7 +790,7 @@ fn run_mp_build_iterator_diagnostic() {
     ALLOCATOR.reset();
     for _ in 0..OPERATIONS {
         ALLOCATOR.enable();
-        let tail = rich_mp_tail();
+        let tail = tail_fixture.clone();
         let message = UpdateMessage::try_build_from_attribute_iter(
             &[],
             &[],
@@ -935,9 +946,58 @@ fn run_attr_decode_revised_diagnostic() -> DiagnosticRow {
 }
 
 #[cfg(feature = "codec-allocation-diagnostics")]
+fn run_attr_decode_revised_mp_diagnostic() -> DiagnosticRow {
+    let expected = decode_path_attributes_revised(RICH_MP_REACH_ATTRIBUTE_WIRE, true, false, &[])
+        .expect("MP revised-decode fixture must decode before measurement");
+    assert_eq!(
+        expected.attributes.len(),
+        1,
+        "MP revised-decode fixture must retain one attribute"
+    );
+    assert!(
+        expected.malformed.is_empty(),
+        "MP revised-decode fixture must not exercise recovery"
+    );
+    assert_eq!(
+        expected.bgpls_nlri_discarded, 0,
+        "MP revised-decode fixture must not discard BGP-LS NLRI"
+    );
+
+    ALLOCATOR.reset();
+    for _ in 0..DIAGNOSTIC_OPERATIONS {
+        ALLOCATOR.enable();
+        let result = decode_path_attributes_revised(RICH_MP_REACH_ATTRIBUTE_WIRE, true, false, &[]);
+        ALLOCATOR.disable();
+        let decoded = result.expect("every measured MP revised decode must accept the fixture");
+        assert_eq!(
+            decoded.attributes, expected.attributes,
+            "every measured MP revised decode must preserve the attribute"
+        );
+        assert!(
+            decoded.malformed.is_empty(),
+            "measured MP revised decode must not exercise recovery"
+        );
+        assert_eq!(
+            decoded.bgpls_nlri_discarded, 0,
+            "measured MP revised decode must not discard BGP-LS NLRI"
+        );
+    }
+    let allocation = ALLOCATOR.receipt();
+
+    DiagnosticRow {
+        benchmark: "attr_decode_revised/ipv6_mp_reach/1",
+        fixture_attributes: expected.attributes.len(),
+        fixture_len_bytes: RICH_MP_REACH_ATTRIBUTE_WIRE.len(),
+        fixture_digest: fnv1a64(RICH_MP_REACH_ATTRIBUTE_WIRE),
+        allocation,
+    }
+}
+
+#[cfg(feature = "codec-allocation-diagnostics")]
 fn main() {
     let attr_encode = run_attr_encode_diagnostic();
     let attr_decode_revised = run_attr_decode_revised_diagnostic();
+    let attr_decode_revised_mp = run_attr_decode_revised_mp_diagnostic();
     let validate_update = run_validate_update_diagnostic();
     assert_ne!(
         attr_encode.fixture_digest, validate_update.fixture_digest,
@@ -949,6 +1009,7 @@ fn main() {
     );
     attr_encode.write_json();
     attr_decode_revised.write_json();
+    attr_decode_revised_mp.write_json();
     validate_update.write_json();
     run_mp_build_iterator_diagnostic();
 }
