@@ -93,8 +93,9 @@ def workspace_version(manifest: bytes) -> str:
 def validate_workspace_release(version: str) -> None:
     if version != WORKSPACE_RELEASE:
         raise ValueError(
-            f"workspace release changed from {WORKSPACE_RELEASE} to {version}; roll the "
-            "metric baseline and current-section contract together"
+            f"workspace release changed from {WORKSPACE_RELEASE} to {version}; select the "
+            "target changelog section explicitly and review whether the released metric "
+            "baseline must roll"
         )
 
 

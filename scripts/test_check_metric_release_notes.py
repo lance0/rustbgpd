@@ -123,10 +123,12 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "added=bgp_new_total"):
             check.validate_release_notes(set(), {"bgp_new_total"}, section, {})
 
-    def test_workspace_release_change_requires_baseline_roll(self):
+    def test_workspace_release_change_requires_explicit_target_review(self):
         check.validate_workspace_release("0.67.0")
         with self.assertRaisesRegex(
-            ValueError, "roll the metric baseline and current-section contract together"
+            ValueError,
+            "select the target changelog section explicitly and review whether the "
+            "released metric baseline must roll",
         ):
             check.validate_workspace_release("0.68.0")
 
