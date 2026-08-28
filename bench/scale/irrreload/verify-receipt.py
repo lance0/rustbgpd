@@ -1119,7 +1119,10 @@ def generation_marker(path: Path) -> str:
 
 
 def validate_quiet(path: Path) -> None:
-    data = list(csv.DictReader(path.open(), delimiter="\t"))
+    with path.open() as stream:
+        reader = csv.DictReader(stream, delimiter="\t")
+        fields = set(reader.fieldnames or ())
+        data = list(reader)
     if [row.get("sample") for row in data] != ["1", "2"]:
         fail(f"{path}: quiet gate needs exactly two samples")
     epochs = [int(row["epoch_s"]) for row in data]
@@ -1133,6 +1136,37 @@ def validate_quiet(path: Path) -> None:
         or any(not row.get("pswpin", "").isdigit() or not row.get("pswpout", "").isdigit() for row in data)
     ):
         fail(f"{path}: quiet samples fail spacing, load, port, disk, or swap gates")
+    canonical = {
+        "governors", "performance_governors", "governor_count", "competitors",
+        "quiet", "failed_dimensions", "original_attempt",
+    }
+    present = fields & canonical
+    if present and present != canonical:
+        fail(f"{path}: canonical quiet-host fields are incomplete")
+    if present:
+        attempts = []
+        for row in data:
+            try:
+                performance = int(row["performance_governors"])
+                count = int(row["governor_count"])
+                attempt = int(row["original_attempt"])
+            except (KeyError, TypeError, ValueError, OverflowError):
+                fail(f"{path}: canonical quiet-host counts are malformed")
+            governors = row["governors"].split(",")
+            if (
+                count <= 0
+                or performance != count
+                or len(governors) != count
+                or any(governor != "performance" for governor in governors)
+                or row["competitors"] != "none"
+                or row["quiet"] != "true"
+                or row["failed_dimensions"] != "none"
+                or attempt <= 0
+            ):
+                fail(f"{path}: canonical governor or competitor quiet gate failed")
+            attempts.append(attempt)
+        if attempts[0] >= attempts[1]:
+            fail(f"{path}: canonical quiet-host attempts are not ordered")
 
 
 def validate_process(path: Path) -> tuple[int, int]:

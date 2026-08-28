@@ -399,22 +399,31 @@ jobs:
             bench/tests/test-rib-memory-comparator.sh
           shellcheck bench/smoke-benches.sh
           bash -n bench/scale/route-server-1000/run-receipt.sh
+          bash -n bench/scale/host-quiet.sh
+          bash -n bench/scale/matrix/run-matrix.sh
+          bash -n bench/scale/irrreload/run-irr-reload.sh
           bash -n bench/scale/enhanced-route-refresh/run-receipt.sh
           bash -n bench/scale/rrtransport/run-receipt.sh
           bash -n bench/tests/test-rrtransport-receipt.sh
           bash -n bench/tests/test-route-server-1000-receipt.sh
+          bash -n bench/tests/test-scale-host-quiet.sh
           bash -n bench/tests/test-vpn-query-receipt.sh
           bash -n bench/tests/test-vpn-query-campaign.sh
           bash -n bench/run-vpn-query-campaign.sh
-          shellcheck bench/scale/route-server-1000/run-receipt.sh \
+          shellcheck bench/scale/host-quiet.sh \
+            bench/scale/matrix/run-matrix.sh \
+            bench/scale/irrreload/run-irr-reload.sh \
+            bench/scale/route-server-1000/run-receipt.sh \
             bench/scale/enhanced-route-refresh/run-receipt.sh \
             bench/scale/rrtransport/run-receipt.sh \
             bench/tests/test-rrtransport-receipt.sh \
-            bench/tests/test-route-server-1000-receipt.sh
+            bench/tests/test-route-server-1000-receipt.sh \
+            bench/tests/test-scale-host-quiet.sh
           shellcheck bench/tests/test-vpn-query-receipt.sh
           shellcheck bench/tests/test-vpn-query-campaign.sh \
             bench/run-vpn-query-campaign.sh
           bash bench/tests/test-route-server-1000-receipt.sh
+          bash bench/tests/test-scale-host-quiet.sh
           bash bench/tests/test-vpn-query-receipt.sh
           bash bench/tests/test-vpn-query-campaign.sh
           bash bench/tests/test-compare-criterion-harness.sh

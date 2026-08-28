@@ -42,7 +42,7 @@ cleanup() {
 
 [[ ${BASH_SOURCE[0]} == "$0" ]] || return 0
 [[ $# -eq 0 ]] || { echo "usage: $0" >&2; exit 2; }
-for command in awk cargo curl date find flock git grep mktemp nproc python3 \
+for command in awk cargo curl date find flock git grep mktemp nproc ps python3 \
     rustc sha256sum sort ss timeout uname xargs; do
     command -v "$command" >/dev/null || {
         echo "missing required command: $command" >&2
@@ -52,19 +52,19 @@ done
 
 REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
 readonly REPO
+# shellcheck disable=SC1091 # REPO is resolved dynamically above
+source "$REPO/tests/soak/host-lock.sh"
+# shellcheck disable=SC1091 # REPO is resolved dynamically above
+source "$REPO/bench/scale/host-quiet.sh"
 readonly RECEIPT_DIR="$REPO/bench/scale/enhanced-route-refresh"
 readonly PORT=1793 METRICS_PORT=9183 PREFIXES=100000
 readonly PEER=127.1.0.1 FAMILY=ipv4_unicast
-readonly LOCK="${RUSTBGPD_HOST_LOCK:-${HOME}/.local/state/rustbgpd-host.lock}"
 readonly OVERALL_TIMEOUT=480
 [[ -z $(git -C "$REPO" status --porcelain --untracked-files=normal) ]] || {
     echo "refusing dirty worktree (tracked or untracked files present)" >&2
     exit 2
 }
-mkdir -p "$(dirname "$LOCK")"
-touch "$LOCK"
-exec {LOCK_FD}>"$LOCK"
-flock -n "$LOCK_FD" || { echo "host lock busy: $LOCK" >&2; exit 75; }
+acquire_rustbgpd_host_lock || exit $?
 
 COMMIT="$(git -C "$REPO" rev-parse HEAD)"
 TREE="$(git -C "$REPO" rev-parse 'HEAD^{tree}')"
@@ -135,6 +135,7 @@ python3 "$RECEIPT_DIR/gen-scenario.py" "$RUN" "$PORT" "$METRICS_PORT" \
     >"$OUT/scenario/generator.log"
 cp "$RUN/config.toml" "$OUT/scenario/config.toml"
 "$DAEMON" --check "$RUN/config.toml" >"$OUT/scenario/daemon-check.log" 2>&1
+wait_for_rustbgpd_quiet_host "$OUT/quiet.tsv" || exit $?
 "$DAEMON" "$RUN/config.toml" >"$OUT/daemon.log" 2>&1 &
 DAEMON_PID=$!
 for _ in {1..200}; do

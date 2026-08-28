@@ -21,6 +21,8 @@ cargo update --workspace --manifest-path bench/scale/Cargo.toml
 | [`rrharness/`](rrharness/) | RibManager flood/churn CPU + memory profiling (manager task in isolation, folded-stack output) | `docs/perf/rebaseline-2026-07.md`, LAN-348 re-profile |
 | [`rrtransport/`](rrtransport/) | Fixed real-transport RR correctness smoke plus a gated 1,000-peer × 100,000-route measurement instrument with exact staged/wire classification | CI foundation and LAN-694 measurement campaign; no published claim yet |
 | [`reloadstall/`](reloadstall/) | Policy-reload UPDATE-stall at route-server scale (real BGP stub clients vs a running daemon) | `docs/perf/reload-stall-2026-07.md` (LAN-333) |
+| [`matrix/`](matrix/) | Sequential same-host rustbgpd, BIRD, and OpenBGPD reload-stall comparison driver | `docs/perf/ixp-matrix-2026-07.md` |
+| [`enhanced-route-refresh/`](enhanced-route-refresh/) | Real-session one-peer × 100,000-prefix RFC 7313 inventory and memory receipt | `docs/perf/enhanced-route-refresh-2026-07.md` |
 | [`irrreload/`](irrreload/) | Full IRR-policy reload matrix plus a two-run, one-collector RFC 9069 dump/live-buffer boundary receipt | IRR reload evidence and BMP Loc-RIB buffer measurement; no general capacity claim |
 | [`route-server-1000/`](route-server-1000/) | Fixed-shape 1,000-peer rustbgpd route-server retained receipt driver | LAN-508 ([retained receipt](../../docs/perf/route-server-1000-2026-07.md)) |
 
