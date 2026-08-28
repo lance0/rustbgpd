@@ -137,6 +137,16 @@ impl<V> FamilyPrefixMap<V> {
             )
         }))
     }
+
+    /// Iterate strictly after `prefix` in [`Prefix`]'s derived order.
+    ///
+    /// Dataplane continuation cursors identify a complete prefix rather than
+    /// a route identity, so unlike [`Self::iter_from`] they must never revisit
+    /// the cursor prefix.
+    pub(crate) fn iter_after(&self, prefix: Option<Prefix>) -> impl Iterator<Item = (Prefix, &V)> {
+        self.iter_from(prefix)
+            .filter(move |(candidate, _)| prefix.is_none_or(|cursor| *candidate > cursor))
+    }
 }
 
 impl<V> FamilyPrefixMap<V> {
@@ -216,5 +226,29 @@ mod tests {
                 .collect();
             assert_eq!(actual, authoritative, "cursor {cursor}");
         }
+    }
+
+    #[test]
+    fn exclusive_continuation_never_revisits_cursor_prefix() {
+        let mut map = FamilyPrefixMap::<()>::default();
+        let prefixes = [
+            Prefix::V4(Ipv4Prefix::new("10.0.0.0".parse().unwrap(), 8)),
+            Prefix::V4(Ipv4Prefix::new("10.0.0.0".parse().unwrap(), 16)),
+            Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32)),
+        ];
+        for prefix in prefixes {
+            map.entry_or_default(prefix);
+        }
+
+        assert_eq!(
+            map.iter_after(Some(prefixes[0]))
+                .map(|(prefix, ())| prefix)
+                .collect::<Vec<_>>(),
+            prefixes[1..]
+        );
+        assert!(
+            map.iter_after(Some(prefixes[2])).next().is_none(),
+            "the last prefix has no continuation"
+        );
     }
 }

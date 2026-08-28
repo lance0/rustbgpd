@@ -26,8 +26,9 @@ use super::RibManager;
 use crate::event::{EvpnRouteEvent, RouteEvent};
 use crate::route::Route;
 use crate::update::{
-    ExactExportEncoder, OutboundRouteUpdate, PeerExportPolicyReplacement, RibUpdate, RoutePage,
-    RouteQueryKey, RouteQueryScope,
+    BestRoutesPage, DataplanePageError, ExactExportEncoder, FibInstallCandidatesPage,
+    OutboundRouteUpdate, PeerExportPolicyReplacement, RibUpdate, RoutePage, RouteQueryKey,
+    RouteQueryScope,
 };
 
 /// Structural receipt for the production prefix-to-announcing-peers index.
@@ -41,6 +42,13 @@ pub struct UnicastPrefixPeersMemoryReceipt {
     pub primary_value_size: usize,
     pub epoch_size: usize,
     pub spill_slots: usize,
+}
+
+/// Compact eager/lazy ordered-index receipt for dataplane paging benchmarks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DataplanePrefixIndexBenchReceipt {
+    pub prefixes: usize,
+    pub index_bytes: usize,
 }
 
 static POLICY_TRANSITION_RECEIPT_PRINTED: AtomicBool = AtomicBool::new(false);
@@ -1069,6 +1077,68 @@ impl RibManager {
         response
             .try_recv()
             .expect("route page handler replies synchronously")
+    }
+
+    /// Return the populated ordered-prefix index's entry and allocator size.
+    #[must_use]
+    pub fn bench_dataplane_prefix_index_receipt(&self) -> DataplanePrefixIndexBenchReceipt {
+        let (prefixes, index_bytes) = self.loc_rib.bench_ordered_index_receipt();
+        DataplanePrefixIndexBenchReceipt {
+            prefixes,
+            index_bytes,
+        }
+    }
+
+    /// Drive the internal best-route dataplane page handler synchronously.
+    ///
+    /// # Errors
+    ///
+    /// Returns the production handler's index/generation error.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the production handler stops replying synchronously.
+    pub fn bench_query_best_routes_page(
+        &mut self,
+        after: Option<Prefix>,
+    ) -> Result<BestRoutesPage, DataplanePageError> {
+        let (reply, mut response) = oneshot::channel();
+        self.handle_query_best_routes_page(
+            after,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(60),
+            reply,
+        );
+        response
+            .try_recv()
+            .expect("best dataplane page handler replies synchronously")
+    }
+
+    /// Drive the internal FIB-candidate dataplane page handler synchronously.
+    ///
+    /// # Errors
+    ///
+    /// Returns the production handler's index/generation error.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the production handler stops replying synchronously.
+    pub fn bench_query_fib_install_candidates_page(
+        &mut self,
+        after: Option<Prefix>,
+        max_paths: u32,
+    ) -> Result<FibInstallCandidatesPage, DataplanePageError> {
+        let (reply, mut response) = oneshot::channel();
+        self.handle_query_fib_install_candidates_page(
+            after,
+            max_paths,
+            false,
+            false,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(60),
+            reply,
+        );
+        response
+            .try_recv()
+            .expect("FIB dataplane page handler replies synchronously")
     }
 
     /// Publish an owned batch through the production route-event helper.

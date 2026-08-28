@@ -2,9 +2,10 @@
 mod bench_support;
 #[cfg(feature = "bench-internals")]
 pub use bench_support::{
-    AdjRibOutFanoutBenchReceipt, EvpnDataplaneQueryBenchReceipt, PolicyTransitionBenchReceipt,
-    UnicastPrefixPeersMemoryReceipt, bench_evpn_dataplane_generation_query,
-    bench_evpn_dataplane_generation_snapshot, bench_evpn_dataplane_legacy_snapshot,
+    AdjRibOutFanoutBenchReceipt, DataplanePrefixIndexBenchReceipt, EvpnDataplaneQueryBenchReceipt,
+    PolicyTransitionBenchReceipt, UnicastPrefixPeersMemoryReceipt,
+    bench_evpn_dataplane_generation_query, bench_evpn_dataplane_generation_snapshot,
+    bench_evpn_dataplane_legacy_snapshot,
 };
 mod distribution;
 mod graceful_restart;
@@ -458,6 +459,12 @@ pub struct RibManager {
     /// the Loc-RIB. Counts rows visited only by full internal snapshots.
     #[cfg(test)]
     evpn_dataplane_query_row_visits: usize,
+    /// Deterministic proof that paged FIB queries use the prefix-announcer
+    /// reverse index rather than walking unrelated peer RIBs.
+    #[cfg(test)]
+    dataplane_page_announcer_visits: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    dataplane_page_sibling_visits: std::sync::atomic::AtomicUsize,
     adj_ribs_out: HashMap<IpAddr, AdjRibOut>,
     /// Per-peer outbound unicast prefix admission state (ADR-0113). An entry
     /// exists only for a peer whose resolved `max_prefixes_out_ipv4` /
@@ -1392,6 +1399,10 @@ impl RibManager {
             evpn_dataplane_route_count: 0,
             #[cfg(test)]
             evpn_dataplane_query_row_visits: 0,
+            #[cfg(test)]
+            dataplane_page_announcer_visits: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            dataplane_page_sibling_visits: std::sync::atomic::AtomicUsize::new(0),
             adj_ribs_out: HashMap::new(),
             outbound_prefix_limits: HashMap::new(),
             outbound_limit_control: outbound_prefix_limits::OutboundLimitControl::default(),
@@ -1511,6 +1522,26 @@ impl RibManager {
             test_ingest_stall,
             test_panic_on_peer_up: test_panic_on_peer_up.then_some(()),
         }
+    }
+
+    /// Select eager Loc-RIB prefix indexing for bounded internal dataplane
+    /// pages. The mode must be chosen before the manager contains any unicast
+    /// route; this avoids a synchronous index rebuild at cutover time.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any Adj-RIB-In or Loc-RIB unicast route is already present.
+    #[must_use]
+    pub fn with_eager_dataplane_prefix_index(mut self) -> Self {
+        assert!(
+            self.loc_rib.is_empty() && self.ribs.is_empty(),
+            "eager dataplane prefix indexing must be selected on an empty RIB manager"
+        );
+        assert!(
+            self.loc_rib.enable_dataplane_prefix_index(),
+            "eager dataplane prefix indexing requires pristine index state"
+        );
+        self
     }
 
     /// Arm bounded benchmark receipts for the real VPN snapshot query arm.
@@ -2412,6 +2443,11 @@ impl RibManager {
             RibUpdate::QueryBestRoutes { deadline, reply } => {
                 self.handle_query_best_routes(deadline, reply);
             }
+            RibUpdate::QueryBestRoutesPage {
+                after,
+                deadline,
+                reply,
+            } => self.handle_query_best_routes_page(after, deadline, reply),
             RibUpdate::QueryFibInstallCandidates {
                 max_paths,
                 relax,
@@ -2423,6 +2459,16 @@ impl RibManager {
                     max_paths, relax, weighted, deadline, reply,
                 );
             }
+            RibUpdate::QueryFibInstallCandidatesPage {
+                after,
+                max_paths,
+                relax,
+                weighted,
+                deadline,
+                reply,
+            } => self.handle_query_fib_install_candidates_page(
+                after, max_paths, relax, weighted, deadline, reply,
+            ),
             RibUpdate::QueryPeerGroups { reply } => self.handle_query_peer_groups(reply),
             RibUpdate::ExplainBestPath {
                 prefix,
