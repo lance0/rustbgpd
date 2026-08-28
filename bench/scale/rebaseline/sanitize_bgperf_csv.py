@@ -15,7 +15,7 @@ import sys
 
 MAX_INPUT_BYTES = 16 * 1024
 MAX_OUTPUT_BYTES = 4 * 1024
-RAW_HEADER = (
+LEGACY_RAW_HEADER = (
     "name",
     "target",
     "version",
@@ -45,7 +45,14 @@ RAW_HEADER = (
 # tester_timeouts in the data row but omits that label from stats_header(). Pin
 # the actual 25-value row explicitly so upstream drift fails closed instead of
 # shifting metrics by a column.
-RAW_ROW_FIELDS = RAW_HEADER[:21] + ("tester timeouts",) + RAW_HEADER[21:]
+LEGACY_RAW_ROW_FIELDS = (
+    LEGACY_RAW_HEADER[:21] + ("tester timeouts",) + LEGACY_RAW_HEADER[21:]
+)
+# The row-local provenance adapter fixes that missing label and appends three
+# bounded identity fields. Keep this as a second exact schema so historical
+# captures remain verifiable and any later upstream drift still fails closed.
+PROVENANCE_FIELDS = ("target image", "tester version", "monitor version")
+PROVENANCE_RAW_HEADER = LEGACY_RAW_ROW_FIELDS + PROVENANCE_FIELDS
 OUTPUT_FIELDS = (
     "target",
     "version",
@@ -65,6 +72,7 @@ OUTPUT_FIELDS = (
 )
 LONG_HEX_ID = re.compile(r"\b[0-9a-fA-F]{16,}\b")
 SAFE_VERSION = re.compile(r"[A-Za-z0-9._+() -]{1,80}")
+SAFE_IMAGE = re.compile(r"bgperf/rustbgpd(?::[A-Za-z0-9._-]{1,80})?")
 SAFE_DECIMAL = re.compile(r"(?:0|[1-9][0-9]{0,12})(?:\.[0-9]{1,6})?")
 
 
@@ -116,17 +124,29 @@ def load(path: Path) -> str:
         raise ValueError(f"{path}: expected exactly one header and one result row")
     header = tuple(value.strip() for value in rows[0])
     values = tuple(value.strip() for value in rows[1])
-    if header != RAW_HEADER:
+    if header == LEGACY_RAW_HEADER:
+        row_fields = LEGACY_RAW_ROW_FIELDS
+    elif header == PROVENANCE_RAW_HEADER:
+        row_fields = PROVENANCE_RAW_HEADER
+    else:
         raise ValueError(f"{path}: unsupported bgperf2 header/schema")
-    if len(values) != len(RAW_ROW_FIELDS):
-        raise ValueError(f"{path}: expected {len(RAW_ROW_FIELDS)} result fields")
-    for value in values:
+    if len(values) != len(row_fields):
+        raise ValueError(f"{path}: expected {len(row_fields)} result fields")
+    row = dict(zip(row_fields, values, strict=True))
+    for field, value in row.items():
+        if field in PROVENANCE_FIELDS:
+            continue
         if any(marker in value for marker in ("/", "\\", "\0", "\t", "\n", "\r")):
             raise ValueError(f"{path}: result contains a path or control character")
         if LONG_HEX_ID.search(value):
             raise ValueError(f"{path}: result contains a process/container-like identifier")
 
-    row = dict(zip(RAW_ROW_FIELDS, values, strict=True))
+    if header == PROVENANCE_RAW_HEADER:
+        if not SAFE_IMAGE.fullmatch(row["target image"]):
+            raise ValueError(f"{path}: unsupported target image identity")
+        for field in ("tester version", "monitor version"):
+            if not SAFE_VERSION.fullmatch(row[field]) or LONG_HEX_ID.search(row[field]):
+                raise ValueError(f"{path}: unsafe or empty {field}")
     if row["name"] != "rustbgpd" or row["target"] != "rustbgpd":
         raise ValueError(f"{path}: receipt target/name must both be rustbgpd")
     if not SAFE_VERSION.fullmatch(row["version"]):

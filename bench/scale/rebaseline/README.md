@@ -179,11 +179,14 @@ The sanitizer accepts exactly one header and one result row (16 KiB input,
 4 KiB output), the pinned rustbgpd 2x100k shape, convergence with zero tester
 errors/timeouts, and an allowlisted set of numeric metrics. It rejects schema
 drift, extra fields, paths, process/container-like IDs, filters, and failed
-runs. The current bgperf2 schema emits an unlabeled `tester_timeouts` data
-column; the sanitizer pins the known 24-label/25-value shape from
-`jauderho/bgperf2` commit
-`17216483e779f1484ef38562fb8f6b5ea6ad4d8f` explicitly so an upstream fix
-cannot silently shift columns. Never commit the unsanitized temporary CSV.
+runs. The sanitizer accepts two exact bgperf2 schemas. The historical shape
+from `jauderho/bgperf2` commit
+`17216483e779f1484ef38562fb8f6b5ea6ad4d8f` emits an unlabeled
+`tester_timeouts` data column, so its 24-label/25-value row remains pinned
+explicitly. The row-local provenance adapter labels that column and appends
+bounded target-image, tester-version, and monitor-version fields; those fields
+are validated and omitted from the stable receipt. Any other schema still
+fails closed. Never commit the unsanitized temporary CSV.
 Review the committed artifact without the raw capture using:
 
 ```text
