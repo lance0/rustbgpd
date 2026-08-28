@@ -136,7 +136,7 @@ PERMISSION_HASHES = {
     "kernel-dataplane.yml": "6f1d70d72bad231d43c575acef6946580e439c879794ed2ea1f4a40340245172",
 }
 CALL_HASHES = {
-    "interop.yml": "59a909cca623733c8407b8bc706443ee54d6a2451169af0f73a81faed8badd6e",
+    "interop.yml": "da64ebaf2c2e49b8ca54181d81777e4148586d80d385d93e1271cff38ec6b676",
     "kernel-dataplane.yml": "310ed2344bd6ff3f766580f704cc77fec4be0a2103a943e2ad837f497af346c3",
 }
 PINS = collections.Counter(

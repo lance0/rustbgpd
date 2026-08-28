@@ -30,6 +30,9 @@ name: Interop
 #   - M10 (~10 s test): IPv6 dual-stack via MP_REACH_NLRI /
 #     MP_UNREACH_NLRI, IPv4 + IPv6 routes over the same session.
 #     Wire-level fragility check for MP-BGP.
+#   - M16 (~30 s test): dual-stack LLGR (RFC 9494) over one IPv4
+#     session. Exact IPv4/IPv6 inventories cross GR-stale and
+#     LLGR-stale before both-family EoR restores fresh state.
 #   - M14 (~10 s test): Route Reflector (RFC 4456) — RR + 2 iBGP
 #     clients, validates CLUSTER_LIST + ORIGINATOR_ID set
 #     correctly on reflected routes. Spine of every IX deployment.
@@ -380,7 +383,7 @@ jobs:
 
   m10:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M10 — IPv6 dual-stack / MP-BGP (FRR 10.3.1)
+    name: M10/M16 — IPv6 MP-BGP + dual-stack LLGR (FRR 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -410,6 +413,13 @@ jobs:
           label: M10
           topology: tests/interop/m10-frr-ipv6.clab.yml
           script: tests/interop/scripts/test-m10-frr-ipv6.sh
+
+      - name: Run M16 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M16
+          topology: tests/interop/m16-llgr-frr.clab.yml
+          script: tests/interop/scripts/test-m16-llgr-frr.sh
 
   m14:
     needs: [grpcurl_archive, prime_dev_image]

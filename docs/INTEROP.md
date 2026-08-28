@@ -139,7 +139,7 @@ supports manual dispatch. Neither workflow has a scheduled trigger.
 - **Address-family + topology** — MP-BGP, RR, multi-path, BGP-LS reflection,
   VPNv4 reflection, RT-Constrain filtering, ORR divergent-best, RR-family
   GR/LLGR stale preservation, multi-cluster ORR, labeled-unicast reflection,
-  and experimental Paths-Limit against real FRR: **M10**, **M14**, **M17**,
+  and experimental Paths-Limit against real FRR: **M10**, **M14**, **M16**, **M17**,
   **M73**, **M74**,
   **M75**, **M76**, **M77**, **M78**, **M79**, **M89**.
 - **Operational + security** — BMP, transport security, FlowSpec: **M22**, **M24**, **M25**, and the BMP trio + BMPv4 receipt **M81**.
@@ -232,7 +232,7 @@ first show the negative, unresolved, or uniquely injected target state, then
 prove the positive state and final withdrawal or cleanup.
 
 The remaining interop scripts are local / manual gates because they
-need substantial wall-clock (M11/M16 GR/LLGR, M33 scale soak),
+need substantial wall-clock (M11 GR and M33 scale soak),
 additional fixtures (StayRTR / mock RTR v2 server), or
 broader platform-diversity validation beyond the protected hosted matrix.
 
@@ -249,7 +249,7 @@ broader platform-diversity validation beyond the protected hosted matrix.
 | FRR (bgpd) | 10.3.1 | `tests/interop/m13-policy-frr.clab.yml` | Tested (M13) | Policy Engine (chains, actions) | 3-node: import chain + export deny/MED/prepend | — |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m14-rr-frr.clab.yml` | Tested (M14) | Route Reflector (RFC 4456) | 3-node iBGP: RR + 2 clients | — |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m15-rr-frr.clab.yml` | Tested (M15) | Route Refresh (RFC 2918) | SoftResetIn via gRPC | — |
-| FRR (bgpd) | 10.3.1 | `tests/interop/m16-llgr-frr.clab.yml` | Tested (M16) | LLGR (RFC 9494) | GR→LLGR transition, stale clearing | — |
+| FRR (bgpd) | 10.3.1 | `tests/interop/m16-llgr-frr.clab.yml` | Tested (M16, hosted CI) | Dual-stack LLGR (RFC 9494) | Exact IPv4 2 + IPv6 1 inventory crosses fresh → GR-stale → LLGR-stale → fresh; structured MP/GR/LLGR timer and both-family EoR proof | — |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m17-addpath-frr.clab.yml` | Tested (M17) | Add-Path (RFC 7911) | Multi-path send, distinct path_ids | — |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m89-paths-limit-frr.clab.yml` | Tested (M89) | Experimental Paths-Limit (IANA capability 76; expired `draft-abraitis-idr-addpath-paths-limit-04`) | Unequal IPv4/IPv6 receive limits cap Add-Path export at 2/3 | Digest-pinned image; outside v1 contract |
 | BIRD 2 + GoBGP ×3 + arouteserver | BIRD 2.0.12, GoBGP 3.37.0, arouteserver 1.23.2 | `tests/interop/m90-differential.clab.yml` | Tested (M90, local) | ADR-0110 route-server filtering differential | One site input drives arouteserver/BIRD and `rs-config-render`/rustbgpd; 11/11 accept/reject verdicts and rustbgpd explain terms agree | Pinned arouteserver digest; 65/65, with a rust-only policy mutation making the differential red |
@@ -1521,25 +1521,37 @@ Automated test: `bash tests/interop/scripts/test-m15-rr-frr.sh` — **10 passed,
 
 ```
 M16 LLGR:
-  rustbgpd (10.0.0.1/24, AS 65001) ── eth1 ─── eth1 ── FRR (10.0.0.2/24, AS 65002)
+  rustbgpd (10.0.0.1, fd00:16::1, AS 65001)
+      ── eth1 ─── eth1 ──
+  FRR      (10.0.0.2, fd00:16::2, AS 65002)
 ```
 
-rustbgpd has `graceful_restart = true`, `gr_restart_time = 15`, `llgr_stale_time = 60`.
-FRR has `bgp graceful-restart` and `bgp long-lived-graceful-restart stale-time 60`.
+The BGP session uses the IPv4 endpoints and negotiates IPv4 and IPv6 unicast.
+rustbgpd has `graceful_restart = true`, `gr_restart_time = 15`, and
+`llgr_stale_time = 60`. FRR has `bgp graceful-restart`, a 15-second restart
+timer, and `bgp long-lived-graceful-restart stale-time 30`. FRR originates
+`192.168.1.0/24`, `192.168.2.0/24`, and `2001:db8:16::/48`.
 
 ### Test 1: Initial Routes Received
 
-Verify routes arrive normally.
+Require the exact two-route IPv4 and one-route IPv6 inventory fresh. Structured
+neighbor state must show both MP and GR families on rustbgpd and FRR, LLGR
+advertised and received, 15-second GR timers, per-family LLGR timers, exact
+FRR export counts, and EoR sent for both families. The driver deliberately
+does not use FRR's incomplete per-peer LLGR family view.
 
 ### Test 2: GR → LLGR Transition
 
-Kill FRR's bgpd. Wait for GR timer (15s) to expire. Routes should still be present
-(LLGR preserves them beyond the GR timer).
+Pause watchfrr and kill FRR's bgpd once. Bounded polls require the exact
+dual-stack inventory first GR-stale and then LLGR-stale. The GR-active gauge
+must remain exactly one, the session-flap counter must advance exactly once,
+and `bgp_gr_timer_expired_total` must advance exactly once at LLGR promotion.
 
 ### Test 3: Reconnect Clears LLGR-Stale
 
-watchfrr restarts bgpd. After session re-establishment and EoR, LLGR-stale state
-should be cleared and routes remain valid.
+Resume watchfrr for one bgpd relaunch. A new process ID, exactly one cumulative
+session flap, repeated capability/timer assertions, FRR EoR for both families,
+the exact fresh 2+1 inventory, and `bgp_gr_active_peers = 0` close the receipt.
 
 ### Automated Test Script
 
@@ -1549,20 +1561,20 @@ bash tests/interop/scripts/test-m16-llgr-frr.sh
 
 ---
 
-## M16 LLGR FRR Test Results (2026-03-06, FRR 10.3.1)
+## M16 LLGR FRR Test Results (2026-08-28, FRR 10.3.1)
 
-Automated test: `bash tests/interop/scripts/test-m16-llgr-frr.sh` — **8 passed, 0 failed.**
+Automated local exact-head test:
+`bash tests/interop/scripts/test-m16-llgr-frr.sh` — **20 passed, 0 failed.**
+The same M16 driver runs immediately after M10 in the hosted `m10` interop job.
 
 | Test | Result | Details |
 |------|--------|---------|
-| Session establishment | PASS | Established on first attempt |
-| Routes received (2/2) | PASS | Both prefixes in RIB |
-| 192.168.1.0/24 present | PASS | In received routes |
-| 192.168.2.0/24 present | PASS | In received routes |
-| Routes preserved after GR timer | PASS | 2 routes still present (LLGR active) |
-| Session re-established | PASS | watchfrr restarted bgpd |
-| Routes present after reconnect | PASS | 2 routes still present |
-| LLGR-stale cleared | PASS | No stale routes after EoR |
+| Dual-stack negotiation | PASS | Both peers show IPv4/IPv6 MP and GR; FRR shows LLGR advertised/received and exact per-family LLGR timers |
+| Initial inventory + EoR | PASS | Exact IPv4 2 + IPv6 1 fresh routes; FRR sent EoR for both families |
+| GR-stale phase | PASS | All three exact routes GR-stale; GR-active 1; cumulative flap count +1 |
+| LLGR promotion | PASS | All three exact routes LLGR-stale; GR timer counter exactly +1 |
+| Single relaunch | PASS | watchfrr starts one new bgpd process; rustbgpd observes exactly one flap total |
+| Reconciliation | PASS | Both-family EoR restores the exact fresh 2+1 inventory; GR-active returns to 0 |
 
 ---
 
