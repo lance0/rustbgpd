@@ -21,6 +21,10 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
+# shellcheck disable=SC1091 # REPO is resolved dynamically above
+source "$REPO/tests/soak/host-lock.sh"
+# shellcheck disable=SC1091 # REPO is resolved dynamically above
+source "$REPO/bench/scale/host-quiet.sh"
 RSTALL="$REPO/bench/scale/reloadstall"
 HARNESS="$REPO/bench/scale/target/release/reloadstall"
 SAMPLER="$REPO/bench/scale/matrix/rss-sampler.sh"
@@ -35,6 +39,8 @@ FLAPSTORM="${FLAPSTORM:-}"
 ART="${ARTIFACTS_DIR:-$REPO/bench/scale/matrix/artifacts}"
 RSS_LIMIT_KIB=$((100 * 1024 * 1024)) # abort a cell past 100 GiB
 
+acquire_rustbgpd_host_lock || exit $?
+
 CELLS=("$@")
 [ ${#CELLS[@]} -eq 0 ] && CELLS=(rustbgpd bird openbgpd)
 
@@ -43,16 +49,6 @@ CELLS=("$@")
     exit 1
 }
 mkdir -p "$ART"
-
-load_gate() {
-    local load
-    while :; do
-        load=$(cut -d' ' -f1 /proc/loadavg)
-        if awk -v l="$load" 'BEGIN { exit !(l < 2.0) }'; then return 0; fi
-        echo "load_gate: 1-min loadavg $load >= 2.0, waiting 30s"
-        sleep 30
-    done
-}
 
 # run_cell <cell>: everything for one matrix cell. Nonzero return = cell
 # failed; the campaign moves on.
@@ -171,7 +167,7 @@ for cell in "${CELLS[@]}"; do
         echo "cell $cell: already pass, skipping (rm $status_file to rerun)"
         continue
     fi
-    load_gate
+    wait_for_rustbgpd_quiet_host "$ART/$cell/quiet.tsv" || exit $?
     echo "=== cell $cell start $(date -Is) ==="
     if run_cell "$cell"; then
         echo pass >"$status_file"

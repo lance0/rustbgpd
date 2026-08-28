@@ -37,6 +37,10 @@ set -u
 set -o pipefail
 
 REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
+# shellcheck disable=SC1091 # REPO is resolved dynamically above
+source "$REPO/tests/soak/host-lock.sh"
+# shellcheck disable=SC1091 # REPO is resolved dynamically above
+source "$REPO/bench/scale/host-quiet.sh"
 RSTALL="$REPO/bench/scale/reloadstall"
 HARNESS="$REPO/bench/scale/target/release/reloadstall"
 GEN="$RSTALL/gen-irr-scenario.py"
@@ -127,6 +131,52 @@ PORT="${PORT:-1790}"
 START_TIMEOUT="${START_TIMEOUT:-600}"
 BIRD_THREADS="${BIRD_THREADS:-8}"
 ART="${ARTIFACTS_DIR:-/tmp/irrreload-artifacts}"
+
+# shellcheck disable=SC2317 # invoked indirectly by the shared host-quiet sampler
+irrreload_host_quiet_extra_sample() {
+    local disk_kib port1790 port9179
+    local port1790_free=true port9179_free=true
+    local -a failed=()
+
+    disk_kib=$(df -Pk "$ART" | awk 'NR == 2 {print $4}') || {
+        RUSTBGPD_HOST_QUIET_EXTRA_FIELDS=$'unreadable\tunreadable\tunreadable'
+        RUSTBGPD_HOST_QUIET_EXTRA_FAILED=extra_snapshot
+        return 1
+    }
+    port1790=$(ss -ltnH 'sport = :1790') || {
+        RUSTBGPD_HOST_QUIET_EXTRA_FIELDS=$'unreadable\tunreadable\tunreadable'
+        RUSTBGPD_HOST_QUIET_EXTRA_FAILED=extra_snapshot
+        return 1
+    }
+    port9179=$(ss -ltnH 'sport = :9179') || {
+        RUSTBGPD_HOST_QUIET_EXTRA_FIELDS=$'unreadable\tunreadable\tunreadable'
+        RUSTBGPD_HOST_QUIET_EXTRA_FAILED=extra_snapshot
+        return 1
+    }
+    if [ -n "$port1790" ]; then
+        port1790_free=false
+        failed+=(port1790)
+    fi
+    if [ -n "$port9179" ]; then
+        port9179_free=false
+        failed+=(port9179)
+    fi
+    [ "$disk_kib" -ge $((40 * 1024 * 1024)) ] || failed+=(disk_available)
+    printf -v RUSTBGPD_HOST_QUIET_EXTRA_FIELDS '%s\t%s\t%s' \
+        "$port1790_free" "$port9179_free" "$disk_kib"
+    RUSTBGPD_HOST_QUIET_EXTRA_FAILED=$(IFS=,; printf '%s' "${failed[*]}")
+    [ ${#failed[@]} -eq 0 ]
+}
+
+if [ "${1:-}" = --self-test-host-quiet ]; then
+    [ "$#" -eq 2 ] || { echo "usage: $0 --self-test-host-quiet OUTPUT" >&2; exit 2; }
+    ART=$(dirname "$2")
+    mkdir -p "$ART"
+    wait_for_rustbgpd_quiet_host "$2" irrreload_host_quiet_extra_sample \
+        $'port1790_free\tport9179_free\tdisk_available_kib'
+    exit $?
+fi
+
 PREFLIGHT_LOG=""
 cleanup_preflight_log() { [ -z "$PREFLIGHT_LOG" ] || rm -f "$PREFLIGHT_LOG"; }
 trap cleanup_preflight_log EXIT
@@ -186,7 +236,7 @@ if [ -e "$ART" ] || [ -L "$ART" ]; then
     exit 2
 fi
 
-for tool in docker jq python3 cargo curl flock ss sha256sum git awk timeout find sort setsid stdbuf cmp mktemp stat df env; do
+for tool in docker jq python3 cargo curl flock ss sha256sum git awk timeout find sort setsid stdbuf cmp mktemp stat df env ps; do
     command -v "$tool" >/dev/null || {
         echo "missing required tool: $tool" >&2
         exit 1
@@ -272,13 +322,7 @@ if [ -z "$SMOKE" ]; then
     }
 fi
 
-HOST_LOCK="${RUSTBGPD_HOST_LOCK:-$HOME/.local/state/rustbgpd-host.lock}"
-mkdir -p "$(dirname "$HOST_LOCK")"
-exec {HOST_LOCK_FD}>"$HOST_LOCK"
-flock -n "$HOST_LOCK_FD" || {
-    echo "host benchmark lock is held: $HOST_LOCK" >&2
-    exit 75
-}
+acquire_rustbgpd_host_lock || exit $?
 
 echo "=== builds ==="
 (cd "$REPO" && cargo build --release -q -p rustbgpd -p rustbgpctl -p rs-config-render) || exit 1
@@ -410,39 +454,12 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 load_gate() {
-    local cell=$1 load sample=1 quiet pswpin pswpout disk_kib first_pswpin first_pswpout port1790 port9179
+    local cell=$1 quiet
     quiet="$ART/$cell/quiet.tsv"
     [ -n "$SMOKE" ] && return 0
     mkdir -p "$ART/$cell"
-    printf 'sample\tepoch_s\tload1\tpswpin\tpswpout\tport1790_free\tport9179_free\tdisk_available_kib\n' >"$quiet"
-    while [ "$sample" -le 2 ]; do
-        load=$(cut -d' ' -f1 /proc/loadavg)
-        pswpin=$(awk '$1 == "pswpin" {print $2}' /proc/vmstat)
-        pswpout=$(awk '$1 == "pswpout" {print $2}' /proc/vmstat)
-        disk_kib=$(df -Pk "$ART" | awk 'NR == 2 {print $4}')
-        port1790=$(ss -ltnH 'sport = :1790') || { echo "load_gate: cannot inspect port 1790" >&2; exit 1; }
-        port9179=$(ss -ltnH 'sport = :9179') || { echo "load_gate: cannot inspect port 9179" >&2; exit 1; }
-        if awk -v l="$load" 'BEGIN { exit !(l < 2.0) }' &&
-            [ -z "$port1790" ] && [ -z "$port9179" ] &&
-            [ "$disk_kib" -ge $((40 * 1024 * 1024)) ]; then
-            printf '%s\t%s\t%s\t%s\t%s\ttrue\ttrue\t%s\n' \
-                "$sample" "$(date +%s)" "$load" "$pswpin" "$pswpout" "$disk_kib" >>"$quiet"
-            if [ "$sample" -eq 1 ]; then
-                first_pswpin=$pswpin
-                first_pswpout=$pswpout
-            elif [ "$pswpin" != "$first_pswpin" ] || [ "$pswpout" != "$first_pswpout" ]; then
-                echo "load_gate: swap activity observed; restarting quiet samples"
-                printf 'sample\tepoch_s\tload1\tpswpin\tpswpout\tport1790_free\tport9179_free\tdisk_available_kib\n' >"$quiet"
-                sample=1
-                sleep 30
-                continue
-            fi
-            sample=$((sample + 1))
-        else
-            echo "load_gate: waiting for load <2, free ports 1790/9179, and 40 GiB free on ART"
-        fi
-        [ "$sample" -gt 2 ] || sleep 30
-    done
+    wait_for_rustbgpd_quiet_host "$quiet" irrreload_host_quiet_extra_sample \
+        $'port1790_free\tport9179_free\tdisk_available_kib'
 }
 
 capture_topology() {
@@ -869,7 +886,7 @@ run_cell() {
 overall=0
 for cell in "${CELLS[@]}"; do
     status_file="$ART/$cell/status"
-    load_gate "$cell"
+    load_gate "$cell" || exit $?
     echo "=== cell $cell start $(date -Is) ==="
     if run_cell "$cell"; then
         printf 'pass\n' >"$status_file"
