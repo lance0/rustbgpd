@@ -2382,12 +2382,14 @@ impl PeerManager {
             else {
                 continue;
             };
-            match rustbgpd_transport::PeerHandle::query_state_outcome_with(
-                commands,
-                PEER_QUERY_TIMEOUT,
-            )
-            .await
-            {
+            let state = self
+                .await_with_readiness(rustbgpd_transport::PeerHandle::query_state_outcome_with(
+                    commands,
+                    PEER_QUERY_TIMEOUT,
+                ))
+                .await;
+            self.drain_readiness_queries().await;
+            match state {
                 StateQueryOutcome::State(state) if state.fsm_state == SessionState::Established => {
                 }
                 StateQueryOutcome::State(_) | StateQueryOutcome::SessionGone => {
@@ -2533,12 +2535,14 @@ impl PeerManager {
             else {
                 continue;
             };
-            match rustbgpd_transport::PeerHandle::query_state_outcome_with(
-                commands,
-                PEER_QUERY_TIMEOUT,
-            )
-            .await
-            {
+            let state = self
+                .await_with_readiness(rustbgpd_transport::PeerHandle::query_state_outcome_with(
+                    commands,
+                    PEER_QUERY_TIMEOUT,
+                ))
+                .await;
+            self.drain_readiness_queries().await;
+            match state {
                 StateQueryOutcome::State(state) if state.fsm_state == SessionState::Established => {
                 }
                 StateQueryOutcome::State(_) | StateQueryOutcome::SessionGone => {
