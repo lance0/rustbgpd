@@ -50,7 +50,23 @@ boundary to reset the daemon's kernel high-water mark and capture the
 pre-action allocator/RSS state. It continuously samples RSS and jemalloc
 gauges, then captures the exact post-action state before acknowledging the
 driver. The actor-duration histogram must advance on every accepted begin,
-EoRR, and timeout operation.
+EoRR, and timeout operation. Timing is checked only between exact adjacent
+accepted phases, in this order:
+
+```text
+baseline -> first-borr -> replay-one -> duplicate-borr -> eorr
+         -> restored -> timeout-borr -> timeout-complete
+```
+
+Before validating a transition, the validator rechecks the predecessor's
+absolute actor counts against the settled baseline and its complete production
+state. A timed transition must add exactly one operation, leave every other
+operation's count and sum unchanged, and have a positive adjacent sum delta no
+greater than the always-on ceiling: begin **0.025 s**, EoRR **0.250 s**, and
+timeout completion **0.250 s**. Replay-one and restored are untimed boundaries,
+so every actor count and sum must remain unchanged. These are per-operation
+deltas, not cumulative histogram averages; older fast observations cannot mask
+one slow operation.
 
 The fleet shape is deliberately one ERR-capable peer × 100,000 unique IPv4
 /24s. It isolates per-peer inventory cost; it does not claim synchronized
@@ -78,10 +94,12 @@ approximately six-minute session; and leaves private raw output under
   local run from being mislabeled as the durable 100k receipt. Removing the
   fixed-shape guard makes it proceed to connection and changes the asserted
   error.
-- `test_validate_phase.py` feeds every exact phase through the same validator
-  the runner invokes, then injects an unswept RIB and a missing actor
-  observation. Removing either production obligation makes its mutation
-  test red.
+- `test_validate_phase.py` feeds every exact adjacent phase pair through the
+  same validator the runner invokes. It pins equality at all three timing
+  ceilings, rejects each over-cap operation, proves a low cumulative average
+  cannot mask one slow transition, rejects untimed sum movement, and rejects
+  missing or wrong predecessors. It also retains the unswept-RIB, missing-actor,
+  and uninterrupted-session mutation proofs.
 - The receipt gate itself checks all route, stale, max-prefix, histogram,
   API-sentinel, session-establishment, and flap values at every boundary.
   Removing the RIB BoRR snapshot makes the first-BoRR assertion red; removing

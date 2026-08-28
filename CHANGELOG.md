@@ -21,6 +21,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The Enhanced Route Refresh 100k real-session receipt now applies always-on
+  adjacent-operation ceilings to its actor-duration histogram: 25 ms for each
+  accepted BoRR begin and 250 ms for EoRR or timeout completion. Every phase
+  revalidates the exact accepted predecessor and baseline-relative actor counts;
+  timed transitions advance exactly one operation while all other counts and
+  sums remain unchanged, preventing cumulative averages from masking one slow
+  operation.
+
 - Periodic BMP peer statistics now include RFC 9972 type 22 for exact counts of
   current pre-policy IPv4/IPv6-unicast Adj-RIB-In routes rejected by inbound
   policy. Rows are emitted only for negotiated families while rejected-route

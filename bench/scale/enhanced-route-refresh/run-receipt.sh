@@ -246,19 +246,46 @@ ack() {
     touch "$RUN/evidence/${phase}.ack"
 }
 
+phase_predecessor() {
+    case "$1" in
+        first-borr) printf '%s\n' baseline ;;
+        replay-one) printf '%s\n' first-borr ;;
+        duplicate-borr) printf '%s\n' replay-one ;;
+        eorr) printf '%s\n' duplicate-borr ;;
+        restored) printf '%s\n' eorr ;;
+        timeout-borr) printf '%s\n' restored ;;
+        timeout-complete) printf '%s\n' timeout-borr ;;
+        *) echo "phase $1 has no receipt predecessor" >&2; return 1 ;;
+    esac
+}
+
 validate_phase() {
     local phase=$1 timeout_seconds=$2
     local deadline=$((SECONDS + timeout_seconds))
     local candidate="$RUN/${phase}.candidate.prom"
     local error="$RUN/${phase}.error"
     local baseline="$OUT/metrics/baseline.prom"
+    local predecessor_phase='' predecessor=''
+    local -a validator
+    if [[ $phase != baseline ]]; then
+        predecessor_phase=$(phase_predecessor "$phase")
+        predecessor="$OUT/metrics/${predecessor_phase}.prom"
+        [[ -f $predecessor ]] || {
+            echo "phase $phase predecessor is missing: $predecessor" >&2
+            exit 1
+        }
+    fi
     until ((SECONDS >= deadline)); do
         if [[ $phase == baseline ]]; then
             baseline=$candidate
         fi
+        validator=(
+            python3 "$RECEIPT_DIR/validate_phase.py" "$phase" "$candidate" "$baseline"
+        )
+        [[ -z $predecessor ]] || validator+=("$predecessor")
+        validator+=(--output "$OUT/phase/${phase}.json")
         if scrape "$candidate" &&
-            python3 "$RECEIPT_DIR/validate_phase.py" "$phase" "$candidate" \
-                "$baseline" --output "$OUT/phase/${phase}.json" \
+            "${validator[@]}" \
                 >"$OUT/phase/${phase}.validation.log" 2>"$error"; then
             mv "$candidate" "$OUT/metrics/${phase}.prom"
             validate_route_sentinels "$phase"
