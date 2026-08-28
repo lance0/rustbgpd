@@ -535,7 +535,10 @@ def validate_wire_corpus_cache_contract(
         raise InventoryError("nightly wire corpus cache unique run key count differs")
     if "WIRE_SEALED_BUNDLE" in workflow:
         raise InventoryError("nightly wire corpus cache has distinct seal staging")
-    job_header = workflow[: workflow.index("    steps:\n")]
+    steps_index = workflow.find("    steps:\n")
+    if steps_index < 0:
+        raise InventoryError("nightly wire corpus cache lacks steps marker")
+    job_header = workflow[:steps_index]
     if "runner." in job_header:
         raise InventoryError("nightly wire corpus cache uses runner context in job env")
     bundle_env = "WIRE_CACHE_BUNDLE: ${{ runner.temp }}/wire-corpus-cache"

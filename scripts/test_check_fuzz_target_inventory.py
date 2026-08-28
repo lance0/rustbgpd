@@ -545,6 +545,12 @@ class FuzzTargetInventoryTests(unittest.TestCase):
                 invalid_job_env, helper, dictionary
             )
 
+        missing_steps = workflow.replace("    steps:\n", "    workflow-steps:\n", 1)
+        with self.assertRaisesRegex(inventory.InventoryError, "lacks steps marker"):
+            inventory.validate_wire_corpus_cache_contract(
+                missing_steps, helper, dictionary
+            )
+
         reordered = workflow.replace(
             "python3 scripts/fuzz_corpus_cache.py seal",
             "python3 scripts/fuzz_corpus_cache.py restore",
