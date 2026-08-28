@@ -1573,6 +1573,7 @@ fn config_field_impact(field: &str) -> Option<(ConfigFieldImpact, &'static str)>
         "route_reflector_client"
         | "orr_vantage"
         | "route_server_client"
+        | "send_non_transitive_extended_communities"
         | "per_client_best"
         | "next_hop_ownership"
         | "interpret_rfc1997"
@@ -1727,6 +1728,7 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<FieldCha
     cmp_field!(route_reflector_client);
     cmp_field!(orr_vantage);
     cmp_field!(route_server_client);
+    cmp_field!(send_non_transitive_extended_communities);
     cmp_field!(per_client_best);
     cmp_field!(next_hop_ownership);
     cmp_field!(interpret_rfc1997);
@@ -1858,6 +1860,8 @@ fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
         && old.route_reflector_client == new.route_reflector_client
         && old.orr_vantage == new.orr_vantage
         && old.route_server_client == new.route_server_client
+        && old.send_non_transitive_extended_communities
+            == new.send_non_transitive_extended_communities
         && old.per_client_best == new.per_client_best
         && old.next_hop_ownership == new.next_hop_ownership
         && old.interpret_rfc1997 == new.interpret_rfc1997
@@ -2718,6 +2722,12 @@ impl Config {
                 neighbor
                     .route_server_client
                     .or_else(|| group.and_then(|g| g.route_server_client))
+                    .unwrap_or(false),
+            );
+            neighbor.send_non_transitive_extended_communities = Some(
+                neighbor
+                    .send_non_transitive_extended_communities
+                    .or_else(|| group.and_then(|g| g.send_non_transitive_extended_communities))
                     .unwrap_or(false),
             );
             neighbor.per_client_best = Some(
@@ -4883,6 +4893,7 @@ pub fn describe_peer_group_changes(
     cmp_field!(route_reflector_client);
     cmp_field!(orr_vantage);
     cmp_field!(route_server_client);
+    cmp_field!(send_non_transitive_extended_communities);
     cmp_field!(per_client_best);
     cmp_field!(next_hop_ownership);
     cmp_field!(interpret_rfc1997);

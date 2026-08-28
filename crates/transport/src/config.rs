@@ -450,6 +450,10 @@ pub struct TransportConfig {
     pub orr_vantage: Option<IpAddr>,
     /// Whether this eBGP neighbor is a transparent route-server client.
     pub route_server_client: bool,
+    /// Explicitly permit non-transitive Extended Communities across a plain
+    /// eBGP boundary. iBGP and transparent route-server-client sessions
+    /// preserve them regardless of this setting. Default: `false`.
+    pub send_non_transitive_extended_communities: bool,
     /// RFC 7947 §2.3.2 per-client best-path for a route-server client:
     /// the RIB stages the first export-policy-permitted candidate for
     /// this peer instead of the Loc-RIB best (path-hiding mitigation
@@ -568,6 +572,7 @@ impl TransportConfig {
             route_reflector_client: false,
             orr_vantage: None,
             route_server_client: false,
+            send_non_transitive_extended_communities: false,
             per_client_best: false,
             next_hop_ownership_strict_peer: false,
             interpret_rfc1997: true,

@@ -160,6 +160,7 @@ fn transport_config(remote: SocketAddr) -> TransportConfig {
         route_reflector_client: true,
         orr_vantage: None,
         route_server_client: false,
+        send_non_transitive_extended_communities: false,
         per_client_best: false,
         next_hop_ownership_strict_peer: false,
         interpret_rfc1997: true,

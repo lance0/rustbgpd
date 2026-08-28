@@ -877,6 +877,8 @@ impl PeerManager {
         transport.route_reflector_client = config.route_reflector_client;
         transport.orr_vantage = config.orr_vantage;
         transport.route_server_client = config.route_server_client;
+        transport.send_non_transitive_extended_communities =
+            config.send_non_transitive_extended_communities;
         // RFC 7947 §2.3.2 / ADR-0101: without this line the knob
         // parses, validates, and reloads — and every session still
         // registers single-best (caught by M83; the RIB/CLI unit

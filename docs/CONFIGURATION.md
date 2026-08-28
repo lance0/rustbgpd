@@ -904,6 +904,7 @@ complete atomic block. There is no probe or automatic legacy fallback.
 | `gr_peer_restart_time_max` | u16  | no       | 4095    | Local upper bound on the peer-advertised Restart Time used for initial disconnected stale-route retention (seconds, 1--4095); does not change this daemon's OPEN |
 | `gr_stale_routes_time` | u64      | no       | 360     | Time to retain stale routes after peer reconnects (seconds, 1--3600) |
 | `route_server_client`  | bool     | no       | false   | Transparent route-server mode for eBGP peers (see below) |
+| `send_non_transitive_extended_communities` | bool | no | false | Permit non-transitive Extended Communities to cross a plain eBGP boundary. iBGP and `route_server_client` sessions always preserve them. Inherits from the peer-group |
 | `per_client_best`      | bool     | no       | false   | RFC 7947 §2.3.2 per-client best-path for route-server clients: when export policy denies the Loc-RIB best toward this peer, advertise the best *permitted* candidate instead of hiding the prefix. Requires `route_server_client = true`; inherits from the peer-group (see below) |
 | `next_hop_ownership`   | string   | no       | --      | ADR-0107 pre-policy NEXT_HOP ownership enforcement for route-server clients (RFC 7948 §4.8). `"strict_peer"` accepts a unicast announcement only when its complete wire next-hop identity is the advertising session's own address; non-conforming announcements are rejected before import policy (fail-closed, treat-as-withdraw). Requires `route_server_client = true`; inherits from the peer-group (see below) |
 | `interpret_rfc1997`    | bool     | no       | (derived) | Honor RFC 1997 `NO_EXPORT`/`NO_EXPORT_SUBCONFED` at egress: routes received with either community are not advertised to this neighbor when it is eBGP. Default: `true` unless `route_server_client = true` (route servers pass communities through transparently and let members enforce them). Inherits from the peer-group; set explicitly to override either default (see below) |
@@ -1754,6 +1755,27 @@ This applies to:
 - IPv6 unicast (`MP_REACH_NLRI`)
 - IPv4 and IPv6 FlowSpec export (`AS_PATH` transparency only; FlowSpec has no
   wire-level `NEXT_HOP`)
+
+Route-server transparency also preserves transitive and non-transitive
+Extended Communities as required by RFC 7947 §2.2.4. On ordinary eBGP
+sessions, non-transitive Extended Communities are removed after export policy
+and before UPDATE encoding. This prevents attributes such as RFC 8097 origin
+validation state and non-transitive RFC 10005 Link Bandwidth from crossing an
+AS boundary by default. To preserve them toward one ordinary eBGP neighbor,
+opt in explicitly:
+
+```toml
+[[neighbors]]
+address = "192.0.2.2"
+remote_asn = 65002
+send_non_transitive_extended_communities = true
+```
+
+The knob inherits from `[peer_groups.<name>]`, and a neighbor-level value wins.
+It has no effect on iBGP or `route_server_client` sessions because those paths
+always preserve the attributes. Filtering retains the original normal or
+Partial attribute form when any transitive values remain and removes the
+attribute when none remain.
 
 Transparent export does not by itself verify that an inbound unicast next hop
 belongs to the advertising route-server client — a next-hop rewrite alone is

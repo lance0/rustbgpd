@@ -298,6 +298,115 @@ fn outbound_attribute_preparation_preserves_partial_community_variants() {
     }
 }
 
+#[test]
+fn plain_ebgp_strips_non_transitive_extended_communities_for_unicast() {
+    let session = make_test_session(65001, 65002);
+    let transitive = rustbgpd_wire::ExtendedCommunity::new(0x0002_FDE8_0000_0064);
+    let non_transitive = rustbgpd_wire::ExtendedCommunity::ORIGIN_VALIDATION_INVALID;
+    let route = Route {
+        attributes: Arc::new(vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+            PathAttribute::ExtendedCommunities(vec![transitive, non_transitive]),
+        ]),
+        ..make_route(100)
+    };
+
+    let attrs = session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None);
+    assert!(matches!(
+        attrs
+            .iter()
+            .find(|attr| attr.extended_communities().is_some()),
+        Some(PathAttribute::ExtendedCommunities(values)) if values == &[transitive]
+    ));
+
+    let route = Route {
+        attributes: Arc::new(vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+            PathAttribute::ExtendedCommunitiesPartial(vec![non_transitive]),
+        ]),
+        ..make_route(100)
+    };
+    let attrs = session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None);
+    assert!(
+        attrs
+            .iter()
+            .all(|attr| attr.extended_communities().is_none()),
+        "an empty filtered attribute is removed rather than encoded"
+    );
+}
+
+#[test]
+fn plain_ebgp_strips_non_transitive_extended_communities_for_mp_export() {
+    let session = make_test_session(65001, 65002);
+    let transitive = rustbgpd_wire::ExtendedCommunity::new(0x0002_FDE8_0000_0064);
+    let non_transitive = rustbgpd_wire::ExtendedCommunity::ORIGIN_VALIDATION_INVALID;
+    let mut route = make_flowspec_route();
+    route
+        .attributes
+        .push(PathAttribute::ExtendedCommunitiesPartial(vec![
+            non_transitive,
+            transitive,
+        ]));
+
+    let attrs = session.prepare_outbound_attributes_flowspec(&route, true);
+    assert!(matches!(
+        attrs
+            .iter()
+            .find(|attr| attr.extended_communities().is_some()),
+        Some(PathAttribute::ExtendedCommunitiesPartial(values)) if values == &[transitive]
+    ));
+}
+
+#[test]
+fn non_transitive_extended_communities_preserve_on_exempt_or_opted_in_export() {
+    let non_transitive = rustbgpd_wire::ExtendedCommunity::ORIGIN_VALIDATION_INVALID;
+    let route = Route {
+        attributes: Arc::new(vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+            PathAttribute::ExtendedCommunitiesPartial(vec![non_transitive]),
+        ]),
+        ..make_route(100)
+    };
+
+    for (name, local_asn, remote_asn, route_server_client, opted_in) in [
+        ("iBGP", 65001, 65001, false, false),
+        ("route-server client", 65001, 65002, true, false),
+        ("plain eBGP opt-in", 65001, 65002, false, true),
+    ] {
+        let mut session = make_test_session(local_asn, remote_asn);
+        session.config.route_server_client = route_server_client;
+        session.config.send_non_transitive_extended_communities = opted_in;
+        let attrs = session.prepare_outbound_attributes(
+            &route,
+            local_asn != remote_asn,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+        );
+        assert!(
+            matches!(
+                attrs
+                    .iter()
+                    .find(|attr| attr.extended_communities().is_some()),
+                Some(PathAttribute::ExtendedCommunitiesPartial(values))
+                    if values == &[non_transitive]
+            ),
+            "{name} must preserve the Partial attribute and value"
+        );
+    }
+}
+
 /// A fresh (non-LLGR-stale) route toward the same non-LLGR iBGP peer is
 /// untouched by the §4.6 rewrite: no `NO_EXPORT`, `LOCAL_PREF` preserved.
 #[test]

@@ -38,6 +38,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Plain eBGP export now removes non-transitive Extended Communities after
+  export policy by default, while iBGP and transparent route-server-client
+  sessions preserve them. A peer-group-inheritable
+  `send_non_transitive_extended_communities` opt-in permits deliberate export
+  across an AS boundary; normal and Partial attribute forms remain distinct.
+
 - BMPv4 Route Monitoring now follows draft-ietf-grow-bmp-tlv-21's registry:
   Group=1, VRF/Table Name=2, Stateless Parsing=3, BGP Message=4, Sequence
   Number=5, Extended Flags=6, and Timestamp=7. BMPv3 remains byte-identical.

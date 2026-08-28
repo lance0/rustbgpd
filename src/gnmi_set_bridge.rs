@@ -473,6 +473,7 @@ fn empty_neighbor(address: IpAddr) -> Neighbor {
         route_reflector_client: None,
         orr_vantage: None,
         route_server_client: None,
+        send_non_transitive_extended_communities: None,
         per_client_best: None,
         next_hop_ownership: None,
         interpret_rfc1997: None,

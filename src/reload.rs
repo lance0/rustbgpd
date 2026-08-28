@@ -234,6 +234,7 @@ pub(crate) fn build_peer_mgr_config(
         route_reflector_client: tc.route_reflector_client,
         orr_vantage: tc.orr_vantage,
         route_server_client: tc.route_server_client,
+        send_non_transitive_extended_communities: tc.send_non_transitive_extended_communities,
         per_client_best: tc.per_client_best,
         next_hop_ownership_strict_peer: tc.next_hop_ownership_strict_peer,
         slow_peer_threshold_pct: tc.slow_peer_threshold_pct,
@@ -9360,11 +9361,7 @@ remote_asn = 65002
         use rustbgpd_wire::{Afi, Safi};
         use tokio::sync::oneshot::error::TryRecvError;
         use tokio::time::{Duration, timeout};
-
-        let stale_path = unique_temp_path("bridge-static-ack-stale");
-        std::fs::write(&stale_path, baseline_toml()).unwrap();
-        let stale = Config::load_with_diagnostics(stale_path.to_str().unwrap()).unwrap();
-        std::fs::remove_file(&stale_path).ok();
+        let stale = load_config_from_toml("bridge-static-ack-stale", baseline_toml());
 
         let (event_tx, event_rx) = mpsc::channel::<ConfigEvent>(8);
         let (replace_tx, replace_rx) = mpsc::unbounded_channel::<Box<Config>>();
@@ -9403,6 +9400,7 @@ remote_asn = 65002
                     route_reflector_client: false,
                     orr_vantage: None,
                     route_server_client: false,
+                    send_non_transitive_extended_communities: false,
                     per_client_best: false,
                     next_hop_ownership_strict_peer: false,
                     slow_peer_threshold_pct: rustbgpd_transport::DEFAULT_SLOW_PEER_THRESHOLD_PCT,
@@ -9515,6 +9513,7 @@ remote_asn = 65002
                     route_reflector_client: false,
                     orr_vantage: None,
                     route_server_client: false,
+                    send_non_transitive_extended_communities: false,
                     per_client_best: false,
                     next_hop_ownership_strict_peer: false,
                     slow_peer_threshold_pct: rustbgpd_transport::DEFAULT_SLOW_PEER_THRESHOLD_PCT,

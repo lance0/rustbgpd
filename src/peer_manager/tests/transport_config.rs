@@ -255,6 +255,7 @@ fn build_transport_config_reflects_every_transport_field() {
         route_reflector_client: true,
         orr_vantage: Some(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9))),
         route_server_client: true,
+        send_non_transitive_extended_communities: true,
         per_client_best: true,
         next_hop_ownership_strict_peer: true,
         interpret_rfc1997: false,
@@ -301,6 +302,7 @@ fn build_transport_config_reflects_every_transport_field() {
         route_reflector_client,
         orr_vantage,
         route_server_client,
+        send_non_transitive_extended_communities,
         per_client_best,
         next_hop_ownership_strict_peer,
         slow_peer_threshold_pct,
@@ -384,6 +386,10 @@ fn build_transport_config_reflects_every_transport_field() {
     assert_eq!(
         t.route_server_client, *route_server_client,
         "route_server_client"
+    );
+    assert_eq!(
+        t.send_non_transitive_extended_communities, *send_non_transitive_extended_communities,
+        "send_non_transitive_extended_communities"
     );
     // The #702 field: this is the exact assertion the class of tests exists
     // to make impossible to lose again.
