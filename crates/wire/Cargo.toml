@@ -30,7 +30,7 @@ tokio-util = { workspace = true, features = ["codec"], optional = true }
 [dev-dependencies]
 proptest.workspace = true
 criterion.workspace = true
-syn = { version = "2", features = ["full"] }
+syn = { version = "3", features = ["full"] }
 
 [[bench]]
 name = "codec"
