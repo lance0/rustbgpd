@@ -1,0 +1,33 @@
+FROM debian:trixie-slim
+
+ARG BIRD_VERSION=3.3.2
+ARG BIRD_SHA256=21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c
+
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive \
+    apt-get install -y --no-install-recommends \
+        bison \
+        build-essential \
+        ca-certificates \
+        curl \
+        flex \
+        iproute2 \
+        libncurses-dev \
+        libreadline-dev \
+        m4 \
+        perl \
+        pkg-config \
+        tshark \
+    && curl -fsSLo /tmp/bird.tar.gz \
+        "https://bird.nic.cz/download/bird-${BIRD_VERSION}.tar.gz" \
+    && echo "${BIRD_SHA256}  /tmp/bird.tar.gz" | sha256sum --check --strict \
+    && mkdir /tmp/bird \
+    && tar -xzf /tmp/bird.tar.gz -C /tmp/bird --strip-components=1 \
+    && cd /tmp/bird \
+    && ./configure --prefix=/usr --sysconfdir=/etc/bird --localstatedir=/run/bird \
+    && make -j"$(nproc)" \
+    && make install \
+    && test "$(bird --version 2>&1)" = "BIRD version ${BIRD_VERSION}" \
+    && rm -rf /tmp/bird /tmp/bird.tar.gz /var/lib/apt/lists/* \
+    && mkdir -p /etc/bird /run/bird
+
+CMD ["sleep", "infinity"]

@@ -1453,6 +1453,37 @@ class PrimerContractTests(unittest.TestCase):
             with self.subTest(seam=old):
                 self.mutate(relative, old)
 
+    def test_m101_bird332_real_wire_job_is_load_bearing(self):
+        relative = ".github/workflows/interop.yml"
+        for old in (
+            "  m101:\n",
+            "    needs: [grpcurl_archive, prime_dev_image]\n",
+            "      - name: Build checksum-pinned BIRD 3.3.2 image\n",
+            "        run: docker build -t bird:v3.3.2-m101 -f tests/interop/Dockerfile.bird-v332 tests/interop\n",
+            "      - name: Pull digest-pinned FRR 10.3.1 image\n",
+            "        run: docker pull quay.io/frrouting/frr@sha256:f90d26a9fd5c14fc5795a73b4254ac88bc3186c45bbeb220a225fb6182de812c\n",
+            "          label: M101\n",
+            "          topology: tests/interop/m101-routeserver-bird332.clab.yml\n",
+            "          script: tests/interop/scripts/test-m101-routeserver-bird332.sh\n",
+            '          max_attempts: "1"\n',
+        ):
+            with self.subTest(seam=old):
+                count = (ROOT / relative).read_text().count(old)
+                self.assertGreater(count, 0, f"missing M101 seam: {old}")
+                self.mutate(relative, old, occurrence=count - 1)
+
+        digest_pull = (
+            "docker pull quay.io/frrouting/frr@sha256:"
+            "f90d26a9fd5c14fc5795a73b4254ac88bc3186c45bbeb220a225fb6182de812c"
+        )
+        count = (ROOT / relative).read_text().count(digest_pull)
+        self.mutate(
+            relative,
+            digest_pull,
+            "docker pull quay.io/frrouting/frr:10.3.1",
+            occurrence=count - 1,
+        )
+
     def test_dockerfile_exact_source_bridge(self):
         for binary in ("rustbgpd", "rbgp", "evpn-tester", "evpn-monitor"):
             with self.subTest(binary=binary, side="builder"):
