@@ -38,6 +38,57 @@ fn bmp_source_drop_metric(metrics: &BgpMetrics, peer: &str, reason: &str) -> Opt
         })
 }
 
+fn peer_identity_series_count(
+    metrics: &BgpMetrics,
+    family_name: &str,
+    peer: &str,
+    interface: &str,
+) -> usize {
+    metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .find(|family| family.name() == family_name)
+        .map_or(0, |family| {
+            family
+                .get_metric()
+                .iter()
+                .filter(|metric| {
+                    let labels = metric.get_label();
+                    labels
+                        .iter()
+                        .any(|label| label.name() == "peer" && label.value() == peer)
+                        && labels
+                            .iter()
+                            .any(|label| label.name() == "interface" && label.value() == interface)
+                })
+                .count()
+        })
+}
+
+fn peer_state_gauge(metrics: &BgpMetrics, peer: &str, interface: &str, state: &str) -> Option<f64> {
+    metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .find(|family| family.name() == "bgp_peer_session_state")
+        .and_then(|family| {
+            family.get_metric().iter().find_map(|metric| {
+                let labels = metric.get_label();
+                (labels
+                    .iter()
+                    .any(|label| label.name() == "peer" && label.value() == peer)
+                    && labels
+                        .iter()
+                        .any(|label| label.name() == "interface" && label.value() == interface)
+                    && labels
+                        .iter()
+                        .any(|label| label.name() == "state" && label.value() == state))
+                .then(|| metric.get_gauge().value())
+            })
+        })
+}
+
 fn blocked_truth_observing_start_handle(
     metrics: BgpMetrics,
     peer: PeerKey,
@@ -61,7 +112,16 @@ fn blocked_truth_observing_start_handle(
             peer_identity_gauge(&metrics, "bgp_peer_session_established", &label, interface),
             Some(0.0)
         );
+        assert_eq!(
+            peer_state_gauge(&metrics, &label, interface, "idle"),
+            Some(1.0)
+        );
+        assert_eq!(
+            peer_identity_series_count(&metrics, "bgp_peer_session_state", &label, interface),
+            6
+        );
         metrics.set_peer_session_established(&label, interface, true);
+        metrics.set_peer_session_state(&label, interface, "established");
         let _ = observed_tx.send(());
         while let Some(command) = command_rx.recv().await {
             if matches!(command, PeerCommand::Shutdown) {
@@ -95,6 +155,14 @@ async fn assert_new_peer_start_truth_is_seeded(peer: PeerKey) {
         peer_identity_gauge(&metrics, "bgp_peer_session_established", &label, interface),
         Some(0.0)
     );
+    assert_eq!(
+        peer_state_gauge(&metrics, &label, interface, "idle"),
+        Some(1.0)
+    );
+    assert_eq!(
+        peer_identity_series_count(&metrics, "bgp_session_down_total", &label, interface),
+        6
+    );
     gate.notify_one();
     let handle = provision.await.unwrap();
     observed.await.unwrap();
@@ -102,6 +170,10 @@ async fn assert_new_peer_start_truth_is_seeded(peer: PeerKey) {
         peer_identity_gauge(&metrics, "bgp_peer_session_established", &label, interface),
         Some(1.0),
         "ownership preparation must never overwrite a post-Start state"
+    );
+    assert_eq!(
+        peer_state_gauge(&metrics, &label, interface, "established"),
+        Some(1.0)
     );
     handle.shutdown().await.unwrap().unwrap();
 }
@@ -182,6 +254,16 @@ async fn failed_start_exact_reaps_provisional_truth_and_preserves_scoped_sibling
             Some(0.0)
         );
     }
+    for family in ["bgp_peer_session_state", "bgp_session_down_total"] {
+        assert_eq!(
+            peer_identity_series_count(&metrics, family, "fe80::1", "eth0"),
+            0
+        );
+        assert_eq!(
+            peer_identity_series_count(&metrics, family, "fe80::1", "eth1"),
+            6
+        );
+    }
 
     let source = include_str!("../lifecycle.rs");
     let body = source
@@ -209,6 +291,7 @@ fn seed_peer_metric_series(metrics: &BgpMetrics, peer_label: &str) {
     metrics.record_state_transition(peer_label, "open_confirm", "established");
     metrics.set_peer_admin_enabled(peer_label, "", true);
     metrics.set_peer_session_established(peer_label, "", true);
+    metrics.set_peer_session_state(peer_label, "", "established");
     metrics.record_message_sent(peer_label, "keepalive");
     metrics.set_rib_prefixes(peer_label, "ipv4_unicast", 42);
     metrics.record_bfd_state(peer_label, true, false);
@@ -359,11 +442,31 @@ async fn peer_presence_scoped_siblings_remove_exactly_and_reap_bare_address_last
     }
 
     mgr.delete_peer(first, false).await.unwrap();
+    assert_eq!(
+        peer_identity_series_count(&mgr.metrics, "bgp_peer_session_state", "fe80::1", "eth0"),
+        0
+    );
+    assert_eq!(
+        peer_identity_series_count(&mgr.metrics, "bgp_peer_session_state", "fe80::1", "eth1"),
+        6
+    );
+    assert_eq!(
+        peer_identity_series_count(&mgr.metrics, "bgp_session_down_total", "fe80::1", "eth1"),
+        6
+    );
     assert!(
         rib_rx.try_recv().is_err(),
         "surviving sibling owns bare address"
     );
     mgr.delete_peer(last, false).await.unwrap();
+    assert_eq!(
+        peer_identity_series_count(&mgr.metrics, "bgp_peer_session_state", "fe80::1", "eth1"),
+        0
+    );
+    assert_eq!(
+        peer_identity_series_count(&mgr.metrics, "bgp_session_down_total", "fe80::1", "eth1"),
+        0
+    );
     assert!(matches!(
         rib_rx.try_recv(),
         Ok(RibUpdate::PeerDeleted { peer }) if peer == address

@@ -1585,9 +1585,8 @@ impl PeerSession {
                 // Collision promotion activates every metric lease owned only
                 // by the active primary, not just max-prefix capacity.
                 self.max_prefix_metric_lease.active = true;
-                self.session_established_metric_lease.active = true;
-                self.session_established_metric_lease
-                    .set(self.fsm.state() == SessionState::Established);
+                self.session_telemetry_metric_lease
+                    .activate(self.fsm.state());
                 self.sync_max_prefix_capacity_metrics();
                 let _ = reply.send(());
                 ControlFlow::Continue(())
@@ -1602,11 +1601,15 @@ impl PeerSession {
                     cease_subcode::CONNECTION_COLLISION_RESOLUTION,
                     bytes::Bytes::new(),
                 );
+                self.session_telemetry_metric_lease.latch_down_reason(
+                    rustbgpd_telemetry::reason_labels::SessionDownReason::LocalNotification,
+                );
                 self.emit_notification_event(SessionNotificationDirection::Sent, &notif, None);
                 let _ = self.enqueue_priority(&Message::Notification(notif));
                 self.notifications_sent += 1;
                 // Clean up RIB if Established
                 if self.fsm.state() == SessionState::Established {
+                    self.session_telemetry_metric_lease.record_down();
                     let _ = self
                         .rib_tx
                         .send(RibUpdate::PeerDown {

@@ -69,6 +69,8 @@ impl PeerManager {
             .set_peer_admin_enabled(&peer_label, interface, enabled);
         self.metrics
             .set_peer_session_established(&peer_label, interface, false);
+        self.metrics
+            .set_peer_session_state(&peer_label, interface, "idle");
     }
 
     pub(super) async fn provision_new_peer_session(

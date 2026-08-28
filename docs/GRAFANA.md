@@ -152,6 +152,18 @@ inside the bounded window does.
   empty `interface`. The shipped session-down alert joins these exact labels,
   so enabled peers that never Established are visible while disabled peers do
   not page.
+- **Exact session state** uses the one-hot vector directly; preserving
+  `interface` keeps scoped siblings distinct and summing the six rows provides
+  a built-in integrity check:
+  `sum by (instance,peer,interface) (bgp_peer_session_state) == 1`.
+  Recent Established losses can be grouped without log parsing via
+  `sum by (instance,peer,interface,reason)
+  (increase(bgp_session_down_total[$__rate_interval]))`. The fixed `reason`
+  vocabulary separates locally initiated and remotely received NOTIFICATION
+  teardown, local/remote close without NOTIFICATION, transport failure, and
+  defensive `unknown`. Local initiation remains the cause when best-effort
+  NOTIFICATION delivery fails; neither query adds an alert or overview-dashboard
+  panel.
 - Exact-export rejection and malformed-UPDATE disposition rates share the
   `$peer` selector, like every other per-peer panel.
   Outbound route-drop and RFC 9687 send-hold alerts preserve that same `peer`

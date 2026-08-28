@@ -214,6 +214,13 @@ impl PeerSession {
             if hard_reset_notification_in_actions(&actions) {
                 self.sent_hard_reset = true;
             }
+            // Classify before executing the batch: some FSM paths publish
+            // SessionDown before their SendNotification action. This observes
+            // the batch without changing protocol action order.
+            if let Some(reason) = session_down_reason_for_batch(&event, &actions) {
+                self.session_telemetry_metric_lease
+                    .latch_down_reason(reason);
+            }
             let follow_up = self.execute_actions(actions).await;
             pending.extend(follow_up);
         }
@@ -282,7 +289,9 @@ impl PeerSession {
                         self.sent_hard_reset = true;
                     }
                     let msg = Message::Notification(notif);
-                    // Cache raw NOTIFICATION PDU for BMP Peer Down (reason 1: local sent NOTIFICATION)
+                    // Cache the attempted raw NOTIFICATION PDU for BMP Peer
+                    // Down reason 1. The locally initiated cause survives a
+                    // best-effort enqueue/write failure.
                     if self.bmp_tx.is_some()
                         && let Ok(encoded) = rustbgpd_wire::encode_message(&msg)
                     {
@@ -354,10 +363,7 @@ impl PeerSession {
                     self.close_tcp();
                 }
                 Action::StateChanged { old, new } => {
-                    if old == SessionState::Established || new == SessionState::Established {
-                        self.session_established_metric_lease
-                            .set(new == SessionState::Established);
-                    }
+                    self.session_telemetry_metric_lease.set_state(new);
                     info!(
                         peer = %self.peer_label,
                         from = old.as_str(),
@@ -731,6 +737,7 @@ impl PeerSession {
                 }
                 Action::SessionDown => {
                     info!(peer = %self.peer_label, "session down");
+                    self.session_telemetry_metric_lease.record_down();
 
                     // Emit BMP Peer Down event before clearing state —
                     // reliable (awaited): PeerDown is the collectors'
@@ -887,6 +894,32 @@ impl PeerSession {
             }
         }
     }
+}
+
+/// Derive the bounded Prometheus teardown reason from one unchanged FSM
+/// event/action batch. A received NOTIFICATION wins, followed by a locally
+/// initiated NOTIFICATION and then a transport failure. The action vector is
+/// inspected without reordering it or requiring best-effort delivery to
+/// succeed.
+pub(super) fn session_down_reason_for_batch(
+    event: &Event,
+    actions: &[Action],
+) -> Option<rustbgpd_telemetry::reason_labels::SessionDownReason> {
+    use rustbgpd_telemetry::reason_labels::SessionDownReason;
+
+    if matches!(event, Event::NotificationReceived(_)) {
+        return Some(SessionDownReason::RemoteNotification);
+    }
+    if actions
+        .iter()
+        .any(|action| matches!(action, Action::SendNotification(_)))
+    {
+        return Some(SessionDownReason::LocalNotification);
+    }
+    if matches!(event, Event::TcpConnectionFails) {
+        return Some(SessionDownReason::TransportError);
+    }
+    None
 }
 
 /// Return true when this event/action batch represents a

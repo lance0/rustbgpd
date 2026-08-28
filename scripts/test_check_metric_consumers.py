@@ -47,10 +47,10 @@ class MetricConsumerContractTests(unittest.TestCase):
 
     def test_live_inventory_and_consumer_counts_are_exact(self):
         self.assertEqual(set(self.sources), set(CHECK.EMITTER_FILES))
-        self.assertEqual(len(self.inventory), 199)
+        self.assertEqual(len(self.inventory), 201)
         self.assertEqual(
             len(CHECK.DASHBOARD_CHECK.rust_metric_inventory(self.sources[CHECK.TELEMETRY])),
-            186,
+            188,
         )
         self.assertEqual(
             len(CHECK.settlement_metric_inventory(self.sources[CHECK.SETTLEMENT])), 4
@@ -58,10 +58,10 @@ class MetricConsumerContractTests(unittest.TestCase):
         self.assertEqual(len(CHECK.PROCESS_FAMILIES), 7)
         self.assertEqual(len(self.dashboard_refs), 95)
         self.assertEqual(len(self.rule_refs), 42)
-        self.assertEqual(len(self.public_doc_refs), 188)
-        self.assertEqual(len(self.doc_refs), 188)
+        self.assertEqual(len(self.public_doc_refs), 190)
+        self.assertEqual(len(self.doc_refs), 190)
         consumers = self.dashboard_refs | self.rule_refs | self.doc_refs
-        self.assertEqual(len(consumers), 193)
+        self.assertEqual(len(consumers), 195)
         self.assertEqual(set(self.inventory) - consumers, set(CHECK.ALLOWLIST))
         self.assertEqual(
             set(CHECK.ALLOWLIST), CHECK.PROCESS_FAMILIES - {"process_start_time_seconds"}
@@ -72,9 +72,9 @@ class MetricConsumerContractTests(unittest.TestCase):
         stdout = io.StringIO()
         with redirect_stdout(stdout):
             self.assertEqual(CHECK.main(), 0)
-        self.assertIn("199 emitted families", stdout.getvalue())
-        self.assertIn("188 normative-doc families", stdout.getvalue())
-        self.assertIn("193 consumed, 6 justified raw diagnostics", stdout.getvalue())
+        self.assertIn("201 emitted families", stdout.getvalue())
+        self.assertIn("190 normative-doc families", stdout.getvalue())
+        self.assertIn("195 consumed, 6 justified raw diagnostics", stdout.getvalue())
 
     def test_blackhole_metric_inventory_has_one_operations_row_per_family(self):
         prefix = "bgp_blackhole_discard_"

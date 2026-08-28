@@ -1,5 +1,5 @@
-//! Canonical reason-label vocabulary for UPDATE-path route rejection
-//! and inbound connection admission drops.
+//! Canonical reason-label vocabulary for UPDATE-path route rejection,
+//! session teardown, and inbound connection admission drops.
 //!
 //! Single source of truth for the `reason` strings that ingress (and
 //! the OTC egress sibling) route-rejection mechanisms report across
@@ -15,8 +15,9 @@
 //! - One reason string per mechanism, shared by every surface that
 //!   reports that mechanism. The metric label value IS the documented
 //!   string; log lines may add detail but carry the canonical token.
-//! - Reasons are named for what was observed on the wire, not for the
-//!   consumer that reacts to it.
+//! - Reasons are named for the bounded protocol condition or locally selected
+//!   protocol action that initiated the outcome, not for the consumer that
+//!   reacts to it.
 //!
 //! Renaming any string here is a breaking observability change
 //! (operators key alerts on these values) and must be called out in
@@ -29,6 +30,62 @@
 //! `reason` label, but the log line emitted alongside it
 //! distinguishes the two RFC 4456 §8 loop signals via
 //! [`RrLoopReason`].
+
+/// Active-primary Established-session teardown reasons.
+///
+/// This vocabulary is deliberately independent of BMP's raw-PDU-bearing
+/// `PeerDownReason`: Prometheus needs a closed, low-cardinality answer even
+/// when BMP is disabled. One Established epoch contributes at most one sample
+/// to `bgp_session_down_total{peer,interface,reason}`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SessionDownReason {
+    /// The local speaker initiated a NOTIFICATION teardown.
+    ///
+    /// The label describes the selected protocol action even when the
+    /// best-effort enqueue or TCP write cannot deliver the NOTIFICATION.
+    LocalNotification,
+    /// The local speaker closed without a NOTIFICATION.
+    LocalNoNotification,
+    /// The remote speaker sent a BGP NOTIFICATION before teardown.
+    RemoteNotification,
+    /// The remote speaker closed the TCP stream without a NOTIFICATION.
+    RemoteNoNotification,
+    /// The reader, writer, connect task, or enqueue path failed.
+    TransportError,
+    /// Defensive fallback for abrupt actor loss without a classified cause.
+    Unknown,
+}
+
+impl SessionDownReason {
+    /// Every stable Prometheus label value.
+    pub const ALL: [Self; 6] = [
+        Self::LocalNotification,
+        Self::LocalNoNotification,
+        Self::RemoteNotification,
+        Self::RemoteNoNotification,
+        Self::TransportError,
+        Self::Unknown,
+    ];
+
+    /// The canonical bounded label string.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalNotification => "local_notification",
+            Self::LocalNoNotification => "local_no_notification",
+            Self::RemoteNotification => "remote_notification",
+            Self::RemoteNoNotification => "remote_no_notification",
+            Self::TransportError => "transport_error",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl std::fmt::Display for SessionDownReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 /// RFC 9234 Only-to-Customer route-leak block reasons.
 ///
@@ -395,7 +452,7 @@ impl std::fmt::Display for ExactExportReason {
 mod tests {
     use super::{
         ExactExportReason, ImportRejectReason, MalformedUpdateDisposition,
-        NextHopOwnershipBlockReason, OtcBlockReason, RrLoopReason,
+        NextHopOwnershipBlockReason, OtcBlockReason, RrLoopReason, SessionDownReason,
     };
 
     fn assert_snake_case(label: &str) {
@@ -416,6 +473,15 @@ mod tests {
     fn otc_block_reasons_are_snake_case_and_distinct() {
         let mut seen = std::collections::HashSet::new();
         for reason in OtcBlockReason::ALL {
+            assert_snake_case(reason.as_str());
+            assert!(seen.insert(reason.as_str()), "duplicate label");
+        }
+    }
+
+    #[test]
+    fn session_down_reasons_are_snake_case_and_distinct() {
+        let mut seen = std::collections::HashSet::new();
+        for reason in SessionDownReason::ALL {
             assert_snake_case(reason.as_str());
             assert!(seen.insert(reason.as_str()), "duplicate label");
         }
@@ -473,6 +539,21 @@ mod tests {
     /// old → new pair.
     #[test]
     fn canonical_reason_strings_are_pinned() {
+        let session_down: Vec<&str> = SessionDownReason::ALL
+            .iter()
+            .map(|reason| reason.as_str())
+            .collect();
+        assert_eq!(
+            session_down,
+            [
+                "local_notification",
+                "local_no_notification",
+                "remote_notification",
+                "remote_no_notification",
+                "transport_error",
+                "unknown",
+            ]
+        );
         let otc: Vec<&str> = OtcBlockReason::ALL.iter().map(|r| r.as_str()).collect();
         assert_eq!(
             otc,

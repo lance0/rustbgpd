@@ -151,6 +151,17 @@ const ORR_INPUT_CLASSIFICATIONS: [&str; 5] = [
 const EVENT_OUTBOX_QUEUE_DEPTH_CATEGORIES: [&str; 6] =
     ["route", "evpn", "session", "policy", "bfd", "dataplane"];
 
+/// Exact RFC 4271 FSM state vocabulary exported by
+/// `bgp_peer_session_state`.
+const SESSION_STATES: [&str; 6] = [
+    "idle",
+    "connect",
+    "active",
+    "open_sent",
+    "open_confirm",
+    "established",
+];
+
 /// Shared wall-clock buckets for synchronous work on the single RIB actor.
 const RIB_ACTOR_DURATION_BUCKETS: [f64; 13] = [
     0.001, 0.005, 0.010, 0.025, 0.050, 0.100, 0.200, 0.500, 1.0, 2.5, 5.0, 10.0, 30.0,
@@ -271,6 +282,8 @@ struct BgpMetricsInner {
     session_established: IntCounterVec,
     peer_admin_enabled: IntGaugeVec,
     peer_session_established: IntGaugeVec,
+    peer_session_state: IntGaugeVec,
+    session_down: IntCounterVec,
     stale_timer_events: IntCounterVec,
     session_notification_outstanding_value: Arc<AtomicI64>,
     session_notification_outstanding_high_watermark_value: Arc<AtomicI64>,
@@ -612,6 +625,24 @@ impl BgpMetrics {
                 "Active-primary BGP session state (1 = Established, 0 = not Established)",
             ),
             &["peer", "interface"],
+        )
+        .expect("valid metric definition");
+
+        let peer_session_state = IntGaugeVec::new(
+            Opts::new(
+                "bgp_peer_session_state",
+                "Active-primary BGP FSM state as an exact six-row one-hot gauge",
+            ),
+            &["peer", "interface", "state"],
+        )
+        .expect("valid metric definition");
+
+        let session_down = IntCounterVec::new(
+            Opts::new(
+                "bgp_session_down_total",
+                "Established active-primary sessions that ended, by bounded teardown reason",
+            ),
+            &["peer", "interface", "reason"],
         )
         .expect("valid metric definition");
 
@@ -2236,6 +2267,12 @@ impl BgpMetrics {
             .register(Box::new(peer_session_established.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(peer_session_state.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(session_down.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(bfd_session_up.clone()))
             .expect("metric not already registered");
         registry
@@ -2790,6 +2827,8 @@ impl BgpMetrics {
             session_established,
             peer_admin_enabled,
             peer_session_established,
+            peer_session_state,
+            session_down,
             stale_timer_events,
             dynamic_neighbor_slots_used,
             dynamic_neighbor_slots_limit,
@@ -3056,6 +3095,8 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.0.session_established, peer);
         Self::reap_peer_series_from_vec(&self.0.peer_admin_enabled, peer);
         Self::reap_peer_series_from_vec(&self.0.peer_session_established, peer);
+        Self::reap_peer_series_from_vec(&self.0.peer_session_state, peer);
+        Self::reap_peer_series_from_vec(&self.0.session_down, peer);
         Self::reap_peer_series_from_vec(&self.0.stale_timer_events, peer);
         Self::reap_peer_series_from_vec(&self.0.bfd_session_up, peer);
         Self::reap_peer_series_from_vec(&self.0.bfd_session_flaps_total, peer);
@@ -3125,6 +3166,18 @@ impl BgpMetrics {
         let labels = &[peer, interface];
         let _ = self.0.peer_admin_enabled.remove_label_values(labels);
         let _ = self.0.peer_session_established.remove_label_values(labels);
+        for state in SESSION_STATES {
+            let _ = self
+                .0
+                .peer_session_state
+                .remove_label_values(&[peer, interface, state]);
+        }
+        for reason in crate::reason_labels::SessionDownReason::ALL {
+            let _ = self
+                .0
+                .session_down
+                .remove_label_values(&[peer, interface, reason.as_str()]);
+        }
     }
 
     fn reap_peer_series_from_vec<T: prometheus::core::MetricVecBuilder>(
@@ -3222,6 +3275,54 @@ impl BgpMetrics {
             .peer_session_established
             .with_label_values(&[peer, interface])
             .set(i64::from(established));
+    }
+
+    /// Materialize the exact six-row active-primary FSM state vector.
+    ///
+    /// Calling this for every transition keeps the vector one-hot; calling it
+    /// before `Start` makes a never-established peer visible as `idle=1`.
+    ///
+    /// An unknown state is rejected without changing the last valid vector;
+    /// accepting it would publish an invalid all-zero vector.
+    pub fn set_peer_session_state(&self, peer: &str, interface: &str, current: &str) {
+        debug_assert!(
+            SESSION_STATES.contains(&current),
+            "session state must use the exact bounded FSM vocabulary"
+        );
+        if !SESSION_STATES.contains(&current) {
+            tracing::warn!(
+                peer,
+                interface,
+                state = current,
+                "unknown BGP session state; one-hot gauge left unchanged"
+            );
+            return;
+        }
+        for state in SESSION_STATES {
+            self.0
+                .peer_session_state
+                .with_label_values(&[peer, interface, state])
+                .set(i64::from(state == current));
+        }
+        for reason in crate::reason_labels::SessionDownReason::ALL {
+            let _counter =
+                self.0
+                    .session_down
+                    .with_label_values(&[peer, interface, reason.as_str()]);
+        }
+    }
+
+    /// Record one classified active-primary Established-session teardown.
+    pub fn record_session_down(
+        &self,
+        peer: &str,
+        interface: &str,
+        reason: crate::reason_labels::SessionDownReason,
+    ) {
+        self.0
+            .session_down
+            .with_label_values(&[peer, interface, reason.as_str()])
+            .inc();
     }
 
     /// Set the gNMI dial-out connection gauge for a configured target.
@@ -5892,10 +5993,13 @@ mod tests {
         let m = BgpMetrics::new();
         m.set_peer_admin_enabled("192.0.2.1", "", true);
         m.set_peer_session_established("192.0.2.1", "", false);
+        m.set_peer_session_state("192.0.2.1", "", "idle");
         m.set_peer_admin_enabled("fe80::1", "eth0", true);
         m.set_peer_session_established("fe80::1", "eth0", true);
+        m.set_peer_session_state("fe80::1", "eth0", "established");
         m.set_peer_admin_enabled("fe80::1", "eth1", false);
         m.set_peer_session_established("fe80::1", "eth1", false);
+        m.set_peer_session_state("fe80::1", "eth1", "idle");
 
         let text = gather_text(&m);
         assert!(text.contains(r#"bgp_peer_admin_enabled{interface="",peer="192.0.2.1"} 1"#));
@@ -5908,6 +6012,16 @@ mod tests {
         let text = gather_text(&m);
         assert!(!text.contains(r#"interface="eth0",peer="fe80::1""#));
         assert!(text.contains(r#"interface="eth1",peer="fe80::1""#));
+        assert_eq!(
+            text.matches(r#"interface="eth1",peer="fe80::1",state="#)
+                .count(),
+            6
+        );
+        assert_eq!(
+            text.matches(r#"interface="eth1",peer="fe80::1",reason="#)
+                .count(),
+            6
+        );
     }
 
     #[test]
@@ -7587,6 +7701,12 @@ mod tests {
         m.record_state_transition(peer, "established", "idle");
         m.set_peer_admin_enabled(peer, "", true);
         m.set_peer_session_established(peer, "", false);
+        m.set_peer_session_state(peer, "", "established");
+        m.record_session_down(
+            peer,
+            "",
+            crate::reason_labels::SessionDownReason::TransportError,
+        );
         m.record_stale_timer_event(peer, "idle", "hold");
         m.record_bfd_state(peer, true, false);
         m.record_bfd_state(peer, false, true); // bfd flap counter
@@ -7672,8 +7792,9 @@ mod tests {
         let m = BgpMetrics::new();
         populate_all_peer_families(&m, "10.0.0.1");
         populate_all_peer_families(&m, "10.0.0.2");
-        // 56 peer-labeled series; state transitions hold two series.
-        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 56);
+        // 68 peer-labeled series; state transitions hold two, while exact
+        // state and down-reason vocabularies materialize six rows each.
+        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 68);
 
         m.reap_peer_series("10.0.0.1");
 
@@ -7683,7 +7804,7 @@ mod tests {
             "peer-labeled families not reaped: {leftovers:?}"
         );
         // The other peer's series are untouched.
-        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 56);
+        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 68);
     }
 
     /// Load-bearing finite/unlimited proof: removing either finite gauge
@@ -7927,7 +8048,7 @@ mod tests {
     // `gather()`, so no runtime check can catch one that is added and
     // left unpopulated; this list plus the struct doc comment is the
     // practical ceiling.
-    const PEER_LABELED_FAMILIES: [&str; 55] = [
+    const PEER_LABELED_FAMILIES: [&str; 57] = [
         "bfd_session_flaps_total",
         "bfd_session_up",
         "bgp_as_path_loop_detected_total",
@@ -7959,6 +8080,7 @@ mod tests {
         "bgp_peer_admin_enabled",
         "bgp_peer_outbound_queue_depth",
         "bgp_peer_session_established",
+        "bgp_peer_session_state",
         "bgp_peer_slow",
         "bgp_peer_update_group",
         "bgp_policy_routes_total",
@@ -7977,6 +8099,7 @@ mod tests {
         "bgp_route_refresh_stale_entries",
         "bgp_rr_loop_detected_total",
         "bgp_send_hold_expirations_total",
+        "bgp_session_down_total",
         "bgp_session_established_total",
         "bgp_session_flaps_total",
         "bgp_session_state_transitions_total",
