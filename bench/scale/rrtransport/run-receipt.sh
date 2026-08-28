@@ -4,6 +4,8 @@ set -euo pipefail
 root=$(git rev-parse --show-toplevel)
 # shellcheck disable=SC1091 # root is resolved dynamically above
 source "$root/tests/soak/host-lock.sh"
+# shellcheck disable=SC1091 # root is resolved dynamically above
+source "$root/bench/scale/provenance.sh"
 verifier="$root/bench/scale/rrtransport/verify_receipt.py"
 manifest="$root/bench/scale/rrtransport/Cargo.toml"
 binary="$root/bench/scale/target/release/rrtransport"
@@ -766,6 +768,7 @@ case ${1:-} in
     rm -rf "$receipt"
     mkdir -p "$receipt"
     tiny_binary="$root/bench/scale/target/debug/rrtransport"
+    tiny_binary_sha256=$(provenance_sha256_file "$tiny_binary") || exit 1
     run_grouped_commit_fixture "$receipt" 4 100
     printf 'observer\trss_kib\n' >"$receipt/rss.tsv"
     tiny_ready=$receipt/.startup-ready
@@ -774,6 +777,7 @@ case ${1:-} in
     launch_supervised "$receipt/harness.log" env \
       RRTRANSPORT_STARTUP_READY="$tiny_ready" RRTRANSPORT_STARTUP_GO="$tiny_go" \
       "$tiny_binary" rrtiny "$receipt"
+    provenance_require_sha256 "$tiny_binary" "$tiny_binary_sha256" || exit 1
     max_rss=0
     if ! gate_tiny_supervisor; then
       report_tiny_startup_failure "$receipt" || true
@@ -792,12 +796,13 @@ case ${1:-} in
       exit 1
     fi
     pid=
+    provenance_require_sha256 "$tiny_binary" "$tiny_binary_sha256" || exit 1
     rm -f "$tiny_ready" "$tiny_go"
     cp "$receipt/phase.json" "$receipt/phase.saved"
     python3 "$verifier" "$receipt" --write-rss "$max_rss"
     head=$(git -C "$root" rev-parse HEAD)
-    printf '{"commit":"%s","governors":["performance"],"load_before":"fixture","load_after":"fixture","pswpin_before":0,"pswpin_after":0,"pswpout_before":0,"pswpout_after":0,"rustc":"fixture","host":"fixture","competitors":[]}\n' \
-      "$head" >"$receipt/provenance.json"
+    printf '{"commit":"%s","governors":["performance"],"load_before":"fixture","load_after":"fixture","pswpin_before":0,"pswpin_after":0,"pswpout_before":0,"pswpout_after":0,"rustc":"fixture","host":"fixture","competitors":[],"rrtransport_binary_sha256":"%s"}\n' \
+      "$head" "$tiny_binary_sha256" >"$receipt/provenance.json"
     python3 "$verifier" "$receipt" --tiny
     exit
     ;;
@@ -826,6 +831,7 @@ available=$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)
 
 head_before=$(git -C "$root" rev-parse HEAD)
 timeout -k 10 300 cargo build --manifest-path "$manifest" --locked --release
+binary_sha256=$(provenance_sha256_file "$binary") || exit 1
 mkdir -p "$output"; campaign_started=$SECONDS
 run_grouped_commit_fixture "$output" 1000 100000
 chmod 0444 "$output/grouped-commit.json"
@@ -842,19 +848,21 @@ for run in 1 2 3; do
   receipt="$output/run-$run"; mkdir -p "$receipt"
   cp "$output/grouped-commit.json" "$receipt/grouped-commit.json"
   printf 'observer\trss_kib\n' >"$receipt/rss.tsv"
+  provenance_require_sha256 "$binary" "$binary_sha256" || exit 1
   launch_supervised "$receipt/harness.log" timeout -k 10 300 "$binary" rr1000 "$receipt"
   wait_exe "$pid" "$(command -v timeout)"
   sampler_observation_reader=read_live_sampler_observation
   sample_supervisor "$binary" "$receipt" "$run" || exit 1
   python3 "$verifier" "$receipt" --write-rss "$max_rss"
+  provenance_require_sha256 "$binary" "$binary_sha256" || exit 1
   head_after=$(git -C "$root" rev-parse HEAD)
   [[ -z $(git -C "$root" status --porcelain) ]] || { echo "tree dirtied during run" >&2; exit 1; }
   [[ $head_before == "$head_after" ]] || { echo "HEAD changed during run" >&2; exit 1; }
   host_state after
   require_quiet after || { echo "host not quiet after attempt" >&2; exit 1; }
   [[ $before_pswpin == "$after_pswpin" && $before_pswpout == "$after_pswpout" ]] || { echo "swap I/O changed" >&2; exit 1; }
-  printf '{"commit":"%s","governors":["performance"],"load_before":"%s","load_after":"%s","pswpin_before":%s,"pswpin_after":%s,"pswpout_before":%s,"pswpout_after":%s,"rustc":"%s","host":"%s","competitors":[]}\n' \
-    "$head_before" "$before_load" "$after_load" "$before_pswpin" "$after_pswpin" "$before_pswpout" "$after_pswpout" "$(rustc -V)" "$(uname -srvmo)" >"$receipt/provenance.json"
+  printf '{"commit":"%s","governors":["performance"],"load_before":"%s","load_after":"%s","pswpin_before":%s,"pswpin_after":%s,"pswpout_before":%s,"pswpout_after":%s,"rustc":"%s","host":"%s","competitors":[],"rrtransport_binary_sha256":"%s"}\n' \
+    "$head_before" "$before_load" "$after_load" "$before_pswpin" "$after_pswpin" "$before_pswpout" "$after_pswpout" "$(rustc -V)" "$(uname -srvmo)" "$binary_sha256" >"$receipt/provenance.json"
   full_verify "$receipt"
 done
 printf 'pass\n' >"$output/COMPLETED"

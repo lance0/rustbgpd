@@ -382,6 +382,7 @@ jobs:
           rrtransport_receipt=$(mktemp -d)
           bench/scale/rrtransport/run-receipt.sh --real-smoke "$rrtransport_receipt"
           bash bench/tests/test-rrtransport-receipt.sh
+          bash bench/tests/test-scale-provenance.sh
           cargo clippy --manifest-path bench/scale/enhanced-route-refresh/Cargo.toml \
             --locked --all-targets -- -D warnings
           # The IRR manifest contract exercises the production rustbgpd
@@ -400,23 +401,27 @@ jobs:
           shellcheck bench/smoke-benches.sh
           bash -n bench/scale/route-server-1000/run-receipt.sh
           bash -n bench/scale/host-quiet.sh
+          bash -n bench/scale/provenance.sh
           bash -n bench/scale/matrix/run-matrix.sh
           bash -n bench/scale/irrreload/run-irr-reload.sh
           bash -n bench/scale/enhanced-route-refresh/run-receipt.sh
           bash -n bench/scale/rrtransport/run-receipt.sh
           bash -n bench/tests/test-rrtransport-receipt.sh
+          bash -n bench/tests/test-scale-provenance.sh
           bash -n bench/tests/test-route-server-1000-receipt.sh
           bash -n bench/tests/test-scale-host-quiet.sh
           bash -n bench/tests/test-vpn-query-receipt.sh
           bash -n bench/tests/test-vpn-query-campaign.sh
           bash -n bench/run-vpn-query-campaign.sh
           shellcheck bench/scale/host-quiet.sh \
+            bench/scale/provenance.sh \
             bench/scale/matrix/run-matrix.sh \
             bench/scale/irrreload/run-irr-reload.sh \
             bench/scale/route-server-1000/run-receipt.sh \
             bench/scale/enhanced-route-refresh/run-receipt.sh \
             bench/scale/rrtransport/run-receipt.sh \
             bench/tests/test-rrtransport-receipt.sh \
+            bench/tests/test-scale-provenance.sh \
             bench/tests/test-route-server-1000-receipt.sh \
             bench/tests/test-scale-host-quiet.sh
           shellcheck bench/tests/test-vpn-query-receipt.sh

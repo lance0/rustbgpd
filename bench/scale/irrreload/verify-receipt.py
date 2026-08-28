@@ -1659,6 +1659,13 @@ def validate_root(root: Path, kind: str):
     validate_preflight(root / "preflight.log")
     provenance = read_json(root / "provenance.json")
     inputs, git = provenance.get("inputs", {}), provenance.get("git", {})
+    binaries = provenance.get("binaries")
+    expected_binaries = {
+        "bench/scale/target/release/reloadstall",
+        "target/release/rbgp",
+        "target/release/rs-config-render",
+        "target/release/rustbgpd",
+    }
     expected_cells = {
         "comparison": COMPARISON_CELLS,
         "grouped": (GROUPED_CELL,),
@@ -1683,15 +1690,19 @@ def validate_root(root: Path, kind: str):
             "started_at_epoch_ns",
             "git",
             "environment",
+            "binaries",
             "inputs",
         }
-        or provenance.get("schema") != 1
+        or provenance.get("schema") != 2
         or not isinstance(provenance.get("started_at_epoch_ns"), int)
         or provenance.get("started_at_epoch_ns", -1) <= 0
         or not isinstance(environment, dict)
         or set(environment)
         != {"rustc", "cargo", "python", "jq", "docker", "kernel", "cpu_model"}
         or not all(isinstance(value, str) and value for value in environment.values())
+        or not isinstance(binaries, dict)
+        or set(binaries) != expected_binaries
+        or not all(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) for value in binaries.values())
     ):
         fail(f"{root}: receipt context is incomplete")
     expected_input_keys = {
@@ -1868,6 +1879,7 @@ def validate_root(root: Path, kind: str):
         "completed": int(completed.get("completed_at_epoch_ns", -1)),
         "git": git,
         "environment": environment,
+        "binaries": binaries,
         "inputs": inputs,
         "identities": identities,
         "rows": rows_data,
@@ -1932,14 +1944,14 @@ def validate_campaigns(roots: list[Path], output_dir: Path) -> None:
         for index in range(3)
     ):
         fail("campaign roots overlap or do not finish before the next root starts")
-    source_identity = ("git", "environment")
+    source_identity = ("git", "environment", "binaries")
     if any(
         tuple(campaign[key] for key in source_identity)
         != tuple(campaigns[0][key] for key in source_identity)
         for campaign in campaigns[1:]
     ):
         fail("four roots do not share exact source and environment context")
-    repeat_identity = ("git", "environment", "inputs")
+    repeat_identity = ("git", "environment", "binaries", "inputs")
     for left, right in ((campaigns[0], campaigns[3]), (campaigns[1], campaigns[2])):
         if tuple(left[key] for key in repeat_identity) != tuple(
             right[key] for key in repeat_identity
@@ -2113,10 +2125,11 @@ def make_fixture(root: Path, kind: str, started: int, identity_seed: int) -> Non
     (root / "dataset.sha256").write_text(dataset + "\n")
     image_id = "sha256:" + "a" * 64
     provenance = {
-        "schema": 1,
+        "schema": 2,
         "started_at_epoch_ns": started,
         "git": {"commit": "c" * 40, "tree": "b" * 40, "dirty": False},
         "environment": {key: "fixture" for key in ("rustc", "cargo", "python", "jq", "docker", "kernel", "cpu_model")},
+        "binaries": {key: "d" * 64 for key in ("bench/scale/target/release/reloadstall", "target/release/rbgp", "target/release/rs-config-render", "target/release/rustbgpd")},
         "inputs": {
             **CANONICAL_FULL_INPUTS,
             "overlap_fraction": "0",
@@ -2401,7 +2414,7 @@ def self_test() -> None:
                 fail(f"pair fixture did not publish negative {name}")
             print(f"red-proof authoritative-pair-negative-{name}=pass")
         for name, mutate in (
-            ("schema", lambda value: value.update(schema=2)),
+            ("schema", lambda value: value.update(schema=1)),
             ("input", lambda value: value["inputs"].update(overlap_fraction="0.1"))):
             copied = root / f"pair-{name}"; shutil.copytree(roots[1], copied)
             value = read_json(copied / "provenance.json"); mutate(value); copied.joinpath("provenance.json").write_text(json.dumps(value))
@@ -2919,6 +2932,9 @@ def self_test() -> None:
         rejected("dirty-commit", lambda root: alter_json(root / "provenance.json", lambda data: data["git"].update({"dirty": True})))
         rejected("mismatched-commit", lambda root: alter_json(root / "provenance.json", lambda data: data["git"].update({"commit": "d" * 40})))
         rejected("commit-malformed", lambda root: alter_json(root / "provenance.json", lambda data: data["git"].update({"commit": "C" * 40})))
+        rejected("provenance-downgrade", lambda root: alter_json(root / "provenance.json", lambda data: data.update({"schema": 1})))
+        rejected("binary-roster", lambda root: alter_json(root / "provenance.json", lambda data: data["binaries"].pop("target/release/rbgp")))
+        rejected("binary-malformed", lambda root: alter_json(root / "provenance.json", lambda data: data["binaries"].update({"target/release/rbgp": "ABC"})))
         def change_input(root, key, value):
             alter_json(root / "provenance.json", lambda data: data["inputs"].update({key: value}))
         rejected("canonical-changed-fraction", lambda root: change_input(root, "changed_fraction", "0.2"))
@@ -3054,7 +3070,8 @@ def self_test() -> None:
             except InvalidReceipt:
                 proofs[name] = True
         grouped_pair_drift("cross-role-environment", "environment", "cpu_model", "other-platform")
-        expected = {"default-roster", "mixed-roster", "mode-flags", "topology-mutation", "barrier-marker", "final-barrier-marker", "live-topology-gauge", "route-gauge", "route-family", "one-scrape-drift", "add-path", "config-count", "dirty-commit", "mismatched-commit", "commit-malformed", "canonical-changed-fraction", "canonical-control-secs", "canonical-bird-threads", "repeat-image-identity", "nonoverlap-order", "quiet-spacing", "preflight-raw", "cell-status", "manifest-changed-fraction", "cell-root-rows", "reload-log-rows", "percentile-order", "percentile-positive", "first-generation-bound", "observer-gap-bound", "row-invariants", "rss-raw", "grouped-output-isolation", "output-exact-roster", "output-audit-call", "ordering", "reused-identity", "cross-role-environment"}
+        grouped_pair_drift("cross-root-binaries", "binaries", "target/release/rustbgpd", "e" * 64)
+        expected = {"default-roster", "mixed-roster", "mode-flags", "topology-mutation", "barrier-marker", "final-barrier-marker", "live-topology-gauge", "route-gauge", "route-family", "one-scrape-drift", "add-path", "config-count", "dirty-commit", "mismatched-commit", "commit-malformed", "provenance-downgrade", "binary-roster", "binary-malformed", "canonical-changed-fraction", "canonical-control-secs", "canonical-bird-threads", "repeat-image-identity", "nonoverlap-order", "quiet-spacing", "preflight-raw", "cell-status", "manifest-changed-fraction", "cell-root-rows", "reload-log-rows", "percentile-order", "first-generation-bound", "observer-gap-bound", "row-invariants", "rss-raw", "grouped-output-isolation", "output-exact-roster", "output-audit-call", "ordering", "reused-identity", "cross-role-environment", "cross-root-binaries"}
         expected |= {"current-down", "reestablished", "flapped", "counter-malformed", "establishment-roster", "flap-roster", "row-session-loss"}
         expected |= {"preflip-private", "lane-gauge"}
         expected |= set(
