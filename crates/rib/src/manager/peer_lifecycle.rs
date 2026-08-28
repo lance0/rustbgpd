@@ -5,6 +5,7 @@ use rustbgpd_policy::PolicyChain;
 use rustbgpd_telemetry::metrics::StaleSessionMessageKind;
 use rustbgpd_wire::{EvpnRouteKey, Prefix, Safi};
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 use tracing::{debug, info, warn};
 
 use super::distribution::OutboundCommitBatch;
@@ -260,11 +261,10 @@ impl RibManager {
     /// session task from its authoritative negotiated set, because the
     /// manager's live-session record holds only the *sendable* (outbound)
     /// subset and a family negotiated for receive but pruned from it must
-    /// still be refreshed. One-shot best-effort: a full outbound channel
-    /// only loses the *request*; the peer's natural re-advertisement
-    /// remains the fallback, and the outbound table resync is handled
-    /// separately by the dirty-peer mechanism.
-    fn request_inbound_refresh(&mut self, peer: IpAddr) {
+    /// still be refreshed. A full outbound channel defers one generation-
+    /// scoped request into the existing bounded resync cadence; a closed
+    /// channel is terminal.
+    pub(super) fn request_inbound_refresh(&mut self, peer: IpAddr) {
         let Some(record) = self
             .live_sessions
             .get(&peer)
@@ -272,18 +272,113 @@ impl RibManager {
         else {
             return;
         };
+        let session_id = record.session_id;
         let update = OutboundRouteUpdate {
             request_refresh_all_negotiated: true,
             ..OutboundRouteUpdate::default()
         };
-        if record.outbound_tx.try_send(update).is_err() {
-            warn!(
-                %peer,
-                "outbound channel full or closed — inbound ROUTE-REFRESH request \
-                 after failover was dropped; Adj-RIB-In recovers only on the \
-                 peer's natural re-advertisement"
-            );
-            self.metrics.record_outbound_route_drop(&peer.to_string());
+        match record.outbound_tx.try_send(update) {
+            Ok(()) => {
+                self.pending_inbound_refresh.remove(&peer);
+            }
+            Err(TrySendError::Full(_)) => {
+                self.pending_inbound_refresh.insert(peer, session_id);
+                warn!(
+                    %peer,
+                    session_id,
+                    "outbound channel full — deferring collision-failback inbound \
+                     ROUTE-REFRESH request to the bounded resync timer"
+                );
+            }
+            Err(TrySendError::Closed(_)) => {
+                self.pending_inbound_refresh.remove(&peer);
+                warn!(
+                    %peer,
+                    session_id,
+                    "outbound channel closed — collision-failback inbound \
+                     ROUTE-REFRESH request cannot be delivered"
+                );
+                self.metrics.record_outbound_route_drop(&peer.to_string());
+            }
+        }
+        if self.pending_inbound_refresh.is_empty() {
+            self.pending_inbound_refresh_cursor = None;
+        }
+    }
+
+    /// Retry one bounded ring slice of deferred collision-failback refreshes.
+    /// Full channels retain the coalesced bit for the ordinary retry interval;
+    /// closed or superseded sessions retire it without spinning.
+    pub(super) fn retry_pending_inbound_refresh_bounded(&mut self) {
+        let ring: Vec<IpAddr> = {
+            let after = self.pending_inbound_refresh.keys().filter(|peer| {
+                match self.pending_inbound_refresh_cursor {
+                    Some(cursor) => **peer > cursor,
+                    None => true,
+                }
+            });
+            let wrapped = self.pending_inbound_refresh.keys().filter(|peer| {
+                self.pending_inbound_refresh_cursor
+                    .is_some_and(|cursor| **peer <= cursor)
+            });
+            after
+                .chain(wrapped)
+                .take(super::RESYNC_PEERS_PER_TICK)
+                .copied()
+                .collect()
+        };
+        if let Some(&last) = ring.last() {
+            self.pending_inbound_refresh_cursor = Some(last);
+        }
+
+        for peer in ring {
+            let Some(&session_id) = self.pending_inbound_refresh.get(&peer) else {
+                continue;
+            };
+            let sender = self
+                .live_sessions
+                .get(&peer)
+                .and_then(|sessions| sessions.last())
+                .filter(|record| record.session_id == session_id)
+                .map(|record| record.outbound_tx.clone());
+            let Some(sender) = sender else {
+                debug!(
+                    %peer,
+                    session_id,
+                    "retiring deferred inbound ROUTE-REFRESH for a superseded or departed session"
+                );
+                self.pending_inbound_refresh.remove(&peer);
+                continue;
+            };
+            let update = OutboundRouteUpdate {
+                request_refresh_all_negotiated: true,
+                ..OutboundRouteUpdate::default()
+            };
+            match sender.try_send(update) {
+                Ok(()) => {
+                    self.pending_inbound_refresh.remove(&peer);
+                    debug!(
+                        %peer,
+                        session_id,
+                        "delivered deferred collision-failback inbound ROUTE-REFRESH request"
+                    );
+                }
+                Err(TrySendError::Full(_)) => {}
+                Err(TrySendError::Closed(_)) => {
+                    self.pending_inbound_refresh.remove(&peer);
+                    warn!(
+                        %peer,
+                        session_id,
+                        "outbound channel closed while retrying collision-failback \
+                         inbound ROUTE-REFRESH request"
+                    );
+                    self.metrics.record_outbound_route_drop(&peer.to_string());
+                }
+            }
+        }
+
+        if self.pending_inbound_refresh.is_empty() {
+            self.pending_inbound_refresh_cursor = None;
         }
     }
 
@@ -480,6 +575,10 @@ impl RibManager {
     pub(super) fn clear_outbound_peer_state(&mut self, peer: IpAddr) {
         let was_registered = self.outbound_peers.remove(&peer).is_some();
         self.outbound_session_ids.remove(&peer);
+        self.pending_inbound_refresh.remove(&peer);
+        if self.pending_inbound_refresh.is_empty() {
+            self.pending_inbound_refresh_cursor = None;
+        }
         // INFO, not debug: an outbound deregistration is the event that
         // historically wedged a still-Established session's advertisement
         // path (stale collision-loser `PeerDown` after the winner's

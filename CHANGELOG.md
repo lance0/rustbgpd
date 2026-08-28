@@ -70,6 +70,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   positive receipts. Settlement surfaces expose closed, secret-free policy
   failure codes while unprovable repair remains `KnownDivergence`.
 
+- Collision registration failback now retains one survivor-session-scoped
+  inbound ROUTE-REFRESH request when its outbound channel is full and retries
+  it through the existing bounded RIB resync cadence. Repeated requests
+  coalesce, a newer registration or peer teardown reaps stale intent, and a
+  closed matching channel is counted as terminal loss instead of spinning.
+
 ## [0.67.0] — 2026-08-26
 
 > **Release framing — strict wire input, explicit migrations.** The wire crate

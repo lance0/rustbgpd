@@ -23,7 +23,7 @@ mod tests;
 #[cfg(test)]
 use crate::ERR_REFRESH_TIMEOUT;
 
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{BuildHasher, Hasher};
 use std::net::{IpAddr, Ipv4Addr};
 use std::num::NonZeroU32;
@@ -564,6 +564,13 @@ pub struct RibManager {
     /// whose sends keep failing cannot monopolize every tick while
     /// drainable peers starve.
     dirty_resync_cursor: Option<IpAddr>,
+    /// Collision-failback inbound ROUTE-REFRESH requests deferred because
+    /// the surviving session's outbound channel was full. One generation
+    /// per peer coalesces repeat attempts and fences delivery to the same
+    /// live session that became the survivor.
+    pending_inbound_refresh: BTreeMap<IpAddr, u64>,
+    /// Ring position for bounded pending inbound-refresh retries.
+    pending_inbound_refresh_cursor: Option<IpAddr>,
     /// Wall-clock budget one actor poll may spend flushing paced work —
     /// commit-kind transition polls and dirty-resync ticks — before parking
     /// for the readiness seam. A unit of paced work is cheap-to-moderate,
@@ -1414,6 +1421,8 @@ impl RibManager {
             cluster_id,
             dirty_peers: BTreeSet::new(),
             dirty_resync_cursor: None,
+            pending_inbound_refresh: BTreeMap::new(),
+            pending_inbound_refresh_cursor: None,
             force_outbound_peers: HashSet::new(),
             pending_eor: HashMap::new(),
             pending_refresh: HashMap::new(),
@@ -1826,12 +1835,15 @@ impl RibManager {
     }
 
     /// Whether the resync timer still has runnable work: failed outbound
-    /// sends, or an ADR-0113 capacity recovery that is not selection/ORF
-    /// gated. Gate-blocked recovery remains queued without spinning the
-    /// timer; the gate-release message makes it runnable and the next event
-    /// loop turn arms this timer again.
+    /// sends, deferred collision-failback inbound refreshes, or an ADR-0113
+    /// capacity recovery that is not selection/ORF gated. Gate-blocked
+    /// recovery remains queued without spinning the timer; the gate-release
+    /// message makes it runnable and the next event loop turn arms this timer
+    /// again.
     fn resync_tick_pending(&self) -> bool {
-        !self.dirty_peers.is_empty() || self.outbound_limit_recovery_runnable()
+        !self.dirty_peers.is_empty()
+            || !self.pending_inbound_refresh.is_empty()
+            || self.outbound_limit_recovery_runnable()
     }
 
     /// Run one bounded resync-timer tick. ADR-0113 recovery replays at most
@@ -1857,6 +1869,7 @@ impl RibManager {
         // One live peer/family is replayed per timer tick; any runnable
         // remainder keeps `resync_tick_pending` true and re-arms the timer.
         let recovered = self.drain_outbound_limit_recovery();
+        self.retry_pending_inbound_refresh_bounded();
         // Peers whose outbound channel is gone can never resync: drop them
         // before selecting the slice, so a backlog of dead sessions (e.g.
         // after shutdown tore the TCP sessions down) quiesces in one cheap
