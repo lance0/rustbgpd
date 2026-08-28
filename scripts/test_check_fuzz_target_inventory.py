@@ -490,7 +490,7 @@ class FuzzTargetInventoryTests(unittest.TestCase):
         )
         for name, old, new in mutations:
             with self.subTest(contract=name), self.assertRaisesRegex(
-                inventory.InventoryError, "nightly wire corpus cache"
+                inventory.InventoryError, "wire corpus cache"
             ):
                 inventory.validate_wire_corpus_cache_contract(
                     workflow.replace(old, new, 1), helper, dictionary
@@ -504,7 +504,8 @@ class FuzzTargetInventoryTests(unittest.TestCase):
         restore_continue = workflow.index("continue-on-error: true", restore_start)
         save_start = workflow.index("- name: Save bounded wire corpus cache")
         save_continue = workflow.index("continue-on-error: true", save_start)
-        save_path = workflow.index("path: ${{ env.WIRE_CACHE_BUNDLE }}", save_start)
+        cache_path = "path: ${{ runner.temp }}/wire-corpus-cache"
+        save_path = workflow.index(cache_path, save_start)
         for name, position in (
             ("restore", restore_continue),
             ("save", save_continue),
@@ -524,11 +525,30 @@ class FuzzTargetInventoryTests(unittest.TestCase):
         distinct_save_path = (
             workflow[:save_path]
             + "path: ${{ runner.temp }}/wire-corpus-save"
-            + workflow[save_path + len("path: ${{ env.WIRE_CACHE_BUNDLE }}") :]
+            + workflow[save_path + len(cache_path) :]
         )
         with self.assertRaisesRegex(inventory.InventoryError, "action paths differ"):
             inventory.validate_wire_corpus_cache_contract(
                 distinct_save_path, helper, dictionary
+            )
+
+        steps = workflow.index("    steps:\n")
+        invalid_job_env = (
+            workflow[:steps]
+            + "      WIRE_CACHE_BUNDLE: ${{ runner.temp }}/wire-corpus-cache\n"
+            + workflow[steps:]
+        )
+        with self.assertRaisesRegex(
+            inventory.InventoryError, "runner context in job env"
+        ):
+            inventory.validate_wire_corpus_cache_contract(
+                invalid_job_env, helper, dictionary
+            )
+
+        missing_steps = workflow.replace("    steps:\n", "    workflow-steps:\n", 1)
+        with self.assertRaisesRegex(inventory.InventoryError, "lacks steps marker"):
+            inventory.validate_wire_corpus_cache_contract(
+                missing_steps, helper, dictionary
             )
 
         reordered = workflow.replace(
