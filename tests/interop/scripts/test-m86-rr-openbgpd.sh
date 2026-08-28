@@ -46,6 +46,9 @@ fi
 OBGP1="clab-${TOPO}-obgp1"
 OBGP2="clab-${TOPO}-obgp2"
 CLIENT="clab-${TOPO}-client"
+OPENBGPD_IMAGE="openbgpd/openbgpd@sha256:b3d4413662098070d5643a0473a5a866f2922069ee9c75132c1cea3ac5914fa4"
+OPENBGPD_VERSION="OpenBGPD 9.1"
+OPENBGPD_IDENTITY_PREFLIGHTED=0
 
 OBGP1_ADDR="10.86.1.2"
 RR_FROM_OBGP1="10.86.1.1"
@@ -65,8 +68,55 @@ rr_ctl()     { docker exec "$RUSTBGPD" rbgp -s http://127.0.0.1:50051 "$@"; }
 client_ctl() { docker exec "$CLIENT" rbgp -s http://127.0.0.1:50051 "$@"; }
 
 start_bgpd() {
+    if [ "$OPENBGPD_IDENTITY_PREFLIGHTED" -ne 1 ]; then
+        fail "OpenBGPD identity preflight did not complete before daemon start"
+        return 1
+    fi
     docker exec "${1:?}" sh -c \
         'mkdir -p /run/bgpd && (bgpd -d -f /etc/bgpd/bgpd.conf >>/tmp/bgpd.log 2>&1 &)'
+}
+
+preflight_openbgpd_identity() {
+    local expected_local_image container configured_image local_image version
+
+    if ! expected_local_image=$(docker image inspect --format '{{.Id}}' \
+        "$OPENBGPD_IMAGE" 2>&1); then
+        fail "cannot resolve the pinned OpenBGPD image locally: $expected_local_image"
+        return 1
+    fi
+
+    for container in "$OBGP1" "$OBGP2"; do
+        if ! configured_image=$(docker inspect --format '{{.Config.Image}}' \
+            "$container" 2>&1); then
+            fail "cannot inspect $container configured image: $configured_image"
+            return 1
+        fi
+        if [ "$configured_image" != "$OPENBGPD_IMAGE" ]; then
+            fail "$container configured image is $configured_image (want $OPENBGPD_IMAGE)"
+            return 1
+        fi
+
+        if ! local_image=$(docker inspect --format '{{.Image}}' "$container" 2>&1); then
+            fail "cannot inspect $container local image: $local_image"
+            return 1
+        fi
+        if [ "$local_image" != "$expected_local_image" ]; then
+            fail "$container local image is $local_image (want $expected_local_image)"
+            return 1
+        fi
+
+        if ! version=$(docker exec "$container" bgpd -V 2>&1); then
+            fail "cannot query $container OpenBGPD version: $version"
+            return 1
+        fi
+        if [ "$version" != "$OPENBGPD_VERSION" ]; then
+            fail "$container runtime is $version (want $OPENBGPD_VERSION)"
+            return 1
+        fi
+    done
+
+    OPENBGPD_IDENTITY_PREFLIGHTED=1
+    log "OpenBGPD clients match the pinned local image and exact 9.1 runtime"
 }
 
 kill_bgpd() {
@@ -429,6 +479,8 @@ main() {
 
     log "Starting rustbgpd client..."
     docker exec -d "$CLIENT" /usr/local/bin/start-rustbgpd.sh
+
+    preflight_openbgpd_identity || return 1
 
     log "Starting OpenBGPD clients..."
     start_bgpd "$OBGP1"

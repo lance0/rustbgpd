@@ -8,6 +8,10 @@ fn interop_path(relative: &str) -> PathBuf {
         .join(relative)
 }
 
+fn repo_path(relative: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
+}
+
 fn topology(relative: &str) -> serde_yaml::Value {
     let path = interop_path(relative);
     let source = fs::read_to_string(&path)
@@ -99,6 +103,127 @@ fn m83_pins_refreshed_incumbent_images_and_preflights_before_capture() {
     assert!(
         preflight < capture,
         "M83 must preflight versions before capture"
+    );
+}
+
+#[test]
+fn m86_pins_openbgpd_identity_and_preflights_every_daemon_start() {
+    const IMAGE: &str =
+        "openbgpd/openbgpd@sha256:b3d4413662098070d5643a0473a5a866f2922069ee9c75132c1cea3ac5914fa4";
+    const AMD64_MANIFEST: &str =
+        "sha256:85c443bcb16b1e1b2c6ea6bddcd540352d280f1eaed66b7a7cd0ea1122c866e6";
+    const CONFIG: &str = "sha256:b38add7d3ec1a0d3caea8eb5dc799fda1925e60fb7689dc532cbada6551ee1a8";
+
+    // Destructive red proof: replacing either topology image with the mutable
+    // `:9.1` tag makes the exact node assertions fail.
+    let topology = topology("m86-rr-openbgpd.clab.yml");
+    for node in ["obgp1", "obgp2"] {
+        assert_eq!(
+            topology["topology"]["nodes"][node]["image"], IMAGE,
+            "M86 {node} must use the reviewed OpenBGPD index"
+        );
+    }
+
+    let workflow_path = repo_path(".github/workflows/interop.yml");
+    let workflow = fs::read_to_string(&workflow_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", workflow_path.display()));
+    let m86 = workflow
+        .split_once("\n  m86:\n")
+        .and_then(|(_, remainder)| remainder.split_once("\n  m25:\n").map(|(job, _)| job))
+        .expect("interop workflow has a bounded M86 job");
+    for required in [
+        format!("OPENBGPD_IMAGE: {IMAGE}"),
+        format!("OPENBGPD_AMD64_MANIFEST: {AMD64_MANIFEST}"),
+        format!("OPENBGPD_CONFIG: {CONFIG}"),
+        "docker buildx imagetools inspect --raw \"$OPENBGPD_IMAGE\"".to_owned(),
+        "\"openbgpd/openbgpd@$amd64_manifest\"".to_owned(),
+        "test \"$amd64_manifest\" = \"$OPENBGPD_AMD64_MANIFEST\"".to_owned(),
+        "test \"$config_digest\" = \"$OPENBGPD_CONFIG\"".to_owned(),
+        "docker pull \"$OPENBGPD_IMAGE\"".to_owned(),
+    ] {
+        assert!(m86.contains(&required), "M86 workflow lost `{required}`");
+    }
+    assert!(
+        !m86.contains("openbgpd/openbgpd:9.1"),
+        "M86 workflow must reject the mutable OpenBGPD tag"
+    );
+
+    let script_path = interop_path("scripts/test-m86-rr-openbgpd.sh");
+    let script = fs::read_to_string(&script_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", script_path.display()));
+    for required in [
+        format!("OPENBGPD_IMAGE=\"{IMAGE}\""),
+        "OPENBGPD_VERSION=\"OpenBGPD 9.1\"".to_owned(),
+        "OPENBGPD_IDENTITY_PREFLIGHTED=0".to_owned(),
+    ] {
+        assert!(script.contains(&required), "M86 driver lost `{required}`");
+    }
+    assert!(
+        !script.contains("OPENBGPD_IMAGE=\"openbgpd/openbgpd:9.1\""),
+        "M86 driver must reject the mutable OpenBGPD tag"
+    );
+    let preflight = script
+        .split_once("preflight_openbgpd_identity() {")
+        .and_then(|(_, remainder)| remainder.split_once("kill_bgpd() {").map(|(body, _)| body))
+        .expect("M86 identity preflight has a bounded source section");
+    for required in [
+        "docker image inspect --format '{{.Id}}'",
+        "docker inspect --format '{{.Config.Image}}'",
+        "[ \"$configured_image\" != \"$OPENBGPD_IMAGE\" ]",
+        "docker inspect --format '{{.Image}}'",
+        "[ \"$local_image\" != \"$expected_local_image\" ]",
+        "docker exec \"$container\" bgpd -V",
+        "[ \"$version\" != \"$OPENBGPD_VERSION\" ]",
+        "OPENBGPD_IDENTITY_PREFLIGHTED=1",
+    ] {
+        assert!(
+            preflight.contains(required),
+            "M86 preflight lost `{required}`"
+        );
+    }
+
+    let start = script
+        .split_once("start_bgpd() {")
+        .and_then(|(_, remainder)| {
+            remainder
+                .split_once("preflight_openbgpd_identity() {")
+                .map(|(body, _)| body)
+        })
+        .expect("M86 daemon-start helper has a bounded source section");
+    let guard = start
+        .find("[ \"$OPENBGPD_IDENTITY_PREFLIGHTED\" -ne 1 ]")
+        .expect("M86 daemon start is identity-gated");
+    let launch = start
+        .find("bgpd -d -f /etc/bgpd/bgpd.conf")
+        .expect("M86 daemon start retains the production launch");
+    assert!(
+        guard < launch,
+        "M86 identity gate must precede daemon launch"
+    );
+    assert_eq!(
+        script.matches("bgpd -d -f /etc/bgpd/bgpd.conf").count(),
+        1,
+        "every M86 OpenBGPD launch must use the gated helper"
+    );
+    assert_eq!(
+        script.matches("start_bgpd \"$OBGP").count(),
+        3,
+        "M86 must retain its two initial starts and one controlled restart"
+    );
+
+    let main = script
+        .split_once("main() {")
+        .and_then(|(_, remainder)| remainder.split_once("\n}\n\nif [").map(|(body, _)| body))
+        .expect("M86 main has a bounded source section");
+    let preflight_call = main
+        .find("preflight_openbgpd_identity || return 1")
+        .expect("M86 main invokes the identity preflight");
+    let first_openbgpd_start = main
+        .find("start_bgpd \"$OBGP1\"")
+        .expect("M86 main starts the first OpenBGPD client");
+    assert!(
+        preflight_call < first_openbgpd_start,
+        "M86 identity preflight must complete before either initial daemon start"
     );
 }
 

@@ -33,6 +33,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The M86 OpenBGPD route-reflector receipt now pins the reviewed 9.1
+  multi-platform image index. Hosted CI verifies its exact linux/amd64
+  manifest and image-config digests, and the driver requires both sleeping
+  clients to match the local pinned image and exact `OpenBGPD 9.1` runtime
+  before either daemon starts. Its reflection, graceful-restart, timing, and
+  exact 27/0 receipt remain unchanged.
+
 - The M83 route-server multi-stack receipt now runs its incumbent members as
   checksum-pinned BIRD 2.19.2 and GoBGP 4.8.0 images, with exact runtime
   version preflights before capture. Its FRR 10.3.1 member, AS_SET-only policy
