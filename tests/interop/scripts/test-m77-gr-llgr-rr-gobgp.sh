@@ -204,16 +204,16 @@ gr_timer_expired_count() {
 
 wait_gr_active() {
     local want=${1:?} label=${2:?}
+    local current="unavailable"
     log "Waiting for bgp_gr_active_peers == $want ($label)..."
     for i in $(seq 1 30); do
-        local current
         if current=$(gr_active_total) && [ "$current" -eq "$want" ]; then
             ok "bgp_gr_active_peers == $want ($label, attempt $i)"
             return 0
         fi
         sleep 2
     done
-    fail "bgp_gr_active_peers never reached $want ($label), got $(gr_active_total)"
+    fail "bgp_gr_active_peers never reached $want ($label), got ${current:-unavailable}"
     return 1
 }
 
