@@ -190,7 +190,11 @@ fn assert_settlement_metrics(text: &str, kind: &str, phase: &str, attachment: &s
     }
 }
 
-fn assert_one_redacted_diagnostic(daemon: &Daemon) {
+fn assert_one_redacted_diagnostic(
+    daemon: &Daemon,
+    expected_reload_step: &str,
+    expected_accepted_effect: bool,
+) {
     let matching = daemon
         .log()
         .lines()
@@ -198,6 +202,14 @@ fn assert_one_redacted_diagnostic(daemon: &Daemon) {
         .map(str::to_string)
         .collect::<Vec<_>>();
     assert_eq!(matching.len(), 1, "log:\n{}", daemon.log());
+    let diagnostic: serde_json::Value =
+        serde_json::from_str(&matching[0]).expect("fail-stop diagnostic is JSON");
+    let fields = &diagnostic["fields"];
+    assert_eq!(fields["reload_step"], expected_reload_step);
+    assert_eq!(
+        fields["accepted_effect"],
+        serde_json::Value::Bool(expected_accepted_effect)
+    );
     for forbidden in ["injected", "rustbgpd.toml", "grpc.sock", FIRST_NEIGHBOR] {
         assert!(
             !matching[0].contains(forbidden),
@@ -329,7 +341,7 @@ fn exercise(fault: &str, published: bool) {
         .expect("daemon exceeded the five-second fail-stop grace plus test jitter before wait");
     let status = daemon.wait_for_exit(remaining_grace);
     assert_eq!(status.code(), Some(70), "log:\n{}", daemon.log());
-    assert_one_redacted_diagnostic(&daemon);
+    assert_one_redacted_diagnostic(&daemon, "not_applicable", false);
     assert!(
         recovery_fenced_at.elapsed() <= FAILSTOP_GRACE_WITH_JITTER,
         "exit 70 exceeded the five-second grace plus test jitter"
@@ -421,7 +433,28 @@ fn exercise_sighup_ack_loss(fault: &str) {
         .expect("daemon exceeded the five-second fail-stop grace plus test jitter before wait");
     let status = daemon.wait_for_exit(remaining_grace);
     assert_eq!(status.code(), Some(70), "log:\n{}", daemon.log());
-    assert_one_redacted_diagnostic(&daemon);
+    assert_one_redacted_diagnostic(
+        &daemon,
+        if fault == "reconcile" {
+            "neighbors.reconcile"
+        } else {
+            "config_bridge"
+        },
+        true,
+    );
+    if fault == "reconcile" {
+        let log = daemon.log();
+        let credential_reload = log
+            .find("gRPC credential generation reloaded")
+            .expect("SIGHUP credential generation refresh precedes reconciliation");
+        let fail_stop = log
+            .find("runtime config settlement fail-stop armed")
+            .expect("fail-stop diagnostic exists");
+        assert!(
+            credential_reload < fail_stop,
+            "credential refresh must precede the reconciler fence:\n{log}"
+        );
+    }
 
     let bytes = std::fs::read(&config_path).expect("read operator config");
     assert_eq!(bytes, operator_candidate.as_bytes());

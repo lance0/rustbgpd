@@ -5391,6 +5391,7 @@ async fn run<T>(
                         SighupReloadOutcome::RecoveryFenced { error, reason } => OwnedRuntimeConfigOutcome::Fenced { error, reason },
                         SighupReloadOutcome::Acknowledged(authority) => {
                             let Some(bridge_replace) = bridge_replace.as_ref() else {
+                                operation.record_sighup_recovery_step("config_bridge");
                                 return OwnedRuntimeConfigOutcome::Fenced {
                                     error: SighupReloadError::preflight("config_bridge", "bridge authority unavailable after runtime effects"),
                                     reason: rustbgpd_api::runtime_config_settlement::RuntimeConfigFenceReason::KnownDivergence,

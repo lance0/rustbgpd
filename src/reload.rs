@@ -370,10 +370,14 @@ struct SighupMutationProgress<'a> {
 
 impl<'a> SighupMutationProgress<'a> {
     fn new(operation: Option<&'a OwnedRuntimeConfigOperation>, accepted_effect: bool) -> Self {
-        Self {
+        let progress = Self {
             operation,
             accepted_effect,
+        };
+        if accepted_effect && let Some(operation) = operation {
+            operation.mark_sighup_accepted_effect();
         }
+        progress
     }
 
     fn begin_mutation(&self) {
@@ -384,6 +388,15 @@ impl<'a> SighupMutationProgress<'a> {
 
     fn mark_accepted_effect(&mut self) {
         self.accepted_effect = true;
+        if let Some(operation) = self.operation {
+            operation.mark_sighup_accepted_effect();
+        }
+    }
+
+    fn record_recovery_step(&self, reload_step: &'static str) {
+        if let Some(operation) = self.operation {
+            operation.record_sighup_recovery_step(reload_step);
+        }
     }
 }
 
@@ -443,10 +456,12 @@ fn clean_reload_failure(bucket: &'static str, error: impl Into<String>) -> Sighu
 }
 
 fn fenced_reload_failure(
+    progress: &SighupMutationProgress<'_>,
     bucket: &'static str,
     error: ReloadStepError,
     reason: RuntimeConfigFenceReason,
 ) -> SighupReloadOutcome {
+    progress.record_recovery_step(bucket);
     SighupReloadOutcome::RecoveryFenced {
         error: sighup_error(bucket, String::new(), error),
         reason,
@@ -480,16 +495,19 @@ fn tcp_ao_awaiting_peer_outcome(
             )
         }
         ReloadDispatch::AcknowledgementLost => fenced_reload_failure(
+            progress,
             "tcp_ao.awaiting_peer_marker",
             ReloadStepError::AcknowledgementLost,
             RuntimeConfigFenceReason::AcknowledgementLost,
         ),
         ReloadDispatch::NotAccepted(error) => fenced_reload_failure(
+            progress,
             "tcp_ao.awaiting_peer_marker",
             ReloadStepError::NotAccepted(error.to_string()),
             RuntimeConfigFenceReason::KnownDivergence,
         ),
         ReloadDispatch::Replied(Err(error)) => fenced_reload_failure(
+            progress,
             "tcp_ao.awaiting_peer_marker",
             ReloadStepError::Rejected(error.to_string()),
             RuntimeConfigFenceReason::KnownDivergence,
@@ -1118,7 +1136,9 @@ fn owned_step_failure(
                 error,
             },
         ),
-        OwnedStepFailure::Fenced { error, reason } => fenced_reload_failure(bucket, error, reason),
+        OwnedStepFailure::Fenced { error, reason } => {
+            fenced_reload_failure(progress, bucket, error, reason)
+        }
     }
 }
 
@@ -1653,13 +1673,16 @@ pub(crate) async fn finalize_sighup_authority(
     dialout_manager: &Arc<tokio::sync::Mutex<rustbgpd_api::gnmi_dialout::DialoutManager>>,
 ) -> OwnedRuntimeConfigOutcome<SighupAuthority, SighupReloadError> {
     operation.advance_phase(RuntimeConfigSettlementPhase::SettlingRollback);
-    let fenced = |bucket, reason, fence_reason| OwnedRuntimeConfigOutcome::Fenced {
-        error: SighupReloadError::Failed(ReloadStepFailure {
-            bucket,
-            target: String::new(),
-            error: reason,
-        }),
-        reason: fence_reason,
+    let fenced = |bucket, reason, fence_reason| {
+        operation.record_sighup_recovery_step(bucket);
+        OwnedRuntimeConfigOutcome::Fenced {
+            error: SighupReloadError::Failed(ReloadStepFailure {
+                bucket,
+                target: String::new(),
+                error: reason,
+            }),
+            reason: fence_reason,
+        }
     };
     // Acknowledge the snapshot so the caller (holding the FIB coordinator lock)
     // doesn't release the lock until the peer manager has actually assigned
@@ -1688,6 +1711,7 @@ pub(crate) async fn finalize_sighup_authority(
             RuntimeConfigFenceReason::AcknowledgementLost,
         );
     }
+    operation.mark_sighup_accepted_effect();
     let (adopted, adopted_rx) = oneshot::channel();
     if bridge_replace_tx
         .send(AcceptedBridgeReplacement {
@@ -1704,7 +1728,7 @@ pub(crate) async fn finalize_sighup_authority(
         );
     }
     match adopted_rx.await {
-        Ok(ReloadDispatch::Replied(())) => {}
+        Ok(ReloadDispatch::Replied(())) => operation.mark_sighup_accepted_effect(),
         Ok(ReloadDispatch::NotAccepted(error)) => {
             return fenced(
                 "config_persister",
@@ -2129,7 +2153,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
             } else {
                 RuntimeConfigFenceReason::KnownDivergence
             };
-            return fenced_reload_failure("tcp_ao.listener_apply", error, reason);
+            return fenced_reload_failure(&progress, "tcp_ao.listener_apply", error, reason);
         }
         if let Err(error) = send_tcp_ao_apply(peer_mgr_tx, plan, &mut progress).await {
             if plan.operation == TcpAoRotationOperation::Selection
@@ -2174,7 +2198,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
             } else {
                 RuntimeConfigFenceReason::KnownDivergence
             };
-            return fenced_reload_failure("tcp_ao.peer_apply", error, reason);
+            return fenced_reload_failure(&progress, "tcp_ao.peer_apply", error, reason);
         }
         if plan.operation == TcpAoRotationOperation::Selection
             && let Err(error) = listener_step(
@@ -2197,7 +2221,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
             } else {
                 RuntimeConfigFenceReason::KnownDivergence
             };
-            return fenced_reload_failure("tcp_ao.listener_finalize", error, reason);
+            return fenced_reload_failure(&progress, "tcp_ao.listener_finalize", error, reason);
         }
         if let Err(error) = listener_step(
             listener
@@ -2218,7 +2242,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
             } else {
                 RuntimeConfigFenceReason::KnownDivergence
             };
-            return fenced_reload_failure("tcp_ao.listener_commit", error, reason);
+            return fenced_reload_failure(&progress, "tcp_ao.listener_commit", error, reason);
         }
         tcp_ao_rotation_applied = true;
         info!(
@@ -2267,7 +2291,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
                 } else {
                     RuntimeConfigFenceReason::KnownDivergence
                 };
-                return fenced_reload_failure("listener_auth.apply", error, reason);
+                return fenced_reload_failure(&progress, "listener_auth.apply", error, reason);
             }
             info!("listener inbound MD5/GTSM inventory replaced");
         }
@@ -2315,6 +2339,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
                      fencing before later reload mutations"
                 );
                 return fenced_reload_failure(
+                    &progress,
                     "evpn_runtime.apply",
                     ReloadStepError::Rejected(format!("{error:?}")),
                     RuntimeConfigFenceReason::KnownDivergence,
@@ -2327,6 +2352,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
                      fencing before later reload mutations"
                 );
                 return fenced_reload_failure(
+                    &progress,
                     "evpn_runtime.apply",
                     ReloadStepError::Rejected(format!("{error:?}")),
                     RuntimeConfigFenceReason::PublicationAmbiguous,
@@ -3314,6 +3340,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
             if sighup_ack_fault("reconcile") {
                 drop(reply_rx);
                 return fenced_reload_failure(
+                    &progress,
                     "neighbors.reconcile",
                     ReloadStepError::AcknowledgementLost,
                     RuntimeConfigFenceReason::AcknowledgementLost,
@@ -3323,6 +3350,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
                 Ok(reconcile) => {
                     if reconcile.authority == PeerReconcileAuthority::Diverged {
                         return fenced_reload_failure(
+                            &progress,
                             "neighbors.reconcile",
                             ReloadStepError::Rejected(
                                 "peer reconcile returned non-authoritative state".into(),
@@ -3386,6 +3414,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
                 }
                 Err(_) => {
                     return fenced_reload_failure(
+                        &progress,
                         "neighbors.reconcile",
                         ReloadStepError::AcknowledgementLost,
                         RuntimeConfigFenceReason::AcknowledgementLost,
@@ -3415,6 +3444,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
             }
             Err(error @ ReloadStepError::AcknowledgementLost) => {
                 return fenced_reload_failure(
+                    &progress,
                     "honor_graceful_shutdown.apply",
                     error,
                     RuntimeConfigFenceReason::AcknowledgementLost,
@@ -3460,6 +3490,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
             }
             Err(error @ ReloadStepError::AcknowledgementLost) => {
                 return fenced_reload_failure(
+                    &progress,
                     "honor_blackhole.apply",
                     error,
                     RuntimeConfigFenceReason::AcknowledgementLost,
@@ -3558,6 +3589,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
                     }
                     Ok(OwnedFibReplaceOutcome::CompensationAmbiguous(error)) => {
                         return fenced_reload_failure(
+                            &progress,
                             "fib_tables.apply",
                             ReloadStepError::Rejected(error),
                             RuntimeConfigFenceReason::KnownDivergence,
@@ -3565,6 +3597,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
                     }
                     Err(_) => {
                         return fenced_reload_failure(
+                            &progress,
                             "fib_tables.apply",
                             ReloadStepError::AcknowledgementLost,
                             RuntimeConfigFenceReason::AcknowledgementLost,
@@ -3759,6 +3792,7 @@ fn acknowledge_partial(
         "config reload stopped at this step; settling the acknowledged partial runtime authority before another reload may begin"
     );
     if matches!(failure.error, ReloadStepError::AcknowledgementLost) {
+        progress.record_recovery_step(failure.bucket);
         return SighupReloadOutcome::RecoveryFenced {
             error: SighupReloadError::Failed(failure),
             reason: RuntimeConfigFenceReason::AcknowledgementLost,
@@ -6456,8 +6490,10 @@ hold_time = 90
                 SighupReloadOutcome::CleanNoEffect(_)
             ));
         }
+        let progress = SighupMutationProgress::new(None, false);
         assert!(matches!(
             fenced_reload_failure(
+                &progress,
                 "tcp_ao.peer_apply",
                 ReloadStepError::AcknowledgementLost,
                 RuntimeConfigFenceReason::AcknowledgementLost,
