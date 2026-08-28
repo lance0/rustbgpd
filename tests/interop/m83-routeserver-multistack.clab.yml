@@ -30,8 +30,8 @@
 #   FRR 10.3.1:  per-neighbor `no neighbor X enforce-first-as`
 #                (global `no bgp enforce-first-as` alone is
 #                insufficient — the M19 finding)
-#   BIRD 2.0.12: `enforce first as off` (also the default)
-#   GoBGP 3.37:  no first-AS enforcement exists; nothing to disable
+#   BIRD 2.19.2: `enforce first as off` (also the default)
+#   GoBGP 4.8.0: no first-AS enforcement exists; nothing to disable
 #
 # Cross-subnet static routes make the preserved BGP NEXT_HOPs
 # resolvable for this control-plane receipt. M83 sends no data-plane
@@ -39,8 +39,8 @@
 #
 # Usage:
 #   docker build --target dev -t rustbgpd:dev .
-#   docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop
-#   docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop
+#   docker build -t bird:v2.19.2-m83 -f tests/interop/Dockerfile.bird-v2192 tests/interop
+#   docker build --build-arg TARGETARCH=amd64 --build-arg GOBGP_VERSION=4.8.0 --build-arg GOBGP_SHA256=43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03 -t gobgp:v4.8.0-m83 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 #   containerlab deploy -t tests/interop/m83-routeserver-multistack.clab.yml
 #   bash tests/interop/scripts/test-m83-routeserver-multistack.sh
 #   containerlab destroy -t tests/interop/m83-routeserver-multistack.clab.yml
@@ -71,7 +71,7 @@ topology:
 
     bird:
       kind: linux
-      image: bird:2-bookworm
+      image: bird:v2.19.2-m83
       cmd: sleep infinity
       binds:
         - ./configs/bird-m83.conf:/etc/bird/bird.conf:ro
@@ -84,7 +84,7 @@ topology:
 
     gobgp:
       kind: linux
-      image: gobgp:interop
+      image: gobgp:v4.8.0-m83
       cmd: sleep infinity
       binds:
         - ./configs/gobgp-m83.toml:/config/gobgp.toml:ro

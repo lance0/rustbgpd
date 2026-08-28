@@ -3,7 +3,7 @@
 # path-hiding mitigation): this member must see BOTH candidate paths
 # for the Add-Path pair prefix.
 #
-# First-AS: GoBGP 3.x has no first-AS enforcement — nothing to
+# First-AS: GoBGP 4.8.0 has no first-AS enforcement — nothing to
 # disable (documented in the topology header).
 # Routes are injected at test time via `gobgp global rib add` (MED,
 # standard + large communities on the transparency probe).

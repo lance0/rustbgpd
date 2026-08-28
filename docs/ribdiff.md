@@ -343,8 +343,9 @@ Each converter is pinned by golden tests in `cargo test -p rustbgpctl`
 container must convert byte-for-byte to its checked-in
 `.expected.ndjson`, parse as a complete snapshot, and diff clean against
 the same capture's wire-truth values. An upstream output-format change
-breaks these tests first. The M83 refresh covers BIRD 2.0.12, FRR 10.3.1,
-and GoBGP 3.37.0. The separate BIRD 3.3.1 recipe uses its upstream tag at
+breaks these tests first. The checked-in M83 converter fixtures cover BIRD
+2.0.12, FRR 10.3.1, and GoBGP 3.37.0. Refreshing the live M83 interop members
+does not recapture these fixtures. The separate BIRD 3.3.1 recipe uses its upstream tag at
 commit `695c7b74`: source AS64501 (`10.92.6.11`) advertises
 `203.0.113.0/24` with MED 120, community `64501:111`, and large community
 `64501:92:6` through the RS fixture

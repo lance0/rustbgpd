@@ -13,7 +13,7 @@ rejected the single best path.
 
 **Proven by:**
 [M83](../RECEIPTS.md#interop-labs--pr-gated-interopyml) (RFC 7947
-route-server profile against BIRD 2.0.12 + GoBGP 3.37.0 + FRR 10.3.1 +
+route-server profile against BIRD 2.19.2 + GoBGP 4.8.0 + FRR 10.3.1 +
 StayRTR, [ADR-0101](../adr/0101-route-server-profile.md)): byte-level
 transparency on the wire (tshark on the RS↔BIRD link — no route-server
 ASN in any AS_PATH segment, NEXT_HOP = originator, MED and communities
