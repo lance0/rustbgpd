@@ -396,6 +396,13 @@ memory-safe-language row refers to.
 
 ## Performance Snapshot (bgperf2 — 2026-07-26)
 
+> **Integrity correction (2026-08-28): Historical July harness output only; no current cross-daemon ranking is supported.** Targets ran in the fixed
+> order rustbgpd → BIRD → GoBGP → FRR while one-second samplers from earlier
+> cells continued polling during later cells. Only rustbgpd has a retained
+> fresh no-cache build receipt; competitor provenance is incomplete, and FRR
+> was gcov-instrumented. No ranking, ratio, or sampler-derived correction is
+> assigned to these historical rows.
+
 Same host and harness, all targets run back to back on an idle machine,
 medians of 3 runs per cell (6 at 10×1k). "Converged" is bgperf2's
 elapsed-to-full-table figure; memory is peak raw container cgroup usage over
@@ -411,20 +418,14 @@ socket memory.
 | 30 peers × 1k prefixes | 3 s / 108.5 | 3 s / 11.3 | 4 s / 68.6 | 4 s / 51.2 |
 | 100 peers × 1k prefixes | 3 s / 212.0 | 5 s / 32.8 | 20 s / 193.5 | 7 s / 134.1 |
 
-rustbgpd is fastest on total time at all five shapes, and its convergence
-lead widens with peer count: 3 s at 100 peers against 5 / 7 / 20 s.
-**On memory it is last of the four at 100 peers × 1k — its own target
-shape** — at 1.10× GoBGP, 1.58× FRR, and 6.46× BIRD; against BIRD the
-ratio is 4.6×–9.6× at every shape. rustbgpd's raw cgroup usage is also the
-noisiest figure in the run (86.0 / 108.5 / 131.1 MiB across three runs at 30
-peers), so treat it as a range. The campaign's 100 peers × 1k and
-2 peers × 100k cells both measure 212.0 MiB, but that coincidence does
-not isolate a scaling dimension. A controlled follow-up varies peers and
-BASE routes independently under continuous churn: steady RSS grows by
-118.200/142.844 KiB per peer at fixed 10k/100k BASE routes and
-825.515/850.751 B per BASE route at fixed 10/100 peers. Both dimensions
-are material; the old 1.93
-MiB/peer value is a mixed-shape upper bound, not a sizing coefficient.
+The raw rows are retained without comparative interpretation. Rustbgpd's own
+raw-cgroup values span 86.0 / 108.5 / 131.1 MiB across the three 30-peer runs,
+so quote that observation as a range. The campaign's 100 peers × 1k and
+2 peers × 100k rustbgpd cells both record 212.0 MiB, but that coincidence does
+not isolate a scaling dimension. A controlled rustbgpd-only follow-up varies
+peers and BASE routes independently under continuous churn: steady RSS grows
+by 118.200/142.844 KiB per peer at fixed 10k/100k BASE routes and
+825.515/850.751 B per BASE route at fixed 10/100 peers.
 The same follow-up removes a 6,150,300-byte eager RFC 8654 receive-buffer
 owner. It makes no RSS claim because the measured −0.324% falls below
 its 0.645% floor, and no allocator-total or aggregate-DHAT claim because
