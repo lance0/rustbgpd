@@ -1,0 +1,62 @@
+# M99 — RFC 9072 extended OPEN against stock FRR 10.3.1.
+#
+# The first peer enables every production capability attachment so its OPEN is
+# the fleet maximum pinned by crates/fsm: 307 capability octets and 342 bytes
+# total. The second peer is the exact 49-byte classic-format control.
+
+[global]
+asn = 65001
+router_id = "10.99.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
+
+[[neighbors]]
+address = "10.99.0.2"
+remote_asn = 65002
+description = "m99-extended-open"
+hold_time = 90
+families = [
+  "ipv4_unicast",
+  "ipv6_unicast",
+  "ipv4_flowspec",
+  "ipv6_flowspec",
+  "l2vpn_evpn",
+  "linkstate",
+  "linkstate_vpn",
+  "l3vpn_ipv4_unicast",
+  "l3vpn_ipv6_unicast",
+  "ipv4_labeled_unicast",
+  "ipv6_labeled_unicast",
+  "rtc",
+]
+graceful_restart = true
+llgr_stale_time = 3600
+prefix_orf_receive = true
+role = "route_server"
+
+[neighbors.add_path]
+receive = true
+send = true
+receive_max = 8
+
+[[neighbors]]
+address = "10.99.1.2"
+remote_asn = 65002
+description = "m99-classic-control"
+hold_time = 90
+families = ["ipv4_unicast"]
+graceful_restart = false
+
+[security.grpc]
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"

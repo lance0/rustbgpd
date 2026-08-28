@@ -1410,6 +1410,24 @@ class PrimerContractTests(unittest.TestCase):
                 occurrence = count - 1
                 self.mutate(relative, old, occurrence=occurrence)
 
+    def test_m99_rfc9072_raw_capture_job_is_load_bearing(self):
+        relative = ".github/workflows/interop.yml"
+        for old in (
+            "  m99:\n",
+            "      - name: Ensure host raw-capture tools\n",
+            "          if ! command -v tshark >/dev/null || ! command -v nsenter >/dev/null \\\n",
+            "            || ! command -v jq >/dev/null; then\n",
+            "            sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y tshark util-linux jq\n",
+            "          tshark --version\n",
+            "          nsenter --version\n",
+            "          label: M99\n",
+            "          topology: tests/interop/m99-rfc9072-extended-open-frr.clab.yml\n",
+            "          script: tests/interop/scripts/test-m99-rfc9072-extended-open.sh\n",
+            '          max_attempts: "1"\n',
+        ):
+            with self.subTest(seam=old):
+                self.mutate(relative, old)
+
     def test_dockerfile_exact_source_bridge(self):
         for binary in ("rustbgpd", "rbgp", "evpn-tester", "evpn-monitor"):
             with self.subTest(binary=binary, side="builder"):
