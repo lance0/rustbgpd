@@ -793,6 +793,8 @@ const FENCE_REASON_DIVERGENCE: u8 = 3;
 const FENCE_REASON_PUBLICATION: u8 = 4;
 const FENCE_REASON_ACKNOWLEDGEMENT: u8 = 5;
 const RECOVERY_NOT_READY: &str = "runtime config settlement requires supervised recovery";
+const SIGHUP_RELOAD_STEP_NOT_RECORDED: &str = "not_recorded";
+const SIGHUP_RELOAD_STEP_NOT_APPLICABLE: &str = "not_applicable";
 const WARNING_HALF_BUDGET: Duration = Duration::from_mins(15);
 const WARNING_FIVE_MINUTES_REMAINING: Duration = Duration::from_mins(25);
 const WARNING_ONE_MINUTE_REMAINING: Duration = Duration::from_mins(29);
@@ -835,6 +837,25 @@ struct OwnedResources {
     stream_admission: Option<Arc<Semaphore>>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SighupRecoveryContext {
+    reload_step: &'static str,
+    accepted_effect: bool,
+}
+
+impl SighupRecoveryContext {
+    const fn for_kind(kind: RuntimeConfigOperationKind) -> Self {
+        Self {
+            reload_step: if matches!(kind, RuntimeConfigOperationKind::Sighup) {
+                SIGHUP_RELOAD_STEP_NOT_RECORDED
+            } else {
+                SIGHUP_RELOAD_STEP_NOT_APPLICABLE
+            },
+            accepted_effect: false,
+        }
+    }
+}
+
 struct OperationInner {
     id: u64,
     kind: RuntimeConfigOperationKind,
@@ -844,6 +865,7 @@ struct OperationInner {
     response_attached: Arc<AtomicBool>,
     fatal_at_nanos: AtomicU64,
     warning_bits: AtomicU8,
+    sighup_recovery: Mutex<SighupRecoveryContext>,
     propagation_claimed: AtomicBool,
     #[cfg(test)]
     propagation_completed: AtomicBool,
@@ -1245,6 +1267,7 @@ impl RuntimeConfigSettlementWatchdog {
                 self.registry.instant_nanos(deadline + self.registry.grace),
             ),
             warning_bits: AtomicU8::new(0),
+            sighup_recovery: Mutex::new(SighupRecoveryContext::for_kind(kind)),
             propagation_claimed: AtomicBool::new(false),
             #[cfg(test)]
             propagation_completed: AtomicBool::new(false),
@@ -1555,6 +1578,38 @@ impl OwnedRuntimeConfigOperation {
         self.inner.fence_reason()
     }
 
+    /// Record that an earlier SIGHUP effect was accepted. The bit is monotonic
+    /// and freezes when recovery fencing wins.
+    pub fn mark_sighup_accepted_effect(&self) {
+        if self.inner.kind != RuntimeConfigOperationKind::Sighup {
+            return;
+        }
+        let mut context = self
+            .inner
+            .sighup_recovery
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.inner.terminal() == RuntimeConfigSettlementTerminal::Owned {
+            context.accepted_effect = true;
+        }
+    }
+
+    /// Record the compile-time SIGHUP bucket that produced a typed recovery
+    /// fence. Runtime targets and raw error text must never enter this field.
+    pub fn record_sighup_recovery_step(&self, reload_step: &'static str) {
+        if self.inner.kind != RuntimeConfigOperationKind::Sighup {
+            return;
+        }
+        let mut context = self
+            .inner
+            .sighup_recovery
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.inner.terminal() == RuntimeConfigSettlementTerminal::Owned {
+            context.reload_step = reload_step;
+        }
+    }
+
     /// Fence a typed recovery result before any response can be published.
     #[must_use]
     pub fn fence_recovery(&self, reason: RuntimeConfigFenceReason) -> bool {
@@ -1632,6 +1687,12 @@ fn transition_to_fenced(operation: &OperationInner, reason: RuntimeConfigFenceRe
         RuntimeConfigFenceReason::PublicationAmbiguous => FENCE_REASON_PUBLICATION,
         RuntimeConfigFenceReason::AcknowledgementLost => FENCE_REASON_ACKNOWLEDGEMENT,
     };
+    // Serialize the winning terminal transition with SIGHUP diagnostic writes
+    // so the fail-stop line cannot observe a post-fence bucket or effect bit.
+    let _sighup_recovery = operation
+        .sighup_recovery
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut observed = operation.state.load(Ordering::Acquire);
     loop {
         if observed & TERMINAL_MASK != TERMINAL_OWNED {
@@ -1685,6 +1746,10 @@ fn propagate_fence(operation: &OperationInner) {
     {
         admission.close();
     }
+    let sighup_recovery = *operation
+        .sighup_recovery
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     tracing::error!(
         operation_id = operation.id,
         kind = operation.kind.as_str(),
@@ -1700,6 +1765,8 @@ fn propagate_fence(operation: &OperationInner) {
         fence_reason = operation
             .fence_reason()
             .map_or("none", RuntimeConfigFenceReason::as_str),
+        reload_step = sighup_recovery.reload_step,
+        accepted_effect = sighup_recovery.accepted_effect,
         exit_status = AMBIGUOUS_CONFIG_EXIT_STATUS,
         "runtime config settlement fail-stop armed"
     );
@@ -1934,6 +2001,19 @@ mod tests {
         RuntimeConfigCoordinator,
         Option<Arc<Semaphore>>,
     ) {
+        operation_with_kind(watchdog, stream, RuntimeConfigOperationKind::Apply).await
+    }
+
+    async fn operation_with_kind(
+        watchdog: &RuntimeConfigSettlementWatchdog,
+        stream: bool,
+        kind: RuntimeConfigOperationKind,
+    ) -> (
+        OwnedRuntimeConfigOperation,
+        RuntimeConfigExecutorGuard,
+        RuntimeConfigCoordinator,
+        Option<Arc<Semaphore>>,
+    ) {
         let coordinator = RuntimeConfigCoordinator::new();
         let permit = coordinator.acquire().await.unwrap();
         let admission = stream.then(|| Arc::new(Semaphore::new(1)));
@@ -1942,7 +2022,7 @@ mod tests {
             None => None,
         };
         let (operation, guard) = watchdog.register_owned(
-            RuntimeConfigOperationKind::Apply,
+            kind,
             coordinator.clone(),
             permit,
             DaemonGate::new(),
@@ -2435,6 +2515,78 @@ mod tests {
         operation.advance_phase(RuntimeConfigSettlementPhase::SettlingRollback);
         assert_eq!(operation.phase(), RuntimeConfigSettlementPhase::Mutating);
         assert_eq!(receiver.recv_timeout(Duration::from_secs(5)).unwrap(), 70);
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn sighup_recovery_context_is_monotonic_and_freezes_with_fence() {
+        let (watchdog, receiver) = test_watchdog(Duration::from_secs(5), Duration::from_millis(20));
+        let (operation, guard, _, _) =
+            operation_with_kind(&watchdog, false, RuntimeConfigOperationKind::Sighup).await;
+        assert_eq!(
+            *operation.inner.sighup_recovery.lock().unwrap(),
+            SighupRecoveryContext {
+                reload_step: SIGHUP_RELOAD_STEP_NOT_RECORDED,
+                accepted_effect: false,
+            }
+        );
+        operation.mark_sighup_accepted_effect();
+        operation.record_sighup_recovery_step("neighbors.reconcile");
+        assert!(operation.fence_recovery(RuntimeConfigFenceReason::AcknowledgementLost));
+        operation.record_sighup_recovery_step("config_bridge");
+        operation.mark_sighup_accepted_effect();
+        assert_eq!(
+            *operation.inner.sighup_recovery.lock().unwrap(),
+            SighupRecoveryContext {
+                reload_step: "neighbors.reconcile",
+                accepted_effect: true,
+            }
+        );
+        assert_eq!(receiver.recv_timeout(Duration::from_secs(5)).unwrap(), 70);
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn sighup_recovery_context_freezes_false_before_any_accepted_effect() {
+        let (watchdog, receiver) = test_watchdog(Duration::from_secs(5), Duration::from_millis(20));
+        let (operation, guard, _, _) =
+            operation_with_kind(&watchdog, false, RuntimeConfigOperationKind::Sighup).await;
+        assert_eq!(
+            *operation.inner.sighup_recovery.lock().unwrap(),
+            SighupRecoveryContext {
+                reload_step: SIGHUP_RELOAD_STEP_NOT_RECORDED,
+                accepted_effect: false,
+            }
+        );
+        operation.record_sighup_recovery_step("neighbors.reconcile");
+        assert!(operation.fence_recovery(RuntimeConfigFenceReason::AcknowledgementLost));
+        operation.record_sighup_recovery_step("config_bridge");
+        operation.mark_sighup_accepted_effect();
+        assert_eq!(
+            *operation.inner.sighup_recovery.lock().unwrap(),
+            SighupRecoveryContext {
+                reload_step: "neighbors.reconcile",
+                accepted_effect: false,
+            }
+        );
+        assert_eq!(receiver.recv_timeout(Duration::from_secs(5)).unwrap(), 70);
+        drop(guard);
+    }
+
+    #[tokio::test]
+    async fn non_sighup_recovery_context_remains_not_applicable() {
+        let (watchdog, _receiver) = test_watchdog(Duration::from_secs(5), Duration::from_secs(1));
+        let (operation, guard, _, _) = operation(&watchdog, false).await;
+        operation.mark_sighup_accepted_effect();
+        operation.record_sighup_recovery_step("neighbors.reconcile");
+        assert_eq!(
+            *operation.inner.sighup_recovery.lock().unwrap(),
+            SighupRecoveryContext {
+                reload_step: SIGHUP_RELOAD_STEP_NOT_APPLICABLE,
+                accepted_effect: false,
+            }
+        );
+        assert!(operation.try_settle());
         drop(guard);
     }
 

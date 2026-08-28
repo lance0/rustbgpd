@@ -226,7 +226,8 @@ runtime config settlement fail-stop armed
 
 with fields `operation_id`, `kind`, `phase`, `elapsed_seconds`,
 `budget_seconds`, `response_attached`, `terminal="recovery_fenced"`,
-`fence_reason`, and `exit_status=70`. In daemon mode no other path
+`fence_reason`, `reload_step`, `accepted_effect`, and `exit_status=70`.
+In daemon mode no other path
 exits 70, and no fail-stop happens without this line. Reading it:
 
 - `kind` names the owner family (`sighup`, `apply`, `confirm`,
@@ -244,10 +245,21 @@ exits 70, and no fail-stop happens without this line. Reading it:
   anything; it explains why no client saw an error.
 - `operation_id` is a daemon-generated correlation ID, meaningful only
   for matching this process's own log lines.
+- For `kind=sighup`, `reload_step` names the compile-time reload bucket
+  that returned the typed fenced outcome, and `accepted_effect=true`
+  means at least one earlier SIGHUP effect was accepted, including the
+  credential-generation refresh that begins a daemon SIGHUP. `false`
+  means no earlier accepted effect was observed; it does **not** prove
+  that the fenced step had no effect, because an acknowledgement-lost
+  step remains ambiguous by definition.
+  `reload_step=not_recorded` means the budget or executor-loss fence won
+  before a typed SIGHUP bucket was recorded. Other operation kinds report
+  `reload_step=not_applicable` and `accepted_effect=false`; the bit is not
+  meaningful for those kinds.
 
 The diagnostic deliberately carries no config contents, paths, tokens,
-confirm IDs, or raw error text; `kind` + `phase` + `fence_reason` are
-the complete classification.
+confirm IDs, targets, or raw error text. The SIGHUP bucket is a static
+classification, never an operator-supplied value.
 
 The Prometheus `RustbgpdRestarted` alert can reveal a sampled change in
 `process_start_time_seconds` for the stable rustbgpd scrape target. It covers

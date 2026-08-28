@@ -11,6 +11,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- SIGHUP settlement fail-stop diagnostics now name the static reload step
+  that fenced and whether an earlier effect was accepted. Non-SIGHUP owners
+  report an explicit non-applicable step, while
+  targets, configuration contents, and raw error text remain excluded.
+
 - The July bgperf2 receipt and its documentation mirrors now preserve the raw
   historical rows without cross-daemon rankings. A fixed target order,
   sampler threads that continued polling across later cells, incomplete
