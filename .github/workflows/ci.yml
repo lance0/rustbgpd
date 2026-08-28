@@ -393,6 +393,7 @@ jobs:
             --artifact-dir docs/perf/artifacts/reload-authoritative-batch-discriminator-2026-08
           bash -n bench/compare-criterion.sh bench/tests/test-compare-criterion-harness.sh
           shellcheck bench/compare-criterion.sh bench/tests/test-compare-criterion-harness.sh
+          shellcheck bench/compare-route-paging.sh bench/compare-rib-memory.sh
           shellcheck bench/smoke-benches.sh
           bash -n bench/scale/route-server-1000/run-receipt.sh
           bash -n bench/scale/enhanced-route-refresh/run-receipt.sh
@@ -414,6 +415,8 @@ jobs:
           bash bench/tests/test-vpn-query-receipt.sh
           bash bench/tests/test-vpn-query-campaign.sh
           bash bench/tests/test-compare-criterion-harness.sh
+          bash bench/tests/test-route-paging-driver.sh
+          python3 bench/tests/test_verify_mrt_attribute_scratch_campaign.py
           bash -n bench/scale/compare-rrharness.sh
           bash bench/tests/test-rrharness-driver.sh
           python3 -m unittest discover \
