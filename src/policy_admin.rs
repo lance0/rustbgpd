@@ -446,10 +446,10 @@ pub(crate) fn catalog_config_error(error: ConfigError) -> CatalogMutationError {
 }
 
 fn raw_neighbor(raw: &PresenceAwareNeighborCreate) -> Neighbor {
-    let family_name = |(afi, safi): &(rustbgpd_wire::Afi, rustbgpd_wire::Safi)| match (afi, safi) {
-        (rustbgpd_wire::Afi::Ipv4, rustbgpd_wire::Safi::Unicast) => "ipv4_unicast".to_string(),
-        (rustbgpd_wire::Afi::Ipv6, rustbgpd_wire::Safi::Unicast) => "ipv6_unicast".to_string(),
-        _ => format!("{afi:?}_{safi:?}"),
+    let family_name = |(afi, safi): &(rustbgpd_wire::Afi, rustbgpd_wire::Safi)| {
+        rustbgpd_wire::family_label(*afi, *safi)
+            .unwrap_or("unsupported")
+            .to_string()
     };
     Neighbor {
         address: raw.address.to_string(),
@@ -941,6 +941,42 @@ remote_asn = 65002
         let config = toml::from_str(&tier_authorized_uds_test_config(toml)).unwrap();
         assert_tier_authorized_test_config(&config);
         config
+    }
+
+    #[test]
+    fn raw_neighbor_persists_canonical_family_labels() {
+        let families = rustbgpd_wire::CONFIGURED_FAMILIES
+            .iter()
+            .map(|(_, afi, safi)| (*afi, *safi))
+            .collect::<Vec<_>>();
+        let raw = PresenceAwareNeighborCreate {
+            address: "192.0.2.1".parse().unwrap(),
+            interface: None,
+            remote_asn: 65_001,
+            description: None,
+            peer_group: None,
+            hold_time: None,
+            min_hold_time: None,
+            send_hold_time: None,
+            max_prefixes: None,
+            max_prefix_restart_seconds: None,
+            remove_private_as: None,
+            local_role: None,
+            families: Some(families.clone()),
+            required_families: Some(families),
+            route_server_client: None,
+            per_client_best: None,
+            strict_role: None,
+            add_path: None,
+        };
+        let expected = rustbgpd_wire::CONFIGURED_FAMILIES
+            .iter()
+            .map(|(label, _, _)| (*label).to_string())
+            .collect::<Vec<_>>();
+
+        let neighbor = raw_neighbor(&raw);
+        assert_eq!(neighbor.families, expected);
+        assert_eq!(neighbor.required_families, expected);
     }
 
     #[test]

@@ -872,6 +872,12 @@ IPv6 unicast.
 `AddNeighbor` returns `INVALID_ARGUMENT`. Empty inherits a non-empty peer-group
 list; when both are empty, partial negotiation is preserved.
 `NeighborState.config.required_families` reports the effective inherited list.
+Both fields accept the same twelve canonical labels as the configuration file:
+`ipv4_unicast`, `ipv6_unicast`, `ipv4_flowspec`, `ipv6_flowspec`,
+`l2vpn_evpn`, `linkstate`, `linkstate_vpn`, `l3vpn_ipv4_unicast`,
+`l3vpn_ipv6_unicast`, `ipv4_labeled_unicast`, `ipv6_labeled_unicast`, and
+`rtc`. Read responses return those same labels; the `bgpls` spellings remain
+metric labels rather than configuration aliases.
 
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \

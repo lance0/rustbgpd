@@ -5,6 +5,9 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+- Added one canonical address-family label table plus `parse_family` and
+  `family_label` helpers for the twelve AFI/SAFI pairs accepted by rustbgpd's
+  configuration and control-plane APIs.
 - Added `PathAttribute::only_to_customer()` for reading either typed OTC
   representation without discarding the Partial flag.
 

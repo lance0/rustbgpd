@@ -58,6 +58,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   framing boundary, while pre-negotiation OPEN bodies retain their exact
   4,077-byte legacy boundary.
 
+- Neighbor and peer-group gRPC mutations now accept every address family
+  supported by the configuration file, and read responses emit the same
+  canonical vocabulary. BGP-LS remains `linkstate` / `linkstate_vpn` on
+  configuration and operator surfaces while existing `bgpls` metric labels
+  remain unchanged.
+
 - Policy mutation preflight failures now preserve `NOT_FOUND`, `INVALID_ARGUMENT`, and
   `FAILED_PRECONDITION` while retaining the closed `policy_preflight_rejected` diagnostic.
 
