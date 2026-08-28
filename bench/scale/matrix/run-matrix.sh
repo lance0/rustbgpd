@@ -50,6 +50,21 @@ resolve_competitor_image() {
 }
 
 matrix_prepare_event() { :; }
+recheck_source_git_identity() {
+    local repo=$1 provenance_file=$2 stored current_commit current_tree current_dirty=false status
+    local stored_commit stored_tree stored_dirty
+    stored=$(jq -er '[.git.commit,.git.tree,(.git.dirty|tostring)] | @tsv' "$provenance_file") || return 1
+    IFS=$'\t' read -r stored_commit stored_tree stored_dirty <<<"$stored"
+    [[ $stored_commit =~ ^[0-9a-f]{40}$ && $stored_tree =~ ^[0-9a-f]{40}$ ]] || return 1
+    [[ $stored_dirty == true || $stored_dirty == false ]] || return 1
+    current_commit=$(git -C "$repo" rev-parse 'HEAD^{commit}') || return 1
+    current_tree=$(git -C "$repo" rev-parse 'HEAD^{tree}') || return 1
+    status=$(git -C "$repo" status --porcelain=v1) || return 1
+    [ -z "$status" ] || current_dirty=true
+    [ "$stored_commit" = "$current_commit" ] &&
+        [ "$stored_tree" = "$current_tree" ] &&
+        [ "$stored_dirty" = "$current_dirty" ]
+}
 prepare_selected_cell() {
     local cell=$1 status_file=$2 quiet_file=$3
     PREPARED_IMAGE_REF=""
@@ -75,7 +90,11 @@ if [ "${1:-}" = --self-test-prepare-order ]; then
     [ "$#" -eq 4 ] || exit 2
     trace=$2 selected=$3 status=$4
     matrix_prepare_event() { printf '%s\n' "$1" >>"$trace"; }
-    recheck_cell_provenance() { matrix_prepare_event "$1:live-verify"; [ -s "$status.provenance" ]; }
+    recheck_cell_provenance() {
+        matrix_prepare_event "$1:live-verify"
+        [ -n "${MATRIX_SELF_TEST_REPO:-}" ] &&
+            recheck_source_git_identity "$MATRIX_SELF_TEST_REPO" "$status.provenance"
+    }
     resolve_competitor_image() { printf 'sha256:%064d\n' 0; }
     wait_for_rustbgpd_quiet_host() { : >"$1"; }
     prepare_selected_cell "$selected" "$status" "$status.quiet"
@@ -147,10 +166,11 @@ recheck_cell_provenance() {
         provenance_require_sha256 "$REPO/$relative" "$expected" || return 1
     done < <(jq -r '.sources.common + .sources.generator + {(.sources.reloadstall.path):.sources.reloadstall.sha256} | to_entries[] | [.key,.value] | @tsv' "$file")
     if [ "$cell" = rustbgpd ]; then
-        provenance_require_sha256 "$REPO/$(jq -r '.workload.binary' "$file")" "$(jq -r '.workload.sha256' "$file")"
+        provenance_require_sha256 "$REPO/$(jq -r '.workload.binary' "$file")" "$(jq -r '.workload.sha256' "$file")" || return 1
     else
-        [ "$(docker image inspect --format '{{.Id}}' "$(jq -r '.workload.image_ref' "$file")")" = "$(jq -r '.workload.image_id' "$file")" ]
+        [ "$(docker image inspect --format '{{.Id}}' "$(jq -r '.workload.image_ref' "$file")")" = "$(jq -r '.workload.image_id' "$file")" ] || return 1
     fi
+    recheck_source_git_identity "$REPO" "$file"
 }
 
 # run_cell <cell>: everything for one matrix cell. Nonzero return = cell

@@ -61,10 +61,45 @@ if "$root/bench/scale/matrix/run-matrix.sh" --self-test-prepare-order \
   "$trace" bird "$status" >/dev/null; then
   exit 1
 fi
-printf 'present\n' >"$status.provenance"
+
+source_repo="$tmp/source-repo"
+git init -q "$source_repo"
+git -C "$source_repo" config user.email scale-provenance@test.invalid
+git -C "$source_repo" config user.name scale-provenance-test
+printf 'source\n' >"$source_repo/input"
+git -C "$source_repo" add input
+git -C "$source_repo" commit -qm initial
+source_commit=$(git -C "$source_repo" rev-parse 'HEAD^{commit}')
+source_tree=$(git -C "$source_repo" rev-parse 'HEAD^{tree}')
+write_source_identity() {
+  jq -n --arg commit "$1" --arg tree "$2" --argjson dirty "$3" \
+    '{git:{commit:$commit,tree:$tree,dirty:$dirty}}' >"$status.provenance"
+}
+run_resume_check() {
+  MATRIX_SELF_TEST_REPO="$source_repo" \
+    "$root/bench/scale/matrix/run-matrix.sh" --self-test-prepare-order \
+      "$trace" bird "$status" >/dev/null
+}
+
+write_source_identity "$source_commit" "$source_tree" false
 resume_rc=0
-"$root/bench/scale/matrix/run-matrix.sh" --self-test-prepare-order \
-  "$trace" bird "$status" >/dev/null || resume_rc=$?
+run_resume_check || resume_rc=$?
 [[ $resume_rc == 10 ]]
 [[ $(tail -n2 "$trace") == $'bird:resume-verify\nbird:live-verify' ]]
+
+git -C "$source_repo" commit --allow-empty -qm changed-head
+if run_resume_check; then exit 1; fi
+git -C "$source_repo" reset -q --hard "$source_commit"
+
+write_source_identity "$source_commit" "$(printf 'f%.0s' {1..40})" false
+if run_resume_check; then exit 1; fi
+
+write_source_identity "$source_commit" "$source_tree" false
+printf 'dirty\n' >>"$source_repo/input"
+if run_resume_check; then exit 1; fi
+git -C "$source_repo" restore input
+
+resume_rc=0
+run_resume_check || resume_rc=$?
+[[ $resume_rc == 10 ]]
 echo "scale provenance tests pass"
