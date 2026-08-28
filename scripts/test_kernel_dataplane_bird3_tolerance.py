@@ -52,6 +52,7 @@ def needs_context(
     bird3_status: str | None = "ok",
     bird3_result: str | None = None,
     m43_result: str | None = None,
+    tcp_ao_supported: str | None = "true",
 ) -> dict[str, dict]:
     default = "success" if run_labs == "true" else "skipped"
     needs = {job: {"result": default} for job in EXPECTED_JOBS}
@@ -63,6 +64,8 @@ def needs_context(
     if bird3_status is not None:
         needs["bird3_archive"]["outputs"] = {"bird3_status": bird3_status}
     needs["m43"] = {"result": m43_result or default}
+    if tcp_ao_supported is not None:
+        needs["m43"]["outputs"] = {"tcp_ao_supported": tcp_ao_supported}
     return needs
 
 
@@ -104,6 +107,27 @@ class Bird3ToleranceTests(unittest.TestCase):
         self.assertEqual(1, result.returncode, result.stdout + result.stderr)
         self.assertIn("m43=failure\n", result.stdout)
         self.assertNotIn(EXCUSE, result.stdout)
+
+    def test_m43_success_with_tcp_ao_disabled_fails(self) -> None:
+        # A green m43 on a kernel without CONFIG_TCP_AO=y ran zero lab
+        # steps; the aggregate must treat that success as a coverage hole.
+        for tcp_ao in ("false", None):
+            with self.subTest(tcp_ao_supported=tcp_ao):
+                result = run_aggregate(needs_context(tcp_ao_supported=tcp_ao))
+                self.assertEqual(1, result.returncode, result.stdout)
+                self.assertIn("every TCP-AO step was disabled", result.stdout)
+
+    def test_excused_skip_needs_no_tcp_ao_output(self) -> None:
+        # A skipped job publishes no outputs; the excused bird3 skip must
+        # not additionally be charged with the missing TCP-AO verdict.
+        result = run_aggregate(
+            needs_context(
+                bird3_status="unavailable",
+                m43_result="skipped",
+                tcp_ao_supported=None,
+            )
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
     def test_corrupt_archive_stays_red(self) -> None:
         # A checksum/version failure on bytes that DID download is a
@@ -149,6 +173,7 @@ class Bird3ToleranceTests(unittest.TestCase):
             "bird3_status: ${{ steps.prepare.outputs.bird3_status }}",
             "if: needs.bird3_archive.outputs.bird3_status != 'unavailable'",
             "if: steps.prepare.outputs.bird3_status == 'ok'",
+            "tcp_ao_supported: ${{ steps.tcp_ao.outputs.supported }}",
             "3) status=unavailable ;;",
             "4) status=corrupt ;;",
         ):

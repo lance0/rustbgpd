@@ -438,6 +438,11 @@ jobs:
     name: M43 — TCP-AO live rotation and crash recovery (BIRD 3.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Every lab step below is gated on the TCP-AO probe, so a runner kernel
+    # without CONFIG_TCP_AO=y would let this job succeed having run nothing.
+    # Republish the probe result for the check aggregate to require.
+    outputs:
+      tcp_ao_supported: ${{ steps.tcp_ao.outputs.supported }}
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-dataplane-host
@@ -978,6 +983,22 @@ jobs:
                   continue
               if result != expected_result:
                   failed = True
+          # An m43 that succeeded with every TCP-AO step disabled ran no labs
+          # at all: the kernel-support probe republishes its verdict as a job
+          # output, and a lab run must prove the steps were live. The excused
+          # bird3 skip above stays the only tolerated coverage hole.
+          tcp_ao = needs["m43"].get("outputs", {}).get("tcp_ao_supported")
+          if (
+              run_labs == "true"
+              and needs["m43"].get("result") == "success"
+              and tcp_ao != "true"
+          ):
+              print(
+                  "::error::m43 succeeded with tcp_ao_supported="
+                  f"{tcp_ao!r}: every TCP-AO step was disabled, so the "
+                  "TCP-AO lane ran nothing"
+              )
+              failed = True
           if excused:
               print(
                   "::warning::m43=skipped (bird3 archive unavailable upstream): "

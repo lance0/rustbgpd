@@ -320,6 +320,10 @@ class PrimerContractTests(unittest.TestCase):
             }
             for job in expected
         }
+        if workflow == "kernel-dataplane.yml" and needs["m43"]["result"] == "success":
+            # A live m43 republishes its TCP-AO probe verdict; the aggregate
+            # requires it whenever the labs ran.
+            needs["m43"]["outputs"] = {"tcp_ao_supported": "true"}
         return subprocess.run(
             ["python3", "-c", script],
             check=False,

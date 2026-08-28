@@ -278,6 +278,30 @@ else
     fi
 fi
 
+# Cargo exits 0 when a test filter matches nothing, so a renamed or
+# removed test would leave every selector green while running zero
+# tests. List what the assembled command would actually run — same
+# image, env, and filters — and require the expected match count
+# before the real invocation.
+if [ -n "$RUSTBGPD_TEST_FILTER" ]; then
+    LIST_ARGS=(sh -c "${TEST_ARGS[2]} --list")
+else
+    LIST_ARGS=("${TEST_ARGS[@]}" --list)
+fi
+echo "[harness] listing: ${LIST_ARGS[*]}"
+LIST_OUT="$(docker run "${DOCKER_ARGS[@]}" "$IMAGE_TAG" "${LIST_ARGS[@]}")"
+MATCHED="$(grep -c ': test$' <<<"$LIST_OUT" || true)"
+if [ "$EXACT_FILTER" = "1" ] && [ -n "$FILTER" ]; then
+    if [ "$MATCHED" -ne 1 ]; then
+        echo "ERROR: selector '$SELECTOR' (--exact '$FILTER') matched $MATCHED tests in $TEST_BIN, expected exactly 1 — renamed or removed?" >&2
+        exit 1
+    fi
+elif [ "$MATCHED" -lt 1 ]; then
+    echo "ERROR: selector '$SELECTOR' matched 0 tests — renamed, removed, or filter narrowed?" >&2
+    exit 1
+fi
+echo "[harness] selector '$SELECTOR' matches $MATCHED test(s)"
+
 echo "[harness] running: ${TEST_ARGS[*]}"
 docker run "${DOCKER_ARGS[@]}" "$IMAGE_TAG" "${TEST_ARGS[@]}"
 
