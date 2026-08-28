@@ -62,6 +62,73 @@ async fn closed_internal_command_lane_keeps_public_actor_live() {
         .unwrap();
 }
 
+/// A readiness ping is an actor-liveness check, not an inventory request. A
+/// session command queue that cannot currently accept `QueryState` must not
+/// delay either the ordinary fallback or the dedicated readiness lane.
+#[tokio::test]
+async fn ping_on_both_manager_lanes_does_not_query_stalled_session_state() {
+    let (tx, rx) = mpsc::channel(4);
+    let (readiness_tx, readiness_rx) = mpsc::channel(4);
+    let (rib_tx, _rib_rx) = mpsc::channel(8);
+    let mut manager = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    )
+    .with_readiness_queries(readiness_rx);
+    let peer: IpAddr = "192.0.2.1".parse().unwrap();
+    let (release, release_rx) = oneshot::channel();
+    let (observed, mut observations) = mpsc::unbounded_channel();
+    insert_test_managed_peer(
+        &mut manager,
+        peer,
+        blocked_snapshot_query_handle(peer, release_rx, observed),
+        false,
+    );
+    let actor = tokio::spawn(manager.run());
+
+    let (ordinary_reply, ordinary_response) = oneshot::channel();
+    tx.send(PeerManagerCommand::Ping {
+        reply: ordinary_reply,
+    })
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), ordinary_response)
+        .await
+        .expect("ordinary ping must not wait for session state")
+        .expect("ordinary ping reply");
+
+    let (readiness_reply, readiness_response) = oneshot::channel();
+    readiness_tx
+        .send(PeerManagerReadinessQuery::Ping {
+            reply: readiness_reply,
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), readiness_response)
+        .await
+        .expect("dedicated ping must not wait for session state")
+        .expect("dedicated ping reply");
+
+    assert!(
+        observations.try_recv().is_err(),
+        "neither ping may fan out a session-state query"
+    );
+
+    release.send(()).unwrap();
+    tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    actor.await.unwrap();
+    assert!(
+        observations.try_recv().is_err(),
+        "no delayed session-state query may outlive either ping"
+    );
+}
+
 fn blocked_snapshot_query_handle(
     peer: IpAddr,
     release: oneshot::Receiver<()>,

@@ -580,6 +580,9 @@ impl PeerManager {
 
     async fn handle_readiness_query(&self, query: PeerManagerReadinessQuery) {
         match query {
+            PeerManagerReadinessQuery::Ping { reply } => {
+                let _ = reply.send(());
+            }
             PeerManagerReadinessQuery::ListPeers { reply } => {
                 self.answer_list_peers(reply).await;
             }
@@ -986,6 +989,9 @@ impl PeerManager {
                         return;
                     };
                     match cmd {
+                        PeerManagerCommand::Ping { reply } => {
+                            let _ = reply.send(());
+                        }
                         PeerManagerCommand::AddPeer { config, sync_config_snapshot, reply } => {
                             let result = self.add_peer(config, sync_config_snapshot).await;
                             let _ = reply.send(result);

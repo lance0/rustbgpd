@@ -38,6 +38,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `/readyz` now checks peer-manager responsiveness with a constant-time actor
+  ping instead of building a full peer inventory and querying every session.
+  The mutation gate, RIB check, and shared 200 ms deadline are unchanged;
+  `GetHealth` continues to return the detailed peer snapshot.
+
 - Full-table blackhole and FIB RIB queries now share one two-second deadline
   across channel admission and reply, and cooperatively abandon Loc-RIB and
   ECMP materialization at bounded strides. An incomplete snapshot is dropped
