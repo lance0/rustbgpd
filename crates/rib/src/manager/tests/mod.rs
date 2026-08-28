@@ -663,6 +663,24 @@ fn gauge_metric_value(metrics: &BgpMetrics, name: &str, labels: &[(&str, &str)])
         .map_or(0.0, |metric| metric.get_gauge().value())
 }
 
+fn counter_metric_value(metrics: &BgpMetrics, name: &str, labels: &[(&str, &str)]) -> f64 {
+    metrics
+        .registry()
+        .gather()
+        .iter()
+        .find(|family| family.name() == name)
+        .and_then(|family| {
+            family.metric.iter().find(|metric| {
+                labels.iter().all(|(expected_name, expected_value)| {
+                    metric.get_label().iter().any(|label| {
+                        label.name() == *expected_name && label.value() == *expected_value
+                    })
+                })
+            })
+        })
+        .map_or(0.0, |metric| metric.get_counter().value())
+}
+
 fn histogram_sample_counts_by_label(
     metrics: &BgpMetrics,
     name: &str,

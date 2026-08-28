@@ -947,6 +947,179 @@ async fn peer_down_of_replacement_session_fails_over_to_surviving_session() {
     handle.await.unwrap();
 }
 
+/// A full survivor channel must defer the collision-failback refresh without
+/// counting permanent loss, then deliver exactly one request after capacity
+/// returns through the existing resync timer.
+#[tokio::test]
+async fn failover_inbound_refresh_retries_once_after_channel_drains() {
+    tokio::time::pause();
+
+    let (tx, rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let handle = tokio::spawn(manager.run());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+    // Capacity one makes the failover initial EoR occupy the only slot, so
+    // the immediately-following inbound refresh request must be deferred.
+    let (winner_tx, mut winner_rx) = mpsc::channel(1);
+    let winner_session_tx = winner_tx.clone();
+    tx.send(session_peer_up(peer, 1, winner_tx, evpn_sendable()))
+        .await
+        .unwrap();
+    drain_eor(&mut winner_rx).await;
+
+    let (loser_tx, mut loser_rx) = mpsc::channel(1);
+    tx.send(session_peer_up(peer, 2, loser_tx, evpn_sendable()))
+        .await
+        .unwrap();
+    drain_eor(&mut loser_rx).await;
+    tx.send(RibUpdate::PeerDown {
+        peer,
+        session_id: 2,
+    })
+    .await
+    .unwrap();
+
+    let failover_dump = winner_rx.recv().await.expect("winner channel stays open");
+    assert!(!failover_dump.request_refresh_all_negotiated);
+    assert!(!failover_dump.end_of_rib.is_empty());
+    assert!(
+        counter_metric_value(
+            &metrics,
+            "bgp_outbound_route_drops_total",
+            &[("peer", "10.0.0.2")],
+        )
+        .abs()
+            < f64::EPSILON,
+        "temporary saturation is deferred, not counted as permanent loss"
+    );
+
+    tokio::time::advance(DIRTY_RESYNC_INTERVAL).await;
+    tokio::task::yield_now().await;
+    let refresh = winner_rx.recv().await.expect("retry reaches live winner");
+    assert!(refresh.request_refresh_all_negotiated);
+
+    tokio::time::advance(DIRTY_RESYNC_INTERVAL).await;
+    tokio::task::yield_now().await;
+    assert!(
+        winner_rx.try_recv().is_err(),
+        "successful retry must clear the coalesced request"
+    );
+    assert!(
+        counter_metric_value(
+            &metrics,
+            "bgp_outbound_route_drops_total",
+            &[("peer", "10.0.0.2")],
+        )
+        .abs()
+            < f64::EPSILON,
+    );
+
+    drop(winner_session_tx);
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[test]
+fn pending_inbound_refresh_coalesces_and_closed_channel_is_terminal() {
+    let (_tx, rx) = mpsc::channel(1);
+    let metrics = BgpMetrics::new();
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, mut out_rx) = mpsc::channel(1);
+    manager.handle_update(session_peer_up(peer, 11, out_tx, evpn_sendable()));
+
+    // The initial EoR fills the only slot. Repeat requests replace the same
+    // peer-generation bit instead of appending attempts.
+    manager.request_inbound_refresh(peer);
+    manager.request_inbound_refresh(peer);
+    assert_eq!(manager.pending_inbound_refresh.len(), 1);
+    assert_eq!(manager.pending_inbound_refresh.get(&peer), Some(&11));
+
+    let _ = out_rx.try_recv().expect("initial EoR occupied the channel");
+    drop(out_rx);
+    manager.retry_pending_inbound_refresh_bounded();
+    assert!(manager.pending_inbound_refresh.is_empty());
+    assert!(
+        (counter_metric_value(
+            &metrics,
+            "bgp_outbound_route_drops_total",
+            &[("peer", "10.0.0.2")],
+        ) - 1.0)
+            .abs()
+            < f64::EPSILON,
+        "a closed live-session channel retires and counts terminal loss"
+    );
+}
+
+#[test]
+fn newer_registration_reaps_older_pending_inbound_refresh() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (old_tx, mut old_rx) = mpsc::channel(1);
+    manager.handle_update(session_peer_up(peer, 21, old_tx, evpn_sendable()));
+    manager.request_inbound_refresh(peer);
+    assert_eq!(manager.pending_inbound_refresh.get(&peer), Some(&21));
+
+    let (new_tx, _new_rx) = mpsc::channel(1);
+    manager.handle_update(session_peer_up(peer, 22, new_tx, evpn_sendable()));
+    assert!(manager.pending_inbound_refresh.is_empty());
+    assert_eq!(manager.outbound_session_ids.get(&peer), Some(&22));
+
+    let _ = old_rx
+        .try_recv()
+        .expect("old session's initial EoR remains");
+    assert!(
+        old_rx.try_recv().is_err(),
+        "stale refresh must not be delivered to the superseded session"
+    );
+}
+
+#[test]
+fn inbound_refresh_retry_attempts_at_most_one_resync_slice() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer_count = super::super::RESYNC_PEERS_PER_TICK + 1;
+    let mut receivers = Vec::with_capacity(peer_count);
+
+    for index in 0..peer_count {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, u8::try_from(index + 1).unwrap()));
+        let (out_tx, out_rx) = mpsc::channel(1);
+        manager.handle_update(session_peer_up(
+            peer,
+            u64::try_from(index + 1).unwrap(),
+            out_tx,
+            ipv4_sendable(),
+        ));
+        manager.request_inbound_refresh(peer);
+        receivers.push(out_rx);
+    }
+    assert_eq!(manager.pending_inbound_refresh.len(), peer_count);
+    for receiver in &mut receivers {
+        let _ = receiver.try_recv().expect("initial EoR fills each channel");
+    }
+
+    manager.retry_pending_inbound_refresh_bounded();
+    let first_slice_deliveries = receivers
+        .iter_mut()
+        .filter_map(|receiver| receiver.try_recv().ok())
+        .filter(|update| update.request_refresh_all_negotiated)
+        .count();
+    assert_eq!(first_slice_deliveries, super::super::RESYNC_PEERS_PER_TICK);
+    assert_eq!(manager.pending_inbound_refresh.len(), 1);
+
+    manager.retry_pending_inbound_refresh_bounded();
+    let second_slice_deliveries = receivers
+        .iter_mut()
+        .filter_map(|receiver| receiver.try_recv().ok())
+        .filter(|update| update.request_refresh_all_negotiated)
+        .count();
+    assert_eq!(second_slice_deliveries, 1);
+    assert!(manager.pending_inbound_refresh.is_empty());
+}
+
 /// GR flavor of the registration failover: a `PeerGracefulRestart` from
 /// the ACTIVE (replacement) session while another live session remains
 /// must fail the registration over to the survivor — NOT enter GR

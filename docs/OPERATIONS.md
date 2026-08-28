@@ -997,7 +997,7 @@ exactly under the floods these drops account for.
 | `bgp_rib_attr_intern_global_size` | Unique attribute sets in the daemon-wide cross-peer intern table (attribute-memory dedup across ALL peers). Tracks reclaim sweeps and growth under churn; a monotonic slope under steady-state churn indicates an intern leak. Replaces the per-peer `bgp_rib_attr_intern_size{peer}` gauge |
 | `bgp_messages_received_total` | Inbound BGP messages by type |
 | `bgp_messages_sent_total` | Outbound BGP messages by type |
-| `bgp_outbound_route_drops_total{peer}` | Outbound BGP work lost because the peer writer channel was full or closed. Unlike inbound RIB backpressure, this is a loss signal, not safe producer parking. Ordinary route updates, peer-refresh responses, and initial dumps enter dirty-peer resync; prefix-limit recovery remains queued for automatic family-scoped retry. A lost failover request for inbound ROUTE-REFRESH is not retried automatically, so run `rbgp neighbor <peer> softreset` or wait for natural re-advertisement |
+| `bgp_outbound_route_drops_total{peer}` | Outbound BGP work dropped because the peer writer channel was full or closed. Unlike inbound RIB backpressure, this is a loss signal, not safe producer parking. Ordinary route updates, peer-refresh responses, and initial dumps enter dirty-peer resync; prefix-limit recovery remains queued for automatic family-scoped retry. Collision-failback inbound ROUTE-REFRESH requests retain one peer/session-generation-scoped intent and retry on the same bounded cadence, so temporary saturation of that request does not increment this counter; a closed matching session is terminal and does increment it |
 | `bgp_peer_outbound_queue_depth{peer}` | Coalesced update frames buffered for a peer's outbound writer — the "which clients are behind" signal during convergence. Sampled at batch granularity (once per enqueue batch and once per writer drain pass, never per message). A value pinned near the writer's bulk-buffer capacity marks a slow or stuck client that is not draining our output; a healthy peer's depth returns to 0 after each burst. At large route-reflector fanout, sort peers by this gauge to find the laggard holding up convergence. Series reaped on session teardown |
 | `bgp_peer_update_group{peer}` | Which update group a peer currently belongs to — the "which group is this client in" lookup that `bgp_update_group_members{group}` (member counts) cannot answer. The value is the stable numeric group id (matches the `group` label of `bgp_update_group_members`); the sentinel `-1` marks a peer on the per-peer/ungrouped fallback path (peer-context policy, Add-Path send, per-client-best on a VPN/RTC session, ORR vantage, negotiated ORF, or slow-peer isolation). Refreshed on every membership change; series reaped on session teardown |
 | `bgp_peer_slow{peer}` | 1 while the peer is flagged slow: Established and alive (keepalives flowing, so the RFC 9687 send-hold teardown never fires) but persistently not draining its outbound queue — backlog at or above `slow_peer_threshold_pct` of the writer buffer for `slow_peer_duration` seconds. See "Slow peers" below for interpretation and actions. Refreshed on both transitions and on session teardown; series reaped on peer delete |
@@ -1564,8 +1564,10 @@ to the exact nonzero, unambiguous survivor, only that survivor enters
 as soon as ordinary waiters finish, but downstream EoR and route-refresh
 responses stay held until a post-failback BoRR is followed by the matching peer
 EoRR. Ordinary EoR, stray EoRR, and the local refresh timeout do not satisfy the
-waiter. Full or closed survivor outbound channels can lose the request, so the
-original selection-deferral deadline remains the bounded fallback.
+waiter. A full survivor outbound channel retains one session-generation-scoped
+request and retries it through the bounded RIB resync cadence. A closed channel
+retires the request without spinning; the original selection-deferral deadline
+remains the bounded fallback.
 
 The `active` and `waiters` gauges, plus ordinary `all_eor`,
 `collision_refresh`, and `all_excluded` releases, are dashboard context rather
