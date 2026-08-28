@@ -11,6 +11,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The July bgperf2 receipt and its documentation mirrors now preserve the raw
+  historical rows without cross-daemon rankings. A fixed target order,
+  sampler threads that continued polling across later cells, incomplete
+  competitor build provenance, and an instrumented FRR build make the former
+  margins and ratios unsupported; rustbgpd's fresh no-cache and release-only
+  repeatability receipts remain valid.
+
 - BMP per-collector queue loss now resets only the affected connection
   generation. A full or closed live fan-out queue closes that collector's TCP
   session without BMP Termination; the existing one-second retry reconnects,

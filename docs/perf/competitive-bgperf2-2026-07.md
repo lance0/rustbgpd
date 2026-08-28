@@ -1,22 +1,30 @@
 # Cross-stack bgperf2 receipt — rustbgpd vs BIRD, GoBGP, and FRR — 2026-07
 
-This receipt answers one bounded question: on one host, through one harness,
-how does rustbgpd compare to three incumbent BGP daemons across five fleet
-shapes? The short version is that rustbgpd is the fastest of the four on total
-time at every shape measured, wins convergence decisively at the route-server
-shape, and **has the largest of the four peak raw container cgroup-usage
-values at 100 peers ×
-1,000 prefixes — the route-server shape rustbgpd is built for.**
+This receipt preserves the raw output of one historical four-daemon bgperf2
+campaign across five fleet shapes. It no longer supports a cross-daemon
+performance ranking: a 2026-08-28 audit found execution-order and build
+asymmetries that the original interpretation did not disclose. The measured
+rows remain useful as historical observations, but derived wins, losses,
+ratios, slopes, and ordering claims are retracted.
 
-Both halves of that are the result. A comparison table that only gets
-published when it flatters the author is worth nothing, so the losses below
-are stated with the same precision as the wins, and the noisiest figure in the
-campaign is rustbgpd's own memory.
+Rustbgpd's separately retained no-cache measurements and later rustbgpd-only
+release spot checks remain valid for tracking that daemon against itself.
 
-Every figure is labelled *measured*, *computed*, or *extrapolated* at the point
-of use.
+**Historical July harness output only; no current cross-daemon ranking is supported.**
 
 ## Provenance
+
+> **Integrity correction — 2026-08-28:** the campaign always ran targets in
+> the fixed order rustbgpd → BIRD → GoBGP → FRR. One-second resource samplers
+> started for an earlier cell continued polling while later cells ran, adding
+> cumulative host work. That direction favors the earlier rustbgpd cells, but
+> the magnitude was not measured, so no correction factor is assigned. The
+> sampler data is not subtracted from target-container memory. Rustbgpd is the
+> only target with a retained fresh no-cache image-build receipt; competitor
+> images were pre-existing or not pinned to reproducible image digests and
+> source revisions. FRR was additionally built with gcov instrumentation.
+> These asymmetries invalidate cross-daemon rankings while leaving the raw
+> historical rows and rustbgpd-only repeatability checks intact.
 
 **Measured commit:** `515659b191b7fde91a1a1c9f973e7c8ae3731086`. That was the
 candidate tip when this campaign ran. `main` has since moved through routing
@@ -45,9 +53,9 @@ than asserted.
 Linux 6.17, Docker. All four daemons, the BIRD tester fleet, and the GoBGP
 monitor ran in containers on this one host. **Same-host caveat:** every daemon
 therefore competes for the same cores, memory bandwidth, and Docker bridge as
-the load generators. This is a comparison under identical conditions, not an
-absolute performance figure for any of the four, and it does not forecast a
-different machine.
+the load generators. This is historical same-host output, not an
+equal-condition comparison, an absolute performance figure for any daemon, or
+a forecast for another machine.
 
 **Campaign window:** 2026-07-26 00:22–01:57 UTC. The harness `date` column
 records the host's local date, 2026-07-25.
@@ -75,8 +83,8 @@ prefixes received, which therefore includes the wait for the first prefix.
 
 | Daemon | Convergence | Total (s) | Max CPU | Peak raw cgroup (MiB) |
 |---|---:|---:|---:|---:|
-| **rustbgpd** | **2 s** | **8.23** | 7% | 37.9 |
-| BIRD 2.18 | 2 s | 9.20 | 2% | **8.2** |
+| rustbgpd | 2 s | 8.23 | 7% | 37.9 |
+| BIRD 2.18 | 2 s | 9.20 | 2% | 8.2 |
 | GoBGP 4.3.0 | 3 s | 10.32 | 126% | 38.9 |
 | FRR 10.7.0-dev | 3 s | 10.27 | 4% | 27.6 |
 
@@ -90,8 +98,8 @@ BIRD raw cgroup usage: 8.2 five times and 9.2 once. GoBGP raw cgroup usage:
 
 | Daemon | Convergence | Total (s) | Max CPU | Peak raw cgroup (MiB) |
 |---|---:|---:|---:|---:|
-| **rustbgpd** | **2 s** | **8.26** | 7% | 48.1 |
-| BIRD 2.18 | 2 s | 9.24 | 1% | **9.2** |
+| rustbgpd | 2 s | 8.26 | 7% | 48.1 |
+| BIRD 2.18 | 2 s | 9.24 | 1% | 9.2 |
 | GoBGP 4.3.0 | 3 s | 10.34 | 88% | 44.0 |
 | FRR 10.7.0-dev | 3 s | 9.31 | 5% | 36.9 |
 
@@ -103,22 +111,21 @@ usage: 36.9 / 36.9 / 36.9.
 
 | Daemon | Convergence | Total (s) | Max CPU | Peak raw cgroup (MiB) |
 |---|---:|---:|---:|---:|
-| **rustbgpd** | **3 s** | **12.32** | 41% | 212.0 |
-| BIRD 2.18 | 3 s | 13.22 | 6% | **27.6** |
+| rustbgpd | 3 s | 12.32 | 41% | 212.0 |
+| BIRD 2.18 | 3 s | 13.22 | 6% | 27.6 |
 | GoBGP 4.3.0 | 6 s | 16.49 | 565% | 202.8 |
 | FRR 10.7.0-dev | 4 s | 13.39 | 94% | 228.4 |
 
 rustbgpd raw cgroup usage: 205.8 / 212.0 / 214.0. BIRD raw cgroup usage: 26.6 /
 27.6 / 28.7. GoBGP raw cgroup usage: 200.7 / 202.8 / 202.8. FRR raw cgroup
-usage: 226.3 / 228.4 / 229.4. This is the one shape where rustbgpd is not last
-on this memory surface — FRR is 7.7% larger.
+usage: 226.3 / 228.4 / 229.4.
 
 ### 30 peers × 1,000 prefixes — 30,000 routes (new)
 
 | Daemon | Convergence | Total (s) | Max CPU | Peak raw cgroup (MiB) |
 |---|---:|---:|---:|---:|
-| **rustbgpd** | **3 s** | **9.83** | 22% | 108.5 |
-| BIRD 2.18 | 3 s | 10.87 | 14% | **11.3** |
+| rustbgpd | 3 s | 9.83 | 22% | 108.5 |
+| BIRD 2.18 | 3 s | 10.87 | 14% | 11.3 |
 | GoBGP 4.3.0 | 4 s | 11.84 | 897% | 68.6 |
 | FRR 10.7.0-dev | 4 s | 10.85 | 11% | 51.2 |
 
@@ -130,8 +137,8 @@ BIRD raw cgroup usage: 11.3 / 11.3 / 14.3. GoBGP raw cgroup usage: 67.6 / 68.6 /
 
 | Daemon | Convergence | Total (s) | Max CPU | Peak raw cgroup (MiB) |
 |---|---:|---:|---:|---:|
-| **rustbgpd** | **3 s** | **11.79** | 122% | 212.0 |
-| BIRD 2.18 | 5 s | 15.22 | 101% | **32.8** |
+| rustbgpd | 3 s | 11.79 | 122% | 212.0 |
+| BIRD 2.18 | 5 s | 15.22 | 101% | 32.8 |
 | GoBGP 4.3.0 | 20 s | 28.50 | 1281% | 193.5 |
 | FRR 10.7.0-dev | 7 s | 16.01 | 68% | 134.1 |
 
@@ -139,63 +146,24 @@ BIRD raw cgroup usage: 11.3 / 11.3 / 14.3. GoBGP raw cgroup usage: 67.6 / 68.6 /
 32.8 / 32.8 / 33.8. GoBGP raw cgroup usage: 183.3 / 193.5 / 198.7. FRR raw
 cgroup usage: 134.1 / 134.1 / 135.2.
 
-## What rustbgpd wins
+## Cross-daemon interpretation retracted
 
-**Total time, at all five shapes.** *Computed* margins against the next-fastest
-daemon at each shape: 0.97 s at 10p × 1k (vs BIRD), 1.05 s at 2p × 10k (vs
-FRR), 0.90 s at 2p × 100k (vs BIRD), 1.02 s at 30p × 1k (vs FRR), and 3.43 s at
-100p × 1k (vs BIRD). Four of those five margins are around a second and sit on
-a per-cell spread of a few hundredths of a second, so the ordering is stable;
-the fifth is not close.
+The elapsed, total-time, CPU, and raw-cgroup columns above are retained exactly
+as recorded. They must not be turned into daemon rankings or cross-daemon
+ratios because the targets did not receive an order-neutral, build-equivalent
+measurement envelope. A future comparison needs counterbalanced target order,
+cell-scoped samplers that are stopped and reaped before the next target, and
+reproducibly pinned non-instrumented builds for every daemon.
 
-**Convergence at the route-server shape.** At 100 peers rustbgpd converges in a
-*measured* 3 s against FRR's 7 s, BIRD's 5 s, and GoBGP's 20 s. That is the
-largest separation in the campaign and it is the shape rustbgpd is designed
-for. At every other shape rustbgpd ties the leader.
+### Rustbgpd raw-cgroup spread
 
-**CPU at the shapes where peer count drives cost.** 22% at 30p × 1k and 122% at
-100p × 1k against GoBGP's 897% and 1281%. BIRD is materially cheaper than
-rustbgpd at every shape below 100 peers, and at 100 peers the two are close
-(101% vs 122%).
-
-## What rustbgpd loses
-
-### Memory at 100 peers × 1,000 prefixes — last of four, at our own target shape
-
-At 100 peers rustbgpd's *measured* 212.0 MiB is the largest of the four
-daemons. *Computed* ratios: **1.10× GoBGP's 193.5 MiB, 1.58× FRR's 134.1 MiB,
-and 6.46× BIRD's 32.8 MiB.** This is the route-server shape, so it is the loss
-that matters most.
-
-### Memory against BIRD, at every shape
-
-*Computed* rustbgpd-to-BIRD raw-cgroup-usage ratio:
-
-| Shape | rustbgpd (MiB) | BIRD (MiB) | Ratio |
-|---|---:|---:|---:|
-| 10p × 1k | 37.9 | 8.2 | 4.62× |
-| 2p × 10k | 48.1 | 9.2 | 5.23× |
-| 2p × 100k | 212.0 | 27.6 | 7.68× |
-| 30p × 1k | 108.5 | 11.3 | **9.60×** |
-| 100p × 1k | 212.0 | 32.8 | 6.46× |
-
-The range is **4.6×–9.6×** and the worst cell is 30 peers × 1,000 prefixes.
-BIRD's radix-tree RIB with global attribute deduplication is a structurally
-leaner design on this data, and nothing in this campaign narrows that.
-
-### rustbgpd's raw cgroup usage is the noisiest figure in the campaign
-
-**Do not read rustbgpd's memory numbers as single values.** They have the
-widest run-to-run spread of anything measured:
+**Do not read rustbgpd's memory numbers as single values.** Its retained runs
+have substantial within-target spread:
 
 | Shape | rustbgpd runs (MiB) | Spread as % of median |
 |---|---|---:|
 | 30p × 1k | 86.0 / 108.5 / 131.1 | **42%** (*computed*) |
 | 100p × 1k | 180.2 / 212.0 / 230.4 | **24%** (*computed*) |
-
-For contrast, at those same two shapes GoBGP spans a *computed* 2.9% and 7.9%
-and FRR spans 2.0% and 0.8%. BIRD's relative spread at 30p × 1k is a *computed*
-26.5%, but that is ±1.5 MiB in absolute terms against rustbgpd's ±22.6 MiB.
 
 A reader who reproduces 30p × 1k and measures 131 MiB has not found a
 regression and has not caught this receipt understating the number — that value
@@ -215,8 +183,8 @@ one it explains.
 > last 8 stubs continuously flap distinct 16-prefix blocks after convergence.
 > Under that workload it measures 118.200/142.844 KiB per peer and
 > 825.515/850.751 B per BASE route. Both dimensions are material, so the
-> 1.93 MiB/peer table remains the historical campaign's mixed-shape upper
-> bound, not an isolated per-peer cost or sizing coefficient.
+> former mixed-shape slope is not an isolated per-peer cost or sizing
+> coefficient.
 > The follow-up and immutable artifacts are in
 > [`per-peer-rss-attribution-2026-07.md`](per-peer-rss-attribution-2026-07.md).
 > The numeric cross-stack rows below are retained unchanged.
@@ -233,18 +201,10 @@ identical memory:
 controlled follow-up; it does not by itself establish which dimension
 dominates.
 
-Across the 10 → 100 peer span the *computed* marginal cost is:
-
-| Daemon | Raw cgroup 10p (MiB) | Raw cgroup 100p (MiB) | Marginal MiB/peer (*computed*) |
-|---|---:|---:|---:|
-| rustbgpd | 37.9 | 212.0 | **1.93** |
-| GoBGP | 38.9 | 193.5 | 1.72 |
-| FRR | 27.6 | 134.1 | 1.18 |
-| BIRD | 8.2 | 32.8 | **0.27** |
-
-Those slopes are an **upper bound** for all four daemons, not a clean per-peer
-cost: prefix totals grow from 10,000 to 100,000 across the same span, so route
-storage is folded into the numerator.
+The former cross-daemon marginal-cost table is removed. Its slopes mixed a
+tenfold route-count change with the peer-count change and also inherited the
+campaign-order confound. The controlled rustbgpd-only follow-up above is the
+source for peer and route attribution.
 
 **Any projection past 100 peers is *extrapolated* and assumes a linearity this
 campaign did not demonstrate.** Two points do not establish a line, and the 42%
@@ -257,9 +217,8 @@ evidence at that scale; this table is not.
 ## Establishment versus flood at 100 peers
 
 Splitting convergence into "time to the monitor's first prefix" and "time from
-first prefix to all 100,000" separates session establishment from route
-processing. The split was *measured* identically in all three runs for
-rustbgpd, BIRD, and GoBGP:
+first prefix to all 100,000" preserves additional raw timing observations.
+They share the same campaign-order limitation and do not establish a ranking:
 
 | Daemon | First prefix | All 100,000 | Shape of the curve |
 |---|---:|---:|---|
@@ -268,12 +227,11 @@ rustbgpd, BIRD, and GoBGP:
 | GoBGP | 1 s | 18 s | Long linear climb of roughly 4–5k prefixes per second for seventeen seconds. |
 | FRR | 5–6 s | 6 s | Flat at zero, then everything at once. |
 
-FRR is the interesting shape and the one place the three runs differ: its
+FRR is the one place the three runs differ: its
 monitor count stays at zero through second 4 in all three runs, then in one run
 35,809 prefixes appear at second 5 before all 100,000 at second 6, and in the
 other two nothing appears until second 6, when the whole table lands inside a
-single sample. FRR spends its time before the flood, not during it; rustbgpd
-does neither.
+single sample.
 
 ## Harness defects and anomalies, disclosed
 
@@ -336,6 +294,8 @@ source; it is not a pinned release, and we did not establish whether those
 identifiers correspond to distinct upstream commits. FRR's cell-to-cell
 consistency was nonetheless high (2p × 10k total measured 9.31 s in all three
 runs), so this is a caveat on reproducibility, not a visible source of scatter.
+The image was also gcov-instrumented. Its CPU and timing rows are retained as
+historical harness output, not as a release-build comparison.
 
 ### The `tester errors` column is not interpreted
 
@@ -358,6 +318,10 @@ load average below 1.0 — **confirmed twice, 30 seconds apart**, so a run could
 not start in a momentary dip. Every admission decision and the load average at
 it are in the retained chain logs. All targets within a run executed back to
 back through the same harness invocation, sequentially, never concurrently.
+The target order was fixed as rustbgpd, BIRD, GoBGP, then FRR. One-second
+sampler threads from earlier cells were not stopped before later cells, so the
+host work accumulated across that sequence. This was discovered after
+publication; its effect was not measured, and no numeric adjustment is made.
 
 The measured tree was a git-archive export of the commit, built and run outside
 the working repository, so a concurrently active branch could not perturb the
@@ -366,8 +330,11 @@ measurement.
 ## Limitations
 
 - One host, one harness, one campaign window. Absolute figures are
-  host-specific; the *ordering* between daemons under identical conditions is
-  the durable result.
+  host-specific, and the fixed target order plus accumulating sampler work
+  means this campaign does not support a cross-daemon ordering.
+- Only the rustbgpd image has a retained fresh no-cache build receipt.
+  Competitor provenance is insufficient for a current reproducible ranking,
+  and FRR was gcov-instrumented.
 - Every daemon ran with the harness's default configuration for that target. No
   daemon was tuned, including rustbgpd. An operator who tunes any of the four
   will get different numbers.
@@ -409,28 +376,24 @@ Medians of 3 runs per cell:
 
 | Shape | Daemon | Total (s) | Convergence (s) | Max CPU | Peak raw cgroup (MiB) |
 |---|---|---:|---:|---:|---:|
-| 10p × 1k | **rustbgpd** | **8.28** | 2 | 6% | 37.9 |
-| | BIRD 2.18 | 9.23 | 2 | 3% | **9.2** |
+| 10p × 1k | rustbgpd | 8.28 | 2 | 6% | 37.9 |
+| | BIRD 2.18 | 9.23 | 2 | 3% | 9.2 |
 | | GoBGP 4.3.0 | 10.29 | 3 | 140% | 37.9 |
 | | FRR 10.7.0-dev | 10.32 | 3 | 3% | 27.6 |
-| 2p × 10k | **rustbgpd** | **8.21** | 2 | 7% | 48.1 |
-| | BIRD 2.18 | 9.22 | 2 | 1% | **9.2** |
+| 2p × 10k | rustbgpd | 8.21 | 2 | 7% | 48.1 |
+| | BIRD 2.18 | 9.22 | 2 | 1% | 9.2 |
 | | GoBGP 4.3.0 | 10.35 | 3 | 82% | 45.1 |
 | | FRR 10.7.0-dev | 9.28 | 3 | 6% | 36.9 |
-| 2p × 100k | **rustbgpd** | **12.33** | 3 | 41% | 212.0 |
-| | BIRD 2.18 | 13.20 | 3 | 6% | **27.6** |
+| 2p × 100k | rustbgpd | 12.33 | 3 | 41% | 212.0 |
+| | BIRD 2.18 | 13.20 | 3 | 6% | 27.6 |
 | | GoBGP 4.3.0 | 16.45 | 6 | 580% | 204.8 |
 | | FRR 10.7.0-dev | 13.26 | 4 | 92% | 228.4 |
 
-The result is stable against the campaign above: rustbgpd is the
-**fastest on total time at the three measured shapes** (this refresh
-makes no claim about the two unmeasured route-server shapes), with
-every rustbgpd median within 0.05 s of its published value. The
-memory ordering is likewise unchanged: BIRD remains far leaner at
-every shape (rustbgpd/BIRD ratio 4.1×–7.7× here), rustbgpd sits with
-GoBGP at the small shapes, and 2p × 100k remains the one shape where
-FRR is larger than rustbgpd. CPU stays mid-pack, with BIRD cheapest
-and GoBGP most expensive at every shape.
+Every rustbgpd median is within 0.05 s of its earlier rustbgpd value, which is
+the supported repeatability conclusion. The cross-daemon rows remain subject
+to the fixed-order, sampler-lifetime, image-provenance, and FRR-instrumentation
+limitations above; this refresh does not establish time, CPU, or memory
+rankings.
 
 Raw per-run harness CSVs, full run transcripts, the `nocache` build
 transcript, the per-run medians, the campaign timeline with quiet-gate
@@ -439,6 +402,11 @@ are in
 [`artifacts/competitive-bgperf2-2026-07/v0610-refresh-2026-07/`](artifacts/competitive-bgperf2-2026-07/v0610-refresh-2026-07/).
 
 ## Reproduce and artifacts
+
+> **Archival warning:** reproduction with the historical driver reproduces its
+> fixed-order and sampler-lifetime defects. Do not use it to publish a current
+> cross-daemon ranking. A replacement campaign must counterbalance order, reap
+> every cell's samplers, and pin equivalent non-instrumented builds.
 
 With a bgperf2 checkout and Docker on an otherwise idle host:
 

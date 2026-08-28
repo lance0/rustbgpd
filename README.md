@@ -28,7 +28,7 @@ reproducible receipt:
   live churn, same harness / same host — the policy-file reload, not the IRR
   filter refresh below): new policy fully delivered to every member in
   **1.28–1.57 s p50** vs BIRD 3.3.1's 64–85 s and OpenBGPD 9.1's 244–251 s —
-  measured 2026-07-17,
+  measured 2026-08-08,
   [IXP receipt matrix](docs/perf/ixp-matrix-2026-07.md)
 - **IRR-scale filter reload** (320 route-server members × 183,040 prefixes ×
   3,218,965 IRR filter entries, same harness / same host): steady-state reload
@@ -43,11 +43,11 @@ reproducible receipt:
   [grouped per-client-best receipt](docs/perf/irr-reload-grouped-per-client-best-2026-08.md)
 - **Member-flap propagation** (50 members flap, 650 observers): re-announce
   p50 **0.49–0.55 s** vs BIRD's 2.9–3.7 s and OpenBGPD's 21.1–21.6 s;
-  withdraw p50 0.31–0.47 s, also fastest — measured 2026-07-17,
+  withdraw p50 0.31–0.47 s, also fastest — measured 2026-08-08,
   [same matrix](docs/perf/ixp-matrix-2026-07.md#s3--flapstorm-member-down--member-up-propagation)
 - **Cold start**: full 400,400-route table delivered to all 700 members in
   **4.8–5.0 s** vs 60.9–63.3 s (BIRD) and 338.0–352.1 s (OpenBGPD) —
-  measured 2026-07-17,
+  measured 2026-08-08,
   [same matrix](docs/perf/ixp-matrix-2026-07.md#s1--cold-convergence)
 - **Route-reflector scale**: 1,000 RR clients × 100k routes converge on the
   wire in **1.82 s** at **419 MiB** whole-process RSS — measured 2026-07-03
@@ -366,7 +366,7 @@ and 3.92 s / 636 MiB with heterogeneous ~10% RT memberships (vs ~73 s / ~31 GiB
 and ~12.5 s / ~5.7 GiB extrapolated per-peer), with a one-RT membership flip
 delivering its 1600-route delta in ~15 ms with zero policy evaluations.
 
-Microbenchmarks, memory scaling, and the bgperf2 cross-daemon comparison:
+Microbenchmarks, memory scaling, and the corrected historical bgperf2 output:
 [docs/BENCHMARKS.md](docs/BENCHMARKS.md). Every receipt is indexed in
 [docs/RECEIPTS.md](docs/RECEIPTS.md); GoBGP-specific parity is in
 [docs/gobgp-parity.md](docs/gobgp-parity.md).
