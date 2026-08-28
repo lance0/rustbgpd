@@ -397,10 +397,22 @@ impl SessionExportProfile {
             PathAttribute::ExtendedCommunitiesPartial(values) => (values, true),
             _ => return Some(attr.clone()),
         };
-        if values.iter().all(|community| community.is_transitive()) {
+        let mut has_transitive = false;
+        let mut has_non_transitive = false;
+        for community in values {
+            if community.is_transitive() {
+                has_transitive = true;
+            } else {
+                has_non_transitive = true;
+            }
+            if has_transitive && has_non_transitive {
+                break;
+            }
+        }
+        if !has_non_transitive {
             return Some(attr.clone());
         }
-        if values.iter().all(|community| !community.is_transitive()) {
+        if !has_transitive {
             return None;
         }
 
