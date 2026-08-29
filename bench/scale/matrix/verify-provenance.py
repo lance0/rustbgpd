@@ -72,7 +72,7 @@ def verify(path, expected_cell, competitor_generation="historical"):
 if __name__ == "__main__":
     try:
         if len(sys.argv) not in {3, 4} or sys.argv[2] not in GENERATORS:
-            fail("usage: verify-provenance.py CELL/provenance.json EXPECTED_CELL [historical|current]")
+            fail("usage: verify-provenance.py PROVENANCE_JSON EXPECTED_CELL [historical|current]")
         verify(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) == 4 else "historical")
     except (OSError, ValueError, json.JSONDecodeError, KeyError, TypeError) as error:
         print(f"FAIL: {error}", file=sys.stderr)
