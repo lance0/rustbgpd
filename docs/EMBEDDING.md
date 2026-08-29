@@ -22,7 +22,7 @@ This document is the contract for embedders: which crate to depend on, what the
 | `rs-config-render` | Disabled | `rustbgpd-policy` | Route-server configuration rendering tool. |
 | `rustbgpctl` | Disabled | `rustbgpd-policy`, `rustbgpd-wire` | Thin gRPC management CLI and support library. |
 | `rustbgpd` | Disabled | `rustbgpd-api`, `rustbgpd-bfd`, `rustbgpd-bmp`, `rustbgpd-event-history`, `rustbgpd-evpn`, `rustbgpd-evpn-linux`, `rustbgpd-fsm`, `rustbgpd-mrt`, `rustbgpd-policy`, `rustbgpd-rib`, `rustbgpd-rpki`, `rustbgpd-telemetry`, `rustbgpd-transport`, `rustbgpd-wire` | Daemon binary and internal assembly library. |
-| `rustbgpd-api` | Disabled | `rustbgpd-event-history`, `rustbgpd-evpn`, `rustbgpd-fsm`, `rustbgpd-policy`, `rustbgpd-rib`, `rustbgpd-telemetry`, `rustbgpd-transport`, `rustbgpd-wire` | gRPC server, generated bindings, and service types. |
+| `rustbgpd-api` | Disabled | `rustbgpd-event-history`, `rustbgpd-evpn`, `rustbgpd-fsm`, `rustbgpd-policy`, `rustbgpd-rib`, `rustbgpd-rpki`, `rustbgpd-telemetry`, `rustbgpd-transport`, `rustbgpd-wire` | gRPC server, generated bindings, and service types. |
 | `rustbgpd-bfd` | Disabled | None | Pure BFD packet codec and session state machine. |
 | `rustbgpd-bmp` | Disabled | `rustbgpd-telemetry`, `rustbgpd-wire` | RFC 7854 BMP export. |
 | `rustbgpd-event-history` | Disabled | `rustbgpd-telemetry` | Durable local event outbox. |
