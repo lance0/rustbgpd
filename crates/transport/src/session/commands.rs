@@ -1592,7 +1592,6 @@ impl PeerSession {
                 ControlFlow::Continue(())
             }
             PeerCommand::CollisionDump => {
-                info!(peer = %self.peer_label, "collision dump: sending Cease/7");
                 self.stop_requested = true;
                 self.reconnect_timer = None;
                 // Send Cease/7 NOTIFICATION
@@ -1601,6 +1600,7 @@ impl PeerSession {
                     cease_subcode::CONNECTION_COLLISION_RESOLUTION,
                     bytes::Bytes::new(),
                 );
+                self.log_notification(SessionNotificationDirection::Sent, &notif, None);
                 self.session_telemetry_metric_lease.latch_down_reason(
                     rustbgpd_telemetry::reason_labels::SessionDownReason::LocalNotification,
                 );

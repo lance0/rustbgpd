@@ -1,5 +1,159 @@
 use super::*;
 
+#[derive(Clone, Default)]
+struct NotificationLogCapture {
+    events: Arc<std::sync::Mutex<Vec<std::collections::BTreeMap<String, String>>>>,
+}
+
+impl tracing::Subscriber for NotificationLogCapture {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        *metadata.level() == tracing::Level::INFO
+    }
+
+    fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Visitor(std::collections::BTreeMap<String, String>);
+        impl tracing::field::Visit for Visitor {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0
+                    .insert(field.name().to_string(), format!("{value:?}"));
+            }
+
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                self.0.insert(field.name().to_string(), value.to_string());
+            }
+
+            fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+                self.0.insert(field.name().to_string(), value.to_string());
+            }
+        }
+
+        let mut visitor = Visitor(std::collections::BTreeMap::new());
+        event.record(&mut visitor);
+        self.events.lock().unwrap().push(visitor.0);
+    }
+
+    fn enter(&self, _span: &tracing::span::Id) {}
+
+    fn exit(&self, _span: &tracing::span::Id) {}
+}
+
+fn capture_notification_log(
+    direction: SessionNotificationDirection,
+    notification: &NotificationMessage,
+    reason: Option<&str>,
+) -> Vec<std::collections::BTreeMap<String, String>> {
+    let subscriber = NotificationLogCapture::default();
+    let events = subscriber.events.clone();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    make_test_session(65001, 65002).log_notification(direction, notification, reason);
+    events.lock().unwrap().clone()
+}
+
+#[test]
+fn notification_logs_are_structured_once_per_direction() {
+    let notification = NotificationMessage::new(
+        NotificationCode::Cease,
+        cease_subcode::ADMINISTRATIVE_SHUTDOWN,
+        Bytes::new(),
+    );
+    for (direction, expected) in [
+        (SessionNotificationDirection::Received, "received"),
+        (SessionNotificationDirection::Sent, "sent"),
+    ] {
+        let events = capture_notification_log(direction, &notification, Some("maintenance"));
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].get("message").map(String::as_str),
+            Some("BGP NOTIFICATION")
+        );
+        assert_eq!(
+            events[0].get("direction").map(String::as_str),
+            Some(expected)
+        );
+        assert_eq!(events[0].get("code").map(String::as_str), Some("6"));
+        assert_eq!(events[0].get("subcode").map(String::as_str), Some("2"));
+        assert_eq!(
+            events[0].get("description").map(String::as_str),
+            Some("Administrative Shutdown")
+        );
+        assert_eq!(
+            events[0].get("reason").map(String::as_str),
+            Some("maintenance")
+        );
+    }
+}
+
+#[test]
+fn hard_reset_log_keeps_outer_code_and_decodes_inner_description() {
+    let notification = NotificationMessage::new(
+        NotificationCode::Cease,
+        cease_subcode::HARD_RESET,
+        Bytes::from(vec![
+            NotificationCode::Cease.as_u8(),
+            cease_subcode::ADMINISTRATIVE_RESET,
+        ]),
+    );
+    let events =
+        capture_notification_log(SessionNotificationDirection::Received, &notification, None);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].get("code").map(String::as_str), Some("6"));
+    assert_eq!(events[0].get("subcode").map(String::as_str), Some("9"));
+    assert_eq!(
+        events[0].get("description").map(String::as_str),
+        Some("Hard Reset: Administrative Reset")
+    );
+    assert!(!events[0].contains_key("reason"));
+}
+
+#[test]
+fn notification_log_omits_invalid_or_missing_reason() {
+    let notification = NotificationMessage::new(
+        NotificationCode::Cease,
+        cease_subcode::ADMINISTRATIVE_RESET,
+        Bytes::from_static(&[1, 0xff]),
+    );
+    let decoded = rustbgpd_wire::notification::extract_shutdown_communication(&notification)
+        .ok()
+        .flatten();
+    let events = capture_notification_log(
+        SessionNotificationDirection::Received,
+        &notification,
+        decoded,
+    );
+    assert_eq!(events.len(), 1);
+    assert!(!events[0].contains_key("reason"));
+}
+
+#[test]
+fn notification_log_reason_is_escaped_ascii_and_bounded() {
+    let notification = NotificationMessage::new(
+        NotificationCode::Cease,
+        cease_subcode::ADMINISTRATIVE_RESET,
+        Bytes::new(),
+    );
+    let reason = format!("line\n🦀{}", "x".repeat(600));
+    let events = capture_notification_log(
+        SessionNotificationDirection::Sent,
+        &notification,
+        Some(&reason),
+    );
+    assert_eq!(events.len(), 1);
+    let logged = events[0].get("reason").unwrap();
+    assert_eq!(logged.len(), 512);
+    assert!(logged.is_ascii());
+    assert!(!logged.contains('\n'));
+    assert!(logged.contains("\\n"));
+    assert!(logged.contains("\\u{1f980}"));
+}
+
 #[tokio::test]
 async fn shutdown_aborts_inflight_connect_task() {
     let mut session = make_test_session(65001, 65002);
