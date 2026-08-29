@@ -419,6 +419,41 @@ class RsFlagshipAnalyzerContracts(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertFalse(payload["gates"]["management_evidence"]["pass"])
 
+    def test_malformed_operations_do_not_count_toward_derived_gates(self):
+        meta = smoke_meta()
+        records = [json.loads(line) for line in management_jsonl(meta).splitlines()]
+        for record in records:
+            if record.get("operation") == "policy_stats":
+                record["scheduled_monotonic"] = -1.0
+                record["sha256"] = "not-a-digest"
+        malformed = b"".join(
+            (json.dumps(record, separators=(",", ":")) + "\n").encode()
+            for record in records
+        )
+        result, payload = run_analyzer(
+            smoke_rows(), smoke_cycles(), meta, management=malformed
+        )
+        self.assertEqual(result.returncode, 1)
+        gates = payload["gates"]
+        self.assertFalse(gates["management_evidence"]["pass"])
+        self.assertEqual(gates["management_operations"]["value"]["policy_stats"], 0)
+        self.assertFalse(gates["management_operations"]["pass"])
+        self.assertEqual(
+            gates["management_completion"]["value"]["policy_stats"]["completed"],
+            0,
+        )
+        self.assertEqual(
+            gates["management_completion"]["value"]["policy_stats"]["ratio"],
+            0.0,
+        )
+        self.assertFalse(gates["management_completion"]["pass"])
+        self.assertFalse(
+            any(
+                defect.startswith("policy_stats:")
+                for defect in gates["management_cadence"]["value"]
+            )
+        )
+
     def test_management_operation_failure_dispositions_fail(self):
         for disposition in (
             "http_status", "empty", "cli_exit", "timeout", "json",

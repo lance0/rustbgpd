@@ -150,7 +150,6 @@ def analyze_management_load(raw: bytes, meta: dict) -> dict:
                     f"line {line_number}: unknown operation {operation!r}"
                 )
                 continue
-            operations[operation].append(record)
             scheduled = finite_number(record.get("scheduled_monotonic"))
             started = finite_number(record.get("started_monotonic"))
             completed = finite_number(record.get("completed_monotonic"))
@@ -174,6 +173,7 @@ def analyze_management_load(raw: bytes, meta: dict) -> dict:
                     f"line {line_number}: invalid bounded operation record"
                 )
                 continue
+            operations[operation].append(record)
             if record["result"] != "ok":
                 failures.append({
                     "operation": operation,
