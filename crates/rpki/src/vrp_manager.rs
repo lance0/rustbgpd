@@ -69,8 +69,58 @@ impl CacheQueryHandle {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("RPKI cache inventory actor is unavailable")]
 pub struct CacheQueryError;
+
+#[derive(Debug, Default)]
+struct ServerVrpTable {
+    entries: HashSet<VrpEntry>,
+    v4_count: usize,
+    v6_count: usize,
+}
+
+impl ServerVrpTable {
+    fn from_entries(entries: impl IntoIterator<Item = VrpEntry>) -> Self {
+        let mut table = Self::default();
+        for entry in entries {
+            table.insert(entry);
+        }
+        table
+    }
+
+    fn insert(&mut self, entry: VrpEntry) -> bool {
+        let is_v4 = entry.prefix.is_ipv4();
+        if !self.entries.insert(entry) {
+            return false;
+        }
+        if is_v4 {
+            self.v4_count += 1;
+        } else {
+            self.v6_count += 1;
+        }
+        true
+    }
+
+    fn remove(&mut self, entry: &VrpEntry) -> bool {
+        if !self.entries.remove(entry) {
+            return false;
+        }
+        match entry.prefix {
+            std::net::IpAddr::V4(_) => self.v4_count -= 1,
+            std::net::IpAddr::V6(_) => self.v6_count -= 1,
+        }
+        true
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &VrpEntry> {
+        self.entries.iter()
+    }
+
+    const fn counts(&self) -> (usize, usize) {
+        (self.v4_count, self.v6_count)
+    }
+}
 
 #[derive(Debug)]
 pub(crate) enum EnhancedVrpUpdate {
@@ -192,9 +242,9 @@ pub struct AspaTableUpdate {
 
 /// Merges VRP and ASPA data from multiple RTR cache servers.
 pub struct VrpManager {
-    /// Per-server VRP entry sets. A set (not a list) so an incremental
-    /// withdraw is O(withdrawn) instead of O(withdrawn × table size).
-    server_tables: HashMap<SocketAddr, HashSet<VrpEntry>>,
+    /// Per-server VRP tables. Each table owns a set for bounded incremental
+    /// updates and cached family counts for bounded inventory queries.
+    server_tables: HashMap<SocketAddr, ServerVrpTable>,
     /// Per-server ASPA state, keyed by customer ASN.
     ///
     /// Keyed (not a record list) because 8210bis ASPA PDUs carry the
@@ -311,15 +361,10 @@ impl VrpManager {
             .take(MAX_CACHE_ROWS)
             .map(|(&server, state)| {
                 let accepted = state.accepted.as_ref().map(|metadata| {
-                    let table = self.server_tables.get(&server);
-                    let (vrp_v4_count, vrp_v6_count) = table.map_or((0, 0), |entries| {
-                        entries
-                            .iter()
-                            .fold((0, 0), |(v4, v6), entry| match entry.prefix {
-                                std::net::IpAddr::V4(_) => (v4 + 1, v6),
-                                std::net::IpAddr::V6(_) => (v4, v6 + 1),
-                            })
-                    });
+                    let (vrp_v4_count, vrp_v6_count) = self
+                        .server_tables
+                        .get(&server)
+                        .map_or((0, 0), ServerVrpTable::counts);
                     AcceptedCacheState {
                         protocol_version: metadata.version,
                         session_id: metadata.session_id,
@@ -469,7 +514,7 @@ impl VrpManager {
                     "full table from cache"
                 );
                 self.server_tables
-                    .insert(server, entries.into_iter().collect());
+                    .insert(server, ServerVrpTable::from_entries(entries));
                 // Later PDUs for the same customer ASN replace earlier
                 // ones within a full table (8210bis replacement semantics).
                 self.server_aspa_tables.insert(
@@ -515,7 +560,9 @@ impl VrpManager {
                 // set is mutated, and only by exactly these entries).
                 let mut delta = withdrawn.clone();
                 delta.extend(announced.iter().cloned());
-                table.extend(announced);
+                for entry in announced {
+                    table.insert(entry);
+                }
 
                 // ASPA incremental (8210bis semantics): a withdraw (which
                 // carries an empty provider set on the wire) removes the
@@ -635,7 +682,7 @@ impl VrpManager {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::sync::{Arc, Mutex};
 
     use super::*;
@@ -649,12 +696,33 @@ mod tests {
         }
     }
 
+    fn entry_v6(addr: Ipv6Addr, prefix_len: u8, max_len: u8, asn: u32) -> VrpEntry {
+        VrpEntry {
+            prefix: IpAddr::V6(addr),
+            prefix_len,
+            max_len,
+            origin_asn: asn,
+        }
+    }
+
     fn server1() -> SocketAddr {
         "10.0.0.1:3323".parse().unwrap()
     }
 
     fn server2() -> SocketAddr {
         "10.0.0.2:3323".parse().unwrap()
+    }
+
+    #[test]
+    fn cache_query_error_has_stable_error_contract() {
+        fn assert_error(error: &dyn std::error::Error) -> String {
+            error.to_string()
+        }
+
+        assert_eq!(
+            assert_error(&CacheQueryError),
+            "RPKI cache inventory actor is unavailable"
+        );
     }
 
     #[tokio::test]
@@ -1094,7 +1162,10 @@ mod tests {
             .await;
         mgr.handle_enhanced_update(EnhancedVrpUpdate::Full {
             server: server1(),
-            entries: vec![entry(Ipv4Addr::new(192, 0, 2, 0), 24, 24, 64_496)],
+            entries: vec![
+                entry(Ipv4Addr::new(192, 0, 2, 0), 24, 24, 64_496),
+                entry_v6("2001:db8::".parse().unwrap(), 32, 48, 64_496),
+            ],
             aspa_records: vec![AspaRecord {
                 customer_asn: 64_496,
                 provider_asns: vec![64_497],
@@ -1124,7 +1195,7 @@ mod tests {
                 accepted.vrp_v6_count,
                 accepted.aspa_count
             ),
-            (1, 0, 1)
+            (1, 1, 1)
         );
         assert!(accepted.age_seconds >= 3);
 
@@ -1141,8 +1212,16 @@ mod tests {
             .await;
         mgr.handle_enhanced_update(EnhancedVrpUpdate::Incremental {
             server: server1(),
-            announced: vec![],
-            withdrawn: vec![],
+            announced: vec![
+                // Duplicate announcement must not inflate the v6 count.
+                entry_v6("2001:db8::".parse().unwrap(), 32, 48, 64_496),
+                entry(Ipv4Addr::new(198, 51, 100, 0), 24, 24, 64_497),
+            ],
+            withdrawn: vec![
+                entry(Ipv4Addr::new(192, 0, 2, 0), 24, 24, 64_496),
+                // Absent withdrawal must not deflate the v4 count.
+                entry(Ipv4Addr::new(203, 0, 113, 0), 24, 24, 64_498),
+            ],
             aspa_announced: vec![],
             aspa_withdrawn: vec![],
             version: 2,
@@ -1155,6 +1234,8 @@ mod tests {
             mgr.cache_list().rows[0].accepted.as_ref().unwrap().serial,
             Some(12)
         );
+        let accepted = mgr.cache_list().rows[0].accepted.clone().unwrap();
+        assert_eq!((accepted.vrp_v4_count, accepted.vrp_v6_count), (1, 1));
 
         mgr.handle_enhanced_update(EnhancedVrpUpdate::Disconnected {
             server: server1(),
