@@ -853,9 +853,9 @@ cleanup_m103() {
     trap - EXIT
     set +e
     [ -z "$ARTIFACT_STAGE" ] || rm -rf "$ARTIFACT_STAGE"
-    rm -rf "$WORK"
     kill_round_daemons
     _cleanup_on_exit
+    rm -rf "$WORK"
     exit "$rc"
 }
 
@@ -924,7 +924,8 @@ make_self_test_negative_work() {
 }
 
 artifact_export_self_test() {
-    local destination negative_destination a b c
+    local destination negative_destination cleanup_root cleanup_order
+    local cleanup_transcript a b c
     SELF_TEST_ROOT=$(mktemp -d)
     trap 'rm -rf "$SELF_TEST_ROOT"' EXIT
     WORK="$SELF_TEST_ROOT/work"
@@ -956,6 +957,36 @@ artifact_export_self_test() {
     printf '%s\n' '{"route":{"age":999,"best":true}}' >"$c"
     [ "$(canonical_sha "$a")" = "$(canonical_sha "$b")" ]
     [ "$(canonical_sha "$a")" != "$(canonical_sha "$c")" ]
+
+    cleanup_root="$SELF_TEST_ROOT/cleanup"
+    cleanup_order="$cleanup_root/order"
+    cleanup_transcript="$cleanup_root/transcript-captured.log"
+    mkdir -p "$cleanup_root/work"
+    : >"$cleanup_root/work/transcript.log"
+    if ! (
+        WORK="$cleanup_root/work"
+        TRANSCRIPT="$WORK/transcript.log"
+        ARTIFACT_STAGE=""
+        CLEANUP=1
+        kill_round_daemons() {
+            printf '%s\n' daemons >>"$cleanup_order"
+        }
+        _cleanup_on_exit() {
+            if [ "${CLEANUP:-0}" = 1 ]; then
+                log "[cleanup] synthetic topology destroy"
+                cp "$TRANSCRIPT" "$cleanup_transcript"
+                printf '%s\n' topology >>"$cleanup_order"
+            fi
+        }
+        cleanup_m103 0
+    ) >"$cleanup_root/stdout" 2>"$cleanup_root/stderr"; then
+        return 1
+    fi
+    printf '%s\n' daemons topology >"$cleanup_root/expected-order"
+    cmp -s "$cleanup_root/expected-order" "$cleanup_order"
+    grep -qF '[cleanup] synthetic topology destroy' "$cleanup_transcript"
+    [ ! -e "$cleanup_root/work" ]
+    [ ! -s "$cleanup_root/stderr" ]
 
     WORK="$SELF_TEST_ROOT/negative-work"
     TRANSCRIPT="$WORK/transcript.log"
