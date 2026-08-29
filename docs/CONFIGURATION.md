@@ -1172,11 +1172,14 @@ connection carries the kernel default TTL like any other TCP connection. The
 same is true in the inbound direction: nothing inspects the arriving TTL unless
 `ttl_security` is set.
 
-Use GTSM when the distance should also be bounded. `ttl_security = true` alone
-preserves the strict adjacent-peer behavior: outbound TTL / Hop Limit is 255
-and inbound packets must arrive with 255. Add `ttl_security_hops = N` for a
-peer up to N hops away. The kernel then rejects inbound packets below `256 - N`
-while rustbgpd continues to send with 255:
+Use GTSM when the distance should also be bounded. Both speakers must transmit
+GTSM packets with TTL / Hop Limit 255. On each speaker, a configured maximum
+distance of `N` hops sets that speaker's receive floor to
+`255 - (N - 1)`, equivalently `256 - N`. `ttl_security = true` without an
+explicit hop count therefore preserves the one-hop policy: rustbgpd sends 255
+and accepts only 255. Add `ttl_security_hops = N` for a peer up to N hops away;
+rustbgpd still sends 255 while the kernel rejects packets arriving below the
+receive floor:
 
 ```toml
 [[neighbors]]
@@ -1186,11 +1189,27 @@ ttl_security = true
 ttl_security_hops = 9
 ```
 
-The hop value does not enable GTSM by itself; an explicit value with effective
-`ttl_security = false` is a configuration error. Pin the family's active-open
-source with `[global].listen_addresses` when a multihop session needs a stable
-local address. The per-implementation comparison and its sourcing live in
-[COMPARISON.md](COMPARISON.md).
+`ttl_security_hops` changes only rustbgpd's inbound floor. It does not rewrite
+packets received from the peer and cannot make an ordinary peer that transmits
+a lower TTL / Hop Limit compatible with GTSM; configure distance-aware GTSM on
+both sides. The hop value also does not enable GTSM by itself: an explicit value
+with effective `ttl_security = false` is a configuration error.
+
+There is no separate `ebgp_multihop` path that disables GTSM. Bounded multihop
+is the same GTSM path with a larger hop count. Without GTSM, multihop eBGP uses
+the kernel's default outbound TTL and performs no direct-connect check. That
+permits a routed peer, but also loses the fail-fast intent check that would
+reject an off-subnet address typo before attempting TCP. Pin the family's
+active-open source with `[global].listen_addresses` when a multihop session
+needs a stable local address.
+
+GTSM failures are scoped to the affected socket. An active open fails before
+`connect(2)` when its TTL policy cannot be installed. A passive accepted socket
+that cannot receive the required minimum is discarded. A listener-family
+socket whose GTSM policy cannot be installed is rejected; daemon startup fails
+only when no listener family remains usable, or when strict explicit endpoint
+binding requires the failed socket. The per-implementation comparison and its
+sourcing live in [COMPARISON.md](COMPARISON.md).
 
 ### BFD (RFC 5880 / 5881 / 5882)
 

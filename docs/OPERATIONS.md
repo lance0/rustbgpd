@@ -1813,7 +1813,24 @@ rustbgpd uses structured JSON logging. Key messages to watch for:
    - **Hold timer zero vs non-zero:** One side sends hold_time=0, the other expects keepalives
    - **Capability mismatch:** Check address family negotiation in OPEN logs
    - **MD5 mismatch:** TCP RST with no BGP-level error; check both sides' passwords
-   - **TTL security:** GTSM requires TTL=255; multi-hop peers will fail
+   - **TTL security:** Both GTSM speakers must transmit TTL / Hop Limit 255.
+     With `ttl_security_hops = N`, rustbgpd accepts packets at or above
+     `255 - (N - 1)` (`256 - N`); the knob changes only this receive floor and
+     cannot make a peer that transmits an ordinary lower TTL compatible.
+     Bounded multihop is supported, with distance-aware GTSM configured on
+     both sides. Packets below rustbgpd's receive floor are discarded by the
+     kernel before BGP processing and therefore produce no BGP NOTIFICATION.
+
+   There is no separate `ebgp_multihop` mode that disables GTSM. Without
+   GTSM, rustbgpd uses the kernel default outbound TTL and does not require an
+   eBGP peer to be directly connected. That permits routed peers, but an
+   off-subnet address typo is attempted instead of failing an intent check.
+
+   GTSM setup failures are socket-scoped: an active open fails before connect,
+   a passive accepted socket is discarded, and an affected listener-family
+   socket is rejected. The process fails startup only if no listener family
+   remains usable or strict explicit endpoint binding fails; do not interpret
+   one family/socket rejection as an unconditional daemon startup failure.
 
 4. **Verify from the remote side:**
    Check FRR/BIRD/peer logs for their view of the session attempt.
