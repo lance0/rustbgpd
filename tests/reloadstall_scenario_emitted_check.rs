@@ -264,7 +264,8 @@ fn irr_reload_competitor_generation_is_closed_and_byte_stable() {
             manifest["file_bytes"]
                 .as_object_mut()
                 .expect("file byte map")
-                .remove(main_config);
+                .remove(main_config)
+                .expect("manifest records main config byte count");
             manifest
         };
         assert_eq!(

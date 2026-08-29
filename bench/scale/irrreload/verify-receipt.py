@@ -1682,7 +1682,11 @@ def validate_transaction_evidence(cdir: Path, identity: tuple[int, int]) -> dict
 def validate_root(root: Path, kind: str):
     validate_preflight(root / "preflight.log")
     provenance = read_json(root / "provenance.json")
-    inputs, git = provenance.get("inputs", {}), provenance.get("git", {})
+    if not isinstance(provenance, dict):
+        fail(f"{root}: receipt context is incomplete")
+    inputs, git = provenance.get("inputs"), provenance.get("git")
+    if not isinstance(inputs, dict) or not isinstance(git, dict):
+        fail(f"{root}: receipt context is incomplete")
     binaries = provenance.get("binaries")
     expected_binaries = {
         "bench/scale/target/release/reloadstall",
@@ -2987,6 +2991,7 @@ def self_test() -> None:
         rejected("mismatched-commit", lambda root: alter_json(root / "provenance.json", lambda data: data["git"].update({"commit": "d" * 40})))
         rejected("commit-malformed", lambda root: alter_json(root / "provenance.json", lambda data: data["git"].update({"commit": "C" * 40})))
         rejected("provenance-downgrade", lambda root: alter_json(root / "provenance.json", lambda data: data.update({"schema": 1})))
+        rejected("inputs-container", lambda root: alter_json(root / "provenance.json", lambda data: data.update({"inputs": []})))
         rejected("binary-roster", lambda root: alter_json(root / "provenance.json", lambda data: data["binaries"].pop("target/release/rbgp")))
         rejected("binary-malformed", lambda root: alter_json(root / "provenance.json", lambda data: data["binaries"].update({"target/release/rbgp": "ABC"})))
         def change_input(root, key, value):
@@ -3147,7 +3152,7 @@ def self_test() -> None:
             )
         except InvalidReceipt:
             proofs["cross-role-competitor-generation"] = True
-        expected = {"default-roster", "mixed-roster", "mode-flags", "topology-mutation", "barrier-marker", "final-barrier-marker", "live-topology-gauge", "route-gauge", "route-family", "one-scrape-drift", "add-path", "config-count", "dirty-commit", "mismatched-commit", "commit-malformed", "provenance-downgrade", "binary-roster", "binary-malformed", "canonical-changed-fraction", "canonical-control-secs", "canonical-bird-threads", "competitor-ref-arbitrary", "competitor-ref-drift", "competitor-mixed-generation", "repeat-competitor-generation", "repeat-image-identity", "cross-role-competitor-generation", "nonoverlap-order", "quiet-spacing", "preflight-raw", "cell-status", "manifest-changed-fraction", "cell-root-rows", "reload-log-rows", "percentile-order", "first-generation-bound", "observer-gap-bound", "row-invariants", "rss-raw", "grouped-output-isolation", "output-exact-roster", "output-audit-call", "ordering", "reused-identity", "cross-role-environment", "cross-root-binaries"}
+        expected = {"default-roster", "mixed-roster", "mode-flags", "topology-mutation", "barrier-marker", "final-barrier-marker", "live-topology-gauge", "route-gauge", "route-family", "one-scrape-drift", "add-path", "config-count", "dirty-commit", "mismatched-commit", "commit-malformed", "provenance-downgrade", "inputs-container", "binary-roster", "binary-malformed", "canonical-changed-fraction", "canonical-control-secs", "canonical-bird-threads", "competitor-ref-arbitrary", "competitor-ref-drift", "competitor-mixed-generation", "repeat-competitor-generation", "repeat-image-identity", "cross-role-competitor-generation", "nonoverlap-order", "quiet-spacing", "preflight-raw", "cell-status", "manifest-changed-fraction", "cell-root-rows", "reload-log-rows", "percentile-order", "first-generation-bound", "observer-gap-bound", "row-invariants", "rss-raw", "grouped-output-isolation", "output-exact-roster", "output-audit-call", "ordering", "reused-identity", "cross-role-environment", "cross-root-binaries"}
         expected |= {"current-down", "reestablished", "flapped", "counter-malformed", "establishment-roster", "flap-roster", "row-session-loss"}
         expected |= {"preflip-private", "lane-gauge"}
         expected |= set(
