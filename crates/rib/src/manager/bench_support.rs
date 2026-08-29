@@ -51,6 +51,24 @@ pub struct DataplanePrefixIndexBenchReceipt {
     pub index_bytes: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SelectionDeferralFamilyInventoryBenchReceipt {
+    routes: usize,
+    checksum: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SelectionDeferralInventoryBenchReceipt {
+    loc_ipv4: SelectionDeferralFamilyInventoryBenchReceipt,
+    loc_ipv6: SelectionDeferralFamilyInventoryBenchReceipt,
+    adj_ipv4: SelectionDeferralFamilyInventoryBenchReceipt,
+    adj_ipv6: SelectionDeferralFamilyInventoryBenchReceipt,
+    source_stores: usize,
+    nonempty_source_stores: usize,
+    min_routes_per_source: usize,
+    max_routes_per_source: usize,
+}
+
 static POLICY_TRANSITION_RECEIPT_PRINTED: AtomicBool = AtomicBool::new(false);
 static PCB_ENUMERATION_PHASES: AtomicUsize = AtomicUsize::new(0);
 static PCB_ENUMERATED_PREFIXES: AtomicUsize = AtomicUsize::new(0);
@@ -198,6 +216,57 @@ fn bench_add_duration(total: &AtomicU64, elapsed: std::time::Duration) {
     });
 }
 
+fn selection_deferral_prefix_checksum(prefix: Prefix) -> u64 {
+    let raw = match prefix {
+        Prefix::V4(prefix) => {
+            u64::from(u32::from(prefix.addr))
+                ^ (u64::from(prefix.len) << 32)
+                ^ 0x04d5_1ec7_10a7_0001
+        }
+        Prefix::V6(prefix) => {
+            let address = u128::from(prefix.addr);
+            u64::try_from(address >> 64).expect("upper IPv6 half fits u64")
+                ^ u64::try_from(address & u128::from(u64::MAX)).expect("lower IPv6 half fits u64")
+                ^ (u64::from(prefix.len) << 48)
+                ^ 0x06d5_1ec7_10a7_0001
+        }
+    };
+    let mut mixed = raw.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    mixed ^ (mixed >> 31)
+}
+
+fn selection_deferral_add_inventory(
+    receipt: &mut SelectionDeferralFamilyInventoryBenchReceipt,
+    prefix: Prefix,
+) {
+    receipt.routes = receipt.routes.saturating_add(1);
+    receipt.checksum = receipt
+        .checksum
+        .wrapping_add(selection_deferral_prefix_checksum(prefix));
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "Prometheus integer counters are exactly representable at benchmark scale"
+)]
+fn selection_deferral_counter_total(metrics: &rustbgpd_telemetry::BgpMetrics, name: &str) -> u64 {
+    metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .find(|family| family.name() == name)
+        .map_or(0, |family| {
+            family
+                .get_metric()
+                .iter()
+                .map(|metric| metric.get_counter().value() as u64)
+                .sum()
+        })
+}
+
 pub(in crate::manager) fn bench_record_per_client_best_candidates(
     cardinality: usize,
     heap_backed: bool,
@@ -296,6 +365,265 @@ pub struct AdjRibOutFanoutBenchReceipt {
 }
 
 impl RibManager {
+    /// Stable checksum contribution shared by the selection-deferral fixture
+    /// generator and the actor-owned inventory walk.
+    #[must_use]
+    pub fn bench_selection_deferral_prefix_checksum(prefix: Prefix) -> u64 {
+        selection_deferral_prefix_checksum(prefix)
+    }
+
+    /// Register one GR-waiting eBGP route-server session per synthetic peer.
+    /// The returned receivers retain release-time payloads and `EoR`s; only any
+    /// registration-time envelope is drained.
+    ///
+    /// # Panics
+    ///
+    /// Panics for an empty peer/family fixture, a peer index outside the
+    /// benchmark address space, or an invalid channel capacity.
+    #[must_use]
+    pub fn bench_register_selection_deferral_route_server_peers<F>(
+        &mut self,
+        n_peers: usize,
+        gate_families: &[(Afi, Safi)],
+        sendable_families: &[(Afi, Safi)],
+        channel_capacity: usize,
+        mut make_exact_export_encoder: F,
+    ) -> Vec<mpsc::Receiver<OutboundRouteUpdate>>
+    where
+        F: FnMut(u32) -> Arc<dyn ExactExportEncoder>,
+    {
+        assert!(n_peers > 0, "selection-deferral fixture needs peers");
+        assert!(
+            !gate_families.is_empty(),
+            "selection-deferral fixture needs gate families"
+        );
+        assert!(
+            !sendable_families.is_empty(),
+            "selection-deferral fixture needs sendable families"
+        );
+        let mut receivers = Vec::with_capacity(n_peers);
+        for index in 0..n_peers {
+            let peer = Self::bench_peer_address(index);
+            let session_id = u64::try_from(index)
+                .expect("bench peer index fits u64")
+                .saturating_add(1);
+            let peer_asn = 4_200_000_000u32
+                .saturating_add(u32::try_from(index).expect("bench peer index fits u32"));
+            self.handle_update(RibUpdate::SetPeerGracefulRestartContext {
+                peer,
+                session_id,
+                peer_restart_state: false,
+                peer_gr_families: gate_families.to_vec(),
+                peer_enhanced_refresh: true,
+            });
+            let (outbound_tx, mut outbound_rx) = mpsc::channel(channel_capacity);
+            self.pending_peer_export_encoders
+                .insert((peer, session_id), make_exact_export_encoder(peer_asn));
+            self.handle_peer_up(
+                peer,
+                session_id,
+                peer_asn,
+                Ipv4Addr::new(192, 0, 2, 1),
+                outbound_tx,
+                None,
+                sendable_families.to_vec(),
+                true,
+                false,
+                None,
+                false,
+                false,
+                Vec::new(),
+                0,
+                Vec::new(),
+                Vec::new(),
+            );
+            while outbound_rx.try_recv().is_ok() {}
+            receivers.push(outbound_rx);
+        }
+        receivers
+    }
+
+    /// Return exact commutative checksums and source-store occupancy without
+    /// cloning any route shell. The stable array layout is documented by the
+    /// sole bench target that consumes this feature-gated seam.
+    ///
+    /// # Panics
+    ///
+    /// Panics only on a platform whose `usize` route count exceeds `u64`.
+    #[must_use]
+    pub fn bench_selection_deferral_inventory(&self) -> [u64; 12] {
+        let mut receipt = SelectionDeferralInventoryBenchReceipt {
+            source_stores: self.ribs.len(),
+            min_routes_per_source: usize::MAX,
+            ..SelectionDeferralInventoryBenchReceipt::default()
+        };
+        for route in self.loc_rib.iter() {
+            match route.prefix {
+                Prefix::V4(_) => {
+                    selection_deferral_add_inventory(&mut receipt.loc_ipv4, route.prefix);
+                }
+                Prefix::V6(_) => {
+                    selection_deferral_add_inventory(&mut receipt.loc_ipv6, route.prefix);
+                }
+            }
+        }
+        for rib in self.ribs.values() {
+            let rows = rib.len();
+            if rows > 0 {
+                receipt.nonempty_source_stores = receipt.nonempty_source_stores.saturating_add(1);
+            }
+            receipt.min_routes_per_source = receipt.min_routes_per_source.min(rows);
+            receipt.max_routes_per_source = receipt.max_routes_per_source.max(rows);
+            for route in rib.iter() {
+                match route.prefix {
+                    Prefix::V4(_) => {
+                        selection_deferral_add_inventory(&mut receipt.adj_ipv4, route.prefix);
+                    }
+                    Prefix::V6(_) => {
+                        selection_deferral_add_inventory(&mut receipt.adj_ipv6, route.prefix);
+                    }
+                }
+            }
+        }
+        if self.ribs.is_empty() {
+            receipt.min_routes_per_source = 0;
+        }
+        [
+            u64::try_from(receipt.loc_ipv4.routes).expect("route count fits u64"),
+            receipt.loc_ipv4.checksum,
+            u64::try_from(receipt.loc_ipv6.routes).expect("route count fits u64"),
+            receipt.loc_ipv6.checksum,
+            u64::try_from(receipt.adj_ipv4.routes).expect("route count fits u64"),
+            receipt.adj_ipv4.checksum,
+            u64::try_from(receipt.adj_ipv6.routes).expect("route count fits u64"),
+            receipt.adj_ipv6.checksum,
+            u64::try_from(receipt.source_stores).expect("source-store count fits u64"),
+            u64::try_from(receipt.nonempty_source_stores).expect("source-store count fits u64"),
+            u64::try_from(receipt.min_routes_per_source).expect("source rows fit u64"),
+            u64::try_from(receipt.max_routes_per_source).expect("source rows fit u64"),
+        ]
+    }
+
+    fn bench_selection_deferral_ledger_cleared(&self) -> bool {
+        // `DeferredSelectionKeys` deliberately exposes no production
+        // introspection. Its derived Debug is exhaustive over every retained
+        // set/map/byte counter; compare that state to a fresh ledger while
+        // ignoring the fixture-local limit value.
+        fn without_limits(debug: &str) -> &str {
+            debug
+                .split_once(", limits:")
+                .map_or(debug, |(state, _)| state)
+        }
+        let actual = format!("{:?}", self.deferred_selection_keys);
+        let empty = format!(
+            "{:?}",
+            super::selection_deferral::DeferredSelectionKeys::default()
+        );
+        without_limits(&actual) == without_limits(&empty)
+    }
+
+    /// Queue one Loc-RIB-count sentinel, time the exact production expiry
+    /// call, then serve the sentinel through the production general-query drain.
+    /// `expire = false` is the same-setup control.
+    ///
+    /// # Panics
+    ///
+    /// Panics unless primary updates and general queries are empty before the
+    /// sentinel is queued, its depth becomes exactly one, the query replies
+    /// synchronously, or the release leaves inconsistent gate/counter state.
+    #[must_use]
+    pub fn bench_selection_deferral_release_with_sentinel(
+        &mut self,
+        query_tx: &mpsc::Sender<RibUpdate>,
+        families: &[(Afi, Safi)],
+        snapshot_peer: IpAddr,
+        expire: bool,
+    ) -> [u64; 14] {
+        let primary_depth_before = self.rx.len();
+        assert_eq!(primary_depth_before, 0, "primary update lane must be empty");
+        assert_eq!(
+            self.query_rx.len(),
+            0,
+            "general query lane must start empty"
+        );
+
+        let releases_before = selection_deferral_counter_total(
+            &self.metrics,
+            "bgp_selection_deferral_releases_total",
+        );
+        let timeouts_before = selection_deferral_counter_total(
+            &self.metrics,
+            "bgp_selection_deferral_timeouts_total",
+        );
+        let overflows_before = selection_deferral_counter_total(
+            &self.metrics,
+            "bgp_selection_deferral_ledger_overflows_total",
+        );
+        let (reply, mut response) = oneshot::channel();
+        let sentinel_started = std::time::Instant::now();
+        query_tx
+            .try_send(RibUpdate::QueryLocRibCount { reply })
+            .expect("general query channel has one reserved sentinel slot");
+        let query_depth_before = self.query_rx.len();
+        assert_eq!(
+            query_depth_before, 1,
+            "exactly one sentinel query must be queued"
+        );
+        let release_duration = if expire {
+            let release_started = std::time::Instant::now();
+            self.expire_selection_deferral();
+            release_started.elapsed()
+        } else {
+            std::time::Duration::ZERO
+        };
+        self.drain_queries(1);
+        let sentinel_latency = sentinel_started.elapsed();
+        let sentinel_loc_rib_count = response
+            .try_recv()
+            .expect("Loc-RIB-count sentinel replies through the query drain");
+        let query_depth_after = self.query_rx.len();
+
+        let rows = self
+            .selection_deferral
+            .as_ref()
+            .map_or_else(Vec::new, |selection| selection.peer_snapshot(snapshot_peer));
+        let relevant = rows
+            .iter()
+            .filter(|row| families.contains(&(row.afi, row.safi)))
+            .collect::<Vec<_>>();
+        let active_gates_after = relevant.iter().filter(|row| row.active).count();
+        let released_gates_after = relevant.iter().filter(|row| !row.active).count();
+        let timer_released_gates_after = relevant
+            .iter()
+            .filter(|row| !row.active && row.release_reason == "timer")
+            .count();
+        let releases_after = selection_deferral_counter_total(
+            &self.metrics,
+            "bgp_selection_deferral_releases_total",
+        );
+        let timeouts_after = selection_deferral_counter_total(
+            &self.metrics,
+            "bgp_selection_deferral_timeouts_total",
+        );
+
+        [
+            u64::try_from(release_duration.as_nanos()).unwrap_or(u64::MAX),
+            u64::try_from(sentinel_latency.as_nanos()).unwrap_or(u64::MAX),
+            u64::try_from(sentinel_loc_rib_count).expect("Loc-RIB count fits u64"),
+            u64::try_from(primary_depth_before).expect("channel depth fits u64"),
+            u64::try_from(query_depth_before).expect("channel depth fits u64"),
+            u64::try_from(query_depth_after).expect("channel depth fits u64"),
+            releases_after.saturating_sub(releases_before),
+            timeouts_after.saturating_sub(timeouts_before),
+            u64::try_from(active_gates_after).expect("gate count fits u64"),
+            u64::try_from(released_gates_after).expect("gate count fits u64"),
+            u64::try_from(timer_released_gates_after).expect("gate count fits u64"),
+            u64::from(self.bench_selection_deferral_ledger_cleared()),
+            u64::try_from(relevant.len()).expect("gate count fits u64"),
+            overflows_before,
+        ]
+    }
+
     /// Populate the manager's actual production prefix-to-announcing-peers
     /// index from prebuilt keys. The caller can therefore place prefix/input
     /// construction before an allocator baseline and isolate index growth.

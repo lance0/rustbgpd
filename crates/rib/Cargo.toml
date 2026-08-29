@@ -57,3 +57,8 @@ required-features = ["bench-internals"]
 name = "dataplane_prefix_paging"
 harness = false
 required-features = ["bench-internals"]
+
+[[bench]]
+name = "selection_deferral_release"
+harness = false
+required-features = ["bench-internals"]

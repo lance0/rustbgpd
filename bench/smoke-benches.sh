@@ -13,7 +13,7 @@
 # timing it happens to produce is meaningless and is not reported.
 #
 # The target list comes from `cargo metadata`, so a bench target is covered the
-# day it lands rather than when someone remembers to register it here. The five
+# day it lands rather than when someone remembers to register it here. The six
 # non-criterion harnesses are excluded by name; renaming one drops its
 # exclusion and this script then fails loudly instead of skipping it silently.
 
@@ -52,7 +52,10 @@ done
 #                        per process, driven by prefix/path/index-mode flags.
 #   vpn_query_*          are one-cell timing/allocation executables. CI runs
 #                        their exact 256-route smoke separately.
-EXCLUDED=(snapshot_allocation route_paging dataplane_prefix_paging vpn_query_timing vpn_query_allocation)
+#   selection_deferral_release
+#                        fixed-fleet receipt harness with its own CLI and
+#                        bounded self-test, which CI runs separately.
+EXCLUDED=(snapshot_allocation route_paging dataplane_prefix_paging vpn_query_timing vpn_query_allocation selection_deferral_release)
 
 mapfile -t targets < <(
   cargo metadata "${locked_args[@]}" --no-deps --format-version 1 | python3 -c '
