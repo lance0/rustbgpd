@@ -3,6 +3,8 @@ use crate::error::CliError;
 use crate::output::{self, JsonHealth};
 use crate::proto::control_service_client::ControlServiceClient;
 use crate::proto::{HealthRequest, MetricsRequest, ShutdownRequest, TriggerMrtDumpRequest};
+use std::collections::BTreeMap;
+use std::net::SocketAddr;
 
 /// Sum a complete, unique, valid IPv4 + IPv6 RPKI VRP gauge snapshot.
 /// `Some(0)` distinguishes a synchronized empty table from an unusable snapshot.
@@ -43,6 +45,49 @@ pub(crate) fn rpki_vrp_count_sum(prometheus_text: &str) -> Option<u64> {
         by_family[index] = Some(value);
     }
     by_family[0]?.checked_add(by_family[1]?)
+}
+
+/// Parse the exact per-cache retained End-of-Data readiness gauge family.
+/// Any malformed exact-name row invalidates the snapshot; similarly-prefixed
+/// metric families are unrelated and ignored.
+pub(crate) fn rpki_cache_end_of_data_readiness(
+    prometheus_text: &str,
+) -> Option<BTreeMap<SocketAddr, bool>> {
+    const NAME: &str = "bgp_rpki_cache_end_of_data_ready";
+    let mut readiness = BTreeMap::new();
+
+    for line in prometheus_text.lines().map(str::trim) {
+        let Some(rest) = line.strip_prefix(NAME) else {
+            continue;
+        };
+        if !rest.starts_with('{') {
+            if rest.is_empty() || rest.as_bytes().first().is_some_and(u8::is_ascii_whitespace) {
+                return None;
+            }
+            continue;
+        }
+        let labels_and_value = rest.strip_prefix(r#"{cache=""#)?;
+        let (cache, value_text) = labels_and_value.split_once(r#""}"#)?;
+        if cache.is_empty()
+            || !value_text
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_whitespace)
+        {
+            return None;
+        }
+        let cache = cache.parse::<SocketAddr>().ok()?;
+        let mut fields = value_text.split_ascii_whitespace();
+        let value = match fields.next()? {
+            "0" => false,
+            "1" => true,
+            _ => return None,
+        };
+        if fields.next().is_some() || readiness.insert(cache, value).is_some() {
+            return None;
+        }
+    }
+    Some(readiness)
 }
 
 pub async fn health(connection: Connection, json: bool) -> Result<(), CliError> {
@@ -172,5 +217,37 @@ unrelated_metric 7
         ] {
             assert_eq!(rpki_vrp_count_sum(invalid), None, "{invalid}");
         }
+    }
+
+    #[test]
+    fn rpki_cache_readiness_requires_exact_typed_unique_samples() {
+        let parsed = rpki_cache_end_of_data_readiness(
+            "bgp_rpki_cache_end_of_data_ready{cache=\"192.0.2.1:8282\"} 1\n\
+             bgp_rpki_cache_end_of_data_ready{cache=\"[2001:db8::1]:8282\"} 0\n\
+             bgp_rpki_cache_end_of_data_ready_total{cache=\"192.0.2.1:8282\"} 9",
+        )
+        .unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert!(parsed[&"192.0.2.1:8282".parse().unwrap()]);
+        assert!(!parsed[&"[2001:db8::1]:8282".parse().unwrap()]);
+
+        for invalid in [
+            "bgp_rpki_cache_end_of_data_ready 1",
+            "bgp_rpki_cache_end_of_data_ready{cache=\"192.0.2.1:8282\",extra=\"x\"} 1",
+            "bgp_rpki_cache_end_of_data_ready{other=\"192.0.2.1:8282\"} 1",
+            "bgp_rpki_cache_end_of_data_ready{cache=\"not-an-address\"} 1",
+            "bgp_rpki_cache_end_of_data_ready{cache=\"192.0.2.1:8282\"} 2",
+            "bgp_rpki_cache_end_of_data_ready{cache=\"192.0.2.1:8282\"} 1 extra",
+            "bgp_rpki_cache_end_of_data_ready{cache=\"[2001:db8::1]:8282\"} 1\n\
+             bgp_rpki_cache_end_of_data_ready{cache=\"[2001:0db8:0:0:0:0:0:1]:8282\"} 1",
+        ] {
+            assert_eq!(rpki_cache_end_of_data_readiness(invalid), None, "{invalid}");
+        }
+        assert_eq!(
+            rpki_cache_end_of_data_readiness(
+                "bgp_rpki_cache_end_of_data_readiness{cache=\"bad\"} 7"
+            ),
+            Some(BTreeMap::new())
+        );
     }
 }

@@ -753,8 +753,12 @@ will cause route drops. The recommended policy is to deny `Invalid` and
 prefer `Valid`, leaving `NotFound` as a neutral fallback.
 `rbgp doctor` probes every configured cache from the `rbgp` process
 (`rpki.cache.<addr>.reachable_from_cli`). That raw connect is explicitly a
-CLI-network-vantage check and warns on failure; use the daemon-side
-`rpki.vrp_table` check to assess whether rustbgpd has synchronized VRPs.
+CLI-network-vantage connectivity check and warns on failure. The single
+daemon-side `rpki.vrp_table` check is green only when the merged VRP count is
+nonzero and every configured cache reports retained accepted complete
+End-of-Data readiness; it names configured caches whose readiness is `0`
+separately from caches missing from the metric snapshot. Neither result proves
+that an RTR TCP connection is currently established.
 
 `bgp_rpki_cache_end_of_data_ready{cache}` is `0` at startup, becomes `1` only
 after an accepted, complete, validated End of Data (including an empty table),
@@ -1841,7 +1845,7 @@ First-deploy checks (network probes are bounded to a 2s timeout; all are read-on
 | Check | What it probes | Red/yellow advice |
 |-------|----------------|-------------------|
 | `bgp.listener` | Daemon up: TCP connect to the BGP listen port. Daemon down: test-bind the port and release it | `CAP_NET_BIND_SERVICE` for ports below 1024; port-in-use is yellow (an unreachable daemon may hold it) |
-| `rpki.vrp_table` | With configured caches and a reachable daemon, sums the complete IPv4 + IPv6 `bgp_rpki_vrp_count` snapshot | yellow when the merged table is zero, missing, malformed, or unavailable; verify RTR synchronization and `/metrics` |
+| `rpki.vrp_table` | With configured caches and a reachable daemon, requires a nonzero complete IPv4 + IPv6 `bgp_rpki_vrp_count` snapshot and retained accepted complete End-of-Data readiness for every configured cache | yellow when the merged table is zero/missing/malformed/unavailable or a configured cache is not ready/missing from the readiness snapshot; this is retained readiness, not current RTR connectivity |
 | `rpki.cache.<addr>.reachable_from_cli` | TCP connect from the `rbgp` process to each `[rpki] cache_servers` entry | yellow on failure because this is CLI-network-vantage evidence, not daemon-side connectivity; use `rpki.vrp_table` for the daemon's VRP state |
 | `bmp.collector.<addr>.reachable_from_cli` | TCP connect from the `rbgp` process to each `[bmp] collectors` entry | yellow on failure because the daemon may have a different network vantage; inspect rustbgpd and collector logs for actual export state |
 | `gnmi_dialout.<name>.reachable_from_cli` | TCP connect from the `rbgp` process to each `[gnmi_dialout] targets` entry | yellow on failure because the daemon may have a different network vantage; inspect `gnmi_dialout_connected` and daemon logs for actual dial-out state |
