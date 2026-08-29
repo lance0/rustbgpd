@@ -172,9 +172,13 @@ matching reachable when RFC 8654 extended messages are enabled (affected
 through 2.19.0), is a recent example of the vulnerability class the
 memory-safe-language row refers to.
 
-[^gtsm-distance]: rustbgpd sends with TTL / Hop Limit 255 and accepts an
-    optional `ttl_security_hops` value whose inbound floor is `256 - hops`;
-    omission preserves the exact-255 one-hop policy. The other implementations
+[^gtsm-distance]: Both GTSM speakers must transmit TTL / Hop Limit 255. On each
+    side, a maximum distance of `hops` sets that side's inbound floor to
+    `255 - (hops - 1)`, equivalently `256 - hops`. rustbgpd's
+    `ttl_security_hops` changes only its receive floor; it cannot make a peer
+    transmitting an ordinary lower TTL compatible. Omission preserves the
+    exact-255 one-hop policy, while a larger value supports bounded multihop.
+    The other implementations
     document equivalent distance-aware forms: FRR
     [`neighbor PEER ttl-security hops NUMBER`](https://docs.frrouting.org/en/latest/bgp.html#clicmd-neighbor-PEER-ttl-security-hops-NUMBER)
     (documented as mutually exclusive with `ebgp-multihop`), BIRD
@@ -192,8 +196,10 @@ memory-safe-language row refers to.
     to enable: it never lowers the outbound TTL / Hop Limit on a BGP socket and
     has no check refusing an eBGP peer for not being directly connected, so a
     non-adjacent peer is dialed with the kernel default TTL. That default path
-    has no distance guard; enable `ttl_security` with `ttl_security_hops` when
-    the peer's maximum distance should be bounded. This describes the
+    has no distance guard and does not fail fast on an off-subnet address typo.
+    There is no separate `ebgp_multihop` path that disables GTSM: enable
+    `ttl_security` with `ttl_security_hops` on a peer that also transmits GTSM
+    TTL / Hop Limit 255 when the distance should be bounded. This describes the
     mechanism, not an interoperability receipt.
     See [CONFIGURATION.md](CONFIGURATION.md) and
     [LIMITATIONS.md](LIMITATIONS.md).
