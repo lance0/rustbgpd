@@ -30,6 +30,18 @@ adapter_pid=
 dump_proof_logs() {
   [ ! -f "$tmp/daemon.log" ] || { echo '--- rustbgpd log ---' >&2; tail -n 80 "$tmp/daemon.log" >&2; }
   [ ! -f "$tmp/adapter.log" ] || { echo '--- adapter log ---' >&2; tail -n 80 "$tmp/adapter.log" >&2; }
+  if docker inspect "$oracle" >/dev/null 2>&1; then
+    echo '--- oracle container log ---' >&2
+    docker logs --tail 80 "$oracle" >&2 || true
+  fi
+  if docker inspect "$announcer_a" >/dev/null 2>&1; then
+    echo '--- AS64496 announcer log ---' >&2
+    docker logs --tail 80 "$announcer_a" >&2 || true
+  fi
+  if docker inspect "$announcer_b" >/dev/null 2>&1; then
+    echo '--- AS64497 announcer log ---' >&2
+    docker logs --tail 80 "$announcer_b" >&2 || true
+  fi
   if docker inspect "$alice" >/dev/null 2>&1; then
     echo '--- Alice-LG log ---' >&2
     docker logs --tail 80 "$alice" >&2 || true
@@ -73,6 +85,11 @@ cargo build --quiet --locked --manifest-path "$repo/Cargo.toml" -p birdwatcher-a
 oracle_image=$(docker build --quiet --file "$root/Dockerfile.oracle" "$root")
 docker network create --subnet 198.51.100.0/24 \
   --ipv6 --subnet 2001:db8:5100::/64 "$network" >/dev/null
+gateway=$(docker network inspect --format '{{(index .IPAM.Config 0).Gateway}}' "$network")
+[ "$gateway" = 198.51.100.1 ] || {
+  echo "populated oracle network gateway drifted: expected 198.51.100.1, got $gateway" >&2
+  exit 1
+}
 
 # Oracle: the Bird's Eye checkout installed from its committed lockfile earlier
 # in the gate, copied in next to the pinned BIRD so the real birdc is local.
@@ -188,13 +205,13 @@ for _ in $(seq 1 120); do
 done
 [ -S "$socket" ] || exit 1
 NO_COLOR=1 "$repo/target/debug/birdwatcher-adapter" \
-  --grpc-addr "unix://$socket" --listen 0.0.0.0:0 \
+  --grpc-addr "unix://$socket" --listen "$gateway:0" \
   --protocol-alias-file "$aliases" --max-routes 100 \
   >"$tmp/adapter.out" 2>"$tmp/adapter.log" &
 adapter_pid=$!
 port=
 for _ in $(seq 1 120); do
-  port=$(grep -o '0\.0\.0\.0:[0-9][0-9]*' "$tmp/adapter.log" | tail -1 | cut -d: -f2 || true)
+  port=$(grep -o '198\.51\.100\.1:[0-9][0-9]*' "$tmp/adapter.log" | tail -1 | cut -d: -f2 || true)
   [ -z "$port" ] || break
   kill -0 "$daemon_pid" 2>/dev/null \
     && kill -0 "$adapter_pid" 2>/dev/null \
@@ -202,9 +219,11 @@ for _ in $(seq 1 120); do
   sleep 0.1
 done
 [ -n "$port" ] || exit 1
-live_api=http://127.0.0.1:$port
+live_api=http://$gateway:$port
 
-sed "s/__ADAPTER_PORT__/$port/" "$root/alice.conf" >"$tmp/alice.conf"
+sed "s#http://198.51.100.1:__ADAPTER_PORT__#http://$gateway:$port#" \
+  "$root/alice.conf" >"$tmp/alice.conf"
+grep -Fqx "api = http://$gateway:$port" "$tmp/alice.conf"
 docker run --detach --name "$alice" --network "$network" \
   --ip 198.51.100.5 \
   --volume "$tmp/alice.conf:/etc/alice-lg/alice.conf:ro" \
@@ -230,7 +249,7 @@ alice_ready || exit 1
 # Both legs must hold every route from both announcers in both tables before
 # the consumer reads them: 4 IPv4 (3 + 1) and 3 IPv6 (2 + 1).
 table_size() {
-  curl --silent --max-time 1 "$1/routes/table/$2" | python3 -c \
+  curl --silent --max-time 5 "$1/routes/table/$2" | python3 -c \
     'import json,sys; print(len(json.load(sys.stdin).get("routes", [])))' 2>/dev/null || echo -1
 }
 converged() {
@@ -248,8 +267,8 @@ while [ "$(date +%s)" -lt "$convergence_deadline" ]; do
 done
 if ! converged; then
   echo "populated oracle leg did not converge: oracle master4=$(table_size "$oracle_api" master4) master6=$(table_size "$oracle_api" master6) live master4=$(table_size "$live_api" master4) master6=$(table_size "$live_api" master6)" >&2
-  docker exec "$oracle" cat /tmp/birdseye.log >&2 || true
-  docker logs "$announcer_a" >&2 || true
+  docker exec "$oracle" tail -n 80 /tmp/birdseye.log >&2 || true
+  docker logs --tail 80 "$announcer_a" >&2 || true
   tail -n 40 "$tmp/daemon.log" >&2
   exit 1
 fi
