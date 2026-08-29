@@ -85,11 +85,25 @@ cargo build --quiet --locked --manifest-path "$repo/Cargo.toml" -p birdwatcher-a
 oracle_image=$(docker build --quiet --file "$root/Dockerfile.oracle" "$root")
 docker network create --subnet 198.51.100.0/24 \
   --ipv6 --subnet 2001:db8:5100::/64 "$network" >/dev/null
-gateway=$(docker network inspect --format \
-  '{{range .IPAM.Config}}{{if eq .Subnet "198.51.100.0/24"}}{{.Gateway}}{{"\n"}}{{end}}{{end}}' \
-  "$network")
+gateway=$(
+  docker network inspect "$network" |
+    jq -er '
+      [
+        .[0].IPAM.Config[]?
+        | select(.Subnet == "198.51.100.0/24")
+        | .Gateway
+      ]
+      | if length == 1 and (.[0] | type) == "string" and (.[0] | length) > 0
+        then .[0]
+        else empty
+        end
+    ' 2>/dev/null
+) || {
+  echo 'populated oracle network must have exactly one IPv4 gateway for 198.51.100.0/24' >&2
+  exit 1
+}
 [ "$gateway" = 198.51.100.1 ] || {
-  echo "populated oracle network gateway drifted: expected 198.51.100.1, got $gateway" >&2
+  echo 'populated oracle network IPv4 gateway does not match expected 198.51.100.1' >&2
   exit 1
 }
 
