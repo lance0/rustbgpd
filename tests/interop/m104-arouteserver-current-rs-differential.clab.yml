@@ -1,0 +1,90 @@
+# Containerlab topology: current-daemon sibling of the immutable M90
+# ARouteServer filtering differential.
+#
+# M104 reuses every M90 site/config input read-only while changing only the
+# daemon identities under proof:
+#   - rustbgpd: the exact workflow SHA built as rustbgpd:dev
+#   - BIRD 2.19.2, built from the staged checksum-verified source archive
+#   - GoBGP 4.8.0, built from the checksum-pinned release archive
+#
+# The driver renders both route-server configurations after deploy, validates
+# them before daemon start, then drives the unchanged 11-route M90 corpus.
+
+name: m104-arouteserver-current-rs-differential
+
+topology:
+  nodes:
+    switch:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      exec:
+        - ip link add br0 type bridge mcast_snooping 0
+        - ip link set eth1 master br0
+        - ip link set eth2 master br0
+        - ip link set eth3 master br0
+        - ip link set eth4 master br0
+        - ip link set eth5 master br0
+        - ip link set eth1 up
+        - ip link set eth2 up
+        - ip link set eth3 up
+        - ip link set eth4 up
+        - ip link set eth5 up
+        - ip link set br0 up
+
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      exec:
+        - ip addr add 192.0.2.9/24 dev eth1
+        - ip link set eth1 up
+        - mkdir -p /etc/rustbgpd /var/lib/rustbgpd
+      env:
+        RUST_LOG: info
+
+    bird:
+      kind: linux
+      image: bird:v2.19.2-m104
+      cmd: sleep infinity
+      exec:
+        - ip addr add 192.0.2.10/24 dev eth1
+        - ip link set eth1 up
+        - mkdir -p /etc/bird /run/bird
+
+    member1:
+      kind: linux
+      image: gobgp:v4.8.0-m104
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m90-member1.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 192.0.2.11/24 dev eth1
+        - ip link set eth1 up
+
+    member2:
+      kind: linux
+      image: gobgp:v4.8.0-m104
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m90-member2.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 192.0.2.12/24 dev eth1
+        - ip link set eth1 up
+
+    member3:
+      kind: linux
+      image: gobgp:v4.8.0-m104
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m90-member3.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 192.0.2.13/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["switch:eth1", "rustbgpd:eth1"]
+    - endpoints: ["switch:eth2", "bird:eth1"]
+    - endpoints: ["switch:eth3", "member1:eth1"]
+    - endpoints: ["switch:eth4", "member2:eth1"]
+    - endpoints: ["switch:eth5", "member3:eth1"]

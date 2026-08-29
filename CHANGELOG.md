@@ -11,6 +11,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- M104 adds a hosted current-daemon sibling of the immutable M90
+  ARouteServer filtering differential. It reuses the exact M90 site and
+  11-route corpus while requiring a 23/23 context-ingestion proof and 74/0
+  live verdict/session proof against ARouteServer 1.23.2, staged BIRD 2.19.2,
+  GoBGP 4.8.0, and the exact checked-out rustbgpd image.
+
 - Hosted M83 and M101 interop jobs now consume independently cached,
   checksum- and source-version-verified BIRD 2.19.2 and 3.3.2 archives from
   required same-run producers before building their images with dedicated

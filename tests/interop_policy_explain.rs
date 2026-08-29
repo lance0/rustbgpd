@@ -22,13 +22,17 @@ const FIXED_CONFIG_RECEIPTS: &[(&str, &str)] = &[
         "configs/rustbgpd-m102-rs.toml",
     ),
 ];
-const GENERATED_CONFIG_RECEIPT: &str = "test-m90-differential.sh";
+const GENERATED_CONFIG_RECEIPTS: &[&str] = &[
+    "test-m90-differential.sh",
+    "test-m104-arouteserver-current-rs-differential.sh",
+];
 const GENERATED_CONFIG_FRAGMENT: &str = "m90-differential/policy-explain.toml";
 const GENERATED_CONFIG_APPEND: &str =
     "cat \"$POLICY_EXPLAIN_FRAGMENT\" >>\"$RENDER_DIR/config.toml\"";
 const GENERATED_CONFIG_COPY: &str =
     "docker cp \"$RENDER_DIR/config.toml\" \"$RUSTBGPD\":/etc/rustbgpd/config.toml";
-const GENERATED_CONFIG_CHECK: &str = "--check --strict /etc/rustbgpd/config.toml";
+const GENERATED_CONFIG_CHECK: &str = "--check --strict";
+const GENERATED_CONFIG_CHECK_TARGET: &str = "/etc/rustbgpd/config.toml";
 
 fn explain_enabled(source: &str) -> bool {
     let value: toml::Value = toml::from_str(source).expect("fixture must be valid TOML");
@@ -71,7 +75,11 @@ fn interop_policy_explain_receipts_explicitly_opt_in() {
     let expected: BTreeSet<String> = FIXED_CONFIG_RECEIPTS
         .iter()
         .map(|(script, _)| (*script).to_owned())
-        .chain(std::iter::once(GENERATED_CONFIG_RECEIPT.to_owned()))
+        .chain(
+            GENERATED_CONFIG_RECEIPTS
+                .iter()
+                .map(|script| (*script).to_owned()),
+        )
         .collect();
     assert_eq!(
         discovered, expected,
@@ -88,25 +96,35 @@ fn interop_policy_explain_receipts_explicitly_opt_in() {
         );
     }
 
-    let generated_script =
-        fs::read_to_string(scripts.join(GENERATED_CONFIG_RECEIPT)).expect("M90 script is readable");
     let fragment = fs::read_to_string(interop.join(GENERATED_CONFIG_FRAGMENT))
         .expect("M90 explain fragment is readable");
     assert!(
         explain_enabled(&fragment),
         "{GENERATED_CONFIG_FRAGMENT} must explicitly enable policy explain"
     );
-    let append_pos = generated_script
-        .find(GENERATED_CONFIG_APPEND)
-        .expect("M90 must append its policy-explain fragment");
-    let copy_pos = generated_script
-        .find(GENERATED_CONFIG_COPY)
-        .expect("M90 must copy its rendered config into the daemon container");
-    let check_pos = generated_script
-        .find(GENERATED_CONFIG_CHECK)
-        .expect("M90 must validate its rendered config");
-    assert!(
-        append_pos < copy_pos && append_pos < check_pos,
-        "{GENERATED_CONFIG_RECEIPT} must append its policy-explain fragment before config copy and validation"
-    );
+    for script in GENERATED_CONFIG_RECEIPTS {
+        let generated_script = fs::read_to_string(scripts.join(script))
+            .unwrap_or_else(|error| panic!("{script} is unreadable: {error}"));
+        let append_pos = generated_script
+            .find(GENERATED_CONFIG_APPEND)
+            .unwrap_or_else(|| panic!("{script} must append its policy-explain fragment"));
+        let copy_pos = generated_script[append_pos..]
+            .find(GENERATED_CONFIG_COPY)
+            .map(|position| append_pos + position)
+            .unwrap_or_else(|| {
+                panic!("{script} must copy its rendered config into the daemon container")
+            });
+        let check_pos = generated_script[append_pos..]
+            .find(GENERATED_CONFIG_CHECK)
+            .map(|position| append_pos + position)
+            .unwrap_or_else(|| panic!("{script} must validate its rendered config"));
+        let check_target_pos = generated_script[check_pos..]
+            .find(GENERATED_CONFIG_CHECK_TARGET)
+            .map(|position| check_pos + position)
+            .unwrap_or_else(|| panic!("{script} must validate the installed rendered config"));
+        assert!(
+            append_pos < copy_pos && append_pos < check_pos && check_pos < check_target_pos,
+            "{script} must append its policy-explain fragment before config copy and validation"
+        );
+    }
 }

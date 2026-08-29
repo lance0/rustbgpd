@@ -1709,6 +1709,58 @@ class PrimerContractTests(unittest.TestCase):
             self.assertGreaterEqual(count, 2)
             self.mutate(relative, old, occurrence=count - 1)
 
+    def test_m104_current_arouteserver_differential_job_is_load_bearing(self):
+        relative = ".github/workflows/interop.yml"
+        for old in (
+            "  m104:\n",
+            "    needs: [grpcurl_archive, bird2192_archive, prime_dev_image]\n",
+            "      - name: Verify and pull exact ARouteServer 1.23.2 image\n",
+            "          AROUTESERVER_IMAGE: pierky/arouteserver@sha256:ba0e9c0b541c63acf0765a08fd2e09c2bba9dc64af1f5bbdce7819e8d1c34d66\n",
+            "          AROUTESERVER_CONFIG: sha256:4a08ef740f00a119f5897b0f834da9ff172a282c93d47fdff636c3b50c9aec93\n",
+            '          manifest_json=$(docker buildx imagetools inspect --raw "$AROUTESERVER_IMAGE")\n',
+            "            application/vnd.docker.distribution.manifest.v2+json\n",
+            '            \'import importlib.metadata; print(importlib.metadata.version("arouteserver"))\')" = \\\n',
+            "      - name: Build bird:v2.19.2-m104\n",
+            "          tags: bird:v2.19.2-m104\n",
+            "          cache-from: type=gha,scope=bird2192-m104\n",
+            "          cache-to: type=gha,mode=max,scope=bird2192-m104,ignore-error=true\n",
+            "      - name: Build gobgp:v4.8.0-m104\n",
+            "      - uses: ./.github/actions/install-protobuf\n",
+            "          -t gobgp:v4.8.0-m104 -f tests/interop/Dockerfile.gobgp-v47 tests/interop\n",
+            "      - name: Run immutable M90 context proof (exact 23/23)\n",
+            "          M90_ARS_IMAGE: pierky/arouteserver@sha256:ba0e9c0b541c63acf0765a08fd2e09c2bba9dc64af1f5bbdce7819e8d1c34d66\n",
+            "          output=$(bash tests/interop/m90-differential/prove-context-ingestion.sh)\n",
+            "          grep -Fq 'PROOF PASS: 23 checks' <<<\"$output\"\n",
+            "      - name: Run M104 offline destructive contract\n",
+            "          --self-test-offline-contract\n",
+            "      - name: Run M104 (single-attempt current-daemon differential)\n",
+            "          M104_EXPECTED_GIT_SHA: ${{ github.sha }}\n",
+            "          label: M104\n",
+            "          topology: tests/interop/m104-arouteserver-current-rs-differential.clab.yml\n",
+            "          script: tests/interop/scripts/test-m104-arouteserver-current-rs-differential.sh\n",
+        ):
+            with self.subTest(seam=old):
+                count = (ROOT / relative).read_text().count(old)
+                self.assertGreater(count, 0, f"missing M104 seam: {old}")
+                self.mutate(relative, old, occurrence=count - 1)
+
+        stage = (
+            "      - name: Stage verified BIRD 2.19.2 archive\n"
+            "        uses: ./.github/actions/stage-bird3-artifact\n"
+            "        with:\n"
+            '          version: "2.19.2"\n'
+            "          sha256: aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660\n"
+            "          artifact-name: bird2192-v2.19.2-source\n"
+        )
+        count = (ROOT / relative).read_text().count(stage)
+        self.assertGreaterEqual(count, 2)
+        self.mutate(relative, stage, occurrence=count - 1)
+
+        max_attempt = '          max_attempts: "1"\n'
+        count = (ROOT / relative).read_text().count(max_attempt)
+        self.assertGreaterEqual(count, 1)
+        self.mutate(relative, max_attempt, occurrence=count - 1)
+
     def test_dockerfile_exact_source_bridge(self):
         for binary in ("rustbgpd", "rbgp", "evpn-tester", "evpn-monitor"):
             with self.subTest(binary=binary, side="builder"):
