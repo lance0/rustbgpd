@@ -70,6 +70,15 @@ wait_for() {
     for _ in $(seq 1 60); do "$@" >/dev/null 2>&1 && return; sleep 1; done
     diagnostic_die "timeout: $label"
 }
+import_explain_names_m102_import() {
+    local output
+    output=$(rs_ctl policy explain --neighbor "$OPENBGPD_ADDR" --prefix "$IMPORT_DENY") \
+      || return 1
+    [[ "$output" == *m102-import* ]]
+}
+wait_import_explain_ready() {
+    wait_for "$IMPORT_DENY import explain decision" import_explain_names_m102_import
+}
 open_session_json_valid() {
     local json=$1
     jq -e '
@@ -728,6 +737,37 @@ json_expect_reject() {
         die "JSON fixture unexpectedly accepted: $label"
     fi
 }
+self_test_import_explain_readiness() {
+    local attempts count count_file
+    count_file=$(mktemp /tmp/m102-import-explain.XXXXXX)
+    printf '0\n' >"$count_file"
+    # shellcheck disable=SC2317 # wait_for invokes this stub indirectly
+    rs_ctl() {
+        read -r count <"$count_file"
+        count=$((count + 1))
+        printf '%s\n' "$count" >"$count_file"
+        if [ "$count" -lt 3 ]; then
+            printf 'outcome: not_seen\n'
+        else
+            printf 'matched policy: m102-import\n'
+        fi
+    }
+    sleep() { :; }
+    diagnostic_die() { return 1; }
+
+    if ! wait_import_explain_ready; then
+        rm -f "$count_file"
+        echo "import-explain readiness did not converge" >&2
+        return 1
+    fi
+    read -r attempts <"$count_file"
+    rm -f "$count_file"
+    if [ "$attempts" -ne 3 ]; then
+        echo "import-explain readiness accepted attempt $attempts, expected 3" >&2
+        return 1
+    fi
+    echo "M102 import-explain readiness self-test: 3 attempts"
+}
 self_test_openbgpd_json() {
     local session route inventory
     session='{"neighbors":[{"remote_addr":"10.102.1.1","state":"Established"}]}'
@@ -1049,7 +1089,7 @@ assert_reverse() {
 }
 assert_policy() {
  rs_loc_absent "$IMPORT_DENY" && ok "global import policy denies its prefix" || fail "import deny leaked"
- rs_ctl policy explain --neighbor "$OPENBGPD_ADDR" --prefix "$IMPORT_DENY" | grep -q m102-import && ok "import explain names m102-import" || fail "import explain missing"
+ import_explain_names_m102_import && ok "import explain names m102-import" || fail "import explain missing"
  rs_loc "$EXPORT_DENY" && ok "export-denied route remains in Loc-RIB" || fail "export source missing"
  rs_advertised_absent "$FRR_ADDR" ipv4 "$EXPORT_DENY" && ok "FRR advertised view omits export deny" || fail "export deny advertised"
  rs_ctl rib --prefix "$EXPORT_DENY" advertised "$FRR_ADDR" --explain | grep -q m102-export-to-frr && ok "export explain names m102-export-to-frr" || fail "export explain missing"
@@ -1108,6 +1148,7 @@ main() {
  wait_for "$OPEN_V4 local" open_has "$OPEN_V4"; wait_for "$OPEN_V6 local" open_has "$OPEN_V6"
  wait_for "$IMPORT_DENY local" open_has "$IMPORT_DENY"; wait_for "$EXPORT_DENY local" open_has "$EXPORT_DENY"
  wait_for "all OpenBGPD UPDATEs accounted" open_updates_accounted; wait_for "$EXPORT_DENY in Loc-RIB" rs_loc "$EXPORT_DENY"
+ wait_import_explain_ready
  wait_for "$OPEN_V4 at FRR" frr_has ipv4 "$OPEN_V4"; wait_for "$OPEN_V6 at FRR" frr_has ipv6 "$OPEN_V6"
  wait_for "$FRR_V4 at OpenBGPD" open_route_matches "$FRR_V4" 4200000202 10.102.2.2
  wait_for "$FRR_V6 at OpenBGPD" open_route_matches "$FRR_V6" 4200000202 2001:db8:102:2::2
@@ -1125,6 +1166,7 @@ case "${1:-}" in
  --self-test-oracle-update) self_test_oracle update; exit 0;;
  --self-test-oracle-trailing) self_test_oracle trailing; exit 0;;
  --self-test-oracle-marker) self_test_oracle marker; exit 0;;
+ --self-test-import-explain-readiness) self_test_import_explain_readiness; exit 0;;
  --self-test-openbgpd-json) self_test_openbgpd_json; exit 0;;
 esac
 # shellcheck disable=SC1091 # resolved from SCRIPT_DIR at runtime
