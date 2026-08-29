@@ -1,8 +1,8 @@
 # gRPC API Reference
 
 This reference documents rustbgpd's gRPC API.
-rustbgpd exposes eleven native `rustbgpd.v1` gRPC services (Global, Config,
-Neighbor, Policy, PeerGroup, Rib, BFD, Event, Injection, Control, Evpn) plus the
+rustbgpd exposes twelve native `rustbgpd.v1` gRPC services (Global, Config,
+Neighbor, Policy, PeerGroup, Rib, BFD, RPKI, Event, Injection, Control, Evpn) plus the
 `gnmi.gNMI` OpenConfig service over one or more configured listeners. The
 gNMI surface is read-only telemetry (`Capabilities` / `Get` / `Subscribe`) plus an
 operator-tier `Set` subset — transaction-backed create/update/delete for static
@@ -57,6 +57,7 @@ not by itself make it v1-stable.
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup`, `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` | Peer-group CRUD and neighbor membership assignment |
 | `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainAdvertisedRoute`, `ExplainBestPath`, `LookupBestPath`, `ListFlowSpecRoutes`, `ListEvpnRoutes`, `ListBgpLsRoutes`, `ListTopologyNodes`, `ListTopologyLinks`, `ListOrrStatus`, `ListVpnRoutes`, `ListRtcRoutes`, `ListLabeledRoutes`, `ListBlackholeDiscards`, `ListFibRoutes`, `ListFibTables`, `SetFibTable`, `DeleteFibTable`, `ListRouteEvents` | Query-only RIB route surfaces (incl. EVPN, BGP-LS, VPNv4/v6, RT-Constrain, and labeled-unicast), the RFC 9107 ORR / BGP-LS topology read surface (`ListTopologyNodes` / `ListTopologyLinks` / `ListOrrStatus`), BLACKHOLE discard status, paginated FIB status, runtime FIB-table CRUD, exact explain plus outside-v1 global LPM, and recent route-event history; live route streaming is owned by `EventService.WatchEvents` / `SubscribeFromEvent` |
 | `BfdService` | `GetBfdSessions` | Single-hop BFD session inspection for configured static neighbors |
+| `RpkiService` | `ValidateRouteOrigin` | Bounded point validation against the latest authoritative VRP snapshot |
 | `EventService` | `WatchEvents`, `SubscribeFromEvent`, `ListEvpnEvents`, `ListSessionEvents`, `ListPolicyEvents` | Unified live stream for route, session lifecycle, BGP NOTIFICATION metadata, policy mutation, EVPN route events, BFD session events, and FIB / BLACKHOLE dataplane status-row summary events, with `stream_lagged` warnings for bounded-source backpressure; durable cursor replay via `SubscribeFromEvent` when `[event_history].enabled = true`; plus bounded after-the-fact EVPN, session-lifecycle, and policy-mutation history. Per-MAC EVPN dataplane categories remain follow-up work |
 | `InjectionService` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddEvpnRoute`, `DeleteEvpnRoute` | Programmatic route, FlowSpec, and EVPN injection |
 | `ControlService` | `GetHealth`, `GetMetrics`, `Shutdown`, `TriggerMrtDump` | Health, metrics, lifecycle, MRT dumps |
@@ -211,6 +212,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 | `EventService` | All RPCs | None |
 | `EvpnService` | `GetEvpnRuntime`, `ListEvpnInstances`, `ListEvpnNexthops`, `ListEthernetSegments`, `ListIpVrfs`, `ListManagedNetdevs`, `GetIpVrf` | `ClearDuplicateMacQuarantine`, `SetEthernetSegmentDrain`, `ApplyEvpnRuntime` |
 | `BfdService` | `GetBfdSessions` | None |
+| `RpkiService` | `ValidateRouteOrigin` | None |
 | `gnmi.gNMI` | `Capabilities`, `Get`, `Subscribe` | `Set` (operator-only; transaction-backed OpenConfig subset — static numbered-neighbor `neighbor-address`/`peer-as`/`description`/`peer-group` create/update/delete, peer-group catalog entries, dynamic-neighbor prefixes, and the commit-confirmed extension via ADR-0076; unsupported paths return `UNIMPLEMENTED`) |
 | `InjectionService` | None | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddEvpnRoute`, `DeleteEvpnRoute` |
 | `ControlService` | `GetHealth`, `GetMetrics` | `Shutdown`, `TriggerMrtDump` |
@@ -2503,6 +2505,34 @@ Live state-change events are available on `EventService.WatchEvents` with
 until BFD Up) and non-strict (tear BGP down on BFD-down before the hold timer) —
 is driven by `PeerManager` from these sessions; it is not exposed as a separate
 RPC.
+
+---
+
+## RpkiService
+
+`ValidateRouteOrigin` is a `sensitive_read`, outside-v1 diagnostic over the
+latest authoritative `VrpTable`. It accepts a bare IP address, an explicitly
+present prefix length, and a nonzero origin ASN. Host bits are normalized in
+the response. CIDR text in `prefix`, omitted or out-of-family prefix lengths,
+malformed addresses, and AS0 queries return `INVALID_ARGUMENT`.
+
+```bash
+rbgp rpki validate 192.0.2.129/24 64496
+
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"prefix":"192.0.2.129","prefix_length":24,"origin_asn":64496}' \
+  localhost:50051 rustbgpd.v1.RpkiService/ValidateRouteOrigin
+```
+
+The `valid`, `invalid`, or `not_found` verdict is computed from the complete
+table before diagnostic truncation. `covering_vrps` contains at most 256
+effective duplicate-collapsed rows, authorizers first, followed by deterministic
+non-authorizers. `complete` and exact `omitted` describe that listing. AS0 VRPs
+remain visible but always have `authorizes: false`. Before the first
+authoritative snapshot the RPC returns `FAILED_PRECONDITION`; a received empty
+snapshot is authoritative and returns `not_found` with a complete empty list.
+This surface does not expose cache provenance, readiness, raw RTR data, or cache
+management.
 
 ---
 

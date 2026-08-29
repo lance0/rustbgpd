@@ -35,6 +35,37 @@ struct VrpGroup<N> {
     auths: SmallVec<[VrpAuth; 1]>,
 }
 
+/// One effective VRP that covers a route prefix.
+///
+/// Duplicate `(network, prefix_len, origin_asn)` authorizations are collapsed
+/// by [`VrpTable`] and the greatest `max_len` is retained, so every returned
+/// row is the effective authorization used by origin validation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoveringVrp {
+    /// Canonical VRP network address.
+    pub prefix: IpAddr,
+    /// VRP prefix length.
+    pub prefix_len: u8,
+    /// Greatest effective maximum prefix length for this prefix and origin.
+    pub max_len: u8,
+    /// Authorized origin AS number. AS0 rows remain visible for diagnostics.
+    pub origin_asn: u32,
+    /// Whether this row authorizes the queried prefix and nonzero origin ASN.
+    pub authorizes: bool,
+}
+
+/// Bounded covering-VRP diagnostic result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoveringVrps {
+    /// Deterministically ordered effective covering VRPs.
+    pub rows: Vec<CoveringVrp>,
+    /// Effective covering rows omitted by the bound.
+    pub omitted: u64,
+}
+
+/// Hard bound used by the public covering-VRP diagnostic surface.
+pub const MAX_COVERING_VRPS: usize = 256;
+
 /// A single Validated ROA Payload entry from an RPKI cache.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct VrpEntry {
@@ -268,6 +299,101 @@ impl VrpTable {
             RpkiValidation::Invalid
         } else {
             RpkiValidation::NotFound
+        }
+    }
+
+    /// Return a bounded, deterministic view of effective VRPs covering a route.
+    ///
+    /// Authorizing rows are retained first in descending prefix-length order.
+    /// Remaining rows follow in descending prefix-length and ascending-ASN
+    /// order. The implementation visits only the route's ancestor buckets and
+    /// never builds or sorts an unbounded intermediate collection. `limit` is
+    /// capped at [`MAX_COVERING_VRPS`]. AS0 rows remain visible but never
+    /// authorize a route.
+    #[must_use]
+    pub fn covering_vrps(&self, prefix: &Prefix, origin_asn: u32, limit: usize) -> CoveringVrps {
+        let limit = limit.min(MAX_COVERING_VRPS);
+        let mut rows = Vec::with_capacity(limit);
+        let mut total = 0_u64;
+
+        macro_rules! visit_family {
+            ($route:expr, $buckets:expr, $mask:ident, $addr:ident) => {{
+                let route_len = $route.len;
+                let family_max =
+                    u8::try_from($buckets.len() - 1).expect("VRP family bucket count fits in u8");
+                let search_len = route_len.min(family_max);
+
+                // There is at most one effective matching-origin row per
+                // ancestor prefix. Retain every authorizer before considering
+                // non-authorizers; IPv6 therefore has at most 129 of them.
+                for len in (0..=search_len).rev() {
+                    let network = $mask($route.addr, len);
+                    let bucket = &$buckets[len as usize];
+                    if let Ok(index) = bucket.binary_search_by_key(&network, |group| group.network)
+                    {
+                        let group = &bucket[index];
+                        if origin_asn != 0
+                            && let Ok(auth_index) = group
+                                .auths
+                                .binary_search_by_key(&origin_asn, |auth| auth.origin_asn)
+                            && route_len <= group.auths[auth_index].max_len
+                        {
+                            let auth = &group.auths[auth_index];
+                            total += 1;
+                            if rows.len() < limit {
+                                rows.push(CoveringVrp {
+                                    prefix: IpAddr::$addr(group.network.into()),
+                                    prefix_len: len,
+                                    max_len: auth.max_len,
+                                    origin_asn: auth.origin_asn,
+                                    authorizes: true,
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // Auth vectors are already ascending by ASN and compressed to
+                // their greatest maxLength. Walking prefix lengths downward
+                // supplies the remaining deterministic ordering without a
+                // collect-all/sort-all path.
+                for len in (0..=search_len).rev() {
+                    let network = $mask($route.addr, len);
+                    let bucket = &$buckets[len as usize];
+                    if let Ok(index) = bucket.binary_search_by_key(&network, |group| group.network)
+                    {
+                        let group = &bucket[index];
+                        for auth in &group.auths {
+                            let authorizes = origin_asn != 0
+                                && auth.origin_asn == origin_asn
+                                && route_len <= auth.max_len;
+                            if authorizes {
+                                continue;
+                            }
+                            total += 1;
+                            if rows.len() < limit {
+                                rows.push(CoveringVrp {
+                                    prefix: IpAddr::$addr(group.network.into()),
+                                    prefix_len: len,
+                                    max_len: auth.max_len,
+                                    origin_asn: auth.origin_asn,
+                                    authorizes: false,
+                                });
+                            }
+                        }
+                    }
+                }
+            }};
+        }
+
+        match prefix {
+            Prefix::V4(route) => visit_family!(route, self.v4, mask_v4, V4),
+            Prefix::V6(route) => visit_family!(route, self.v6, mask_v6, V6),
+        }
+
+        CoveringVrps {
+            rows,
+            omitted: total.saturating_sub(limit as u64),
         }
     }
 
@@ -697,5 +823,138 @@ mod tests {
             table.validate(&v4_prefix(Ipv4Addr::new(10, 0, 0, 0), 24), 65003),
             RpkiValidation::Valid
         );
+    }
+
+    #[test]
+    fn covering_vrps_handles_v4_v6_zero_and_max_length() {
+        let table = VrpTable::new(vec![
+            v4_vrp(Ipv4Addr::UNSPECIFIED, 0, 32, 65000),
+            v4_vrp(Ipv4Addr::new(10, 0, 0, 0), 8, 16, 65001),
+            v4_vrp(Ipv4Addr::new(10, 1, 0, 0), 16, 16, 65001),
+            v6_vrp(Ipv6Addr::UNSPECIFIED, 0, 128, 65002),
+            v6_vrp("2001:db8::".parse().unwrap(), 32, 48, 65003),
+        ]);
+
+        let v4 = table.covering_vrps(
+            &v4_prefix(Ipv4Addr::new(10, 1, 2, 3), 24),
+            65001,
+            MAX_COVERING_VRPS,
+        );
+        assert_eq!(v4.omitted, 0);
+        assert_eq!(
+            v4.rows
+                .iter()
+                .map(|row| (row.prefix_len, row.origin_asn, row.authorizes))
+                .collect::<Vec<_>>(),
+            vec![(16, 65001, false), (8, 65001, false), (0, 65000, false)]
+        );
+
+        let v6 = table.covering_vrps(
+            &v6_prefix("2001:db8:1::1".parse().unwrap(), 48),
+            65003,
+            MAX_COVERING_VRPS,
+        );
+        assert_eq!(
+            v6.rows
+                .iter()
+                .map(|row| (row.prefix, row.prefix_len, row.authorizes))
+                .collect::<Vec<_>>(),
+            vec![
+                (IpAddr::V6("2001:db8::".parse().unwrap()), 32, true),
+                (IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn covering_vrps_collapses_duplicates_and_is_input_order_independent() {
+        let entries = vec![
+            v4_vrp(Ipv4Addr::new(10, 0, 0, 0), 8, 16, 65003),
+            v4_vrp(Ipv4Addr::new(10, 0, 0, 0), 8, 24, 65003),
+            v4_vrp(Ipv4Addr::new(10, 1, 0, 0), 16, 24, 65002),
+            v4_vrp(Ipv4Addr::new(10, 1, 0, 0), 16, 24, 65001),
+        ];
+        let mut reversed = entries.clone();
+        reversed.reverse();
+        let prefix = v4_prefix(Ipv4Addr::new(10, 1, 2, 3), 24);
+        let first = VrpTable::new(entries).covering_vrps(&prefix, 65002, 256);
+        let second = VrpTable::new(reversed).covering_vrps(&prefix, 65002, 256);
+
+        assert_eq!(first, second);
+        assert_eq!(
+            first
+                .rows
+                .iter()
+                .map(|row| { (row.prefix_len, row.origin_asn, row.max_len, row.authorizes,) })
+                .collect::<Vec<_>>(),
+            vec![
+                (16, 65002, 24, true),
+                (16, 65001, 24, false),
+                (8, 65003, 24, false)
+            ]
+        );
+    }
+
+    #[test]
+    fn covering_vrps_keeps_as0_visible_but_non_authorizing() {
+        let table = VrpTable::new(vec![
+            v4_vrp(Ipv4Addr::new(192, 0, 2, 0), 24, 24, 0),
+            v4_vrp(Ipv4Addr::new(192, 0, 2, 0), 24, 24, 64496),
+        ]);
+        let prefix = v4_prefix(Ipv4Addr::new(192, 0, 2, 7), 24);
+
+        let as0 = table.covering_vrps(&prefix, 0, 256);
+        assert!(as0.rows.iter().any(|row| row.origin_asn == 0));
+        assert!(as0.rows.iter().all(|row| !row.authorizes));
+        assert_eq!(table.validate(&prefix, 0), RpkiValidation::Valid);
+
+        let ordinary = table.covering_vrps(&prefix, 64496, 256);
+        assert_eq!(ordinary.rows[0].origin_asn, 64496);
+        assert!(ordinary.rows[0].authorizes);
+        assert!(ordinary.rows.iter().any(|row| row.origin_asn == 0));
+    }
+
+    #[test]
+    fn covering_vrp_bounds_and_omitted_are_exact() {
+        let mut entries = (1..=10_000)
+            .map(|asn| v4_vrp(Ipv4Addr::new(10, 0, 0, 0), 8, 24, asn))
+            .collect::<Vec<_>>();
+        entries.push(v4_vrp(Ipv4Addr::new(10, 0, 0, 0), 8, 24, 65_000));
+        let table = VrpTable::new(entries);
+        let prefix = v4_prefix(Ipv4Addr::new(10, 1, 2, 3), 24);
+
+        for (requested, expected_len, expected_omitted) in [
+            (255, 255, 9_746),
+            (256, 256, 9_745),
+            (257, 256, 9_745),
+            (10_000, 256, 9_745),
+        ] {
+            let result = table.covering_vrps(&prefix, 65_000, requested);
+            assert_eq!(result.rows.len(), expected_len);
+            assert_eq!(result.omitted, expected_omitted);
+            assert_eq!(result.rows[0].origin_asn, 65_000);
+            assert!(result.rows[0].authorizes);
+        }
+    }
+
+    #[test]
+    fn covering_vrp_truncation_does_not_change_validation_verdict() {
+        let mut entries = (1..=300)
+            .map(|asn| v4_vrp(Ipv4Addr::new(203, 0, 113, 0), 24, 24, asn))
+            .collect::<Vec<_>>();
+        entries.push(v4_vrp(Ipv4Addr::new(203, 0, 113, 0), 24, 24, 64_496));
+        let table = VrpTable::new(entries);
+        let prefix = v4_prefix(Ipv4Addr::new(203, 0, 113, 99), 24);
+
+        assert_eq!(table.validate(&prefix, 64_496), RpkiValidation::Valid);
+        assert_eq!(table.validate(&prefix, 64_497), RpkiValidation::Invalid);
+        assert_eq!(
+            table.validate(&v4_prefix(Ipv4Addr::new(198, 51, 100, 1), 24), 64_496),
+            RpkiValidation::NotFound
+        );
+        let bounded = table.covering_vrps(&prefix, 64_496, 1);
+        assert_eq!(bounded.rows.len(), 1);
+        assert_eq!(bounded.omitted, 300);
+        assert!(bounded.rows[0].authorizes);
     }
 }

@@ -3954,7 +3954,7 @@ async fn run<T>(
         metrics.clone(),
         rib_tx.clone(),
         bmp_tx,
-        Some(validation_watch_rx),
+        Some(validation_watch_rx.clone()),
         config.clone(),
     )
     .with_readiness_queries(peer_mgr_readiness_rx)
@@ -4767,6 +4767,13 @@ async fn run<T>(
         start_time,
         peer_mgr_readiness_tx: peer_mgr_readiness_tx.clone(),
         rib_readiness_tx: rib_readiness_tx.clone(),
+        vrp_snapshot: {
+            let rx = validation_watch_rx.clone();
+            // Clone the table Arc while the watch borrow is scoped to this
+            // synchronous statement. The API never holds that borrow while
+            // walking the table or building a response.
+            Arc::new(move || rx.borrow().vrp_table.clone())
+        },
         mrt_trigger_tx,
         evpn_originated_local_mac_count: {
             let counts = evpn_originated_local_mac_counts.clone();

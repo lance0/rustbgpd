@@ -165,8 +165,8 @@ config from their existing `general.yml`/`clients.yml`:
 
 ## Why rustbgpd
 
-- **API-first control plane** — full gRPC surface across twelve services
-  (eleven native `rustbgpd.v1` services plus the OpenConfig `gnmi.gNMI`
+- **API-first control plane** — full gRPC surface across thirteen services
+  (twelve native `rustbgpd.v1` services plus the OpenConfig `gnmi.gNMI`
   service) and a thin CLI (`rbgp`): dynamic peer management, policy CRUD,
   route injection, streaming events, all without restarts
 - **Native route explainability** — "why is this route (not) here?" answered
@@ -375,10 +375,10 @@ Microbenchmarks, memory scaling, and the corrected historical bgperf2 output:
 
 ## gRPC API
 
-Eleven native `rustbgpd.v1` services cover the daemon's operational surface —
+Twelve native `rustbgpd.v1` services cover the daemon's operational surface —
 Global, Config, Neighbor, Policy (23 RPCs including explain, dry-run, per-term
-stats, and bounded validation-policy posture), PeerGroup, Rib, BFD, Event,
-Injection, Control, and Evpn —
+stats, and bounded validation-policy posture), PeerGroup, Rib, BFD, RPKI,
+Event, Injection, Control, and Evpn —
 plus a separate `gnmi.gNMI` service for OpenConfig BGP telemetry and the first
 transaction-backed config subset.
 

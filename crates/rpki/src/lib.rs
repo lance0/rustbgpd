@@ -62,7 +62,7 @@ pub use aspa_verify::{AspaInvalidHop, AspaVerificationResult};
 pub use rtr_client::{
     EXPIRE_MAX_SECS as RTR_EXPIRE_MAX_SECS, RtrClient, RtrClientConfig, VrpUpdate,
 };
-pub use vrp::{VrpEntry, VrpTable};
+pub use vrp::{CoveringVrp, CoveringVrps, MAX_COVERING_VRPS, VrpEntry, VrpTable};
 pub use vrp_manager::{AspaTableUpdate, RpkiTableUpdate, VrpManager};
 
 /// Snapshot of RPKI validation tables, broadcast to transport sessions

@@ -10,7 +10,7 @@ newer. Release-by-release crate changes are recorded in the
 ## What this crate provides
 
 - **VRP table** — a synchronous, immutable `VrpTable` for RFC 6811 origin
-  validation.
+  validation plus a deterministic, 256-row-bounded covering-VRP diagnostic.
 - **RTR client** — an asynchronous client that prefers the ASPA-capable
   protocol v2 shape and falls back to RFC 8210 version 1 when the cache
   explicitly rejects v2. `RtrClientConfig::max_expire_interval` adds an
@@ -59,6 +59,10 @@ let table = VrpTable::new(vec![VrpEntry {
 let route = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24));
 
 assert_eq!(table.validate(&route, 64_496), RpkiValidation::Valid);
+
+let covering = table.covering_vrps(&route, 64_496, 256);
+assert!(covering.rows[0].authorizes);
+assert_eq!(covering.omitted, 0);
 ```
 
 The same public-API walkthrough is kept compiling as an in-tree example:
@@ -90,7 +94,8 @@ is retained across reconnects until replacement or expiry.
 
 The crate-root facade exports the primary application surface:
 
-- `VrpEntry`, `VrpTable`, `AspaRecord`, and `AspaTable`
+- `VrpEntry`, `VrpTable`, `CoveringVrp`, `CoveringVrps`,
+  `MAX_COVERING_VRPS`, `AspaRecord`, and `AspaTable`
 - `AspaInvalidHop`, `AspaVerificationResult`, and `ValidationSnapshot`
 - `RtrClient`, `RtrClientConfig`, `VrpUpdate`, and `RTR_EXPIRE_MAX_SECS`
 - `VrpManager`, `RpkiTableUpdate`, and `AspaTableUpdate`

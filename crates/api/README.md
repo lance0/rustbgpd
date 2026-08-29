@@ -15,6 +15,7 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 | **PeerGroupService** | Peer-group CRUD, neighbor-to-group assignment |
 | **RibService** | Received/best/advertised route queries (incl. EVPN), BLACKHOLE discard status, FIB route status, and BGP-LS route queries (ListBgpLsRoutes, RFC 9552); all unary — live route deltas stream through `EventService.WatchEvents` |
 | **BfdService** | BFD session queries (RFC 5880/5881/5882) |
+| **RpkiService** | Bounded route-origin validation against the current authoritative VRP table |
 | **EventService** | Live event stream (`WatchEvents`), recent session/policy/EVPN history, and the durable `SubscribeFromEvent` cursor (ADR-0072) |
 | **InjectionService** | Inject/withdraw unicast, FlowSpec, and EVPN routes |
 | **ControlService** | Health, metrics, shutdown, MRT trigger |
@@ -31,7 +32,7 @@ See [docs/API.md](../../docs/API.md) for the full RPC reference and examples.
 ## Proto
 
 Protocol buffer definitions live under [proto/](../../proto/):
-`rustbgpd.proto` defines the eleven native services,
+`rustbgpd.proto` defines the twelve native services,
 `rustbgpd_dialout.proto` defines the gNMI dial-out publish stream, and the
 vendored OpenConfig `gnmi.proto` / `gnmi_ext.proto` define the gNMI service,
 messages, and extensions. Code generation runs from `build.rs`.
