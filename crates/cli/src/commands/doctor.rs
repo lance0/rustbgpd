@@ -1071,34 +1071,81 @@ fn deploy_targets(toml_text: &str) -> DeployTargets {
     }
 }
 
-fn rpki_vrp_table_check(configured: bool, metrics: Option<&str>) -> Option<Check> {
-    if !configured {
+fn rpki_vrp_table_check(configured_caches: &[String], metrics: Option<&str>) -> Option<Check> {
+    if configured_caches.is_empty() {
         return None;
     }
-    let count = metrics.and_then(crate::commands::control::rpki_vrp_count_sum);
-    let (status, detail) = match count {
-        Some(count @ 1..) => (
-            CheckStatus::Ok,
-            format!("RPKI VRP table contains {count} IPv4+IPv6 entries"),
-        ),
-        Some(0) => (
-            CheckStatus::Warn,
-            "RPKI caches are configured but the daemon reports 0 VRPs; \
-             verify RTR synchronization before relying on NotFound decisions"
+    let Some(metrics) = metrics else {
+        return Some(Check {
+            name: "rpki.vrp_table".to_string(),
+            status: CheckStatus::Warn,
+            detail: "RPKI caches are configured but the metrics snapshot is unavailable; \
+                     rerun doctor after the metrics RPC succeeds"
                 .to_string(),
-        ),
-        None if metrics.is_some() => (
+        });
+    };
+    let count = crate::commands::control::rpki_vrp_count_sum(metrics);
+    let readiness = crate::commands::control::rpki_cache_end_of_data_readiness(metrics);
+    let configured = configured_caches
+        .iter()
+        .map(|cache| cache.parse::<std::net::SocketAddr>())
+        .collect::<Result<Vec<_>, _>>();
+    let (status, detail) = match (count, readiness, configured) {
+        (None, _, _) => (
             CheckStatus::Warn,
             "RPKI caches are configured but bgp_rpki_vrp_count is absent or malformed; \
              inspect /metrics and RTR synchronization"
                 .to_string(),
         ),
-        None => (
+        (_, None, _) => (
             CheckStatus::Warn,
-            "RPKI caches are configured but the metrics snapshot is unavailable; \
-             rerun doctor after the metrics RPC succeeds"
+            "RPKI caches are configured but bgp_rpki_cache_end_of_data_ready is malformed; \
+             inspect /metrics and RTR synchronization"
                 .to_string(),
         ),
+        (_, _, Err(_)) => (
+            CheckStatus::Warn,
+            "A configured RPKI cache address is invalid; expected IP:port or [IPv6]:port"
+                .to_string(),
+        ),
+        (Some(count), Some(readiness), Ok(configured)) => {
+            let not_ready = configured
+                .iter()
+                .filter(|cache| readiness.get(cache) == Some(&false))
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            let missing = configured
+                .iter()
+                .filter(|cache| !readiness.contains_key(cache))
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            if count > 0 && not_ready.is_empty() && missing.is_empty() {
+                (
+                    CheckStatus::Ok,
+                    format!(
+                        "RPKI VRP table contains {count} IPv4+IPv6 entries; every configured cache has retained accepted complete End-of-Data readiness"
+                    ),
+                )
+            } else {
+                let mut reasons = Vec::new();
+                if count == 0 {
+                    reasons.push("merged VRP count is 0".to_string());
+                }
+                if !not_ready.is_empty() {
+                    reasons.push(format!("not ready: {}", not_ready.join(", ")));
+                }
+                if !missing.is_empty() {
+                    reasons.push(format!("readiness missing: {}", missing.join(", ")));
+                }
+                (
+                    CheckStatus::Warn,
+                    format!(
+                        "RPKI merged-table prerequisites are incomplete ({})",
+                        reasons.join("; ")
+                    ),
+                )
+            }
+        }
     };
     Some(Check {
         name: "rpki.vrp_table".to_string(),
@@ -1828,10 +1875,9 @@ pub(crate) async fn run(
                     for check in tcp_ao_capability_checks(&toml_text, tcp_ao_support) {
                         reporter.record(check.name, check.status, check.detail);
                     }
-                    if let Some(check) = rpki_vrp_table_check(
-                        !deploy_targets(&toml_text).rpki_caches.is_empty(),
-                        metrics_text.as_deref(),
-                    ) {
+                    let rpki_caches = deploy_targets(&toml_text).rpki_caches;
+                    if let Some(check) = rpki_vrp_table_check(&rpki_caches, metrics_text.as_deref())
+                    {
                         reporter.record(check.name, check.status, check.detail);
                     }
                     if let Some(check) = authz_enforcement_check(&toml_text) {
@@ -3255,30 +3301,97 @@ paths = ["x"]
     /// Red proofs: zero-as-OK and dropping the configured guard fail below.
     #[test]
     fn rpki_vrp_table_check_distinguishes_configuration_and_snapshot_state() {
-        assert!(rpki_vrp_table_check(false, None).is_none());
+        let caches = vec!["192.0.2.1:8282".to_string()];
+        assert!(rpki_vrp_table_check(&[], None).is_none());
 
         let nonzero = rpki_vrp_table_check(
-            true,
-            Some("bgp_rpki_vrp_count{af=\"ipv4\"} 1\nbgp_rpki_vrp_count{af=\"ipv6\"} 2"),
+            &caches,
+            Some(
+                "bgp_rpki_vrp_count{af=\"ipv4\"} 1\n\
+                 bgp_rpki_vrp_count{af=\"ipv6\"} 2\n\
+                 bgp_rpki_cache_end_of_data_ready{cache=\"192.0.2.1:8282\"} 1",
+            ),
         )
         .unwrap();
         assert_eq!(nonzero.status, CheckStatus::Ok);
 
         let zero = rpki_vrp_table_check(
-            true,
+            &caches,
             Some("bgp_rpki_vrp_count{af=\"ipv4\"} 0\nbgp_rpki_vrp_count{af=\"ipv6\"} 0"),
         )
         .unwrap();
         assert_eq!(zero.status, CheckStatus::Warn);
+        assert!(zero.detail.contains("merged VRP count is 0"));
+        assert!(!zero.detail.contains("cache readiness is incomplete"));
         assert_eq!(
-            rpki_vrp_table_check(true, Some("unrelated_metric 1"))
+            rpki_vrp_table_check(&caches, Some("unrelated_metric 1"))
                 .unwrap()
                 .status,
             CheckStatus::Warn
         );
         assert_eq!(
-            rpki_vrp_table_check(true, None).unwrap().status,
+            rpki_vrp_table_check(&caches, None).unwrap().status,
             CheckStatus::Warn
+        );
+    }
+
+    #[test]
+    fn rpki_vrp_table_requires_every_configured_cache_ready() {
+        let caches = vec![
+            "192.0.2.1:8282".to_string(),
+            "[2001:db8::1]:8282".to_string(),
+        ];
+        let base = "bgp_rpki_vrp_count{af=\"ipv4\"} 1\n\
+                    bgp_rpki_vrp_count{af=\"ipv6\"} 2\n";
+        let not_ready = rpki_vrp_table_check(
+            &caches,
+            Some(&format!(
+                "{base}bgp_rpki_cache_end_of_data_ready{{cache=\"192.0.2.1:8282\"}} 1\n\
+                 bgp_rpki_cache_end_of_data_ready{{cache=\"[2001:0db8::1]:8282\"}} 0\n\
+                 bgp_rpki_cache_end_of_data_ready{{cache=\"198.51.100.9:8282\"}} 1"
+            )),
+        )
+        .unwrap();
+        assert_eq!(not_ready.status, CheckStatus::Warn);
+        assert!(not_ready.detail.contains("not ready: [2001:db8::1]:8282"));
+        assert!(!not_ready.detail.contains("198.51.100.9"));
+
+        let missing = rpki_vrp_table_check(
+            &caches,
+            Some(&format!(
+                "{base}bgp_rpki_cache_end_of_data_ready{{cache=\"192.0.2.1:8282\"}} 1"
+            )),
+        )
+        .unwrap();
+        assert_eq!(missing.status, CheckStatus::Warn);
+        assert!(
+            missing
+                .detail
+                .contains("readiness missing: [2001:db8::1]:8282")
+        );
+
+        let malformed = rpki_vrp_table_check(
+            &caches,
+            Some(&format!(
+                "{base}bgp_rpki_cache_end_of_data_ready{{cache=\"bad\"}} 1"
+            )),
+        )
+        .unwrap();
+        assert_eq!(malformed.status, CheckStatus::Warn);
+        assert!(malformed.detail.contains("is malformed"));
+
+        let invalid_config = rpki_vrp_table_check(
+            &["cache.example:8282".to_string()],
+            Some(&format!(
+                "{base}bgp_rpki_cache_end_of_data_ready{{cache=\"192.0.2.1:8282\"}} 1"
+            )),
+        )
+        .unwrap();
+        assert_eq!(invalid_config.status, CheckStatus::Warn);
+        assert!(
+            invalid_config
+                .detail
+                .contains("configured RPKI cache address is invalid")
         );
     }
 
