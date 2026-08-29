@@ -1484,6 +1484,35 @@ class PrimerContractTests(unittest.TestCase):
             occurrence=count - 1,
         )
 
+    def test_m102_openbgpd92_route_server_job_is_load_bearing(self):
+        relative = ".github/workflows/interop.yml"
+        for old in (
+            "  m102:\n",
+            "    needs: [grpcurl_archive, prime_dev_image]\n",
+            "      - name: Verify and pull digest-pinned OpenBGPD 9.2 image\n",
+            "          OPENBGPD_AMD64_MANIFEST: sha256:3178027d7ca916eacec247c66472a1f95a17d83d4616fe4f118318a912ab8beb\n",
+            "          OPENBGPD_CONFIG: sha256:06317b65d9fadc80f68c5c8e7c82815b0643577fd5441bd55038e43771b5807e\n",
+            "          docker pull \"$OPENBGPD_IMAGE\"\n",
+            "      - name: Build bmpsink:m102 capture sidecar\n",
+            "        run: docker build -t bmpsink:m102 -f tests/interop/Dockerfile.bmpsink tests/interop\n",
+            '          CLEANUP: "1"\n',
+            "          label: M102\n",
+            "          topology: tests/interop/m102-routeserver-openbgpd92.clab.yml\n",
+            "          script: tests/interop/scripts/test-m102-routeserver-openbgpd92.sh\n",
+            '          max_attempts: "1"\n',
+        ):
+            with self.subTest(seam=old):
+                count = (ROOT / relative).read_text().count(old)
+                self.assertGreater(count, 0, f"missing M102 seam: {old}")
+                self.mutate(relative, old, occurrence=count - 1)
+        job_name = "    name: M102 — OpenBGPD 9.2 route-server member proof\n"
+        self.mutate(
+            relative,
+            job_name,
+            job_name
+            + "      # sudo apt-get install tshark util-linux is forbidden here\n",
+        )
+
     def test_dockerfile_exact_source_bridge(self):
         for binary in ("rustbgpd", "rbgp", "evpn-tester", "evpn-monitor"):
             with self.subTest(binary=binary, side="builder"):

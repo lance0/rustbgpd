@@ -50,6 +50,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   marking them authorizing, and the whole service remains outside the narrow
   v1 contract.
 
+- M102 adds a hosted dual-stack route-server receipt with a digest-pinned
+  OpenBGPD 9.2 member and FRR 10.3.1 control. Its exact 32/0 contract covers
+  enforced role/family/four-octet-AS negotiation, bidirectional transparent
+  routes with standard and Large Communities, independently reassembled raw
+  OPEN and IPv4 UPDATE evidence, explicit import/export policy, all four
+  directional-family withdrawals, and session continuity. Malformed Partial
+  and AS_SET behavior remain outside this receipt.
+
 - `bgp_dataplane_reconcile_planning_failures_total{actor,reason}` exposes
   bounded pre-kernel planning aborts for the general FIB and BLACKHOLE discard
   reconcilers. Each abort emits one structured warning while preserving the
