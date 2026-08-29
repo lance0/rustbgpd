@@ -19,6 +19,16 @@ GENERATORS = {
     "bird": "bench/scale/reloadstall/gen-bird-scenario.py",
     "openbgpd": "bench/scale/reloadstall/gen-obgpd-scenario.py",
 }
+COMPETITOR_GENERATIONS = {
+    "historical": {
+        "bird": "bird:3.3.1",
+        "openbgpd": "openbgpd/openbgpd:9.1",
+    },
+    "current": {
+        "bird": "bird:v3.3.2-m101",
+        "openbgpd": "openbgpd/openbgpd@sha256:b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9",
+    },
+}
 
 def fail(message):
     raise ValueError(message)
@@ -29,7 +39,9 @@ def hashed_map(value, expected):
     if not all(isinstance(v, str) and HASH.fullmatch(v) for v in value.values()):
         fail("malformed source hash")
 
-def verify(path, expected_cell):
+def verify(path, expected_cell, competitor_generation="historical"):
+    if competitor_generation not in COMPETITOR_GENERATIONS:
+        fail("unknown competitor generation")
     data = json.loads(Path(path).read_text())
     if set(data) != {"schema", "cell", "git", "toolchain", "host", "sources", "workload"} or data["schema"] != 1:
         fail("wrong provenance schema")
@@ -54,14 +66,14 @@ def verify(path, expected_cell):
     if cell == "rustbgpd":
         if set(workload) != {"binary", "sha256"} or workload["binary"] != "target/release/rustbgpd" or not HASH.fullmatch(workload["sha256"]):
             fail("malformed rustbgpd workload")
-    elif set(workload) != {"image_ref", "image_id"} or workload["image_ref"] != {"bird": "bird:3.3.1", "openbgpd": "openbgpd/openbgpd:9.1"}[cell] or not IMAGE.fullmatch(workload["image_id"]):
+    elif set(workload) != {"image_ref", "image_id"} or workload["image_ref"] != COMPETITOR_GENERATIONS[competitor_generation][cell] or not IMAGE.fullmatch(workload["image_id"]):
         fail("malformed competitor workload")
 
 if __name__ == "__main__":
     try:
-        if len(sys.argv) != 3 or sys.argv[2] not in GENERATORS:
-            fail("usage: verify-provenance.py CELL/provenance.json EXPECTED_CELL")
-        verify(sys.argv[1], sys.argv[2])
+        if len(sys.argv) not in {3, 4} or sys.argv[2] not in GENERATORS:
+            fail("usage: verify-provenance.py PROVENANCE_JSON EXPECTED_CELL [historical|current]")
+        verify(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) == 4 else "historical")
     except (OSError, ValueError, json.JSONDecodeError, KeyError, TypeError) as error:
         print(f"FAIL: {error}", file=sys.stderr)
         sys.exit(1)

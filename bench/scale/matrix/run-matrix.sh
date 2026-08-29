@@ -3,10 +3,12 @@
 #
 # Cells:
 #   rustbgpd  bare release binary, SIGHUP reloads (the frozen receipt recipe)
-#   bird      BIRD 3.3.1 in docker --network=host, `birdc configure` reloads
-#             (image: docker build -t bird:3.3.1 -f tests/interop/Dockerfile.bird3 tests/interop)
-#   openbgpd  OpenBGPD 9.1 in docker --network=host, `bgpctl reload` reloads
-#             (image: docker pull openbgpd/openbgpd:9.1)
+#   bird      BIRD in docker --network=host, `birdc configure` reloads
+#   openbgpd  OpenBGPD in docker --network=host, `bgpctl reload` reloads
+#
+# COMPETITOR_GENERATION selects one fail-closed pair of image references:
+#   historical (default): BIRD 3.3.1 / OpenBGPD 9.1, the frozen receipt recipe
+#   current: BIRD 3.3.2 / OpenBGPD 9.2, the explicit refresh generation
 #
 # One cell at a time: 1-min loadavg gate (< 2.0) before each cell, 5-minute
 # cool-down after. Per-cell status files under the artifacts dir make the
@@ -17,6 +19,7 @@
 # Usage: run-matrix.sh [cell ...]         (default: rustbgpd bird openbgpd)
 # Knobs (env): N_PEERS=700 TOTAL_PREFIXES=400400 PORT=1790 RELOADS=4
 #              CONTROL_SECS=30 BIRD_THREADS=8 FLAPSTORM= (K, optional)
+#              COMPETITOR_GENERATION=historical|current
 #              ARTIFACTS_DIR=bench/scale/matrix/artifacts
 set -u
 
@@ -39,13 +42,40 @@ CONTROL_SECS="${CONTROL_SECS:-30}"
 BIRD_THREADS="${BIRD_THREADS:-8}"
 FLAPSTORM="${FLAPSTORM:-}"
 ART="${ARTIFACTS_DIR:-$REPO/bench/scale/matrix/artifacts}"
+COMPETITOR_GENERATION="${COMPETITOR_GENERATION:-historical}"
 RSS_LIMIT_KIB=$((100 * 1024 * 1024)) # abort a cell past 100 GiB
+
+competitor_image_ref() {
+    local cell=$1
+    case "$COMPETITOR_GENERATION:$cell" in
+        historical:bird) printf '%s\n' bird:3.3.1 ;;
+        historical:openbgpd) printf '%s\n' openbgpd/openbgpd:9.1 ;;
+        current:bird) printf '%s\n' bird:v3.3.2-m101 ;;
+        current:openbgpd)
+            printf '%s\n' 'openbgpd/openbgpd@sha256:b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9'
+            ;;
+        historical:rustbgpd | current:rustbgpd) ;;
+        *) return 1 ;;
+    esac
+}
+
+case "$COMPETITOR_GENERATION" in
+    historical | current) ;;
+    *)
+        echo "unknown COMPETITOR_GENERATION: $COMPETITOR_GENERATION (want historical|current)" >&2
+        exit 2
+        ;;
+esac
+
+inspect_competitor_image() {
+    docker image inspect --format '{{.Id}}' "$1" 2>/dev/null
+}
 
 resolve_competitor_image() {
     local image_ref=$1
-    docker image inspect --format '{{.Id}}' "$image_ref" 2>/dev/null || {
+    inspect_competitor_image "$image_ref" || {
         docker pull "$image_ref" >/dev/null &&
-            docker image inspect --format '{{.Id}}' "$image_ref"
+            inspect_competitor_image "$image_ref"
     }
 }
 
@@ -65,19 +95,27 @@ recheck_source_git_identity() {
         [ "$stored_tree" = "$current_tree" ] &&
         [ "$stored_dirty" = "$current_dirty" ]
 }
+verify_live_competitor_identity() {
+    local cell=$1 file=$2 expected_ref stored_ref stored_id live_id
+    [ "$cell" != rustbgpd ] || return 0
+    expected_ref=$(competitor_image_ref "$cell") || return 1
+    stored_ref=$(jq -er '.workload.image_ref' "$file") || return 1
+    stored_id=$(jq -er '.workload.image_id' "$file") || return 1
+    [ "$stored_ref" = "$expected_ref" ] || return 1
+    [[ $stored_id =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+    live_id=$(inspect_competitor_image "$expected_ref") || return 1
+    [ "$live_id" = "$stored_id" ]
+}
 prepare_selected_cell() {
     local cell=$1 status_file=$2 quiet_file=$3
     PREPARED_IMAGE_REF=""
     PREPARED_IMAGE_ID=""
+    PREPARED_IMAGE_REF=$(competitor_image_ref "$cell") || return 1
     if [ -f "$status_file" ] && grep -qx pass "$status_file"; then
         matrix_prepare_event "$cell:resume-verify"
         recheck_cell_provenance "$cell" || return 1
         return 10
     fi
-    case $cell in
-        bird) PREPARED_IMAGE_REF=bird:3.3.1 ;;
-        openbgpd) PREPARED_IMAGE_REF=openbgpd/openbgpd:9.1 ;;
-    esac
     if [ -n "$PREPARED_IMAGE_REF" ]; then
         matrix_prepare_event "$cell:resolve"
         PREPARED_IMAGE_ID=$(resolve_competitor_image "$PREPARED_IMAGE_REF") || return 1
@@ -92,10 +130,14 @@ if [ "${1:-}" = --self-test-prepare-order ]; then
     matrix_prepare_event() { printf '%s\n' "$1" >>"$trace"; }
     recheck_cell_provenance() {
         matrix_prepare_event "$1:live-verify"
-        [ -n "${MATRIX_SELF_TEST_REPO:-}" ] &&
+        verify_live_competitor_identity "$1" "$status.provenance" &&
+            [ -n "${MATRIX_SELF_TEST_REPO:-}" ] &&
             recheck_source_git_identity "$MATRIX_SELF_TEST_REPO" "$status.provenance"
     }
-    resolve_competitor_image() { printf 'sha256:%064d\n' 0; }
+    inspect_competitor_image() {
+        [ -z "${MATRIX_SELF_TEST_IMAGE_TRACE:-}" ] || printf '%s\n' "$1" >>"$MATRIX_SELF_TEST_IMAGE_TRACE"
+        printf '%s\n' "${MATRIX_SELF_TEST_IMAGE_ID:-sha256:$(printf '%064d' 0)}"
+    }
     wait_for_rustbgpd_quiet_host() { : >"$1"; }
     prepare_selected_cell "$selected" "$status" "$status.quiet"
     exit $?
@@ -155,20 +197,21 @@ write_cell_provenance() {
         '{schema:1,cell:$cell,git:{commit:$commit,tree:$tree,dirty:$dirty},toolchain:$toolchain,host:$host,sources:{common:$common,generator:{($generator_path):$generator_hash},reloadstall:{path:"bench/scale/target/release/reloadstall",sha256:$reloadstall_hash}},workload:$workload}' \
         >"$ART/$cell/provenance.json" || return 1
     python3 "$REPO/bench/scale/matrix/verify-provenance.py" \
-        "$ART/$cell/provenance.json" "$cell"
+        "$ART/$cell/provenance.json" "$cell" "$COMPETITOR_GENERATION"
 }
 
 recheck_cell_provenance() {
     local cell=$1 relative expected
     local file="$ART/$cell/provenance.json"
-    python3 "$REPO/bench/scale/matrix/verify-provenance.py" "$file" "$cell" || return 1
+    python3 "$REPO/bench/scale/matrix/verify-provenance.py" \
+        "$file" "$cell" "$COMPETITOR_GENERATION" || return 1
     while IFS=$'\t' read -r relative expected; do
         provenance_require_sha256 "$REPO/$relative" "$expected" || return 1
     done < <(jq -r '.sources.common + .sources.generator + {(.sources.reloadstall.path):.sources.reloadstall.sha256} | to_entries[] | [.key,.value] | @tsv' "$file")
     if [ "$cell" = rustbgpd ]; then
         provenance_require_sha256 "$REPO/$(jq -r '.workload.binary' "$file")" "$(jq -r '.workload.sha256' "$file")" || return 1
     else
-        [ "$(docker image inspect --format '{{.Id}}' "$(jq -r '.workload.image_ref' "$file")")" = "$(jq -r '.workload.image_id' "$file")" ] || return 1
+        verify_live_competitor_identity "$cell" "$file" || return 1
     fi
     recheck_source_git_identity "$REPO" "$file"
 }
@@ -206,11 +249,11 @@ run_cell() {
     bird)
         generator=bench/scale/reloadstall/gen-bird-scenario.py
         image_ref=$prepared_image_ref image_id=$prepared_image_id
-        [ "$image_ref" = bird:3.3.1 ] && [[ $image_id =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+        [ "$image_ref" = "$(competitor_image_ref bird)" ] && [[ $image_id =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
         write_cell_provenance "$cell" "$generator" image "$image_ref" "$image_id" || return 1
         recheck_cell_provenance "$cell" || return 1
         python3 "$RSTALL/gen-bird-scenario.py" "$N_PEERS" "$run" "$PORT" \
-            "$BIRD_THREADS" || return 1
+            "$BIRD_THREADS" /etc/bird "$COMPETITOR_GENERATION" || return 1
         recheck_cell_provenance "$cell" || return 1
         container="ixp-bird"
         docker rm -f "$container" >/dev/null 2>&1
@@ -223,10 +266,11 @@ run_cell() {
     openbgpd)
         generator=bench/scale/reloadstall/gen-obgpd-scenario.py
         image_ref=$prepared_image_ref image_id=$prepared_image_id
-        [ "$image_ref" = openbgpd/openbgpd:9.1 ] && [[ $image_id =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+        [ "$image_ref" = "$(competitor_image_ref openbgpd)" ] && [[ $image_id =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
         write_cell_provenance "$cell" "$generator" image "$image_ref" "$image_id" || return 1
         recheck_cell_provenance "$cell" || return 1
-        python3 "$RSTALL/gen-obgpd-scenario.py" "$N_PEERS" "$run" "$PORT" || return 1
+        python3 "$RSTALL/gen-obgpd-scenario.py" "$N_PEERS" "$run" "$PORT" \
+            /etc/bgpd "$COMPETITOR_GENERATION" || return 1
         recheck_cell_provenance "$cell" || return 1
         container="ixp-obgpd"
         docker rm -f "$container" >/dev/null 2>&1

@@ -95,6 +95,10 @@ convention in `CONTRIBUTING.md`:
       catalog the whole performance corpus; the checker's sorted
       zero-inbound-link inventory covers all top-level receipts as an advisory
       so discoverability is not conflated with measurement validity.
+- [ ] Cross-daemon performance claims name each comparator release and its
+      release date. If a newer comparator release exists at review time,
+      either refresh the affected cells or disclose the newer release beside
+      the dated historical result.
 
 ## Narrow v1 RS/RR compatibility gate
 
