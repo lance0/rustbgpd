@@ -43,6 +43,8 @@
 #       (ADR-0061 Slice 4 general unicast FIB runtime validation)
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh bfd_runtime
 #       (ADR-0067 single-hop BFD actor netns validation)
+#   bash crates/evpn-linux/tests/docker/run-netns-tests.sh bfd_runtime_ipv4
+#       (ADR-0067 IPv4-only BFD actor netns validation)
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh bgp_unnumbered
 #       (ADR-0069 BGP unnumbered Linux/socket primitive spike)
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh link_carrier
@@ -100,8 +102,9 @@ DOCKERFILE="$SCRIPT_DIR/Dockerfile"
 
 # Test selector. `bum_*` runs the Gate 8b harness; `fdb_nhg` runs
 # the ADR-0059 slice 3b FDB nexthop group integration test;
-# `fib_runtime` / `bfd_runtime` run same-module `-p rustbgpd` daemon
-# runtime tests (ADR-0061 FIB / ADR-0067 BFD). `bgp_unnumbered` runs the
+# `fib_runtime` / `bfd_runtime` / `bfd_runtime_ipv4` run same-module
+# `-p rustbgpd` daemon runtime tests (ADR-0061 FIB / ADR-0067 BFD).
+# `bgp_unnumbered` runs the
 # ADR-0069 evpn-linux integration proof; `link_carrier` runs the
 # ADR-0085 RTNLGRP_LINK carrier monitor proof; `dataplane_vlan_fdb`
 # runs the ADR-0089 VLAN-scoped FDB proof; `svd_fdb_vni` runs the
@@ -129,6 +132,7 @@ case "${1:-all}" in
     fdb_nhg_cve)        TEST_BIN="netns_fdb_nhg"; FILTER="cve_guard_blocks_install_when_learning_enabled" ;;
     fib_runtime)        FILTER=""; RUSTBGPD_TEST_FILTER="fib_runtime::tests::netns_general_unicast_fib_" ;;
     bfd_runtime)        FILTER=""; RUSTBGPD_TEST_FILTER="bfd_runtime::tests::netns::" ;;
+    bfd_runtime_ipv4)   FILTER=""; RUSTBGPD_TEST_FILTER="bfd_runtime::tests::netns::session_reaches_up_and_detects_down" ;;
     bgp_unnumbered)     TEST_BIN="netns_bgp_unnumbered"; FILTER="" ;;
     link_carrier)       TEST_BIN="netns_link_carrier"; FILTER="" ;;
     ac_gate)            TEST_BIN="netns_ac_gate"; FILTER="" ;;
@@ -153,7 +157,7 @@ case "${1:-all}" in
     l3_single_path_cycle) TEST_BIN="netns_l3_install"; FILTER="linux_dataplane_installs_and_withdraws_l3_triple" ;;
     l3_foreign_route_cycle) TEST_BIN="netns_l3_install"; FILTER="linux_dataplane_foreign_route_survives_l3_cycle" ;;
     *)
-        echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all, fdb_nhg, fdb_nhg_roundtrip, fdb_nhg_cve, fib_runtime, bfd_runtime, bgp_unnumbered, link_carrier, ac_gate, nexthop_raw, foreign_state_l2, foreign_state_nhid, foreign_state_l3, l3_route_event, dataplane_vlan_fdb, dataplane_remote_mac, vlan_local_mac_attribution, macip_vlan_attribution, svd_fdb_vni, l3_multipath, l3_all_active_writer, managed_bridge, managed_vxlan, managed_svd_vxlan, managed_vlan_upper, managed_ready, managed_ip_vrf_ready, l3_single_path_cycle, l3_foreign_route_cycle" >&2
+        echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all, fdb_nhg, fdb_nhg_roundtrip, fdb_nhg_cve, fib_runtime, bfd_runtime, bfd_runtime_ipv4, bgp_unnumbered, link_carrier, ac_gate, nexthop_raw, foreign_state_l2, foreign_state_nhid, foreign_state_l3, l3_route_event, dataplane_vlan_fdb, dataplane_remote_mac, vlan_local_mac_attribution, macip_vlan_attribution, svd_fdb_vni, l3_multipath, l3_all_active_writer, managed_bridge, managed_vxlan, managed_svd_vxlan, managed_vlan_upper, managed_ready, managed_ip_vrf_ready, l3_single_path_cycle, l3_foreign_route_cycle" >&2
         exit 2
         ;;
 esac
