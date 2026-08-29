@@ -175,6 +175,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The unpublished RIB crate no longer exposes unrestricted mutable Adj-RIB-In
+  iteration. Its sole internal all-route mutation callback now maintains exact
+  RPKI validation counts, preserving RFC 9972 BMP path-count rows and safe
+  withdrawal after ASPA or future validation-state updates.
+
 - SIGHUP settlement fail-stop diagnostics now name the static reload step
   that fenced and whether an earlier effect was accepted. Non-SIGHUP owners
   report an explicit non-applicable step, while

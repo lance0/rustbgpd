@@ -338,23 +338,47 @@ impl AdjRibIn {
             .filter(move |route| after.is_none_or(|cursor| route_query_key(route) > cursor))
     }
 
-    /// Iterate mutably over all stored routes.
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Route> {
-        self.routes.iter_mut()
-    }
-
-    /// Visit mutably every unicast route whose prefix is covered by
-    /// `covering` — the prefix itself and all stored more-specifics
-    /// (network containment, same family). Uses the prefix trie for
-    /// O(covered) enumeration instead of an O(N) full scan.
-    pub fn for_each_covered_mut(&mut self, covering: &Prefix, mut f: impl FnMut(&mut Route)) {
-        let routes = &mut self.routes;
-        for (_, ids) in self.prefix_index.children(covering) {
-            for &(_, handle) in ids {
-                if let Some(route) = routes.get_mut(handle) {
-                    f(route);
-                }
+    /// Mutate every unicast route while maintaining exact RPKI path counts.
+    ///
+    /// This crate-private callback is the only whole-route mutation boundary.
+    /// Callers may update route data freely, but must preserve the indexed
+    /// `(prefix, path_id)` identity. Changes to `validation_state` are
+    /// reflected in the route family's counters before the next route is
+    /// visited.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a callback changes the route's indexed identity.
+    pub(crate) fn for_each_route_mut_accounting_rpki(
+        &mut self,
+        mut mutate: impl FnMut(&mut Route),
+    ) {
+        let Self {
+            routes,
+            rpki_counts_v4,
+            rpki_counts_v6,
+            ..
+        } = self;
+        for route in routes.iter_mut() {
+            let old_prefix = route.prefix;
+            let old_path_id = route.path_id;
+            let old_state = route.validation_state;
+            mutate(route);
+            assert_eq!(
+                (route.prefix, route.path_id),
+                (old_prefix, old_path_id),
+                "whole-route mutation must preserve indexed route identity"
+            );
+            let new_state = route.validation_state;
+            if old_state == new_state {
+                continue;
             }
+            let counts = match old_prefix {
+                Prefix::V4(_) => &mut *rpki_counts_v4,
+                Prefix::V6(_) => &mut *rpki_counts_v6,
+            };
+            counts.decrement(old_state);
+            counts.increment(new_state);
         }
     }
 
@@ -2621,6 +2645,47 @@ mod tests {
     }
 
     #[test]
+    fn accounted_route_mutation_preserves_rpki_counts_and_withdrawal() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+        let mut route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
+        route.validation_state = RpkiValidation::NotFound;
+        assert!(!rib.insert(route));
+
+        rib.for_each_route_mut_accounting_rpki(|route| {
+            route.validation_state = RpkiValidation::Valid;
+        });
+
+        assert_eq!(
+            rib.rpki_validation_counts(),
+            vec![(
+                (Afi::Ipv4, Safi::Unicast),
+                RpkiValidationCounts {
+                    invalid: 0,
+                    valid: 1,
+                    not_found: 0,
+                },
+            )]
+        );
+        assert!(rib.withdraw(&Prefix::V4(prefix), 0));
+        assert!(rib.rpki_validation_counts().is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "whole-route mutation must preserve indexed route identity")]
+    fn accounted_route_mutation_rejects_identity_changes() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+        assert!(!rib.insert(make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))));
+
+        rib.for_each_route_mut_accounting_rpki(|route| {
+            route.path_id = 1;
+        });
+    }
+
+    #[test]
     fn vpn_insert_get_replace_withdraw_round_trip() {
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         let mut rib = AdjRibIn::new(peer);
@@ -3146,9 +3211,9 @@ mod tests {
             v6,
             Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
         ));
-        for route in rib.iter_mut() {
+        rib.for_each_route_mut_accounting_rpki(|route| {
             route.is_llgr_stale = true;
-        }
+        });
 
         let swept = rib.sweep_llgr_stale_family((Afi::Ipv4, Safi::Unicast));
         assert_eq!(swept, vec![Prefix::V4(v4)]);
