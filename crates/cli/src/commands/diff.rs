@@ -2402,9 +2402,13 @@ mod tests {
     /// GoBGP's raw `peer-address` fields identify the source paths
     /// (192.0.2.12/.13); the ribsnap `peer` is the export target
     /// (192.0.2.11), supplied with `--peer` during conversion.
+    /// M103's GoBGP 4.8 oracle is the archived M92 object with only
+    /// recursive `age` deletion. Hosted M103 captures must compare to
+    /// both objects after precisely that deletion before conversion.
     /// Regenerate the .expected.ndjson goldens by re-running the
     /// converters with the per-adapter arguments below (`--generation
-    /// 7` for M83 and `--generation 92` for M92).
+    /// 7` for M83, `--generation 92` for M92, and `--generation 103`
+    /// for M103).
     mod adapters {
         use super::*;
 
@@ -2465,6 +2469,15 @@ mod tests {
             peer_asn: 64510,
             source: "m92-gobgp-v4.7-incumbent",
             generation: "92",
+        };
+        const GOBGP_V48: Converter = Converter {
+            script: "gobgp-adjout-to-ribsnap.py",
+            raw_fixture: "gobgp-v48-m103-adjout.json",
+            golden: "gobgp-v48-m103.expected.ndjson",
+            peer: "192.0.2.11",
+            peer_asn: 64510,
+            source: "m103-gobgp-v4.8-incumbent",
+            generation: "103",
         };
 
         fn fixture_path(name: &str) -> std::path::PathBuf {
@@ -2764,6 +2777,81 @@ mod tests {
             );
             assert_eq!(report["entries"], serde_json::json!([]));
             assert_eq!(report["ignored_attributes"], serde_json::json!([]));
+        }
+
+        fn remove_recursive_age(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Object(object) => {
+                    object.remove("age");
+                    for child in object.values_mut() {
+                        remove_recursive_age(child);
+                    }
+                }
+                serde_json::Value::Array(array) => {
+                    for child in array {
+                        remove_recursive_age(child);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        /// M103 keeps M92 immutable and admits no GoBGP 4.7 -> 4.8 raw
+        /// delta except recursive `age`. The versioned golden may change
+        /// only its header source/generation; route records and trailer
+        /// remain byte-identical and still diff clean against wire truth.
+        #[tokio::test]
+        async fn gobgp_v48_matches_v47_except_age_and_versioned_header() {
+            assert_eq!(GOBGP_V48.golden, "gobgp-v48-m103.expected.ndjson");
+            check_golden(&GOBGP_V48);
+
+            let v47_text = std::fs::read_to_string(fixture_path(GOBGP_V47.raw_fixture)).unwrap();
+            let v48_text = std::fs::read_to_string(fixture_path(GOBGP_V48.raw_fixture)).unwrap();
+            assert!(!v48_text.contains("\"age\""));
+            let mut v47_raw: serde_json::Value = serde_json::from_str(&v47_text).unwrap();
+            let mut v48_raw: serde_json::Value = serde_json::from_str(&v48_text).unwrap();
+            remove_recursive_age(&mut v47_raw);
+            remove_recursive_age(&mut v48_raw);
+            assert_eq!(v47_raw, v48_raw, "non-age GoBGP raw delta");
+
+            let v47_golden = std::fs::read_to_string(fixture_path(GOBGP_V47.golden)).unwrap();
+            let v48_golden = std::fs::read_to_string(fixture_path(GOBGP_V48.golden)).unwrap();
+            let v47_lines: Vec<_> = v47_golden.lines().collect();
+            let v48_lines: Vec<_> = v48_golden.lines().collect();
+            assert_eq!(&v47_lines[1..], &v48_lines[1..]);
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(v48_lines[0]).unwrap(),
+                serde_json::json!({
+                    "record": "header",
+                    "schema": "rbgp-ribsnap/1",
+                    "source": "gobgp-adjout/1 view=adj-rib-out-capture m103-gobgp-v4.8-incumbent",
+                    "generation": 103
+                })
+            );
+
+            let routes = vec![
+                server_proto::Route {
+                    med: 92,
+                    med_attr: Some(92),
+                    communities: vec![(64501 << 16) | 92],
+                    large_communities: vec!["64501:92:4".to_string()],
+                    ..wire_route("198.51.100.0", 24, "192.0.2.12", vec![64501])
+                },
+                wire_route("203.0.113.0", 24, "192.0.2.13", vec![64502]),
+                server_proto::Route {
+                    med: 192,
+                    med_attr: Some(192),
+                    communities: vec![(64501 << 16) | 192],
+                    large_communities: vec!["64501:92:6".to_string()],
+                    ..wire_route("2001:db8:9201::", 48, "2001:db8:92::12", vec![64501])
+                },
+                wire_route("2001:db8:9202::", 48, "2001:db8:92::13", vec![64502]),
+            ];
+            let server = wire_truth_server(&GOBGP_V48, routes).await;
+            let (rendered, code) = diff_golden_against(&GOBGP_V48, &server, &[]).await;
+            assert_eq!(code, EXIT_IN_SYNC, "output was:\n{rendered}");
+            assert!(rendered.contains("ipv4_unicast: matched 2"));
+            assert!(rendered.contains("ipv6_unicast: matched 2"));
         }
 
         /// The explained-difference outcome from the lab: the RS

@@ -61,6 +61,7 @@ const TOPOLOGIES: &[&str] = &[
     "m91-rfc7606-malformed",
     "m92-gobgp-v47-rs-differential",
     "m93-required-families-bird",
+    "m103-gobgp-v48-rs-differential",
 ];
 fn is_rr_slice(name: &str) -> bool {
     let Some(suffix) = name.strip_prefix("rustbgpd-m") else {
@@ -203,7 +204,7 @@ fn rr_and_route_server_interop_is_tier_authenticated_end_to_end() {
         topologies, expected_topologies,
         "topology inventory changed"
     );
-    assert_eq!(nodes, 26, "rustbgpd node inventory changed");
+    assert_eq!(nodes, 27, "rustbgpd node inventory changed");
     assert_eq!(mounted, expected_configs, "config mount inventory changed");
 
     let mut drivers = BTreeSet::new();
@@ -224,7 +225,7 @@ fn rr_and_route_server_interop_is_tier_authenticated_end_to_end() {
         );
         drivers.insert(driver);
     }
-    assert_eq!(drivers.len(), 23, "driver inventory changed");
+    assert_eq!(drivers.len(), 24, "driver inventory changed");
 }
 
 /// v0.63.0 retired `enforcement = "legacy"` (validation rejects it), so no

@@ -1684,6 +1684,213 @@ fn m102_pins_openbgpd92_route_server_member_contract() {
 }
 
 #[test]
+fn m103_gobgp48_differential_is_exact_and_keeps_m92_immutable() {
+    fn sha256(path: &Path) -> String {
+        let output = Command::new("sha256sum")
+            .arg(path)
+            .output()
+            .unwrap_or_else(|error| panic!("sha256sum {}: {error}", path.display()));
+        assert!(
+            output.status.success(),
+            "sha256sum failed for {}",
+            path.display()
+        );
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_owned()
+    }
+
+    assert_eq!(
+        sha256(&interop_path("m92-gobgp-v47-rs-differential.clab.yml")),
+        "ee7e41f42bdc034c625f33217c400fddae9ce7986d85d4ad8f397b6d28a878f0",
+        "M103 must not edit the M92 topology"
+    );
+    assert_eq!(
+        sha256(&interop_path(
+            "scripts/test-m92-gobgp-v47-rs-differential.sh"
+        )),
+        "60980d52db0d12df0d821b25cf7b724636d056ef708c59cee4041dcb51bf7ea1",
+        "M103 must not edit the M92 driver"
+    );
+
+    let topology = topology("m103-gobgp-v48-rs-differential.clab.yml");
+    let nodes = topology["topology"]["nodes"].as_mapping().unwrap();
+    for name in ["gobgp-rs", "source1", "source2"] {
+        assert_eq!(
+            nodes[name]["image"].as_str(),
+            Some("gobgp:v4.8.0-m103"),
+            "M103 {name} image drifted"
+        );
+    }
+    assert_eq!(nodes["target"]["image"].as_str(), Some("bird:2-bookworm"));
+    assert_eq!(nodes["rustbgpd"]["image"].as_str(), Some("rustbgpd:dev"));
+    for (name, config) in [
+        (
+            "rustbgpd",
+            "./configs/rustbgpd-m92-rs.toml:/config/rustbgpd.toml:ro",
+        ),
+        (
+            "gobgp-rs",
+            "./configs/gobgp-m92-rs.toml:/config/gobgp.toml:ro",
+        ),
+        (
+            "source1",
+            "./configs/gobgp-m92-source1.toml:/config/gobgp.toml:ro",
+        ),
+        (
+            "source2",
+            "./configs/gobgp-m92-source2.toml:/config/gobgp.toml:ro",
+        ),
+        (
+            "target",
+            "./configs/bird-m92-target.conf:/config/bird.conf:ro",
+        ),
+    ] {
+        let binds: Vec<_> = nodes[name]["binds"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .filter_map(serde_yaml::Value::as_str)
+            .collect();
+        assert!(
+            binds.contains(&config),
+            "M103 {name} lost read-only M92 input {config}"
+        );
+    }
+
+    let script_path = interop_path("scripts/test-m103-gobgp-v48-rs-differential.sh");
+    let script = fs::read_to_string(&script_path).expect("read M103 driver");
+    let m92_script = fs::read_to_string(interop_path(
+        "scripts/test-m92-gobgp-v47-rs-differential.sh",
+    ))
+    .expect("read immutable M92 driver");
+    assert_eq!(
+        script.matches("ok \"").count(),
+        m92_script.matches("ok \"").count(),
+        "M103 must preserve every M92 positive ledger row"
+    );
+    assert_eq!(
+        script.matches("    poll ").count(),
+        m92_script.matches("    poll ").count(),
+        "M103 must preserve every M92 polled ledger row"
+    );
+    for required in [
+        "gobgp version 4.8.0",
+        "gobgpd version 4.8.0",
+        "docker exec \"$container\" gobgp --version",
+        "docker exec \"$container\" gobgpd --version",
+        "BIRD version 2.0.12",
+        "5bd2c6eddab475746d5257c4466f8377b3790bcf7159e18e03a9d44a1685348b",
+        "710b7c28d2b83aef887cc28ae6ddcffe82f11a27e0ba263d9f747658b45f8a97",
+        "ac79814f81dee293acba58dd112086c6c0eda6f83a18526d122261a509a46141",
+        "957f6630f1f52d1e4030523661ba653b41253ba2a2a961c09b508fcdf99c373a",
+        "gobgp-v47-m92-adjout.json",
+        "gobgp-v48-m103-adjout.json",
+        "gobgp-v48-m103.expected.ndjson",
+        "--source m103-gobgp-v4.8-incumbent --generation 103",
+        "expected_pass=56",
+        "expected_pass=17",
+        "M103_COMPLETENESS_NEGATIVE",
+        "M103_ARTIFACT_DIR",
+        "artifact-manifest.sha256",
+        "identities.json",
+        "ledger.json",
+        "transcript.log",
+        "negative-candidate-verifier.txt",
+        "negative-incumbent-verifier.txt",
+        "--self-test-artifact-export",
+    ] {
+        assert!(script.contains(required), "M103 driver lost `{required}`");
+    }
+    assert_eq!(
+        script.matches("del(.age)").count(),
+        1,
+        "M103 raw comparison must delete only the one recursive age field"
+    );
+    for forbidden in [
+        "del(.uptime)",
+        "del(.timestamp)",
+        "del(.best)",
+        "del(.stale)",
+    ] {
+        assert!(
+            !script.contains(forbidden),
+            "M103 regained forbidden normalization `{forbidden}`"
+        );
+    }
+    let main = script
+        .split_once("main() {")
+        .unwrap()
+        .1
+        .split_once("\n}\n\nif [ \"$SELF_TEST_MODE\"")
+        .unwrap()
+        .0;
+    let identity = main.find("preflight_m103_identity_and_inputs").unwrap();
+    let baseline = main.find("run_round baseline").unwrap();
+    assert!(
+        identity < baseline,
+        "M103 identity/input preflight must precede daemon rounds"
+    );
+    let round = script
+        .split_once("run_round() {")
+        .unwrap()
+        .1
+        .split_once("run_completeness_negative() {")
+        .unwrap()
+        .0;
+    assert!(
+        round
+            .find("check_eor_order \"$WORK/${round}-incumbent.pdml\"")
+            .unwrap()
+            < round.find("if run_diff \"$round\"").unwrap(),
+        "M103 must authorize the incumbent EoR before capture/diff"
+    );
+    let negative = script
+        .split_once("run_completeness_negative() {")
+        .unwrap()
+        .1
+        .split_once("main() {")
+        .unwrap()
+        .0;
+    assert!(!negative.contains("run_diff"));
+    assert!(!negative.contains("capture_incumbent"));
+    assert!(negative.contains("v4_eor=0 v6_eor=0"));
+    let summary = main.find("print_summary").unwrap();
+    let ledger = main.find("write_ledger").unwrap();
+    let export = main.find("export_success_artifacts").unwrap();
+    assert!(
+        summary < ledger && ledger < export,
+        "M103 must finish its exact ledger, record it, then export before returning to EXIT cleanup"
+    );
+    assert!(!main.contains("rm -rf \"$WORK\""));
+    let cleanup = script
+        .split_once("cleanup_m103() {")
+        .unwrap()
+        .1
+        .split_once("write_self_test_identity() {")
+        .unwrap()
+        .0;
+    assert!(cleanup.contains("rm -rf \"$WORK\""));
+    assert!(cleanup.contains("[ -z \"$ARTIFACT_STAGE\" ] || rm -rf \"$ARTIFACT_STAGE\""));
+
+    let output = Command::new("bash")
+        .arg(&script_path)
+        .arg("--self-test-artifact-export")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run M103 artifact export self-test");
+    assert!(
+        output.status.success(),
+        "M103 artifact export self-test failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn m83_eor_order_rejects_same_frame_reversal() {
     // Destructive red proof: replacing tuple order with frame-only order makes
     // the script's reversed same-frame fixture pass and this test fail.
