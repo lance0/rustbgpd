@@ -948,6 +948,183 @@ fn peer_identity(address: &str, interface: &str) -> String {
     }
 }
 
+#[derive(Default)]
+struct GtsmInventory {
+    static_peers: HashMap<String, Option<u8>>,
+    peer_groups: HashMap<String, Option<u8>>,
+}
+
+fn configured_gtsm_hops(row: &toml::Value) -> Option<u8> {
+    if row.get("ttl_security").and_then(toml::Value::as_bool) != Some(true) {
+        return None;
+    }
+    match row.get("ttl_security_hops") {
+        None => Some(1),
+        Some(value) => value
+            .as_integer()
+            .and_then(|hops| u8::try_from(hops).ok())
+            .filter(|hops| *hops != 0),
+    }
+}
+
+fn insert_unique(map: &mut HashMap<String, Option<u8>>, key: String, hops: u8) {
+    match map.entry(key) {
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(Some(hops));
+        }
+        std::collections::hash_map::Entry::Occupied(mut entry) => {
+            entry.insert(None);
+        }
+    }
+}
+
+fn gtsm_inventory(effective_toml: &str) -> Option<GtsmInventory> {
+    let value: toml::Value = toml::from_str(effective_toml).ok()?;
+    let mut inventory = GtsmInventory::default();
+    for row in value
+        .get("neighbors")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(hops) = configured_gtsm_hops(row) else {
+            continue;
+        };
+        let address = row.get("address")?.as_str()?;
+        let interface = row
+            .get("interface")
+            .and_then(toml::Value::as_str)
+            .unwrap_or_default();
+        insert_unique(
+            &mut inventory.static_peers,
+            peer_identity(address, interface),
+            hops,
+        );
+    }
+    for (name, row) in value
+        .get("peer_groups")
+        .and_then(toml::Value::as_table)
+        .into_iter()
+        .flat_map(toml::map::Map::iter)
+    {
+        if let Some(hops) = configured_gtsm_hops(row) {
+            insert_unique(&mut inventory.peer_groups, name.clone(), hops);
+        }
+    }
+    Some(inventory)
+}
+
+fn parse_metric_labels(input: &str) -> Option<HashMap<String, String>> {
+    let mut labels = HashMap::new();
+    let mut rest = input;
+    while !rest.is_empty() {
+        let (name, after_name) = rest.split_once('=')?;
+        if name.is_empty() || !after_name.starts_with('"') {
+            return None;
+        }
+        let mut value = String::new();
+        let mut escaped = false;
+        let mut end = None;
+        for (offset, ch) in after_name[1..].char_indices() {
+            if escaped {
+                value.push(match ch {
+                    'n' => '\n',
+                    '\\' => '\\',
+                    '"' => '"',
+                    _ => return None,
+                });
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                end = Some(offset + 2);
+                break;
+            } else {
+                value.push(ch);
+            }
+        }
+        let end = end?;
+        if labels.insert(name.to_string(), value).is_some() {
+            return None;
+        }
+        rest = &after_name[end..];
+        if rest.is_empty() {
+            break;
+        }
+        rest = rest.strip_prefix(',')?;
+    }
+    Some(labels)
+}
+
+fn unique_admin_enabled(metrics: &str, peer: &str, interface: &str) -> bool {
+    let mut matched = None;
+    for line in metrics.lines() {
+        let Some(rest) = line.strip_prefix("bgp_peer_admin_enabled{") else {
+            continue;
+        };
+        let Some((label_text, value_text)) = rest.split_once("} ") else {
+            return false;
+        };
+        let Some(labels) = parse_metric_labels(label_text) else {
+            return false;
+        };
+        if labels.get("peer").map(String::as_str) != Some(peer)
+            || labels.get("interface").map(String::as_str) != Some(interface)
+        {
+            continue;
+        }
+        if matched.is_some() || !matches!(value_text, "0" | "1") {
+            return false;
+        }
+        matched = Some(value_text == "1");
+    }
+    matched == Some(true)
+}
+
+fn gtsm_advisory_check(
+    record: &NeighborDoctorRecord,
+    session_evidence: SessionHistoryEvidence,
+    inventory: Option<&GtsmInventory>,
+    metrics: Option<&str>,
+) -> Option<Check> {
+    if record.support.stale
+        || record.support.state == "Established"
+        || record.support.flap_count != 0
+        || record.max_prefix_restart_remaining_millis.is_some()
+        || matches!(
+            session_evidence,
+            SessionHistoryEvidence::Retained {
+                latest_admin_state: Some(RetainedAdminState::Disabled),
+                ..
+            }
+        )
+    {
+        return None;
+    }
+    let inventory = inventory?;
+    let hops = if record.support.is_dynamic {
+        let peer_group = &record.support.accepted_dynamic_range.as_ref()?.peer_group;
+        inventory.peer_groups.get(peer_group).copied().flatten()?
+    } else {
+        inventory
+            .static_peers
+            .get(&record.identity)
+            .copied()
+            .flatten()?
+    };
+    if !unique_admin_enabled(metrics?, &record.support.address, &record.support.interface) {
+        return None;
+    }
+    Some(Check {
+        name: format!("peer.{}.ttl_security", record.identity),
+        status: CheckStatus::Warn,
+        detail: format!(
+            "peer {} has ttl_security enabled (ttl_security_hops={hops}) and has not established during the current session-task lifetime; GTSM drops occur in the kernel before BGP and produce no NOTIFICATION. Confirm the peer transmits TTL/Hop Limit 255 and that ttl_security_hops covers the actual path; this is an advisory, not a diagnosis.",
+            record.identity
+        ),
+    })
+}
+
 fn last_event_by_peer(
     events: &[serde_json::Value],
     include: impl Fn(&serde_json::Value) -> bool,
@@ -2021,6 +2198,7 @@ pub(crate) async fn run(
             match neighbor_snapshot {
                 Ok(resp) => {
                     let neighbors = resp.into_inner();
+                    let gtsm = effective_toml.as_deref().and_then(gtsm_inventory);
                     let transitions = last_transition_by_peer(&session_events);
                     let losses = last_loss_by_peer(&session_events);
                     let admin_states = latest_admin_state_by_peer(&session_events);
@@ -2121,6 +2299,14 @@ pub(crate) async fn run(
                             session_evidence,
                             now,
                             &record.support.last_error,
+                        ) {
+                            reporter.record(check.name, check.status, check.detail);
+                        }
+                        if let Some(check) = gtsm_advisory_check(
+                            record,
+                            session_evidence,
+                            gtsm.as_ref(),
+                            metrics_text.as_deref(),
                         ) {
                             reporter.record(check.name, check.status, check.detail);
                         }
@@ -2437,6 +2623,198 @@ mod tests {
     use crate::connection::connect;
     use crate::test_support::spawn_mock_server;
     use tonic::Code;
+
+    fn gtsm_record(address: &str, interface: &str) -> NeighborDoctorRecord {
+        NeighborDoctorRecord {
+            support: JsonNeighbor {
+                address: address.to_string(),
+                interface: interface.to_string(),
+                remote_asn: 65001,
+                state: "Active".to_string(),
+                stale: false,
+                slow_peer: false,
+                uptime_seconds: 0,
+                prefixes_received: 0,
+                prefixes_sent: 0,
+                messages_received: 0,
+                messages_sent: 0,
+                flap_count: 0,
+                last_error: String::new(),
+                is_dynamic: false,
+                accepted_dynamic_range: None,
+                route_reflector_client: false,
+                description: String::new(),
+            },
+            identity: peer_identity(address, interface),
+            update_group: String::new(),
+            max_prefix_restart_remaining_millis: None,
+        }
+    }
+
+    fn gtsm_config() -> &'static str {
+        r#"
+[peer_groups.dynamic]
+ttl_security = true
+ttl_security_hops = 9
+
+[[neighbors]]
+address = "192.0.2.1"
+ttl_security = true
+
+[[neighbors]]
+address = "fe80::1"
+interface = "eth0"
+ttl_security = true
+ttl_security_hops = 3
+"#
+    }
+
+    fn admin_metric(peer: &str, interface: &str, value: u8) -> String {
+        format!("bgp_peer_admin_enabled{{interface=\"{interface}\",peer=\"{peer}\"}} {value}")
+    }
+
+    fn gtsm_check(
+        record: &NeighborDoctorRecord,
+        history: SessionHistoryEvidence,
+        config: Option<&str>,
+        metrics: Option<&str>,
+    ) -> Option<Check> {
+        let inventory = config.and_then(gtsm_inventory);
+        gtsm_advisory_check(record, history, inventory.as_ref(), metrics)
+    }
+
+    #[test]
+    fn gtsm_advisory_static_and_dynamic_identity_and_detail_are_exact() {
+        let static_record = gtsm_record("fe80::1", "eth0");
+        let metric = admin_metric("fe80::1", "eth0", 1);
+        let check = gtsm_check(
+            &static_record,
+            SessionHistoryEvidence::Unavailable,
+            Some(gtsm_config()),
+            Some(&metric),
+        )
+        .unwrap();
+        assert_eq!(check.name, "peer.fe80::1%eth0.ttl_security");
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert_eq!(
+            check.detail,
+            "peer fe80::1%eth0 has ttl_security enabled (ttl_security_hops=3) and has not established during the current session-task lifetime; GTSM drops occur in the kernel before BGP and produce no NOTIFICATION. Confirm the peer transmits TTL/Hop Limit 255 and that ttl_security_hops covers the actual path; this is an advisory, not a diagnosis."
+        );
+
+        let mut dynamic = gtsm_record("198.51.100.8", "");
+        dynamic.support.is_dynamic = true;
+        dynamic.support.accepted_dynamic_range = Some(output::JsonAcceptedDynamicRange {
+            prefix: "198.51.100.0/24".to_string(),
+            peer_group: "dynamic".to_string(),
+        });
+        let metric = admin_metric("198.51.100.8", "", 1);
+        let check = gtsm_check(
+            &dynamic,
+            SessionHistoryEvidence::Unavailable,
+            Some(gtsm_config()),
+            Some(&metric),
+        )
+        .unwrap();
+        assert!(check.detail.contains("ttl_security_hops=9"));
+    }
+
+    #[test]
+    fn gtsm_advisory_suppresses_ineligible_session_states() {
+        let metric = admin_metric("192.0.2.1", "", 1);
+        let inventory = gtsm_inventory(gtsm_config()).unwrap();
+        let history =
+            retained_session_evidence_with_admin(None, None, Some(RetainedAdminState::Enabled));
+        let eligible = gtsm_record("192.0.2.1", "");
+        assert!(gtsm_advisory_check(&eligible, history, Some(&inventory), Some(&metric)).is_some());
+
+        for variant in 0..5 {
+            let mut record = gtsm_record("192.0.2.1", "");
+            match variant {
+                0 => record.support.state = "Established".to_string(),
+                1 => record.support.stale = true,
+                2 => record.support.flap_count = 1,
+                3 => record.max_prefix_restart_remaining_millis = Some(0),
+                4 => record.max_prefix_restart_remaining_millis = Some(10),
+                _ => unreachable!(),
+            }
+            assert!(
+                gtsm_advisory_check(&record, history, Some(&inventory), Some(&metric)).is_none(),
+                "variant {variant} must be absent"
+            );
+        }
+        let disabled =
+            retained_session_evidence_with_admin(None, None, Some(RetainedAdminState::Disabled));
+        assert!(
+            gtsm_advisory_check(&eligible, disabled, Some(&inventory), Some(&metric)).is_none()
+        );
+    }
+
+    #[test]
+    fn gtsm_advisory_requires_unique_authoritative_admin_metric() {
+        let record = gtsm_record("192.0.2.1", "");
+        let history = SessionHistoryEvidence::Unavailable;
+        for metrics in [
+            None,
+            Some("unrelated 1"),
+            Some("bgp_peer_admin_enabled{interface=\"\",peer=\"192.0.2.1\"} 0"),
+            Some("bgp_peer_admin_enabled{interface=\"\",peer=\"192.0.2.1\"} nope"),
+            Some("bgp_peer_admin_enabled{peer=\"192.0.2.1\"} 1"),
+            Some("bgp_peer_admin_enabled{interface=\"\",peer=\"192.0.2.1\" 1"),
+            Some("bgp_peer_admin_enabled{interface=\"eth0\",peer=\"192.0.2.1\"} 1"),
+            Some(
+                "bgp_peer_admin_enabled{interface=\"\",peer=\"192.0.2.1\"} 1\nbgp_peer_admin_enabled{interface=\"\",peer=\"192.0.2.1\"} 1",
+            ),
+        ] {
+            assert!(
+                gtsm_check(&record, history, Some(gtsm_config()), metrics).is_none(),
+                "metric evidence must suppress: {metrics:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn gtsm_advisory_suppresses_unconfigured_ambiguous_and_unattributed_dynamic_peers() {
+        let metric = admin_metric("192.0.2.9", "", 1);
+        let record = gtsm_record("192.0.2.9", "");
+        assert!(
+            gtsm_check(
+                &record,
+                SessionHistoryEvidence::Unavailable,
+                Some(gtsm_config()),
+                Some(&metric)
+            )
+            .is_none()
+        );
+
+        let duplicate = format!(
+            "{}\n[[neighbors]]\naddress = \"192.0.2.1\"\nttl_security = true\n",
+            gtsm_config()
+        );
+        let duplicate_record = gtsm_record("192.0.2.1", "");
+        let duplicate_metric = admin_metric("192.0.2.1", "", 1);
+        assert!(
+            gtsm_check(
+                &duplicate_record,
+                SessionHistoryEvidence::Unavailable,
+                Some(&duplicate),
+                Some(&duplicate_metric)
+            )
+            .is_none()
+        );
+
+        let mut dynamic = gtsm_record("198.51.100.8", "");
+        dynamic.support.is_dynamic = true;
+        let dynamic_metric = admin_metric("198.51.100.8", "", 1);
+        assert!(
+            gtsm_check(
+                &dynamic,
+                SessionHistoryEvidence::Unavailable,
+                Some(gtsm_config()),
+                Some(&dynamic_metric)
+            )
+            .is_none()
+        );
+    }
 
     /// The effective config can approach 384 MiB. Reintroducing either the
     /// bundle copy or the probe-source copy adds `toml_text.clone()` to the

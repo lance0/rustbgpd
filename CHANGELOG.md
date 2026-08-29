@@ -11,6 +11,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `rbgp doctor` warns on a narrowly evidenced first-session GTSM stall when
+  effective TTL-security configuration and the authoritative administrative
+  metric agree; established, stale, held, disabled, previously established,
+  ambiguous, and unattributed peers remain silent.
+
 - Decoded inbound and attempted outbound BGP NOTIFICATIONs now emit exactly one
   structured INFO record with peer, direction, outer code/subcode, and a human
   description. Hard Reset records retain outer Cease/9 and identify the valid
