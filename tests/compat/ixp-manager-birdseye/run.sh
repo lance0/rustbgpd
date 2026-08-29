@@ -67,9 +67,18 @@ manrs_image=$(docker build --quiet --platform linux/amd64 \
   --file "$root/Dockerfile.manrs" \
   --label "org.opencontainers.image.revision=$manrs_commit" \
   "$tmp/manrs-ixp-validation-tool")
-[ "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$alice_image")" = "$alice_lg_commit" ]
-[ "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$alice_image")" = "$alice_lg_version" ]
-[ "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$manrs_image")" = "$manrs_commit" ]
+[ "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$alice_image" 2>/dev/null || true)" = "$alice_lg_commit" ] || {
+  echo 'Alice-LG image revision label does not match the pinned source revision' >&2
+  exit 1
+}
+[ "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$alice_image" 2>/dev/null || true)" = "$alice_lg_version" ] || {
+  echo 'Alice-LG image version label does not match the pinned source version' >&2
+  exit 1
+}
+[ "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$manrs_image" 2>/dev/null || true)" = "$manrs_commit" ] || {
+  echo 'MANRS image revision label does not match the pinned source revision' >&2
+  exit 1
+}
 docker network create "$network" >/dev/null
 docker run --detach --name "$mysql" --network "$network" \
   --env MYSQL_ALLOW_EMPTY_PASSWORD=yes --env MYSQL_DATABASE=ixp_ci \

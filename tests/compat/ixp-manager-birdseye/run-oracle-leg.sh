@@ -85,7 +85,9 @@ cargo build --quiet --locked --manifest-path "$repo/Cargo.toml" -p birdwatcher-a
 oracle_image=$(docker build --quiet --file "$root/Dockerfile.oracle" "$root")
 docker network create --subnet 198.51.100.0/24 \
   --ipv6 --subnet 2001:db8:5100::/64 "$network" >/dev/null
-gateway=$(docker network inspect --format '{{(index .IPAM.Config 0).Gateway}}' "$network")
+gateway=$(docker network inspect --format \
+  '{{range .IPAM.Config}}{{if eq .Subnet "198.51.100.0/24"}}{{.Gateway}}{{"\n"}}{{end}}{{end}}' \
+  "$network")
 [ "$gateway" = 198.51.100.1 ] || {
   echo "populated oracle network gateway drifted: expected 198.51.100.1, got $gateway" >&2
   exit 1
