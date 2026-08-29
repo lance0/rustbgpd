@@ -14,7 +14,7 @@ from pathlib import Path
 INTEROP = (
     "m1 m13 m80 m15 m10 m14 m17 m73 m74 m75 m76 m77 m78 m79 m22 "
     "m24 m81 m82 m83 m85 m94 m86 m25 m29 m30 m34 m35 m35b m35c m41 "
-    "m44 m54 m55 m56 m45 m57 m63 m64 m26_m27_m28_m59_m91 m92 m84 m99 m101 m102 m103"
+    "m44 m54 m55 m56 m45 m57 m63 m64 m26_m27_m28_m59_m91 m92 m84 m99 m101 m102 m103 m104"
 ).split()
 KERNEL = (
     "m36 m37 m37-ip m38 m39 m39b m48 m60 m61 m62 m40 m42 m50 m52 "
@@ -146,17 +146,17 @@ PERMISSION_HASHES = {
     "kernel-dataplane.yml": "6f1d70d72bad231d43c575acef6946580e439c879794ed2ea1f4a40340245172",
 }
 CALL_HASHES = {
-    "interop.yml": "1e446c04d526b8181e61f2e6e81c7bfcdfaff7046a907a5bb75d12d1de150958",
+    "interop.yml": "01f2ffcc62c7f3a2976a7b915a13af95084c6bab4fe7d93835813fd8884cdfb6",
     "kernel-dataplane.yml": "310ed2344bd6ff3f766580f704cc77fec4be0a2103a943e2ad837f497af346c3",
 }
 PINS = collections.Counter(
     {
-        "actions/checkout@v7": 93,
+        "actions/checkout@v7": 94,
         "dtolnay/rust-toolchain@v1 # stable": 3,
         "Swatinem/rust-cache@v2": 5,
         "dtolnay/rust-toolchain@v1 # 1.95": 2,
-        "docker/setup-buildx-action@v4": 48,
-        "docker/build-push-action@v7": 51,
+        "docker/setup-buildx-action@v4": 49,
+        "docker/build-push-action@v7": 53,
         "actions/cache@v6": 7,
         "actions/upload-artifact@v7": 11,
         "actions/download-artifact@v8": 6,
@@ -769,7 +769,7 @@ def check(root: Path) -> list[str]:
             errors.append(f"{name}: primer exact job contract drifted")
         for job_name in roster:
             job = jobs.get(job_name, "")
-            if not setup and job_name == "m83":
+            if not setup and job_name in ("m83", "m104"):
                 expected_needs = (
                     "    needs: [grpcurl_archive, bird2192_archive, prime_dev_image]"
                 )
@@ -842,6 +842,19 @@ def check(root: Path) -> list[str]:
                             'version: "3.3.2"',
                             f"sha256: {BIRD332_SHA256}",
                             f"artifact-name: {BIRD332_ARTIFACT}",
+                        ),
+                    ),
+                    "m104": (
+                        "file: tests/interop/Dockerfile.bird-v2192",
+                        (
+                            "cache-from: type=gha,scope=bird2192-m104",
+                            "cache-to: type=gha,mode=max,scope=bird2192-m104,ignore-error=true",
+                        ),
+                        (
+                            "name: Stage verified BIRD 2.19.2 archive",
+                            'version: "2.19.2"',
+                            f"sha256: {BIRD2192_SHA256}",
+                            f"artifact-name: {BIRD2192_ARTIFACT}",
                         ),
                     ),
                 }
@@ -1075,6 +1088,63 @@ def check(root: Path) -> list[str]:
     for forbidden in ("continue-on-error:", 'max_attempts: "2"'):
         if forbidden in m103:
             errors.append(f"interop.yml:m103: permits {forbidden}")
+    m104 = _jobs(texts["interop.yml"]).get("m104", "")
+    m104_required = {
+        GRPCURL_ACTION: 1,
+        BIRD3_ACTION: 1,
+        'version: "2.19.2"': 1,
+        f"sha256: {BIRD2192_SHA256}": 1,
+        f"artifact-name: {BIRD2192_ARTIFACT}": 1,
+        "name: Verify and pull exact ARouteServer 1.23.2 image": 1,
+        "AROUTESERVER_IMAGE: pierky/arouteserver@sha256:ba0e9c0b541c63acf0765a08fd2e09c2bba9dc64af1f5bbdce7819e8d1c34d66": 1,
+        "AROUTESERVER_CONFIG: sha256:4a08ef740f00a119f5897b0f834da9ff172a282c93d47fdff636c3b50c9aec93": 1,
+        'manifest_json=$(docker buildx imagetools inspect --raw "$AROUTESERVER_IMAGE")': 1,
+        "application/vnd.docker.distribution.manifest.v2+json": 1,
+        'test "$(jq -er \'.config.digest\' <<<"$manifest_json")" =': 1,
+        'docker pull "$AROUTESERVER_IMAGE"': 1,
+        'importlib.metadata.version("arouteserver")': 1,
+        "name: Build bird:v2.19.2-m104": 1,
+        "file: tests/interop/Dockerfile.bird-v2192": 1,
+        "tags: bird:v2.19.2-m104": 1,
+        "cache-from: type=gha,scope=bird2192-m104": 1,
+        "cache-to: type=gha,mode=max,scope=bird2192-m104,ignore-error=true": 1,
+        "name: Build gobgp:v4.8.0-m104": 1,
+        "--build-arg TARGETARCH=amd64": 1,
+        "--build-arg GOBGP_VERSION=4.8.0": 1,
+        "--build-arg GOBGP_SHA256=43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03": 1,
+        "-t gobgp:v4.8.0-m104 -f tests/interop/Dockerfile.gobgp-v47 tests/interop": 1,
+        "name: Run immutable M90 context proof (exact 23/23)": 1,
+        "M90_ARS_IMAGE: pierky/arouteserver@sha256:ba0e9c0b541c63acf0765a08fd2e09c2bba9dc64af1f5bbdce7819e8d1c34d66": 1,
+        "bash tests/interop/m90-differential/prove-context-ingestion.sh": 1,
+        "grep -Fq 'PROOF PASS: 23 checks'": 1,
+        "name: Run M104 offline destructive contract": 1,
+        "--self-test-offline-contract": 1,
+        "name: Run M104 (single-attempt current-daemon differential)": 1,
+        "M104_EXPECTED_GIT_SHA: ${{ github.sha }}": 1,
+        "uses: ./.github/actions/run-interop-test": 1,
+        "label: M104\n": 1,
+        "topology: tests/interop/m104-arouteserver-current-rs-differential.clab.yml": 1,
+        "script: tests/interop/scripts/test-m104-arouteserver-current-rs-differential.sh": 1,
+        'max_attempts: "1"': 1,
+    }
+    if any(m104.count(seam) != count for seam, count in m104_required.items()):
+        errors.append(
+            "interop.yml:m104: current ARouteServer differential semantics drifted"
+        )
+    m104_context = m104.find("name: Run immutable M90 context proof (exact 23/23)")
+    m104_live = m104.find("name: Run M104 (single-attempt current-daemon differential)")
+    if not (0 <= m104_context < m104_live):
+        errors.append(
+            "interop.yml:m104: context proof must precede the live differential"
+        )
+    for forbidden in (
+        "pierky/arouteserver:latest",
+        "BIRD_TARGET_VERSION=2.0.11",
+        "continue-on-error:",
+        'max_attempts: "2"',
+    ):
+        if forbidden in m104:
+            errors.append(f"interop.yml:m104: permits {forbidden}")
     interop_classifier = _jobs(texts["interop.yml"]).get("classify_changes", "")
     kernel_jobs = _jobs(texts["kernel-dataplane.yml"])
     interop_classifier = interop_classifier.replace("interop heavy-lab", "heavy-lab")
@@ -1400,7 +1470,7 @@ def check(root: Path) -> list[str]:
     )
     if "osrg/gobgp/releases" in gobgp_surfaces:
         errors.append("gobgp release URL escaped the installer/Dockerfile")
-    if texts["interop.yml"].count(BIRD3_ACTION) != 2:
+    if texts["interop.yml"].count(BIRD3_ACTION) != 3:
         errors.append("interop.yml: BIRD stage consumer inventory drifted")
     if texts["kernel-dataplane.yml"].count(BIRD3_ACTION) != 1:
         errors.append("kernel-dataplane.yml: bird3 stage consumer inventory drifted")

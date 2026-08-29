@@ -2303,6 +2303,103 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  m104:
+    needs: [grpcurl_archive, bird2192_archive, prime_dev_image]
+    name: M104 — current ARouteServer route-server differential
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install containerlab
+        uses: ./.github/actions/install-containerlab
+
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
+
+      - name: Ensure jq
+        run: |
+          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build rustbgpd:dev
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: rustbgpd:dev
+          target: dev
+          cache-from: type=gha,scope=rustbgpd-dev
+
+      - name: Verify and pull exact ARouteServer 1.23.2 image
+        env:
+          AROUTESERVER_IMAGE: pierky/arouteserver@sha256:ba0e9c0b541c63acf0765a08fd2e09c2bba9dc64af1f5bbdce7819e8d1c34d66
+          AROUTESERVER_CONFIG: sha256:4a08ef740f00a119f5897b0f834da9ff172a282c93d47fdff636c3b50c9aec93
+        run: |
+          set -euo pipefail
+          manifest_json=$(docker buildx imagetools inspect --raw "$AROUTESERVER_IMAGE")
+          test "$(jq -er '.schemaVersion' <<<"$manifest_json")" = 2
+          test "$(jq -er '.mediaType' <<<"$manifest_json")" = \
+            application/vnd.docker.distribution.manifest.v2+json
+          test "$(jq -er '.config.digest' <<<"$manifest_json")" = \
+            "$AROUTESERVER_CONFIG"
+          docker pull "$AROUTESERVER_IMAGE"
+          bash tests/interop/scripts/test-m104-arouteserver-current-rs-differential.sh \
+            --preflight-arouteserver-image
+          test "$(docker run --rm "$AROUTESERVER_IMAGE" python3 -c \
+            'import importlib.metadata; print(importlib.metadata.version("arouteserver"))')" = \
+            1.23.2
+
+      - name: Stage verified BIRD 2.19.2 archive
+        uses: ./.github/actions/stage-bird3-artifact
+        with:
+          version: "2.19.2"
+          sha256: aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660
+          artifact-name: bird2192-v2.19.2-source
+
+      - name: Build bird:v2.19.2-m104
+        uses: docker/build-push-action@v7
+        with:
+          context: tests/interop
+          file: tests/interop/Dockerfile.bird-v2192
+          load: true
+          tags: bird:v2.19.2-m104
+          cache-from: type=gha,scope=bird2192-m104
+          cache-to: type=gha,mode=max,scope=bird2192-m104,ignore-error=true
+
+      - name: Build gobgp:v4.8.0-m104
+        run: >-
+          docker build --build-arg TARGETARCH=amd64
+          --build-arg GOBGP_VERSION=4.8.0
+          --build-arg GOBGP_SHA256=43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03
+          -t gobgp:v4.8.0-m104 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
+
+      - name: Run immutable M90 context proof (exact 23/23)
+        env:
+          M90_ARS_IMAGE: pierky/arouteserver@sha256:ba0e9c0b541c63acf0765a08fd2e09c2bba9dc64af1f5bbdce7819e8d1c34d66
+        run: |
+          set -euo pipefail
+          output=$(bash tests/interop/m90-differential/prove-context-ingestion.sh)
+          printf '%s\n' "$output"
+          grep -Fq 'PROOF PASS: 23 checks' <<<"$output"
+
+      - name: Run M104 offline destructive contract
+        run: >-
+          bash tests/interop/scripts/test-m104-arouteserver-current-rs-differential.sh
+          --self-test-offline-contract
+
+      - name: Run M104 (single-attempt current-daemon differential)
+        env:
+          M104_EXPECTED_GIT_SHA: ${{ github.sha }}
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M104
+          topology: tests/interop/m104-arouteserver-current-rs-differential.clab.yml
+          script: tests/interop/scripts/test-m104-arouteserver-current-rs-differential.sh
+          max_attempts: "1"
+
   check:
     name: check
     runs-on: ubuntu-latest
@@ -2313,7 +2410,7 @@ jobs:
       m13, m80, m15, m10, m14, m17, m73, m74, m75, m76, m77, m78, m79, m22, m24,
       m81, m82, m83, m85, m94, m86, m25, m29, m30, m34, m35, m35b, m35c,
       m41, m44, m54, m55, m56, m45, m57, m63, m64,
-      m26_m27_m28_m59_m91, m92, m84, m99, m101, m102, m103]
+      m26_m27_m28_m59_m91, m92, m84, m99, m101, m102, m103, m104]
     env:
       NEEDS_CONTEXT: ${{ toJSON(needs) }}
       EXPECTED_JOBS: >-
@@ -2322,7 +2419,7 @@ jobs:
         m1 m13 m80 m15 m10
         m14 m17 m73 m74 m75 m76 m77 m78 m79 m22 m24 m81 m82 m83 m85 m94
         m86 m25 m29 m30 m34 m35 m35b m35c m41 m44 m54 m55 m56 m45 m57
-        m63 m64 m26_m27_m28_m59_m91 m92 m84 m99 m101 m102 m103
+        m63 m64 m26_m27_m28_m59_m91 m92 m84 m99 m101 m102 m103 m104
     steps:
       - name: Aggregate required Interop result
         shell: bash

@@ -1915,6 +1915,246 @@ fn m103_gobgp48_differential_is_exact_and_keeps_m92_immutable() {
 }
 
 #[test]
+fn m104_current_arouteserver_differential_is_exact_and_keeps_m90_immutable() {
+    fn sha256(path: &Path) -> String {
+        let output = Command::new("sha256sum")
+            .arg(path)
+            .output()
+            .unwrap_or_else(|error| panic!("sha256sum {}: {error}", path.display()));
+        assert!(
+            output.status.success(),
+            "sha256sum failed for {}",
+            path.display()
+        );
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_owned()
+    }
+
+    for (relative, expected) in [
+        (
+            "m90-differential.clab.yml",
+            "61e0bae1b47b82f71e6865daec01351f9326a506c898dc9e1fa6f9bdd1ec058a",
+        ),
+        (
+            "scripts/test-m90-differential.sh",
+            "c2a878d51ea09422ffcabd4641de5a0a880d9c43f482016a46423dc49740c230",
+        ),
+        (
+            "m90-differential/README.md",
+            "c965a7f95e916fb40fc9cae35f776782af3e01694c6caab17ea436aebe66279c",
+        ),
+        (
+            "m90-differential/prove-context-ingestion.sh",
+            "638d50ee11b4ff4b55ae888d69ecde0225d4d69a6b6f6b9d7a1250b54e2b2270",
+        ),
+        (
+            "m90-differential/general.yml",
+            "c47fed81ba4c7b3671d8c3f3a26955037e5cef67e7c7b7650dc9bf3ceaeb214d",
+        ),
+        (
+            "m90-differential/clients.yml",
+            "08ceca5f9bafb13139538096a94595d075b7a7dae9342deb26d7f5adfc337e1e",
+        ),
+        (
+            "m90-differential/context.yml",
+            "f979b7b72f9385bf5e10258b967c22da0ec1bd5b214ad9f42197fcd104471eda",
+        ),
+        (
+            "m90-differential/context-sectioned.yml",
+            "f61c2a6d88aae1bb11c9ea95a4dd73abfb3c2f2577df69316f10d49e436b8790",
+        ),
+        (
+            "m90-differential/announcements.json",
+            "e55a7faea278b962139a17fe5daf81026761b6eef57cb8bb7807005c12f8164a",
+        ),
+        (
+            "m90-differential/bogons.yml",
+            "26e7c313a41fd7a854f73c656a77415fd9c2bb9057b625a7592bd436ee26dfe5",
+        ),
+        (
+            "m90-differential/arouteserver.yml",
+            "c3b85f1af54c437ae50b0d4e1502b3a6e95cb2c4b12c255ac1c90cfc9eec5b19",
+        ),
+        (
+            "m90-differential/bgpq4-stub.sh",
+            "cebb06da5c9adff5184652bca877ab7956f137c5d9cd425b7c449ad0e950bb84",
+        ),
+        (
+            "m90-differential/policy-explain.toml",
+            "811634752dee124d80be1b0836c61f1a5f20af32b3c94c7fb48536573fd98030",
+        ),
+        (
+            "configs/gobgp-m90-member1.toml",
+            "b7d897cb35aa657d469dbc7c35d9bdff2b346dc7169bcf820a331a06866f33e2",
+        ),
+        (
+            "configs/gobgp-m90-member2.toml",
+            "1cfea7eee37eb764a5ab8f090d7f3f25d252ed18d8ff0b9b7f9dbf5e2defd329",
+        ),
+        (
+            "configs/gobgp-m90-member3.toml",
+            "27e3955e743203ba352f177eb5e0899d061520bd14e7c0412a02007073c74f72",
+        ),
+    ] {
+        assert_eq!(
+            sha256(&interop_path(relative)),
+            expected,
+            "M104 must not edit immutable M90 asset {relative}"
+        );
+    }
+
+    let topology = topology("m104-arouteserver-current-rs-differential.clab.yml");
+    assert_eq!(
+        topology["name"],
+        "m104-arouteserver-current-rs-differential"
+    );
+    let nodes = topology["topology"]["nodes"].as_mapping().unwrap();
+    assert_eq!(nodes["rustbgpd"]["image"], "rustbgpd:dev");
+    assert_eq!(nodes["bird"]["image"], "bird:v2.19.2-m104");
+    for member in ["member1", "member2", "member3"] {
+        assert_eq!(
+            nodes[member]["image"], "gobgp:v4.8.0-m104",
+            "M104 {member} image drifted"
+        );
+        let binds: Vec<_> = nodes[member]["binds"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .filter_map(serde_yaml::Value::as_str)
+            .collect();
+        assert_eq!(binds.len(), 1, "M104 {member} must have one read-only bind");
+        assert!(binds[0].ends_with(":/config/gobgp.toml:ro"));
+        assert!(binds[0].contains(&format!("gobgp-m90-{member}.toml")));
+    }
+
+    let script_path = interop_path("scripts/test-m104-arouteserver-current-rs-differential.sh");
+    let script = fs::read_to_string(&script_path).expect("read M104 driver");
+    for required in [
+        "M104_BASE_SHA=\"350eb813b7a2a71ccfae2084d033253e96419cea\"",
+        "ARS_MANIFEST_DIGEST=\"sha256:ba0e9c0b541c63acf0765a08fd2e09c2bba9dc64af1f5bbdce7819e8d1c34d66\"",
+        "ARS_IMAGE=\"pierky/arouteserver@$ARS_MANIFEST_DIGEST\"",
+        "sha256:4a08ef740f00a119f5897b0f834da9ff172a282c93d47fdff636c3b50c9aec93",
+        "ARS_VERSION=\"1.23.2\"",
+        "ARS_TAG_COMMIT=\"85f24252564822556bd93cb9eba1f73d1e8268ea\"",
+        "BIRD_IMAGE=\"bird:v2.19.2-m104\"",
+        "BIRD_VERSION=\"BIRD version 2.19.2\"",
+        "BIRD_TARGET_VERSION=\"2.16\"",
+        "GOBGP_IMAGE=\"gobgp:v4.8.0-m104\"",
+        "5bd2c6eddab475746d5257c4466f8377b3790bcf7159e18e03a9d44a1685348b",
+        "710b7c28d2b83aef887cc28ae6ddcffe82f11a27e0ba263d9f747658b45f8a97",
+        "--target-version \"$BIRD_TARGET_VERSION\"",
+        "bird -p -c /etc/bird/bird.conf",
+        "reject-irrdb-prefix-filtered",
+        "require_equal \"$pass\" 74",
+        "require_equal \"$fail\" 0",
+        "local exit_code=$? topo_file",
+        "return \"$exit_code\"",
+        "--self-test-offline-contract",
+        "--preflight-arouteserver-image",
+        "docker buildx imagetools inspect --raw \"$ARS_IMAGE\"",
+        "ARouteServer registry config digest",
+        "ARouteServer containerd descriptor digest",
+        "ARouteServer containerd descriptor digest is missing",
+    ] {
+        assert!(script.contains(required), "M104 driver lost `{required}`");
+    }
+    for forbidden in ["M90_ARS_IMAGE", "M90_BIRD_TARGET_VERSION", "2.0.11"] {
+        assert!(
+            !script.contains(forbidden),
+            "M104 driver regained historical override `{forbidden}`"
+        );
+    }
+    for destructive_fixture in [
+        "classic",
+        "containerd",
+        "swapped",
+        "wrong_manifest",
+        "ambiguous",
+        "missing_descriptor",
+        "missing_repo",
+        "wrong_id",
+        "wrong_config",
+        "missing_config",
+    ] {
+        assert!(
+            script.contains(destructive_fixture),
+            "M104 identity self-test lost {destructive_fixture} representation"
+        );
+    }
+
+    let main = script
+        .split_once("main() {")
+        .unwrap()
+        .1
+        .split_once("\n}\n\ncase \"$SELF_TEST_MODE\"")
+        .unwrap()
+        .0;
+    let inputs = main.find("preflight_m104_inputs").unwrap();
+    let identities = main.find("preflight_runtime_identities").unwrap();
+    let bird_render = main.find("render_bird_config").unwrap();
+    let rust_render = main.find("render_rustbgpd_config").unwrap();
+    let start = main.find("start_daemons").unwrap();
+    assert!(
+        inputs < identities
+            && identities < bird_render
+            && bird_render < rust_render
+            && rust_render < start,
+        "M104 must freeze inputs and identities before render and daemon start"
+    );
+
+    let workflow =
+        fs::read_to_string(repo_path(".github/workflows/interop.yml")).expect("read workflow");
+    let m104 = workflow
+        .split_once("\n  m104:\n")
+        .and_then(|(_, rest)| rest.split_once("\n  check:\n").map(|(job, _)| job))
+        .expect("interop workflow has bounded M104 job");
+    let context = m104
+        .find("Run immutable M90 context proof (exact 23/23)")
+        .unwrap();
+    let live = m104
+        .find("Run M104 (single-attempt current-daemon differential)")
+        .unwrap();
+    assert!(context < live, "M104 context proof must precede live proof");
+    for required in [
+        "needs: [grpcurl_archive, bird2192_archive, prime_dev_image]",
+        "PROOF PASS: 23 checks",
+        "M104_EXPECTED_GIT_SHA: ${{ github.sha }}",
+        "max_attempts: \"1\"",
+        "--preflight-arouteserver-image",
+    ] {
+        assert!(m104.contains(required), "M104 workflow lost `{required}`");
+    }
+    let pull = m104.find("docker pull \"$AROUTESERVER_IMAGE\"").unwrap();
+    let identity = m104.find("--preflight-arouteserver-image").unwrap();
+    let package = m104.find("importlib.metadata.version").unwrap();
+    assert!(
+        pull < identity && identity < package,
+        "M104 must validate local manifest/config identity after pull and before package use"
+    );
+    assert!(
+        !m104.contains("docker image inspect -f '{{.Id}}' \"$AROUTESERVER_IMAGE\""),
+        "M104 workflow must not conflate a store-dependent local ID with the config digest"
+    );
+
+    let output = Command::new("bash")
+        .arg(&script_path)
+        .arg("--self-test-offline-contract")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run M104 offline contract self-test");
+    assert!(
+        output.status.success(),
+        "M104 offline self-test failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn m83_eor_order_rejects_same_frame_reversal() {
     // Destructive red proof: replacing tuple order with frame-only order makes
     // the script's reversed same-frame fixture pass and this test fail.
