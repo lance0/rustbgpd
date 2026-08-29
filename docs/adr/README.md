@@ -137,6 +137,7 @@ consequences so future contributors understand *why*, not just *what*.
 | [0126](0126-shared-group-per-client-best.md) | Shared-group per-client best-path — path-hiding mitigation inside update groups | Accepted | 2026-08-05 |
 | [0127](0127-config-transaction-settlement-watchdog.md) | Persisted runtime-config settlement watchdog | Accepted | 2026-08-11 |
 | [0128](0128-route-server-next-hop-translation.md) | Route-server next-hop translation | Accepted (architecture GO if activated; implementation NO-GO, demand-gated) | 2026-08-29 |
+| [0129](0129-prefix-sid-domain-boundary.md) | BGP Prefix-SID administrative-domain boundary | Proposed (no runtime behavior shipped) | 2026-08-29 |
 
 ## Template
 
