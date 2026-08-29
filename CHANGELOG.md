@@ -11,6 +11,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Hosted M83 and M101 interop jobs now consume independently cached,
+  checksum- and source-version-verified BIRD 2.19.2 and 3.3.2 archives from
+  required same-run producers before building their images with dedicated
+  Buildx cache scopes. Their Dockerfiles recheck staged bytes before extraction
+  and retain a bounded three-attempt download only for cold local builds; the
+  existing M43 BIRD 3.3.1 unavailable-upstream tolerance is unchanged.
+
 - `rbgp doctor` warns on a narrowly evidenced first-session GTSM stall when
   effective TTL-security configuration and the authoritative administrative
   metric agree; established, stale, held, disabled, previously established,

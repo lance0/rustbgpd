@@ -86,6 +86,16 @@ PR_FILES = {
 
 
 class PrimerContractTests(unittest.TestCase):
+    def copy_bird_dockerfiles(self, root):
+        interop = root / "tests" / "interop"
+        interop.mkdir(parents=True, exist_ok=True)
+        for name in (
+            "Dockerfile.bird3",
+            "Dockerfile.bird-v2192",
+            "Dockerfile.bird-v332",
+        ):
+            shutil.copy2(ROOT / "tests" / "interop" / name, interop / name)
+
     def mutate(self, relative, old, new="", occurrence=0):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -120,8 +130,7 @@ class PrimerContractTests(unittest.TestCase):
             gobgp = root / "tests" / "interop" / "Dockerfile.gobgp"
             gobgp.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / "tests" / "interop" / "Dockerfile.gobgp", gobgp)
-            bird3 = root / "tests" / "interop" / "Dockerfile.bird3"
-            shutil.copy2(ROOT / "tests" / "interop" / "Dockerfile.bird3", bird3)
+            self.copy_bird_dockerfiles(root)
             path = root / relative
             text = path.read_text()
             start = 0
@@ -156,9 +165,7 @@ class PrimerContractTests(unittest.TestCase):
         shutil.copy2(
             ROOT / "tests" / "interop" / "Dockerfile.gobgp", interop / "Dockerfile.gobgp"
         )
-        shutil.copy2(
-            ROOT / "tests" / "interop" / "Dockerfile.bird3", interop / "Dockerfile.bird3"
-        )
+        self.copy_bird_dockerfiles(root)
         scripts = root / ".github" / "scripts"
         scripts.mkdir(parents=True)
         for name in (
@@ -249,8 +256,7 @@ class PrimerContractTests(unittest.TestCase):
             gobgp = root / "tests" / "interop" / "Dockerfile.gobgp"
             gobgp.parent.mkdir(parents=True)
             shutil.copy2(ROOT / "tests" / "interop" / "Dockerfile.gobgp", gobgp)
-            bird3 = root / "tests" / "interop" / "Dockerfile.bird3"
-            shutil.copy2(ROOT / "tests" / "interop" / "Dockerfile.bird3", bird3)
+            self.copy_bird_dockerfiles(root)
             gnmic_installer = root / ".github" / "scripts" / "install-gnmic.sh"
             gnmic_installer.parent.mkdir(parents=True)
             shutil.copy2(ROOT / gnmic_installer.relative_to(root), gnmic_installer)
@@ -279,8 +285,7 @@ class PrimerContractTests(unittest.TestCase):
             gobgp = root / "tests" / "interop" / "Dockerfile.gobgp"
             gobgp.parent.mkdir(parents=True)
             shutil.copy2(ROOT / "tests" / "interop" / "Dockerfile.gobgp", gobgp)
-            bird3 = root / "tests" / "interop" / "Dockerfile.bird3"
-            shutil.copy2(ROOT / "tests" / "interop" / "Dockerfile.bird3", bird3)
+            self.copy_bird_dockerfiles(root)
             installer = root / ".github" / "scripts" / "install-grpcurl.sh"
             installer.parent.mkdir(parents=True)
             shutil.copy2(ROOT / installer.relative_to(root), installer)
@@ -308,7 +313,9 @@ class PrimerContractTests(unittest.TestCase):
         if workflow == "interop.yml":
             artifacts.append("gnmic_archive")
         artifacts.append("gobgp_archive")
-        if workflow == "kernel-dataplane.yml":
+        if workflow == "interop.yml":
+            artifacts.extend(("bird2192_archive", "bird332_archive"))
+        else:
             artifacts.append("bird3_archive")
         expected = ["classify_changes", *artifacts, "prime_dev_image", *roster]
         if workflow == "kernel-dataplane.yml":
@@ -346,7 +353,9 @@ class PrimerContractTests(unittest.TestCase):
             if workflow == "interop.yml":
                 artifacts.append("gnmic_archive")
             artifacts.append("gobgp_archive")
-            if workflow == "kernel-dataplane.yml":
+            if workflow == "interop.yml":
+                artifacts.extend(("bird2192_archive", "bird332_archive"))
+            else:
                 artifacts.append("bird3_archive")
             skipped = {
                 job: "skipped" for job in [*artifacts, "prime_dev_image", *roster]
@@ -387,7 +396,7 @@ class PrimerContractTests(unittest.TestCase):
                         ).returncode,
                     )
             gobgp_consumers = (
-                ("m74", "m75", "m81", "m82", "m83")
+                ("m74", "m75", "m81", "m82")
                 if workflow == "interop.yml"
                 else ("m65", "m71", "m72")
             )
@@ -408,6 +417,20 @@ class PrimerContractTests(unittest.TestCase):
                             {"bird3_archive": "failure", "m43": "skipped"},
                         ).returncode,
                     )
+            else:
+                for producer, consumer in (
+                    ("bird2192_archive", "m83"),
+                    ("bird332_archive", "m101"),
+                ):
+                    with self.subTest(workflow=workflow, producer=producer):
+                        self.assertNotEqual(
+                            0,
+                            self.run_aggregate(
+                                workflow,
+                                "true",
+                                {producer: "failure", consumer: "skipped"},
+                            ).returncode,
+                        )
             for run_labs, results in (
                 ("", {}),
                 ("unknown", {}),
@@ -900,7 +923,7 @@ class PrimerContractTests(unittest.TestCase):
         action = ".github/actions/stage-bird3-artifact/action.yml"
         for old, new in (
             ("actions/download-artifact@v8", "actions/download-artifact@main"),
-            ("name: bird3-v3.3.1-source", "name: bird3-latest"),
+            ('default: "bird3-v3.3.1-source"', 'default: "bird3-latest"'),
             ("--stage-archive", "--prepare-archive"),
             (
                 "set -euo pipefail",
@@ -912,13 +935,127 @@ class PrimerContractTests(unittest.TestCase):
 
         installer = ".github/scripts/install-bird3.sh"
         for old, new in (
-            ('readonly BIRD3_VERSION="3.3.1"', 'readonly BIRD3_VERSION="latest"'),
+            ('BIRD3_VERSION="3.3.1"', 'BIRD3_VERSION="latest"'),
             (checksum, "0" * 64),
             ("curl -fsSL", "curl -sL"),
             ("--connect-timeout 10", "--connect-timeout 0"),
         ):
             with self.subTest(seam=old):
                 self.mutate(installer, old, new)
+
+    def test_required_interop_bird_producers_are_load_bearing(self):
+        relative = ".github/workflows/interop.yml"
+        specs = (
+            (
+                "bird2192_archive",
+                "2.19.2",
+                "aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660",
+                "bird2192-cache",
+                "bird2192-v2.19.2-source",
+            ),
+            (
+                "bird332_archive",
+                "3.3.2",
+                "21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c",
+                "bird332-cache",
+                "bird332-v3.3.2-source",
+            ),
+        )
+        for job, version, checksum, cache_dir, artifact in specs:
+            archive = f"bird-{version}.tar.gz"
+            cache_key = f"{artifact}-{checksum}"
+            for old, new in (
+                (f"  {job}:\n", f"  removed_{job}:\n"),
+                (f"key: {cache_key}", "key: bird-latest"),
+                (f"--version {version}", "--version latest"),
+                (f"--sha256 {checksum}", "--sha256 " + "0" * 64),
+                (f"name: {artifact}", "name: bird-latest"),
+            ):
+                with self.subTest(job=job, seam=old):
+                    self.mutate(relative, old, new)
+            upload_tail = (
+                f"          name: {artifact}\n"
+                f"          path: ${{{{ runner.temp }}}}/{cache_dir}/{archive}\n"
+                "          if-no-files-found: error\n"
+                "          retention-days: 1\n"
+                "          compression-level: 0\n"
+            )
+            with self.subTest(job=job, seam="compression zero"):
+                self.mutate(
+                    relative,
+                    upload_tail,
+                    upload_tail.replace("compression-level: 0", "compression-level: 9"),
+                )
+            exact_path = (
+                f"path: ${{{{ runner.temp }}}}/{cache_dir}/{archive}"
+            )
+            for occurrence in (0, 1):
+                with self.subTest(job=job, seam="exact path", occurrence=occurrence):
+                    self.mutate(
+                        relative,
+                        exact_path,
+                        f"path: ${{{{ runner.temp }}}}/{cache_dir}/wrong.tar.gz",
+                        occurrence=occurrence,
+                    )
+            with self.subTest(job=job, seam="no restore keys"):
+                self.mutate(
+                    relative,
+                    f"          key: {cache_key}\n",
+                    f"          key: {cache_key}\n          restore-keys: bird-\n",
+                )
+
+    def test_parameterized_bird_stage_action_is_load_bearing(self):
+        relative = ".github/actions/stage-bird3-artifact/action.yml"
+        for old, new in (
+            ("name: ${{ inputs.artifact-name }}", "name: bird3-v3.3.1-source"),
+            ('--version "${{ inputs.version }}"', "--version 3.3.1"),
+            ('--sha256 "${{ inputs.sha256 }}"', "--sha256 " + "0" * 64),
+            (
+                '"$RUNNER_TEMP/bird3-artifact/bird-${{ inputs.version }}.tar.gz"',
+                '"$RUNNER_TEMP/bird3-artifact/bird-3.3.1.tar.gz"',
+            ),
+            ('"${{ inputs.stage-directory }}"', "tests/interop/bird3-archive"),
+        ):
+            with self.subTest(seam=old):
+                self.mutate(relative, old, new)
+
+    def test_m83_m101_bird_archive_dockerfiles_are_load_bearing(self):
+        specs = (
+            (
+                "tests/interop/Dockerfile.bird-v2192",
+                "2.19.2",
+                "aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660",
+            ),
+            (
+                "tests/interop/Dockerfile.bird-v332",
+                "3.3.2",
+                "21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c",
+            ),
+        )
+        for relative, version, checksum in specs:
+            for old, new in (
+                (f"ARG BIRD_VERSION={version}", "ARG BIRD_VERSION=latest"),
+                (f"ARG BIRD_SHA256={checksum}", "ARG BIRD_SHA256=" + "0" * 64),
+                (
+                    "COPY bird3-archive/ /tmp/bird-archive/",
+                    "RUN mkdir -p /tmp/bird-archive",
+                ),
+                ('if [ ! -f "${target}" ]; then', "if true; then"),
+                (
+                    'if [ "${attempt}" -ge 3 ]; then',
+                    'if [ "${attempt}" -ge 999 ]; then',
+                ),
+                (
+                    'echo "${BIRD_SHA256}  ${target}" | sha256sum --check --strict',
+                    "true # checksum skipped",
+                ),
+                (
+                    'tar -xzf "${target}" -C /tmp/bird --strip-components=1',
+                    'tar -xzf "${target}" -C /tmp/bird',
+                ),
+            ):
+                with self.subTest(dockerfile=relative, seam=old):
+                    self.mutate(relative, old, new)
 
     def test_gnmic_installer_executable_mode_is_load_bearing(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -939,8 +1076,7 @@ class PrimerContractTests(unittest.TestCase):
             gobgp = root / "tests" / "interop" / "Dockerfile.gobgp"
             gobgp.parent.mkdir(parents=True)
             shutil.copy2(ROOT / "tests" / "interop" / "Dockerfile.gobgp", gobgp)
-            bird3 = root / "tests" / "interop" / "Dockerfile.bird3"
-            shutil.copy2(ROOT / "tests" / "interop" / "Dockerfile.bird3", bird3)
+            self.copy_bird_dockerfiles(root)
             scripts = root / ".github" / "scripts"
             scripts.mkdir(parents=True)
             for name in (
@@ -975,8 +1111,7 @@ class PrimerContractTests(unittest.TestCase):
             gobgp = root / "tests" / "interop" / "Dockerfile.gobgp"
             gobgp.parent.mkdir(parents=True)
             shutil.copy2(ROOT / "tests" / "interop" / "Dockerfile.gobgp", gobgp)
-            bird3 = root / "tests" / "interop" / "Dockerfile.bird3"
-            shutil.copy2(ROOT / "tests" / "interop" / "Dockerfile.bird3", bird3)
+            self.copy_bird_dockerfiles(root)
             scripts = root / ".github" / "scripts"
             scripts.mkdir(parents=True)
             for name in (
@@ -1011,8 +1146,7 @@ class PrimerContractTests(unittest.TestCase):
             gobgp = root / "tests" / "interop" / "Dockerfile.gobgp"
             gobgp.parent.mkdir(parents=True)
             shutil.copy2(ROOT / "tests" / "interop" / "Dockerfile.gobgp", gobgp)
-            bird3 = root / "tests" / "interop" / "Dockerfile.bird3"
-            shutil.copy2(ROOT / "tests" / "interop" / "Dockerfile.bird3", bird3)
+            self.copy_bird_dockerfiles(root)
             scripts = root / ".github" / "scripts"
             scripts.mkdir(parents=True)
             for name in (
@@ -1038,6 +1172,11 @@ class PrimerContractTests(unittest.TestCase):
                 "needs: [classify_changes, grpcurl_archive, "
                 + ("gnmic_archive, " if workflow == "interop.yml" else "")
                 + "gobgp_archive, "
+                + (
+                    "bird2192_archive,\n      bird332_archive, "
+                    if workflow == "interop.yml"
+                    else ""
+                )
                 + ("bird3_archive, " if workflow == "kernel-dataplane.yml" else "")
                 + "prime_dev_image, "
             )
@@ -1414,18 +1553,25 @@ class PrimerContractTests(unittest.TestCase):
         relative = ".github/workflows/interop.yml"
         m83_needs = (
             "  m83:\n"
-            "    needs: [grpcurl_archive, prime_dev_image]\n"
+            "    needs: [grpcurl_archive, bird2192_archive, prime_dev_image]\n"
         )
         workflow = (ROOT / relative).read_text()
         self.assertEqual(1, workflow.count(m83_needs), "M83 needs seam must be unique")
         self.mutate(
             relative,
             m83_needs,
-            "  m83:\n    needs: [grpcurl_archive]\n",
+            "  m83:\n    needs: [grpcurl_archive, prime_dev_image]\n",
         )
 
         for old in (
-            "        run: docker build -t bird:v2.19.2-m83 -f tests/interop/Dockerfile.bird-v2192 tests/interop\n",
+            "      - name: Stage verified BIRD 2.19.2 archive\n",
+            '          version: "2.19.2"\n',
+            "          sha256: aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660\n",
+            "          artifact-name: bird2192-v2.19.2-source\n",
+            "          file: tests/interop/Dockerfile.bird-v2192\n",
+            "          tags: bird:v2.19.2-m83\n",
+            "          cache-from: type=gha,scope=bird2192-m83\n",
+            "          cache-to: type=gha,mode=max,scope=bird2192-m83,ignore-error=true\n",
             "          --build-arg GOBGP_VERSION=4.8.0\n",
             "          --build-arg GOBGP_SHA256=43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03\n",
             "          -t gobgp:v4.8.0-m83 -f tests/interop/Dockerfile.gobgp-v47 tests/interop\n",
@@ -1457,9 +1603,16 @@ class PrimerContractTests(unittest.TestCase):
         relative = ".github/workflows/interop.yml"
         for old in (
             "  m101:\n",
-            "    needs: [grpcurl_archive, prime_dev_image]\n",
+            "    needs: [grpcurl_archive, bird332_archive, prime_dev_image]\n",
+            "      - name: Stage verified BIRD 3.3.2 archive\n",
+            '          version: "3.3.2"\n',
+            "          sha256: 21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c\n",
+            "          artifact-name: bird332-v3.3.2-source\n",
             "      - name: Build checksum-pinned BIRD 3.3.2 image\n",
-            "        run: docker build -t bird:v3.3.2-m101 -f tests/interop/Dockerfile.bird-v332 tests/interop\n",
+            "          file: tests/interop/Dockerfile.bird-v332\n",
+            "          tags: bird:v3.3.2-m101\n",
+            "          cache-from: type=gha,scope=bird332-m101\n",
+            "          cache-to: type=gha,mode=max,scope=bird332-m101,ignore-error=true\n",
             "      - name: Pull digest-pinned FRR 10.3.1 image\n",
             "        run: docker pull quay.io/frrouting/frr@sha256:f90d26a9fd5c14fc5795a73b4254ac88bc3186c45bbeb220a225fb6182de812c\n",
             "          label: M101\n",

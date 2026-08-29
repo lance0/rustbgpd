@@ -1,22 +1,41 @@
-name: "Stage verified BIRD 3 source archive"
+name: "Stage verified BIRD source archive"
 description: >-
-  Download the same-run BIRD 3 source archive, verify its immutable checksum
+  Download a same-run BIRD source archive, verify its immutable checksum
   and source version offline, and stage it into the interop image build
   context.
+inputs:
+  version:
+    description: "Exact BIRD source version"
+    required: false
+    default: "3.3.1"
+  sha256:
+    description: "Exact BIRD source archive SHA-256"
+    required: false
+    default: "d5a8d651d6184c18252954932bb249dfee1fd213b3665cdd86226ac45edc0190"
+  artifact-name:
+    description: "Same-run artifact containing the source archive"
+    required: false
+    default: "bird3-v3.3.1-source"
+  stage-directory:
+    description: "Directory in the interop Docker build context"
+    required: false
+    default: "tests/interop/bird3-archive"
 runs:
   using: "composite"
   steps:
-    - name: Download verified BIRD 3 archive
+    - name: Download verified BIRD archive
       uses: actions/download-artifact@v8
       with:
-        name: bird3-v3.3.1-source
+        name: ${{ inputs.artifact-name }}
         path: ${{ runner.temp }}/bird3-artifact
 
-    - name: Stage exact BIRD 3 archive offline
+    - name: Stage exact BIRD archive offline
       shell: bash
       run: |
         set -euo pipefail
         .github/scripts/install-bird3.sh \
+          --version "${{ inputs.version }}" \
+          --sha256 "${{ inputs.sha256 }}" \
           --stage-archive \
-          "$RUNNER_TEMP/bird3-artifact/bird-3.3.1.tar.gz" \
-          tests/interop/bird3-archive
+          "$RUNNER_TEMP/bird3-artifact/bird-${{ inputs.version }}.tar.gz" \
+          "${{ inputs.stage-directory }}"
