@@ -154,8 +154,13 @@ start_capture() {
         sh "$CAPTURE_PATH" "$CAPTURE_LOG"
     CAPTURE_RUNNING=1
     sleep 2
-    docker exec "$BIRD" sh -c \
-        'cat /proc/[0-9]*/comm 2>/dev/null | grep -x tshark' >/dev/null
+    if ! docker exec "$BIRD" sh -c \
+        'cat /proc/[0-9]*/comm 2>/dev/null | grep -x tshark' >/dev/null; then
+        echo "ERROR: M101 tshark did not stay running after startup" >&2
+        docker exec "$BIRD" sh -c \
+            'tail -n 80 "$1" 2>/dev/null || true' sh "$CAPTURE_LOG" >&2 || true
+        return 1
+    fi
 }
 
 stop_capture() {
