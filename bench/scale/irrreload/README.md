@@ -26,6 +26,30 @@ sessions over loopback TCP, receiver-side timestamps, generation-marker
 completion tracking — driven by `bench/scale/reloadstall/gen-irr-scenario.py`,
 which can emit every native representation from one seeded dataset.
 
+## Comparator generations
+
+The runner defaults to the frozen `historical` comparator generation: BIRD
+3.3.1 at `bird:3.3.1` and OpenBGPD 9.1 at
+`openbgpd/openbgpd:9.1`. Set `COMPETITOR_GENERATION=current` for the explicit
+refresh pair:
+
+- BIRD 3.3.2 at `bird:v3.3.2-m101`, built from the checksum-pinned
+  `tests/interop/Dockerfile.bird-v332`;
+- OpenBGPD 9.2 at
+  `openbgpd/openbgpd@sha256:b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9`.
+
+The pair is closed and cannot be independently overridden. Each artifact root
+records both requested references and their resolved image IDs. The runner
+re-inspects selected references before each cell and again before writing
+`COMPLETED`, so retagging or replacing either local image fails the root. The
+protocol never resumes an artifact root: an interrupted attempt remains intact
+and the fresh replacement resolves and records both identities again.
+
+`gen-irr-scenario.py` accepts the same optional `historical` / `current`
+selector. Only the first two version/image header comments differ; all policy,
+dataset, and remaining operational config bytes are identical. The manifest is
+semantically identical except for the main config's resulting byte count.
+
 ## What is being reloaded
 
 The IXP operation this models is the routine IRR filter refresh: the daily
@@ -330,7 +354,8 @@ The root schema-2 `provenance.json` is a compact context record: exact commit an
 the clean-worktree result, selected workload knobs, container image IDs, and
 plain tool/platform versions. Its exact `binaries` map binds the rustbgpd,
 reloadstall, rbgp, and rs-config-render bytes used by the campaign; the runner
-rechecks those bytes before every selected cell and before `COMPLETED`. Older
+rechecks those bytes and the selected comparator image IDs before every cell
+and before `COMPLETED`. Older
 schema-1 roots have no binary-byte identity and must be attributed only to the
 originating commit, never treated as evidence for rebuilt binaries. Every cell retains its generator `manifest.json`,
 raw rows, RSS samples, daemon and harness logs, process identity, and semantic
@@ -502,6 +527,11 @@ python3 bench/scale/irrreload/verify-receipt.py campaigns \
   --output-dir /tmp/irrreload-verified \
   /tmp/irrreload-comparison-A /tmp/irrreload-grouped-A \
   /tmp/irrreload-grouped-B /tmp/irrreload-comparison-B
+
+# Current comparator refresh: use this same setting for all four fresh roots.
+export COMPETITOR_GENERATION=current
+ARTIFACTS_DIR=/tmp/irrreload-current-comparison-A \
+  bench/scale/irrreload/run-irr-reload.sh
 
 # Separate full-shape transaction receipt, repeated into fresh roots:
 ARTIFACTS_DIR=/tmp/irrreload-txn-runA bench/scale/irrreload/run-irr-reload.sh rustbgpd-txn

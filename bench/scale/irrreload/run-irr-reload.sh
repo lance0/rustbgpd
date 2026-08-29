@@ -13,6 +13,10 @@
 #   bird             BIRD 3.3.x in docker --network=host; `birdc configure`
 #   openbgpd         OpenBGPD 9.x in docker --network=host; `bgpctl reload`
 #
+# COMPETITOR_GENERATION selects one fail-closed pair of image references:
+#   historical (default): BIRD 3.3.1 / OpenBGPD 9.1, the frozen receipts
+#   current: BIRD 3.3.2 / OpenBGPD 9.2, the explicit refresh generation
+#
 # Usage: run-irr-reload.sh [cell ...]
 #        (measured default: rustbgpd-sighup bird openbgpd)
 #        (smoke default: all four cells)
@@ -26,7 +30,7 @@
 # Knobs (env): N_MEMBERS TOTAL_PREFIXES MIN_LIST MAX_LIST SEED
 #              CHANGED_FRACTION OVERLAP_FRACTION PORT RELOADS CONTROL_SECS
 #              BIRD_THREADS CELL_TIMEOUT START_TIMEOUT ARTIFACTS_DIR
-#              TXN_MAX_CANDIDATE_BYTES
+#              TXN_MAX_CANDIDATE_BYTES COMPETITOR_GENERATION=historical|current
 #
 # OVERLAP_FRACTION (default 0) selects the LAN-892 overlap shape: that
 # fraction of base prefixes is announced by a second member, so per-client
@@ -133,6 +137,83 @@ PORT="${PORT:-1790}"
 START_TIMEOUT="${START_TIMEOUT:-600}"
 BIRD_THREADS="${BIRD_THREADS:-8}"
 ART="${ARTIFACTS_DIR:-/tmp/irrreload-artifacts}"
+COMPETITOR_GENERATION="${COMPETITOR_GENERATION:-historical}"
+
+competitor_image_ref() {
+    case "$COMPETITOR_GENERATION:$1" in
+    historical:bird) printf '%s\n' bird:3.3.1 ;;
+    historical:openbgpd) printf '%s\n' openbgpd/openbgpd:9.1 ;;
+    current:bird) printf '%s\n' bird:v3.3.2-m101 ;;
+    current:openbgpd)
+        printf '%s\n' 'openbgpd/openbgpd@sha256:b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9'
+        ;;
+    *) return 1 ;;
+    esac
+}
+
+case $COMPETITOR_GENERATION in
+historical | current) ;;
+*)
+    echo "unknown COMPETITOR_GENERATION: $COMPETITOR_GENERATION (want historical|current)" >&2
+    exit 2
+    ;;
+esac
+
+BIRD_IMAGE=$(competitor_image_ref bird) || exit 2
+OPENBGPD_IMAGE=$(competitor_image_ref openbgpd) || exit 2
+
+inspect_competitor_image() {
+    docker image inspect --format '{{.Id}}' "$1" 2>/dev/null
+}
+
+recheck_campaign_images() {
+    local cell expected_ref stored_id live_id
+    for cell in bird openbgpd; do
+        expected_ref=$(competitor_image_ref "$cell") || return 1
+        case $cell in
+        bird) stored_id=$BIRD_IMAGE_ID ;;
+        openbgpd) stored_id=$OPENBGPD_IMAGE_ID ;;
+        esac
+        if [[ " ${CELLS[*]} " != *" $cell "* ]]; then
+            [ "$stored_id" = not-selected ] || {
+                echo "$cell recorded an image ID although the cell is not selected" >&2
+                return 1
+            }
+            continue
+        fi
+        [[ $stored_id =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "$cell has no valid resolved image ID" >&2
+            return 1
+        }
+        live_id=$(inspect_competitor_image "$expected_ref") || {
+            echo "$cell requested image is no longer inspectable: $expected_ref" >&2
+            return 1
+        }
+        [ "$live_id" = "$stored_id" ] || {
+            echo "$cell requested image now resolves to different bytes: $expected_ref" >&2
+            return 1
+        }
+    done
+}
+
+if [ "${1:-}" = --self-test-competitor-identity ]; then
+    [ "$#" -eq 3 ] || {
+        echo "usage: $0 --self-test-competitor-identity BIRD_ID OPENBGPD_ID" >&2
+        exit 2
+    }
+    CELLS=(bird openbgpd)
+    BIRD_IMAGE_ID=$2
+    OPENBGPD_IMAGE_ID=$3
+    inspect_competitor_image() {
+        case $1 in
+        "$BIRD_IMAGE") printf '%s\n' "${IRRRELOAD_SELF_TEST_BIRD_ID:-}" ;;
+        "$OPENBGPD_IMAGE") printf '%s\n' "${IRRRELOAD_SELF_TEST_OPENBGPD_ID:-}" ;;
+        *) return 1 ;;
+        esac
+    }
+    recheck_campaign_images
+    exit $?
+fi
 
 # shellcheck disable=SC2317 # invoked indirectly by the shared host-quiet sampler
 irrreload_host_quiet_extra_sample() {
@@ -226,6 +307,8 @@ if [ -n "${DRY_RUN_PROTOCOL:-}" ]; then
     printf 'rustbgpd_private=path_hiding:true,admit_churn:true\n'
     printf 'rustbgpd_grouped_control=path_hiding:false,admit_churn:true,standalone:true\n'
     printf 'competitor_path_hiding=applicable:false,requested:true\n'
+    printf 'competitor_generation=%s\n' "$COMPETITOR_GENERATION"
+    printf 'competitor_images=%s,%s\n' "$BIRD_IMAGE" "$OPENBGPD_IMAGE"
     printf 'shape=%s,%s,%s,%s\n' "$N_MEMBERS" "$TOTAL_PREFIXES" "$MIN_LIST" "$MAX_LIST"
     printf 'overlap_fraction=%s\n' "$OVERLAP_FRACTION"
     printf 'reloads=%s control_secs=%s txn_max_candidate_bytes=%s\n' \
@@ -355,21 +438,20 @@ DIRTY=false
 [ -z "$(git -C "$REPO" status --porcelain=v1)" ] || DIRTY=true
 mkdir "$ART" || exit 1
 
-BIRD_IMAGE="bird:3.3.1"
-OPENBGPD_IMAGE="openbgpd/openbgpd:9.1"
 image_id_for_cells() {
     local cell=$1 image=$2
     if [[ " ${CELLS[*]} " != *" $cell "* ]]; then
         printf 'not-selected'
         return
     fi
-    docker image inspect --format '{{.Id}}' "$image" 2>/dev/null || {
+    inspect_competitor_image "$image" || {
         docker pull "$image" >/dev/null || return 1
-        docker image inspect --format '{{.Id}}' "$image"
+        inspect_competitor_image "$image"
     }
 }
 BIRD_IMAGE_ID=$(image_id_for_cells bird "$BIRD_IMAGE") || exit 1
 OPENBGPD_IMAGE_ID=$(image_id_for_cells openbgpd "$OPENBGPD_IMAGE") || exit 1
+recheck_campaign_images || exit 1
 DOCKER_VERSION=$(docker --version)
 
 CAMPAIGN_STARTED_EPOCH_NS=$(date +%s%N)
@@ -702,7 +784,8 @@ run_cell() {
         ;;
     bird)
         gen_scenario bird "$run" --threads "$BIRD_THREADS" \
-            --path-hiding true --admit-churn true || return 1
+            --path-hiding true --admit-churn true \
+            --competitor-generation "$COMPETITOR_GENERATION" || return 1
         record_dataset "$run" || return 1
         recheck_campaign_binaries || return 1
         container="irr-bird"
@@ -714,7 +797,8 @@ run_cell() {
         pid_arg=0 # the outer sampler owns RSS
         ;;
     openbgpd)
-        gen_scenario openbgpd "$run" --path-hiding true --admit-churn true || return 1
+        gen_scenario openbgpd "$run" --path-hiding true --admit-churn true \
+            --competitor-generation "$COMPETITOR_GENERATION" || return 1
         record_dataset "$run" || return 1
         recheck_campaign_binaries || return 1
         container="irr-obgpd"
@@ -912,8 +996,10 @@ overall=0
 for cell in "${CELLS[@]}"; do
     status_file="$ART/$cell/status"
     recheck_campaign_binaries || exit 1
+    recheck_campaign_images || exit 1
     load_gate "$cell" || exit $?
     recheck_campaign_binaries || exit 1
+    recheck_campaign_images || exit 1
     echo "=== cell $cell start $(date -Is) ==="
     if run_cell "$cell"; then
         printf 'pass\n' >"$status_file"
@@ -942,6 +1028,7 @@ done
 echo "measurement rows: $ART/rows.csv"
 if [ "$overall" -eq 0 ]; then
     recheck_campaign_binaries || exit 1
+    recheck_campaign_images || exit 1
     jq -n --argjson completed_at_epoch_ns "$(date +%s%N)" \
         --arg cells "$(IFS=,; echo "${CELLS[*]}")" \
         '{status:"pass",completed_at_epoch_ns:$completed_at_epoch_ns,cells:$cells}' \

@@ -37,6 +37,19 @@ AUTHORITATIVE_PHASES = (
     "duplicate_fallback_us",
 )
 CANONICAL_SHAPE = (320, 183040, 1000, 40000, 61)
+COMPETITOR_GENERATIONS = {
+    "historical": {
+        "bird_image": "bird:3.3.1",
+        "openbgpd_image": "openbgpd/openbgpd:9.1",
+    },
+    "current": {
+        "bird_image": "bird:v3.3.2-m101",
+        "openbgpd_image": (
+            "openbgpd/openbgpd@sha256:"
+            "b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9"
+        ),
+    },
+}
 CANONICAL_FULL_INPUTS = {
     "smoke": "",
     "n_members": "320",
@@ -80,6 +93,17 @@ class InvalidReceipt(ValueError):
 
 def fail(message: str) -> None:
     raise InvalidReceipt(message)
+
+
+def competitor_generation(inputs: dict) -> str:
+    matches = [
+        name
+        for name, expected in COMPETITOR_GENERATIONS.items()
+        if all(inputs.get(key) == value for key, value in expected.items())
+    ]
+    if len(matches) != 1:
+        fail("competitor image references are not one exact supported generation")
+    return matches[0]
 
 
 def validate_reload_phases(daemon_log: Path, reload_log: Path, output: Path) -> None:
@@ -1714,6 +1738,8 @@ def validate_root(root: Path, kind: str):
         "overlap_fraction",
     }
     canonical_inputs = dict(CANONICAL_FULL_INPUTS)
+    generation = competitor_generation(inputs)
+    canonical_inputs.update(COMPETITOR_GENERATIONS[generation])
     if kind == "sighup" and inputs.get("changed_fraction") == "1.0":
         canonical_inputs["changed_fraction"] = "1.0"
     if set(inputs) != expected_input_keys or any(
@@ -1884,6 +1910,7 @@ def validate_root(root: Path, kind: str):
         "identities": identities,
         "rows": rows_data,
         "transaction_evidence": transaction_evidence,
+        "competitor_generation": generation,
     }
 
 
@@ -1934,6 +1961,9 @@ def validate_campaigns(roots: list[Path], output_dir: Path) -> None:
         validate_root(roots[2], "grouped"),
         validate_root(roots[3], "comparison"),
     ]
+    generations = {entry["competitor_generation"] for entry in campaigns}
+    if len(generations) != 1:
+        fail("four roots do not share one exact competitor generation")
     if len({(entry["commit"], entry["shape"], entry["dataset"]) for entry in campaigns}) != 1:
         fail("four roots do not share commit, canonical shape/seed, and dataset digest")
     starts = [entry["started"] for entry in campaigns]
@@ -1988,6 +2018,7 @@ def validate_campaigns(roots: list[Path], output_dir: Path) -> None:
                 "order": ["comparison-A", "grouped-A", "grouped-B", "comparison-B"],
                 "commit": campaigns[0]["commit"],
                 "dataset_sha256": campaigns[0]["dataset"],
+                "competitor_generation": campaigns[0]["competitor_generation"],
                 "comparison_rows": len(campaigns[0]["rows"]) + len(campaigns[3]["rows"]),
                 "grouped_control_rows": len(campaigns[1]["rows"]) + len(campaigns[2]["rows"]),
                 "received_view_delta": deltas["A"],
@@ -2113,7 +2144,13 @@ def make_transaction_evidence(cdir: Path, pid: int) -> None:
     (cdir / "daemon.log").write_text((warning_line + "\n") * 9)
 
 
-def make_fixture(root: Path, kind: str, started: int, identity_seed: int) -> None:
+def make_fixture(
+    root: Path,
+    kind: str,
+    started: int,
+    identity_seed: int,
+    generation: str = "historical",
+) -> None:
     cells = {
         "comparison": COMPARISON_CELLS,
         "grouped": (GROUPED_CELL,),
@@ -2132,6 +2169,7 @@ def make_fixture(root: Path, kind: str, started: int, identity_seed: int) -> Non
         "binaries": {key: "d" * 64 for key in ("bench/scale/target/release/reloadstall", "target/release/rbgp", "target/release/rs-config-render", "target/release/rustbgpd")},
         "inputs": {
             **CANONICAL_FULL_INPUTS,
+            **COMPETITOR_GENERATIONS[generation],
             "overlap_fraction": "0",
             "campaign_kind": {"comparison": "full-cross-daemon", "grouped": "full-grouped-control", "transaction": "full-transaction", "sighup": "full-rustbgpd-sighup"}[kind],
             "cells": ",".join(cells),
@@ -2802,6 +2840,22 @@ def self_test() -> None:
         validate_campaigns(roots, good_output)
         audit_combined(good_output / "comparison.csv", COMPARISON_CELLS)
         audit_combined(good_output / "grouped-control.csv", (GROUPED_CELL,))
+        current_roots = [base / f"current-{name}" for name in names]
+        for index, (root, kind) in enumerate(
+            zip(current_roots, kinds, strict=True)
+        ):
+            make_fixture(
+                root,
+                kind,
+                1000 + index * 10,
+                5000 + index * 10,
+                generation="current",
+            )
+        current_output = base / "current-output"
+        validate_campaigns(current_roots, current_output)
+        current_verification = read_json(current_output / "verification.json")
+        if current_verification.get("competitor_generation") != "current":
+            fail("current competitor generation was not retained in verification")
         txn_roots = [base / "transaction-a", base / "transaction-b"]
         make_fixture(txn_roots[0], "transaction", 100, 2000)
         make_fixture(txn_roots[1], "transaction", 110, 3000)
@@ -2940,6 +2994,15 @@ def self_test() -> None:
         rejected("canonical-changed-fraction", lambda root: change_input(root, "changed_fraction", "0.2"))
         rejected("canonical-control-secs", lambda root: change_input(root, "control_secs", "31"))
         rejected("canonical-bird-threads", lambda root: change_input(root, "bird_threads", "7"))
+        rejected("competitor-ref-arbitrary", lambda root: change_input(root, "bird_image", "bird:latest"))
+        rejected("competitor-ref-drift", lambda root: change_input(root, "bird_image", "bird:v3.3.2-m102"))
+        rejected("competitor-mixed-generation", lambda root: change_input(root, "bird_image", COMPETITOR_GENERATIONS["current"]["bird_image"]))
+        def change_competitor_generation(root, generation):
+            alter_json(
+                root / "provenance.json",
+                lambda data: data["inputs"].update(COMPETITOR_GENERATIONS[generation]),
+            )
+        rejected("repeat-competitor-generation", lambda root: change_competitor_generation(root, "current"))
         rejected("repeat-image-identity", lambda root: change_input(root, "bird_image_id", "sha256:" + "b" * 64))
         def overlap_next_root(root):
             alter_json(root / "COMPLETED", lambda data: data.update({"completed_at_epoch_ns": 20}))
@@ -3071,7 +3134,20 @@ def self_test() -> None:
                 proofs[name] = True
         grouped_pair_drift("cross-role-environment", "environment", "cpu_model", "other-platform")
         grouped_pair_drift("cross-root-binaries", "binaries", "target/release/rustbgpd", "e" * 64)
-        expected = {"default-roster", "mixed-roster", "mode-flags", "topology-mutation", "barrier-marker", "final-barrier-marker", "live-topology-gauge", "route-gauge", "route-family", "one-scrape-drift", "add-path", "config-count", "dirty-commit", "mismatched-commit", "commit-malformed", "provenance-downgrade", "binary-roster", "binary-malformed", "canonical-changed-fraction", "canonical-control-secs", "canonical-bird-threads", "repeat-image-identity", "nonoverlap-order", "quiet-spacing", "preflight-raw", "cell-status", "manifest-changed-fraction", "cell-root-rows", "reload-log-rows", "percentile-order", "first-generation-bound", "observer-gap-bound", "row-invariants", "rss-raw", "grouped-output-isolation", "output-exact-roster", "output-audit-call", "ordering", "reused-identity", "cross-role-environment", "cross-root-binaries"}
+        changed_grouped = []
+        for suffix, source in zip(("a", "b"), roots[1:3], strict=True):
+            copied = base / f"bad-cross-role-competitor-generation-{suffix}"
+            shutil.copytree(source, copied)
+            change_competitor_generation(copied, "current")
+            changed_grouped.append(copied)
+        try:
+            validate_campaigns(
+                [roots[0], *changed_grouped, roots[3]],
+                base / "output-cross-role-competitor-generation",
+            )
+        except InvalidReceipt:
+            proofs["cross-role-competitor-generation"] = True
+        expected = {"default-roster", "mixed-roster", "mode-flags", "topology-mutation", "barrier-marker", "final-barrier-marker", "live-topology-gauge", "route-gauge", "route-family", "one-scrape-drift", "add-path", "config-count", "dirty-commit", "mismatched-commit", "commit-malformed", "provenance-downgrade", "binary-roster", "binary-malformed", "canonical-changed-fraction", "canonical-control-secs", "canonical-bird-threads", "competitor-ref-arbitrary", "competitor-ref-drift", "competitor-mixed-generation", "repeat-competitor-generation", "repeat-image-identity", "cross-role-competitor-generation", "nonoverlap-order", "quiet-spacing", "preflight-raw", "cell-status", "manifest-changed-fraction", "cell-root-rows", "reload-log-rows", "percentile-order", "first-generation-bound", "observer-gap-bound", "row-invariants", "rss-raw", "grouped-output-isolation", "output-exact-roster", "output-audit-call", "ordering", "reused-identity", "cross-role-environment", "cross-root-binaries"}
         expected |= {"current-down", "reestablished", "flapped", "counter-malformed", "establishment-roster", "flap-roster", "row-session-loss"}
         expected |= {"preflip-private", "lane-gauge"}
         expected |= set(
