@@ -151,7 +151,7 @@ competitor_image_ref() {
     esac
 }
 
-case $COMPETITOR_GENERATION in
+case "$COMPETITOR_GENERATION" in
 historical | current) ;;
 *)
     echo "unknown COMPETITOR_GENERATION: $COMPETITOR_GENERATION (want historical|current)" >&2
