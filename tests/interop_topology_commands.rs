@@ -39,6 +39,30 @@ fn rustbgpd_image_and_exec(topology: &serde_yaml::Value) -> (&str, Vec<&str>) {
 }
 
 #[test]
+fn m16_ipv6_addresses_disable_dad_on_both_nodes() {
+    // Destructive red proof: removing `nodad` from either node makes that
+    // node's exact IPv6 address command differ and this test fail.
+    let topology = topology("m16-llgr-frr.clab.yml");
+    for (node, expected) in [
+        ("rustbgpd", "ip -6 addr add fd00:16::1/64 dev eth1 nodad"),
+        ("frr", "ip -6 addr add fd00:16::2/64 dev eth1 nodad"),
+    ] {
+        let ipv6_commands: Vec<_> = topology["topology"]["nodes"][node]["exec"]
+            .as_sequence()
+            .unwrap_or_else(|| panic!("M16 {node} exec must be a sequence"))
+            .iter()
+            .filter_map(serde_yaml::Value::as_str)
+            .filter(|command| command.starts_with("ip -6 addr add "))
+            .collect();
+        assert_eq!(
+            ipv6_commands,
+            [expected],
+            "M16 {node} must disable IPv6 DAD before starting its session",
+        );
+    }
+}
+
+#[test]
 fn route_server_topologies_have_exact_control_plane_setup() {
     // Destructive red proof: adding either former `sysctl -w
     // net.ipv4.ip_forward=1` command makes the corresponding exact exec list
