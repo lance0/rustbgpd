@@ -1054,6 +1054,9 @@ pub struct ServeConfig {
     /// Optional duplicate-MAC quarantine manual-clear hook. Present
     /// only when the EVPN originator actor is running.
     pub evpn_duplicate_mac_clear: Option<DuplicateMacClearFn>,
+    /// Atomic actor-published set of active duplicate-MAC quarantines.
+    pub evpn_duplicate_mac_quarantine_snapshot:
+        crate::evpn_service::DuplicateMacQuarantineSnapshotFn,
     /// Optional ADR-0084 Ethernet Segment drain hook. Present only
     /// when the EVPN segment actor is running.
     pub evpn_es_drain: Option<crate::evpn_service::EthernetSegmentDrainFn>,
@@ -1522,6 +1525,7 @@ async fn run_listener(
     let evpn_runtime_model = config.evpn_runtime_model;
     let evpn_runtime_apply = config.evpn_runtime_apply;
     let evpn_duplicate_mac_clear = config.evpn_duplicate_mac_clear;
+    let evpn_duplicate_mac_quarantine_snapshot = config.evpn_duplicate_mac_quarantine_snapshot;
     let evpn_es_drain = config.evpn_es_drain;
     let blackhole_discard_snapshot = config.blackhole_discard_snapshot;
     let fib_route_snapshot = config.fib_route_snapshot;
@@ -1587,6 +1591,7 @@ async fn run_listener(
                 evpn_runtime_model,
                 evpn_runtime_apply,
                 evpn_duplicate_mac_clear,
+                evpn_duplicate_mac_quarantine_snapshot,
                 evpn_es_drain.clone(),
                 blackhole_discard_snapshot,
                 fib_route_snapshot,
@@ -1650,6 +1655,7 @@ async fn run_listener(
                 evpn_runtime_model,
                 evpn_runtime_apply,
                 evpn_duplicate_mac_clear,
+                evpn_duplicate_mac_quarantine_snapshot,
                 evpn_es_drain,
                 blackhole_discard_snapshot,
                 fib_route_snapshot,
@@ -1719,6 +1725,7 @@ async fn run_tcp_listener(
     evpn_runtime_model: EvpnRuntimeModelFn,
     evpn_runtime_apply: Option<EvpnRuntimeApplyFn>,
     evpn_duplicate_mac_clear: Option<DuplicateMacClearFn>,
+    evpn_duplicate_mac_quarantine_snapshot: crate::evpn_service::DuplicateMacQuarantineSnapshotFn,
     evpn_es_drain: Option<crate::evpn_service::EthernetSegmentDrainFn>,
     blackhole_discard_snapshot: crate::rib_service::BlackholeDiscardSnapshotFn,
     fib_route_snapshot: crate::rib_service::FibRouteSnapshotFn,
@@ -1912,6 +1919,7 @@ async fn run_tcp_listener(
         .with_instance_status_snapshot(evpn_instance_status_snapshot)
         .with_managed_netdev_status_snapshot(evpn_managed_netdev_status_snapshot)
         .with_remote_ip_prefix_drop_counts(evpn_remote_ip_prefix_drop_counts)
+        .with_duplicate_mac_quarantine_snapshot(evpn_duplicate_mac_quarantine_snapshot)
         .with_ethernet_segment_state(
             evpn_bum_enforcement_snapshot,
             evpn_same_esi_bias_snapshot,
@@ -1991,6 +1999,7 @@ async fn run_uds_listener(
     evpn_runtime_model: EvpnRuntimeModelFn,
     evpn_runtime_apply: Option<EvpnRuntimeApplyFn>,
     evpn_duplicate_mac_clear: Option<DuplicateMacClearFn>,
+    evpn_duplicate_mac_quarantine_snapshot: crate::evpn_service::DuplicateMacQuarantineSnapshotFn,
     evpn_es_drain: Option<crate::evpn_service::EthernetSegmentDrainFn>,
     blackhole_discard_snapshot: crate::rib_service::BlackholeDiscardSnapshotFn,
     fib_route_snapshot: crate::rib_service::FibRouteSnapshotFn,
@@ -2145,6 +2154,7 @@ async fn run_uds_listener(
         .with_instance_status_snapshot(evpn_instance_status_snapshot)
         .with_managed_netdev_status_snapshot(evpn_managed_netdev_status_snapshot)
         .with_remote_ip_prefix_drop_counts(evpn_remote_ip_prefix_drop_counts)
+        .with_duplicate_mac_quarantine_snapshot(evpn_duplicate_mac_quarantine_snapshot)
         .with_ethernet_segment_state(
             evpn_bum_enforcement_snapshot,
             evpn_same_esi_bias_snapshot,
@@ -2808,6 +2818,16 @@ mod tests {
             "RpkiServiceServer::with_interceptor("
         );
         assert_eq!(source.matches(registration).count(), 2);
+    }
+
+    #[test]
+    fn duplicate_mac_quarantine_snapshot_is_wired_on_tcp_and_uds() {
+        let source = include_str!("server.rs");
+        let wiring = concat!(
+            ".with_duplicate_mac_",
+            "quarantine_snapshot(evpn_duplicate_mac_quarantine_snapshot)"
+        );
+        assert_eq!(source.matches(wiring).count(), 2);
     }
 
     /// Load-bearing: without a server-side deadline inside

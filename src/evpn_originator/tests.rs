@@ -484,7 +484,8 @@ async fn duplicate_mac_recovery_replays_local_route_and_resets_metric() {
     let (log, _responder) = rib_capture_responder(rib_rx);
     let metrics = BgpMetrics::new();
     let counts = OriginatedLocalMacCounts::default();
-    let mut state = originator_state(&instances);
+    let (quarantine_tx, quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
+    let mut state = OriginatorState::new(&instances, quarantine_tx);
 
     handle_observation(
         &LocalMacObservation::Learned {
@@ -526,7 +527,10 @@ async fn duplicate_mac_recovery_replays_local_route_and_resets_metric() {
     )
     .await;
 
-    seed_elapsed_quarantine(&mut state, &inst, DuplicateMacKey::new(vni(100), mac(0xAA)));
+    let key = DuplicateMacKey::new(vni(100), mac(0xAA));
+    assert!(quarantine_rx.borrow().contains(&key));
+
+    seed_elapsed_quarantine(&mut state, &inst, key);
     recover_duplicate_macs(
         &mut state,
         &instances,
@@ -537,6 +541,7 @@ async fn duplicate_mac_recovery_replays_local_route_and_resets_metric() {
         &std::collections::BTreeSet::new(),
     )
     .await;
+    assert!(!quarantine_rx.borrow().contains(&key));
 
     let actions = log.lock().await.clone();
     assert_eq!(
@@ -1403,7 +1408,8 @@ async fn runtime_model_esi_change_preserves_duplicate_mac_quarantine() {
     let (log, _responder) = rib_capture_responder(rib_rx);
     let metrics = BgpMetrics::new();
     let counts = OriginatedLocalMacCounts::default();
-    let mut state = originator_state(&instances);
+    let (quarantine_tx, quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
+    let mut state = OriginatorState::new(&instances, quarantine_tx);
     state.remote_mac_view.insert(
         (vni(100), mac(0xAA)),
         RemoteMacView {
@@ -1435,6 +1441,7 @@ async fn runtime_model_esi_change_preserves_duplicate_mac_quarantine() {
             .contains(&duplicate_key),
         "remote contender should activate suppress-local quarantine"
     );
+    assert!(quarantine_rx.borrow().contains(&duplicate_key));
     assert!(
         log.lock().await.is_empty(),
         "quarantined local MAC must not advertise before ESI change"
@@ -1471,6 +1478,7 @@ async fn runtime_model_esi_change_preserves_duplicate_mac_quarantine() {
             .contains(&duplicate_key),
         "ESI-map changes must not clear active duplicate-MAC suppression"
     );
+    assert!(quarantine_rx.borrow().contains(&duplicate_key));
     assert!(
         state
             .duplicate_mac_detector
@@ -1494,7 +1502,8 @@ async fn runtime_model_redefine_clears_duplicate_mac_quarantine_and_replays() {
     let (log, _responder) = rib_capture_responder(rib_rx);
     let metrics = BgpMetrics::new();
     let counts = OriginatedLocalMacCounts::default();
-    let mut state = originator_state(&instances);
+    let (quarantine_tx, quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
+    let mut state = OriginatorState::new(&instances, quarantine_tx);
     state.remote_mac_view.insert(
         (vni(100), mac(0xAA)),
         RemoteMacView {
@@ -1557,6 +1566,7 @@ async fn runtime_model_redefine_clears_duplicate_mac_quarantine_and_replays() {
             .contains(&duplicate_key),
         "redefine must clear the active duplicate-MAC quarantine"
     );
+    assert!(!quarantine_rx.borrow().contains(&duplicate_key));
     assert!(
         !state
             .duplicate_mac_detector
@@ -1927,6 +1937,23 @@ fn remove_vni_state_clears_inactive_duplicate_mac_detector_windows() {
 
     assert!(!state.known_duplicate_mac_keys.contains(&key));
     assert!(!state.duplicate_mac_detector.clear(key));
+}
+
+#[test]
+fn remove_vni_state_publishes_active_duplicate_mac_quarantine_reset() {
+    let inst = suppress_local_instance(100);
+    let instances = instance_table_with(inst.clone());
+    let (quarantine_tx, quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
+    let mut state = OriginatorState::new(&instances, quarantine_tx);
+    let metrics = BgpMetrics::new();
+    let key = DuplicateMacKey::new(vni(100), mac(0xAA));
+
+    assert!(record_duplicate_mac_move(
+        &metrics, &mut state, &inst, key.vni, key.mac
+    ));
+    assert!(quarantine_rx.borrow().contains(&key));
+    remove_vni_state(&mut state, key.vni, &metrics);
+    assert!(quarantine_rx.borrow().is_empty());
 }
 
 #[tokio::test]

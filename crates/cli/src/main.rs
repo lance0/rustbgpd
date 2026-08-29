@@ -1589,6 +1589,8 @@ enum EvpnAction {
         #[arg(long)]
         mac: String,
     },
+    /// List active duplicate-MAC local-origin quarantines.
+    DuplicateMacQuarantines,
     /// Ethernet Segment runtime controls and diagnose state.
     Es {
         #[command(subcommand)]
@@ -3104,6 +3106,9 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             }
             Some(EvpnAction::ClearDuplicateMac { vni, mac }) => {
                 commands::evpn::clear_duplicate_mac(connection, vni, mac, json).await
+            }
+            Some(EvpnAction::DuplicateMacQuarantines) => {
+                commands::evpn::list_duplicate_mac_quarantines(connection, json).await
             }
             Some(EvpnAction::Es { action }) => match action {
                 EsAction::List { esi } => {
@@ -5450,6 +5455,18 @@ printf '%s\n' "${COMPREPLY[@]}"
         } else {
             panic!("expected Evpn ClearDuplicateMac command");
         }
+    }
+
+    #[test]
+    fn test_parse_evpn_duplicate_mac_quarantines() {
+        let cli = Cli::try_parse_from(["rbgp", "evpn", "duplicate-mac-quarantines"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Evpn {
+                action: Some(EvpnAction::DuplicateMacQuarantines),
+                ..
+            }
+        ));
     }
 
     #[test]

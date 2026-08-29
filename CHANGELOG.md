@@ -11,6 +11,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `EvpnService.ListDuplicateMacQuarantines` and `rbgp evpn
+  duplicate-mac-quarantines` expose the current duplicate-MAC local-origin
+  quarantine set as one deterministic, key-only snapshot. Responses are capped
+  at 4096 rows with exact omission metadata; the sensitive-read method remains
+  outside the narrow v1 contract.
+
 - `RpkiService.ValidateRouteOrigin` and `rbgp rpki validate <PREFIX>
   <ORIGIN_ASN>` provide a read-only, bounded explanation of one route-origin
   validation against the latest authoritative VRP snapshot. The complete-table

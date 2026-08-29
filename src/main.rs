@@ -4862,6 +4862,10 @@ async fn run<T>(
                 as rustbgpd_api::evpn_service::EvpnRuntimeApplyFn)
         },
         evpn_duplicate_mac_clear,
+        evpn_duplicate_mac_quarantine_snapshot: {
+            let rx = evpn_duplicate_mac_quarantine_tx.subscribe();
+            Arc::new(move || rx.borrow().clone())
+        },
         evpn_es_drain,
         blackhole_discard_snapshot: {
             let rx = blackhole_status_rx.clone();

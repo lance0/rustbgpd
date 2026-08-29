@@ -1554,6 +1554,18 @@ _arguments "${_arguments_options[@]}" : \
 '--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
+(duplicate-mac-quarantines)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
 (es)
 _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
@@ -1759,6 +1771,10 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (clear-duplicate-mac)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(duplicate-mac-quarantines)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -3301,6 +3317,10 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(duplicate-mac-quarantines)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (es)
 _arguments "${_arguments_options[@]}" : \
 ":: :_rbgp__subcmd__help__subcmd__evpn__subcmd__es_commands" \
@@ -4099,6 +4119,7 @@ _rbgp__subcmd__evpn_commands() {
 'delete-imet:Withdraw a Type 3 IMET route by its key fields' \
 'delete-ip-prefix:Withdraw a Type 5 IP Prefix route by its key fields' \
 'clear-duplicate-mac:Clear one duplicate-MAC local-origin quarantine' \
+'duplicate-mac-quarantines:List active duplicate-MAC local-origin quarantines' \
 'es:Ethernet Segment runtime controls and diagnose state' \
 'runtime:Show the committed ADR-0063 EVPN runtime generation' \
 'instances:List local EVPN instances configured on this VTEP' \
@@ -4149,6 +4170,11 @@ _rbgp__subcmd__evpn__subcmd__delete-mac-ip_commands() {
 _rbgp__subcmd__evpn__subcmd__diagnose_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp evpn diagnose commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__evpn__subcmd__duplicate-mac-quarantines_commands] )) ||
+_rbgp__subcmd__evpn__subcmd__duplicate-mac-quarantines_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp evpn duplicate-mac-quarantines commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__evpn__subcmd__es_commands] )) ||
 _rbgp__subcmd__evpn__subcmd__es_commands() {
@@ -4215,6 +4241,7 @@ _rbgp__subcmd__evpn__subcmd__help_commands() {
 'delete-imet:Withdraw a Type 3 IMET route by its key fields' \
 'delete-ip-prefix:Withdraw a Type 5 IP Prefix route by its key fields' \
 'clear-duplicate-mac:Clear one duplicate-MAC local-origin quarantine' \
+'duplicate-mac-quarantines:List active duplicate-MAC local-origin quarantines' \
 'es:Ethernet Segment runtime controls and diagnose state' \
 'runtime:Show the committed ADR-0063 EVPN runtime generation' \
 'instances:List local EVPN instances configured on this VTEP' \
@@ -4265,6 +4292,11 @@ _rbgp__subcmd__evpn__subcmd__help__subcmd__delete-mac-ip_commands() {
 _rbgp__subcmd__evpn__subcmd__help__subcmd__diagnose_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp evpn help diagnose commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__evpn__subcmd__help__subcmd__duplicate-mac-quarantines_commands] )) ||
+_rbgp__subcmd__evpn__subcmd__help__subcmd__duplicate-mac-quarantines_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp evpn help duplicate-mac-quarantines commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__evpn__subcmd__help__subcmd__es_commands] )) ||
 _rbgp__subcmd__evpn__subcmd__help__subcmd__es_commands() {
@@ -4675,6 +4707,7 @@ _rbgp__subcmd__help__subcmd__evpn_commands() {
 'delete-imet:Withdraw a Type 3 IMET route by its key fields' \
 'delete-ip-prefix:Withdraw a Type 5 IP Prefix route by its key fields' \
 'clear-duplicate-mac:Clear one duplicate-MAC local-origin quarantine' \
+'duplicate-mac-quarantines:List active duplicate-MAC local-origin quarantines' \
 'es:Ethernet Segment runtime controls and diagnose state' \
 'runtime:Show the committed ADR-0063 EVPN runtime generation' \
 'instances:List local EVPN instances configured on this VTEP' \
@@ -4724,6 +4757,11 @@ _rbgp__subcmd__help__subcmd__evpn__subcmd__delete-mac-ip_commands() {
 _rbgp__subcmd__help__subcmd__evpn__subcmd__diagnose_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp help evpn diagnose commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__evpn__subcmd__duplicate-mac-quarantines_commands] )) ||
+_rbgp__subcmd__help__subcmd__evpn__subcmd__duplicate-mac-quarantines_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help evpn duplicate-mac-quarantines commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__help__subcmd__evpn__subcmd__es_commands] )) ||
 _rbgp__subcmd__help__subcmd__evpn__subcmd__es_commands() {
