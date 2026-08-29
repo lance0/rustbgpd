@@ -165,12 +165,15 @@ class JsonlSink:
     def __init__(self, path: str) -> None:
         self._fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
         self._lock = threading.Lock()
+        self._closed = False
 
     def write(self, record: dict, *, terminal: bool = False) -> None:
         encoded = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode()
         if len(encoded) > MAX_RECORD_BYTES:
             raise RuntimeError(f"management-plane JSONL record exceeds {MAX_RECORD_BYTES} bytes")
         with self._lock:
+            if self._closed:
+                raise RuntimeError("management-plane JSONL sink is closed")
             view = memoryview(encoded)
             while view:
                 written = os.write(self._fd, view)
@@ -181,7 +184,11 @@ class JsonlSink:
                 os.fsync(self._fd)
 
     def close(self) -> None:
-        os.close(self._fd)
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            os.close(self._fd)
 
 
 class ManagementPlaneLoad:
@@ -223,6 +230,15 @@ class ManagementPlaneLoad:
     def _mark(self, operation: str, field: str, amount: int = 1) -> None:
         with self.counter_lock:
             self.counts[operation][field] += amount
+
+    def _record_worker_error(self, error: str) -> None:
+        with self.counter_lock:
+            if self.worker_error is None:
+                self.worker_error = error
+
+    def _worker_error(self) -> Optional[str]:
+        with self.counter_lock:
+            return self.worker_error
 
     def _probe(self, operation: str) -> ProbeResult:
         if operation == "metrics":
@@ -278,7 +294,7 @@ class ManagementPlaneLoad:
                     self._mark(operation, "missed", missed)
                     due += missed * interval
         except Exception as error:  # evidence and parent lifecycle handle failure
-            self.worker_error = f"{operation}:{type(error).__name__}"
+            self._record_worker_error(f"{operation}:{type(error).__name__}")
             self.stop.set()
 
     def run(self) -> int:
@@ -303,11 +319,11 @@ class ManagementPlaneLoad:
         for worker in workers:
             worker.start()
         while not self.stop.wait(1.0):
-            if self.worker_error is not None:
+            if self._worker_error() is not None:
                 break
         for worker in workers:
             worker.join(self.timeout_seconds + 1.0)
-        if self.worker_error is not None or any(worker.is_alive() for worker in workers):
+        if self._worker_error() is not None or any(worker.is_alive() for worker in workers):
             self.sink.close()
             return 1
         completed_monotonic = time.monotonic()

@@ -277,6 +277,117 @@ class ManagementPlaneLoadContracts(unittest.TestCase):
                     stalled.write({"record": "test"})
             stalled.close()
 
+    def test_jsonl_sink_serializes_close_and_rejects_late_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "serialized.jsonl")
+            sink = load.JsonlSink(path)
+            real_write = os.write
+            write_started = threading.Event()
+            allow_write = threading.Event()
+            close_attempted = threading.Event()
+            close_completed = threading.Event()
+            errors = []
+
+            def blocking_write(fd, data):
+                write_started.set()
+                allow_write.wait()
+                return real_write(fd, data)
+
+            def writer():
+                try:
+                    sink.write({"record": "test"})
+                except Exception as error:  # surfaced in the parent test thread
+                    errors.append(error)
+
+            def closer():
+                close_attempted.set()
+                sink.close()
+                close_completed.set()
+
+            with mock.patch.object(load.os, "write", side_effect=blocking_write):
+                writer_thread = threading.Thread(target=writer)
+                writer_thread.start()
+                close_thread = threading.Thread(target=closer)
+                try:
+                    self.assertTrue(write_started.wait(1.0))
+                    close_thread.start()
+                    self.assertTrue(close_attempted.wait(1.0))
+                    self.assertFalse(close_completed.wait(0.05))
+                finally:
+                    allow_write.set()
+                    writer_thread.join(1.0)
+                    if close_thread.ident is not None:
+                        close_thread.join(1.0)
+
+            self.assertFalse(writer_thread.is_alive())
+            self.assertFalse(close_thread.is_alive())
+            self.assertFalse(errors)
+            self.assertTrue(close_completed.is_set())
+            self.assertEqual(
+                [json.loads(line) for line in Path(path).read_bytes().splitlines()],
+                [{"record": "test"}],
+            )
+            with mock.patch.object(load.os, "write") as late_write:
+                with self.assertRaisesRegex(RuntimeError, "sink is closed"):
+                    sink.write({"record": "late"})
+                late_write.assert_not_called()
+            sink.close()
+
+    def test_failure_path_survivor_cannot_reuse_fd_or_replace_first_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = str(Path(tmp) / "load.jsonl")
+            unrelated = str(Path(tmp) / "unrelated")
+            engine = load.ManagementPlaneLoad(
+                output=output,
+                metrics_url="http://127.0.0.1:1/metrics",
+                rbgp="/missing/rbgp",
+                uds="unix:///tmp/grpc.sock",
+                peer_count=1,
+                route_prefix="20.0.0.0/24",
+                metrics_interval_seconds=60,
+                cli_interval_seconds=60,
+                timeout_seconds=0.01,
+            )
+            sink_fd = engine.sink._fd
+            probe_started = threading.Event()
+            release_probe = threading.Event()
+            self.addCleanup(release_probe.set)
+
+            def probe(operation):
+                if operation == "metrics":
+                    probe_started.set()
+                    release_probe.wait()
+                    return load.ProbeResult(0, "ok", 2, "a" * 64)
+                if operation == "neighbor":
+                    probe_started.wait()
+                    raise RuntimeError("first worker failure")
+                return load.ProbeResult(0, "ok", 2, "a" * 64)
+
+            engine._probe = probe
+            self.assertEqual(engine.run(), 1)
+            self.assertEqual(engine._worker_error(), "neighbor:RuntimeError")
+            survivors = [
+                thread for thread in threading.enumerate()
+                if thread.name == "metrics" and thread.is_alive()
+            ]
+            self.assertEqual(len(survivors), 1)
+
+            unrelated_fd = os.open(
+                unrelated, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644
+            )
+            try:
+                self.assertEqual(unrelated_fd, sink_fd)
+                os.write(unrelated_fd, b"unrelated\n")
+                release_probe.set()
+                survivors[0].join(1.0)
+                self.assertFalse(survivors[0].is_alive())
+            finally:
+                release_probe.set()
+                os.close(unrelated_fd)
+
+            self.assertEqual(Path(unrelated).read_bytes(), b"unrelated\n")
+            self.assertEqual(engine._worker_error(), "neighbor:RuntimeError")
+
     def test_runner_starts_load_after_convergence_before_measured_window(self):
         runner = (HERE / "run-soak-rs-flagship.sh").read_text()
         main = runner.split("main() {", 1)[1]
