@@ -1,0 +1,51 @@
+{
+  "host_tools": {
+    "cloud_image_utils": {
+      "deb_sha256": "c4203167b5f2ccc8d7e2ff66f6ed5bb55d1ce467511d27732b91e1389e15cd9e",
+      "package": "cloud-image-utils",
+      "path": "/usr/bin/cloud-localds",
+      "version": "0.33-1"
+    },
+    "qemu_system_x86": {
+      "deb_sha256": "14602e262627adac030329d2cecfee5f6c0938b34566ff2ea2d4c9a9eb02430d",
+      "package": "qemu-system-x86",
+      "path": "/usr/bin/qemu-system-x86_64",
+      "version": "1:8.2.2+ds-0ubuntu1.18"
+    }
+  },
+  "profiles": [
+    {
+      "guest": {
+        "iproute2_package_version": "5.15.0-1ubuntu2.2",
+        "kernel_package_version": "5.15.0-190.200",
+        "kernel_release": "5.15.0-190-generic"
+      },
+      "name": "baseline-jammy-5.15",
+      "role": "baseline",
+      "source": {
+        "sha256": "c0a5af17e6c0f76351fe07e2fffef3011dab1facb8a8ed5701dcf648dabd4f0a",
+        "url": "https://cloud-images.ubuntu.com/releases/jammy/release-20260826/ubuntu-22.04-server-cloudimg-amd64.img"
+      }
+    },
+    {
+      "guest": {
+        "iproute2_package_version": "6.1.0-1ubuntu6.4",
+        "kernel_package_version": "6.8.0-138.138",
+        "kernel_release": "6.8.0-138-generic"
+      },
+      "name": "current-noble-6.8",
+      "role": "current",
+      "source": {
+        "sha256": "d0fe84bb5f80853425fa6be28e2c106f30104c3cfe8611933f2e65c9b63f0e30",
+        "url": "https://cloud-images.ubuntu.com/releases/noble/release-20260826/ubuntu-24.04-server-cloudimg-amd64.img"
+      }
+    }
+  ],
+  "schema": 1,
+  "vm": {
+    "machine": "pc-q35-8.2",
+    "memory_mib": 2048,
+    "timeout_seconds": 300,
+    "vcpus": 2
+  }
+}
