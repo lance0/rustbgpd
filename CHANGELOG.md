@@ -9,28 +9,6 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Fixed
-
-- SIGHUP settlement fail-stop diagnostics now name the static reload step
-  that fenced and whether an earlier effect was accepted. Non-SIGHUP owners
-  report an explicit non-applicable step, while
-  targets, configuration contents, and raw error text remain excluded.
-
-- The July bgperf2 receipt and its documentation mirrors now preserve the raw
-  historical rows without cross-daemon rankings. A fixed target order,
-  sampler threads that continued polling across later cells, incomplete
-  competitor build provenance, and an instrumented FRR build make the former
-  margins and ratios unsupported; rustbgpd's fresh no-cache and release-only
-  repeatability receipts remain valid.
-
-- BMP per-collector queue loss now resets only the affected connection
-  generation. A full or closed live fan-out queue closes that collector's TCP
-  session without BMP Termination; the existing one-second retry reconnects,
-  replays cached Peer Up state, and runs a fresh EoR-closed Loc-RIB dump when
-  configured. Healthy collectors still receive the triggering event, and
-  `bmp_collector_drops_total{phase="fan_out",reason}` records the reset trigger
-  exactly once.
-
 ### Added
 
 - M101 adds a hosted three-node IPv4-unicast route-server receipt against
@@ -191,6 +169,26 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- SIGHUP settlement fail-stop diagnostics now name the static reload step
+  that fenced and whether an earlier effect was accepted. Non-SIGHUP owners
+  report an explicit non-applicable step, while
+  targets, configuration contents, and raw error text remain excluded.
+
+- The July bgperf2 receipt and its documentation mirrors now preserve the raw
+  historical rows without cross-daemon rankings. A fixed target order,
+  sampler threads that continued polling across later cells, incomplete
+  competitor build provenance, and an instrumented FRR build make the former
+  margins and ratios unsupported; rustbgpd's fresh no-cache and release-only
+  repeatability receipts remain valid.
+
+- BMP per-collector queue loss now resets only the affected connection
+  generation. A full or closed live fan-out queue closes that collector's TCP
+  session without BMP Termination; the existing one-second retry reconnects,
+  replays cached Peer Up state, and runs a fresh EoR-closed Loc-RIB dump when
+  configured. Healthy collectors still receive the triggering event, and
+  `bmp_collector_drops_total{phase="fan_out",reason}` records the reset trigger
+  exactly once.
+
 - Linux BLACKHOLE and general unicast FIB reconciliation now walks bounded,
   ordered Loc-RIB pages instead of retaining a second full route snapshot.
   Each pass has a 30-second planning ceiling and two-second query slices;
@@ -237,9 +235,6 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - BMPv4 Route Monitoring now follows draft-ietf-grow-bmp-tlv-21's registry:
   Group=1, VRF/Table Name=2, Stateless Parsing=3, BGP Message=4, Sequence
   Number=5, Extended Flags=6, and Timestamp=7. BMPv3 remains byte-identical.
-  Path Marking is temporarily not emitted because its active draft still
-  self-assigns type 5, which now collides with Sequence Number; it will return
-  only after a non-colliding assignment is available.
 
 - Validation-cache and generated-dataset refreshes now distinguish a departed
   or non-Established session from a timed-out state query. Ambiguous queries
@@ -286,6 +281,77 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it through the existing bounded RIB resync cadence. Repeated requests
   coalesce, a newer registration or peer teardown reaps stale intent, and a
   closed matching channel is counted as terminal loss instead of spinning.
+
+### Changed
+
+- `bmp_source_drops_total{peer,reason}` now also counts omitted periodic
+  reports as `state_query_timeout`; the existing warning expression, severity,
+  and timing are unchanged.
+- Debug rendering of address families now uses the canonical public labels;
+  unsupported or unconfigured known pairs use the `afi_N_safi_N` fallback.
+- `bgp_outbound_route_drops_total` now counts only terminal outbound work loss;
+  temporary collision-failback ROUTE-REFRESH saturation is retained and
+  retried instead.
+
+### Removed
+
+- BMPv4 Path Marking TLV emission is temporarily removed because its draft
+  type 5 assignment conflicts with the current Route Monitoring TLV registry.
+  BMPv3 output is unaffected.
+
+### Upgrade notes
+
+- **BMPv4 collector migration:** Route Monitoring TLV type assignments changed
+  from Group `4` to `1`, VRF/Table Name `5` to `2`, Stateless Parsing `6` to
+  `3`, BGP Message `7` to `4`, Sequence Number `1` to `5`, Extended Flags `2`
+  to `6`, and Timestamp `3` to `7`. Upgrade BMPv4 collectors before rustbgpd,
+  or temporarily configure the collector with `version = 3`; BMPv3 framing is
+  byte-identical. Path Marking is not emitted until its draft receives a
+  non-conflicting type, so consumers that require it must remain on the prior
+  release or tolerate its absence.
+- **BMP source-drop accounting:** `bmp_source_drops_total` adds the bounded
+  `state_query_timeout` reason. It means one periodic report was omitted and
+  will be retried on the next tick; `channel_full` and `channel_closed` mean a
+  source-channel event or report was lost. The shipped warning rule's
+  expression, severity, and timing are unchanged, and an increment alone does
+  not prove Route Monitoring divergence or a reset; use
+  `bmp_stream_diverged` as the authoritative divergence signal.
+- **Plain eBGP export default:** non-transitive Extended Communities are now
+  filtered after export policy on plain eBGP sessions. iBGP and transparent
+  route-server-client sessions are unaffected. Set the peer-group-inheritable
+  `send_non_transitive_extended_communities = true` only when deliberate
+  propagation across the AS boundary is required.
+- **Policy mutation errors:** preflight failures that were formerly collapsed
+  to gRPC `INTERNAL` now retain `NOT_FOUND`, `INVALID_ARGUMENT`, or
+  `FAILED_PRECONDITION` as applicable. Clients should branch on the status code
+  while continuing to use the stable `policy_preflight_rejected` diagnostic.
+- **Compensated mutation errors:** a failed runtime mutation whose effects were
+  fully repaired now prefixes its message with `runtime effects were fully
+  compensated; retry may repeat transient runtime changes:` and adds the
+  `rustbgpd-runtime-config-outcome: fully-compensated` response trailer. The
+  original gRPC status code remains authoritative; retry may repeat transient
+  runtime work even though the staged persistent candidate was discarded.
+- **Address-family diagnostics:** old Debug-form family spellings in read-side
+  diagnostics are replaced by canonical labels such as `ipv4_unicast`, with a
+  `afi_N_safi_N` fallback for unsupported or unconfigured known pairs. This is
+  display-only: no persisted configuration or stored value is rewritten during
+  upgrade.
+- **Opaque attribute validation:** malformed Tunnel Encapsulation (type 23) or
+  ATTR_SET (type 128) attributes that were previously re-advertised opaquely
+  now make affected NLRI treat-as-withdraw. Monitor
+  `bgp_update_malformed_total{disposition="treat_as_withdraw"}` and correct the
+  sending peer before retrying the route.
+- **BLACKHOLE reconciliation:** bounded full-table planning can report
+  `route_churn_deferred` while route churn prevents a stable
+  snapshot. No install token is consumed and no new guarded route is installed;
+  safe exact cleanup of stale daemon-owned entries may continue. Allow a later
+  reconcile to retry after churn settles.
+- **Outbound-drop alerting:** collision-failback ROUTE-REFRESH saturation is now
+  retried and excluded from `bgp_outbound_route_drops_total`, so the unchanged
+  critical alert may fire less often. An increment still means terminal
+  outbound work loss; inspect the writer and peer, then refresh outbound if an
+  advertised view was missed. The former inbound soft-reset advice no longer
+  applies to this counter.
 
 ## [0.67.0] — 2026-08-26
 

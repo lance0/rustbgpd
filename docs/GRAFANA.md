@@ -107,11 +107,12 @@ with per-rule unit tests in
 The loss alerts use a 10-minute counter-increase window and clear after
 the last increment ages out:
 
-- `BgpOutboundRouteDrops` is critical because the full outbound distribution
-  channel has already discarded outbound BGP work. Inspect the peer writer,
-  daemon log, and last error to identify the failed path and correct the
-  bottleneck. Then refresh outbound for a missed advertised view, or soft reset
-  inbound for a missed inbound ROUTE-REFRESH request.
+- `BgpOutboundRouteDrops` is critical because outbound BGP work was terminally
+  lost before reaching the peer writer. Temporary collision-failback
+  ROUTE-REFRESH saturation is retained and retried, so it does not increment
+  this counter. Inspect the peer writer, daemon log, and last error to identify
+  the failed path and correct the bottleneck, then refresh outbound if the peer
+  missed an advertised view.
 - `BgpSendHoldExpired` is critical because RFC 9687 expiry has already torn
   down the session without a NOTIFICATION after the remote endpoint stopped
   draining TCP. Inspect the writer and peer before allowing the session to
@@ -127,13 +128,16 @@ the last increment ages out:
   Treat all incremental session history as potentially incomplete and
   resnapshot current neighbor state. The alert clears after the last source
   drop ages out of its 10-minute window; a flat historical counter stays quiet.
-- `BmpSourceDrops`, `BmpLocRibSourceDrops`, and `BmpCollectorDrops` are
-  warning severity because routing is unaffected, but the BMP mirror is now
-  lossy: a dropped per-peer event forces a synthetic PeerDown/PeerUp so
-  collectors rebuild that peer, a dropped Loc-RIB event leaves Loc-RIB
-  collectors stale until their next reconnect, and a collector-side drop
-  leaves that collector incomplete until it reconnects. Find the slow
-  consumer via `bmp_collector_drops_total` and the
+- `BmpSourceDrops`, `BmpLocRibSourceDrops`, and `BmpCollectorDrops` are warning
+  severity because routing is unaffected. For `BmpSourceDrops`,
+  `channel_full` and `channel_closed` mean a source-channel event or report was
+  lost, while `state_query_timeout` means one periodic report was omitted and
+  will be retried on the next tick. An increment alone does not prove that the
+  Route Monitoring stream diverged or reset; `bmp_stream_diverged` is the
+  authoritative per-peer divergence signal. A dropped Loc-RIB event leaves
+  Loc-RIB collectors stale until their next reconnect, and a collector-side
+  drop leaves that collector incomplete until it reconnects. Inspect source
+  pressure, session responsiveness, `bmp_collector_drops_total`, and the
   `bmp_loc_rib_dump_live_buffer_*` gauges.
 
 The rules intentionally alert on the exported loss counters, not adjacent

@@ -1342,11 +1342,10 @@ tests:
               description: >-
                 bgp_outbound_route_drops_total for peer 192.0.2.40 on
                 edge1:9179 increased by 1 in the last 10 minutes. Outbound BGP
-                work was lost before reaching the peer writer; inspect the
-                writer, peer, daemon log, and last error to identify the failed
-                path. Once healthy, refresh outbound for a missed advertised
-                view or soft reset inbound for a missed inbound ROUTE-REFRESH
-                request.
+                work was terminally lost before reaching the peer writer;
+                inspect the writer, peer, daemon log, and last error to
+                identify the failed path. Once healthy, refresh outbound if
+                the peer missed an advertised view.
           - exp_labels:
               severity: critical
               peer: 192.0.2.41
@@ -1356,11 +1355,10 @@ tests:
               description: >-
                 bgp_outbound_route_drops_total for peer 192.0.2.41 on
                 edge1:9179 increased by 1 in the last 10 minutes. Outbound BGP
-                work was lost before reaching the peer writer; inspect the
-                writer, peer, daemon log, and last error to identify the failed
-                path. Once healthy, refresh outbound for a missed advertised
-                view or soft reset inbound for a missed inbound ROUTE-REFRESH
-                request.
+                work was terminally lost before reaching the peer writer;
+                inspect the writer, peer, daemon log, and last error to
+                identify the failed path. Once healthy, refresh outbound if
+                the peer missed an advertised view.
           - exp_labels:
               severity: critical
               peer: 192.0.2.42
@@ -1370,11 +1368,10 @@ tests:
               description: >-
                 bgp_outbound_route_drops_total for peer 192.0.2.42 on
                 edge1:9179 increased by 1 in the last 10 minutes. Outbound BGP
-                work was lost before reaching the peer writer; inspect the
-                writer, peer, daemon log, and last error to identify the failed
-                path. Once healthy, refresh outbound for a missed advertised
-                view or soft reset inbound for a missed inbound ROUTE-REFRESH
-                request.
+                work was terminally lost before reaching the peer writer;
+                inspect the writer, peer, daemon log, and last error to
+                identify the failed path. Once healthy, refresh outbound if
+                the peer missed an advertised view.
       - eval_time: 21m
         alertname: BgpOutboundRouteDrops
         exp_alerts: []
@@ -1574,6 +1571,8 @@ tests:
         values: "0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
       - series: 'bmp_source_drops_total{peer="192.0.2.62", reason="channel_full", instance="edge1:9179"}'
         values: "3x22"
+      - series: 'bmp_source_drops_total{peer="192.0.2.64", reason="state_query_timeout", instance="edge1:9179"}'
+        values: "0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
       - series: 'bgp_outbound_route_drops_total{peer="192.0.2.63", instance="edge1:9179"}'
         values: "0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
     alert_rule_test:
@@ -1589,30 +1588,49 @@ tests:
               reason: channel_full
               instance: edge1:9179
             exp_annotations:
-              summary: "BMP events dropped for 192.0.2.60 (channel_full)"
+              summary: "BMP source work not delivered for 192.0.2.60 (channel_full)"
               description: >-
                 bmp_source_drops_total for peer 192.0.2.60 on edge1:9179
                 increased by 1 in the last 10 minutes (reason=channel_full).
-                The BMP manager is not draining the per-peer event channel as
-                fast as the session produces events; collectors receive a
-                peer-state reset and rebuild this peer's view. Find the slow
-                collector via bmp_collector_drops_total and the
-                bmp_loc_rib_dump_live_buffer_* gauges.
+                A channel_full or channel_closed increment means a
+                source-channel event or report was lost; a state_query_timeout
+                increment means one periodic report was omitted and will be
+                retried on the next tick. Check bmp_stream_diverged for
+                authoritative per-peer divergence, then inspect source-channel
+                pressure and session responsiveness.
           - exp_labels:
               severity: warning
               peer: 192.0.2.61
               reason: channel_closed
               instance: edge1:9179
             exp_annotations:
-              summary: "BMP events dropped for 192.0.2.61 (channel_closed)"
+              summary: "BMP source work not delivered for 192.0.2.61 (channel_closed)"
               description: >-
                 bmp_source_drops_total for peer 192.0.2.61 on edge1:9179
                 increased by 1 in the last 10 minutes (reason=channel_closed).
-                The BMP manager is not draining the per-peer event channel as
-                fast as the session produces events; collectors receive a
-                peer-state reset and rebuild this peer's view. Find the slow
-                collector via bmp_collector_drops_total and the
-                bmp_loc_rib_dump_live_buffer_* gauges.
+                A channel_full or channel_closed increment means a
+                source-channel event or report was lost; a state_query_timeout
+                increment means one periodic report was omitted and will be
+                retried on the next tick. Check bmp_stream_diverged for
+                authoritative per-peer divergence, then inspect source-channel
+                pressure and session responsiveness.
+          - exp_labels:
+              severity: warning
+              peer: 192.0.2.64
+              reason: state_query_timeout
+              instance: edge1:9179
+            exp_annotations:
+              summary: "BMP source work not delivered for 192.0.2.64 (state_query_timeout)"
+              description: >-
+                bmp_source_drops_total for peer 192.0.2.64 on edge1:9179
+                increased by 1 in the last 10 minutes
+                (reason=state_query_timeout). A channel_full or channel_closed
+                increment means a source-channel event or report was lost; a
+                state_query_timeout increment means one periodic report was
+                omitted and will be retried on the next tick. Check
+                bmp_stream_diverged for authoritative per-peer divergence,
+                then inspect source-channel pressure and session
+                responsiveness.
       - eval_time: 21m
         alertname: BmpSourceDrops
         exp_alerts: []
