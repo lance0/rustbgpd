@@ -48,8 +48,8 @@ inside_guest() {
     fi
 
     ip -n "$NETNS" link add rbgpbr0 type bridge vlan_filtering 1
-    ip -n "$NETNS" link add rbgpce10 type veth peer name rgbph10
-    ip -n "$NETNS" link add rbgpce20 type veth peer name rgbph20
+    ip -n "$NETNS" link add rbgpce10 type veth peer name rbgph10
+    ip -n "$NETNS" link add rbgpce20 type veth peer name rbgph20
     ip -n "$NETNS" link set rbgpce10 master rbgpbr0
     ip -n "$NETNS" link set rbgpce20 master rbgpbr0
     ip netns exec "$NETNS" bridge vlan add dev rbgpce10 vid 10 pvid untagged
