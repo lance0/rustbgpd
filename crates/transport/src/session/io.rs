@@ -16,11 +16,7 @@ const ORF_RIB_REPLY_TIMEOUT: Duration = Duration::from_millis(500);
 impl PeerSession {
     pub(super) fn record_connect_failure(&mut self, error: &impl std::fmt::Display) {
         let error = error.to_string();
-        self.record_connect_failure_with_source(
-            error.clone(),
-            &error,
-            ConnectFailureSource::Socket,
-        );
+        self.record_connect_failure_with_source(error, None, ConnectFailureSource::Socket);
     }
 
     pub(super) fn record_connect_task_failure(&mut self, error: &JoinError) {
@@ -31,7 +27,7 @@ impl PeerSession {
         };
         self.record_connect_failure_with_source(
             error.to_string(),
-            log_error,
+            Some(log_error),
             ConnectFailureSource::Task,
         );
     }
@@ -39,10 +35,10 @@ impl PeerSession {
     fn record_connect_failure_with_source(
         &mut self,
         last_error: String,
-        log_error: &str,
+        bounded_log_error: Option<&str>,
         source: ConnectFailureSource,
     ) {
-        self.last_error = last_error;
+        let log_error = bounded_log_error.unwrap_or(&last_error);
         let previously_established = self.flap_count > 0;
         if self.connect_failure_episode.mark_reported(source) {
             match source {
@@ -86,6 +82,7 @@ impl PeerSession {
                 ),
             }
         }
+        self.last_error = last_error;
     }
 
     pub(super) fn reset_connect_failure_episode(&mut self) {
