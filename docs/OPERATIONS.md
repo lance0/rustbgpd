@@ -2681,6 +2681,15 @@ system errors, task panic payloads, routes, attributes, policy data, and
 shutdown communication text. A locally sent Cease/8 retains the category while
 its canonical BGP description and wire payload remain unchanged.
 
+Every decoded inbound or attempted outbound BGP NOTIFICATION also emits one
+structured INFO record named `BGP NOTIFICATION`. The record includes `peer`,
+`direction`, the outer numeric `code` and `subcode`, and their human
+`description`. A valid Hard Reset keeps outer Cease/9 while its description
+identifies the decoded inner error. Valid RFC 9003 shutdown communication is an
+optional `reason`; it is escaped to printable ASCII and capped at 512 bytes.
+Malformed or absent communication is omitted, with malformed input retaining
+its separate warning.
+
 An RFC 9107 ORR peer's explain ranks the per-vantage candidate set the
 ORR export uses (with per-candidate cost output). When filtered or ignored
 topology inputs are present, the stable

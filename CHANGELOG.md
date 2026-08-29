@@ -11,6 +11,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Decoded inbound and attempted outbound BGP NOTIFICATIONs now emit exactly one
+  structured INFO record with peer, direction, outer code/subcode, and a human
+  description. Hard Reset records retain outer Cease/9 and identify the valid
+  inner error; optional shutdown communication is escaped to ASCII and bounded
+  to 512 bytes, while malformed communication remains omitted and warned.
+
 - `EvpnService.ListDuplicateMacQuarantines` and `rbgp evpn
   duplicate-mac-quarantines` expose the current duplicate-MAC local-origin
   quarantine set as one deterministic, key-only snapshot. Responses are capped

@@ -10,13 +10,65 @@ pub(super) fn notification_description(
 ) -> String {
     if notification.code == NotificationCode::Cease
         && notification.subcode == cease_subcode::HARD_RESET
-        && notification
-            .data
-            .starts_with(&[NotificationCode::Cease.as_u8(), cease_subcode::BFD_DOWN])
+        && notification.data.len() >= 2
     {
-        return "Hard Reset: BFD Down".to_string();
+        let inner_code = NotificationCode::from_u8(notification.data[0]);
+        let inner_subcode = notification.data[1];
+        return format!(
+            "Hard Reset: {}",
+            rustbgpd_wire::notification::description(inner_code, inner_subcode)
+        );
     }
     rustbgpd_wire::notification::description(notification.code, notification.subcode).to_string()
+}
+
+fn sanitized_notification_reason(reason: &str) -> String {
+    let mut sanitized = String::with_capacity(reason.len().min(512));
+    for character in reason.chars() {
+        for escaped in character.escape_default() {
+            if sanitized.len() == 512 {
+                return sanitized;
+            }
+            sanitized.push(escaped);
+        }
+    }
+    sanitized
+}
+
+impl PeerSession {
+    pub(super) fn log_notification(
+        &self,
+        direction: SessionNotificationDirection,
+        notification: &rustbgpd_wire::NotificationMessage,
+        reason: Option<&str>,
+    ) {
+        let direction = match direction {
+            SessionNotificationDirection::Sent => "sent",
+            SessionNotificationDirection::Received => "received",
+        };
+        let description = notification_description(notification);
+        if let Some(reason) = reason {
+            let reason = sanitized_notification_reason(reason);
+            info!(
+                peer = %self.peer_label,
+                direction,
+                code = notification.code.as_u8(),
+                subcode = notification.subcode,
+                description,
+                reason,
+                "BGP NOTIFICATION"
+            );
+        } else {
+            info!(
+                peer = %self.peer_label,
+                direction,
+                code = notification.code.as_u8(),
+                subcode = notification.subcode,
+                description,
+                "BGP NOTIFICATION"
+            );
+        }
+    }
 }
 
 impl PeerSession {
@@ -283,6 +335,11 @@ impl PeerSession {
                                 None
                             }
                         };
+                    self.log_notification(
+                        SessionNotificationDirection::Sent,
+                        &notif,
+                        shutdown_reason.as_deref(),
+                    );
                     self.record_notification_cause(SessionNotificationDirection::Sent, &notif);
                     // RFC 8538: track outbound Hard Reset to bypass GR
                     if code == NotificationCode::Cease && subcode == cease_subcode::HARD_RESET {

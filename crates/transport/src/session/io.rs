@@ -433,6 +433,7 @@ impl PeerSession {
             cease_subcode::OUT_OF_RESOURCES,
             bytes::Bytes::new(),
         );
+        self.log_notification(SessionNotificationDirection::Sent, &notif, None);
         self.record_notification_cause(SessionNotificationDirection::Sent, &notif);
         self.last_error = cause.to_string();
         // Classify the upcoming BMP Peer Down as the locally initiated
@@ -594,6 +595,11 @@ impl PeerSession {
                                         None
                                     }
                                 };
+                            self.log_notification(
+                                SessionNotificationDirection::Received,
+                                &notif,
+                                shutdown_reason.as_deref(),
+                            );
                             // Cache raw NOTIFICATION PDU for BMP Peer Down (reason 3: remote sent NOTIFICATION)
                             if self.bmp_tx.is_some() {
                                 self.last_down_reason =
@@ -611,14 +617,6 @@ impl PeerSession {
                             );
                             self.metrics
                                 .record_message_received(&self.peer_label, "notification");
-                            // Log shutdown communication reason (RFC 9003)
-                            if let Some(reason) = shutdown_reason.as_deref() {
-                                info!(
-                                    peer = %self.peer_label,
-                                    reason,
-                                    "peer sent shutdown communication"
-                                );
-                            }
                             self.emit_notification_event(
                                 SessionNotificationDirection::Received,
                                 &notif,
@@ -628,10 +626,6 @@ impl PeerSession {
                             if notif.code == NotificationCode::Cease
                                 && notif.subcode == cease_subcode::HARD_RESET
                             {
-                                info!(
-                                    peer = %self.peer_label,
-                                    "peer sent Cease/Hard Reset, GR will be skipped"
-                                );
                                 self.received_hard_reset = true;
                             }
                             Event::NotificationReceived(notif)
