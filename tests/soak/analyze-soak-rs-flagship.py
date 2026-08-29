@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Post-hoc analyzer for the route-server flagship soak.
 
-Reads samples.csv + cycles.log + run.json emitted by
+Reads samples.csv + cycles.log + run.json + management-plane-load.jsonl emitted by
 run-soak-rs-flagship.sh and emits a JSON verdict against the
 precommitted gates in docs/soaks/soak-acceptance-gates.md (scenario 10):
 
@@ -17,6 +17,9 @@ precommitted gates in docs/soaks/soak-acceptance-gates.md (scenario 10):
   - flap budget exact: session-flap delta == trips (one per teardown)
   - counter monotonicity: bgp_messages_sent_total never decreases
   - readyz availability: 200 within 250 ms on every sample
+  - management-plane load brackets the measured window, retains every
+    operation, completes >= 90% of scheduled probes, misses no cadence,
+    and records zero non-ok results or invalid ok results
   - RSS peak ceiling; late-window RSS/intern slope (evaluated only when
     the late window spans >= --min-slope-seconds)
   - no ABORT record in cycles.log
@@ -51,6 +54,9 @@ RSS_LATE_SLOPE_LIMIT = 10.0     # MB/h over the late window
 INTERN_LATE_SLOPE_LIMIT = 100.0  # entries/h over the late window
 READYZ_MS_LIMIT = 250.0
 REESTABLISH_GRACE_SEC = 60
+MANAGEMENT_OPERATIONS = ("metrics", "neighbor", "policy_stats", "rib_prefix")
+MANAGEMENT_RECORD_LIMIT = 4096
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 CYCLE_RE = re.compile(
     r"^\[(?P<ts>[0-9T:\-]+Z)\] (?P<body>.*)$"
@@ -78,6 +84,324 @@ def parse_ts(value: str) -> float:
     return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
         tzinfo=timezone.utc
     ).timestamp()
+
+
+def finite_number(value: object) -> Optional[float]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    parsed = float(value)
+    return parsed if math.isfinite(parsed) else None
+
+
+def expected_management_route_prefix(routes_per_peer: object) -> Optional[str]:
+    """Recompute stub 1's first /24 using reloadstall's Rust mapping."""
+    if (
+        isinstance(routes_per_peer, bool)
+        or not isinstance(routes_per_peer, int)
+        or routes_per_peer <= 0
+    ):
+        return None
+    first = 20 + (routes_per_peer >> 16)
+    if first > 255:
+        return None
+    second = (routes_per_peer >> 8) & 0xFF
+    third = routes_per_peer & 0xFF
+    return f"{first}.{second}.{third}.0/24"
+
+
+def analyze_management_load(raw: bytes, meta: dict) -> dict:
+    """Validate bounded JSONL evidence without trusting its terminal summary."""
+    schema_errors: list[str] = []
+    failures: list[dict] = []
+    starts: list[dict] = []
+    summaries: list[dict] = []
+    operations: dict[str, list[dict]] = {
+        operation: [] for operation in MANAGEMENT_OPERATIONS
+    }
+
+    if not raw.endswith(b"\n"):
+        schema_errors.append("JSONL does not end with a complete record")
+    lines = raw.splitlines(keepends=True)
+    records: list[dict] = []
+    for line_number, encoded in enumerate(lines, 1):
+        if len(encoded) > MANAGEMENT_RECORD_LIMIT:
+            schema_errors.append(f"line {line_number}: record exceeds bound")
+            continue
+        try:
+            record = json.loads(encoded)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            schema_errors.append(f"line {line_number}: malformed JSON")
+            continue
+        if not isinstance(record, dict):
+            schema_errors.append(f"line {line_number}: record is not an object")
+            continue
+        if any(key in record for key in ("payload", "stdout", "stderr")):
+            schema_errors.append(f"line {line_number}: retained response payload")
+        records.append(record)
+        kind = record.get("record")
+        if kind == "start":
+            starts.append(record)
+        elif kind == "summary":
+            summaries.append(record)
+        elif kind == "operation":
+            operation = record.get("operation")
+            if operation not in operations:
+                schema_errors.append(
+                    f"line {line_number}: unknown operation {operation!r}"
+                )
+                continue
+            scheduled = finite_number(record.get("scheduled_monotonic"))
+            started = finite_number(record.get("started_monotonic"))
+            completed = finite_number(record.get("completed_monotonic"))
+            duration = finite_number(record.get("duration_ms"))
+            byte_count = record.get("bytes")
+            if (
+                scheduled is None or started is None or completed is None
+                or duration is None or duration < 0
+                or not scheduled <= started <= completed
+                or abs(duration - (completed - started) * 1000) > 2.0
+                or isinstance(byte_count, bool)
+                or not isinstance(byte_count, int) or byte_count < 0
+                or not isinstance(record.get("sha256"), str)
+                or SHA256_RE.fullmatch(record["sha256"]) is None
+                or not isinstance(record.get("result"), str)
+                or (record.get("exit") is not None
+                    and (isinstance(record["exit"], bool)
+                         or not isinstance(record["exit"], int)))
+            ):
+                schema_errors.append(
+                    f"line {line_number}: invalid bounded operation record"
+                )
+                continue
+            operations[operation].append(record)
+            if record["result"] != "ok":
+                failures.append({
+                    "operation": operation,
+                    "result": record["result"],
+                    "exit": record.get("exit"),
+                })
+            elif operation == "metrics" and record.get("exit") != 200:
+                failures.append({
+                    "operation": operation,
+                    "result": "invalid_http_success",
+                    "exit": record.get("exit"),
+                })
+            elif operation != "metrics" and record.get("exit") != 0:
+                failures.append({
+                    "operation": operation,
+                    "result": "invalid_cli_success",
+                    "exit": record.get("exit"),
+                })
+            elif byte_count == 0:
+                failures.append({
+                    "operation": operation,
+                    "result": "empty_success",
+                    "exit": record.get("exit"),
+                })
+        else:
+            schema_errors.append(f"line {line_number}: unknown record type {kind!r}")
+
+    if len(starts) != 1:
+        schema_errors.append(f"expected one start record, found {len(starts)}")
+    if len(summaries) != 1:
+        schema_errors.append(f"expected one terminal summary, found {len(summaries)}")
+    if records and records[0].get("record") != "start":
+        schema_errors.append("start record is not first")
+    if records and records[-1].get("record") != "summary":
+        schema_errors.append("terminal summary is not last")
+
+    expected_intervals = {
+        "metrics": meta.get("management_metrics_interval_sec"),
+        "neighbor": meta.get("management_cli_interval_sec"),
+        "policy_stats": meta.get("management_cli_interval_sec"),
+        "rib_prefix": meta.get("management_cli_interval_sec"),
+    }
+    expected_timeout = meta.get("management_timeout_sec")
+    expected_peers = meta.get("peers")
+    expected_prefix = meta.get("management_route_prefix")
+    derived_prefix = expected_management_route_prefix(meta.get("routes_per_peer"))
+    for operation, interval in expected_intervals.items():
+        parsed = finite_number(interval)
+        if parsed is None or parsed <= 0:
+            schema_errors.append(
+                f"run metadata has invalid {operation} interval"
+            )
+    parsed_timeout = finite_number(expected_timeout)
+    if parsed_timeout is None or parsed_timeout <= 0:
+        schema_errors.append("run metadata has invalid management timeout")
+    if (
+        isinstance(expected_peers, bool) or not isinstance(expected_peers, int)
+        or expected_peers <= 0
+    ):
+        schema_errors.append("run metadata has invalid peer cardinality")
+    if derived_prefix is None:
+        schema_errors.append(
+            "run metadata routes_per_peer cannot map to a management route prefix"
+        )
+    elif expected_prefix != derived_prefix:
+        schema_errors.append(
+            "run metadata management route prefix mismatches stub 1 first route"
+        )
+    started_at = None
+    summary_end = None
+    stop_requested = None
+    summary_scheduled = {operation: 0 for operation in MANAGEMENT_OPERATIONS}
+    summary_completed = {operation: 0 for operation in MANAGEMENT_OPERATIONS}
+    summary_missed = {operation: 0 for operation in MANAGEMENT_OPERATIONS}
+
+    if len(starts) == 1:
+        start = starts[0]
+        started_at = finite_number(start.get("started_monotonic"))
+        if (
+            started_at is None
+            or start.get("operations") != list(MANAGEMENT_OPERATIONS)
+            or start.get("interval_seconds") != expected_intervals
+            or start.get("timeout_seconds") != expected_timeout
+            or start.get("peer_count") != expected_peers
+            or start.get("route_prefix") != expected_prefix
+        ):
+            schema_errors.append("start record does not match run metadata")
+
+    if len(summaries) == 1:
+        summary = summaries[0]
+        summary_start = finite_number(summary.get("started_monotonic"))
+        stop_requested = finite_number(summary.get("stop_requested_monotonic"))
+        summary_end = finite_number(summary.get("completed_monotonic"))
+        duration = finite_number(summary.get("duration_ms"))
+        if (
+            summary_start is None or stop_requested is None
+            or summary_end is None or duration is None
+            or not summary_start <= stop_requested <= summary_end
+            or abs(duration - (summary_end - summary_start) * 1000) > 2.0
+            or summary.get("operation") != "summary"
+            or summary.get("exit") != 0
+            or summary.get("result") != "clean_sigterm"
+            or summary.get("signal") != "SIGTERM"
+            or summary.get("bytes") != 0
+            or SHA256_RE.fullmatch(str(summary.get("sha256", ""))) is None
+            or summary.get("interval_seconds") != expected_intervals
+            or summary.get("timeout_seconds") != expected_timeout
+            or summary.get("peer_count") != expected_peers
+            or summary.get("route_prefix") != expected_prefix
+            or started_at is None or abs(summary_start - started_at) > 0.001
+        ):
+            schema_errors.append("terminal summary is invalid or mismatches metadata")
+        for field, target in (
+            ("scheduled", summary_scheduled),
+            ("completed", summary_completed),
+            ("missed", summary_missed),
+        ):
+            value = summary.get(field)
+            if not isinstance(value, dict) or set(value) != set(MANAGEMENT_OPERATIONS):
+                schema_errors.append(f"terminal summary has invalid {field} counts")
+                continue
+            for operation in MANAGEMENT_OPERATIONS:
+                count = value[operation]
+                if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                    schema_errors.append(
+                        f"terminal summary has invalid {field}.{operation}"
+                    )
+                else:
+                    target[operation] = count
+
+    count_mismatches = []
+    coverage = {}
+    cadence_defects = []
+    for operation in MANAGEMENT_OPERATIONS:
+        observed = len(operations[operation])
+        if summary_completed[operation] != observed:
+            count_mismatches.append(
+                f"{operation}: summary completed={summary_completed[operation]} "
+                f"observed={observed}"
+            )
+        if summary_scheduled[operation] != (
+            summary_completed[operation] + summary_missed[operation]
+        ):
+            count_mismatches.append(f"{operation}: scheduled != completed + missed")
+        scheduled = summary_scheduled[operation]
+        ratio = observed / scheduled if scheduled else 0.0
+        coverage[operation] = {
+            "scheduled": scheduled,
+            "completed": observed,
+            "ratio": ratio,
+        }
+        if summary_missed[operation] != 0:
+            cadence_defects.append(
+                f"{operation}: missed={summary_missed[operation]}"
+            )
+        interval = finite_number(expected_intervals.get(operation))
+        if started_at is not None and stop_requested is not None and interval and interval > 0:
+            schedules = [
+                finite_number(record.get("scheduled_monotonic"))
+                for record in operations[operation]
+            ]
+            if schedules and schedules[0] is not None:
+                if abs(schedules[0] - started_at) > 0.002:
+                    cadence_defects.append(
+                        f"{operation}: first schedule does not start with load"
+                    )
+                for previous, current in zip(schedules, schedules[1:]):
+                    if (
+                        previous is None or current is None
+                        or abs((current - previous) - interval) > 0.002
+                    ):
+                        cadence_defects.append(
+                            f"{operation}: scheduled interval drift"
+                        )
+                        break
+            active_lifetime = stop_requested - started_at
+            expected_floor = max(
+                1,
+                math.floor(max(0.0, active_lifetime - 0.1) / interval) + 1,
+            )
+            if scheduled < expected_floor:
+                cadence_defects.append(
+                    f"{operation}: scheduled={scheduled} expected>={expected_floor}"
+                )
+
+    measured_start = finite_number(meta.get("measured_start_monotonic"))
+    measured_end = finite_number(meta.get("measured_end_monotonic"))
+    brackets = (
+        started_at is not None and stop_requested is not None
+        and summary_end is not None
+        and measured_start is not None and measured_end is not None
+        and started_at <= measured_start <= measured_end
+        <= stop_requested <= summary_end
+    )
+
+    return {
+        "management_evidence": {
+            "value": {"errors": schema_errors[:20], "count_mismatches": count_mismatches},
+            "pass": not schema_errors and not count_mismatches,
+        },
+        "management_lifetime": {
+            "value": {
+                "load_start": started_at,
+                "measured_start": measured_start,
+                "measured_end": measured_end,
+                "stop_requested": stop_requested,
+                "load_end": summary_end,
+            },
+            "pass": brackets,
+        },
+        "management_operations": {
+            "value": {operation: len(records) for operation, records in operations.items()},
+            "pass": all(operations[operation] for operation in MANAGEMENT_OPERATIONS),
+        },
+        "management_completion": {
+            "value": coverage,
+            "limit": 0.9,
+            "pass": all(item["ratio"] >= 0.9 for item in coverage.values()),
+        },
+        "management_cadence": {
+            "value": cadence_defects,
+            "pass": not cadence_defects,
+        },
+        "management_failures": {
+            "value": {"count": len(failures), "first": failures[:20]},
+            "pass": not failures,
+        },
+    }
 
 
 def linreg(xs: list[float], ys: list[float]) -> float:
@@ -388,6 +712,17 @@ def main() -> int:
             print(f"error: run.json missing integer {key}", file=sys.stderr)
             return 2
 
+    load_file = meta.get("management_load_file")
+    if load_file != "management-plane-load.jsonl":
+        print("error: run.json has invalid management_load_file", file=sys.stderr)
+        return 2
+    try:
+        with open(f"{args.run_dir}/{load_file}", "rb") as f:
+            management_raw = f.read()
+    except OSError as e:
+        print(f"error reading management-plane evidence: {e}", file=sys.stderr)
+        return 2
+
     if not rows:
         print("error: samples.csv is empty", file=sys.stderr)
         return 2
@@ -409,6 +744,11 @@ def main() -> int:
 
     cycles = parse_cycles(cycle_lines)
     result = analyze(rows, cycles, meta, args.min_slope_seconds)
+    result["gates"].update(analyze_management_load(management_raw, meta))
+    result["verdict"] = (
+        "pass" if all(gate["pass"] for gate in result["gates"].values())
+        else "fail"
+    )
     out = json.dumps(result, indent=2)
     print(out)
     if args.output:
