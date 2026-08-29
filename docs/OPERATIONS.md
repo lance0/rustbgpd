@@ -1774,6 +1774,8 @@ rustbgpd uses structured JSON logging. Key messages to watch for:
 | `starting rustbgpd` | INFO | Daemon started successfully |
 | `session established` | INFO | BGP session reached Established |
 | `session down` | INFO | BGP session left Established |
+| `TCP connect failed` | INFO / WARN | First socket failure in a failed-connect episode; WARN after an Established epoch, INFO for a peer that has not established yet |
+| `TCP connect task failed` | WARN | First internal connect-task failure in a failed-connect episode |
 | `received SIGTERM` / `received SIGINT` | INFO | Process signal received |
 | `shutdown initiated via gRPC` | INFO | `Shutdown` RPC called |
 | `gRPC server exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
@@ -1787,6 +1789,11 @@ rustbgpd uses structured JSON logging. Key messages to watch for:
 | `published GR restart marker with wall-clock fallback because boottime protection was unavailable` | WARN | Clock-domain sampling or representation failed; a complete bounded v1/v2 marker was selected. Check `publication_durability` on the final publication log for directory-sync status. |
 | `max-prefix limit exceeded` | WARN | Peer exceeded prefix limit |
 | `gRPC TCP listener bound to a non-loopback address` | WARN | Security posture warning |
+
+Later socket or task retries in the same failed-connect episode stay at DEBUG
+to avoid one default-visible record per ConnectRetry interval. Every retry still
+refreshes the neighbor's `Last Error`; a successful TCP connection re-arms both
+records for a later outage.
 
 ---
 

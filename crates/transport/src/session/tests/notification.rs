@@ -1,30 +1,29 @@
 use super::*;
 
-type NotificationLogFields = std::collections::BTreeMap<String, String>;
-type NotificationLogBuckets =
-    std::collections::HashMap<std::thread::ThreadId, Vec<NotificationLogFields>>;
+type SessionLogFields = std::collections::BTreeMap<String, String>;
+type SessionLogBuckets = std::collections::HashMap<std::thread::ThreadId, Vec<SessionLogFields>>;
 
 #[derive(Clone, Default)]
-struct NotificationLogCapture {
-    events: Arc<std::sync::Mutex<NotificationLogBuckets>>,
+struct SessionLogCapture {
+    events: Arc<std::sync::Mutex<SessionLogBuckets>>,
 }
 
-fn notification_log_capture() -> &'static NotificationLogCapture {
-    static CAPTURE: std::sync::OnceLock<NotificationLogCapture> = std::sync::OnceLock::new();
+fn session_log_capture() -> &'static SessionLogCapture {
+    static CAPTURE: std::sync::OnceLock<SessionLogCapture> = std::sync::OnceLock::new();
     CAPTURE.get_or_init(|| {
-        let capture = NotificationLogCapture::default();
+        let capture = SessionLogCapture::default();
         tracing::subscriber::set_global_default(capture.clone())
-            .expect("notification tests require an unclaimed global tracing subscriber");
+            .expect("session log tests require an unclaimed global tracing subscriber");
         capture
     })
 }
 
-impl tracing::Subscriber for NotificationLogCapture {
+impl tracing::Subscriber for SessionLogCapture {
     fn register_callsite(
         &self,
         metadata: &'static tracing::Metadata<'static>,
     ) -> tracing::subscriber::Interest {
-        if notification_log_metadata(metadata) {
+        if session_log_metadata(metadata) {
             tracing::subscriber::Interest::sometimes()
         } else {
             tracing::subscriber::Interest::never()
@@ -32,7 +31,7 @@ impl tracing::Subscriber for NotificationLogCapture {
     }
 
     fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
-        notification_log_metadata(metadata)
+        session_log_metadata(metadata)
             && self
                 .events
                 .lock()
@@ -63,9 +62,16 @@ impl tracing::Subscriber for NotificationLogCapture {
             fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
                 self.0.insert(field.name().to_string(), value.to_string());
             }
+
+            fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+                self.0.insert(field.name().to_string(), value.to_string());
+            }
         }
 
         let mut visitor = Visitor(std::collections::BTreeMap::new());
+        visitor
+            .0
+            .insert("level".to_string(), event.metadata().level().to_string());
         event.record(&mut visitor);
         if let Some(events) = self
             .events
@@ -82,6 +88,10 @@ impl tracing::Subscriber for NotificationLogCapture {
     fn exit(&self, _span: &tracing::span::Id) {}
 }
 
+fn session_log_metadata(metadata: &tracing::Metadata<'_>) -> bool {
+    notification_log_metadata(metadata) || connect_failure_log_metadata(metadata)
+}
+
 fn notification_log_metadata(metadata: &tracing::Metadata<'_>) -> bool {
     *metadata.level() == tracing::Level::INFO
         && ["direction", "code", "subcode", "description"]
@@ -89,13 +99,14 @@ fn notification_log_metadata(metadata: &tracing::Metadata<'_>) -> bool {
             .all(|field| metadata.fields().field(field).is_some())
 }
 
-fn capture_notification_log(
-    direction: SessionNotificationDirection,
-    notification: &NotificationMessage,
-    reason: Option<&str>,
-) -> Vec<NotificationLogFields> {
-    let session = make_test_session(65001, 65002);
-    let capture = notification_log_capture();
+fn connect_failure_log_metadata(metadata: &tracing::Metadata<'_>) -> bool {
+    ["peer", "error", "failure_source", "previously_established"]
+        .into_iter()
+        .all(|field| metadata.fields().field(field).is_some())
+}
+
+fn capture_session_logs(action: impl FnOnce()) -> Vec<SessionLogFields> {
+    let capture = session_log_capture();
     let thread_id = std::thread::current().id();
     assert!(
         capture
@@ -104,15 +115,24 @@ fn capture_notification_log(
             .unwrap()
             .insert(thread_id, Vec::new())
             .is_none(),
-        "notification log capture bucket was already armed for this thread"
+        "session log capture bucket was already armed for this thread"
     );
-    session.log_notification(direction, notification, reason);
+    action();
     capture
         .events
         .lock()
         .unwrap()
         .remove(&thread_id)
-        .expect("armed notification log capture bucket")
+        .expect("armed session log capture bucket")
+}
+
+fn capture_notification_log(
+    direction: SessionNotificationDirection,
+    notification: &NotificationMessage,
+    reason: Option<&str>,
+) -> Vec<SessionLogFields> {
+    let session = make_test_session(65001, 65002);
+    capture_session_logs(|| session.log_notification(direction, notification, reason))
 }
 
 #[test]
@@ -210,6 +230,132 @@ fn notification_log_reason_is_escaped_ascii_and_bounded() {
     assert!(!logged.contains('\n'));
     assert!(logged.contains("\\n"));
     assert!(logged.contains("\\u{1f980}"));
+}
+
+fn assert_connect_log(
+    event: &SessionLogFields,
+    level: &str,
+    message: &str,
+    source: &str,
+    previously_established: bool,
+    error: &str,
+) {
+    assert_eq!(event.get("level").map(String::as_str), Some(level));
+    assert_eq!(event.get("message").map(String::as_str), Some(message));
+    assert_eq!(event.get("peer").map(String::as_str), Some("10.0.0.2"));
+    assert_eq!(
+        event.get("failure_source").map(String::as_str),
+        Some(source)
+    );
+    assert_eq!(
+        event.get("previously_established").map(String::as_str),
+        Some(if previously_established {
+            "true"
+        } else {
+            "false"
+        })
+    );
+    assert_eq!(event.get("error").map(String::as_str), Some(error));
+}
+
+/// Mutants: raising every retry, suppressing the cold first failure, or using
+/// `last_error` as the episode latch changes this exact INFO/DEBUG pair.
+#[test]
+fn cold_connect_failure_logs_once_and_keeps_refreshing_last_error() {
+    let mut session = make_test_session(65001, 65002);
+    session.last_error = "prior non-connect failure".to_string();
+    let first = "Cannot assign requested address (os error 99)";
+    let retry = "Connection refused (os error 111)";
+
+    let events = capture_session_logs(|| {
+        session.record_connect_failure(&std::io::Error::other(first));
+        session.record_connect_failure(&std::io::Error::other(retry));
+    });
+
+    assert_eq!(events.len(), 2);
+    assert_connect_log(
+        &events[0],
+        "INFO",
+        "TCP connect failed",
+        "socket",
+        false,
+        first,
+    );
+    assert_connect_log(
+        &events[1],
+        "DEBUG",
+        "TCP connect failed",
+        "socket",
+        false,
+        retry,
+    );
+    assert_eq!(session.last_error, retry);
+}
+
+/// Mutants: consulting current FSM state rather than completed-epoch history,
+/// or sharing the socket/task bit, loses one of these warnings.
+#[tokio::test(flavor = "current_thread")]
+async fn established_socket_and_first_task_failures_warn_independently() {
+    let mut session = make_test_session(65001, 65002);
+    session.flap_count = 1;
+    let socket = "Network is unreachable (os error 101)";
+    let task = tokio::spawn(std::future::pending::<()>());
+    task.abort();
+    let task = task.await.unwrap_err();
+    let exact_task_error = task.to_string();
+
+    let events = capture_session_logs(|| {
+        session.record_connect_failure(&std::io::Error::other(socket));
+        session.record_connect_task_failure(&task);
+        session.record_connect_task_failure(&task);
+    });
+
+    assert_eq!(events.len(), 3);
+    assert_connect_log(
+        &events[0],
+        "WARN",
+        "TCP connect failed",
+        "socket",
+        true,
+        socket,
+    );
+    assert_connect_log(
+        &events[1],
+        "WARN",
+        "TCP connect task failed",
+        "task",
+        true,
+        "connect task cancelled",
+    );
+    assert_connect_log(
+        &events[2],
+        "DEBUG",
+        "TCP connect task failed",
+        "task",
+        true,
+        "connect task cancelled",
+    );
+    assert_eq!(session.last_error, exact_task_error);
+}
+
+/// Mutant: omitting the successful-connect reset leaves the second episode at
+/// DEBUG and hides the next outage from default-level logs.
+#[test]
+fn successful_connect_rearms_failure_visibility() {
+    let mut session = make_test_session(65001, 65002);
+    let error = "Connection timed out (os error 110)";
+
+    let events = capture_session_logs(|| {
+        session.record_connect_failure(&std::io::Error::other(error));
+        session.record_connect_failure(&std::io::Error::other(error));
+        session.reset_connect_failure_episode();
+        session.record_connect_failure(&std::io::Error::other(error));
+    });
+
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0].get("level").map(String::as_str), Some("INFO"));
+    assert_eq!(events[1].get("level").map(String::as_str), Some("DEBUG"));
+    assert_eq!(events[2].get("level").map(String::as_str), Some("INFO"));
 }
 
 #[tokio::test]
