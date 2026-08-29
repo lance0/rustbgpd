@@ -90,16 +90,17 @@ gateway=$(
     jq -er '
       [
         .[0].IPAM.Config[]?
-        | select(.Subnet == "198.51.100.0/24")
         | .Gateway
+        | select(type == "string")
+        | select(length > 0 and (contains(":") | not))
       ]
-      | if length == 1 and (.[0] | type) == "string" and (.[0] | length) > 0
+      | if length == 1
         then .[0]
         else empty
         end
     ' 2>/dev/null
 ) || {
-  echo 'populated oracle network must have exactly one IPv4 gateway for 198.51.100.0/24' >&2
+  echo 'populated oracle network must have exactly one nonempty IPv4 gateway' >&2
   exit 1
 }
 [ "$gateway" = 198.51.100.1 ] || {
