@@ -2309,7 +2309,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      # The differential asserts its source contains the post-M103 boundary via
+      # `git merge-base --is-ancestor`, which needs history the default shallow
+      # checkout does not fetch.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - uses: ./.github/actions/install-protobuf
 
