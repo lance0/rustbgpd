@@ -19,7 +19,7 @@ precommitted gates in docs/soaks/soak-acceptance-gates.md (scenario 10):
   - readyz availability: 200 within 250 ms on every sample
   - management-plane load brackets the measured window, retains every
     operation, completes >= 90% of scheduled probes, misses no cadence,
-    and records zero HTTP/CLI/timeout/JSON/schema/cardinality failures
+    and records zero non-ok results or invalid ok results
   - RSS peak ceiling; late-window RSS/intern slope (evaluated only when
     the late window spans >= --min-slope-seconds)
   - no ABORT record in cycles.log
