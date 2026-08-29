@@ -690,7 +690,19 @@ _arguments "${_arguments_options[@]}" : \
         (( CURRENT += 1 ))
         curcontext="${curcontext%:*:*}:rbgp-rpki-command-$line[1]:"
         case $line[1] in
-            (validate)
+            (caches)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(validate)
 _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
@@ -716,7 +728,11 @@ _arguments "${_arguments_options[@]}" : \
         (( CURRENT += 1 ))
         curcontext="${curcontext%:*:*}:rbgp-rpki-help-command-$line[1]:"
         case $line[1] in
-            (validate)
+            (caches)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(validate)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -3117,7 +3133,11 @@ _arguments "${_arguments_options[@]}" : \
         (( CURRENT += 1 ))
         curcontext="${curcontext%:*:*}:rbgp-help-rpki-command-$line[1]:"
         case $line[1] in
-            (validate)
+            (caches)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(validate)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -5174,9 +5194,15 @@ _rbgp__subcmd__help__subcmd__rib__subcmd__vpn_commands() {
 (( $+functions[_rbgp__subcmd__help__subcmd__rpki_commands] )) ||
 _rbgp__subcmd__help__subcmd__rpki_commands() {
     local commands; commands=(
+'caches:List configured RTR caches and accepted validation epochs' \
 'validate:Validate one CIDR prefix and origin ASN' \
     )
     _describe -t commands 'rbgp help rpki commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__rpki__subcmd__caches_commands] )) ||
+_rbgp__subcmd__help__subcmd__rpki__subcmd__caches_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help rpki caches commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__help__subcmd__rpki__subcmd__validate_commands] )) ||
 _rbgp__subcmd__help__subcmd__rpki__subcmd__validate_commands() {
@@ -5875,18 +5901,30 @@ _rbgp__subcmd__rib__subcmd__vpn_commands() {
 (( $+functions[_rbgp__subcmd__rpki_commands] )) ||
 _rbgp__subcmd__rpki_commands() {
     local commands; commands=(
+'caches:List configured RTR caches and accepted validation epochs' \
 'validate:Validate one CIDR prefix and origin ASN' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'rbgp rpki commands' commands "$@"
 }
+(( $+functions[_rbgp__subcmd__rpki__subcmd__caches_commands] )) ||
+_rbgp__subcmd__rpki__subcmd__caches_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rpki caches commands' commands "$@"
+}
 (( $+functions[_rbgp__subcmd__rpki__subcmd__help_commands] )) ||
 _rbgp__subcmd__rpki__subcmd__help_commands() {
     local commands; commands=(
+'caches:List configured RTR caches and accepted validation epochs' \
 'validate:Validate one CIDR prefix and origin ASN' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'rbgp rpki help commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__rpki__subcmd__help__subcmd__caches_commands] )) ||
+_rbgp__subcmd__rpki__subcmd__help__subcmd__caches_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rpki help caches commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__rpki__subcmd__help__subcmd__help_commands] )) ||
 _rbgp__subcmd__rpki__subcmd__help__subcmd__help_commands() {

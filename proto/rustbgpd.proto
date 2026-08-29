@@ -1922,6 +1922,34 @@ service RpkiService {
   // snapshot. Covering VRPs are bounded to 256 effective rows; the validation
   // verdict is computed from the complete table before diagnostic truncation.
   rpc ValidateRouteOrigin(ValidateRouteOriginRequest) returns (ValidateRouteOriginResponse);
+  // List configured RTR caches and their latest atomically accepted epoch.
+  rpc ListCaches(ListRpkiCachesRequest) returns (ListRpkiCachesResponse);
+}
+
+message ListRpkiCachesRequest {}
+
+message AcceptedRpkiCacheState {
+  optional uint32 protocol_version = 1;
+  optional uint32 session_id = 2;
+  optional uint32 serial = 3;
+  uint64 vrp_v4_count = 4;
+  uint64 vrp_v6_count = 5;
+  uint64 aspa_count = 6;
+  uint64 age_seconds = 7;
+}
+
+message RpkiCacheState {
+  string address = 1;
+  bool connected = 2;
+  // Present only after a validated End of Data; an accepted empty table is
+  // represented by a present message whose counts are zero.
+  optional AcceptedRpkiCacheState accepted = 3;
+}
+
+message ListRpkiCachesResponse {
+  repeated RpkiCacheState caches = 1;
+  bool complete = 2;
+  uint64 omitted = 3;
 }
 
 message ValidateRouteOriginRequest {

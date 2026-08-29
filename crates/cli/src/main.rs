@@ -1155,6 +1155,8 @@ enum BfdAction {
 
 #[derive(Subcommand)]
 enum RpkiAction {
+    /// List configured RTR caches and accepted validation epochs
+    Caches,
     /// Validate one CIDR prefix and origin ASN
     Validate {
         /// Route prefix in CIDR form, for example 192.0.2.0/24
@@ -2341,6 +2343,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
         },
 
         Command::Rpki { action } => match action {
+            RpkiAction::Caches => commands::rpki::caches(connection, json).await,
             RpkiAction::Validate { prefix, origin_asn } => {
                 commands::rpki::validate(connection, &prefix, origin_asn, json).await
             }

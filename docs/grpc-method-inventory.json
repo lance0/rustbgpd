@@ -6,10 +6,10 @@
   "additional_protos": [
     "proto/github.com/openconfig/gnmi/proto/gnmi/gnmi.proto"
   ],
-  "method_count": 106,
+  "method_count": 107,
   "tier_counts": {
     "read": 0,
-    "sensitive_read": 62,
+    "sensitive_read": 63,
     "mutating": 20,
     "operator_only": 24
   },
@@ -94,6 +94,7 @@
     { "service": "rustbgpd.v1.RibService", "method": "ListOrrStatus", "path": "/rustbgpd.v1.RibService/ListOrrStatus", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.BfdService", "method": "GetBfdSessions", "path": "/rustbgpd.v1.BfdService/GetBfdSessions", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.RpkiService", "method": "ValidateRouteOrigin", "path": "/rustbgpd.v1.RpkiService/ValidateRouteOrigin", "tier": "sensitive_read" },
+    { "service": "rustbgpd.v1.RpkiService", "method": "ListCaches", "path": "/rustbgpd.v1.RpkiService/ListCaches", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.EventService", "method": "WatchEvents", "path": "/rustbgpd.v1.EventService/WatchEvents", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.EventService", "method": "ListEvpnEvents", "path": "/rustbgpd.v1.EventService/ListEvpnEvents", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.EventService", "method": "ListSessionEvents", "path": "/rustbgpd.v1.EventService/ListSessionEvents", "tier": "sensitive_read" },

@@ -3812,6 +3812,7 @@ async fn run<T>(
         mpsc::channel::<PeerManagerReadinessQuery>(64);
     let (peer_mgr_internal_tx, peer_mgr_internal_rx) = mpsc::channel(1);
 
+    let mut rpki_cache_queries = None;
     // Spawn RPKI subsystem (VRP manager + per-cache RTR clients)
     if let Some(ref rpki_config) = config.rpki
         && !rpki_config.cache_servers.is_empty()
@@ -3822,9 +3823,19 @@ async fn run<T>(
         // ASPA table channel (VrpManager → RIB)
         let (aspa_table_tx, mut aspa_table_rx) = mpsc::channel(16);
 
+        let configured_cache_addrs: Vec<std::net::SocketAddr> = rpki_config
+            .cache_servers
+            .iter()
+            .filter_map(|server| server.address.parse().ok())
+            .collect();
+        let (cache_inventory, cache_update_handle, cache_query_handle) =
+            rustbgpd_rpki::CacheInventoryAttachment::new(configured_cache_addrs);
+        rpki_cache_queries = Some(cache_query_handle);
+
         // Spawn VRP + ASPA manager
         let readiness_metrics = metrics.clone();
         let vrp_mgr = rustbgpd_rpki::VrpManager::new(vrp_update_rx, rpki_table_tx)
+            .with_cache_inventory(cache_inventory)
             .with_aspa_tx(aspa_table_tx)
             .with_readiness_observer(move |server, ready| {
                 readiness_metrics.set_rpki_cache_end_of_data_ready(&server.to_string(), ready);
@@ -3901,6 +3912,7 @@ async fn run<T>(
             let cache_label = addr.to_string();
             metrics.set_rpki_cache_end_of_data_ready(&cache_label, false);
             let client = rustbgpd_rpki::RtrClient::new(client_config, vrp_update_tx.clone())
+                .with_cache_inventory(cache_update_handle.clone())
                 .with_expire_observer(move |secs| {
                     expire_metrics.set_rpki_cache_effective_expire_seconds(&cache_label, secs);
                 });
@@ -4774,6 +4786,7 @@ async fn run<T>(
             // walking the table or building a response.
             Arc::new(move || rx.borrow().vrp_table.clone())
         },
+        rpki_cache_queries,
         mrt_trigger_tx,
         evpn_originated_local_mac_count: {
             let counts = evpn_originated_local_mac_counts.clone();

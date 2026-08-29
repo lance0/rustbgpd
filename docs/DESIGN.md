@@ -793,7 +793,7 @@ This matrix tracks every protocol behavior: its RFC basis, implementation status
 | TCP-AO | 5925 | Post-v1 | BIRD | Static and direct dynamic-prefix keyrings; fail-closed accept validation and live API/CLI health; successor install, observation-gated RNext selection/deprecation, and later deprecated unselected-MKT deletion |
 | BMP exporter | 7854 | post-v0.3.0 | — | Implemented (ADR-0041); reconnect replay + periodic stats + coordinated-shutdown termination |
 | MRT dump export | 6396 | post-v0.3.0 | — | Implemented (ADR-0044); TABLE_DUMP_V2 periodic + on-demand, gzip optional |
-| RPKI / RTR client | 8210 | post-v0.3.0 | — | Implemented (ADR-0034); bounded read-only point validation is available through `RpkiService`, while cache management remains deferred |
+| RPKI / RTR client | 8210 | post-v0.3.0 | — | Implemented (ADR-0034); `RpkiService` provides bounded point validation and read-only configured-cache accepted-epoch inventory, while cache mutation remains deferred |
 
 This matrix is updated with every milestone. "Interop Tested" means validated
 by a documented containerlab or privileged-netns procedure. CI-gated rows are

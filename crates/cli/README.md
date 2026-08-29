@@ -82,6 +82,7 @@ rbgp neighbor-set set <name> --from-file set.json
 rbgp bfd
 rbgp bfd show <addr>
 rbgp rpki validate 192.0.2.0/24 64496       # complete verdict + bounded covering VRPs
+rbgp rpki caches                             # configured caches + accepted RTR epochs
 ```
 
 `rpki validate` requires the daemon's first authoritative VRP snapshot. Before

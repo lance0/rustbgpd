@@ -600,6 +600,12 @@ pub const METHODS: &[GrpcMethodAuthz] = &[
         AuthTier::SensitiveRead,
     ),
     method(
+        "rustbgpd.v1.RpkiService",
+        "ListCaches",
+        "/rustbgpd.v1.RpkiService/ListCaches",
+        AuthTier::SensitiveRead,
+    ),
+    method(
         "rustbgpd.v1.EventService",
         "WatchEvents",
         "/rustbgpd.v1.EventService/WatchEvents",
@@ -789,7 +795,7 @@ mod tests {
     const INVENTORY_JSON: &str = include_str!("../../../docs/grpc-method-inventory.json");
     const INVENTORY_MD: &str = include_str!("../../../docs/grpc-method-inventory.md");
     const READ_TOTAL: &str = "| `read` | 0 | 0.0% |";
-    const SENSITIVE_TOTAL: &str = "| `sensitive_read` | 62 | 58.5% |";
+    const SENSITIVE_TOTAL: &str = "| `sensitive_read` | 63 | 58.9% |";
     const AUTHZ_SOURCE_PATH: &str = "crates/api/src/authz.rs";
     const PRIMARY_PROTO_PATH: &str = "proto/rustbgpd.proto";
     const ADDITIONAL_PROTO_PATHS: &[&str] =
@@ -1021,7 +1027,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(matrix_methods, proto_methods);
-        assert_eq!(METHODS.len(), 106);
+        assert_eq!(METHODS.len(), 107);
     }
 
     #[test]
@@ -1062,7 +1068,7 @@ mod tests {
     #[test]
     fn method_matrix_tier_counts_match_inventory() {
         assert_eq!(method_count_by_tier(AuthTier::Read), 0);
-        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 62);
+        assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 63);
         assert_eq!(method_count_by_tier(AuthTier::Mutating), 20);
         assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 24);
     }
@@ -1079,6 +1085,14 @@ mod tests {
     fn route_origin_validation_is_sensitive_read() {
         assert_eq!(
             method_authz("/rustbgpd.v1.RpkiService/ValidateRouteOrigin").map(|method| method.tier),
+            Some(AuthTier::SensitiveRead)
+        );
+    }
+
+    #[test]
+    fn rpki_cache_inventory_is_sensitive_read() {
+        assert_eq!(
+            method_authz("/rustbgpd.v1.RpkiService/ListCaches").map(|method| method.tier),
             Some(AuthTier::SensitiveRead)
         );
     }
@@ -1169,7 +1183,7 @@ mod tests {
 
     #[test]
     fn markdown_totals_rejects_stale_percentage() {
-        let stale = INVENTORY_MD.replace(SENSITIVE_TOTAL, "| `sensitive_read` | 62 | 57.0% |");
+        let stale = INVENTORY_MD.replace(SENSITIVE_TOTAL, "| `sensitive_read` | 63 | 57.0% |");
         assert_eq!(
             verify_markdown_totals(&stale, &fixture_totals(), METHODS.len()),
             Err("percentage mismatch")
@@ -1219,7 +1233,7 @@ mod tests {
 
     #[test]
     fn markdown_totals_preserves_count_fence() {
-        let stale = INVENTORY_MD.replace(SENSITIVE_TOTAL, "| `sensitive_read` | 60 | 58.1% |");
+        let stale = INVENTORY_MD.replace(SENSITIVE_TOTAL, "| `sensitive_read` | 61 | 58.1% |");
         assert_eq!(
             verify_markdown_totals(&stale, &fixture_totals(), METHODS.len()),
             Err("counts mismatch")
