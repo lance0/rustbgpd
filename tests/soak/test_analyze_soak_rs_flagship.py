@@ -14,7 +14,8 @@ from pathlib import Path
 HERE = Path(__file__).parent
 ANALYZER = HERE / "analyze-soak-rs-flagship.py"
 ANALYZER_SPEC = importlib.util.spec_from_file_location("rs_soak_analyzer", ANALYZER)
-assert ANALYZER_SPEC is not None and ANALYZER_SPEC.loader is not None
+if ANALYZER_SPEC is None or ANALYZER_SPEC.loader is None:
+    raise RuntimeError(f"could not load soak analyzer from {ANALYZER}")
 analyzer = importlib.util.module_from_spec(ANALYZER_SPEC)
 ANALYZER_SPEC.loader.exec_module(analyzer)
 T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)

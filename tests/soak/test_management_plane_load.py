@@ -13,6 +13,7 @@ import time
 import unittest
 import urllib.error
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
@@ -249,6 +250,32 @@ class ManagementPlaneLoadContracts(unittest.TestCase):
         self.assertIs(records[-1], summaries[0])
         self.assertEqual(summaries[0]["result"], "clean_sigterm")
         self.assertNotIn("payload", raw.decode())
+
+    def test_jsonl_sink_completes_short_writes_and_rejects_no_progress(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "short.jsonl")
+            sink = load.JsonlSink(path)
+            real_write = os.write
+            writes = []
+
+            def short_write(fd, data):
+                chunk = data[: max(1, len(data) // 2)]
+                writes.append(len(chunk))
+                return real_write(fd, chunk)
+
+            with mock.patch.object(load.os, "write", side_effect=short_write):
+                sink.write({"record": "test", "value": "x" * 64}, terminal=True)
+            sink.close()
+            records = [json.loads(line) for line in Path(path).read_bytes().splitlines()]
+            self.assertEqual(records, [{"record": "test", "value": "x" * 64}])
+            self.assertGreater(len(writes), 1)
+
+            stalled_path = str(Path(tmp) / "stalled.jsonl")
+            stalled = load.JsonlSink(stalled_path)
+            with mock.patch.object(load.os, "write", return_value=0):
+                with self.assertRaisesRegex(RuntimeError, "made no progress"):
+                    stalled.write({"record": "test"})
+            stalled.close()
 
     def test_runner_starts_load_after_convergence_before_measured_window(self):
         runner = (HERE / "run-soak-rs-flagship.sh").read_text()

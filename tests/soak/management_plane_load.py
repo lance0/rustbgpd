@@ -171,9 +171,12 @@ class JsonlSink:
         if len(encoded) > MAX_RECORD_BYTES:
             raise RuntimeError(f"management-plane JSONL record exceeds {MAX_RECORD_BYTES} bytes")
         with self._lock:
-            written = os.write(self._fd, encoded)
-            if written != len(encoded):
-                raise RuntimeError("short management-plane JSONL append")
+            view = memoryview(encoded)
+            while view:
+                written = os.write(self._fd, view)
+                if written <= 0:
+                    raise RuntimeError("management-plane JSONL append made no progress")
+                view = view[written:]
             if terminal:
                 os.fsync(self._fd)
 
