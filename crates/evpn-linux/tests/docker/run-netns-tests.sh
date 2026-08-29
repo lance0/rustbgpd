@@ -132,7 +132,7 @@ case "${1:-all}" in
     fdb_nhg_cve)        TEST_BIN="netns_fdb_nhg"; FILTER="cve_guard_blocks_install_when_learning_enabled" ;;
     fib_runtime)        FILTER=""; RUSTBGPD_TEST_FILTER="fib_runtime::tests::netns_general_unicast_fib_" ;;
     bfd_runtime)        FILTER=""; RUSTBGPD_TEST_FILTER="bfd_runtime::tests::netns::" ;;
-    bfd_runtime_ipv4)   FILTER=""; RUSTBGPD_TEST_FILTER="bfd_runtime::tests::netns::session_reaches_up_and_detects_down" ;;
+    bfd_runtime_ipv4)   FILTER="bfd_runtime::tests::netns::session_reaches_up_and_detects_down"; RUSTBGPD_TEST_FILTER="$FILTER" ;;
     bgp_unnumbered)     TEST_BIN="netns_bgp_unnumbered"; FILTER="" ;;
     link_carrier)       TEST_BIN="netns_link_carrier"; FILTER="" ;;
     ac_gate)            TEST_BIN="netns_ac_gate"; FILTER="" ;;
