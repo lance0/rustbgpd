@@ -3118,6 +3118,10 @@ fn sighup_reload_metric_outcome(
     }
 }
 
+fn record_sighup_ignored_in_flight(metrics: &BgpMetrics) {
+    metrics.record_sighup_reload_outcome(SighupReloadMetricOutcome::IgnoredInFlight);
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "runtime startup keeps listener, API, and shutdown wiring in one owner"
@@ -5286,7 +5290,7 @@ async fn run<T>(
             }
             _ = sighup.recv() => {
                 if reload_in_flight.is_some() {
-                    metrics.record_sighup_reload_outcome(SighupReloadMetricOutcome::IgnoredInFlight);
+                    record_sighup_ignored_in_flight(&metrics);
                     warn!("SIGHUP received while previous reload still in flight; ignoring");
                     continue;
                 }
@@ -6146,38 +6150,82 @@ mod tests {
         assert!(!run.contains("tokio::signal::ctrl_c()"));
     }
 
+    #[tokio::test]
+    async fn sighup_reload_metric_outcomes_are_behavioral() {
+        let config = Config::load_toml_with_diagnostics(
+            &tier_authorized_uds_test_config(
+                "[global]\nasn = 65000\nrouter_id = \"10.0.0.1\"\nlisten_port = 1179\n\n[global.telemetry]\nlog_format = \"json\"\n",
+            ),
+            "SIGHUP metric outcome test",
+        )
+        .unwrap();
+        let complete = SighupAuthority {
+            runtime: config.clone(),
+            desired: AcceptedConfigSnapshot::from_config_for_test(config),
+            dialout_targets: Vec::new(),
+            completion: reload::SighupCompletion::Complete,
+        };
+        let complete_outcome = Ok(Ok(complete));
+        assert_eq!(
+            sighup_reload_metric_outcome(&complete_outcome),
+            SighupReloadMetricOutcome::Complete
+        );
+
+        let rejected_outcome = Ok(Err(SighupReloadError::CoordinatorClosed));
+        assert_eq!(
+            sighup_reload_metric_outcome(&rejected_outcome),
+            SighupReloadMetricOutcome::RejectedNoEffect
+        );
+
+        let task_failed: Result<
+            Result<SighupAuthority, SighupReloadError>,
+            tokio::task::JoinError,
+        > = tokio::spawn(async { panic!("test reload task failure") }).await;
+        assert_eq!(
+            sighup_reload_metric_outcome(&task_failed),
+            SighupReloadMetricOutcome::TaskFailed
+        );
+    }
+
     #[test]
-    fn sighup_outcome_metric_covers_every_terminal_and_drop_path_once() {
-        let source = include_str!("main.rs");
-        let production = source.split_once("\n#[cfg(test)]\nmod tests").unwrap().0;
-        let classifier = production
-            .split_once("fn sighup_reload_metric_outcome(")
-            .unwrap()
-            .1
-            .split_once("\n}\n")
-            .unwrap()
-            .0;
-        for outcome in ["Complete", "KnownPartial", "RejectedNoEffect", "TaskFailed"] {
-            assert_eq!(
-                classifier
-                    .matches(&format!("SighupReloadMetricOutcome::{outcome}"))
-                    .count(),
-                1
+    fn sighup_ignored_in_flight_records_one_bounded_row() {
+        let metrics = BgpMetrics::new();
+        record_sighup_ignored_in_flight(&metrics);
+
+        let family = metrics
+            .registry()
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == "bgp_sighup_reload_outcomes_total")
+            .expect("SIGHUP outcome family registered");
+        let mut outcomes = BTreeSet::new();
+        for metric in family.get_metric() {
+            let outcome = metric
+                .get_label()
+                .iter()
+                .find(|label| label.name() == "outcome")
+                .expect("outcome label")
+                .value();
+            assert!(outcomes.insert(outcome), "duplicate {outcome} row");
+            let expected = if outcome == "ignored_in_flight" {
+                1.0
+            } else {
+                0.0
+            };
+            assert!(
+                (metric.get_counter().value() - expected).abs() < f64::EPSILON,
+                "unexpected {outcome} SIGHUP outcome count"
             );
         }
         assert_eq!(
-            production
-                .matches("record_sighup_reload_outcome(sighup_reload_metric_outcome(&outcome))")
-                .count(),
-            2,
-            "normal completion and shutdown drain must each classify before consumption",
-        );
-        assert_eq!(
-            production
-                .matches("record_sighup_reload_outcome(SighupReloadMetricOutcome::IgnoredInFlight)")
-                .count(),
-            1,
-            "each dropped concurrent signal is counted at the drop site",
+            outcomes,
+            BTreeSet::from([
+                "complete",
+                "ignored_in_flight",
+                "known_partial",
+                "rejected_no_effect",
+                "task_failed",
+            ])
         );
     }
 

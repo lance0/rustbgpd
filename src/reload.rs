@@ -7191,6 +7191,41 @@ tcp_ao = [
         assert_eq!(failures[0].bucket, "tcp_ao.awaiting_peer");
         assert_eq!(failures[0].error.to_string(), detail);
 
+        let metrics = BgpMetrics::new();
+        let classified = crate::sighup_reload_metric_outcome(&Ok(Ok(authority.clone())));
+        metrics.record_sighup_reload_outcome(classified);
+        let family = metrics
+            .registry()
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == "bgp_sighup_reload_outcomes_total")
+            .expect("SIGHUP outcome family registered");
+        let mut outcomes = std::collections::BTreeSet::new();
+        for metric in family.get_metric() {
+            let outcome = metric
+                .get_label()
+                .iter()
+                .find(|label| label.name() == "outcome")
+                .expect("outcome label")
+                .value();
+            assert!(outcomes.insert(outcome), "duplicate {outcome} row");
+            let expected = if outcome == "known_partial" { 1.0 } else { 0.0 };
+            assert!(
+                (metric.get_counter().value() - expected).abs() < f64::EPSILON,
+                "unexpected {outcome} SIGHUP outcome count"
+            );
+        }
+        assert_eq!(
+            outcomes,
+            std::collections::BTreeSet::from([
+                "complete",
+                "ignored_in_flight",
+                "known_partial",
+                "rejected_no_effect",
+                "task_failed",
+            ])
+        );
+
         let awaiting = TcpAoRotationStatus {
             desired: TcpAoRotationGeneration::new(2).unwrap(),
             applied: TcpAoRotationGeneration::STARTUP,
