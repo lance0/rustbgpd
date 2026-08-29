@@ -21,7 +21,7 @@ evpn           ──► wire
 evpn-linux     ──► evpn
 rib            ──► wire, policy, telemetry, rpki, bmp
 transport      ──► wire, fsm, rib, policy, rpki, telemetry, bmp
-api            ──► wire, fsm, rib, policy, transport, telemetry, evpn, event-history
+api            ──► wire, fsm, rib, policy, transport, telemetry, evpn, event-history, rpki
 cli            ──► wire, policy    (dev tests also use api, evpn, bmp)
 ```
 
@@ -258,14 +258,30 @@ SIGTERM in that window is retained and honored as a graceful shutdown instead
 of taking its default process action. The ordering is a contract, asserted by
 `signal_handlers_are_registered_before_external_reachability`.
 
-1. `main.rs` loads TOML config, validates, initializes logging and metrics.
-2. Checks for GR restart marker file (`runtime_state_dir/gr-restart.toml`). If present and not expired, static peers will advertise `R=1` in OPEN.
-3. Spawns RibManager task (owns all routing state).
-4. Spawns PeerManager task (owns neighbor lifecycle).
-5. Spawns BgpListener (accepts inbound TCP on `listen_port` on both address families — `0.0.0.0` and `[::]` — behind one accept loop; a family that cannot bind is logged and skipped).
-6. Spawns gRPC API server. Optionally spawns Prometheus metrics server (if `prometheus_addr` configured).
-7. Optionally spawns BMP manager + per-collector clients, MRT manager, RPKI VRP manager + RTR clients.
-8. For each configured neighbor, sends `AddPeer` to PeerManager → PeerManager spawns a PeerSession task.
+1. `main.rs` loads and validates the TOML config, initializes logging and
+   metrics, and checks the GR restart marker
+   (`runtime_state_dir/gr-restart.toml`). If the marker is present and not
+   expired, static peers advertise `R=1` in OPEN.
+2. It resolves the complete static-peer and policy/EVPN startup state, then
+   binds the BGP listener socket(s) and optional metrics/readiness socket. This
+   reserves every configured address and fails fast, but neither accept loop is
+   running yet.
+3. It starts EventHistoryManager before any event producer, when durable event
+   history is enabled.
+4. It wires and starts the optional BMP manager and collector clients, then
+   RibManager, the optional RPKI VRP/ASPA manager and RTR clients, the optional
+   MRT manager, and PeerManager.
+5. It starts the remaining pre-gRPC optional runtime actors, including BFD
+   from its already prepared sockets, and then starts the gRPC API server.
+6. For each configured neighbor, it sends `AddPeer` to PeerManager and waits
+   for the result, so the complete configured-peer roster is installed before
+   inbound BGP can be admitted.
+7. It activates BGP ingress by starting the accept loop and its PeerManager
+   forwarder, then starts the optional metrics/readiness server. A configured-
+   peer failure suppresses both activations and enters coordinated teardown.
+8. It constructs the gNMI dial-out manager and applies the configured targets
+   after metrics/readiness activation. An initial configured-peer failure also
+   suppresses this dial-out activation.
 
 ### Peer Establishment
 
