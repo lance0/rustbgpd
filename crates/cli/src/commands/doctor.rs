@@ -2208,8 +2208,11 @@ pub(crate) async fn run(
             match neighbor_snapshot {
                 Ok(resp) => {
                     let neighbors = resp.into_inner();
-                    let gtsm = effective_toml.as_deref().and_then(gtsm_inventory);
                     let admin_enabled = metrics_text.as_deref().and_then(admin_enabled_inventory);
+                    let gtsm = admin_enabled
+                        .as_ref()
+                        .and(effective_toml.as_deref())
+                        .and_then(gtsm_inventory);
                     let transitions = last_transition_by_peer(&session_events);
                     let losses = last_loss_by_peer(&session_events);
                     let admin_states = latest_admin_state_by_peer(&session_events);
@@ -2858,6 +2861,17 @@ ttl_security_hops = 3
                 .matches(".and_then(admin_enabled_inventory)")
                 .count(),
             1
+        );
+        let collection = production
+            .split("let admin_enabled =")
+            .nth(1)
+            .unwrap()
+            .split("let transitions =")
+            .next()
+            .unwrap();
+        assert!(
+            collection.find("admin_enabled_inventory").unwrap()
+                < collection.find("gtsm_inventory").unwrap()
         );
         let advisory = production
             .split("fn gtsm_advisory_check")
