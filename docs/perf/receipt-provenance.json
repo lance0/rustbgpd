@@ -15,11 +15,13 @@
     },
     {
       "path": "docs/perf/irr-reload-comparison-2026-08.md",
-      "measured_commit": "f2a8b0275d22d431ec0b031cb8f58fcf28a95029"
+      "measured_commit": "f2a8b0275d22d431ec0b031cb8f58fcf28a95029",
+      "measured_on": "2026-08-04"
     },
     {
       "path": "docs/perf/irr-reload-grouped-per-client-best-2026-08.md",
-      "measured_commit": "aa022e18c14fc8e2cf6ec23f9ba88d9e0c090042"
+      "measured_commit": "aa022e18c14fc8e2cf6ec23f9ba88d9e0c090042",
+      "measured_on": "2026-08-08"
     },
     {
       "path": "docs/perf/ixp-matrix-2026-07.md",
