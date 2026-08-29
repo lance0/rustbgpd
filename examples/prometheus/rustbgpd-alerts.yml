@@ -430,8 +430,9 @@ groups:
             dashboard p99 and transition state before retrying a reload.
 
       - alert: BgpOutboundRouteDrops
-        # A full outbound distribution channel drops BGP work instead of
-        # delaying it; the failed path can be advertisement or refresh work.
+        # This counter records terminal outbound work loss. Temporary
+        # collision-failback ROUTE-REFRESH saturation is retained and retried,
+        # so it does not increment this family.
         expr: increase(bgp_outbound_route_drops_total[10m]) > 0
         for: 0m
         labels:
@@ -442,10 +443,10 @@ groups:
             bgp_outbound_route_drops_total for peer {{ $labels.peer }} on
             {{ $labels.instance }} increased by
             {{ $value | printf "%.0f" }} in the last 10 minutes. Outbound BGP
-            work was lost before reaching the peer writer; inspect the writer,
-            peer, daemon log, and last error to identify the failed path. Once
-            healthy, refresh outbound for a missed advertised view or soft
-            reset inbound for a missed inbound ROUTE-REFRESH request.
+            work was terminally lost before reaching the peer writer; inspect
+            the writer, peer, daemon log, and last error to identify the failed
+            path. Once healthy, refresh outbound if the peer missed an
+            advertised view.
 
       - alert: BgpSendHoldExpired
         # RFC 9687 expiry means the remote peer stopped draining TCP long
@@ -593,26 +594,26 @@ groups:
 
       - alert: BmpSourceDrops
         # The per-peer PeerSession→BmpManager channel is lossy by design
-        # (it never backpressures the session). Any increment means the
-        # collectors' Adj-RIB monitoring view for this peer is now wrong;
-        # a dropped RouteMonitoring forces a synthetic PeerDown/PeerUp reset
-        # once the channel drains, so the collector rebuilds from scratch.
+        # (it never backpressures the session). channel_full/channel_closed
+        # mean a source event or report was lost. state_query_timeout means
+        # one periodic report was omitted and will be retried next tick.
         expr: increase(bmp_source_drops_total[10m]) > 0
         for: 0m
         labels:
           severity: warning
         annotations:
           summary: >-
-            BMP events dropped for {{ $labels.peer }} ({{ $labels.reason }})
+            BMP source work not delivered for {{ $labels.peer }} ({{ $labels.reason }})
           description: >-
             bmp_source_drops_total for peer {{ $labels.peer }} on
             {{ $labels.instance }} increased by
             {{ $value | printf "%.0f" }} in the last 10 minutes
-            (reason={{ $labels.reason }}). The BMP manager is not draining the
-            per-peer event channel as fast as the session produces events;
-            collectors receive a peer-state reset and rebuild this peer's view.
-            Find the slow collector via bmp_collector_drops_total and the
-            bmp_loc_rib_dump_live_buffer_* gauges.
+            (reason={{ $labels.reason }}). A channel_full or channel_closed
+            increment means a source-channel event or report was lost; a
+            state_query_timeout increment means one periodic report was
+            omitted and will be retried on the next tick. Check
+            bmp_stream_diverged for authoritative per-peer divergence, then
+            inspect source-channel pressure and session responsiveness.
 
       - alert: BmpStreamDiverged
         expr: bmp_stream_diverged == 1
