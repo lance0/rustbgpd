@@ -37,9 +37,9 @@ struct VrpGroup<N> {
 
 /// One effective VRP that covers a route prefix.
 ///
-/// Duplicate `(prefix, origin_asn)` inputs are collapsed by [`VrpTable`] and
-/// the greatest `max_len` is retained, so every returned row is the effective
-/// authorization used by origin validation.
+/// Duplicate `(network, prefix_len, origin_asn)` authorizations are collapsed
+/// by [`VrpTable`] and the greatest `max_len` is retained, so every returned
+/// row is the effective authorization used by origin validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoveringVrp {
     /// Canonical VRP network address.
