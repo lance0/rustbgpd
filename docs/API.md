@@ -1570,8 +1570,10 @@ block is configured. `state` is a `FibRouteState` enum (`FIB_ROUTE_STATE_INSTALL
 carries values such as `owned`, `foreign_route_exists`,
 `next_hop_family_unsupported`, `peer_not_allowed`,
 `route_limit_exceeded`, `owned_route_drifted`, `next_hop_unresolved`, `dump_failed:DETAIL`,
-`rib_query_failed:DETAIL`, or a kernel apply error such as
-`install_failed:DETAIL`.
+or a kernel apply error such as `install_failed:DETAIL`. When a pre-kernel
+planning query fails, this RPC preserves the last successful status snapshot;
+use `bgp_dataplane_reconcile_planning_failures_total` and the matching
+structured warning for the current failure.
 
 `ListFibRoutesRequest` supports optional filters for `table_name`, `state`,
 `reason`, exact `prefix` + `prefix_length`, and `peer_address`; filters compose

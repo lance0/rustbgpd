@@ -1503,6 +1503,7 @@ a snapshot or bounded history query.
 | `bgp_blackhole_discard_reaped_total` | Post-startup cleanup events for adopted-but-unclaimed kernel discard routes |
 | `bgp_blackhole_discard_rejected_total{reason}` | Pre-install rejection transitions; `reason` is bounded to `broad_prefix`, `not_ebgp`, `active_limit_exceeded`, or `install_rate_limited` |
 | `bgp_blackhole_discard_kernel_failures_total{action}` | Kernel-operation failure events; `action` is bounded to `setup`, `install`, `remove`, or `dump` |
+| `bgp_dataplane_reconcile_planning_failures_total{actor="blackhole_discard",reason}` | Pre-kernel planning aborts; `reason` is bounded to `send_failed`, `reply_dropped`, `query_failed`, or `timeout` |
 
 Use `rbgp rib blackholes` for the current per-prefix decision details.
 Reconcile planning is bounded to 30 seconds with two-second RIB query slices.
@@ -1533,11 +1534,22 @@ FIB runtime. The actor is still default-off; configure at least one
 | `bgp_fib_kernel_failures_total{action="install"}` | Kernel rejected an add operation for a reason other than a classified unresolved next hop |
 | `bgp_fib_kernel_failures_total{action="replace"}` | Kernel rejected a replace operation for a reason other than a classified unresolved next hop |
 | `bgp_fib_kernel_failures_total{action="remove"}` | Kernel rejected a remove operation |
+| `bgp_dataplane_reconcile_planning_failures_total{actor="general_fib",reason}` | Pre-kernel planning aborts; the last successful status snapshot and all kernel/ownership state remain unchanged |
 | `bgp_kernel_route_notify_dropped_total{actor,reason="channel_full"}` | Kernel route-event wake feed dropped an event before the FIB or BLACKHOLE reconciler could consume it; periodic reconcile remains the repair backstop |
 | `bgp_kernel_route_notify_subscription_failures_total{actor,group}` | The FIB or BLACKHOLE reconciler failed to subscribe to an IPv4/IPv6 route multicast group and is running with periodic-only kernel-drift repair |
 | `bgp_netlink_subscription_overruns_total{actor}` | The kernel reported a receive-buffer overrun to the `link_carrier`, `general_fib`, or `blackhole_discard` NETLINK_ROUTE actor. Each increment is one overrun notification—not a count of lost events—and proves only that one or more multicast events may have been lost |
 | `bgp_session_notification_outstanding` | Current lossless session notifications from sender entry through successful PeerManager dequeue. This includes synchronous in-flight reservations plus queued notifications; handling occurs after the value is decremented. |
 | `bgp_session_notification_outstanding_high_watermark` | Monotonic daemon-lifetime high-water mark of that outstanding population. It resets only when the daemon restarts and is not an exact per-flap or per-round peak. |
+
+Alert on recent planning aborts without assuming the status RPC was refreshed:
+
+```promql
+increase(bgp_dataplane_reconcile_planning_failures_total[10m]) > 0
+```
+
+Correlate `actor` and bounded `reason` with the structured warning; its `stage`
+field is diagnostic context, not a metric label. General-FIB shutdown
+cancellation is not counted.
 
 The three netlink-overrun series are materialized at zero. A non-zero value
 does not identify which multicast group lost events and does not prove that a

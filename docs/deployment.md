@@ -1396,6 +1396,7 @@ short version for first deployment:
 | Routes received but not installed | `rbgp rib`, then `rbgp rib received <peer> --rejected`; for the statement-level trace, `rbgp policy explain --neighbor <peer> --prefix <CIDR>` (opt-in: needs `[policy.explain] enabled = true`) |
 | Reload didn't change behavior | `rustbgpd --diff <file>` + cross-reference [reload matrix](reload-matrix.md) |
 | FIB programming failures | `bgp_fib_kernel_failures_total` Prometheus counter + `journalctl` for `kernel-dataplane` lines |
+| FIB or BLACKHOLE planning stops before kernel access | `increase(bgp_dataplane_reconcile_planning_failures_total[10m]) > 0` + matching structured warning; status remains the last successful snapshot |
 | EVPN-specific issues | [`evpn-vtep-troubleshooting.md`](evpn-vtep-troubleshooting.md) |
 | Anything not above | [`OPERATIONS.md`](OPERATIONS.md) "Debugging" section |
 

@@ -582,7 +582,7 @@ async fn query_best_route_pages(
     rib_tx: &mpsc::Sender<RibUpdate>,
     config: BlackholeConfig,
     planning_deadline: tokio::time::Instant,
-) -> Option<(Vec<Candidate>, rustbgpd_rib::RoutePageVersion, bool)> {
+) -> Result<(Vec<Candidate>, rustbgpd_rib::RoutePageVersion, bool), &'static str> {
     let mut after = None;
     let mut derived = Vec::new();
     let mut first_version = None;
@@ -590,7 +590,7 @@ async fn query_best_route_pages(
     loop {
         let deadline = planning_request_deadline(planning_deadline);
         if tokio::time::Instant::now() >= deadline {
-            return None;
+            return Err("timeout");
         }
         let (reply, rx) = oneshot::channel();
         let query = async {
@@ -601,10 +601,14 @@ async fn query_best_route_pages(
                     reply,
                 })
                 .await
-                .map_err(|_| ())?;
-            rx.await.map_err(|_| ())?.map_err(|_| ())
+                .map_err(|_| "send_failed")?;
+            rx.await
+                .map_err(|_| "reply_dropped")?
+                .map_err(|_| "query_failed")
         };
-        let page = tokio::time::timeout_at(deadline, query).await.ok()?.ok()?;
+        let page = tokio::time::timeout_at(deadline, query)
+            .await
+            .map_err(|_| "timeout")??;
         if let Some(first) = first_version {
             churned |= first != page.observed_version;
         } else {
@@ -613,7 +617,7 @@ async fn query_best_route_pages(
         derived.extend(derive_desired(config, &page.routes));
         match page.next_cursor {
             Some(cursor) => after = Some(cursor),
-            None => return Some((derived, first_version?, churned)),
+            None => return Ok((derived, first_version.ok_or("query_failed")?, churned)),
         }
     }
 }
@@ -622,7 +626,7 @@ async fn exact_best_routes(
     rib_tx: &mpsc::Sender<RibUpdate>,
     prefixes: Vec<Prefix>,
     planning_deadline: tokio::time::Instant,
-) -> Option<(Vec<Option<Route>>, rustbgpd_rib::RoutePageVersion, bool)> {
+) -> Result<(Vec<Option<Route>>, rustbgpd_rib::RoutePageVersion, bool), &'static str> {
     let mut routes = Vec::with_capacity(prefixes.len());
     let mut version = None;
     let mut churned = false;
@@ -637,10 +641,14 @@ async fn exact_best_routes(
                     reply,
                 })
                 .await
-                .map_err(|_| ())?;
-            rx.await.map_err(|_| ())?.map_err(|_| ())
+                .map_err(|_| "send_failed")?;
+            rx.await
+                .map_err(|_| "reply_dropped")?
+                .map_err(|_| "query_failed")
         };
-        let exact = tokio::time::timeout_at(deadline, query).await.ok()?.ok()?;
+        let exact = tokio::time::timeout_at(deadline, query)
+            .await
+            .map_err(|_| "timeout")??;
         if let Some(first) = version {
             churned |= first != exact.observed_version;
         } else {
@@ -648,23 +656,27 @@ async fn exact_best_routes(
         }
         routes.extend(exact.routes);
     }
-    Some((routes, version?, churned))
+    Ok((routes, version.ok_or("query_failed")?, churned))
 }
 
 async fn query_dataplane_versions(
     rib_tx: &mpsc::Sender<RibUpdate>,
     planning_deadline: tokio::time::Instant,
-) -> Option<rustbgpd_rib::DataplaneVersions> {
+) -> Result<rustbgpd_rib::DataplaneVersions, &'static str> {
     let deadline = planning_request_deadline(planning_deadline);
     let (reply, rx) = oneshot::channel();
     let query = async {
         rib_tx
             .send(RibUpdate::QueryDataplaneVersions { deadline, reply })
             .await
-            .map_err(|_| ())?;
-        rx.await.map_err(|_| ())?.map_err(|_| ())
+            .map_err(|_| "send_failed")?;
+        rx.await
+            .map_err(|_| "reply_dropped")?
+            .map_err(|_| "query_failed")
     };
-    tokio::time::timeout_at(deadline, query).await.ok()?.ok()
+    tokio::time::timeout_at(deadline, query)
+        .await
+        .map_err(|_| "timeout")?
 }
 
 #[expect(
@@ -682,11 +694,20 @@ async fn reconcile_once<F>(
     F: BlackholeFib,
 {
     let planning_deadline = tokio::time::Instant::now() + PLANNING_TIMEOUT;
-    let Some((mut derived, first_version, mut churned)) =
-        query_best_route_pages(rib_tx, config, planning_deadline).await
-    else {
-        return;
-    };
+    let (mut derived, first_version, mut churned) =
+        match query_best_route_pages(rib_tx, config, planning_deadline).await {
+            Ok(result) => result,
+            Err(reason) => {
+                metrics.record_dataplane_reconcile_planning_failure("blackhole_discard", reason);
+                warn!(
+                    actor = "blackhole_discard",
+                    reason,
+                    stage = "route_pages",
+                    "dataplane reconcile planning failed"
+                );
+                return;
+            }
+        };
     let provisional_desired: HashSet<Prefix> = derived
         .iter()
         .filter(|candidate| candidate.installable)
@@ -703,11 +724,21 @@ async fn reconcile_once<F>(
         .into_iter()
         .collect();
     if !protected.is_empty() {
-        let Some((exact, exact_version, exact_churn)) =
-            exact_best_routes(rib_tx, protected, planning_deadline).await
-        else {
-            return;
-        };
+        let (exact, exact_version, exact_churn) =
+            match exact_best_routes(rib_tx, protected, planning_deadline).await {
+                Ok(result) => result,
+                Err(reason) => {
+                    metrics
+                        .record_dataplane_reconcile_planning_failure("blackhole_discard", reason);
+                    warn!(
+                        actor = "blackhole_discard",
+                        reason,
+                        stage = "exact_routes",
+                        "dataplane reconcile planning failed"
+                    );
+                    return;
+                }
+            };
         churned |= exact_churn || exact_version != first_version;
         for route in exact.into_iter().flatten() {
             if let Some(candidate) = derive_desired(config, std::slice::from_ref(&route))
@@ -719,8 +750,18 @@ async fn reconcile_once<F>(
             }
         }
     }
-    let Some(seal) = query_dataplane_versions(rib_tx, planning_deadline).await else {
-        return;
+    let seal = match query_dataplane_versions(rib_tx, planning_deadline).await {
+        Ok(seal) => seal,
+        Err(reason) => {
+            metrics.record_dataplane_reconcile_planning_failure("blackhole_discard", reason);
+            warn!(
+                actor = "blackhole_discard",
+                reason,
+                stage = "version_seal",
+                "dataplane reconcile planning failed"
+            );
+            return;
+        }
     };
     churned |= seal.routes != first_version;
     let guarded_churn = churned
@@ -742,6 +783,13 @@ async fn reconcile_once<F>(
     let mut current_rejected = HashSet::new();
 
     if tokio::time::Instant::now() >= planning_deadline {
+        metrics.record_dataplane_reconcile_planning_failure("blackhole_discard", "timeout");
+        warn!(
+            actor = "blackhole_discard",
+            reason = "timeout",
+            stage = "post_seal",
+            "dataplane reconcile planning failed"
+        );
         return;
     }
 
@@ -2003,15 +2051,33 @@ pub(super) mod tests {
         }));
     }
 
+    #[derive(Clone, Copy)]
+    enum PlanningFailure {
+        Send,
+        Page,
+        Exact,
+        Seal,
+    }
+
+    impl PlanningFailure {
+        const fn reason(self) -> &'static str {
+            match self {
+                Self::Send => "send_failed",
+                Self::Page => "reply_dropped",
+                Self::Exact => "query_failed",
+                Self::Seal => "timeout",
+            }
+        }
+    }
+
     #[tokio::test]
     async fn page_exact_and_seal_failures_leave_blackhole_state_unpublished_and_untouched() {
-        #[derive(Clone, Copy)]
-        enum Failure {
-            Page,
-            Exact,
-            Seal,
-        }
-        for failure in [Failure::Page, Failure::Exact, Failure::Seal] {
+        for failure in [
+            PlanningFailure::Send,
+            PlanningFailure::Page,
+            PlanningFailure::Exact,
+            PlanningFailure::Seal,
+        ] {
             let prefix = v4(32);
             let desired = route(
                 prefix,
@@ -2023,21 +2089,26 @@ pub(super) mod tests {
             let cursor_route = route(cursor, RouteOrigin::Ebgp, Vec::new());
             let (rib_tx, mut rib_rx) = mpsc::channel(8);
             tokio::spawn(async move {
+                if matches!(failure, PlanningFailure::Send) {
+                    drop(rib_rx);
+                    return;
+                }
                 let mut page_calls = 0usize;
                 while let Some(update) = rib_rx.recv().await {
                     match update {
                         RibUpdate::QueryBestRoutesPage { reply, .. } => {
                             page_calls += 1;
-                            if matches!(failure, Failure::Page) && page_calls == 2 {
+                            if matches!(failure, PlanningFailure::Page) && page_calls == 2 {
                                 drop(reply);
                             } else {
-                                let (routes, next_cursor) = if matches!(failure, Failure::Page) {
-                                    (vec![cursor_route.clone()], Some(cursor))
-                                } else if matches!(failure, Failure::Seal) {
-                                    (vec![desired.clone()], None)
-                                } else {
-                                    (Vec::new(), None)
-                                };
+                                let (routes, next_cursor) =
+                                    if matches!(failure, PlanningFailure::Page) {
+                                        (vec![cursor_route.clone()], Some(cursor))
+                                    } else if matches!(failure, PlanningFailure::Seal) {
+                                        (vec![desired.clone()], None)
+                                    } else {
+                                        (Vec::new(), None)
+                                    };
                                 let _ = reply.send(Ok(rustbgpd_rib::BestRoutesPage {
                                     routes,
                                     next_cursor,
@@ -2046,12 +2117,16 @@ pub(super) mod tests {
                             }
                         }
                         RibUpdate::QueryBestRoutesExact { reply, .. } => {
-                            if matches!(failure, Failure::Exact) {
-                                drop(reply);
+                            if matches!(failure, PlanningFailure::Exact) {
+                                let _ = reply.send(Err(
+                                    rustbgpd_rib::DataplaneExactQueryError::BudgetExceeded,
+                                ));
                             }
                         }
                         RibUpdate::QueryDataplaneVersions { reply, .. } => {
-                            if matches!(failure, Failure::Seal) {
+                            if matches!(failure, PlanningFailure::Seal) {
+                                tokio::time::sleep(RIB_QUERY_TIMEOUT + Duration::from_millis(10))
+                                    .await;
                                 drop(reply);
                             }
                         }
@@ -2059,6 +2134,9 @@ pub(super) mod tests {
                     }
                 }
             });
+            if matches!(failure, PlanningFailure::Send) {
+                rib_tx.closed().await;
+            }
             let metrics = BgpMetrics::with_registry(Registry::new());
             let sentinel = vec![BlackholeStatus {
                 prefix,
@@ -2091,6 +2169,7 @@ pub(super) mod tests {
             assert!(state.adoption.swept && state.adoption.pending.is_empty());
             assert_eq!(*status_rx.borrow(), sentinel);
             assert!(gauge_value(&metrics, "bgp_blackhole_discard_active").abs() < f64::EPSILON);
+            assert_planning_failure_value(&metrics, "blackhole_discard", failure.reason(), 1.0);
         }
     }
 
@@ -2158,6 +2237,7 @@ pub(super) mod tests {
         assert!(fib.install_calls.is_empty() && fib.remove_calls.is_empty());
         assert!(state.owned.is_empty() && state.ownership.prefixes.is_empty());
         assert_eq!(*status_rx.borrow(), sentinel);
+        assert_planning_failure_value(&test_metrics, "blackhole_discard", "timeout", 1.0);
     }
 
     fn rib_with_routes(routes: Vec<Route>) -> mpsc::Sender<RibUpdate> {
@@ -2393,6 +2473,48 @@ pub(super) mod tests {
                 })
             })
             .unwrap_or(0.0)
+    }
+
+    fn planning_failure_value(metrics: &BgpMetrics, actor: &str, reason: &str) -> f64 {
+        metrics
+            .registry()
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == "bgp_dataplane_reconcile_planning_failures_total")
+            .and_then(|family| {
+                family
+                    .get_metric()
+                    .iter()
+                    .find(|metric| {
+                        let labels: HashMap<_, _> = metric
+                            .get_label()
+                            .iter()
+                            .map(|label| (label.name(), label.value()))
+                            .collect();
+                        labels.get("actor") == Some(&actor) && labels.get("reason") == Some(&reason)
+                    })
+                    .cloned()
+            })
+            .and_then(|metric| {
+                metric
+                    .get_counter()
+                    .as_ref()
+                    .map(prometheus::proto::Counter::value)
+            })
+            .unwrap_or(0.0)
+    }
+
+    fn assert_planning_failure_value(
+        metrics: &BgpMetrics,
+        actor: &str,
+        reason: &str,
+        expected: f64,
+    ) {
+        let actual = planning_failure_value(metrics, actor, reason);
+        assert!(
+            (actual - expected).abs() < f64::EPSILON,
+            "expected {expected}, got {actual} for {actor}/{reason}"
+        );
     }
 
     fn gauge_value(metrics: &BgpMetrics, name: &str) -> f64 {
