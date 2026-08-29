@@ -10,15 +10,15 @@
 //! TOML through the coordinator while non-noop mutations fail closed
 //! until actor convergence commands exist.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use rustbgpd_evpn::ip_vrf::{IpVrfId, IpVrfNotReady, IpVrfStatus, IpVrfTable};
 use rustbgpd_evpn::{
-    BridgeVlan, BumEnforcementTable, DfAlgorithm, EthernetSegmentIdentifier, EvpnInstance,
-    EvpnInstanceId, EvpnInstanceTable, EvpnRuntimeLifecycle, EvpnRuntimeModel,
+    BridgeVlan, BumEnforcementTable, DfAlgorithm, DuplicateMacKey, EthernetSegmentIdentifier,
+    EvpnInstance, EvpnInstanceId, EvpnInstanceTable, EvpnRuntimeLifecycle, EvpnRuntimeModel,
     EvpnRuntimeMutationState, EvpnRuntimePlan, EvpnRuntimeSnapshot, FdbNexthopDataplaneStatus,
     InstanceDataplaneStatus, InstanceState, IpVrfDataplaneStatus, MacAddress, ManagedNetdevStatus,
     SameEsiBiasTable,
@@ -103,6 +103,12 @@ pub type EthernetSegmentDrainReasonsFn =
 
 /// Read-side hook for the current ADR-0063 EVPN runtime model.
 pub type EvpnRuntimeModelFn = Arc<dyn Fn() -> EvpnRuntimeModel + Send + Sync + 'static>;
+
+/// Read-side hook for the actor-published active duplicate-MAC quarantine set.
+pub type DuplicateMacQuarantineSnapshotFn =
+    Arc<dyn Fn() -> Arc<BTreeSet<DuplicateMacKey>> + Send + Sync + 'static>;
+
+const DUPLICATE_MAC_QUARANTINE_RESPONSE_CAP: usize = 4096;
 
 pub type EvpnRuntimeApplyFuture = Pin<
     Box<dyn Future<Output = Result<proto::ApplyEvpnRuntimeResponse, EvpnRuntimeApplyError>> + Send>,
@@ -200,6 +206,7 @@ pub struct EvpnService {
     runtime_model: EvpnRuntimeModelFn,
     runtime_apply: Option<EvpnRuntimeApplyFn>,
     duplicate_mac_clear: Option<DuplicateMacClearFn>,
+    duplicate_mac_quarantine_snapshot: DuplicateMacQuarantineSnapshotFn,
     ethernet_segment_drain: Option<EthernetSegmentDrainFn>,
 }
 
@@ -227,6 +234,7 @@ impl EvpnService {
             runtime_model,
             runtime_apply: None,
             duplicate_mac_clear: None,
+            duplicate_mac_quarantine_snapshot: Arc::new(|| Arc::new(BTreeSet::new())),
             ethernet_segment_drain: None,
         }
     }
@@ -258,6 +266,7 @@ impl EvpnService {
             runtime_model,
             runtime_apply: None,
             duplicate_mac_clear: None,
+            duplicate_mac_quarantine_snapshot: Arc::new(|| Arc::new(BTreeSet::new())),
             ethernet_segment_drain: None,
         }
     }
@@ -361,6 +370,7 @@ impl EvpnService {
             runtime_model,
             runtime_apply,
             duplicate_mac_clear,
+            duplicate_mac_quarantine_snapshot: Arc::new(|| Arc::new(BTreeSet::new())),
             ethernet_segment_drain: None,
         }
     }
@@ -426,6 +436,16 @@ impl EvpnService {
         ethernet_segment_drain: Option<EthernetSegmentDrainFn>,
     ) -> Self {
         self.ethernet_segment_drain = ethernet_segment_drain;
+        self
+    }
+
+    /// Attach the actor-published active duplicate-MAC quarantine snapshot.
+    #[must_use]
+    pub fn with_duplicate_mac_quarantine_snapshot(
+        mut self,
+        snapshot: DuplicateMacQuarantineSnapshotFn,
+    ) -> Self {
+        self.duplicate_mac_quarantine_snapshot = snapshot;
         self
     }
 }
@@ -673,6 +693,32 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
         Ok(Response::new(proto::ClearDuplicateMacQuarantineResponse {
             cleared: outcome.cleared,
             message,
+        }))
+    }
+
+    async fn list_duplicate_mac_quarantines(
+        &self,
+        _request: Request<proto::ListDuplicateMacQuarantinesRequest>,
+    ) -> Result<Response<proto::ListDuplicateMacQuarantinesResponse>, Status> {
+        let snapshot = (self.duplicate_mac_quarantine_snapshot)();
+        let quarantines = snapshot
+            .iter()
+            .take(DUPLICATE_MAC_QUARANTINE_RESPONSE_CAP)
+            .map(|key| proto::DuplicateMacQuarantine {
+                vni: key.vni.as_u32(),
+                mac: key.mac.to_string(),
+            })
+            .collect();
+        let omitted = u64::try_from(
+            snapshot
+                .len()
+                .saturating_sub(DUPLICATE_MAC_QUARANTINE_RESPONSE_CAP),
+        )
+        .expect("supported targets fit a collection length in uint64");
+        Ok(Response::new(proto::ListDuplicateMacQuarantinesResponse {
+            quarantines,
+            omitted,
+            complete: omitted == 0,
         }))
     }
 
@@ -1251,6 +1297,54 @@ mod tests {
             .unwrap()
             .into_inner();
         assert!(resp.instances.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_duplicate_mac_quarantines_is_empty_and_complete_by_default() {
+        let svc = EvpnService::new(Arc::new(EvpnInstanceTable::new()));
+        let resp = svc
+            .list_duplicate_mac_quarantines(Request::new(
+                proto::ListDuplicateMacQuarantinesRequest {},
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(resp.quarantines.is_empty());
+        assert_eq!(resp.omitted, 0);
+        assert!(resp.complete);
+    }
+
+    #[tokio::test]
+    async fn list_duplicate_mac_quarantines_is_ordered_canonical_and_exactly_bounded() {
+        let mut keys = BTreeSet::new();
+        for index in 0_u32..4098 {
+            let octets = index.to_be_bytes();
+            keys.insert(DuplicateMacKey::new(
+                EvpnInstanceId::new(100 + (index % 2)).unwrap(),
+                MacAddress::new([0xAA, 0xBB, octets[0], octets[1], octets[2], octets[3]]),
+            ));
+        }
+        let snapshot = Arc::new(keys);
+        let svc = EvpnService::new(Arc::new(EvpnInstanceTable::new()))
+            .with_duplicate_mac_quarantine_snapshot(Arc::new(move || snapshot.clone()));
+
+        let resp = svc
+            .list_duplicate_mac_quarantines(Request::new(
+                proto::ListDuplicateMacQuarantinesRequest {},
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(resp.quarantines.len(), 4096);
+        assert_eq!(resp.omitted, 2);
+        assert!(!resp.complete);
+        assert_eq!(resp.quarantines[0].vni, 100);
+        assert_eq!(resp.quarantines[0].mac, "aa:bb:00:00:00:00");
+        assert!(
+            resp.quarantines
+                .windows(2)
+                .all(|rows| (rows[0].vni, &rows[0].mac) < (rows[1].vni, &rows[1].mac))
+        );
     }
 
     #[tokio::test]

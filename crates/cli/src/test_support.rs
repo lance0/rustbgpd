@@ -1349,6 +1349,22 @@ struct MockEvpnService;
 
 #[tonic::async_trait]
 impl rustbgpd_api::proto::evpn_service_server::EvpnService for MockEvpnService {
+    async fn list_duplicate_mac_quarantines(
+        &self,
+        _request: Request<server_proto::ListDuplicateMacQuarantinesRequest>,
+    ) -> Result<Response<server_proto::ListDuplicateMacQuarantinesResponse>, Status> {
+        Ok(Response::new(
+            server_proto::ListDuplicateMacQuarantinesResponse {
+                quarantines: vec![server_proto::DuplicateMacQuarantine {
+                    vni: 100,
+                    mac: "aa:bb:cc:dd:ee:ff".into(),
+                }],
+                omitted: 0,
+                complete: true,
+            },
+        ))
+    }
+
     async fn get_evpn_runtime(
         &self,
         _request: Request<server_proto::GetEvpnRuntimeRequest>,

@@ -51,7 +51,9 @@ Shipped and interop-tested:
 - Active-active multi-homing building blocks: DF election, Type 1/4, BUM
   suppression, aliasing ECMP via FDB nexthop groups, and all-active Type 5
   receive.
-- Duplicate-MAC detection with quarantine and manual clear.
+- Duplicate-MAC detection with quarantine, bounded key-only status listing,
+  and manual clear. The listing intentionally exposes no detector clocks or
+  recovery durations and caps each atomic snapshot response at 4096 rows.
 - Controller injection for EVPN route types 2, 3, and 5.
 - VNI-per-broadcast-domain VLAN-aware bridge support, including SVD /
   collect-metadata VXLAN detection and programming.

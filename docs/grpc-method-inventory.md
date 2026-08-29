@@ -229,7 +229,7 @@ shape itself does not raise the tier.
 | `GetMetrics` | `sensitive_read` | Returns Prometheus-shaped counters; volumetric metadata leaks RIB size, peer count, churn rate. |
 | `TriggerMrtDump` | `operator_only` | Writes a TABLE_DUMP_V2 snapshot to disk. Disk-I/O burst, potentially very large; also exposes RIB content to whoever can read the dump file later. |
 
-### EvpnService (10 RPCs)
+### EvpnService (11 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
@@ -240,6 +240,7 @@ shape itself does not raise the tier.
 | `ListIpVrfs` | `sensitive_read` | Gate 9 IP-VRF table. |
 | `ListManagedNetdevs` | `sensitive_read` | ADR-0091 managed EVPN netdev status — exposes desired bridge, fixed-VNI VXLAN, VLAN upper, VRF, and L3VXLAN names, ownership stamps, observed protected attributes, and orphan/foreign/unsafe state. |
 | `GetIpVrf` | `sensitive_read` | Single-VRF detail. |
+| `ListDuplicateMacQuarantines` | `sensitive_read` | Bounded deterministic key-only snapshot of active duplicate-MAC local-origin quarantines. |
 | `ClearDuplicateMacQuarantine` | `mutating` | Clears one local duplicate-MAC suppression key and may replay still-live local MAC state. Reversible, per-`(VNI, MAC)` scope; not a route-injection primitive and not a clear-all. |
 | `SetEthernetSegmentDrain` | `operator_only` | ADR-0084 manual Ethernet Segment drain/undrain. Draining withdraws the ES's Type 4/EAD routes and the member VNIs' local Type 2 routes and suppresses new local-MAC origination — traffic-impacting origination control that redirects live customer traffic onto remote PEs' backup paths (a step above the per-key, restorative duplicate-MAC clear). Owns the `operator` drain reason only (ADR-0085): reasons compose, so the response's `drained` is the composed state and `reasons` lists what holds (an operator undrain does not override a `link` drain from the interface binding). Runtime-only and in-memory; restart clears it (bound segments re-evaluate carrier at startup). |
 | `ApplyEvpnRuntime` | `mutating` | ADR-0063 full-candidate EVPN runtime validation/apply entry point. `validate_only` and no-op applies are bounded; supported shapes converge live and commit a new generation (single L2VNI/IP-VRF/Ethernet-Segment add/delete/redefine, additive build-up, atomic tenant teardown, `ip_vrf` relink, and decomposable mixed edits ordered as deletes -> redefines -> `ip_vrf` relinks -> adds). L3VNI/device/table IP-VRF identity redefine remains restart-required by design; unsupported dependency cycles fail closed before commit and later convergence failures fail-stop on the last committed generation. Request TOML can contain credentials and must be audit-redacted. |
@@ -258,13 +259,13 @@ shape itself does not raise the tier.
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 0 | 0.0% |
-| `sensitive_read` | 61 | 58.1% |
-| `mutating` | 20 | 19.0% |
-| `operator_only` | 24 | 22.9% |
-| **Total** | **105** | **100%** |
+| `sensitive_read` | 62 | 58.5% |
+| `mutating` | 20 | 18.9% |
+| `operator_only` | 24 | 22.6% |
+| **Total** | **106** | **100%** |
 
-(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 105
-total is 101 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
+(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 106
+total is 102 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
 
 ## Notes for ADR-0064
 
@@ -343,7 +344,7 @@ specific method if the model warrants it.
 
 ## Code matrix
 
-`crates/api/src/authz.rs` contains the same 105-method classification
+`crates/api/src/authz.rs` contains the same 106-method classification
 as a static Rust table. `docs/grpc-method-inventory.json` is the
 machine-readable export for auditors, tooling, and generated clients. The
 `authz` tests parse `proto/rustbgpd.proto` and fail if a new RPC is added

@@ -3636,6 +3636,10 @@ service EvpnService {
   // Gate 9 — fetch one IP-VRF by operator-facing `name`.
   // Returns `NotFound` when the name is not in the resolved table.
   rpc GetIpVrf(GetIpVrfRequest) returns (IpVrfState);
+  // List the current RFC 7432 section 15.1 duplicate-MAC local-origin
+  // quarantines from one atomic actor-published snapshot. The response is
+  // bounded and key-only; it does not expose detector timing state.
+  rpc ListDuplicateMacQuarantines(ListDuplicateMacQuarantinesRequest) returns (ListDuplicateMacQuarantinesResponse);
   // RFC 7432 section 15.1 duplicate-MAC loop protection — manually
   // clear local-origin suppression for one `(VNI, MAC)`. Returns
   // `cleared = false` when no active quarantine exists. This does
@@ -3881,6 +3885,23 @@ message IpVrfRemotePrefixDropCount {
 message GetIpVrfRequest {
   // Operator-facing handle (`name` field on `[[evpn_ip_vrfs]]`).
   string name = 1;
+}
+
+message ListDuplicateMacQuarantinesRequest {}
+
+message DuplicateMacQuarantine {
+  uint32 vni = 1;
+  // Canonical lowercase colon-hex MAC address.
+  string mac = 2;
+}
+
+message ListDuplicateMacQuarantinesResponse {
+  // At most 4096 rows, ordered by VNI then raw MAC bytes.
+  repeated DuplicateMacQuarantine quarantines = 1;
+  // Exact number of rows omitted by the response cap.
+  uint64 omitted = 2;
+  // True exactly when omitted is zero.
+  bool complete = 3;
 }
 
 message ClearDuplicateMacQuarantineRequest {

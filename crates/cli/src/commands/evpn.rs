@@ -9,10 +9,11 @@ use crate::proto::{
     AddEvpnRouteRequest, ClearDuplicateMacQuarantineRequest, DeleteEvpnRouteRequest,
     EthernetSegmentState, EvpnInstanceReadinessState, EvpnInstanceState, EvpnRuntimeLifecycle,
     EvpnRuntimeMutationState, EvpnRuntimeState, GetEvpnRuntimeRequest, GetIpVrfRequest,
-    IpVrfReadinessState, IpVrfState, ListEthernetSegmentsRequest, ListEthernetSegmentsResponse,
-    ListEvpnInstancesRequest, ListEvpnNexthopsRequest, ListEvpnRequest, ListIpVrfsRequest,
-    ListManagedNetdevsRequest, ManagedNetdevClass, ManagedNetdevLifecycleState, ManagedNetdevState,
-    MetricsRequest, SetEthernetSegmentDrainRequest,
+    IpVrfReadinessState, IpVrfState, ListDuplicateMacQuarantinesRequest,
+    ListEthernetSegmentsRequest, ListEthernetSegmentsResponse, ListEvpnInstancesRequest,
+    ListEvpnNexthopsRequest, ListEvpnRequest, ListIpVrfsRequest, ListManagedNetdevsRequest,
+    ManagedNetdevClass, ManagedNetdevLifecycleState, ManagedNetdevState, MetricsRequest,
+    SetEthernetSegmentDrainRequest,
 };
 
 const EVPN_DIAGNOSE_METRIC_PREFIXES: &[&str] = &[
@@ -398,6 +399,40 @@ pub async fn clear_duplicate_mac(
         println!("EVPN duplicate-MAC quarantine cleared: {mac} on VNI {vni}");
     } else {
         println!("No active EVPN duplicate-MAC quarantine: {mac} on VNI {vni}");
+    }
+    Ok(())
+}
+
+/// List the bounded current duplicate-MAC local-origin quarantine snapshot.
+pub async fn list_duplicate_mac_quarantines(
+    connection: Connection,
+    json: bool,
+) -> Result<(), CliError> {
+    let mut client =
+        EvpnServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let resp = client
+        .list_duplicate_mac_quarantines(ListDuplicateMacQuarantinesRequest {})
+        .await?
+        .into_inner();
+    if json {
+        output::print_json_pretty(&serde_json::json!({
+            "quarantines": resp.quarantines.iter().map(|row| serde_json::json!({
+                "vni": row.vni,
+                "mac": row.mac,
+            })).collect::<Vec<_>>(),
+            "omitted": resp.omitted,
+            "complete": resp.complete,
+        }))?;
+    } else if resp.quarantines.is_empty() {
+        println!("No active EVPN duplicate-MAC quarantines");
+    } else {
+        println!("VNI\tMAC");
+        for row in resp.quarantines {
+            println!("{}\t{}", row.vni, row.mac);
+        }
+        if !resp.complete {
+            println!("... {} additional quarantines omitted", resp.omitted);
+        }
     }
     Ok(())
 }
@@ -1708,6 +1743,24 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
             .await
             .unwrap();
         super::clear_duplicate_mac(connection, 100, "aa:bb:cc:dd:ee:ff".to_string(), true)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn duplicate_mac_quarantines_command_runs_in_human_and_json_modes() {
+        let server = crate::test_support::spawn_mock_server(None).await;
+        let connection = crate::connection::connect(&server.addr, None)
+            .await
+            .unwrap();
+        super::list_duplicate_mac_quarantines(connection, false)
+            .await
+            .unwrap();
+
+        let connection = crate::connection::connect(&server.addr, None)
+            .await
+            .unwrap();
+        super::list_duplicate_mac_quarantines(connection, true)
             .await
             .unwrap();
     }
