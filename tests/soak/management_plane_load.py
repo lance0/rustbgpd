@@ -50,8 +50,8 @@ def _payload_fingerprint(stream: BinaryIO) -> tuple[Optional[bytes], int, str]:
             break
         total += len(chunk)
         digest.update(chunk)
-        if len(retained) <= MAX_PAYLOAD_BYTES:
-            remaining = MAX_PAYLOAD_BYTES + 1 - len(retained)
+        if len(retained) < MAX_PAYLOAD_BYTES:
+            remaining = MAX_PAYLOAD_BYTES - len(retained)
             retained.extend(chunk[:remaining])
     payload = bytes(retained) if total <= MAX_PAYLOAD_BYTES else None
     return payload, total, digest.hexdigest()

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Destructive contracts for the flagship management-plane load driver."""
 
+import hashlib
 import io
 import json
 import os
@@ -82,6 +83,20 @@ class ManagementPlaneLoadContracts(unittest.TestCase):
         self.assertEqual(result.result, "ok")
         self.assertEqual(result.byte_count, 9)
         self.assertEqual(len(result.sha256), 64)
+
+    def test_payload_fingerprint_accepts_exact_cap_and_rejects_one_more_byte(self):
+        payload = b"x" * load.MAX_PAYLOAD_BYTES
+        retained, byte_count, digest = load._payload_fingerprint(io.BytesIO(payload))
+        self.assertEqual(retained, payload)
+        self.assertEqual(byte_count, load.MAX_PAYLOAD_BYTES)
+        self.assertEqual(digest, hashlib.sha256(payload).hexdigest())
+
+        retained, byte_count, digest = load._payload_fingerprint(
+            io.BytesIO(payload + b"y")
+        )
+        self.assertIsNone(retained)
+        self.assertEqual(byte_count, load.MAX_PAYLOAD_BYTES + 1)
+        self.assertEqual(digest, hashlib.sha256(payload + b"y").hexdigest())
 
     def test_metrics_timeout_is_classified_without_retry(self):
         def opener(*_args, **_kwargs):
