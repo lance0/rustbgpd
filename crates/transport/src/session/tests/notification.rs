@@ -1,13 +1,43 @@
 use super::*;
 
+type NotificationLogFields = std::collections::BTreeMap<String, String>;
+type NotificationLogBuckets =
+    std::collections::HashMap<std::thread::ThreadId, Vec<NotificationLogFields>>;
+
 #[derive(Clone, Default)]
 struct NotificationLogCapture {
-    events: Arc<std::sync::Mutex<Vec<std::collections::BTreeMap<String, String>>>>,
+    events: Arc<std::sync::Mutex<NotificationLogBuckets>>,
+}
+
+fn notification_log_capture() -> &'static NotificationLogCapture {
+    static CAPTURE: std::sync::OnceLock<NotificationLogCapture> = std::sync::OnceLock::new();
+    CAPTURE.get_or_init(|| {
+        let capture = NotificationLogCapture::default();
+        tracing::subscriber::set_global_default(capture.clone())
+            .expect("notification tests require an unclaimed global tracing subscriber");
+        capture
+    })
 }
 
 impl tracing::Subscriber for NotificationLogCapture {
+    fn register_callsite(
+        &self,
+        metadata: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        if notification_log_metadata(metadata) {
+            tracing::subscriber::Interest::sometimes()
+        } else {
+            tracing::subscriber::Interest::never()
+        }
+    }
+
     fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
-        *metadata.level() == tracing::Level::INFO
+        notification_log_metadata(metadata)
+            && self
+                .events
+                .lock()
+                .unwrap()
+                .contains_key(&std::thread::current().id())
     }
 
     fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
@@ -37,7 +67,14 @@ impl tracing::Subscriber for NotificationLogCapture {
 
         let mut visitor = Visitor(std::collections::BTreeMap::new());
         event.record(&mut visitor);
-        self.events.lock().unwrap().push(visitor.0);
+        if let Some(events) = self
+            .events
+            .lock()
+            .unwrap()
+            .get_mut(&std::thread::current().id())
+        {
+            events.push(visitor.0);
+        }
     }
 
     fn enter(&self, _span: &tracing::span::Id) {}
@@ -45,16 +82,37 @@ impl tracing::Subscriber for NotificationLogCapture {
     fn exit(&self, _span: &tracing::span::Id) {}
 }
 
+fn notification_log_metadata(metadata: &tracing::Metadata<'_>) -> bool {
+    *metadata.level() == tracing::Level::INFO
+        && ["direction", "code", "subcode", "description"]
+            .into_iter()
+            .all(|field| metadata.fields().field(field).is_some())
+}
+
 fn capture_notification_log(
     direction: SessionNotificationDirection,
     notification: &NotificationMessage,
     reason: Option<&str>,
-) -> Vec<std::collections::BTreeMap<String, String>> {
-    let subscriber = NotificationLogCapture::default();
-    let events = subscriber.events.clone();
-    let _guard = tracing::subscriber::set_default(subscriber);
-    make_test_session(65001, 65002).log_notification(direction, notification, reason);
-    events.lock().unwrap().clone()
+) -> Vec<NotificationLogFields> {
+    let session = make_test_session(65001, 65002);
+    let capture = notification_log_capture();
+    let thread_id = std::thread::current().id();
+    assert!(
+        capture
+            .events
+            .lock()
+            .unwrap()
+            .insert(thread_id, Vec::new())
+            .is_none(),
+        "notification log capture bucket was already armed for this thread"
+    );
+    session.log_notification(direction, notification, reason);
+    capture
+        .events
+        .lock()
+        .unwrap()
+        .remove(&thread_id)
+        .expect("armed notification log capture bucket")
 }
 
 #[test]
