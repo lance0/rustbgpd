@@ -1,0 +1,14 @@
+FROM python:3.9-slim-bookworm@sha256:a02e9c5406c416c504d6c9a1a306ff4080c3173f1008d192f953bd20382a2d5c
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+WORKDIR /app
+COPY requirements.txt ./
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends gcc libc6-dev \
+    && python3 -m pip install --no-cache-dir -r requirements.txt \
+    && apt-get purge --yes --auto-remove gcc libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY validator ./validator
+USER nobody
+ENTRYPOINT ["python3", "validator/run.py"]

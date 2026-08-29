@@ -351,18 +351,14 @@ ambiguous, custom, and the five defined-only IDs `2,4,11,12,15` remain `0`.
 Alice-LG config to render the reasons:
 
 ```ini
-[rejection]
-asn = 64496
-reject_id = 65520
-
 [rejection_reasons]
-0 = Route was filtered
-1 = Denied by import policy
-2 = Only-to-Customer role leak (RFC 9234)
-3 = NEXT_HOP is not the peer's own address
-4 = Receiver's AS appears in the AS_PATH
-5 = Route reflection loop
-6 = Malformed attributes (treat-as-withdraw, RFC 7606)
+64496:65520:0 = Route was filtered
+64496:65520:1 = Denied by import policy
+64496:65520:2 = Only-to-Customer role leak (RFC 9234)
+64496:65520:3 = NEXT_HOP is not the peer's own address
+64496:65520:4 = Receiver's AS appears in the AS_PATH
+64496:65520:5 = Route reflection loop
+64496:65520:6 = Malformed attributes (treat-as-withdraw, RFC 7606)
 ```
 
 ## Noexport routes and reasons
@@ -405,8 +401,8 @@ current per-request implementation to be expensive until a bulk RPC exists.
 
 Same edge-synthesis convention as the reject reasons: one appended triplet
 `64496:65521:<id>` per route — function `65521` (adjacent to the
-reject-reason function `65520`, distinct so the `[rejection]` and
-`[noexport]` matchers never overlap), and a stable id per stopping gate:
+reject-reason function `65520`, distinct so the `[rejection_reasons]` and
+`[noexport_reasons]` matchers never overlap), and a stable id per stopping gate:
 
 | Stopping gate    | Large community  | Meaning                                          |
 |------------------|------------------|--------------------------------------------------|
@@ -427,19 +423,17 @@ Alice-LG config to render the reasons:
 
 ```ini
 [noexport]
-asn = 64496
-noexport_id = 65521
 load_on_demand = true
 
 [noexport_reasons]
-0 = Route was not exported
-1 = Route originated from this peer (split horizon)
-2 = Route reflection rules (RFC 4456)
-3 = Address family not negotiated
-4 = Long-lived stale route (RFC 9494)
-5 = Outbound route filter (RFC 5291)
-6 = RT membership (RFC 4684)
-7 = Denied by export policy
+64496:65521:0 = Route was not exported
+64496:65521:1 = Route originated from this peer (split horizon)
+64496:65521:2 = Route reflection rules (RFC 4456)
+64496:65521:3 = Address family not negotiated
+64496:65521:4 = Long-lived stale route (RFC 9494)
+64496:65521:5 = Outbound route filter (RFC 5291)
+64496:65521:6 = RT membership (RFC 4684)
+64496:65521:7 = Denied by export policy
 ```
 
 ### Field-level gaps
@@ -466,3 +460,8 @@ the adapter returns `502 Bad Gateway` (the in-daemon server returned
   peer, and asserts the accepted, filtered, and both sides of the noexport
   views — including received/exported Add-Path multiplicity, order, source
   alias direction, exact-filter-before-cap, and stable 400/404/502 errors).
+- Pinned external-consumer proof: the IXP compatibility gate source-builds
+  Alice-LG 6.2.0 and the MANRS IXP validation tool, then requires Alice to
+  consume this adapter's seven populated accepted routes, empty filtered
+  endpoints, and one split-horizon noexport route before MANRS traverses the
+  Alice received-route API. This is not a browser/UI or certification claim.

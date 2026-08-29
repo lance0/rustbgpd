@@ -266,4 +266,11 @@ boundary: this is a maintained single-table unicast subset — a few
 Birdwatcher fields are served as sentinels (the adapter README lists
 every gap).
 
+The pinned compatibility gate exercises this wiring through Alice-LG 6.2.0:
+four live neighbor IDs, seven accepted routes, empty filtered arrays, and the
+labeled `192.0.2.0/24` split-horizon noexport route. A pinned MANRS consumer
+then traverses Alice's received routes and finds one deliberate synthetic ROA
+mismatch. That is an API proof, not a browser/UI, MANRS certification,
+rustbgpd RPKI-enforcement, or route-server policy-conformance claim.
+
 [arouteserver]: https://github.com/pierky/arouteserver

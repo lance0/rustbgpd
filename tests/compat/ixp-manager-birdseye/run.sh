@@ -28,6 +28,9 @@ read_manifest() {
 }
 birdseye_commit=$(read_manifest birdseye_commit)
 ixp_manager_commit=$(read_manifest ixp_manager_commit)
+alice_lg_commit=$(read_manifest alice_lg_commit)
+alice_lg_version=$(read_manifest alice_lg_version)
+manrs_commit=$(read_manifest manrs_commit)
 
 clone_pin() {
   repository=$1
@@ -45,8 +48,27 @@ clone_pin() {
 
 clone_pin https://github.com/inex/birdseye.git "$birdseye_commit" "$tmp/birdseye"
 clone_pin https://github.com/inex/IXP-Manager.git "$ixp_manager_commit" "$tmp/ixp-manager"
+clone_pin https://github.com/alice-lg/alice-lg.git "$alice_lg_commit" "$tmp/alice-lg"
+clone_pin https://github.com/manrs-tools/manrs-ixp-validation-tool.git \
+  "$manrs_commit" "$tmp/manrs-ixp-validation-tool"
+[ "$(tr -d '\n' <"$tmp/alice-lg/VERSION")" = "$alice_lg_version" ] || {
+  echo "Alice-LG version at the pinned revision is not $alice_lg_version" >&2
+  exit 1
+}
 
 image=$(docker build --quiet --file "$root/Dockerfile" "$root")
+alice_image=$(docker build --quiet --platform linux/amd64 \
+  --file "$root/Dockerfile.alice" \
+  --label "org.opencontainers.image.revision=$alice_lg_commit" \
+  --label "org.opencontainers.image.version=$alice_lg_version" \
+  "$tmp/alice-lg")
+manrs_image=$(docker build --quiet --platform linux/amd64 \
+  --file "$root/Dockerfile.manrs" \
+  --label "org.opencontainers.image.revision=$manrs_commit" \
+  "$tmp/manrs-ixp-validation-tool")
+[ "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$alice_image")" = "$alice_lg_commit" ]
+[ "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$alice_image")" = "$alice_lg_version" ]
+[ "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$manrs_image")" = "$manrs_commit" ]
 docker network create "$network" >/dev/null
 docker run --detach --name "$mysql" --network "$network" \
   --env MYSQL_ALLOW_EMPTY_PASSWORD=yes --env MYSQL_DATABASE=ixp_ci \
@@ -278,5 +300,7 @@ python3 "$root/verify_capture.py" --nagios "$capture_output/nagios-monitoring.js
 # fed by the same announcers, read by the same pinned consumer, diffed against
 # the runtime divergence allow-list. Prints one "populated oracle proof:" line.
 CAPTURE_OUTPUT="$capture_output" "$root/run-oracle-leg.sh" \
-  "$tmp/ixp-manager" "$image" "$tmp/birdseye" >/dev/null
+  "$tmp/ixp-manager" "$image" "$tmp/birdseye" \
+  "$tmp/alice-lg" "$alice_image" \
+  "$tmp/manrs-ixp-validation-tool" "$manrs_image" >/dev/null
 python3 "$root/verify_capture.py" --populated "$capture_output" "$tmp/birdseye/routes/web.php"
