@@ -2026,6 +2026,50 @@ jobs:
           script: tests/interop/scripts/test-m99-rfc9072-extended-open.sh
           max_attempts: "1"
 
+  m101:
+    needs: [grpcurl_archive, prime_dev_image]
+    name: M101 — BIRD 3.3.2 real-wire attribute discard at a route server
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install containerlab
+        uses: ./.github/actions/install-containerlab
+
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
+
+      - name: Ensure jq
+        run: |
+          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build rustbgpd:dev
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: rustbgpd:dev
+          target: dev
+          cache-from: type=gha,scope=rustbgpd-dev
+
+      - name: Build checksum-pinned BIRD 3.3.2 image
+        run: docker build -t bird:v3.3.2-m101 -f tests/interop/Dockerfile.bird-v332 tests/interop
+
+      - name: Pull digest-pinned FRR 10.3.1 image
+        run: docker pull quay.io/frrouting/frr@sha256:f90d26a9fd5c14fc5795a73b4254ac88bc3186c45bbeb220a225fb6182de812c
+
+      - name: Run M101 (single-attempt real-wire proof)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M101
+          topology: tests/interop/m101-routeserver-bird332.clab.yml
+          script: tests/interop/scripts/test-m101-routeserver-bird332.sh
+          max_attempts: "1"
+
   check:
     name: check
     runs-on: ubuntu-latest
@@ -2035,7 +2079,7 @@ jobs:
       m13, m80, m15, m10, m14, m17, m73, m74, m75, m76, m77, m78, m79, m22, m24,
       m81, m82, m83, m85, m94, m86, m25, m29, m30, m34, m35, m35b, m35c,
       m41, m44, m54, m55, m56, m45, m57, m63, m64,
-      m26_m27_m28_m59_m91, m92, m84, m99]
+      m26_m27_m28_m59_m91, m92, m84, m99, m101]
     env:
       NEEDS_CONTEXT: ${{ toJSON(needs) }}
       EXPECTED_JOBS: >-
@@ -2043,7 +2087,7 @@ jobs:
         m1 m13 m80 m15 m10
         m14 m17 m73 m74 m75 m76 m77 m78 m79 m22 m24 m81 m82 m83 m85 m94
         m86 m25 m29 m30 m34 m35 m35b m35c m41 m44 m54 m55 m56 m45 m57
-        m63 m64 m26_m27_m28_m59_m91 m92 m84 m99
+        m63 m64 m26_m27_m28_m59_m91 m92 m84 m99 m101
     steps:
       - name: Aggregate required Interop result
         shell: bash

@@ -14,7 +14,7 @@ from pathlib import Path
 INTEROP = (
     "m1 m13 m80 m15 m10 m14 m17 m73 m74 m75 m76 m77 m78 m79 m22 "
     "m24 m81 m82 m83 m85 m94 m86 m25 m29 m30 m34 m35 m35b m35c m41 "
-    "m44 m54 m55 m56 m45 m57 m63 m64 m26_m27_m28_m59_m91 m92 m84 m99"
+    "m44 m54 m55 m56 m45 m57 m63 m64 m26_m27_m28_m59_m91 m92 m84 m99 m101"
 ).split()
 KERNEL = (
     "m36 m37 m37-ip m38 m39 m39b m48 m60 m61 m62 m40 m42 m50 m52 "
@@ -136,17 +136,17 @@ PERMISSION_HASHES = {
     "kernel-dataplane.yml": "6f1d70d72bad231d43c575acef6946580e439c879794ed2ea1f4a40340245172",
 }
 CALL_HASHES = {
-    "interop.yml": "ca3b362b262e9d285650bf5678646ff3ab3106ef17b10a500c8dcdfc5cb57a9b",
+    "interop.yml": "f7294fcdc9b9c910810b07db5b0328bb4bd1b85f7ec2ac98eefb54f888875d5a",
     "kernel-dataplane.yml": "310ed2344bd6ff3f766580f704cc77fec4be0a2103a943e2ad837f497af346c3",
 }
 PINS = collections.Counter(
     {
-        "actions/checkout@v7": 88,
+        "actions/checkout@v7": 89,
         "dtolnay/rust-toolchain@v1 # stable": 3,
         "Swatinem/rust-cache@v2": 5,
         "dtolnay/rust-toolchain@v1 # 1.95": 2,
-        "docker/setup-buildx-action@v4": 45,
-        "docker/build-push-action@v7": 46,
+        "docker/setup-buildx-action@v4": 46,
+        "docker/build-push-action@v7": 47,
         "actions/cache@v6": 5,
         "actions/upload-artifact@v7": 7,
         "actions/download-artifact@v8": 6,
@@ -817,6 +817,29 @@ def check(root: Path) -> list[str]:
     for forbidden in ("continue-on-error:", "docker exec", "max_attempts: \"2\""):
         if forbidden in m99:
             errors.append(f"interop.yml:m99: permits {forbidden}")
+    m101 = _jobs(texts["interop.yml"]).get("m101", "")
+    m101_required = {
+        GRPCURL_ACTION: 1,
+        "name: Build checksum-pinned BIRD 3.3.2 image": 1,
+        "docker build -t bird:v3.3.2-m101 -f tests/interop/Dockerfile.bird-v332 tests/interop": 1,
+        "name: Pull digest-pinned FRR 10.3.1 image": 1,
+        "docker pull quay.io/frrouting/frr@sha256:f90d26a9fd5c14fc5795a73b4254ac88bc3186c45bbeb220a225fb6182de812c": 1,
+        "uses: ./.github/actions/run-interop-test": 1,
+        "label: M101\n": 1,
+        "topology: tests/interop/m101-routeserver-bird332.clab.yml": 1,
+        "script: tests/interop/scripts/test-m101-routeserver-bird332.sh": 1,
+        'max_attempts: "1"': 1,
+    }
+    if any(m101.count(seam) != count for seam, count in m101_required.items()):
+        errors.append("interop.yml:m101: BIRD 3.3.2 real-wire job semantics drifted")
+    for forbidden in (
+        "bird:3.3.2",
+        "quay.io/frrouting/frr:10.3.1",
+        "continue-on-error:",
+        'max_attempts: "2"',
+    ):
+        if forbidden in m101:
+            errors.append(f"interop.yml:m101: permits {forbidden}")
     interop_classifier = _jobs(texts["interop.yml"]).get("classify_changes", "")
     kernel_jobs = _jobs(texts["kernel-dataplane.yml"])
     interop_classifier = interop_classifier.replace("interop heavy-lab", "heavy-lab")

@@ -33,6 +33,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- M101 adds a hosted three-node IPv4-unicast route-server receipt against
+  checksum-built BIRD 3.3.2 and digest-pinned FRR 10.3.1. A BIRD-originated
+  optional-transitive-partial type-40 attribute is pinned as the exact raw
+  tuple `e0 28 01 00`; rustbgpd discards only that attribute, preserves the
+  route and unrelated communities through post-policy Adj-RIB-In to FRR, and
+  advances only the `attribute_discard` malformed-UPDATE disposition. The
+  exact 27/0 receipt also covers import and member-scoped export policy
+  controls, explain/advertised views, deterministic withdrawal, and stable
+  sessions.
+
 - The M86 OpenBGPD route-reflector receipt now pins the reviewed 9.1
   multi-platform image index. Hosted CI verifies its exact linux/amd64
   manifest and image-config digests, and the driver requires both sleeping

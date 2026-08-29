@@ -43,17 +43,28 @@ fn route_server_topologies_have_exact_control_plane_setup() {
     // Destructive red proof: adding either former `sysctl -w
     // net.ipv4.ip_forward=1` command makes the corresponding exact exec list
     // differ and this test fail.
-    let cases = [(
-        "m83-routeserver-multistack.clab.yml",
-        vec![
-            "ip addr add 10.83.1.1/24 dev eth1",
-            "ip link set eth1 up",
-            "ip addr add 10.83.2.1/24 dev eth2",
-            "ip link set eth2 up",
-            "ip addr add 10.83.3.1/24 dev eth3",
-            "ip link set eth3 up",
-        ],
-    )];
+    let cases = [
+        (
+            "m83-routeserver-multistack.clab.yml",
+            vec![
+                "ip addr add 10.83.1.1/24 dev eth1",
+                "ip link set eth1 up",
+                "ip addr add 10.83.2.1/24 dev eth2",
+                "ip link set eth2 up",
+                "ip addr add 10.83.3.1/24 dev eth3",
+                "ip link set eth3 up",
+            ],
+        ),
+        (
+            "m101-routeserver-bird332.clab.yml",
+            vec![
+                "ip addr add 10.101.1.1/24 dev eth1",
+                "ip link set eth1 up",
+                "ip addr add 10.101.2.1/24 dev eth2",
+                "ip link set eth2 up",
+            ],
+        ),
+    ];
 
     for (relative, expected_exec) in cases {
         let topology = topology(relative);
@@ -224,6 +235,101 @@ fn m86_pins_openbgpd_identity_and_preflights_every_daemon_start() {
     assert!(
         preflight_call < first_openbgpd_start,
         "M86 identity preflight must complete before either initial daemon start"
+    );
+}
+
+#[test]
+fn m101_pins_peer_identity_and_real_wire_attribute_discard_contract() {
+    const FRR_IMAGE: &str = "quay.io/frrouting/frr@sha256:f90d26a9fd5c14fc5795a73b4254ac88bc3186c45bbeb220a225fb6182de812c";
+    const BIRD_SHA256: &str = "21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c";
+
+    let topology = topology("m101-routeserver-bird332.clab.yml");
+    assert_eq!(
+        topology["topology"]["nodes"]["bird"]["image"],
+        "bird:v3.3.2-m101"
+    );
+    assert_eq!(topology["topology"]["nodes"]["frr"]["image"], FRR_IMAGE);
+    for node in ["bird", "frr"] {
+        assert_eq!(
+            topology["topology"]["nodes"][node]["cmd"], "sleep infinity",
+            "M101 {node} must remain asleep until identity preflight completes"
+        );
+    }
+
+    let dockerfile = fs::read_to_string(interop_path("Dockerfile.bird-v332"))
+        .expect("read M101 BIRD Dockerfile");
+    for required in [
+        "ARG BIRD_VERSION=3.3.2",
+        "ARG BIRD_SHA256=21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c",
+        "sha256sum --check --strict",
+        "test \"$(bird --version 2>&1)\" = \"BIRD version ${BIRD_VERSION}\"",
+    ] {
+        assert!(
+            dockerfile.contains(required),
+            "M101 BIRD build lost `{required}`"
+        );
+    }
+    assert!(dockerfile.contains(BIRD_SHA256));
+
+    let bird_config =
+        fs::read_to_string(interop_path("configs/bird-m101.conf")).expect("read M101 BIRD config");
+    for required in [
+        "attribute bgp 40 bytestring m101_bad;",
+        "m101_bad = hex:00;",
+        "route 198.51.100.0/24 blackhole;",
+        "local role rs_client;",
+        "enforce first as off;",
+    ] {
+        assert!(
+            bird_config.contains(required),
+            "M101 BIRD config lost `{required}`"
+        );
+    }
+
+    let script_path = interop_path("scripts/test-m101-routeserver-bird332.sh");
+    let script = fs::read_to_string(&script_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", script_path.display()));
+    for required in [
+        format!("FRR_IMAGE=\"{FRR_IMAGE}\""),
+        "BIRD_VERSION=\"BIRD version 3.3.2\"".to_owned(),
+        "FRR_VERSION=\"bgpd version 10.3.1_git\"".to_owned(),
+        "[ \"$command\" = '[\"sleep\",\"infinity\"]' ]".to_owned(),
+        "type-40 tuple mismatch".to_owned(),
+        "e0280100".to_owned(),
+        "counter_delta_is attribute_discard \"$M101_DISCARD_BEFORE\" 1".to_owned(),
+        "counter_delta_is treat_as_withdraw \"$M101_TAW_BEFORE\" 0".to_owned(),
+        "counter_delta_is session_reset \"$M101_RESET_BEFORE\" 0".to_owned(),
+        "birdc disable malformed_probe".to_owned(),
+        "[ \"$pass\" -ne 27 ] || [ \"$fail\" -ne 0 ]".to_owned(),
+    ] {
+        assert!(script.contains(&required), "M101 driver lost `{required}`");
+    }
+    assert_eq!(
+        script.matches("        ok \"").count(),
+        26,
+        "M101 must retain 26 local assertions plus shared gRPC readiness"
+    );
+
+    let main = script
+        .split_once("main() {")
+        .and_then(|(_, remainder)| {
+            remainder
+                .split_once("\n}\n\nmain \"$@\"")
+                .map(|(body, _)| body)
+        })
+        .expect("M101 main has a bounded source section");
+    let identity = main
+        .find("preflight_identities_and_configs")
+        .expect("M101 main preflights both peer identities");
+    let capture = main.find("start_capture").expect("M101 main arms capture");
+    let rust_start = main
+        .find("start_rustbgpd")
+        .expect("M101 main starts rustbgpd");
+    let frr_start = main.find("start_frr").expect("M101 main starts FRR");
+    let bird_start = main.find("start_bird").expect("M101 main starts BIRD");
+    assert!(
+        identity < capture && capture < rust_start && capture < frr_start && capture < bird_start,
+        "M101 identity preflight and capture must precede every daemon start"
     );
 }
 
