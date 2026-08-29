@@ -83,30 +83,11 @@ manrs_commit=$(read_manifest manrs_commit)
 cargo build --quiet --locked --manifest-path "$repo/Cargo.toml" --bin rustbgpd
 cargo build --quiet --locked --manifest-path "$repo/Cargo.toml" -p birdwatcher-adapter
 oracle_image=$(docker build --quiet --file "$root/Dockerfile.oracle" "$root")
-docker network create --subnet 198.51.100.0/24 \
-  --ipv6 --subnet 2001:db8:5100::/64 "$network" >/dev/null
-gateway=$(
-  docker network inspect "$network" |
-    jq -er '
-      [
-        .[0].IPAM.Config[]?
-        | .Gateway
-        | select(type == "string")
-        | select(length > 0 and (contains(":") | not))
-      ]
-      | if length == 1
-        then .[0]
-        else empty
-        end
-    ' 2>/dev/null
-) || {
-  echo 'populated oracle network must have exactly one nonempty IPv4 gateway' >&2
-  exit 1
-}
-[ "$gateway" = 198.51.100.1 ] || {
-  echo 'populated oracle network IPv4 gateway does not match expected 198.51.100.1' >&2
-  exit 1
-}
+docker network create \
+  --subnet 198.51.100.0/24 --gateway 198.51.100.1 \
+  --ipv6 --subnet 2001:db8:5100::/64 --gateway 2001:db8:5100::1 \
+  "$network" >/dev/null
+gateway=198.51.100.1
 
 # Oracle: the Bird's Eye checkout installed from its committed lockfile earlier
 # in the gate, copied in next to the pinned BIRD so the real birdc is local.
