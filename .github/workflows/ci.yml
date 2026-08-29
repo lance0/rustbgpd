@@ -197,6 +197,8 @@ jobs:
       # separates "broken" from "nobody ran it". Smoke only — no timings.
       - name: Smoke every criterion bench target
         run: bash bench/smoke-benches.sh
+      - name: Smoke selection-deferral release receipt
+        run: cargo test --locked -p rustbgpd-rib --features bench-internals --bench selection_deferral_release -- --self-test
       # LAN-572 keeps the real MRT snapshot encoder benchmark usable in both
       # deliberately incompatible builds: bare-jemalloc timing, and opt-in
       # allocation/growth diagnostics.  `--smoke` bounds both executions for
