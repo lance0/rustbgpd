@@ -218,7 +218,12 @@ new AFI/SAFI and EVPN dataplane expansion.
   immutable wire next-hop identity before import policy and fails closed for
   third-party or unverifiable next hops. Same-AS alternate next hops and
   explicit authorization remain deferred behind a generation-consistent fleet
-  inventory.
+  inventory. IPv6-only peering-LAN next-hop translation is a separate,
+  demand-gated design rather than another ownership mode:
+  [ADR-0128](docs/adr/0128-route-server-next-hop-translation.md) records the
+  generation-stamped SLAT and receiver-class boundaries, with implementation
+  blocked until either working-group adoption or named IXP demand exists, and
+  a real SLAT producer plus retained fixtures are available.
 - **Single-owner RIB actor ceiling: measured at 1M; sharding stays unjustified.**
   The named-workload number that gates ADR-0100 parallel-RibManager exists
   ([the 1M actor-ceiling receipt](docs/perf/actor-ceiling-1m-2026-07.md),

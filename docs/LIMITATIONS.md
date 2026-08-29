@@ -36,6 +36,10 @@ surfaces; it does not promote the rest of the project out of alpha.
   only when the complete wire next-hop identity is the advertising session's
   own address. Same-AS alternate next hops and explicit authorization remain
   deferred; see [ADR-0107](adr/0107-route-server-next-hop-ownership.md).
+  SLAT-driven translation for mixed RFC 8950 client fleets is not implemented;
+  [ADR-0128](adr/0128-route-server-next-hop-translation.md) keeps it
+  demand-gated. Implementation requires either working-group adoption or named
+  IXP demand, plus a real SLAT producer and retained fixtures.
 
 ## EVPN
 

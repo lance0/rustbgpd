@@ -136,6 +136,7 @@ consequences so future contributors understand *why*, not just *what*.
 | [0125](0125-v1-stability-contract.md) | v1.0 stability contract | Accepted (tagging remains evidence-gated; no tag is scheduled) | 2026-08-04 |
 | [0126](0126-shared-group-per-client-best.md) | Shared-group per-client best-path — path-hiding mitigation inside update groups | Accepted | 2026-08-05 |
 | [0127](0127-config-transaction-settlement-watchdog.md) | Persisted runtime-config settlement watchdog | Accepted | 2026-08-11 |
+| [0128](0128-route-server-next-hop-translation.md) | Route-server next-hop translation | Accepted (architecture GO if activated; implementation NO-GO, demand-gated) | 2026-08-29 |
 
 ## Template
 
