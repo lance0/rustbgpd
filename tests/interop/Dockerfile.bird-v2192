@@ -17,17 +17,46 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive \
         perl \
         pkg-config \
         tshark \
-    && curl -fsSLo /tmp/bird.tar.gz \
-        "https://bird.nic.cz/download/bird-${BIRD_VERSION}.tar.gz" \
-    && echo "${BIRD_SHA256}  /tmp/bird.tar.gz" | sha256sum -c - \
-    && mkdir /tmp/bird \
-    && tar -xzf /tmp/bird.tar.gz -C /tmp/bird --strip-components=1 \
-    && cd /tmp/bird \
-    && ./configure --prefix=/usr --sysconfdir=/etc/bird --localstatedir=/run/bird \
-    && make -j"$(nproc)" \
-    && make install \
-    && test "$(bird --version 2>&1)" = "BIRD version ${BIRD_VERSION}" \
-    && rm -rf /tmp/bird /tmp/bird.tar.gz /var/lib/apt/lists/* \
-    && mkdir -p /etc/bird /run/bird
+    && rm -rf /var/lib/apt/lists/*
+
+# Hosted CI stages a checksum- and version-verified same-run artifact before
+# this build. The absent-archive branch is only for cold local builds and is
+# deliberately bounded to three attempts.
+COPY bird3-archive/ /tmp/bird-archive/
+
+RUN set -eux; \
+    archive="bird-${BIRD_VERSION}.tar.gz"; \
+    target="/tmp/bird-archive/${archive}"; \
+    if [ ! -f "${target}" ]; then \
+        attempt=1; \
+        while :; do \
+            rm -f "${target}.download"; \
+            if curl --fail --location --silent --show-error \
+                --connect-timeout 10 --max-time 120 \
+                "https://bird.nic.cz/download/${archive}" \
+                --output "${target}.download" \
+                && echo "${BIRD_SHA256}  ${target}.download" | sha256sum --check --strict; then \
+                mv "${target}.download" "${target}"; \
+                break; \
+            fi; \
+            rm -f "${target}.download"; \
+            if [ "${attempt}" -ge 3 ]; then \
+                echo "BIRD ${BIRD_VERSION} local archive fallback failed after ${attempt} attempts" >&2; \
+                exit 1; \
+            fi; \
+            sleep $((attempt * 5)); \
+            attempt=$((attempt + 1)); \
+        done; \
+    fi; \
+    echo "${BIRD_SHA256}  ${target}" | sha256sum --check --strict; \
+    mkdir /tmp/bird; \
+    tar -xzf "${target}" -C /tmp/bird --strip-components=1; \
+    cd /tmp/bird; \
+    ./configure --prefix=/usr --sysconfdir=/etc/bird --localstatedir=/run/bird; \
+    make -j"$(nproc)"; \
+    make install; \
+    test "$(bird --version 2>&1)" = "BIRD version ${BIRD_VERSION}"; \
+    rm -rf /tmp/bird /tmp/bird-archive; \
+    mkdir -p /etc/bird /run/bird
 
 CMD ["sleep", "infinity"]

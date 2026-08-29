@@ -104,6 +104,33 @@ fn m83_pins_refreshed_incumbent_images_and_preflights_before_capture() {
         "quay.io/frrouting/frr:10.3.1"
     );
 
+    let dockerfile = fs::read_to_string(interop_path("Dockerfile.bird-v2192"))
+        .expect("read M83 BIRD Dockerfile");
+    for required in [
+        "ARG BIRD_VERSION=2.19.2",
+        "ARG BIRD_SHA256=aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660",
+        "COPY bird3-archive/ /tmp/bird-archive/",
+        "if [ ! -f \"${target}\" ]; then",
+        "if [ \"${attempt}\" -ge 3 ]; then",
+        "sha256sum --check --strict",
+        "test \"$(bird --version 2>&1)\" = \"BIRD version ${BIRD_VERSION}\"",
+    ] {
+        assert!(
+            dockerfile.contains(required),
+            "M83 BIRD build lost `{required}`"
+        );
+    }
+    let copy = dockerfile
+        .find("COPY bird3-archive/ /tmp/bird-archive/")
+        .expect("M83 copies the staged archive directory");
+    let checksum = dockerfile
+        .rfind("sha256sum --check --strict")
+        .expect("M83 checks the staged archive");
+    let extract = dockerfile
+        .find("tar -xzf \"${target}\" -C /tmp/bird --strip-components=1")
+        .expect("M83 extracts the checked archive");
+    assert!(copy < checksum && checksum < extract);
+
     let script = fs::read_to_string(interop_path("scripts/test-m83-routeserver-multistack.sh"))
         .expect("read M83 script");
     for exact_version in [
@@ -272,6 +299,9 @@ fn m101_pins_peer_identity_and_real_wire_attribute_discard_contract() {
     for required in [
         "ARG BIRD_VERSION=3.3.2",
         "ARG BIRD_SHA256=21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c",
+        "COPY bird3-archive/ /tmp/bird-archive/",
+        "if [ ! -f \"${target}\" ]; then",
+        "if [ \"${attempt}\" -ge 3 ]; then",
         "sha256sum --check --strict",
         "test \"$(bird --version 2>&1)\" = \"BIRD version ${BIRD_VERSION}\"",
     ] {
@@ -281,6 +311,16 @@ fn m101_pins_peer_identity_and_real_wire_attribute_discard_contract() {
         );
     }
     assert!(dockerfile.contains(BIRD_SHA256));
+    let copy = dockerfile
+        .find("COPY bird3-archive/ /tmp/bird-archive/")
+        .expect("M101 copies the staged archive directory");
+    let checksum = dockerfile
+        .rfind("sha256sum --check --strict")
+        .expect("M101 checks the staged archive");
+    let extract = dockerfile
+        .find("tar -xzf \"${target}\" -C /tmp/bird --strip-components=1")
+        .expect("M101 extracts the checked archive");
+    assert!(copy < checksum && checksum < extract);
 
     let bird_config =
         fs::read_to_string(interop_path("configs/bird-m101.conf")).expect("read M101 BIRD config");

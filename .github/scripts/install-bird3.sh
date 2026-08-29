@@ -2,8 +2,34 @@
 
 set -euo pipefail
 
-readonly BIRD3_VERSION="3.3.1"
-readonly BIRD3_SHA256="d5a8d651d6184c18252954932bb249dfee1fd213b3665cdd86226ac45edc0190"
+BIRD3_VERSION="3.3.1"
+BIRD3_SHA256="d5a8d651d6184c18252954932bb249dfee1fd213b3665cdd86226ac45edc0190"
+BIRD3_COVERAGE_LABEL=""
+while [[ ${1:-} == --version || ${1:-} == --sha256 || ${1:-} == --coverage-label ]]; do
+    option=$1
+    [[ $# -ge 2 ]] || {
+        echo "install-bird3: ${option} requires a value" >&2
+        exit 2
+    }
+    case "$option" in
+        --version) BIRD3_VERSION=$2 ;;
+        --sha256) BIRD3_SHA256=$2 ;;
+        --coverage-label) BIRD3_COVERAGE_LABEL=$2 ;;
+    esac
+    shift 2
+done
+[[ $BIRD3_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+    echo "install-bird3: invalid BIRD version: ${BIRD3_VERSION}" >&2
+    exit 2
+}
+[[ $BIRD3_SHA256 =~ ^[0-9a-f]{64}$ ]] || {
+    echo "install-bird3: invalid BIRD SHA-256" >&2
+    exit 2
+}
+if [[ -z $BIRD3_COVERAGE_LABEL ]]; then
+    BIRD3_COVERAGE_LABEL="M43 (TCP-AO interop vs BIRD ${BIRD3_VERSION}) skipped"
+fi
+readonly BIRD3_VERSION BIRD3_SHA256 BIRD3_COVERAGE_LABEL
 readonly BIRD3_ASSET="bird-${BIRD3_VERSION}.tar.gz"
 readonly BIRD3_URL="https://bird.nic.cz/download/${BIRD3_ASSET}"
 readonly BIRD3_ATTEMPTS=3
@@ -77,7 +103,7 @@ announce_unavailable() {
     local url=${1:?url}
     local message
 
-    message="M43 (TCP-AO interop vs BIRD ${BIRD3_VERSION}) skipped: the pinned"
+    message="${BIRD3_COVERAGE_LABEL}: the pinned"
     message+=" bird ${BIRD3_VERSION} source archive is unavailable upstream"
     message+=" after ${BIRD3_ATTEMPTS} attempts (${url})."
     message+=" This is third-party unavailability, not a rustbgpd failure;"
@@ -311,7 +337,7 @@ self_test() (
 )
 
 usage() {
-    echo "usage: $0 --prepare-archive ARCHIVE | --stage-archive ARCHIVE STAGE_DIR | --self-test" >&2
+    echo "usage: $0 [--version VERSION --sha256 SHA256] [--coverage-label LABEL] (--prepare-archive ARCHIVE | --stage-archive ARCHIVE STAGE_DIR | --self-test)" >&2
     return 2
 }
 

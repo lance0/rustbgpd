@@ -123,6 +123,16 @@ BIRD3_CACHE_SEAMS = (
     "cache-from: type=gha,scope=bird3-tcpao",
     "cache-to: type=gha,mode=max,scope=bird3-tcpao,ignore-error=true",
 )
+BIRD2192_VERSION = "2.19.2"
+BIRD2192_SHA256 = "aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660"
+BIRD2192_ARCHIVE = f"bird-{BIRD2192_VERSION}.tar.gz"
+BIRD2192_ARTIFACT = f"bird2192-v{BIRD2192_VERSION}-source"
+BIRD2192_CACHE_KEY = f"{BIRD2192_ARTIFACT}-{BIRD2192_SHA256}"
+BIRD332_VERSION = "3.3.2"
+BIRD332_SHA256 = "21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c"
+BIRD332_ARCHIVE = f"bird-{BIRD332_VERSION}.tar.gz"
+BIRD332_ARTIFACT = f"bird332-v{BIRD332_VERSION}-source"
+BIRD332_CACHE_KEY = f"{BIRD332_ARTIFACT}-{BIRD332_SHA256}"
 TRIGGER_HASHES = {
     "ci.yml": "65951f4c4d1d6c4d3aae2c33705d14cdc144b3efd8bcc01653049e6d7f2fb5f8",
     "audit.yml": "1829597143324f5361dfdfece50ddeffd6f7d5934b72198f1837fbdf25339fd3",
@@ -141,14 +151,14 @@ CALL_HASHES = {
 }
 PINS = collections.Counter(
     {
-        "actions/checkout@v7": 90,
+        "actions/checkout@v7": 92,
         "dtolnay/rust-toolchain@v1 # stable": 3,
         "Swatinem/rust-cache@v2": 5,
         "dtolnay/rust-toolchain@v1 # 1.95": 2,
         "docker/setup-buildx-action@v4": 47,
-        "docker/build-push-action@v7": 48,
-        "actions/cache@v6": 5,
-        "actions/upload-artifact@v7": 7,
+        "docker/build-push-action@v7": 50,
+        "actions/cache@v6": 7,
+        "actions/upload-artifact@v7": 9,
         "actions/download-artifact@v8": 6,
         "rustsec/audit-check@v2.0.0": 1,
         "EmbarkStudios/cargo-deny-action@v2": 1,
@@ -386,8 +396,11 @@ def check(root: Path) -> list[str]:
         bird3_installer.read_text() if bird3_installer.is_file() else ""
     )
     for seam in (
-        f'readonly BIRD3_VERSION="{BIRD3_VERSION}"',
-        f'readonly BIRD3_SHA256="{BIRD3_SHA256}"',
+        f'BIRD3_VERSION="{BIRD3_VERSION}"',
+        f'BIRD3_SHA256="{BIRD3_SHA256}"',
+        "--version",
+        "--sha256",
+        "--coverage-label",
         'readonly BIRD3_ASSET="bird-${BIRD3_VERSION}.tar.gz"',
         "https://bird.nic.cz/download/${BIRD3_ASSET}",
         "readonly BIRD3_ATTEMPTS=3",
@@ -497,6 +510,7 @@ def check(root: Path) -> list[str]:
             ["grpcurl_archive"]
             + ([] if setup else ["gnmic_archive"])
             + ["gobgp_archive"]
+            + ([] if setup else ["bird2192_archive", "bird332_archive"])
             + (["bird3_archive"] if setup else [])
         )
         gobgp_consumers = (
@@ -654,6 +668,99 @@ def check(root: Path) -> list[str]:
             )
             if bird3_producer.count(exact_bird3_path) != 2:
                 errors.append(f"{name}:bird3_archive cache/artifact paths drifted")
+        else:
+            bird_producers = (
+                (
+                    "bird2192_archive",
+                    "BIRD 2.19.2",
+                    BIRD2192_VERSION,
+                    BIRD2192_SHA256,
+                    BIRD2192_ARCHIVE,
+                    BIRD2192_ARTIFACT,
+                    BIRD2192_CACHE_KEY,
+                    "bird2192-cache",
+                    "M83 BIRD 2.19.2 image blocked",
+                ),
+                (
+                    "bird332_archive",
+                    "BIRD 3.3.2",
+                    BIRD332_VERSION,
+                    BIRD332_SHA256,
+                    BIRD332_ARCHIVE,
+                    BIRD332_ARTIFACT,
+                    BIRD332_CACHE_KEY,
+                    "bird332-cache",
+                    "M101 BIRD 3.3.2 image blocked",
+                ),
+            )
+            for (
+                producer_name,
+                display,
+                version,
+                checksum,
+                archive,
+                artifact,
+                cache_key,
+                cache_dir,
+                coverage_label,
+            ) in bird_producers:
+                producer = jobs.get(producer_name, "")
+                exact_path = (
+                    f"path: ${{{{ runner.temp }}}}/{cache_dir}/{archive}"
+                )
+                for seam in (CLASSIFIER_NEEDS, CLASSIFIER_IF):
+                    if not _has_line(producer, f"    {seam}"):
+                        errors.append(
+                            f"interop.yml:{producer_name} missing job-level {seam}"
+                        )
+                for seam in (
+                    f"name: Prepare exact {display} archive",
+                    "runs-on: ubuntu-latest",
+                    "timeout-minutes: 10",
+                    CHECKOUT,
+                    "ref: ${{ github.sha }}",
+                    "uses: actions/cache@v6",
+                    exact_path,
+                    f"key: {cache_key}",
+                    f"--version {version}",
+                    f"--sha256 {checksum}",
+                    f'--coverage-label "{coverage_label}"',
+                    "--prepare-archive",
+                    f'"$RUNNER_TEMP/{cache_dir}/{archive}"',
+                    "uses: actions/upload-artifact@v7",
+                    f"name: {artifact}",
+                    "if-no-files-found: error",
+                    "retention-days: 1",
+                    "compression-level: 0",
+                ):
+                    if seam not in producer:
+                        errors.append(f"interop.yml:{producer_name} missing {seam}")
+                for forbidden in (
+                    "restore-keys:",
+                    "continue-on-error:",
+                    "actions/download-artifact@",
+                    "--stage-archive",
+                ):
+                    if forbidden in producer:
+                        errors.append(
+                            f"interop.yml:{producer_name} permits {forbidden}"
+                        )
+                if producer.count("uses: actions/cache@v6") != 1:
+                    errors.append(
+                        f"interop.yml:{producer_name} must restore one exact cache"
+                    )
+                if producer.count("--prepare-archive") != 1:
+                    errors.append(
+                        f"interop.yml:{producer_name} must prepare one archive"
+                    )
+                if producer.count("uses: actions/upload-artifact@v7") != 1:
+                    errors.append(
+                        f"interop.yml:{producer_name} must upload one artifact"
+                    )
+                if producer.count(exact_path) != 2:
+                    errors.append(
+                        f"interop.yml:{producer_name} cache/artifact paths drifted"
+                    )
         primer = jobs.get("prime_dev_image", "")
         if (
             _canonical_yaml_contract(primer)
@@ -662,7 +769,15 @@ def check(root: Path) -> list[str]:
             errors.append(f"{name}: primer exact job contract drifted")
         for job_name in roster:
             job = jobs.get(job_name, "")
-            if not setup and job_name in ("m54", "m56"):
+            if not setup and job_name == "m83":
+                expected_needs = (
+                    "    needs: [grpcurl_archive, bird2192_archive, prime_dev_image]"
+                )
+            elif not setup and job_name == "m101":
+                expected_needs = (
+                    "    needs: [grpcurl_archive, bird332_archive, prime_dev_image]"
+                )
+            elif not setup and job_name in ("m54", "m56"):
                 expected_needs = (
                     "    needs: [grpcurl_archive, gnmic_archive, prime_dev_image]"
                 )
@@ -693,29 +808,71 @@ def check(root: Path) -> list[str]:
                 errors.append(
                     f"{name}:{job_name}: gobgp build precedes the staged artifact"
                 )
-            expected_bird3 = 1 if setup and job_name == "m43" else 0
+            bird_contracts = (
+                {
+                    "m43": (
+                        "file: tests/interop/Dockerfile.bird3",
+                        BIRD3_CACHE_SEAMS,
+                        ("name: Stage verified BIRD 3 archive",),
+                    )
+                }
+                if setup
+                else {
+                    "m83": (
+                        "file: tests/interop/Dockerfile.bird-v2192",
+                        (
+                            "cache-from: type=gha,scope=bird2192-m83",
+                            "cache-to: type=gha,mode=max,scope=bird2192-m83,ignore-error=true",
+                        ),
+                        (
+                            "name: Stage verified BIRD 2.19.2 archive",
+                            'version: "2.19.2"',
+                            f"sha256: {BIRD2192_SHA256}",
+                            f"artifact-name: {BIRD2192_ARTIFACT}",
+                        ),
+                    ),
+                    "m101": (
+                        "file: tests/interop/Dockerfile.bird-v332",
+                        (
+                            "cache-from: type=gha,scope=bird332-m101",
+                            "cache-to: type=gha,mode=max,scope=bird332-m101,ignore-error=true",
+                        ),
+                        (
+                            "name: Stage verified BIRD 3.3.2 archive",
+                            'version: "3.3.2"',
+                            f"sha256: {BIRD332_SHA256}",
+                            f"artifact-name: {BIRD332_ARTIFACT}",
+                        ),
+                    ),
+                }
+            )
+            expected_bird3 = 1 if job_name in bird_contracts else 0
             if job.count(BIRD3_ACTION) != expected_bird3:
                 errors.append(f"{name}:{job_name}: bird3 stage consumer drifted")
-            if job.count(BIRD3_BUILD) != expected_bird3:
-                errors.append(
-                    f"{name}:{job_name}: bird3 image build inventory drifted"
-                )
-            if expected_bird3 and not (
-                0 <= job.find(BIRD3_ACTION) < job.find(BIRD3_BUILD)
-            ):
-                errors.append(
-                    f"{name}:{job_name}: bird3 build precedes the staged artifact"
-                )
             if expected_bird3:
-                for seam in BIRD3_CACHE_SEAMS:
+                bird_build, cache_seams, action_inputs = bird_contracts[job_name]
+                if job.count(bird_build) != 1:
+                    errors.append(
+                        f"{name}:{job_name}: bird image build inventory drifted"
+                    )
+                if not (0 <= job.find(BIRD3_ACTION) < job.find(bird_build)):
+                    errors.append(
+                        f"{name}:{job_name}: bird build precedes the staged artifact"
+                    )
+                for seam in (*cache_seams, *action_inputs):
                     if seam not in job:
                         errors.append(
-                            f"{name}:{job_name}: bird3 buildx layer cache missing {seam}"
+                            f"{name}:{job_name}: bird artifact/build seam missing {seam}"
                         )
+                expected_build_push = 1 if setup else 2
+                if job.count(BUILD_PUSH) != expected_build_push:
+                    errors.append(
+                        f"{name}:{job_name}: must use build-push-action for rustbgpd and BIRD"
+                    )
             if not setup and job_name == "m83":
                 m83_required = {
-                    "needs: [grpcurl_archive, prime_dev_image]": 1,
-                    "docker build -t bird:v2.19.2-m83 -f tests/interop/Dockerfile.bird-v2192 tests/interop": 1,
+                    "needs: [grpcurl_archive, bird2192_archive, prime_dev_image]": 1,
+                    "tags: bird:v2.19.2-m83": 1,
                     "--build-arg GOBGP_VERSION=4.8.0": 1,
                     "--build-arg GOBGP_SHA256=43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03": 1,
                     "-t gobgp:v4.8.0-m83 -f tests/interop/Dockerfile.gobgp-v47 tests/interop": 1,
@@ -737,7 +894,7 @@ def check(root: Path) -> list[str]:
                 for seam in (IMPORT, "load: true", "tags: rustbgpd:dev", "target: dev"):
                     if seam not in job:
                         errors.append(f"{name}:{job_name}: consumer missing {seam}")
-                if "cache-to:" in job:
+                if "cache-to:" in job and job_name not in bird_contracts:
                     errors.append(f"{name}:{job_name}: consumer exports a cache")
                 expected_gnmic = 1 if job_name in ("m54", "m56") else 0
                 if job.count(GNMIC_ACTION) != expected_gnmic:
@@ -820,8 +977,13 @@ def check(root: Path) -> list[str]:
     m101 = _jobs(texts["interop.yml"]).get("m101", "")
     m101_required = {
         GRPCURL_ACTION: 1,
+        BIRD3_ACTION: 1,
+        f"artifact-name: {BIRD332_ARTIFACT}": 1,
         "name: Build checksum-pinned BIRD 3.3.2 image": 1,
-        "docker build -t bird:v3.3.2-m101 -f tests/interop/Dockerfile.bird-v332 tests/interop": 1,
+        "file: tests/interop/Dockerfile.bird-v332": 1,
+        "tags: bird:v3.3.2-m101": 1,
+        "cache-from: type=gha,scope=bird332-m101": 1,
+        "cache-to: type=gha,mode=max,scope=bird332-m101,ignore-error=true": 1,
         "name: Pull digest-pinned FRR 10.3.1 image": 1,
         "docker pull quay.io/frrouting/frr@sha256:f90d26a9fd5c14fc5795a73b4254ac88bc3186c45bbeb220a225fb6182de812c": 1,
         "uses: ./.github/actions/run-interop-test": 1,
@@ -1099,12 +1261,19 @@ def check(root: Path) -> list[str]:
         if forbidden in gobgp_action:
             errors.append(f"stage-gobgp-artifact permits {forbidden}")
     for seam in (
+        "inputs:",
+        'default: "3.3.1"',
+        f'default: "{BIRD3_SHA256}"',
+        f'default: "{BIRD3_ARTIFACT}"',
+        'default: "tests/interop/bird3-archive"',
         "uses: actions/download-artifact@v8",
-        f"name: {BIRD3_ARTIFACT}",
+        "name: ${{ inputs.artifact-name }}",
         "path: ${{ runner.temp }}/bird3-artifact",
+        '--version "${{ inputs.version }}"',
+        '--sha256 "${{ inputs.sha256 }}"',
         "--stage-archive",
-        f'"$RUNNER_TEMP/bird3-artifact/{BIRD3_ARCHIVE}"',
-        "tests/interop/bird3-archive",
+        '"$RUNNER_TEMP/bird3-artifact/bird-${{ inputs.version }}.tar.gz"',
+        '"${{ inputs.stage-directory }}"',
     ):
         if seam not in bird3_action:
             errors.append(f"stage-bird3-artifact missing {seam}")
@@ -1123,6 +1292,8 @@ def check(root: Path) -> list[str]:
     ):
         if forbidden in bird3_action:
             errors.append(f"stage-bird3-artifact permits {forbidden}")
+    if bird3_action.count("default:") != 4:
+        errors.append("stage-bird3-artifact exact default inventory drifted")
     # split(...)[-1] returns the whole file when the step name drifts, which
     # turns every seam check below into a file-wide search that passes
     # vacuously. Scope the region only once the anchor is known to be present.
@@ -1191,8 +1362,8 @@ def check(root: Path) -> list[str]:
     )
     if "osrg/gobgp/releases" in gobgp_surfaces:
         errors.append("gobgp release URL escaped the installer/Dockerfile")
-    if texts["interop.yml"].count(BIRD3_ACTION) != 0:
-        errors.append("interop.yml: bird3 stage must remain kernel-only")
+    if texts["interop.yml"].count(BIRD3_ACTION) != 2:
+        errors.append("interop.yml: BIRD stage consumer inventory drifted")
     if texts["kernel-dataplane.yml"].count(BIRD3_ACTION) != 1:
         errors.append("kernel-dataplane.yml: bird3 stage consumer inventory drifted")
     bird3_surfaces = "\n".join(
@@ -1288,6 +1459,41 @@ def check(root: Path) -> list[str]:
         errors.append("Dockerfile.bird3: extraction precedes checksum verification")
     if re.search(r"BIRD_VERSION=latest|/download/latest", bird3):
         errors.append("Dockerfile.bird3: floating BIRD release is forbidden")
+    for dockerfile, version, checksum in (
+        ("Dockerfile.bird-v2192", BIRD2192_VERSION, BIRD2192_SHA256),
+        ("Dockerfile.bird-v332", BIRD332_VERSION, BIRD332_SHA256),
+    ):
+        source = (root / "tests" / "interop" / dockerfile).read_text()
+        for seam in (
+            f"ARG BIRD_VERSION={version}",
+            f"ARG BIRD_SHA256={checksum}",
+            "COPY bird3-archive/ /tmp/bird-archive/",
+            'archive="bird-${BIRD_VERSION}.tar.gz"',
+            'target="/tmp/bird-archive/${archive}"',
+            'if [ ! -f "${target}" ]; then',
+            "--connect-timeout 10 --max-time 120",
+            "https://bird.nic.cz/download/${archive}",
+            '--output "${target}.download"',
+            'if [ "${attempt}" -ge 3 ]; then',
+            'echo "${BIRD_SHA256}  ${target}" | sha256sum --check --strict',
+            'tar -xzf "${target}" -C /tmp/bird --strip-components=1',
+            'test "$(bird --version 2>&1)" = "BIRD version ${BIRD_VERSION}"',
+        ):
+            if seam not in source:
+                errors.append(f"{dockerfile}: pinned source seam missing: {seam}")
+        if source.count("bird.nic.cz/download/") != 1:
+            errors.append(f"{dockerfile}: download URL inventory drifted")
+        if not (
+            0
+            <= source.find("COPY bird3-archive/ /tmp/bird-archive/")
+            < source.find(
+                'echo "${BIRD_SHA256}  ${target}" | sha256sum --check --strict'
+            )
+            < source.find('tar -xzf "${target}" -C /tmp/bird --strip-components=1')
+        ):
+            errors.append(f"{dockerfile}: copy/check/extract ordering drifted")
+        if re.search(r"BIRD_VERSION=latest|/download/latest", source):
+            errors.append(f"{dockerfile}: floating BIRD release is forbidden")
     return errors
 
 

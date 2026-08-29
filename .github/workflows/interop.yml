@@ -230,6 +230,72 @@ jobs:
       - name: Restore, prepare, and upload exact gobgp archive
         uses: ./.github/actions/prepare-gobgp-artifact
 
+  bird2192_archive:
+    needs: classify_changes
+    if: needs.classify_changes.outputs.run_labs == 'true'
+    name: Prepare exact BIRD 2.19.2 archive
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - name: Restore exact BIRD 2.19.2 archive cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/bird2192-cache/bird-2.19.2.tar.gz
+          key: bird2192-v2.19.2-source-aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660
+      - name: Prepare exact BIRD 2.19.2 archive
+        run: |
+          set -euo pipefail
+          .github/scripts/install-bird3.sh \
+            --version 2.19.2 \
+            --sha256 aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660 \
+            --coverage-label "M83 BIRD 2.19.2 image blocked" \
+            --prepare-archive \
+            "$RUNNER_TEMP/bird2192-cache/bird-2.19.2.tar.gz"
+      - name: Upload verified BIRD 2.19.2 archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: bird2192-v2.19.2-source
+          path: ${{ runner.temp }}/bird2192-cache/bird-2.19.2.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  bird332_archive:
+    needs: classify_changes
+    if: needs.classify_changes.outputs.run_labs == 'true'
+    name: Prepare exact BIRD 3.3.2 archive
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - name: Restore exact BIRD 3.3.2 archive cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/bird332-cache/bird-3.3.2.tar.gz
+          key: bird332-v3.3.2-source-21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c
+      - name: Prepare exact BIRD 3.3.2 archive
+        run: |
+          set -euo pipefail
+          .github/scripts/install-bird3.sh \
+            --version 3.3.2 \
+            --sha256 21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c \
+            --coverage-label "M101 BIRD 3.3.2 image blocked" \
+            --prepare-archive \
+            "$RUNNER_TEMP/bird332-cache/bird-3.3.2.tar.gz"
+      - name: Upload verified BIRD 3.3.2 archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: bird332-v3.3.2-source
+          path: ${{ runner.temp }}/bird332-cache/bird-3.3.2.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
   # Warm one fixed-scope cache per source SHA; jobs still build and load their
   # own image, falling back to an uncached build if the cache is unavailable.
   prime_dev_image:
@@ -971,7 +1037,7 @@ jobs:
           script: tests/interop/scripts/test-m82-evpn-bundle-synthetic-gobgp.sh
 
   m83:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [grpcurl_archive, bird2192_archive, prime_dev_image]
     name: M83 — route-server profile, multi-stack (BIRD 2.19.2 + GoBGP 4.8.0 + FRR + RTR)
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -1001,10 +1067,24 @@ jobs:
           target: dev
           cache-from: type=gha,scope=rustbgpd-dev
 
+      - name: Stage verified BIRD 2.19.2 archive
+        uses: ./.github/actions/stage-bird3-artifact
+        with:
+          version: "2.19.2"
+          sha256: aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660
+          artifact-name: bird2192-v2.19.2-source
+
       - name: Build bird:v2.19.2-m83
         # BIRD 2.19.2 + tshark: the member stack that carries the byte-level
         # RFC 7947 transparency / OTC / EoR wire assertions.
-        run: docker build -t bird:v2.19.2-m83 -f tests/interop/Dockerfile.bird-v2192 tests/interop
+        uses: docker/build-push-action@v7
+        with:
+          context: tests/interop
+          file: tests/interop/Dockerfile.bird-v2192
+          load: true
+          tags: bird:v2.19.2-m83
+          cache-from: type=gha,scope=bird2192-m83
+          cache-to: type=gha,mode=max,scope=bird2192-m83,ignore-error=true
 
       - name: Build gobgp:v4.8.0-m83
         run: >-
@@ -2027,7 +2107,7 @@ jobs:
           max_attempts: "1"
 
   m101:
-    needs: [grpcurl_archive, prime_dev_image]
+    needs: [grpcurl_archive, bird332_archive, prime_dev_image]
     name: M101 — BIRD 3.3.2 real-wire attribute discard at a route server
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -2056,8 +2136,22 @@ jobs:
           target: dev
           cache-from: type=gha,scope=rustbgpd-dev
 
+      - name: Stage verified BIRD 3.3.2 archive
+        uses: ./.github/actions/stage-bird3-artifact
+        with:
+          version: "3.3.2"
+          sha256: 21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c
+          artifact-name: bird332-v3.3.2-source
+
       - name: Build checksum-pinned BIRD 3.3.2 image
-        run: docker build -t bird:v3.3.2-m101 -f tests/interop/Dockerfile.bird-v332 tests/interop
+        uses: docker/build-push-action@v7
+        with:
+          context: tests/interop
+          file: tests/interop/Dockerfile.bird-v332
+          load: true
+          tags: bird:v3.3.2-m101
+          cache-from: type=gha,scope=bird332-m101
+          cache-to: type=gha,mode=max,scope=bird332-m101,ignore-error=true
 
       - name: Pull digest-pinned FRR 10.3.1 image
         run: docker pull quay.io/frrouting/frr@sha256:f90d26a9fd5c14fc5795a73b4254ac88bc3186c45bbeb220a225fb6182de812c
@@ -2137,7 +2231,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: ${{ always() }}
-    needs: [classify_changes, grpcurl_archive, gnmic_archive, gobgp_archive, prime_dev_image, m1,
+    needs: [classify_changes, grpcurl_archive, gnmic_archive, gobgp_archive, bird2192_archive,
+      bird332_archive, prime_dev_image, m1,
       m13, m80, m15, m10, m14, m17, m73, m74, m75, m76, m77, m78, m79, m22, m24,
       m81, m82, m83, m85, m94, m86, m25, m29, m30, m34, m35, m35b, m35c,
       m41, m44, m54, m55, m56, m45, m57, m63, m64,
@@ -2145,7 +2240,8 @@ jobs:
     env:
       NEEDS_CONTEXT: ${{ toJSON(needs) }}
       EXPECTED_JOBS: >-
-        classify_changes grpcurl_archive gnmic_archive gobgp_archive prime_dev_image
+        classify_changes grpcurl_archive gnmic_archive gobgp_archive bird2192_archive
+        bird332_archive prime_dev_image
         m1 m13 m80 m15 m10
         m14 m17 m73 m74 m75 m76 m77 m78 m79 m22 m24 m81 m82 m83 m85 m94
         m86 m25 m29 m30 m34 m35 m35b m35c m41 m44 m54 m55 m56 m45 m57
