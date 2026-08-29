@@ -64,6 +64,17 @@ fn route_server_topologies_have_exact_control_plane_setup() {
                 "ip link set eth2 up",
             ],
         ),
+        (
+            "m102-routeserver-openbgpd92.clab.yml",
+            vec![
+                "ip addr add 10.102.1.1/24 dev eth1",
+                "ip -6 addr add 2001:db8:102:1::1/64 dev eth1 nodad",
+                "ip link set eth1 up",
+                "ip addr add 10.102.2.1/24 dev eth2",
+                "ip -6 addr add 2001:db8:102:2::1/64 dev eth2 nodad",
+                "ip link set eth2 up",
+            ],
+        ),
     ];
 
     for (relative, expected_exec) in cases {
@@ -331,6 +342,1305 @@ fn m101_pins_peer_identity_and_real_wire_attribute_discard_contract() {
         identity < capture && capture < rust_start && capture < frr_start && capture < bird_start,
         "M101 identity preflight and capture must precede every daemon start"
     );
+}
+
+#[test]
+fn m102_pins_openbgpd92_route_server_member_contract() {
+    const OPENBGPD_IMAGE: &str =
+        "openbgpd/openbgpd@sha256:b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9";
+    const FRR_IMAGE: &str = "quay.io/frrouting/frr@sha256:f90d26a9fd5c14fc5795a73b4254ac88bc3186c45bbeb220a225fb6182de812c";
+    let topology = topology("m102-routeserver-openbgpd92.clab.yml");
+    assert_eq!(
+        topology["topology"]["nodes"]["openbgpd"]["image"],
+        OPENBGPD_IMAGE
+    );
+    assert_eq!(topology["topology"]["nodes"]["frr"]["image"], FRR_IMAGE);
+    for node in ["openbgpd", "frr"] {
+        assert_eq!(topology["topology"]["nodes"][node]["cmd"], "sleep infinity");
+    }
+    let topology_source = fs::read_to_string(interop_path("m102-routeserver-openbgpd92.clab.yml"))
+        .expect("read M102 topology");
+    assert_eq!(
+        topology_source.matches("accept_dad=0").count(),
+        4,
+        "M102 peer images use their supported DAD sysctls, while rustbgpd uses nodad"
+    );
+    let rust_exec = topology["topology"]["nodes"]["rustbgpd"]["exec"]
+        .as_sequence()
+        .expect("M102 rustbgpd exec is a sequence");
+    assert!(
+        rust_exec.iter().all(|command| {
+            command
+                .as_str()
+                .is_some_and(|command| !command.contains("sysctl"))
+        }),
+        "M102 rustbgpd startup must not depend on sysctl being installed"
+    );
+    assert_eq!(
+        rust_exec
+            .iter()
+            .filter_map(|command| command.as_str())
+            .filter(|command| command.contains("ip -6 addr add") && command.ends_with(" nodad"))
+            .count(),
+        2,
+        "M102 rustbgpd must make both IPv6 addresses usable with iproute2 nodad"
+    );
+    let open_config = fs::read_to_string(interop_path("configs/bgpd-m102-member.conf"))
+        .expect("read M102 OpenBGPD config");
+    for required in [
+        "AS 4200000201",
+        "remote-as 4200000102",
+        "announce policy enforce",
+        "announce as-4byte enforce",
+        "enforce neighbor-as no",
+        "role rs-client",
+        "announce IPv4 unicast enforce",
+        "announce IPv6 unicast enforce",
+    ] {
+        assert!(
+            open_config.contains(required),
+            "M102 OpenBGPD config lost `{required}`"
+        );
+    }
+    let rust_config = fs::read_to_string(interop_path("configs/rustbgpd-m102-rs.toml"))
+        .expect("read M102 rustbgpd config");
+    for required in [
+        "config_epoch = 2",
+        "asn = 4200000102",
+        "ebgp_requires_policy = true",
+        "remote_asn = 4200000201",
+        "remote_asn = 4200000202",
+        "strict_role = true",
+        "import_policy_chain",
+        "export_policy_chain",
+    ] {
+        assert!(
+            rust_config.contains(required),
+            "M102 rustbgpd config lost `{required}`"
+        );
+    }
+    let script_path = interop_path("scripts/test-m102-routeserver-openbgpd92.sh");
+    let script = fs::read_to_string(&script_path).expect("read M102 driver");
+    for required in [
+        "OpenBGPD 9.2",
+        "bgpctl network add",
+        "bgpctl network delete",
+        "CAPTURE_IMAGE=bmpsink:m102",
+        "CAPTURE_CONTAINER=m102-raw-capture",
+        "CAPTURE_VOLUME=m102-raw-capture-data",
+        "for b in docker python3 jq timeout",
+        "capture tshark is not 4.4.x",
+        "docker volume create --label rustbgpd.interop.milestone=M102",
+        "--network \"container:$RUSTBGPD\"",
+        "--cap-add=NET_ADMIN --cap-add=NET_RAW",
+        "--mount \"type=volume,src=$CAPTURE_VOLUME,dst=/capture\"",
+        "\"$CAPTURE_IMAGE\" tshark -p -i any",
+        "docker logs \"$CAPTURE_CONTAINER\"",
+        "Capturing on",
+        "docker kill --signal=SIGINT \"$CAPTURE_CONTAINER\"",
+        "timeout 10 docker wait \"$CAPTURE_CONTAINER\"",
+        "/tmp/m102-rustbgpd.log",
+        "mkdir -p /run/bgpd",
+        "/tmp/m102-bgpd.log",
+        "/tmp/m102-bgpd.pid",
+        "kill -0 \"$pid\"",
+        "bgpctl show",
+        "bgpctl show neighbor 10.102.1.1",
+        "docker top \"$FRR\"",
+        "rm -f /tmp/m102-bgpd.pid /tmp/m102-bgpd.log",
+        "/run/bgpd/bgpd.sock.*",
+        "/run/bgpd/bgpd.rsock.*",
+        "OpenBGPD startup or control-socket readiness failed",
+        "start_m102_rustbgpd",
+        "trap - EXIT INT TERM HUP",
+        "pass=$((pass + 1))",
+        "open_absent",
+        "frr_absent",
+        "still present or uninspectable",
+        "open_session_json_valid",
+        "open_route_json_valid",
+        "open_absence_json_valid",
+        "open_communities_json_valid",
+        "rs_presence_json_valid",
+        "rs_absence_json_valid",
+        "frr_communities_json_valid",
+        "frr_absence_json_valid",
+        "neighbor_state_json_valid",
+        ".config.remoteAsn == $expected_asn",
+        "bgpctl -j show rib detail \"$prefix\"",
+        "frr_inventory_json_valid",
+        "[.[].routes | keys[]] | sort",
+        "emit_session_mismatch",
+        "emit_community_mismatch",
+        "emit_inventory_mismatch",
+        "inventory_row_matches",
+        ".neighbors[0].remote_addr == \"10.102.1.1\"",
+        ".rib[0].exit_nexthop == $nh",
+        ".paths[0].community.string",
+        ".paths[0].largeCommunity.string",
+        "--self-test-openbgpd-json",
+        "dump_m102_control_plane_diagnostics",
+        "dump_m102_capture_diagnostics",
+        "packet summary (first 80 BGP TCP packets)",
+        "TCP conversation summary",
+        "-z conv,tcp",
+        "capture volume retained for idempotent trap cleanup",
+        "0|130",
+        "--mount \"type=volume,src=$CAPTURE_VOLUME,dst=/capture,readonly\"",
+        "test -s /capture/m102.pcap",
+        "tshark -r /capture/m102.pcap",
+        "tcp.seq_raw",
+        "--self-test-oracle",
+        "--self-test-oracle-conflict",
+        "--self-test-oracle-gap",
+        "--self-test-oracle-capability",
+        "--self-test-oracle-update",
+        "--self-test-oracle-trailing",
+        "--self-test-oracle-marker",
+        "4200000201",
+        "expected exactly one OpenBGPD-to-rustbgpd TCP stream",
+        "conflicting TCP overlap",
+        "capability 65 ASN mismatch",
+        "role capability 9 mismatch",
+        "exact UPDATE attributes absent",
+        "BGP marker is not at stream cursor",
+        "unexplained trailing partial BGP bytes",
+        "2001:db8:1102::/48",
+        "2001:db8:2102::/48",
+        "f[1]==\"10.102.1.2\" and f[2]==\"10.102.1.1\"",
+        "OpenBGPD member is Established",
+        "FRR member is Established",
+        "rustbgpd reports exact remote ASNs and negotiated Roles",
+        "rs_loc_inventory_exact",
+        "open_inventory_exact",
+        "frr_inventory_exact",
+        "Rust Adj-RIB-In contains OpenBGPD IPv4",
+        "Rust Adj-RIB-In contains OpenBGPD IPv6",
+        "Rust Loc-RIB contains OpenBGPD IPv4",
+        "Rust Loc-RIB contains OpenBGPD IPv6",
+        "FRR IPv4 has exact OpenBGPD AS_PATH/NEXT_HOP",
+        "FRR IPv6 has exact OpenBGPD AS_PATH/NEXT_HOP",
+        "OpenBGPD IPv4 has exact FRR AS_PATH/NEXT_HOP",
+        "OpenBGPD IPv6 has exact FRR AS_PATH/NEXT_HOP",
+        "raw OPEN uses AS_TRANS",
+        "raw capability 65 carries ASN 4200000201",
+        "raw capability 9 carries rs-client role",
+        "raw OPEN carries exact IPv4/IPv6 MP tuples",
+        "raw UPDATE has exact AS_PATH/NEXT_HOP",
+        "raw UPDATE has exact standard/Large Communities",
+        "standard and Large Communities survive both directions",
+        "global import policy denies its prefix",
+        "import explain names m102-import",
+        "export-denied route remains in Loc-RIB",
+        "FRR advertised view omits export deny",
+        "export explain names m102-export-to-frr",
+        "policy positive controls pass both directions",
+        "OpenBGPD, FRR, and Rust inventories are exact with no extras",
+        "OpenBGPD IPv4 leaves Rust Adj-RIB-In/Loc-RIB and FRR",
+        "OpenBGPD IPv6 leaves Rust Adj-RIB-In/Loc-RIB and FRR",
+        "FRR IPv4 leaves Rust Adj-RIB-In/Loc-RIB and OpenBGPD",
+        "FRR IPv6 leaves Rust Adj-RIB-In/Loc-RIB and OpenBGPD",
+        "OpenBGPD remains Established without a flap",
+        "FRR remains Established without a flap",
+        "m102-import",
+        "m102-export-to-frr",
+        "[ \"$pass\" -eq 32 ] && [ \"$fail\" -eq 0 ]",
+    ] {
+        assert!(script.contains(required), "M102 driver lost `{required}`");
+    }
+    for forbidden in ["sudo", "nsenter", "command -v tshark"] {
+        assert!(
+            !script.contains(forbidden),
+            "M102 sidecar driver regained forbidden host seam `{forbidden}`"
+        );
+    }
+    for forbidden in [
+        ".neighbors|length==1 and",
+        ".nexthop==",
+        ".nexthop ==",
+        "|tostring|contains",
+        "! rs_loc",
+        "! rs_received",
+        "! rs_advertised",
+        ".paths // []",
+        "$os.remoteAsn",
+        "$fs.remoteAsn",
+        "..|objects|select(has(\"prefix\"))",
+        "sort -u",
+    ] {
+        assert!(
+            !script.contains(forbidden),
+            "M102 JSON proof regained forbidden legacy seam `{forbidden}`"
+        );
+    }
+    assert_eq!(
+        script.matches("ok \"").count(),
+        31,
+        "M102 must retain 31 local assertions plus shared gRPC readiness"
+    );
+    let ledger_rows = [
+        "OpenBGPD member is Established",
+        "FRR member is Established",
+        "rustbgpd reports exact remote ASNs and negotiated Roles",
+        "Rust Adj-RIB-In contains OpenBGPD IPv4",
+        "Rust Adj-RIB-In contains OpenBGPD IPv6",
+        "Rust Loc-RIB contains OpenBGPD IPv4",
+        "Rust Loc-RIB contains OpenBGPD IPv6",
+        "FRR IPv4 has exact OpenBGPD AS_PATH/NEXT_HOP",
+        "FRR IPv6 has exact OpenBGPD AS_PATH/NEXT_HOP",
+        "OpenBGPD IPv4 has exact FRR AS_PATH/NEXT_HOP",
+        "OpenBGPD IPv6 has exact FRR AS_PATH/NEXT_HOP",
+        "standard and Large Communities survive both directions",
+        "global import policy denies its prefix",
+        "import explain names m102-import",
+        "export-denied route remains in Loc-RIB",
+        "FRR advertised view omits export deny",
+        "export explain names m102-export-to-frr",
+        "policy positive controls pass both directions",
+        "raw OPEN uses AS_TRANS",
+        "raw capability 65 carries ASN 4200000201",
+        "raw capability 9 carries rs-client role",
+        "raw OPEN carries exact IPv4/IPv6 MP tuples",
+        "raw UPDATE has exact AS_PATH/NEXT_HOP",
+        "raw UPDATE has exact standard/Large Communities",
+        "OpenBGPD, FRR, and Rust inventories are exact with no extras",
+        "OpenBGPD IPv4 leaves Rust Adj-RIB-In/Loc-RIB and FRR",
+        "OpenBGPD IPv6 leaves Rust Adj-RIB-In/Loc-RIB and FRR",
+        "FRR IPv4 leaves Rust Adj-RIB-In/Loc-RIB and OpenBGPD",
+        "FRR IPv6 leaves Rust Adj-RIB-In/Loc-RIB and OpenBGPD",
+        "OpenBGPD remains Established without a flap",
+        "FRR remains Established without a flap",
+    ];
+    assert_eq!(ledger_rows.len(), 31);
+    for row in ledger_rows {
+        assert_eq!(
+            script.matches(&format!("ok \"{row}\"")).count(),
+            1,
+            "M102 ledger row `{row}` must appear exactly once"
+        );
+    }
+    assert_eq!(
+        script.matches("\npreflight() {").count(),
+        0,
+        "M102 must not override the shared test-lib preflight"
+    );
+    assert_eq!(
+        script
+            .matches("\npreflight_identities_and_configs() {")
+            .count(),
+        1,
+        "M102 must define exactly one uniquely named identity/config preflight"
+    );
+    let source = script
+        .find("source \"$SCRIPT_DIR/test-lib.sh\"")
+        .expect("M102 sources shared test-lib");
+    let self_test_dispatch = script
+        .find("case \"${1:-}\" in")
+        .expect("M102 dispatches offline oracle self-tests");
+    let capture_allocation = script
+        .find("PAYLOADS=\"$(mktemp /tmp/m102.XXXXXX.tsv)\"")
+        .expect("M102 allocates host payload state");
+    let custom_trap = script
+        .find("trap on_exit EXIT INT TERM HUP")
+        .expect("M102 installs its composed cleanup trap");
+    let main_invoke = script.rfind("main \"$@\"").expect("M102 invokes main");
+    assert!(
+        self_test_dispatch < source
+            && source < capture_allocation
+            && capture_allocation < custom_trap
+            && custom_trap < main_invoke,
+        "M102 must dispatch offline self-tests before shared preflight, then allocate capture state and install its final trap before main"
+    );
+    let on_exit = script
+        .split_once("on_exit() {")
+        .expect("M102 composed cleanup helper")
+        .1
+        .split_once("\n}")
+        .expect("M102 cleanup helper has a bounded source section")
+        .0;
+    let capture_cleanup = on_exit
+        .find("cleanup_capture || capture_status=$?")
+        .expect("M102 cleanup records capture status");
+    let temp_cleanup = on_exit
+        .find("rm -f \"$PAYLOADS\"")
+        .expect("M102 cleanup removes host payload state");
+    let shared_cleanup = on_exit
+        .find("_cleanup_on_exit")
+        .expect("M102 cleanup composes shared topology cleanup");
+    let status_propagation = on_exit
+        .find("[ \"$status\" -eq 0 ] && [ \"$capture_status\" -ne 0 ] && status=$capture_status")
+        .expect("M102 cleanup propagates capture failure after successful main");
+    let status_exit = on_exit
+        .find("exit \"$status\"")
+        .expect("M102 cleanup preserves final status");
+    assert!(
+        capture_cleanup < temp_cleanup
+            && temp_cleanup < shared_cleanup
+            && shared_cleanup < status_propagation
+            && status_propagation < status_exit,
+        "M102 must stop capture, remove temp state, run shared cleanup, propagate capture status, and preserve the final exit status"
+    );
+    let capture_cleanup_body = script
+        .split_once("cleanup_capture() {")
+        .expect("M102 cleanup capture helper")
+        .1
+        .split_once("\n}")
+        .expect("M102 cleanup capture helper is bounded")
+        .0;
+    let cleanup_stop = capture_cleanup_body
+        .find("stop_capture_container")
+        .expect("M102 cleanup bounded-stops the sidecar");
+    let cleanup_container = capture_cleanup_body
+        .find("timeout 10 docker rm -f \"$CAPTURE_CONTAINER\"")
+        .expect("M102 cleanup removes the sidecar");
+    let cleanup_volume = capture_cleanup_body
+        .find("timeout 10 docker volume rm -f \"$CAPTURE_VOLUME\"")
+        .expect("M102 cleanup removes the capture volume");
+    assert!(
+        cleanup_stop < cleanup_container && cleanup_container < cleanup_volume,
+        "M102 cleanup must stop/remove the sidecar before removing its volume"
+    );
+    let stop_capture_container = script
+        .split_once("stop_capture_container() {")
+        .expect("M102 stop capture helper")
+        .1
+        .split_once("\n}")
+        .expect("M102 stop capture helper is bounded")
+        .0;
+    let signal = stop_capture_container
+        .find("timeout 10 docker kill --signal=SIGINT")
+        .expect("M102 sends bounded SIGINT to tshark PID 1");
+    let wait = stop_capture_container
+        .find("timeout 10 docker wait")
+        .expect("M102 bounded-waits for tshark");
+    let remove = stop_capture_container
+        .find("timeout 10 docker rm -f")
+        .expect("M102 removes the stopped sidecar");
+    assert!(
+        signal < wait && wait < remove,
+        "M102 must signal, wait for, then remove the capture sidecar"
+    );
+    let start_capture = script
+        .split_once("start_capture() {")
+        .expect("M102 start capture helper")
+        .1
+        .split_once("\n}")
+        .expect("M102 start capture helper is bounded")
+        .0;
+    let stale_container = start_capture
+        .find("timeout 10 docker rm -f \"$CAPTURE_CONTAINER\"")
+        .expect("M102 removes a stale sidecar");
+    let stale_volume = start_capture
+        .find("timeout 10 docker volume rm -f \"$CAPTURE_VOLUME\"")
+        .expect("M102 removes a stale capture volume");
+    let create_volume = start_capture
+        .find("docker volume create --label rustbgpd.interop.milestone=M102")
+        .expect("M102 creates a labeled capture volume");
+    let run_sidecar = start_capture
+        .find("docker run -d --name \"$CAPTURE_CONTAINER\"")
+        .expect("M102 starts the capture sidecar");
+    let ready_running = start_capture
+        .find("'{{.State.Running}}'")
+        .expect("M102 readiness checks the sidecar state");
+    let ready_log = start_capture
+        .find("Capturing on")
+        .expect("M102 readiness checks tshark output");
+    assert!(
+        stale_container < stale_volume
+            && stale_volume < create_volume
+            && create_volume < run_sidecar
+            && run_sidecar < ready_running
+            && ready_running < ready_log,
+        "M102 must clean stale state, create its volume, then start and verify the sidecar"
+    );
+    let stop_capture = script
+        .split_once("stop_capture() {")
+        .expect("M102 capture decode helper")
+        .1
+        .split_once("\n}")
+        .expect("M102 capture decode helper is bounded")
+        .0;
+    let stopped = stop_capture
+        .find("stop_capture_container")
+        .expect("M102 decode first stops and removes the sidecar");
+    let readonly = stop_capture
+        .find("dst=/capture,readonly")
+        .expect("M102 decode mounts capture read-only");
+    let nonempty_capture = stop_capture
+        .find("test -s /capture/m102.pcap")
+        .expect("M102 decode checks the in-container capture");
+    let decode = stop_capture
+        .find("tshark -r /capture/m102.pcap")
+        .expect("M102 decodes with the sidecar image");
+    let nonempty_payloads = stop_capture
+        .find("[ -s \"$PAYLOADS\" ]")
+        .expect("M102 requires decoded payload rows");
+    let remove_volume = stop_capture
+        .find("timeout 10 docker volume rm \"$CAPTURE_VOLUME\"")
+        .expect("M102 removes the capture volume after decode");
+    assert!(
+        stopped < readonly
+            && readonly < nonempty_capture
+            && nonempty_capture < decode
+            && decode < nonempty_payloads
+            && nonempty_payloads < remove_volume,
+        "M102 must stop, decode read-only, validate payloads, then remove its volume"
+    );
+    let capture_diagnostics = script
+        .split_once("dump_m102_capture_diagnostics() {")
+        .expect("M102 capture diagnostics helper")
+        .1
+        .split_once("\n}")
+        .expect("M102 capture diagnostics helper is bounded")
+        .0;
+    let diagnostic_stop = capture_diagnostics
+        .find("stop_capture_container")
+        .expect("M102 diagnostics stops the capture sidecar");
+    let diagnostic_readonly = capture_diagnostics
+        .find("dst=/capture,readonly")
+        .expect("M102 diagnostics mounts the retained capture read-only");
+    let packet_summary = capture_diagnostics
+        .find("packet summary (first 80 BGP TCP packets)")
+        .expect("M102 diagnostics emits a bounded BGP packet summary");
+    let conversation_summary = capture_diagnostics
+        .find("-z conv,tcp")
+        .expect("M102 diagnostics emits a TCP conversation summary");
+    let retained = capture_diagnostics
+        .find("capture volume retained for idempotent trap cleanup")
+        .expect("M102 diagnostics leaves the volume to trap cleanup");
+    assert!(
+        diagnostic_stop < diagnostic_readonly
+            && diagnostic_readonly < packet_summary
+            && packet_summary < conversation_summary
+            && conversation_summary < retained,
+        "M102 failure capture must stop, decode read-only, summarize packets/conversations, then retain the volume for cleanup"
+    );
+    assert!(
+        !capture_diagnostics.contains("raw_oracle")
+            && !capture_diagnostics.contains("docker volume rm"),
+        "M102 failure diagnostics must neither run the strict receipt oracle nor remove retained capture state"
+    );
+    let diagnostics = script
+        .split_once("dump_m102_diagnostics() {")
+        .expect("M102 diagnostic coordinator")
+        .1
+        .split_once("\n}")
+        .expect("M102 diagnostic coordinator is bounded")
+        .0;
+    let idempotence = diagnostics
+        .find("[ \"$DIAGNOSTICS_DUMPED\" -eq 0 ] || return 0")
+        .expect("M102 diagnostics are idempotent");
+    let control_diagnostics = diagnostics
+        .find("dump_m102_control_plane_diagnostics")
+        .expect("M102 emits control-plane diagnostics");
+    let capture_diagnostics_call = diagnostics
+        .find("dump_m102_capture_diagnostics")
+        .expect("M102 emits capture diagnostics");
+    assert!(
+        idempotence < control_diagnostics && control_diagnostics < capture_diagnostics_call,
+        "M102 must emit control-plane diagnostics before stopping and decoding its capture"
+    );
+    let diagnostic_die = script
+        .split_once("diagnostic_die() {")
+        .expect("M102 diagnostic failure helper")
+        .1
+        .split_once("\n}")
+        .expect("M102 diagnostic failure helper is bounded")
+        .0;
+    assert!(
+        diagnostic_die
+            .find("dump_m102_diagnostics")
+            .expect("M102 failure invokes diagnostics")
+            < diagnostic_die
+                .find("die \"$message\"")
+                .expect("M102 failure exits after diagnostics"),
+        "M102 failures must emit diagnostics before exiting"
+    );
+    let control_plane_diagnostics = script
+        .split_once("dump_m102_control_plane_diagnostics() {")
+        .expect("M102 control-plane diagnostic helper")
+        .1
+        .split_once("\n}")
+        .expect("M102 control-plane diagnostic helper is bounded")
+        .0;
+    let open_neighbor = control_plane_diagnostics
+        .find("timeout 5 docker exec \"$OPENBGPD\" bgpctl show neighbor 10.102.1.1")
+        .expect("M102 captures the exact OpenBGPD neighbor view");
+    let frr_process = control_plane_diagnostics
+        .find("timeout 5 docker top \"$FRR\"")
+        .expect("M102 captures the bounded FRR process view");
+    let frr_neighbor = control_plane_diagnostics
+        .find("timeout 5 docker exec \"$FRR\" vtysh")
+        .expect("M102 captures the bounded FRR neighbor view");
+    assert!(
+        open_neighbor < frr_process && frr_process < frr_neighbor,
+        "M102 control-plane diagnostics must include the exact OpenBGPD neighbor plus FRR process and neighbor views"
+    );
+    assert!(
+        !script.contains("wait_absent()"),
+        "M102 must not use a negated generic absence poll"
+    );
+    for helper in [
+        "wait_for() {",
+        "wait_open_absent() {",
+        "wait_frr_absent() {",
+    ] {
+        let body = script
+            .split_once(helper)
+            .expect("M102 wait helper")
+            .1
+            .split_once("\n}")
+            .expect("M102 wait helper is bounded")
+            .0;
+        assert!(
+            body.contains("diagnostic_die"),
+            "M102 wait helper `{helper}` must diagnose before failing"
+        );
+    }
+    let open_absent = script
+        .split_once("open_absent() {")
+        .expect("M102 OpenBGPD absence inspector")
+        .1
+        .split_once("\n}")
+        .expect("M102 OpenBGPD absence inspector is bounded")
+        .0;
+    let open_json = open_absent
+        .find("output=$(timeout 5 docker exec")
+        .expect("M102 requires a successful bounded OpenBGPD inspection");
+    let full_rib = open_absent
+        .find("bgpctl -j show rib)")
+        .expect("M102 inspects the full OpenBGPD RIB for absence");
+    let open_valid = open_absent
+        .find("open_absence_json_valid \"$output\" \"$prefix\"")
+        .expect("M102 delegates to the pure full-RIB absence validator");
+    assert!(
+        open_json <= full_rib && full_rib < open_valid,
+        "M102 OpenBGPD withdrawal inspection must successfully fetch the full RIB before pure JSON validation"
+    );
+    assert!(
+        !open_absent.contains("show rib \"$prefix\""),
+        "M102 OpenBGPD absence must not query an exact-prefix view"
+    );
+    let open_absence_validator = script
+        .split_once("open_absence_json_valid() {")
+        .expect("M102 pure OpenBGPD absence validator")
+        .1
+        .split_once("\n}")
+        .expect("M102 pure OpenBGPD absence validator is bounded")
+        .0;
+    for required in [
+        "(type == \"object\")",
+        "((keys | length) == 0)",
+        "(keys == [\"rib\"])",
+        "((.rib | type) == \"array\")",
+        "all(.rib[];",
+        "(.prefix | type) == \"string\"",
+        "all(.rib[]; .prefix != $p)",
+    ] {
+        assert!(
+            open_absence_validator.contains(required),
+            "M102 pure OpenBGPD absence validator lost `{required}`"
+        );
+    }
+    assert!(
+        !open_absence_validator.contains("docker")
+            && !open_absence_validator.contains("timeout")
+            && !open_absence_validator.contains("bgpctl"),
+        "M102 OpenBGPD absence JSON validator must remain pure"
+    );
+    for validator in [
+        "open_session_json_valid() {",
+        "open_prefix_json_valid() {",
+        "open_route_json_valid() {",
+        "open_absence_json_valid() {",
+        "open_communities_json_valid() {",
+        "rs_presence_json_valid() {",
+        "rs_absence_json_valid() {",
+        "frr_communities_json_valid() {",
+        "frr_absence_json_valid() {",
+        "neighbor_state_json_valid() {",
+        "frr_inventory_json_valid() {",
+    ] {
+        let body = script
+            .split_once(validator)
+            .expect("M102 pure JSON validator")
+            .1
+            .split_once("\n}")
+            .expect("M102 pure JSON validator is bounded")
+            .0;
+        for forbidden in ["docker", "bgpctl", "vtysh", "rs_ctl", "grpcurl", "timeout"] {
+            assert!(
+                !body.contains(forbidden),
+                "M102 JSON validator `{validator}` regained live seam `{forbidden}`"
+            );
+        }
+    }
+    let open_session_validator = script
+        .split_once("open_session_json_valid() {")
+        .expect("M102 OpenBGPD session JSON validator")
+        .1
+        .split_once("\n}")
+        .expect("M102 OpenBGPD session JSON validator is bounded")
+        .0;
+    for required in [
+        "(type == \"object\")",
+        "and ((.neighbors | type) == \"array\")",
+        "and ((.neighbors | length) == 1)",
+        "and (.neighbors[0].remote_addr == \"10.102.1.1\")",
+        "and (.neighbors[0].state == \"Established\")",
+    ] {
+        assert!(
+            open_session_validator.contains(required),
+            "M102 exact OpenBGPD session validator lost `{required}`"
+        );
+    }
+    let open_route_validator = script
+        .split_once("open_route_json_valid() {")
+        .expect("M102 OpenBGPD route JSON validator")
+        .1
+        .split_once("\n}")
+        .expect("M102 OpenBGPD route JSON validator is bounded")
+        .0;
+    for required in [
+        "and ((.rib | length) == 1)",
+        "and (.rib[0].prefix == $p)",
+        "and (.rib[0].valid == true)",
+        "and (.rib[0].aspath == $path)",
+        "and (.rib[0].exit_nexthop == $nh)",
+    ] {
+        assert!(
+            open_route_validator.contains(required),
+            "M102 exact OpenBGPD route validator lost `{required}`"
+        );
+    }
+    assert!(
+        !open_route_validator.contains(".nexthop"),
+        "M102 OpenBGPD route validator must use exit_nexthop, not a nonexistent nexthop field"
+    );
+    let rs_presence_validator = script
+        .split_once("rs_presence_json_valid() {")
+        .expect("M102 rust presence JSON validator")
+        .1
+        .split_once("\n}")
+        .expect("M102 rust presence JSON validator is bounded")
+        .0;
+    let rs_absence_validator = script
+        .split_once("rs_absence_json_valid() {")
+        .expect("M102 rust absence JSON validator")
+        .1
+        .split_once("\n}")
+        .expect("M102 rust absence JSON validator is bounded")
+        .0;
+    for validator in [rs_presence_validator, rs_absence_validator] {
+        for required in [
+            "(type == \"array\")",
+            "all(.[]; valid_row)",
+            "(.prefix | type) == \"string\"",
+        ] {
+            assert!(
+                validator.contains(required),
+                "M102 rust route JSON validator lost `{required}`"
+            );
+        }
+    }
+    let open_communities_validator = script
+        .split_once("open_communities_json_valid() {")
+        .expect("M102 OpenBGPD community JSON validator")
+        .1
+        .split_once("\n}")
+        .expect("M102 OpenBGPD community JSON validator is bounded")
+        .0;
+    for required in [
+        "((.rib[0].communities | type) == \"array\")",
+        "all(.rib[0].communities[]; type == \"string\")",
+        "((.rib[0].communities | sort | unique) == ($standard | tokens))",
+        "((.rib[0].large_communities | type) == \"array\")",
+        "((.rib[0].large_communities | sort | unique) == ($large | tokens))",
+    ] {
+        assert!(
+            open_communities_validator.contains(required),
+            "M102 OpenBGPD exact-community validator lost `{required}`"
+        );
+    }
+    let frr_communities_validator = script
+        .split_once("frr_communities_json_valid() {")
+        .expect("M102 FRR community JSON validator")
+        .1
+        .split_once("\n}")
+        .expect("M102 FRR community JSON validator is bounded")
+        .0;
+    for required in [
+        ".paths[0].community.string",
+        ".paths[0].largeCommunity.string",
+        "== ($standard | tokens)",
+        "== ($large | tokens)",
+    ] {
+        assert!(
+            frr_communities_validator.contains(required),
+            "M102 FRR documented-community validator lost `{required}`"
+        );
+    }
+    let neighbor_state_validator = script
+        .split_once("neighbor_state_json_valid() {")
+        .expect("M102 NeighborState JSON validator")
+        .1
+        .split_once("\n}")
+        .expect("M102 NeighborState JSON validator is bounded")
+        .0;
+    for required in [
+        "(type == \"object\")",
+        "((.config | type) == \"object\")",
+        "(.config.remoteAsn == $expected_asn)",
+        "(.roleNegotiated == true)",
+    ] {
+        assert!(
+            neighbor_state_validator.contains(required),
+            "M102 NeighborState validator lost `{required}`"
+        );
+    }
+    assert!(
+        !neighbor_state_validator.contains("and (.remoteAsn == $expected_asn)"),
+        "M102 NeighborState validator must not accept the old top-level remoteAsn seam"
+    );
+    let frr_inventory_validator = script
+        .split_once("frr_inventory_json_valid() {")
+        .expect("M102 FRR inventory JSON validator")
+        .1
+        .split_once("\n}")
+        .expect("M102 FRR inventory JSON validator is bounded")
+        .0;
+    for required in [
+        "(length == 2)",
+        "and all(.[];",
+        "((.routes | type) == \"object\")",
+        "([.[].routes | keys[]] | sort)",
+        "($expected | sort)",
+    ] {
+        assert!(
+            frr_inventory_validator.contains(required),
+            "M102 FRR inventory validator lost `{required}`"
+        );
+    }
+    assert!(
+        !frr_inventory_validator.contains("..") && !frr_inventory_validator.contains("sort -u"),
+        "M102 FRR inventory validator must use only the two top-level routes-key multisets"
+    );
+    let open_community_wrapper = script
+        .split_once("open_communities_exact() {")
+        .expect("M102 OpenBGPD community live wrapper")
+        .1
+        .split_once("\n}")
+        .expect("M102 OpenBGPD community live wrapper is bounded")
+        .0;
+    assert!(
+        open_community_wrapper.contains("OPEN_COMMUNITY_OBS=$(timeout 5 docker exec \"$OPENBGPD\"")
+            && open_community_wrapper.contains("bgpctl -j show rib detail \"$prefix\"")
+            && open_community_wrapper.contains(") || return 1")
+            && open_community_wrapper.contains("open_communities_json_valid"),
+        "M102 OpenBGPD community wrapper must command-gate the exact detail view before route-level validation"
+    );
+    assert!(
+        !open_community_wrapper.contains("bgpctl -j show rib \"$prefix\""),
+        "M102 OpenBGPD community wrapper must not use the non-detail route view"
+    );
+    let frr_community_wrapper = script
+        .split_once("frr_communities_exact() {")
+        .expect("M102 FRR community live wrapper")
+        .1
+        .split_once("\n}")
+        .expect("M102 FRR community live wrapper is bounded")
+        .0;
+    assert!(
+        frr_community_wrapper.contains("FRR_COMMUNITY_OBS=$(frr_json")
+            && frr_community_wrapper.contains(") || return 1")
+            && frr_community_wrapper.contains("frr_communities_json_valid"),
+        "M102 FRR community wrapper must retain a command-gated observation for projection and validation"
+    );
+    for (wrapper, validator) in [
+        ("open_established() {", "open_session_json_valid"),
+        ("open_has() {", "open_prefix_json_valid"),
+        ("open_route_matches() {", "open_route_json_valid"),
+        ("open_absent() {", "open_absence_json_valid"),
+        ("frr_absent() {", "frr_absence_json_valid"),
+        ("rs_received() {", "rs_presence_json_valid"),
+        ("rs_received_absent() {", "rs_absence_json_valid"),
+        ("rs_loc() {", "rs_presence_json_valid"),
+        ("rs_loc_absent() {", "rs_absence_json_valid"),
+        ("rs_advertised() {", "rs_presence_json_valid"),
+        ("rs_advertised_absent() {", "rs_absence_json_valid"),
+    ] {
+        let body = script
+            .split_once(wrapper)
+            .expect("M102 live JSON wrapper")
+            .1
+            .split_once("\n}")
+            .expect("M102 live JSON wrapper is bounded")
+            .0;
+        assert!(
+            body.contains("output=$(")
+                && body.contains(") || return 1")
+                && body.contains(validator),
+            "M102 live wrapper `{wrapper}` must fail closed before pure `{validator}` validation"
+        );
+    }
+    let frr_absent = script
+        .split_once("frr_absent() {")
+        .expect("M102 FRR absence inspector")
+        .1
+        .split_once("\n}")
+        .expect("M102 FRR absence inspector is bounded")
+        .0;
+    let frr_json = frr_absent
+        .find("output=$(timeout 5 docker exec \"$FRR\" vtysh")
+        .expect("M102 requires a successful bounded FRR inspection");
+    let frr_valid = frr_absent
+        .find("frr_absence_json_valid \"$output\"")
+        .expect("M102 delegates to the pure FRR absence validator");
+    assert!(
+        frr_json < frr_valid,
+        "M102 FRR withdrawal inspection must succeed before pure JSON validation"
+    );
+    let frr_absence_validator = script
+        .split_once("frr_absence_json_valid() {")
+        .expect("M102 pure FRR absence validator")
+        .1
+        .split_once("\n}")
+        .expect("M102 pure FRR absence validator is bounded")
+        .0;
+    for required in [
+        "(type == \"object\")",
+        "((keys | length) == 0)",
+        "(keys == [\"paths\"])",
+        "((.paths | type) == \"array\")",
+        "((.paths | length) == 0)",
+    ] {
+        assert!(
+            frr_absence_validator.contains(required),
+            "M102 pure FRR absence validator lost `{required}`"
+        );
+    }
+    assert!(
+        !frr_absence_validator.contains(".paths // []"),
+        "M102 FRR absence validator must not normalize error objects into empty paths"
+    );
+    for (helper, inspector) in [
+        ("wait_open_absent() {", "open_absent \"$prefix\" && return"),
+        (
+            "wait_frr_absent() {",
+            "frr_absent \"$family\" \"$prefix\" && return",
+        ),
+    ] {
+        let body = script
+            .split_once(helper)
+            .expect("M102 positive absence wait helper")
+            .1
+            .split_once("\n}")
+            .expect("M102 positive absence wait helper is bounded")
+            .0;
+        assert!(
+            body.contains(inspector) && !body.contains("do !"),
+            "M102 absence wait helper `{helper}` must only accept a successful positive inspector"
+        );
+    }
+    let open_start = script
+        .split_once("start_openbgpd() {")
+        .expect("M102 OpenBGPD startup helper")
+        .1
+        .split_once("\n}")
+        .expect("M102 OpenBGPD startup helper is bounded")
+        .0;
+    let run_dir = open_start
+        .find("mkdir -p /run/bgpd")
+        .expect("M102 creates OpenBGPD runtime state");
+    let stale_cleanup = open_start
+        .find("rm -f /tmp/m102-bgpd.pid /tmp/m102-bgpd.log")
+        .expect("M102 removes stale milestone-local OpenBGPD state");
+    let log_file = open_start
+        .find(": > /tmp/m102-bgpd.log")
+        .expect("M102 truncates its local OpenBGPD log");
+    let daemon = open_start
+        .find("bgpd -d -f /etc/bgpd.conf")
+        .expect("M102 starts the pinned OpenBGPD daemon");
+    let pid_file = daemon
+        + open_start[daemon..]
+            .find("> /tmp/m102-bgpd.pid")
+            .expect("M102 records the OpenBGPD PID");
+    let alive = open_start
+        .find("kill -0 \"$pid\"")
+        .expect("M102 fail-fast checks the OpenBGPD PID");
+    let control_ready = open_start
+        .find("bgpctl show")
+        .expect("M102 waits for the OpenBGPD control socket");
+    assert!(
+        run_dir < stale_cleanup
+            && stale_cleanup < log_file
+            && log_file < daemon
+            && daemon < pid_file
+            && pid_file < alive
+            && alive < control_ready,
+        "M102 must create runtime state, start/log/record OpenBGPD, then require process and control-socket readiness"
+    );
+    let cleanup_clause = &open_start[stale_cleanup..log_file];
+    for required in [
+        "/tmp/m102-bgpd.pid",
+        "/tmp/m102-bgpd.log",
+        "/run/bgpd/bgpd.sock.*",
+        "/run/bgpd/bgpd.rsock",
+        "/run/bgpd/bgpd.rsock.*",
+    ] {
+        assert!(
+            cleanup_clause.contains(required),
+            "M102 stale OpenBGPD cleanup lost `{required}`"
+        );
+    }
+    assert!(
+        !cleanup_clause.contains("/etc/bgpd.conf"),
+        "M102 stale control-state cleanup must not touch the mounted config"
+    );
+    let peer_start = script
+        .split_once("start_peers() {")
+        .expect("M102 peer startup helper")
+        .1
+        .split_once("\n}")
+        .expect("M102 peer startup helper is bounded")
+        .0;
+    assert_eq!(
+        peer_start.matches("diagnostic_die").count(),
+        2,
+        "M102 must diagnose both FRR and OpenBGPD startup failures"
+    );
+    let rust_start = script
+        .split_once("start_m102_rustbgpd() {")
+        .expect("M102 isolated rustbgpd startup helper")
+        .1
+        .split_once("\n}")
+        .expect("M102 isolated rustbgpd startup helper is bounded")
+        .0;
+    let subshell = rust_start
+        .find("if ! (")
+        .expect("M102 runs shared rustbgpd startup in a subshell");
+    let cleared_traps = rust_start
+        .find("trap - EXIT INT TERM HUP")
+        .expect("M102 clears inherited cleanup traps in the startup subshell");
+    let shared_start = rust_start
+        .find("start_rustbgpd")
+        .expect("M102 invokes the shared rustbgpd startup helper");
+    let parent_diagnostics = rust_start
+        .find("diagnostic_die \"rustbgpd gRPC startup failed\"")
+        .expect("M102 diagnoses shared startup failure in the parent");
+    let parent_ledger = rust_start
+        .find("pass=$((pass + 1))")
+        .expect("M102 restores the shared readiness ledger in the parent");
+    assert!(
+        subshell < cleared_traps
+            && cleared_traps < shared_start
+            && shared_start < parent_diagnostics
+            && parent_diagnostics < parent_ledger,
+        "M102 must isolate shared startup exits, diagnose failure in the parent, then restore the successful shared ledger increment"
+    );
+    assert_eq!(
+        rust_start.matches("pass=$((pass + 1))").count(),
+        1,
+        "M102 must restore exactly one shared gRPC readiness ledger increment"
+    );
+    assert!(
+        !rust_start.contains("ok \"") && !rust_start.contains("fail \""),
+        "M102 parent ledger restoration must not duplicate shared PASS output or claims"
+    );
+    let session_assertion = script
+        .split_once("assert_sessions() {")
+        .expect("M102 combined session assertion")
+        .1
+        .split_once("\n}")
+        .expect("M102 combined session assertion is bounded")
+        .0;
+    let open_state = session_assertion
+        .find("os=$(rs_state \"$OPENBGPD_ADDR\" 2>/dev/null) || os_rc=$?")
+        .expect("M102 command-gates the OpenBGPD NeighborState observation");
+    let frr_state = session_assertion
+        .find("fs=$(rs_state \"$FRR_ADDR\" 2>/dev/null) || fs_rc=$?")
+        .expect("M102 command-gates the FRR NeighborState observation");
+    let open_validation = session_assertion
+        .find("neighbor_state_json_valid \"$os\" 4200000201")
+        .expect("M102 validates the nested OpenBGPD remote ASN and Role");
+    let frr_validation = session_assertion
+        .find("neighbor_state_json_valid \"$fs\" 4200000202")
+        .expect("M102 validates the nested FRR remote ASN and Role");
+    let session_projection = session_assertion
+        .find("emit_session_mismatch \"$os\" \"$fs\"")
+        .expect("M102 emits a compact session mismatch projection");
+    let session_fail = session_assertion
+        .find("fail \"rustbgpd ASN/Role state mismatch\"")
+        .expect("M102 retains the existing session ledger failure");
+    assert!(
+        open_state < frr_state
+            && frr_state < open_validation
+            && open_validation < frr_validation
+            && frr_validation < session_projection
+            && session_projection < session_fail,
+        "M102 combined session row must command-gate, validate nested state, then project only on failure"
+    );
+    let community_match = script
+        .split_once("community_row_matches() {")
+        .expect("M102 combined community matcher")
+        .1
+        .split_once("\n}")
+        .expect("M102 combined community matcher is bounded")
+        .0;
+    assert!(
+        community_match.contains("frr_communities_exact")
+            && community_match.contains("open_communities_exact")
+            && community_match.matches("|| rc=1").count() == 2,
+        "M102 combined community matcher must retain both observations even when one fails"
+    );
+    let reverse_assertion = script
+        .split_once("assert_reverse() {")
+        .expect("M102 reverse assertion helper")
+        .1
+        .split_once("\n}")
+        .expect("M102 reverse assertion helper is bounded")
+        .0;
+    assert!(
+        reverse_assertion.contains("if community_row_matches; then")
+            && reverse_assertion.contains("emit_community_mismatch")
+            && reverse_assertion.contains("fail \"bidirectional communities missing\""),
+        "M102 combined community row must emit its compact projection only in the failure branch"
+    );
+    let inventory_match = script
+        .split_once("inventory_row_matches() {")
+        .expect("M102 combined inventory matcher")
+        .1
+        .split_once("\n}")
+        .expect("M102 combined inventory matcher is bounded")
+        .0;
+    assert_eq!(
+        inventory_match.matches("rs_inventory_exact").count(),
+        8,
+        "M102 combined inventory matcher must evaluate all eight rust received/advertised surfaces"
+    );
+    for required in [
+        "rs_loc_inventory_exact",
+        "open_inventory_exact",
+        "frr_inventory_exact",
+    ] {
+        assert!(
+            inventory_match.contains(required),
+            "M102 combined inventory matcher lost `{required}`"
+        );
+    }
+    for helper in [
+        "rs_inventory_exact() {",
+        "rs_loc_inventory_exact() {",
+        "open_inventory_exact() {",
+        "frr_inventory_exact() {",
+    ] {
+        let body = script
+            .split_once(helper)
+            .expect("M102 exact inventory helper")
+            .1
+            .split_once("\n}")
+            .expect("M102 exact inventory helper is bounded")
+            .0;
+        assert!(
+            body.contains("emit_inventory_mismatch")
+                && !body.contains("ok \"")
+                && !body.contains("fail \"")
+                && !body.contains("dump_m102"),
+            "M102 inventory helper `{helper}` must emit only its failing compact surface projection"
+        );
+    }
+    let frr_inventory_wrapper = script
+        .split_once("frr_inventory_exact() {")
+        .expect("M102 FRR inventory live wrapper")
+        .1
+        .split_once("\n}")
+        .expect("M102 FRR inventory live wrapper is bounded")
+        .0;
+    assert!(
+        frr_inventory_wrapper.contains("output=$(timeout 10 docker exec \"$FRR\" vtysh")
+            && frr_inventory_wrapper.contains("frr_inventory_json_valid \"$output\" \"$@\""),
+        "M102 FRR inventory wrapper must command-gate two sequential documents before pure validation"
+    );
+    for helper in [
+        "emit_session_mismatch() {",
+        "emit_community_mismatch() {",
+        "emit_inventory_mismatch() {",
+    ] {
+        let body = script
+            .split_once(helper)
+            .expect("M102 compact row projection")
+            .1
+            .split_once("\n}")
+            .expect("M102 compact row projection is bounded")
+            .0;
+        assert!(
+            !body.contains("ok \"")
+                && !body.contains("fail \"")
+                && !body.contains("dump_m102")
+                && !body.contains("docker"),
+            "M102 projection `{helper}` must add no ledger row or heavyweight diagnostics"
+        );
+    }
+    let withdrawals = script
+        .split_once("assert_withdrawals() {")
+        .expect("M102 withdrawal assertion helper")
+        .1
+        .split_once("\n}")
+        .expect("M102 withdrawal assertion helper is bounded")
+        .0;
+    assert_eq!(
+        withdrawals.matches("wait_frr_absent").count(),
+        2,
+        "M102 must use the fail-closed FRR absence inspector for both families"
+    );
+    assert_eq!(
+        withdrawals.matches("wait_open_absent").count(),
+        2,
+        "M102 must use the fail-closed OpenBGPD absence inspector for both families"
+    );
+    assert!(
+        !withdrawals.contains("wait_absent")
+            && !withdrawals.contains("! frr_has")
+            && !withdrawals.contains("! rs_"),
+        "M102 withdrawal proof must not regain a negated command-as-absence seam"
+    );
+    assert_eq!(
+        withdrawals.matches("rs_received_absent").count(),
+        4,
+        "M102 must prove all four rust Adj-RIB-In withdrawals with positive absence validators"
+    );
+    assert_eq!(
+        withdrawals.matches("rs_loc_absent").count(),
+        4,
+        "M102 must prove all four rust Loc-RIB withdrawals with positive absence validators"
+    );
+    let json_self_test = script
+        .split_once("self_test_openbgpd_json() {")
+        .expect("M102 OpenBGPD JSON offline self-test")
+        .1
+        .split_once("\n}")
+        .expect("M102 OpenBGPD JSON offline self-test is bounded")
+        .0;
+    for required in [
+        "session exact neighbor",
+        "session wrong peer",
+        "session wrong state",
+        "neighbor state nested ASN ignores top-level decoy",
+        "neighbor state missing config",
+        "neighbor state wrong nested ASN despite top-level decoy",
+        "neighbor state false role",
+        "neighbor state malformed config",
+        "neighbor state malformed JSON",
+        "route exact tuple",
+        "route nonexistent nexthop field",
+        "absence missing rib",
+        "absence empty rib",
+        "absence unrelated route",
+        "absence error-only object",
+        "absence failed status object",
+        "absence empty rib plus error",
+        "absence arbitrary extra key",
+        "absence target present",
+        "absence malformed JSON",
+        "rust presence exact row",
+        "rust presence malformed row",
+        "rust absence empty array",
+        "rust absence target present",
+        "FRR absence exact empty object",
+        "FRR absence exact empty paths",
+        "FRR absence error-only object",
+        "FRR absence failed status object",
+        "FRR absence empty paths plus error",
+        "FRR absence arbitrary extra key",
+        "FRR absence nonempty paths",
+        "FRR absence malformed JSON",
+        "FRR inventory exact dual documents ignores nested decoys",
+        "FRR inventory one document",
+        "FRR inventory three documents",
+        "FRR inventory missing routes",
+        "FRR inventory non-object routes",
+        "FRR inventory wrong keys",
+        "FRR inventory missing key",
+        "FRR inventory extra key",
+        "FRR inventory non-object root",
+        "FRR inventory malformed JSON",
+        "Open communities normalized exact sets",
+        "Open communities standard extra",
+        "Open communities large extra",
+        "FRR communities normalized exact sets",
+        "FRR communities standard extra",
+        "FRR communities large extra",
+    ] {
+        assert!(
+            json_self_test.contains(required),
+            "M102 OpenBGPD JSON self-test lost fixture `{required}`"
+        );
+    }
+    for forbidden in [
+        "docker",
+        "containerlab",
+        "grpcurl",
+        "rs_ctl",
+        "mktemp",
+        "/tmp/",
+    ] {
+        assert!(
+            !json_self_test.contains(forbidden),
+            "M102 OpenBGPD JSON self-test regained external seam `{forbidden}`"
+        );
+    }
+    assert_eq!(
+        script.matches("--self-test-openbgpd-json").count(),
+        1,
+        "M102 must expose exactly one synthetic OpenBGPD JSON self-test mode"
+    );
+    let main = script
+        .split_once("main() {")
+        .expect("M102 main")
+        .1
+        .split_once("\n}\ncase ")
+        .expect("M102 main has a bounded source section")
+        .0;
+    let shared_preflight = main
+        .find("preflight;")
+        .expect("M102 main invokes shared preflight");
+    let identity_preflight = main
+        .find("preflight_identities_and_configs;")
+        .expect("M102 main invokes identity/config preflight");
+    let capture = main.find("start_capture").expect("M102 capture");
+    let rust_start = main
+        .find("start_m102_rustbgpd")
+        .expect("M102 isolated rust start");
+    let peers = main.find("start_peers").expect("M102 peer start");
+    assert!(
+        shared_preflight < identity_preflight
+            && identity_preflight < capture
+            && capture < rust_start
+            && rust_start < peers
+            && capture < peers,
+        "M102 shared and identity/config preflights must precede capture and daemon starts"
+    );
+    for mode in [
+        "--self-test-oracle",
+        "--self-test-oracle-conflict",
+        "--self-test-oracle-gap",
+        "--self-test-oracle-capability",
+        "--self-test-oracle-update",
+        "--self-test-oracle-trailing",
+        "--self-test-oracle-marker",
+        "--self-test-openbgpd-json",
+    ] {
+        let output = Command::new("bash")
+            .arg(&script_path)
+            .arg(mode)
+            .output()
+            .expect("run M102 oracle self-test");
+        assert!(
+            output.status.success(),
+            "M102 oracle self-test {mode} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 #[test]

@@ -14,7 +14,7 @@ from pathlib import Path
 INTEROP = (
     "m1 m13 m80 m15 m10 m14 m17 m73 m74 m75 m76 m77 m78 m79 m22 "
     "m24 m81 m82 m83 m85 m94 m86 m25 m29 m30 m34 m35 m35b m35c m41 "
-    "m44 m54 m55 m56 m45 m57 m63 m64 m26_m27_m28_m59_m91 m92 m84 m99 m101"
+    "m44 m54 m55 m56 m45 m57 m63 m64 m26_m27_m28_m59_m91 m92 m84 m99 m101 m102"
 ).split()
 KERNEL = (
     "m36 m37 m37-ip m38 m39 m39b m48 m60 m61 m62 m40 m42 m50 m52 "
@@ -136,17 +136,17 @@ PERMISSION_HASHES = {
     "kernel-dataplane.yml": "6f1d70d72bad231d43c575acef6946580e439c879794ed2ea1f4a40340245172",
 }
 CALL_HASHES = {
-    "interop.yml": "f7294fcdc9b9c910810b07db5b0328bb4bd1b85f7ec2ac98eefb54f888875d5a",
+    "interop.yml": "e43303cedf777993bdf5ae3dce4df7a51150d1c02facbf4f18f7c780439dc679",
     "kernel-dataplane.yml": "310ed2344bd6ff3f766580f704cc77fec4be0a2103a943e2ad837f497af346c3",
 }
 PINS = collections.Counter(
     {
-        "actions/checkout@v7": 89,
+        "actions/checkout@v7": 90,
         "dtolnay/rust-toolchain@v1 # stable": 3,
         "Swatinem/rust-cache@v2": 5,
         "dtolnay/rust-toolchain@v1 # 1.95": 2,
-        "docker/setup-buildx-action@v4": 46,
-        "docker/build-push-action@v7": 47,
+        "docker/setup-buildx-action@v4": 47,
+        "docker/build-push-action@v7": 48,
         "actions/cache@v6": 5,
         "actions/upload-artifact@v7": 7,
         "actions/download-artifact@v8": 6,
@@ -840,6 +840,41 @@ def check(root: Path) -> list[str]:
     ):
         if forbidden in m101:
             errors.append(f"interop.yml:m101: permits {forbidden}")
+    m102 = _jobs(texts["interop.yml"]).get("m102", "")
+    m102_required = {
+        GRPCURL_ACTION: 1,
+        "name: Verify and pull digest-pinned OpenBGPD 9.2 image": 1,
+        "OPENBGPD_AMD64_MANIFEST: sha256:3178027d7ca916eacec247c66472a1f95a17d83d4616fe4f118318a912ab8beb": 1,
+        "OPENBGPD_CONFIG: sha256:06317b65d9fadc80f68c5c8e7c82815b0643577fd5441bd55038e43771b5807e": 1,
+        'index_json=$(docker buildx imagetools inspect --raw "$OPENBGPD_IMAGE")': 1,
+        'test "$amd64_manifest" = "$OPENBGPD_AMD64_MANIFEST"': 1,
+        'test "$(jq -er \'.config.digest\' <<<"$manifest_json")" = "$OPENBGPD_CONFIG"': 1,
+        'docker pull "$OPENBGPD_IMAGE"': 1,
+        "name: Build bmpsink:m102 capture sidecar": 1,
+        "docker build -t bmpsink:m102 -f tests/interop/Dockerfile.bmpsink tests/interop": 1,
+        "name: Pull digest-pinned FRR 10.3.1 image": 1,
+        "docker pull quay.io/frrouting/frr@sha256:f90d26a9fd5c14fc5795a73b4254ac88bc3186c45bbeb220a225fb6182de812c": 1,
+        "uses: ./.github/actions/run-interop-test": 1,
+        'CLEANUP: "1"': 1,
+        "label: M102\n": 1,
+        "topology: tests/interop/m102-routeserver-openbgpd92.clab.yml": 1,
+        "script: tests/interop/scripts/test-m102-routeserver-openbgpd92.sh": 1,
+        'max_attempts: "1"': 1,
+    }
+    if any(m102.count(seam) != count for seam, count in m102_required.items()):
+        errors.append("interop.yml:m102: OpenBGPD 9.2 route-server job semantics drifted")
+    for forbidden in (
+        "openbgpd/openbgpd:9.2",
+        "quay.io/frrouting/frr:10.3.1",
+        "name: Ensure host raw-capture tools",
+        "apt-get install",
+        "nsenter",
+        "sudo ",
+        "continue-on-error:",
+        'max_attempts: "2"',
+    ):
+        if forbidden in m102:
+            errors.append(f"interop.yml:m102: permits {forbidden}")
     interop_classifier = _jobs(texts["interop.yml"]).get("classify_changes", "")
     kernel_jobs = _jobs(texts["kernel-dataplane.yml"])
     interop_classifier = interop_classifier.replace("interop heavy-lab", "heavy-lab")

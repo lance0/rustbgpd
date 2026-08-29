@@ -17,6 +17,10 @@ const FIXED_CONFIG_RECEIPTS: &[(&str, &str)] = &[
         "test-m101-routeserver-bird332.sh",
         "configs/rustbgpd-m101-rs.toml",
     ),
+    (
+        "test-m102-routeserver-openbgpd92.sh",
+        "configs/rustbgpd-m102-rs.toml",
+    ),
 ];
 const GENERATED_CONFIG_RECEIPT: &str = "test-m90-differential.sh";
 const GENERATED_CONFIG_FRAGMENT: &str = "m90-differential/policy-explain.toml";

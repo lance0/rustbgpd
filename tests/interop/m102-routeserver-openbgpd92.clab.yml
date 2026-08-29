@@ -1,0 +1,59 @@
+# M102 — OpenBGPD 9.2 dual-stack route-server member proof.
+name: m102-routeserver-openbgpd92
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m102-rs.toml:/etc/rustbgpd/config.toml:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.102.1.1/24 dev eth1
+        - ip -6 addr add 2001:db8:102:1::1/64 dev eth1 nodad
+        - ip link set eth1 up
+        - ip addr add 10.102.2.1/24 dev eth2
+        - ip -6 addr add 2001:db8:102:2::1/64 dev eth2 nodad
+        - ip link set eth2 up
+      env:
+        RUST_LOG: info
+        RUSTBGPD_TOKEN_FILE: /run/rustbgpd/grpc-test-only-operator.token
+
+    openbgpd:
+      kind: linux
+      image: openbgpd/openbgpd@sha256:b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9
+      cmd: sleep infinity
+      binds:
+        - ./configs/bgpd-m102-member.conf:/etc/bgpd.conf:ro
+      exec:
+        - sysctl -w net.ipv6.conf.all.accept_dad=0
+        - sysctl -w net.ipv6.conf.default.accept_dad=0
+        - ip addr add 10.102.1.2/24 dev eth1
+        - ip addr add 2001:db8:102:1::2/64 dev eth1
+        - ip link set eth1 up
+        - ip route add 10.102.2.0/24 via 10.102.1.1
+        - ip -6 route add 2001:db8:102:2::/64 via 2001:db8:102:1::1
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr@sha256:f90d26a9fd5c14fc5795a73b4254ac88bc3186c45bbeb220a225fb6182de812c
+      cmd: sleep infinity
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m102-control.conf:/etc/frr/frr.conf:ro
+        - /dev/null:/etc/frr/vtysh.conf:ro
+      exec:
+        - sysctl -w net.ipv6.conf.all.accept_dad=0
+        - sysctl -w net.ipv6.conf.default.accept_dad=0
+        - ip addr add 10.102.2.2/24 dev eth1
+        - ip addr add 2001:db8:102:2::2/64 dev eth1
+        - ip link set eth1 up
+        - ip route add 10.102.1.0/24 via 10.102.2.1
+        - ip -6 route add 2001:db8:102:1::/64 via 2001:db8:102:2::1
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "openbgpd:eth1"]
+    - endpoints: ["rustbgpd:eth2", "frr:eth1"]
