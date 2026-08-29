@@ -7,6 +7,10 @@ if [ "$EUID" -eq 0 ]; then
     exit 1
 fi
 
+for tool in python3 realpath setsid sha256sum timeout; do
+    command -v "$tool" >/dev/null || { echo "required tool is missing: $tool" >&2; exit 1; }
+done
+
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 PROFILES="$SCRIPT_DIR/profiles.json"
@@ -105,9 +109,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for tool in setsid timeout sha256sum python3; do
-    command -v "$tool" >/dev/null || { echo "required tool is missing: $tool" >&2; exit 1; }
-done
 verify_dpkg_owned_tool() {
     local package=$1 path=$2 item owned=false
     if [ ! -f "$path" ] || [ -L "$path" ] || [ ! -x "$path" ]; then
