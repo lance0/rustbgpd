@@ -124,9 +124,10 @@ because the upper-device ifindex carries the VLAN directly.
 
 ### 5. The freshness window is a heuristic and must be calibrated before implementation
 
-The kernel provides **no ordering guarantee** across the AF_INET / AF_INET6 and
-AF_BRIDGE `RTNLGRP_NEIGH` multicast groups: the ARP/ND event can arrive before,
-after, or concurrently with the corresponding FDB event. The freshness window
+The kernel provides **no causal-ordering guarantee** between AF_INET / AF_INET6
+and AF_BRIDGE messages delivered on the single `RTNLGRP_NEIGH` subscription and
+socket: the ARP/ND event can arrive before, after, or concurrently with the
+corresponding FDB event. The freshness window
 is therefore a **heuristic, not a proof** — it bounds the race, it does not
 eliminate it. The ADR does not choose a value; calibration must **measure the
 worst-case inter-arrival skew under load and set the window to roughly 2-3× it**.

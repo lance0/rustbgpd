@@ -9,6 +9,14 @@ binary tarballs, and the default (runtime) container image. The
 only with `--workspace` and ship only in the `dev` image target used
 by the interop/soak labs.
 
+## Pinned-kernel netns calibration
+
+`netns-calibration/` is the offline-verifiable QEMU/KVM boundary for
+timing-sensitive Linux netlink receipts that need exact kernel and iproute2
+identities. It uses closed, dated Ubuntu 22.04/24.04 cloud-image tuples, never
+mistakes a Docker container for a kernel matrix, and ships no production code.
+See [`netns-calibration/README.md`](netns-calibration/README.md).
+
 ## evpn-load
 
 `evpn-load/` is the EVPN scale load generator — a deliberately minimal
