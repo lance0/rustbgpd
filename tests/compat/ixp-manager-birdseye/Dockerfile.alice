@@ -6,16 +6,19 @@ RUN corepack enable && yarn install --frozen-lockfile
 COPY ui/ ./
 RUN yarn build
 
-FROM golang:1.21-bookworm@sha256:c6a5b9308b3f3095e8fde83c8bf4d68bd101fce606c1a0a1394522542509dda9 AS backend
+FROM golang:1.22.7-bookworm@sha256:af1bb8730643ca372b0fe9613a17300ade3ad113d36328e2a7e604ccb2b1584b AS backend
 
-ENV GOTOOLCHAIN=go1.22.7+auto
+ENV GOTOOLCHAIN=local
+ARG ALICE_VERSION
 WORKDIR /src/alice-lg
+RUN test "$(go version)" = 'go version go1.22.7 linux/amd64'
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . ./
 COPY --from=ui /src/alice-lg/ui/build ui/build
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
-    -ldflags="-X github.com/alice-lg/alice-lg/pkg/config.Version=6.2.0 -extldflags '-static'" \
+RUN test -n "$ALICE_VERSION" \
+    && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -ldflags="-X github.com/alice-lg/alice-lg/pkg/config.Version=$ALICE_VERSION -extldflags '-static'" \
     -o /alice-lg ./cmd/alice-lg
 
 FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce

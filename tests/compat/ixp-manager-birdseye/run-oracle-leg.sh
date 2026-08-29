@@ -32,14 +32,14 @@ dump_proof_logs() {
   [ ! -f "$tmp/adapter.log" ] || { echo '--- adapter log ---' >&2; tail -n 80 "$tmp/adapter.log" >&2; }
   if docker inspect "$alice" >/dev/null 2>&1; then
     echo '--- Alice-LG log ---' >&2
-    docker logs "$alice" >&2 || true
+    docker logs --tail 80 "$alice" >&2 || true
   fi
   if docker inspect "$manrs" >/dev/null 2>&1; then
     echo '--- MANRS log ---' >&2
-    docker logs "$manrs" >&2 || true
+    docker logs --tail 80 "$manrs" >&2 || true
   elif [ -f "$tmp/manrs.out" ]; then
     echo '--- MANRS output ---' >&2
-    cat "$tmp/manrs.out" >&2
+    tail -n 80 "$tmp/manrs.out" >&2
   fi
 }
 cleanup() {
@@ -212,7 +212,8 @@ docker run --detach --name "$alice" --network "$network" \
 alice_api=http://198.51.100.5:7340/api/v1
 alice_ready() {
   curl --fail --silent --max-time 2 "$alice_api/status" | python3 -c \
-    'import json,sys; assert json.load(sys.stdin).get("version") == "6.2.0"' \
+    'import json,sys; assert json.load(sys.stdin).get("version") == sys.argv[1]' \
+    "$alice_version" \
     >/dev/null 2>&1
 }
 alice_deadline=$(($(date +%s) + 115))
@@ -256,10 +257,10 @@ fi
 # stable snapshot before reading.
 sleep 3
 
-alice_proof='alice consumer proof: Alice-LG 6.2.0 read rs0 with 4 up neighbors, 7 accepted routes, 0 filtered routes, and the labeled split-horizon noexport route'
-timeout 60s python3 "$root/alice-consumer.py" "$alice_api" >"$tmp/alice-consumer.out"
+alice_proof="alice consumer proof: Alice-LG $alice_version read rs0 with 4 up neighbors, 7 accepted routes, 0 filtered routes, and the labeled split-horizon noexport route"
+timeout 60s python3 "$root/alice-consumer.py" "$alice_api" "$alice_version" >"$tmp/alice-consumer.out"
 [ "$(grep -Fxc "$alice_proof" "$tmp/alice-consumer.out")" -eq 1 ]
-cat "$tmp/alice-consumer.out" >&2
+tail -n 20 "$tmp/alice-consumer.out" >&2
 
 timeout 120s docker run --name "$manrs" --network "$network" \
   --volume "$root/manrs-roas.json:/proof/manrs-roas.json:ro" \
@@ -289,7 +290,11 @@ Source: Alice LG route server rs0 peer pb_as64496
 ROAs found:
     Prefix 203.0.113.0/24, ASN 64496, max length 26"""
 if actual != expected:
-    raise SystemExit(f"MANRS invalid stanza drifted:\n{actual}")
+    lines = actual.splitlines()
+    preview = "\n".join(lines[:40])
+    if len(lines) > 40:
+        preview += f"\n... {len(lines) - 40} more lines omitted"
+    raise SystemExit(f"MANRS invalid stanza drifted:\n{preview}")
 lower = text.lower()
 for marker in ("traceback", "decoder error", "decode error"):
     if marker in lower:

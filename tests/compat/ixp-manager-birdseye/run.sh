@@ -59,6 +59,7 @@ clone_pin https://github.com/manrs-tools/manrs-ixp-validation-tool.git \
 image=$(docker build --quiet --file "$root/Dockerfile" "$root")
 alice_image=$(docker build --quiet --platform linux/amd64 \
   --file "$root/Dockerfile.alice" \
+  --build-arg "ALICE_VERSION=$alice_lg_version" \
   --label "org.opencontainers.image.revision=$alice_lg_commit" \
   --label "org.opencontainers.image.version=$alice_lg_version" \
   "$tmp/alice-lg")

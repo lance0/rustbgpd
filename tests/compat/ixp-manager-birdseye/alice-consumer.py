@@ -42,13 +42,14 @@ def nested_label(document, section, community):
 
 
 def main():
-    if len(sys.argv) != 2:
-        fail("usage: alice-consumer.py BASE_URL")
+    if len(sys.argv) != 3:
+        fail("usage: alice-consumer.py BASE_URL EXPECTED_VERSION")
     base = sys.argv[1].rstrip("/")
+    expected_version = sys.argv[2]
 
     status = get_json(base, "/status")
-    if status.get("version") != "6.2.0":
-        fail(f"expected Alice-LG 6.2.0, got {status.get('version')!r}")
+    if status.get("version") != expected_version:
+        fail(f"expected Alice-LG {expected_version}, got {status.get('version')!r}")
 
     config = get_json(base, "/config")
     if config.get("prefix_lookup_enabled") is not False:
@@ -145,7 +146,7 @@ def main():
         fail(f"split-horizon community missing from {large!r}")
 
     print(
-        "alice consumer proof: Alice-LG 6.2.0 read rs0 with 4 up neighbors, "
+        f"alice consumer proof: Alice-LG {expected_version} read rs0 with 4 up neighbors, "
         "7 accepted routes, 0 filtered routes, and the labeled split-horizon noexport route"
     )
 
