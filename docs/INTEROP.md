@@ -65,6 +65,15 @@ from the alias file on an explicit `SIGHUP`; nothing signals the sidecar
 automatically, so adding a member means republishing the alias file and
 signaling it (or restarting it when direct aliases are used).
 
+The populated leg additionally source-builds pinned Alice-LG 6.2.0 and the
+MANRS IXP validation tool from verified temporary checkouts. Alice must consume
+the adapter's existing seven accepted routes across four up neighbors, empty
+filtered endpoints, and one labeled split-horizon noexport route. MANRS then
+walks those Alice received-route endpoints and reports the one deliberate
+synthetic ROA mismatch. The proof stops at those APIs: it does not cover a
+browser, a populated filtered/reject UI, MANRS certification, rustbgpd RPKI
+enforcement, or route-server policy conformance.
+
 ### IXP Manager v7.4 manual configuration oracle
 
 The same pinned gate installs the repository's GPL-2.0-only Foil exporter into

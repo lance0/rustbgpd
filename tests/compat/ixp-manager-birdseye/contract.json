@@ -1,6 +1,9 @@
 {
   "birdseye_commit": "7f8c2375e610578bcf6ea5ceec630a180f945b89",
   "ixp_manager_commit": "300b7e0ba9adb0aaac975899e45fc8bcbc0ca37d",
+  "alice_lg_commit": "e9fa175d00eb192cb09fe1b460bb53a54398fc34",
+  "alice_lg_version": "6.2.0",
+  "manrs_commit": "5354e402f65fdbf17711ada30da947cb2670d2ce",
   "protocol_aliases": {
     "member-v4": "pb_as64496",
     "member-v4-reloaded": "pb_reloaded_as64496"

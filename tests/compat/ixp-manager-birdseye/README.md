@@ -16,6 +16,8 @@ pinned consumer's `protocolRoute()`, `exportRoute()`, `protocolTable()`, and
 
 - Bird's Eye v2.1.0: `7f8c2375e610578bcf6ea5ceec630a180f945b89`
 - IXP Manager v7.4.0: `300b7e0ba9adb0aaac975899e45fc8bcbc0ca37d`
+- Alice-LG v6.2.0: `e9fa175d00eb192cb09fe1b460bb53a54398fc34`
+- MANRS IXP validation tool: `5354e402f65fdbf17711ada30da947cb2670d2ce`
 
 The BIRD side is a deterministic fake `birdc` fed only RFC 5737 documentation
 addresses and RFC 5398 documentation ASNs. The capture covers status, BGP
@@ -134,6 +136,18 @@ fail-closed on every run (each entry removed in turn surfaces an unlisted
 difference; a bogus entry is reported stale), and checks the pinned
 `routes/web.php` route set against `birdseye_routes`. It prints one
 `populated oracle proof:` line; silent success is a failure.
+
+That populated live leg also source-builds the pinned Alice-LG and MANRS
+revisions in ephemeral, digest-pinned Linux/amd64 images. Alice reads the
+existing adapter at the harness gateway and must expose exactly one source,
+four up neighbors, all seven accepted routes, empty filtered arrays, and the
+`192.0.2.0/24` split-horizon noexport route with its full-key reason label.
+The pinned MANRS tool then traverses Alice's received-route API with five
+synthetic ROAs and must report exactly one deliberate mismatch: the covering
+`203.0.113.0/24` originated by AS64520. This is an API consumer proof, not a
+browser/UI proof. It does not prove a populated Alice filtered/reject page,
+MANRS certification, rustbgpd RPKI enforcement, or route-server policy
+conformance; those require their own gates.
 
 Run the gate from the repository root:
 
@@ -464,6 +478,8 @@ owner and refresh relationship.
 |---|---|---|
 | `Dockerfile` | Hand-maintained PHP/Composer environment for the two pinned upstream checkouts | `run.sh` builds the image used by `run-in-container.sh`, `run-adapter-consumer.sh`, and `run-oracle-leg.sh`. |
 | `Dockerfile.oracle` | Hand-maintained BIRD 2.0.12 oracle image | `run-oracle-leg.sh` builds it and verifies the installed BIRD version before the populated comparison. |
+| `Dockerfile.alice`, `alice.conf`, `alice-consumer.py` | Pinned-source Alice-LG 6.2.0 build and bounded API assertions | `run.sh` builds and label-verifies the image; `run-oracle-leg.sh` proves the populated accepted/noexport and empty filtered views. |
+| `Dockerfile.manrs`, `manrs-roas.json` | Pinned-source MANRS build and five synthetic ROAs | `run-oracle-leg.sh` requires one exact Alice-derived invalid stanza and the exact 7-route/5-ROA summary. |
 | `birdseye.env` | Hand-maintained production-mode Bird's Eye settings | `run-in-container.sh` copies it unchanged; `run-oracle-leg.sh` changes only `BIRDC` and `MAX_ROUTES` before installing it in the real-BIRD oracle. |
 | `fake-birdc` | Hand-maintained deterministic `birdc` transcript oracle selected by `birdseye.env` | Bird's Eye executes it during `run-in-container.sh`; `verify_capture.py` checks the resulting HTTP capture. The populated oracle does not use it. |
 | `contract.json` | Reviewed compatibility pins, scope, and divergence decisions | `run.sh`, `verify_capture.py`, `consumer.php`, `adapter-consumer.php`, `oracle-consumer.php`, `nagios-consumer.php`, `scripts/check_ixp_manager_docs.py`, and `tests/interop/scripts/test-m97-ixp-manager-authenticated-lifecycle.sh` read it directly. |
@@ -488,7 +504,10 @@ both copies still match the same fresh output.
 
 ## Provenance and licensing
 
-Upstream source stays in a temporary directory and is never vendored. IXP
+Upstream source stays in a temporary directory and is never vendored. Alice-LG
+is BSD-3-Clause; the pinned MANRS checkout has no detected license file, so the
+harness executes it only transiently and makes no redistribution claim. Both
+run only against the synthetic populated leg. IXP
 Manager is GPL-2.0; the gate executes its installed consumer while this
 repository keeps its original GPL-2.0-only Foil exporter in the segregated
 integration subtree. Bird's Eye is MIT-licensed. The two
