@@ -954,6 +954,11 @@ struct GtsmInventory {
     peer_groups: HashMap<String, Option<u8>>,
 }
 
+#[derive(Default)]
+struct AdminEnabledInventory {
+    peers: HashMap<String, Option<bool>>,
+}
+
 fn configured_gtsm_hops(row: &toml::Value) -> Option<u8> {
     if row.get("ttl_security").and_then(toml::Value::as_bool) != Some(true) {
         return None;
@@ -990,7 +995,9 @@ fn gtsm_inventory(effective_toml: &str) -> Option<GtsmInventory> {
         let Some(hops) = configured_gtsm_hops(row) else {
             continue;
         };
-        let address = row.get("address")?.as_str()?;
+        let Some(address) = row.get("address").and_then(toml::Value::as_str) else {
+            continue;
+        };
         let interface = row
             .get("interface")
             .and_then(toml::Value::as_str)
@@ -1056,36 +1063,39 @@ fn parse_metric_labels(input: &str) -> Option<HashMap<String, String>> {
     Some(labels)
 }
 
-fn unique_admin_enabled(metrics: &str, peer: &str, interface: &str) -> bool {
-    let mut matched = None;
+fn admin_enabled_inventory(metrics: &str) -> Option<AdminEnabledInventory> {
+    let mut inventory = AdminEnabledInventory::default();
     for line in metrics.lines() {
         let Some(rest) = line.strip_prefix("bgp_peer_admin_enabled{") else {
             continue;
         };
-        let Some((label_text, value_text)) = rest.split_once("} ") else {
-            return false;
+        let (label_text, value_text) = rest.split_once("} ")?;
+        let labels = parse_metric_labels(label_text)?;
+        let peer = labels.get("peer")?.clone();
+        let interface = labels.get("interface")?.clone();
+        let enabled = match value_text {
+            "0" => false,
+            "1" => true,
+            _ => return None,
         };
-        let Some(labels) = parse_metric_labels(label_text) else {
-            return false;
-        };
-        if labels.get("peer").map(String::as_str) != Some(peer)
-            || labels.get("interface").map(String::as_str) != Some(interface)
-        {
-            continue;
+        let key = peer_identity(&peer, &interface);
+        match inventory.peers.entry(key) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(Some(enabled));
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                entry.insert(None);
+            }
         }
-        if matched.is_some() || !matches!(value_text, "0" | "1") {
-            return false;
-        }
-        matched = Some(value_text == "1");
     }
-    matched == Some(true)
+    Some(inventory)
 }
 
 fn gtsm_advisory_check(
     record: &NeighborDoctorRecord,
     session_evidence: SessionHistoryEvidence,
     inventory: Option<&GtsmInventory>,
-    metrics: Option<&str>,
+    admin_enabled: Option<&AdminEnabledInventory>,
 ) -> Option<Check> {
     if record.support.stale
         || record.support.state == "Established"
@@ -1112,7 +1122,7 @@ fn gtsm_advisory_check(
             .copied()
             .flatten()?
     };
-    if !unique_admin_enabled(metrics?, &record.support.address, &record.support.interface) {
+    if admin_enabled?.peers.get(&record.identity) != Some(&Some(true)) {
         return None;
     }
     Some(Check {
@@ -2199,6 +2209,7 @@ pub(crate) async fn run(
                 Ok(resp) => {
                     let neighbors = resp.into_inner();
                     let gtsm = effective_toml.as_deref().and_then(gtsm_inventory);
+                    let admin_enabled = metrics_text.as_deref().and_then(admin_enabled_inventory);
                     let transitions = last_transition_by_peer(&session_events);
                     let losses = last_loss_by_peer(&session_events);
                     let admin_states = latest_admin_state_by_peer(&session_events);
@@ -2306,7 +2317,7 @@ pub(crate) async fn run(
                             record,
                             session_evidence,
                             gtsm.as_ref(),
-                            metrics_text.as_deref(),
+                            admin_enabled.as_ref(),
                         ) {
                             reporter.record(check.name, check.status, check.detail);
                         }
@@ -2680,7 +2691,8 @@ ttl_security_hops = 3
         metrics: Option<&str>,
     ) -> Option<Check> {
         let inventory = config.and_then(gtsm_inventory);
-        gtsm_advisory_check(record, history, inventory.as_ref(), metrics)
+        let admin_enabled = metrics.and_then(admin_enabled_inventory);
+        gtsm_advisory_check(record, history, inventory.as_ref(), admin_enabled.as_ref())
     }
 
     #[test]
@@ -2725,7 +2737,11 @@ ttl_security_hops = 3
         let history =
             retained_session_evidence_with_admin(None, None, Some(RetainedAdminState::Enabled));
         let eligible = gtsm_record("192.0.2.1", "");
-        assert!(gtsm_advisory_check(&eligible, history, Some(&inventory), Some(&metric)).is_some());
+        let admin_enabled = admin_enabled_inventory(&metric).unwrap();
+        assert!(
+            gtsm_advisory_check(&eligible, history, Some(&inventory), Some(&admin_enabled))
+                .is_some()
+        );
 
         for variant in 0..5 {
             let mut record = gtsm_record("192.0.2.1", "");
@@ -2738,14 +2754,16 @@ ttl_security_hops = 3
                 _ => unreachable!(),
             }
             assert!(
-                gtsm_advisory_check(&record, history, Some(&inventory), Some(&metric)).is_none(),
+                gtsm_advisory_check(&record, history, Some(&inventory), Some(&admin_enabled))
+                    .is_none(),
                 "variant {variant} must be absent"
             );
         }
         let disabled =
             retained_session_evidence_with_admin(None, None, Some(RetainedAdminState::Disabled));
         assert!(
-            gtsm_advisory_check(&eligible, disabled, Some(&inventory), Some(&metric)).is_none()
+            gtsm_advisory_check(&eligible, disabled, Some(&inventory), Some(&admin_enabled))
+                .is_none()
         );
     }
 
@@ -2814,6 +2832,41 @@ ttl_security_hops = 3
             )
             .is_none()
         );
+
+        let malformed_then_valid = format!("[[neighbors]]\nttl_security = true\n{}", gtsm_config());
+        let valid_record = gtsm_record("192.0.2.1", "");
+        let valid_metric = admin_metric("192.0.2.1", "", 1);
+        assert!(
+            gtsm_check(
+                &valid_record,
+                SessionHistoryEvidence::Unavailable,
+                Some(&malformed_then_valid),
+                Some(&valid_metric)
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn gtsm_admin_metric_inventory_is_built_once_outside_the_peer_loop() {
+        let production = include_str!("doctor.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert_eq!(
+            production
+                .matches(".and_then(admin_enabled_inventory)")
+                .count(),
+            1
+        );
+        let advisory = production
+            .split("fn gtsm_advisory_check")
+            .nth(1)
+            .unwrap()
+            .split("fn last_event_by_peer")
+            .next()
+            .unwrap();
+        assert!(!advisory.contains("metrics.lines()"));
     }
 
     /// The effective config can approach 384 MiB. Reintroducing either the
