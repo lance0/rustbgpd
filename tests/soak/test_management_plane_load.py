@@ -71,6 +71,38 @@ class ManagementPlaneLoadContracts(unittest.TestCase):
                 self.assertEqual(result.returncode, 2)
                 self.assertIn("SOAK_ROUTES_PER_PEER", result.stderr)
 
+    def test_runner_canonicalizes_python_float_syntax_in_run_json(self):
+        runner = HERE / "run-soak-rs-flagship.sh"
+        for raw, expected in (("05", 5.0), ("1.", 1.0), ("+1", 1.0), (".5", 0.5)):
+            with self.subTest(raw=raw), tempfile.TemporaryDirectory() as tmp:
+                env = os.environ.copy()
+                env.update(
+                    {
+                        "RUN_DIR_OVERRIDE": tmp,
+                        "MANAGEMENT_METRICS_INTERVAL_SEC": raw,
+                        "MANAGEMENT_CLI_INTERVAL_SEC": raw,
+                        "MANAGEMENT_TIMEOUT_SEC": raw,
+                    }
+                )
+                result = subprocess.run(
+                    [
+                        "bash",
+                        "-c",
+                        'source "$1"; mkdir -p "$RUN_DIR"; write_run_json',
+                        "runner-json-test",
+                        str(runner),
+                    ],
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                run = json.loads((Path(tmp) / "run.json").read_text())
+                self.assertEqual(run["management_metrics_interval_sec"], expected)
+                self.assertEqual(run["management_cli_interval_sec"], expected)
+                self.assertEqual(run["management_timeout_sec"], expected)
+
     def test_metrics_requires_http_200_and_nonempty_body(self):
         self.assertEqual(load.validate_metrics(503, b"busy", 4), "http_status")
         self.assertEqual(load.validate_metrics(200, b"", 0), "empty")

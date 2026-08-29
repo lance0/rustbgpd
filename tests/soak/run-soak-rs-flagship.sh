@@ -180,9 +180,10 @@ monotonic_now() {
     python3 -c 'import time; print(f"{time.monotonic():.9f}")'
 }
 
-validate_management_timing() {
+canonical_management_timing() {
     python3 - "$MANAGEMENT_METRICS_INTERVAL_SEC" \
         "$MANAGEMENT_CLI_INTERVAL_SEC" "$MANAGEMENT_TIMEOUT_SEC" <<'PY'
+import json
 import math
 import sys
 
@@ -190,8 +191,14 @@ try:
     values = [float(value) for value in sys.argv[1:]]
 except ValueError:
     raise SystemExit(1)
-raise SystemExit(0 if all(math.isfinite(value) and value > 0 for value in values) else 1)
+if not all(math.isfinite(value) and value > 0 for value in values):
+    raise SystemExit(1)
+print(*(json.dumps(value, allow_nan=False) for value in values), sep="\t")
 PY
+}
+
+validate_management_timing() {
+    canonical_management_timing >/dev/null
 }
 
 stop_management_load() {
@@ -467,6 +474,13 @@ start_management_load() {
 
 write_run_json() {
     local tmp="$RUN_JSON.tmp" measured_start=null measured_end=null
+    local management_timing management_metrics_interval management_cli_interval
+    local management_timeout
+    if ! management_timing=$(canonical_management_timing); then
+        abort "management-plane intervals and timeout are no longer valid"
+    fi
+    IFS=$'\t' read -r management_metrics_interval management_cli_interval \
+        management_timeout <<<"$management_timing"
     [[ -n $MEASURED_START_MONOTONIC ]] && measured_start=$MEASURED_START_MONOTONIC
     [[ -n $MEASURED_END_MONOTONIC ]] && measured_end=$MEASURED_END_MONOTONIC
     {
@@ -493,9 +507,9 @@ write_run_json() {
         printf '  "listen_port": %d,\n' "$LISTEN_PORT"
         printf '  "metrics_port": %d,\n' "$METRICS_PORT"
         printf '  "management_load_file": "management-plane-load.jsonl",\n'
-        printf '  "management_metrics_interval_sec": %s,\n' "$MANAGEMENT_METRICS_INTERVAL_SEC"
-        printf '  "management_cli_interval_sec": %s,\n' "$MANAGEMENT_CLI_INTERVAL_SEC"
-        printf '  "management_timeout_sec": %s,\n' "$MANAGEMENT_TIMEOUT_SEC"
+        printf '  "management_metrics_interval_sec": %s,\n' "$management_metrics_interval"
+        printf '  "management_cli_interval_sec": %s,\n' "$management_cli_interval"
+        printf '  "management_timeout_sec": %s,\n' "$management_timeout"
         printf '  "management_route_prefix": "%s",\n' "$MANAGEMENT_ROUTE_PREFIX"
         printf '  "measured_start_monotonic": %s,\n' "$measured_start"
         printf '  "measured_end_monotonic": %s,\n' "$measured_end"
