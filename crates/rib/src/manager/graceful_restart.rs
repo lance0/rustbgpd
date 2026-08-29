@@ -532,7 +532,7 @@ impl RibManager {
         let mut changed_routes = 0_u64;
         let mut invalid_hops = AspaInvalidHopSummary::default();
         for rib in self.ribs.values_mut() {
-            for route in rib.iter_mut() {
+            rib.for_each_route_mut_accounting_rpki(|route| {
                 routes_scanned += 1;
                 // A table update can affect a verdict only when its customer
                 // ASN occurs in the route's AS_SEQUENCE or AS_SET. We still
@@ -542,7 +542,7 @@ impl RibManager {
                         .as_path()
                         .is_none_or(|path| path.asns().all(|asn| !changed.contains(&asn)))
                 }) {
-                    continue;
+                    return;
                 }
                 routes_revalidated += 1;
                 let result = validate_route_aspa_detailed(route, table);
@@ -554,7 +554,7 @@ impl RibManager {
                     changed_routes += 1;
                     affected.insert(route.prefix);
                 }
-            }
+            });
         }
 
         if !affected.is_empty() {
