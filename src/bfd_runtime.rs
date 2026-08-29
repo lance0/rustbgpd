@@ -20,7 +20,7 @@
 //! zero-discriminator bootstrap), and executes the resulting
 //! [`rustbgpd_bfd::Action`]s.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr, SocketAddrV6};
 
 use crate::config::{BfdConfig, Config};
 
@@ -34,6 +34,14 @@ use crate::config::{BfdConfig, Config};
 pub struct BfdSessionParams {
     /// Peer IP address (the BGP neighbor).
     pub peer: IpAddr,
+    /// Linux interface index for an IPv6 link-local peer. Global IPv4/IPv6
+    /// sessions are deliberately unscoped (`None`). This stays inside the
+    /// daemon runtime and is not part of the public BFD status identity.
+    pub(crate) scope_id: Option<u32>,
+    /// Concrete control-packet destination derived together with `scope_id`.
+    /// Keeping this in the startup-pinned runtime value makes a missing scope
+    /// impossible to discover as a best-effort transmit failure later.
+    pub(crate) destination: SocketAddr,
     /// Desired minimum transmit interval (microseconds).
     pub desired_min_tx_us: u32,
     /// Required minimum receive interval (microseconds).
@@ -57,6 +65,18 @@ pub struct BfdRuntimeConfig {
     /// One entry per BFD-enabled neighbor.
     pub sessions: Vec<BfdSessionParams>,
 }
+
+/// Checked BFD startup derivation failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BfdRuntimeConfigError(String);
+
+impl std::fmt::Display for BfdRuntimeConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for BfdRuntimeConfigError {}
 
 /// A BFD session state change delivered to `PeerManager` (ADR-0067 step 4) over
 /// the per-peer coalescing channel from [`state_change_channel`] — distinct
@@ -203,11 +223,23 @@ impl BfdRuntimeConfig {
         self.sessions.iter().any(|s| s.peer.is_ipv6())
     }
 
+    fn validate_destinations(&self) -> Result<(), BfdRuntimeConfigError> {
+        for session in &self.sessions {
+            let expected = bfd_destination(session.peer, session.scope_id)?;
+            if session.destination != expected {
+                return Err(BfdRuntimeConfigError(format!(
+                    "BFD peer {} has inconsistent runtime destination {} (expected {expected})",
+                    session.peer, session.destination
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Resolve the BFD session set from the daemon config: every static
     /// neighbor whose own `bfd` (or inherited peer-group `bfd`) names a defined
     /// profile. Config validation has already checked the profile references.
-    #[must_use]
-    pub fn from_config(config: &Config) -> BfdRuntimeConfig {
+    pub fn from_config(config: &Config) -> Result<BfdRuntimeConfig, BfdRuntimeConfigError> {
         let mut sessions = Vec::new();
         for neighbor in &config.neighbors {
             let Some(bfd) = resolve_bfd(
@@ -222,14 +254,43 @@ impl BfdRuntimeConfig {
             if !bfd.enabled {
                 continue;
             }
-            let Ok(peer) = neighbor.address.parse::<IpAddr>() else {
-                continue;
+            let peer = neighbor.address.parse::<IpAddr>().map_err(|error| {
+                BfdRuntimeConfigError(format!(
+                    "neighbor {:?}: failed to derive configured BFD session address: {error}",
+                    neighbor.address
+                ))
+            })?;
+            let profile = config
+                .bfd_profiles
+                .iter()
+                .find(|p| p.name == bfd.profile)
+                .ok_or_else(|| {
+                    BfdRuntimeConfigError(format!(
+                        "neighbor {:?}: configured BFD profile {:?} is missing",
+                        neighbor.address, bfd.profile
+                    ))
+                })?;
+            let scope_id = if is_ipv6_link_local(peer) {
+                let interface = neighbor.interface.as_deref().ok_or_else(|| {
+                    BfdRuntimeConfigError(format!(
+                        "neighbor {:?}: IPv6 link-local BFD requires a configured interface",
+                        neighbor.address
+                    ))
+                })?;
+                Some(nix::net::if_::if_nametoindex(interface).map_err(|error| {
+                    BfdRuntimeConfigError(format!(
+                        "neighbor {:?} interface {:?}: failed to resolve IPv6 link-local BFD scope: {error}",
+                        neighbor.address, interface
+                    ))
+                })?)
+            } else {
+                None
             };
-            let Some(profile) = config.bfd_profiles.iter().find(|p| p.name == bfd.profile) else {
-                continue;
-            };
+            let destination = bfd_destination(peer, scope_id)?;
             sessions.push(BfdSessionParams {
                 peer,
+                scope_id,
+                destination,
                 desired_min_tx_us: profile.min_tx_interval.saturating_mul(1000),
                 required_min_rx_us: profile.min_rx_interval.saturating_mul(1000),
                 // Validation rejects multiplier > 255 / interval > u32::MAX/1000,
@@ -239,7 +300,35 @@ impl BfdRuntimeConfig {
                 enabled: true,
             });
         }
-        BfdRuntimeConfig { sessions }
+        Ok(BfdRuntimeConfig { sessions })
+    }
+}
+
+fn is_ipv6_link_local(peer: IpAddr) -> bool {
+    matches!(peer, IpAddr::V6(v6) if {
+        let octets = v6.octets();
+        octets[0] == 0xfe && (octets[1] & 0xc0) == 0x80
+    })
+}
+
+pub(crate) fn bfd_destination(
+    peer: IpAddr,
+    scope_id: Option<u32>,
+) -> Result<SocketAddr, BfdRuntimeConfigError> {
+    match (peer, scope_id) {
+        (IpAddr::V6(v6), Some(scope_id)) if is_ipv6_link_local(peer) && scope_id != 0 => {
+            Ok(SocketAddr::V6(SocketAddrV6::new(v6, 3784, 0, scope_id)))
+        }
+        (IpAddr::V6(_), None) if is_ipv6_link_local(peer) => Err(BfdRuntimeConfigError(format!(
+            "BFD peer {peer} is IPv6 link-local but has no interface scope"
+        ))),
+        (IpAddr::V6(_), Some(0)) if is_ipv6_link_local(peer) => Err(BfdRuntimeConfigError(
+            format!("BFD peer {peer} has invalid zero interface scope"),
+        )),
+        (_, Some(scope_id)) => Err(BfdRuntimeConfigError(format!(
+            "global BFD peer {peer} unexpectedly carries interface scope {scope_id}"
+        ))),
+        (_, None) => Ok(SocketAddr::new(peer, 3784)),
     }
 }
 
@@ -450,6 +539,12 @@ mod linux {
 
     /// Open the required family sockets without spawning the BFD actor.
     pub fn prepare_runtime(config: &BfdRuntimeConfig) -> std::io::Result<Option<PreparedRuntime>> {
+        config.validate_destinations().map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid BFD runtime configuration: {error}"),
+            )
+        })?;
         let sockets = prepare_runtime_sockets(
             config.needs_ipv4(),
             config.needs_ipv6(),
@@ -490,6 +585,12 @@ mod linux {
     struct Entry {
         session: Session,
         peer: IpAddr,
+        /// Required receive/transmit interface for an IPv6 link-local peer.
+        /// Global IPv4/IPv6 sessions remain unscoped.
+        scope_id: Option<u32>,
+        /// Prevalidated concrete destination; link-local addresses include the
+        /// required interface scope.
+        destination: SocketAddr,
         strict: bool,
         /// Our local discriminator for this session (RFC 5880 §6.8.1) — held so
         /// it can be released back to the allocator and removed from the
@@ -636,8 +737,8 @@ mod linux {
                         if drained {
                             g.clear_ready();
                         }
-                        for (src, pkt) in pkts {
-                            actor.on_packet(src, &pkt, metrics, status_tx).await;
+                        for packet in pkts {
+                            actor.on_packet(packet, metrics, status_tx).await;
                         }
                     }
                 }
@@ -647,8 +748,8 @@ mod linux {
                         if drained {
                             g.clear_ready();
                         }
-                        for (src, pkt) in pkts {
-                            actor.on_packet(src, &pkt, metrics, status_tx).await;
+                        for packet in pkts {
+                            actor.on_packet(packet, metrics, status_tx).await;
                         }
                     }
                 }
@@ -700,6 +801,8 @@ mod linux {
             let entry = Entry {
                 session,
                 peer: params.peer,
+                scope_id: params.scope_id,
+                destination: params.destination,
                 strict: params.strict,
                 local_discriminator: discr,
                 last_diagnostic: Diagnostic::None,
@@ -796,21 +899,27 @@ mod linux {
 
         async fn on_packet(
             &mut self,
-            src: IpAddr,
-            pkt: &ControlPacket,
+            packet: ReceivedPacket,
             metrics: &BgpMetrics,
             status_tx: &watch::Sender<Vec<BfdStatus>>,
         ) {
-            let Some(peer) = demux_target(
+            let ReceivedPacket {
+                src,
+                ifindex,
+                packet: pkt,
+            } = packet;
+            let Some(peer) = scoped_demux_target(
                 &self.by_discriminator,
                 src,
                 pkt.your_discriminator,
-                self.sessions.contains_key(&src),
+                ifindex,
+                |candidate| self.sessions.get(&candidate).map(|entry| entry.scope_id),
             ) else {
                 debug!(
                     peer = %src,
+                    received_scope = ?ifindex,
                     your_discriminator = pkt.your_discriminator,
-                    "BFD packet not matched to a session; ignoring"
+                    "BFD packet not matched to a session and interface scope; ignoring"
                 );
                 return;
             };
@@ -819,7 +928,7 @@ mod linux {
             };
             let before_state = entry.session.state();
             let before_remote_admin_down = entry.session.remote_admin_down();
-            let actions = entry.session.handle(Event::PacketReceived(pkt.clone()));
+            let actions = entry.session.handle(Event::PacketReceived(pkt));
             let changed = operator_status_changed(
                 before_state,
                 before_remote_admin_down,
@@ -979,7 +1088,9 @@ mod linux {
 
         async fn send(&self, peer: IpAddr, pkt: &ControlPacket) {
             let bytes = pkt.encode();
-            let dst = SocketAddr::new(peer, BFD_CONTROL_PORT);
+            let Some(dst) = self.sessions.get(&peer).map(|entry| entry.destination) else {
+                return;
+            };
             let sock = if peer.is_ipv4() {
                 self.tx_v4.as_ref()
             } else {
@@ -1028,6 +1139,36 @@ mod linux {
         }
     }
 
+    /// Enforce receive-interface identity for any packet involving a
+    /// link-local address. This gate runs after selecting the candidate session
+    /// but before the packet reaches its FSM, so neither zero-discriminator
+    /// bootstrap nor non-zero discriminator demux can bypass scope.
+    fn receive_scope_matches(
+        src: IpAddr,
+        peer: IpAddr,
+        expected_scope: Option<u32>,
+        received_scope: Option<u32>,
+    ) -> bool {
+        if super::is_ipv6_link_local(src) || super::is_ipv6_link_local(peer) {
+            expected_scope.is_some() && expected_scope == received_scope
+        } else {
+            true
+        }
+    }
+
+    fn scoped_demux_target(
+        by_discriminator: &HashMap<u32, IpAddr>,
+        src: IpAddr,
+        your_discriminator: u32,
+        received_scope: Option<u32>,
+        session_scope: impl Fn(IpAddr) -> Option<Option<u32>>,
+    ) -> Option<IpAddr> {
+        let source_exists = session_scope(src).is_some();
+        let peer = demux_target(by_discriminator, src, your_discriminator, source_exists)?;
+        let expected_scope = session_scope(peer)?;
+        receive_scope_matches(src, peer, expected_scope, received_scope).then_some(peer)
+    }
+
     fn next_timer_sleep(timers: &BinaryHeap<Reverse<Deadline>>) -> tokio::time::Sleep {
         match timers.peek() {
             Some(Reverse(d)) => tokio::time::sleep_until(d.at),
@@ -1038,13 +1179,19 @@ mod linux {
     }
 
     /// Outcome of one `recvmsg`.
-    enum Recv {
+    pub(super) enum Recv {
         /// A valid control packet from `(source IP)`.
-        Packet(IpAddr, ControlPacket),
+        Packet(ReceivedPacket),
         /// A datagram was received but dropped (bad TTL, address, or decode).
         Discard,
         /// Nothing more to read (would-block or error).
         Done,
+    }
+
+    pub(super) struct ReceivedPacket {
+        pub(super) src: IpAddr,
+        pub(super) ifindex: Option<u32>,
+        pub(super) packet: ControlPacket,
     }
 
     /// Read up to `budget` datagrams from a non-blocking RX socket, validating
@@ -1055,11 +1202,11 @@ mod linux {
     /// whether the socket was fully drained (`false` = budget exhausted with
     /// data possibly still queued — the caller must keep the socket marked
     /// ready and come back).
-    fn drain_socket(fd: i32, budget: usize) -> (Vec<(IpAddr, ControlPacket)>, bool) {
+    fn drain_socket(fd: i32, budget: usize) -> (Vec<ReceivedPacket>, bool) {
         let mut out = Vec::new();
         for _ in 0..budget {
             match recv_one(fd) {
-                Recv::Packet(src, pkt) => out.push((src, pkt)),
+                Recv::Packet(packet) => out.push(packet),
                 Recv::Discard => {}
                 Recv::Done => return (out, true),
             }
@@ -1067,7 +1214,7 @@ mod linux {
         (out, false)
     }
 
-    fn recv_one(fd: i32) -> Recv {
+    pub(super) fn recv_one(fd: i32) -> Recv {
         let mut buf = [0u8; 256];
         let mut iov = [IoSliceMut::new(&mut buf)];
         let mut cmsg = nix::cmsg_space!([u8; 256]);
@@ -1081,11 +1228,15 @@ mod linux {
             return Recv::Done;
         };
         let mut ttl: Option<i32> = None;
+        let mut ifindex: Option<u32> = None;
         if let Ok(cmsgs) = msg.cmsgs() {
             for c in cmsgs {
                 match c {
                     ControlMessageOwned::Ipv4Ttl(t) | ControlMessageOwned::Ipv6HopLimit(t) => {
                         ttl = Some(t);
+                    }
+                    ControlMessageOwned::Ipv6PacketInfo(info) => {
+                        ifindex = Some(info.ipi6_ifindex);
                     }
                     _ => {}
                 }
@@ -1113,7 +1264,11 @@ mod linux {
         }
         let n = msg.bytes;
         match ControlPacket::decode(&buf[..n]) {
-            Ok(pkt) => Recv::Packet(src, pkt),
+            Ok(packet) => Recv::Packet(ReceivedPacket {
+                src,
+                ifindex,
+                packet,
+            }),
             Err(_) => Recv::Discard,
         }
     }
@@ -1166,6 +1321,21 @@ mod linux {
                 format!("failed to enable {option} on {family} BFD receive socket {bind}: {error}"),
             )
         })?;
+        if v6 {
+            nix::sys::socket::setsockopt(
+                &socket,
+                nix::sys::socket::sockopt::Ipv6RecvPacketInfo,
+                &true,
+            )
+            .map_err(|error| {
+                std::io::Error::new(
+                    std::io::Error::from(error).kind(),
+                    format!(
+                        "failed to enable IPV6_RECVPKTINFO on IPv6 BFD receive socket {bind}: {error}"
+                    ),
+                )
+            })?;
+        }
         Ok(socket.into())
     }
 
@@ -1174,7 +1344,7 @@ mod linux {
     const BFD_SRC_PORT_MIN: u16 = 49152;
     const BFD_SRC_PORT_MAX: u16 = 65535;
 
-    fn tx_socket(v6: bool) -> std::io::Result<std::net::UdpSocket> {
+    pub(super) fn tx_socket(v6: bool) -> std::io::Result<std::net::UdpSocket> {
         let domain = if v6 { Domain::IPV6 } else { Domain::IPV4 };
         let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
         if v6 {
@@ -1220,7 +1390,7 @@ mod linux {
         unsafe_code,
         reason = "BFD receive TTL requires the raw Linux socket-option ABI"
     )]
-    fn enable_recv_ttl(fd: i32, v6: bool) -> std::io::Result<()> {
+    pub(super) fn enable_recv_ttl(fd: i32, v6: bool) -> std::io::Result<()> {
         let on: libc::c_int = 1;
         let (level, opt) = if v6 {
             (libc::IPPROTO_IPV6, libc::IPV6_RECVHOPLIMIT)
@@ -1249,10 +1419,11 @@ mod linux {
     mod unit {
         use super::{
             BFD_SRC_PORT_MIN, Deadline, FamilySockets, enable_recv_ttl, kind_key,
-            prepare_runtime_sockets, rx_socket_with,
+            prepare_runtime_sockets, rx_socket_with, scoped_demux_target,
         };
         use rustbgpd_bfd::{ControlPacket, Diagnostic, SessionState, TimerKind};
-        use std::net::IpAddr;
+        use std::collections::HashMap;
+        use std::net::{IpAddr, SocketAddr, SocketAddrV6};
         use std::os::fd::AsRawFd;
         use tokio::io::unix::AsyncFd;
         use tokio::time::Instant;
@@ -1314,6 +1485,110 @@ mod linux {
         }
 
         #[test]
+        fn transmit_destination_scopes_only_link_local_ipv6() {
+            use super::super::{BfdRuntimeConfigError, bfd_destination};
+
+            let link_local: IpAddr = "fe80::2".parse().unwrap();
+            assert_eq!(
+                bfd_destination(link_local, Some(17)),
+                Ok(SocketAddr::V6(SocketAddrV6::new(
+                    "fe80::2".parse().unwrap(),
+                    3784,
+                    0,
+                    17
+                )))
+            );
+            assert_eq!(
+                bfd_destination(link_local, None),
+                Err(BfdRuntimeConfigError(
+                    "BFD peer fe80::2 is IPv6 link-local but has no interface scope".to_string()
+                )),
+                "link-local transmit must fail closed without a scope"
+            );
+            assert_eq!(
+                bfd_destination(link_local, Some(0)),
+                Err(BfdRuntimeConfigError(
+                    "BFD peer fe80::2 has invalid zero interface scope".to_string()
+                )),
+                "link-local transmit must fail closed with an invalid scope"
+            );
+
+            let global_v6: IpAddr = "2001:db8::2".parse().unwrap();
+            assert_eq!(
+                bfd_destination(global_v6, None),
+                Ok("[2001:db8::2]:3784".parse().unwrap())
+            );
+            let global_v4: IpAddr = "192.0.2.2".parse().unwrap();
+            assert_eq!(
+                bfd_destination(global_v4, None),
+                Ok("192.0.2.2:3784".parse().unwrap())
+            );
+        }
+
+        #[test]
+        fn link_local_scope_gates_zero_and_nonzero_discriminator_demux() {
+            let peer: IpAddr = "fe80::2".parse().unwrap();
+            let by_discriminator = HashMap::from([(41_u32, peer)]);
+            let session_scope = |candidate| (candidate == peer).then_some(Some(17));
+
+            for discriminator in [0, 41] {
+                assert_eq!(
+                    scoped_demux_target(
+                        &by_discriminator,
+                        peer,
+                        discriminator,
+                        Some(17),
+                        session_scope,
+                    ),
+                    Some(peer),
+                    "matching receive scope must admit discriminator {discriminator}"
+                );
+                assert_eq!(
+                    scoped_demux_target(
+                        &by_discriminator,
+                        peer,
+                        discriminator,
+                        None,
+                        session_scope,
+                    ),
+                    None,
+                    "missing pktinfo must drop discriminator {discriminator}"
+                );
+                assert_eq!(
+                    scoped_demux_target(
+                        &by_discriminator,
+                        peer,
+                        discriminator,
+                        Some(18),
+                        session_scope,
+                    ),
+                    None,
+                    "wrong interface must drop discriminator {discriminator}"
+                );
+            }
+
+            let global: IpAddr = "2001:db8::2".parse().unwrap();
+            let global_disc = HashMap::from([(42_u32, global)]);
+            let global_scope = |candidate| (candidate == global).then_some(None);
+            assert_eq!(
+                scoped_demux_target(&global_disc, global, 42, None, global_scope),
+                Some(global),
+                "global IPv6 behavior remains unscoped"
+            );
+        }
+
+        #[test]
+        fn ipv6_receive_socket_enables_packet_info() {
+            let socket = rx_socket_with(true, 0, enable_recv_ttl).expect("IPv6 receive socket");
+            let enabled = nix::sys::socket::getsockopt(
+                &socket,
+                nix::sys::socket::sockopt::Ipv6RecvPacketInfo,
+            )
+            .expect("read IPV6_RECVPKTINFO");
+            assert!(enabled);
+        }
+
+        #[test]
         fn configured_startup_propagates_socket_open_failure() {
             // Load-bearing proof: changing `prepare_runtime_sockets` back to
             // the old log-and-continue behavior (`Err(_) => Ok(None)`) makes
@@ -1331,6 +1606,33 @@ mod linux {
             assert_eq!(
                 error.to_string(),
                 "BFD IPv4 socket startup failed: injected UDP/3784 collision"
+            );
+        }
+
+        #[test]
+        fn missing_link_local_scope_fails_before_socket_preparation() {
+            use super::super::{BfdRuntimeConfig, BfdSessionParams};
+
+            let config = BfdRuntimeConfig {
+                sessions: vec![BfdSessionParams {
+                    peer: "fe80::2".parse().unwrap(),
+                    scope_id: None,
+                    destination: "[fe80::2]:3784".parse().unwrap(),
+                    desired_min_tx_us: 300_000,
+                    required_min_rx_us: 300_000,
+                    detect_mult: 3,
+                    strict: false,
+                    enabled: true,
+                }],
+            };
+            let Err(error) = super::prepare_runtime(&config) else {
+                panic!("missing scope must fail at startup preflight");
+            };
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert!(
+                error.to_string().contains("fe80::2")
+                    && error.to_string().contains("no interface scope"),
+                "actionable startup error: {error}"
             );
         }
 
@@ -1507,7 +1809,10 @@ mod linux {
 
             let (pkts, drained) = super::drain_socket(rx.as_raw_fd(), 8);
             assert!(drained, "both datagrams fit the budget");
-            let discs: Vec<u32> = pkts.iter().map(|(_, p)| p.my_discriminator).collect();
+            let discs: Vec<u32> = pkts
+                .iter()
+                .map(|received| received.packet.my_discriminator)
+                .collect();
             assert_eq!(
                 discs,
                 vec![0x600D],
@@ -1556,6 +1861,8 @@ mod linux {
             let config = BfdRuntimeConfig {
                 sessions: vec![BfdSessionParams {
                     peer: "127.0.0.9".parse().expect("ip"),
+                    scope_id: None,
+                    destination: "127.0.0.9:3784".parse().expect("socket address"),
                     desired_min_tx_us: 100_000,
                     required_min_rx_us: 100_000,
                     detect_mult: 3,
@@ -1660,16 +1967,113 @@ remote_asn = 65002
 bfd = { profile = "fast", strict = true }
 "#,
         );
-        let rc = BfdRuntimeConfig::from_config(&config);
+        let rc = BfdRuntimeConfig::from_config(&config).expect("derive BFD runtime");
         assert!(rc.enabled());
         assert_eq!(rc.sessions.len(), 1);
         let s = &rc.sessions[0];
         assert_eq!(s.peer, ip("10.0.0.2"));
+        assert_eq!(s.scope_id, None, "global IPv4 remains unscoped");
         // Profile ms intervals become microseconds for the FSM.
         assert_eq!(s.desired_min_tx_us, 250_000);
         assert_eq!(s.required_min_rx_us, 200_000);
         assert_eq!(s.detect_mult, 4);
         assert!(s.strict);
+    }
+
+    #[test]
+    fn from_config_resolves_link_local_interface_scope() {
+        let config = config_with(
+            r#"
+[[bfd_profiles]]
+name = "p"
+
+[[neighbors]]
+address = "fe80::2"
+interface = "lo"
+remote_asn = 65002
+bfd = { profile = "p" }
+"#,
+        );
+        let rc = BfdRuntimeConfig::from_config(&config).expect("resolve link-local scope");
+        assert_eq!(rc.sessions.len(), 1);
+        assert_eq!(rc.sessions[0].peer, ip("fe80::2"));
+        assert_eq!(
+            rc.sessions[0].scope_id,
+            Some(nix::net::if_::if_nametoindex("lo").expect("loopback interface"))
+        );
+    }
+
+    #[test]
+    fn from_config_resolves_inherited_link_local_interface_scope() {
+        let config = config_with(
+            r#"
+[[bfd_profiles]]
+name = "p"
+
+[peer_groups.fabric]
+bfd = { profile = "p" }
+
+[[neighbors]]
+address = "fe80::3"
+interface = "lo"
+remote_asn = 65003
+peer_group = "fabric"
+"#,
+        );
+        let rc = BfdRuntimeConfig::from_config(&config).expect("resolve inherited scope");
+        assert_eq!(rc.sessions.len(), 1);
+        assert_eq!(rc.sessions[0].peer, ip("fe80::3"));
+        assert_eq!(
+            rc.sessions[0].scope_id,
+            Some(nix::net::if_::if_nametoindex("lo").expect("loopback interface"))
+        );
+    }
+
+    #[test]
+    fn link_local_disabled_override_runs_no_session() {
+        let config = config_with(
+            r#"
+[[bfd_profiles]]
+name = "p"
+
+[peer_groups.fabric]
+bfd = { profile = "p" }
+
+[[neighbors]]
+address = "fe80::4"
+interface = "lo"
+remote_asn = 65004
+peer_group = "fabric"
+bfd = { profile = "p", enabled = false }
+"#,
+        );
+        let rc = BfdRuntimeConfig::from_config(&config).expect("disabled BFD needs no scope");
+        assert!(rc.sessions.is_empty());
+    }
+
+    #[test]
+    fn nonexistent_link_local_interface_fails_checked_derivation() {
+        let config = config_with(
+            r#"
+[[bfd_profiles]]
+name = "p"
+
+[[neighbors]]
+address = "fe80::5"
+interface = "rustbgpd-no-such-interface"
+remote_asn = 65005
+bfd = { profile = "p" }
+"#,
+        );
+        let error = BfdRuntimeConfig::from_config(&config)
+            .expect_err("missing interface must fail before socket preparation");
+        let message = error.to_string();
+        assert!(message.contains("fe80::5"), "neighbor context: {message}");
+        assert!(
+            message.contains("rustbgpd-no-such-interface"),
+            "interface context: {message}"
+        );
+        assert!(message.contains("failed to resolve"), "reason: {message}");
     }
 
     #[test]
@@ -1691,9 +2095,10 @@ remote_asn = 65002
 peer_group = "rrc"
 "#,
         );
-        let rc = BfdRuntimeConfig::from_config(&config);
+        let rc = BfdRuntimeConfig::from_config(&config).expect("derive BFD runtime");
         assert_eq!(rc.sessions.len(), 1);
         assert_eq!(rc.sessions[0].peer, ip("10.0.0.2"));
+        assert_eq!(rc.sessions[0].scope_id, None);
         assert!(!rc.sessions[0].strict);
     }
 
@@ -1719,7 +2124,7 @@ peer_group = "rrc"
 bfd = { profile = "p", enabled = false }
 "#,
         );
-        let rc = BfdRuntimeConfig::from_config(&config);
+        let rc = BfdRuntimeConfig::from_config(&config).expect("derive BFD runtime");
         // Only the inheriting neighbor runs a session; the override disables it.
         assert_eq!(rc.sessions.len(), 1);
         assert_eq!(rc.sessions[0].peer, ip("10.0.0.2"));
@@ -1751,7 +2156,7 @@ peer_group = "rrc"
 bfd = { profile = "own", strict = true }
 "#,
         );
-        let rc = BfdRuntimeConfig::from_config(&config);
+        let rc = BfdRuntimeConfig::from_config(&config).expect("derive BFD runtime");
         assert_eq!(rc.sessions.len(), 1);
         let s = &rc.sessions[0];
         assert_eq!(s.desired_min_tx_us, 150_000);
@@ -1768,7 +2173,7 @@ address = "10.0.0.2"
 remote_asn = 65002
 "#,
         );
-        let rc = BfdRuntimeConfig::from_config(&config);
+        let rc = BfdRuntimeConfig::from_config(&config).expect("derive BFD runtime");
         assert!(rc.sessions.is_empty());
         assert!(!rc.enabled());
     }
@@ -1800,7 +2205,8 @@ remote_asn = 65003
 bfd = {{ profile = "p" }}
 "#
         ));
-        let candidate_families = BfdRuntimeConfig::from_config(&candidate);
+        let candidate_families =
+            BfdRuntimeConfig::from_config(&candidate).expect("derive candidate BFD runtime");
         assert!(
             candidate_families.needs_ipv6(),
             "candidate must genuinely ask for a new family"
@@ -1809,7 +2215,7 @@ bfd = {{ profile = "p" }}
             crate::config::pin_bfd_startup_only_runtime(&mut candidate, &live),
             "a BFD-attachment change must be classified restart-required"
         );
-        let rc = BfdRuntimeConfig::from_config(&candidate);
+        let rc = BfdRuntimeConfig::from_config(&candidate).expect("derive pinned BFD runtime");
         assert!(rc.needs_ipv4());
         assert!(
             !rc.needs_ipv6(),
@@ -1948,6 +2354,7 @@ bfd = {{ profile = "p" }}
     // mirroring `fib_runtime`'s pattern.
     #[cfg(target_os = "linux")]
     mod netns {
+        use super::super::linux::{Recv, enable_recv_ttl, recv_one};
         use super::super::{
             BfdRuntimeConfig, BfdSessionParams, BfdStatus, prepare_runtime, spawn_prepared,
         };
@@ -1955,10 +2362,11 @@ bfd = {{ profile = "p" }}
         use rustbgpd_bfd::{ControlPacket, Diagnostic, SessionState};
         use rustbgpd_telemetry::BgpMetrics;
         use socket2::{Domain, Protocol, Socket, Type};
-        use std::net::{IpAddr, SocketAddr};
+        use std::net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV6};
+        use std::os::fd::AsRawFd;
         use std::process::Command;
         use std::sync::Arc;
-        use std::sync::atomic::{AtomicU16, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
         use std::time::Duration;
         use tokio::sync::{broadcast, watch};
         use tokio_util::sync::CancellationToken;
@@ -1966,12 +2374,26 @@ bfd = {{ profile = "p" }}
         const PEER_DISC: u32 = 0x0A0B_0C0D;
         const ACTOR_ADDR: &str = "127.0.0.1";
         const PEER_ADDR: &str = "127.0.0.2";
+        const LL_ACTOR_ADDR: &str = "fe80::51";
+        const LL_PEER_ADDR: &str = "fe80::52";
+        const LL_WRONG_ACTOR_ADDR: &str = "fe80::53";
+        const LL_ACTOR_IF: &str = "bfda";
+        const LL_PEER_IF: &str = "bfdp";
+        const LL_WRONG_ACTOR_IF: &str = "bfdwa";
+        const LL_WRONG_PEER_IF: &str = "bfdwp";
         const PORT: u16 = 3784;
 
         // Peer responder mode, shared via a watch channel.
         const MODE_TTL_BAD: u8 = 0; // reply with TTL=1 (must be discarded)
         const MODE_TTL_GOOD: u8 = 1; // reply with TTL=255 (valid)
         const MODE_SILENT: u8 = 2; // stop replying
+
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        enum LinkLocalResponderMode {
+            WrongInterface,
+            IntendedInterface,
+            Silent,
+        }
 
         fn netns_gate() -> bool {
             std::env::var("EVPN_LINUX_NETNS").as_deref() == Ok("1")
@@ -1999,8 +2421,8 @@ bfd = {{ profile = "p" }}
         }
 
         impl Netns {
-            fn create() -> Self {
-                let name = format!("rustbgpd-bfd-{}", std::process::id());
+            fn create(suffix: &str) -> Self {
+                let name = format!("rustbgpd-bfd-{suffix}-{}", std::process::id());
                 try_run("ip", &["netns", "delete", &name]);
                 run("ip", &["netns", "add", &name]);
                 // Bring up loopback and assign 127.0.0.1/8 so both the actor
@@ -2012,6 +2434,46 @@ bfd = {{ profile = "p" }}
                 run("ip", &["-n", &name, "link", "set", "lo", "up"]);
                 Self { name }
             }
+
+            fn create_link_local() -> Self {
+                let ns = Self::create("ll");
+                for (actor_if, peer_if) in [
+                    (LL_ACTOR_IF, LL_PEER_IF),
+                    (LL_WRONG_ACTOR_IF, LL_WRONG_PEER_IF),
+                ] {
+                    run(
+                        "ip",
+                        &[
+                            "-n", &ns.name, "link", "add", actor_if, "type", "veth", "peer",
+                            "name", peer_if,
+                        ],
+                    );
+                    run("ip", &["-n", &ns.name, "link", "set", actor_if, "up"]);
+                    run("ip", &["-n", &ns.name, "link", "set", peer_if, "up"]);
+                }
+                for (address, interface) in [
+                    (LL_ACTOR_ADDR, LL_ACTOR_IF),
+                    (LL_PEER_ADDR, LL_PEER_IF),
+                    (LL_WRONG_ACTOR_ADDR, LL_WRONG_ACTOR_IF),
+                    (LL_PEER_ADDR, LL_WRONG_PEER_IF),
+                ] {
+                    run(
+                        "ip",
+                        &[
+                            "-n",
+                            &ns.name,
+                            "-6",
+                            "addr",
+                            "add",
+                            &format!("{address}/64"),
+                            "dev",
+                            interface,
+                            "nodad",
+                        ],
+                    );
+                }
+                ns
+            }
         }
 
         impl Drop for Netns {
@@ -2020,16 +2482,12 @@ bfd = {{ profile = "p" }}
             }
         }
 
-        fn reexec_inner(ns: &Netns) {
+        fn reexec_inner(ns: &Netns, test_name: &str) {
             let exe = std::env::current_exe().expect("self-exe");
             let status = Command::new("ip")
                 .args(["netns", "exec", &ns.name])
                 .arg(&exe)
-                .args([
-                    "--exact",
-                    "--nocapture",
-                    "bfd_runtime::tests::netns::session_reaches_up_and_detects_down",
-                ])
+                .args(["--exact", "--nocapture", test_name])
                 .env("RUSTBGPD_BFD_NETNS_INNER", "1")
                 .env("EVPN_LINUX_NETNS", "1")
                 .status()
@@ -2059,6 +2517,40 @@ bfd = {{ profile = "p" }}
             assert!(bound, "no free peer source port in 49152..=65535");
             s.set_nonblocking(true).unwrap();
             tokio::net::UdpSocket::from_std(s.into()).unwrap()
+        }
+
+        fn link_local_peer_rx(scope_id: u32) -> std::net::UdpSocket {
+            let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP)).unwrap();
+            socket.set_reuse_address(true).unwrap();
+            socket.set_only_v6(true).unwrap();
+            let peer: Ipv6Addr = LL_PEER_ADDR.parse().unwrap();
+            socket
+                .bind(&SocketAddrV6::new(peer, PORT, 0, scope_id).into())
+                .unwrap();
+            enable_recv_ttl(socket.as_raw_fd(), true).unwrap();
+            nix::sys::socket::setsockopt(
+                &socket,
+                nix::sys::socket::sockopt::Ipv6RecvPacketInfo,
+                &true,
+            )
+            .unwrap();
+            socket.set_nonblocking(true).unwrap();
+            socket.into()
+        }
+
+        fn link_local_peer_tx(source_scope: u32) -> tokio::net::UdpSocket {
+            let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP)).unwrap();
+            socket.set_only_v6(true).unwrap();
+            socket.set_unicast_hops_v6(255).unwrap();
+            let source: Ipv6Addr = LL_PEER_ADDR.parse().unwrap();
+            let bound = (49152_u16..=65535).any(|port| {
+                socket
+                    .bind(&SocketAddrV6::new(source, port, 0, source_scope).into())
+                    .is_ok()
+            });
+            assert!(bound, "no free scoped IPv6 BFD source port");
+            socket.set_nonblocking(true).unwrap();
+            tokio::net::UdpSocket::from_std(socket.into()).unwrap()
         }
 
         // A control packet from the hand-rolled peer that drives a Down actor
@@ -2119,6 +2611,75 @@ bfd = {{ profile = "p" }}
                             cur_ttl = ttl;
                         }
                         let _ = tx_sock.send_to(&peer_init(actor_disc), actor).await;
+                    }
+                }
+            }
+        }
+
+        #[expect(
+            clippy::too_many_arguments,
+            reason = "netns responder carries both intended and adversarial interface scopes"
+        )]
+        async fn link_local_peer_responder(
+            rx: std::net::UdpSocket,
+            good_tx: tokio::net::UdpSocket,
+            wrong_tx: tokio::net::UdpSocket,
+            peer_scope: u32,
+            wrong_peer_scope: u32,
+            mode_rx: watch::Receiver<LinkLocalResponderMode>,
+            observed_source: Arc<AtomicBool>,
+            observed_interface: Arc<AtomicBool>,
+            wrong_send_succeeded: Arc<AtomicBool>,
+            stop: CancellationToken,
+        ) -> Result<(), String> {
+            let good_actor = SocketAddr::V6(SocketAddrV6::new(
+                LL_ACTOR_ADDR.parse().unwrap(),
+                PORT,
+                0,
+                peer_scope,
+            ));
+            let wrong_actor = SocketAddr::V6(SocketAddrV6::new(
+                LL_WRONG_ACTOR_ADDR.parse().unwrap(),
+                PORT,
+                0,
+                wrong_peer_scope,
+            ));
+            let expected_source: IpAddr = LL_ACTOR_ADDR.parse().unwrap();
+            loop {
+                tokio::select! {
+                    biased;
+                    () = stop.cancelled() => return Ok(()),
+                    () = tokio::time::sleep(Duration::from_millis(10)) => {
+                        let Recv::Packet(received) = recv_one(rx.as_raw_fd()) else {
+                            continue;
+                        };
+                        // `recv_one` admits only Hop-Limit 255 and an RFC 5881
+                        // source port. Its pktinfo also proves which veth
+                        // received the actor's shared-socket transmit.
+                        observed_source.store(received.src == expected_source, Ordering::Relaxed);
+                        observed_interface.store(
+                            received.ifindex == Some(peer_scope),
+                            Ordering::Relaxed,
+                        );
+                        let actor_disc = received.packet.my_discriminator;
+                        if actor_disc == 0
+                            || *mode_rx.borrow() == LinkLocalResponderMode::Silent
+                        {
+                            continue;
+                        }
+                        let response = peer_init(actor_disc);
+                        if *mode_rx.borrow() == LinkLocalResponderMode::WrongInterface {
+                            wrong_tx
+                                .send_to(&response, wrong_actor)
+                                .await
+                                .map_err(|error| format!("wrong-interface BFD send failed: {error}"))?;
+                            wrong_send_succeeded.store(true, Ordering::Relaxed);
+                        } else {
+                            good_tx
+                                .send_to(&response, good_actor)
+                                .await
+                                .map_err(|error| format!("intended-interface BFD send failed: {error}"))?;
+                        }
                     }
                 }
             }
@@ -2191,8 +2752,11 @@ bfd = {{ profile = "p" }}
                 return;
             }
             if !is_inner() {
-                let ns = Netns::create();
-                reexec_inner(&ns);
+                let ns = Netns::create("v4");
+                reexec_inner(
+                    &ns,
+                    "bfd_runtime::tests::netns::session_reaches_up_and_detects_down",
+                );
                 return;
             }
 
@@ -2200,6 +2764,8 @@ bfd = {{ profile = "p" }}
             let config = BfdRuntimeConfig {
                 sessions: vec![BfdSessionParams {
                     peer: peer_ip,
+                    scope_id: None,
+                    destination: "127.0.0.2:3784".parse().unwrap(),
                     desired_min_tx_us: 100_000,
                     required_min_rx_us: 100_000,
                     detect_mult: 3,
@@ -2330,6 +2896,147 @@ bfd = {{ profile = "p" }}
 
             peer_stop.cancel();
             let _ = peer_task.await;
+            handle.shutdown().await;
+        }
+
+        #[tokio::test]
+        #[expect(clippy::too_many_lines, reason = "scoped IPv6 netns scenario")]
+        async fn link_local_session_enforces_interface_scope_and_detects_down() {
+            if !netns_gate() {
+                eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run the privileged BFD netns test");
+                return;
+            }
+            if !is_inner() {
+                let ns = Netns::create_link_local();
+                reexec_inner(
+                    &ns,
+                    "bfd_runtime::tests::netns::link_local_session_enforces_interface_scope_and_detects_down",
+                );
+                return;
+            }
+
+            let actor_scope = nix::net::if_::if_nametoindex(LL_ACTOR_IF).unwrap();
+            let peer_scope = nix::net::if_::if_nametoindex(LL_PEER_IF).unwrap();
+            let wrong_peer_scope = nix::net::if_::if_nametoindex(LL_WRONG_PEER_IF).unwrap();
+            let peer_ip: IpAddr = LL_PEER_ADDR.parse().unwrap();
+
+            // Bind the hand-rolled peer specifically to its intended veth.
+            // The actor itself still uses one shared wildcard IPv6 socket.
+            let peer_rx = link_local_peer_rx(peer_scope);
+            let good_tx = link_local_peer_tx(peer_scope);
+            let wrong_tx = link_local_peer_tx(wrong_peer_scope);
+            let config = BfdRuntimeConfig {
+                sessions: vec![BfdSessionParams {
+                    peer: peer_ip,
+                    scope_id: Some(actor_scope),
+                    destination: SocketAddr::V6(SocketAddrV6::new(
+                        LL_PEER_ADDR.parse().unwrap(),
+                        PORT,
+                        0,
+                        actor_scope,
+                    )),
+                    desired_min_tx_us: 100_000,
+                    required_min_rx_us: 100_000,
+                    detect_mult: 3,
+                    strict: false,
+                    enabled: true,
+                }],
+            };
+            let prepared = prepare_runtime(&config).expect("scoped actor sockets open");
+            let metrics = BgpMetrics::with_registry(Registry::new());
+            let (status_tx, status_rx) = watch::channel(Vec::new());
+            let (event_tx, _event_rx) = broadcast::channel(64);
+            let (_desired_tx, desired_rx) = watch::channel(config);
+            let (state_change_tx, _state_change_rx) = super::super::state_change_channel();
+            let shutdown = CancellationToken::new();
+            let handle = spawn_prepared(
+                prepared,
+                desired_rx,
+                metrics,
+                status_tx,
+                event_tx,
+                state_change_tx,
+                shutdown.clone(),
+            )
+            .expect("scoped actor starts");
+
+            let (mode_tx, mode_rx) = watch::channel(LinkLocalResponderMode::WrongInterface);
+            let peer_stop = CancellationToken::new();
+            let observed_source = Arc::new(AtomicBool::new(false));
+            let observed_interface = Arc::new(AtomicBool::new(false));
+            let wrong_send_succeeded = Arc::new(AtomicBool::new(false));
+            let peer_task = tokio::spawn(link_local_peer_responder(
+                peer_rx,
+                good_tx,
+                wrong_tx,
+                peer_scope,
+                wrong_peer_scope,
+                mode_rx,
+                Arc::clone(&observed_source),
+                Arc::clone(&observed_interface),
+                Arc::clone(&wrong_send_succeeded),
+                peer_stop.clone(),
+            ));
+
+            // Replies use the correct link-local source but arrive through the
+            // adversarial veth. Non-zero discriminator knowledge must not let
+            // them bypass the configured-interface gate.
+            assert!(
+                !wait_for(
+                    &status_rx,
+                    peer_ip,
+                    SessionState::Up,
+                    Duration::from_millis(1500),
+                )
+                .await,
+                "link-local BFD came Up from the wrong receive interface"
+            );
+            assert!(
+                observed_source.load(Ordering::Relaxed),
+                "actor transmit did not use the intended link-local source"
+            );
+            assert!(
+                observed_interface.load(Ordering::Relaxed),
+                "actor transmit did not arrive on the intended peer interface with Hop-Limit 255"
+            );
+            assert!(
+                wrong_send_succeeded.load(Ordering::Relaxed),
+                "adversarial peer packet was never successfully sent through the wrong interface"
+            );
+
+            // Switch only the peer's output interface. The same peer address
+            // and packet now arrive with matching IPV6_PKTINFO and reach Up.
+            mode_tx
+                .send(LinkLocalResponderMode::IntendedInterface)
+                .unwrap();
+            assert!(
+                wait_for(
+                    &status_rx,
+                    peer_ip,
+                    SessionState::Up,
+                    Duration::from_secs(5),
+                )
+                .await,
+                "link-local BFD did not reach Up on the configured interface"
+            );
+
+            mode_tx.send(LinkLocalResponderMode::Silent).unwrap();
+            assert!(
+                wait_for(
+                    &status_rx,
+                    peer_ip,
+                    SessionState::Down,
+                    Duration::from_secs(5),
+                )
+                .await,
+                "link-local BFD did not detect loss"
+            );
+
+            peer_stop.cancel();
+            peer_task
+                .await
+                .expect("link-local responder task join")
+                .expect("link-local responder completed without send failures");
             handle.shutdown().await;
         }
     }

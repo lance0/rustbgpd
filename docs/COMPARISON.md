@@ -290,12 +290,12 @@ memory-safe-language row refers to.
     events + Prometheus. RFC 5882 BGP coupling ships in both **strict** (withhold
     BGP until BFD Up) and **non-strict** (tear BGP down on BFD-down before the
     hold timer) modes; the non-strict path is cross-checked against FRR `bfdd` by
-    interop test M51, and strict mode is covered by unit tests. v1 is IPv4 +
-    IPv6 **global**, static neighbors only. Deferred: multihop (RFC 5883),
+    interop test M51, and strict mode is covered by unit tests. IPv4, IPv6
+    global, and interface-scoped IPv6 link-local static neighbors are
+    supported; link-local RX is pinned to the configured interface through
+    `IPV6_PKTINFO`, and M51 exercises it against FRR. Deferred: multihop (RFC 5883),
     echo / demand mode, authentication, C-bit / GR-aware nuance, static-route
-    BFD tracking, dynamic-neighbor BFD, hardware / offload, and BFD over
-    IPv6 link-local / unnumbered peers → v1.1 (BGP unnumbered itself shipped —
-    ADR-0069 / M53).
+    BFD tracking, dynamic-neighbor BFD, and hardware / offload.
 
 [^fuzz]: Every entry in this row means in-tree fuzz targets; the scope
     differs. rustbgpd carries libFuzzer targets in

@@ -86,9 +86,9 @@ full gate ladder.
   that are neither Current nor RNext. Key edits/reordering, selected or
   non-deprecated-key deletion, and protected-owner CRUD require a daemon restart.
 - TCP MD5 and GTSM are supported.
-- BFD supports IPv4/IPv6 global-address single-hop asynchronous sessions for
-  static neighbors. Multihop BFD (RFC 5883), echo, demand mode,
-  authentication, dynamic-neighbor BFD, and IPv6 link-local BFD remain
+- BFD supports IPv4, IPv6 global, and interface-scoped IPv6 link-local
+  single-hop asynchronous sessions for static neighbors. Multihop BFD (RFC
+  5883), echo, demand mode, authentication, and dynamic-neighbor BFD remain
   follow-up work. This deferral is scoped to BFD sessions only. It says
   nothing about BGP sessions to non-adjacent peers: those require no separate
   enablement and can be distance-bounded with `ttl_security_hops`.

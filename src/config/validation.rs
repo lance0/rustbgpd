@@ -3315,37 +3315,7 @@ fn validate_bfd(config: &Config) -> Result<(), ConfigError> {
         }
     }
 
-    // v1 ships IPv4 + IPv6 global only. BGP link-local peers carry interface
-    // scope, but the BFD actor still keys and sends sessions by bare address.
-    // Reject it up front with an actionable error rather than silently failing
-    // to converge (ADR-0067 defers link-local BFD to v1.1).
-    for neighbor in &config.neighbors {
-        // Effective BFD = own block, else inherited from the peer group; a
-        // disabled (`enabled = false`) block runs no session, so it does not
-        // count.
-        let group = config.peer_group_for_neighbor(neighbor)?;
-        let effective_bfd = neighbor
-            .bfd
-            .as_ref()
-            .or_else(|| group.and_then(|group| group.bfd.as_ref()));
-        let has_effective_bfd = effective_bfd.is_some_and(|b| b.enabled);
-        if has_effective_bfd && is_ipv6_link_local(&neighbor.address) {
-            return Err(ConfigError::InvalidBfd {
-                reason: format!(
-                    "neighbor {:?}: BFD on IPv6 link-local addresses is not supported in v1 \
-                     (BFD link-local session scoping is deferred to v1.1)",
-                    neighbor.address
-                ),
-            });
-        }
-    }
     Ok(())
-}
-
-/// Whether `addr` parses to an IPv6 link-local address (`fe80::/10`).
-fn is_ipv6_link_local(addr: &str) -> bool {
-    addr.parse::<std::net::Ipv6Addr>()
-        .is_ok_and(|a| is_ipv6_link_local_addr(&a))
 }
 
 fn is_ipv6_link_local_addr(addr: &std::net::Ipv6Addr) -> bool {

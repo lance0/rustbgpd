@@ -31,6 +31,9 @@ source "$SCRIPT_DIR/test-lib.sh"
 FRR1="clab-${TOPO}-frr1"
 PEER="10.0.0.2"
 FRR_BFD_PEER="10.0.0.1"
+LL_PEER="fe80::52"
+FRR_LL_BFD_PEER="fe80::51"
+LL_INTERFACE="eth1"
 STRICT_CONFIG="/etc/rustbgpd/config-strict.toml"
 STRICT_LOG="/tmp/rustbgpd-m51-strict.log"
 
@@ -45,6 +48,13 @@ grpc_bfd_state() {
     # State of the BFD session to $PEER as reported by rustbgpd, e.g.
     # "BFD_SESSION_STATE_UP". Empty if the session is absent.
     grpc_bfd_json \
+        | jq -r '.sessions[0].state // ""'
+}
+
+grpc_ll_bfd_state() {
+    grpcurl_call \
+        -d "{\"peer_address\": \"$LL_PEER\"}" \
+        "$GRPC_ADDR" rustbgpd.v1.BfdService/GetBfdSessions 2>/dev/null \
         | jq -r '.sessions[0].state // ""'
 }
 
@@ -73,6 +83,23 @@ grpc_bgp_json() {
     grpcurl_call \
         -d "{\"address\": \"$PEER\"}" \
         "$GRPC_ADDR" rustbgpd.v1.NeighborService/GetNeighborState 2>/dev/null
+}
+
+grpc_ll_bgp_json() {
+    grpcurl_call \
+        -d "{\"address\": \"$LL_PEER\", \"interface\": \"$LL_INTERFACE\"}" \
+        "$GRPC_ADDR" rustbgpd.v1.NeighborService/GetNeighborState 2>/dev/null
+}
+
+grpc_ll_bgp_state() {
+    local snapshot
+    snapshot=$(grpc_ll_bgp_json) || return 1
+    printf '%s\n' "$snapshot" | jq -er '
+        select(type == "object")
+        | select((.stale // false) == false)
+        | .state
+        | select(type == "string" and length > 0)
+    '
 }
 
 grpc_bgp_authoritative_json() {
@@ -116,9 +143,24 @@ wait_grpc_bgp_established() {
     return 1
 }
 
+wait_grpc_ll_bgp_established() {
+    local label=$1 attempts=${2:-30} state
+    for _ in $(seq 1 "$attempts"); do
+        if state=$(grpc_ll_bgp_state) && [ "$state" = "SESSION_STATE_ESTABLISHED" ]; then
+            ok "$label BGP state is authoritatively Established"
+            return 0
+        fi
+        sleep 1
+    done
+    fail "$label BGP state did not reach authoritative Established"
+    dump_state_on_failure
+    return 1
+}
+
 frr_bfd_status() {
     docker exec "$FRR1" vtysh -c "show bfd peers json" 2>/dev/null \
-        | jq -r '.[0].status // ""'
+        | jq -r --arg peer "$FRR_BFD_PEER" \
+            '[.[] | select([.. | strings] | index($peer))][0].status // ""'
 }
 
 frr_bgp_connections_established() {
@@ -177,9 +219,17 @@ dump_state_on_failure() {
     grpcurl_call \
         -d "{\"peer_address\": \"$PEER\"}" \
         "$GRPC_ADDR" rustbgpd.v1.BfdService/GetBfdSessions >&2 2>&1 || true
+    echo "===== rustbgpd link-local GetBfdSessions (raw) =====" >&2
+    grpcurl_call \
+        -d "{\"peer_address\": \"$LL_PEER\"}" \
+        "$GRPC_ADDR" rustbgpd.v1.BfdService/GetBfdSessions >&2 2>&1 || true
     echo "===== rustbgpd GetNeighborState (raw) =====" >&2
     grpcurl_call \
         -d "{\"address\": \"$PEER\"}" \
+        "$GRPC_ADDR" rustbgpd.v1.NeighborService/GetNeighborState >&2 2>&1 || true
+    echo "===== rustbgpd link-local GetNeighborState (raw) =====" >&2
+    grpcurl_call \
+        -d "{\"address\": \"$LL_PEER\", \"interface\": \"$LL_INTERFACE\"}" \
         "$GRPC_ADDR" rustbgpd.v1.NeighborService/GetNeighborState >&2 2>&1 || true
     echo "===== frr1 vtysh: show bfd peers =====" >&2
     docker exec "$FRR1" vtysh -c 'show bfd peers' >&2 2>&1 || true
@@ -201,6 +251,20 @@ wait_grpc_bfd() {
     return 1
 }
 
+wait_grpc_ll_bfd() {
+    local want=$1 label=$2 attempts=${3:-30}
+    for _ in $(seq 1 "$attempts"); do
+        [ "$(grpc_ll_bfd_state)" = "$want" ] && {
+            ok "rustbgpd link-local BFD session $label"
+            return 0
+        }
+        sleep 1
+    done
+    fail "rustbgpd link-local BFD session did not reach $label"
+    dump_state_on_failure
+    return 1
+}
+
 wait_grpc_bfd_remote_admin_down() {
     local want=$1 label=$2 attempts=${3:-30} observed
     for _ in $(seq 1 "$attempts"); do
@@ -216,6 +280,9 @@ wait_grpc_bfd_remote_admin_down() {
 }
 
 wait_grpc_bfd "BFD_SESSION_STATE_UP" "Up"
+wait_frr_established "$FRR1" "$FRR_LL_BFD_PEER" "rustbgpd ↔ frr1 link-local"
+wait_grpc_ll_bgp_established "link-local"
+wait_grpc_ll_bfd "BFD_SESSION_STATE_UP" "Up"
 
 for _ in $(seq 1 30); do
     [ "$(frr_bfd_status)" = "up" ] && break
@@ -281,6 +348,47 @@ else
     dump_state_on_failure
 fi
 
+# The same bfdd loss must be visible on the additive scoped session without
+# weakening the numbered-session oracle above.
+LL_BFD_DROPPED=0
+for _ in $(seq 1 10); do
+    state=$(grpc_ll_bfd_state)
+    if [ "$state" != "BFD_SESSION_STATE_UP" ] && [ -n "$state" ]; then
+        LL_BFD_DROPPED=1
+        break
+    fi
+    sleep 1
+done
+if [ "$LL_BFD_DROPPED" -eq 1 ]; then
+    ok "rustbgpd link-local BFD detected bfdd loss"
+else
+    fail "rustbgpd link-local BFD did not detect bfdd loss"
+    dump_state_on_failure
+fi
+
+LL_BGP_DOWN=0
+LL_BGP_UNKNOWN=0
+for _ in $(seq 1 10); do
+    if ! state=$(grpc_ll_bgp_state); then
+        LL_BGP_UNKNOWN=1
+        break
+    fi
+    if [ "$state" != "SESSION_STATE_ESTABLISHED" ]; then
+        LL_BGP_DOWN=1
+        break
+    fi
+    sleep 1
+done
+if [ "$LL_BGP_UNKNOWN" -eq 1 ]; then
+    fail "rustbgpd link-local BGP state became unavailable or stale during teardown"
+    dump_state_on_failure
+elif [ "$LL_BGP_DOWN" -eq 1 ]; then
+    ok "rustbgpd tore down link-local BGP after BFD loss"
+else
+    fail "rustbgpd did not tear down link-local BGP after BFD loss"
+    dump_state_on_failure
+fi
+
 # --- 3. Recovery: watchfrr restarts bfdd → BFD + BGP re-establish -----------
 
 log "Waiting for BFD + BGP to recover (watchfrr restarts bfdd)..."
@@ -288,6 +396,10 @@ log "Waiting for BFD + BGP to recover (watchfrr restarts bfdd)..."
 # registration + the BFD three-way handshake, so allow a generous window.
 wait_grpc_bfd "BFD_SESSION_STATE_UP" "Up again" 60
 wait_frr_established "$FRR1" "10.0.0.1" "rustbgpd ↔ frr1 (recovered)"
+wait_grpc_ll_bfd "BFD_SESSION_STATE_UP" "Up again" 60
+wait_frr_established "$FRR1" "$FRR_LL_BFD_PEER" \
+    "rustbgpd ↔ frr1 link-local (recovered)"
+wait_grpc_ll_bgp_established "link-local recovery" 60
 
 # --- 4. Strict: remote AdminDown permits BGP while local BFD stays Down ------
 
@@ -308,6 +420,8 @@ else
 fi
 start_rustbgpd \
     "exec /usr/local/bin/rustbgpd $STRICT_CONFIG >$STRICT_LOG 2>&1"
+wait_grpc_ll_bfd "BFD_SESSION_STATE_UP" "Up after strict-config restart" 60
+wait_grpc_ll_bgp_established "link-local after strict-config restart" 60
 wait_grpc_bfd "BFD_SESSION_STATE_DOWN" "Down (strict startup)"
 wait_grpc_bfd_remote_admin_down "false" "explicitly false at strict startup"
 

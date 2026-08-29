@@ -16,6 +16,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   metric agree; established, stale, held, disabled, previously established,
   ambiguous, and unattributed peers remain silent.
 
+- Single-hop asynchronous BFD now supports static IPv6 link-local neighbors.
+  rustbgpd resolves the neighbor's required `interface` to a startup-pinned
+  scope, transmits through the shared IPv6 socket with that scope, and accepts
+  control packets only when kernel packet-info reports the same receive
+  interface. Missing or unresolvable scopes fail startup before BFD sockets are
+  prepared; global IPv4/IPv6 behavior and public BFD peer identity are
+  unchanged.
+
 - Decoded inbound and attempted outbound BGP NOTIFICATIONs now emit exactly one
   structured INFO record with peer, direction, outer code/subcode, and a human
   description. Hard Reset records retain outer Cease/9 and identify the valid

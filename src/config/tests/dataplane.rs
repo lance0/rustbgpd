@@ -479,9 +479,7 @@ metric = 200
 }
 
 #[test]
-fn bfd_rejects_ipv6_link_local_neighbor() {
-    // v1 ships IPv4 + IPv6 global only; link-local BFD is deferred to v1.1
-    // even though BGP link-local peers now carry interface scope.
+fn bfd_accepts_ipv6_link_local_neighbor_with_interface() {
     let toml = format!(
         r#"
 {}
@@ -491,23 +489,23 @@ name = "fast"
 
 [[neighbors]]
 address = "fe80::1"
-interface = "eth0"
+interface = "lo"
 remote_asn = 65003
 bfd = {{ profile = "fast" }}
 "#,
         valid_toml()
     );
-    let err = parse(&toml).unwrap_err();
-    let ConfigError::InvalidBfd { reason } = err else {
-        panic!("expected InvalidBfd, got {err}");
-    };
-    assert!(reason.contains("link-local"), "unexpected: {reason}");
+    let config = parse(&toml).expect("scoped link-local BFD is valid");
+    let neighbor = config
+        .neighbors
+        .iter()
+        .find(|neighbor| neighbor.address == "fe80::1")
+        .expect("link-local neighbor");
+    assert_eq!(neighbor.interface.as_deref(), Some("lo"));
 }
 
 #[test]
-fn bfd_link_local_rejected_via_peer_group_inheritance() {
-    // Inheriting BFD from a peer-group must also be rejected on a link-local
-    // neighbor — the effective config is what matters, not just the inline form.
+fn bfd_link_local_accepts_peer_group_inheritance() {
     let toml = format!(
         r#"
 {}
@@ -520,17 +518,19 @@ bfd = {{ profile = "fast" }}
 
 [[neighbors]]
 address = "fe80::2"
-interface = "eth0"
+interface = "lo"
 remote_asn = 65003
 peer_group = "rrc"
 "#,
         valid_toml()
     );
-    let err = parse(&toml).unwrap_err();
-    let ConfigError::InvalidBfd { reason } = err else {
-        panic!("expected InvalidBfd, got {err}");
-    };
-    assert!(reason.contains("link-local"), "unexpected: {reason}");
+    let config = parse(&toml).expect("inherited scoped link-local BFD is valid");
+    let neighbor = config
+        .neighbors
+        .iter()
+        .find(|neighbor| neighbor.address == "fe80::2")
+        .expect("link-local neighbor");
+    assert_eq!(neighbor.interface.as_deref(), Some("lo"));
 }
 
 #[test]

@@ -178,11 +178,12 @@ this makes the *effective* session set fully expressible inline, which the
 restart-required reload pin (below) relies on to represent "inherits the group
 but BFD is off" without editing peer-group membership. Validation checks
 that the referenced profile name is defined and that the interval/multiplier
-bounds hold, mirroring the peer-group-reference validation. It also **rejects
-effective BFD on an IPv6 link-local (`fe80::/10`) neighbor** — link-local BFD is
-deferred to v1.1 (see the spike), so the actor would otherwise send to an
-unscoped peer and never converge; failing config load is clearer than a session
-that silently stays Down.
+bounds hold, mirroring the peer-group-reference validation. An IPv6 link-local
+neighbor already requires `interface`; BFD resolves that name to a scope at
+startup, fails before socket preparation if it cannot, and uses the scope on
+the shared IPv6 transmit socket. Receive-side `IPV6_PKTINFO` must report the
+same interface before either discriminator path can reach the FSM. Global
+IPv4/IPv6 sessions remain unscoped.
 
 **Restart-required:** the actor resolves its session set once at startup, so
 BFD edits (`[[bfd_profiles]]`, neighbor/peer-group `bfd`) are restart-required —
@@ -201,8 +202,9 @@ reconfiguration is a later enhancement.
 - Behavior is staged behind observability: metrics and the gRPC/CLI surface land
   before any BFD-driven BGP teardown exists.
 - Validation: deterministic FSM + codec unit tests (no time, no sockets);
-  config parse/validation tests; a privileged netns test (two actors reach Up,
-  dropping traffic drives Down within the detection window, TTL≠255 is rejected);
+  config parse/validation tests; privileged netns tests (global and veth
+  link-local sessions reach Up, wrong-interface and TTL≠255 traffic is rejected,
+  and dropping traffic drives Down within the detection window);
   coupling-logic unit tests with fakes; and **M51** containerlab interop against
   FRR with `bfdd = yes` (BGP + BFD Up, induced failure drops BGP faster than the
   hold timer, recovery reconnects, asserted via both `vtysh show bfd peers` and
@@ -216,15 +218,18 @@ reconfiguration is a later enhancement.
 - Timer precision: a 300 ms interval under CPU load held **max jitter 0.61 ms,
   avg 0.21 ms** over 20 samples — ample margin for a 300 ms × 3 detection
   window. No timer concern.
-- **IPv6 link-local / unnumbered → deferred to v1.1.** At the time of this spike
+- **IPv6 link-local / unnumbered was initially deferred.** At the time of this spike
   the BGP side could not peer over link-local: `Neighbor` had no interface field,
   the address parsed as a bare `IpAddr` (no `%scope`), and `resolve_neighbor`
   built an unscoped `SocketAddr`. Link-local BFD first needs link-local **BGP**
   peering (a neighbor interface field + scoped connect). The BFD-side mechanics
   (scope_id TX, `PKTINFO` ifindex RX) are already proven. **Update:** scoped
   link-local BGP peering has since shipped (ADR-0069 / M53), so the prerequisite
-  now exists; link-local BFD becomes a small add keyed by the same scoped peer
-  identity but remains deferred to v1.1. **BFD v1 ships IPv4 + IPv6 global.**
+  now exists. Link-local BFD now carries that resolved scope privately through
+  its desired session and actor entry, uses scoped `sendto`, and rejects receive
+  packet-info from any other interface. M51 retains its numbered strict/failure/
+  recovery/AdminDown receipts and adds a distinct non-strict link-local FRR
+  session.
 
 ## Deferred (explicit non-scope)
 
@@ -234,8 +239,6 @@ reconfiguration is a later enhancement.
 - **C-bit / GR-aware** control-plane-independence nuance.
 - **Static-route BFD tracking** and **dynamic-neighbor (inbound-promoted) BFD** —
   static neighbors only in v1.
-- **IPv6 link-local / unnumbered** peering → **v1.1** (gated on link-local BGP
-  peering, per the spike).
 - **Hardware / offload.**
 
 ## Alternatives considered
