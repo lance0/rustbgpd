@@ -1,0 +1,100 @@
+# M105 — live AS_SET receiver behavior across five current route servers.
+name: m105-live-as-set
+
+topology:
+  nodes:
+    switch:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      exec:
+        - ip link add br0 type bridge mcast_snooping 0
+        - ip link set eth1 master br0
+        - ip link set eth2 master br0
+        - ip link set eth3 master br0
+        - ip link set eth4 master br0
+        - ip link set eth5 master br0
+        - ip link set eth6 master br0
+        - ip link set eth1 up
+        - ip link set eth2 up
+        - ip link set eth3 up
+        - ip link set eth4 up
+        - ip link set eth5 up
+        - ip link set eth6 up
+        - ip link set br0 up
+
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m105-receiver.toml:/etc/rustbgpd/config.toml:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.105.0.1/24 dev eth1
+        - ip link set eth1 up
+      env:
+        RUST_LOG: info
+        RUSTBGPD_TOKEN_FILE: /run/rustbgpd/grpc-test-only-operator.token
+
+    bird:
+      kind: linux
+      image: bird:v3.3.2-m101
+      cmd: sleep infinity
+      binds:
+        - ./configs/bird-m105-receiver.conf:/etc/bird/bird.conf:ro
+      exec:
+        - ip addr add 10.105.0.2/24 dev eth1
+        - ip link set eth1 up
+        - mkdir -p /run/bird
+
+    openbgpd:
+      kind: linux
+      image: openbgpd/openbgpd@sha256:b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9
+      cmd: sleep infinity
+      binds:
+        - ./configs/bgpd-m105-receiver.conf:/etc/bgpd.conf:ro
+      exec:
+        - ip addr add 10.105.0.3/24 dev eth1
+        - ip link set eth1 up
+
+    gobgp:
+      kind: linux
+      image: gobgp:v4.8.0-m103
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m105-receiver.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.105.0.4/24 dev eth1
+        - ip link set eth1 up
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr@sha256:f90d26a9fd5c14fc5795a73b4254ac88bc3186c45bbeb220a225fb6182de812c
+      cmd: sleep infinity
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m105-receiver.conf:/etc/frr/frr.conf:ro
+        - /dev/null:/etc/frr/vtysh.conf:ro
+      exec:
+        - ip addr add 10.105.0.5/24 dev eth1
+        - ip link set eth1 up
+
+    raw:
+      kind: linux
+      image: bmpsink:m102
+      cmd: sleep infinity
+      binds:
+        - ./scripts/m105_raw_peer.py:/m105_raw_peer.py:ro
+      exec:
+        - ip addr add 10.105.0.10/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["switch:eth1", "rustbgpd:eth1"]
+    - endpoints: ["switch:eth2", "bird:eth1"]
+    - endpoints: ["switch:eth3", "openbgpd:eth1"]
+    - endpoints: ["switch:eth4", "gobgp:eth1"]
+    - endpoints: ["switch:eth5", "frr:eth1"]
+    - endpoints: ["switch:eth6", "raw:eth1"]

@@ -1,0 +1,41 @@
+# M105: current rustbgpd as a single-member route server receiver.
+config_epoch = 2
+
+[global]
+asn = 65001
+router_id = "10.105.0.1"
+listen_port = 179
+ebgp_requires_policy = true
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
+
+[security.grpc]
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"
+
+[policy.definitions.m105-import]
+default_action = "permit"
+
+[policy.definitions.m105-export]
+default_action = "deny"
+
+[[neighbors]]
+address = "10.105.0.10"
+remote_asn = 64512
+description = "m105-raw-rs-client"
+hold_time = 90
+families = ["ipv4_unicast"]
+route_server_client = true
+role = "route_server"
+strict_role = true
+import_policy_chain = ["m105-import"]
+export_policy_chain = ["m105-export"]

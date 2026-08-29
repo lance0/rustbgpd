@@ -1,0 +1,17 @@
+# M105: GoBGP 4.8.0 as a route server receiver. AS_SET defaults are untouched.
+[global.config]
+as = 65004
+router-id = "10.105.0.4"
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "10.105.0.10"
+peer-as = 64512
+[neighbors.route-server.config]
+route-server-client = true
+[neighbors.apply-policy.config]
+default-import-policy = "accept-route"
+default-export-policy = "reject-route"
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "ipv4-unicast"
