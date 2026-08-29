@@ -262,6 +262,8 @@ impl VrpManager {
 
     /// Main event loop.
     pub async fn run(mut self) {
+        let mut legacy_updates_open = true;
+        let mut enhanced_updates_open = self.cache_inventory.is_some();
         loop {
             if self.cache_inventory.is_none() {
                 let Some(update) = self.update_rx.recv().await else {
@@ -270,20 +272,21 @@ impl VrpManager {
                 self.handle_update(update).await;
                 continue;
             }
+            if !legacy_updates_open && !enhanced_updates_open {
+                break;
+            }
             let Some(inventory) = self.cache_inventory.as_mut() else {
                 continue;
             };
             tokio::select! {
                 biased;
-                update = self.update_rx.recv() => match update {
+                update = self.update_rx.recv(), if legacy_updates_open => match update {
                     Some(update) => self.handle_update(update).await,
-                    None if inventory.update_rx.is_closed() => break,
-                    None => {},
+                    None => legacy_updates_open = false,
                 },
-                update = inventory.update_rx.recv() => match update {
+                update = inventory.update_rx.recv(), if enhanced_updates_open => match update {
                     Some(update) => self.handle_enhanced_update(update).await,
-                    None if self.update_rx.is_closed() => break,
-                    None => {},
+                    None => enhanced_updates_open = false,
                 },
                 query = inventory.query_rx.recv(), if inventory.query_open => match query {
                     Some(query) => { let _ = query.reply.send(self.cache_list()); }
@@ -1265,6 +1268,78 @@ mod tests {
         assert_eq!(update.table.len(), 1);
         drop(legacy_tx);
         drop(updates);
+        tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn either_update_lane_can_close_while_the_other_updates_and_answers_queries() {
+        let (legacy_tx, legacy_rx) = mpsc::channel(1);
+        let (rib_tx, mut rib_rx) = mpsc::channel(2);
+        let (attachment, updates, queries) = CacheInventoryAttachment::new([server1()]);
+        let task = tokio::spawn(
+            VrpManager::new(legacy_rx, rib_tx)
+                .with_cache_inventory(attachment)
+                .run(),
+        );
+        drop(legacy_tx);
+        updates
+            .0
+            .send(EnhancedVrpUpdate::Full {
+                server: server1(),
+                entries: vec![entry(Ipv4Addr::new(192, 0, 2, 0), 24, 24, 64_496)],
+                aspa_records: vec![],
+                version: 2,
+                session_id: 7,
+                serial: 11,
+                accepted_at: Instant::now(),
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), rib_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let list = tokio::time::timeout(std::time::Duration::from_secs(1), queries.list())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(list.rows[0].accepted.as_ref().unwrap().serial, Some(11));
+        drop(updates);
+        tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let (legacy_tx, legacy_rx) = mpsc::channel(1);
+        let (rib_tx, mut rib_rx) = mpsc::channel(2);
+        let (attachment, updates, queries) = CacheInventoryAttachment::new([server1()]);
+        let task = tokio::spawn(
+            VrpManager::new(legacy_rx, rib_tx)
+                .with_cache_inventory(attachment)
+                .run(),
+        );
+        drop(updates);
+        legacy_tx
+            .send(VrpUpdate::FullTable {
+                server: server1(),
+                entries: vec![entry(Ipv4Addr::new(198, 51, 100, 0), 24, 24, 64_497)],
+                aspa_records: vec![],
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), rib_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let list = tokio::time::timeout(std::time::Duration::from_secs(1), queries.list())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(list.rows[0].accepted.as_ref().unwrap().vrp_v4_count, 1);
+        drop(legacy_tx);
         tokio::time::timeout(std::time::Duration::from_secs(1), task)
             .await
             .unwrap()

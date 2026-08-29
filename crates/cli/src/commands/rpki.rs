@@ -221,13 +221,16 @@ fn render_caches_human(response: &ListRpkiCachesResponse) -> String {
             } else {
                 writeln!(
                     rendered,
-                    "{:<45} {:<12} {:>10}",
+                    "{:<45} {:<12} {:>10} {:>10} {:>10} {:>10}",
                     cache.address,
                     if cache.connected {
                         "syncing"
                     } else {
                         "disconnected"
                     },
+                    "-",
+                    "-",
+                    "-",
                     "-"
                 )
                 .unwrap();
@@ -420,6 +423,24 @@ mod tests {
         assert_eq!(
             render_caches_human(&ListRpkiCachesResponse::default()),
             "RPKI caches: none\nListing: incomplete (0 omitted)\n"
+        );
+
+        let unavailable = ListRpkiCachesResponse {
+            caches: vec![crate::proto::RpkiCacheState {
+                address: "[2001:db8::1]:3323".to_string(),
+                connected: false,
+                accepted: None,
+            }],
+            complete: true,
+            omitted: 0,
+        };
+        assert_eq!(
+            render_caches_human(&unavailable),
+            concat!(
+                "Address                                       State            VRP v4     VRP v6      ASPAs     Age(s)\n",
+                "[2001:db8::1]:3323                            disconnected          -          -          -          -\n",
+                "Listing: complete\n",
+            )
         );
     }
 
