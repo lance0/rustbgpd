@@ -70,9 +70,16 @@ MANRS IXP validation tool from verified temporary checkouts. Alice must consume
 the adapter's existing seven accepted routes across four up neighbors, empty
 filtered endpoints, and one labeled split-horizon noexport route. MANRS then
 walks those Alice received-route endpoints and reports the one deliberate
-synthetic ROA mismatch. The proof stops at those APIs: it does not cover a
-browser, a populated filtered/reject UI, MANRS certification, rustbgpd RPKI
-enforcement, or route-server policy conformance.
+synthetic ROA mismatch. After both populated captures are frozen, a runtime-
+added fifth route-server client and an atomically reloaded adapter alias expose
+one retained AS-path-loop rejection from a pinned ExaBGP speaker. Restarted
+Alice must keep the original seven accepted routes, four empty filtered views,
+and noexport route unchanged while its fifth peer exposes no accepted routes,
+exactly one filtered route, `64496:65520:4`, and the matching configured
+`Receiver AS appears in AS_PATH` label. The pre-fifth-peer captures must remain
+hash-identical across that fifth-peer phase. The proof stops at the backend
+APIs: it does not cover rendered browser behavior, MANRS certification,
+rustbgpd RPKI enforcement, or route-server policy conformance.
 
 ### IXP Manager v7.4 manual configuration oracle
 

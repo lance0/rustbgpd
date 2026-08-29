@@ -270,7 +270,13 @@ The pinned compatibility gate exercises this wiring through Alice-LG 6.2.0:
 four live neighbor IDs, seven accepted routes, empty filtered arrays, and the
 labeled `192.0.2.0/24` split-horizon noexport route. A pinned MANRS consumer
 then traverses Alice's received routes and finds one deliberate synthetic ROA
-mismatch. That is an API proof, not a browser/UI, MANRS certification,
-rustbgpd RPKI-enforcement, or route-server policy-conformance claim.
+mismatch. After freezing that baseline, the gate runtime-adds a fifth live
+member, atomically reloads the adapter alias, and restarts Alice to clear its
+caches. The four original peers and seven routes remain unchanged; the fifth
+peer has an empty accepted view and exactly one filtered `198.18.0.0/24` with
+`64496:65520:4`, joined through `/config.reject_reasons` to `Receiver AS
+appears in AS_PATH`. That is a backend/API proof, not a rendered-browser,
+MANRS certification, rustbgpd RPKI-enforcement, or route-server-policy-
+conformance claim.
 
 [arouteserver]: https://github.com/pierky/arouteserver

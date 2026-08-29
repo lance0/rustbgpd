@@ -42,10 +42,12 @@ def nested_label(document, section, community):
 
 
 def main():
-    if len(sys.argv) != 3:
-        fail("usage: alice-consumer.py BASE_URL EXPECTED_VERSION")
+    filtered_flag_invalid = len(sys.argv) == 4 and sys.argv[3] != "--filtered-peer"
+    if len(sys.argv) not in (3, 4) or filtered_flag_invalid:
+        fail("usage: alice-consumer.py BASE_URL EXPECTED_VERSION [--filtered-peer]")
     base = sys.argv[1].rstrip("/")
     expected_version = sys.argv[2]
+    filtered_peer = len(sys.argv) == 4
 
     status = get_json(base, "/status")
     if status.get("version") != expected_version:
@@ -99,6 +101,8 @@ def main():
         "pb_as64497",
         "pb6_as64497",
     }
+    if filtered_peer:
+        expected_peers.add("pb_as64498")
     by_id = {neighbor.get("id"): neighbor for neighbor in neighbors}
     if set(by_id) != expected_peers:
         fail(f"neighbor IDs drifted: {sorted(str(value) for value in by_id)}")
@@ -120,7 +124,7 @@ def main():
         "pb6_as64497": {("2001:db8:c::/48", (64497, 64530))},
     }
     accepted_total = 0
-    for peer in sorted(expected_peers):
+    for peer in sorted(expected_routes):
         received = get_json(base, routes_path(peer, "received")).get("imported")
         if not isinstance(received, list):
             fail(f"{peer} accepted response omitted imported array")
@@ -135,6 +139,28 @@ def main():
     if accepted_total != 7:
         fail(f"expected 7 accepted routes, got {accepted_total}")
 
+    if filtered_peer:
+        received = get_json(base, routes_path("pb_as64498", "received")).get("imported")
+        if received != []:
+            fail(f"pb_as64498 accepted view must be empty, got {received!r}")
+        filtered = get_json(base, routes_path("pb_as64498", "filtered")).get("filtered")
+        if not isinstance(filtered, list) or len(filtered) != 1:
+            fail(f"pb_as64498 must expose exactly one filtered route, got {filtered!r}")
+        route = filtered[0]
+        if route_key(route) != ("198.18.0.0/24", (64498, 65001)):
+            fail(f"pb_as64498 filtered route identity drifted: {route!r}")
+        reject_community = [64496, 65520, 4]
+        large = route.get("bgp", {}).get("large_communities")
+        if large != [reject_community]:
+            fail(f"pb_as64498 rejection community drifted: {large!r}")
+        reason = nested_label(
+            config,
+            "reject_reasons",
+            ":".join(str(component) for component in reject_community),
+        )
+        if reason != "Receiver AS appears in AS_PATH":
+            fail(f"pb_as64498 rejection label drifted: {reason!r}")
+
     noexport = get_json(base, routes_path("pb_as64497", "not-exported")).get("not_exported")
     if not isinstance(noexport, list) or len(noexport) != 1:
         fail(f"expected one deterministic split-horizon route, got {noexport!r}")
@@ -145,10 +171,17 @@ def main():
     if [64496, 65521, 1] not in large:
         fail(f"split-horizon community missing from {large!r}")
 
-    print(
-        f"alice consumer proof: Alice-LG {expected_version} read rs0 with 4 up neighbors, "
-        "7 accepted routes, 0 filtered routes, and the labeled split-horizon noexport route"
-    )
+    if filtered_peer:
+        print(
+            f"alice filtered proof: Alice-LG {expected_version} read rs0 with 5 up neighbors, "
+            "preserved 7 accepted routes and 4 empty baseline filtered views, and joined one "
+            "AS-path-loop rejection to its exact label"
+        )
+    else:
+        print(
+            f"alice consumer proof: Alice-LG {expected_version} read rs0 with 4 up neighbors, "
+            "7 accepted routes, 0 filtered routes, and the labeled split-horizon noexport route"
+        )
 
 
 if __name__ == "__main__":
