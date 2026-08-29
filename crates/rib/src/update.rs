@@ -924,9 +924,9 @@ pub struct OutboundRouteUpdate {
     /// or belongs to another encoder implementation.
     pub exact_export_snapshot: Option<Arc<dyn ExactExportSnapshot>>,
     /// Optional source peer omitted from the shared unicast announce view.
-    /// Set only by a preflighted clean group-transition envelope; ordinary
-    /// updates materialize their already-filtered member view and leave this
-    /// `None`.
+    /// Set by preflighted shared group fanout when transport-side exclusion
+    /// is exactly equivalent to materializing the member's split-horizon
+    /// view.
     pub announce_source_exclusion: Option<IpAddr>,
     /// Routes to announce to this peer. `Arc`-shared so an update-group
     /// fanout enqueues ONE staged announce vector to every in-sync
@@ -993,8 +993,8 @@ pub struct OutboundRouteUpdate {
     /// peer's natural re-advertisement.
     pub request_refresh_all_negotiated: bool,
     /// Encode-once cell shared by every member envelope of one grouped
-    /// fanout (set only by the clean group-transition seam alongside
-    /// `announce_source_exclusion`). `None` = ordinary per-session encode.
+    /// fanout whose exact-export preflight retained the identical announce
+    /// inventory. `None` = ordinary per-session encode.
     pub shared_group_encode: Option<Arc<SharedGroupEncode>>,
 }
 

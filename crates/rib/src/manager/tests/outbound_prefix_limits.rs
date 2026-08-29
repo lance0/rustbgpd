@@ -6,6 +6,7 @@
 
 use std::collections::HashSet;
 use std::num::NonZeroU32;
+use std::sync::Arc;
 
 use rustbgpd_wire::RouteRefreshSubtype;
 
@@ -270,6 +271,49 @@ fn source_v6_routes(source: Ipv6Addr, segments: &[u16]) -> Vec<Route> {
             make_v6_route(prefix, source)
         })
         .collect()
+}
+
+#[test]
+fn source_excluded_route_does_not_consume_grouped_capacity() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 113, 0, 9));
+    set_ipv4_limit(&mut manager, peer, 1);
+
+    let IpAddr::V4(peer_source) = peer else {
+        unreachable!()
+    };
+    let own_route = crate::test_support::make_route(
+        Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 9), 32),
+        peer_source,
+    );
+    let effective_route = crate::test_support::make_route(
+        Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 10), 32),
+        Ipv4Addr::new(192, 0, 2, 113),
+    );
+    let mut announce: Arc<[Route]> = vec![own_route.clone(), effective_route.clone()].into();
+    let mut next_hop_override = vec![None, None].into();
+
+    assert!(!manager.enforce_outbound_prefix_limits(
+        peer,
+        true,
+        Some(peer),
+        &mut announce,
+        &mut next_hop_override,
+        &[],
+    ));
+    assert_eq!(announce.len(), 2);
+    assert_eq!(announce[0].prefix, own_route.prefix);
+    assert_eq!(announce[0].peer, own_route.peer);
+    assert_eq!(announce[1].prefix, effective_route.prefix);
+    assert_eq!(announce[1].peer, effective_route.peer);
+    let limits = manager.outbound_prefix_limits.get(&peer).unwrap();
+    assert_eq!(limits.grouped_len(Afi::Ipv4), 1);
+    assert!(limits.grouped_contains(&effective_route.prefix));
+    assert!(!limits.grouped_contains(&Prefix::V4(Ipv4Prefix::new(
+        Ipv4Addr::new(203, 0, 113, 9),
+        32,
+    ))));
 }
 
 /// Inertness: with no limit configured — the state of every peer today —

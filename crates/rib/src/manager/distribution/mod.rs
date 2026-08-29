@@ -133,6 +133,11 @@ pub(in crate::manager) struct SharedUnicastPrecommit<'a> {
 #[derive(Default)]
 pub(in crate::manager) struct OutboundCommitBatch {
     pub(in crate::manager) unicast: AlignedUnicastPayload,
+    /// The shared plain-group staging pass already applied the group-uniform
+    /// OTC egress gate to every unicast announcement in this batch.
+    pub(in crate::manager) unicast_otc_prechecked: bool,
+    pub(in crate::manager) announce_source_exclusion: Option<IpAddr>,
+    pub(in crate::manager) shared_group_encode: Option<Arc<crate::update::SharedGroupEncode>>,
     pub(in crate::manager) withdraw: Vec<(Prefix, u32)>,
     pub(in crate::manager) end_of_rib: Vec<(Afi, Safi)>,
     pub(in crate::manager) refresh_markers: Vec<(Afi, Safi, RouteRefreshSubtype)>,
@@ -570,29 +575,42 @@ fn reconcile_exact_export_overlay(
     rejected: &mut HashSet<crate::update::ExactExportKey>,
     candidate_keys: Vec<crate::update::ExactExportKey>,
     probe_results: Vec<Result<crate::update::ExactExportResult, crate::update::ExactExportError>>,
+    source_excluded: Vec<bool>,
     previously_advertised: &HashSet<crate::update::ExactExportKey>,
 ) -> ExactExportOverlayDecision {
+    debug_assert_eq!(candidate_keys.len(), source_excluded.len());
     let mut owed_withdrawals = HashSet::new();
     let mut new_rejections = Vec::new();
     let keep = candidate_keys
         .into_iter()
         .zip(probe_results)
-        .map(|(key, result)| match result {
-            Ok(_) => {
-                rejected.remove(&key);
-                true
-            }
-            Err(error) => {
-                let newly_rejected = rejected.insert(key.clone());
-                if newly_rejected && previously_advertised.contains(&key) {
-                    owed_withdrawals.insert(key.clone());
+        .zip(source_excluded)
+        .map(
+            |((key, result), source_excluded)| match (source_excluded, result) {
+                (true, _) => {
+                    // Transport removes this route before encoding. A conservative
+                    // shared probe may still have inspected it, but its result is
+                    // not part of this peer's wire view and must not create or
+                    // retain a sparse rejection entry.
+                    rejected.remove(&key);
+                    true
                 }
-                if newly_rejected {
-                    new_rejections.push((key, error));
+                (false, Ok(_)) => {
+                    rejected.remove(&key);
+                    true
                 }
-                false
-            }
-        })
+                (false, Err(error)) => {
+                    let newly_rejected = rejected.insert(key.clone());
+                    if newly_rejected && previously_advertised.contains(&key) {
+                        owed_withdrawals.insert(key.clone());
+                    }
+                    if newly_rejected {
+                        new_rejections.push((key, error));
+                    }
+                    false
+                }
+            },
+        )
         .collect();
     ExactExportOverlayDecision {
         keep,
@@ -2109,6 +2127,9 @@ impl RibManager {
                     mut announce,
                     mut next_hop_override,
                 },
+            unicast_otc_prechecked,
+            announce_source_exclusion,
+            mut shared_group_encode,
             mut withdraw,
             end_of_rib,
             refresh_markers,
@@ -2128,10 +2149,14 @@ impl RibManager {
         #[cfg(feature = "bench-internals")]
         let bench_per_client_best_resync = self.peer_per_client_best.contains(&peer)
             && (self.dirty_peers.contains(&peer) || self.force_outbound_peers.contains(&peer));
-        // Every arm below is provably false without an active deferral state:
-        // `selection_deferred` / `selection_convergence_held` short-circuit on
-        // `None`. Guard once so the common no-gate commit skips all the scans.
-        let gated = self.selection_deferral.is_some()
+        // Every arm below is provably false without an active family gate.
+        // The deferral object intentionally retains released-family history,
+        // so `Option::is_some` is too broad after startup convergence: guard
+        // on the O(1) active map instead and skip every route-vector scan.
+        let gated = self
+            .selection_deferral
+            .as_ref()
+            .is_some_and(super::selection_deferral::SelectionDeferral::has_active_gates)
             && (announce
                 .iter()
                 .any(|route| self.selection_deferred(prefix_family(&route.prefix)))
@@ -2184,7 +2209,10 @@ impl RibManager {
         if let Some(prefixes) = otc_reconcile_prefixes {
             let blocked = announce
                 .iter()
-                .filter(|route| otc_egress_blocked(route, local_role))
+                .filter(|route| {
+                    announce_source_exclusion != Some(route.peer)
+                        && otc_egress_blocked(route, local_role)
+                })
                 .cloned()
                 .collect();
             self.reconcile_peer_otc_blocked(peer, prefixes, blocked);
@@ -2234,9 +2262,11 @@ impl RibManager {
         // stages the first permitted candidate regardless of OTC and defers
         // egress enforcement here (ADR-0126 Decision 5), matching the
         // ungrouped per-client-best path.
-        if announce
-            .iter()
-            .any(|route| otc_egress_blocked(route, local_role))
+        if !unicast_otc_prechecked
+            && announce.iter().any(|route| {
+                announce_source_exclusion != Some(route.peer)
+                    && otc_egress_blocked(route, local_role)
+            })
         {
             let per_client_best_member = self
                 .grouped_member_of(peer)
@@ -2256,7 +2286,12 @@ impl RibManager {
             // copied into a fresh one; blocked routes are inspected in place
             // and never cloned.
             for (route, next_hop) in announce.iter().zip(next_hop_override.iter()) {
-                if otc_egress_blocked(route, local_role) {
+                if announce_source_exclusion == Some(route.peer) {
+                    // Keep the shared slice aligned; transport suppresses
+                    // this route before encoding for this member.
+                    permitted.push(route.clone());
+                    permitted_next_hops.push(next_hop.clone());
+                } else if otc_egress_blocked(route, local_role) {
                     // A per-client-best group member's prior wire view is
                     // group-derived (no per-peer unicast Adj-RIB-Out), so
                     // the previously-advertised gate below cannot see it. A
@@ -2290,6 +2325,9 @@ impl RibManager {
             }
             announce = permitted.into();
             next_hop_override = permitted_next_hops.into();
+            // The permitted subset is member-specific, so the group's
+            // pre-encoded bytes no longer describe this envelope.
+            shared_group_encode = None;
         }
         let otc_blocked: Vec<crate::route::Route> = self
             .pending_otc_blocked
@@ -2354,25 +2392,15 @@ impl RibManager {
                 labeled_announce.len(),
                 rtc_announce.len(),
             ];
-            let candidates = announce
-                .iter()
-                .zip(next_hop_override.iter())
-                .map(|(route, next_hop)| ExactExportCandidate::Unicast {
-                    route,
-                    next_hop_override: next_hop.as_ref(),
-                })
-                .chain(flowspec_announce.iter().map(ExactExportCandidate::FlowSpec))
-                .chain(evpn_announce.iter().map(ExactExportCandidate::Evpn))
-                .chain(bgpls_announce.iter().map(ExactExportCandidate::BgpLs))
-                .chain(vpn_announce.iter().map(ExactExportCandidate::Vpn))
-                .chain(labeled_announce.iter().map(ExactExportCandidate::Labeled))
-                .chain(rtc_announce.iter().map(ExactExportCandidate::Rtc))
-                .collect::<Vec<_>>();
             // Ordinary clean update-group members receive Arc clones of one
-            // shared unicast payload. Reuse a prior member's successful
-            // encoded lengths only when the concrete target snapshot proves
-            // it can safely recheck them. Mixed-family envelopes stay on the
-            // ordinary exact batch path so result ordering remains unchanged.
+            // shared unicast payload. A compatible target first proves the
+            // cached cohort's largest successful message: monotone ceiling
+            // acceptance then proves every shorter route without allocating
+            // or scanning a routes-long result vector for each member. A
+            // failed maximum falls back to the full cached-length vector so
+            // individual rejected routes remain exact. Mixed-family
+            // envelopes stay on the ordinary batch path so result ordering
+            // remains unchanged.
             let has_non_unicast_payload = !flowspec_announce.is_empty()
                 || !flowspec_withdraw.is_empty()
                 || !evpn_announce.is_empty()
@@ -2386,10 +2414,57 @@ impl RibManager {
                 || !rtc_announce.is_empty()
                 || !rtc_withdraw.is_empty();
             let cache_eligible = !announce.is_empty()
-                && candidates.len() == announce.len()
                 && !has_non_unicast_payload
                 && shared_unicast_precommit.is_some();
-            let reused_results = cache_eligible
+            let maximum_fast_path_eligible = cache_eligible
+                && shared_unicast_precommit
+                    .as_ref()
+                    .is_some_and(|precommit| precommit.lazy_group_prior.is_some())
+                && !self.peer_unexportable.contains_key(&peer);
+            #[cfg(test)]
+            let maximum_fast_path_eligible =
+                maximum_fast_path_eligible && !self.test_force_exact_export_slow_path;
+            let reused_maximum = maximum_fast_path_eligible
+                .then(|| {
+                    shared_unicast_precommit.as_mut().and_then(|precommit| {
+                        precommit.probe_cache.reuse_grouped_exact_export_maximum(
+                            precommit.group_id,
+                            &announce,
+                            &next_hop_override,
+                            snapshot.as_ref(),
+                        )
+                    })
+                })
+                .flatten()
+                .and_then(Result::ok);
+            if reused_maximum.is_some() {
+                #[cfg(any(test, feature = "bench-internals"))]
+                {
+                    self.adj_rib_out_commit_stats.exact_probe_cache_reuses = self
+                        .adj_rib_out_commit_stats
+                        .exact_probe_cache_reuses
+                        .saturating_add(announce.len());
+                }
+            }
+            let candidates = if reused_maximum.is_some() {
+                Vec::new()
+            } else {
+                announce
+                    .iter()
+                    .zip(next_hop_override.iter())
+                    .map(|(route, next_hop)| ExactExportCandidate::Unicast {
+                        route,
+                        next_hop_override: next_hop.as_ref(),
+                    })
+                    .chain(flowspec_announce.iter().map(ExactExportCandidate::FlowSpec))
+                    .chain(evpn_announce.iter().map(ExactExportCandidate::Evpn))
+                    .chain(bgpls_announce.iter().map(ExactExportCandidate::BgpLs))
+                    .chain(vpn_announce.iter().map(ExactExportCandidate::Vpn))
+                    .chain(labeled_announce.iter().map(ExactExportCandidate::Labeled))
+                    .chain(rtc_announce.iter().map(ExactExportCandidate::Rtc))
+                    .collect::<Vec<_>>()
+            };
+            let reused_results = (!candidates.is_empty() && cache_eligible)
                 .then(|| {
                     shared_unicast_precommit.as_mut().and_then(|precommit| {
                         precommit.probe_cache.reuse_grouped_exact_export_ceiling(
@@ -2411,6 +2486,8 @@ impl RibManager {
                 }
                 debug_assert_eq!(results.len(), candidates.len());
                 results
+            } else if candidates.is_empty() {
+                Vec::new()
             } else {
                 #[cfg(any(test, feature = "bench-internals"))]
                 {
@@ -2452,14 +2529,17 @@ impl RibManager {
                     .exact_probe_nonzero_encoded_lengths = self
                     .adj_rib_out_commit_stats
                     .exact_probe_nonzero_encoded_lengths
-                    .saturating_add(
-                        probe_results
-                            .iter()
-                            .filter(|result| {
-                                result.as_ref().is_ok_and(|result| result.encoded_len > 0)
-                            })
-                            .count(),
-                    );
+                    .saturating_add(reused_maximum.as_ref().map_or_else(
+                        || {
+                            probe_results
+                                .iter()
+                                .filter(|result| {
+                                    result.as_ref().is_ok_and(|result| result.encoded_len > 0)
+                                })
+                                .count()
+                        },
+                        |result| usize::from(result.encoded_len > 0) * announce.len(),
+                    ));
             }
 
             // The common grouped path is deliberately keyless: when every
@@ -2467,12 +2547,13 @@ impl RibManager {
             // no candidate can be owed a withdrawal and no overlay entry can
             // need reconciliation. The immutable target snapshot remains on
             // the outbound envelope for transport's owner/generation fence.
-            let fast_path = !candidates.is_empty()
-                && shared_unicast_precommit
-                    .as_ref()
-                    .is_some_and(|precommit| precommit.lazy_group_prior.is_some())
-                && probe_results.iter().all(Result::is_ok)
-                && !self.peer_unexportable.contains_key(&peer);
+            let fast_path = reused_maximum.is_some()
+                || (!candidates.is_empty()
+                    && shared_unicast_precommit
+                        .as_ref()
+                        .is_some_and(|precommit| precommit.lazy_group_prior.is_some())
+                    && probe_results.iter().all(Result::is_ok)
+                    && !self.peer_unexportable.contains_key(&peer));
             #[cfg(test)]
             let fast_path = {
                 let enabled = fast_path && !self.test_force_exact_export_slow_path;
@@ -2484,12 +2565,28 @@ impl RibManager {
             };
 
             if !fast_path {
+                // Reconciliation may filter this member's announce inventory.
+                // A shared encode cell is only valid while every member still
+                // carries the identical Arc-backed payload; transport proves
+                // profile equivalence, but it cannot recover a route removed
+                // here by this member's exact-export ceiling.
+                shared_group_encode = None;
                 // Keys and prior advertised state are fallback-only. A clean
                 // grouped member materializes its staged prior at most once,
                 // and only when a failed probe can actually owe a withdrawal.
                 let candidate_keys = candidates
                     .iter()
                     .map(ExactExportCandidate::key)
+                    .collect::<Vec<_>>();
+                let source_excluded = candidates
+                    .iter()
+                    .map(|candidate| {
+                        matches!(
+                            candidate,
+                            ExactExportCandidate::Unicast { route, .. }
+                                if announce_source_exclusion == Some(route.peer)
+                        )
+                    })
                     .collect::<Vec<_>>();
                 let has_probe_failure = probe_results.iter().any(Result::is_err);
                 let mut previously_advertised = group_prior;
@@ -2514,6 +2611,7 @@ impl RibManager {
                     self.peer_unexportable.entry(peer).or_default(),
                     candidate_keys,
                     probe_results,
+                    source_excluded,
                     &previously_advertised,
                 );
                 let keep = decision.keep;
@@ -2646,13 +2744,17 @@ impl RibManager {
         // capacity, and a prefix blocked here never reaches Adj-RIB-Out, the
         // grouped admitted set, or the wire. Withdrawals are untouched.
         let limited = self.outbound_prefix_limits.contains_key(&peer);
-        self.enforce_outbound_prefix_limits(
+        let capacity_filtered = self.enforce_outbound_prefix_limits(
             peer,
             grouped_unicast_count.is_some(),
+            announce_source_exclusion,
             &mut announce,
             &mut next_hop_override,
             &withdraw,
         );
+        if capacity_filtered {
+            shared_group_encode = None;
+        }
         // A limited grouped member's advertised count is its admitted
         // projection, which enforcement above just moved.
         let grouped_unicast_count = if limited {
@@ -2838,7 +2940,7 @@ impl RibManager {
             permit,
             OutboundRouteUpdate {
                 exact_export_snapshot,
-                announce_source_exclusion: None,
+                announce_source_exclusion,
                 announce,
                 withdraw,
                 end_of_rib,
@@ -2858,7 +2960,7 @@ impl RibManager {
                 rtc_withdraw,
                 otc_blocked,
                 request_refresh_all_negotiated: false,
-                shared_group_encode: None,
+                shared_group_encode,
             },
         );
         #[cfg(feature = "bench-internals")]
@@ -4629,6 +4731,8 @@ impl RibManager {
         // best).
         let group_stage = self.stage_update_groups(&best_changed, &all_affected, &mut export_memo);
         let mut shared_unicast_probe_cache = SharedUnicastProbeCache::default();
+        let mut shared_group_encodes: HashMap<usize, Arc<crate::update::SharedGroupEncode>> =
+            HashMap::new();
         // LAN-474 emit-time filter: whether a group's pass carries any
         // control-tagged announce delta, memoized per (group, rs_asn) —
         // one delta scan per group per pass, not per member. Untagged
@@ -4989,6 +5093,9 @@ impl RibManager {
             // pre-built shared emission: the announce payload is an Arc
             // clone shared across members, not a per-member Vec build.
             let mut shared_unicast: Option<super::update_groups::SharedUnicastPayload> = None;
+            let mut unicast_otc_prechecked = false;
+            let mut announce_source_exclusion = None;
+            let mut shared_group_encode = None;
             let mut fs_announce = Vec::new();
             let mut fs_withdraw = Vec::new();
             let mut evpn_announce = Vec::new();
@@ -5028,6 +5135,7 @@ impl RibManager {
                     .copied()
                     .zip(self.peer_asn.get(&peer).copied());
                 if let Some(group) = self.group_ribs.get(&gid) {
+                    unicast_otc_prechecked = !group.per_client_best;
                     if resync {
                         Self::assemble_group_resync(
                             group,
@@ -5077,11 +5185,23 @@ impl RibManager {
                                 .entry((gid, rs_asn))
                                 .or_insert_with(|| stage.has_tagged_route(rs_asn))
                         });
-                        if stage.shared_applies_to(peer) && !rs_diverges {
+                        let shared_exact = stage.shared_applies_to(peer);
+                        let shared_with_source_exclusion = !shared_exact
+                            && stage.shared_applies_with_source_exclusion(peer)
+                            && stage.shared_has_payload_after_source_exclusion(peer);
+                        if (shared_exact || shared_with_source_exclusion) && !rs_diverges {
                             // Common case: this member's matrix output IS
-                            // the shared emission — enqueue Arc clones.
+                            // the shared emission after transport omits any
+                            // newly staged own-source routes. Enqueue Arc
+                            // clones and one encode cell for the whole group.
                             shared_unicast =
                                 Some((stage.shared_announce.clone(), stage.shared_nh.clone()));
+                            announce_source_exclusion =
+                                shared_with_source_exclusion.then_some(peer);
+                            shared_group_encode =
+                                Some(Arc::clone(shared_group_encodes.entry(gid).or_insert_with(
+                                    || Arc::new(crate::update::SharedGroupEncode::default()),
+                                )));
                             unicast.withdraw.extend_from_slice(&stage.shared_withdraw);
                         } else {
                             super::update_groups::emit_group_deltas_for_member(
@@ -5758,6 +5878,9 @@ impl RibManager {
                 if self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
                     peer,
                     OutboundCommitBatch {
+                        unicast_otc_prechecked,
+                        announce_source_exclusion,
+                        shared_group_encode,
                         withdraw: unicast.withdraw,
                         end_of_rib: pending_eor.clone(),
                         flowspec_announce: fs_announce,

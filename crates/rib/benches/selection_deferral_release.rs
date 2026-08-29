@@ -11,12 +11,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rustbgpd_rib::{
-    ExactExportCandidate, ExactExportEncoder, ExactExportError, ExactExportResult,
-    ExactExportSnapshot, OutboundRouteUpdate, RibManager, RibUpdate, Route, RouteOrigin,
-    SelectionDeferralConfig, SelectionDeferralWaiterConfig,
+    ExactExportCandidate, ExactExportEncoder, ExactExportError, ExactExportErrorCode,
+    ExactExportResult, ExactExportSnapshot, OutboundRouteUpdate, RibManager, RibUpdate, Route,
+    RouteOrigin, SelectionDeferralConfig, SelectionDeferralWaiterConfig,
 };
 use rustbgpd_telemetry::BgpMetrics;
-use rustbgpd_wire::{Afi, Ipv4Prefix, Ipv6Prefix, Prefix, RpkiValidation, Safi};
+use rustbgpd_wire::{Afi, Ipv4Prefix, Ipv6Prefix, MAX_MESSAGE_LEN, Prefix, RpkiValidation, Safi};
 use tokio::sync::mpsc;
 
 const FLEET_PEERS: usize = 700;
@@ -24,6 +24,7 @@ const FLEET_ROUTES: usize = 400_400;
 const SELF_TEST_PEERS: usize = 4;
 const SELF_TEST_ROUTES: usize = 64;
 const LEDGER_IDENTITY_LIMIT: usize = 1_000_000;
+const HOMOGENEOUS_WIRE_PROFILE: u64 = 1;
 
 const IPV4_UNICAST: (Afi, Safi) = (Afi::Ipv4, Safi::Unicast);
 const IPV6_UNICAST: (Afi, Safi) = (Afi::Ipv6, Safi::Unicast);
@@ -123,10 +124,22 @@ struct Receipt {
     peers_with_route_payload: usize,
 }
 
-#[derive(Debug)]
-struct PermissiveExactExport;
+#[derive(Clone, Copy, Debug)]
+struct HomogeneousExactExport {
+    wire_profile: u64,
+    max_len: usize,
+}
 
-impl ExactExportSnapshot for PermissiveExactExport {
+impl HomogeneousExactExport {
+    fn fixture() -> Self {
+        Self {
+            wire_profile: HOMOGENEOUS_WIRE_PROFILE,
+            max_len: usize::from(MAX_MESSAGE_LEN),
+        }
+    }
+}
+
+impl ExactExportSnapshot for HomogeneousExactExport {
     fn owner_id(&self) -> u64 {
         1
     }
@@ -141,9 +154,43 @@ impl ExactExportSnapshot for PermissiveExactExport {
     ) -> Result<ExactExportResult, ExactExportError> {
         Ok(ExactExportResult {
             encoded_len: 0,
-            max_len: usize::MAX,
+            max_len: self.max_len,
             generation: 0,
         })
+    }
+
+    fn reuse_successful_probes(
+        &self,
+        source: &dyn ExactExportSnapshot,
+        encoded_lengths: &[usize],
+    ) -> Option<Vec<Result<ExactExportResult, ExactExportError>>> {
+        let source = source.as_any().downcast_ref::<Self>()?;
+        if self.wire_profile != source.wire_profile {
+            return None;
+        }
+
+        Some(
+            encoded_lengths
+                .iter()
+                .map(|&encoded_len| {
+                    if encoded_len > self.max_len {
+                        Err(ExactExportError::new(
+                            ExactExportErrorCode::MessageTooLong,
+                            format_args!(
+                                "encoded UPDATE is {encoded_len} bytes; negotiated maximum is {} bytes",
+                                self.max_len
+                            ),
+                        ))
+                    } else {
+                        Ok(ExactExportResult {
+                            encoded_len,
+                            max_len: self.max_len,
+                            generation: 0,
+                        })
+                    }
+                })
+                .collect(),
+        )
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -151,13 +198,13 @@ impl ExactExportSnapshot for PermissiveExactExport {
     }
 }
 
-impl ExactExportEncoder for PermissiveExactExport {
+impl ExactExportEncoder for HomogeneousExactExport {
     fn owner_id(&self) -> u64 {
         1
     }
 
     fn snapshot(&self) -> Arc<dyn ExactExportSnapshot> {
-        Arc::new(Self)
+        Arc::new(*self)
     }
 }
 
@@ -409,7 +456,7 @@ fn run(mode: Mode, peers: usize, total_routes: usize) -> Receipt {
         &gated_families,
         &sendable_families,
         gated_families.len().saturating_add(4),
-        |_| Arc::new(PermissiveExactExport),
+        |_| Arc::new(HomogeneousExactExport::fixture()),
     );
 
     if mode.is_overflow() {
@@ -631,6 +678,32 @@ fn assert_rejected(label: &str, receipt: &Receipt, mutate: impl FnOnce(&mut Rece
 }
 
 fn self_test() {
+    let profile = HomogeneousExactExport::fixture();
+    let incompatible = HomogeneousExactExport {
+        wire_profile: HOMOGENEOUS_WIRE_PROFILE + 1,
+        ..profile
+    };
+    assert!(
+        profile
+            .reuse_successful_probes(&incompatible, &[64])
+            .is_none(),
+        "wire-profile mismatch must decline exact-probe reuse"
+    );
+    let reused = profile
+        .reuse_successful_probes(&profile, &[profile.max_len, profile.max_len + 1])
+        .expect("matching wire profiles reuse successful probes");
+    assert!(
+        reused[0].is_ok(),
+        "message at the ceiling must remain valid"
+    );
+    assert!(
+        matches!(
+            &reused[1],
+            Err(error) if error.code() == ExactExportErrorCode::MessageTooLong
+        ),
+        "message beyond the ceiling must be rejected"
+    );
+
     let receipt = run(Mode::Seven, SELF_TEST_PEERS, SELF_TEST_ROUTES);
     validate(&receipt).expect("uncorrupted self-test receipt validates");
     assert_rejected("query_depth", &receipt, |row| {

@@ -581,14 +581,20 @@ mod tests {
                 .collect(),
         );
         let mut seed_inventory = None;
+        let mut seed_encode = None;
         for receiver in &mut receivers {
             let seeded = receiver.try_recv().unwrap();
             assert_eq!(seeded.announce.len(), prefixes);
-            assert!(seeded.shared_group_encode.is_none());
-            if let Some(first) = &seed_inventory {
-                assert!(Arc::ptr_eq(first, &seeded.announce));
+            assert_eq!(seeded.announce_source_exclusion, None);
+            let encode = seeded.shared_group_encode.as_ref().unwrap();
+            if let (Some(first_inventory), Some(first_encode)) = (&seed_inventory, &seed_encode) {
+                assert!(
+                    Arc::ptr_eq(first_inventory, &seeded.announce)
+                        && Arc::ptr_eq(first_encode, encode)
+                );
             } else {
                 seed_inventory = Some(Arc::clone(&seeded.announce));
+                seed_encode = Some(Arc::clone(encode));
             }
             assert!(receiver.try_recv().is_err());
         }
@@ -600,7 +606,7 @@ mod tests {
         assert!(fast_path);
         let mut shared_encode = None;
         let mut shared_announce = None;
-        for receiver in &mut receivers {
+        for (index, receiver) in receivers.iter_mut().enumerate() {
             let update = receiver.try_recv().unwrap();
             assert_eq!(update.announce.len(), prefixes);
             assert_ne!(update.announce[0].attributes, seed_inventory[0].attributes);
@@ -616,6 +622,10 @@ mod tests {
             );
             let encode = update.shared_group_encode.as_ref().unwrap();
             let announce = &update.announce;
+            assert_eq!(
+                update.announce_source_exclusion,
+                Some(RibManager::bench_peer_address(index))
+            );
             if let (Some(first_encode), Some(first_announce)) = (&shared_encode, &shared_announce) {
                 assert!(Arc::ptr_eq(first_encode, encode) && Arc::ptr_eq(first_announce, announce));
             } else {
@@ -649,7 +659,7 @@ mod tests {
                      \"fixture_peers\":{peers},\"fixture_prefixes\":{prefixes},\
                      \"seed\":{{\"routes_received_dispatches\":1,\"routes_received_withdrawals\":0,\
                      \"envelopes\":{peers},\"routes_per_envelope\":{prefixes},\
-                     \"shared_group_encode\":false,\"community\":\"65000:100\"}},\
+                     \"shared_group_encode\":true,\"community\":\"65000:100\"}},\
                      \"transition\":{{\"fast_path\":{fast_path},\"routes_received_dispatches\":0,\
                      \"routes_received_withdrawals\":0,\
                      \"probe_accounting\":\"policy_transition_receipt\",\

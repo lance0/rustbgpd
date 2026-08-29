@@ -14,6 +14,7 @@ use super::*;
 
 #[path = "update_groups_harness.rs"]
 mod update_groups_harness;
+use crate::manager::distribution::OutboundCommitBatch;
 use update_groups_harness::{RunningManager, spawn_running_manager};
 
 #[test]
@@ -543,16 +544,23 @@ fn exact_update_semantic(update: &OutboundRouteUpdate) -> ExactUpdateSemantic {
         .exact_export_snapshot
         .as_ref()
         .map(|snapshot| (snapshot.owner_id(), snapshot.generation()));
+    assert_eq!(update.announce.len(), update.next_hop_override.len());
+    let (announce, next_hop_override): (Vec<_>, Vec<_>) = update
+        .announce
+        .iter()
+        .zip(update.next_hop_override.iter())
+        .filter(|(route, _)| update.announce_source_exclusion != Some(route.peer))
+        .unzip();
     ExactUpdateSemantic {
         snapshot,
         payload: format!(
             "{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{}",
-            update.announce_source_exclusion,
-            update.announce,
+            Option::<IpAddr>::None,
+            announce,
             update.withdraw,
             update.end_of_rib,
             update.refresh_markers,
-            update.next_hop_override,
+            next_hop_override,
             update.flowspec_announce,
             update.flowspec_withdraw,
             update.evpn_announce,
@@ -705,6 +713,178 @@ fn distribution_clones_metrics_once_per_pass() {
             Err(mpsc::error::TryRecvError::Empty)
         ));
     }
+}
+
+/// A plain route-server-shaped group whose members are also route sources
+/// must keep the ordinary delta on the shared fanout path. Split horizon is
+/// represented by transport-side source exclusion, so one announce `Arc`,
+/// one encode cell, and one exact batch serve the whole cohort.
+#[test]
+fn grouped_source_exceptions_share_payload_and_exact_proof() {
+    const PEERS: usize = 4;
+    const ROUTES: usize = 3;
+
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let probes = Arc::new(AtomicUsize::new(0));
+    let reuses = Arc::new(AtomicUsize::new(0));
+    let peers: Vec<_> = (0..PEERS)
+        .map(|index| IpAddr::V4(Ipv4Addr::new(10, 63, 3, u8::try_from(index + 1).unwrap())))
+        .collect();
+    let mut receivers = Vec::new();
+    for (index, &peer) in peers.iter().enumerate() {
+        receivers.push(register_direct_exact_peer(
+            &mut manager,
+            peer,
+            Arc::new(CohortExactEncoder {
+                owner: u64::try_from(index + 1).unwrap(),
+                profile: 63,
+                max_len: 4_096,
+                generation: AtomicUsize::new(0),
+                advance_generation: false,
+                probes: Arc::clone(&probes),
+                reuses: Arc::clone(&reuses),
+            }),
+        ));
+        assert!(manager.grouped_member_of(peer).is_some());
+    }
+
+    manager.adj_rib_out_commit_stats = AdjRibOutCommitStats::default();
+    let IpAddr::V4(source) = peers[0] else {
+        unreachable!()
+    };
+    let prefixes: Vec<_> = (0..ROUTES)
+        .map(|index| {
+            Ipv4Prefix::new(
+                Ipv4Addr::new(203, 0, u8::try_from(120 + index).unwrap(), 0),
+                24,
+            )
+        })
+        .collect();
+    distribute_direct_routes(&mut manager, source, prefixes);
+
+    let mut announces = Vec::new();
+    let mut encode_cells = Vec::new();
+    for (member, receiver) in peers.iter().zip(&mut receivers) {
+        if *member == peers[0] {
+            assert!(
+                receiver.try_recv().is_err(),
+                "an all-own-source payload remains a no-op for its source"
+            );
+            continue;
+        }
+        let update = receiver.try_recv().unwrap();
+        assert_eq!(update.announce.len(), ROUTES);
+        assert_eq!(update.announce_source_exclusion, None);
+        assert_eq!(
+            update
+                .announce
+                .iter()
+                .filter(|route| update.announce_source_exclusion != Some(route.peer))
+                .count(),
+            ROUTES,
+            "source exclusion must preserve the historical per-member wire view"
+        );
+        announces.push(update.announce.clone());
+        encode_cells.push(update.shared_group_encode.clone().unwrap());
+        assert!(receiver.try_recv().is_err());
+    }
+    assert!(
+        announces
+            .iter()
+            .all(|announce| Arc::ptr_eq(announce, &announces[0]))
+    );
+    assert!(
+        encode_cells
+            .iter()
+            .all(|cell| Arc::ptr_eq(cell, &encode_cells[0]))
+    );
+    assert_eq!(probes.load(Ordering::Relaxed), ROUTES);
+    assert_eq!(announces.len(), PEERS - 1);
+    assert_eq!(reuses.load(Ordering::Relaxed), PEERS - 2);
+    assert_eq!(manager.adj_rib_out_commit_stats.exact_probe_batches, 1);
+    assert_eq!(
+        manager.adj_rib_out_commit_stats.exact_probe_candidates,
+        ROUTES
+    );
+    assert_eq!(
+        manager.adj_rib_out_commit_stats.exact_probe_cache_reuses,
+        ROUTES * (PEERS - 2)
+    );
+}
+
+#[test]
+fn source_excluded_exact_failure_never_enters_the_peer_overlay() {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 63, 4, 1));
+    let probes = Arc::new(AtomicUsize::new(0));
+    manager.handle_update(RibUpdate::SetPeerExportContext {
+        peer,
+        session_id: 0,
+        local_role: Some(rustbgpd_wire::BgpRole::Customer),
+    });
+    let mut outbound = register_direct_exact_peer(
+        &mut manager,
+        peer,
+        Arc::new(CohortExactEncoder {
+            owner: 1,
+            profile: 64,
+            max_len: 128,
+            generation: AtomicUsize::new(0),
+            advance_generation: false,
+            probes: Arc::clone(&probes),
+            reuses: Arc::new(AtomicUsize::new(0)),
+        }),
+    );
+
+    let IpAddr::V4(peer_source) = peer else {
+        unreachable!()
+    };
+    let own_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 120, 0), 24);
+    let mut own_route = crate::test_support::make_route(own_prefix, peer_source);
+    Arc::make_mut(&mut own_route.attributes).extend([
+        PathAttribute::Communities(vec![0xFDE8_0002]),
+        PathAttribute::OnlyToCustomer(64_512),
+    ]);
+    let other_route = crate::test_support::make_route(
+        Ipv4Prefix::new(Ipv4Addr::new(203, 0, 121, 0), 24),
+        Ipv4Addr::new(192, 0, 2, 64),
+    );
+    let mut batch = OutboundCommitBatch::with_unicast(
+        vec![own_route.clone(), other_route.clone()].into(),
+        vec![None, None].into(),
+    );
+    batch.announce_source_exclusion = Some(peer);
+    batch.shared_group_encode = Some(Arc::new(crate::update::SharedGroupEncode::default()));
+
+    assert!(
+        manager.try_send_and_commit_outbound_update_with_group_prior(
+            peer,
+            batch,
+            HashSet::new(),
+            None,
+        )
+    );
+    let update = outbound.try_recv().unwrap();
+    assert_eq!(update.announce_source_exclusion, Some(peer));
+    assert_eq!(update.announce.len(), 2);
+    assert_eq!(update.announce[0].prefix, own_route.prefix);
+    assert_eq!(update.announce[0].peer, own_route.peer);
+    assert_eq!(update.announce[1].prefix, other_route.prefix);
+    assert_eq!(update.announce[1].peer, other_route.peer);
+    assert!(update.withdraw.is_empty());
+    assert!(
+        update.shared_group_encode.is_none(),
+        "a member-specific exact fallback cannot retain shared encoded bytes"
+    );
+    assert_eq!(probes.load(Ordering::Relaxed), 2);
+    assert!(
+        !manager.peer_unexportable.contains_key(&peer),
+        "the rejected own-source route is absent from this peer's wire view"
+    );
+    assert!(!manager.peer_otc_blocked.contains_key(&peer));
+    assert!(!manager.pending_otc_blocked.contains_key(&peer));
 }
 
 #[test]
@@ -1316,8 +1496,21 @@ async fn run_clean_transition_equivalence(force_ungrouped: bool) -> Vec<Vec<Stri
     })
     .await
     .unwrap();
-    for receiver in &mut receivers {
-        assert_eq!(receiver.recv().await.unwrap().announce.len(), 2);
+    for (index, receiver) in receivers.iter_mut().enumerate() {
+        let update = receiver.recv().await.unwrap();
+        assert_eq!(
+            update.announce_source_exclusion,
+            (!force_ungrouped).then_some(peers[index])
+        );
+        assert_eq!(update.announce.len(), if force_ungrouped { 2 } else { 3 });
+        assert_eq!(
+            update
+                .announce
+                .iter()
+                .filter(|route| update.announce_source_exclusion != Some(route.peer))
+                .count(),
+            2
+        );
     }
 
     let (reply, response) = oneshot::channel();

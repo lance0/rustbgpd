@@ -2163,6 +2163,28 @@ fn member_emission(out: &GroupStageOutput, member: IpAddr) -> (Vec<Route>, Vec<(
             "shared/walk withdraw diverged for {member}"
         );
     }
+    if out.shared_applies_with_source_exclusion(member) {
+        let filtered = out
+            .shared_announce
+            .iter()
+            .filter(|route| route.peer != member)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            announce.len(),
+            filtered.len(),
+            "source-excluded shared/walk announce count diverged for {member}"
+        );
+        for (walked, shared) in announce.iter().zip(filtered) {
+            assert!(
+                routes_equal(walked, shared),
+                "source-excluded shared/walk announce diverged for {member}"
+            );
+        }
+        assert_eq!(
+            withdraw, out.shared_withdraw,
+            "source-excluded shared/walk withdraw diverged for {member}"
+        );
+    }
     (announce, withdraw)
 }
 
