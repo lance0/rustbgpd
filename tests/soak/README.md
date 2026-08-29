@@ -861,7 +861,7 @@ script's header for the deploy step and its env vars.
 
 ---
 
-# Route-server flagship soak (SIGHUP reload + max-prefix trip)
+# Route-server flagship soak (reload + max-prefix + management-plane load)
 
 `run-soak-rs-flagship.sh` drives the flagship shape — 1000 real eBGP
 route-server-client sessions × 400 routes each — against a bare-host
@@ -878,6 +878,20 @@ the engine's steady churn running throughout. Two serialized injections:
   countdown visible in `rbgp neighbor -j` → re-Established within
   `max_prefix_restart_seconds` + 60 s → headroom sane.
 
+After the engine's convergence barrier and before the measured window, the
+runner also starts an independent management-plane load process. It scrapes
+`/metrics` every second and, every five seconds, runs the shipped `rbgp` over
+the scenario's existing UDS for the full JSON neighbor inventory,
+`policy stats --direction both`, and an exact RIB lookup. The lookup targets
+stub 1's first route, derived from `SOAK_ROUTES_PER_PEER` with the engine's
+base-prefix mapping (`20.1.144.0/24` at the 400-route flagship shape), so
+stub 0's deliberate max-prefix trip cannot create a false load failure. Each
+surface has its own monotonic schedule and a five-second timeout with no retry.
+The retained JSONL contains only timing, disposition, byte count, and SHA-256
+fields—not the potentially large responses. The load must outlive the complete
+measured window and finish with its atomic SIGTERM summary before analysis
+begins.
+
 ```bash
 # Full 24 h flagship run (defaults):
 bash tests/soak/run-soak-rs-flagship.sh
@@ -889,10 +903,17 @@ TRIP_RESTART_SECONDS=20 WARMUP_SEC=30 SAMPLE_INTERVAL=10 \
 bash tests/soak/run-soak-rs-flagship.sh
 ```
 
+Smokes may lengthen the probe schedules with
+`MANAGEMENT_METRICS_INTERVAL_SEC` and `MANAGEMENT_CLI_INTERVAL_SEC`, or change
+the per-attempt `MANAGEMENT_TIMEOUT_SEC`; the runner records the exact values
+in `run.json` and the terminal summary, and the analyzer requires them to
+match. The management-plane load itself is not optional.
+
 Requires host ports 1790 (BGP) and 9179 (metrics) free — the runner
 refuses to start otherwise and never kills unknown processes. Output
 lands in `tests/soak/runs/soak-rs-flagship-<UTC>/` (`samples.csv`,
-`cycles.log`, `reloadstall.log`, `rustbgpd.log`, `run.json`,
+`cycles.log`, `reloadstall.log`, `rustbgpd.log`,
+`management-plane-load.jsonl`, `management-plane-load.log`, `run.json`,
 `verdict.json`); the analyzer is `analyze-soak-rs-flagship.py` and the
 precommitted gates are scenario 10 in
 `docs/soaks/soak-acceptance-gates.md`. Note the short scenario

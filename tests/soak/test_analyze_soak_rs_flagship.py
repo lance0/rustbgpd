@@ -2,6 +2,8 @@
 """Load-bearing gate contracts for the route-server flagship soak analyzer."""
 
 import csv
+import hashlib
+import importlib.util
 import json
 import subprocess
 import tempfile
@@ -11,6 +13,10 @@ from pathlib import Path
 
 HERE = Path(__file__).parent
 ANALYZER = HERE / "analyze-soak-rs-flagship.py"
+ANALYZER_SPEC = importlib.util.spec_from_file_location("rs_soak_analyzer", ANALYZER)
+assert ANALYZER_SPEC is not None and ANALYZER_SPEC.loader is not None
+analyzer = importlib.util.module_from_spec(ANALYZER_SPEC)
+ANALYZER_SPEC.loader.exec_module(analyzer)
 T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 FIELDS = [
@@ -34,8 +40,18 @@ def smoke_meta(**over):
         "soak_seconds": 240, "sample_interval_sec": 30, "warmup_sec": 30,
         "planned_reloads": 4, "planned_trips": 2, "trip_every": 2,
         "max_prefixes": 100, "trip_restart_seconds": 20,
+        "management_load_file": "management-plane-load.jsonl",
+        "management_metrics_interval_sec": 30,
+        "management_cli_interval_sec": 60,
+        "management_timeout_sec": 5,
+        "management_route_prefix": "20.0.50.0/24",
     }
     meta.update(over)
+    meta.setdefault("measured_start_monotonic", 1000.1)
+    meta.setdefault(
+        "measured_end_monotonic",
+        meta["measured_start_monotonic"] + meta["soak_seconds"],
+    )
     return meta
 
 
@@ -89,7 +105,9 @@ def smoke_rows():
 def long_meta():
     return smoke_meta(soak_seconds=86400, sample_interval_sec=3600,
                       warmup_sec=300, planned_reloads=48, planned_trips=6,
-                      trip_every=8)
+                      trip_every=8, management_metrics_interval_sec=3600,
+                      management_cli_interval_sec=7200,
+                      measured_end_monotonic=87400.1)
 
 
 def long_cycles():
@@ -119,7 +137,83 @@ def long_rows(rss_of=None):
     return rows
 
 
-def run_analyzer(rows, cycles, meta, fields=FIELDS):
+def management_jsonl(meta, *, missing_operation=None, early=False,
+                     missed=False, failure=None, terminal=True,
+                     truncated=False, cadence_gap=False):
+    operations = ("metrics", "neighbor", "policy_stats", "rib_prefix")
+    start = meta["measured_start_monotonic"] - 0.1
+    end = (meta["measured_end_monotonic"] - 1.0 if early
+           else meta["measured_end_monotonic"] + 0.1)
+    intervals = {
+        "metrics": meta["management_metrics_interval_sec"],
+        "neighbor": meta["management_cli_interval_sec"],
+        "policy_stats": meta["management_cli_interval_sec"],
+        "rib_prefix": meta["management_cli_interval_sec"],
+    }
+    records = [{
+        "record": "start", "started_monotonic": start,
+        "operations": list(operations), "interval_seconds": intervals,
+        "timeout_seconds": meta["management_timeout_sec"],
+        "peer_count": meta["peers"],
+        "route_prefix": meta["management_route_prefix"],
+    }]
+    completed = {}
+    scheduled = {}
+    missed_counts = {operation: 0 for operation in operations}
+    digest = hashlib.sha256(b"{}").hexdigest()
+    for operation in operations:
+        interval = intervals[operation]
+        count = max(1, int(max(0.0, end - start - 0.1) // interval) + 1)
+        if operation == missing_operation:
+            count = 0
+        completed[operation] = count
+        scheduled[operation] = count
+        for index in range(count):
+            due = start + index * interval
+            if cadence_gap and operation == "metrics" and index == 1:
+                due += interval / 2
+            result = failure if failure and operation == failure[0] else "ok"
+            if isinstance(result, tuple):
+                result = result[1]
+            records.append({
+                "record": "operation",
+                "scheduled_monotonic": due,
+                "started_monotonic": due + 0.001,
+                "completed_monotonic": due + 0.002,
+                "operation": operation,
+                "duration_ms": 1.0,
+                "exit": 200 if operation == "metrics" else 0,
+                "result": result,
+                "bytes": 2,
+                "sha256": digest,
+            })
+    if missed:
+        missed_count = int(missed)
+        scheduled["metrics"] += missed_count
+        missed_counts["metrics"] = missed_count
+    if terminal:
+        records.append({
+            "record": "summary", "started_monotonic": start,
+            "stop_requested_monotonic": end - 0.05,
+            "completed_monotonic": end, "operation": "summary",
+            "duration_ms": (end - start) * 1000, "exit": 0,
+            "result": "clean_sigterm", "bytes": 0,
+            "sha256": hashlib.sha256(b"").hexdigest(),
+            "signal": "SIGTERM", "scheduled": scheduled,
+            "completed": completed, "missed": missed_counts,
+            "interval_seconds": intervals,
+            "timeout_seconds": meta["management_timeout_sec"],
+            "peer_count": meta["peers"],
+            "route_prefix": meta["management_route_prefix"],
+        })
+    raw = b"".join(
+        (json.dumps(record, separators=(",", ":")) + "\n").encode()
+        for record in records
+    )
+    return raw + (b'{"record":' if truncated else b"")
+
+
+def run_analyzer(rows, cycles, meta, fields=FIELDS, management=None):
     with tempfile.TemporaryDirectory() as tmp:
         run_dir = Path(tmp)
         with (run_dir / "samples.csv").open("w", newline="") as stream:
@@ -129,6 +223,8 @@ def run_analyzer(rows, cycles, meta, fields=FIELDS):
             writer.writerows(rows)
         (run_dir / "cycles.log").write_text("\n".join(cycles) + "\n")
         (run_dir / "run.json").write_text(json.dumps(meta))
+        evidence = management_jsonl(meta) if management is None else management
+        (run_dir / "management-plane-load.jsonl").write_bytes(evidence)
         result = subprocess.run(
             ["python3", str(ANALYZER), str(run_dir)],
             text=True, capture_output=True, check=False,
@@ -138,6 +234,30 @@ def run_analyzer(rows, cycles, meta, fields=FIELDS):
 
 
 class RsFlagshipAnalyzerContracts(unittest.TestCase):
+    def test_management_prefix_matches_reloadstall_mapping(self):
+        cases = {
+            50: "20.0.50.0/24",
+            255: "20.0.255.0/24",
+            256: "20.1.0.0/24",
+            400: "20.1.144.0/24",
+            65535: "20.255.255.0/24",
+            65536: "21.0.0.0/24",
+            15466495: "255.255.255.0/24",
+        }
+        for routes_per_peer, prefix in cases.items():
+            with self.subTest(routes_per_peer=routes_per_peer):
+                self.assertEqual(
+                    analyzer.expected_management_route_prefix(routes_per_peer),
+                    prefix,
+                )
+
+    def test_management_prefix_rejects_invalid_route_counts(self):
+        for routes_per_peer in (True, 0, -1, 1.0, "400", 15466496):
+            with self.subTest(routes_per_peer=routes_per_peer):
+                self.assertIsNone(
+                    analyzer.expected_management_route_prefix(routes_per_peer)
+                )
+
     def test_clean_smoke_run_passes_with_slope_gates_annotated(self):
         result, payload = run_analyzer(smoke_rows(), smoke_cycles(),
                                        smoke_meta())
@@ -219,6 +339,103 @@ class RsFlagshipAnalyzerContracts(unittest.TestCase):
         result, payload = run_analyzer(smoke_rows(), cycles, smoke_meta())
         self.assertEqual(result.returncode, 1)
         self.assertFalse(payload["gates"]["no_abort"]["pass"])
+
+    def test_management_load_missing_operation_fails(self):
+        meta = smoke_meta()
+        result, payload = run_analyzer(
+            smoke_rows(), smoke_cycles(), meta,
+            management=management_jsonl(meta, missing_operation="policy_stats"),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(payload["gates"]["management_operations"]["pass"])
+
+    def test_management_load_rejects_old_stub_zero_and_mismatched_prefixes(self):
+        for prefix in ("20.0.0.0/24", "20.0.51.0/24"):
+            with self.subTest(prefix=prefix):
+                meta = smoke_meta(management_route_prefix=prefix)
+                result, payload = run_analyzer(
+                    smoke_rows(), smoke_cycles(), meta,
+                    management=management_jsonl(meta),
+                )
+                self.assertEqual(result.returncode, 1)
+                gate = payload["gates"]["management_evidence"]
+                self.assertFalse(gate["pass"])
+                self.assertTrue(
+                    any("mismatches stub 1" in error
+                        for error in gate["value"]["errors"])
+                )
+
+    def test_management_load_early_death_fails_lifetime_bracket(self):
+        meta = smoke_meta()
+        result, payload = run_analyzer(
+            smoke_rows(), smoke_cycles(), meta,
+            management=management_jsonl(meta, early=True),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(payload["gates"]["management_lifetime"]["pass"])
+
+    def test_management_load_missed_cadence_fails(self):
+        meta = smoke_meta()
+        result, payload = run_analyzer(
+            smoke_rows(), smoke_cycles(), meta,
+            management=management_jsonl(meta, missed=True),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(payload["gates"]["management_cadence"]["pass"])
+
+    def test_management_load_schedule_gap_fails_even_when_counts_match(self):
+        meta = smoke_meta()
+        result, payload = run_analyzer(
+            smoke_rows(), smoke_cycles(), meta,
+            management=management_jsonl(meta, cadence_gap=True),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(payload["gates"]["management_cadence"]["pass"])
+
+    def test_management_load_below_ninety_percent_completion_fails(self):
+        meta = smoke_meta()
+        result, payload = run_analyzer(
+            smoke_rows(), smoke_cycles(), meta,
+            management=management_jsonl(meta, missed=2),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(payload["gates"]["management_completion"]["pass"])
+
+    def test_management_load_truncated_jsonl_fails(self):
+        meta = smoke_meta()
+        result, payload = run_analyzer(
+            smoke_rows(), smoke_cycles(), meta,
+            management=management_jsonl(meta, truncated=True),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(payload["gates"]["management_evidence"]["pass"])
+
+    def test_management_load_missing_terminal_summary_fails(self):
+        meta = smoke_meta()
+        result, payload = run_analyzer(
+            smoke_rows(), smoke_cycles(), meta,
+            management=management_jsonl(meta, terminal=False),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(payload["gates"]["management_evidence"]["pass"])
+
+    def test_management_operation_failure_dispositions_fail(self):
+        for disposition in (
+            "http_status", "empty", "cli_exit", "timeout", "json",
+            "schema", "cardinality", "route",
+        ):
+            with self.subTest(disposition=disposition):
+                meta = smoke_meta()
+                result, payload = run_analyzer(
+                    smoke_rows(), smoke_cycles(), meta,
+                    management=management_jsonl(
+                        meta, failure=("neighbor", disposition)
+                    ),
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertFalse(
+                    payload["gates"]["management_failures"]["pass"]
+                )
 
     def test_missing_column_is_input_error(self):
         fields = [f for f in FIELDS if f != "max_prefix_exceeded_total"]

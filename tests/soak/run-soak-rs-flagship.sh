@@ -29,6 +29,8 @@
 #   - cycles.log       reload + trip event/evidence lines
 #   - rustbgpd.log     daemon JSON logs
 #   - reloadstall.log  engine stdout/stderr (markers, csv records)
+#   - management-plane-load.jsonl  bounded HTTP/CLI load evidence
+#   - management-plane-load.log    load-driver stdout/stderr
 #   - run.json         run metadata (analyzer input)
 #   - verdict.json     analyzer verdict
 
@@ -58,6 +60,37 @@ LISTEN_PORT="${LISTEN_PORT:-1790}"
 # gen-scenario.py pins prometheus_addr to 127.0.0.1:9179.
 readonly METRICS_PORT=9179
 DESIGNATED_ADDR="127.1.0.1" # stub_addr(0) — the engine's designated member
+MANAGEMENT_METRICS_INTERVAL_SEC="${MANAGEMENT_METRICS_INTERVAL_SEC:-1}"
+MANAGEMENT_CLI_INTERVAL_SEC="${MANAGEMENT_CLI_INTERVAL_SEC:-5}"
+MANAGEMENT_TIMEOUT_SEC="${MANAGEMENT_TIMEOUT_SEC:-5}"
+
+# Match reloadstall's base_prefix(idx) exactly for stub 1's first route:
+# own_slice(1) starts at global index SOAK_ROUTES_PER_PEER. Stub 1 is stable
+# while the designated stub 0 is deliberately withdrawn during trip cycles.
+management_route_prefix() {
+    local routes_per_peer=$1
+    if [[ ! $routes_per_peer =~ ^[1-9][0-9]*$ ]]; then
+        echo "SOAK_ROUTES_PER_PEER must be a positive decimal integer" >&2
+        return 2
+    fi
+    # 20 + (idx >> 16) must remain an IPv4 octet. Compare as decimal text
+    # before shell arithmetic so an oversized environment value cannot wrap.
+    if ((${#routes_per_peer} > 8)) || \
+        ((${#routes_per_peer} == 8 && 10#$routes_per_peer > 15466495)); then
+        echo "SOAK_ROUTES_PER_PEER exhausts the reloadstall IPv4 base-prefix space" >&2
+        return 2
+    fi
+    local index=$((10#$routes_per_peer))
+    printf '%d.%d.%d.0/24\n' \
+        "$((20 + (index >> 16)))" \
+        "$(((index >> 8) & 255))" \
+        "$((index & 255))"
+}
+
+if ! MANAGEMENT_ROUTE_PREFIX=$(management_route_prefix "$SOAK_ROUTES_PER_PEER"); then
+    exit 2
+fi
+readonly MANAGEMENT_ROUTE_PREFIX
 
 # --- Derived ---
 TOTAL_PREFIXES=$((SOAK_PEERS * SOAK_ROUTES_PER_PEER))
@@ -99,6 +132,8 @@ CYCLES_LOG="$RUN_DIR/cycles.log"
 RUN_JSON="$RUN_DIR/run.json"
 RUSTBGPD_LOG="$RUN_DIR/rustbgpd.log"
 RELOADSTALL_LOG="$RUN_DIR/reloadstall.log"
+MANAGEMENT_LOAD_JSONL="$RUN_DIR/management-plane-load.jsonl"
+MANAGEMENT_LOAD_LOG="$RUN_DIR/management-plane-load.log"
 PROM_TMP="$RUN_DIR/.metrics.prom"
 
 # shellcheck source=tests/soak/host-lock.sh
@@ -135,12 +170,57 @@ terminate() {
 }
 
 H_PID=""
+MANAGEMENT_LOAD_PID=""
 DAEMON_PID=""
 SCEN=""
+MEASURED_START_MONOTONIC=""
+MEASURED_END_MONOTONIC=""
+
+monotonic_now() {
+    python3 -c 'import time; print(f"{time.monotonic():.9f}")'
+}
+
+validate_management_timing() {
+    python3 - "$MANAGEMENT_METRICS_INTERVAL_SEC" \
+        "$MANAGEMENT_CLI_INTERVAL_SEC" "$MANAGEMENT_TIMEOUT_SEC" <<'PY'
+import math
+import sys
+
+try:
+    values = [float(value) for value in sys.argv[1:]]
+except ValueError:
+    raise SystemExit(1)
+raise SystemExit(0 if all(math.isfinite(value) and value > 0 for value in values) else 1)
+PY
+}
+
+stop_management_load() {
+    local pid=${MANAGEMENT_LOAD_PID:-} rc=0 wait_tenths i
+    [[ -n $pid ]] || return 0
+    wait_tenths=$(python3 -c \
+        'import math,sys; print(math.ceil((float(sys.argv[1]) + 2) * 10))' \
+        "$MANAGEMENT_TIMEOUT_SEC")
+    if pid_running "$pid"; then
+        kill -TERM "$pid" 2>/dev/null || true
+        for ((i = 0; i < wait_tenths; i++)); do
+            pid_running "$pid" || break
+            sleep 0.1
+        done
+        if pid_running "$pid"; then
+            kill -KILL "$pid" 2>/dev/null || true
+            rc=1
+        fi
+    fi
+    wait "$pid" 2>/dev/null || rc=$?
+    MANAGEMENT_LOAD_PID=""
+    return "$rc"
+}
+
 cleanup() {
     local rc=$?
     trap - EXIT
     set +e
+    stop_management_load
     terminate "$H_PID"
     H_PID=""
     terminate "$DAEMON_PID"
@@ -355,7 +435,40 @@ sample_row() {
     fi
 }
 
+start_management_load() {
+    if [[ -e $MANAGEMENT_LOAD_JSONL || -e $MANAGEMENT_LOAD_LOG ]]; then
+        abort "management-plane evidence path already exists"
+    fi
+    python3 "$SOAK_SCRIPT_DIR/management_plane_load.py" \
+        --output "$MANAGEMENT_LOAD_JSONL" \
+        --metrics-url "http://127.0.0.1:${METRICS_PORT}/metrics" \
+        --rbgp "$RBGP" \
+        --socket "unix://$SCEN/grpc.sock" \
+        --peers "$SOAK_PEERS" \
+        --route-prefix "$MANAGEMENT_ROUTE_PREFIX" \
+        --metrics-interval "$MANAGEMENT_METRICS_INTERVAL_SEC" \
+        --cli-interval "$MANAGEMENT_CLI_INTERVAL_SEC" \
+        --timeout "$MANAGEMENT_TIMEOUT_SEC" \
+        >"$MANAGEMENT_LOAD_LOG" 2>&1 &
+    MANAGEMENT_LOAD_PID=$!
+    for _ in $(seq 1 50); do
+        if grep -q '"record":"start"' "$MANAGEMENT_LOAD_JSONL" 2>/dev/null; then
+            log "management-plane load started pid=$MANAGEMENT_LOAD_PID"
+            return 0
+        fi
+        pid_running "$MANAGEMENT_LOAD_PID" || break
+        sleep 0.1
+    done
+    local rc=0
+    wait "$MANAGEMENT_LOAD_PID" 2>/dev/null || rc=$?
+    MANAGEMENT_LOAD_PID=""
+    abort "management-plane load failed before its start record (rc=$rc)"
+}
+
 write_run_json() {
+    local tmp="$RUN_JSON.tmp" measured_start=null measured_end=null
+    [[ -n $MEASURED_START_MONOTONIC ]] && measured_start=$MEASURED_START_MONOTONIC
+    [[ -n $MEASURED_END_MONOTONIC ]] && measured_end=$MEASURED_END_MONOTONIC
     {
         echo "{"
         printf '  "run_id": "%s",\n' "$RUN_ID"
@@ -379,9 +492,17 @@ write_run_json() {
         printf '  "trip_final_quiesce_sec": %d,\n' "$TRIP_FINAL_QUIESCE_SEC"
         printf '  "listen_port": %d,\n' "$LISTEN_PORT"
         printf '  "metrics_port": %d,\n' "$METRICS_PORT"
+        printf '  "management_load_file": "management-plane-load.jsonl",\n'
+        printf '  "management_metrics_interval_sec": %s,\n' "$MANAGEMENT_METRICS_INTERVAL_SEC"
+        printf '  "management_cli_interval_sec": %s,\n' "$MANAGEMENT_CLI_INTERVAL_SEC"
+        printf '  "management_timeout_sec": %s,\n' "$MANAGEMENT_TIMEOUT_SEC"
+        printf '  "management_route_prefix": "%s",\n' "$MANAGEMENT_ROUTE_PREFIX"
+        printf '  "measured_start_monotonic": %s,\n' "$measured_start"
+        printf '  "measured_end_monotonic": %s,\n' "$measured_end"
         printf '  "designated_member": "%s"\n' "$DESIGNATED_ADDR"
         echo "}"
-    } >"$RUN_JSON"
+    } >"$tmp"
+    mv "$tmp" "$RUN_JSON"
 }
 
 main() {
@@ -394,6 +515,10 @@ main() {
     for tool in cargo curl awk python3 ss flock git ps df mktemp timeout; do
         require_tool "$tool"
     done
+    if ! validate_management_timing; then
+        log "ERROR: management-plane intervals and timeout must be finite positive numbers"
+        exit 2
+    fi
 
     if ! ports_free; then
         log "ERROR: port $LISTEN_PORT or $METRICS_PORT is already in use — refusing to start (not killing unknown processes)"
@@ -461,7 +586,11 @@ main() {
         (($(date +%s) < converge_deadline)) || abort "convergence exceeded ${CONVERGE_CAP_SEC}s"
         sleep 1
     done
-    log "engine converged; sampling starts (interval=${SAMPLE_INTERVAL}s warmup=${WARMUP_SEC}s)"
+    log "engine converged; starting management-plane load"
+    start_management_load
+    MEASURED_START_MONOTONIC=$(monotonic_now)
+    write_run_json
+    log "sampling starts (interval=${SAMPLE_INTERVAL}s warmup=${WARMUP_SEC}s)"
 
     echo "timestamp,elapsed_sec,rss_mb,intern_size,established,flaps_total,msgs_sent_total,max_prefix_exceeded_total,readyz_code,readyz_ms" >"$SAMPLES_CSV"
     local start_epoch now next_sample overall_deadline
@@ -472,9 +601,11 @@ main() {
     while :; do
         now=$(date +%s)
         if ! pid_running "$H_PID"; then
+            MEASURED_END_MONOTONIC=$(monotonic_now)
             process_log
             break
         fi
+        pid_running "$MANAGEMENT_LOAD_PID" || abort "management-plane load exited before engine"
         pid_running "$DAEMON_PID" || abort "daemon died mid-soak"
         process_log
         trip_evidence_tick
@@ -490,6 +621,10 @@ main() {
     wait "$H_PID" || hrc=$?
     H_PID=""
     ((hrc == 0)) || abort "engine exited non-zero: $hrc"
+    if ! stop_management_load; then
+        abort "management-plane load did not terminate cleanly"
+    fi
+    write_run_json
     if [[ -n $TRIP_N ]]; then
         # Drain the last trip's headroom evidence (bounded). When the last
         # trip rides the last reload, the engine holds every session up for
@@ -503,7 +638,7 @@ main() {
             sleep 1
         done
     fi
-    log "engine completed cleanly; running analyzer"
+    log "engine and management-plane load completed cleanly; running analyzer"
 
     terminate "$DAEMON_PID"
     DAEMON_PID=""

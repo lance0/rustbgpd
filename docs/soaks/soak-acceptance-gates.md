@@ -211,7 +211,7 @@ every post-warmup sample; `tenant_present` ↔ `pe1_observed_routes`
 agree within one sample interval (wake-path latency ceiling);
 `churn_cycles` strictly monotone.
 
-### 10. Route-server flagship (SIGHUP reload + max-prefix trip) — `run-soak-rs-flagship.sh` (`analyze-soak-rs-flagship.py`)
+### 10. Route-server flagship (reload + max-prefix + management-plane load) — `run-soak-rs-flagship.sh` (`analyze-soak-rs-flagship.py`)
 
 The flagship shape on a bare-host daemon: 1000 real eBGP route-server-client
 sessions × 400 routes each (400 k total), driven by the
@@ -222,6 +222,20 @@ engine's generation-marker completion barriers, and a max-prefix
 trip/timed-restart cycle every `TRIP_INTERVAL_SEC` (default 14 400 s →
 6/24 h) on the designated member (stub 0, `127.1.0.1`,
 `max_prefixes = routes + 50`, `max_prefix_restart_seconds = 120`).
+
+The measured window also carries mandatory management-plane load, started
+after convergence and before sampling. Four independent monotonic schedules
+exercise the shipped surfaces until the engine exits: HTTP `/metrics` every
+1 s, plus `rbgp --json neighbor`,
+`rbgp --json policy stats --direction both`, and
+an exact RIB lookup over the existing UDS every 5 s. The lookup is stub 1's
+first route, derived independently from `SOAK_ROUTES_PER_PEER` using the
+reloadstall base-prefix mapping (`20.1.144.0/24` at flagship scale); stub 0
+remains reserved for the intentional max-prefix trip. Each attempt has a 5 s
+timeout and no retry. Evidence is bounded JSONL: it
+retains schedule/start/completion time, operation, duration, exit/result,
+response bytes, and SHA-256 only, followed by one atomic clean-SIGTERM
+summary. Response payloads are never retained.
 
 RSS bounds rationale: the ceiling is calibrated from the
 `bench/scale/route-server-1000` retained receipt, whose one-shot
@@ -250,6 +264,8 @@ never as silent green.
 | Intern-table late-window slope | < 100 entries/h over the same window (the scenario's attribute universe is fixed; reload re-interning must return to plateau) | `bgp_rib_attr_intern_global_size` → CSV `intern_size` | Every reload re-interns per-chain attributes; GC reclaims after transition. |
 | Counter monotonicity (no restart) | `bgp_messages_sent_total` never decreases between samples | CSV `msgs_sent_total` | Advances with every keepalive/UPDATE across 1000 sessions; a decrease means a daemon restart (abort criterion). |
 | readyz availability | HTTP 200 within 250 ms on every sample (the route-server-1000 receipt enforces this bound during reloads at this exact shape) | CSV `readyz_code`, `readyz_ms` | Probed every sample, including mid-reload and mid-trip. |
+| Management-load lifetime and cadence | Load start ≤ measured-window start and load end ≥ measured-window end; all four operations present; each operation completes ≥ 90% of its scheduled attempts; zero missed cadence slots; terminal summary is the final complete JSONL record and its counts/configuration match independently observed records plus `run.json` | `management-plane-load.jsonl` start/operation/summary records + monotonic window bounds and exact intervals in `run.json` | The runner starts the load only after the engine convergence marker, aborts if it exits while the engine lives, then SIGTERMs and reaps it before analysis. Smoke interval knobs remain fail-closed because both evidence sources must agree. |
+| Management-load correctness | Zero non-200 or empty metrics responses; zero CLI exits/timeouts; zero malformed JSON, wrong-root/schema, neighbor-cardinality, policy-chain-shape, or exact-prefix RIB failures | Per-operation `exit`, `result`, `bytes`, and SHA-256 in the bounded JSONL; neighbor array cardinality must equal configured peers, policy root must contain a `chains` array, and the route array must contain exactly the independently recomputed stub 1 first prefix | Every attempt validates the live response before discarding its payload. There is no enable/skip switch and no retry that can hide a failed attempt. |
 | Minimum sample count | ≥ 0.9 × (`SOAK_SECONDS` ÷ `SAMPLE_INTERVAL`) | CSV row count | One row per interval; scrape failures skip the row (and ≥ 5 consecutive failures abort). |
 | No abort record | zero `ABORT:` lines | `cycles.log` | The runner writes one before any fail-closed exit (daemon death, blind sampler, evidence deadline, disk floor, watchdog). |
 
