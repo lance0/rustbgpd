@@ -749,7 +749,7 @@ self_test_import_explain_readiness() {
         if [ "$count" -lt 3 ]; then
             printf 'outcome: not_seen\n'
         else
-            printf 'matched policy: m102-import\n'
+            printf 'policy:  m102-import\n'
         fi
     }
     sleep() { :; }
