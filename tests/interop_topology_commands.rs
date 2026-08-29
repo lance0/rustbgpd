@@ -2074,6 +2074,7 @@ fn m104_current_arouteserver_differential_is_exact_and_keeps_m90_immutable() {
         "swapped",
         "wrong_manifest",
         "ambiguous",
+        "unrelated",
         "missing_descriptor",
         "missing_repo",
         "wrong_id",

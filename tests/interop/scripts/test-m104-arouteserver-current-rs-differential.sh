@@ -145,10 +145,8 @@ validate_arouteserver_image_identity() {
     local_id=$(jq -er '.[0].Id' <<<"$image_metadata")
     repo_digests=$(jq -ec '.[0].RepoDigests' <<<"$image_metadata")
     descriptor_digest=$(jq -r '.[0].Descriptor.digest // empty' <<<"$image_metadata")
-    if ! jq -e --arg expected "$ARS_IMAGE" --arg repository 'pierky/arouteserver@' '
-        all(.[]; type == "string") and
-        ([.[] | select(. == $expected)] | length == 1) and
-        all(.[] | select(startswith($repository)); . == $expected)
+    if ! jq -e --arg expected "$ARS_IMAGE" '
+        . == [$expected]
     ' <<<"$repo_digests" >/dev/null; then
         echo "ERROR: ARouteServer RepoDigests do not identify only the pinned manifest" >&2
         return 1
@@ -617,6 +615,9 @@ self_test_offline_contract() {
     ambiguous=$(jq -c \
         '.[0].RepoDigests += ["pierky/arouteserver@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"]' \
         <<<"$containerd")
+    unrelated=$(jq -c --arg digest "$ARS_MANIFEST_DIGEST" \
+        '.[0].RepoDigests += ["registry.example/unrelated@" + $digest]' \
+        <<<"$containerd")
     missing_descriptor=$(jq -c '.[0] | del(.Descriptor) | [.]' <<<"$containerd")
     missing_repo=$(jq -c '.[0] | del(.RepoDigests) | [.]' <<<"$containerd")
     wrong_id=$(jq -c \
@@ -629,6 +630,7 @@ self_test_offline_contract() {
     reject_arouteserver_identity_fixture swapped "$swapped" "$manifest"
     reject_arouteserver_identity_fixture wrong_manifest "$wrong_manifest" "$manifest"
     reject_arouteserver_identity_fixture ambiguous "$ambiguous" "$manifest"
+    reject_arouteserver_identity_fixture unrelated "$unrelated" "$manifest"
     reject_arouteserver_identity_fixture missing_descriptor "$missing_descriptor" "$manifest"
     reject_arouteserver_identity_fixture missing_repo "$missing_repo" "$manifest"
     reject_arouteserver_identity_fixture wrong_id "$wrong_id" "$manifest"
