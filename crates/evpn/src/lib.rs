@@ -79,7 +79,6 @@
 //! `RemoteMacEntry`, plus the ADR-0083 single-active eligible-set /
 //! backup-PE derivation), `df_election` (Gate 8 RFC 7432 §8.5),
 //! `label_allocator` (Gate 8b per-ESI EVPN label),
-//! `mass_withdraw` (Gate 8b RFC 7432 §8.4 receive-side filter),
 //! `projection` (RIB → `RemoteMacTable` with same-AF
 //! invariant enforcement).
 //!
@@ -101,7 +100,6 @@ pub mod ip_vrf;
 pub mod label_allocator;
 pub mod mac;
 pub mod managed_netdev;
-pub mod mass_withdraw;
 pub mod origination;
 pub mod origination_es;
 pub mod origination_macip;
@@ -152,7 +150,6 @@ pub use managed_netdev::{
     parse_ownership_stamp, svd_vxlan_ownership_stamp, vlan_upper_ownership_stamp,
     vrf_ownership_stamp, vxlan_ownership_stamp,
 };
-pub use mass_withdraw::{AsPathFingerprint, AsPathTracker, MassWithdrawTrigger};
 pub use origination::{LocalMacOriginator, OriginationAction, RemoteMacView};
 pub use origination_es::{LocalEadPerEsOriginator, LocalEadPerEviOriginator, LocalEsOriginator};
 pub use origination_macip::{LocalMacIpOriginator, MacIpKey, RemoteMacIpView};

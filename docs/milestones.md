@@ -672,7 +672,7 @@ for the architectural record.
   aliasing receive-side projection
   (`crates/evpn/src/aliasing.rs`), RFC 7432 §8.4 receive-side
   EAD-per-ES mass-withdraw filtering
-  (`crates/evpn/src/mass_withdraw.rs`), and kernel BUM-port
+  (`src/evpn_dataplane.rs`), and kernel BUM-port
   enforcement (RFC 7432 §8.5) via `apply_bum_enforcement`, default-on
   since v0.23.0 with explicit `false` as the observe-only opt-out. The
   enforcement primitive flips `flood off / mcast_flood off /
@@ -1067,7 +1067,7 @@ to the plain capability they delivered.
   CI under a Docker harness with `CAP_NET_ADMIN + CAP_SYS_ADMIN`. RFC 7432 §14
   aliasing receive-side projection (`crates/evpn/src/aliasing.rs`) and §8.4
   receive-side EAD-per-ES mass-withdraw filtering
-  (`crates/evpn/src/mass_withdraw.rs`) landed alongside. BUM-port enforcement and
+  (`src/evpn_dataplane.rs`) landed alongside. BUM-port enforcement and
   aliasing ECMP became production defaults (`apply_bum_enforcement` /
   `apply_aliasing_ecmp` default `true`, explicit `false` opt-out) since v0.23.0,
   after the BUM-state 24 h MAC-churn soak and the M37 local-origination 24 h soak

@@ -223,13 +223,6 @@ landing, tracked here for visibility)
   that can reach the segment. Shovel-ready for the projection
   layer's `RemoteMacEntry::alias_vtep_ips` wiring slice and the
   dataplane's ECMP-to-multiple-VTEPs forwarding slice.
-- [x] **Mass-withdraw `AS_PATH`-change detector landed**
-  (`crates/evpn/src/mass_withdraw.rs`). Pure-logic
-  `AsPathTracker` with `record_advertisement` / `record_withdrawal`
-  / `drop_origin_vtep`. Returns
-  `MassWithdrawTrigger { origin_vtep, esi }` for fingerprint
-  changes. The RIB-side sweep that consumes triggers remains a
-  follow-up integration slice.
 - [x] **Aliasing receive-side projection + dataplane wiring
   landed.** The daemon's projection layer resolves
   `RemoteMacEntry::alias_vtep_ips` for non-zero-ESI Type 2 routes
@@ -267,15 +260,12 @@ landing, tracked here for visibility)
   network-namespace privileges before setting `EVPN_LINUX_NETNS=1`
   and running the gated cargo test binaries sequentially.
 - [x] **Mass-withdraw receive-side filter landed (RFC 7432 §8.4).**
-  The supervisor's `build_remote_mac_table` snapshots EAD-per-ES
-  routes from the RIB on every pass and drops any Type 2 with
-  non-zero ESI whose `(origin VTEP next-hop, ESI)` isn't in that
-  snapshot. When a PE withdraws its EAD-per-ES, all that PE's MACs
-  for the segment disappear from the next supervisor pass (≤5s).
-  Stateless, no event-tracking state machine in the supervisor — the
-  `mass_withdraw::AsPathTracker` shipped earlier remains for
-  future event-driven RIB-side work where sub-poll latency
-  matters.
+  The stateless projection in `src/evpn_dataplane.rs` derives
+  EAD-per-ES reachability from each RIB snapshot. Missing EAD-per-ES
+  flushes all-active routes and single-active routes with no eligible
+  survivor; a single-active route with eligible survivors remains
+  projected and is retargeted to the selected survivor. RIB route-event
+  wakeups prompt recomputation, with the periodic reconcile as backstop.
 - [x] **Gate 8b — multi-homing enforcement validated under MAC
   churn.** The MAC-churn 24 h soak passed (slice 1 below). Slice 2
   (optional import-side ES-Import RT filtering) is a separable

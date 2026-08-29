@@ -173,6 +173,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `regression-gate-passed` / `max-regression` instead of the advisory or
   pinned statuses it did not run under. (LAN-1316)
 
+### Removed
+
+- Remove the unused EVPN `mass_withdraw` tracker API; receive-side
+  mass-withdraw remains the stateless, route-event-driven projection owned by
+  the daemon dataplane supervisor.
+
 ### Fixed
 
 - The unpublished RIB crate no longer exposes unrestricted mutable Adj-RIB-In
