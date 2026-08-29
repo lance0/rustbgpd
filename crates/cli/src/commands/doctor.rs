@@ -1088,7 +1088,7 @@ fn admin_enabled_inventory(metrics: &str) -> Option<AdminEnabledInventory> {
             }
         }
     }
-    Some(inventory)
+    (!inventory.peers.is_empty()).then_some(inventory)
 }
 
 fn gtsm_advisory_check(
@@ -2791,6 +2791,7 @@ ttl_security_hops = 3
                 "metric evidence must suppress: {metrics:?}"
             );
         }
+        assert!(admin_enabled_inventory("unrelated 1").is_none());
     }
 
     #[test]
