@@ -115,10 +115,12 @@ mechanism; it is out of scope here.
   `group_members` already define the portable NHG intent; the Linux
   reconcile actor programs it. Single-active is currently the one
   multi-homed shape that bypasses this entire stack.
-- **Mass-withdraw** (`crates/evpn/src/mass_withdraw.rs` + the
-  `project_one` gate): EAD-per-ES withdrawal currently means "drop the
-  MACs". This ADR changes its meaning for single-active segments that
-  still have an eligible backup.
+- **Mass-withdraw projection** (`src/evpn_dataplane.rs`): the daemon
+  derives EAD-per-ES reachability statelessly from each RIB snapshot;
+  route-event wakeups trigger prompt recomputation and the periodic
+  reconcile is the backstop. EAD-per-ES withdrawal currently means
+  "drop the MACs". This ADR changes its meaning for single-active
+  segments that still have an eligible backup.
 - **ADR-0079 adoption sweeps**: NHG-tagged FDB rows are explicitly
   excluded from the single-dst FDB adoption sweep (the ADR-0059 drift
   sweep owns them), and ADR-0079 records the NHG reap-cascade hazard.
@@ -171,7 +173,7 @@ answer.**
    authoritative. Lowest-IP is honest about being arbitrary.
 3. **Switchover trigger: EAD-per-ES withdrawal, reinterpreted.** For a
    single-active `(origin VTEP, ESI)` with a non-empty remaining
-   eligible set, the `MassWithdrawTrigger` no longer sweeps the MAC
+   eligible set, the recomputed projection no longer sweeps the MAC
    rows; it drives one `add_fdb_group` (`NLM_F_REPLACE`) per affected
    `(ESI, EthernetTag)` group — groups are keyed per Ethernet Tag, so
    an ES spanning several tags takes one replace each — swapping that
@@ -324,11 +326,10 @@ answer.**
   a single-active ES behind an L3VNI keeps its L3 reconvergence-speed
   behavior until a follow-up extends the same eligible-set function to
   the L3 next-hop choice.
-- **Eligible-set flap hygiene.** A flapping EAD-per-ES (e.g. the
-  AS_PATH-change heuristic in `mass_withdraw.rs`) now drives NHG
-  membership replaces instead of MAC flushes — cheaper, but still
-  worth damping observation if a segment flaps fast; the drift sweep's
-  cadence is the backstop, not the rate limiter.
+- **Eligible-set flap hygiene.** A flapping EAD-per-ES drives
+  route-event-triggered NHG membership replaces instead of MAC flushes —
+  cheaper, but still worth damping observation if a segment flaps fast; the
+  drift sweep's cadence is the backstop, not the rate limiter.
 
 ## Consequences
 
@@ -354,7 +355,7 @@ answer.**
      groups through the existing reconcile actor; pre-create the
      backup per-VTEP NH (ref-counted, not a member); row-shape
      migration verification (hazard above).
-  3. **Swap path**: prompt recompute on `MassWithdrawTrigger` for
+  3. **Swap path**: prompt recompute on an EAD-per-ES route event for
      single-active segments; single-message membership replace;
      ordered teardown when the eligible set empties; the
      `single_active_backup_active` observability surface.
@@ -417,8 +418,7 @@ answer.**
   <https://github.com/FRRouting/frr/blob/master/zebra/zebra_evpn_mh.c>
 - FRR EVPN docs — All-Active multihoming only:
   <https://docs.frrouting.org/en/latest/evpn.html>
-- Our machinery: `crates/evpn/src/aliasing.rs`,
-  `crates/evpn/src/mass_withdraw.rs`, `src/evpn_dataplane.rs`
+- Our machinery: `crates/evpn/src/aliasing.rs`, `src/evpn_dataplane.rs`
   (`fold_ead_per_es_modes`, `project_ead_per_evi`, `project_one`),
   `crates/evpn-linux/src/group_state.rs`,
   `crates/evpn-linux/src/nh_id_alloc.rs`,

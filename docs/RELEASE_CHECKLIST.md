@@ -521,9 +521,9 @@ suppression — `crates/evpn/src/origination_macip.rs`), also run
 M37+IP. If the release touches **Gate 8 / 8b** (Type 1/4 origination
 in `crates/evpn/src/origination_es.rs`, DF election in
 `crates/evpn/src/df_election.rs`, ESI Label / ES-Import RT extcomms,
-aliasing in `crates/evpn/src/aliasing.rs`, mass-withdraw in
-`crates/evpn/src/mass_withdraw.rs`, or BUM-port intent/enforcement in
-`crates/evpn/src/dataplane.rs`, `src/evpn_dataplane.rs`,
+aliasing in `crates/evpn/src/aliasing.rs`, receive-side mass-withdraw
+projection and BUM-port supervision in `src/evpn_dataplane.rs`, or
+BUM-port intent/enforcement in `crates/evpn/src/dataplane.rs`,
 `src/evpn_segment.rs`,
 `crates/evpn-linux/src/bum_filter.rs`,
 `crates/evpn-linux/src/enforcement.rs`, or
