@@ -335,10 +335,22 @@ run_consumer() {
     "$image" php /harness/oracle-consumer.php >"$2"
   [ -s "$2" ]
 }
+capture_sha256() {
+  sha256_output=$(sha256sum "$1") || return 1
+  sha256_digest=${sha256_output%% *}
+  [ "$sha256_digest" != "$sha256_output" ] || return 1
+  printf '%s\n' "$sha256_digest"
+}
 run_consumer "$oracle_api" "$capture_output/populated-oracle.raw.json"
 run_consumer "$live_api" "$capture_output/populated-live.raw.json"
-oracle_capture_sha256=$(sha256sum "$capture_output/populated-oracle.raw.json" | cut -d' ' -f1)
-live_capture_sha256=$(sha256sum "$capture_output/populated-live.raw.json" | cut -d' ' -f1)
+oracle_capture_sha256=$(capture_sha256 "$capture_output/populated-oracle.raw.json") || {
+  echo 'could not hash populated oracle capture' >&2
+  exit 1
+}
+live_capture_sha256=$(capture_sha256 "$capture_output/populated-live.raw.json") || {
+  echo 'could not hash populated live capture' >&2
+  exit 1
+}
 
 # Keep the four-peer oracle comparison and MANRS proof frozen above. This
 # fifth, live-only member is added through the public runtime API after both
@@ -437,11 +449,19 @@ timeout 60s python3 "$root/alice-consumer.py" \
 [ "$(grep -Fxc "$filtered_alice_proof" "$tmp/alice-filtered-consumer.out")" -eq 1 ]
 tail -n 20 "$tmp/alice-filtered-consumer.out" >&2
 
-[ "$oracle_capture_sha256" = "$(sha256sum "$capture_output/populated-oracle.raw.json" | cut -d' ' -f1)" ] || {
+oracle_capture_sha256_after=$(capture_sha256 "$capture_output/populated-oracle.raw.json") || {
+  echo 'could not re-hash populated oracle capture' >&2
+  exit 1
+}
+live_capture_sha256_after=$(capture_sha256 "$capture_output/populated-live.raw.json") || {
+  echo 'could not re-hash populated live capture' >&2
+  exit 1
+}
+[ "$oracle_capture_sha256" = "$oracle_capture_sha256_after" ] || {
   echo 'populated oracle capture changed during the fifth-peer proof' >&2
   exit 1
 }
-[ "$live_capture_sha256" = "$(sha256sum "$capture_output/populated-live.raw.json" | cut -d' ' -f1)" ] || {
+[ "$live_capture_sha256" = "$live_capture_sha256_after" ] || {
   echo 'populated live capture changed during the fifth-peer proof' >&2
   exit 1
 }
