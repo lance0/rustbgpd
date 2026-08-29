@@ -121,7 +121,7 @@ def analyze_management_load(raw: bytes, meta: dict) -> dict:
 
     if not raw.endswith(b"\n"):
         schema_errors.append("JSONL does not end with a complete record")
-    lines = raw.splitlines()
+    lines = raw.splitlines(keepends=True)
     records: list[dict] = []
     for line_number, encoded in enumerate(lines, 1):
         if len(encoded) > MANAGEMENT_RECORD_LIMIT:

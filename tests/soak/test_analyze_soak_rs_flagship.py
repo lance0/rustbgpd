@@ -420,6 +420,54 @@ class RsFlagshipAnalyzerContracts(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertFalse(payload["gates"]["management_evidence"]["pass"])
 
+    def test_management_record_limit_counts_physical_line_ending(self):
+        meta = smoke_meta()
+        original_lines = management_jsonl(meta).splitlines()
+        operation_index = next(
+            index for index, encoded in enumerate(original_lines)
+            if json.loads(encoded).get("record") == "operation"
+        )
+        operation = json.loads(original_lines[operation_index])
+
+        for ending, admitted_size, rejected_size in (
+            (b"\n", 4095, 4096),
+            (b"\r\n", 4094, 4095),
+        ):
+            for payload_size, expected_size_error in (
+                (admitted_size, False),
+                (rejected_size, True),
+            ):
+                with self.subTest(
+                    ending=ending,
+                    payload_size=payload_size,
+                ):
+                    padded = dict(operation, padding="")
+                    encoded = json.dumps(padded, separators=(",", ":")).encode()
+                    padded["padding"] = "x" * (payload_size - len(encoded))
+                    encoded = json.dumps(padded, separators=(",", ":")).encode()
+                    self.assertEqual(len(encoded), payload_size)
+                    self.assertEqual(
+                        len(encoded + ending),
+                        payload_size + len(ending),
+                    )
+
+                    physical_lines = [line + b"\n" for line in original_lines]
+                    physical_lines[operation_index] = encoded + ending
+                    result, payload = run_analyzer(
+                        smoke_rows(), smoke_cycles(), meta,
+                        management=b"".join(physical_lines),
+                    )
+                    errors = payload["gates"]["management_evidence"]["value"][
+                        "errors"
+                    ]
+                    size_error = any("record exceeds bound" in error for error in errors)
+                    self.assertEqual(size_error, expected_size_error)
+                    if expected_size_error:
+                        self.assertEqual(result.returncode, 1)
+                    else:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(payload["verdict"], "pass")
+
     def test_malformed_operations_do_not_count_toward_derived_gates(self):
         meta = smoke_meta()
         records = [json.loads(line) for line in management_jsonl(meta).splitlines()]
