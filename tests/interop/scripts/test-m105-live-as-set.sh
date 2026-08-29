@@ -153,6 +153,7 @@ m105_on_exit() {
             docker exec "$container" cat "$path" \
                 >"$ARTIFACT_DIR/${name}.partial.log" 2>/dev/null || true
         done
+        docker logs "$FRR" >"$ARTIFACT_DIR/frr.partial.log" 2>&1 || true
     fi
     cleanup_capture
     _cleanup_on_exit
