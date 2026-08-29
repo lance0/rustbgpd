@@ -1109,6 +1109,7 @@ def check(root: Path) -> list[str]:
         "cache-from: type=gha,scope=bird2192-m104": 1,
         "cache-to: type=gha,mode=max,scope=bird2192-m104,ignore-error=true": 1,
         "name: Build gobgp:v4.8.0-m104": 1,
+        "uses: ./.github/actions/install-protobuf": 1,
         "--build-arg TARGETARCH=amd64": 1,
         "--build-arg GOBGP_VERSION=4.8.0": 1,
         "--build-arg GOBGP_SHA256=43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03": 1,
@@ -1132,10 +1133,11 @@ def check(root: Path) -> list[str]:
             "interop.yml:m104: current ARouteServer differential semantics drifted"
         )
     m104_context = m104.find("name: Run immutable M90 context proof (exact 23/23)")
+    m104_protobuf = m104.find("uses: ./.github/actions/install-protobuf")
     m104_live = m104.find("name: Run M104 (single-attempt current-daemon differential)")
-    if not (0 <= m104_context < m104_live):
+    if not (0 <= m104_protobuf < m104_context < m104_live):
         errors.append(
-            "interop.yml:m104: context proof must precede the live differential"
+            "interop.yml:m104: protoc must precede the context proof and live differential"
         )
     for forbidden in (
         "pierky/arouteserver:latest",

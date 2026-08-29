@@ -2115,10 +2115,16 @@ fn m104_current_arouteserver_differential_is_exact_and_keeps_m90_immutable() {
     let context = m104
         .find("Run immutable M90 context proof (exact 23/23)")
         .unwrap();
+    let protobuf = m104
+        .find("uses: ./.github/actions/install-protobuf")
+        .unwrap();
     let live = m104
         .find("Run M104 (single-attempt current-daemon differential)")
         .unwrap();
-    assert!(context < live, "M104 context proof must precede live proof");
+    assert!(
+        protobuf < context && context < live,
+        "M104 must install protoc before the context proof and run that proof before live"
+    );
     for required in [
         "needs: [grpcurl_archive, bird2192_archive, prime_dev_image]",
         "PROOF PASS: 23 checks",

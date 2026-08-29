@@ -1725,6 +1725,7 @@ class PrimerContractTests(unittest.TestCase):
             "          cache-from: type=gha,scope=bird2192-m104\n",
             "          cache-to: type=gha,mode=max,scope=bird2192-m104,ignore-error=true\n",
             "      - name: Build gobgp:v4.8.0-m104\n",
+            "      - uses: ./.github/actions/install-protobuf\n",
             "          -t gobgp:v4.8.0-m104 -f tests/interop/Dockerfile.gobgp-v47 tests/interop\n",
             "      - name: Run immutable M90 context proof (exact 23/23)\n",
             "          M90_ARS_IMAGE: pierky/arouteserver@sha256:ba0e9c0b541c63acf0765a08fd2e09c2bba9dc64af1f5bbdce7819e8d1c34d66\n",
