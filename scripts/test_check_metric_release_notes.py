@@ -30,6 +30,7 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
             added,
             {
                 "bgp_evpn_nlri_discarded_total",
+                "bgp_dataplane_reconcile_planning_failures_total",
                 "bgp_path_attribute_discarded_total",
                 "bgp_peer_session_state",
                 "bgp_rib_policy_transition_total",

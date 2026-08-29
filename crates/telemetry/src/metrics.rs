@@ -457,6 +457,7 @@ struct BgpMetricsInner {
     fib_routes_rejected: IntCounterVec,
     fib_routes_unresolved: IntGauge,
     fib_kernel_failures: IntCounterVec,
+    dataplane_reconcile_planning_failures: IntCounterVec,
     kernel_route_notify_dropped: IntCounterVec,
     kernel_route_notify_subscription_failures: IntCounterVec,
     netlink_subscription_overruns: IntCounterVec,
@@ -1529,6 +1530,20 @@ impl BgpMetrics {
             &["action"],
         )
         .expect("valid metric definition");
+
+        let dataplane_reconcile_planning_failures = IntCounterVec::new(
+            Opts::new(
+                "bgp_dataplane_reconcile_planning_failures_total",
+                "Pre-kernel dataplane reconcile planning failures by actor and bounded reason.",
+            ),
+            &["actor", "reason"],
+        )
+        .expect("valid metric definition");
+        for actor in ["general_fib", "blackhole_discard"] {
+            for reason in ["send_failed", "reply_dropped", "query_failed", "timeout"] {
+                dataplane_reconcile_planning_failures.with_label_values(&[actor, reason]);
+            }
+        }
 
         let kernel_route_notify_dropped = IntCounterVec::new(
             Opts::new(
@@ -2626,6 +2641,9 @@ impl BgpMetrics {
             .register(Box::new(fib_kernel_failures.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(dataplane_reconcile_planning_failures.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(kernel_route_notify_dropped.clone()))
             .expect("metric not already registered");
         registry
@@ -3004,6 +3022,7 @@ impl BgpMetrics {
             fib_routes_rejected,
             fib_routes_unresolved,
             fib_kernel_failures,
+            dataplane_reconcile_planning_failures,
             kernel_route_notify_dropped,
             kernel_route_notify_subscription_failures,
             netlink_subscription_overruns,
@@ -4336,6 +4355,19 @@ impl BgpMetrics {
         self.0
             .fib_kernel_failures
             .with_label_values(&[action])
+            .inc();
+    }
+
+    /// Record one pre-kernel dataplane reconcile planning failure.
+    pub fn record_dataplane_reconcile_planning_failure(&self, actor: &str, reason: &str) {
+        debug_assert!(matches!(actor, "general_fib" | "blackhole_discard"));
+        debug_assert!(matches!(
+            reason,
+            "send_failed" | "reply_dropped" | "query_failed" | "timeout"
+        ));
+        self.0
+            .dataplane_reconcile_planning_failures
+            .with_label_values(&[actor, reason])
             .inc();
     }
 
@@ -6225,6 +6257,35 @@ mod tests {
             m.0.fib_kernel_failures.with_label_values(&["dump"]).get(),
             1
         );
+    }
+
+    #[test]
+    fn dataplane_planning_failure_labels_are_fully_bounded() {
+        let m = BgpMetrics::new();
+        for actor in ["general_fib", "blackhole_discard"] {
+            for reason in ["send_failed", "reply_dropped", "query_failed", "timeout"] {
+                assert_eq!(
+                    m.0.dataplane_reconcile_planning_failures
+                        .with_label_values(&[actor, reason])
+                        .get(),
+                    0
+                );
+                m.record_dataplane_reconcile_planning_failure(actor, reason);
+            }
+        }
+        let family = m
+            .registry()
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == "bgp_dataplane_reconcile_planning_failures_total")
+            .expect("planning failure family registered");
+        assert_eq!(family.get_metric().len(), 8);
+        assert!(family.get_metric().iter().all(|metric| {
+            metric
+                .get_counter()
+                .as_ref()
+                .is_some_and(|counter| (counter.value() - 1.0).abs() < f64::EPSILON)
+        }));
     }
 
     #[test]

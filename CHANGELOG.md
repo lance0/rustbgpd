@@ -11,6 +11,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `bgp_dataplane_reconcile_planning_failures_total{actor,reason}` exposes
+  bounded pre-kernel planning aborts for the general FIB and BLACKHOLE discard
+  reconcilers. Each abort emits one structured warning while preserving the
+  last successful status snapshot, ownership, unresolved/adoption bookkeeping,
+  and kernel state; general-FIB shutdown cancellation is not counted.
+
 - M101 adds a hosted three-node IPv4-unicast route-server receipt against
   checksum-built BIRD 3.3.2 and digest-pinned FRR 10.3.1. A BIRD-originated
   optional-transitive-partial type-40 attribute is pinned as the exact raw
