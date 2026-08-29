@@ -192,9 +192,23 @@ outside RFC 8212's default-deny and the RR soak runs zero reloads; the
 contract). Mutually exclusive with the `GEN_TRIP_*` knobs; absent, the
 emitted config is byte-for-byte the historical one.
 
-Cross-daemon cells (BIRD 3.3.1 / OpenBGPD 9.1) generate their route-server
-configs with `gen-bird-scenario.py` / `gen-obgpd-scenario.py` (same
-addressing contract) and are sequenced by `bench/scale/matrix/run-matrix.sh`.
+Cross-daemon cells generate their route-server configs with
+`gen-bird-scenario.py` / `gen-obgpd-scenario.py` (same addressing contract)
+and are sequenced by `bench/scale/matrix/run-matrix.sh`. The runner defaults
+to the frozen `historical` comparator generation (BIRD 3.3.1 / OpenBGPD 9.1).
+Set `COMPETITOR_GENERATION=current` to select the explicit current pair:
+
+- BIRD 3.3.2, built as `bird:v3.3.2-m101` from the checksum-pinned
+  `tests/interop/Dockerfile.bird-v332`;
+- OpenBGPD 9.2 at
+  `openbgpd/openbgpd@sha256:b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9`.
+
+The pair is not independently overridable. Initial runs record the requested
+reference and resolved image ID; resumes require both identities to match.
+The generators accept the same optional final `historical` / `current`
+selector. The first two version/image header comments are the only generated
+config differences; every remaining config line and all policy bytes are
+identical.
 
 Generate matching daemon configuration and policy generations with:
 
