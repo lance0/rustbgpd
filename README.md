@@ -36,11 +36,13 @@ reproducible receipt:
   points) vs BIRD 3.3.1's ~11.5–13.6 s, every member's received view
   byte-identical to the ungrouped per-client-best baseline, sampler RSS peak
   1,972–2,098 MiB vs BIRD's 1,375–1,420 MiB. The earlier
-  [per-client receipt](docs/perf/irr-reload-comparison-2026-08.md) measured
+  [per-client receipt](docs/perf/irr-reload-comparison-2026-08.md) (measured 2026-08-04)
+  measured
   67.2–69.4 s at this shape (~87–143 s once announcement overlap was
   modelled); [ADR-0126](docs/adr/0126-shared-group-per-client-best.md)'s
   shared winner walk, one per update group, is what changed it —
-  [grouped per-client-best receipt](docs/perf/irr-reload-grouped-per-client-best-2026-08.md)
+  [grouped per-client-best receipt](docs/perf/irr-reload-grouped-per-client-best-2026-08.md),
+  measured 2026-08-08
 - **Member-flap propagation** (50 members flap, 650 observers): re-announce
   p50 **0.49–0.55 s** vs BIRD's 2.9–3.7 s and OpenBGPD's 21.1–21.6 s;
   withdraw p50 0.31–0.47 s, also fastest — measured 2026-08-08,
