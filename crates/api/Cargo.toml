@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
-description = "gRPC API server — tonic bindings for the rustbgpd services (Global, Neighbor, Policy, PeerGroup, Rib, Injection, Control, Evpn)"
+description = "gRPC API server — tonic bindings for the rustbgpd management and diagnostic services"
 readme = "README.md"
 
 [features]
@@ -27,6 +27,7 @@ rustbgpd-transport.workspace = true
 rustbgpd-telemetry.workspace = true
 rustbgpd-evpn.workspace = true
 rustbgpd-event-history.workspace = true
+rustbgpd-rpki.workspace = true
 tonic.workspace = true
 tonic-prost.workspace = true
 tower.workspace = true

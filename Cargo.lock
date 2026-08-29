@@ -3071,6 +3071,7 @@ dependencies = [
  "rustbgpd-fsm",
  "rustbgpd-policy",
  "rustbgpd-rib",
+ "rustbgpd-rpki",
  "rustbgpd-telemetry",
  "rustbgpd-transport",
  "rustbgpd-wire",

@@ -193,6 +193,12 @@ shape itself does not raise the tier.
 |-----|------|-------|
 | `GetBfdSessions` | `sensitive_read` | ADR-0067 BFD session snapshot — peer addresses, state, diagnostics, and strict flag. |
 
+### RpkiService (1 RPC)
+
+| RPC | Tier | Notes |
+|-----|------|-------|
+| `ValidateRouteOrigin` | `sensitive_read` | Bounded origin-validation diagnostic over the current authoritative VRP table. Exposes effective covering ROAs and origin ASNs; outside the narrow v1 contract. |
+
 ### EventService (5 RPCs)
 
 | RPC | Tier | Notes |
@@ -252,13 +258,13 @@ shape itself does not raise the tier.
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 0 | 0.0% |
-| `sensitive_read` | 60 | 57.7% |
-| `mutating` | 20 | 19.2% |
-| `operator_only` | 24 | 23.1% |
-| **Total** | **104** | **100%** |
+| `sensitive_read` | 61 | 58.1% |
+| `mutating` | 20 | 19.0% |
+| `operator_only` | 24 | 22.9% |
+| **Total** | **105** | **100%** |
 
-(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 104
-total is 100 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
+(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 105
+total is 101 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
 
 ## Notes for ADR-0064
 
@@ -337,7 +343,7 @@ specific method if the model warrants it.
 
 ## Code matrix
 
-`crates/api/src/authz.rs` contains the same 104-method classification
+`crates/api/src/authz.rs` contains the same 105-method classification
 as a static Rust table. `docs/grpc-method-inventory.json` is the
 machine-readable export for auditors, tooling, and generated clients. The
 `authz` tests parse `proto/rustbgpd.proto` and fail if a new RPC is added

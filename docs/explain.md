@@ -244,11 +244,15 @@ rbgp rib received 198.51.100.2 --rejected
 # 2. Rejected with a reason token? Get the statement-level why.
 rbgp policy explain --neighbor 198.51.100.2 --prefix 203.0.113.0/24
 
-# 3. Accepted but another member doesn't see it? Walk the export ladder
+# 3. If RPKI drove the decision, inspect the current complete-table verdict
+#    and its bounded effective covering-VRP evidence.
+rbgp rpki validate 203.0.113.0/24 64501
+
+# 4. Accepted but another member doesn't see it? Walk the export ladder
 #    toward that member.
 rbgp rib --prefix 203.0.113.0/24 advertised 198.51.100.7 --explain
 
-# 4. Accepted but lost best-path selection? See what beat it.
+# 5. Accepted but lost best-path selection? See what beat it.
 rbgp rib --prefix 203.0.113.0/24 --explain
 ```
 

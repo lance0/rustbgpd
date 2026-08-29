@@ -5,6 +5,11 @@ Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+- Added `VrpTable::covering_vrps` and the `CoveringVrp` / `CoveringVrps`
+  result types. The helper walks only ancestor buckets, returns authorizers
+  first, applies a 256-row hard cap with exact omission, and exposes the
+  table's effective duplicate-collapsed VRPs without changing `validate`.
+
 ## 0.1.0 - 2026-08-27
 
 - Initial independent crate release with immutable VRP and ASPA tables, RFC

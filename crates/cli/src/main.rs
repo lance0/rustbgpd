@@ -152,6 +152,12 @@ enum Command {
         action: Option<BfdAction>,
     },
 
+    /// Validate a route origin against the current authoritative VRP table
+    Rpki {
+        #[command(subcommand)]
+        action: RpkiAction,
+    },
+
     /// Query and manage the RIB
     Rib {
         #[command(subcommand)]
@@ -1144,6 +1150,17 @@ enum BfdAction {
     Show {
         /// Peer address
         address: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum RpkiAction {
+    /// Validate one CIDR prefix and origin ASN
+    Validate {
+        /// Route prefix in CIDR form, for example 192.0.2.0/24
+        prefix: String,
+        /// Origin AS number (AS0 is rejected by the daemon)
+        origin_asn: u32,
     },
 }
 
@@ -2321,6 +2338,12 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             None => commands::bfd::list(connection, json).await,
         },
 
+        Command::Rpki { action } => match action {
+            RpkiAction::Validate { prefix, origin_asn } => {
+                commands::rpki::validate(connection, &prefix, origin_asn, json).await
+            }
+        },
+
         Command::Config { action } => match action {
             ConfigAction::Diff { candidate } => {
                 let has_changes = commands::config::diff(connection, &candidate, json).await?;
@@ -3445,7 +3468,7 @@ mod tests {
             ("README.md", 4),
             ("docs/QUICKSTART.md", 5),
             ("docs/cookbook/route-server.md", 3),
-            ("docs/explain.md", 5),
+            ("docs/explain.md", 6),
             ("docs/OPERATIONS.md", 2),
         ];
 
@@ -6257,5 +6280,28 @@ printf '%s\n' "${COMPREPLY[@]}"
         } else {
             panic!("expected PeerGroup Attach");
         }
+    }
+
+    #[test]
+    fn test_parse_rpki_validate() {
+        let cli = Cli::try_parse_from([
+            "rbgp",
+            "--json",
+            "rpki",
+            "validate",
+            "192.0.2.0/24",
+            "64496",
+        ])
+        .unwrap();
+        assert!(cli.json);
+        assert!(matches!(
+            cli.command,
+            Command::Rpki {
+                action: RpkiAction::Validate {
+                    ref prefix,
+                    origin_asn: 64_496,
+                },
+            } if prefix == "192.0.2.0/24"
+        ));
     }
 }

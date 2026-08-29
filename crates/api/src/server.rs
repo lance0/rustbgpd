@@ -57,7 +57,9 @@ use crate::proto::neighbor_service_server::NeighborServiceServer;
 use crate::proto::peer_group_service_server::PeerGroupServiceServer;
 use crate::proto::policy_service_server::PolicyServiceServer;
 use crate::proto::rib_service_server::RibServiceServer;
+use crate::proto::rpki_service_server::RpkiServiceServer;
 use crate::rib_service::RibService;
+use crate::rpki_service::{RpkiService, VrpSnapshotFn};
 use crate::runtime_config_settlement::{
     OwnedRuntimeConfigRequestContext, OwnedRuntimeConfigResponseAttachment,
     RuntimeConfigFenceReason, RuntimeConfigSettlementWatchdog,
@@ -996,6 +998,10 @@ pub struct ServeConfig {
     pub peer_mgr_readiness_tx: mpsc::Sender<PeerManagerReadinessQuery>,
     /// Dedicated type-narrow RIB lane used only by core readiness.
     pub rib_readiness_tx: mpsc::Sender<RibReadinessQuery>,
+    /// Narrow synchronous reader for the latest authoritative VRP table.
+    /// The closure clones the table Arc and releases its watch borrow before
+    /// returning; `None` means no first authoritative snapshot has arrived.
+    pub vrp_snapshot: VrpSnapshotFn,
     /// Optional MRT dump trigger channel (None if MRT not configured).
     pub mrt_trigger_tx: Option<MrtTriggerTx>,
     /// Live count provider for locally-originated Type 2 MAC routes
@@ -1500,6 +1506,7 @@ async fn run_listener(
     let start_time = config.start_time;
     let peer_mgr_readiness_tx = config.peer_mgr_readiness_tx;
     let rib_readiness_tx = config.rib_readiness_tx;
+    let vrp_snapshot = config.vrp_snapshot;
     let mrt_trigger_tx = config.mrt_trigger_tx;
     let evpn_originated_local_mac_count = config.evpn_originated_local_mac_count;
     let evpn_instance_status_snapshot = config.evpn_instance_status_snapshot;
@@ -1557,6 +1564,7 @@ async fn run_listener(
                 rib_tx,
                 rib_query_tx,
                 rib_readiness_tx,
+                vrp_snapshot.clone(),
                 peer_mgr_tx,
                 peer_mgr_readiness_tx,
                 asn,
@@ -1619,6 +1627,7 @@ async fn run_listener(
                 rib_tx,
                 rib_query_tx,
                 rib_readiness_tx,
+                vrp_snapshot,
                 peer_mgr_tx,
                 peer_mgr_readiness_tx,
                 asn,
@@ -1687,6 +1696,7 @@ async fn run_tcp_listener(
     rib_tx: mpsc::Sender<RibUpdate>,
     rib_query_tx: mpsc::Sender<RibUpdate>,
     rib_readiness_tx: mpsc::Sender<RibReadinessQuery>,
+    vrp_snapshot: VrpSnapshotFn,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     peer_mgr_readiness_tx: mpsc::Sender<PeerManagerReadinessQuery>,
     asn: u32,
@@ -1826,6 +1836,10 @@ async fn run_tcp_listener(
         BfdService::with_snapshot(bfd_session_snapshot),
         interceptor.clone(),
     ));
+    routes.add_service(RpkiServiceServer::with_interceptor(
+        RpkiService::new(vrp_snapshot),
+        interceptor.clone(),
+    ));
     routes.add_service(InjectionServiceServer::with_interceptor(
         InjectionService::new(rib_tx, access_mode),
         interceptor.clone(),
@@ -1954,6 +1968,7 @@ async fn run_uds_listener(
     rib_tx: mpsc::Sender<RibUpdate>,
     rib_query_tx: mpsc::Sender<RibUpdate>,
     rib_readiness_tx: mpsc::Sender<RibReadinessQuery>,
+    vrp_snapshot: VrpSnapshotFn,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     peer_mgr_readiness_tx: mpsc::Sender<PeerManagerReadinessQuery>,
     asn: u32,
@@ -2052,6 +2067,10 @@ async fn run_uds_listener(
     ));
     routes.add_service(BfdServiceServer::with_interceptor(
         BfdService::with_snapshot(bfd_session_snapshot),
+        interceptor.clone(),
+    ));
+    routes.add_service(RpkiServiceServer::with_interceptor(
+        RpkiService::new(vrp_snapshot),
         interceptor.clone(),
     ));
     routes.add_service(InjectionServiceServer::with_interceptor(
@@ -2776,6 +2795,19 @@ mod tests {
         );
         assert_eq!(context.authn(), GrpcAuthnKind::Uds);
         assert_eq!(context.principal(), "uds:/run/rustbgpd/grpc.sock");
+    }
+
+    #[test]
+    fn rpki_service_is_registered_on_tcp_and_uds() {
+        // There are exactly two listener route builders. Pin one registration
+        // in each so a future refactor cannot silently make the diagnostic
+        // available on only one transport.
+        let source = include_str!("server.rs");
+        let registration = concat!(
+            "routes.add_service(",
+            "RpkiServiceServer::with_interceptor("
+        );
+        assert_eq!(source.matches(registration).count(), 2);
     }
 
     /// Load-bearing: without a server-side deadline inside

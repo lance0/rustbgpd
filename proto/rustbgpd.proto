@@ -1913,6 +1913,53 @@ service BfdService {
   rpc GetBfdSessions(GetBfdSessionsRequest) returns (GetBfdSessionsResponse);
 }
 
+// ---------------------------------------------------------------------------
+// RpkiService — bounded route-origin validation diagnostics (outside narrow v1)
+// ---------------------------------------------------------------------------
+
+service RpkiService {
+  // Validate one route prefix and origin against the latest authoritative VRP
+  // snapshot. Covering VRPs are bounded to 256 effective rows; the validation
+  // verdict is computed from the complete table before diagnostic truncation.
+  rpc ValidateRouteOrigin(ValidateRouteOriginRequest) returns (ValidateRouteOriginResponse);
+}
+
+message ValidateRouteOriginRequest {
+  // Bare IPv4 or IPv6 address. CIDR text is rejected so prefix-length presence
+  // remains explicit and /0 is distinguishable from omission.
+  string prefix = 1;
+  optional uint32 prefix_length = 2;
+  // AS0 is rejected as a query origin; AS0 VRPs remain visible in the response.
+  uint32 origin_asn = 3;
+}
+
+enum RouteOriginValidation {
+  ROUTE_ORIGIN_VALIDATION_UNSPECIFIED = 0;
+  ROUTE_ORIGIN_VALIDATION_VALID = 1;
+  ROUTE_ORIGIN_VALIDATION_INVALID = 2;
+  ROUTE_ORIGIN_VALIDATION_NOT_FOUND = 3;
+}
+
+message CoveringVrp {
+  // Canonical network address without a slash suffix.
+  string prefix = 1;
+  uint32 prefix_length = 2;
+  uint32 max_length = 3;
+  uint32 origin_asn = 4;
+  // False for AS0 rows even if the other fields match the query.
+  bool authorizes = 5;
+}
+
+message ValidateRouteOriginResponse {
+  // Canonical CIDR after host-bit normalization.
+  string prefix = 1;
+  uint32 origin_asn = 2;
+  RouteOriginValidation validation = 3;
+  repeated CoveringVrp covering_vrps = 4;
+  bool complete = 5;
+  uint64 omitted = 6;
+}
+
 message GetBfdSessionsRequest {
   // Optional exact peer-address filter. Empty = all sessions.
   string peer_address = 1;

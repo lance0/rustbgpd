@@ -8,12 +8,12 @@ it. If you want the one-screen version, read the
 
 ## API-first control plane
 
-Full gRPC control surface across twelve services (eleven native
+Full gRPC control surface across thirteen services (twelve native
 `rustbgpd.v1` services plus the OpenConfig `gnmi.gNMI` service) and a
 thin CLI (`rbgp`) with colored tables, dynamic column alignment, and
 human-readable uptimes. Dynamic peer management, dynamic-neighbor and
 FIB-table CRUD, route injection, policy CRUD, peer groups, BFD
-inspection, EVPN
+inspection, bounded point-in-time RPKI origin validation, EVPN
 instance queries, streaming events, and daemon control without
 restarts. Service-by-service reference: [API.md](API.md); CLI command
 map: [`crates/cli/README.md`](../crates/cli/README.md).

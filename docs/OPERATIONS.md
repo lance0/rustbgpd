@@ -1689,6 +1689,20 @@ daemon log for the peer-specific reason.
 cache contributions flush or expire. The readiness gauge cannot be matched in
 policy.
 
+For a point check against the daemon's current authoritative table, run:
+
+```bash
+rbgp rpki validate 203.0.113.0/24 64496
+```
+
+The verdict always uses the complete table. The accompanying list is capped at
+256 effective covering VRPs and reports `complete` plus exact `omitted`; AS0
+rows are shown but never authorize. `precondition failed` means no first
+authoritative snapshot has arrived, while `not_found` with a complete empty
+list means an authoritative snapshot exists but contains no covering VRP. This
+command does not diagnose individual cache readiness or provenance; use the
+per-cache readiness metrics and RTR logs for those questions.
+
 ### EVPN VTEP alpha
 
 | Metric | What it tells you |

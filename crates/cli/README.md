@@ -81,7 +81,14 @@ rbgp neighbor-set set <name> --from-file set.json
 
 rbgp bfd
 rbgp bfd show <addr>
+rbgp rpki validate 192.0.2.0/24 64496       # complete verdict + bounded covering VRPs
 ```
+
+`rpki validate` requires the daemon's first authoritative VRP snapshot. Before
+that snapshot it fails with `FAILED_PRECONDITION`; an authoritative empty
+snapshot returns `not_found`. JSON reports the canonical prefix, origin ASN,
+typed validation, `complete`, exact `omitted`, and up to 256 effective covering
+VRPs. AS0 VRPs remain visible but never authorize the queried route.
 
 `dynamic-neighbor add` requires its peer group to exist first. The
 [Quickstart operating example](../../docs/QUICKSTART.md#5-operate) creates the

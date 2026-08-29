@@ -11,6 +11,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `RpkiService.ValidateRouteOrigin` and `rbgp rpki validate <PREFIX>
+  <ORIGIN_ASN>` provide a read-only, bounded explanation of one route-origin
+  validation against the latest authoritative VRP snapshot. The complete-table
+  verdict is independent of the 256-row diagnostic cap; effective covering
+  VRPs are deterministic, report exact omission, retain AS0 rows without ever
+  marking them authorizing, and the whole service remains outside the narrow
+  v1 contract.
+
 - `bgp_dataplane_reconcile_planning_failures_total{actor,reason}` exposes
   bounded pre-kernel planning aborts for the general FIB and BLACKHOLE discard
   reconcilers. Each abort emits one structured warning while preserving the
