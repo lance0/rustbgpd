@@ -2226,6 +2226,83 @@ jobs:
           script: tests/interop/scripts/test-m102-routeserver-openbgpd92.sh
           max_attempts: "1"
 
+  m103:
+    needs: [grpcurl_archive, prime_dev_image]
+    name: M103 — GoBGP 4.8 route-server differential
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install containerlab
+        uses: ./.github/actions/install-containerlab
+
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
+
+      - name: Ensure jq
+        run: |
+          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build rustbgpd:dev
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: rustbgpd:dev
+          target: dev
+          cache-from: type=gha,scope=rustbgpd-dev
+
+      - name: Build bird:2-bookworm
+        run: docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop
+
+      - name: Build gobgp:v4.8.0-m103
+        run: >-
+          docker build --build-arg TARGETARCH=amd64
+          --build-arg GOBGP_VERSION=4.8.0
+          --build-arg GOBGP_SHA256=43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03
+          -t gobgp:v4.8.0-m103 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
+
+      - name: Run M103 (single-attempt GoBGP 4.8 differential)
+        env:
+          M103_ARTIFACT_DIR: ${{ runner.temp }}/m103-normal
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M103
+          topology: tests/interop/m103-gobgp-v48-rs-differential.clab.yml
+          script: tests/interop/scripts/test-m103-gobgp-v48-rs-differential.sh
+          max_attempts: "1"
+
+      - name: Upload M103 normal successful-run evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: m103-gobgp-v48-normal-${{ github.sha }}
+          path: ${{ runner.temp }}/m103-normal
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Run M103 negative completeness proof (single attempt)
+        uses: ./.github/actions/run-interop-test
+        env:
+          M103_COMPLETENESS_NEGATIVE: "1"
+          M103_ARTIFACT_DIR: ${{ runner.temp }}/m103-negative
+        with:
+          label: M103-negative
+          topology: tests/interop/m103-gobgp-v48-rs-differential.clab.yml
+          script: tests/interop/scripts/test-m103-gobgp-v48-rs-differential.sh
+          max_attempts: "1"
+
+      - name: Upload M103 negative successful-run evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: m103-gobgp-v48-negative-${{ github.sha }}
+          path: ${{ runner.temp }}/m103-negative
+          if-no-files-found: error
+          retention-days: 14
+
   check:
     name: check
     runs-on: ubuntu-latest
@@ -2236,7 +2313,7 @@ jobs:
       m13, m80, m15, m10, m14, m17, m73, m74, m75, m76, m77, m78, m79, m22, m24,
       m81, m82, m83, m85, m94, m86, m25, m29, m30, m34, m35, m35b, m35c,
       m41, m44, m54, m55, m56, m45, m57, m63, m64,
-      m26_m27_m28_m59_m91, m92, m84, m99, m101, m102]
+      m26_m27_m28_m59_m91, m92, m84, m99, m101, m102, m103]
     env:
       NEEDS_CONTEXT: ${{ toJSON(needs) }}
       EXPECTED_JOBS: >-
@@ -2245,7 +2322,7 @@ jobs:
         m1 m13 m80 m15 m10
         m14 m17 m73 m74 m75 m76 m77 m78 m79 m22 m24 m81 m82 m83 m85 m94
         m86 m25 m29 m30 m34 m35 m35b m35c m41 m44 m54 m55 m56 m45 m57
-        m63 m64 m26_m27_m28_m59_m91 m92 m84 m99 m101 m102
+        m63 m64 m26_m27_m28_m59_m91 m92 m84 m99 m101 m102 m103
     steps:
       - name: Aggregate required Interop result
         shell: bash

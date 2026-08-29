@@ -18,6 +18,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and retain a bounded three-attempt download only for cold local builds; the
   existing M43 BIRD 3.3.1 unavailable-upstream tolerance is unchanged.
 
+- M103 adds a sibling hosted GoBGP 4.8.0 route-server differential without
+  changing the historical M92 GoBGP 4.7 receipt. Exact normal 56/0 and
+  missing-EoR 17/0 runs retain the baseline/mutant/restore contract while
+  requiring raw 4.7/4.8 oracle equality after recursive deletion of only
+  `age`; route records and trailer remain byte-identical under a separately
+  versioned M103 golden.
+
 - `rbgp doctor` warns on a narrowly evidenced first-session GTSM stall when
   effective TTL-security configuration and the authoritative administrative
   metric agree; established, stale, held, disabled, previously established,

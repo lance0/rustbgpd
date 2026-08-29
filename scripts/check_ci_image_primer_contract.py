@@ -14,7 +14,7 @@ from pathlib import Path
 INTEROP = (
     "m1 m13 m80 m15 m10 m14 m17 m73 m74 m75 m76 m77 m78 m79 m22 "
     "m24 m81 m82 m83 m85 m94 m86 m25 m29 m30 m34 m35 m35b m35c m41 "
-    "m44 m54 m55 m56 m45 m57 m63 m64 m26_m27_m28_m59_m91 m92 m84 m99 m101 m102"
+    "m44 m54 m55 m56 m45 m57 m63 m64 m26_m27_m28_m59_m91 m92 m84 m99 m101 m102 m103"
 ).split()
 KERNEL = (
     "m36 m37 m37-ip m38 m39 m39b m48 m60 m61 m62 m40 m42 m50 m52 "
@@ -146,19 +146,19 @@ PERMISSION_HASHES = {
     "kernel-dataplane.yml": "6f1d70d72bad231d43c575acef6946580e439c879794ed2ea1f4a40340245172",
 }
 CALL_HASHES = {
-    "interop.yml": "e43303cedf777993bdf5ae3dce4df7a51150d1c02facbf4f18f7c780439dc679",
+    "interop.yml": "1e446c04d526b8181e61f2e6e81c7bfcdfaff7046a907a5bb75d12d1de150958",
     "kernel-dataplane.yml": "310ed2344bd6ff3f766580f704cc77fec4be0a2103a943e2ad837f497af346c3",
 }
 PINS = collections.Counter(
     {
-        "actions/checkout@v7": 92,
+        "actions/checkout@v7": 93,
         "dtolnay/rust-toolchain@v1 # stable": 3,
         "Swatinem/rust-cache@v2": 5,
         "dtolnay/rust-toolchain@v1 # 1.95": 2,
-        "docker/setup-buildx-action@v4": 47,
-        "docker/build-push-action@v7": 50,
+        "docker/setup-buildx-action@v4": 48,
+        "docker/build-push-action@v7": 51,
         "actions/cache@v6": 7,
-        "actions/upload-artifact@v7": 9,
+        "actions/upload-artifact@v7": 11,
         "actions/download-artifact@v8": 6,
         "rustsec/audit-check@v2.0.0": 1,
         "EmbarkStudios/cargo-deny-action@v2": 1,
@@ -1037,6 +1037,44 @@ def check(root: Path) -> list[str]:
     ):
         if forbidden in m102:
             errors.append(f"interop.yml:m102: permits {forbidden}")
+    m103 = _jobs(texts["interop.yml"]).get("m103", "")
+    m103_required = {
+        GRPCURL_ACTION: 1,
+        "docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop": 1,
+        "name: Build gobgp:v4.8.0-m103": 1,
+        "--build-arg TARGETARCH=amd64": 1,
+        "--build-arg GOBGP_VERSION=4.8.0": 1,
+        "--build-arg GOBGP_SHA256=43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03": 1,
+        "-t gobgp:v4.8.0-m103 -f tests/interop/Dockerfile.gobgp-v47 tests/interop": 1,
+        "uses: ./.github/actions/run-interop-test": 2,
+        "name: Run M103 (single-attempt GoBGP 4.8 differential)": 1,
+        "name: Run M103 negative completeness proof (single attempt)": 1,
+        "uses: actions/upload-artifact@v7": 2,
+        "name: Upload M103 normal successful-run evidence": 1,
+        "name: Upload M103 negative successful-run evidence": 1,
+        "M103_ARTIFACT_DIR: ${{ runner.temp }}/m103-normal": 1,
+        "M103_ARTIFACT_DIR: ${{ runner.temp }}/m103-negative": 1,
+        "name: m103-gobgp-v48-normal-${{ github.sha }}": 1,
+        "name: m103-gobgp-v48-negative-${{ github.sha }}": 1,
+        "path: ${{ runner.temp }}/m103-normal": 1,
+        "path: ${{ runner.temp }}/m103-negative": 1,
+        "if-no-files-found: error": 2,
+        "retention-days: 14": 2,
+        "topology: tests/interop/m103-gobgp-v48-rs-differential.clab.yml": 2,
+        "script: tests/interop/scripts/test-m103-gobgp-v48-rs-differential.sh": 2,
+        "label: M103\n": 1,
+        "label: M103-negative\n": 1,
+        'M103_COMPLETENESS_NEGATIVE: "1"': 1,
+        'max_attempts: "1"': 2,
+    }
+    if any(m103.count(seam) != count for seam, count in m103_required.items()):
+        errors.append("interop.yml:m103: GoBGP 4.8 differential job semantics drifted")
+    negative = m103.split("- name: Run M103 negative completeness proof", 1)
+    if len(negative) != 2 or 'M103_COMPLETENESS_NEGATIVE: "1"' in negative[0]:
+        errors.append("interop.yml:m103: negative environment scope drifted")
+    for forbidden in ("continue-on-error:", 'max_attempts: "2"'):
+        if forbidden in m103:
+            errors.append(f"interop.yml:m103: permits {forbidden}")
     interop_classifier = _jobs(texts["interop.yml"]).get("classify_changes", "")
     kernel_jobs = _jobs(texts["kernel-dataplane.yml"])
     interop_classifier = interop_classifier.replace("interop heavy-lab", "heavy-lab")

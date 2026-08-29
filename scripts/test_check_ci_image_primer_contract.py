@@ -1666,6 +1666,49 @@ class PrimerContractTests(unittest.TestCase):
             + "      # sudo apt-get install tshark util-linux is forbidden here\n",
         )
 
+    def test_m103_gobgp48_differential_job_is_load_bearing(self):
+        relative = ".github/workflows/interop.yml"
+        for old in (
+            "  m103:\n",
+            "      - name: Build gobgp:v4.8.0-m103\n",
+            "          docker build --build-arg TARGETARCH=amd64\n",
+            "          --build-arg GOBGP_VERSION=4.8.0\n",
+            "          --build-arg GOBGP_SHA256=43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03\n",
+            "          -t gobgp:v4.8.0-m103 -f tests/interop/Dockerfile.gobgp-v47 tests/interop\n",
+            "      - name: Run M103 (single-attempt GoBGP 4.8 differential)\n",
+            "          label: M103\n",
+            "          topology: tests/interop/m103-gobgp-v48-rs-differential.clab.yml\n",
+            "          script: tests/interop/scripts/test-m103-gobgp-v48-rs-differential.sh\n",
+            "      - name: Run M103 negative completeness proof (single attempt)\n",
+            '          M103_COMPLETENESS_NEGATIVE: "1"\n',
+            "          label: M103-negative\n",
+            '          M103_ARTIFACT_DIR: ${{ runner.temp }}/m103-normal\n',
+            '          M103_ARTIFACT_DIR: ${{ runner.temp }}/m103-negative\n',
+            "      - name: Upload M103 normal successful-run evidence\n",
+            "      - name: Upload M103 negative successful-run evidence\n",
+            '          name: m103-gobgp-v48-normal-${{ github.sha }}\n',
+            '          name: m103-gobgp-v48-negative-${{ github.sha }}\n',
+            '          path: ${{ runner.temp }}/m103-normal\n',
+            '          path: ${{ runner.temp }}/m103-negative\n',
+        ):
+            with self.subTest(seam=old):
+                count = (ROOT / relative).read_text().count(old)
+                self.assertGreater(count, 0, f"missing M103 seam: {old}")
+                self.mutate(relative, old, occurrence=count - 1)
+
+        max_attempt = '          max_attempts: "1"\n'
+        count = (ROOT / relative).read_text().count(max_attempt)
+        self.assertGreaterEqual(count, 2)
+        self.mutate(relative, max_attempt, occurrence=count - 1)
+        for old in (
+            "        uses: actions/upload-artifact@v7\n",
+            "          if-no-files-found: error\n",
+            "          retention-days: 14\n",
+        ):
+            count = (ROOT / relative).read_text().count(old)
+            self.assertGreaterEqual(count, 2)
+            self.mutate(relative, old, occurrence=count - 1)
+
     def test_dockerfile_exact_source_bridge(self):
         for binary in ("rustbgpd", "rbgp", "evpn-tester", "evpn-monitor"):
             with self.subTest(binary=binary, side="builder"):
