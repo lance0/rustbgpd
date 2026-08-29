@@ -30,6 +30,17 @@ description = "frr1-m51-strict"
 hold_time = 90
 bfd = { profile = "fast", strict = true }
 
+# Additive link-local coverage stays non-strict; only the numbered neighbor is
+# used by the remote-AdminDown strict oracle.
+[[neighbors]]
+address = "fe80::52"
+interface = "eth1"
+remote_asn = 65002
+description = "frr1-m51-link-local"
+hold_time = 90
+families = ["ipv6_unicast"]
+bfd = { profile = "fast" }
+
 [security.grpc]
 enforcement = "tier"
 

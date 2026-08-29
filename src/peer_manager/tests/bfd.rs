@@ -42,6 +42,9 @@ fn fake_bfd_peer_handle(counters: Arc<BfdCouplingCounters>) -> PeerHandle {
 fn bfd_params(peer: IpAddr, strict: bool) -> crate::bfd_runtime::BfdSessionParams {
     crate::bfd_runtime::BfdSessionParams {
         peer,
+        scope_id: None,
+        destination: crate::bfd_runtime::bfd_destination(peer, None)
+            .expect("global test peer destination"),
         desired_min_tx_us: 300_000,
         required_min_rx_us: 300_000,
         detect_mult: 3,
@@ -551,6 +554,52 @@ async fn republish_reflects_disable_and_readd() {
     // Re-add (reconfigure delete→add) → re-enabled so the actor restarts it.
     mgr.set_bfd_peer_disabled(peer, false);
     assert_eq!(enabled_now(&rx), Some(true), "re-added peer re-enabled");
+}
+
+#[tokio::test]
+async fn republish_preserves_link_local_scope_across_reconcile() {
+    let peer: IpAddr = "fe80::2".parse().unwrap();
+    let params = crate::bfd_runtime::BfdSessionParams {
+        peer,
+        scope_id: Some(71),
+        destination: crate::bfd_runtime::bfd_destination(peer, Some(71))
+            .expect("scoped test peer destination"),
+        desired_min_tx_us: 300_000,
+        required_min_rx_us: 300_000,
+        detect_mult: 3,
+        strict: false,
+        enabled: true,
+    };
+    let configured = std::collections::HashMap::from([(peer, params)]);
+    let (desired_tx, desired_rx) = watch::channel(crate::bfd_runtime::BfdRuntimeConfig::default());
+    let (_state_tx, state_rx) = crate::bfd_runtime::state_change_channel();
+    let mut mgr = test_peer_manager().with_bfd_coupling(desired_tx, state_rx, configured);
+
+    mgr.republish_bfd_desired();
+    let session = desired_rx
+        .borrow()
+        .sessions
+        .iter()
+        .find(|session| session.peer == peer)
+        .cloned()
+        .expect("configured link-local BFD session");
+    assert!(session.enabled);
+    assert_eq!(session.scope_id, Some(71));
+
+    mgr.set_bfd_peer_disabled(peer, true);
+    let session = desired_rx
+        .borrow()
+        .sessions
+        .iter()
+        .find(|session| session.peer == peer)
+        .cloned()
+        .expect("disabled session remains in desired set for actor drain");
+    assert!(!session.enabled);
+    assert_eq!(
+        session.scope_id,
+        Some(71),
+        "PeerManager clone/reconcile must not erase the startup-resolved scope"
+    );
 }
 
 /// Regression: a genuine BFD Down must tear down a pending inbound collision

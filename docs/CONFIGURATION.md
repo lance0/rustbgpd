@@ -901,7 +901,7 @@ complete atomic block. There is no probe or automatic legacy fallback.
 | `max_prefix_restart_seconds` | non-zero u32 | no | unset | Opt in to one timed restart attempt after max-prefix teardown. Omit to retain the indefinite fail-closed latch until explicit enable; failure to deliver the timed session `Start` command consumes the attempt and stays latched off |
 | `md5_password`         | string   | no       | --      | TCP MD5 authentication password (RFC 2385, Linux only) |
 | `tcp_ao`               | table or array | no | -- | Ordered TCP-AO keyring for static neighbors (RFC 5925; Linux; append a non-preferred successor, then select it in a later observation-gated SIGHUP generation) |
-| `bfd`                  | table    | no       | --      | Single-hop BFD attachment referencing a `[[bfd_profiles]]` entry (RFC 5880/5881/5882; static neighbors only, restart-required edits) |
+| `bfd`                  | table    | no       | --      | Single-hop BFD attachment referencing a `[[bfd_profiles]]` entry (RFC 5880/5881/5882; static neighbors only, including interface-scoped IPv6 link-local peers; restart-required edits) |
 | `ttl_security`         | bool     | no       | false   | Enable GTSM / TTL security (RFC 5082, Linux only). Outbound packets use TTL/Hop-Limit 255. Without `ttl_security_hops`, inbound packets must arrive with exactly 255, preserving the historical one-hop policy |
 | `ttl_security_hops`    | non-zero u8 | no    | 1 when GTSM is enabled | Maximum expected peer distance for GTSM (1--255). Requires effective `ttl_security = true`; inbound packets below `256 - ttl_security_hops` are dropped by `IP_MINTTL` / `IPV6_MINHOPCOUNT`. Inherits from peer groups and may be overridden per neighbor |
 | `families`             | [string] | no       | (auto)  | Address families to negotiate (see below)        |
@@ -1241,6 +1241,14 @@ address = "10.0.0.3"
 remote_asn = 65003
 peer_group = "edge"
 bfd = { profile = "fast", enabled = false }   # opt this neighbor out
+
+# Link-local BGP and BFD use the neighbor's required interface scope.
+[[neighbors]]
+address = "fe80::2"
+interface = "eth1"
+remote_asn = 65002
+families = ["ipv6_unicast"]
+bfd = { profile = "fast" }
 ```
 
 `[neighbors.bfd]` / `[peer_groups.<name>.bfd]` fields:
@@ -1269,11 +1277,15 @@ BGP.) Genuine failures — a detection timeout or a remote-signaled
 operator disable/delete of the neighbor stops BGP through the normal lifecycle,
 not this path.
 
-BFD is **static-neighbors only** in v1 — a `[[dynamic_neighbors]]` range whose
-peer group enables BFD is rejected at config time. v1 covers IPv4 + IPv6
-**global** addresses. BFD on IPv6 link-local / unnumbered peers is still
-deferred even though the BGP neighbor itself can be interface scoped. Like
-TCP-AO, BFD edits are **restart-required**: on SIGHUP rustbgpd pins
+BFD is **static-neighbors only** — a `[[dynamic_neighbors]]` range whose peer
+group enables BFD is rejected at config time. IPv4, IPv6 global, and IPv6
+link-local neighbors are supported. A link-local neighbor already requires a
+unique bare address plus `interface`; startup resolves that interface to the
+BFD transmit scope and rejects an unresolvable name before preparing sockets.
+Receive-side `IPV6_PKTINFO` must report the same interface for every link-local
+control packet, including zero-discriminator bootstrap packets. The public BFD
+status and metric key remains the bare peer address under the existing unique
+link-local-address rule. Like TCP-AO, BFD edits are **restart-required**: on SIGHUP rustbgpd pins
 `[[bfd_profiles]]` and neighbor / peer-group `bfd` back to the live snapshot and
 reports them as restart-required in `--diff`. Inspect sessions with
 `rbgp bfd` / `BfdService.GetBfdSessions` (see [API.md](API.md)); an older daemon

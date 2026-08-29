@@ -30,6 +30,18 @@ description = "frr1-m51"
 hold_time = 90
 bfd = { profile = "fast" }
 
+# IPv6 link-local BGP + BFD shares the same fabric interface and actor socket.
+# The neighbor remains non-strict so M51's numbered strict-mode phase below is
+# still isolated to 10.0.0.2.
+[[neighbors]]
+address = "fe80::52"
+interface = "eth1"
+remote_asn = 65002
+description = "frr1-m51-link-local"
+hold_time = 90
+families = ["ipv6_unicast"]
+bfd = { profile = "fast" }
+
 [security.grpc]
 enforcement = "tier"
 

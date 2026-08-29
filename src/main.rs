@@ -3497,7 +3497,9 @@ async fn run<T>(
     // these resources reserves the operator's configured addresses, but no
     // BFD actor, BGP accept loop, or metrics HTTP server runs before its
     // existing activation barrier below.
-    let bfd_initial = bfd_runtime::BfdRuntimeConfig::from_config(&config);
+    let bfd_initial = bfd_runtime::BfdRuntimeConfig::from_config(&config).unwrap_or_else(|error| {
+        fatal_startup_error("failed to resolve configured BFD sessions", error);
+    });
     let bfd_prepared = bfd_runtime::prepare_runtime(&bfd_initial).unwrap_or_else(|error| {
         fatal_startup_error(
             "failed to acquire sockets for configured BFD sessions",
