@@ -22,6 +22,7 @@ network=rustbgpd-ixp-oracle-$$
 oracle=rustbgpd-ixp-oracle-$$
 announcer_a=rustbgpd-ixp-announcer-as64496-$$
 announcer_b=rustbgpd-ixp-announcer-as64497-$$
+announcer_filtered=rustbgpd-ixp-announcer-as64498-$$
 alice=rustbgpd-ixp-alice-$$
 manrs=rustbgpd-ixp-manrs-$$
 exabgp='ghcr.io/exa-networks/exabgp@sha256:5554ac053766e66ca3b99eb6b66e83e32113913729a184dcbaf0cc4abd2f4244'
@@ -42,6 +43,10 @@ dump_proof_logs() {
     echo '--- AS64497 announcer log ---' >&2
     docker logs --tail 80 "$announcer_b" >&2 || true
   fi
+  if docker inspect "$announcer_filtered" >/dev/null 2>&1; then
+    echo '--- AS64498 filtered announcer log ---' >&2
+    docker logs --tail 80 "$announcer_filtered" >&2 || true
+  fi
   if docker inspect "$alice" >/dev/null 2>&1; then
     echo '--- Alice-LG log ---' >&2
     docker logs --tail 80 "$alice" >&2 || true
@@ -60,7 +65,8 @@ cleanup() {
   [ -z "$adapter_pid" ] || kill "$adapter_pid" 2>/dev/null || true
   [ -z "$daemon_pid" ] || kill "$daemon_pid" 2>/dev/null || true
   docker rm --force "$manrs" "$alice" >/dev/null 2>&1 || true
-  docker rm --force "$oracle" "$announcer_a" "$announcer_b" >/dev/null 2>&1 || true
+  docker rm --force "$oracle" "$announcer_a" "$announcer_b" "$announcer_filtered" \
+    >/dev/null 2>&1 || true
   docker network rm "$network" >/dev/null 2>&1 || true
   rm -rf "$tmp"
 }
@@ -82,6 +88,7 @@ manrs_commit=$(read_manifest manrs_commit)
 
 cargo build --quiet --locked --manifest-path "$repo/Cargo.toml" --bin rustbgpd
 cargo build --quiet --locked --manifest-path "$repo/Cargo.toml" -p birdwatcher-adapter
+cargo build --quiet --locked --manifest-path "$repo/Cargo.toml" -p rustbgpctl --bin rbgp
 oracle_image=$(docker build --quiet --file "$root/Dockerfile.oracle" "$root")
 docker network create \
   --subnet 198.51.100.0/24 --gateway 198.51.100.1 \
@@ -330,6 +337,115 @@ run_consumer() {
 }
 run_consumer "$oracle_api" "$capture_output/populated-oracle.raw.json"
 run_consumer "$live_api" "$capture_output/populated-live.raw.json"
+oracle_capture_sha256=$(sha256sum "$capture_output/populated-oracle.raw.json" | cut -d' ' -f1)
+live_capture_sha256=$(sha256sum "$capture_output/populated-live.raw.json" | cut -d' ' -f1)
+
+# Keep the four-peer oracle comparison and MANRS proof frozen above. This
+# fifth, live-only member is added through the public runtime API after both
+# captures exist, then exercises Alice's populated filtered-route backend.
+"$repo/target/debug/rbgp" -s "unix://$socket" \
+  neighbor 198.51.100.6 add --remote-asn 64498 \
+  --description 'filtered Alice proof AS64498' --hold-time 240 \
+  --families ipv4_unicast --route-server-client >"$tmp/add-neighbor.out"
+
+aliases_next=$tmp/protocol-aliases.next
+cp "$aliases" "$aliases_next"
+printf '%s\n' 'pb_as64498=198.51.100.6@master4' >>"$aliases_next"
+mv "$aliases_next" "$aliases"
+[ "$(grep -Fxc 'pb_as64498=198.51.100.6@master4' "$aliases")" -eq 1 ]
+kill -HUP "$adapter_pid"
+alias_loaded() {
+  curl --fail --silent --max-time 2 "$live_api/protocol/pb_as64498" | python3 -c \
+    'import json,sys; row=json.load(sys.stdin).get("protocol", {}); assert row.get("protocol") == "pb_as64498"; assert row.get("neighbor_address") == "198.51.100.6"' \
+    >/dev/null 2>&1
+}
+alias_deadline=$(($(date +%s) + 15))
+while [ "$(date +%s)" -lt "$alias_deadline" ]; do
+  if alias_loaded; then break; fi
+  kill -0 "$daemon_pid" 2>/dev/null \
+    && kill -0 "$adapter_pid" 2>/dev/null \
+    && topology_containers_running || exit 1
+  sleep 0.1
+done
+alias_loaded || exit 1
+
+docker run --rm \
+  --volume "$root/filtered-announcer-as64498.conf:/etc/exabgp/exabgp.conf:ro" \
+  "$exabgp" validate /etc/exabgp/exabgp.conf >/dev/null
+docker run --detach --name "$announcer_filtered" --network "$network" \
+  --ip 198.51.100.6 --env exabgp_tcp_bind=198.51.100.6 \
+  --env exabgp_tcp_port=179 \
+  --volume "$root/filtered-announcer-as64498.conf:/etc/exabgp/exabgp.conf:ro" \
+  "$exabgp" server /etc/exabgp/exabgp.conf >/dev/null
+
+filtered_backend_ready() {
+  curl --fail --silent --max-time 3 \
+    --output "$tmp/filtered-protocols.json" "$live_api/protocols/bgp" \
+    && curl --fail --silent --max-time 3 \
+      --output "$tmp/filtered-routes.json" "$live_api/routes/filtered/pb_as64498" \
+    && python3 - "$tmp/filtered-protocols.json" "$tmp/filtered-routes.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    row = json.load(handle).get("protocols", {}).get("pb_as64498", {})
+with open(sys.argv[2], encoding="utf-8") as handle:
+    routes = json.load(handle).get("routes")
+ready = (
+    row.get("state") == "up"
+    and row.get("neighbor_as") == 64498
+    and row.get("routes", {}).get("imported") == 0
+    and row.get("routes", {}).get("filtered") == 1
+    and isinstance(routes, list)
+    and len(routes) == 1
+)
+raise SystemExit(0 if ready else 1)
+PY
+}
+filtered_deadline=$(($(date +%s) + 110))
+while [ "$(date +%s)" -lt "$filtered_deadline" ]; do
+  if filtered_backend_ready; then break; fi
+  kill -0 "$daemon_pid" 2>/dev/null \
+    && kill -0 "$adapter_pid" 2>/dev/null \
+    && topology_containers_running \
+    && container_running "$announcer_filtered" || exit 1
+  sleep 1
+done
+if ! filtered_backend_ready; then
+  echo 'live adapter did not expose the retained AS64498 rejection' >&2
+  exit 1
+fi
+
+# Alice caches backend responses in-process. Restart the pinned consumer after
+# the alias/session mutation so every fifth-peer assertion reads one fresh API.
+docker restart "$alice" >/dev/null
+alice_deadline=$(($(date +%s) + 115))
+while [ "$(date +%s)" -lt "$alice_deadline" ]; do
+  if alice_ready; then break; fi
+  kill -0 "$daemon_pid" 2>/dev/null \
+    && kill -0 "$adapter_pid" 2>/dev/null \
+    && topology_containers_running \
+    && container_running "$announcer_filtered" \
+    && container_running "$alice" || exit 1
+  sleep 1
+done
+alice_ready || exit 1
+
+filtered_alice_proof="alice filtered proof: Alice-LG $alice_version read rs0 with 5 up neighbors, preserved 7 accepted routes and 4 empty baseline filtered views, and joined one AS-path-loop rejection to its exact label"
+timeout 60s python3 "$root/alice-consumer.py" \
+  "$alice_api" "$alice_version" --filtered-peer >"$tmp/alice-filtered-consumer.out"
+[ "$(grep -Fxc "$filtered_alice_proof" "$tmp/alice-filtered-consumer.out")" -eq 1 ]
+tail -n 20 "$tmp/alice-filtered-consumer.out" >&2
+
+[ "$oracle_capture_sha256" = "$(sha256sum "$capture_output/populated-oracle.raw.json" | cut -d' ' -f1)" ] || {
+  echo 'populated oracle capture changed during the fifth-peer proof' >&2
+  exit 1
+}
+[ "$live_capture_sha256" = "$(sha256sum "$capture_output/populated-live.raw.json" | cut -d' ' -f1)" ] || {
+  echo 'populated live capture changed during the fifth-peer proof' >&2
+  exit 1
+}
+echo "pre-fifth-peer capture hash proof: oracle=$oracle_capture_sha256 live=$live_capture_sha256" >&2
 
 # Deterministic backend-failure journey, captured last so every journey above
 # read a healthy backend: stop rustbgpd under the still-running adapter (its

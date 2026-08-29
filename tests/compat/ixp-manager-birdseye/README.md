@@ -144,10 +144,20 @@ four up neighbors, all seven accepted routes, empty filtered arrays, and the
 `192.0.2.0/24` split-horizon noexport route with its full-key reason label.
 The pinned MANRS tool then traverses Alice's received-route API with five
 synthetic ROAs and must report exactly one deliberate mismatch: the covering
-`203.0.113.0/24` originated by AS64520. This is an API consumer proof, not a
-browser/UI proof. It does not prove a populated Alice filtered/reject page,
-MANRS certification, rustbgpd RPKI enforcement, or route-server policy
-conformance; those require their own gates.
+`203.0.113.0/24` originated by AS64520. Only after that baseline and both
+populated captures are frozen, the same live leg adds a fifth route-server
+client through the runtime API, atomically reloads its adapter alias, and
+starts a pinned ExaBGP speaker whose sole route contains the receiver AS in
+its path. Restarted Alice must still expose the original seven accepted
+routes, four empty baseline filtered arrays, and labeled noexport route, while
+the fifth peer has no accepted routes and exactly one `198.18.0.0/24`
+filtered route tagged `64496:65520:4`; `/config.reject_reasons` must join that
+community to `Receiver AS appears in AS_PATH`. Hashes require both pre-fifth-
+peer captures to remain unchanged throughout that phase; the existing backend-
+failure journey is appended afterward. This is a backend/API consumer proof,
+not a rendered-browser proof. It does not prove MANRS certification, rustbgpd
+RPKI enforcement, or route-server policy conformance; those require their own
+gates.
 
 Run the gate from the repository root:
 
@@ -478,7 +488,7 @@ owner and refresh relationship.
 |---|---|---|
 | `Dockerfile` | Hand-maintained PHP/Composer environment for the two pinned upstream checkouts | `run.sh` builds the image used by `run-in-container.sh`, `run-adapter-consumer.sh`, and `run-oracle-leg.sh`. |
 | `Dockerfile.oracle` | Hand-maintained BIRD 2.0.12 oracle image | `run-oracle-leg.sh` builds it and verifies the installed BIRD version before the populated comparison. |
-| `Dockerfile.alice`, `alice.conf`, `alice-consumer.py` | Pinned-source Alice-LG 6.2.0 build and bounded API assertions | `run.sh` builds and label-verifies the image; `run-oracle-leg.sh` proves the populated accepted/noexport and empty filtered views. |
+| `Dockerfile.alice`, `alice.conf`, `alice-consumer.py`, `filtered-announcer-as64498.conf` | Pinned-source Alice-LG 6.2.0 build, bounded API assertions, and one live-only AS-path-loop announcement | `run.sh` builds and label-verifies the image; `run-oracle-leg.sh` preserves the four-peer accepted/noexport baseline, then proves the fifth peer's populated filtered backend and exact configured reason label without changing the frozen captures. |
 | `Dockerfile.manrs`, `manrs-roas.json` | Pinned-source MANRS build and five synthetic ROAs | `run-oracle-leg.sh` requires one exact Alice-derived invalid stanza and the exact 7-route/5-ROA summary. |
 | `birdseye.env` | Hand-maintained production-mode Bird's Eye settings | `run-in-container.sh` copies it unchanged; `run-oracle-leg.sh` changes only `BIRDC` and `MAX_ROUTES` before installing it in the real-BIRD oracle. |
 | `fake-birdc` | Hand-maintained deterministic `birdc` transcript oracle selected by `birdseye.env` | Bird's Eye executes it during `run-in-container.sh`; `verify_capture.py` checks the resulting HTTP capture. The populated oracle does not use it. |

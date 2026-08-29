@@ -464,4 +464,10 @@ the adapter returns `502 Bad Gateway` (the in-daemon server returned
   Alice-LG 6.2.0 and the MANRS IXP validation tool, then requires Alice to
   consume this adapter's seven populated accepted routes, empty filtered
   endpoints, and one split-horizon noexport route before MANRS traverses the
-  Alice received-route API. This is not a browser/UI or certification claim.
+  Alice received-route API. After freezing and hashing those captures, the
+  gate runtime-adds a fifth live peer, atomically reloads its alias, and proves
+  through restarted Alice that one AS-path-loop route appears only in that
+  peer's filtered backend with `64496:65520:4` joined to the exact configured
+  reason label. The original seven accepted routes, four empty filtered
+  endpoints, and noexport route remain unchanged. This is a backend/API proof,
+  not a rendered-browser or certification claim.
