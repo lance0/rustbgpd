@@ -242,6 +242,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Outbound TCP connect failures now surface once per failed-connect episode
+  instead of remaining below the default log level: a cold peer's first socket
+  failure is INFO, the first failure after an Established epoch and the first
+  internal connect-task failure are WARN, and subsequent retries remain DEBUG.
+  Every retry still refreshes `last_error`, and a successful TCP connection
+  re-arms visibility without changing the FSM or ConnectRetry cadence.
+
 - The unpublished RIB crate no longer exposes unrestricted mutable Adj-RIB-In
   iteration. Its sole internal all-route mutation callback now maintains exact
   RPKI validation counts, preserving RFC 9972 BMP path-count rows and safe

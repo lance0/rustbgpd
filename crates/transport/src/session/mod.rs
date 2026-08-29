@@ -191,6 +191,30 @@ impl Drop for SessionTelemetryMetricLease {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum ConnectFailureSource {
+    Socket,
+    Task,
+}
+
+#[derive(Default)]
+struct ConnectFailureEpisode {
+    socket_reported: bool,
+    task_reported: bool,
+}
+
+impl ConnectFailureEpisode {
+    fn mark_reported(&mut self, source: ConnectFailureSource) -> bool {
+        let reported = match source {
+            ConnectFailureSource::Socket => &mut self.socket_reported,
+            ConnectFailureSource::Task => &mut self.task_reported,
+        };
+        let first = !*reported;
+        *reported = true;
+        first
+    }
+}
+
 /// Runtime for a single BGP peer session.
 ///
 /// Owns the FSM, TCP stream, timers, and read buffer. Runs as a single
@@ -288,6 +312,10 @@ pub(crate) struct PeerSession {
     /// In-flight outbound TCP connect attempt. Polled by the main event loop
     /// so control commands remain responsive during connection establishment.
     connect_task: Option<ConnectTask>,
+    /// Visibility latch for one failed-connect episode. Ordinary socket errors
+    /// and internal task failures each get one default-visible record; a
+    /// successful TCP connection re-arms both without changing retry behavior.
+    connect_failure_episode: ConnectFailureEpisode,
     /// Receiver for outbound route updates from the RIB manager.
     outbound_rx: mpsc::Receiver<OutboundRouteUpdate>,
     /// Sender clone held to give to RIB manager on `PeerUp`.
@@ -1163,6 +1191,7 @@ impl PeerSession {
             stop_requested: false,
             reconnect_timer: None,
             connect_task: None,
+            connect_failure_episode: ConnectFailureEpisode::default(),
             outbound_rx,
             outbound_tx,
             import_policy,
@@ -1331,6 +1360,7 @@ impl PeerSession {
             stop_requested: false,
             reconnect_timer: None,
             connect_task: None,
+            connect_failure_episode: ConnectFailureEpisode::default(),
             outbound_rx,
             outbound_tx,
             import_policy,
@@ -1913,6 +1943,7 @@ impl PeerSession {
                     self.connect_task = None;
                     match result {
                         Ok(Ok((stream, tcp_ao_info))) => {
+                            self.reset_connect_failure_episode();
                             info!(peer = %self.peer_label, "TCP connected");
                             // Split the stream and spawn the writer task.
                             // Read half stays here for the read_tcp arm; the
@@ -1944,13 +1975,11 @@ impl PeerSession {
                             self.drive_fsm(Event::TcpConnectionConfirmed).await;
                         }
                         Ok(Err(e)) => {
-                            debug!(peer = %self.peer_label, error = %e, "TCP connect failed");
                             self.record_connect_failure(&e);
                             self.drive_fsm(Event::TcpConnectionFails).await;
                         }
                         Err(e) => {
-                            debug!(peer = %self.peer_label, error = %e, "TCP connect task failed");
-                            self.record_connect_failure(&e);
+                            self.record_connect_task_failure(&e);
                             self.drive_fsm(Event::TcpConnectionFails).await;
                         }
                     }

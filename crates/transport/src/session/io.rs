@@ -1,7 +1,8 @@
 use super::{
-    BmpEvent, Bytes, Event, Message, NotificationCode, OwnedReadHalf, PeerDownReason, PeerSession,
-    RibUpdate, RouteRefreshSubtype, SessionNotificationDirection, TcpStream, TransportError,
-    cease_subcode, debug, error, info, warn,
+    BmpEvent, Bytes, ConnectFailureEpisode, ConnectFailureSource, Event, Message, NotificationCode,
+    OwnedReadHalf, PeerDownReason, PeerSession, RibUpdate, RouteRefreshSubtype,
+    SessionNotificationDirection, TcpStream, TransportError, cease_subcode, debug, error, info,
+    warn,
 };
 use crate::config::TransportConfig;
 use rustbgpd_wire::{AddressPrefixOrf, OrfAction, OrfEntries, OrfMatch, OrfType};
@@ -14,7 +15,81 @@ const ORF_RIB_REPLY_TIMEOUT: Duration = Duration::from_millis(500);
 
 impl PeerSession {
     pub(super) fn record_connect_failure(&mut self, error: &impl std::fmt::Display) {
-        self.last_error = error.to_string();
+        let error = error.to_string();
+        self.record_connect_failure_with_source(
+            error.clone(),
+            &error,
+            ConnectFailureSource::Socket,
+        );
+    }
+
+    pub(super) fn record_connect_task_failure(&mut self, error: &JoinError) {
+        let log_error = if error.is_cancelled() {
+            "connect task cancelled"
+        } else {
+            "connect task panicked"
+        };
+        self.record_connect_failure_with_source(
+            error.to_string(),
+            log_error,
+            ConnectFailureSource::Task,
+        );
+    }
+
+    fn record_connect_failure_with_source(
+        &mut self,
+        last_error: String,
+        log_error: &str,
+        source: ConnectFailureSource,
+    ) {
+        self.last_error = last_error;
+        let previously_established = self.flap_count > 0;
+        if self.connect_failure_episode.mark_reported(source) {
+            match source {
+                ConnectFailureSource::Socket if previously_established => warn!(
+                    peer = %self.peer_label,
+                    error = log_error,
+                    failure_source = "socket",
+                    previously_established,
+                    "TCP connect failed"
+                ),
+                ConnectFailureSource::Socket => info!(
+                    peer = %self.peer_label,
+                    error = log_error,
+                    failure_source = "socket",
+                    previously_established,
+                    "TCP connect failed"
+                ),
+                ConnectFailureSource::Task => warn!(
+                    peer = %self.peer_label,
+                    error = log_error,
+                    failure_source = "task",
+                    previously_established,
+                    "TCP connect task failed"
+                ),
+            }
+        } else {
+            match source {
+                ConnectFailureSource::Socket => debug!(
+                    peer = %self.peer_label,
+                    error = log_error,
+                    failure_source = "socket",
+                    previously_established,
+                    "TCP connect failed"
+                ),
+                ConnectFailureSource::Task => debug!(
+                    peer = %self.peer_label,
+                    error = log_error,
+                    failure_source = "task",
+                    previously_established,
+                    "TCP connect task failed"
+                ),
+            }
+        }
+    }
+
+    pub(super) fn reset_connect_failure_episode(&mut self) {
+        self.connect_failure_episode = ConnectFailureEpisode::default();
     }
 
     /// Handle the ORF section of an inbound ROUTE-REFRESH (RFC 5291/5292).
