@@ -790,6 +790,9 @@ _rbgp() {
             rbgp__subcmd__help__subcmd__rib,vpn)
                 cmd="rbgp__subcmd__help__subcmd__rib__subcmd__vpn"
                 ;;
+            rbgp__subcmd__help__subcmd__rpki,caches)
+                cmd="rbgp__subcmd__help__subcmd__rpki__subcmd__caches"
+                ;;
             rbgp__subcmd__help__subcmd__rpki,validate)
                 cmd="rbgp__subcmd__help__subcmd__rpki__subcmd__validate"
                 ;;
@@ -1108,11 +1111,17 @@ _rbgp() {
             rbgp__subcmd__rib__subcmd__help,vpn)
                 cmd="rbgp__subcmd__rib__subcmd__help__subcmd__vpn"
                 ;;
+            rbgp__subcmd__rpki,caches)
+                cmd="rbgp__subcmd__rpki__subcmd__caches"
+                ;;
             rbgp__subcmd__rpki,help)
                 cmd="rbgp__subcmd__rpki__subcmd__help"
                 ;;
             rbgp__subcmd__rpki,validate)
                 cmd="rbgp__subcmd__rpki__subcmd__validate"
+                ;;
+            rbgp__subcmd__rpki__subcmd__help,caches)
+                cmd="rbgp__subcmd__rpki__subcmd__help__subcmd__caches"
                 ;;
             rbgp__subcmd__rpki__subcmd__help,help)
                 cmd="rbgp__subcmd__rpki__subcmd__help__subcmd__help"
@@ -5739,8 +5748,22 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__help__subcmd__rpki)
-            opts="validate"
+            opts="caches validate"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__help__subcmd__rpki__subcmd__caches)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
@@ -8379,7 +8402,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__rpki)
-            opts="-s -j -h --addr --token-file --json --no-color --help validate help"
+            opts="-s -j -h --addr --token-file --json --no-color --help caches validate help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -8404,9 +8427,49 @@ _rbgp() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
-        rbgp__subcmd__rpki__subcmd__help)
-            opts="validate help"
+        rbgp__subcmd__rpki__subcmd__caches)
+            opts="-s -j -h --addr --token-file --json --no-color --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --addr)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -s)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --token-file)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__rpki__subcmd__help)
+            opts="caches validate help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__rpki__subcmd__help__subcmd__caches)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi

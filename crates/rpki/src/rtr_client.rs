@@ -20,7 +20,7 @@
 //! supported RFC 8210 / 8210bis subset.
 
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -31,6 +31,7 @@ use tracing::{debug, info, warn};
 use crate::aspa::AspaRecord;
 use crate::rtr_codec::{RtrDecodeError, RtrEncodeError, RtrPdu};
 use crate::vrp::VrpEntry;
+use crate::vrp_manager::{CacheUpdateHandle, EnhancedVrpUpdate};
 
 /// Maximum read buffer size (256 KiB).
 const MAX_READ_BUF: usize = 256 * 1024;
@@ -203,6 +204,7 @@ pub struct RtrClient {
     /// The cache epoch backing the currently held data, if any.
     epoch: Option<CacheEpoch>,
     vrp_tx: mpsc::Sender<VrpUpdate>,
+    enhanced_tx: Option<CacheUpdateHandle>,
     refresh_interval: Duration,
     retry_interval: Duration,
     expire_interval: Duration,
@@ -244,6 +246,7 @@ impl RtrClient {
             last_end_of_data_at: None,
             data_expires_at: None,
             vrp_tx,
+            enhanced_tx: None,
             config,
             epoch: None,
             negotiated_version: crate::rtr_codec::RTR_VERSION_2,
@@ -252,6 +255,20 @@ impl RtrClient {
             max_transaction_records: MAX_TRANSACTION_RECORDS,
             max_transaction_bytes: MAX_TRANSACTION_BYTES,
             expire_observer: None,
+        }
+    }
+
+    /// Route validated cache epochs and connection lifecycle through the
+    /// manager's atomic cache-inventory attachment.
+    #[must_use]
+    pub fn with_cache_inventory(mut self, handle: CacheUpdateHandle) -> Self {
+        self.enhanced_tx = Some(handle);
+        self
+    }
+
+    async fn send_enhanced(&self, update: EnhancedVrpUpdate) {
+        if let Some(handle) = &self.enhanced_tx {
+            let _ = handle.0.send(update).await;
         }
     }
 
@@ -311,6 +328,11 @@ impl RtrClient {
 
     async fn connect_and_run(&mut self) -> Result<(), std::io::Error> {
         let mut stream = TcpStream::connect(self.config.server_addr).await?;
+        let mut disconnect_sent = false;
+        self.send_enhanced(EnhancedVrpUpdate::Connected {
+            server: self.config.server_addr,
+        })
+        .await;
         info!(
             server = %self.config.server_addr,
             rtr_version = self.negotiated_version,
@@ -322,6 +344,11 @@ impl RtrClient {
             // (the teardown Error Report, if any, was already sent).
             drop(stream);
             if self.should_fallback_to_v1(&error) {
+                self.send_enhanced(EnhancedVrpUpdate::Disconnected {
+                    server: self.config.server_addr,
+                    flush: false,
+                })
+                .await;
                 self.run_v1_fallback_session().await;
                 return Ok(());
             }
@@ -331,7 +358,23 @@ impl RtrClient {
                 error = %error,
                 "RTR session ended"
             );
+            disconnect_sent = true;
+            if error.disposition() != SessionEndDisposition::FlushAndDrop {
+                self.send_enhanced(EnhancedVrpUpdate::Disconnected {
+                    server: self.config.server_addr,
+                    flush: false,
+                })
+                .await;
+            }
             self.end_session(&error).await;
+        }
+
+        if !disconnect_sent {
+            self.send_enhanced(EnhancedVrpUpdate::Disconnected {
+                server: self.config.server_addr,
+                flush: false,
+            })
+            .await;
         }
 
         Ok(())
@@ -389,6 +432,11 @@ impl RtrClient {
 
         match TcpStream::connect(self.config.server_addr).await {
             Ok(mut stream) => {
+                let mut disconnect_sent = false;
+                self.send_enhanced(EnhancedVrpUpdate::Connected {
+                    server: self.config.server_addr,
+                })
+                .await;
                 info!(
                     server = %self.config.server_addr,
                     rtr_version = self.negotiated_version,
@@ -401,7 +449,22 @@ impl RtrClient {
                         error = %error,
                         "RTR session ended after v1 fallback"
                     );
+                    disconnect_sent = true;
+                    if error.disposition() != SessionEndDisposition::FlushAndDrop {
+                        self.send_enhanced(EnhancedVrpUpdate::Disconnected {
+                            server: self.config.server_addr,
+                            flush: false,
+                        })
+                        .await;
+                    }
                     self.end_session(&error).await;
+                }
+                if !disconnect_sent {
+                    self.send_enhanced(EnhancedVrpUpdate::Disconnected {
+                        server: self.config.server_addr,
+                        flush: false,
+                    })
+                    .await;
                 }
             }
             Err(error) => {
@@ -434,12 +497,26 @@ impl RtrClient {
         let now = TokioInstant::now();
         let expired = flush_now || self.data_expires_at.is_some_and(|at| now >= at);
         if expired {
-            let _ = self
-                .vrp_tx
-                .send(VrpUpdate::ServerDown {
-                    server: self.config.server_addr,
-                })
-                .await;
+            if let Some(handle) = &self.enhanced_tx {
+                let update = if flush_now {
+                    EnhancedVrpUpdate::Disconnected {
+                        server: self.config.server_addr,
+                        flush: true,
+                    }
+                } else {
+                    EnhancedVrpUpdate::Expired {
+                        server: self.config.server_addr,
+                    }
+                };
+                let _ = handle.0.send(update).await;
+            } else {
+                let _ = self
+                    .vrp_tx
+                    .send(VrpUpdate::ServerDown {
+                        server: self.config.server_addr,
+                    })
+                    .await;
+            }
             self.epoch = None;
             self.last_end_of_data_at = None;
             self.data_expires_at = None;
@@ -1125,7 +1202,46 @@ impl RtrClient {
                                 );
                             }
 
-                            let _ = self.vrp_tx.send(update).await;
+                            if let Some(handle) = &self.enhanced_tx {
+                                let update = match update {
+                                    VrpUpdate::FullTable {
+                                        server,
+                                        entries,
+                                        aspa_records,
+                                    } => EnhancedVrpUpdate::Full {
+                                        server,
+                                        entries,
+                                        aspa_records,
+                                        version: self.negotiated_version,
+                                        session_id,
+                                        serial,
+                                        accepted_at: Instant::now(),
+                                    },
+                                    VrpUpdate::IncrementalUpdate {
+                                        server,
+                                        announced,
+                                        withdrawn,
+                                        aspa_announced,
+                                        aspa_withdrawn,
+                                    } => EnhancedVrpUpdate::Incremental {
+                                        server,
+                                        announced,
+                                        withdrawn,
+                                        aspa_announced,
+                                        aspa_withdrawn,
+                                        version: self.negotiated_version,
+                                        session_id,
+                                        serial,
+                                        accepted_at: Instant::now(),
+                                    },
+                                    VrpUpdate::ServerDown { .. } => {
+                                        unreachable!("End of Data never emits ServerDown")
+                                    }
+                                };
+                                let _ = handle.0.send(update).await;
+                            } else {
+                                let _ = self.vrp_tx.send(update).await;
+                            }
                             return Ok(());
                         }
                         RtrPdu::CacheReset => {

@@ -65,6 +65,7 @@ use crate::runtime_config_settlement::{
     RuntimeConfigFenceReason, RuntimeConfigSettlementWatchdog,
 };
 use rustbgpd_rib::{RibReadinessQuery, RibUpdate};
+use rustbgpd_rpki::CacheQueryHandle;
 use rustbgpd_telemetry::BgpMetrics;
 
 const MAX_CONCURRENT_GRPC_TLS_HANDSHAKES: usize = 64;
@@ -1002,6 +1003,8 @@ pub struct ServeConfig {
     /// The closure clones the table Arc and releases its watch borrow before
     /// returning; `None` means no first authoritative snapshot has arrived.
     pub vrp_snapshot: VrpSnapshotFn,
+    /// Bounded actor-owned RTR cache inventory query lane.
+    pub rpki_cache_queries: Option<CacheQueryHandle>,
     /// Optional MRT dump trigger channel (None if MRT not configured).
     pub mrt_trigger_tx: Option<MrtTriggerTx>,
     /// Live count provider for locally-originated Type 2 MAC routes
@@ -1510,6 +1513,7 @@ async fn run_listener(
     let peer_mgr_readiness_tx = config.peer_mgr_readiness_tx;
     let rib_readiness_tx = config.rib_readiness_tx;
     let vrp_snapshot = config.vrp_snapshot;
+    let rpki_cache_queries = config.rpki_cache_queries;
     let mrt_trigger_tx = config.mrt_trigger_tx;
     let evpn_originated_local_mac_count = config.evpn_originated_local_mac_count;
     let evpn_instance_status_snapshot = config.evpn_instance_status_snapshot;
@@ -1569,6 +1573,7 @@ async fn run_listener(
                 rib_query_tx,
                 rib_readiness_tx,
                 vrp_snapshot.clone(),
+                rpki_cache_queries.clone(),
                 peer_mgr_tx,
                 peer_mgr_readiness_tx,
                 asn,
@@ -1633,6 +1638,7 @@ async fn run_listener(
                 rib_query_tx,
                 rib_readiness_tx,
                 vrp_snapshot,
+                rpki_cache_queries,
                 peer_mgr_tx,
                 peer_mgr_readiness_tx,
                 asn,
@@ -1703,6 +1709,7 @@ async fn run_tcp_listener(
     rib_query_tx: mpsc::Sender<RibUpdate>,
     rib_readiness_tx: mpsc::Sender<RibReadinessQuery>,
     vrp_snapshot: VrpSnapshotFn,
+    rpki_cache_queries: Option<CacheQueryHandle>,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     peer_mgr_readiness_tx: mpsc::Sender<PeerManagerReadinessQuery>,
     asn: u32,
@@ -1844,7 +1851,7 @@ async fn run_tcp_listener(
         interceptor.clone(),
     ));
     routes.add_service(RpkiServiceServer::with_interceptor(
-        RpkiService::new(vrp_snapshot),
+        RpkiService::new(vrp_snapshot).with_cache_queries(rpki_cache_queries),
         interceptor.clone(),
     ));
     routes.add_service(InjectionServiceServer::with_interceptor(
@@ -1977,6 +1984,7 @@ async fn run_uds_listener(
     rib_query_tx: mpsc::Sender<RibUpdate>,
     rib_readiness_tx: mpsc::Sender<RibReadinessQuery>,
     vrp_snapshot: VrpSnapshotFn,
+    rpki_cache_queries: Option<CacheQueryHandle>,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     peer_mgr_readiness_tx: mpsc::Sender<PeerManagerReadinessQuery>,
     asn: u32,
@@ -2079,7 +2087,7 @@ async fn run_uds_listener(
         interceptor.clone(),
     ));
     routes.add_service(RpkiServiceServer::with_interceptor(
-        RpkiService::new(vrp_snapshot),
+        RpkiService::new(vrp_snapshot).with_cache_queries(rpki_cache_queries),
         interceptor.clone(),
     ));
     routes.add_service(InjectionServiceServer::with_interceptor(

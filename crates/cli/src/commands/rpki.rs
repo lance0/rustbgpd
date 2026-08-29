@@ -10,8 +10,27 @@ use crate::error::CliError;
 use crate::output;
 use crate::proto::rpki_service_client::RpkiServiceClient;
 use crate::proto::{
-    CoveringVrp, RouteOriginValidation, ValidateRouteOriginRequest, ValidateRouteOriginResponse,
+    CoveringVrp, ListRpkiCachesRequest, ListRpkiCachesResponse, RouteOriginValidation,
+    ValidateRouteOriginRequest, ValidateRouteOriginResponse,
 };
+
+#[derive(Debug, Serialize)]
+struct JsonCache<'a> {
+    address: &'a str,
+    connected: bool,
+    accepted: Option<JsonAcceptedCache>,
+}
+
+#[derive(Debug, Serialize)]
+struct JsonAcceptedCache {
+    protocol_version: Option<u32>,
+    session_id: Option<u32>,
+    serial: Option<u32>,
+    vrp_v4_count: u64,
+    vrp_v6_count: u64,
+    aspa_count: u64,
+    age_seconds: u64,
+}
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 struct JsonCoveringVrp {
@@ -171,6 +190,99 @@ pub async fn validate(
     Ok(())
 }
 
+fn render_caches_human(response: &ListRpkiCachesResponse) -> String {
+    let mut rendered = String::new();
+    if response.caches.is_empty() {
+        rendered.push_str("RPKI caches: none\n");
+    } else {
+        writeln!(
+            rendered,
+            "{:<45} {:<12} {:>10} {:>10} {:>10} {:>10}",
+            "Address", "State", "VRP v4", "VRP v6", "ASPAs", "Age(s)"
+        )
+        .unwrap();
+        for cache in &response.caches {
+            if let Some(accepted) = &cache.accepted {
+                writeln!(
+                    rendered,
+                    "{:<45} {:<12} {:>10} {:>10} {:>10} {:>10}",
+                    cache.address,
+                    if cache.connected {
+                        "connected"
+                    } else {
+                        "retained"
+                    },
+                    accepted.vrp_v4_count,
+                    accepted.vrp_v6_count,
+                    accepted.aspa_count,
+                    accepted.age_seconds
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    rendered,
+                    "{:<45} {:<12} {:>10}",
+                    cache.address,
+                    if cache.connected {
+                        "syncing"
+                    } else {
+                        "disconnected"
+                    },
+                    "-"
+                )
+                .unwrap();
+            }
+        }
+    }
+    if response.complete {
+        rendered.push_str("Listing: complete\n");
+    } else {
+        writeln!(
+            rendered,
+            "Listing: incomplete ({} omitted)",
+            response.omitted
+        )
+        .unwrap();
+    }
+    rendered
+}
+
+fn caches_json(response: &ListRpkiCachesResponse) -> serde_json::Value {
+    let rows: Vec<_> = response
+        .caches
+        .iter()
+        .map(|cache| JsonCache {
+            address: &cache.address,
+            connected: cache.connected,
+            accepted: cache.accepted.as_ref().map(|state| JsonAcceptedCache {
+                protocol_version: state.protocol_version,
+                session_id: state.session_id,
+                serial: state.serial,
+                vrp_v4_count: state.vrp_v4_count,
+                vrp_v6_count: state.vrp_v6_count,
+                aspa_count: state.aspa_count,
+                age_seconds: state.age_seconds,
+            }),
+        })
+        .collect();
+    serde_json::json!({ "caches": rows, "complete": response.complete, "omitted": response.omitted })
+}
+
+pub async fn caches(connection: Connection, json: bool) -> Result<(), CliError> {
+    let mut client =
+        RpkiServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let response = client
+        .list_caches(ListRpkiCachesRequest {})
+        .await?
+        .into_inner();
+    if json {
+        output::print_json_pretty(&caches_json(&response))?;
+    } else {
+        print!("{}", render_caches_human(&response));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -271,6 +383,46 @@ mod tests {
         assert!(render_human(&empty).contains("Covering VRPs: none\nListing: complete\n"));
     }
 
+    #[test]
+    fn cache_inventory_human_and_json_are_presence_aware() {
+        let response = ListRpkiCachesResponse {
+            caches: vec![crate::proto::RpkiCacheState {
+                address: "192.0.2.1:3323".to_string(),
+                connected: false,
+                accepted: Some(crate::proto::AcceptedRpkiCacheState {
+                    protocol_version: Some(2),
+                    session_id: Some(7),
+                    serial: Some(11),
+                    vrp_v4_count: 10,
+                    vrp_v6_count: 20,
+                    aspa_count: 3,
+                    age_seconds: 4,
+                }),
+            }],
+            complete: false,
+            omitted: 1,
+        };
+        let human = render_caches_human(&response);
+        assert!(human.contains("192.0.2.1:3323"));
+        assert!(human.contains("retained"));
+        assert!(human.ends_with("Listing: incomplete (1 omitted)\n"));
+        assert_eq!(
+            caches_json(&response),
+            serde_json::json!({
+                "caches": [{
+                    "address": "192.0.2.1:3323", "connected": false,
+                    "accepted": { "protocol_version": 2, "session_id": 7, "serial": 11,
+                        "vrp_v4_count": 10, "vrp_v6_count": 20, "aspa_count": 3, "age_seconds": 4 }
+                }],
+                "complete": false, "omitted": 1
+            })
+        );
+        assert_eq!(
+            render_caches_human(&ListRpkiCachesResponse::default()),
+            "RPKI caches: none\nListing: incomplete (0 omitted)\n"
+        );
+    }
+
     #[derive(Clone)]
     struct MockRpki {
         request: Arc<Mutex<Option<server_proto::ValidateRouteOriginRequest>>>,
@@ -278,6 +430,15 @@ mod tests {
 
     #[tonic::async_trait]
     impl RpkiService for MockRpki {
+        async fn list_caches(
+            &self,
+            _request: Request<server_proto::ListRpkiCachesRequest>,
+        ) -> Result<Response<server_proto::ListRpkiCachesResponse>, Status> {
+            Ok(Response::new(
+                server_proto::ListRpkiCachesResponse::default(),
+            ))
+        }
+
         async fn validate_route_origin(
             &self,
             request: Request<server_proto::ValidateRouteOriginRequest>,

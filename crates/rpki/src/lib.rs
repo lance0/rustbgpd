@@ -63,7 +63,10 @@ pub use rtr_client::{
     EXPIRE_MAX_SECS as RTR_EXPIRE_MAX_SECS, RtrClient, RtrClientConfig, VrpUpdate,
 };
 pub use vrp::{CoveringVrp, CoveringVrps, MAX_COVERING_VRPS, VrpEntry, VrpTable};
-pub use vrp_manager::{AspaTableUpdate, RpkiTableUpdate, VrpManager};
+pub use vrp_manager::{
+    AcceptedCacheState, AspaTableUpdate, CacheInventoryAttachment, CacheList, CacheQueryError,
+    CacheQueryHandle, CacheState, CacheUpdateHandle, RpkiTableUpdate, VrpManager,
+};
 
 /// Snapshot of RPKI validation tables, broadcast to transport sessions
 /// via `tokio::sync::watch` for import-time route validation.

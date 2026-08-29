@@ -17,6 +17,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   inner error; optional shutdown communication is escaped to ASCII and bounded
   to 512 bytes, while malformed communication remains omitted and warned.
 
+- `RpkiService.ListCaches` and `rbgp rpki caches` expose a bounded,
+  deterministic inventory of configured RTR caches, connection state, and
+  latest atomically accepted epoch. Accepted-empty tables remain distinguishable
+  from initial, expired, and flushed state; responses cap at 256 rows with exact
+  omission metadata, and the sensitive-read RPC remains outside narrow v1.
+
 - `EvpnService.ListDuplicateMacQuarantines` and `rbgp evpn
   duplicate-mac-quarantines` expose the current duplicate-MAC local-origin
   quarantine set as one deterministic, key-only snapshot. Responses are capped

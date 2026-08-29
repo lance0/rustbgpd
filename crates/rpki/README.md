@@ -22,7 +22,10 @@ newer. Release-by-release crate changes are recorded in the
 - **ASPA path verification** — a synchronous `AspaTable` plus role-aware path
   verification.
 - **Multi-cache merge** — a `VrpManager` that merges retained contributions
-  from multiple RTR caches and publishes immutable VRP and ASPA snapshots.
+  from multiple RTR caches and publishes immutable VRP and ASPA snapshots. An
+  optional `CacheInventoryAttachment` supplies distinct enhanced-update and
+  bounded query handles without changing the legacy constructors or
+  `VrpUpdate` contract.
 
 The standalone crate does not select BGP best paths or evaluate rustbgpd policy
 statements. In the daemon, `rustbgpd-rib` consumes these validation results in
@@ -98,6 +101,8 @@ The crate-root facade exports the primary application surface:
   `MAX_COVERING_VRPS`, `AspaRecord`, and `AspaTable`
 - `AspaInvalidHop`, `AspaVerificationResult`, and `ValidationSnapshot`
 - `RtrClient`, `RtrClientConfig`, `VrpUpdate`, and `RTR_EXPIRE_MAX_SECS`
+- `CacheInventoryAttachment`, `CacheUpdateHandle`, and `CacheQueryHandle` for
+  atomic accepted-epoch inventory when the optional attachment is used
 - `VrpManager`, `RpkiTableUpdate`, and `AspaTableUpdate`
 
 The public modules are also part of the `0.1.x` API. They expose the advanced

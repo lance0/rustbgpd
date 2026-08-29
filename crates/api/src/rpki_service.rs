@@ -3,13 +3,14 @@
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use rustbgpd_rpki::{MAX_COVERING_VRPS, VrpTable};
+use rustbgpd_rpki::{CacheQueryHandle, MAX_COVERING_VRPS, VrpTable};
 use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix, Prefix, RpkiValidation};
 use tonic::{Request, Response, Status};
 
 use crate::proto::rpki_service_server::RpkiService as RpkiServiceTrait;
 use crate::proto::{
-    CoveringVrp, RouteOriginValidation, ValidateRouteOriginRequest, ValidateRouteOriginResponse,
+    AcceptedRpkiCacheState, CoveringVrp, ListRpkiCachesRequest, ListRpkiCachesResponse,
+    RouteOriginValidation, RpkiCacheState, ValidateRouteOriginRequest, ValidateRouteOriginResponse,
 };
 
 /// Synchronous daemon-owned reader for the latest authoritative VRP snapshot.
@@ -23,13 +24,23 @@ pub type VrpSnapshotFn = Arc<dyn Fn() -> Option<Arc<VrpTable>> + Send + Sync>;
 #[derive(Clone)]
 pub struct RpkiService {
     snapshot: VrpSnapshotFn,
+    cache_queries: Option<CacheQueryHandle>,
 }
 
 impl RpkiService {
     /// Construct a service from the daemon's narrow synchronous snapshot read.
     #[must_use]
     pub fn new(snapshot: VrpSnapshotFn) -> Self {
-        Self { snapshot }
+        Self {
+            snapshot,
+            cache_queries: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_cache_queries(mut self, cache_queries: Option<CacheQueryHandle>) -> Self {
+        self.cache_queries = cache_queries;
+        self
     }
 }
 
@@ -74,6 +85,45 @@ const fn validation_to_proto(validation: RpkiValidation) -> RouteOriginValidatio
 
 #[tonic::async_trait]
 impl RpkiServiceTrait for RpkiService {
+    async fn list_caches(
+        &self,
+        _request: Request<ListRpkiCachesRequest>,
+    ) -> Result<Response<ListRpkiCachesResponse>, Status> {
+        let Some(queries) = self.cache_queries.clone() else {
+            return Ok(Response::new(ListRpkiCachesResponse {
+                caches: Vec::new(),
+                complete: true,
+                omitted: 0,
+            }));
+        };
+        let list = tokio::time::timeout(std::time::Duration::from_secs(2), queries.list())
+            .await
+            .map_err(|_| Status::deadline_exceeded("RPKI cache inventory query timed out"))?
+            .map_err(|_| Status::unavailable("RPKI cache inventory actor is unavailable"))?;
+        let caches = list
+            .rows
+            .into_iter()
+            .map(|row| RpkiCacheState {
+                address: row.server.to_string(),
+                connected: row.connected,
+                accepted: row.accepted.map(|accepted| AcceptedRpkiCacheState {
+                    protocol_version: accepted.protocol_version.map(u32::from),
+                    session_id: accepted.session_id.map(u32::from),
+                    serial: accepted.serial,
+                    vrp_v4_count: u64::try_from(accepted.vrp_v4_count).unwrap_or(u64::MAX),
+                    vrp_v6_count: u64::try_from(accepted.vrp_v6_count).unwrap_or(u64::MAX),
+                    aspa_count: u64::try_from(accepted.aspa_count).unwrap_or(u64::MAX),
+                    age_seconds: accepted.age_seconds,
+                }),
+            })
+            .collect();
+        Ok(Response::new(ListRpkiCachesResponse {
+            caches,
+            complete: list.omitted == 0,
+            omitted: list.omitted,
+        }))
+    }
+
     async fn validate_route_origin(
         &self,
         request: Request<ValidateRouteOriginRequest>,
@@ -191,6 +241,70 @@ mod tests {
         assert!(response.covering_vrps.is_empty());
         assert!(response.complete);
         assert_eq!(response.omitted, 0);
+    }
+
+    #[tokio::test]
+    async fn unconfigured_cache_inventory_is_empty_and_complete() {
+        let service = RpkiService::new(Arc::new(|| None));
+        let response = service
+            .list_caches(Request::new(ListRpkiCachesRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(response.caches.is_empty());
+        assert!(response.complete);
+        assert_eq!(response.omitted, 0);
+    }
+
+    #[tokio::test]
+    async fn closed_cache_inventory_actor_is_unavailable() {
+        let (attachment, updates, queries) = rustbgpd_rpki::CacheInventoryAttachment::new([]);
+        drop(attachment);
+        drop(updates);
+        let service = RpkiService::new(Arc::new(|| None)).with_cache_queries(Some(queries));
+        let error = service
+            .list_caches(Request::new(ListRpkiCachesRequest {}))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), Code::Unavailable);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cache_inventory_whole_query_timeout_is_deadline_exceeded() {
+        let (_attachment, _updates, queries) =
+            rustbgpd_rpki::CacheInventoryAttachment::new(["192.0.2.1:3323".parse().unwrap()]);
+        let service = RpkiService::new(Arc::new(|| None)).with_cache_queries(Some(queries));
+        let error = service
+            .list_caches(Request::new(ListRpkiCachesRequest {}))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), Code::DeadlineExceeded);
+    }
+
+    #[tokio::test]
+    async fn configured_initial_cache_is_present_without_accepted_epoch() {
+        let (legacy_tx, legacy_rx) = tokio::sync::mpsc::channel(1);
+        let (rib_tx, _rib_rx) = tokio::sync::mpsc::channel(1);
+        let (attachment, updates, queries) =
+            rustbgpd_rpki::CacheInventoryAttachment::new(["192.0.2.1:3323".parse().unwrap()]);
+        let manager = tokio::spawn(
+            rustbgpd_rpki::VrpManager::new(legacy_rx, rib_tx)
+                .with_cache_inventory(attachment)
+                .run(),
+        );
+        let service = RpkiService::new(Arc::new(|| None)).with_cache_queries(Some(queries));
+        let response = service
+            .list_caches(Request::new(ListRpkiCachesRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(response.caches.len(), 1);
+        assert_eq!(response.caches[0].address, "192.0.2.1:3323");
+        assert!(!response.caches[0].connected);
+        assert!(response.caches[0].accepted.is_none());
+        drop(legacy_tx);
+        drop(updates);
+        manager.await.unwrap();
     }
 
     #[tokio::test]

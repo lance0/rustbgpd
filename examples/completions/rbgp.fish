@@ -321,18 +321,25 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and __fish_seen_subcommand_from show" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and __fish_seen_subcommand_from help" -f -a "show" -d 'Show a single BFD session by peer address'
 complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
-complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from validate help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from validate help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from validate help" -s j -l json -d 'Output in JSON format'
-complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from validate help" -l no-color -d 'Disable colored output'
-complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from validate help" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from validate help" -f -a "validate" -d 'Validate one CIDR prefix and origin ASN'
-complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from validate help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from caches validate help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from caches validate help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from caches validate help" -s j -l json -d 'Output in JSON format'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from caches validate help" -l no-color -d 'Disable colored output'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from caches validate help" -s h -l help -d 'Print help (see more with \'--help\')'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from caches validate help" -f -a "caches" -d 'List configured RTR caches and accepted validation epochs'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from caches validate help" -f -a "validate" -d 'Validate one CIDR prefix and origin ASN'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from caches validate help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from caches" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from caches" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from caches" -s j -l json -d 'Output in JSON format'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from caches" -l no-color -d 'Disable colored output'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from caches" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from validate" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from validate" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from validate" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from validate" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from validate" -s h -l help -d 'Print help (see more with \'--help\')'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from help" -f -a "caches" -d 'List configured RTR caches and accepted validation epochs'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from help" -f -a "validate" -d 'Validate one CIDR prefix and origin ASN'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -s a -l family -d 'Address family filter (ipv4_unicast, ipv6_unicast)' -r
@@ -1158,6 +1165,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from neighbor" -f -a "softreset" -d 'Trigger soft reset (inbound)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from neighbor" -f -a "refresh-out" -d 'Re-send this peer\'s current exportable outbound routes'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from bfd" -f -a "show" -d 'Show a single BFD session by peer address'
+complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from rpki" -f -a "caches" -d 'List configured RTR caches and accepted validation epochs'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from rpki" -f -a "validate" -d 'Validate one CIDR prefix and origin ASN'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from rib" -f -a "received" -d 'Show received routes from a neighbor'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from rib" -f -a "advertised" -d 'Show advertised routes to a neighbor'

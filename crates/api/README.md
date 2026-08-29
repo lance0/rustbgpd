@@ -15,7 +15,7 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 | **PeerGroupService** | Peer-group CRUD, neighbor-to-group assignment |
 | **RibService** | Received/best/advertised route queries (incl. EVPN), BLACKHOLE discard status, FIB route status, and BGP-LS route queries (ListBgpLsRoutes, RFC 9552); all unary — live route deltas stream through `EventService.WatchEvents` |
 | **BfdService** | BFD session queries (RFC 5880/5881/5882) |
-| **RpkiService** | Bounded route-origin validation against the current authoritative VRP table |
+| **RpkiService** | Bounded route-origin validation and configured RTR-cache accepted-epoch inventory |
 | **EventService** | Live event stream (`WatchEvents`), recent session/policy/EVPN history, and the durable `SubscribeFromEvent` cursor (ADR-0072) |
 | **InjectionService** | Inject/withdraw unicast, FlowSpec, and EVPN routes |
 | **ControlService** | Health, metrics, shutdown, MRT trigger |

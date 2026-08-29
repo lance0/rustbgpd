@@ -5,17 +5,162 @@
 //! snapshots. When either table changes, sends the updated snapshot to the
 //! RIB manager.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use rustc_hash::FxHashSet;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info};
 
 use crate::aspa::{AspaRecord, AspaTable};
 use crate::rtr_client::VrpUpdate;
 use crate::vrp::{VrpEntry, VrpTable};
+
+const CACHE_QUERY_CAPACITY: usize = 16;
+pub const MAX_CACHE_ROWS: usize = 256;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AcceptedCacheState {
+    pub protocol_version: Option<u8>,
+    pub session_id: Option<u16>,
+    pub serial: Option<u32>,
+    pub vrp_v4_count: usize,
+    pub vrp_v6_count: usize,
+    pub aspa_count: usize,
+    pub age_seconds: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CacheState {
+    pub server: SocketAddr,
+    pub connected: bool,
+    pub accepted: Option<AcceptedCacheState>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CacheList {
+    pub rows: Vec<CacheState>,
+    pub omitted: u64,
+}
+
+pub struct CacheQuery {
+    reply: oneshot::Sender<CacheList>,
+}
+
+#[derive(Clone)]
+pub struct CacheQueryHandle(mpsc::Sender<CacheQuery>);
+
+impl CacheQueryHandle {
+    /// Request the current bounded cache inventory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CacheQueryError`] when the manager actor has stopped before
+    /// accepting or answering the request.
+    pub async fn list(&self) -> Result<CacheList, CacheQueryError> {
+        let (reply, rx) = oneshot::channel();
+        self.0
+            .send(CacheQuery { reply })
+            .await
+            .map_err(|_| CacheQueryError)?;
+        rx.await.map_err(|_| CacheQueryError)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CacheQueryError;
+
+#[derive(Debug)]
+pub(crate) enum EnhancedVrpUpdate {
+    Connected {
+        server: SocketAddr,
+    },
+    Disconnected {
+        server: SocketAddr,
+        flush: bool,
+    },
+    Expired {
+        server: SocketAddr,
+    },
+    Full {
+        server: SocketAddr,
+        entries: Vec<VrpEntry>,
+        aspa_records: Vec<AspaRecord>,
+        version: u8,
+        session_id: u16,
+        serial: u32,
+        accepted_at: Instant,
+    },
+    Incremental {
+        server: SocketAddr,
+        announced: Vec<VrpEntry>,
+        withdrawn: Vec<VrpEntry>,
+        aspa_announced: Vec<AspaRecord>,
+        aspa_withdrawn: Vec<AspaRecord>,
+        version: u8,
+        session_id: u16,
+        serial: u32,
+        accepted_at: Instant,
+    },
+}
+
+#[derive(Clone)]
+pub struct CacheUpdateHandle(pub(crate) mpsc::Sender<EnhancedVrpUpdate>);
+
+pub struct CacheInventoryAttachment {
+    update_rx: mpsc::Receiver<EnhancedVrpUpdate>,
+    query_rx: mpsc::Receiver<CacheQuery>,
+    query_open: bool,
+    states: BTreeMap<SocketAddr, InternalCacheState>,
+}
+
+#[derive(Clone, Debug)]
+struct InternalCacheState {
+    connected: bool,
+    accepted: Option<AcceptedMetadata>,
+}
+
+#[derive(Clone, Debug)]
+struct AcceptedMetadata {
+    version: Option<u8>,
+    session_id: Option<u16>,
+    serial: Option<u32>,
+    accepted_at: Instant,
+}
+
+impl CacheInventoryAttachment {
+    #[must_use]
+    pub fn new(
+        servers: impl IntoIterator<Item = SocketAddr>,
+    ) -> (Self, CacheUpdateHandle, CacheQueryHandle) {
+        let (update_tx, update_rx) = mpsc::channel(256);
+        let (query_tx, query_rx) = mpsc::channel(CACHE_QUERY_CAPACITY);
+        let states = servers
+            .into_iter()
+            .map(|server| {
+                (
+                    server,
+                    InternalCacheState {
+                        connected: false,
+                        accepted: None,
+                    },
+                )
+            })
+            .collect();
+        (
+            Self {
+                update_rx,
+                query_rx,
+                query_open: true,
+                states,
+            },
+            CacheUpdateHandle(update_tx),
+            CacheQueryHandle(query_tx),
+        )
+    }
+}
 
 /// Message sent from VRP manager to RIB manager when the VRP table changes.
 #[derive(Debug, Clone)]
@@ -68,6 +213,7 @@ pub struct VrpManager {
     /// Sender for ASPA table snapshots to the RIB manager.
     aspa_rib_tx: Option<mpsc::Sender<AspaTableUpdate>>,
     readiness_observer: Option<Box<dyn Fn(SocketAddr, bool) + Send + Sync>>,
+    cache_inventory: Option<CacheInventoryAttachment>,
 }
 
 impl VrpManager {
@@ -86,7 +232,14 @@ impl VrpManager {
             rib_tx,
             aspa_rib_tx: None,
             readiness_observer: None,
+            cache_inventory: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_cache_inventory(mut self, attachment: CacheInventoryAttachment) -> Self {
+        self.cache_inventory = Some(attachment);
+        self
     }
 
     /// Set the ASPA table update sender.
@@ -109,10 +262,193 @@ impl VrpManager {
 
     /// Main event loop.
     pub async fn run(mut self) {
-        while let Some(update) = self.update_rx.recv().await {
-            self.handle_update(update).await;
+        loop {
+            if self.cache_inventory.is_none() {
+                let Some(update) = self.update_rx.recv().await else {
+                    break;
+                };
+                self.handle_update(update).await;
+                continue;
+            }
+            let Some(inventory) = self.cache_inventory.as_mut() else {
+                continue;
+            };
+            tokio::select! {
+                biased;
+                update = self.update_rx.recv() => match update {
+                    Some(update) => self.handle_update(update).await,
+                    None if inventory.update_rx.is_closed() => break,
+                    None => {},
+                },
+                update = inventory.update_rx.recv() => match update {
+                    Some(update) => self.handle_enhanced_update(update).await,
+                    None if self.update_rx.is_closed() => break,
+                    None => {},
+                },
+                query = inventory.query_rx.recv(), if inventory.query_open => match query {
+                    Some(query) => { let _ = query.reply.send(self.cache_list()); }
+                    None => inventory.query_open = false,
+                },
+            }
         }
         info!("VRP manager shutting down");
+    }
+
+    fn cache_list(&self) -> CacheList {
+        let Some(inventory) = &self.cache_inventory else {
+            return CacheList {
+                rows: Vec::new(),
+                omitted: 0,
+            };
+        };
+        let total = inventory.states.len();
+        let rows = inventory
+            .states
+            .iter()
+            .take(MAX_CACHE_ROWS)
+            .map(|(&server, state)| {
+                let accepted = state.accepted.as_ref().map(|metadata| {
+                    let table = self.server_tables.get(&server);
+                    let (vrp_v4_count, vrp_v6_count) = table.map_or((0, 0), |entries| {
+                        entries
+                            .iter()
+                            .fold((0, 0), |(v4, v6), entry| match entry.prefix {
+                                std::net::IpAddr::V4(_) => (v4 + 1, v6),
+                                std::net::IpAddr::V6(_) => (v4, v6 + 1),
+                            })
+                    });
+                    AcceptedCacheState {
+                        protocol_version: metadata.version,
+                        session_id: metadata.session_id,
+                        serial: metadata.serial,
+                        vrp_v4_count,
+                        vrp_v6_count,
+                        aspa_count: self.server_aspa_tables.get(&server).map_or(0, HashMap::len),
+                        age_seconds: metadata.accepted_at.elapsed().as_secs(),
+                    }
+                });
+                CacheState {
+                    server,
+                    connected: state.connected,
+                    accepted,
+                }
+            })
+            .collect();
+        CacheList {
+            rows,
+            omitted: u64::try_from(total.saturating_sub(MAX_CACHE_ROWS)).unwrap_or(u64::MAX),
+        }
+    }
+
+    async fn handle_enhanced_update(&mut self, update: EnhancedVrpUpdate) {
+        match update {
+            EnhancedVrpUpdate::Connected { server } => {
+                if let Some(state) = self
+                    .cache_inventory
+                    .as_mut()
+                    .and_then(|i| i.states.get_mut(&server))
+                {
+                    state.connected = true;
+                }
+            }
+            EnhancedVrpUpdate::Disconnected { server, flush } => {
+                if let Some(state) = self
+                    .cache_inventory
+                    .as_mut()
+                    .and_then(|i| i.states.get_mut(&server))
+                {
+                    state.connected = false;
+                    if flush {
+                        state.accepted = None;
+                    }
+                }
+                if flush {
+                    self.handle_update(VrpUpdate::ServerDown { server }).await;
+                }
+            }
+            EnhancedVrpUpdate::Expired { server } => {
+                if let Some(state) = self
+                    .cache_inventory
+                    .as_mut()
+                    .and_then(|i| i.states.get_mut(&server))
+                {
+                    state.accepted = None;
+                }
+                self.handle_update(VrpUpdate::ServerDown { server }).await;
+            }
+            EnhancedVrpUpdate::Full {
+                server,
+                entries,
+                aspa_records,
+                version,
+                session_id,
+                serial,
+                accepted_at,
+            } => {
+                self.handle_update(VrpUpdate::FullTable {
+                    server,
+                    entries,
+                    aspa_records,
+                })
+                .await;
+                self.set_accepted(
+                    server,
+                    Some(version),
+                    Some(session_id),
+                    Some(serial),
+                    accepted_at,
+                );
+            }
+            EnhancedVrpUpdate::Incremental {
+                server,
+                announced,
+                withdrawn,
+                aspa_announced,
+                aspa_withdrawn,
+                version,
+                session_id,
+                serial,
+                accepted_at,
+            } => {
+                self.handle_update(VrpUpdate::IncrementalUpdate {
+                    server,
+                    announced,
+                    withdrawn,
+                    aspa_announced,
+                    aspa_withdrawn,
+                })
+                .await;
+                self.set_accepted(
+                    server,
+                    Some(version),
+                    Some(session_id),
+                    Some(serial),
+                    accepted_at,
+                );
+            }
+        }
+    }
+
+    fn set_accepted(
+        &mut self,
+        server: SocketAddr,
+        version: Option<u8>,
+        session_id: Option<u16>,
+        serial: Option<u32>,
+        accepted_at: Instant,
+    ) {
+        if let Some(state) = self
+            .cache_inventory
+            .as_mut()
+            .and_then(|i| i.states.get_mut(&server))
+        {
+            state.accepted = Some(AcceptedMetadata {
+                version,
+                session_id,
+                serial,
+                accepted_at,
+            });
+        }
     }
 
     async fn handle_update(&mut self, update: VrpUpdate) {
@@ -122,6 +458,7 @@ impl VrpManager {
                 entries,
                 aspa_records,
             } => {
+                self.set_accepted(server, None, None, None, Instant::now());
                 info!(
                     %server,
                     vrps = entries.len(),
@@ -150,6 +487,7 @@ impl VrpManager {
                 aspa_announced,
                 aspa_withdrawn,
             } => {
+                self.set_accepted(server, None, None, None, Instant::now());
                 debug!(
                     %server,
                     vrps_announced = announced.len(),
@@ -740,5 +1078,196 @@ mod tests {
             update.table.authorized(65001, 65002),
             ProviderAuth::NotProviderPlus
         );
+    }
+
+    #[tokio::test]
+    async fn cache_inventory_tracks_atomic_epochs_retention_and_flush() {
+        let (_legacy_tx, legacy_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let (attachment, _updates, _queries) = CacheInventoryAttachment::new([server1()]);
+        let mut mgr = VrpManager::new(legacy_rx, rib_tx).with_cache_inventory(attachment);
+
+        mgr.handle_enhanced_update(EnhancedVrpUpdate::Connected { server: server1() })
+            .await;
+        mgr.handle_enhanced_update(EnhancedVrpUpdate::Full {
+            server: server1(),
+            entries: vec![entry(Ipv4Addr::new(192, 0, 2, 0), 24, 24, 64_496)],
+            aspa_records: vec![AspaRecord {
+                customer_asn: 64_496,
+                provider_asns: vec![64_497],
+            }],
+            version: 2,
+            session_id: 7,
+            serial: 11,
+            accepted_at: Instant::now()
+                .checked_sub(std::time::Duration::from_secs(3))
+                .unwrap_or_else(Instant::now),
+        })
+        .await;
+        let row = mgr.cache_list().rows.pop().unwrap();
+        assert!(row.connected);
+        let accepted = row.accepted.unwrap();
+        assert_eq!(
+            (
+                accepted.protocol_version,
+                accepted.session_id,
+                accepted.serial
+            ),
+            (Some(2), Some(7), Some(11))
+        );
+        assert_eq!(
+            (
+                accepted.vrp_v4_count,
+                accepted.vrp_v6_count,
+                accepted.aspa_count
+            ),
+            (1, 0, 1)
+        );
+        assert!(accepted.age_seconds >= 3);
+
+        mgr.handle_enhanced_update(EnhancedVrpUpdate::Disconnected {
+            server: server1(),
+            flush: false,
+        })
+        .await;
+        let retained = mgr.cache_list().rows.pop().unwrap();
+        assert!(!retained.connected);
+        assert!(retained.accepted.is_some());
+
+        mgr.handle_enhanced_update(EnhancedVrpUpdate::Connected { server: server1() })
+            .await;
+        mgr.handle_enhanced_update(EnhancedVrpUpdate::Incremental {
+            server: server1(),
+            announced: vec![],
+            withdrawn: vec![],
+            aspa_announced: vec![],
+            aspa_withdrawn: vec![],
+            version: 2,
+            session_id: 7,
+            serial: 12,
+            accepted_at: Instant::now(),
+        })
+        .await;
+        assert_eq!(
+            mgr.cache_list().rows[0].accepted.as_ref().unwrap().serial,
+            Some(12)
+        );
+
+        mgr.handle_enhanced_update(EnhancedVrpUpdate::Disconnected {
+            server: server1(),
+            flush: true,
+        })
+        .await;
+        let flushed = mgr.cache_list().rows.pop().unwrap();
+        assert!(!flushed.connected);
+        assert!(flushed.accepted.is_none());
+        assert_eq!(mgr.connected_servers(), 0);
+    }
+
+    #[tokio::test]
+    async fn accepted_empty_legacy_metadata_expiry_and_cap_are_exact() {
+        let (_legacy_tx, legacy_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let servers: Vec<SocketAddr> = (0..257)
+            .map(|index| format!("[2001:db8::{:x}]:3323", index + 1).parse().unwrap())
+            .collect();
+        let first = servers[0];
+        let (attachment, _updates, _queries) = CacheInventoryAttachment::new(servers);
+        let mut mgr = VrpManager::new(legacy_rx, rib_tx).with_cache_inventory(attachment);
+        mgr.handle_update(VrpUpdate::FullTable {
+            server: first,
+            entries: vec![],
+            aspa_records: vec![],
+        })
+        .await;
+        let list = mgr.cache_list();
+        assert_eq!(list.rows.len(), 256);
+        assert_eq!(list.omitted, 1);
+        let accepted = list
+            .rows
+            .iter()
+            .find(|row| row.server == first)
+            .unwrap()
+            .accepted
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            (
+                accepted.protocol_version,
+                accepted.session_id,
+                accepted.serial
+            ),
+            (None, None, None)
+        );
+        assert_eq!(
+            (
+                accepted.vrp_v4_count,
+                accepted.vrp_v6_count,
+                accepted.aspa_count
+            ),
+            (0, 0, 0)
+        );
+        mgr.handle_enhanced_update(EnhancedVrpUpdate::Expired { server: first })
+            .await;
+        assert!(
+            mgr.cache_list()
+                .rows
+                .iter()
+                .find(|row| row.server == first)
+                .unwrap()
+                .accepted
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn query_senders_do_not_keep_manager_alive_after_update_lanes_close() {
+        let (legacy_tx, legacy_rx) = mpsc::channel(1);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        let (attachment, updates, queries) = CacheInventoryAttachment::new([server1()]);
+        let task = tokio::spawn(
+            VrpManager::new(legacy_rx, rib_tx)
+                .with_cache_inventory(attachment)
+                .run(),
+        );
+        drop(legacy_tx);
+        drop(updates);
+        tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(queries.list().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn closed_query_lane_does_not_stop_or_spin_the_update_actor() {
+        let (legacy_tx, legacy_rx) = mpsc::channel(1);
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let (attachment, updates, queries) = CacheInventoryAttachment::new([server1()]);
+        let task = tokio::spawn(
+            VrpManager::new(legacy_rx, rib_tx)
+                .with_cache_inventory(attachment)
+                .run(),
+        );
+        drop(queries);
+        legacy_tx
+            .send(VrpUpdate::FullTable {
+                server: server1(),
+                entries: vec![entry(Ipv4Addr::new(192, 0, 2, 0), 24, 24, 64_496)],
+                aspa_records: vec![],
+            })
+            .await
+            .unwrap();
+        let update = tokio::time::timeout(std::time::Duration::from_secs(1), rib_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(update.table.len(), 1);
+        drop(legacy_tx);
+        drop(updates);
+        tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
     }
 }

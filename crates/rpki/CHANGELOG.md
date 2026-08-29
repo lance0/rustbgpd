@@ -5,6 +5,11 @@ Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+- Added an optional cache-inventory attachment with separate enhanced-update
+  and bounded query handles. Existing `VrpUpdate`, `RtrClient::new`, and
+  `VrpManager::new` callers remain source-compatible; attached clients publish
+  contribution and accepted RTR epoch metadata atomically.
+
 - Added `VrpTable::covering_vrps` and the `CoveringVrp` / `CoveringVrps`
   result types. The helper walks only ancestor buckets, returns authorizers
   first, applies a 256-row hard cap with exact omission, and exposes the

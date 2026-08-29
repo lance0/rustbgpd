@@ -57,7 +57,7 @@ not by itself make it v1-stable.
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup`, `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` | Peer-group CRUD and neighbor membership assignment |
 | `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainAdvertisedRoute`, `ExplainBestPath`, `LookupBestPath`, `ListFlowSpecRoutes`, `ListEvpnRoutes`, `ListBgpLsRoutes`, `ListTopologyNodes`, `ListTopologyLinks`, `ListOrrStatus`, `ListVpnRoutes`, `ListRtcRoutes`, `ListLabeledRoutes`, `ListBlackholeDiscards`, `ListFibRoutes`, `ListFibTables`, `SetFibTable`, `DeleteFibTable`, `ListRouteEvents` | Query-only RIB route surfaces (incl. EVPN, BGP-LS, VPNv4/v6, RT-Constrain, and labeled-unicast), the RFC 9107 ORR / BGP-LS topology read surface (`ListTopologyNodes` / `ListTopologyLinks` / `ListOrrStatus`), BLACKHOLE discard status, paginated FIB status, runtime FIB-table CRUD, exact explain plus outside-v1 global LPM, and recent route-event history; live route streaming is owned by `EventService.WatchEvents` / `SubscribeFromEvent` |
 | `BfdService` | `GetBfdSessions` | Single-hop BFD session inspection for configured static neighbors |
-| `RpkiService` | `ValidateRouteOrigin` | Bounded point validation against the latest authoritative VRP snapshot |
+| `RpkiService` | `ValidateRouteOrigin`, `ListCaches` | Bounded point validation and configured RTR-cache accepted-epoch inventory |
 | `EventService` | `WatchEvents`, `SubscribeFromEvent`, `ListEvpnEvents`, `ListSessionEvents`, `ListPolicyEvents` | Unified live stream for route, session lifecycle, BGP NOTIFICATION metadata, policy mutation, EVPN route events, BFD session events, and FIB / BLACKHOLE dataplane status-row summary events, with `stream_lagged` warnings for bounded-source backpressure; durable cursor replay via `SubscribeFromEvent` when `[event_history].enabled = true`; plus bounded after-the-fact EVPN, session-lifecycle, and policy-mutation history. Per-MAC EVPN dataplane categories remain follow-up work |
 | `InjectionService` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddEvpnRoute`, `DeleteEvpnRoute` | Programmatic route, FlowSpec, and EVPN injection |
 | `ControlService` | `GetHealth`, `GetMetrics`, `Shutdown`, `TriggerMrtDump` | Health, metrics, lifecycle, MRT dumps |
@@ -212,7 +212,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 | `EventService` | All RPCs | None |
 | `EvpnService` | `GetEvpnRuntime`, `ListEvpnInstances`, `ListEvpnNexthops`, `ListEthernetSegments`, `ListIpVrfs`, `ListManagedNetdevs`, `GetIpVrf`, `ListDuplicateMacQuarantines` | `ClearDuplicateMacQuarantine`, `SetEthernetSegmentDrain`, `ApplyEvpnRuntime` |
 | `BfdService` | `GetBfdSessions` | None |
-| `RpkiService` | `ValidateRouteOrigin` | None |
+| `RpkiService` | `ValidateRouteOrigin`, `ListCaches` | None |
 | `gnmi.gNMI` | `Capabilities`, `Get`, `Subscribe` | `Set` (operator-only; transaction-backed OpenConfig subset — static numbered-neighbor `neighbor-address`/`peer-as`/`description`/`peer-group` create/update/delete, peer-group catalog entries, dynamic-neighbor prefixes, and the commit-confirmed extension via ADR-0076; unsupported paths return `UNIMPLEMENTED`) |
 | `InjectionService` | None | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddEvpnRoute`, `DeleteEvpnRoute` |
 | `ControlService` | `GetHealth`, `GetMetrics` | `Shutdown`, `TriggerMrtDump` |
@@ -2536,6 +2536,24 @@ authoritative snapshot the RPC returns `FAILED_PRECONDITION`; a received empty
 snapshot is authoritative and returns `not_found` with a complete empty list.
 This surface does not expose cache provenance, readiness, raw RTR data, or cache
 management.
+
+`ListCaches` exposes configured RTR endpoints in canonical address order,
+current transport connectivity, and the latest atomically accepted End of Data
+epoch. `accepted` is present for an accepted empty table and absent before the
+first accepted epoch or after expiry/fatal flush. Protocol version, session ID,
+and serial are optional for compatibility with legacy embedded update
+producers. Counts are derived from the retained per-cache contribution, and
+`age_seconds` is monotonic whole seconds. Results are capped at 256 rows with
+exact `complete`/`omitted`; an unconfigured daemon returns a complete empty
+list. A closed actor returns `UNAVAILABLE`, while the two-second whole-query
+budget returns `DEADLINE_EXCEEDED`.
+
+```bash
+rbgp rpki caches
+
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{}' localhost:50051 rustbgpd.v1.RpkiService/ListCaches
+```
 
 ---
 
