@@ -83,12 +83,12 @@
     },
     {
       "source": "README.md",
-      "anchor": "The current [v0.67.0 cross-stack bgperf2",
+      "anchor": "The freshest published [v0.67.0 cross-stack bgperf2",
       "receipt": "docs/perf/competitive-bgperf2-v0670-2026-08.md"
     },
     {
       "source": "docs/BENCHMARKS.md",
-      "anchor": "**Current v0.67.0 refresh, measured 2026-08-29.**",
+      "anchor": "**Freshest published cross-stack receipt: v0.67.0, measured 2026-08-29.**",
       "receipt": "docs/perf/competitive-bgperf2-v0670-2026-08.md"
     },
     {
@@ -118,13 +118,13 @@
     },
     {
       "source": "docs/COMPARISON.md",
-      "anchor": "The current [v0.67.0 cross-stack",
-      "receipt": "docs/perf/competitive-bgperf2-v0670-2026-08.md"
+      "anchor": "The exact v0.61.0 release tip also has an",
+      "receipt": "docs/perf/v0.61.0-final-performance-2026-07.md"
     },
     {
       "source": "docs/COMPARISON.md",
-      "anchor": "The exact v0.61.0 release tip also has an",
-      "receipt": "docs/perf/v0.61.0-final-performance-2026-07.md"
+      "anchor": "The freshest published [v0.67.0 cross-stack",
+      "receipt": "docs/perf/competitive-bgperf2-v0670-2026-08.md"
     },
     {
       "source": "docs/ixp-evaluation.md",

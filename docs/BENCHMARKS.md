@@ -15,8 +15,8 @@ superseded campaigns remain below with their original provenance.
 
 | Evaluation question | Current evidence | Boundary |
 |---|---|---|
-| How do current releases compare for route import and convergence? | [v0.67.0 cross-stack receipt](perf/competitive-bgperf2-v0670-2026-08.md) and [80 raw rows](perf/artifacts/competitive-bgperf2-v0670-2026-08/results.csv) | Counterbalanced same-host campaign measured 2026-08-29: rustbgpd v0.67.0, BIRD 2.19.2, FRR 10.7.0, and GoBGP 4.8.0. Seventy-nine cells reached the expected full table; the failed rustbgpd cell is disclosed. IPv4 import/convergence only — no policy, reload, churn, restart, IPv6, or OpenBGPD claim. |
-| What happens at IXP route-server scale under reload and member churn? | [IXP route-server matrix](perf/ixp-matrix-2026-07.md) | 700 clients × 400,400 IPv4 routes. Rustbgpd/BIRD were measured 2026-08-08 at v0.64.0; the OpenBGPD 9.2 amendment was measured 2026-08-30 on post-v0.67.0 repository commits that are not in a stable rustbgpd tag. |
+| How did the measured releases compare for route import and convergence? | [v0.67.0 cross-stack receipt](perf/competitive-bgperf2-v0670-2026-08.md) and [80 raw rows](perf/artifacts/competitive-bgperf2-v0670-2026-08/results.csv) | Counterbalanced same-host campaign measured 2026-08-29: rustbgpd v0.67.0, BIRD 2.19.2, FRR 10.7.0, and GoBGP 4.8.0. Seventy-nine cells reached the expected full table; the failed rustbgpd cell is disclosed. IPv4 import/convergence only — no policy, reload, churn, restart, IPv6, or OpenBGPD claim. |
+| What happens at IXP route-server scale under reload and member churn? | [IXP route-server matrix](perf/ixp-matrix-2026-07.md) | 700 clients × 400,400 IPv4 routes. Rustbgpd/BIRD were measured 2026-08-08 at v0.64.0; the OpenBGPD 9.2 amendment was measured 2026-08-30 on the v0.68.0 release line before the final tag and remains supplemental rather than exact-tag evidence. |
 | Can an IRR-scale candidate use the transactional apply path? | [IRR transactional-apply receipt](perf/irr-transactional-apply-2026-08.md) and [compact evidence](perf/artifacts/irr-transactional-apply-2026-08/README.md) | Two independent single-host runs measured 2026-08-04 at clean, then-current `origin/main` commit `02c752408b2336061da050d3396c3f7a538d3389`. Each completed 4/4 streamed Plan → token-bound Apply → commit-confirm cycles for a ~295.6 MB candidate at 320 members × 183,040 routes and 3,218,965 IRR filter entries, with 320/320 sessions and zero parse errors. Explicit abort and 10 s timeout auto-revert restored disk and runtime byte-exactly; rollback completed 69.5 s / 69.0 s after the deadline under a 600 s ceiling. One fleet shape, two fixed-order repeats; not a cross-daemon comparison. |
 | Which adoption capabilities have direct proof? | [IXP evaluation matrix](ixp-evaluation.md) | Receipt or config per row, including the explicit gap for dual-stack performance evidence. |
 
@@ -1499,10 +1499,11 @@ and may include anonymous, file/cache, kernel, and socket memory.
 
 ### Results
 
-**Current v0.67.0 refresh, measured 2026-08-29.** A counterbalanced 80-cell
-campaign rebuilt and pinned rustbgpd v0.67.0, BIRD 2.19.2, FRR 10.7.0, and
-GoBGP 4.8.0, stopped each cell's samplers before starting the next cell, and
-retained all raw rows in the [current cross-stack bgperf2
+**Freshest published cross-stack receipt: v0.67.0, measured 2026-08-29.** A
+counterbalanced 80-cell campaign rebuilt and pinned rustbgpd v0.67.0, BIRD
+2.19.2, FRR 10.7.0, and GoBGP 4.8.0, stopped each cell's samplers before
+starting the next cell, and
+retained all raw rows in the [same cross-stack bgperf2
 receipt](perf/competitive-bgperf2-v0670-2026-08.md). Seventy-nine cells reached
 the expected full table. One rustbgpd 100-peer cell established no
 monitor-visible sessions or routes; the next three balanced repetitions and a
@@ -1803,7 +1804,7 @@ Measurement environment: AMD Ryzen Threadripper 7970X (32 cores /
 
 End-to-end system benchmarks use [bgperf2](https://github.com/netenglabs/bgperf2),
 a Docker-based BGP benchmarking harness. bgperf2 lives outside the rustbgpd repo.
-The current v0.67.0 campaign pinned
+The v0.67.0 campaign pinned
 [bgperf2 `d0449574`](https://github.com/lance0/bgperf2/commit/d0449574c10966218377ad4ca30da5fc3d783d5c),
 the target images and source revisions in its
 [receipt](perf/competitive-bgperf2-v0670-2026-08.md), and four balanced target

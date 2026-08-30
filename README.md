@@ -378,7 +378,7 @@ and 3.92 s / 636 MiB with heterogeneous ~10% RT memberships (vs ~73 s / ~31 GiB
 and ~12.5 s / ~5.7 GiB extrapolated per-peer), with a one-RT membership flip
 delivering its 1600-route delta in ~15 ms with zero policy evaluations.
 
-The current [v0.67.0 cross-stack bgperf2
+The freshest published [v0.67.0 cross-stack bgperf2
 receipt](docs/perf/competitive-bgperf2-v0670-2026-08.md), measured 2026-08-29,
 is the headline same-host IPv4 import/convergence comparison. Seventy-nine of
 80 cells reached the expected full table; the receipt discloses the failed
