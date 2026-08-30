@@ -238,6 +238,7 @@ fn m77_pins_gobgp48_identity_before_preserving_the_gr_llgr_contract() {
         "sha256sum /usr/local/bin/gobgpd",
         "select(.key == \"default\" or .key == \"0:0:0/0\")",
         ".[\"peer-address\"] == $rr",
+        "and (.attrs | length) == 4",
         ".type == 2 and .as_paths == []",
         ".type == 14",
         ".nexthop == $rr",
@@ -245,6 +246,7 @@ fn m77_pins_gobgp48_identity_before_preserving_the_gr_llgr_contract() {
         ".safi == 132",
         ".value[0].NLRI.prefix == $prefix",
         "--self-test-default-rtc-parser",
+        "parser self-test passed (8 cases)",
     ] {
         assert!(script.contains(required), "M77 driver lost `{required}`");
     }

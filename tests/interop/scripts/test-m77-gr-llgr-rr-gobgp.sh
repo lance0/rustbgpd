@@ -119,6 +119,7 @@ count_exact_default_rtc_rows() {
              and .best == false
              and .stale == false
              and .["peer-address"] == $rr
+             and (.attrs | length) == 4
              and ([.attrs[]? | select(.type == 1 and .value == 0)] | length) == 1
              and ([.attrs[]? | select(.type == 2 and .as_paths == [])] | length) == 1
              and ([.attrs[]? | select(.type == 5 and .value == 100)] | length) == 1
@@ -158,7 +159,7 @@ default_rtc_fixture() {
 }
 
 self_test_default_rtc_parser() {
-    local rr=10.0.1.1 v46 v48 wrong_membership nonempty_as duplicate
+    local rr=10.0.1.1 v46 v48 wrong_membership nonempty_as extra_as duplicate
     v46=$(default_rtc_fixture default "$rr" "$rr")
     v48=$(default_rtc_fixture 0:0:0/0 "$rr" "$rr")
 
@@ -183,10 +184,15 @@ self_test_default_rtc_parser() {
         )' <<<"$v46")
     require_exact "$(count_exact_default_rtc_rows "$rr" <<<"$nonempty_as")" 0 \
         "non-empty default RTC AS_PATH refusal"
+    extra_as=$(jq -c '
+        .default[0].attrs += [{type: 2, as_paths: [{type: 2, asns: [65001]}]}]
+        ' <<<"$v46")
+    require_exact "$(count_exact_default_rtc_rows "$rr" <<<"$extra_as")" 0 \
+        "duplicate default RTC attribute refusal"
     duplicate=$(jq -c '.default += .default' <<<"$v46")
     require_exact "$(count_exact_default_rtc_rows "$rr" <<<"$duplicate")" 2 \
         "duplicate default RTC detection"
-    echo "M77 exact default RTC parser self-test passed (7 cases)"
+    echo "M77 exact default RTC parser self-test passed (8 cases)"
 }
 
 preflight_gobgp_identity() {
