@@ -1,5 +1,14 @@
 use super::*;
 
+const RELEASED_PARTIAL_MED: [u8; 7] = [0xa0, 0x04, 0x04, 0x00, 0x00, 0x00, 0x64];
+const RELEASED_PARTIAL_ORIGINATOR_ID: [u8; 7] = [0xa0, 0x09, 0x04, 0xc0, 0x00, 0x02, 0x09];
+const RELEASED_PARTIAL_CLUSTER_LIST: [u8; 7] = [0xa0, 0x0a, 0x04, 0xc0, 0x00, 0x02, 0x0a];
+const RELEASED_PARTIAL_MP_REACH: [u8; 16] = [
+    0xa0, 0x0e, 0x0d, 0x00, 0x01, 0x01, 0x04, 0x0a, 0x69, 0x00, 0x0a, 0x00, 0x18, 0xc6, 0x33, 0x64,
+];
+const RELEASED_PARTIAL_MP_UNREACH: [u8; 10] =
+    [0xa0, 0x0f, 0x07, 0x00, 0x01, 0x01, 0x18, 0xc6, 0x33, 0x64];
+
 /// RFC 7606 §7.4 + §2: a malformed MED treats the UPDATE as though its
 /// routes had been withdrawn — previously accepted routes for the same
 /// NLRI are removed — and the session stays Established. Load-bearing metric
@@ -56,6 +65,145 @@ async fn rfc7606_treat_as_withdraw_removes_routes_and_keeps_session() {
         "treat-as-withdraw must keep the session Established"
     );
     assert_single_malformed_disposition(&session, "treat_as_withdraw");
+}
+
+/// RFC 4271 §4.3 requires Partial clear on optional non-transitive MED. The
+/// released-receiver byte string therefore takes the existing RFC 7606 §7.4
+/// treat-as-withdraw path: the replacement is withdrawn, the session remains
+/// Established, and the existing disposition metric records exactly one row.
+#[tokio::test]
+async fn partial_optional_nontransitive_med_withdraws_and_keeps_session() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    rfc7606_drain(&mut rib_rx);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+
+    session
+        .process_update(rfc7606_update(rfc7606_attr_bytes(&[]), &[prefix]))
+        .await;
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected initial accepted route");
+    };
+    assert_eq!(announced.len(), 1);
+
+    session
+        .process_update(rfc7606_update(
+            rfc7606_attr_bytes(&RELEASED_PARTIAL_MED),
+            &[prefix],
+        ))
+        .await;
+    let RibUpdate::RoutesReceived {
+        announced,
+        withdrawn,
+        ..
+    } = rib_rx
+        .try_recv()
+        .expect("Partial MED must reach the RIB as a withdrawal")
+    else {
+        panic!("expected treat-as-withdraw RoutesReceived");
+    };
+    assert!(announced.is_empty());
+    assert_eq!(withdrawn, vec![(Prefix::V4(prefix), 0)]);
+    assert!(rib_rx.try_recv().is_err());
+    assert_eq!(session.known_prefix_count(), 0);
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert_single_malformed_disposition(&session, "treat_as_withdraw");
+}
+
+/// RFC 7606 §§7.9-7.10 make malformed route-reflector attributes
+/// neighbor-specific. These exact released-receiver bytes are discarded on
+/// eBGP so their routes survive, but treat the same replacement as withdrawn
+/// on iBGP. Both recoverable branches keep the session Established.
+#[tokio::test]
+async fn partial_optional_nontransitive_rr_attributes_follow_neighbor_role() {
+    let cases: [(u8, &[u8], Ipv4Addr); 2] = [
+        (
+            rustbgpd_wire::constants::attr_type::ORIGINATOR_ID,
+            &RELEASED_PARTIAL_ORIGINATOR_ID,
+            Ipv4Addr::new(203, 0, 113, 9),
+        ),
+        (
+            rustbgpd_wire::constants::attr_type::CLUSTER_LIST,
+            &RELEASED_PARTIAL_CLUSTER_LIST,
+            Ipv4Addr::new(203, 0, 113, 10),
+        ),
+    ];
+
+    for (type_code, partial_attribute, address) in cases {
+        let prefix = Ipv4Prefix::new(address, 32);
+        let (mut ebgp, mut ebgp_rib_rx) = make_test_session_with_rib(65001, 65002);
+        let (client, _server) = connected_stream_pair().await;
+        ebgp.test_install_stream(client);
+        establish_test_session(&mut ebgp, 65002).await;
+        rfc7606_drain(&mut ebgp_rib_rx);
+        ebgp.process_update(rfc7606_update(
+            rfc7606_attr_bytes(partial_attribute),
+            &[prefix],
+        ))
+        .await;
+        let RibUpdate::RoutesReceived { announced, .. } = ebgp_rib_rx
+            .try_recv()
+            .expect("eBGP attribute-discard route must reach the RIB")
+        else {
+            panic!("expected eBGP announcement");
+        };
+        let [route] = announced.as_slice() else {
+            panic!("expected one eBGP route");
+        };
+        assert_eq!(route.prefix, Prefix::V4(prefix));
+        assert!(
+            route
+                .attributes
+                .iter()
+                .all(|attribute| attribute.type_code() != type_code),
+            "type {type_code}: discarded eBGP attribute reached the RIB"
+        );
+        assert!(ebgp_rib_rx.try_recv().is_err());
+        assert_eq!(ebgp.known_prefix_count(), 1);
+        assert_eq!(ebgp.fsm.state(), SessionState::Established);
+        assert_single_malformed_disposition(&ebgp, "attribute_discard");
+
+        let (mut ibgp, mut ibgp_rib_rx) = make_test_session_with_rib(65001, 65001);
+        let (client, _server) = connected_stream_pair().await;
+        ibgp.test_install_stream(client);
+        establish_test_session(&mut ibgp, 65001).await;
+        rfc7606_drain(&mut ibgp_rib_rx);
+        ibgp.process_update(rfc7606_update(rfc7606_attr_bytes(&[]), &[prefix]))
+            .await;
+        let RibUpdate::RoutesReceived { announced, .. } = ibgp_rib_rx.try_recv().unwrap() else {
+            panic!("expected initial iBGP route");
+        };
+        assert_eq!(announced.len(), 1);
+
+        ibgp.process_update(rfc7606_update(
+            rfc7606_attr_bytes(partial_attribute),
+            &[prefix],
+        ))
+        .await;
+        let RibUpdate::RoutesReceived {
+            announced,
+            withdrawn,
+            ..
+        } = ibgp_rib_rx
+            .try_recv()
+            .expect("iBGP treat-as-withdraw must reach the RIB")
+        else {
+            panic!("expected iBGP withdrawal");
+        };
+        assert!(announced.is_empty());
+        assert_eq!(withdrawn, vec![(Prefix::V4(prefix), 0)]);
+        assert!(ibgp_rib_rx.try_recv().is_err());
+        assert_eq!(ibgp.known_prefix_count(), 0);
+        assert_eq!(ibgp.fsm.state(), SessionState::Established);
+        assert_single_malformed_disposition(&ibgp, "treat_as_withdraw");
+
+        assert_eq!(update_malformed_count(&ebgp, "attribute_discard"), 1);
+        assert_eq!(update_malformed_count(&ibgp, "attribute_discard"), 0);
+        assert_eq!(update_malformed_count(&ebgp, "treat_as_withdraw"), 0);
+        assert_eq!(update_malformed_count(&ibgp, "treat_as_withdraw"), 1);
+    }
 }
 
 /// RFC 9234 / RFC 7606 field regression from the 2025 Qrator incident: the
@@ -937,6 +1085,47 @@ async fn rfc7606_mp_partial_flag_resets_with_exact_attribute_flags_error() {
             malformed_mp,
             "type {type_code}, extended={extended}: exact received attribute bytes"
         );
+    }
+}
+
+/// The post-receipt MED and route-reflector policy must not downgrade either
+/// MP attribute. The exact released-receiver bytes retain their UPDATE 3/4
+/// notification data and session-reset disposition.
+#[tokio::test]
+async fn partial_optional_nontransitive_mp_bytes_still_reset() {
+    for partial_mp in [
+        &RELEASED_PARTIAL_MP_REACH[..],
+        &RELEASED_PARTIAL_MP_UNREACH[..],
+    ] {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        let (client, mut server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        establish_test_session(&mut session, 65002).await;
+        rfc7606_drain(&mut rib_rx);
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+
+        session
+            .process_update(rfc7606_update(rfc7606_attr_bytes(partial_mp), &[prefix]))
+            .await;
+
+        assert_ne!(session.fsm.state(), SessionState::Established);
+        while let Ok(message) = rib_rx.try_recv() {
+            assert!(
+                !matches!(message, RibUpdate::RoutesReceived { .. }),
+                "Partial MP route reached the RIB"
+            );
+        }
+        assert_single_malformed_disposition(&session, "session_reset");
+        let notification = read_until_notification(&mut server).await;
+        assert_eq!(
+            notification.code,
+            rustbgpd_wire::notification::NotificationCode::UpdateMessage
+        );
+        assert_eq!(
+            notification.subcode,
+            rustbgpd_wire::notification::update_subcode::ATTRIBUTE_FLAGS_ERROR
+        );
+        assert_eq!(notification.data.as_ref(), partial_mp);
     }
 }
 

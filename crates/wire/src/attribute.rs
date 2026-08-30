@@ -1258,11 +1258,20 @@ pub(crate) fn decode_path_attributes_revised_observed(
             Err(error) => {
                 // RFC 7606 §3 (c): an Optional/Transitive flag conflict is
                 // treat-as-withdraw for every attribute — the §7.6/§7.7
-                // attribute-discard covers length malformations only. max()
-                // keeps MP_REACH/MP_UNREACH at session-reset (§5.3 lists
-                // inconsistent flags among what makes the MP attribute
+                // attribute-discard covers length malformations only. A
+                // Partial-only ORIGINATOR_ID/CLUSTER_LIST conflict instead
+                // retains the §7.9/§7.10 neighbor-specific disposition:
+                // attribute-discard on eBGP, treat-as-withdraw on iBGP.
+                // max() keeps MP_REACH/MP_UNREACH at session-reset (§5.3
+                // lists inconsistent flags among what makes the MP attribute
                 // itself incorrect).
                 let mut disposition = malformed_attr_disposition(type_code, is_ibgp);
+                let received_class = flags & (attr_flags::OPTIONAL | attr_flags::TRANSITIVE);
+                let partial_only_rr_attribute_error = matches!(
+                    type_code,
+                    attr_type::ORIGINATOR_ID | attr_type::CLUSTER_LIST
+                ) && received_class == attr_flags::OPTIONAL
+                    && flags & attr_flags::PARTIAL != 0;
                 if type_code == attr_type::AIGP && (flags & attr_flags::TRANSITIVE) != 0 {
                     // RFC 7311 §3.2 is more specific than RFC 7606 §3(c):
                     // an AIGP attribute with Transitive set is discarded.
@@ -1271,7 +1280,8 @@ pub(crate) fn decode_path_attributes_revised_observed(
                     &error,
                     DecodeError::UpdateAttributeError { subcode, .. }
                         if *subcode == update_subcode::ATTRIBUTE_FLAGS_ERROR
-                ) {
+                ) && !partial_only_rr_attribute_error
+                {
                     disposition = disposition.max(ErrorDisposition::TreatAsWithdraw);
                 }
                 if disposition == ErrorDisposition::SessionReset {
@@ -1665,15 +1675,20 @@ fn decode_attribute_value(
 ) -> Result<PathAttribute, DecodeError> {
     // Validate the required flags for known attribute types (RFC 4271 §6.3).
     // RFC 4271 §4.3 requires Partial=0 for optional non-transitive
-    // attributes. Enforce that bit for MP_REACH_NLRI / MP_UNREACH_NLRI,
-    // whose incorrect flags are fatal under RFC 7606 §5.3, and for the
-    // already-strict BGP-LS Attribute. Do not broaden the legacy flag surface
-    // of unrelated typed attributes here.
+    // attributes. Enforce that bit for all recognized attributes in that
+    // class. The revised decoder maps MED to treat-as-withdraw,
+    // ORIGINATOR_ID/CLUSTER_LIST by neighbor type, and keeps
+    // MP_REACH_NLRI/MP_UNREACH_NLRI on their existing fatal path.
     let flags_mask = attr_flags::OPTIONAL
         | attr_flags::TRANSITIVE
         | if matches!(
             type_code,
-            attr_type::MP_REACH_NLRI | attr_type::MP_UNREACH_NLRI | attr_type::BGP_LS
+            attr_type::MULTI_EXIT_DISC
+                | attr_type::ORIGINATOR_ID
+                | attr_type::CLUSTER_LIST
+                | attr_type::MP_REACH_NLRI
+                | attr_type::MP_UNREACH_NLRI
+                | attr_type::BGP_LS
         ) || registered_flags(type_code)
             .is_some_and(|registered| registered.partial_must_clear)
         {
@@ -6862,6 +6877,124 @@ mod tests {
         );
         // The legacy decoder still aborts on the same bytes.
         assert!(decode_path_attributes(&buf, true, &[]).is_err());
+    }
+    #[test]
+    fn partial_optional_nontransitive_released_bytes_have_exact_decoder_contracts() {
+        use ErrorDisposition::{AttributeDiscard, TreatAsWithdraw};
+
+        let cases: [(u8, &[u8], ErrorDisposition, ErrorDisposition); 3] = [
+            (
+                attr_type::MULTI_EXIT_DISC,
+                &[0xa0, 0x04, 0x04, 0x00, 0x00, 0x00, 0x64],
+                TreatAsWithdraw,
+                TreatAsWithdraw,
+            ),
+            (
+                attr_type::ORIGINATOR_ID,
+                &[0xa0, 0x09, 0x04, 0xc0, 0x00, 0x02, 0x09],
+                AttributeDiscard,
+                TreatAsWithdraw,
+            ),
+            (
+                attr_type::CLUSTER_LIST,
+                &[0xa0, 0x0a, 0x04, 0xc0, 0x00, 0x02, 0x0a],
+                AttributeDiscard,
+                TreatAsWithdraw,
+            ),
+        ];
+
+        for (type_code, wire, ebgp_disposition, ibgp_disposition) in cases {
+            let strict = decode_path_attributes(wire, true, &[]).unwrap_err();
+            assert!(matches!(
+                strict,
+                DecodeError::UpdateAttributeError {
+                    subcode: update_subcode::ATTRIBUTE_FLAGS_ERROR,
+                    ref data,
+                    ..
+                } if data == wire
+            ));
+
+            let ebgp = decode_path_attributes_revised(wire, true, false, &[]).unwrap();
+            let ibgp = decode_path_attributes_revised(wire, true, true, &[]).unwrap();
+            for (role, decoded, expected) in [
+                ("eBGP", &ebgp, ebgp_disposition),
+                ("iBGP", &ibgp, ibgp_disposition),
+            ] {
+                assert!(decoded.attributes.is_empty(), "type {type_code} {role}");
+                let [malformed] = decoded.malformed.as_slice() else {
+                    panic!("type {type_code} {role}: expected one malformed attribute");
+                };
+                assert_eq!(malformed.type_code, type_code, "{role}");
+                assert_eq!(malformed.disposition, expected, "type {type_code} {role}");
+                assert!(matches!(
+                    &malformed.error,
+                    DecodeError::UpdateAttributeError {
+                        subcode,
+                        data,
+                        ..
+                    } if *subcode == update_subcode::ATTRIBUTE_FLAGS_ERROR && data == wire
+                ));
+            }
+            if matches!(
+                type_code,
+                attr_type::ORIGINATOR_ID | attr_type::CLUSTER_LIST
+            ) {
+                assert_ne!(
+                    ebgp.malformed[0].disposition, ibgp.malformed[0].disposition,
+                    "route-reflector attributes must retain the neighbor-specific branch"
+                );
+            }
+        }
+
+        for (type_code, value) in [
+            (attr_type::ORIGINATOR_ID, &[192, 0, 2, 9][..]),
+            (attr_type::CLUSTER_LIST, &[192, 0, 2, 10][..]),
+        ] {
+            let wrong_transitive = attr_bytes(
+                attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+                type_code,
+                value,
+            );
+            let decoded =
+                decode_path_attributes_revised(&wrong_transitive, true, false, &[]).unwrap();
+            assert_eq!(
+                decoded.malformed[0].disposition, TreatAsWithdraw,
+                "type {type_code}: the Partial-only exception must not weaken class errors"
+            );
+        }
+    }
+    #[test]
+    fn partial_mp_released_bytes_keep_exact_session_reset_contract() {
+        let cases: [&[u8]; 2] = [
+            &[
+                0xa0, 0x0e, 0x0d, 0x00, 0x01, 0x01, 0x04, 0x0a, 0x69, 0x00, 0x0a, 0x00, 0x18, 0xc6,
+                0x33, 0x64,
+            ],
+            &[0xa0, 0x0f, 0x07, 0x00, 0x01, 0x01, 0x18, 0xc6, 0x33, 0x64],
+        ];
+
+        for wire in cases {
+            let strict = decode_path_attributes(wire, true, &[]).unwrap_err();
+            assert!(matches!(
+                strict,
+                DecodeError::UpdateAttributeError {
+                    subcode: update_subcode::ATTRIBUTE_FLAGS_ERROR,
+                    ref data,
+                    ..
+                } if data == wire
+            ));
+            for is_ibgp in [false, true] {
+                let revised = decode_path_attributes_revised(wire, true, is_ibgp, &[]).unwrap_err();
+                assert!(matches!(
+                    revised,
+                    DecodeError::UpdateAttributeError {
+                        subcode: update_subcode::ATTRIBUTE_FLAGS_ERROR,
+                        ref data,
+                        ..
+                    } if data == wire
+                ));
+            }
+        }
     }
     #[test]
     fn revised_malformed_communities_is_treat_as_withdraw() {

@@ -261,6 +261,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Recognized optional non-transitive attributes now reject an invalid Partial
+  flag. MED uses treat-as-withdraw; ORIGINATOR_ID and CLUSTER_LIST use
+  attribute-discard on eBGP and treat-as-withdraw on iBGP. MP_REACH and
+  MP_UNREACH retain their exact UPDATE `3/4` session-reset behavior. The policy
+  is uniform rather than configurable and uses the existing malformed-UPDATE
+  log and disposition metric.
+
 - Outbound TCP connect failures now surface once per failed-connect episode
   instead of remaining below the default log level: a cold peer's first socket
   failure is INFO, the first failure after an Established epoch and the first

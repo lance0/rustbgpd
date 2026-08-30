@@ -5,6 +5,11 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+- Enforced Partial clear on typed MED, ORIGINATOR_ID, and CLUSTER_LIST. The
+  strict decoder returns Attribute Flags Error with the exact attribute;
+  revised decoding maps MED to treat-as-withdraw and the route-reflector
+  attributes to attribute-discard on eBGP or treat-as-withdraw on iBGP.
+  MP_REACH and MP_UNREACH retain their existing session-reset contract.
 - Added `EvpnNlriDiscardObservations`, `decode_evpn_nlri_counted`, and
   `UpdateMessage::parse_revised_observed` so callers can observe exact,
   bounded counts of EVPN route types discarded under RFC 7606 §5.4. Existing

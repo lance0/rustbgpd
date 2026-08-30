@@ -41,9 +41,11 @@ impl ErrorDisposition {
 /// cannot be reliably located). `ATOMIC_AGGREGATE` and `AGGREGATOR` use
 /// attribute-discard for their RFC 7606 §7.6/§7.7 length errors; the BGP-LS
 /// Attribute uses attribute-discard for contained TLV-framing errors
-/// (RFC 9552 §8.2.2). Attribute-flag conflicts are upgraded separately to
-/// treat-as-withdraw per RFC 7606 §3(c). Everything else — including
-/// `AS_PATH` (§7.2) — is treat-as-withdraw.
+/// (RFC 9552 §8.2.2). Optional/Transitive class conflicts are upgraded
+/// separately to treat-as-withdraw per RFC 7606 §3(c); Partial-only
+/// `ORIGINATOR_ID` / `CLUSTER_LIST` errors retain the neighbor-specific
+/// disposition above. Everything else — including `AS_PATH` (§7.2) — is
+/// treat-as-withdraw.
 #[must_use]
 pub fn malformed_attr_disposition(type_code: u8, is_ibgp: bool) -> ErrorDisposition {
     match type_code {
