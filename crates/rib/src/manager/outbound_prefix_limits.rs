@@ -346,6 +346,7 @@ impl RibManager {
         &self,
         peer: IpAddr,
         grouped: bool,
+        announce_source_exclusion: Option<IpAddr>,
         announce: &[crate::route::Route],
         withdraw: &[(Prefix, u32)],
     ) -> Vec<FamilyVerdict> {
@@ -399,6 +400,7 @@ impl RibManager {
                 &freed,
                 announce
                     .iter()
+                    .filter(|route| announce_source_exclusion != Some(route.peer))
                     .map(|route| &route.prefix)
                     .filter(|prefix| prefix_family(prefix).0 == afi),
                 is_admitted,
@@ -420,11 +422,13 @@ impl RibManager {
     /// Apply this peer's outbound unicast prefix limits to one final batch.
     ///
     /// Runs at the per-peer commit seam: after export policy, split horizon,
-    /// RFC 9234 OTC, and exact-export precommit have each removed everything
+    /// RFC 9234 OTC, and exact-export precommit have identified everything
     /// this peer must not receive, and before any Adj-RIB-Out or grouped
-    /// admitted-set mutation and before the envelope is enqueued. Routes an
-    /// earlier gate rejected therefore consume no capacity, and a blocked
-    /// prefix never reaches Adj-RIB-Out or the wire.
+    /// admitted-set mutation and before the envelope is enqueued. A shared
+    /// split-horizon payload remains intact for transport, so the explicit
+    /// source exclusion is ignored for admission. Routes an earlier gate
+    /// rejected therefore consume no capacity, and a blocked prefix never
+    /// reaches Adj-RIB-Out or the wire.
     ///
     /// The session stays Established: excess announcements are dropped from
     /// the outgoing vector, nothing already advertised is withdrawn, and no
@@ -435,13 +439,20 @@ impl RibManager {
         &mut self,
         peer: IpAddr,
         grouped: bool,
+        announce_source_exclusion: Option<IpAddr>,
         announce: &mut Arc<[crate::route::Route]>,
         next_hop_override: &mut Arc<[Option<rustbgpd_policy::NextHopAction>]>,
         withdraw: &[(Prefix, u32)],
-    ) {
-        let verdicts = self.outbound_limit_verdicts(peer, grouped, announce, withdraw);
+    ) -> bool {
+        let verdicts = self.outbound_limit_verdicts(
+            peer,
+            grouped,
+            announce_source_exclusion,
+            announce,
+            withdraw,
+        );
         if verdicts.is_empty() {
-            return;
+            return false;
         }
 
         let blocked: HashSet<Prefix> = verdicts
@@ -452,7 +463,10 @@ impl RibManager {
             let (kept_routes, kept_next_hops): (Vec<_>, Vec<_>) = announce
                 .iter()
                 .zip(next_hop_override.iter())
-                .filter(|(route, _)| !blocked.contains(&route.prefix))
+                .filter(|(route, _)| {
+                    announce_source_exclusion == Some(route.peer)
+                        || !blocked.contains(&route.prefix)
+                })
                 .map(|(route, next_hop)| (route.clone(), next_hop.clone()))
                 .unzip();
             *announce = kept_routes.into();
@@ -462,7 +476,7 @@ impl RibManager {
         // One record per family: (afi, prefixes blocked, episode transition).
         let mut episodes: Vec<(Afi, usize, Option<bool>)> = Vec::new();
         let Some(limits) = self.outbound_prefix_limits.get_mut(&peer) else {
-            return;
+            return false;
         };
         for family_verdict in verdicts {
             if grouped {
@@ -524,6 +538,7 @@ impl RibManager {
         // Adj-RIB-Out commit, so an ungrouped peer's usage would still read
         // the pre-batch count. The commit path refreshes them from the same
         // admitted truth the API reports, once that truth exists.
+        !blocked.is_empty()
     }
 
     /// Distinct admitted prefixes for one limited family.

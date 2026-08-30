@@ -417,6 +417,10 @@ impl SelectionDeferral {
         self.active.contains_key(&family)
     }
 
+    pub(super) fn has_active_gates(&self) -> bool {
+        !self.active.is_empty()
+    }
+
     pub(super) fn selection_deferred(&self, family: (Afi, Safi)) -> bool {
         self.active
             .get(&family)

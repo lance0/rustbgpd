@@ -94,7 +94,7 @@ def verify(directory, tiny=False):
         "fixture_prefixes": prefixes,
         "seed": {"routes_received_dispatches": 1,
                  "routes_received_withdrawals": 0, "envelopes": peers,
-                 "routes_per_envelope": prefixes, "shared_group_encode": False,
+                 "routes_per_envelope": prefixes, "shared_group_encode": True,
                  "community": "65000:100"},
         "transition": {
             "fast_path": True, "routes_received_dispatches": 0,

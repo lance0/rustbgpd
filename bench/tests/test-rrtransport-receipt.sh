@@ -63,7 +63,7 @@ checkpoints={"established":point(100,105,1000,1100,1200,1300),
 (d/"grouped-commit.json").write_text(json.dumps({"schema":2,
  "timing":"test_profile_untimed_rpol_community_transition",
  "fixture_peers":1000,"fixture_prefixes":100000,
- "seed":{"routes_received_dispatches":1,"routes_received_withdrawals":0,"envelopes":1000,"routes_per_envelope":100000,"shared_group_encode":False,"community":"65000:100"},
+ "seed":{"routes_received_dispatches":1,"routes_received_withdrawals":0,"envelopes":1000,"routes_per_envelope":100000,"shared_group_encode":True,"community":"65000:100"},
  "transition":{"fast_path":True,"routes_received_dispatches":0,
   "routes_received_withdrawals":0,"probe_accounting":"policy_transition_receipt",
   "plan_builds":1,"full_exact_probes":100000,"route_shell_materializations":100000,
@@ -115,7 +115,7 @@ done
 for phase in seed transition; do
   expect_red "$phase-community" mutate -c "import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/'grouped-commit.json';d=json.loads(p.read_text());d['$phase']['community']='wrong';p.write_text(json.dumps(d))"
 done
-expect_red seed-shared-encode mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/"grouped-commit.json";d=json.loads(p.read_text());d["seed"]["shared_group_encode"]=True;p.write_text(json.dumps(d))'
+expect_red seed-shared-encode mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/"grouped-commit.json";d=json.loads(p.read_text());d["seed"]["shared_group_encode"]=False;p.write_text(json.dumps(d))'
 for checkpoint in established staged wire; do
   for series in jemalloc_allocated_bytes jemalloc_active_bytes \
     jemalloc_resident_bytes jemalloc_mapped_bytes; do

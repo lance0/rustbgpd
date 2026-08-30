@@ -290,6 +290,14 @@ pub(in crate::manager) struct GroupStageOutput {
     /// withdraw), or a consumed lane transition's `emit_target`
     /// (member-scoped emission the shared payload does not carry).
     pub(super) exceptions: HashSet<IpAddr>,
+    /// Exception members that cannot be expressed as the shared announce
+    /// payload plus own-source exclusion and therefore still need the full
+    /// per-member matrix walk.
+    source_exclusion_unsafe: HashSet<IpAddr>,
+    /// Number of shared announcements sourced by each member. This makes the
+    /// all-own-source no-op test O(1): emitting an otherwise empty envelope
+    /// changes marker ordering even though transport would encode no UPDATE.
+    shared_source_counts: HashMap<IpAddr, usize>,
 }
 
 impl GroupStageOutput {
@@ -306,6 +314,27 @@ impl GroupStageOutput {
     /// source-flip matrix output.
     pub(in crate::manager) fn shared_applies_to(&self, member: IpAddr) -> bool {
         !self.exceptions.contains(&member)
+    }
+
+    /// Whether the shared announcement plus transport-side own-source
+    /// exclusion is exactly this member's source-flip result. This covers a
+    /// cold-table announce whose only exception is the newly staged route's
+    /// source: the member must see nothing for that slot, and no displaced
+    /// advertisement or exception lane is owed.
+    pub(in crate::manager) fn shared_applies_with_source_exclusion(&self, member: IpAddr) -> bool {
+        !self.source_exclusion_unsafe.contains(&member)
+    }
+
+    /// Whether own-source exclusion leaves an announcement or the shared
+    /// payload carries a withdrawal. If neither is true, the historical
+    /// per-member matrix correctly emits no envelope for this member.
+    pub(in crate::manager) fn shared_has_payload_after_source_exclusion(
+        &self,
+        member: IpAddr,
+    ) -> bool {
+        !self.shared_withdraw.is_empty()
+            || self.shared_source_counts.get(&member).copied().unwrap_or(0)
+                < self.shared_announce.len()
     }
 
     /// Whether this pass carries a control-form community for `rs_asn`
@@ -406,11 +435,16 @@ impl GroupStageOutput {
         for delta in &self.deltas {
             if let Some((route, flag)) = &delta.new {
                 self.exceptions.insert(route.peer);
+                if delta.old_source.is_some() || delta.lane.is_some() {
+                    self.source_exclusion_unsafe.insert(route.peer);
+                }
+                *self.shared_source_counts.entry(route.peer).or_default() += 1;
                 nh.push(flag.clone());
                 announce.push(route.clone());
             } else {
                 if let Some(source) = delta.old_source {
                     self.exceptions.insert(source);
+                    self.source_exclusion_unsafe.insert(source);
                 }
                 self.shared_withdraw.push((delta.prefix, delta.path_id));
             }
@@ -425,6 +459,7 @@ impl GroupStageOutput {
         for delta in &self.lane_deltas {
             if let Some(target) = delta.emit_target {
                 self.exceptions.insert(target);
+                self.source_exclusion_unsafe.insert(target);
             }
         }
         self.shared_announce = announce.into();
