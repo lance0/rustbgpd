@@ -33,7 +33,7 @@
 #
 # Usage:
 #   docker build --target dev -t rustbgpd:dev .
-#   docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop
+#   docker build -t bird:v2.19.2-m85 -f tests/interop/Dockerfile.bird-v2192 tests/interop
 #   containerlab deploy -t tests/interop/m95-rfc8212-presence-frr-bird.clab.yml
 #   bash tests/interop/scripts/test-m95-rfc8212-presence.sh
 #   containerlab destroy -t tests/interop/m95-rfc8212-presence-frr-bird.clab.yml --cleanup
@@ -77,7 +77,7 @@ topology:
 
     bird:
       kind: linux
-      image: bird:2-bookworm
+      image: bird:v2.19.2-m85
       cmd: sleep infinity
       binds:
         - ./configs/bird-m95-no-route-refresh.conf:/etc/bird/bird.conf:ro

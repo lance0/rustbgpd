@@ -19,6 +19,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   observer reconstruction, and ordered `3/4` notification/close/reconnect
   evidence. This adds no production, configuration, or default-behavior change.
 
+- Hosted M85, M93, and M95 interop proofs now run against a shared,
+  checksum-built BIRD 2.19.2 image. Each driver verifies the configured image
+  and exact runtime before testing; the existing reflection/GR, required-family,
+  and RFC 8212 contracts remain exact at 33/0, 8/0, and 31/0.
+
 - M104 adds a hosted current-daemon sibling of the immutable M90
   ARouteServer filtering differential. It reuses the exact M90 site and
   11-route corpus while requiring a 23/23 context-ingestion proof and 74/0

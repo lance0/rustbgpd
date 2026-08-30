@@ -1,4 +1,4 @@
-# M93 — required-family OPEN enforcement against BIRD 2.
+# M93 — required-family OPEN enforcement against BIRD 2.19.2.
 
 name: m93-required-families-bird
 
@@ -21,7 +21,7 @@ topology:
 
     bird:
       kind: linux
-      image: bird:2-bookworm
+      image: bird:v2.19.2-m85
       cmd: sleep infinity
       binds:
         - ./configs/bird-m93-dual.conf:/fixtures/dual.conf:ro

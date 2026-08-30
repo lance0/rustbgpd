@@ -30,7 +30,7 @@
 #
 # Prerequisites:
 #   - docker build --target dev -t rustbgpd:dev .
-#   - docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop
+#   - docker build -t bird:v2.19.2-m85 -f tests/interop/Dockerfile.bird-v2192 tests/interop
 #   - containerlab deploy -t tests/interop/m95-rfc8212-presence-frr-bird.clab.yml
 #   - grpcurl + jq on the host
 
@@ -43,6 +43,8 @@ export INTEROP_TEST_OPERATOR_AUTH
 source "$SCRIPT_DIR/test-lib.sh"
 FRR="clab-${TOPO}-frr"
 BIRD="clab-${TOPO}-bird"
+readonly BIRD_IMAGE="bird:v2.19.2-m85"
+readonly BIRD_VERSION="BIRD version 2.19.2"
 
 FRR_PEER="10.95.1.2"
 BIRD_PEER="10.95.2.2"
@@ -52,6 +54,18 @@ resolve_grpc_addr
 
 if ! docker inspect "$BIRD" &>/dev/null; then
     echo "ERROR: container $BIRD not running — deploy topology first" >&2
+    exit 1
+fi
+if ! configured_bird_image=$(docker inspect -f '{{.Config.Image}}' "$BIRD" 2>&1); then
+    echo "ERROR: M95 could not inspect the configured BIRD image: $configured_bird_image" >&2
+    exit 1
+fi
+if ! bird_version=$(docker exec "$BIRD" bird --version 2>&1); then
+    echo "ERROR: M95 could not query the BIRD runtime: $bird_version" >&2
+    exit 1
+fi
+if [ "$configured_bird_image" != "$BIRD_IMAGE" ] || [ "$bird_version" != "$BIRD_VERSION" ]; then
+    echo "ERROR: M95 requires $BIRD_IMAGE / $BIRD_VERSION; got $configured_bird_image / $bird_version" >&2
     exit 1
 fi
 
