@@ -93,8 +93,8 @@ Cease/Administrative Reset before authoritative cleanup, while earlier states
 still return cleanly to `Idle`. The public event enum remains
 `#[non_exhaustive]`, and no existing variant or method is removed. The paired
 wire release is API-additive and retains existing decoder result shapes; review
-the itemized "0.19.0 compatibility note" for its new observation surfaces and
-framing refinements.
+the itemized "0.19.0 compatibility note" in the wire README for its new
+observation surfaces and framing refinements.
 
 ## Key types
 

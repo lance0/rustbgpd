@@ -7,7 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGES = ("wire", "fsm", "rpki")
-PUBLISHED_VERSIONS = {"wire": "0.18.0", "fsm": "0.5.0"}
+PUBLISHED_VERSIONS = {"wire": "0.19.0", "fsm": "0.6.0", "rpki": "0.1.0"}
 MANIFESTS = {
     "wire": ("rustbgpd-wire", Path("crates/wire/Cargo.toml"), "crates/wire"),
     "fsm": ("rustbgpd-fsm", Path("crates/fsm/Cargo.toml"), "crates/fsm"),
@@ -91,9 +91,9 @@ def check(document: str, prepared_versions: dict[str, str] | None = None) -> lis
 
     map_status = re.sub(r"\s+", " ", sections["map"])
     expected_map_status = (
-        "`rustbgpd-wire` and `rustbgpd-fsm` have registry-published releases. "
-        "`rustbgpd-rpki` is publish-enabled and its first release is prepared, "
-        "but it is not yet registry-visible."
+        "`rustbgpd-wire`, `rustbgpd-fsm`, and `rustbgpd-rpki` all have "
+        "registry-published releases; `rustbgpd-rpki` is on the registry from "
+        "its first release, `0.1.0`."
     )
     if expected_map_status not in map_status:
         errors.append("publication-map-state")
@@ -112,20 +112,18 @@ def check(document: str, prepared_versions: dict[str, str] | None = None) -> lis
         return errors
 
     package_pattern = "|".join(PACKAGES)
-    published_pattern = "|".join(PUBLISHED_VERSIONS)
-    published = re.findall(rf"`rustbgpd-({published_pattern}) ([^`]+)`", registry_boundary)
+    published = re.findall(rf"`rustbgpd-({package_pattern}) ([^`]+)`", registry_boundary)
     if len(published) != len(PUBLISHED_VERSIONS) or dict(published) != PUBLISHED_VERSIONS:
         errors.append("current-boundary-version")
-    if not re.search(r"`rustbgpd-rpki` has no registry release", registry_boundary):
-        errors.append("rpki-registry-state")
 
     prepared = re.findall(rf"`rustbgpd-({package_pattern}) ([^`]+)`", prepared_boundary)
     if len(prepared) != len(PACKAGES) or dict(prepared) != prepared_versions:
         errors.append("prepared-boundary-version")
 
     examples = {
-        "wire": (sections["decode"], sections["session"]),
+        "wire": (sections["decode"], sections["session"], sections["rpki"]),
         "fsm": (sections["session"],),
+        "rpki": (sections["rpki"],),
     }
     for package, bodies in examples.items():
         assignment = re.compile(rf'^rustbgpd-{package} = "([^"]+)"$', re.MULTILINE)
@@ -133,46 +131,24 @@ def check(document: str, prepared_versions: dict[str, str] | None = None) -> lis
         if not found or any(version != PUBLISHED_VERSIONS[package] for version in found):
             errors.append(f"{package}-snippet-version")
 
-    expected_paths = {
-        "rpki": (
-            f'{{ version = "{prepared_versions["rpki"]}", path = "../rustbgpd/crates/rpki" }}'
-        ),
-        "wire": (
-            f'{{ version = "{prepared_versions["wire"]}", path = "../rustbgpd/crates/wire" }}'
-        ),
-    }
-    assignment = re.compile(r"^rustbgpd-(rpki|wire)\s*=\s*(.+)$", re.MULTILINE)
-    rpki_assignments = assignment.findall(sections["rpki"])
-    for package, expected in expected_paths.items():
-        values = [value for found_package, value in rpki_assignments if found_package == package]
-        if not values or any(value != expected for value in values):
-            diagnostic = (
-                "rpki-registry-snippet"
-                if any("path" not in value for value in values)
-                else "rpki-path-snippet"
-            )
-            errors.append(f"{package}:{diagnostic}")
-
+    # An entry carries "; `X` prepared" only while the working tree runs ahead of
+    # the registry. Omitting the clause is itself a claim -- that the manifest
+    # version is the published one -- so it is compared against the manifest
+    # either way, and a staged version cannot hide by dropping the clause.
     publish = re.findall(
-        rf"^\d+\. \*\*`rustbgpd-({published_pattern})` "
-        r"\(published as `([^`]+)`; `([^`]+)` prepared\)\.\*\*",
+        rf"^\d+\. \*\*`rustbgpd-({package_pattern})` \(published as `([^`]+)`"
+        r"(?:; `([^`]+)` prepared)?\)\.\*\*",
         sections["publish"],
         re.MULTILINE,
     )
     published_status = {package: version for package, version, _ in publish}
-    prepared_status = {package: version for package, _, version in publish}
-    rpki_status = re.findall(
-        r"^\d+\. \*\*`rustbgpd-rpki` \(first publish prepared as `([^`]+)`;\s+"
-        r"not\s+registry-visible\)\.\*\*",
-        sections["publish"],
-        re.MULTILINE,
-    )
+    prepared_status = {
+        package: prepared or version for package, version, prepared in publish
+    }
     if (
         len(publish) != len(PUBLISHED_VERSIONS)
         or published_status != PUBLISHED_VERSIONS
-        or prepared_status
-        != {package: prepared_versions[package] for package in PUBLISHED_VERSIONS}
-        or rpki_status != [prepared_versions["rpki"]]
+        or prepared_status != prepared_versions
     ):
         errors.append("publish-status-version")
 
@@ -180,15 +156,15 @@ def check(document: str, prepared_versions: dict[str, str] | None = None) -> lis
         r"first `([^`]+)` release starts directly on wire `([^`]+)`",
         sections["publish"],
     )
-    if rpki_pair != [(prepared_versions["rpki"], prepared_versions["wire"])]:
-        errors.append("rpki-prepared-pair")
+    if rpki_pair != [(PUBLISHED_VERSIONS["rpki"], PUBLISHED_VERSIONS["wire"])]:
+        errors.append("rpki-wire-pair")
 
     fsm_pair = re.findall(
-        r"The prepared `([^`]+)` line pairs with wire `([^`]+)`",
+        r"The `([^`]+)` line pairs with wire `([^`]+)`",
         sections["publish"],
     )
-    if fsm_pair != [(prepared_versions["fsm"], prepared_versions["wire"])]:
-        errors.append("fsm-prepared-pair")
+    if fsm_pair != [(PUBLISHED_VERSIONS["fsm"], PUBLISHED_VERSIONS["wire"])]:
+        errors.append("fsm-wire-pair")
 
     return errors
 
