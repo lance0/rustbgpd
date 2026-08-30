@@ -111,10 +111,14 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
         self.assertEqual(added, {"bgp_new_name"})
         self.assertEqual(removed, {"bgp_old_name", "bgp_removed"})
 
-    def test_only_current_unreleased_section_counts(self):
+    def test_only_current_release_section_counts(self):
         changelog = """# Changelog
 
 ## [Unreleased]
+
+- `bgp_new_total`
+
+## [0.68.0] - 2026-08-30
 
 - Other change.
 
@@ -131,13 +135,13 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
             check.validate_release_notes(set(), {"bgp_new_total"}, section, {})
 
     def test_workspace_release_change_requires_explicit_target_review(self):
-        check.validate_workspace_release("0.67.0")
+        check.validate_workspace_release("0.68.0")
         with self.assertRaisesRegex(
             ValueError,
             "select the target changelog section explicitly and review whether the "
             "released metric baseline must roll",
         ):
-            check.validate_workspace_release("0.68.0")
+            check.validate_workspace_release("0.69.0")
 
     def test_exceptions_are_reasoned_narrow_and_nonredundant(self):
         with self.assertRaisesRegex(ValueError, "specific reasons"):

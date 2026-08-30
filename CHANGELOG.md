@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.68.0] — 2026-08-30
+
 ### Added
 
 - M100 adds a hosted, proof-only 20-cell receiver differential for an exact
@@ -178,7 +180,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   omits them rather than reporting a false lower bound. Path-aware retained
   identities keep the counts exact when Add-Path receive is negotiated.
 
-- The M77 GoBGP 4.6.0 receipt now peer-proves VPNv6 graceful restart and
+- The M77 GoBGP 4.8.0 receipt now peer-proves VPNv6 graceful restart and
   long-lived graceful restart over the existing IPv4 sessions. Deterministic
   blue/red VPNv6 routes are retained stale without client churn, reconciled
   exactly at End-of-RIB after a selective re-injection, promoted with the
@@ -266,6 +268,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Remove the unused EVPN `mass_withdraw` tracker API; receive-side
   mass-withdraw remains the stateless, route-event-driven projection owned by
   the daemon dataplane supervisor.
+
+- BMPv4 Path Marking TLV emission is temporarily removed because its draft
+  type 5 assignment conflicts with the current Route Monitoring TLV registry.
+  BMPv3 output is unaffected.
 
 ### Fixed
 
@@ -408,6 +414,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Eligible homogeneous route-server update groups now share unicast staging,
+  encoding, and exact-probe work, including safe own-source exclusion and
+  group-uniform OTC handling. Members with differing wire profiles and other
+  ineligible cases retain the exact per-member fallback for source flips,
+  lanes, withdrawals, export rejection, and prefix-limit filtering.
+
 - The IXP comparator refresh now records OpenBGPD 9.2 at 700 clients and
   400,400 routes. Policy delivery improves from the 9.1 refresh's 244–251 s
   to 201–206 s, and 50-member re-announcement fan-out improves from
@@ -432,11 +444,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   temporary collision-failback ROUTE-REFRESH saturation is retained and
   retried instead.
 
-### Removed
-
-- BMPv4 Path Marking TLV emission is temporarily removed because its draft
-  type 5 assignment conflicts with the current Route Monitoring TLV registry.
-  BMPv3 output is unaffected.
+- Dependency resolution moves the dev-only MRT oracle from `bgpkit-parser`
+  0.19.0 to 0.21.0, the wire crate's test-only direct `syn` requirement from
+  major line 2 to 3, and locked `uuid` from 1.24.1 to 1.26.0. Other consumers
+  retain their required `syn` lines; the parser and wire-test changes do not
+  enter the shipped daemon dependency graph.
 
 ### Upgrade notes
 

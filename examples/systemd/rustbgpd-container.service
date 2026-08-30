@@ -15,7 +15,7 @@ Group=root
 
 # RUSTBGPD_IMAGE is required. The other values below are overridable defaults.
 # Example EnvironmentFile:
-#   RUSTBGPD_IMAGE=ghcr.io/lance0/rustbgpd:0.67.0
+#   RUSTBGPD_IMAGE=ghcr.io/lance0/rustbgpd:0.68.0
 Environment=RUSTBGPD_CONFIG_DIR=/etc/rustbgpd
 Environment=RUSTBGPD_STATE_DIR=/var/lib/rustbgpd
 Environment=RUSTBGPD_CONFIG_FILE=/etc/rustbgpd/config.toml

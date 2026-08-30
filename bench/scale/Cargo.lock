@@ -1008,7 +1008,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-bmp"
-version = "0.67.0"
+version = "0.68.0"
 dependencies = [
  "bytes",
  "rustbgpd-telemetry",
@@ -1019,7 +1019,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-evpn-load"
-version = "0.67.0"
+version = "0.68.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1044,7 +1044,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-policy"
-version = "0.67.0"
+version = "0.68.0"
 dependencies = [
  "arc-swap",
  "ariadne",
@@ -1058,7 +1058,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-rib"
-version = "0.67.0"
+version = "0.68.0"
 dependencies = [
  "bytes",
  "ipnet",
@@ -1090,7 +1090,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-telemetry"
-version = "0.67.0"
+version = "0.68.0"
 dependencies = [
  "prometheus",
  "thiserror 2.0.20",
@@ -1101,7 +1101,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-transport"
-version = "0.67.0"
+version = "0.68.0"
 dependencies = [
  "bytes",
  "libc",
