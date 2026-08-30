@@ -2106,6 +2106,71 @@ jobs:
           script: tests/interop/scripts/test-m99-rfc9072-extended-open.sh
           max_attempts: "1"
 
+  m100:
+    needs: [grpcurl_archive, bird2192_archive]
+    name: M100 — released-daemon Partial-flag receiver differential
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install containerlab
+        uses: ./.github/actions/install-containerlab
+
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Stage verified BIRD 2.19.2 archive
+        uses: ./.github/actions/stage-bird3-artifact
+        with:
+          version: "2.19.2"
+          sha256: aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660
+          artifact-name: bird2192-v2.19.2-source
+
+      - name: Build bird:v2.19.2-m100
+        uses: docker/build-push-action@v7
+        with:
+          context: tests/interop
+          file: tests/interop/Dockerfile.bird-v2192
+          load: true
+          tags: bird:v2.19.2-m100
+          cache-from: type=gha,scope=bird2192-m100
+          cache-to: type=gha,mode=max,scope=bird2192-m100,ignore-error=true
+
+      - name: Build bmpsink:m100 fixture image
+        run: docker build -t bmpsink:m100 -f tests/interop/Dockerfile.bmpsink tests/interop
+
+      - name: Pull exact receiver images
+        run: |
+          docker pull ghcr.io/lance0/rustbgpd@sha256:cc6207fe950ee15f6793ca0119d531067c7b358b6c6193b0fda929495714c9da
+          docker pull openbgpd/openbgpd@sha256:b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9
+          docker pull quay.io/frrouting/frr@sha256:f90d26a9fd5c14fc5795a73b4254ac88bc3186c45bbeb220a225fb6182de812c
+
+      - name: Run M100 offline diagnostic contract
+        run: python3 tests/interop/scripts/m100_partial_raw_peer.py --self-test
+
+      - name: Run M100 (single-attempt 20-cell receiver differential)
+        env:
+          CLEANUP: "1"
+          M100_ARTIFACT_DIR: ${{ runner.temp }}/m100
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M100
+          topology: tests/interop/m100-partial-receiver.clab.yml
+          script: tests/interop/scripts/test-m100-partial-receiver.sh
+          max_attempts: "1"
+
+      - name: Upload M100 successful-run evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: m100-partial-receiver-${{ github.sha }}
+          path: ${{ runner.temp }}/m100
+          if-no-files-found: error
+          retention-days: 14
+
   m101:
     needs: [grpcurl_archive, bird332_archive, prime_dev_image]
     name: M101 — BIRD 3.3.2 real-wire attribute discard at a route server
@@ -2417,7 +2482,7 @@ jobs:
       m13, m80, m15, m10, m14, m17, m73, m74, m75, m76, m77, m78, m79, m22, m24,
       m81, m82, m83, m85, m94, m86, m25, m29, m30, m34, m35, m35b, m35c,
       m41, m44, m54, m55, m56, m45, m57, m63, m64,
-      m26_m27_m28_m59_m91, m92, m84, m99, m101, m102, m103, m104]
+      m26_m27_m28_m59_m91, m92, m84, m99, m100, m101, m102, m103, m104]
     env:
       NEEDS_CONTEXT: ${{ toJSON(needs) }}
       EXPECTED_JOBS: >-
@@ -2426,7 +2491,7 @@ jobs:
         m1 m13 m80 m15 m10
         m14 m17 m73 m74 m75 m76 m77 m78 m79 m22 m24 m81 m82 m83 m85 m94
         m86 m25 m29 m30 m34 m35 m35b m35c m41 m44 m54 m55 m56 m45 m57
-        m63 m64 m26_m27_m28_m59_m91 m92 m84 m99 m101 m102 m103 m104
+        m63 m64 m26_m27_m28_m59_m91 m92 m84 m99 m100 m101 m102 m103 m104
     steps:
       - name: Aggregate required Interop result
         shell: bash

@@ -1599,6 +1599,91 @@ class PrimerContractTests(unittest.TestCase):
             with self.subTest(seam=old):
                 self.mutate(relative, old)
 
+    def test_m100_partial_flag_receiver_job_is_load_bearing(self):
+        relative = ".github/workflows/interop.yml"
+        unique_blocks = (
+            (
+                "  m100:\n"
+                "    needs: [grpcurl_archive, bird2192_archive]\n",
+                "  m100:\n    needs: [grpcurl_archive]\n",
+            ),
+            (
+                "      - name: Build bird:v2.19.2-m100\n"
+                "        uses: docker/build-push-action@v7\n"
+                "        with:\n"
+                "          context: tests/interop\n"
+                "          file: tests/interop/Dockerfile.bird-v2192\n"
+                "          load: true\n"
+                "          tags: bird:v2.19.2-m100\n"
+                "          cache-from: type=gha,scope=bird2192-m100\n"
+                "          cache-to: type=gha,mode=max,scope=bird2192-m100,ignore-error=true\n",
+                "",
+            ),
+            (
+                "      - name: Build bmpsink:m100 fixture image\n"
+                "        run: docker build -t bmpsink:m100 -f tests/interop/Dockerfile.bmpsink tests/interop\n",
+                "",
+            ),
+            (
+                "      - name: Pull exact receiver images\n"
+                "        run: |\n"
+                "          docker pull ghcr.io/lance0/rustbgpd@sha256:cc6207fe950ee15f6793ca0119d531067c7b358b6c6193b0fda929495714c9da\n"
+                "          docker pull openbgpd/openbgpd@sha256:b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9\n"
+                "          docker pull quay.io/frrouting/frr@sha256:f90d26a9fd5c14fc5795a73b4254ac88bc3186c45bbeb220a225fb6182de812c\n",
+                "",
+            ),
+            (
+                "      - name: Run M100 offline diagnostic contract\n"
+                "        run: python3 tests/interop/scripts/m100_partial_raw_peer.py --self-test\n",
+                "",
+            ),
+            (
+                "      - name: Run M100 (single-attempt 20-cell receiver differential)\n"
+                "        env:\n"
+                '          CLEANUP: "1"\n'
+                "          M100_ARTIFACT_DIR: ${{ runner.temp }}/m100\n"
+                "        uses: ./.github/actions/run-interop-test\n"
+                "        with:\n"
+                "          label: M100\n"
+                "          topology: tests/interop/m100-partial-receiver.clab.yml\n"
+                "          script: tests/interop/scripts/test-m100-partial-receiver.sh\n"
+                '          max_attempts: "1"\n',
+                "",
+            ),
+            (
+                "      - name: Upload M100 successful-run evidence\n"
+                "        uses: actions/upload-artifact@v7\n"
+                "        with:\n"
+                "          name: m100-partial-receiver-${{ github.sha }}\n"
+                "          path: ${{ runner.temp }}/m100\n"
+                "          if-no-files-found: error\n"
+                "          retention-days: 14\n",
+                "",
+            ),
+        )
+        for old, new in unique_blocks:
+            with self.subTest(seam=old.splitlines()[0]):
+                self.assertEqual(1, (ROOT / relative).read_text().count(old))
+                self.mutate(relative, old, new)
+
+        stage = (
+            "      - name: Stage verified BIRD 2.19.2 archive\n"
+            "        uses: ./.github/actions/stage-bird3-artifact\n"
+            "        with:\n"
+            '          version: "2.19.2"\n'
+            "          sha256: aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660\n"
+            "          artifact-name: bird2192-v2.19.2-source\n"
+        )
+        self.assertEqual(3, (ROOT / relative).read_text().count(stage))
+        self.mutate(relative, stage, occurrence=1)
+
+        job_name = "    name: M100 — released-daemon Partial-flag receiver differential\n"
+        self.mutate(
+            relative,
+            job_name,
+            job_name + "    # rustbgpd:dev must not enter this released-image lane\n",
+        )
+
     def test_m101_bird332_real_wire_job_is_load_bearing(self):
         relative = ".github/workflows/interop.yml"
         for old in (
