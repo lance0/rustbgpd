@@ -1,21 +1,24 @@
 #!/usr/bin/env bash
 #
-# Prove every criterion bench target still *executes*.
+# Exercise every bench target that is not already smoked by a dedicated CI
+# step.
 #
 # Benches are outside the gate battery, so a bench that panics on its first
 # iteration is indistinguishable from one nobody ran. `cargo bench --no-run`
 # does not close that: an attribute fixture that a codec change made illegal
-# compiles fine and only fails when the body runs. `cargo test --bench` puts
-# criterion in `--test` mode — every benchmark body runs exactly once with no
-# measurement, which is the cheapest thing that actually catches it.
+# compiles fine and only fails when the body runs. `cargo test --bench` runs
+# every criterion benchmark body exactly once with no measurement, which is
+# the cheapest thing that actually catches it. The two paging receipt harnesses
+# are custom CLIs, so they use bounded multi-page fixtures below instead.
 #
 # This is a smoke check, not a measurement. It reports pass/fail only; any
 # timing it happens to produce is meaningless and is not reported.
 #
 # The target list comes from `cargo metadata`, so a bench target is covered the
-# day it lands rather than when someone remembers to register it here. The six
-# non-criterion harnesses are excluded by name; renaming one drops its
-# exclusion and this script then fails loudly instead of skipping it silently.
+# day it lands rather than when someone remembers to register it here. Four
+# custom harnesses with separate CI smoke steps are excluded by package/target
+# key; renaming one drops its exclusion and this script then fails loudly
+# instead of skipping it silently.
 
 set -euo pipefail
 
@@ -39,23 +42,33 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
-# Excluded — standalone measurement harnesses with their own CLIs rather than
-# criterion, so they reject criterion's `--test` flag:
+# Standalone measurement harnesses have their own CLIs rather than criterion.
+# They accept Cargo's libtest-compatible `--bench` marker; two have bounded
+# invocations in this script:
+#
+#   route_paging         CSV receipt harness; one complete traversal per
+#                        process, driven by --routes/--page-size/--scope.
+#   dataplane_prefix_paging
+#                        CSV-to-stdout receipt harness; one complete traversal
+#                        per process, driven by prefix/path/index-mode flags.
+#
+# The remaining four are excluded here because CI executes their native smoke
+# contracts separately:
 #
 #   snapshot_allocation  needs a `timing|diagnostic` mode plus --commit and
 #                        --output. CI smokes both modes separately through the
 #                        harness's own `--smoke` bound.
-#   route_paging         CSV receipt harness; one complete traversal per
-#                        process, driven by --route-count/--output.
-#   dataplane_prefix_paging
-#                        CSV-to-stdout receipt harness; one complete traversal
-#                        per process, driven by prefix/path/index-mode flags.
 #   vpn_query_*          are one-cell timing/allocation executables. CI runs
 #                        their exact 256-route smoke separately.
 #   selection_deferral_release
 #                        fixed-fleet receipt harness with its own CLI and
 #                        bounded self-test, which CI runs separately.
-EXCLUDED=(snapshot_allocation route_paging dataplane_prefix_paging vpn_query_timing vpn_query_allocation selection_deferral_release)
+EXCLUDED=(
+  rustbgpd-mrt/snapshot_allocation
+  rustbgpd-api/vpn_query_timing
+  rustbgpd-api/vpn_query_allocation
+  rustbgpd-rib/selection_deferral_release
+)
 
 mapfile -t targets < <(
   cargo metadata "${locked_args[@]}" --no-deps --format-version 1 | python3 -c '
@@ -77,10 +90,11 @@ fi
 status=0
 for target in "${targets[@]}"; do
   read -r package name features <<<"$target"
+  key="$package/$name"
 
   skip=
   for excluded in "${EXCLUDED[@]}"; do
-    if [ "$name" = "$excluded" ]; then
+    if [ "$key" = "$excluded" ]; then
       skip=1
       break
     fi
@@ -95,8 +109,21 @@ for target in "${targets[@]}"; do
     feature_args=(--features "$features")
   fi
 
+  bench_args=()
+  case "$key" in
+    rustbgpd-rib/route_paging)
+      # Grouped advertised routes exercise split horizon; 31 leaves a partial
+      # eighth page after the filtered rows are removed.
+      bench_args=(-- --routes 257 --page-size 31 --scope grouped-advertised --repetition 1)
+      ;;
+    rustbgpd-rib/dataplane_prefix_paging)
+      # Cross the harness's 1,024-prefix page boundary and retain multipath.
+      bench_args=(-- --prefixes 1025 --announcers 2 --max-paths 2 --mode eager --repetition 1)
+      ;;
+  esac
+
   echo "smoke $package/$name ${features:+[$features]}"
-  if ! cargo test "${locked_args[@]}" -p "$package" --bench "$name" "${feature_args[@]}"; then
+  if ! cargo test "${locked_args[@]}" -p "$package" --bench "$name" "${feature_args[@]}" "${bench_args[@]}"; then
     echo "::error::bench target $package/$name failed to execute" >&2
     if [ "$fail_fast" -eq 1 ]; then
       exit 1
