@@ -106,7 +106,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::BytesMut;
 use rustbgpd_wire::capability::{Afi, Capability, Safi};
-use rustbgpd_wire::constants::{HEADER_LEN, MAX_MESSAGE_LEN};
+use rustbgpd_wire::constants::{AS_TRANS, HEADER_LEN, MAX_MESSAGE_LEN};
 use rustbgpd_wire::header::peek_message_length;
 use rustbgpd_wire::message::{decode_message, encode_message, Message};
 use rustbgpd_wire::open::OpenMessage;
@@ -841,18 +841,12 @@ async fn establish_stream_with_retry(
     }
 }
 
-async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<(Stub, u32), String> {
-    let local = stub_addr(i);
-
-    // iBGP-RR mode: every stub OPENs with the shared local AS (the
-    // daemon's own ASN); otherwise the per-stub eBGP ASN.
-    let open_asn = match ibgp_rr_asn() {
-        0 => stub_asn(i),
-        shared => shared,
-    };
-    let open = OpenMessage {
+fn stub_open(i: u32, open_asn: u32) -> OpenMessage {
+    OpenMessage {
         version: 4,
-        my_as: u16::try_from(open_asn).unwrap(),
+        // RFC 6793: the legacy two-octet field carries AS_TRANS when the
+        // speaker's real ASN does not fit; capability 65 retains that ASN.
+        my_as: u16::try_from(open_asn).unwrap_or(AS_TRANS),
         hold_time: HOLD_TIME,
         bgp_identifier: Ipv4Addr::new(
             240,
@@ -868,7 +862,19 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<(Stub, u32), String> {
             Capability::FourOctetAs { asn: open_asn },
             Capability::RouteRefresh,
         ],
+    }
+}
+
+async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<(Stub, u32), String> {
+    let local = stub_addr(i);
+
+    // iBGP-RR mode: every stub OPENs with the shared local AS (the
+    // daemon's own ASN); otherwise the per-stub eBGP ASN.
+    let open_asn = match ibgp_rr_asn() {
+        0 => stub_asn(i),
+        shared => shared,
     };
+    let open = stub_open(i, open_asn);
     let bytes = encode_message(&Message::Open(open)).map_err(|e| format!("open encode: {e}"))?;
     let ka = encode_message(&Message::Keepalive).unwrap();
     let (stream, retries) =
@@ -2727,6 +2733,27 @@ mod tests {
         }))
         .unwrap()
         .to_vec()
+    }
+
+    #[test]
+    fn stub_open_crosses_the_four_octet_asn_boundary() {
+        for (peer, true_asn, expected_my_as) in [(1023, 65_535, u16::MAX), (1024, 65_536, AS_TRANS)]
+        {
+            assert_eq!(stub_asn(peer), true_asn);
+            let open = stub_open(peer, true_asn);
+            assert_eq!(open.my_as, expected_my_as);
+            assert_eq!(open.four_byte_as(), true_asn);
+
+            let mut wire = encode_message(&Message::Open(open)).unwrap().freeze();
+            let Message::Open(decoded) = decode_message(&mut wire, MAX_MESSAGE_LEN).unwrap() else {
+                panic!("encoded stub OPEN decoded as another message type");
+            };
+            assert_eq!(decoded.my_as, expected_my_as);
+            assert_eq!(decoded.four_byte_as(), true_asn);
+            assert!(decoded
+                .capabilities
+                .contains(&Capability::FourOctetAs { asn: true_asn }));
+        }
     }
 
     #[tokio::test]
