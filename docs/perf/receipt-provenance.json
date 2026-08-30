@@ -9,6 +9,11 @@
   ],
   "receipts": [
     {
+      "path": "docs/perf/competitive-bgperf2-v0670-2026-08.md",
+      "measured_commit": "69b27812eecc66e7affc505fbe887259b48990f5",
+      "measured_on": "2026-08-29"
+    },
+    {
       "path": "docs/perf/fib-kernel-dump-2026-08.md",
       "measured_commit": "8f1c920e0f0b9d0adefdc1874ef867c3454a21f9",
       "measured_on": "2026-08-25"
@@ -68,6 +73,11 @@
     },
     {
       "source": "docs/BENCHMARKS.md",
+      "anchor": "**Current v0.67.0 refresh, measured 2026-08-29.**",
+      "receipt": "docs/perf/competitive-bgperf2-v0670-2026-08.md"
+    },
+    {
+      "source": "docs/BENCHMARKS.md",
       "anchor": "`bench/run-fib-kernel-dump.py` is the privileged",
       "receipt": "docs/perf/fib-kernel-dump-2026-08.md"
     },
@@ -90,6 +100,11 @@
       "source": "docs/COMPARISON.md",
       "anchor": "At route-server scale, the [IXP receipt",
       "receipt": "docs/perf/ixp-matrix-2026-07.md"
+    },
+    {
+      "source": "docs/COMPARISON.md",
+      "anchor": "The current [v0.67.0 cross-stack",
+      "receipt": "docs/perf/competitive-bgperf2-v0670-2026-08.md"
     },
     {
       "source": "docs/COMPARISON.md",

@@ -1468,6 +1468,36 @@ and may include anonymous, file/cache, kernel, and socket memory.
 
 ### Results
 
+**Current v0.67.0 refresh, measured 2026-08-29.** A counterbalanced 80-cell
+campaign rebuilt and pinned rustbgpd v0.67.0, BIRD 2.19.2, FRR 10.7.0, and
+GoBGP 4.8.0, stopped each cell's samplers before starting the next cell, and
+retained all raw rows in the [current cross-stack bgperf2
+receipt](perf/competitive-bgperf2-v0670-2026-08.md). Seventy-nine cells reached
+the expected full table. One rustbgpd 100-peer cell established no
+monitor-visible sessions or routes; the next three balanced repetitions and a
+fresh-bridge focused rerun passed, so the failure is disclosed and excluded
+from the successful-run medians rather than assigned a root cause.
+
+Values are **convergence seconds / total seconds / peak raw container cgroup
+GiB**. Each median has four successful repetitions except rustbgpd at 100
+peers, which has three.
+
+| Shape | rustbgpd v0.67.0 | BIRD 2.19.2 | FRR 10.7.0 | GoBGP 4.8.0 |
+|---|---:|---:|---:|---:|
+| 10p × 1k | 2 / 8.22 / 0.029 | 2 / 9.23 / 0.010 | 3 / 9.29 / 0.030 | 4 / 11.38 / 0.114 |
+| 2p × 10k | 2 / 8.26 / 0.038 | 2 / 9.27 / 0.010 | 3 / 9.34 / 0.042 | 3 / 10.39 / 0.076 |
+| 2p × 100k | 3 / 12.44 / 0.197 | 3 / 13.53 / 0.028 | 4 / 13.56 / 0.259 | 4 / 14.59 / 0.388 |
+| 30p × 1k | 3 / 9.81 / 0.104 | 3 / 10.30 / 0.013 | 4 / 10.89 / 0.057 | 4 / 11.44 / 0.577 |
+| 100p × 1k | 3 / 11.91 / 0.248 | 5 / 14.00 / 0.032 | 7 / 16.58 / 0.152 | 16 / 24.75 / 4.902 |
+
+On successful repetitions, rustbgpd had the lowest median total time in all
+five shapes and tied or had the lowest median convergence time. BIRD used the
+least peak raw cgroup memory throughout. These same-host IPv4 import results
+do not cover policy, reload, churn, restart, or absolute behavior on another
+machine.
+
+### Historical July results
+
 > **Integrity correction (2026-08-28): Historical July harness output only; no current cross-daemon ranking is supported.** The target order was fixed
 > as rustbgpd → BIRD → GoBGP → FRR, and one-second sampler threads from earlier
 > cells continued polling during later cells. Only rustbgpd has a retained
