@@ -760,8 +760,8 @@ async fn open_stub_stream(
     // Protocol failures remain fatal so retries cannot hide bad wire behavior.
     let mut buf = BytesMut::with_capacity(4096);
     loop {
-        if let Ok(Some(total)) = peek_message_length(&buf, MAX_MESSAGE_LEN) {
-            if buf.len() >= usize::from(total) {
+        match peek_message_length(&buf, MAX_MESSAGE_LEN) {
+            Ok(Some(total)) if buf.len() >= usize::from(total) => {
                 let mut b = buf.split_to(usize::from(total)).freeze();
                 match decode_message(&mut b, MAX_MESSAGE_LEN) {
                     Ok(Message::Open(_)) => break,
@@ -776,6 +776,12 @@ async fn open_stub_stream(
                         return Err(StubOpenError::Fatal(format!("decode during open: {e}")));
                     }
                 }
+            }
+            Ok(Some(_)) | Ok(None) => {}
+            Err(error) => {
+                return Err(StubOpenError::Fatal(format!(
+                    "invalid frame during open: {error}"
+                )));
             }
         }
         let mut tmp = [0u8; 4096];
@@ -2758,6 +2764,36 @@ mod tests {
 
         assert_eq!(retries, 1);
         drop(stream);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn establishment_does_not_retry_an_invalid_bgp_header() {
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let daemon = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut client_open = [0u8; 4096];
+            assert!(stream.read(&mut client_open).await.unwrap() > 0);
+            stream.write_all(&[0u8; 19]).await.unwrap();
+        });
+
+        let client_open = test_open(64_512);
+        let keepalive = encode_message(&Message::Keepalive).unwrap();
+        let error = establish_stream_with_retry(
+            daemon,
+            Ipv4Addr::new(127, 0, 0, 2),
+            &client_open,
+            &keepalive,
+            Duration::from_secs(2),
+        )
+        .await
+        .err()
+        .unwrap();
+
+        assert!(error.contains("invalid frame during open"), "{error}");
         server.await.unwrap();
     }
 
