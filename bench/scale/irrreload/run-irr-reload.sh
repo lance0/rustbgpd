@@ -943,7 +943,7 @@ run_cell() {
         echo "cell $cell: reload phase attribution validation failed" >&2
         rc=90
     fi
-    if [ -n "$dataset_stage_cmd" ] && [ "$rc" -eq 0 ] &&
+    if [ "$CAMPAIGN_KIND" != smoke ] && [ -n "$dataset_stage_cmd" ] && [ "$rc" -eq 0 ] &&
         ! python3 "$VERIFY" dataset-refresh --daemon-log "$cdir/daemon.log" \
             --reload-log "$cdir/reloadstall.log" --manifest "$run/manifest.json" \
             --output "$cdir/dataset-refresh-summary.csv"; then

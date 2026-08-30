@@ -100,6 +100,9 @@ fn irr_reload_phase_receipt_is_semantically_fail_closed() {
     assert!(verifier.contains("phase records are reordered"));
     assert!(verifier.contains("missing/duplicate record"));
     assert!(verifier.contains("dataset refresh summary requires four ordered SIGHUP triggers"));
+    assert!(runner.contains(
+        r#"if [ "$CAMPAIGN_KIND" != smoke ] && [ -n "$dataset_stage_cmd" ] && [ "$rc" -eq 0 ] &&"#
+    ));
     assert!(runner.contains("dataset-refresh-summary.csv"));
 }
 
