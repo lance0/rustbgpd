@@ -294,11 +294,13 @@ result). Guard test: `bench/tests/test_verify_mrt_growth_campaign.py`.
 
 ## Bench smoke check
 
-`smoke-benches.sh` proves every Criterion bench target still
-*executes* by running each benchmark body exactly once in `--test`
-mode (no measurement). The target list comes from `cargo metadata`, so
-new bench targets are covered automatically; the non-criterion
-harnesses are excluded by name.
+`smoke-benches.sh` gives every metadata-enumerated bench target execution
+coverage unless CI already invokes its native smoke contract. Criterion
+benchmark bodies run exactly once through `cargo test --bench` (no measurement), while
+`route_paging` and `dataplane_prefix_paging` run bounded multi-page fixtures
+through their custom CLIs. The other four custom harnesses retain their
+separate CI smoke invocations. The target list comes from `cargo metadata`, so
+new bench targets are covered automatically.
 
 ## Scale drivers
 
