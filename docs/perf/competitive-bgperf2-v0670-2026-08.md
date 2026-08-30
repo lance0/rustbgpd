@@ -34,7 +34,7 @@ The first 100 peers × 1,000 prefixes rustbgpd cell established no monitor-visib
 sessions or routes after an 88-second monitor wait and ended with
 `stuck received count 0 neighbors_checked 0`. The host remained idle, and the
 tester reported no errors or timeouts. The next three counterbalanced campaign
-repetitions completed at 11.90–11.97 seconds total, then a new-bridge
+repetitions completed at 11.90–11.97 seconds total, then a fresh-bridge
 [focused run](artifacts/competitive-bgperf2-v0670-2026-08/focused-rerun.csv)
 completed 100 of 100 sessions and 100,000 of 100,000 routes in 11.97 seconds.
 The failed cell's target and monitor logs were overwritten by the
