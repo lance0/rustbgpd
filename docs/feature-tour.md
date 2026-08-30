@@ -99,7 +99,7 @@ labeled-unicast route-reflection (RFC 8277, SAFI 4 — label stack and
 next-hop preserved verbatim) have shipped under ADR-0077, and
 **Optimal Route Reflection (RFC 9107, ADR-0095)** computes per-client
 best paths via SPF over the BGP-LS-sourced topology, peer-proven against
-GoBGP 4.6.0 in [M76](RECEIPTS.md#interop-labs--pr-gated-interopyml).
+checksum-built GoBGP 4.8.0 in [M76](RECEIPTS.md#interop-labs--pr-gated-interopyml).
 Future BGP-LS local topology production stays scoped by
 [ADR-0077](adr/0077-mpls-vpn-bgpls-address-family-boundary.md): those
 families must land as typed route-family slices or unreachable

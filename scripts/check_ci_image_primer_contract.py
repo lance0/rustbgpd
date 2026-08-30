@@ -914,6 +914,28 @@ def check(root: Path) -> list[str]:
                     errors.append(
                         f"{name}:{job_name}: build-push-action inventory drifted"
                     )
+            if not setup and job_name == "m76":
+                m76_required = {
+                    "needs: [grpcurl_archive, prime_dev_image]": 1,
+                    "name: M76 — ORR divergent-best (GoBGP 4.8.0)": 1,
+                    "name: Build gobgp:v4.8.0-m76": 1,
+                    "--build-arg TARGETARCH=amd64": 1,
+                    "--build-arg GOBGP_VERSION=4.8.0": 1,
+                    "--build-arg GOBGP_SHA256=43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03": 1,
+                    "-t gobgp:v4.8.0-m76 -f tests/interop/Dockerfile.gobgp-v47 tests/interop": 1,
+                    "name: Run M76 (deploy + test + destroy with retry)": 1,
+                    "topology: tests/interop/m76-orr-divergent-best-gobgp.clab.yml": 1,
+                    "script: tests/interop/scripts/test-m76-orr-divergent-best-gobgp.sh": 1,
+                }
+                if any(job.count(seam) != count for seam, count in m76_required.items()):
+                    errors.append("interop.yml:m76: exact GoBGP 4.8.0 job contract drifted")
+                for forbidden in (
+                    "GoBGP 4.6.0",
+                    "gobgp:bgpls",
+                    "Dockerfile.gobgp-bgpls",
+                ):
+                    if forbidden in job:
+                        errors.append(f"interop.yml:m76: permits historical peer seam {forbidden}")
             if not setup and job_name == "m77":
                 m77_required = {
                     "needs: [grpcurl_archive, prime_dev_image]": 1,
