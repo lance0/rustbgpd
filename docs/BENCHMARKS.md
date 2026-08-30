@@ -7,6 +7,31 @@ For the consolidated operator-facing proof index that rolls benchmark, memory,
 interop, dataplane, and soak receipts together, see
 [`OPERATIONAL_PROOF.md`](OPERATIONAL_PROOF.md).
 
+## Current evaluator evidence
+
+Start here for current whole-daemon measurements. The detailed microbenchmark
+record and superseded campaigns remain below with their original provenance.
+
+| Evaluation question | Current evidence | Boundary |
+|---|---|---|
+| How do current releases compare for route import and convergence? | [v0.67.0 cross-stack receipt](perf/competitive-bgperf2-v0670-2026-08.md) and [80 raw rows](perf/artifacts/competitive-bgperf2-v0670-2026-08/results.csv) | Counterbalanced same-host campaign measured 2026-08-29: rustbgpd v0.67.0, BIRD 2.19.2, FRR 10.7.0, and GoBGP 4.8.0. Seventy-nine cells reached the expected full table; the failed rustbgpd cell is disclosed. IPv4 import/convergence only — no policy, reload, churn, restart, IPv6, or OpenBGPD claim. |
+| What happens at IXP route-server scale under reload and member churn? | [IXP route-server matrix](perf/ixp-matrix-2026-07.md) | 700 clients × 400,400 IPv4 routes. Rustbgpd/BIRD were measured 2026-08-08 at v0.64.0; the OpenBGPD 9.2 amendment was measured 2026-08-30 on post-v0.67.0 repository commits that are not in a stable rustbgpd tag. |
+| Which adoption capabilities have direct proof? | [IXP evaluation matrix](ixp-evaluation.md) | Receipt or config per row, including the explicit gap for dual-stack performance evidence. |
+
+The three commonly cited 1,000-peer memory values are not a release trend:
+
+- [419 MiB](perf/scale-receipt-2026-07.md) is whole-process RSS for an
+  in-process iBGP RR plus 1,000 client stubs at 100,000 routes.
+- [1,057.2 MiB](perf/route-server-1000-2026-07.md) is maximum process-tree RSS
+  for a real eBGP route server at 400,000 unique routes, with the now-opt-in
+  import-decision explain cache enabled and four policy reloads.
+- [441.1–441.8 MiB](perf/v0.61.0-final-performance-2026-07.md) is steady
+  process-tree RSS for the v0.61.0 candidate at the same 400,000-route eBGP
+  fleet shape, with import-decision explain disabled and no reloads.
+
+Use each receipt's fleet, sampling point, and process boundary; do not compare
+the three values as if only the rustbgpd version changed.
+
 jemalloc is the default allocator feature, so a plain
 `cargo build --release` produces the same allocator configuration as the
 published artifacts — the GHCR runtime image and the release tarballs
@@ -34,7 +59,8 @@ v0.61.0 release-tip real-daemon and single-revision absolute baseline:
 2026-08; v0.64.0 release-tag bgperf2 spot-check (rustbgpd only, same host):
 2026-08-08; v0.66.0 release-tag bgperf2 spot-check (rustbgpd only, same
 host): 2026-08-23; EVPN dataplane generation-query controlled A/B: 2026-08-24;
-MP_REACH borrowed-attribute exact-export controlled A/B: 2026-08-25.
+MP_REACH borrowed-attribute exact-export controlled A/B: 2026-08-25; current
+v0.67.0 cross-stack bgperf2 campaign: 2026-08-29.
 
 | Field | Value |
 |-------|-------|
@@ -1775,6 +1801,13 @@ Measurement environment: AMD Ryzen Threadripper 7970X (32 cores /
 
 End-to-end system benchmarks use [bgperf2](https://github.com/netenglabs/bgperf2),
 a Docker-based BGP benchmarking harness. bgperf2 lives outside the rustbgpd repo.
+The current v0.67.0 campaign pinned
+[bgperf2 `d0449574`](https://github.com/netenglabs/bgperf2/commit/d0449574c10966218377ad4ca30da5fc3d783d5c),
+the target images and source revisions in its
+[receipt](perf/competitive-bgperf2-v0670-2026-08.md), and four balanced target
+orders. The commands below reproduce individual cells after those pins are
+matched; they are not the unpublished 80-cell batch orchestration and must not
+be presented as a reproduction of its medians or ordering controls.
 
 ### Prerequisites
 

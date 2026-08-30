@@ -24,6 +24,13 @@ arouteserver-driven, or IXP Manager-driven — chosen in the
 | 7 | Reload at IRR scale | Yes | Four fresh sealed roots compare rustbgpd, BIRD 3.3.1, and OpenBGPD 9.1 at 320 members × 183,040 routes with 3,218,965 IRR filter entries. The receipt publishes the real losses — BIRD leads completion and rustbgpd uses substantially more memory — alongside the grouped-control result and the later grouped per-client-best improvement. | [IRR reload comparison](perf/irr-reload-comparison-2026-08.md), measured 2026-08-04 · [grouped per-client-best receipt](perf/irr-reload-grouped-per-client-best-2026-08.md), measured 2026-08-08 |
 | 8 | Paired-RS operations | Yes | Runbook for two independent route servers: why members peer with both, staggered config updates, inter-RS consistency checked with `rbgp diff advertised`, and the maintenance-window drain flow (RFC 8326). | [Paired route servers](cookbook/paired-route-servers.md) |
 | 9 | MANRS documentation | Yes | MANRS IXP Programme Action 1 is mapped requirement-by-requirement to validated config fragments and member-verifiable surfaces. Separately, the pinned MANRS tool traverses seven synthetic routes through Alice-LG and must identify one deliberate ROA mismatch; this is consumer interoperability, not MANRS certification or a route-server policy proof. | [MANRS IXP Action 1](cookbook/manrs-ixp-action1.md) · [consumer proof](../tests/compat/ixp-manager-birdseye/README.md) |
+| 10 | Dual-stack performance evidence | In progress | IPv4/IPv6 route-server behavior is real-peer and differential-proven, but the current 700-member IXP and four-daemon performance campaigns are IPv4-only. No IPv6 scale or comparative-performance claim is made. | M102/M103 in [RECEIPTS.md](RECEIPTS.md#interop-labs--pr-gated-interopyml) · [IXP receipt](perf/ixp-matrix-2026-07.md) · [current cross-stack receipt](perf/competitive-bgperf2-v0670-2026-08.md) |
+
+For a sizing review, start with the
+[current evaluator evidence roll-up](BENCHMARKS.md#current-evaluator-evidence).
+It separates current four-daemon import/convergence data from the IXP-specific
+reload and member-churn campaign, records the IPv4-only boundary, and explains
+why the three commonly cited 1,000-peer memory values are not a time series.
 
 Related evaluation material: the broader daemon
 [feature comparison](COMPARISON.md), the
