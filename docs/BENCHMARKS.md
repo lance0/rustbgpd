@@ -1574,8 +1574,9 @@ unbounded loop and hung about 11 minutes before the attempt was killed. The
 comparison is therefore four-way. Root cause and retained evidence are in the
 [receipt](perf/competitive-bgperf2-2026-07.md#openbgpd-could-not-be-collected--harness-defect-not-a-daemon-result).
 The [IXP receipt matrix](perf/ixp-matrix-2026-07.md) carries a head-to-head
-OpenBGPD 9.1 comparison through a different harness (700 clients × 400,400
-routes, policy reload), and the IRR-scale reload receipts carry a third:
+OpenBGPD 9.2 comparison through a different harness (700 clients × 400,400
+routes, policy reload; measured 2026-08-30), and the IRR-scale reload receipts
+retain their separate OpenBGPD 9.1 comparison:
 
 | IRR-scale filter reload (320 members × 183,040 routes × 3,218,965 IRR entries, steady-state reloads 2–4, both announcement-overlap points) | rustbgpd | BIRD 3.3.1 | OpenBGPD 9.1 |
 |---|---|---|---|

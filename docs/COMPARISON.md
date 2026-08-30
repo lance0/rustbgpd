@@ -473,12 +473,12 @@ per-run values, plus the [controlled attribution
 receipt](perf/per-peer-rss-attribution-2026-07.md) for the correction.
 
 At route-server scale, the [IXP receipt
-matrix](perf/ixp-matrix-2026-07.md), measured 2026-08-08, compares rustbgpd,
-BIRD 3.3.1, and
-OpenBGPD 9.1 head-to-head at 700 peers × 400k prefixes under live churn
+matrix](perf/ixp-matrix-2026-07.md) compares rustbgpd, BIRD 3.3.1, and
+OpenBGPD 9.2 head-to-head at 700 peers × 400k prefixes under live churn
 — policy-reload stall and completion, member-flap propagation,
 convergence, and RSS — with identical wire inputs, config disclosure,
-and the losses published alongside the wins.
+and the losses published alongside the wins. Rustbgpd/BIRD were measured
+2026-08-08; the OpenBGPD 9.2 comparator amendment was measured 2026-08-30.
 
 At IRR scale, the [grouped per-client-best IRR reload
 receipt](perf/irr-reload-grouped-per-client-best-2026-08.md), measured 2026-08-08
@@ -559,9 +559,9 @@ metric this market has actually selected on — and it is exactly what the
 700 peers × 400k prefixes: rustbgpd is the only daemon of the three tested
 that holds both sub-second median UPDATE stall and single-digit-seconds
 policy-reload completion (p50 1.3–1.6 s at the v0.64.0 refresh, vs 64–85 s
-for BIRD 3.3.1 and ~250 s for OpenBGPD 9.1 on the same host and wire
+for BIRD 3.3.1 and 201–206 s for OpenBGPD 9.2 on the same host and wire
 inputs), with per-daemon wins and losses — including OpenBGPD's smaller raw
-stall — published in the receipt.
+stall and its repeated-reconnect IdleHold pacing — published in the receipt.
 
 Reload speed is only half the operator concern; the other half is what an
 invalid config does to a running router. FRR's reload driver
