@@ -96,6 +96,16 @@ expect_red() {
 
 cp -a "$fixture" "$tmp/accepted"
 python3 "$verifier" "$tmp/accepted"
+cp -a "$fixture" "$tmp/timing-boundaries"
+mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1]);phase=p/"phase.json";d=json.loads(phase.read_text());d["staged_ms"]=354;d["wire_ms"]=385;phase.write_text(json.dumps(d));peers=p/"per-peer.tsv";rows=peers.read_text().splitlines();fields=rows[1].split("\t");fields[-1]="385";rows[1]="\t".join(fields);peers.write_text("\n".join(rows)+"\n")' \
+  "$tmp/timing-boundaries"
+python3 "$verifier" "$tmp/timing-boundaries"
+expect_red staged-time-ceiling mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/"phase.json";d=json.loads(p.read_text());d["staged_ms"]=355;p.write_text(json.dumps(d))'
+grep -Fxq "FAIL: staged convergence ceiling exceeded: 355 ms > 354 ms" \
+  "$tmp/staged-time-ceiling.result"
+expect_red wire-time-ceiling mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1]);phase=p/"phase.json";d=json.loads(phase.read_text());d["wire_ms"]=386;phase.write_text(json.dumps(d));peers=p/"per-peer.tsv";rows=peers.read_text().splitlines();fields=rows[1].split("\t");fields[-1]="386";rows[1]="\t".join(fields);peers.write_text("\n".join(rows)+"\n")'
+grep -Fxq "FAIL: wire convergence ceiling exceeded: 386 ms > 385 ms" \
+  "$tmp/wire-time-ceiling.result"
 expect_red missing-internal-receipt mutate -c 'import pathlib,sys;(pathlib.Path(sys.argv[1])/"grouped-commit.json").unlink()'
 for field in routes_received_dispatches routes_received_withdrawals envelopes \
   routes_per_envelope; do
