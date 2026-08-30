@@ -1110,8 +1110,8 @@ jobs:
           retention-days: 14
 
   m85:
-    needs: [grpcurl_archive, prime_dev_image]
-    name: M85/M93/M95 — RR core, required families, and RFC 8212 presence transitions against BIRD 2
+    needs: [grpcurl_archive, bird2192_archive, prime_dev_image]
+    name: M85/M93/M95 — RR core, required families, and RFC 8212 presence transitions against BIRD 2.19.2
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -1140,8 +1140,22 @@ jobs:
           target: dev
           cache-from: type=gha,scope=rustbgpd-dev
 
-      - name: Build bird:2-bookworm
-        run: docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop
+      - name: Stage verified BIRD 2.19.2 archive
+        uses: ./.github/actions/stage-bird3-artifact
+        with:
+          version: "2.19.2"
+          sha256: aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660
+          artifact-name: bird2192-v2.19.2-source
+
+      - name: Build bird:v2.19.2-m85
+        uses: docker/build-push-action@v7
+        with:
+          context: tests/interop
+          file: tests/interop/Dockerfile.bird-v2192
+          load: true
+          tags: bird:v2.19.2-m85
+          cache-from: type=gha,scope=bird2192-m85
+          cache-to: type=gha,mode=max,scope=bird2192-m85,ignore-error=true
 
       - name: Run M85 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test

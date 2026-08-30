@@ -30,7 +30,7 @@
 #
 # Usage:
 #   docker build --target dev -t rustbgpd:dev .
-#   docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop
+#   docker build -t bird:v2.19.2-m85 -f tests/interop/Dockerfile.bird-v2192 tests/interop
 #   containerlab deploy -t tests/interop/m85-rr-bird.clab.yml
 #   bash tests/interop/scripts/test-m85-rr-bird.sh
 #   containerlab destroy -t tests/interop/m85-rr-bird.clab.yml
@@ -63,7 +63,7 @@ topology:
 
     bird1:
       kind: linux
-      image: bird:2-bookworm
+      image: bird:v2.19.2-m85
       cmd: sleep infinity
       binds:
         - ./configs/bird-m85-c1.conf:/etc/bird/bird.conf:ro
@@ -75,7 +75,7 @@ topology:
 
     bird2:
       kind: linux
-      image: bird:2-bookworm
+      image: bird:v2.19.2-m85
       cmd: sleep infinity
       binds:
         - ./configs/bird-m85-c2.conf:/etc/bird/bird.conf:ro

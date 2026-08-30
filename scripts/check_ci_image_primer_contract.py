@@ -156,7 +156,7 @@ PINS = collections.Counter(
         "Swatinem/rust-cache@v2": 5,
         "dtolnay/rust-toolchain@v1 # 1.95": 2,
         "docker/setup-buildx-action@v4": 50,
-        "docker/build-push-action@v7": 54,
+        "docker/build-push-action@v7": 55,
         "actions/cache@v6": 7,
         "actions/upload-artifact@v7": 12,
         "actions/download-artifact@v8": 6,
@@ -771,7 +771,7 @@ def check(root: Path) -> list[str]:
             job = jobs.get(job_name, "")
             if not setup and job_name == "m100":
                 expected_needs = "    needs: [grpcurl_archive, bird2192_archive]"
-            elif not setup and job_name in ("m83", "m104"):
+            elif not setup and job_name in ("m83", "m85", "m104"):
                 expected_needs = (
                     "    needs: [grpcurl_archive, bird2192_archive, prime_dev_image]"
                 )
@@ -846,6 +846,19 @@ def check(root: Path) -> list[str]:
                             f"artifact-name: {BIRD2192_ARTIFACT}",
                         ),
                     ),
+                    "m85": (
+                        "file: tests/interop/Dockerfile.bird-v2192",
+                        (
+                            "cache-from: type=gha,scope=bird2192-m85",
+                            "cache-to: type=gha,mode=max,scope=bird2192-m85,ignore-error=true",
+                        ),
+                        (
+                            "name: Stage verified BIRD 2.19.2 archive",
+                            'version: "2.19.2"',
+                            f"sha256: {BIRD2192_SHA256}",
+                            f"artifact-name: {BIRD2192_ARTIFACT}",
+                        ),
+                    ),
                     "m101": (
                         "file: tests/interop/Dockerfile.bird-v332",
                         (
@@ -907,6 +920,31 @@ def check(root: Path) -> list[str]:
                 }
                 if any(job.count(seam) != count for seam, count in m83_required.items()):
                     errors.append("interop.yml:m83: exact incumbent image contract drifted")
+            if not setup and job_name == "m85":
+                m85_required = {
+                    "needs: [grpcurl_archive, bird2192_archive, prime_dev_image]": 1,
+                    "name: M85/M93/M95 — RR core, required families, and RFC 8212 presence transitions against BIRD 2.19.2": 1,
+                    "name: Build bird:v2.19.2-m85": 1,
+                    "tags: bird:v2.19.2-m85": 1,
+                    "label: M85\n": 1,
+                    "topology: tests/interop/m85-rr-bird.clab.yml": 1,
+                    "script: tests/interop/scripts/test-m85-rr-bird.sh": 1,
+                    "label: M93\n": 1,
+                    "topology: tests/interop/m93-required-families-bird.clab.yml": 1,
+                    "script: tests/interop/scripts/test-m93-required-families-bird.sh": 1,
+                    "label: M95\n": 1,
+                    "topology: tests/interop/m95-rfc8212-presence-frr-bird.clab.yml": 1,
+                    "script: tests/interop/scripts/test-m95-rfc8212-presence.sh": 1,
+                }
+                if any(job.count(seam) != count for seam, count in m85_required.items()):
+                    errors.append("interop.yml:m85: exact BIRD 2.19.2 job semantics drifted")
+                for forbidden in (
+                    "bird:2-bookworm",
+                    "Dockerfile.bird tests/interop",
+                    "BIRD 2.0.12",
+                ):
+                    if forbidden in job:
+                        errors.append(f"interop.yml:m85: permits {forbidden}")
             if CHECKOUT not in job:
                 errors.append(f"{name}:{job_name}: pinned checkout drifted")
             if setup:
@@ -1548,7 +1586,7 @@ def check(root: Path) -> list[str]:
     )
     if "osrg/gobgp/releases" in gobgp_surfaces:
         errors.append("gobgp release URL escaped the installer/Dockerfile")
-    if texts["interop.yml"].count(BIRD3_ACTION) != 4:
+    if texts["interop.yml"].count(BIRD3_ACTION) != 5:
         errors.append("interop.yml: BIRD stage consumer inventory drifted")
     if texts["kernel-dataplane.yml"].count(BIRD3_ACTION) != 1:
         errors.append("kernel-dataplane.yml: bird3 stage consumer inventory drifted")

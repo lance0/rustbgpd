@@ -1549,6 +1549,55 @@ class PrimerContractTests(unittest.TestCase):
                 occurrence = count - 1
                 self.mutate(relative, old, occurrence=occurrence)
 
+    def test_m85_bird2192_job_is_load_bearing(self):
+        relative = ".github/workflows/interop.yml"
+        workflow = (ROOT / relative).read_text()
+        job_start = workflow.index("  m85:\n")
+
+        m85_needs = (
+            "  m85:\n"
+            "    needs: [grpcurl_archive, bird2192_archive, prime_dev_image]\n"
+        )
+        self.assertEqual(1, workflow.count(m85_needs), "M85 needs seam must be unique")
+        self.mutate(
+            relative,
+            m85_needs,
+            "  m85:\n    needs: [grpcurl_archive, prime_dev_image]\n",
+        )
+
+        for old in (
+            "      - name: Stage verified BIRD 2.19.2 archive\n",
+            '          version: "2.19.2"\n',
+            "          sha256: aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660\n",
+            "          artifact-name: bird2192-v2.19.2-source\n",
+            "      - name: Build bird:v2.19.2-m85\n",
+            "          file: tests/interop/Dockerfile.bird-v2192\n",
+            "          tags: bird:v2.19.2-m85\n",
+            "          cache-from: type=gha,scope=bird2192-m85\n",
+            "          cache-to: type=gha,mode=max,scope=bird2192-m85,ignore-error=true\n",
+            "          label: M85\n",
+            "          topology: tests/interop/m85-rr-bird.clab.yml\n",
+            "          script: tests/interop/scripts/test-m85-rr-bird.sh\n",
+            "          label: M93\n",
+            "          topology: tests/interop/m93-required-families-bird.clab.yml\n",
+            "          script: tests/interop/scripts/test-m93-required-families-bird.sh\n",
+            "          label: M95\n",
+            "          topology: tests/interop/m95-rfc8212-presence-frr-bird.clab.yml\n",
+            "          script: tests/interop/scripts/test-m95-rfc8212-presence.sh\n",
+        ):
+            with self.subTest(seam=old):
+                occurrence = workflow[:job_start].count(old)
+                self.assertGreater(
+                    workflow[job_start:].count(old), 0, f"missing M85 seam: {old}"
+                )
+                self.mutate(relative, old, occurrence=occurrence)
+
+        job_name = (
+            "    name: M85/M93/M95 — RR core, required families, and RFC 8212 "
+            "presence transitions against BIRD 2.19.2\n"
+        )
+        self.mutate(relative, job_name, job_name + "      # bird:2-bookworm\n")
+
     def test_m83_exact_incumbent_images_are_load_bearing(self):
         relative = ".github/workflows/interop.yml"
         m83_needs = (
@@ -1674,8 +1723,8 @@ class PrimerContractTests(unittest.TestCase):
             "          sha256: aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660\n"
             "          artifact-name: bird2192-v2.19.2-source\n"
         )
-        self.assertEqual(3, (ROOT / relative).read_text().count(stage))
-        self.mutate(relative, stage, occurrence=1)
+        self.assertEqual(4, (ROOT / relative).read_text().count(stage))
+        self.mutate(relative, stage, occurrence=2)
 
         job_name = "    name: M100 — released-daemon Partial-flag receiver differential\n"
         self.mutate(

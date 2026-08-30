@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# M85 interop test — rustbgpd RR + BIRD 2 clients (RFC 4456 + RFC 4724)
+# M85 interop test — rustbgpd RR + BIRD 2.19.2 clients (RFC 4456 + RFC 4724)
 #
 # Topology: rustbgpd RR (AS 65001, cluster-id 10.85.0.1) with three RR
 # clients — bird1 (GR on), bird2 (GR default/aware), and a rustbgpd
@@ -41,6 +41,8 @@ source "$SCRIPT_DIR/test-lib.sh"
 BIRD1="clab-${TOPO}-bird1"
 BIRD2="clab-${TOPO}-bird2"
 CLIENT="clab-${TOPO}-client"
+readonly BIRD_IMAGE="bird:v2.19.2-m85"
+readonly BIRD_VERSION="BIRD version 2.19.2"
 
 BIRD1_ADDR="10.85.1.2"
 
@@ -61,6 +63,18 @@ start_bird() {
     local container=${1:?}
     docker exec "$container" sh -c \
         'mkdir -p /run/bird && (bird -d -c /etc/bird/bird.conf >>/tmp/bird.log 2>&1 &)'
+}
+
+preflight_bird_versions() {
+    local container configured version
+    for container in "$BIRD1" "$BIRD2"; do
+        configured=$(docker inspect -f '{{.Config.Image}}' "$container") || return 1
+        version=$(docker exec "$container" bird --version 2>&1) || return 1
+        if [ "$configured" != "$BIRD_IMAGE" ] || [ "$version" != "$BIRD_VERSION" ]; then
+            echo "ERROR: M85 requires $BIRD_IMAGE / $BIRD_VERSION; $container has $configured / $version" >&2
+            return 1
+        fi
+    done
 }
 
 # SIGKILL bird (ungraceful). The slim image has no pkill/pidof; find the
@@ -324,10 +338,12 @@ test_gr_bird2_aware() {
 # Main
 # ---------------------------------------------------------------------------
 main() {
-    log "M85 interop test: rustbgpd RR + BIRD 2 clients (RFC 4456 + RFC 4724)"
+    log "M85 interop test: rustbgpd RR + BIRD 2.19.2 clients (RFC 4456 + RFC 4724)"
     log "Topology: $TOPO"
 
+    preflight
     resolve_grpc_addr
+    preflight_bird_versions || exit 1
     # shellcheck disable=SC2119
     start_rustbgpd
 
