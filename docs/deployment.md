@@ -611,8 +611,8 @@ docker compose down
 For your own deployment:
 
 - **Image name and command**: published GHCR version tags have **no leading
-  `v`**: use `ghcr.io/lance0/rustbgpd:0.67.0`, not
-  `ghcr.io/lance0/rustbgpd:v0.67.0`. The production image runs as uid/gid 999
+  `v`**: use `ghcr.io/lance0/rustbgpd:0.68.0`, not
+  `ghcr.io/lance0/rustbgpd:v0.68.0`. The production image runs as uid/gid 999
   and its default command is exactly
   `rustbgpd /etc/rustbgpd/config.toml`. If the config is mounted under another
   container filename, pass that filename explicitly after the image, for
@@ -698,7 +698,7 @@ Use exactly one of these deployment paths:
      --ulimit nofile=65536:524288 \
      --mount=type=bind,source=/etc/rustbgpd,target=/etc/rustbgpd,readonly \
      --mount=type=bind,source=/var/lib/rustbgpd,target=/var/lib/rustbgpd \
-     ghcr.io/lance0/rustbgpd:0.67.0
+     ghcr.io/lance0/rustbgpd:0.68.0
    ```
 
 Do not omit the host state bind when overriding the image user. The directory
@@ -745,7 +745,7 @@ sudo install -o root -g root -m 0600 config.toml /etc/rustbgpd/config.toml
 sudo install -m 0644 examples/systemd/rustbgpd-container.service \
   /etc/systemd/system/rustbgpd-container.service
 sudo tee /etc/rustbgpd/rustbgpd-container.env >/dev/null <<'EOF'
-RUSTBGPD_IMAGE=ghcr.io/lance0/rustbgpd:0.67.0
+RUSTBGPD_IMAGE=ghcr.io/lance0/rustbgpd:0.68.0
 EOF
 sudo chmod 0644 /etc/rustbgpd/rustbgpd-container.env
 sudo systemctl daemon-reload
@@ -775,7 +775,7 @@ docker run --rm \
   --user=root \
   --cap-drop=ALL \
   --mount=type=bind,source=/etc/rustbgpd,target=/etc/rustbgpd,readonly \
-  ghcr.io/lance0/rustbgpd:0.67.0 \
+  ghcr.io/lance0/rustbgpd:0.68.0 \
   rustbgpd --check --strict /etc/rustbgpd/config.toml
 ```
 

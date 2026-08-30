@@ -690,27 +690,34 @@ Before rolling any versions:
    updated in CHANGELOG.md, README.md, and ROADMAP.md. Also sweep
    `(post-vX.Y.Z)` annotations in ROADMAP.md and the Maturity row in README.md.
 3. Bump versions:
-   - Root `Cargo.toml`: `[workspace.package] version` plus every internal
-     `rustbgpd-*` pin in `[workspace.dependencies]`. Library crates that
-     publish independently, such as `rustbgpd-wire`, may carry both `path`
-     and `version` so downstream publish dry-runs resolve from crates.io;
-     do not remove those version pins during the workspace bump.
+   - Root `Cargo.toml`: move `[workspace.package] version` and every
+     daemon-line internal `rustbgpd-*` pin in `[workspace.dependencies]` to
+     the new workspace version. Keep the independently versioned
+     `rustbgpd-wire`, `rustbgpd-fsm`, and `rustbgpd-rpki` pins at the versions
+     selected by their own crate manifests and release steps; never align them
+     to the daemon workspace bump. Retain both `path` and `version` so
+     downstream publish dry-runs resolve from crates.io.
    - `crates/wire/Cargo.toml`: bump **only** if `crates/wire/src/` changed
      since the last wire publish (see semver rules in the next section).
      Land the wire bump in its **own commit** before the workspace bump so
      the wire publish is reproducible from the commit alone.
 4. Run the full checklist above (fmt, clippy `-D warnings`, test, doc
    `-D warnings`, release build)
-5. Commit (workspace): `release: prep vX.Y.Z — bump workspace, roll CHANGELOG`
-6. **Annotated** tag (lightweight tags break the release-history convention
-   here): `git tag -a vX.Y.Z -m "vX.Y.Z — <one-line headline>"`
-7. Push: `git push origin main && git push origin vX.Y.Z`
+5. Commit the final release candidate (workspace):
+   `release: prep vX.Y.Z — bump workspace, roll CHANGELOG`
+6. Push the final release candidate to `main`: `git push origin main`.
+7. Wait for every applicable gate to pass on that exact final `main` SHA.
+   When an independently published crate changed, manually dispatch
+   `semver-checks.yml` at the release commit because it has no push trigger.
    - If this cycle touched `.github/workflows/release.yml`, run the
-     dispatch dry-run to green **before pushing the tag** (after the
-     workflow change is on `main`): `gh workflow run release.yml -f
-     dry_run=true` — workflow edits otherwise meet their first
-     execution on the live tag.
-8. Verify CI passes on the tag (build matrix x86_64 + aarch64, doc, GHCR
+     dispatch dry-run to green in this step, after the workflow change is on
+     `main`: `gh workflow run release.yml -f dry_run=true`. Workflow edits
+     otherwise meet their first execution on the live tag.
+8. Create and push the **annotated** tag only after step 7 is green
+   (lightweight tags break the release-history convention here):
+   `git tag -a vX.Y.Z -m "vX.Y.Z — <one-line headline>"`, then
+   `git push origin vX.Y.Z`.
+9. Verify CI passes on the tag (build matrix x86_64 + aarch64, doc, GHCR
    push, release.yml binary build + GitHub Release creation). Both
    publication workflows are fail-closed: `release.yml` and
    `container.yml` each gate publication on a `verify-tag-version` job
@@ -719,7 +726,7 @@ Before rolling any versions:
    commit). If you tagged a commit without the version bump, the tag
    build fails and publishes nothing — fix the bump, delete the tag,
    and re-tag.
-9. **Verify container image published to GHCR** via `docker/metadata-action`'s
+10. **Verify container image published to GHCR** via `docker/metadata-action`'s
    semver pattern:
    - `ghcr.io/lance0/rustbgpd:X.Y.Z` (exact, immutable)
    - `ghcr.io/lance0/rustbgpd:X.Y` (rolls forward within the minor)
@@ -727,8 +734,8 @@ Before rolling any versions:
      tags via the action's default `latest=auto` flavor)
    These **container-image** tags are emitted **without** the `v` prefix —
    `0.45.0`, not `v0.45.0` (`docker/metadata-action` strips it). The **git tag
-   stays `vX.Y.Z`** (step 6); only the image tag drops the `v`.
-10. **Verify release tarballs and packages** under
+   stays `vX.Y.Z`** (step 8); only the image tag drops the `v`.
+11. **Verify release tarballs and packages** under
     [GitHub Releases](https://github.com/lance0/rustbgpd/releases) — each
     tag should publish version-less `rustbgpd-linux-amd64.tar.gz` and
     `rustbgpd-linux-arm64.tar.gz`, per-arch `.deb`/`.rpm` packages, the
@@ -749,7 +756,7 @@ Before rolling any versions:
       checksums-linux-amd64.txt | sha256sum -c -
     ```
 
-11. **Verify GitHub release notes**: check that the release created by CI has
+12. **Verify GitHub release notes**: check that the release created by CI has
     accurate notes. The `release` workflow extracts the matching
     `## [X.Y.Z]` block out of `CHANGELOG.md` via awk and fails the tag build
     if the section is missing; if GitHub shows the auto-generated commit list
@@ -768,7 +775,10 @@ changed.
 2. Decide semver bump (see below). The `semver-checks` workflow already
    compared the crate against its latest crates.io release on the PR, so a
    bump it reported as required is not optional.
-3. Update `version` in `crates/wire/Cargo.toml`
+3. Update `version` in `crates/wire/Cargo.toml`, its matching root workspace
+   dependency pin, root `Cargo.lock`, and `bench/scale/Cargo.lock`. Keep the
+   wire publish ahead of dependent FSM or RPKI releases when moving to a new
+   wire line.
 4. Roll `crates/wire/CHANGELOG.md` and add a `rustbgpd-wire` entry in the
    repository-level `CHANGELOG.md`
 5. Run `cargo package --locked -p rustbgpd-wire --list` and inspect the exact
@@ -806,7 +816,9 @@ do not force an FSM release for every daemon tag.
      shape changes not protected by `#[non_exhaustive]`.
    The `semver-checks` workflow applies the same crates.io comparison to this
    crate on the PR.
-3. Update `version` in `crates/fsm/Cargo.toml`
+3. Update `version` in `crates/fsm/Cargo.toml`, its matching root workspace
+   dependency pin, root `Cargo.lock`, and `bench/scale/Cargo.lock`. When the
+   wire line also moves, publish wire first so the FSM package can resolve it.
 4. Roll `crates/fsm/CHANGELOG.md` and add a `rustbgpd-fsm` entry in the
    repository-level `CHANGELOG.md`
 5. Run `cargo package --locked -p rustbgpd-fsm --list` and inspect the exact
@@ -841,8 +853,8 @@ client will share one public compatibility boundary after the first publish.
      types appear in public RPKI method signatures.
    The `semver-checks` workflow compares every registry-visible release with
    its latest normal crates.io baseline.
-3. Update `version` in `crates/rpki/Cargo.toml` and the root workspace
-   dependency pin. Refresh every lockfile that resolves the path crate.
+3. Update `version` in `crates/rpki/Cargo.toml`, its matching root workspace
+   dependency pin, root `Cargo.lock`, and `bench/scale/Cargo.lock`.
 4. Roll `crates/rpki/CHANGELOG.md`, update the crate README, and add a
    `rustbgpd-rpki` entry in the repository-level `CHANGELOG.md`.
 5. Run `cargo package --locked -p rustbgpd-rpki --list`; inspect the exact

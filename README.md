@@ -72,10 +72,9 @@ reproducible receipt:
 
 The rustbgpd/BIRD IXP-matrix figures above are from the v0.64.0 same-host
 refresh (measured 2026-08-08). The OpenBGPD 9.2 comparator amendment was
-measured 2026-08-30 on post-v0.67.0 repository commits that are not yet
-contained in a stable rustbgpd tag; it is supplemental rather than
-release-tagged evidence. The original campaign and all earlier bands are
-preserved in the receipt.
+measured 2026-08-30 on the v0.68.0 release line before the final tag; it is
+supplemental rather than exact-tag evidence. The original campaign and all
+earlier bands are preserved in the receipt.
 
 **Status: public alpha.** Feature-complete for the initial programmable
 control-plane target and expanding toward cloud / AI-scale data-center
@@ -292,8 +291,8 @@ cargo build --release -p rustbgpd -p rustbgpctl -p rs-config-render -p birdwatch
 
 ### Docker
 
-Release images are published to GHCR (versioned tags, e.g.
-`ghcr.io/lance0/rustbgpd:0.67.0`), or build locally:
+Tagged releases publish versioned images to GHCR (for this release,
+`ghcr.io/lance0/rustbgpd:0.68.0`); alternatively, build locally:
 
 ```bash
 docker build -t rustbgpd .                    # daemon + rbgp + birdwatcher-adapter, nonroot
@@ -497,7 +496,7 @@ evolving API.**
 | Dimension | Current state |
 |-----------|---------------|
 | **Target use case** | Data-center fabric pilots, IXP route servers, programmable BGP control planes, lab/test environments |
-| **Maturity** | Public alpha (v0.67.0) |
+| **Maturity** | Public alpha (v0.68.0) |
 | **Adopter support** | Reporting channels, compatibility boundaries, and proof limits are documented in [SUPPORT.md](SUPPORT.md). |
 | **Narrow stable contract** | The machine-pinned [route-server / route-reflector v1 contract](docs/v1-stable-contract.md) covers only its inventoried control-plane roles and surfaces; the project and all unlisted features remain alpha. |
 | **Implemented** | Dual-stack BGP/MP-BGP, Add-Path, GR/LLGR, RPKI/RTR, ASPA path verification, FlowSpec, BMP, MRT, BFD, EVPN/VXLAN (alpha), and full gRPC/CLI management. Linux FIB integration is default-off and scoped to RFC 7999 discard routes and configured unicast tables (including ECMP and weighted multipath); broader routing-suite features remain future work. |
