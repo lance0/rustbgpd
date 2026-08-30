@@ -1,0 +1,50 @@
+# M100: released rustbgpd receiver with a separate observation peer.
+config_epoch = 2
+
+[global]
+asn = 65001
+router_id = "10.105.0.1"
+listen_port = 179
+ebgp_requires_policy = true
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
+
+[security.grpc]
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"
+
+[policy.definitions.m100-permit]
+default_action = "permit"
+
+[[neighbors]]
+address = "10.105.0.10"
+remote_asn = 64512
+description = "m100-source"
+hold_time = 90
+families = ["ipv4_unicast"]
+route_server_client = true
+role = "route_server"
+strict_role = true
+import_policy_chain = ["m100-permit"]
+export_policy_chain = ["m100-permit"]
+
+[[neighbors]]
+address = "10.105.0.11"
+remote_asn = 64513
+description = "m100-observer"
+hold_time = 90
+families = ["ipv4_unicast"]
+route_server_client = true
+role = "route_server"
+strict_role = true
+import_policy_chain = ["m100-permit"]
+export_policy_chain = ["m100-permit"]

@@ -11,6 +11,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- M100 adds a hosted, proof-only 20-cell receiver differential for an exact
+  `0xa0` Partial-flag corpus across released rustbgpd 0.67.0, BIRD 2.19.2,
+  OpenBGPD 9.2, and FRR 10.3.1. MED, ORIGINATOR_ID, CLUSTER_LIST, MP_REACH,
+  and MP_UNREACH outcomes are frozen as accept, same-session withdrawal,
+  treat-as-withdraw, or reset with exact UPDATE bytes, route/survivor state,
+  observer reconstruction, and ordered `3/4` notification/close/reconnect
+  evidence. This adds no production, configuration, or default-behavior change.
+
 - M104 adds a hosted current-daemon sibling of the immutable M90
   ARouteServer filtering differential. It reuses the exact M90 site and
   11-route corpus while requiring a 23/23 context-ingestion proof and 74/0

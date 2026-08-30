@@ -1,0 +1,85 @@
+# M100 — malformed Partial flag receiver behavior across four current daemons.
+name: m100-partial-receiver
+
+topology:
+  nodes:
+    switch:
+      kind: linux
+      image: bmpsink:m100
+      cmd: sleep infinity
+      exec:
+        - ip link add br0 type bridge mcast_snooping 0
+        - ip link set eth1 master br0
+        - ip link set eth2 master br0
+        - ip link set eth3 master br0
+        - ip link set eth4 master br0
+        - ip link set eth5 master br0
+        - ip link set eth1 up
+        - ip link set eth2 up
+        - ip link set eth3 up
+        - ip link set eth4 up
+        - ip link set eth5 up
+        - ip link set br0 up
+
+    rustbgpd:
+      kind: linux
+      image: ghcr.io/lance0/rustbgpd@sha256:cc6207fe950ee15f6793ca0119d531067c7b358b6c6193b0fda929495714c9da
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m100-receiver.toml:/etc/rustbgpd/config.toml:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      env:
+        RUST_LOG: info
+        RUSTBGPD_TOKEN_FILE: /run/rustbgpd/grpc-test-only-operator.token
+
+    bird:
+      kind: linux
+      image: bird:v2.19.2-m100
+      cmd: sleep infinity
+      binds:
+        - ./configs/bird-m100-receiver.conf:/etc/bird/bird.conf:ro
+      exec:
+        - ip addr add 10.105.0.2/24 dev eth1
+        - ip link set eth1 up
+        - mkdir -p /run/bird
+
+    openbgpd:
+      kind: linux
+      image: openbgpd/openbgpd@sha256:b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9
+      cmd: sleep infinity
+      binds:
+        - ./configs/bgpd-m100-receiver.conf:/etc/bgpd.conf:ro
+      exec:
+        - ip addr add 10.105.0.3/24 dev eth1
+        - ip link set eth1 up
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr@sha256:f90d26a9fd5c14fc5795a73b4254ac88bc3186c45bbeb220a225fb6182de812c
+      cmd: sleep infinity
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m100-receiver.conf:/etc/frr/frr.conf:ro
+        - /dev/null:/etc/frr/vtysh.conf:ro
+      exec:
+        - ip addr add 10.105.0.5/24 dev eth1
+        - ip link set eth1 up
+
+    raw:
+      kind: linux
+      image: bmpsink:m100
+      cmd: sleep infinity
+      binds:
+        - ./scripts/m100_partial_raw_peer.py:/m100_partial_raw_peer.py:ro
+      exec:
+        - ip addr add 10.105.0.10/24 dev eth1
+        - ip addr add 10.105.0.11/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["switch:eth1", "rustbgpd:eth1"]
+    - endpoints: ["switch:eth2", "bird:eth1"]
+    - endpoints: ["switch:eth3", "openbgpd:eth1"]
+    - endpoints: ["switch:eth4", "frr:eth1"]
+    - endpoints: ["switch:eth5", "raw:eth1"]

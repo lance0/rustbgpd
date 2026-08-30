@@ -113,6 +113,101 @@ fn route_server_topologies_have_exact_control_plane_setup() {
 }
 
 #[test]
+fn m100_pins_released_receivers_and_exact_twenty_cell_contract() {
+    let topology = topology("m100-partial-receiver.clab.yml");
+    for (node, image) in [
+        (
+            "rustbgpd",
+            "ghcr.io/lance0/rustbgpd@sha256:cc6207fe950ee15f6793ca0119d531067c7b358b6c6193b0fda929495714c9da",
+        ),
+        ("bird", "bird:v2.19.2-m100"),
+        (
+            "openbgpd",
+            "openbgpd/openbgpd@sha256:b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9",
+        ),
+        (
+            "frr",
+            "quay.io/frrouting/frr@sha256:f90d26a9fd5c14fc5795a73b4254ac88bc3186c45bbeb220a225fb6182de812c",
+        ),
+        ("raw", "bmpsink:m100"),
+        ("switch", "bmpsink:m100"),
+    ] {
+        assert_eq!(
+            topology["topology"]["nodes"][node]["image"], image,
+            "M100 {node} image drifted"
+        );
+    }
+
+    let topology_source = fs::read_to_string(interop_path("m100-partial-receiver.clab.yml"))
+        .expect("read M100 topology");
+    for fixture in [
+        "configs/rustbgpd-m100-receiver.toml",
+        "configs/bird-m100-receiver.conf",
+        "configs/bgpd-m100-receiver.conf",
+        "configs/frr-bgpd-m100-receiver.conf",
+        "scripts/m100_partial_raw_peer.py",
+    ] {
+        assert!(
+            topology_source.contains(fixture),
+            "M100 topology lost `{fixture}`"
+        );
+    }
+
+    let peer = fs::read_to_string(interop_path("scripts/m100_partial_raw_peer.py"))
+        .expect("read M100 raw peer");
+    for expected in [
+        r#"("rustbgpd", "med"): "accepted""#,
+        r#"("rustbgpd", "originator_id"): "accepted""#,
+        r#"("rustbgpd", "cluster_list"): "accepted""#,
+        r#"("rustbgpd", "mp_reach"): "reset""#,
+        r#"("rustbgpd", "mp_unreach"): "reset""#,
+        r#"("bird", "med"): "accepted""#,
+        r#"("bird", "originator_id"): "accepted""#,
+        r#"("bird", "cluster_list"): "accepted""#,
+        r#"("bird", "mp_reach"): "accepted""#,
+        r#"("bird", "mp_unreach"): "same_session_withdrawal""#,
+        r#"("openbgpd", "med"): "reset""#,
+        r#"("openbgpd", "originator_id"): "reset""#,
+        r#"("openbgpd", "cluster_list"): "reset""#,
+        r#"("openbgpd", "mp_reach"): "reset""#,
+        r#"("openbgpd", "mp_unreach"): "reset""#,
+        r#"("frr", "med"): "treat_as_withdraw""#,
+        r#"("frr", "originator_id"): "treat_as_withdraw""#,
+        r#"("frr", "cluster_list"): "treat_as_withdraw""#,
+        r#"("frr", "mp_reach"): "reset""#,
+        r#"("frr", "mp_unreach"): "reset""#,
+    ] {
+        assert!(peer.contains(expected), "M100 matrix lost `{expected}`");
+    }
+    for exact in [
+        r#""med": "a0040400000064""#,
+        r#""originator_id": "a00904c0000209""#,
+        r#""cluster_list": "a00a04c000020a""#,
+        r#""mp_reach": "a00e0d000101040a69000a0018c63364""#,
+        r#""mp_unreach": "a00f0700010118c63364""#,
+        "if cursor + length > attributes_end:",
+        "negative flag mutation was accepted",
+        "inverted outcome negative test was accepted",
+        "malformed snapshot negative test was accepted",
+        "M100 exact 20-cell contract verified",
+    ] {
+        assert!(peer.contains(exact), "M100 oracle lost `{exact}`");
+    }
+
+    let driver = fs::read_to_string(interop_path("scripts/test-m100-partial-receiver.sh"))
+        .expect("read M100 driver");
+    for required in [
+        "CASES=(med originator_id cluster_list mp_reach mp_unreach)",
+        "RECEIVERS=(rustbgpd bird openbgpd frr)",
+        "M100 produced exactly 20 unique cells",
+        "--verify-results",
+        "M100 exact observed matrix and evidence",
+    ] {
+        assert!(driver.contains(required), "M100 driver lost `{required}`");
+    }
+}
+
+#[test]
 fn m83_pins_refreshed_incumbent_images_and_preflights_before_capture() {
     let topology = topology("m83-routeserver-multistack.clab.yml");
     assert_eq!(

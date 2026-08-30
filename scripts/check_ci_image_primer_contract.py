@@ -14,7 +14,7 @@ from pathlib import Path
 INTEROP = (
     "m1 m13 m80 m15 m10 m14 m17 m73 m74 m75 m76 m77 m78 m79 m22 "
     "m24 m81 m82 m83 m85 m94 m86 m25 m29 m30 m34 m35 m35b m35c m41 "
-    "m44 m54 m55 m56 m45 m57 m63 m64 m26_m27_m28_m59_m91 m92 m84 m99 m101 m102 m103 m104"
+    "m44 m54 m55 m56 m45 m57 m63 m64 m26_m27_m28_m59_m91 m92 m84 m99 m100 m101 m102 m103 m104"
 ).split()
 KERNEL = (
     "m36 m37 m37-ip m38 m39 m39b m48 m60 m61 m62 m40 m42 m50 m52 "
@@ -146,19 +146,19 @@ PERMISSION_HASHES = {
     "kernel-dataplane.yml": "6f1d70d72bad231d43c575acef6946580e439c879794ed2ea1f4a40340245172",
 }
 CALL_HASHES = {
-    "interop.yml": "01f2ffcc62c7f3a2976a7b915a13af95084c6bab4fe7d93835813fd8884cdfb6",
+    "interop.yml": "2ee5070303677fa0353cc5197f5b6f60505a404c1619259245c80db6697b3d7c",
     "kernel-dataplane.yml": "310ed2344bd6ff3f766580f704cc77fec4be0a2103a943e2ad837f497af346c3",
 }
 PINS = collections.Counter(
     {
-        "actions/checkout@v7": 94,
+        "actions/checkout@v7": 95,
         "dtolnay/rust-toolchain@v1 # stable": 3,
         "Swatinem/rust-cache@v2": 5,
         "dtolnay/rust-toolchain@v1 # 1.95": 2,
-        "docker/setup-buildx-action@v4": 49,
-        "docker/build-push-action@v7": 53,
+        "docker/setup-buildx-action@v4": 50,
+        "docker/build-push-action@v7": 54,
         "actions/cache@v6": 7,
-        "actions/upload-artifact@v7": 11,
+        "actions/upload-artifact@v7": 12,
         "actions/download-artifact@v8": 6,
         "rustsec/audit-check@v2.0.0": 1,
         "EmbarkStudios/cargo-deny-action@v2": 1,
@@ -769,7 +769,9 @@ def check(root: Path) -> list[str]:
             errors.append(f"{name}: primer exact job contract drifted")
         for job_name in roster:
             job = jobs.get(job_name, "")
-            if not setup and job_name in ("m83", "m104"):
+            if not setup and job_name == "m100":
+                expected_needs = "    needs: [grpcurl_archive, bird2192_archive]"
+            elif not setup and job_name in ("m83", "m104"):
                 expected_needs = (
                     "    needs: [grpcurl_archive, bird2192_archive, prime_dev_image]"
                 )
@@ -831,6 +833,19 @@ def check(root: Path) -> list[str]:
                             f"artifact-name: {BIRD2192_ARTIFACT}",
                         ),
                     ),
+                    "m100": (
+                        "file: tests/interop/Dockerfile.bird-v2192",
+                        (
+                            "cache-from: type=gha,scope=bird2192-m100",
+                            "cache-to: type=gha,mode=max,scope=bird2192-m100,ignore-error=true",
+                        ),
+                        (
+                            "name: Stage verified BIRD 2.19.2 archive",
+                            'version: "2.19.2"',
+                            f"sha256: {BIRD2192_SHA256}",
+                            f"artifact-name: {BIRD2192_ARTIFACT}",
+                        ),
+                    ),
                     "m101": (
                         "file: tests/interop/Dockerfile.bird-v332",
                         (
@@ -877,10 +892,10 @@ def check(root: Path) -> list[str]:
                         errors.append(
                             f"{name}:{job_name}: bird artifact/build seam missing {seam}"
                         )
-                expected_build_push = 1 if setup else 2
+                expected_build_push = 1 if setup or job_name == "m100" else 2
                 if job.count(BUILD_PUSH) != expected_build_push:
                     errors.append(
-                        f"{name}:{job_name}: must use build-push-action for rustbgpd and BIRD"
+                        f"{name}:{job_name}: build-push-action inventory drifted"
                     )
             if not setup and job_name == "m83":
                 m83_required = {
@@ -904,9 +919,24 @@ def check(root: Path) -> list[str]:
                     errors.append(
                         f"{name}:{job_name}: must consume one grpcurl artifact"
                     )
-                for seam in (IMPORT, "load: true", "tags: rustbgpd:dev", "target: dev"):
-                    if seam not in job:
-                        errors.append(f"{name}:{job_name}: consumer missing {seam}")
+                if job_name == "m100":
+                    for seam in (
+                        "prime_dev_image",
+                        "rustbgpd:dev",
+                        "scope=rustbgpd-dev",
+                        "target: dev",
+                    ):
+                        if seam in job:
+                            errors.append(f"{name}:{job_name}: release lane permits {seam}")
+                else:
+                    for seam in (
+                        IMPORT,
+                        "load: true",
+                        "tags: rustbgpd:dev",
+                        "target: dev",
+                    ):
+                        if seam not in job:
+                            errors.append(f"{name}:{job_name}: consumer missing {seam}")
                 if "cache-to:" in job and job_name not in bird_contracts:
                     errors.append(f"{name}:{job_name}: consumer exports a cache")
                 expected_gnmic = 1 if job_name in ("m54", "m56") else 0
@@ -987,6 +1017,52 @@ def check(root: Path) -> list[str]:
     for forbidden in ("continue-on-error:", "docker exec", "max_attempts: \"2\""):
         if forbidden in m99:
             errors.append(f"interop.yml:m99: permits {forbidden}")
+    m100 = _jobs(texts["interop.yml"]).get("m100", "")
+    m100_required = {
+        GRPCURL_ACTION: 1,
+        "needs: [grpcurl_archive, bird2192_archive]": 1,
+        BIRD3_ACTION: 1,
+        'version: "2.19.2"': 1,
+        f"sha256: {BIRD2192_SHA256}": 1,
+        f"artifact-name: {BIRD2192_ARTIFACT}": 1,
+        "name: Build bird:v2.19.2-m100": 1,
+        "file: tests/interop/Dockerfile.bird-v2192": 1,
+        "tags: bird:v2.19.2-m100": 1,
+        "cache-from: type=gha,scope=bird2192-m100": 1,
+        "cache-to: type=gha,mode=max,scope=bird2192-m100,ignore-error=true": 1,
+        "docker build -t bmpsink:m100 -f tests/interop/Dockerfile.bmpsink tests/interop": 1,
+        "docker pull ghcr.io/lance0/rustbgpd@sha256:cc6207fe950ee15f6793ca0119d531067c7b358b6c6193b0fda929495714c9da": 1,
+        "docker pull openbgpd/openbgpd@sha256:b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9": 1,
+        "docker pull quay.io/frrouting/frr@sha256:f90d26a9fd5c14fc5795a73b4254ac88bc3186c45bbeb220a225fb6182de812c": 1,
+        "python3 tests/interop/scripts/m100_partial_raw_peer.py --self-test": 1,
+        'CLEANUP: "1"': 1,
+        "M100_ARTIFACT_DIR: ${{ runner.temp }}/m100": 1,
+        "uses: ./.github/actions/run-interop-test": 1,
+        "label: M100\n": 1,
+        "topology: tests/interop/m100-partial-receiver.clab.yml": 1,
+        "script: tests/interop/scripts/test-m100-partial-receiver.sh": 1,
+        'max_attempts: "1"': 1,
+        "uses: actions/upload-artifact@v7": 1,
+        "name: m100-partial-receiver-${{ github.sha }}": 1,
+        "path: ${{ runner.temp }}/m100": 1,
+        "if-no-files-found: error": 1,
+        "retention-days: 14": 1,
+    }
+    if any(m100.count(seam) != count for seam, count in m100_required.items()):
+        errors.append("interop.yml:m100: exact released-daemon receiver matrix drifted")
+    for forbidden in (
+        "ghcr.io/lance0/rustbgpd:0.67.0",
+        "openbgpd/openbgpd:9.2",
+        "quay.io/frrouting/frr:10.3.1",
+        "bird:2.19.2",
+        "prime_dev_image",
+        "rustbgpd:dev",
+        "scope=rustbgpd-dev",
+        "continue-on-error:",
+        'max_attempts: "2"',
+    ):
+        if forbidden in m100:
+            errors.append(f"interop.yml:m100: permits {forbidden}")
     m101 = _jobs(texts["interop.yml"]).get("m101", "")
     m101_required = {
         GRPCURL_ACTION: 1,
@@ -1472,7 +1548,7 @@ def check(root: Path) -> list[str]:
     )
     if "osrg/gobgp/releases" in gobgp_surfaces:
         errors.append("gobgp release URL escaped the installer/Dockerfile")
-    if texts["interop.yml"].count(BIRD3_ACTION) != 3:
+    if texts["interop.yml"].count(BIRD3_ACTION) != 4:
         errors.append("interop.yml: BIRD stage consumer inventory drifted")
     if texts["kernel-dataplane.yml"].count(BIRD3_ACTION) != 1:
         errors.append("kernel-dataplane.yml: bird3 stage consumer inventory drifted")

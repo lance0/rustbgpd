@@ -105,6 +105,33 @@ disposition shown.
 | 10 | 80 | c0000201 | c00002 | attribute-discard | treat-as-withdraw |
 <!-- core-behavior:end -->
 
+## M100 released-receiver Partial-flag differential
+
+M100 freezes one version-scoped receiver observation across rustbgpd 0.67.0,
+BIRD 2.19.2, OpenBGPD 9.2, and FRR 10.3.1. Each cell receives the exact
+attribute bytes shown below with flags `0xa0`; a separate observer session
+reconstructs candidate and survivor state. This is a proof-only comparison of
+the named releases, not a change to rustbgpd policy, configuration, defaults,
+or the current-main core-behavior matrix above.
+
+| Attribute | Exact attribute bytes | rustbgpd 0.67.0 | BIRD 2.19.2 | OpenBGPD 9.2 | FRR 10.3.1 |
+|---|---|---|---|---|---|
+| MED (4), value 100 | `a0040400000064` | accepted | accepted | reset | treat-as-withdraw |
+| ORIGINATOR_ID (9) | `a00904c0000209` | accepted; attribute not forwarded to observer | accepted; attribute not forwarded to observer | reset | treat-as-withdraw |
+| CLUSTER_LIST (10) | `a00a04c000020a` | accepted; attribute not forwarded to observer | accepted; attribute not forwarded to observer | reset | treat-as-withdraw |
+| MP_REACH (14) | `a00e0d000101040a69000a0018c63364` | reset | accepted | reset | reset |
+| MP_UNREACH (15) | `a00f0700010118c63364` | reset | same-session candidate withdrawal | reset | reset |
+
+`accepted` means the source session stays in the same epoch and both candidate
+and survivor remain visible through the observer; MED is additionally pinned at
+100. The two same-session withdrawal labels both mean the candidate disappears,
+the survivor remains, and no notification, close, or re-establishment occurs.
+`reset` requires one ordered UPDATE `3/4` notification carrying the exact
+attribute bytes, one close, and one re-establishment at the next source epoch;
+both routes are absent across that boundary. The hosted job also rejects altered
+flags, inverted expected outcomes, malformed command output, incomplete UPDATE
+attribute bounds, missing route reconstruction, and duplicate or missing rows.
+
 ## Assigned class fence
 
 This matrix audits only the registered Optional/Transitive class; bounded
