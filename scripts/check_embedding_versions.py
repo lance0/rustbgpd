@@ -151,7 +151,7 @@ def check(document: str, prepared_versions: dict[str, str] | None = None) -> lis
                 if any("path" not in value for value in values)
                 else "rpki-path-snippet"
             )
-            errors.append(diagnostic)
+            errors.append(f"{package}:{diagnostic}")
 
     publish = re.findall(
         rf"^\d+\. \*\*`rustbgpd-({published_pattern})` "

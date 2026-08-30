@@ -40,7 +40,7 @@ synchronous. `RtrClient` and `VrpManager` require a Tokio runtime.
 
 Origin validation uses prefix and validation-state types from the independently
 published wire crate. The `rustbgpd-rpki 0.1.x` release boundary pairs with
-`rustbgpd-wire 0.19.x`. Registry consumers use:
+`rustbgpd-wire 0.19.x`. Once both versions are registry-visible, consumers use:
 
 ```toml
 [dependencies]
@@ -48,7 +48,7 @@ rustbgpd-rpki = "0.1.0"
 rustbgpd-wire = "0.19.0"
 ```
 
-When either version is not yet registry-visible, or when testing a source
+Before both versions are registry-visible, or when testing a source
 checkout, use matching versioned paths from one rustbgpd checkout:
 
 ```toml

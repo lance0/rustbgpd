@@ -59,19 +59,21 @@ class EmbeddingVersionContractTests(unittest.TestCase):
         """Fails if either pre-publish path dependency drifts."""
         mutations = (
             (
+                "rpki",
                 'rustbgpd-rpki = { version = "0.1.0", path = "../rustbgpd/crates/rpki" }',
                 'rustbgpd-rpki = { version = "0.1.0", path = "../rustbgpd/crates/rpki-old" }',
             ),
             (
+                "wire",
                 'rustbgpd-wire = { version = "0.19.0", path = "../rustbgpd/crates/wire" }',
                 'rustbgpd-wire = { version = "0.19.0", path = "../rustbgpd/crates/wire-old" }',
             ),
         )
-        for current, old in mutations:
-            with self.subTest(current=current):
+        for package, current, old in mutations:
+            with self.subTest(package=package):
                 self.assert_fails(
                     self.replace_nth(current, old),
-                    "rpki-path-snippet",
+                    f"{package}:rpki-path-snippet",
                 )
 
     def test_rpki_registry_snippet_is_rejected(self) -> None:
@@ -86,7 +88,7 @@ class EmbeddingVersionContractTests(unittest.TestCase):
                         'rustbgpd-rpki = { version = "0.1.0", path = "../rustbgpd/crates/rpki" }',
                         replacement,
                     ),
-                    "rpki-registry-snippet",
+                    "rpki:rpki-registry-snippet",
                 )
 
     def test_publication_map_state_is_guarded(self) -> None:
