@@ -36,6 +36,11 @@ these additions and decode-behavior refinements when upgrading:
 - Tunnel Encapsulation and ATTR_SET stay payload-opaque, but their declared
   nested lengths must now frame exactly. Malformed values receive their
   registered RFC 7606 dispositions instead of being accepted opaquely.
+- Partial is rejected on typed MED, ORIGINATOR_ID, and CLUSTER_LIST. Strict
+  decoding returns Attribute Flags Error with the exact offending attribute;
+  revised decoding treats MED as withdraw and treats the route-reflector
+  attributes as discard on eBGP or withdraw on iBGP. MP_REACH_NLRI and
+  MP_UNREACH_NLRI retain their existing session-reset contract.
 
 ### 0.18.0 compatibility note
 

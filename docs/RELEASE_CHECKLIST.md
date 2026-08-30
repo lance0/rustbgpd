@@ -771,9 +771,11 @@ changed.
 3. Update `version` in `crates/wire/Cargo.toml`
 4. Roll `crates/wire/CHANGELOG.md` and add a `rustbgpd-wire` entry in the
    repository-level `CHANGELOG.md`
-5. `cargo publish -p rustbgpd-wire --dry-run`
-6. `cargo publish -p rustbgpd-wire`
-7. Verify the version is visible in the registry, update the declared current
+5. Run `cargo package --locked -p rustbgpd-wire --list` and inspect the exact
+   package inventory and normalized manifest.
+6. `cargo publish --locked -p rustbgpd-wire --dry-run`
+7. `cargo publish --locked -p rustbgpd-wire`
+8. Verify the version is visible in the registry, update the declared current
    boundary and dependency snippets in `docs/EMBEDDING.md`, then run
    `python3 scripts/check_embedding_versions.py`.
 
@@ -797,7 +799,9 @@ do not force an FSM release for every daemon tag.
      fields on an existing `#[non_exhaustive]` config struct when its
      constructor preserves the prior defaults.
    - **Minor**: additive events/actions/helpers, new public types, or other
-     non-breaking negotiation surfaces.
+     non-breaking negotiation surfaces. An incompatible `rustbgpd-wire`
+     dependency move also requires an FSM minor bump because wire types appear
+     in the public FSM API.
    - **Major**: changed method signatures, removed variants, or enum/struct
      shape changes not protected by `#[non_exhaustive]`.
    The `semver-checks` workflow applies the same crates.io comparison to this
@@ -805,9 +809,13 @@ do not force an FSM release for every daemon tag.
 3. Update `version` in `crates/fsm/Cargo.toml`
 4. Roll `crates/fsm/CHANGELOG.md` and add a `rustbgpd-fsm` entry in the
    repository-level `CHANGELOG.md`
-5. `cargo publish -p rustbgpd-fsm --dry-run`
-6. `cargo publish -p rustbgpd-fsm`
-7. Verify the version is visible in the registry, update the declared current
+5. Run `cargo package --locked -p rustbgpd-fsm --list` and inspect the exact
+   package inventory and normalized manifest.
+6. `cargo publish --locked -p rustbgpd-fsm --dry-run`. When this release moves
+   to a new wire line, a resolver failure is expected until that wire version
+   is registry-visible; do not weaken verification with `--no-verify`.
+7. `cargo publish --locked -p rustbgpd-fsm`
+8. Verify the version is visible in the registry, update the declared current
    boundary and dependency snippets in `docs/EMBEDDING.md`, then run
    `python3 scripts/check_embedding_versions.py`.
 
@@ -815,15 +823,19 @@ do not force an FSM release for every daemon tag.
 
 The RPKI crate has its own version in `crates/rpki/Cargo.toml`, decoupled from
 the daemon workspace version. Its synchronous table API and asynchronous RTR
-client share one published compatibility boundary.
+client will share one public compatibility boundary after the first publish.
 
 1. **Did `crates/rpki/` or its public examples/docs change since the last
    `rustbgpd-rpki` publish?**
    - If no: skip. Do not publish a no-op release.
    - If yes: continue.
 2. Decide semver bump:
+   - **First publish**: establish `0.1.0` directly on the intended compatible
+     wire line. With no registry baseline, there is no obsolete RPKI line to
+     bump away from.
    - **Patch**: backward-compatible fixes, docs/test improvements, or additive
-     public API within the current `0.x` compatibility line.
+     public API after the first release within the current `0.x`
+     compatibility line.
    - **Minor**: removed/changed public items, incompatible enum or struct shape
      changes, or an incompatible `rustbgpd-wire` dependency move because wire
      types appear in public RPKI method signatures.
@@ -836,7 +848,10 @@ client share one published compatibility boundary.
 5. Run `cargo package --locked -p rustbgpd-rpki --list`; inspect the exact
    package inventory and normalized manifest. Normal dependencies must resolve
    from crates.io with no path-only edge.
-6. Run `cargo publish --locked -p rustbgpd-rpki --dry-run`.
+6. Run `cargo publish --locked -p rustbgpd-rpki --dry-run`. For the initial
+   release prepared against a new wire line, a resolver failure is expected
+   until that wire version is registry-visible; do not weaken verification
+   with `--no-verify`.
 7. Publish `rustbgpd-rpki`, verify the version and ownership are visible in the
    registry, then manually dispatch `semver-checks.yml` at the publish commit.
    The checked package set must now include RPKI.
@@ -847,5 +862,5 @@ For the initial `0.1.0` publish only, the semver workflow permits the exact
 `rustbgpd-rpki 0.1.0` package to have no baseline while crates.io returns 404
 for its name. Any other missing package/version, a claimed name without a
 normal release, or an ambiguous registry response fails closed. Recheck the
-name immediately before removing `publish = false` and immediately before the
-real publish.
+name immediately before the real publish; the package is already
+publish-enabled in its manifest.

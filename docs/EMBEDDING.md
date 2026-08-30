@@ -1,7 +1,7 @@
 # Embedding rustbgpd — the Rust BGP library map
 
 rustbgpd is not one crate; it is a layered workspace. The bottom layers are
-published as daemon-independent crates: a pure BGP message codec
+packaged as daemon-independent crates: a pure BGP message codec
 (`rustbgpd-wire`), a pure RFC 4271 state machine (`rustbgpd-fsm`), and RPKI/RTR
 validation components (`rustbgpd-rpki`). They are consumable by Rust projects —
 monitors, analyzers, test harnesses, MRT readers, RPKI validators, k8s sidecars,
@@ -41,13 +41,14 @@ This document is the contract for embedders: which crate to depend on, what the
 
 All Cargo workspace packages are listed. Internal dependencies include normal and build dependencies, including target-specific dependencies; dev dependencies are excluded.
 
-`rustbgpd-wire`, `rustbgpd-fsm`, and `rustbgpd-rpki` are registry-published
-releases from this workspace. `Disabled` means this repository's package
-manifest sets `publish = false`; it makes no claim about unrelated registry
-packages with a similar name. These workspace packages can still be consumed
-through git or path dependencies, including from outside this repository. A
-consumer that needs the daemon's gRPC surface can instead generate a client
-from the proto (§3.5).
+`rustbgpd-wire` and `rustbgpd-fsm` have registry-published releases.
+`rustbgpd-rpki` is publish-enabled and its first release is prepared, but it is
+not yet registry-visible. `Disabled` means this repository's package manifest
+sets `publish = false`; it makes no claim about unrelated registry packages
+with a similar name. These workspace packages can still be consumed through
+git or path dependencies, including from outside this repository. A consumer
+that needs the daemon's gRPC surface can instead generate a client from the
+proto (§3.5).
 
 This map records the current workspace topology, not a publication sequence.
 Notably, `rustbgpd-rib` depends on `rustbgpd-bmp`; §4 discusses future
@@ -274,13 +275,14 @@ This makes it trivially testable and lets a sidecar plug in any transport
 An analyzer or policy controller that already has validated ROA payloads can
 construct an immutable table and classify a route without starting Tokio or an
 RTR session. The prefix and validation-state types are part of the published
-wire boundary, so consumers name both compatible crate lines directly.
+wire boundary. The RPKI crate's first registry release is prepared but not yet
+available, so this pre-publish example uses matching workspace paths.
 
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-rpki = "0.1.0"
-rustbgpd-wire = "0.18.0"
+rustbgpd-rpki = { version = "0.1.0", path = "../rustbgpd/crates/rpki" }
+rustbgpd-wire = { version = "0.19.0", path = "../rustbgpd/crates/wire" }
 ```
 
 ```rust
@@ -346,18 +348,19 @@ not want a full daemon in the loop (e.g. a minimal speaker in a constrained
 k8s pod) links `rustbgpd-wire` + `rustbgpd-fsm` and owns one or a few sessions.
 It does *not* get a RIB or best-path — it is a speaker, not a router. This is
 the gap Cilium fills by embedding GoBGP today. Links: `rustbgpd-wire` +
-`rustbgpd-fsm` + `tokio`. If it needs origin validation, add the published
-`rustbgpd-rpki 0.1` line with its compatible direct `rustbgpd-wire 0.18`
-dependency.
+`rustbgpd-fsm` + `tokio`. If it needs origin validation, add the RPKI crate
+after its first release. The prepared RPKI/wire pair is recorded in §7; before
+then, use matching workspace paths as in §3.4.
 
 ---
 
 ## 4. Which crate to publish next, and why
 
-**Status: `wire`, `fsm`, and `rpki` are published; `rib`, `bmp`, `mrt`, and
-`policy` remain demand-gated.**
+**Status: `wire` and `fsm` are published; their next paired boundary and
+`rpki`'s first publish are prepared. `rib`, `bmp`, `mrt`, and `policy` remain
+demand-gated.**
 
-1. **`rustbgpd-wire` (published as `0.18.0`).** This is the
+1. **`rustbgpd-wire` (published as `0.18.0`; `0.19.0` prepared).** This is the
    foundation — dependent crate versions cannot publish before their wire
    dependency exists on crates.io. `0.15.0` brought `Capability::PathsLimit`
    with its `PathsLimitFamily` entry type (experimental capability code 76),
@@ -427,9 +430,14 @@ dependency.
    with independent inbound and outbound RFC 8654 ceilings). A consumer that
    asserts on accepted bytes or on exact `PathAttribute` variants must diff
    the itemized list in `crates/wire/README.md` under "0.18.0 compatibility
-   note" before upgrading.
+   note" before upgrading. The prepared `0.19.0` line remains API-additive but
+   intentionally advances the 0.x boundary for new observation/framing APIs
+   and decode-behavior refinements. Its compatibility note includes the exact
+   role-sensitive disposition for Partial-bearing MED, ORIGINATOR_ID, and
+   CLUSTER_LIST, while MP_REACH_NLRI and MP_UNREACH_NLRI retain session reset.
 
-2. **`rustbgpd-fsm` (published as `0.5.0`).** The `0.4.0` release makes no
+2. **`rustbgpd-fsm` (published as `0.5.0`; `0.6.0` prepared).** The `0.4.0`
+   release makes no
    FSM API changes of its own — it exists because the FSM's public surface
    re-exports `rustbgpd-wire` types (`Action` carries wire messages), so the
    wire `0.16.2 → 0.17.0` breaking transition changes the identity of those
@@ -471,8 +479,12 @@ dependency.
      is `#[non_exhaustive]` or gets a constructor/default path. The published
      crate already has the forward-compat boundary: `PeerConfig`,
      `NegotiatedSession`, `Event`, and `Action` are `#[non_exhaustive]`.
+   The prepared `0.6.0` line pairs with wire `0.19.0`, which changes the
+   identity of wire types exposed through the FSM. It also adds
+   `Event::AdministrativeReset` to the non-exhaustive event enum.
 
-3. **`rustbgpd-rpki` (published as `0.1.0`).** Why it is independent:
+3. **`rustbgpd-rpki` (first publish prepared as `0.1.0`; not
+   registry-visible).** Why it is independent:
    - Its direct dependencies are `rustbgpd-wire`, `tokio`, `tracing`,
      `smallvec`, `thiserror`, and `rustc-hash`; it has no `rib`/`policy` edge.
    - Synchronous `VrpTable` / `AspaTable` validation can be embedded without a
@@ -480,7 +492,9 @@ dependency.
      acquisition layer.
    - The `0.1.x` compatibility boundary covers the crate-root facade and every
      public module path, including the raw RTR PDU codec. Breaking Rust API or
-     an incompatible public wire-type move requires `0.2.0`.
+     an incompatible public wire-type move after first publish requires
+     `0.2.0`. There is no earlier public RPKI line to bump away from, so the
+     first `0.1.0` release starts directly on wire `0.19.0`.
 
 4. **Later: `rib`, `bmp`, `mrt`, `policy`.** These pull in heavier deps
    (`prefix-trie`, `ipnet`, `flate2`, `chrono`) and have more churn. Publish
@@ -502,7 +516,7 @@ dependency.
 | 1 | **BGP test harness / fuzzer** (à la GoBGP's `internal/testing`, or a Rust peer for FRR interop CI) | Replays PCAPs/MRT, speaks BGP to a device under test, asserts on received UPDATEs | `rustbgpd-wire` (decode/encode), `rustbgpd-fsm` (drive a peer) | `decode_message`, `encode_message`, `Message`/`ParsedUpdate`, `Session::handle_event` | **Highest-leverage, lowest-friction.** Pure codec + pure FSM. No network state, no RIB. This is the crate's natural first friend — we should ship one in-tree as `examples/peer-loop/` to prove the embedding story. |
 | 2 | **MRT route collector / analyzer** (à la BGPKIT-parser use case, but with *encode* too) | Reads RFC 6396 dumps, decodes UPDATEs, builds reports; some also synthesize test traffic | `rustbgpd-wire` for decode; optionally `rustbgpd-mrt` later for the dump container | `decode_message`, `ParsedUpdate`, `PathAttribute`, `Prefix`, EVPN/FlowSpec/BGP-LS NLRI types | **Strong fit.** The wire crate already decodes everything BGPKIT-parser parses *plus* BGP-LS, ORF, PMSI, OTC. The gap is the MRT container — `rustbgpd-mrt` closes it but is not yet published. |
 | 3 | **k8s BGP sidecar / minimal speaker** (the Cilium-embeds-GoBGP niche, in Rust) | Advertises pod/service CIDRs to a top-of-rack router; needs a *speaker*, not a router | `rustbgpd-wire` + `rustbgpd-fsm` (+ `rustbgpd-rpki` for origin validation) | `Session`, `PeerConfig`, `Action`, `encode_message`, `VrpTable` | **Real but hard.** This is GoBGP's library-reach moat: Cilium embeds the full GoBGP library (not just the codec) to get a session runtime + RIB + policy. rustbgpd offers only codec+FSM as a library today; the sidecar would have to own the RIB-less "speaker" path itself. Honest: we are not displacing Cilium's GoBGP embedding in 2026; we are the option for a *Rust-native* sidecar that wants no CGo and a smaller blast radius. |
-| 4 | **RPKI validator / RTR cache client** (à la Routinator consumer, or a VRP-driven policy gate) | Maintains a VRP table from one or more RTR caches; validates origins | `rustbgpd-rpki` (`VrpTable`, `RtrClient`, `VrpManager`), `rustbgpd-wire` (`RpkiValidation`) | `VrpTable::validate`, `RtrClient` async session, `VrpManager` merge | **Published fit.** Table validation is synchronous; cache acquisition and merging are Tokio-coupled. The validation-state type lives in the compatible wire line. |
+| 4 | **RPKI validator / RTR cache client** (à la Routinator consumer, or a VRP-driven policy gate) | Maintains a VRP table from one or more RTR caches; validates origins | `rustbgpd-rpki` (`VrpTable`, `RtrClient`, `VrpManager`), `rustbgpd-wire` (`RpkiValidation`) | `VrpTable::validate`, `RtrClient` async session, `VrpManager` merge | **Prepared fit, pending first publish.** Table validation is synchronous; cache acquisition and merging are Tokio-coupled. The validation-state type lives in the compatible wire line. |
 | 5 | **BMP monitor / telemetry sink** (à la OpenBMP, or a Rust BMP collector) | Receives RFC 7854 BMP messages, decodes per-peer UPDATEs, exports metrics | `rustbgpd-wire` (decode embedded UPDATEs), `rustbgpd-bmp` later | `decode_message`, `PathAttribute`, `MpReachNlri` | **Medium.** BMP message framing is small; the value is the embedded UPDATE decode, which `wire` already does. `rustbgpd-bmp` is the container/framing; publish it once a collector asks. |
 
 ---
@@ -548,18 +562,23 @@ To be the de facto Rust BGP codec, the concrete gaps:
 
 ## 7. Published-crate release boundary
 
-`rustbgpd-wire 0.18.0`, `rustbgpd-fsm 0.5.0`, and `rustbgpd-rpki 0.1.0` are
-published and are the versions the §3 dependency examples name. The wire/FSM
-pair moved together because the FSM re-exports codec types. RPKI starts its own
-alpha line but also exposes wire types in public method signatures, so an
-incompatible wire move requires the corresponding RPKI compatibility-line
-bump. The ordering rules that govern future publishes are:
+Registry-visible releases are `rustbgpd-wire 0.18.0` and
+`rustbgpd-fsm 0.5.0`; `rustbgpd-rpki` has no registry release. The registry
+dependency examples in §3 name only those published versions.
+
+The prepared package boundary is `rustbgpd-wire 0.19.0`,
+`rustbgpd-fsm 0.6.0`, and first-publish `rustbgpd-rpki 0.1.0`. The wire/FSM
+pair moves together because the FSM re-exports codec types. RPKI also exposes
+wire types in public method signatures, but there is no frozen RPKI baseline:
+its first `0.1.0` line can start directly on wire `0.19.0`. After that publish,
+an incompatible wire move requires the corresponding RPKI compatibility-line
+bump. The ordering rules that govern these publishes are:
 
 - Publish `rustbgpd-wire` first, then verify it is registry-visible. Only then
-  run the fully verified package/dry-run gate for `rustbgpd-fsm`. Cargo
-  normalizes the FSM's path dependency to a caret requirement on the wire
-  version, so a full FSM package verify cannot resolve before that wire release
-  is present in the registry.
+  run the fully verified package/dry-run gates for `rustbgpd-fsm` and
+  `rustbgpd-rpki`. Cargo normalizes their path dependencies to a caret
+  requirement on the wire version, so either full package verify may fail to
+  resolve before that wire release is present in the registry.
 - Keep the dependency examples in §3 pinned to the versions actually available
   from crates.io — never to a version not yet published.
 - Publish a changed wire compatibility line before packaging either FSM or RPKI

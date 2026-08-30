@@ -39,12 +39,22 @@ synchronous. `RtrClient` and `VrpManager` require a Tokio runtime.
 ## Usage
 
 Origin validation uses prefix and validation-state types from the independently
-published wire crate:
+published wire crate. The `rustbgpd-rpki 0.1.x` release boundary pairs with
+`rustbgpd-wire 0.19.x`. Registry consumers use:
 
 ```toml
 [dependencies]
 rustbgpd-rpki = "0.1.0"
-rustbgpd-wire = "0.18.0"
+rustbgpd-wire = "0.19.0"
+```
+
+When either version is not yet registry-visible, or when testing a source
+checkout, use matching versioned paths from one rustbgpd checkout:
+
+```toml
+[dependencies]
+rustbgpd-rpki = { version = "0.1.0", path = "../rustbgpd/crates/rpki" }
+rustbgpd-wire = { version = "0.19.0", path = "../rustbgpd/crates/wire" }
 ```
 
 ```rust
@@ -115,11 +125,12 @@ details.
 
 ## Compatibility
 
-This is an alpha `0.x` crate. Backward-compatible fixes and additions remain on
-the `0.1.x` line. Removing or changing public items requires `0.2.0`. Public
-method signatures use types from `rustbgpd-wire 0.18`; moving that dependency
-to an incompatible wire line also requires an RPKI minor-version bump so the
-shared types do not silently split in one dependency graph.
+This is an alpha `0.x` crate. Its first public `0.1.x` line starts with
+`rustbgpd-wire 0.19`; no earlier `rustbgpd-rpki` release exists to preserve.
+Backward-compatible fixes and additions remain on that line. Removing or
+changing public items requires `0.2.0`, as does moving the public method
+signatures to an incompatible wire line, so shared types do not silently split
+in one dependency graph.
 
 ## License
 
