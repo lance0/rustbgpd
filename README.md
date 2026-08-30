@@ -191,7 +191,7 @@ config from their existing `general.yml`/`clients.yml`:
   FlowSpec, Prefix ORF, large/extended communities — plus VPNv4/v6, RT-Constrain,
   labeled-unicast, and BGP-LS reflection, and **RFC 9107 Optimal Route
   Reflection** (per-client best paths via SPF over BGP-LS topology,
-  [peer-proven against GoBGP 4.6.0 in M76](docs/RECEIPTS.md#interop-labs--pr-gated-interopyml))
+  [peer-proven against checksum-built GoBGP 4.8.0 in M76](docs/RECEIPTS.md#interop-labs--pr-gated-interopyml))
 - **Explicit architecture** — pure FSM with no I/O, single-owner RIB with no
   locks, bounded channels; no `Arc<RwLock>` on routing state
   ([ARCHITECTURE.md](ARCHITECTURE.md))
@@ -468,7 +468,7 @@ architecture decision record for every protocol and design choice.
 |----------|---------|
 | Workspace tests | Unit, integration, and property tests (`cargo test --workspace`) |
 | Wire fuzzing | libFuzzer harnesses on message and attribute decoders, run nightly in CI |
-| Interop suites | Automated interop suite (see [docs/INTEROP.md](docs/INTEROP.md) for the full matrix), primarily against FRR 10.3.1 plus GoBGP 3.37.0 / 4.6.0 / 4.7.0 across established labs; M83 uses FRR 10.7.0 with GoBGP 4.8.0, which also appears in M103/M104 and the local M105 observation. StayRTR backs RTR coverage; BIRD 2.0.12 anchors M0 and immutable legacy/differential labs, BIRD 2.19.2 covers M83/M85/M93/M95/M100/M104, BIRD 3.3.1 covers the TCP-AO smoke, and BIRD 3.3.2 covers M101 plus local M105. A foundation tier is gated on every PR, privileged Linux dataplane smokes run in hosted kernel-dataplane CI, and longer soaks / platform-diversity scripts remain local. |
+| Interop suites | Automated interop suite (see [docs/INTEROP.md](docs/INTEROP.md) for the full matrix), primarily against FRR 10.3.1 plus GoBGP 3.37.0 / 4.6.0 / 4.7.0 across established labs; M76/M77/M83/M103/M104 use GoBGP 4.8.0, which also appears in the local M105 observation, and M83 uses FRR 10.7.0. StayRTR backs RTR coverage; BIRD 2.0.12 anchors M0 and immutable legacy/differential labs, BIRD 2.19.2 covers M83/M85/M93/M95/M100/M104, BIRD 3.3.1 covers the TCP-AO smoke, and BIRD 3.3.2 covers M101 plus local M105. A foundation tier is gated on every PR, privileged Linux dataplane smokes run in hosted kernel-dataplane CI, and longer soaks / platform-diversity scripts remain local. |
 | Operational proof | Consolidated receipts for CI interop, hosted kernel dataplane, benchmarks, memory profiles, and archived 24 h soaks live in [docs/OPERATIONAL_PROOF.md](docs/OPERATIONAL_PROOF.md) — including the 1,000-session flagship 24 h runs for the [route server](docs/soaks/soak-rs-flagship-24h.md) and the [route reflector](docs/soaks/soak-rr-flagship-24h.md). |
 | Protocol coverage | [Supported standards at a glance](docs/RFC_NOTES.md#supported-standards-at-a-glance) plus per-RFC conformance notes in [docs/RFC_NOTES.md](docs/RFC_NOTES.md); interop matrix in [docs/INTEROP.md](docs/INTEROP.md) and receipts in [docs/RECEIPTS.md](docs/RECEIPTS.md). |
 | Architecture decisions | ADRs documenting every protocol and design choice ([docs/adr/](docs/adr/)) |

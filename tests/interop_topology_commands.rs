@@ -208,6 +208,86 @@ fn m100_pins_released_receivers_and_exact_twenty_cell_contract() {
 }
 
 #[test]
+fn m76_pins_gobgp48_identity_before_preserving_the_orr_contract() {
+    let topology = topology("m76-orr-divergent-best-gobgp.clab.yml");
+    assert_eq!(topology["name"], "m76-orr-divergent-best-gobgp");
+    let nodes = topology["topology"]["nodes"].as_mapping().unwrap();
+    assert_eq!(
+        nodes.len(),
+        6,
+        "M76 must retain one RR and five GoBGP peers"
+    );
+    assert_eq!(nodes["rustbgpd"]["image"], "rustbgpd:dev");
+    for peer in [
+        "gobgp-src",
+        "gobgp-pe1",
+        "gobgp-pe2",
+        "gobgp-c1",
+        "gobgp-c2",
+    ] {
+        assert_eq!(
+            nodes[peer]["image"], "gobgp:v4.8.0-m76",
+            "M76 {peer} image drifted"
+        );
+    }
+
+    let script = fs::read_to_string(interop_path("scripts/test-m76-orr-divergent-best-gobgp.sh"))
+        .expect("read M76 driver");
+    for required in [
+        "GOBGP_IMAGE=\"gobgp:v4.8.0-m76\"",
+        "GOBGP_VERSION=\"gobgp version 4.8.0\"",
+        "GOBGPD_VERSION=\"gobgpd version 4.8.0\"",
+        "5bd2c6eddab475746d5257c4466f8377b3790bcf7159e18e03a9d44a1685348b",
+        "710b7c28d2b83aef887cc28ae6ddcffe82f11a27e0ba263d9f747658b45f8a97",
+        "docker image inspect -f '{{.Architecture}}' \"$GOBGP_IMAGE\"",
+        "docker inspect -f '{{.Config.Image}}' \"$container\"",
+        "docker inspect -f '{{.Image}}' \"$container\"",
+        "docker exec \"$container\" uname -m",
+        "docker exec \"$container\" gobgp --version",
+        "docker exec \"$container\" gobgpd --version",
+        "sha256sum /usr/local/bin/gobgp",
+        "sha256sum /usr/local/bin/gobgpd",
+        "assert_family_negotiated \"$GOBGP_SRC\" \"10.0.0.1\" \"ls\" \"source\"",
+        "wait_topology_counts 4 4 \"square injected\"",
+        "wait_vantages_resolved true \"square injected\"",
+        "wait_client_best \"$GOBGP_C1\" \"$NH_X\" \"$PE1_ADDR\"",
+        "wait_client_best \"$GOBGP_C2\" \"$NH_Y\" \"$PE2_ADDR\"",
+        "gobgp \"$GOBGP_SRC\" global rib add -a ls $(ls_link_a_x 100)",
+        "if [ \"$c2_updates_after\" = \"$c2_updates\" ]; then",
+        "assert_no_flap \"$C1_ADDR\" \"$c1_flaps\" \"flip/c1\"",
+        "assert_no_flap \"$C2_ADDR\" \"$c2_flaps\" \"flip/c2\"",
+        "wait_topology_counts 0 0 \"square withdrawn\"",
+        "wait_vantages_resolved false \"square withdrawn\"",
+        "wait_client_best \"$GOBGP_C1\" \"$NH_X\" \"$PE1_ADDR\" \"c1 fallback\"",
+        "wait_client_best \"$GOBGP_C2\" \"$NH_X\" \"$PE1_ADDR\" \"c2 fallback\"",
+        "capture_ip_routes mpls \"$RUSTBGPD\" MPLS -M",
+        "capture_ip_routes ipv4 \"$RUSTBGPD\" IPv4",
+        "wait_topology_counts 4 4 \"square re-injected\"",
+        "assert_no_flap \"$SRC_ADDR\" \"$src_flaps\" \"src (linkstate-only)\"",
+    ] {
+        assert!(script.contains(required), "M76 driver lost `{required}`");
+    }
+    for historical in ["gobgp:bgpls", "Dockerfile.gobgp-bgpls", "GoBGP v4.6.0"] {
+        assert!(
+            !script.contains(historical),
+            "M76 driver regained historical seam `{historical}`"
+        );
+    }
+    let main = script.rfind("\nmain() {").expect("M76 main exists");
+    let main = &script[main..];
+    let identity = main
+        .find("    preflight_gobgp_identity\n")
+        .expect("M76 main invokes the exact GoBGP identity preflight");
+    let first_start = main
+        .find("    start_gobgpd \"$GOBGP_SRC\"\n")
+        .expect("M76 main starts the BGP-LS source");
+    assert!(
+        identity < first_start,
+        "M76 must preflight exact GoBGP identity before any daemon start"
+    );
+}
+
+#[test]
 fn m77_pins_gobgp48_identity_before_preserving_the_gr_llgr_contract() {
     let topology = topology("m77-gr-llgr-rr-gobgp.clab.yml");
     assert_eq!(topology["name"], "m77-gr-llgr-rr-gobgp");

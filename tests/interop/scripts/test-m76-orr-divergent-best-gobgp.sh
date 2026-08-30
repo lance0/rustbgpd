@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # M76 interop test — RFC 9107 Optimal Route Reflection divergent-best
-# receipt against GoBGP v4.
+# receipt against checksum-built GoBGP v4.8.0.
 #
 # gobgp-src injects a 4-link BGP-LS square via `gobgp global rib add -a ls
 # link ...`; pe1/pe2 announce the SAME prefix 203.0.113.0/24 with next-hops
@@ -33,7 +33,9 @@
 #
 # Prerequisites:
 #   - docker build --target dev -t rustbgpd:dev .
-#   - docker build -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-bgpls tests/interop
+#   - docker build --build-arg TARGETARCH=amd64 --build-arg GOBGP_VERSION=4.8.0 \
+#       --build-arg GOBGP_SHA256=43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03 \
+#       -t gobgp:v4.8.0-m76 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 #   - containerlab deployed:
 #       containerlab deploy -t tests/interop/m76-orr-divergent-best-gobgp.clab.yml
 
@@ -48,6 +50,11 @@ GOBGP_PE1="clab-${TOPO}-gobgp-pe1"
 GOBGP_PE2="clab-${TOPO}-gobgp-pe2"
 GOBGP_C1="clab-${TOPO}-gobgp-c1"
 GOBGP_C2="clab-${TOPO}-gobgp-c2"
+readonly GOBGP_IMAGE="gobgp:v4.8.0-m76"
+readonly GOBGP_VERSION="gobgp version 4.8.0"
+readonly GOBGPD_VERSION="gobgpd version 4.8.0"
+readonly GOBGP_BINARY_SHA256="5bd2c6eddab475746d5257c4466f8377b3790bcf7159e18e03a9d44a1685348b"
+readonly GOBGPD_BINARY_SHA256="710b7c28d2b83aef887cc28ae6ddcffe82f11a27e0ba263d9f747658b45f8a97"
 
 SRC_ADDR="10.0.0.2"
 PE1_ADDR="10.0.1.2"
@@ -70,7 +77,7 @@ RID_B="2.2.2.2"
 RID_X="9.9.9.1"
 RID_Y="9.9.9.2"
 
-# GoBGP v4.6.0 `gobgp global rib add -a ls link` descriptor arguments for
+# GoBGP v4.8.0 `gobgp global rib add -a ls link` descriptor arguments for
 # one directed link. $1=local rid, $2=remote rid, $3=ipv4-interface-address
 # (local side), $4=ipv4-neighbor-address (remote side), $5=IGP metric
 # (TLV 1095 in the BGP-LS Attribute).
@@ -85,6 +92,40 @@ ls_link_a_x() { ls_link_args "$RID_A" "$RID_X" "$VANTAGE_A" "$NH_X" "${1:-1}"; }
 ls_link_a_y() { ls_link_args "$RID_A" "$RID_Y" "$VANTAGE_A" "$NH_Y" 10; }
 ls_link_b_x() { ls_link_args "$RID_B" "$RID_X" "$VANTAGE_B" "$NH_X" 10; }
 ls_link_b_y() { ls_link_args "$RID_B" "$RID_Y" "$VANTAGE_B" "$NH_Y" 1; }
+
+require_exact() {
+    local actual=${1:?} expected=${2:?} label=${3:?}
+    if [ "$actual" != "$expected" ]; then
+        printf 'ERROR: %s: expected %s, got %s\n' "$label" "$expected" "$actual" >&2
+        exit 1
+    fi
+}
+
+preflight_gobgp_identity() {
+    local container image_id
+
+    image_id=$(docker image inspect -f '{{.Id}}' "$GOBGP_IMAGE")
+    require_exact "$(docker image inspect -f '{{.Architecture}}' "$GOBGP_IMAGE")" \
+        amd64 "GoBGP image architecture"
+    for container in \
+        "$GOBGP_SRC" "$GOBGP_PE1" "$GOBGP_PE2" "$GOBGP_C1" "$GOBGP_C2"; do
+        require_exact "$(docker inspect -f '{{.Config.Image}}' "$container")" \
+            "$GOBGP_IMAGE" "$container configured image"
+        require_exact "$(docker inspect -f '{{.Image}}' "$container")" \
+            "$image_id" "$container local image identity"
+        require_exact "$(docker exec "$container" uname -m)" x86_64 \
+            "$container runtime architecture"
+        require_exact "$(docker exec "$container" gobgp --version)" \
+            "$GOBGP_VERSION" "$container gobgp version"
+        require_exact "$(docker exec "$container" gobgpd --version)" \
+            "$GOBGPD_VERSION" "$container gobgpd version"
+        require_exact "$(docker exec "$container" sha256sum /usr/local/bin/gobgp | cut -d' ' -f1)" \
+            "$GOBGP_BINARY_SHA256" "$container gobgp binary SHA-256"
+        require_exact "$(docker exec "$container" sha256sum /usr/local/bin/gobgpd | cut -d' ' -f1)" \
+            "$GOBGPD_BINARY_SHA256" "$container gobgpd binary SHA-256"
+    done
+    log "Verified exact GoBGP 4.8.0 image, amd64 runtime, and binary identities"
+}
 
 start_gobgpd() {
     local container=${1:?}
@@ -409,6 +450,7 @@ main() {
     log "Topology: $TOPO"
 
     preflight
+    preflight_gobgp_identity
     resolve_grpc_addr
     start_gobgpd "$GOBGP_SRC"
     start_gobgpd "$GOBGP_PE1"
