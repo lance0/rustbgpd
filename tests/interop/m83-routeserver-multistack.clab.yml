@@ -27,7 +27,7 @@
 #
 # First-AS relaxation per stack (RFC 7947 §2.2.2.1 client-side
 # requirement):
-#   FRR 10.3.1:  per-neighbor `no neighbor X enforce-first-as`
+#   FRR 10.7.0:  per-neighbor `no neighbor X enforce-first-as`
 #                (global `no bgp enforce-first-as` alone is
 #                insufficient — the M19 finding)
 #   BIRD 2.19.2: `enforce first as off` (also the default)
@@ -41,6 +41,7 @@
 #   docker build --target dev -t rustbgpd:dev .
 #   docker build -t bird:v2.19.2-m83 -f tests/interop/Dockerfile.bird-v2192 tests/interop
 #   docker build --build-arg TARGETARCH=amd64 --build-arg GOBGP_VERSION=4.8.0 --build-arg GOBGP_SHA256=43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03 -t gobgp:v4.8.0-m83 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
+#   docker pull quay.io/frrouting/frr@sha256:a0ed0e4f8727631c8303dd9a4e8199b47464a17a5253135a2c622286aeaec46b
 #   containerlab deploy -t tests/interop/m83-routeserver-multistack.clab.yml
 #   bash tests/interop/scripts/test-m83-routeserver-multistack.sh
 #   containerlab destroy -t tests/interop/m83-routeserver-multistack.clab.yml
@@ -96,7 +97,8 @@ topology:
 
     frr:
       kind: linux
-      image: quay.io/frrouting/frr:10.3.1
+      # quay.io/frrouting/frr:10.7.0, linux/amd64 manifest pinned for the receipt.
+      image: quay.io/frrouting/frr@sha256:a0ed0e4f8727631c8303dd9a4e8199b47464a17a5253135a2c622286aeaec46b
       binds:
         - ./configs/frr-daemons:/etc/frr/daemons:ro
         - ./configs/frr-bgpd-m83.conf:/etc/frr/frr.conf:ro

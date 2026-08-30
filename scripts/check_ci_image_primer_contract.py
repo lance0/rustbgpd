@@ -133,6 +133,10 @@ BIRD332_SHA256 = "21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de
 BIRD332_ARCHIVE = f"bird-{BIRD332_VERSION}.tar.gz"
 BIRD332_ARTIFACT = f"bird332-v{BIRD332_VERSION}-source"
 BIRD332_CACHE_KEY = f"{BIRD332_ARTIFACT}-{BIRD332_SHA256}"
+FRR1070_IMAGE = (
+    "quay.io/frrouting/frr@sha256:"
+    "a0ed0e4f8727631c8303dd9a4e8199b47464a17a5253135a2c622286aeaec46b"
+)
 TRIGGER_HASHES = {
     "ci.yml": "65951f4c4d1d6c4d3aae2c33705d14cdc144b3efd8bcc01653049e6d7f2fb5f8",
     "audit.yml": "1829597143324f5361dfdfece50ddeffd6f7d5934b72198f1837fbdf25339fd3",
@@ -935,10 +939,13 @@ def check(root: Path) -> list[str]:
             if not setup and job_name == "m83":
                 m83_required = {
                     "needs: [grpcurl_archive, bird2192_archive, prime_dev_image]": 1,
+                    "name: M83 — route-server profile, multi-stack (BIRD 2.19.2 + GoBGP 4.8.0 + FRR 10.7.0 + RTR)": 1,
                     "tags: bird:v2.19.2-m83": 1,
                     "--build-arg GOBGP_VERSION=4.8.0": 1,
                     "--build-arg GOBGP_SHA256=43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03": 1,
                     "-t gobgp:v4.8.0-m83 -f tests/interop/Dockerfile.gobgp-v47 tests/interop": 1,
+                    "name: Pull digest-pinned FRR 10.7.0 image": 1,
+                    f"run: docker pull {FRR1070_IMAGE}": 1,
                 }
                 if any(job.count(seam) != count for seam, count in m83_required.items()):
                     errors.append("interop.yml:m83: exact incumbent image contract drifted")
