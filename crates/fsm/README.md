@@ -85,6 +85,17 @@ is removed. The paired wire release is API-additive but changes decode
 acceptance and RFC 7606 classification across assigned attributes; review the
 itemized "0.18.0 compatibility note" in the wire README.
 
+`rustbgpd-fsm 0.6.0` moves the exposed wire-type boundary to
+`rustbgpd-wire 0.19.0`, so consumers must again upgrade the two crates together
+for their shared types to unify. The direct FSM API addition is
+`Event::AdministrativeReset`; in session-bearing states it sends
+Cease/Administrative Reset before authoritative cleanup, while earlier states
+still return cleanly to `Idle`. The public event enum remains
+`#[non_exhaustive]`, and no existing variant or method is removed. The paired
+wire release is API-additive and retains existing decoder result shapes; review
+the itemized "0.19.0 compatibility note" for its new observation surfaces and
+framing refinements.
+
 ## Key types
 
 - **`Session`** — the state machine: `handle_event(&mut self, Event) -> Vec<Action>` (state is mutated in place on `&mut self`)

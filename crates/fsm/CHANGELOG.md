@@ -5,6 +5,8 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+## 0.6.0 - 2026-08-30
+
 - **Additive FSM API:** Added `Event::AdministrativeReset`, which sends
   Cease/Administrative Reset before authoritative `SessionDown` when a BGP
   session exists and emits `SessionDown` in every earlier state. The daemon

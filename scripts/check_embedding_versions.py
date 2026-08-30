@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
 import re
 import sys
+import tomllib
 from pathlib import Path
 
 
+ROOT = Path(__file__).resolve().parents[1]
 PACKAGES = ("wire", "fsm", "rpki")
+PUBLISHED_VERSIONS = {"wire": "0.18.0", "fsm": "0.5.0"}
+MANIFESTS = {
+    "wire": ("rustbgpd-wire", Path("crates/wire/Cargo.toml"), "crates/wire"),
+    "fsm": ("rustbgpd-fsm", Path("crates/fsm/Cargo.toml"), "crates/fsm"),
+    "rpki": ("rustbgpd-rpki", Path("crates/rpki/Cargo.toml"), "crates/rpki"),
+}
 HEADING = re.compile(r"^(#{1,6})\s+(?:\d+(?:\.\d+)*\.?\s+)?(.+?)\s*$", re.MULTILINE)
 SECTION_HEADING = re.compile(r"^(#{2,3})\s+", re.MULTILINE)
 
@@ -23,9 +31,42 @@ def section(document: str, level: int, title: str) -> tuple[str, str | None]:
     return document[heading.end() : end], None
 
 
-def check(document: str) -> list[str]:
+def manifest_versions(root: Path = ROOT) -> dict[str, str]:
+    root_manifest = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
+    workspace_dependencies = root_manifest.get("workspace", {}).get("dependencies", {})
+    versions = {}
+    for package, (cargo_name, relative_manifest, expected_path) in MANIFESTS.items():
+        manifest = tomllib.loads((root / relative_manifest).read_text(encoding="utf-8"))
+        package_table = manifest.get("package", {})
+        if package_table.get("name") != cargo_name:
+            raise ValueError(f"manifest-package-name:{package}")
+        version = package_table.get("version")
+        if not isinstance(version, str):
+            raise ValueError(f"manifest-package-version:{package}")
+        if package_table.get("publish") in (False, []):
+            raise ValueError(f"manifest-publish-disabled:{package}")
+
+        dependency = workspace_dependencies.get(cargo_name)
+        if not isinstance(dependency, dict):
+            raise ValueError(f"workspace-pin:{package}")
+        if dependency.get("version") != version or dependency.get("path") != expected_path:
+            raise ValueError(f"workspace-pin:{package}")
+        versions[package] = version
+    return versions
+
+
+def labeled_paragraph(body: str, label: str) -> tuple[str, str | None]:
+    paragraphs = [paragraph for paragraph in body.strip().split("\n\n") if paragraph]
+    matches = [paragraph for paragraph in paragraphs if paragraph.startswith(label)]
+    if len(matches) != 1:
+        return "", f"boundary-paragraph:{label}"
+    return matches[0], None
+
+
+def check(document: str, prepared_versions: dict[str, str] | None = None) -> list[str]:
     errors: list[str] = []
     requested = {
+        "map": (2, "Crate map and publish status"),
         "boundary": (2, "Published-crate release boundary"),
         "decode": (3, "Decode an UPDATE (codec-only — the canonical embedder)"),
         "session": (3, 'Build a session (codec + FSM — the "minimal speaker" consumer)'),
@@ -40,31 +81,114 @@ def check(document: str) -> list[str]:
     if errors:
         return errors
 
-    boundary = sections["boundary"].lstrip().split("\n\n", 1)[0]
+    if prepared_versions is None:
+        try:
+            prepared_versions = manifest_versions()
+        except (OSError, tomllib.TOMLDecodeError, ValueError) as error:
+            return [f"manifest-version-contract:{error}"]
+    if set(prepared_versions) != set(PACKAGES):
+        return ["manifest-version-contract:package-set"]
+
+    map_status = re.sub(r"\s+", " ", sections["map"])
+    expected_map_status = (
+        "`rustbgpd-wire` and `rustbgpd-fsm` have registry-published releases. "
+        "`rustbgpd-rpki` is publish-enabled and its first release is prepared, "
+        "but it is not yet registry-visible."
+    )
+    if expected_map_status not in map_status:
+        errors.append("publication-map-state")
+
+    registry_boundary, error = labeled_paragraph(
+        sections["boundary"], "Registry-visible releases are"
+    )
+    if error:
+        errors.append(error)
+    prepared_boundary, error = labeled_paragraph(
+        sections["boundary"], "The prepared package boundary is"
+    )
+    if error:
+        errors.append(error)
+    if errors:
+        return errors
+
     package_pattern = "|".join(PACKAGES)
-    current = re.findall(rf"`rustbgpd-({package_pattern}) ([^`]+)`", boundary)
-    versions = dict(current)
-    if len(current) != len(PACKAGES) or set(versions) != set(PACKAGES):
-        return ["current-boundary-version"]
+    published_pattern = "|".join(PUBLISHED_VERSIONS)
+    published = re.findall(rf"`rustbgpd-({published_pattern}) ([^`]+)`", registry_boundary)
+    if len(published) != len(PUBLISHED_VERSIONS) or dict(published) != PUBLISHED_VERSIONS:
+        errors.append("current-boundary-version")
+    if not re.search(r"`rustbgpd-rpki` has no registry release", registry_boundary):
+        errors.append("rpki-registry-state")
+
+    prepared = re.findall(rf"`rustbgpd-({package_pattern}) ([^`]+)`", prepared_boundary)
+    if len(prepared) != len(PACKAGES) or dict(prepared) != prepared_versions:
+        errors.append("prepared-boundary-version")
 
     examples = {
-        "wire": (sections["decode"], sections["session"], sections["rpki"]),
+        "wire": (sections["decode"], sections["session"]),
         "fsm": (sections["session"],),
-        "rpki": (sections["rpki"],),
     }
     for package, bodies in examples.items():
         assignment = re.compile(rf'^rustbgpd-{package} = "([^"]+)"$', re.MULTILINE)
         found = [match for body in bodies for match in assignment.findall(body)]
-        if found != [versions[package]] * len(bodies):
+        if not found or any(version != PUBLISHED_VERSIONS[package] for version in found):
             errors.append(f"{package}-snippet-version")
 
+    expected_paths = {
+        "rpki": (
+            f'{{ version = "{prepared_versions["rpki"]}", path = "../rustbgpd/crates/rpki" }}'
+        ),
+        "wire": (
+            f'{{ version = "{prepared_versions["wire"]}", path = "../rustbgpd/crates/wire" }}'
+        ),
+    }
+    assignment = re.compile(r"^rustbgpd-(rpki|wire)\s*=\s*(.+)$", re.MULTILINE)
+    rpki_assignments = assignment.findall(sections["rpki"])
+    for package, expected in expected_paths.items():
+        values = [value for found_package, value in rpki_assignments if found_package == package]
+        if not values or any(value != expected for value in values):
+            diagnostic = (
+                "rpki-registry-snippet"
+                if any("path" not in value for value in values)
+                else "rpki-path-snippet"
+            )
+            errors.append(f"{package}:{diagnostic}")
+
     publish = re.findall(
-        rf"^\d+\. \*\*`rustbgpd-({package_pattern})` \(published as `([^`]+)`\)\.\*\*",
+        rf"^\d+\. \*\*`rustbgpd-({published_pattern})` "
+        r"\(published as `([^`]+)`; `([^`]+)` prepared\)\.\*\*",
         sections["publish"],
         re.MULTILINE,
     )
-    if len(publish) != len(PACKAGES) or dict(publish) != versions:
+    published_status = {package: version for package, version, _ in publish}
+    prepared_status = {package: version for package, _, version in publish}
+    rpki_status = re.findall(
+        r"^\d+\. \*\*`rustbgpd-rpki` \(first publish prepared as `([^`]+)`;\s+"
+        r"not\s+registry-visible\)\.\*\*",
+        sections["publish"],
+        re.MULTILINE,
+    )
+    if (
+        len(publish) != len(PUBLISHED_VERSIONS)
+        or published_status != PUBLISHED_VERSIONS
+        or prepared_status
+        != {package: prepared_versions[package] for package in PUBLISHED_VERSIONS}
+        or rpki_status != [prepared_versions["rpki"]]
+    ):
         errors.append("publish-status-version")
+
+    rpki_pair = re.findall(
+        r"first `([^`]+)` release starts directly on wire `([^`]+)`",
+        sections["publish"],
+    )
+    if rpki_pair != [(prepared_versions["rpki"], prepared_versions["wire"])]:
+        errors.append("rpki-prepared-pair")
+
+    fsm_pair = re.findall(
+        r"The prepared `([^`]+)` line pairs with wire `([^`]+)`",
+        sections["publish"],
+    )
+    if fsm_pair != [(prepared_versions["fsm"], prepared_versions["wire"])]:
+        errors.append("fsm-prepared-pair")
 
     return errors
 
@@ -72,7 +196,7 @@ def check(document: str) -> list[str]:
 def main() -> int:
     if len(sys.argv) > 2:
         raise SystemExit(f"usage: {Path(sys.argv[0]).name} [EMBEDDING.md]")
-    default = Path(__file__).resolve().parents[1] / "docs" / "EMBEDDING.md"
+    default = ROOT / "docs" / "EMBEDDING.md"
     path = Path(sys.argv[1]) if len(sys.argv) == 2 else default
     errors = check(path.read_text(encoding="utf-8"))
     if errors:

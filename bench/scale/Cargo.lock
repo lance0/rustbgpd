@@ -1035,7 +1035,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-fsm"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "bytes",
  "rustbgpd-wire",
@@ -1124,7 +1124,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-wire"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "bytes",
  "thiserror 2.0.20",

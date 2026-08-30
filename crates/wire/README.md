@@ -16,6 +16,32 @@ Requires Rust 1.95 or newer.
 
 Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 
+### 0.19.0 compatibility note
+
+`rustbgpd-wire` 0.19.0 is API-additive and moves to the next 0.x
+compatibility line under the crate's published release policy. No public item
+is removed and no existing signature is changed. Consumers should account for
+these additions and decode-behavior refinements when upgrading:
+
+- `CONFIGURED_FAMILIES`, `parse_family`, and `family_label` provide one
+  canonical label boundary for the twelve configured AFI/SAFI pairs.
+- `PathAttribute::only_to_customer` reads both canonical and received
+  Partial-preserving OTC variants.
+- `is_dataplane_route_type` identifies EVPN route types 1, 2, and 5 without
+  coupling callers to the route enum.
+- `EvpnNlriDiscardObservations`, `decode_evpn_nlri_counted`, and
+  `UpdateMessage::parse_revised_observed` expose sparse, bounded counts of
+  unsupported EVPN route types discarded under RFC 7606. The established
+  `decode_evpn_nlri` and `parse_revised` result shapes remain unchanged.
+- Tunnel Encapsulation and ATTR_SET stay payload-opaque, but their declared
+  nested lengths must now frame exactly. Malformed values receive their
+  registered RFC 7606 dispositions instead of being accepted opaquely.
+- Partial is rejected on typed MED, ORIGINATOR_ID, and CLUSTER_LIST. Strict
+  decoding returns Attribute Flags Error with the exact offending attribute;
+  revised decoding treats MED as withdraw and treats the route-reflector
+  attributes as discard on eBGP or withdraw on iBGP. MP_REACH_NLRI and
+  MP_UNREACH_NLRI retain their existing session-reset contract.
+
 ### 0.18.0 compatibility note
 
 `rustbgpd-wire` 0.18.0 is API-additive but deliberately uses the next 0.x
@@ -228,7 +254,7 @@ Add the codec and its buffer type as direct dependencies:
 
 ```toml
 [dependencies]
-rustbgpd-wire = "0.18.0"
+rustbgpd-wire = "0.19.0"
 bytes = "1"
 ```
 

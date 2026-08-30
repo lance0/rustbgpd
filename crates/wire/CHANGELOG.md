@@ -5,6 +5,8 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+## 0.19.0 - 2026-08-30
+
 - Enforced Partial clear on typed MED, ORIGINATOR_ID, and CLUSTER_LIST. The
   strict decoder returns Attribute Flags Error with the exact attribute;
   revised decoding maps MED to treat-as-withdraw and the route-reflector
@@ -25,6 +27,8 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 - Added one canonical address-family label table plus `parse_family` and
   `family_label` helpers for the twelve AFI/SAFI pairs accepted by rustbgpd's
   configuration and control-plane APIs.
+- Added `is_dataplane_route_type` as the canonical EVPN route-type classifier
+  for the type 1, 2, and 5 routes projected into the kernel dataplane.
 - Added `PathAttribute::only_to_customer()` for reading either typed OTC
   representation without discarding the Partial flag.
 

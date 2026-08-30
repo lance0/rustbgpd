@@ -236,12 +236,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   DHAT receipt sanitizer accepts both historical and provenance-rich bgperf2
   row schemas without admitting unbounded host identity.
 
-- Prepare `rustbgpd-rpki 0.1.0` as the third independently published library
-  crate, with its current root and module API documented as the complete
+- Prepare `rustbgpd-wire 0.19.0` and `rustbgpd-fsm 0.6.0` as the next paired
+  standalone-library boundary. Wire adds observation and framing surfaces plus
+  revised RFC 7606 handling without removing public items; FSM moves its
+  exposed wire-type identity and adds the non-exhaustive
+  `Event::AdministrativeReset` variant.
+
+- Prepare `rustbgpd-rpki 0.1.0` for its first registry publish, with its current
+  root and module API documented as the complete
   `0.1.x` compatibility boundary. The package includes a compiled origin
   validation example, an explicit Tokio/plain-TCP RTR boundary, and a
   registry-aware CI bootstrap that begins semver checking automatically once
-  the first normal crates.io release is visible.
+  the first normal crates.io release is visible. Because no prior RPKI crate
+  release exists, the initial line starts directly on `rustbgpd-wire 0.19.0`.
 
 - `NeighborService.GetNeighborState` update-group comparisons now report
   `per_client_best` when two shared-staging group keys differ on the RFC 7947
