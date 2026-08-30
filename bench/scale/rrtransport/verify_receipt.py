@@ -14,6 +14,10 @@ SOURCES = 4
 WORKERS = 12
 TOTAL_NLRI = PEERS * PREFIXES
 RSS_LIMIT_KIB = 2 * 1024 * 1024
+# Seeded from a three-attempt full campaign on 2026-08-29: staged
+# 295/300/307 ms and wire 330/334/329 ms. Each limit is ceil(1.15 * max).
+STAGED_MS_LIMIT = 354
+WIRE_MS_LIMIT = 385
 SHAPE = (
     "rr1000-v1:peers=1000;prefixes=100000;sources=4;workers=12;"
     "afi=ipv4-unicast;role=ibgp-rr"
@@ -85,6 +89,16 @@ def verify(directory, tiny=False):
             fail(f"phase {key} is missing or invalid")
     if phase["injection_ms"] > min(phase["staged_ms"], phase["wire_ms"]):
         fail("injection completion follows a convergence timestamp")
+    if not tiny and phase["staged_ms"] > STAGED_MS_LIMIT:
+        fail(
+            f"staged convergence ceiling exceeded: {phase['staged_ms']} ms > "
+            f"{STAGED_MS_LIMIT} ms"
+        )
+    if not tiny and phase["wire_ms"] > WIRE_MS_LIMIT:
+        fail(
+            f"wire convergence ceiling exceeded: {phase['wire_ms']} ms > "
+            f"{WIRE_MS_LIMIT} ms"
+        )
 
     grouped = load(directory / "grouped-commit.json")
     expected_grouped = {

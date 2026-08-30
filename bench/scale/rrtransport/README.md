@@ -76,6 +76,13 @@ written only after all three attempts pass the semantic verifier. Results are
 not comparable to the historical unavailable scratch harness and must not be
 published as an A/B.
 
+A three-attempt full campaign on 2026-08-29 ran at repository commit
+`05a71687ff3f4787eb1eb90a180fa7bd817e36c5`. Its three staged-convergence
+times were 295, 300, and 307 ms; exact wire-convergence times were 330, 334,
+and 329 ms. The full-shape verifier therefore rejects staged time above 354 ms
+or wire time above 385 ms, 15% over the respective observed maxima. The tiny
+CI correctness fixture does not apply these performance ceilings.
+
 CI never runs the scale shape. It runs the original smoke, a 4×100 real-TCP
 fixture through the same scale collector/verifier/RSS seams, and destructive
 parser/mechanics fixtures.
