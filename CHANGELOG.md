@@ -380,6 +380,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The current cross-stack bgperf2 snapshot now measures rustbgpd v0.67.0,
+  BIRD 2.19.2, FRR 10.7.0, and GoBGP 4.8.0 across five fleet shapes and four
+  counterbalanced repetitions. Fresh pinned images and cell-scoped samplers
+  replace the July campaign's fixed-order and build-provenance limitations;
+  all 80 raw rows and the single disclosed incomplete cell are retained.
+
 - `bmp_source_drops_total{peer,reason}` now also counts omitted periodic
   reports as `state_query_timeout`; the existing warning expression, severity,
   and timing are unchanged.

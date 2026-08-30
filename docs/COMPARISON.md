@@ -400,7 +400,30 @@ memory-safe-language row refers to.
     multi-path *send* (RFC 7911, route-server mode) and EVPN aliasing ECMP
     (ADR-0059 FDB nexthop groups, default-on) also ship.
 
-## Performance Snapshot (bgperf2 — 2026-07-26)
+## Performance Snapshot (bgperf2 — 2026-08-29)
+
+The current [v0.67.0 cross-stack
+receipt](perf/competitive-bgperf2-v0670-2026-08.md) is an 80-cell,
+counterbalanced same-host campaign against fresh pinned builds of BIRD 2.19.2,
+FRR 10.7.0, and GoBGP 4.8.0. Values are successful-run medians of
+**convergence seconds / total seconds / peak raw container cgroup GiB**.
+
+| Scenario | rustbgpd v0.67.0 | BIRD 2.19.2 | FRR 10.7.0 | GoBGP 4.8.0 |
+|---|---:|---:|---:|---:|
+| 10 peers × 1k prefixes | 2 / 8.22 / 0.029 | 2 / 9.23 / 0.010 | 3 / 9.29 / 0.030 | 4 / 11.38 / 0.114 |
+| 2 peers × 10k prefixes | 2 / 8.26 / 0.038 | 2 / 9.27 / 0.010 | 3 / 9.34 / 0.042 | 3 / 10.39 / 0.076 |
+| 2 peers × 100k prefixes | 3 / 12.44 / 0.197 | 3 / 13.53 / 0.028 | 4 / 13.56 / 0.259 | 4 / 14.59 / 0.388 |
+| 30 peers × 1k prefixes | 3 / 9.81 / 0.104 | 3 / 10.30 / 0.013 | 4 / 10.89 / 0.057 | 4 / 11.44 / 0.577 |
+| 100 peers × 1k prefixes | 3 / 11.91 / 0.248 | 5 / 14.00 / 0.032 | 7 / 16.58 / 0.152 | 16 / 24.75 / 4.902 |
+
+Rustbgpd's successful repetitions had the lowest median total time in all five
+shapes and tied or had the lowest median convergence time. BIRD had the lowest
+peak raw cgroup usage in all five. Seventy-nine of 80 campaign cells completed:
+one rustbgpd 100-peer cell established no monitor-visible sessions or routes,
+while its next three balanced repetitions and one fresh-bridge focused rerun
+passed. The receipt preserves that failure and the claim boundaries.
+
+## Historical Performance Snapshot (bgperf2 — 2026-07-26)
 
 > **Integrity correction (2026-08-28): Historical July harness output only; no current cross-daemon ranking is supported.** Targets ran in the fixed
 > order rustbgpd → BIRD → GoBGP → FRR while one-second samplers from earlier
