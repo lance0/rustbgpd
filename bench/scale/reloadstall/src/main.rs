@@ -2737,8 +2737,7 @@ mod tests {
 
     #[test]
     fn stub_open_crosses_the_four_octet_asn_boundary() {
-        for (peer, true_asn, expected_my_as) in
-            [(1023, 65_535, u16::MAX), (1024, 65_536, AS_TRANS)]
+        for (peer, true_asn, expected_my_as) in [(1023, 65_535, u16::MAX), (1024, 65_536, AS_TRANS)]
         {
             assert_eq!(stub_asn(peer), true_asn);
             let open = stub_open(peer, true_asn);
