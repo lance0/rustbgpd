@@ -5,6 +5,8 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+## 0.19.0 - 2026-08-30
+
 - Enforced Partial clear on typed MED, ORIGINATOR_ID, and CLUSTER_LIST. The
   strict decoder returns Attribute Flags Error with the exact attribute;
   revised decoding maps MED to treat-as-withdraw and the route-reflector
