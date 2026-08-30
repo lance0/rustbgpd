@@ -71,9 +71,11 @@ reproducible receipt:
   [per-client receipt](docs/perf/irr-reload-comparison-2026-08.md) recorded
 
 The rustbgpd/BIRD IXP-matrix figures above are from the v0.64.0 same-host
-refresh (2026-08-08); the OpenBGPD IXP figures are the 9.2 comparator amendment
-measured 2026-08-30. The original campaign and all earlier bands are preserved
-in the receipt.
+refresh (measured 2026-08-08). The OpenBGPD 9.2 comparator amendment was
+measured 2026-08-30 on post-v0.67.0 repository commits that are not yet
+contained in a stable rustbgpd tag; it is supplemental rather than
+release-tagged evidence. The original campaign and all earlier bands are
+preserved in the receipt.
 
 **Status: public alpha.** Feature-complete for the initial programmable
 control-plane target and expanding toward cloud / AI-scale data-center
@@ -172,15 +174,15 @@ config from their existing `general.yml`/`clients.yml`:
   service) and a thin CLI (`rbgp`): dynamic peer management, policy CRUD,
   route injection, streaming events, all without restarts
 - **Native route explainability** — "why is this route (not) here?" answered
-  from the live RIB in one command, where incumbents need an external
-  looking-glass stack for less. Best-path, export-gate, and filtered-route
+  from the live RIB in one command. Best-path, export-gate, and filtered-route
   views are always on; the **import**-decision surface is opt-in
   (`[policy.explain] enabled = true`), because it retains a decision cache
   per session. The TUI also exposes the unicast export-gate slice for a
   selected peer ([docs/explain.md](docs/explain.md))
 - **Update-group fanout** — peers with provably identical staged output share
   one staging pass: ~27x faster 100k-route convergence at 256 uniform RR
-  clients (15.1 s to 0.56 s); v2 extends sharing to VPNv4/v6 with per-member
+  clients (15.1 s to 0.56 s), measured 2026-07-03; v2 extends sharing to
+  VPNv4/v6 with per-member
   RT filtering at emit ([receipt](docs/perf/scale-receipt-2026-07.md))
 - **Full BMP monitoring trio** — per-collector Adj-RIB-In / Adj-RIB-Out
   (byte-exact wire PDUs) / Loc-RIB on one exporter, validated against pmacct,
@@ -188,8 +190,8 @@ config from their existing `general.yml`/`clients.yml`:
 - **Modern protocol surface** — MP-BGP, Add-Path, GR/LLGR, RPKI/RTR + ASPA,
   FlowSpec, Prefix ORF, large/extended communities — plus VPNv4/v6, RT-Constrain,
   labeled-unicast, and BGP-LS reflection, and **RFC 9107 Optimal Route
-  Reflection** (per-client best paths via SPF over BGP-LS topology — a
-  capability no other open-source BGP daemon ships)
+  Reflection** (per-client best paths via SPF over BGP-LS topology,
+  [peer-proven against GoBGP 4.6.0 in M76](docs/RECEIPTS.md#interop-labs--pr-gated-interopyml))
 - **Explicit architecture** — pure FSM with no I/O, single-owner RIB with no
   locks, bounded channels; no `Arc<RwLock>` on routing state
   ([ARCHITECTURE.md](ARCHITECTURE.md))
@@ -203,7 +205,8 @@ fanout numbers — is the [feature tour](docs/feature-tour.md).
 ## Good fit
 
 - **Internet exchange route servers** — transparent mode, Add-Path, per-client
-  best-path (RFC 7947 path-hiding mitigation), RPKI, Prefix ORF, per-member policy
+  best-path (RFC 7947 path-hiding mitigation), RPKI, Prefix ORF, per-member
+  policy; start with the [IXP evaluation matrix](docs/ixp-evaluation.md)
 - **Route reflectors** — including VPNv4/v6, RT-Constrain, labeled-unicast, and
   BGP-LS reflection, GR/LLGR, and RFC 9107 Optimal Route Reflection
 - **DDoS mitigation platforms** — FlowSpec + RTBH route injection from automation
@@ -368,15 +371,22 @@ at reload 1 vs 3.3–3.8 s after) remains the open item the per-client receipt
 recorded.
 
 At route-reflector shapes, the
-[1000-peer scale receipt](docs/perf/scale-receipt-2026-07.md) measures 1,000
-uniform RR clients × 100k routes converging on the wire in 1.82 s at 419 MiB
+[1000-peer scale receipt](docs/perf/scale-receipt-2026-07.md), measured 2026-07-03,
+records 1,000 uniform RR clients × 100k routes converging on the
+wire in 1.82 s at 419 MiB
 whole-process RSS, and 1,000 clients × 100k VPNv4 in 12.60 s / 625 MiB uniform
 and 3.92 s / 636 MiB with heterogeneous ~10% RT memberships (vs ~73 s / ~31 GiB
 and ~12.5 s / ~5.7 GiB extrapolated per-peer), with a one-RT membership flip
 delivering its 1600-route delta in ~15 ms with zero policy evaluations.
 
-Microbenchmarks, memory scaling, and the corrected historical bgperf2 output:
-[docs/BENCHMARKS.md](docs/BENCHMARKS.md). Every receipt is indexed in
+The current [v0.67.0 cross-stack bgperf2
+receipt](docs/perf/competitive-bgperf2-v0670-2026-08.md), measured 2026-08-29,
+is the headline same-host IPv4 import/convergence comparison. Seventy-nine of
+80 cells reached the expected full table; the receipt discloses the failed
+rustbgpd cell and the campaign's claim boundaries. Microbenchmarks and memory
+scaling are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md). That page also retains
+the corrected July campaign as explicitly historical evidence; it supports no
+cross-daemon ranking. Every receipt is indexed in
 [docs/RECEIPTS.md](docs/RECEIPTS.md); GoBGP-specific parity is in
 [docs/gobgp-parity.md](docs/gobgp-parity.md).
 
@@ -499,6 +509,20 @@ evolving API.**
 | **Tests** | Workspace test suite, fuzz targets, an automated interop suite (see [docs/INTEROP.md](docs/INTEROP.md)) primarily against FRR plus GoBGP / StayRTR / documented BIRD coverage, and an in-tree EVPN load generator (foundation tier gated on every PR; privileged kernel dataplane smokes run on GitHub-hosted CI) |
 
 ## Documentation
+
+Evaluating an IXP route server? Follow this path:
+
+1. Review the [one-page capability matrix](docs/ixp-evaluation.md).
+2. Choose the [hand-written](docs/cookbook/route-server.md),
+   [ARouteServer-driven](docs/cookbook/ixp-filter-pipeline.md), or
+   [IXP Manager-driven](docs/cookbook/ixp-manager-route-server.md)
+   provisioning mode.
+3. Apply the [shadow pilot's mode-specific zero-blast-radius
+   boundary](docs/cookbook/route-server-shadow-pilot.md).
+
+For all documentation, start with the task-oriented
+[documentation index](docs/README.md). The table below remains a compact
+root-level map.
 
 | Document | Content |
 |----------|---------|
