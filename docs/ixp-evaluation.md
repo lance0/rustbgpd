@@ -4,10 +4,11 @@ One page for an exchange evaluating rustbgpd as a route server: the
 capabilities IXP evaluations actually score, each with its current
 status and a link to the config, cookbook, ADR, or measurement receipt
 that backs it. Statuses are deliberately conservative — an "In
-progress" row says exactly what is missing, and where an incumbent
-currently does better, the row links the comparison rather than
-omitting it. To evaluate against live members with zero blast radius,
-start with the
+progress" row says exactly what is missing, while "Measured" and
+"Observed" bound a receipt without turning it into a general or
+cross-daemon superiority claim. Where an incumbent currently does better,
+the row links the comparison rather than omitting it. To evaluate against
+live members with zero blast radius, start with the
 [route-server shadow pilot](cookbook/route-server-shadow-pilot.md).
 Provisioning is one of three mutually exclusive modes — hand-written,
 arouteserver-driven, or IXP Manager-driven — chosen in the
@@ -25,6 +26,8 @@ arouteserver-driven, or IXP Manager-driven — chosen in the
 | 8 | Paired-RS operations | Yes | Runbook for two independent route servers: why members peer with both, staggered config updates, inter-RS consistency checked with `rbgp diff advertised`, and the maintenance-window drain flow (RFC 8326). | [Paired route servers](cookbook/paired-route-servers.md) |
 | 9 | MANRS documentation | Yes | MANRS IXP Programme Action 1 is mapped requirement-by-requirement to validated config fragments and member-verifiable surfaces. Separately, the pinned MANRS tool traverses seven synthetic routes through Alice-LG and must identify one deliberate ROA mismatch; this is consumer interoperability, not MANRS certification or a route-server policy proof. | [MANRS IXP Action 1](cookbook/manrs-ixp-action1.md) · [consumer proof](../tests/compat/ixp-manager-birdseye/README.md) |
 | 10 | Dual-stack performance evidence | In progress | IPv4/IPv6 route-server behavior is real-peer and differential-proven, but the current 700-member IXP and four-daemon performance campaigns are IPv4-only. No IPv6 scale or comparative-performance claim is made. | M102/M103 in [RECEIPTS.md](RECEIPTS.md#interop-labs--pr-gated-interopyml) · [IXP receipt](perf/ixp-matrix-2026-07.md) · [current cross-stack receipt](perf/competitive-bgperf2-v0670-2026-08.md) |
+| 11 | IRR-scale transactional apply | Measured | Two fresh sealed single-host roots measured 2026-08-04 at clean, then-current `origin/main` commit `02c752408b2336061da050d3396c3f7a538d3389`. Each completed 4/4 streamed Plan → token-bound Apply → commit-confirm cycles for a ~295.6 MB candidate at 320 members × 183,040 routes and 3,218,965 IRR filter entries, with 320/320 sessions and zero parse errors. Explicit abort and 10 s timeout auto-revert restored disk and runtime byte-exactly; rollback completed 69.5 s / 69.0 s after the deadline under a 600 s ceiling. This is one fleet shape in two fixed-order repeats, not a cross-daemon comparison. | [transactional-apply receipt](perf/irr-transactional-apply-2026-08.md) · [compact evidence](perf/artifacts/irr-transactional-apply-2026-08/README.md) |
+| 12 | Live AS_SET receiver behavior | Observed | Repeated local runs on 2026-08-29 sent an ordinary AS_SEQUENCE control and a two-member AS_SET over IPv4 from one raw route-server client, without changing any receiver's AS_SET policy default. The control reached all five receivers. Rustbgpd 0.67.0, BIRD 3.3.2, and OpenBGPD 9.2 did not install the AS_SET route; GoBGP 4.8.0 installed it in accepted Adj-RIB-In, and FRR 10.3.1 installed it. All sessions and processes survived, and withdrawal cleared both routes. "Not installed" does not distinguish policy rejection from treat-as-withdraw; this manual observation is not a conformance ranking. | [M105 procedure and observation](../tests/interop/m105-live-as-set/README.md) · [topology](../tests/interop/m105-live-as-set.clab.yml) · [driver](../tests/interop/scripts/test-m105-live-as-set.sh) |
 
 For a sizing review, start with the
 [current evaluator evidence roll-up](BENCHMARKS.md#current-evaluator-evidence).
