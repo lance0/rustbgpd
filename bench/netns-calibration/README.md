@@ -82,6 +82,10 @@ needed for the Stage-A contract suite:
 bash bench/tests/test-netns-calibration-vm.sh
 ```
 
+The `scale / receipt checks` CI job runs this exact offline suite and
+syntax-checks all three shell surfaces. It does not boot QEMU; the image-pinned
+live smoke remains the separately authorized invocation above.
+
 The suite destructively proves the closed profile matrix, exact no-network KVM
 plan, source lifecycle anchors, guest failure cleanup, provenance binding,
 artifact inventory and size limits, sanitation, and final manifest.

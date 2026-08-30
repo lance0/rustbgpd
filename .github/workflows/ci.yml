@@ -415,6 +415,9 @@ jobs:
           bash -n bench/tests/test-vpn-query-receipt.sh
           bash -n bench/tests/test-vpn-query-campaign.sh
           bash -n bench/run-vpn-query-campaign.sh
+          bash -n bench/netns-calibration/run-vm.sh \
+            bench/netns-calibration/guest-smoke.sh \
+            bench/tests/test-netns-calibration-vm.sh
           shellcheck bench/scale/host-quiet.sh \
             bench/scale/provenance.sh \
             bench/scale/matrix/run-matrix.sh \
@@ -429,6 +432,9 @@ jobs:
           shellcheck bench/tests/test-vpn-query-receipt.sh
           shellcheck bench/tests/test-vpn-query-campaign.sh \
             bench/run-vpn-query-campaign.sh
+          shellcheck -x bench/netns-calibration/run-vm.sh \
+            bench/netns-calibration/guest-smoke.sh \
+            bench/tests/test-netns-calibration-vm.sh
           bash bench/tests/test-route-server-1000-receipt.sh
           bash bench/tests/test-scale-host-quiet.sh
           bash bench/tests/test-vpn-query-receipt.sh
@@ -436,6 +442,7 @@ jobs:
           bash bench/tests/test-compare-criterion-harness.sh
           bash bench/tests/test-rib-memory-comparator.sh
           bash bench/tests/test-route-paging-driver.sh
+          bash bench/tests/test-netns-calibration-vm.sh
           python3 bench/tests/test_verify_mrt_attribute_scratch_campaign.py
           bash -n bench/scale/compare-rrharness.sh
           bash bench/tests/test-rrharness-driver.sh
