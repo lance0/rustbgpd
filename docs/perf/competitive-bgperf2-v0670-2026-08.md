@@ -1,6 +1,6 @@
 # Cross-stack bgperf2 v0.67.0 refresh — 2026-08-29
 
-This campaign replaces the corrected July snapshot as the current same-host
+This campaign replaces the corrected July snapshot as the freshest same-host
 comparison. It measured fresh, version-pinned builds of rustbgpd, BIRD, FRR,
 and GoBGP in a counterbalanced order with each cell's samplers stopped before
 the next cell. The [80 raw rows](artifacts/competitive-bgperf2-v0670-2026-08/results.csv)

@@ -402,7 +402,7 @@ memory-safe-language row refers to.
 
 ## Performance Snapshot (bgperf2 — 2026-08-29)
 
-The current [v0.67.0 cross-stack
+The freshest published [v0.67.0 cross-stack
 receipt](perf/competitive-bgperf2-v0670-2026-08.md) is an 80-cell,
 counterbalanced same-host campaign against fresh pinned builds of BIRD 2.19.2,
 FRR 10.7.0, and GoBGP 4.8.0. Values are successful-run medians of
@@ -477,8 +477,9 @@ matrix](perf/ixp-matrix-2026-07.md) compares rustbgpd, BIRD 3.3.1, and
 OpenBGPD 9.2 head-to-head at 700 peers × 400k prefixes under live churn
 — policy-reload stall and completion, member-flap propagation,
 convergence, and RSS — with identical wire inputs, config disclosure,
-and the losses published alongside the wins. Rustbgpd/BIRD were measured
-2026-08-08; the OpenBGPD 9.2 comparator amendment was measured 2026-08-30.
+and the losses published alongside the wins. The rustbgpd/BIRD rows were
+measured 2026-08-08; the OpenBGPD 9.2 comparator amendment was measured
+2026-08-30.
 
 At IRR scale, the [grouped per-client-best IRR reload
 receipt](perf/irr-reload-grouped-per-client-best-2026-08.md), measured 2026-08-08

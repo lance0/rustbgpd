@@ -416,6 +416,8 @@ fn verify_transform(
 }
 
 fn validator_timeout(phase: &str, normal: Duration) -> Duration {
+    #[cfg(not(debug_assertions))]
+    let _ = phase;
     #[cfg(debug_assertions)]
     if std::env::var("RUSTBGPD_TEST_MIGRATION_TIMEOUT_PHASE").as_deref() == Ok(phase) {
         return Duration::from_millis(100);

@@ -717,15 +717,18 @@ Before rolling any versions:
    (lightweight tags break the release-history convention here):
    `git tag -a vX.Y.Z -m "vX.Y.Z — <one-line headline>"`, then
    `git push origin vX.Y.Z`.
-9. Verify CI passes on the tag (build matrix x86_64 + aarch64, doc, GHCR
-   push, release.yml binary build + GitHub Release creation). Both
-   publication workflows are fail-closed: `release.yml` and
-   `container.yml` each gate publication on a `verify-tag-version` job
-   (tag `vX.Y.Z` must equal the workspace `[workspace.package]`
-   version) and a `test` job (`cargo test --workspace` on the tagged
-   commit). If you tagged a commit without the version bump, the tag
-   build fails and publishes nothing — fix the bump, delete the tag,
-   and re-tag.
+9. Confirm the annotated tag resolves to the exact main commit whose
+   applicable CI, interop, documentation, security, and install-contract
+   workflows were already green; those main-only workflows do not rerun for a
+   tag. Then verify both tag-triggered publication workflows pass: **Release
+   Binaries** (`release.yml`, including the x86_64 + aarch64 build matrix,
+   artifacts, and GitHub Release) and **Container Image** (`container.yml`,
+   including the GHCR push). Both are fail-closed: each gates publication on a
+   `verify-tag-version` job (tag `vX.Y.Z` must equal the workspace
+   `[workspace.package]` version) and a `test` job (`cargo test --workspace` on
+   the tagged commit). If you tagged a commit without the version bump, the tag
+   build fails and publishes nothing — fix the bump, delete the tag, and
+   re-tag.
 10. **Verify container image published to GHCR** via `docker/metadata-action`'s
    semver pattern:
    - `ghcr.io/lance0/rustbgpd:X.Y.Z` (exact, immutable)
