@@ -143,12 +143,13 @@ const STALL_WINDOW: Duration = Duration::from_secs(120);
 /// parameter, not a measurement (completion and stall measurements
 /// are timestamp-based and unaffected by watchdog size).
 const FIRST_OUTPUT_WINDOW: Duration = Duration::from_secs(600);
-/// Stub-connect window: how long one stub keeps retrying its TCP
-/// connect (500 ms cadence) before failing. The daemon may still be
-/// absorbing a large config, or its accept backlog may briefly
-/// overflow under the 64-stub establishment waves — refused connects
-/// inside this window are retried, not fatal. A harness parameter,
-/// not a measurement (establishment is not timed against it).
+/// Stub-establishment window: how long one stub keeps retrying its TCP
+/// connect and transport-level pre-OPEN handshake (500 ms cadence) before
+/// failing. The daemon may still be absorbing a large config, its accept
+/// backlog may briefly overflow under the 64-stub establishment waves, or an
+/// IdleHold timer may accept and close the socket before OPEN. BGP protocol
+/// failures are never retried. A harness parameter, not a measurement
+/// (establishment and flap re-announcement are timed outside it).
 const CONNECT_WINDOW: Duration = Duration::from_secs(120);
 const FLAP_ROUNDS: u32 = 3;
 const FLAP_RECONNECT_SECS: u64 = 10;

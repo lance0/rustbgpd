@@ -6,8 +6,14 @@ completion, member-flap propagation, convergence, and memory — when all
 three are fed **identical wire inputs through the same harness on the
 same host**? The [reload-stall receipt](reload-stall-2026-07.md)
 established rustbgpd's own numbers against a pre-committed gate; this
-receipt puts the same scenario through BIRD 3.3.1 and OpenBGPD 9.1 and
-publishes every cell, the losses as plainly as the wins.
+original receipt puts the same scenario through BIRD 3.3.1 and OpenBGPD 9.1
+and publishes every cell, the losses as plainly as the wins.
+
+> **Current comparator amendment (2026-08-30):** OpenBGPD 9.2 S1/S2/S3
+> results, including its faster policy/flap fan-out and longer repeated-
+> reconnect IdleHold pacing, are published in the
+> [OpenBGPD 9.2 refresh](#openbgpd-92-comparator-refresh-2026-08-30).
+> Historical tables remain unchanged below.
 
 **Commit measured:** rustbgpd cells at `576c6c9b` (jemalloc-default
 build plus two fixes this campaign itself surfaced: the route-server
@@ -696,3 +702,57 @@ Scenario configs are regenerated per cell by the committed generators
 at the tag and are not duplicated. Raw campaign roots (including the
 superseded first RR invocation, preserved with its note) are retained
 off-repo.
+
+## OpenBGPD 9.2 comparator refresh (2026-08-30)
+
+The OpenBGPD IXP cells were rerun against the current, digest-pinned 9.2
+image. The rustbgpd and BIRD columns above remain the v0.64.0 release results;
+this is a comparator amendment, not a rewrite of those cells. OpenBGPD 9.1
+was the tagged release used by the original July campaign. The
+[9.2 source tag](https://github.com/openbgpd-portable/openbgpd-portable/tree/9.2)
+subsequently changed peer sync, Adj-RIB-Out handling, fast reconnect, and the
+IdleHold timer—the same paths exercised here.
+
+Two fresh S2 starts and two fresh S3 starts used the existing 700-client,
+400,400-route scenario, image
+`openbgpd/openbgpd@sha256:b2e94bd1538102a89cff96867993eabb6dbb27720de4ab7b588860880e3e3bf9`,
+and exact delivered-table/session/parser gates. Every accepted row retained
+700 sessions and zero parse errors.
+
+| OpenBGPD result | 9.1 v0.64.0 refresh | 9.2 refresh |
+|---|---:|---:|
+| 700 sessions Established (four legs) | 68.9–85.8 s | 83.6–105.7 s |
+| Full base-table delivery (four legs) | 338.0–352.1 s | 326.0–347.8 s |
+| Reload delivery-gap p50 (eight reloads) | 0.25–0.29 s | **0.213–0.238 s** |
+| Reload worst single observer | 0.36 s | **0.304 s** |
+| New-policy completion p50 (eight reloads) | 244.0–251.3 s | **200.8–206.4 s** |
+| 50-member withdraw p50 (six rounds) | 10.45–11.47 s | **8.22–9.55 s** |
+| 50-member re-announce p50 (six rounds) | 21.14–21.54 s | **17.36–17.82 s** |
+| S2 settled RSS (runs A / B) | 756 / 753 MiB | 795 / 801 MiB |
+| S3 settled RSS (runs A / B) | 813 / 815 MiB | 831 / 827 MiB |
+
+The speedup has a separate reconnect trade-off. The flapstorm always holds the
+50 sessions down for 10 seconds before dialing again. Round one then
+reconnected immediately. In both runs, round two's first peer needed 40
+transport retries at 500 ms cadence and round three needed 100: approximately
+20 s and 50 s of additional IdleHold pacing before all 50 sessions returned.
+The re-announce clock starts only after those sessions are Established, so the
+17.36–17.82 s row is pure route fan-out and does not hide the reconnect delay.
+
+The first two 9.2 S3 attempts exposed a harness gap: TCP connect succeeded
+while OpenBGPD still held the passive peer in `Idle`, then the daemon closed
+the socket before sending OPEN. The harness already retried refused TCP
+connects for 120 seconds, but treated that accepted-then-closed transport as a
+terminal result. At measured commit `f8d619d5`, the same existing window now
+covers transport closes before peer OPEN. A BGP NOTIFICATION or decode error
+still fails immediately. Both fresh post-fix S3 runs passed all three rounds;
+an exact 9.1 control passed the unmodified harness and isolated the behavior to
+the 9.2 comparator.
+
+The eight S2 rows were measured at `96fe55b0` with harness SHA-256
+`031d00e7c6dd3424623f8b60dd9f02e2922637b1b63a0e21bf0e51df0c4bd0ee`;
+the six accepted S3 rows were measured at `f8d619d5` with harness SHA-256
+`50297f7d650939d3c299aa269f9423dfa51a631cdc237eb8d4f85f218861969f`.
+The compact machine rows are committed as
+[`openbgpd92-v0670-summary.csv`](artifacts/ixp-matrix-2026-07/openbgpd92-v0670-summary.csv);
+the full cell trees remain retained off-repo.

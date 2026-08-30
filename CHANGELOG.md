@@ -380,6 +380,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The IXP comparator refresh now records OpenBGPD 9.2 at 700 clients and
+  400,400 routes. Policy delivery improves from the 9.1 refresh's 244–251 s
+  to 201–206 s, and 50-member re-announcement fan-out improves from
+  21.1–21.6 s to 17.4–17.8 s. Repeated reconnects also expose 9.2's deliberate
+  IdleHold pacing: after the fixed 10 s flap hold, rounds two and three wait
+  about 20 s and 50 s before OPEN. The harness now retries only transport
+  failures before peer OPEN inside its existing 120 s establishment window;
+  BGP NOTIFICATION and decode failures remain immediate errors.
+
 - The current cross-stack bgperf2 snapshot now measures rustbgpd v0.67.0,
   BIRD 2.19.2, FRR 10.7.0, and GoBGP 4.8.0 across five fleet shapes and four
   counterbalanced repetitions. Fresh pinned images and cell-scoped samplers

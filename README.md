@@ -27,8 +27,8 @@ reproducible receipt:
 - **Policy reload at IXP scale** (700 route-server clients × 400,400 routes,
   live churn, same harness / same host — the policy-file reload, not the IRR
   filter refresh below): new policy fully delivered to every member in
-  **1.28–1.57 s p50** vs BIRD 3.3.1's 64–85 s and OpenBGPD 9.1's 244–251 s —
-  measured 2026-08-08,
+  **1.28–1.57 s p50** vs BIRD 3.3.1's 64–85 s and OpenBGPD 9.2's 201–206 s —
+  rustbgpd/BIRD measured 2026-08-08, OpenBGPD measured 2026-08-30,
   [IXP receipt matrix](docs/perf/ixp-matrix-2026-07.md)
 - **IRR-scale filter reload** (320 route-server members × 183,040 prefixes ×
   3,218,965 IRR filter entries, same harness / same host): steady-state reload
@@ -44,19 +44,20 @@ reproducible receipt:
   [grouped per-client-best receipt](docs/perf/irr-reload-grouped-per-client-best-2026-08.md),
   measured 2026-08-08
 - **Member-flap propagation** (50 members flap, 650 observers): re-announce
-  p50 **0.49–0.55 s** vs BIRD's 2.9–3.7 s and OpenBGPD's 21.1–21.6 s;
-  withdraw p50 0.31–0.47 s, also fastest — measured 2026-08-08,
+  p50 **0.49–0.55 s** vs BIRD's 2.9–3.7 s and OpenBGPD 9.2's 17.4–17.8 s;
+  withdraw p50 0.31–0.47 s, also fastest — rustbgpd/BIRD measured
+  2026-08-08, OpenBGPD measured 2026-08-30,
   [same matrix](docs/perf/ixp-matrix-2026-07.md#s3--flapstorm-member-down--member-up-propagation)
 - **Cold start**: full 400,400-route table delivered to all 700 members in
-  **4.8–5.0 s** vs 60.9–63.3 s (BIRD) and 338.0–352.1 s (OpenBGPD) —
-  measured 2026-08-08,
+  **4.8–5.0 s** vs 60.9–63.3 s (BIRD) and 326.0–347.8 s (OpenBGPD 9.2) —
+  rustbgpd/BIRD measured 2026-08-08, OpenBGPD measured 2026-08-30,
   [same matrix](docs/perf/ixp-matrix-2026-07.md#s1--cold-convergence)
 - **Route-reflector scale**: 1,000 RR clients × 100k routes converge on the
   wire in **1.82 s** at **419 MiB** whole-process RSS — measured 2026-07-03
   at the close of the update-groups arc,
   [1000-peer scale receipt](docs/perf/scale-receipt-2026-07.md)
-- **The losses, stated plainly**: OpenBGPD holds a smaller reload stall
-  (p50 0.25–0.29 s vs rustbgpd's 0.42–0.60 s), and BIRD keeps the settled-RSS
+- **The losses, stated plainly**: OpenBGPD 9.2 holds a smaller reload stall
+  (p50 0.213–0.238 s vs rustbgpd's 0.42–0.60 s), and BIRD keeps the settled-RSS
   win under flap churn (337/328 MiB vs rustbgpd's 441/451 MiB at S3).
   S2 settled RSS is a dead heat in these runs (rustbgpd 419/419 vs BIRD's
   422/412 MiB, one run each way) — published in the
@@ -69,9 +70,10 @@ reproducible receipt:
   remains the open item the
   [per-client receipt](docs/perf/irr-reload-comparison-2026-08.md) recorded
 
-All IXP-matrix figures above are from the v0.64.0 same-host refresh (2026-08-08);
-the original campaign, all earlier bands, and every raw artifact set are
-preserved in the receipt.
+The rustbgpd/BIRD IXP-matrix figures above are from the v0.64.0 same-host
+refresh (2026-08-08); the OpenBGPD IXP figures are the 9.2 comparator amendment
+measured 2026-08-30. The original campaign and all earlier bands are preserved
+in the receipt.
 
 **Status: public alpha.** Feature-complete for the initial programmable
 control-plane target and expanding toward cloud / AI-scale data-center
@@ -319,36 +321,41 @@ redacted support bundle. See the [CLI command map](crates/cli/README.md).
 ## Performance vs the incumbents
 
 The [IXP route-server receipt matrix](docs/perf/ixp-matrix-2026-07.md) runs
-rustbgpd, BIRD 3.3.1, and OpenBGPD 9.1 through **the same harness on the same
+rustbgpd, BIRD 3.3.1, and OpenBGPD 9.2 through **the same harness on the same
 host** — 700 route-server clients × 400,400 routes with live churn, each
 incumbent at its documented strongest configuration, receiver-side timestamps,
 two independent campaign runs, losses published alongside wins:
 
-| KPI (700 clients × 400,400 routes unless noted, p50) | rustbgpd | BIRD 3.3.1 | OpenBGPD 9.1 |
+| KPI (700 clients × 400,400 routes unless noted, p50) | rustbgpd | BIRD 3.3.1 | OpenBGPD 9.2 |
 |---|---|---|---|
-| Sessions Established | **0.7 s** | 18.2–20.5 s | 68.9–85.8 s |
-| Cold start, full table to all members | **4.8–5.0 s** | 60.9–63.3 s | 338.0–352.1 s |
-| Policy reload: UPDATE stall | 0.42–0.60 s | 1.70–2.70 s | **0.25–0.29 s** |
-| Policy reload: new policy fully delivered | **1.28–1.57 s** | 64.3–84.5 s | 244.0–251.3 s |
-| IRR-scale filter reload: steady-state completion (320 members × 183,040 routes × 3,218,965 IRR entries) | **3.25–3.77 s** | ~11.5–13.6 s | ~56–59 s |
-| Flapstorm: withdraw propagation | **0.31–0.47 s** | 0.47–0.61 s | 10.45–11.47 s |
-| Flapstorm: re-announce | **0.49–0.55 s** | 2.85–3.74 s | 21.14–21.54 s |
-| Settled RSS (S2, runs A/B) | 419 / 419 MiB | 422 / 412 MiB | 756 / 753 MiB |
-| Settled RSS (S3, runs A/B) | 441 / 451 MiB | **337 / 328 MiB** | 813 / 815 MiB |
+| Sessions Established | **0.7 s** | 18.2–20.5 s | 83.6–105.7 s |
+| Cold start, full table to all members | **4.8–5.0 s** | 60.9–63.3 s | 326.0–347.8 s |
+| Policy reload: UPDATE stall | 0.42–0.60 s | 1.70–2.70 s | **0.213–0.238 s** |
+| Policy reload: new policy fully delivered | **1.28–1.57 s** | 64.3–84.5 s | 200.8–206.4 s |
+| IRR-scale filter reload: steady-state completion (320 members × 183,040 routes × 3,218,965 IRR entries) | **3.25–3.77 s** | ~11.5–13.6 s | ~56–59 s (9.1) |
+| Flapstorm: withdraw propagation | **0.31–0.47 s** | 0.47–0.61 s | 8.22–9.55 s |
+| Flapstorm: re-announce | **0.49–0.55 s** | 2.85–3.74 s | 17.36–17.82 s |
+| Settled RSS (S2, runs A/B) | 419 / 419 MiB | 422 / 412 MiB | 795 / 801 MiB |
+| Settled RSS (S3, runs A/B) | 441 / 451 MiB | **337 / 328 MiB** | 831 / 827 MiB |
 
-Figures are the v0.64.0 same-host refresh (2026-08-08); the original
-campaign's tables and artifacts are preserved unchanged in the receipt.
+The rustbgpd/BIRD figures are the v0.64.0 same-host refresh (2026-08-08);
+OpenBGPD is the 9.2 amendment measured 2026-08-30. OpenBGPD 9.2's repeated
+flap reconnects also wait about 20 s and 50 s beyond the fixed 10 s hold in
+rounds two and three before the re-announce clock begins; the receipt publishes
+that pacing separately from fan-out.
 rustbgpd is the only daemon in the matrix holding both a sub-second median
 stall **and** single-digit-seconds completion; OpenBGPD has the smallest
-stall at every scale rung; the settled-memory picture is split — S2 settled
-RSS is a dead heat (one run each way), while BIRD's S3 advantage remains
+stall in the current full-shape comparison; the settled-memory picture is
+split — S2 settled RSS is a dead heat (one run each way), while BIRD's S3
+advantage remains
 clear. The receipt includes the full
 method, configuration disclosure, honesty notes, raw artifacts — and a
 post-publication note where the receipt's own tables exposed a rustbgpd
 re-announce plateau that was root-caused, fixed, and rerun (9.5–9.8 s →
 0.46–0.49 s).
 
-The IRR-scale row is a separate campaign, the
+The IRR-scale row is a separate campaign and retains its OpenBGPD 9.1
+comparator. It comes from the
 [grouped per-client-best IRR reload receipt](docs/perf/irr-reload-grouped-per-client-best-2026-08.md)
 (ADR-0126 acceptance): reloads 2–4 at both announcement-overlap points, with
 every member's received view byte-identical to the ungrouped per-client-best
