@@ -20,7 +20,7 @@ M105_ARTIFACT_DIR="$HOME/artifacts/m105-live-as-set-$(date -u +%Y%m%dT%H%M%SZ)" 
 
 The artifact directory contains image/config identities, the raw-peer event
 log, the PCAP and decoded payload rows, the packet-oracle receipt, and the
-per-daemon outcome matrix. The generated directory is not checked in. This
+per-daemon outcome matrix. The artifact directory is not checked in. This
 manual observation is indexed from the public interop, receipt, and evaluation
 pages, but remains outside hosted CI and is not a conformance ranking.
 
