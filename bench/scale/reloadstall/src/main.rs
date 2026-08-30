@@ -730,29 +730,112 @@ fn write_received_view(ctx: &Ctx, path: &Path) -> std::io::Result<()> {
     std::fs::write(path, out)
 }
 
-async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<Stub, String> {
-    let local = stub_addr(i);
-    // Connect with retries inside CONNECT_WINDOW: the socket is
-    // consumed by a failed connect, so each attempt rebuilds it.
-    let deadline = Instant::now() + CONNECT_WINDOW;
-    let mut stream = loop {
-        let sock = TcpSocket::new_v4().map_err(|e| format!("socket: {e}"))?;
-        sock.bind(SocketAddr::new(local.into(), 0))
-            .map_err(|e| format!("bind {local}: {e}"))?;
-        match sock.connect(ctx.daemon).await {
-            Ok(stream) => break stream,
-            Err(e) => {
-                if Instant::now() >= deadline {
-                    return Err(format!(
-                        "connect from {local}: {e} (retried for {}s)",
-                        CONNECT_WINDOW.as_secs()
-                    ));
+enum StubOpenError {
+    Retryable(String),
+    Fatal(String),
+}
+
+async fn open_stub_stream(
+    daemon: SocketAddr,
+    local: Ipv4Addr,
+    open: &[u8],
+    keepalive: &[u8],
+) -> Result<TcpStream, StubOpenError> {
+    let sock = TcpSocket::new_v4().map_err(|e| StubOpenError::Fatal(format!("socket: {e}")))?;
+    sock.bind(SocketAddr::new(local.into(), 0))
+        .map_err(|e| StubOpenError::Fatal(format!("bind {local}: {e}")))?;
+    let mut stream = sock
+        .connect(daemon)
+        .await
+        .map_err(|e| StubOpenError::Retryable(format!("connect from {local}: {e}")))?;
+    stream.set_nodelay(true).ok();
+    stream
+        .write_all(open)
+        .await
+        .map_err(|e| StubOpenError::Retryable(format!("open write: {e}")))?;
+
+    // Read the daemon's OPEN. A transport close before OPEN is retryable:
+    // peers may accept a socket while an IdleHold timer still owns their FSM.
+    // Protocol failures remain fatal so retries cannot hide bad wire behavior.
+    let mut buf = BytesMut::with_capacity(4096);
+    loop {
+        if let Ok(Some(total)) = peek_message_length(&buf, MAX_MESSAGE_LEN) {
+            if buf.len() >= usize::from(total) {
+                let mut b = buf.split_to(usize::from(total)).freeze();
+                match decode_message(&mut b, MAX_MESSAGE_LEN) {
+                    Ok(Message::Open(_)) => break,
+                    Ok(Message::Notification(n)) => {
+                        return Err(StubOpenError::Fatal(format!(
+                            "NOTIFICATION during open: {:?}/{}",
+                            n.code, n.subcode
+                        )));
+                    }
+                    Ok(_) => continue, // tolerate keepalives etc.
+                    Err(e) => {
+                        return Err(StubOpenError::Fatal(format!("decode during open: {e}")));
+                    }
                 }
-                tokio::time::sleep(Duration::from_millis(500)).await;
             }
         }
-    };
-    stream.set_nodelay(true).ok();
+        let mut tmp = [0u8; 4096];
+        let n = stream
+            .read(&mut tmp)
+            .await
+            .map_err(|e| StubOpenError::Retryable(format!("read: {e}")))?;
+        if n == 0 {
+            return Err(StubOpenError::Retryable("closed before OPEN".into()));
+        }
+        buf.extend_from_slice(&tmp[..n]);
+    }
+    stream
+        .write_all(keepalive)
+        .await
+        .map_err(|e| StubOpenError::Retryable(format!("ka write: {e}")))?;
+    Ok(stream)
+}
+
+async fn establish_stream_with_retry(
+    daemon: SocketAddr,
+    local: Ipv4Addr,
+    open: &[u8],
+    keepalive: &[u8],
+    window: Duration,
+) -> Result<(TcpStream, u32), String> {
+    let deadline = Instant::now() + window;
+    let mut retries = 0;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(format!(
+                "establishment from {local} timed out after {}s",
+                window.as_secs()
+            ));
+        }
+        match tokio::time::timeout(remaining, open_stub_stream(daemon, local, open, keepalive))
+            .await
+        {
+            Ok(Ok(stream)) => return Ok((stream, retries)),
+            Ok(Err(StubOpenError::Fatal(error))) => return Err(error),
+            Ok(Err(StubOpenError::Retryable(error))) => {
+                retries += 1;
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(format!("{error} (retried for {}s)", window.as_secs()));
+                }
+                tokio::time::sleep(remaining.min(Duration::from_millis(500))).await;
+            }
+            Err(_) => {
+                return Err(format!(
+                    "establishment from {local} timed out after {}s",
+                    window.as_secs()
+                ));
+            }
+        }
+    }
+}
+
+async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<Stub, String> {
+    let local = stub_addr(i);
 
     // iBGP-RR mode: every stub OPENs with the shared local AS (the
     // daemon's own ASN); otherwise the per-stub eBGP ASN.
@@ -780,45 +863,12 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<Stub, String> {
         ],
     };
     let bytes = encode_message(&Message::Open(open)).map_err(|e| format!("open encode: {e}"))?;
-    stream
-        .write_all(&bytes)
-        .await
-        .map_err(|e| format!("open write: {e}"))?;
-
-    // Read the daemon's OPEN.
-    let mut buf = BytesMut::with_capacity(4096);
-    loop {
-        if let Ok(Some(total)) = peek_message_length(&buf, MAX_MESSAGE_LEN) {
-            if buf.len() >= usize::from(total) {
-                let mut b = buf.split_to(usize::from(total)).freeze();
-                match decode_message(&mut b, MAX_MESSAGE_LEN) {
-                    Ok(Message::Open(_)) => break,
-                    Ok(Message::Notification(n)) => {
-                        return Err(format!(
-                            "NOTIFICATION during open: {:?}/{}",
-                            n.code, n.subcode
-                        ))
-                    }
-                    Ok(_) => continue, // tolerate keepalives etc.
-                    Err(e) => return Err(format!("decode during open: {e}")),
-                }
-            }
-        }
-        let mut tmp = [0u8; 4096];
-        let n = stream
-            .read(&mut tmp)
-            .await
-            .map_err(|e| format!("read: {e}"))?;
-        if n == 0 {
-            return Err("closed before OPEN".into());
-        }
-        buf.extend_from_slice(&tmp[..n]);
-    }
     let ka = encode_message(&Message::Keepalive).unwrap();
-    stream
-        .write_all(&ka)
-        .await
-        .map_err(|e| format!("ka write: {e}"))?;
+    let (stream, retries) =
+        establish_stream_with_retry(ctx.daemon, local, &bytes, &ka, CONNECT_WINDOW).await?;
+    if retries > 0 {
+        eprintln!("stub {i} establishment recovered after {retries} retries");
+    }
 
     ctx.obs[i as usize]
         .established
@@ -2638,6 +2688,52 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_open(asn: u32) -> Vec<u8> {
+        encode_message(&Message::Open(OpenMessage {
+            version: 4,
+            my_as: u16::try_from(asn).unwrap(),
+            hold_time: HOLD_TIME,
+            bgp_identifier: Ipv4Addr::new(192, 0, 2, 1),
+            capabilities: vec![Capability::FourOctetAs { asn }],
+        }))
+        .unwrap()
+        .to_vec()
+    }
+
+    #[tokio::test]
+    async fn establishment_retries_a_transport_close_before_open() {
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let daemon = listener.local_addr().unwrap();
+        let server_open = test_open(65_500);
+        let server = tokio::spawn(async move {
+            let (first, _) = listener.accept().await.unwrap();
+            drop(first);
+
+            let (mut second, _) = listener.accept().await.unwrap();
+            let mut client_open = [0u8; 4096];
+            assert!(second.read(&mut client_open).await.unwrap() > 0);
+            second.write_all(&server_open).await.unwrap();
+        });
+
+        let client_open = test_open(64_512);
+        let keepalive = encode_message(&Message::Keepalive).unwrap();
+        let (stream, retries) = establish_stream_with_retry(
+            daemon,
+            Ipv4Addr::new(127, 0, 0, 2),
+            &client_open,
+            &keepalive,
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(retries, 1);
+        drop(stream);
+        server.await.unwrap();
+    }
 
     #[test]
     fn notification_metric_parser_fails_closed() {
