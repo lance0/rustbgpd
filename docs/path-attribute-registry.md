@@ -132,6 +132,25 @@ both routes are absent across that boundary. The hosted job also rejects altered
 flags, inverted expected outcomes, malformed command output, incomplete UPDATE
 attribute bounds, missing route reconstruction, and duplicate or missing rows.
 
+### Current-main receiver policy after M100
+
+M100 remains a version-scoped rustbgpd 0.67.0 observation. Current main now
+enforces the RFC 4271 requirement that Partial be clear on every recognized
+optional non-transitive attribute. The receiver action follows the existing
+per-attribute RFC 7606 disposition instead of adding a compatibility mode:
+
+| Partial-bearing attribute | eBGP | iBGP |
+|---|---|---|
+| MED | treat-as-withdraw | treat-as-withdraw |
+| ORIGINATOR_ID, CLUSTER_LIST | attribute-discard | treat-as-withdraw |
+| MP_REACH, MP_UNREACH | session reset with exact UPDATE `3/4` attribute data | session reset with exact UPDATE `3/4` attribute data |
+
+Attribute-discard preserves the routes in the UPDATE after removing the
+offending attribute. Treat-as-withdraw removes those routes while keeping the
+session Established. Each recoverable violation uses the existing warning and
+`bgp_update_malformed_total{peer,disposition}` series; there is no per-neighbor
+configuration knob or new metric.
+
 ## Assigned class fence
 
 This matrix audits only the registered Optional/Transitive class; bounded
