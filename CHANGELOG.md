@@ -115,9 +115,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   exact 27/0 receipt remain unchanged.
 
 - The M83 route-server multi-stack receipt now runs its incumbent members as
-  checksum-pinned BIRD 2.19.2 and GoBGP 4.8.0 images, with exact runtime
-  version preflights before capture. Its FRR 10.3.1 member, AS_SET-only policy
-  fixture, assertions 1–50, and exact 57/0 receipt remain unchanged.
+  checksum-pinned BIRD 2.19.2 and GoBGP 4.8.0 images plus manifest-pinned FRR
+  10.7.0, with exact runtime version preflights before capture. Its AS_SET-only
+  policy fixture and assertions 1–50 remain unchanged; a fresh local run
+  completed the full 57/0 receipt.
 
 - Process-global `bgp_sighup_reload_outcomes_total{outcome}` and
   `bgp_rib_policy_transition_total{outcome}` counters expose bounded terminal
