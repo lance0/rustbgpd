@@ -835,7 +835,7 @@ async fn establish_stream_with_retry(
     }
 }
 
-async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<Stub, String> {
+async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<(Stub, u32), String> {
     let local = stub_addr(i);
 
     // iBGP-RR mode: every stub OPENs with the shared local AS (the
@@ -867,10 +867,6 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<Stub, String> {
     let ka = encode_message(&Message::Keepalive).unwrap();
     let (stream, retries) =
         establish_stream_with_retry(ctx.daemon, local, &bytes, &ka, CONNECT_WINDOW).await?;
-    if retries > 0 {
-        eprintln!("stub {i} establishment recovered after {retries} retries");
-    }
-
     ctx.obs[i as usize]
         .established
         .store(true, Ordering::Relaxed);
@@ -1067,11 +1063,14 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<Stub, String> {
         }
     });
 
-    Ok(Stub {
-        tx,
-        reader: reader_handle,
-        writer: writer_handle,
-    })
+    Ok((
+        Stub {
+            tx,
+            reader: reader_handle,
+            writer: writer_handle,
+        },
+        retries,
+    ))
 }
 
 /// Percentile over a sorted slice.
@@ -1345,15 +1344,24 @@ async fn run_flapstorm(
 
         // Re-arm before any flapped session returns, so no announce is missed.
         arm_survivors(ctx, k, flap_prefixes, total, FLAP_TRACK_ANNOUNCES);
+        let mut reconnect_retries = 0u32;
+        let mut recovered_peers = 0u32;
         for i in 0..k {
             match establish_stub(Arc::clone(ctx), i).await {
-                Ok(stub) => stubs[i as usize] = stub,
+                Ok((stub, retries)) => {
+                    reconnect_retries += retries;
+                    recovered_peers += u32::from(retries > 0);
+                    stubs[i as usize] = stub;
+                }
                 Err(e) => {
                     eprintln!("flap {round} reconnect stub {i} failed: {e}");
                     std::process::exit(1);
                 }
             }
         }
+        println!(
+            "flap {round} reconnect transport_retries={reconnect_retries} recovered_peers={recovered_peers}"
+        );
         let t_reann = now_us(ctx);
         println!("flap {round} reannounce wall_us={}", wall_us());
         for i in 0..k {
@@ -1546,7 +1554,7 @@ async fn run_trip_cycle(
     // re-announce is missed.
     arm_survivors(ctx, 1, ctx.per_peer, total, FLAP_TRACK_ANNOUNCES);
     let reconnect_deadline = Instant::now() + reestablish_window;
-    let stub = loop {
+    let (stub, retries) = loop {
         match tokio::time::timeout(
             TRIP_ATTEMPT_WINDOW,
             establish_stub(Arc::clone(ctx), TRIP_MEMBER),
@@ -1576,6 +1584,10 @@ async fn run_trip_cycle(
         }
     };
     stubs[TRIP_MEMBER as usize] = stub;
+    println!(
+        "trip {trip} reconnect transport_retries={retries} recovered_peers={}",
+        u32::from(retries > 0)
+    );
     let t_up = now_us(ctx);
     let holddown_s = t_up.saturating_sub(t_down) as f64 / 1e6;
     println!(
@@ -2086,6 +2098,8 @@ fn main() {
 
         // --- Establish all sessions (waves of 64). ---
         let mut stubs: Vec<Stub> = Vec::with_capacity(n_peers as usize);
+        let mut establishment_retries = 0u32;
+        let mut recovered_peers = 0u32;
         for wave in (0..n_peers).collect::<Vec<_>>().chunks(64) {
             let mut handles = Vec::new();
             for &i in wave {
@@ -2094,7 +2108,11 @@ fn main() {
             }
             for (i, h) in handles {
                 match h.await.unwrap() {
-                    Ok(stub) => stubs.push(stub),
+                    Ok((stub, retries)) => {
+                        establishment_retries += retries;
+                        recovered_peers += u32::from(retries > 0);
+                        stubs.push(stub);
+                    }
                     Err(e) => {
                         eprintln!("stub {i} failed: {e}");
                         std::process::exit(1);
@@ -2107,6 +2125,9 @@ fn main() {
             "established {} at {:.1}s",
             stubs.len(),
             ctx.t0.elapsed().as_secs_f64()
+        );
+        println!(
+            "establishment transport_retries={establishment_retries} recovered_peers={recovered_peers}"
         );
 
         let expected = u64::from(total - per_peer);
@@ -2717,6 +2738,10 @@ mod tests {
             let mut client_open = [0u8; 4096];
             assert!(second.read(&mut client_open).await.unwrap() > 0);
             second.write_all(&server_open).await.unwrap();
+            let mut client_keepalive = [0u8; 19];
+            second.read_exact(&mut client_keepalive).await.unwrap();
+            let expected = encode_message(&Message::Keepalive).unwrap();
+            assert_eq!(client_keepalive.as_slice(), expected.as_ref());
         });
 
         let client_open = test_open(64_512);
