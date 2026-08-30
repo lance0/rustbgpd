@@ -1,5 +1,7 @@
 # Linux FIB kernel-dump scaling receipt (August 2026)
 
+**Measured on:** 2026-08-25 UTC.
+
 ## Result
 
 Linux 6.17 strict table filtering changes the kernel-dump cost from the size of

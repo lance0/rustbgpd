@@ -51,6 +51,7 @@ Start here if you have never run the daemon.
 | [rustbgpd.schema.json](rustbgpd.schema.json) | JSON Schema for the TOML config (editor integration; regenerated via `--dump-config-schema`) |
 | [reload-matrix.md](reload-matrix.md) | Per-field reload classification: live, reload-applied, restart-required, rejected |
 | [stability.md](stability.md) | Authoritative navigation for the narrow daemon contract, crate SemVer, authorization tiers, and adapter compatibility |
+| [v1-stable-contract.md](v1-stable-contract.md) | Narrow machine-pinned v1 compatibility contract for proven route-server and route-reflector roles |
 | [API.md](API.md) | gRPC API reference with examples for every RPC |
 | [grpc-method-inventory.md](grpc-method-inventory.md) | Authorization tier of every gRPC method (machine-readable twin: [grpc-method-inventory.json](grpc-method-inventory.json)) |
 | [rpol-language.md](rpol-language.md) | The `.rpol` typed policy language, ADR-0096 |
@@ -63,6 +64,7 @@ Start here if you have never run the daemon.
 | [gobgp-parity.md](gobgp-parity.md) | Feature-by-feature parity table against GoBGP |
 | [../crates/cli/README.md#familiar-command-map](../crates/cli/README.md#familiar-command-map) | Familiar command map: the FRR/BIRD show-command mental model translated to `rbgp` |
 | [COMPARISON.md](COMPARISON.md) | Feature comparison across open-source BGP daemons |
+| [path-attribute-registry.md](path-attribute-registry.md) | Path-attribute implementation, advertisement, preservation, and evidence registry |
 | [ixp-evaluation.md](ixp-evaluation.md) | One-page IXP route-server evaluation matrix: capability status with the receipt or config behind each row |
 | [kernel-dataplane-runner.md](kernel-dataplane-runner.md) | How the privileged Linux dataplane CI workflow runs |
 | [grafana/](grafana/) | The importable Grafana dashboard JSON |
@@ -71,6 +73,7 @@ Start here if you have never run the daemon.
 
 | Doc | What it explains |
 |-----|------------------|
+| [feature-tour.md](feature-tour.md) | Full-depth tour of the capabilities summarized in the root README |
 | [DESIGN.md](DESIGN.md) | Architecture, tradeoffs, protocol scope, rationale |
 | [adr/](adr/README.md) | Architecture Decision Records for every significant protocol and design choice |
 | [USE_CASES.md](USE_CASES.md) | Deployment scenarios and their architecture (for step-by-step configs, see the cookbook) |

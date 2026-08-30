@@ -72,6 +72,21 @@
       "receipt": "docs/perf/scale-receipt-2026-07.md"
     },
     {
+      "source": "README.md",
+      "anchor": "- **Update-group fanout**",
+      "receipt": "docs/perf/scale-receipt-2026-07.md"
+    },
+    {
+      "source": "README.md",
+      "anchor": "At route-reflector shapes, the",
+      "receipt": "docs/perf/scale-receipt-2026-07.md"
+    },
+    {
+      "source": "README.md",
+      "anchor": "The current [v0.67.0 cross-stack bgperf2",
+      "receipt": "docs/perf/competitive-bgperf2-v0670-2026-08.md"
+    },
+    {
       "source": "docs/BENCHMARKS.md",
       "anchor": "**Current v0.67.0 refresh, measured 2026-08-29.**",
       "receipt": "docs/perf/competitive-bgperf2-v0670-2026-08.md"
