@@ -40,7 +40,7 @@ synchronous. `RtrClient` and `VrpManager` require a Tokio runtime.
 
 Origin validation uses prefix and validation-state types from the independently
 published wire crate. The `rustbgpd-rpki 0.1.x` release boundary pairs with
-`rustbgpd-wire 0.19.x`. Once both versions are registry-visible, consumers use:
+`rustbgpd-wire 0.19.x`. Both versions are registry-visible, so consumers use:
 
 ```toml
 [dependencies]
@@ -48,8 +48,8 @@ rustbgpd-rpki = "0.1.0"
 rustbgpd-wire = "0.19.0"
 ```
 
-Before both versions are registry-visible, or when testing a source
-checkout, use matching versioned paths from one rustbgpd checkout:
+When building against a source checkout instead, use matching versioned paths
+from one rustbgpd checkout:
 
 ```toml
 [dependencies]
@@ -119,14 +119,14 @@ The public modules are also part of the `0.1.x` API. They expose the advanced
 ASPA helpers (`ProviderAuth`, `verify`, `verify_detailed`, `verify_upstream`),
 the raw RTR PDU codec (`RtrPdu`, its version constants, `RtrDecodeError`, and
 `RtrEncodeError`), the client-side `RtrError`, and the module-qualified forms
-of the facade types. Publishing `0.1.0` freezes all of those public paths for
+of the facade types. Publishing `0.1.0` froze all of those public paths for
 the `0.1.x` compatibility line; they are not merely internal implementation
 details.
 
 ## Compatibility
 
 This is an alpha `0.x` crate. Its first public `0.1.x` line starts with
-`rustbgpd-wire 0.19`; no earlier `rustbgpd-rpki` release exists to preserve.
+`rustbgpd-wire 0.19`; no earlier `rustbgpd-rpki` release existed to preserve.
 Backward-compatible fixes and additions remain on that line. Removing or
 changing public items requires `0.2.0`, as does moving the public method
 signatures to an incompatible wire line, so shared types do not silently split
