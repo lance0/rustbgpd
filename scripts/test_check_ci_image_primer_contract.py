@@ -1630,6 +1630,56 @@ class PrimerContractTests(unittest.TestCase):
                 self.assertGreater(count, 0, f"missing M83 seam: {old}")
                 self.mutate(relative, old)
 
+    def test_m77_gobgp48_job_is_load_bearing(self):
+        relative = ".github/workflows/interop.yml"
+        workflow = (ROOT / relative).read_text()
+        m77_header = (
+            "  m77:\n"
+            "    needs: [grpcurl_archive, prime_dev_image]\n"
+            "    name: M77 — VPNv4/VPNv6/RTC GR+LLGR + BGP-LS GR (GoBGP 4.8.0)\n"
+        )
+        self.assertEqual(1, workflow.count(m77_header), "M77 header must be unique")
+        self.mutate(relative, m77_header, m77_header.replace("4.8.0", "4.6.0"))
+
+        build = (
+            "      - name: Build gobgp:v4.8.0-m77\n"
+            "        run: |\n"
+            "          docker build --build-arg TARGETARCH=amd64 \\\n"
+            "          --build-arg GOBGP_VERSION=4.8.0 \\\n"
+            "          --build-arg GOBGP_SHA256=43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03 \\\n"
+            "          -t gobgp:v4.8.0-m77 -f tests/interop/Dockerfile.gobgp-v47 tests/interop\n"
+        )
+        self.assertEqual(1, workflow.count(build), "M77 GoBGP build must be unique")
+        for old, new in (
+            ("TARGETARCH=amd64", "TARGETARCH=arm64"),
+            ("GOBGP_VERSION=4.8.0", "GOBGP_VERSION=4.7.0"),
+            (
+                "GOBGP_SHA256=43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03",
+                "GOBGP_SHA256=wrong",
+            ),
+            ("gobgp:v4.8.0-m77", "gobgp:bgpls"),
+            ("Dockerfile.gobgp-v47", "Dockerfile.gobgp-bgpls"),
+        ):
+            with self.subTest(seam=old):
+                self.mutate(relative, build, build.replace(old, new))
+
+        run = (
+            "      - name: Run M77 (deploy + test + destroy with retry)\n"
+            "        uses: ./.github/actions/run-interop-test\n"
+            "        with:\n"
+            "          label: M77\n"
+            "          topology: tests/interop/m77-gr-llgr-rr-gobgp.clab.yml\n"
+            "          script: tests/interop/scripts/test-m77-gr-llgr-rr-gobgp.sh\n"
+        )
+        self.assertEqual(1, workflow.count(run), "M77 run block must be unique")
+        for old, new in (
+            ("label: M77", "label: M76"),
+            ("m77-gr-llgr-rr-gobgp.clab.yml", "m76-orr-divergent-best-gobgp.clab.yml"),
+            ("test-m77-gr-llgr-rr-gobgp.sh", "test-m76-orr-divergent-best-gobgp.sh"),
+        ):
+            with self.subTest(seam=old):
+                self.mutate(relative, run, run.replace(old, new))
+
     def test_m99_rfc9072_raw_capture_job_is_load_bearing(self):
         relative = ".github/workflows/interop.yml"
         for old in (

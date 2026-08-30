@@ -208,6 +208,101 @@ fn m100_pins_released_receivers_and_exact_twenty_cell_contract() {
 }
 
 #[test]
+fn m77_pins_gobgp48_identity_before_preserving_the_gr_llgr_contract() {
+    let topology = topology("m77-gr-llgr-rr-gobgp.clab.yml");
+    assert_eq!(topology["name"], "m77-gr-llgr-rr-gobgp");
+    let nodes = topology["topology"]["nodes"].as_mapping().unwrap();
+    assert_eq!(nodes["rustbgpd"]["image"], "rustbgpd:dev");
+    for peer in ["gobgp-pe", "gobgp-client", "gobgp-ls"] {
+        assert_eq!(
+            nodes[peer]["image"], "gobgp:v4.8.0-m77",
+            "M77 {peer} image drifted"
+        );
+    }
+
+    let script_path = interop_path("scripts/test-m77-gr-llgr-rr-gobgp.sh");
+    let script = fs::read_to_string(&script_path).expect("read M77 driver");
+    for required in [
+        "GOBGP_IMAGE=\"gobgp:v4.8.0-m77\"",
+        "GOBGP_VERSION=\"gobgp version 4.8.0\"",
+        "GOBGPD_VERSION=\"gobgpd version 4.8.0\"",
+        "5bd2c6eddab475746d5257c4466f8377b3790bcf7159e18e03a9d44a1685348b",
+        "710b7c28d2b83aef887cc28ae6ddcffe82f11a27e0ba263d9f747658b45f8a97",
+        "docker image inspect -f '{{.Architecture}}' \"$GOBGP_IMAGE\"",
+        "docker inspect -f '{{.Config.Image}}' \"$container\"",
+        "docker inspect -f '{{.Image}}' \"$container\"",
+        "docker exec \"$container\" uname -m",
+        "docker exec \"$container\" gobgp --version",
+        "docker exec \"$container\" gobgpd --version",
+        "sha256sum /usr/local/bin/gobgp",
+        "sha256sum /usr/local/bin/gobgpd",
+        "select(.key == \"default\" or .key == \"0:0:0/0\")",
+        ".[\"peer-address\"] == $rr",
+        "and (.attrs | length) == 4",
+        ".type == 2 and .as_paths == []",
+        ".type == 14",
+        ".nexthop == $rr",
+        ".afi == 1",
+        ".safi == 132",
+        ".value[0].NLRI.prefix == $prefix",
+        "--self-test-default-rtc-parser",
+        "parser self-test passed (8 cases)",
+    ] {
+        assert!(script.contains(required), "M77 driver lost `{required}`");
+    }
+    assert!(
+        !script.contains("gobgp:bgpls"),
+        "M77 driver regained the historical source-build image"
+    );
+    let output = Command::new("bash")
+        .arg(&script_path)
+        .arg("--self-test-default-rtc-parser")
+        .output()
+        .expect("run M77 RTC parser self-test");
+    assert!(
+        output.status.success(),
+        "M77 RTC parser self-test failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let main = script.rfind("\nmain() {").expect("M77 main exists");
+    let main = &script[main..];
+    let identity = main
+        .find("    preflight_gobgp_identity\n")
+        .expect("M77 main invokes the exact GoBGP identity preflight");
+    let first_start = main
+        .find("    start_gobgpd \"$GOBGP_PE\"\n")
+        .expect("M77 main starts the PE");
+    assert!(
+        identity < first_start,
+        "M77 must preflight exact GoBGP identity before any daemon start"
+    );
+
+    let dockerfile = fs::read_to_string(interop_path("Dockerfile.gobgp-v47"))
+        .expect("read checksum-built GoBGP Dockerfile");
+    let checksum = dockerfile
+        .find("sha256sum -c -")
+        .expect("GoBGP archive checksum is verified");
+    let extract = dockerfile
+        .find("tar -xzf /tmp/gobgp.tar.gz")
+        .expect("GoBGP archive is extracted");
+    assert!(
+        checksum < extract,
+        "GoBGP archive must be verified before extraction"
+    );
+    for required in [
+        "https://github.com/osrg/gobgp/releases/download/v${GOBGP_VERSION}/",
+        "gobgp_${GOBGP_VERSION}_linux_amd64.tar.gz",
+        "test \"$(gobgp --version)\" = \"gobgp version ${GOBGP_VERSION}\"",
+        "test \"$(gobgpd --version)\" = \"gobgpd version ${GOBGP_VERSION}\"",
+    ] {
+        assert!(
+            dockerfile.contains(required),
+            "checksum-built GoBGP image lost `{required}`"
+        );
+    }
+}
+
+#[test]
 fn m83_pins_refreshed_incumbent_images_and_preflights_before_capture() {
     let topology = topology("m83-routeserver-multistack.clab.yml");
     assert_eq!(

@@ -747,7 +747,7 @@ jobs:
 
   m77:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M77 — VPNv4/VPNv6/RTC GR+LLGR + BGP-LS GR (GoBGP 4.6.0)
+    name: M77 — VPNv4/VPNv6/RTC GR+LLGR + BGP-LS GR (GoBGP 4.8.0)
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -775,8 +775,12 @@ jobs:
           target: dev
           cache-from: type=gha,scope=rustbgpd-dev
 
-      - name: Build gobgp:bgpls
-        run: docker build -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-bgpls tests/interop
+      - name: Build gobgp:v4.8.0-m77
+        run: |
+          docker build --build-arg TARGETARCH=amd64 \
+          --build-arg GOBGP_VERSION=4.8.0 \
+          --build-arg GOBGP_SHA256=43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03 \
+          -t gobgp:v4.8.0-m77 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 
       - name: Run M77 (deploy + test + destroy with retry)
         uses: ./.github/actions/run-interop-test

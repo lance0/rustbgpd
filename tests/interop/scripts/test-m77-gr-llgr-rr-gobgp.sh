@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # M77 interop test — GR/LLGR stale preservation for the RR families
-# (RFC 4724 / RFC 9494) against GoBGP v4.
+# (RFC 4724 / RFC 9494) against checksum-built GoBGP v4.8.0.
 #
 # rustbgpd is the RECEIVING speaker: a GoBGP PE (VPNv4 + VPNv6 + RTC, GR
 # restart-time 60 + LLGR 30 per family) is killed and relaunched with
@@ -51,7 +51,9 @@
 #
 # Prerequisites:
 #   - docker build --target dev -t rustbgpd:dev .
-#   - docker build -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-bgpls tests/interop
+#   - docker build --build-arg TARGETARCH=amd64 --build-arg GOBGP_VERSION=4.8.0 \
+#       --build-arg GOBGP_SHA256=43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03 \
+#       -t gobgp:v4.8.0-m77 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 #   - containerlab deployed:
 #       containerlab deploy -t tests/interop/m77-gr-llgr-rr-gobgp.clab.yml
 
@@ -59,12 +61,15 @@ TOPO="m77-gr-llgr-rr-gobgp"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INTEROP_TEST_OPERATOR_AUTH=1
 export INTEROP_TEST_OPERATOR_AUTH
-# shellcheck source=tests/interop/scripts/test-lib.sh
-source "$SCRIPT_DIR/test-lib.sh"
 
 GOBGP_PE="clab-${TOPO}-gobgp-pe"
 GOBGP_CLIENT="clab-${TOPO}-gobgp-client"
 GOBGP_LS="clab-${TOPO}-gobgp-ls"
+readonly GOBGP_IMAGE="gobgp:v4.8.0-m77"
+readonly GOBGP_VERSION="gobgp version 4.8.0"
+readonly GOBGPD_VERSION="gobgpd version 4.8.0"
+readonly GOBGP_BINARY_SHA256="5bd2c6eddab475746d5257c4466f8377b3790bcf7159e18e03a9d44a1685348b"
+readonly GOBGPD_BINARY_SHA256="710b7c28d2b83aef887cc28ae6ddcffe82f11a27e0ba263d9f747658b45f8a97"
 
 PE_ADDR="10.0.1.2"
 CLIENT_ADDR="10.0.0.2"
@@ -92,6 +97,128 @@ PE_UNIQUE_RT="65001:222"
 
 # RFC 9494 LLGR_STALE community 65535:6 as GoBGP's JSON renders it (u32).
 LLGR_STALE_COMMUNITY=4294901766
+
+require_exact() {
+    local actual=${1:?} expected=${2:?} label=${3:?}
+    if [ "$actual" != "$expected" ]; then
+        printf 'ERROR: %s: expected %s, got %s\n' "$label" "$expected" "$actual" >&2
+        exit 1
+    fi
+}
+
+count_exact_default_rtc_rows() {
+    local rr=${1:?}
+    jq -er --arg rr "$rr" '
+        [to_entries[]
+         | select(.key == "default" or .key == "0:0:0/0")
+         | .key as $prefix
+         | .value[]?
+         | select(
+             .Family == 0
+             and .nlri.prefix == $prefix
+             and .best == false
+             and .stale == false
+             and .["peer-address"] == $rr
+             and (.attrs | length) == 4
+             and ([.attrs[]? | select(.type == 1 and .value == 0)] | length) == 1
+             and ([.attrs[]? | select(.type == 2 and .as_paths == [])] | length) == 1
+             and ([.attrs[]? | select(.type == 5 and .value == 100)] | length) == 1
+             and ([.attrs[]? | select(
+                 .type == 14
+                 and .nexthop == $rr
+                 and .afi == 1
+                 and .safi == 132
+                 and (.value | type) == "array"
+                 and (.value | length) == 1
+                 and .value[0].NLRI.prefix == $prefix
+                 and .value[0].ID == 0
+             )] | length) == 1
+         )]
+        | length
+    '
+}
+
+default_rtc_fixture() {
+    local prefix=${1:?} peer=${2:?} nexthop=${3:?}
+    jq -cn --arg prefix "$prefix" --arg peer "$peer" --arg nexthop "$nexthop" '
+        {($prefix): [{
+            Family: 0,
+            nlri: {prefix: $prefix},
+            best: false,
+            stale: false,
+            "peer-address": $peer,
+            attrs: [
+                {type: 1, value: 0},
+                {type: 2, as_paths: []},
+                {type: 5, value: 100},
+                {type: 14, nexthop: $nexthop, afi: 1, safi: 132,
+                 value: [{NLRI: {prefix: $prefix}, ID: 0}]}
+            ]
+        }]}
+    '
+}
+
+self_test_default_rtc_parser() {
+    local rr=10.0.1.1 v46 v48 wrong_membership nonempty_as extra_as duplicate
+    v46=$(default_rtc_fixture default "$rr" "$rr")
+    v48=$(default_rtc_fixture 0:0:0/0 "$rr" "$rr")
+
+    require_exact "$(count_exact_default_rtc_rows "$rr" <<<"$v46")" 1 \
+        "GoBGP 4.6 default RTC rendering"
+    require_exact "$(count_exact_default_rtc_rows "$rr" <<<"$v48")" 1 \
+        "GoBGP 4.8 canonical default RTC rendering"
+    require_exact "$(default_rtc_fixture default 10.0.1.9 "$rr" \
+        | count_exact_default_rtc_rows "$rr")" 0 "wrong RTC peer-address refusal"
+    require_exact "$(default_rtc_fixture default "$rr" 10.0.1.9 \
+        | count_exact_default_rtc_rows "$rr")" 0 "wrong RTC next-hop refusal"
+
+    wrong_membership=$(jq -c '
+        .default[0].attrs |= map(
+            if .type == 14 then .value[0].NLRI.prefix = "65001:65001:100" else . end
+        )' <<<"$v46")
+    require_exact "$(count_exact_default_rtc_rows "$rr" <<<"$wrong_membership")" 0 \
+        "wrong RTC membership refusal"
+    nonempty_as=$(jq -c '
+        .default[0].attrs |= map(
+            if .type == 2 then .as_paths = [{type: 2, asns: [65001]}] else . end
+        )' <<<"$v46")
+    require_exact "$(count_exact_default_rtc_rows "$rr" <<<"$nonempty_as")" 0 \
+        "non-empty default RTC AS_PATH refusal"
+    extra_as=$(jq -c '
+        .default[0].attrs += [{type: 2, as_paths: [{type: 2, asns: [65001]}]}]
+        ' <<<"$v46")
+    require_exact "$(count_exact_default_rtc_rows "$rr" <<<"$extra_as")" 0 \
+        "duplicate default RTC attribute refusal"
+    duplicate=$(jq -c '.default += .default' <<<"$v46")
+    require_exact "$(count_exact_default_rtc_rows "$rr" <<<"$duplicate")" 2 \
+        "duplicate default RTC detection"
+    echo "M77 exact default RTC parser self-test passed (8 cases)"
+}
+
+preflight_gobgp_identity() {
+    local container image_id
+
+    image_id=$(docker image inspect -f '{{.Id}}' "$GOBGP_IMAGE")
+    require_exact "$(docker image inspect -f '{{.Architecture}}' "$GOBGP_IMAGE")" \
+        amd64 "GoBGP image architecture"
+    for container in "$GOBGP_PE" "$GOBGP_CLIENT" "$GOBGP_LS"; do
+        require_exact "$(docker inspect -f '{{.Config.Image}}' "$container")" \
+            "$GOBGP_IMAGE" "$container configured image"
+        require_exact "$(docker inspect -f '{{.Image}}' "$container")" \
+            "$image_id" "$container local image identity"
+        require_exact "$(docker exec "$container" uname -m)" x86_64 \
+            "$container runtime architecture"
+        require_exact "$(docker exec "$container" gobgp --version)" \
+            "$GOBGP_VERSION" "$container gobgp version"
+        require_exact "$(docker exec "$container" gobgpd --version)" \
+            "$GOBGPD_VERSION" "$container gobgpd version"
+        require_exact "$(docker exec "$container" sha256sum /usr/local/bin/gobgp | cut -d' ' -f1)" \
+            "$GOBGP_BINARY_SHA256" "$container gobgp binary SHA-256"
+        require_exact "$(docker exec "$container" sha256sum /usr/local/bin/gobgpd | cut -d' ' -f1)" \
+            "$GOBGPD_BINARY_SHA256" "$container gobgpd binary SHA-256"
+    done
+    log "Verified exact GoBGP 4.8.0 image, amd64 runtime, and binary identities"
+}
 
 # The M76 square: vantage A (10.0.8.1) is a node with cost-1 and cost-10
 # links; only its presence/absence matters here, not the metrics.
@@ -271,17 +398,19 @@ assert_gr_cap_family() {
 # into adj-in — it is what defeats GoBGP's outbound RTC filter toward the
 # RR, so the PE's VPN routes flow at all.
 wait_default_rtc_accepted() {
-    local container=${1:?} rr=${2:?} label=${3:?}
+    local container=${1:?} rr=${2:?} label=${3:?} count json
     log "Waiting for $label to accept the RR's default RTC NLRI..."
     for i in $(seq 1 30); do
-        if gobgp "$container" neighbor "$rr" adj-in -a rtc | grep -i "default" >/dev/null; then
+        if json=$(gobgp "$container" neighbor "$rr" adj-in -a rtc -j) \
+            && count=$(count_exact_default_rtc_rows "$rr" <<<"$json") \
+            && [ "$count" = 1 ]; then
             ok "$label accepted the RR's default RTC NLRI (attempt $i)"
             return 0
         fi
         sleep 2
     done
     fail "$label never accepted the RR's default RTC NLRI"
-    gobgp "$container" neighbor "$rr" adj-in -a rtc || true
+    gobgp "$container" neighbor "$rr" adj-in -a rtc -j | jq . || true
     return 1
 }
 
@@ -971,6 +1100,7 @@ main() {
     log "Topology: $TOPO"
 
     preflight
+    preflight_gobgp_identity
     resolve_grpc_addr
     start_gobgpd "$GOBGP_PE"
     start_gobgpd "$GOBGP_CLIENT"
@@ -1000,5 +1130,13 @@ main() {
         exit 1
     fi
 }
+
+if [ "${1:-}" = "--self-test-default-rtc-parser" ]; then
+    self_test_default_rtc_parser
+    exit 0
+fi
+
+# shellcheck source=tests/interop/scripts/test-lib.sh
+source "$SCRIPT_DIR/test-lib.sh"
 
 main "$@"

@@ -81,7 +81,7 @@ id matches the milestone. Full procedures: [`INTEROP.md`](INTEROP.md).
 | M74 | VPNv4/VPNv6 reflection: shared-RD identity, scoped API/sink views, same-path RFC 4456 attributes, ordered withdrawals, zero dataplane | GoBGP 3.37.0 ×2 |
 | M75 | RT-Constrain (RFC 4684) VPNv4 reflection filtering, widen/narrow without reset | GoBGP 3.37.0 ×3 |
 | M76 | RFC 9107 Optimal Route Reflection: divergent per-vantage best paths, topology-driven flip | GoBGP 4.6.0 ×5 |
-| M77 | GR/LLGR stale preservation for the RR families (RFC 4724 + RFC 9494) | GoBGP 4.6.0 ×3 |
+| M77 | GR/LLGR stale preservation for the RR families (RFC 4724 + RFC 9494); exact 83/0 current-daemon refresh | Checksum-built GoBGP 4.8.0 ×3 |
 | M78 | Multi-cluster ORR + inter-RR Add-Path | GoBGP 4.6.0 ×5 + rustbgpd ×2 |
 | M79 | RFC 8277 labeled-unicast (SAFI 4) reflection + GR | GoBGP 4.6.0 ×2 |
 | M80 | ADR-0096 `.rpol` policy parity vs FRR route-maps (dual-family, asn-set origin-AS + `route.family` predicates), hot-apply under traffic | FRR 10.3.1 ×3 |

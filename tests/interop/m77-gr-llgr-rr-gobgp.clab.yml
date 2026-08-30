@@ -21,20 +21,23 @@
 # gobgp-ls: linkstate only, GR restart-time 30, no LLGR; injects the M76
 # 4-link square that resolves the RR's ORR vantage.
 #
-# Addressing is deliberate: the CLIENT holds the LOWER address (10.0.0.2)
+# Addressing remains deliberately fixed: the CLIENT holds the LOWER address
+# (10.0.0.2)
 # so its fresh copies of the dual-originated blue/red RTC /96 NLRIs always
 # win the RR's best-path tiebreak. If the PE's copies were best, GR-stale
 # demotion at the kill would flip the best to the client's copy, the RR
 # would withdraw the previously reflected PE copy from the client (RFC
 # 4456 — a client's own route is not reflected back), and GoBGP's
-# processRTCMembership withdraw path would then withdraw the client's VPN
-# routes toward the RR without checking that the RR's default RTC NLRI
-# still covers them (upstream quirk, gobgp v4.6.0 server.go) — emptying
-# the very table this receipt asserts on.
+# v4.6.0 processRTCMembership withdraw path would then withdraw the client's
+# VPN routes toward the RR without checking that the RR's default RTC NLRI
+# still covers them. M77 retains the original topology shape while refreshing
+# the peer runtime, so the GR/LLGR contract is compared without a layout change.
 #
 # Usage:
 #   docker build --target dev -t rustbgpd:dev .
-#   docker build -t gobgp:bgpls -f tests/interop/Dockerfile.gobgp-bgpls tests/interop
+#   docker build --build-arg TARGETARCH=amd64 --build-arg GOBGP_VERSION=4.8.0 \
+#     --build-arg GOBGP_SHA256=43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03 \
+#     -t gobgp:v4.8.0-m77 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
 #   containerlab deploy -t tests/interop/m77-gr-llgr-rr-gobgp.clab.yml
 #   bash tests/interop/scripts/test-m77-gr-llgr-rr-gobgp.sh
 #   containerlab destroy -t tests/interop/m77-gr-llgr-rr-gobgp.clab.yml
@@ -64,7 +67,7 @@ topology:
 
     gobgp-pe:
       kind: linux
-      image: gobgp:bgpls
+      image: gobgp:v4.8.0-m77
       cmd: sleep infinity
       binds:
         - ./configs/gobgp-m77-pe.toml:/config/gobgp.toml:ro
@@ -74,7 +77,7 @@ topology:
 
     gobgp-client:
       kind: linux
-      image: gobgp:bgpls
+      image: gobgp:v4.8.0-m77
       cmd: sleep infinity
       binds:
         - ./configs/gobgp-m77-client.toml:/config/gobgp.toml:ro
@@ -84,7 +87,7 @@ topology:
 
     gobgp-ls:
       kind: linux
-      image: gobgp:bgpls
+      image: gobgp:v4.8.0-m77
       cmd: sleep infinity
       binds:
         - ./configs/gobgp-m77-ls.toml:/config/gobgp.toml:ro
