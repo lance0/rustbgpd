@@ -271,8 +271,10 @@ fn m83_pins_refreshed_incumbent_images_and_preflights_before_capture() {
     for identity_seam in [
         format!("FRR_IMAGE=\"{FRR_IMAGE}\""),
         "frr_image_id=$(docker image inspect -f '{{.Id}}' \"$FRR_IMAGE\")".to_owned(),
-        "frr_container_image=$(docker inspect -f '{{.Image}}' \"$FRR\")".to_owned(),
-        "[ \"$frr_container_image\" = \"$frr_image_id\" ]".to_owned(),
+        "frr_config_image=$(docker inspect -f '{{.Config.Image}}' \"$FRR\")".to_owned(),
+        "frr_container_image_id=$(docker inspect -f '{{.Image}}' \"$FRR\")".to_owned(),
+        "[ \"$frr_config_image\" = \"$FRR_IMAGE\" ]".to_owned(),
+        "[ \"$frr_container_image_id\" = \"$frr_image_id\" ]".to_owned(),
     ] {
         assert!(
             script.contains(&identity_seam),

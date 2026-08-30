@@ -824,13 +824,14 @@ start_capture() {
 }
 
 preflight_incumbent_versions() {
-    local bird_version frr_container_image frr_image_id frr_version
+    local bird_version frr_config_image frr_container_image_id frr_image_id frr_version
     local gobgp_version gobgpd_version
     bird_version=$(docker exec "$BIRD" bird --version 2>&1) || return 1
     gobgp_version=$(docker exec "$GOBGP" gobgp --version 2>&1) || return 1
     gobgpd_version=$(docker exec "$GOBGP" gobgpd --version 2>&1) || return 1
     frr_image_id=$(docker image inspect -f '{{.Id}}' "$FRR_IMAGE") || return 1
-    frr_container_image=$(docker inspect -f '{{.Image}}' "$FRR") || return 1
+    frr_config_image=$(docker inspect -f '{{.Config.Image}}' "$FRR") || return 1
+    frr_container_image_id=$(docker inspect -f '{{.Image}}' "$FRR") || return 1
     frr_version=$(docker exec "$FRR" /usr/lib/frr/bgpd --version 2>&1 \
         | sed -n '1p') || return 1
     [ "$bird_version" = "BIRD version 2.19.2" ] || {
@@ -845,8 +846,12 @@ preflight_incumbent_versions() {
         echo "ERROR: M83 requires gobgpd version 4.8.0, got: $gobgpd_version" >&2
         return 1
     }
-    [ "$frr_container_image" = "$frr_image_id" ] || {
-        echo "ERROR: M83 FRR container image '$frr_container_image' (want '$frr_image_id' from $FRR_IMAGE)" >&2
+    [ "$frr_config_image" = "$FRR_IMAGE" ] || {
+        echo "ERROR: M83 FRR configured image '$frr_config_image' (want '$FRR_IMAGE')" >&2
+        return 1
+    }
+    [ "$frr_container_image_id" = "$frr_image_id" ] || {
+        echo "ERROR: M83 FRR container image ID '$frr_container_image_id' (want '$frr_image_id' from $FRR_IMAGE)" >&2
         return 1
     }
     [ "$frr_version" = "$FRR_VERSION" ] || {
