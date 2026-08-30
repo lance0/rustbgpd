@@ -1624,6 +1624,9 @@ class PrimerContractTests(unittest.TestCase):
             "          --build-arg GOBGP_VERSION=4.8.0\n",
             "          --build-arg GOBGP_SHA256=43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03\n",
             "          -t gobgp:v4.8.0-m83 -f tests/interop/Dockerfile.gobgp-v47 tests/interop\n",
+            "    name: M83 — route-server profile, multi-stack (BIRD 2.19.2 + GoBGP 4.8.0 + FRR 10.7.0 + RTR)\n",
+            "      - name: Pull digest-pinned FRR 10.7.0 image\n",
+            "        run: docker pull quay.io/frrouting/frr@sha256:a0ed0e4f8727631c8303dd9a4e8199b47464a17a5253135a2c622286aeaec46b\n",
         ):
             with self.subTest(seam=old):
                 count = (ROOT / relative).read_text().count(old)

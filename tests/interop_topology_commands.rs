@@ -209,6 +209,7 @@ fn m100_pins_released_receivers_and_exact_twenty_cell_contract() {
 
 #[test]
 fn m83_pins_refreshed_incumbent_images_and_preflights_before_capture() {
+    const FRR_IMAGE: &str = "quay.io/frrouting/frr@sha256:a0ed0e4f8727631c8303dd9a4e8199b47464a17a5253135a2c622286aeaec46b";
     let topology = topology("m83-routeserver-multistack.clab.yml");
     assert_eq!(
         topology["topology"]["nodes"]["bird"]["image"],
@@ -218,9 +219,13 @@ fn m83_pins_refreshed_incumbent_images_and_preflights_before_capture() {
         topology["topology"]["nodes"]["gobgp"]["image"],
         "gobgp:v4.8.0-m83"
     );
-    assert_eq!(
-        topology["topology"]["nodes"]["frr"]["image"],
-        "quay.io/frrouting/frr:10.3.1"
+    assert_eq!(topology["topology"]["nodes"]["frr"]["image"], FRR_IMAGE);
+
+    let frr_config =
+        fs::read_to_string(interop_path("configs/frr-bgpd-m83.conf")).expect("read M83 FRR config");
+    assert!(
+        frr_config.starts_with("frr version 10.7.0\n"),
+        "M83 FRR config must select the refreshed runtime profile"
     );
 
     let dockerfile = fs::read_to_string(interop_path("Dockerfile.bird-v2192"))
@@ -256,10 +261,22 @@ fn m83_pins_refreshed_incumbent_images_and_preflights_before_capture() {
         "BIRD version 2.19.2",
         "gobgp version 4.8.0",
         "gobgpd version 4.8.0",
+        "bgpd version 10.7.0_git",
     ] {
         assert!(
             script.contains(exact_version),
             "missing {exact_version} preflight"
+        );
+    }
+    for identity_seam in [
+        format!("FRR_IMAGE=\"{FRR_IMAGE}\""),
+        "frr_image_id=$(docker image inspect -f '{{.Id}}' \"$FRR_IMAGE\")".to_owned(),
+        "frr_container_image=$(docker inspect -f '{{.Image}}' \"$FRR\")".to_owned(),
+        "[ \"$frr_container_image\" = \"$frr_image_id\" ]".to_owned(),
+    ] {
+        assert!(
+            script.contains(&identity_seam),
+            "missing M83 FRR identity preflight `{identity_seam}`"
         );
     }
     let preflight = script

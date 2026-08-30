@@ -3,12 +3,12 @@
 # (RFC 7947 / RFC 7948 / RFC 9234 / ADR-0101 proof-ladder closer).
 #
 # rustbgpd is the route server (AS 65500) for three member stacks —
-# BIRD 2.19.2, GoBGP 4.8.0 (Add-Path receive), FRR 10.3.1 — with a
+# BIRD 2.19.2, GoBGP 4.8.0 (Add-Path receive), FRR 10.7.0 — with a
 # StayRTR RTR fixture feeding ROV and a tshark capture on the RS↔BIRD
 # link for the byte-level assertions.
 #
 # First-AS relaxation per stack (client-side, RFC 7947 §2.2.2.1):
-#   FRR 10.3.1  — per-neighbor `no neighbor X enforce-first-as`
+#   FRR 10.7.0  — per-neighbor `no neighbor X enforce-first-as`
 #                 (global form alone is insufficient, the M19 finding)
 #   BIRD 2.19.2 — `enforce first as off` (explicit; also the default)
 #   GoBGP 4.8.0 — no first-AS enforcement exists; nothing to disable
@@ -90,6 +90,7 @@
 #   - docker build --target dev -t rustbgpd:dev .
 #   - docker build -t bird:v2.19.2-m83 -f tests/interop/Dockerfile.bird-v2192 tests/interop
 #   - docker build --build-arg TARGETARCH=amd64 --build-arg GOBGP_VERSION=4.8.0 --build-arg GOBGP_SHA256=43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03 -t gobgp:v4.8.0-m83 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
+#   - docker pull quay.io/frrouting/frr@sha256:a0ed0e4f8727631c8303dd9a4e8199b47464a17a5253135a2c622286aeaec46b
 #   - containerlab deploy -t tests/interop/m83-routeserver-multistack.clab.yml
 #
 # Usage:
@@ -587,6 +588,8 @@ BIRD="clab-${TOPO}-bird"
 GOBGP="clab-${TOPO}-gobgp"
 FRR="clab-${TOPO}-frr"
 STAYRTR="clab-${TOPO}-stayrtr"
+FRR_IMAGE="quay.io/frrouting/frr@sha256:a0ed0e4f8727631c8303dd9a4e8199b47464a17a5253135a2c622286aeaec46b"
+FRR_VERSION="bgpd version 10.7.0_git"
 
 RS_BIRD_ADDR="10.83.1.1"
 RS_GOBGP_ADDR="10.83.2.1"
@@ -821,10 +824,15 @@ start_capture() {
 }
 
 preflight_incumbent_versions() {
-    local bird_version gobgp_version gobgpd_version
+    local bird_version frr_container_image frr_image_id frr_version
+    local gobgp_version gobgpd_version
     bird_version=$(docker exec "$BIRD" bird --version 2>&1) || return 1
     gobgp_version=$(docker exec "$GOBGP" gobgp --version 2>&1) || return 1
     gobgpd_version=$(docker exec "$GOBGP" gobgpd --version 2>&1) || return 1
+    frr_image_id=$(docker image inspect -f '{{.Id}}' "$FRR_IMAGE") || return 1
+    frr_container_image=$(docker inspect -f '{{.Image}}' "$FRR") || return 1
+    frr_version=$(docker exec "$FRR" /usr/lib/frr/bgpd --version 2>&1 \
+        | sed -n '1p') || return 1
     [ "$bird_version" = "BIRD version 2.19.2" ] || {
         echo "ERROR: M83 requires BIRD version 2.19.2, got: $bird_version" >&2
         return 1
@@ -837,7 +845,15 @@ preflight_incumbent_versions() {
         echo "ERROR: M83 requires gobgpd version 4.8.0, got: $gobgpd_version" >&2
         return 1
     }
-    log "Runtime preflight: BIRD 2.19.2 and GoBGP 4.8.0 exact versions confirmed"
+    [ "$frr_container_image" = "$frr_image_id" ] || {
+        echo "ERROR: M83 FRR container image '$frr_container_image' (want '$frr_image_id' from $FRR_IMAGE)" >&2
+        return 1
+    }
+    [ "$frr_version" = "$FRR_VERSION" ] || {
+        echo "ERROR: M83 requires $FRR_VERSION, got: $frr_version" >&2
+        return 1
+    }
+    log "Runtime preflight: BIRD 2.19.2, GoBGP 4.8.0, and FRR 10.7.0 exact identities confirmed"
 }
 
 stop_capture() {
@@ -1566,7 +1582,7 @@ assert_reload_stability() {
 # ---------------------------------------------------------------------------
 
 main() {
-    log "M83 interop test: route-server profile, multi-stack (BIRD 2.19.2 + GoBGP 4.8.0 + FRR + RTR)"
+    log "M83 interop test: route-server profile, multi-stack (BIRD 2.19.2 + GoBGP 4.8.0 + FRR 10.7.0 + RTR)"
     log "Topology: $TOPO"
 
     resolve_grpc_addr
