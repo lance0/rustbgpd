@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import importlib.util
 import json
 import re
 import sys
@@ -59,6 +60,13 @@ EXPECTED: dict[str, Any] = {
             },
         },
     ],
+    "raw_bridge_skew": {
+        "active_limits": {"burst-32": 32, "burst-8": 8, "serial-1": 1},
+        "censor_seconds": 5,
+        "pairs_per_profile": 4000,
+        "vm_timeout_seconds": 1500,
+        "wall_seconds": 1200,
+    },
     "schema": 1,
     "vm": {
         "machine": "pc-q35-8.2",
@@ -76,6 +84,11 @@ RECEIPT_FILES = {
     "plan.json": 64 * 1024,
     "quiet.tsv": 64 * 1024,
     "request.json": 64 * 1024,
+}
+SKEW_RECEIPT_FILES = {
+    "guest/skew/report.json": 1024 * 1024,
+    "guest/skew/run.json": 8 * 1024 * 1024,
+    "guest/skew/samples.csv": 8 * 1024 * 1024,
 }
 QUIET_FIELDS = [
     "sample",
@@ -99,6 +112,7 @@ SOURCE_PATHS = {
     "runner": "bench/netns-calibration/run-vm.sh",
     "verifier": "bench/netns-calibration/verify-receipt.py",
 }
+SKEW_SOURCE_PATH = "bench/netns-calibration/raw_bridge_skew.py"
 
 
 class VerificationError(ValueError):
@@ -113,7 +127,21 @@ def require(condition: bool, message: str) -> None:
 def load_json(path: Path) -> dict[str, Any]:
     require(path.is_file() and not path.is_symlink(), f"not a regular file: {path}")
     try:
-        value = json.loads(path.read_text())
+        def reject_constant(value: str) -> None:
+            raise VerificationError(f"non-finite JSON number: {value}")
+
+        def reject_duplicates(items: list[tuple[str, Any]]) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for key, value in items:
+                require(key not in result, f"duplicate JSON key: {key}")
+                result[key] = value
+            return result
+
+        value = json.loads(
+            path.read_text(),
+            parse_constant=reject_constant,
+            object_pairs_hook=reject_duplicates,
+        )
     except (OSError, json.JSONDecodeError) as exc:
         raise VerificationError(f"cannot parse {path}: {exc}") from exc
     require(isinstance(value, dict), f"{path} must contain one JSON object")
@@ -234,6 +262,7 @@ def verify_source_contract(repo: Path, runner: Path | None = None, guest: Path |
     guest = guest or repo / SOURCE_PATHS["guest"]
     runner_text = runner.read_text()
     guest_text = guest.read_text()
+    skew_text = (repo / SKEW_SOURCE_PATH).read_text()
     anchors = [
         "if [ \"$EUID\" -eq 0 ]; then",
         "SCRIPT_DIR=$(cd --",
@@ -293,6 +322,16 @@ def verify_source_contract(repo: Path, runner: Path | None = None, guest: Path |
         require(runner_text.count(anchor) == 1, f"runner tool-path anchor changed: {anchor}")
     for forbidden in ("command -v qemu-system-x86_64", "command -v cloud-localds"):
         require(forbidden not in runner_text, f"runner resolves a pinned tool through PATH: {forbidden}")
+    campaign_runner_anchors = [
+        "CAMPAIGN=''",
+        'if [ "$#" -eq 5 ] && [ "$1" = --raw-bridge-skew ]; then',
+        'CAMPAIGN_TIMEOUT_SECONDS=$(python3 "$VERIFIER" skew-select "$PROFILES" "$CAMPAIGN")',
+        'paths["raw_bridge_skew"] = "bench/netns-calibration/raw_bridge_skew.py"',
+        'cp -- "$SKEW" "$PAYLOAD_DIR/"',
+        'TIMEOUT_SECONDS=$CAMPAIGN_TIMEOUT_SECONDS',
+    ]
+    for anchor in campaign_runner_anchors:
+        require(runner_text.count(anchor) == 1, f"runner campaign anchor changed: {anchor}")
     cleanup_anchor = 'ip netns del "$NETNS" >/dev/null 2>&1 || rc=1'
     require(guest_text.count(cleanup_anchor) == 1, "guest failure cleanup is not unique")
     guest_anchors = [
@@ -307,6 +346,14 @@ def verify_source_contract(repo: Path, runner: Path | None = None, guest: Path |
         guest_positions.append(guest_text.index(anchor))
     require(guest_positions == sorted(guest_positions), "guest cleanup lifecycle changed")
     require(guest_text.index(cleanup_anchor) < guest_positions[0], "guest trap does not use the cleanup helper")
+    campaign_guest_anchors = [
+        'campaign=$(python3 -c',
+        "python3 /mnt/payload/raw_bridge_skew.py",
+        '--campaign "$campaign" --output "$output/skew"',
+        "raw bridge skew campaign left netns residue",
+    ]
+    for anchor in campaign_guest_anchors:
+        require(guest_text.count(anchor) == 1, f"guest campaign anchor changed: {anchor}")
     bootstrap_anchors = [
         "mount -t 9p -o trans=virtio,version=9p2000.L,ro payload",
         "mount -t 9p -o trans=virtio,version=9p2000.L receipt",
@@ -321,6 +368,9 @@ def verify_source_contract(repo: Path, runner: Path | None = None, guest: Path |
     command = re.compile(r"^\s*(sudo|docker|curl|wget)\b", re.MULTILINE)
     require(command.search(runner_text) is None, "runner gained a forbidden host command")
     require(command.search(guest_text) is None, "guest gained a forbidden command")
+    require(skew_text.count("self.socket.bind((0, RTMGRP_NEIGH))") == 1, "collector socket binding changed")
+    for forbidden in ("bridge fdb add", "bridge fdb replace", "ip neigh add", "ip neigh replace"):
+        require(forbidden not in skew_text, f"collector gained a synthetic measured stimulus: {forbidden}")
 
 
 def verify_quiet(path: Path) -> None:
@@ -361,27 +411,61 @@ def exact_keys(value: dict[str, Any], keys: set[str], label: str) -> None:
     require(set(value) == keys, f"{label} has missing or extra fields")
 
 
+def same_typed_value(actual: Any, expected: Any) -> bool:
+    if type(actual) is not type(expected):
+        return False
+    if isinstance(expected, dict):
+        return set(actual) == set(expected) and all(
+            same_typed_value(actual[key], expected[key]) for key in expected
+        )
+    if isinstance(expected, list):
+        return len(actual) == len(expected) and all(
+            same_typed_value(left, right) for left, right in zip(actual, expected, strict=True)
+        )
+    return actual == expected
+
+
 def verify_receipt(profiles_path: Path, root: Path, write_manifest: bool) -> None:
     profiles = verify_profiles(profiles_path)
     require(root.is_dir() and not root.is_symlink(), "receipt root must be a real directory")
+    request = load_json(root / "request.json")
+    campaign = request.get("raw_bridge_skew")
+    if campaign is None:
+        exact_keys(request, {"git", "image", "profile", "schema", "sources"}, "request")
+        receipt_files = dict(RECEIPT_FILES)
+        source_paths = dict(SOURCE_PATHS)
+        allowed_directories = {"guest"}
+    else:
+        exact_keys(
+            request,
+            {"git", "image", "profile", "raw_bridge_skew", "schema", "sources"},
+            "campaign request",
+        )
+        require(isinstance(campaign, dict), "raw bridge skew request must be an object")
+        exact_keys(campaign, {"profile"}, "raw bridge skew request")
+        require(
+            campaign["profile"] in profiles["raw_bridge_skew"]["active_limits"],
+            "unknown raw bridge skew profile",
+        )
+        receipt_files = {**RECEIPT_FILES, **SKEW_RECEIPT_FILES}
+        source_paths = {**SOURCE_PATHS, "raw_bridge_skew": SKEW_SOURCE_PATH}
+        allowed_directories = {"guest", "guest/skew"}
     found: set[str] = set()
     for path in root.rglob("*"):
         relative = path.relative_to(root).as_posix()
         require(not path.is_symlink(), f"receipt contains a symlink: {relative}")
         if path.is_dir():
-            require(relative == "guest", f"receipt contains an unexpected directory: {relative}")
+            require(relative in allowed_directories, f"receipt contains an unexpected directory: {relative}")
             continue
         require(path.is_file(), f"receipt contains a non-regular path: {relative}")
         found.add(relative)
-    allowed = set(RECEIPT_FILES)
+    allowed = set(receipt_files)
     if (root / "SHA256SUMS").exists():
         allowed.add("SHA256SUMS")
     require(found == allowed, f"receipt file set mismatch: got {sorted(found)}")
-    for relative, limit in RECEIPT_FILES.items():
+    for relative, limit in receipt_files.items():
         require((root / relative).stat().st_size <= limit, f"receipt artifact is oversized: {relative}")
 
-    request = load_json(root / "request.json")
-    exact_keys(request, {"git", "image", "profile", "schema", "sources"}, "request")
     require(request["schema"] == 1, "request schema mismatch")
     profile = selected_profile(profiles, request["profile"])
     require(request["image"] == profile["source"], "request mixed or changed its image tuple")
@@ -391,8 +475,8 @@ def verify_receipt(profiles_path: Path, root: Path, write_manifest: bool) -> Non
     require(git["commit"] == git["origin_main"], "request commit is not exact origin/main")
     require(git["dirty"] is False and git["status_sha256"] == EMPTY_SHA256, "dirty source is not publishable")
     repo = Path(__file__).resolve().parents[2]
-    require(set(request["sources"]) == set(SOURCE_PATHS), "request source inventory mismatch")
-    for name, relative in SOURCE_PATHS.items():
+    require(set(request["sources"]) == set(source_paths), "request source inventory mismatch")
+    for name, relative in source_paths.items():
         require(request["sources"][name] == sha256(repo / relative), f"source hash mismatch: {name}")
 
     plan = load_json(root / "plan.json")
@@ -491,14 +575,23 @@ def verify_receipt(profiles_path: Path, root: Path, write_manifest: bool) -> Non
         "guest smoke surface mismatch",
     )
 
-    for relative in RECEIPT_FILES:
-        if relative.endswith((".json", ".tsv", ".log")):
+    if campaign is not None:
+        measured_profile = verify_skew_receipt(root / "guest/skew")
+        require(
+            measured_profile == campaign["profile"],
+            "raw bridge skew request/result profile mismatch",
+        )
+
+    for relative in receipt_files:
+        if relative.endswith((".csv", ".json", ".tsv", ".log")):
             text = (root / relative).read_text(errors="replace")
             for forbidden in ("/home/", "github_pat_", "ghp_", "GITHUB_TOKEN", "AWS_SECRET", "Authorization:"):
                 require(forbidden not in text, f"unsanitized receipt content in {relative}")
 
     manifest_path = root / "SHA256SUMS"
-    expected_manifest = "".join(f"{sha256(root / relative)}  {relative}\n" for relative in sorted(RECEIPT_FILES))
+    expected_manifest = "".join(
+        f"{sha256(root / relative)}  {relative}\n" for relative in sorted(receipt_files)
+    )
     if manifest_path.exists():
         require(manifest_path.is_file() and not manifest_path.is_symlink(), "bad SHA256SUMS path")
         require(manifest_path.read_text() == expected_manifest, "SHA256SUMS does not seal the exact receipt")
@@ -506,6 +599,130 @@ def verify_receipt(profiles_path: Path, root: Path, write_manifest: bool) -> Non
         manifest_path.write_text(expected_manifest)
     else:
         raise VerificationError("receipt has no SHA256SUMS (pass --write-manifest only at finalization)")
+
+
+def verify_skew_receipt(root: Path) -> str:
+    """Recompute a raw-bridge skew report from its closed plan and rows."""
+    files = {"run.json", "samples.csv", "report.json"}
+    require(root.is_dir() and not root.is_symlink(), "skew receipt root is not a real directory")
+    require({path.name for path in root.iterdir()} == files, "skew receipt inventory mismatch")
+    for name in files:
+        path = root / name
+        require(path.is_file() and not path.is_symlink(), f"bad skew artifact: {name}")
+        limit = SKEW_RECEIPT_FILES[f"guest/skew/{name}"]
+        require(path.stat().st_size <= limit, f"oversized skew artifact: {name}")
+    require(sum((root / name).stat().st_size for name in files) <= 10 * 1024 * 1024, "skew artifacts exceed 10 MiB total")
+    module_path = Path(__file__).with_name("raw_bridge_skew.py")
+    spec = importlib.util.spec_from_file_location("raw_bridge_skew_verify", module_path)
+    require(spec is not None and spec.loader is not None, "cannot load skew recomputer")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    run = load_json(root / "run.json")
+    require(
+        set(run)
+        == {
+            "acceptance",
+            "active_limit",
+            "censor_seconds",
+            "planned",
+            "profile",
+            "schema",
+            "topology",
+            "wall_seconds",
+        },
+        "run.json shape mismatch",
+    )
+    require(run["schema"] == 1 and run["profile"] in {"serial-1", "burst-8", "burst-32"}, "bad campaign identity")
+    require(run["active_limit"] == {"serial-1": 1, "burst-8": 8, "burst-32": 32}[run["profile"]], "profile concurrency mismatch")
+    require(run["active_limit"] <= 32 and run["censor_seconds"] == 5 and run["wall_seconds"] == 1200, "campaign bounds mismatch")
+    require(run["acceptance"] is None, "campaign must remain descriptive without external acceptance inputs")
+    topology = run["topology"]
+    require(isinstance(topology, dict), "campaign topology must be an object")
+    exact_keys(topology, {"bridge_ifindex", "port_ifindexes"}, "campaign topology")
+    bridge_ifindex = topology["bridge_ifindex"]
+    ports = topology["port_ifindexes"]
+    require(type(bridge_ifindex) is int and bridge_ifindex > 0, "bad bridge ifindex")
+    require(isinstance(ports, dict), "campaign port map must be an object")
+    try:
+        expected_run = module.deterministic_plan(run["profile"], bridge_ifindex, ports)
+    except (RuntimeError, TypeError, ValueError, KeyError) as exc:
+        raise VerificationError(f"invalid campaign topology: {exc}") from exc
+    require(
+        same_typed_value(run, expected_run),
+        "run.json is not the exact closed deterministic plan",
+    )
+    planned = run["planned"]
+    require(isinstance(planned, list) and len(planned) == 4000, "campaign denominator must be 4,000")
+    expected_header = module.SAMPLE_FIELDS
+    with (root / "samples.csv").open(newline="") as stream:
+        reader = csv.DictReader(stream)
+        require(reader.fieldnames == expected_header, "samples.csv header mismatch")
+        samples = list(reader)
+    require(len(samples) == 4000, "samples.csv denominator mismatch")
+    require(
+        [row["sample_id"] for row in samples] == [row["sample_id"] for row in planned],
+        "samples do not exactly follow plan",
+    )
+
+    def decimal(value: str, label: str, *, signed: bool = False) -> int:
+        pattern = r"-?(?:0|[1-9][0-9]*)" if signed else r"(?:0|[1-9][0-9]*)"
+        require(re.fullmatch(pattern, value) is not None, f"bad sample integer: {label}")
+        return int(value)
+
+    rows = []
+    for expected, sample in zip(planned, samples, strict=True):
+        for field in ("sample_id", "profile", "phase"):
+            require(sample[field] == str(expected[field]), f"sample metadata mismatch: {field}")
+        require(
+            decimal(sample["family"], "family") == expected["family"]
+            and decimal(sample["vlan"], "vlan") == expected["vlan"],
+            "sample family/VLAN mismatch",
+        )
+        complete = sample["complete"] == "true"
+        require(sample["complete"] in {"true", "false"}, "bad complete value")
+        neighbor = decimal(sample["neighbor_ns"], "neighbor_ns") if sample["neighbor_ns"] else None
+        fdb = decimal(sample["fdb_ns"], "fdb_ns") if sample["fdb_ns"] else None
+        skew = decimal(sample["skew_ns"], "skew_ns", signed=True) if sample["skew_ns"] else None
+        require(complete == (neighbor is not None and fdb is not None), "complete row mismatch")
+        require(skew == (neighbor - fdb if complete else None), "signed skew mismatch")
+        missing_reason = (
+            ""
+            if complete
+            else "missing-fdb-and-neighbor"
+            if neighbor is None and fdb is None
+            else "missing-neighbor"
+            if neighbor is None
+            else "missing-fdb"
+        )
+        require(sample["missing_reason"] == missing_reason, "missing reason mismatch")
+        rows.append(
+            {
+                **expected,
+                "complete": complete,
+                "missing_reason": missing_reason,
+                "neighbor_ns": neighbor,
+                "fdb_ns": fdb,
+                "skew_ns": skew,
+                "duplicate_neighbor": decimal(sample["duplicate_neighbor"], "duplicate_neighbor"),
+                "duplicate_fdb": decimal(sample["duplicate_fdb"], "duplicate_fdb"),
+                "delete_events": decimal(sample["delete_events"], "delete_events"),
+                "late_neighbor": decimal(sample["late_neighbor"], "late_neighbor"),
+                "late_fdb": decimal(sample["late_fdb"], "late_fdb"),
+                "late_delete": decimal(sample["late_delete"], "late_delete"),
+            }
+        )
+    report = load_json(root / "report.json")
+    require(
+        report.get("wrong_tenant") == 0 and report.get("ambiguous_tenant") == 0,
+        "wrong-tenant and ambiguity hard gates must be literal zero",
+    )
+    recomputed = module.build_report(rows, 4000, 0, 0, run["acceptance"])
+    require(
+        same_typed_value(report, recomputed),
+        "report.json does not recompute from planned samples",
+    )
+    return run["profile"]
 
 
 def main() -> int:
@@ -516,6 +733,9 @@ def main() -> int:
     select_parser = sub.add_parser("select")
     select_parser.add_argument("profiles", type=Path)
     select_parser.add_argument("name")
+    skew_select_parser = sub.add_parser("skew-select")
+    skew_select_parser.add_argument("profiles", type=Path)
+    skew_select_parser.add_argument("name")
     plan_parser = sub.add_parser("plan")
     plan_parser.add_argument("profiles", type=Path)
     plan_parser.add_argument("plan", type=Path)
@@ -534,6 +754,8 @@ def main() -> int:
     receipt_parser.add_argument("profiles", type=Path)
     receipt_parser.add_argument("root", type=Path)
     receipt_parser.add_argument("--write-manifest", action="store_true")
+    skew_parser = sub.add_parser("skew-receipt")
+    skew_parser.add_argument("root", type=Path)
     args = parser.parse_args()
     try:
         if args.command == "profiles":
@@ -545,6 +767,13 @@ def main() -> int:
             print(profile["source"]["url"])
             print(profiles["host_tools"]["qemu_system_x86"]["path"])
             print(profiles["host_tools"]["cloud_image_utils"]["path"])
+        elif args.command == "skew-select":
+            profiles = verify_profiles(args.profiles)
+            require(
+                args.name in profiles["raw_bridge_skew"]["active_limits"],
+                f"unknown raw bridge skew profile: {args.name}",
+            )
+            print(profiles["raw_bridge_skew"]["vm_timeout_seconds"])
         elif args.command == "plan":
             verify_plan(args.profiles, args.plan)
         elif args.command == "argv":
@@ -562,8 +791,10 @@ def main() -> int:
             sys.stdout.buffer.write(b"\0".join(item.encode() for item in argv) + b"\0")
         elif args.command == "source":
             verify_source_contract(args.repo.resolve(), args.runner, args.guest)
-        else:
+        elif args.command == "receipt":
             verify_receipt(args.profiles, args.root, args.write_manifest)
+        else:
+            verify_skew_receipt(args.root)
     except (OSError, VerificationError, ValueError, KeyError, TypeError) as exc:
         print(f"netns calibration receipt error: {exc}", file=sys.stderr)
         return 1

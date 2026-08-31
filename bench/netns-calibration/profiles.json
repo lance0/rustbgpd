@@ -41,6 +41,17 @@
       }
     }
   ],
+  "raw_bridge_skew": {
+    "active_limits": {
+      "burst-32": 32,
+      "burst-8": 8,
+      "serial-1": 1
+    },
+    "censor_seconds": 5,
+    "pairs_per_profile": 4000,
+    "vm_timeout_seconds": 1500,
+    "wall_seconds": 1200
+  },
   "schema": 1,
   "vm": {
     "machine": "pc-q35-8.2",

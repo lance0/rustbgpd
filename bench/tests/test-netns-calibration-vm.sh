@@ -3,6 +3,7 @@ set -euo pipefail
 export PYTHONDONTWRITEBYTECODE=1
 
 repo=$(git rev-parse --show-toplevel)
+python3 -m unittest -v "$repo/bench/netns-calibration/test_raw_bridge_skew.py"
 profiles="$repo/bench/netns-calibration/profiles.json"
 verifier="$repo/bench/netns-calibration/verify-receipt.py"
 runner="$repo/bench/netns-calibration/run-vm.sh"
@@ -188,6 +189,60 @@ expect(True, "valid-sealed", "receipt", profiles_path, base)
 unsealed = tmp / "receipt-unsuccessful"; shutil.copytree(base, unsealed)
 (unsealed / "SHA256SUMS").unlink()
 expect(False, "unsuccessful-receipt-is-unsealed", "receipt", profiles_path, unsealed)
+
+# The explicit campaign path expands the otherwise byte-stable smoke receipt
+# by exactly one request/source field and three sealed nested artifacts.
+raw_path = repo / "bench/netns-calibration/raw_bridge_skew.py"
+raw_spec = importlib.util.spec_from_file_location("raw_bridge_skew_fixture", raw_path)
+raw = importlib.util.module_from_spec(raw_spec)
+assert raw_spec.loader is not None
+sys.modules[raw_spec.name] = raw
+raw_spec.loader.exec_module(raw)
+campaign = tmp / "receipt-campaign"; shutil.copytree(base, campaign)
+(campaign / "SHA256SUMS").unlink()
+campaign_request = json.loads((campaign / "request.json").read_text())
+campaign_request["raw_bridge_skew"] = {"profile": "burst-8"}
+campaign_request["sources"]["raw_bridge_skew"] = verify.sha256(raw_path)
+write_json(campaign / "request.json", campaign_request)
+raw.write_receipt(raw.deterministic_plan("burst-8"), [], campaign / "guest/skew")
+expect(True, "valid-campaign-finalize", "receipt", profiles_path, campaign, "--write-manifest")
+expect(True, "valid-campaign-sealed", "receipt", profiles_path, campaign)
+manifest = (campaign / "SHA256SUMS").read_text()
+assert "guest/skew/run.json" in manifest
+assert "guest/skew/samples.csv" in manifest
+assert "guest/skew/report.json" in manifest
+
+oversized_skew = tmp / "skew-oversized-report"
+shutil.copytree(campaign / "guest/skew", oversized_skew)
+report_path = oversized_skew / "report.json"
+padding = verify.SKEW_RECEIPT_FILES["guest/skew/report.json"] + 1 - report_path.stat().st_size
+assert padding > 0
+with report_path.open("a") as stream:
+    stream.write(" " * padding)
+expect(False, "skew-oversized-report", "skew-receipt", oversized_skew)
+
+def mutate_campaign_json(path, relative, mutate):
+    value = json.loads((path / relative).read_text())
+    mutate(value)
+    write_json(path / relative, value)
+
+for name, mutate in {
+    "campaign-missing": lambda p: (p / "guest/skew/report.json").unlink(),
+    "campaign-extra": lambda p: (p / "guest/skew/extra.txt").write_text("extra\n"),
+    "campaign-tampered-plan": lambda p: mutate_campaign_json(
+        p, "guest/skew/run.json", lambda x: x["planned"][0].update(ip="192.0.2.99")
+    ),
+    "campaign-nonzero-wrong-tenant": lambda p: mutate_campaign_json(
+        p, "guest/skew/report.json", lambda x: x.update(wrong_tenant=1)
+    ),
+    "campaign-profile-mismatch": lambda p: mutate_campaign_json(
+        p, "request.json", lambda x: x["raw_bridge_skew"].update(profile="serial-1")
+    ),
+}.items():
+    candidate = tmp / f"receipt-{name}"; shutil.copytree(campaign, candidate)
+    (candidate / "SHA256SUMS").unlink()
+    mutate(candidate)
+    expect(False, name, "receipt", profiles_path, candidate, "--write-manifest")
 
 def receipt_mutation(name, mutate):
     path = tmp / f"receipt-{name}"; shutil.copytree(base, path)
