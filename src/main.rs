@@ -2461,8 +2461,8 @@ fn main() -> ExitCode {
                   A running daemon exits 1 on a component failure that ends it\n     \
                   (legacy BGP mode bound neither family; an explicit listen_addresses\n     \
                   endpoint failed to bind; configured metrics/readiness bind failure;\n     \
-                  or unexpected RIB manager, peer manager, gRPC server,\n     \
-                  BGP listener task, or BGP accept-forwarding task exit)\n  \
+                  or unexpected RIB manager, peer manager, RPKI subsystem,\n     \
+                  gRPC server, BGP listener task, or BGP accept-forwarding task exit)\n  \
                2  Invalid invocation (unknown flag combination, missing argument)\n  \
                70 Internal error",
                     env!("CARGO_PKG_VERSION")

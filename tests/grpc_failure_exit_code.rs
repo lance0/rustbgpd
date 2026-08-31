@@ -935,11 +935,11 @@ fn help_and_man_distinguish_bgp_bind_modes_and_supervised_exits() {
     let help = output("--help");
     assert!(help.contains("legacy BGP mode bound neither family; an explicit listen_addresses"));
     assert!(help.contains("endpoint failed to bind; configured metrics/readiness bind failure;"));
-    assert!(help.contains("or unexpected RIB manager, peer manager, gRPC server,"));
-    assert!(help.contains("BGP listener task, or BGP accept-forwarding task exit"));
+    assert!(help.contains("or unexpected RIB manager, peer manager, RPKI subsystem,"));
+    assert!(help.contains("gRPC server, BGP listener task, or BGP accept-forwarding task exit"));
     let man = output("--man");
     assert!(man.contains("legacy BGP listen mode could bind\nneither family; explicit\n.B listen_addresses\nmode could not bind every configured endpoint"));
-    assert!(man.contains("the RIB manager, peer manager, gRPC server,\nBGP listener task, or BGP accept-forwarding task exited unexpectedly"));
+    assert!(man.contains("the RIB manager, peer manager, RPKI subsystem,\ngRPC server, BGP listener task, or BGP accept-forwarding task exited unexpectedly"));
 }
 
 #[test]
