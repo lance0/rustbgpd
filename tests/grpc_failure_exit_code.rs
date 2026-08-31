@@ -3,8 +3,9 @@
 //! Operator-initiated shutdown (SIGTERM) exits 0; a component failure
 //! exits non-zero, so supervisors like systemd with `Restart=on-failure`
 //! restart the daemon instead of treating it as a clean stop. Live proofs cover
-//! startup binds, the RIB manager, both inbound-admission tasks, and the peer
-//! manager; the Shutdown RPC proof pins the intentional exit-0 path beside them.
+//! startup binds, the RIB manager, RPKI subsystem, both inbound-admission tasks,
+//! and the peer manager; the Shutdown RPC proof pins the intentional exit-0 path
+//! beside them.
 
 use std::io::{Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
@@ -163,6 +164,17 @@ fn write_rib_fault_config(dir: &Path) -> PathBuf {
         ),
     )
     .expect("write RIB fault config");
+    config_path
+}
+
+fn write_rpki_fault_config(dir: &Path) -> PathBuf {
+    let config_path = write_config(dir, DAEMON_CHOOSES, DAEMON_CHOOSES);
+    let config = std::fs::read_to_string(&config_path).expect("read test config");
+    std::fs::write(
+        &config_path,
+        format!("{config}\n[rpki]\n[[rpki.cache_servers]]\naddress = \"127.0.0.1:3323\"\n"),
+    )
+    .expect("write RPKI fault config");
     config_path
 }
 
@@ -513,6 +525,95 @@ fn operations_key_log_table_covers_supervised_failures() {
             "missing exact operations row {expected_row:?}"
         );
     }
+
+    let rpki_diagnostic = "RPKI subsystem task exited unexpectedly";
+    assert_eq!(production.matches(rpki_diagnostic).count(), 1);
+    assert!(production.contains("match rpki_supervisor.as_mut()"));
+    assert!(production.contains("None => std::future::pending().await"));
+    assert!(production.contains("rpki_supervisor = None;"));
+    assert!(production.contains("component_failed = true;"));
+    let expected_row =
+        format!("| `{rpki_diagnostic}` | ERROR | Fatal — coordinated shutdown follows |");
+    assert!(key_log_table.lines().any(|line| line == expected_row));
+}
+
+#[test]
+fn rpki_client_panic_uses_common_shutdown_and_exits_nonzero() {
+    let temp = private_tempdir();
+    let config_path = write_rpki_fault_config(temp.path());
+    let mut daemon = spawn_daemon_with_env(
+        temp.path(),
+        &config_path,
+        Some(("RUSTBGPD_TEST_RPKI_TASK_EXIT", "rtr_client_panic")),
+    );
+    let status = daemon.wait_within(Duration::from_secs(30));
+    let logs = daemon.logs();
+
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "RPKI task panic must exit 1\n{logs}"
+    );
+    for message in [
+        "injected RTR client task panic",
+        "RPKI subsystem task exited unexpectedly",
+        "initiating shutdown due to RPKI subsystem task failure",
+        "initiating coordinated shutdown",
+        "rustbgpd exiting",
+    ] {
+        assert!(logs.contains(message), "missing {message:?}\n{logs}");
+    }
+
+    let reports = std::fs::read_dir(temp.path().join("runtime/crash"))
+        .expect("panic report directory")
+        .flatten()
+        .map(|entry| std::fs::read_to_string(entry.path()).expect("read panic report"))
+        .collect::<Vec<_>>();
+    assert_eq!(reports.len(), 1, "one durable panic report: {reports:?}");
+    assert!(reports[0].contains("injected RTR client task panic"));
+}
+
+#[test]
+fn rpki_supervision_covers_every_task_and_common_teardown() {
+    let source = include_str!("../src/main.rs");
+    let setup = source
+        .split_once("let mut rpki_tasks = JoinSet::new();")
+        .expect("RPKI task set must be explicit")
+        .1
+        .split_once("// Spawn MRT manager")
+        .expect("RPKI setup boundary")
+        .0;
+    for kind in [
+        "RpkiTaskKind::VrpManager",
+        "RpkiTaskKind::VrpForwarder",
+        "RpkiTaskKind::AspaForwarder",
+        "RpkiTaskKind::RtrClient",
+    ] {
+        assert!(setup.contains(kind), "missing supervised task class {kind}");
+    }
+    assert_eq!(setup.matches("rpki_tasks.spawn(").count(), 4);
+    assert!(source.contains("None => std::future::pending().await"));
+    assert!(source.contains("RPKI subsystem task exited unexpectedly"));
+    let admission_close = source
+        .find("daemon_gate.begin_shutdown();")
+        .expect("shutdown admission must close");
+    let runtime_config_close = source
+        .find("runtime_config_lock.close();")
+        .expect("runtime-config admission must close");
+    let teardown_start = source
+        .find("if let Some(handle) = rpki_supervisor.take() {")
+        .expect("RPKI supervisor teardown");
+    let settlement_start = source
+        .find("let settlement_wait = runtime_config_settlement.clone();")
+        .expect("runtime-config settlement boundary");
+    assert!(
+        admission_close < runtime_config_close
+            && runtime_config_close < teardown_start
+            && teardown_start < settlement_start
+    );
+    let teardown = &source[teardown_start..settlement_start];
+    assert_eq!(teardown.matches("handle.abort();").count(), 1);
+    assert_eq!(teardown.matches("handle.await").count(), 1);
 }
 
 #[test]

@@ -9,6 +9,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- An unexpected exit or panic in the configured RPKI subsystem now triggers
+  coordinated shutdown and exit 1. Ordinary RTR reconnect and data-expiry
+  handling remain non-fatal.
+
 ### Documentation
 
 - Publish the current v0.68.0 benchmark evidence bundle: exact-release
