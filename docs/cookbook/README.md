@@ -10,6 +10,36 @@ The configs are derived from the interop fixtures under
 M-series receipts run against real peer stacks — every recipe cites the
 receipts that prove its scenario ([`RECEIPTS.md`](../RECEIPTS.md)).
 
+## Find the route-server path
+
+| I want to… | Read this |
+|------------|-----------|
+| Decide whether rustbgpd fits an IXP route-server deployment | [IXP evaluation](../ixp-evaluation.md) |
+| Build a route server from hand-maintained member and policy configuration | [IXP route server](route-server.md) |
+| Keep an existing ARouteServer `general.yml` / `clients.yml` workflow | [IXP filter pipeline](ixp-filter-pipeline.md) |
+| Provision from an IXP Manager v7.4 database | [IXP Manager route server](ixp-manager-route-server.md) |
+| Run a non-authoritative comparison beside the incumbent, without planning a cutover yet | [Route-server shadow pilot](route-server-shadow-pilot.md) |
+| Replace an incumbent through a planned shadow trial and cutover | [Route-server migration](route-server-migration.md) |
+| Verify or troubleshoot a hand-maintained route server after deployment | [IXP route server](route-server.md) |
+
+### How the six route-server documents divide the work
+
+| Document | Scope it owns | Scope it does not own |
+|----------|---------------|-----------------------|
+| [IXP evaluation](../ixp-evaluation.md) | Fit assessment: capability, evidence, and product-boundary checks before choosing a deployment | Configuration generation, a running pilot, or cutover procedure |
+| [IXP route server](route-server.md) | Hand-maintained member and policy configuration, validation, startup, and day-2 verification | ARouteServer or IXP Manager generation, standing incumbent comparison, or migration planning |
+| [IXP filter pipeline](ixp-filter-pipeline.md) | ARouteServer input, generated datasets and configuration, validated activation, and Alice-LG integration | Hand-maintained inventories, IXP Manager lifecycle, or incumbent cutover |
+| [IXP Manager route server](ixp-manager-route-server.md) | IXP Manager export, render, receipt, activation, rollback, lock, fetch, and callback lifecycle | ARouteServer inputs or a generic incumbent-replacement plan |
+| [Route-server shadow pilot](route-server-shadow-pilot.md) | A standing, receive-only comparison beside production, including its mode-specific safety boundary, comparison loop, data return, and teardown | Authoritative service or a decision to cut over |
+| [Route-server migration](route-server-migration.md) | Incumbent concept mapping, a cutover-oriented shadow trial, readiness gates, cutover, and rollback | A long-running evaluation with no planned authority transfer |
+
+The only genuine overlap is the comparison interval shared by the shadow-pilot
+and migration guides. The shadow-pilot guide owns an ongoing non-authoritative
+evaluation; the migration guide repeats the comparison only as a gate on a
+planned cutover. The three provisioning guides can look similar because each
+produces a route-server configuration, but their input authority is mutually
+exclusive: hand-maintained files, ARouteServer, or IXP Manager.
+
 ## IXP provisioning: three modes
 
 An exchange provisions a rustbgpd route server in exactly one of three

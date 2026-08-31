@@ -8,6 +8,18 @@ guides** to get a task done, **reference** to look something up, and
 **explanation** to understand why. Every file in `docs/` is indexed
 below under its primary bucket.
 
+## Start with your task
+
+| I want to… | Read this first |
+|------------|-----------------|
+| Run rustbgpd for the first time | [Quickstart](QUICKSTART.md) |
+| Choose and deploy a complete topology | [Scenario cookbook](cookbook/README.md) |
+| Operate, reload, upgrade, or debug a daemon | [Operations](OPERATIONS.md) |
+| Explain why a route was selected, rejected, or advertised | [Route explainability](explain.md) |
+| Automate rustbgpd through gRPC | [API reference](API.md) |
+| Evaluate support boundaries and non-goals | [Limitations](LIMITATIONS.md) |
+| Audit the evidence behind a claim | [Receipts index](RECEIPTS.md) |
+
 ## Document classes
 
 The label immediately below a page title distinguishes maintained guidance
