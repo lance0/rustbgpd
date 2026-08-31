@@ -182,11 +182,15 @@ class Observer:
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, receive_bytes)
         self.socket.bind((0, RTMGRP_NEIGH))
 
+    def ready(self, timeout_seconds: float = 0.0) -> bool:
+        readable, _, _ = select.select(
+            [self.socket], [], [], max(0.0, timeout_seconds)
+        )
+        return bool(readable)
+
     def receive(self, timeout_seconds: float | None = None) -> list[Event]:
-        if timeout_seconds is not None:
-            readable, _, _ = select.select([self.socket], [], [], max(0.0, timeout_seconds))
-            if not readable:
-                return []
+        if timeout_seconds is not None and not self.ready(timeout_seconds):
+            return []
         try:
             data, _ancillary, flags, address = self.socket.recvmsg(65536)
         except OSError as exc:
@@ -565,6 +569,14 @@ def _command(args: list[str], *, input_text: str | None = None) -> str:
     return result.stdout
 
 
+def _ifindex(name: str) -> int:
+    path = Path("/sys/class/net") / name / "ifindex"
+    try:
+        return int(path.read_text(encoding="ascii").strip())
+    except (OSError, ValueError) as exc:
+        raise MeasurementError(f"cannot read interface index for {name}: {exc}") from exc
+
+
 class TrafficTopology:
     """One disposable bridge namespace with fixed VLAN-specific peer ports."""
 
@@ -680,16 +692,13 @@ class TrafficTopology:
                 args.append("nodad")
             _command(args)
         self._port_ifindexes = {
-            vlan: [
-                int(_command(["cat", f"/sys/class/net/{name}/ifindex"]).strip())
-                for name in names
-            ]
+            vlan: [_ifindex(name) for name in names]
             for vlan, names in self.host_ports.items()
         }
         return self
 
     def ifindexes(self) -> tuple[int, dict[str, list[int]]]:
-        bridge = int(_command(["cat", f"/sys/class/net/{self.bridge}/ifindex"]).strip())
+        bridge = _ifindex(self.bridge)
         return bridge, {key: list(value) for key, value in self._port_ifindexes.items()}
 
     def prepare_rows(self, rows: list[dict[str, object]]) -> None:
@@ -826,11 +835,8 @@ def _collect_batch(
 
 
 def _drain_ready(observer: Observer, pairer: Pairer) -> None:
-    while True:
-        events = observer.receive(0)
-        if not events:
-            return
-        for event in events:
+    while observer.ready():
+        for event in observer.receive():
             pairer.add(event)
 
 

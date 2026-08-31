@@ -227,6 +227,30 @@ class PairingTests(unittest.TestCase):
         self.assertEqual(row["duplicate_fdb"], 0)
         self.assertEqual((row["late_neighbor"], row["late_fdb"]), (1, 1))
 
+    def test_ready_drain_continues_after_an_irrelevant_datagram(self):
+        pairer = MOD.Pairer(self.expected)
+        neighbor = self.event(
+            socket.AF_INET,
+            120,
+            dst="192.0.2.1",
+            lladdr="02:00:00:00:00:01",
+        )
+
+        class ObserverFixture:
+            def __init__(self):
+                self.batches = [[], [neighbor]]
+
+            def ready(self):
+                return bool(self.batches)
+
+            def receive(self):
+                return self.batches.pop(0)
+
+        observer = ObserverFixture()
+        MOD._drain_ready(observer, pairer)
+        self.assertEqual(len(pairer.sides["s1"]["neighbor"]), 1)
+        self.assertEqual(observer.batches, [])
+
     def test_report_is_descriptive_split_by_family_and_timestamp_zero_is_present(self):
         pairer = MOD.Pairer(self.expected)
         pairer.add(
