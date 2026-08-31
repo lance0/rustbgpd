@@ -368,8 +368,8 @@ def verify_source_contract(repo: Path, runner: Path | None = None, guest: Path |
     command = re.compile(r"^\s*(sudo|docker|curl|wget)\b", re.MULTILINE)
     require(command.search(runner_text) is None, "runner gained a forbidden host command")
     require(command.search(guest_text) is None, "guest gained a forbidden command")
-    require(skew_text.count("self.socket.bind((0, RTMGRP_NEIGH))") == 1, "collector socket binding changed")
-    for forbidden in ("bridge fdb add", "bridge fdb replace", "ip neigh add", "ip neigh replace"):
+    require(skew_text.count("netlink.bind((0, RTMGRP_NEIGH))") == 1, "collector socket binding changed")
+    for forbidden in ("NETLINK_NO_ENOBUFS", "bridge fdb add", "bridge fdb replace", "ip neigh add", "ip neigh replace"):
         require(forbidden not in skew_text, f"collector gained a synthetic measured stimulus: {forbidden}")
 
 
@@ -625,6 +625,7 @@ def verify_skew_receipt(root: Path) -> str:
             "acceptance",
             "active_limit",
             "censor_seconds",
+            "observer",
             "planned",
             "profile",
             "schema",
@@ -633,10 +634,53 @@ def verify_skew_receipt(root: Path) -> str:
         },
         "run.json shape mismatch",
     )
-    require(run["schema"] == 1 and run["profile"] in {"serial-1", "burst-8", "burst-32"}, "bad campaign identity")
-    require(run["active_limit"] == {"serial-1": 1, "burst-8": 8, "burst-32": 32}[run["profile"]], "profile concurrency mismatch")
-    require(run["active_limit"] <= 32 and run["censor_seconds"] == 5 and run["wall_seconds"] == 1200, "campaign bounds mismatch")
-    require(run["acceptance"] is None, "campaign must remain descriptive without external acceptance inputs")
+    require(
+        run["schema"] == 2 and run["profile"] in {"serial-1", "burst-8", "burst-32"},
+        "bad campaign identity",
+    )
+    require(
+        run["active_limit"] == {"serial-1": 1, "burst-8": 8, "burst-32": 32}[run["profile"]],
+        "profile concurrency mismatch",
+    )
+    require(
+        run["active_limit"] <= 32 and run["censor_seconds"] == 5 and run["wall_seconds"] == 1200,
+        "campaign bounds mismatch",
+    )
+    require(
+        run["acceptance"] is None,
+        "campaign must remain descriptive without external acceptance inputs",
+    )
+    observer = run["observer"]
+    require(isinstance(observer, dict), "campaign observer provenance must be an object")
+    exact_keys(
+        observer,
+        {
+            "post_freeze_retired_neighbors_max",
+            "so_rcvbuf_effective_bytes",
+            "so_rcvbuf_forced",
+            "so_rcvbuf_requested_bytes",
+        },
+        "campaign observer provenance",
+    )
+    requested = observer["so_rcvbuf_requested_bytes"]
+    effective = observer["so_rcvbuf_effective_bytes"]
+    require(
+        type(requested) is int and requested == module.REQUESTED_RECEIVE_BYTES,
+        "campaign receive-buffer request mismatch",
+    )
+    require(
+        type(effective) is int and effective >= requested * module.LINUX_RCVBUF_ACCOUNTING,
+        "campaign effective receive capacity is undersized",
+    )
+    require(
+        type(observer["so_rcvbuf_forced"]) is bool,
+        "campaign receive-buffer force provenance is not boolean",
+    )
+    retired_max = observer["post_freeze_retired_neighbors_max"]
+    require(
+        type(retired_max) is int and retired_max == module.POST_RETIRE_NEIGHBOR_LIMIT == 0,
+        "campaign neighbor-retirement bound mismatch",
+    )
     topology = run["topology"]
     require(isinstance(topology, dict), "campaign topology must be an object")
     exact_keys(topology, {"bridge_ifindex", "port_ifindexes"}, "campaign topology")
@@ -648,8 +692,16 @@ def verify_skew_receipt(root: Path) -> str:
         expected_run = module.deterministic_plan(run["profile"], bridge_ifindex, ports)
     except (RuntimeError, TypeError, ValueError, KeyError) as exc:
         raise VerificationError(f"invalid campaign topology: {exc}") from exc
+    normalized_run = {
+        **run,
+        "observer": {
+            **observer,
+            "so_rcvbuf_effective_bytes": None,
+            "so_rcvbuf_forced": None,
+        },
+    }
     require(
-        same_typed_value(run, expected_run),
+        same_typed_value(normalized_run, expected_run),
         "run.json is not the exact closed deterministic plan",
     )
     planned = run["planned"]

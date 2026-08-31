@@ -87,18 +87,34 @@ IPv4/IPv6. The profiles release one, eight, or 32 UDP sends together; no more
 than 32 samples are active. Each batch freezes after completion or five
 seconds, and the campaign has a 1,200-second internal wall inside a separate
 1,500-second VM timeout. Late events remain diagnostics and cannot change a
-frozen sample. `raw_bridge_skew.py --plan PROFILE` prints a deterministic
-shape preview with placeholder ifindexes, not an executable receipt.
+frozen sample. After the sender exits, every planned IP in the frozen batch is
+idempotently retired, all resulting notifications are drained, and a `nud all`
+inventory must prove that zero planned neighbors remain before the next batch.
+`raw_bridge_skew.py --plan PROFILE` prints a schema-2 deterministic shape
+preview with placeholder ifindexes and null runtime receive-capacity fields,
+not an executable receipt.
 
 The campaign has no acceptance threshold. Until an external safe window and
 loss rule are predeclared, its output is descriptive and production behavior
 remains deferred. No pinned-image campaign is run by the offline suite.
 
-The decoder uses one `NETLINK_ROUTE` socket bound to the `RTMGRP_NEIGH` bitmask
-4 and rejects receive overflow, truncation, malformed framing, non-kernel
-events, clock regression, and ambiguous identity. IP-neighbor messages are
-paired only through the deterministic expected table; they never infer a VLAN.
-`RTM_DELNEIGH` observations and duplicate or missing sides remain explicit.
+The decoder uses one continuously drained `NETLINK_ROUTE` socket bound to the
+`RTMGRP_NEIGH` bitmask 4. A background receive owner timestamps and parses in
+socket order while only the foreground mutates pairing state. Before binding,
+the collector requests a 4 MiB `SO_RCVBUF`, falls back to
+`SO_RCVBUFFORCE` when the ordinary request is capped, and requires the reported
+Linux capacity to be at least 8 MiB. Requested/effective capacity, force use,
+and the zero planned-neighbor retirement bound are retained in `run.json`.
+Receive overflow, truncation, malformed framing, non-kernel events, clock
+regression, and ambiguous identity remain fatal, including errors observed
+after an apparently complete pair or during synchronized shutdown. IP-neighbor
+messages are paired only through the deterministic expected table; they never
+infer a VLAN. The `recvmsg` sender must always be the kernel and netlink
+sequence must remain zero; Linux's request-correlated `NUD_FAILED` invalidation
+may retain the administrator request's port ID in the message header only when
+it has no LLADDR. `RTM_DELNEIGH` observations with measured identity and
+duplicate or missing sides remain explicit; maintenance deletes without an
+LLADDR are strictly parsed but do not change a frozen sample's diagnostics.
 The three campaign artifacts are staged in a fresh sibling directory, checked
 against a 10 MiB aggregate limit, and atomically published. The outer VM
 receipt verifier recomputes the exact plan and report, hard-requires zero
