@@ -360,7 +360,8 @@ sudo install -m 0755 \
 
 ### Container image
 
-A container image is built on every tagged release and published to
+A container image is built and runtime-verified natively on Linux amd64 and
+arm64 for every tagged release, then published as one two-platform manifest on
 GHCR. Three tag flavors are available per the
 `docker/metadata-action` rules in
 [`.github/workflows/container.yml`](../.github/workflows/container.yml):

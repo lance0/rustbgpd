@@ -723,7 +723,8 @@ Before rolling any versions:
    tag. Then verify both tag-triggered publication workflows pass: **Release
    Binaries** (`release.yml`, including the x86_64 + aarch64 build matrix,
    artifacts, and GitHub Release) and **Container Image** (`container.yml`,
-   including the GHCR push). Both are fail-closed: each gates publication on a
+   including native amd64 + arm64 runtime verification and the GHCR manifest
+   push). Both are fail-closed: each gates publication on a
    `verify-tag-version` job (tag `vX.Y.Z` must equal the workspace
    `[workspace.package]` version) and a `test` job (`cargo test --workspace` on
    the tagged commit). If you tagged a commit without the version bump, the tag
@@ -737,7 +738,12 @@ Before rolling any versions:
      tags via the action's default `latest=auto` flavor)
    These **container-image** tags are emitted **without** the `v` prefix —
    `0.45.0`, not `v0.45.0` (`docker/metadata-action` strips it). The **git tag
-   stays `vX.Y.Z`** (step 8); only the image tag drops the `v`.
+   stays `vX.Y.Z`** (step 8); only the image tag drops the `v`. The container
+   workflow must show both native architecture jobs green and the published
+   manifest must contain exactly `linux/amd64` and `linux/arm64`. When
+   `.github/workflows/container.yml` changes, dispatch it from `main` with
+   `dry_run=true` before the next tag; dispatches build, load, and runtime-check
+   both architectures but cannot authenticate to GHCR or publish.
 11. **Verify release tarballs and packages** under
     [GitHub Releases](https://github.com/lance0/rustbgpd/releases) — each
     tag should publish version-less `rustbgpd-linux-amd64.tar.gz` and

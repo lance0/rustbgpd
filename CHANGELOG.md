@@ -9,6 +9,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Release containers are now built and runtime-verified on native Linux amd64
+  and arm64 runners before a single exact two-platform GHCR manifest is
+  published. A fail-closed dry-run dispatch exercises both native builds
+  without registry authentication or publication.
+
 ### Fixed
 
 - An unexpected exit or panic in the configured RPKI subsystem now triggers

@@ -807,7 +807,10 @@ privileged runner is available.
 ### Supported Platforms
 
 - **v1:** Linux x86_64 and aarch64 are the supported daemon targets.
-- Native daemon/runtime CI is Linux x86_64; aarch64 is cross-built and packaged.
+- Published containers are built and runtime-verified natively on Linux x86_64
+  and aarch64. Broader daemon, interoperability, and privileged CI remains
+  Linux x86_64; packages and tarballs retain their documented cross-build path
+  where applicable.
 - Non-Linux daemon builds are unsupported. See the canonical
   [platform support contract](../SUPPORT.md#platform-support).
 

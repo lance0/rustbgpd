@@ -3,25 +3,28 @@ name: Container Image
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and verify both native images without publishing
+        required: true
+        default: true
+        type: boolean
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
-# Read-only default; `build-and-push` alone adds package publication.
 permissions:
   contents: read
 
 jobs:
   verify-tag-version:
-    # Fail-closed publication gate: the pushed tag `vX.Y.Z` must equal
-    # the workspace `[workspace.package] version` (X.Y.Z). A mismatch
-    # means the tag points at a commit that was never version-bumped
-    # for this release — no image may be published from it.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - name: Assert tag matches workspace version
+        if: github.event_name == 'push'
         run: |
           set -euo pipefail
           tag_version="${GITHUB_REF_NAME#v}"
@@ -30,13 +33,12 @@ jobs:
             echo "::error file=Cargo.toml::tag ${GITHUB_REF_NAME} does not match [workspace.package] version ${manifest_version}; refusing to publish"
             exit 1
           fi
-          echo "tag ${GITHUB_REF_NAME} matches workspace version ${manifest_version}"
+      - name: Confirm dispatch is verification only
+        if: github.event_name == 'workflow_dispatch'
+        run: test "${{ inputs.dry_run }}" = true
 
   test:
-    # Fail-closed publication gate: `build-and-push` `needs:` this, so
-    # the image cannot ship from a tagged commit whose tests did not
-    # run and pass in this exact workflow run.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -49,24 +51,26 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked --workspace
 
-  build-and-push:
+  build:
     needs: [verify-tag-version, test]
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux/amd64
+            artifact: amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            artifact: arm64
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
-
     steps:
       - uses: actions/checkout@v7
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v4
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract version from tag
+      - uses: docker/setup-buildx-action@v4
+      - name: Prepare image metadata
         id: meta
         uses: docker/metadata-action@v6
         with:
@@ -74,27 +78,140 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-
-      - name: Build image for verification
-        # Build (without pushing) into the local image store so artifact
-        # content can be asserted before anything reaches the registry.
-        # The push step below reuses these layers.
+      - name: Build native image for verification
         uses: docker/build-push-action@v7
         with:
           context: .
+          platforms: ${{ matrix.platform }}
           load: true
           tags: rustbgpd:verify
-
-      - name: Assert license files present in image
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: false
+          sbom: false
+      - name: Verify native runtime image
+        env:
+          EXPECTED_PLATFORM: ${{ matrix.platform }}
         run: |
           set -euo pipefail
-          docker run --rm --entrypoint /bin/sh rustbgpd:verify -c \
-            'test -f /LICENSE-MIT && test -f /LICENSE-APACHE'
-
-      - name: Build and push
+          expected_os="${EXPECTED_PLATFORM%/*}"
+          expected_arch="${EXPECTED_PLATFORM#*/}"
+          test "$(docker image inspect rustbgpd:verify --format '{{.Os}}')" = "$expected_os"
+          test "$(docker image inspect rustbgpd:verify --format '{{.Architecture}}')" = "$expected_arch"
+          test "$(docker image inspect rustbgpd:verify --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
+          docker run --rm --entrypoint /bin/sh rustbgpd:verify -c 'test -f /LICENSE-MIT && test -f /LICENSE-APACHE'
+          docker run --rm --entrypoint rustbgpd rustbgpd:verify --version
+          docker run --rm --entrypoint rbgp rustbgpd:verify --version
+          docker run --rm --entrypoint birdwatcher-adapter rustbgpd:verify --help
+      - name: Log in to GitHub Container Registry
+        if: github.event_name == 'push'
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push native image by digest
+        if: github.event_name == 'push'
+        id: push
         uses: docker/build-push-action@v7
         with:
           context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
           labels: ${{ steps.meta.outputs.labels }}
+          provenance: false
+          sbom: false
+      - name: Record native digest
+        if: github.event_name == 'push'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+      - name: Upload native digest
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v7
+        with:
+          name: digest-${{ matrix.artifact }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-manifest:
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download native digests
+        uses: actions/download-artifact@v8
+        with:
+          pattern: digest-*
+          path: /tmp/digests
+          merge-multiple: true
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Extract version tags
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+      - name: Prepare index description
+        env:
+          LABELS: ${{ steps.meta.outputs.labels }}
+        run: |
+          set -euo pipefail
+          test "$(grep -c '^org.opencontainers.image.description=' <<< "$LABELS")" -eq 1
+          description="$(sed -n 's/^org.opencontainers.image.description=//p' <<< "$LABELS")"
+          test -n "$description"
+          echo "INDEX_DESCRIPTION=$description" >> "$GITHUB_ENV"
+      - name: Publish exact two-platform manifest
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          mapfile -t digest_files < <(find /tmp/digests -maxdepth 1 -type f -printf '%f\n' | sort)
+          test "${#digest_files[@]}" -eq 2
+          sources=()
+          for digest in "${digest_files[@]}"; do
+            [[ "$digest" =~ ^[0-9a-f]{64}$ ]]
+            sources+=("${REGISTRY}/${IMAGE_NAME}@sha256:${digest}")
+          done
+          tag_args=()
+          while IFS= read -r tag; do
+            test -n "$tag" && tag_args+=(--tag "$tag")
+          done <<< "$TAGS"
+          test "${#tag_args[@]}" -ge 4
+          test -n "$INDEX_DESCRIPTION"
+          docker buildx imagetools create \
+            --annotation "index:org.opencontainers.image.description=${INDEX_DESCRIPTION}" \
+            "${tag_args[@]}" "${sources[@]}"
+      - name: Verify manifest platforms and tag identity
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          mapfile -t tags < <(printf '%s\n' "$TAGS" | sed '/^$/d')
+          test "${#tags[@]}" -ge 2
+          canonical="$(docker buildx imagetools inspect "${tags[0]}" --format '{{json .Manifest}}' | jq -r '.digest')"
+          [[ "$canonical" =~ ^sha256:[0-9a-f]{64}$ ]]
+          manifest="$(docker buildx imagetools inspect "${tags[0]}" --format '{{json .Manifest}}')"
+          test "$(jq -r '.manifests | length' <<< "$manifest")" -eq 2
+          test "$(jq -r '.annotations["org.opencontainers.image.description"]' <<< "$manifest")" = "$INDEX_DESCRIPTION"
+          platforms="$(jq -r '[.manifests[].platform | (.os + "/" + .architecture)] | sort | join("\n")' <<< "$manifest")"
+          test "$platforms" = $'linux/amd64\nlinux/arm64'
+          for tag in "${tags[@]}"; do
+            digest="$(docker buildx imagetools inspect "$tag" --format '{{json .Manifest}}' | jq -r '.digest')"
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            test "$digest" = "$canonical"
+          done
