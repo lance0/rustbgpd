@@ -1191,7 +1191,7 @@ struct RouteViewArgs {
     prefix: Option<String>,
 
     /// Show longer (more specific) prefixes matching --prefix
-    #[arg(short = 'l', long, requires = "prefix")]
+    #[arg(short = 'l', long)]
     longer: bool,
 
     /// Filter by origin ASN (last ASN in AS_PATH)
@@ -1861,6 +1861,10 @@ fn validate_rib_route_view_action(command: &Command) -> Result<(), CliError> {
             reject_duplicate_route_view_option("--origin-asn", origin_asn, &filters.origin_asn)?;
             reject_duplicate_route_view_option("--limit", limit, &filters.limit)?;
 
+            if filters.longer && prefix.is_none() && filters.prefix.is_none() {
+                return Err(CliError::Argument("--longer requires --prefix".into()));
+            }
+
             let any_limit = limit.is_some() || filters.limit.is_some();
             if route_count_requested(*parent_count, *view_count) && any_limit {
                 return Err(CliError::Argument(
@@ -1900,6 +1904,10 @@ fn validate_rib_route_view_action(command: &Command) -> Result<(), CliError> {
             reject_duplicate_route_view_option("--prefix", prefix, &filters.prefix)?;
             reject_duplicate_route_view_option("--origin-asn", origin_asn, &filters.origin_asn)?;
             reject_duplicate_route_view_option("--limit", limit, &filters.limit)?;
+
+            if filters.longer && prefix.is_none() && filters.prefix.is_none() {
+                return Err(CliError::Argument("--longer requires --prefix".into()));
+            }
 
             let any_limit = limit.is_some() || filters.limit.is_some();
             if route_count_requested(*parent_count, *view_count) && any_limit {
@@ -2760,16 +2768,6 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             large_community,
             limit,
         } => {
-            if limit.is_some()
-                && !matches!(
-                    &action,
-                    None | Some(RibAction::Received { .. } | RibAction::Advertised { .. })
-                )
-            {
-                return Err(CliError::Argument(
-                    "--limit is only valid for best, received, or advertised routes".into(),
-                ));
-            }
             match action {
                 Some(RibAction::Fib {
                     table,
@@ -4946,6 +4944,18 @@ printf '%s\n' "${COMPREPLY[@]}"
                 ..
             } if prefix == "198.51.100.0/24"
         ));
+
+        let compatible_mixed_form = Cli::try_parse_from([
+            "rbgp",
+            "rib",
+            "--prefix",
+            "198.51.100.0/24",
+            "received",
+            "192.0.2.1",
+            "--longer",
+        ])
+        .unwrap();
+        validate_rib_route_view_action(&compatible_mixed_form.command).unwrap();
     }
 
     #[test]
@@ -5029,6 +5039,10 @@ printf '%s\n' "${COMPREPLY[@]}"
                 "--count cannot be combined with --limit",
             ),
             (
+                "rbgp rib received 192.0.2.1 --longer",
+                "--longer requires --prefix",
+            ),
+            (
                 "rbgp rib --limit 10 advertised 192.0.2.1 --count",
                 "--count cannot be combined with --limit",
             ),
@@ -5057,6 +5071,8 @@ printf '%s\n' "${COMPREPLY[@]}"
 
         for args in [
             "rbgp rib --prefix 203.0.113.0/24 received 192.0.2.1",
+            "rbgp rib --prefix 203.0.113.0/24 received 192.0.2.1 --longer",
+            "rbgp rib --prefix 203.0.113.0/24 advertised 192.0.2.1 --longer",
             "rbgp rib received 192.0.2.1 --prefix 203.0.113.0/24 --limit 10",
             "rbgp rib advertised 192.0.2.1 --origin-asn 64496 --limit 10",
         ] {
@@ -5072,6 +5088,10 @@ printf '%s\n' "${COMPREPLY[@]}"
             (
                 "rib --count received 192.0.2.1 --limit 10",
                 "--count cannot be combined with --limit",
+            ),
+            (
+                "rib received 192.0.2.1 --longer",
+                "--longer requires --prefix",
             ),
             (
                 "rib received 192.0.2.1 --rejected --prefix 203.0.113.0/24",
