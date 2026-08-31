@@ -19,7 +19,7 @@ inside_guest() {
         echo "usage: guest-smoke.sh --inside RECEIPT_DIR" >&2
         return 2
     fi
-    local output=$1 before after kernel package_kernel package_iproute
+    local output=$1 before after kernel package_kernel package_iproute campaign
     local ip_path bridge_path ip_hash bridge_hash config_hash ip_version profile
     if [ "${RUSTBGPD_GUEST_SMOKE_TEST_FAIL_AFTER_CREATE:-}" != 1 ]; then
         [ "$(id -u)" -eq 0 ] || { echo "guest smoke must run as root" >&2; return 1; }
@@ -68,6 +68,22 @@ inside_guest() {
     trap - EXIT
     after=$(ip netns list | LC_ALL=C sort)
     [ "$after" = "$before" ] || { echo "guest netns inventory changed" >&2; return 1; }
+
+    campaign=$(python3 -c \
+        'import json; print(json.load(open("/mnt/payload/request.json")).get("raw_bridge_skew", {}).get("profile", ""))')
+    if [ -n "$campaign" ]; then
+        [ -r /mnt/payload/raw_bridge_skew.py ] || {
+            echo "raw bridge skew campaign payload is missing" >&2
+            return 1
+        }
+        python3 /mnt/payload/raw_bridge_skew.py \
+            --campaign "$campaign" --output "$output/skew"
+        after=$(ip netns list | LC_ALL=C sort)
+        [ "$after" = "$before" ] || {
+            echo "raw bridge skew campaign left netns residue" >&2
+            return 1
+        }
+    fi
 
     kernel=$(uname -r)
     [ -r "/boot/config-$kernel" ] || { echo "guest kernel config is unavailable" >&2; return 1; }

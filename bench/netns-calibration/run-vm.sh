@@ -16,15 +16,21 @@ REPO=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 PROFILES="$SCRIPT_DIR/profiles.json"
 VERIFIER="$SCRIPT_DIR/verify-receipt.py"
 GUEST="$SCRIPT_DIR/guest-smoke.sh"
+SKEW="$SCRIPT_DIR/raw_bridge_skew.py"
 # shellcheck disable=SC1091 # REPO is resolved from this tracked script.
 source "$REPO/tests/soak/host-lock.sh"
 # shellcheck disable=SC1091 # REPO is resolved from this tracked script.
 source "$REPO/bench/scale/host-quiet.sh"
 
 usage() {
-    echo "usage: $0 PROFILE PINNED_CLOUD_IMAGE FRESH_RECEIPT_DIR" >&2
+    echo "usage: $0 [--raw-bridge-skew CAMPAIGN] PROFILE PINNED_CLOUD_IMAGE FRESH_RECEIPT_DIR" >&2
 }
 
+CAMPAIGN=''
+if [ "$#" -eq 5 ] && [ "$1" = --raw-bridge-skew ]; then
+    CAMPAIGN=$2
+    shift 2
+fi
 if [ "$#" -ne 3 ]; then
     usage
     exit 2
@@ -39,6 +45,10 @@ EXPECTED_IMAGE_SHA=${PROFILE_FIELDS[0]}
 EXPECTED_IMAGE_URL=${PROFILE_FIELDS[1]}
 QEMU_BIN=${PROFILE_FIELDS[2]}
 CLOUD_BIN=${PROFILE_FIELDS[3]}
+CAMPAIGN_TIMEOUT_SECONDS=''
+if [ -n "$CAMPAIGN" ]; then
+    CAMPAIGN_TIMEOUT_SECONDS=$(python3 "$VERIFIER" skew-select "$PROFILES" "$CAMPAIGN")
+fi
 
 if [ ! -f "$IMAGE" ] || [ -L "$IMAGE" ] || [ ! -r "$IMAGE" ]; then
     echo "pinned cloud image must be a readable regular file: $IMAGE" >&2
@@ -161,10 +171,11 @@ fi
 PAYLOAD_DIR="$TMP_DIR/payload"
 mkdir -m 700 -- "$PAYLOAD_DIR"
 python3 - "$REPO" "$PROFILE" "$EXPECTED_IMAGE_URL" "$EXPECTED_IMAGE_SHA" \
-    "$GIT_COMMIT" "$ORIGIN_MAIN" "$GIT_STATUS_SHA" "$OUTPUT/request.json" <<'PY'
+    "$GIT_COMMIT" "$ORIGIN_MAIN" "$GIT_STATUS_SHA" "$CAMPAIGN" \
+    "$OUTPUT/request.json" <<'PY'
 import hashlib, json, pathlib, sys
 repo = pathlib.Path(sys.argv[1])
-profile, image_url, image_sha, commit, origin_main, status_sha, output = sys.argv[2:]
+profile, image_url, image_sha, commit, origin_main, status_sha, campaign, output = sys.argv[2:]
 paths = {
     "guest": "bench/netns-calibration/guest-smoke.sh",
     "host_lock": "tests/soak/host-lock.sh",
@@ -173,6 +184,8 @@ paths = {
     "runner": "bench/netns-calibration/run-vm.sh",
     "verifier": "bench/netns-calibration/verify-receipt.py",
 }
+if campaign:
+    paths["raw_bridge_skew"] = "bench/netns-calibration/raw_bridge_skew.py"
 payload = {
     "git": {"commit": commit, "dirty": False, "origin_main": origin_main, "status_sha256": status_sha},
     "image": {"sha256": image_sha, "url": image_url},
@@ -180,9 +193,14 @@ payload = {
     "schema": 1,
     "sources": {name: hashlib.sha256((repo / path).read_bytes()).hexdigest() for name, path in paths.items()},
 }
+if campaign:
+    payload["raw_bridge_skew"] = {"profile": campaign}
 pathlib.Path(output).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 PY
 cp -- "$PROFILES" "$GUEST" "$OUTPUT/request.json" "$PAYLOAD_DIR/"
+if [ -n "$CAMPAIGN" ]; then
+    cp -- "$SKEW" "$PAYLOAD_DIR/"
+fi
 chmod 500 "$PAYLOAD_DIR/guest-smoke.sh"
 chmod 400 "$PAYLOAD_DIR/profiles.json" "$PAYLOAD_DIR/request.json"
 
@@ -267,6 +285,9 @@ mapfile -d '' -t QEMU_COMMAND <"$TMP_DIR/qemu-argv.nul"
     exit 1
 }
 TIMEOUT_SECONDS=300
+if [ -n "$CAMPAIGN" ]; then
+    TIMEOUT_SECONDS=$CAMPAIGN_TIMEOUT_SECONDS
+fi
 setsid timeout --signal=TERM --kill-after=10s "${TIMEOUT_SECONDS}s" \
     "${QEMU_COMMAND[@]}" >"$OUTPUT/console.log" 2>&1 &
 QEMU_GROUP_PID=$!

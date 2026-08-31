@@ -1,8 +1,8 @@
 # Pinned-kernel netns calibration
 
-This directory provides the offline-verifiable VM boundary required before a
-timing-sensitive Linux netlink receipt can compare kernels. It does not contain
-the raw-bridge MAC+IP skew campaign itself and does not change production
+This directory provides the offline-verifiable VM boundary and the
+standard-library raw `RTMGRP_NEIGH` decoder required before a timing-sensitive
+Linux netlink receipt can compare kernels. It does not change production
 behavior.
 
 The ordinary Docker netns harness isolates privileged tests and cleans their
@@ -67,11 +67,60 @@ bench/netns-calibration/run-vm.sh \
 ```
 
 Repeat with `current-noble-6.8` and its pinned image. A successful environment
-smoke proves only that the version-pinned privileged netns boundary works. The
-later raw-bridge calibration must separately predeclare workload parameters,
-timestamp decoded messages on the single `RTNLGRP_NEIGH` stream, run real
-ARP/ND under serial and burst profiles, and publish its own bounded
-`run.json`/`samples.csv`/`report.json` receipt.
+smoke proves only that the version-pinned privileged netns boundary works.
+
+The ordinary three-argument invocation and its 300-second timeout remain the
+default. The raw-event campaign is a separate explicit mode:
+
+```bash
+bench/netns-calibration/run-vm.sh \
+  --raw-bridge-skew burst-8 \
+  baseline-jammy-5.15 \
+  /path/to/ubuntu-22.04-server-cloudimg-amd64.img \
+  /path/to/fresh-baseline-campaign-receipt
+```
+
+The other campaign profiles are `serial-1` and `burst-32`. Each materializes
+an exact 4,000-sample table with the guest's real bridge and port ifindexes
+before the first send. Samples are evenly divided across VLANs 10/20 and
+IPv4/IPv6. The profiles release one, eight, or 32 UDP sends together; no more
+than 32 samples are active. Each batch freezes after completion or five
+seconds, and the campaign has a 1,200-second internal wall inside a separate
+1,500-second VM timeout. Late events remain diagnostics and cannot change a
+frozen sample. `raw_bridge_skew.py --plan PROFILE` prints a deterministic
+shape preview with placeholder ifindexes, not an executable receipt.
+
+The campaign has no acceptance threshold. Until an external safe window and
+loss rule are predeclared, its output is descriptive and production behavior
+remains deferred. No pinned-image campaign is run by the offline suite.
+
+The decoder uses one `NETLINK_ROUTE` socket bound to the `RTMGRP_NEIGH` bitmask
+4 and rejects receive overflow, truncation, malformed framing, non-kernel
+events, clock regression, and ambiguous identity. IP-neighbor messages are
+paired only through the deterministic expected table; they never infer a VLAN.
+`RTM_DELNEIGH` observations and duplicate or missing sides remain explicit.
+The three campaign artifacts are staged in a fresh sibling directory, checked
+against a 10 MiB aggregate limit, and atomically published. The outer VM
+receipt verifier recomputes the exact plan and report, hard-requires zero
+wrong-tenant and ambiguous events, and seals the nested artifacts in the
+receipt manifest.
+
+For a disposable parser/pairing proof on the current host kernel, build the
+repository's netns test image and run the two-sample smoke. It sends real IPv4
+ARP and IPv6 ND traffic across VLANs 10 and 20, requires both FDB/neighbor
+pairs, and verifies zero wrong identity, ambiguity, and cleanup residue:
+
+```bash
+docker build -t rustbgpd-netns-tests:latest \
+  crates/evpn-linux/tests/docker
+docker run --rm --network none \
+  --cap-add NET_ADMIN --cap-add SYS_ADMIN \
+  --security-opt apparmor=unconfined \
+  -v "$PWD/bench/netns-calibration/raw_bridge_skew.py:/raw_bridge_skew.py:ro" \
+  rustbgpd-netns-tests:latest \
+  python3 /raw_bridge_skew.py \
+    --current-kernel-smoke --output /tmp/raw-bridge-skew-smoke
+```
 
 ## Offline verification
 
