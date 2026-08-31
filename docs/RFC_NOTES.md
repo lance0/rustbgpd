@@ -1,5 +1,7 @@
 # RFC Implementation Notes
 
+> **Document class: REFERENCE.** This maintained page defines a contract, specification, or reusable procedure; follow any stated version scope.
+
 Notes keyed to RFC sections. Documents interpretations, deviations, and
 implementation choices made during development.
 

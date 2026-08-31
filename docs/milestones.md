@@ -1,5 +1,7 @@
 # Milestone History (M0-M9 plus later interop milestones)
 
+> **Document class: HISTORICAL.** This page preserves a dated decision or observation; its age and scope are part of the evidence.
+
 Archived build orders, exit criteria, and design choices from the
 initial development phase. For the current feature roadmap, see
 [ROADMAP.md](../ROADMAP.md). For a full changelog, see

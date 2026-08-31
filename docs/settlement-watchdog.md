@@ -1,5 +1,7 @@
 # The Settlement Watchdog
 
+> **Document class: CURRENT.** This maintained page reflects the project as it is now; dated sections remain bounded to their stated scope.
+
 Operator reference and runbook for the runtime-config settlement
 watchdog: the mechanism by which the daemon deliberately exits with
 status 70 when it cannot prove that a persisted config mutation

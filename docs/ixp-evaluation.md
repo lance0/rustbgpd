@@ -1,5 +1,7 @@
 # IXP route-server evaluation matrix
 
+> **Document class: CURRENT.** This maintained page reflects the project as it is now; dated sections remain bounded to their stated scope.
+
 One page for an exchange evaluating rustbgpd as a route server: the
 capabilities IXP evaluations actually score, each with its current
 status and a link to the config, cookbook, ADR, or measurement receipt

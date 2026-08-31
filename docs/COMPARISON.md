@@ -1,5 +1,7 @@
 # BGP Implementation Comparison
 
+> **Document class: CURRENT.** This maintained page reflects the project as it is now; dated sections remain bounded to their stated scope.
+
 A feature comparison of open-source BGP daemon implementations.
 
 See [CHANGELOG.md](../CHANGELOG.md) for per-release feature deltas and

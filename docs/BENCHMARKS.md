@@ -1,5 +1,7 @@
 # Benchmarks
 
+> **Document class: CURRENT.** This maintained page reflects the project as it is now; dated sections remain bounded to their stated scope.
+
 Micro-benchmarks using [Criterion](https://github.com/bheisler/criterion.rs) 0.8,
 compiled with `--release` (LTO, codegen-units=1). Numbers below are meant
 for relative comparison and regression tracking, not absolute guarantees.

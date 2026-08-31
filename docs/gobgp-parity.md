@@ -1,5 +1,7 @@
 # rustbgpd vs GoBGP Feature Parity
 
+> **Document class: CURRENT.** This maintained page reflects the project as it is now; dated sections remain bounded to their stated scope.
+
 For release-by-release feature history, see [CHANGELOG.md](../CHANGELOG.md).
 
 This document is the canonical source for GoBGP capability claims in the

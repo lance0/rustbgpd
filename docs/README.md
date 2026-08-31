@@ -1,10 +1,29 @@
 # rustbgpd documentation
 
+> **Document class: CURRENT.** This maintained page reflects the project as it is now; dated sections remain bounded to their stated scope.
+
 The docs are organized by what you are trying to do
 ([Diátaxis](https://diataxis.fr/)): **tutorials** to learn, **how-to
 guides** to get a task done, **reference** to look something up, and
 **explanation** to understand why. Every file in `docs/` is indexed
 below under its primary bucket.
+
+## Document classes
+
+The label immediately below a page title distinguishes maintained guidance
+from dated evidence:
+
+| Class | Meaning |
+|-------|---------|
+| **CURRENT** | Maintained guidance that reflects the system as it is now |
+| **REFERENCE** | A maintained contract, specification, or reusable procedure |
+| **HISTORICAL** | A dated decision or observation whose original scope is part of the evidence |
+
+Immutable record directories use the same classes by convention so their
+evidence does not need to be rewritten. ADR bodies and performance receipts
+are **HISTORICAL**; their maintained indexes are **CURRENT**. Under
+[`soaks/`](soaks/README.md), completed receipts are **HISTORICAL**, while the
+acceptance gates and receipt template are **REFERENCE**.
 
 <!-- Structure note: these four buckets are the intended top-level
      navigation for the future docs site (PR #704) — keep them in
@@ -83,7 +102,7 @@ Start here if you have never run the daemon.
 | [RECEIPTS.md](RECEIPTS.md) | Index of labs and measurements backing every wire-behavior and performance claim |
 | [BENCHMARKS.md](BENCHMARKS.md) | Criterion micro-benchmarks and cross-stack perf snapshots |
 | [INTEROP.md](INTEROP.md) | Interop validation results against FRR, GoBGP, BIRD, and vendor NOSes |
-| [soaks/](soaks/) | Archived long-run soak postmortems (raw artifacts under [artifacts/](artifacts/)) |
+| [soaks/](soaks/README.md) | Archived long-run soak postmortems and the maintained procedures that govern them (raw artifacts under [artifacts/](artifacts/)) |
 | [perf/](perf/) | Scale receipts (1000-peer / VPN convergence measurements) |
 | [evpn-enablement.md](evpn-enablement.md) | Gate-by-gate EVPN roadmap and its history |
 | [milestones.md](milestones.md) | Archived build orders and exit criteria from initial development |

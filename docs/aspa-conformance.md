@@ -1,5 +1,7 @@
 # ASPA conformance and route-server positioning
 
+> **Document class: REFERENCE.** This maintained page defines a contract, specification, or reusable procedure; follow any stated version scope.
+
 Per-procedure conformance of rustbgpd's ASPA implementation against
 [draft-ietf-sidrops-aspa-verification-27](https://datatracker.ietf.org/doc/html/draft-ietf-sidrops-aspa-verification-27),
 with the RTR transport rows against draft-ietf-sidrops-8210bis. Every

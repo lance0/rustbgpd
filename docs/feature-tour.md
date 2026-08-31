@@ -1,5 +1,7 @@
 # Feature tour
 
+> **Document class: CURRENT.** This maintained page reflects the project as it is now; dated sections remain bounded to their stated scope.
+
 The full-depth version of the README's highlights: what each headline
 feature actually contains, with the receipts and reference pages behind
 it. If you want the one-screen version, read the

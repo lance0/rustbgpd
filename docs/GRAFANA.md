@@ -1,5 +1,7 @@
 # Grafana Dashboard
 
+> **Document class: CURRENT.** This maintained page reflects the project as it is now; dated sections remain bounded to their stated scope.
+
 A ready-to-import overview dashboard lives at
 [`grafana/rustbgpd-overview.json`](grafana/rustbgpd-overview.json)
 (uid `rustbgpd-overview`). It covers session health (including graceful

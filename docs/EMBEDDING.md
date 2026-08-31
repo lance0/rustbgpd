@@ -1,5 +1,7 @@
 # Embedding rustbgpd — the Rust BGP library map
 
+> **Document class: REFERENCE.** This maintained page defines a contract, specification, or reusable procedure; follow any stated version scope.
+
 rustbgpd is not one crate; it is a layered workspace. The bottom layers are
 packaged as daemon-independent crates: a pure BGP message codec
 (`rustbgpd-wire`), a pure RFC 4271 state machine (`rustbgpd-fsm`), and RPKI/RTR

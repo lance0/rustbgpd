@@ -1,5 +1,7 @@
 # Kernel Dataplane Runner
 
+> **Document class: CURRENT.** This maintained page reflects the project as it is now; dated sections remain bounded to their stated scope.
+
 The `Kernel Dataplane` workflow (`.github/workflows/kernel-dataplane.yml`) runs
 the privileged Linux dataplane interop suite on **GitHub-hosted `ubuntu-latest`**
 runners. A spike on 2026-05-25 confirmed the hosted Azure-kernel VM provides

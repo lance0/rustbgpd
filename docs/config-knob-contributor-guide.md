@@ -1,5 +1,7 @@
 # Config Knob Contributor Guide
 
+> **Document class: CURRENT.** This maintained page reflects the project as it is now; dated sections remain bounded to their stated scope.
+
 Adding a config knob is a user-visible contract. The parser accepting TOML is
 only the first step; the reload class, persistence behavior, docs, and tests must
 move with it.
