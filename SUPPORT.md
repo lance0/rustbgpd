@@ -20,11 +20,12 @@ Linux aarch64. Published binaries use a glibc 2.31 baseline; see the
 and Windows daemon builds are unsupported: they may not compile or run, and
 there is no degraded daemon mode for those systems.
 
-Daemon runtime, interoperability, and privileged CI run on Linux x86_64.
-Linux aarch64 is cross-built and release-packaged, but is not natively
-executed in CI. Pure, kernel-independent crates and transport or socket
-abstractions with non-Linux fallbacks may remain portable and testable; that
-does not expand daemon platform support.
+Published release containers are built and runtime-verified natively on Linux
+x86_64 and Linux aarch64. Broader daemon, interoperability, and privileged CI
+remains Linux x86_64; release packages and tarballs use their documented
+cross-build path where applicable. Pure, kernel-independent crates and
+transport or socket abstractions with non-Linux fallbacks may remain portable
+and testable; that does not expand daemon platform support.
 
 RFC 8212 enforcement remains opt-in under
 [ADR-0112](docs/adr/0112-rfc-8212-ebgp-requires-policy.md).
