@@ -1332,11 +1332,24 @@ an ADR "Deferred" section that points back here. Tightened, not dropped.
   ADR-0065's netns spike confirmed this is not achievable with stateless
   `tc-flower` on the standard bridged-VXLAN softswitch — the overlay source is
   not visible to `tc` at the VXLAN ingress hook (the FRR #15400 failure mode) —
-  so it is ASIC/offload-dependent. The only remaining softswitch avenue
-  (underlay-ingress eBPF with per-MAC state, or `collect_metadata` VXLAN) is a
-  separate ADR if demand appears. The shipped multi-homing enforcement is
-  role-based DF/non-DF BUM suppression + aliasing ECMP, not source-conditioned
-  local-bias.
+  so that stateless `tc-flower` approach remains ASIC/offload-dependent. A
+  bounded underlay-ingress TC-BPF lab on
+  Linux 6.17.0-35-generic proves that the softswitch plumbing is possible for
+  fixed fixture traffic: a bounds-checked IPv4/UDP/VXLAN parser can identify an
+  ES-peer source and VNI, OR a fixture-reserved `skb->mark` bit before
+  decapsulation, and drive a masked CE-egress drop. The tracked reproducer is
+  `crates/evpn-linux/tests/scripts/netns-localbias-underlay-mark-spike.sh`.
+  Exact mark/drop deltas were 8/8 for broadcast, 5/5 for multicast, and 5/5 for
+  the fixed unknown-unicast MAC; fixed known unicast, non-ES traffic, and
+  non-VXLAN traffic remained unmarked. An earlier removal probe showed ES-peer
+  and non-ES broadcast forwarding resume after removing the functional
+  BPF/mark/drop chain. This establishes no kernel-version floor and makes no
+  timing claim. More importantly, the hard-coded known/unknown fixture proves
+  only parser/mark/drop plumbing: arbitrary unknown-unicast classification
+  still requires dynamic MAC state. Production work remains a separate ADR
+  covering that state, lifecycle, mark ownership, and compatibility. The
+  shipped multi-homing enforcement is still role-based DF/non-DF BUM
+  suppression + aliasing ECMP, not source-conditioned local-bias.
 
 - **RFC 9234 (BGP Roles + OTC) follow-ups** *(ADR-0071 counterpart).* None
   blocking — v1 ships static eBGP Role config + IPv4/IPv6 unicast OTC, proven by
