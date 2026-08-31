@@ -324,20 +324,81 @@ fn establish_bgp_and_observe_shutdown(port: u16) {
     }
 }
 
-fn rbgp(grpc_addr: &str, args: &[&str]) -> std::process::Output {
+fn rbgp_command(grpc_addr: &str) -> Command {
     if let Ok(path) = std::env::var("CARGO_BIN_EXE_rbgp") {
         let mut cmd = Command::new(path);
-        cmd.arg("--addr").arg(grpc_addr).args(args).output()
+        cmd.arg("--addr").arg(grpc_addr);
+        cmd
     } else {
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
         let mut cmd = Command::new(cargo);
         cmd.args(["run", "--quiet", "-p", "rustbgpctl", "--bin", "rbgp", "--"])
             .arg("--addr")
-            .arg(grpc_addr)
-            .args(args)
-            .output()
+            .arg(grpc_addr);
+        cmd
     }
-    .expect("failed to spawn rbgp subprocess")
+}
+
+fn rbgp(grpc_addr: &str, args: &[&str]) -> std::process::Output {
+    rbgp_command(grpc_addr)
+        .args(args)
+        .output()
+        .expect("failed to spawn rbgp subprocess")
+}
+
+fn spawn_rbgp_watch(dir: &Path, grpc_addr: &str) -> Daemon {
+    let stdout_path = dir.join("rbgp-watch.stdout.log");
+    let stderr_path = dir.join("rbgp-watch.stderr.log");
+    Daemon {
+        child: rbgp_command(grpc_addr)
+            .arg("watch")
+            .stdout(Stdio::from(
+                std::fs::File::create(&stdout_path).expect("watcher stdout log"),
+            ))
+            .stderr(Stdio::from(
+                std::fs::File::create(&stderr_path).expect("watcher stderr log"),
+            ))
+            .spawn()
+            .expect("spawn rbgp watch"),
+        stdout_path,
+        stderr_path,
+    }
+}
+
+fn wait_for_route_watcher_subscriber(daemon: &mut Daemon, watcher: &mut Daemon, grpc_addr: &str) {
+    let expected = "bgp_event_stream_subscribers{service=\"watch_events\",source=\"route\"} 1";
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let mut last_metrics = String::new();
+    while Instant::now() < deadline {
+        let output = rbgp(grpc_addr, &["metrics"]);
+        last_metrics = format!(
+            "status: {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if output.status.success() && String::from_utf8_lossy(&output.stdout).contains(expected) {
+            return;
+        }
+        if let Ok(Some(status)) = daemon.child.try_wait() {
+            panic!(
+                "rustbgpd exited before the route watcher subscribed: {status}\n{}",
+                daemon.logs()
+            );
+        }
+        if let Ok(Some(status)) = watcher.child.try_wait() {
+            panic!(
+                "rbgp watch exited before its route subscription became visible: {status}\n{}",
+                watcher.logs()
+            );
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!(
+        "route watcher subscription never became visible\nlast metrics:\n{last_metrics}\n{}\n{}",
+        daemon.logs(),
+        watcher.logs()
+    );
 }
 
 fn run_bgp_ingress_fault(mode: &str, connect: bool) -> (ExitStatus, String, Vec<String>) {
@@ -765,6 +826,60 @@ fn shutdown_rpc_exits_zero_with_peer_manager_supervised() {
     assert!(
         !logs.contains(hidden),
         "unknown environment value leaked: {logs}"
+    );
+}
+
+#[test]
+fn shutdown_rpc_with_active_watch_cleans_up_uds() {
+    let temp = private_tempdir();
+    let config_path = write_config(temp.path(), DAEMON_CHOOSES, DAEMON_CHOOSES);
+    let mut daemon = spawn_daemon(temp.path(), &config_path);
+    wait_for_bound_grpc_port(&mut daemon);
+
+    let socket_path = temp.path().join("runtime/grpc.sock");
+    let socket_deadline = Instant::now() + Duration::from_secs(120);
+    while !socket_path.exists() {
+        if let Ok(Some(status)) = daemon.child.try_wait() {
+            panic!(
+                "rustbgpd exited before binding its UDS listener: {status}\n{}",
+                daemon.logs()
+            );
+        }
+        assert!(
+            Instant::now() < socket_deadline,
+            "gRPC UDS listener never appeared\n{}",
+            daemon.logs()
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+    let grpc_addr = format!("unix://{}", socket_path.display());
+    let mut watcher = spawn_rbgp_watch(temp.path(), &grpc_addr);
+    wait_for_route_watcher_subscriber(&mut daemon, &mut watcher, &grpc_addr);
+
+    let output = rbgp(
+        &grpc_addr,
+        &["shutdown", "--reason", "active watch cleanup test"],
+    );
+    assert!(
+        output.status.success(),
+        "Shutdown RPC failed\nstdout:\n{}\nstderr:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        daemon.logs()
+    );
+
+    let status = daemon.wait_within(Duration::from_secs(120));
+    let logs = daemon.logs();
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "Shutdown RPC with an active watcher must exit 0, got {status}\n{logs}"
+    );
+    let _watcher_status = watcher.wait_within(Duration::from_secs(30));
+    assert!(
+        !socket_path.exists(),
+        "gRPC UDS socket survived coordinated shutdown with an active watcher\n{logs}\n{}",
+        watcher.logs()
     );
 }
 
