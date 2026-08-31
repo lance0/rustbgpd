@@ -40,8 +40,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > **Release framing — broader control surfaces, faster route-server release.**
 > v0.68 closes the externally reported gRPC address-family gap: neighbor and
 > peer-group mutations now accept every family the configuration file supports.
-> In the fully reusable homogeneous-wire-profile receipt, releasing 400,400
-> routes across 700 peers drops from a 53.613 s median to 0.797 s (about 67x);
+> In the [fully reusable homogeneous-wire-profile receipt](docs/perf/artifacts/selection-deferral-release-v0680-2026-08/README.md),
+> releasing 400,400 routes across 700 peers drops from a 53.613 s median to
+> 0.811 s (about 66x);
 > mixed profiles form separate cohorts or keep the exact per-member fallback.
 > IPv6 link-local BFD, RPKI cache and validation APIs, structured NOTIFICATION
 > telemetry, broader pinned interoperability, `rustbgpd-wire` 0.19.0,
@@ -452,11 +453,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Eligible homogeneous route-server update groups now share unicast staging,
   encoding, and exact-probe work, including safe own-source exclusion and
-  group-uniform OTC handling. In the fully reusable homogeneous-wire-profile
-  700-peer / 400,400-route receipt, median release time fell from 53.613 s to
-  0.797 s (about 67x). Mixed wire profiles form separate compatible cohorts;
-  other ineligible cases retain the exact per-member fallback for source
-  flips, lanes, withdrawals, export rejection, and prefix-limit filtering.
+  group-uniform OTC handling. In the [fully reusable homogeneous-wire-profile
+  700-peer / 400,400-route receipt](docs/perf/artifacts/selection-deferral-release-v0680-2026-08/README.md),
+  median release time fell from 53.613 s to 0.811 s (about 66x). Mixed wire
+  profiles form separate compatible cohorts; other ineligible cases retain
+  the exact per-member fallback for source flips, lanes, withdrawals, export
+  rejection, and prefix-limit filtering.
 
 - The IXP comparator refresh now records OpenBGPD 9.2 at 700 clients and
   400,400 routes. Policy delivery improves from the 9.1 refresh's 244–251 s
