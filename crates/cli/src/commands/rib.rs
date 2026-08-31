@@ -29,6 +29,8 @@ pub struct RouteFilterOpts {
     pub origin_asn: Option<u32>,
     pub community: Vec<u32>,
     pub large_community: Vec<String>,
+    /// Maximum rows returned by a bounded single-page query.
+    pub limit: Option<u32>,
 }
 
 /// Parsed general FIB status filter options from CLI flags.
@@ -132,15 +134,26 @@ enum RouteListRpc {
 /// server's per-page cap so the loop takes the fewest round trips.
 const ROUTE_PAGE_SIZE: u32 = 1000;
 
-/// Fetch every page of a route listing. The server bounds each page;
-/// the CLI follows `next_page_token` until the listing completes, so
-/// output is never silently truncated.
-async fn fetch_all_route_pages(
+struct RouteListing {
+    routes: Vec<Route>,
+    total_count: u64,
+    complete: bool,
+    limit: Option<u32>,
+}
+
+/// Fetch a route listing.
+///
+/// Without `limit`, the CLI follows every continuation and preserves the
+/// daemon's fail-closed mutation fence. A bounded query deliberately issues
+/// exactly one RPC: the server caps the requested page at 1000, so the result
+/// can be useful on a churning full table without presenting a torn snapshot.
+async fn fetch_route_listing(
     client: &mut RibClient,
     rpc: &RouteListRpc,
     mut req: ListRoutesRequest,
-) -> Result<Vec<Route>, CliError> {
-    req.page_size = ROUTE_PAGE_SIZE;
+    limit: Option<u32>,
+) -> Result<RouteListing, CliError> {
+    req.page_size = limit.unwrap_or(ROUTE_PAGE_SIZE);
     let mut routes = Vec::new();
     loop {
         let resp = match rpc {
@@ -149,9 +162,16 @@ async fn fetch_all_route_pages(
             RouteListRpc::Advertised => client.list_advertised_routes(req.clone()).await?,
         }
         .into_inner();
+        let total_count = resp.total_count;
         routes.extend(resp.routes);
-        if resp.next_page_token.is_empty() {
-            return Ok(routes);
+        let complete = resp.next_page_token.is_empty();
+        if limit.is_some() || complete {
+            return Ok(RouteListing {
+                routes,
+                total_count,
+                complete,
+                limit,
+            });
         }
         req.page_token = resp.next_page_token;
     }
@@ -378,6 +398,47 @@ fn print_routes(
         println!("No routes");
     } else {
         output::print_route_table(routes, show_age);
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct JsonBoundedRoutes<'a> {
+    routes: JsonRoutes<'a>,
+    returned_count: u64,
+    total_count: u64,
+    complete: bool,
+}
+
+fn print_route_listing(listing: &RouteListing, show_age: bool, json: bool) -> Result<(), CliError> {
+    let Some(limit) = listing.limit else {
+        return print_routes(&listing.routes, show_age, json);
+    };
+
+    if json {
+        return output::print_json_pretty(&JsonBoundedRoutes {
+            routes: JsonRoutes(&listing.routes),
+            returned_count: listing.routes.len() as u64,
+            total_count: listing.total_count,
+            complete: listing.complete,
+        });
+    }
+
+    if listing.routes.is_empty() {
+        println!("No matching routes.");
+        return Ok(());
+    }
+
+    print_routes(&listing.routes, show_age, false)?;
+    if listing.complete {
+        println!("Showing all {} matching routes.", listing.total_count);
+    } else {
+        println!(
+            "Showing first {} of {} matching routes (--limit {}).",
+            listing.routes.len(),
+            listing.total_count,
+            limit
+        );
     }
     Ok(())
 }
@@ -1686,13 +1747,14 @@ pub async fn best(
 ) -> Result<(), CliError> {
     let mut client =
         RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let routes = fetch_all_route_pages(
+    let listing = fetch_route_listing(
         &mut client,
         &RouteListRpc::Best,
         make_route_request(None, family, filters)?,
+        filters.limit,
     )
     .await?;
-    print_routes(&routes, show_age, json)
+    print_route_listing(&listing, show_age, json)
 }
 
 pub async fn count_best(
@@ -1812,16 +1874,17 @@ pub async fn received(
 ) -> Result<(), CliError> {
     let mut client =
         RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let mut routes = fetch_all_route_pages(
+    let mut listing = fetch_route_listing(
         &mut client,
         &RouteListRpc::Received,
         make_route_request(Some(address), family, filters)?,
+        filters.limit,
     )
     .await?;
-    for route in &mut routes {
+    for route in &mut listing.routes {
         restore_matching_scoped_address(Some(address), &mut route.peer_address);
     }
-    print_routes(&routes, show_age, json)
+    print_route_listing(&listing, show_age, json)
 }
 
 pub async fn count_received(
@@ -2002,16 +2065,17 @@ pub async fn advertised(
 ) -> Result<(), CliError> {
     let mut client =
         RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let mut routes = fetch_all_route_pages(
+    let mut listing = fetch_route_listing(
         &mut client,
         &RouteListRpc::Advertised,
         make_route_request(Some(address), family, filters)?,
+        filters.limit,
     )
     .await?;
-    for route in &mut routes {
+    for route in &mut listing.routes {
         restore_matching_scoped_address(Some(address), &mut route.peer_address);
     }
-    print_routes(&routes, show_age, json)
+    print_route_listing(&listing, show_age, json)
 }
 
 pub async fn count_advertised(
@@ -3403,6 +3467,7 @@ mod tests {
             origin_asn: None,
             community: vec![],
             large_community: vec![],
+            limit: None,
         }
     }
 
@@ -3429,6 +3494,7 @@ mod tests {
             origin_asn: Some(64512),
             community: vec![(64512_u32 << 16) | 100],
             large_community: vec!["64512:1:100".to_string()],
+            limit: None,
         }
     }
 
@@ -3668,6 +3734,63 @@ mod tests {
         assert_eq!(requests[0].neighbor_address, "fe80::1");
         assert!(requests[0].page_size > 0, "CLI requests bounded pages");
         assert_eq!(requests[1].page_token, "10.0.0.0/24|192.0.2.1|0");
+    }
+
+    /// A bounded listing never follows a continuation token. This is the
+    /// live-table escape hatch: one server-fenced page with explicit
+    /// completeness, rather than a torn multi-page snapshot.
+    #[tokio::test]
+    async fn received_limit_stops_after_one_page() {
+        let server = spawn_mock_server(None).await;
+        server
+            .state
+            .list_route_pages
+            .lock()
+            .await
+            .push(mock_route_page("10.0.0.0", "poison-if-followed"));
+        let mut filters = no_route_filters();
+        filters.limit = Some(1);
+
+        received(
+            connect(&server.addr, None).await.unwrap(),
+            "192.0.2.1",
+            None,
+            &filters,
+            false,
+            true,
+        )
+        .await
+        .unwrap();
+
+        let requests = server.state.list_route_requests.lock().await;
+        assert_eq!(requests.len(), 1, "bounded query must issue one RPC");
+        assert_eq!(requests[0].page_size, 1);
+        assert!(requests[0].page_token.is_empty());
+    }
+
+    #[test]
+    fn bounded_route_json_exposes_completeness() {
+        let listing = RouteListing {
+            routes: vec![crate::proto::Route {
+                prefix: "10.0.0.0".to_string(),
+                prefix_length: 24,
+                ..Default::default()
+            }],
+            total_count: 42,
+            complete: false,
+            limit: Some(1),
+        };
+        let value = serde_json::to_value(JsonBoundedRoutes {
+            routes: JsonRoutes(&listing.routes),
+            returned_count: listing.routes.len() as u64,
+            total_count: listing.total_count,
+            complete: listing.complete,
+        })
+        .unwrap();
+        assert_eq!(value["returned_count"], 1);
+        assert_eq!(value["total_count"], 42);
+        assert_eq!(value["complete"], false);
+        assert_eq!(value["routes"][0]["prefix"], "10.0.0.0/24");
     }
 
     /// `rbgp best` stops after a single page when the server reports

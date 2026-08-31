@@ -109,11 +109,14 @@ rbgp rib
 rbgp rib --age                              # append original receive age
 rbgp rib --count                            # best-route count only
 rbgp rib received <addr>
+rbgp rib received <addr> --prefix 203.0.113.0/24
+rbgp rib received <addr> --origin-asn 64496 --limit 100
 rbgp rib received <addr> --age
 rbgp rib received <addr> --count
 rbgp rib received <addr> --rejected         # retained rejected routes with reject reasons
 rbgp rib recv <addr>                        # alias
 rbgp rib advertised <addr>
+rbgp rib advertised <addr> --prefix 203.0.113.0/24 --longer
 rbgp rib advertised <addr> --age
 rbgp rib advertised <addr> --count
 rbgp rib sent <addr>                        # alias
@@ -178,6 +181,28 @@ route row, rendering `Total matching routes: N` or `{"total_count":N}` with
 `--json`. A filtered count still scans the matching backend view to compute the
 exact total; `--count` bounds response transfer, not server-side query work. It
 cannot be combined with the rejected-route or explain views.
+
+The accepted-route filters can be placed after `received PEER` or
+`advertised PEER`, where their `--help` pages list them. The older parent form
+(`rbgp rib --prefix CIDR received PEER`) remains accepted for compatibility.
+Filters compose with AND semantics; repeated community filters require every
+specified value.
+
+`--limit N` returns one server-fenced page, with `N` from 1 through the
+server's 1000-row page cap. Human output says whether it is showing the first
+N of the exact matching total. JSON uses
+`{"routes": [...], "returned_count": N, "total_count": T, "complete": false}`.
+This is the bounded inspection path for a live full table. Without `--limit`,
+the CLI still follows every page and fails closed if the table changes; it
+never labels a torn multi-page walk complete.
+
+In JSON route rows, `validation_state` is the route's recorded RPKI
+origin-validation verdict, not an indicator that `[rpki]` is enabled.
+`not_found` means no covering VRP was present when that route was evaluated. A
+daemon with no `[rpki]` sources therefore reports `not_found` for every route;
+with configured and ready sources, the same value is a real uncovered-route
+verdict. Use `rbgp rpki caches` or `rbgp doctor` for validator readiness—the
+route field alone cannot prove it.
 
 The full unary listings (`rib bgpls|vpn|labeled|rtc|blackholes|fib`,
 `flowspec`, `evpn|evpn diagnose`, `topology nodes|links`, `orr`) return the

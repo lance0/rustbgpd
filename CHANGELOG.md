@@ -23,6 +23,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `rbgp rib received` and `rbgp rib advertised` now expose their prefix,
+  longer-prefix, origin-ASN, standard-community, and large-community filters
+  after the route view where operators naturally look for them. A single-page
+  `--limit 1..1000` query reports explicit completeness and remains usable
+  against a churning full table; unbounded walks still fail closed rather than
+  emit a torn snapshot.
+
 - RPKI fail-stop receipts now retain the task class behind a panic even when a
   dependent forwarder returns first. The daemon still performs coordinated
   shutdown and exits 1; ordinary RTR reconnect and expiry remain non-fatal.
