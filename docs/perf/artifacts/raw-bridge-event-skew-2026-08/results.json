@@ -1,0 +1,1285 @@
+{
+  "schema": "rustbgpd.raw-bridge-event-skew.v1",
+  "measured_on": "2026-08-31",
+  "descriptive_only": true,
+  "acceptance": null,
+  "source": {
+    "commit": "fda556c7bc6f4a80eea1918e9b5c8b3864482f69",
+    "dirty": false
+  },
+  "toolchain": {
+    "qemu_system_x86": {
+      "approved_deb_sha256": "14602e262627adac030329d2cecfee5f6c0938b34566ff2ea2d4c9a9eb02430d",
+      "binary_sha256": "8a35ccba41582fc6c38b9df85fc9e35fa1d42f414d2d7d8090ee9b2f5e7c0854",
+      "dpkg_verified": true,
+      "package": "qemu-system-x86",
+      "package_version": "1:8.2.2+ds-0ubuntu1.18",
+      "path": "/usr/bin/qemu-system-x86_64",
+      "version_output": "QEMU emulator version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18)"
+    },
+    "cloud_image_utils": {
+      "approved_deb_sha256": "c4203167b5f2ccc8d7e2ff66f6ed5bb55d1ce467511d27732b91e1389e15cd9e",
+      "binary_sha256": "936eeaf470b208418689a604a1ae7d0dac3f45ea24d68c2c187eac8957543157",
+      "dpkg_verified": true,
+      "package": "cloud-image-utils",
+      "package_version": "0.33-1",
+      "path": "/usr/bin/cloud-localds"
+    }
+  },
+  "runs": [
+    {
+      "id": "01-serial-1-baseline-jammy-5.15",
+      "request": {
+        "git": {
+          "commit": "fda556c7bc6f4a80eea1918e9b5c8b3864482f69",
+          "dirty": false,
+          "origin_main": "fda556c7bc6f4a80eea1918e9b5c8b3864482f69",
+          "status_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "image": {
+          "sha256": "c0a5af17e6c0f76351fe07e2fffef3011dab1facb8a8ed5701dcf648dabd4f0a",
+          "url": "https://cloud-images.ubuntu.com/releases/jammy/release-20260826/ubuntu-22.04-server-cloudimg-amd64.img"
+        },
+        "profile": "baseline-jammy-5.15",
+        "raw_bridge_skew": {
+          "profile": "serial-1"
+        },
+        "schema": 1,
+        "sources": {
+          "guest": "218409b0ef6c373ebf81c1d12d8ce926567babd51b18913658e59596a9a93e7c",
+          "host_lock": "392ce90dec77e51110ae43202275b0142c37da6a3f4ba12c78d913ab6329520e",
+          "host_quiet": "abb3391cd5e0879c29aabd0aa0c316ea33d5f7c72f6d2a7d111b30025de411fd",
+          "profiles": "8afd90d3470d3aa6e8855289dfeb6f30df730867b66adcd1722c2e579f0ef84b",
+          "raw_bridge_skew": "4cf652c39d0e8cf897a2282135770c26de1d7ada539ca2bbe7ac579c0a9a5670",
+          "runner": "90e0b1fa0f0f7e6965c21cf82424ab935387577ec96f86cf93152c527dd8cb30",
+          "verifier": "cacb1325a5d9b5de3701938ad1025248b3801d6c1865991235cf479ddf06725a"
+        }
+      },
+      "host": {
+        "cloud_image_utils": {
+          "approved_deb_sha256": "c4203167b5f2ccc8d7e2ff66f6ed5bb55d1ce467511d27732b91e1389e15cd9e",
+          "binary_sha256": "936eeaf470b208418689a604a1ae7d0dac3f45ea24d68c2c187eac8957543157",
+          "dpkg_verified": true,
+          "package": "cloud-image-utils",
+          "package_version": "0.33-1",
+          "path": "/usr/bin/cloud-localds"
+        },
+        "cpu_model": "AMD Ryzen Threadripper 7970X 32-Cores",
+        "host_kernel": "Linux 6.17.0-35-generic x86_64 GNU/Linux",
+        "kvm_access": true,
+        "profile": "baseline-jammy-5.15",
+        "qemu_system_x86": {
+          "approved_deb_sha256": "14602e262627adac030329d2cecfee5f6c0938b34566ff2ea2d4c9a9eb02430d",
+          "binary_sha256": "8a35ccba41582fc6c38b9df85fc9e35fa1d42f414d2d7d8090ee9b2f5e7c0854",
+          "dpkg_verified": true,
+          "package": "qemu-system-x86",
+          "package_version": "1:8.2.2+ds-0ubuntu1.18",
+          "path": "/usr/bin/qemu-system-x86_64",
+          "version_output": "QEMU emulator version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18)"
+        },
+        "schema": 1
+      },
+      "guest": {
+        "after_netns_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "before_netns_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bridge_binary_sha256": "d2d958a2c87ba9eab4e32d2b7a36a4b4688796636c6d1e2ec6df1f1bc6f48530",
+        "ip_binary_sha256": "ecfa9ead2da37b4103c2cd56f32f05cb840b96b260820be25baeed9628f209ff",
+        "ip_version_output": "ip utility, iproute2-5.15.0, libbpf 0.5.0",
+        "iproute2_package_version": "5.15.0-1ubuntu2.2",
+        "kernel_config_sha256": "e636f80d13248263236e78816107b03e17cd0e81d5caa2906009cf0f5140e196",
+        "kernel_package_version": "5.15.0-190.200",
+        "kernel_release": "5.15.0-190-generic",
+        "profile": "baseline-jammy-5.15",
+        "schema": 1,
+        "smoke": {
+          "bridge_vlan_filtering": true,
+          "deterministic_cleanup": true,
+          "netns": true,
+          "veth": true,
+          "vlan_10": true,
+          "vlan_20": true
+        },
+        "status": "pass",
+        "uid": 0
+      },
+      "report": {
+        "absolute_skew": {
+          "max_ns": 7377833,
+          "min_ns": 24767,
+          "p50_ns": 30836,
+          "p95_ns": 3486151,
+          "p99_9_ns": 6187767,
+          "p99_ns": 4313203
+        },
+        "acceptance": null,
+        "ambiguous_tenant": 0,
+        "by_family": {
+          "ipv4": {
+            "absolute_skew": {
+              "max_ns": 123095,
+              "min_ns": 24977,
+              "p50_ns": 29344,
+              "p95_ns": 53771,
+              "p99_9_ns": 112018,
+              "p99_ns": 64957
+            },
+            "complete": 2000,
+            "directions": {
+              "fdb_first": {
+                "count": 2000,
+                "rate": 1.0
+              },
+              "neighbor_first": {
+                "count": 0,
+                "rate": 0.0
+              },
+              "simultaneous": {
+                "count": 0,
+                "rate": 0.0
+              }
+            },
+            "expected": 2000,
+            "missing_fdb": 0,
+            "missing_neighbor": 0,
+            "signed_skew": {
+              "max_ns": 123095,
+              "min_ns": 24977,
+              "p50_ns": 29344,
+              "p95_ns": 53771,
+              "p99_9_ns": 112018,
+              "p99_ns": 64957
+            }
+          },
+          "ipv6": {
+            "absolute_skew": {
+              "max_ns": 7377833,
+              "min_ns": 24767,
+              "p50_ns": 1280952,
+              "p95_ns": 3757950,
+              "p99_9_ns": 6465002,
+              "p99_ns": 4568897
+            },
+            "complete": 2000,
+            "directions": {
+              "fdb_first": {
+                "count": 2000,
+                "rate": 1.0
+              },
+              "neighbor_first": {
+                "count": 0,
+                "rate": 0.0
+              },
+              "simultaneous": {
+                "count": 0,
+                "rate": 0.0
+              }
+            },
+            "expected": 2000,
+            "missing_fdb": 0,
+            "missing_neighbor": 0,
+            "signed_skew": {
+              "max_ns": 7377833,
+              "min_ns": 24767,
+              "p50_ns": 1280952,
+              "p95_ns": 3757950,
+              "p99_9_ns": 6465002,
+              "p99_ns": 4568897
+            }
+          }
+        },
+        "complete": 4000,
+        "descriptive_only": true,
+        "direction": "neighbor-minus-fdb",
+        "directions": {
+          "fdb_first": {
+            "count": 4000,
+            "rate": 1.0
+          },
+          "neighbor_first": {
+            "count": 0,
+            "rate": 0.0
+          },
+          "simultaneous": {
+            "count": 0,
+            "rate": 0.0
+          }
+        },
+        "duplicate_fdb": 0,
+        "duplicate_neighbor": 0,
+        "expected": 4000,
+        "late_delete": 3998,
+        "late_fdb": 0,
+        "late_neighbor": 1,
+        "missing_fdb": 0,
+        "missing_neighbor": 0,
+        "schema": 1,
+        "signed_skew": {
+          "max_ns": 7377833,
+          "min_ns": 24767,
+          "p50_ns": 30836,
+          "p95_ns": 3486151,
+          "p99_9_ns": 6187767,
+          "p99_ns": 4313203
+        },
+        "wrong_tenant": 0
+      },
+      "observer": {
+        "post_freeze_retired_neighbors_max": 0,
+        "so_rcvbuf_effective_bytes": 8388608,
+        "so_rcvbuf_forced": true,
+        "so_rcvbuf_requested_bytes": 4194304
+      },
+      "sha256": {
+        "outer_manifest": "da3dc5c270ad4f0230203ad125895eb559315d8cd8fb3d7d841fe4d5769e1db6",
+        "run": "c1d07148c80a79cbe6b52b249c90f8bf7410eedd91286b4c28f9d73dc8826d85",
+        "samples": "7025c2ce4541152fc028030805b521b76f5448bd704192c7238f1e8ded50016c",
+        "report": "0f9a863b5456fb5bad1c485fac2d5718c960a1bb7c9bfd8d1143b7b128f9cbf3"
+      }
+    },
+    {
+      "id": "02-serial-1-current-noble-6.8",
+      "request": {
+        "git": {
+          "commit": "fda556c7bc6f4a80eea1918e9b5c8b3864482f69",
+          "dirty": false,
+          "origin_main": "fda556c7bc6f4a80eea1918e9b5c8b3864482f69",
+          "status_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "image": {
+          "sha256": "d0fe84bb5f80853425fa6be28e2c106f30104c3cfe8611933f2e65c9b63f0e30",
+          "url": "https://cloud-images.ubuntu.com/releases/noble/release-20260826/ubuntu-24.04-server-cloudimg-amd64.img"
+        },
+        "profile": "current-noble-6.8",
+        "raw_bridge_skew": {
+          "profile": "serial-1"
+        },
+        "schema": 1,
+        "sources": {
+          "guest": "218409b0ef6c373ebf81c1d12d8ce926567babd51b18913658e59596a9a93e7c",
+          "host_lock": "392ce90dec77e51110ae43202275b0142c37da6a3f4ba12c78d913ab6329520e",
+          "host_quiet": "abb3391cd5e0879c29aabd0aa0c316ea33d5f7c72f6d2a7d111b30025de411fd",
+          "profiles": "8afd90d3470d3aa6e8855289dfeb6f30df730867b66adcd1722c2e579f0ef84b",
+          "raw_bridge_skew": "4cf652c39d0e8cf897a2282135770c26de1d7ada539ca2bbe7ac579c0a9a5670",
+          "runner": "90e0b1fa0f0f7e6965c21cf82424ab935387577ec96f86cf93152c527dd8cb30",
+          "verifier": "cacb1325a5d9b5de3701938ad1025248b3801d6c1865991235cf479ddf06725a"
+        }
+      },
+      "host": {
+        "cloud_image_utils": {
+          "approved_deb_sha256": "c4203167b5f2ccc8d7e2ff66f6ed5bb55d1ce467511d27732b91e1389e15cd9e",
+          "binary_sha256": "936eeaf470b208418689a604a1ae7d0dac3f45ea24d68c2c187eac8957543157",
+          "dpkg_verified": true,
+          "package": "cloud-image-utils",
+          "package_version": "0.33-1",
+          "path": "/usr/bin/cloud-localds"
+        },
+        "cpu_model": "AMD Ryzen Threadripper 7970X 32-Cores",
+        "host_kernel": "Linux 6.17.0-35-generic x86_64 GNU/Linux",
+        "kvm_access": true,
+        "profile": "current-noble-6.8",
+        "qemu_system_x86": {
+          "approved_deb_sha256": "14602e262627adac030329d2cecfee5f6c0938b34566ff2ea2d4c9a9eb02430d",
+          "binary_sha256": "8a35ccba41582fc6c38b9df85fc9e35fa1d42f414d2d7d8090ee9b2f5e7c0854",
+          "dpkg_verified": true,
+          "package": "qemu-system-x86",
+          "package_version": "1:8.2.2+ds-0ubuntu1.18",
+          "path": "/usr/bin/qemu-system-x86_64",
+          "version_output": "QEMU emulator version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18)"
+        },
+        "schema": 1
+      },
+      "guest": {
+        "after_netns_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "before_netns_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bridge_binary_sha256": "c86b054589236cff6ef011e9099fda4c53a6ab4da8b1fd92170debc61d34e4a2",
+        "ip_binary_sha256": "ea200fcc3a7bf723a8e0e2a21ceb3805324812fef36f6ba0552362a9a9e65f92",
+        "ip_version_output": "ip utility, iproute2-6.1.0, libbpf 1.3.0",
+        "iproute2_package_version": "6.1.0-1ubuntu6.4",
+        "kernel_config_sha256": "01445868698b83907bc6c78e419540bf1358461e918015161ff58d0e825ff68b",
+        "kernel_package_version": "6.8.0-138.138",
+        "kernel_release": "6.8.0-138-generic",
+        "profile": "current-noble-6.8",
+        "schema": 1,
+        "smoke": {
+          "bridge_vlan_filtering": true,
+          "deterministic_cleanup": true,
+          "netns": true,
+          "veth": true,
+          "vlan_10": true,
+          "vlan_20": true
+        },
+        "status": "pass",
+        "uid": 0
+      },
+      "report": {
+        "absolute_skew": {
+          "max_ns": 14433741,
+          "min_ns": 23405,
+          "p50_ns": 2421794,
+          "p95_ns": 10989433,
+          "p99_9_ns": 12572618,
+          "p99_ns": 11729703
+        },
+        "acceptance": null,
+        "ambiguous_tenant": 0,
+        "by_family": {
+          "ipv4": {
+            "absolute_skew": {
+              "max_ns": 2421794,
+              "min_ns": 23405,
+              "p50_ns": 44537,
+              "p95_ns": 2002305,
+              "p99_9_ns": 2147393,
+              "p99_ns": 2036636
+            },
+            "complete": 2000,
+            "directions": {
+              "fdb_first": {
+                "count": 2000,
+                "rate": 1.0
+              },
+              "neighbor_first": {
+                "count": 0,
+                "rate": 0.0
+              },
+              "simultaneous": {
+                "count": 0,
+                "rate": 0.0
+              }
+            },
+            "expected": 2000,
+            "missing_fdb": 0,
+            "missing_neighbor": 0,
+            "signed_skew": {
+              "max_ns": 2421794,
+              "min_ns": 23405,
+              "p50_ns": 44537,
+              "p95_ns": 2002305,
+              "p99_9_ns": 2147393,
+              "p99_ns": 2036636
+            }
+          },
+          "ipv6": {
+            "absolute_skew": {
+              "max_ns": 14433741,
+              "min_ns": 7327517,
+              "p50_ns": 10235912,
+              "p95_ns": 11488501,
+              "p99_9_ns": 12862804,
+              "p99_ns": 11838526
+            },
+            "complete": 2000,
+            "directions": {
+              "fdb_first": {
+                "count": 2000,
+                "rate": 1.0
+              },
+              "neighbor_first": {
+                "count": 0,
+                "rate": 0.0
+              },
+              "simultaneous": {
+                "count": 0,
+                "rate": 0.0
+              }
+            },
+            "expected": 2000,
+            "missing_fdb": 0,
+            "missing_neighbor": 0,
+            "signed_skew": {
+              "max_ns": 14433741,
+              "min_ns": 7327517,
+              "p50_ns": 10235912,
+              "p95_ns": 11488501,
+              "p99_9_ns": 12862804,
+              "p99_ns": 11838526
+            }
+          }
+        },
+        "complete": 4000,
+        "descriptive_only": true,
+        "direction": "neighbor-minus-fdb",
+        "directions": {
+          "fdb_first": {
+            "count": 4000,
+            "rate": 1.0
+          },
+          "neighbor_first": {
+            "count": 0,
+            "rate": 0.0
+          },
+          "simultaneous": {
+            "count": 0,
+            "rate": 0.0
+          }
+        },
+        "duplicate_fdb": 0,
+        "duplicate_neighbor": 0,
+        "expected": 4000,
+        "late_delete": 3998,
+        "late_fdb": 0,
+        "late_neighbor": 1,
+        "missing_fdb": 0,
+        "missing_neighbor": 0,
+        "schema": 1,
+        "signed_skew": {
+          "max_ns": 14433741,
+          "min_ns": 23405,
+          "p50_ns": 2421794,
+          "p95_ns": 10989433,
+          "p99_9_ns": 12572618,
+          "p99_ns": 11729703
+        },
+        "wrong_tenant": 0
+      },
+      "observer": {
+        "post_freeze_retired_neighbors_max": 0,
+        "so_rcvbuf_effective_bytes": 8388608,
+        "so_rcvbuf_forced": true,
+        "so_rcvbuf_requested_bytes": 4194304
+      },
+      "sha256": {
+        "outer_manifest": "b77c8ba960c012690443aa23a54933994a1f1cc5eaa1d6ff00d7d9819e81904f",
+        "run": "c1d07148c80a79cbe6b52b249c90f8bf7410eedd91286b4c28f9d73dc8826d85",
+        "samples": "04d05910f526008faaddefa7612c36474510ae97caae1bddd98e441ab6f8ef1e",
+        "report": "2dbeeb50efd861379e324176573323728292a1319502db8fde39156947600be1"
+      }
+    },
+    {
+      "id": "03-burst-8-baseline-jammy-5.15",
+      "request": {
+        "git": {
+          "commit": "fda556c7bc6f4a80eea1918e9b5c8b3864482f69",
+          "dirty": false,
+          "origin_main": "fda556c7bc6f4a80eea1918e9b5c8b3864482f69",
+          "status_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "image": {
+          "sha256": "c0a5af17e6c0f76351fe07e2fffef3011dab1facb8a8ed5701dcf648dabd4f0a",
+          "url": "https://cloud-images.ubuntu.com/releases/jammy/release-20260826/ubuntu-22.04-server-cloudimg-amd64.img"
+        },
+        "profile": "baseline-jammy-5.15",
+        "raw_bridge_skew": {
+          "profile": "burst-8"
+        },
+        "schema": 1,
+        "sources": {
+          "guest": "218409b0ef6c373ebf81c1d12d8ce926567babd51b18913658e59596a9a93e7c",
+          "host_lock": "392ce90dec77e51110ae43202275b0142c37da6a3f4ba12c78d913ab6329520e",
+          "host_quiet": "abb3391cd5e0879c29aabd0aa0c316ea33d5f7c72f6d2a7d111b30025de411fd",
+          "profiles": "8afd90d3470d3aa6e8855289dfeb6f30df730867b66adcd1722c2e579f0ef84b",
+          "raw_bridge_skew": "4cf652c39d0e8cf897a2282135770c26de1d7ada539ca2bbe7ac579c0a9a5670",
+          "runner": "90e0b1fa0f0f7e6965c21cf82424ab935387577ec96f86cf93152c527dd8cb30",
+          "verifier": "cacb1325a5d9b5de3701938ad1025248b3801d6c1865991235cf479ddf06725a"
+        }
+      },
+      "host": {
+        "cloud_image_utils": {
+          "approved_deb_sha256": "c4203167b5f2ccc8d7e2ff66f6ed5bb55d1ce467511d27732b91e1389e15cd9e",
+          "binary_sha256": "936eeaf470b208418689a604a1ae7d0dac3f45ea24d68c2c187eac8957543157",
+          "dpkg_verified": true,
+          "package": "cloud-image-utils",
+          "package_version": "0.33-1",
+          "path": "/usr/bin/cloud-localds"
+        },
+        "cpu_model": "AMD Ryzen Threadripper 7970X 32-Cores",
+        "host_kernel": "Linux 6.17.0-35-generic x86_64 GNU/Linux",
+        "kvm_access": true,
+        "profile": "baseline-jammy-5.15",
+        "qemu_system_x86": {
+          "approved_deb_sha256": "14602e262627adac030329d2cecfee5f6c0938b34566ff2ea2d4c9a9eb02430d",
+          "binary_sha256": "8a35ccba41582fc6c38b9df85fc9e35fa1d42f414d2d7d8090ee9b2f5e7c0854",
+          "dpkg_verified": true,
+          "package": "qemu-system-x86",
+          "package_version": "1:8.2.2+ds-0ubuntu1.18",
+          "path": "/usr/bin/qemu-system-x86_64",
+          "version_output": "QEMU emulator version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18)"
+        },
+        "schema": 1
+      },
+      "guest": {
+        "after_netns_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "before_netns_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bridge_binary_sha256": "d2d958a2c87ba9eab4e32d2b7a36a4b4688796636c6d1e2ec6df1f1bc6f48530",
+        "ip_binary_sha256": "ecfa9ead2da37b4103c2cd56f32f05cb840b96b260820be25baeed9628f209ff",
+        "ip_version_output": "ip utility, iproute2-5.15.0, libbpf 0.5.0",
+        "iproute2_package_version": "5.15.0-1ubuntu2.2",
+        "kernel_config_sha256": "e636f80d13248263236e78816107b03e17cd0e81d5caa2906009cf0f5140e196",
+        "kernel_package_version": "5.15.0-190.200",
+        "kernel_release": "5.15.0-190-generic",
+        "profile": "baseline-jammy-5.15",
+        "schema": 1,
+        "smoke": {
+          "bridge_vlan_filtering": true,
+          "deterministic_cleanup": true,
+          "netns": true,
+          "veth": true,
+          "vlan_10": true,
+          "vlan_20": true
+        },
+        "status": "pass",
+        "uid": 0
+      },
+      "report": {
+        "absolute_skew": {
+          "max_ns": 120295804,
+          "min_ns": 8513,
+          "p50_ns": 289604,
+          "p95_ns": 10960028,
+          "p99_9_ns": 112767877,
+          "p99_ns": 13796655
+        },
+        "acceptance": null,
+        "ambiguous_tenant": 0,
+        "by_family": {
+          "ipv4": {
+            "absolute_skew": {
+              "max_ns": 458127,
+              "min_ns": 8513,
+              "p50_ns": 20250,
+              "p95_ns": 176555,
+              "p99_9_ns": 432559,
+              "p99_ns": 309545
+            },
+            "complete": 2000,
+            "directions": {
+              "fdb_first": {
+                "count": 2000,
+                "rate": 1.0
+              },
+              "neighbor_first": {
+                "count": 0,
+                "rate": 0.0
+              },
+              "simultaneous": {
+                "count": 0,
+                "rate": 0.0
+              }
+            },
+            "expected": 2000,
+            "missing_fdb": 0,
+            "missing_neighbor": 0,
+            "signed_skew": {
+              "max_ns": 458127,
+              "min_ns": 8513,
+              "p50_ns": 20250,
+              "p95_ns": 176555,
+              "p99_9_ns": 432559,
+              "p99_ns": 309545
+            }
+          },
+          "ipv6": {
+            "absolute_skew": {
+              "max_ns": 120295804,
+              "min_ns": 10025,
+              "p50_ns": 6698062,
+              "p95_ns": 12477857,
+              "p99_9_ns": 116485355,
+              "p99_ns": 14961964
+            },
+            "complete": 2000,
+            "directions": {
+              "fdb_first": {
+                "count": 2000,
+                "rate": 1.0
+              },
+              "neighbor_first": {
+                "count": 0,
+                "rate": 0.0
+              },
+              "simultaneous": {
+                "count": 0,
+                "rate": 0.0
+              }
+            },
+            "expected": 2000,
+            "missing_fdb": 0,
+            "missing_neighbor": 0,
+            "signed_skew": {
+              "max_ns": 120295804,
+              "min_ns": 10025,
+              "p50_ns": 6698062,
+              "p95_ns": 12477857,
+              "p99_9_ns": 116485355,
+              "p99_ns": 14961964
+            }
+          }
+        },
+        "complete": 4000,
+        "descriptive_only": true,
+        "direction": "neighbor-minus-fdb",
+        "directions": {
+          "fdb_first": {
+            "count": 4000,
+            "rate": 1.0
+          },
+          "neighbor_first": {
+            "count": 0,
+            "rate": 0.0
+          },
+          "simultaneous": {
+            "count": 0,
+            "rate": 0.0
+          }
+        },
+        "duplicate_fdb": 0,
+        "duplicate_neighbor": 0,
+        "expected": 4000,
+        "late_delete": 3984,
+        "late_fdb": 0,
+        "late_neighbor": 8,
+        "missing_fdb": 0,
+        "missing_neighbor": 0,
+        "schema": 1,
+        "signed_skew": {
+          "max_ns": 120295804,
+          "min_ns": 8513,
+          "p50_ns": 289604,
+          "p95_ns": 10960028,
+          "p99_9_ns": 112767877,
+          "p99_ns": 13796655
+        },
+        "wrong_tenant": 0
+      },
+      "observer": {
+        "post_freeze_retired_neighbors_max": 0,
+        "so_rcvbuf_effective_bytes": 8388608,
+        "so_rcvbuf_forced": true,
+        "so_rcvbuf_requested_bytes": 4194304
+      },
+      "sha256": {
+        "outer_manifest": "00c3e55c189d3fc8cfde1dfa9454128fae881819539e2e0b334ec6be0e0a49e4",
+        "run": "aaa206c2423d8e3d9ea369d912e5f6ba71a70ea4330b9bf8552f12f44dc32dc0",
+        "samples": "a8ea757164296305463291107bbb55cadc12de527c041f2774af87beb3cbfeaa",
+        "report": "e27ca0287e456ab13710d901174403b63facb3fc2cba71bed34fe8c3a771d95b"
+      }
+    },
+    {
+      "id": "04-burst-8-current-noble-6.8",
+      "request": {
+        "git": {
+          "commit": "fda556c7bc6f4a80eea1918e9b5c8b3864482f69",
+          "dirty": false,
+          "origin_main": "fda556c7bc6f4a80eea1918e9b5c8b3864482f69",
+          "status_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "image": {
+          "sha256": "d0fe84bb5f80853425fa6be28e2c106f30104c3cfe8611933f2e65c9b63f0e30",
+          "url": "https://cloud-images.ubuntu.com/releases/noble/release-20260826/ubuntu-24.04-server-cloudimg-amd64.img"
+        },
+        "profile": "current-noble-6.8",
+        "raw_bridge_skew": {
+          "profile": "burst-8"
+        },
+        "schema": 1,
+        "sources": {
+          "guest": "218409b0ef6c373ebf81c1d12d8ce926567babd51b18913658e59596a9a93e7c",
+          "host_lock": "392ce90dec77e51110ae43202275b0142c37da6a3f4ba12c78d913ab6329520e",
+          "host_quiet": "abb3391cd5e0879c29aabd0aa0c316ea33d5f7c72f6d2a7d111b30025de411fd",
+          "profiles": "8afd90d3470d3aa6e8855289dfeb6f30df730867b66adcd1722c2e579f0ef84b",
+          "raw_bridge_skew": "4cf652c39d0e8cf897a2282135770c26de1d7ada539ca2bbe7ac579c0a9a5670",
+          "runner": "90e0b1fa0f0f7e6965c21cf82424ab935387577ec96f86cf93152c527dd8cb30",
+          "verifier": "cacb1325a5d9b5de3701938ad1025248b3801d6c1865991235cf479ddf06725a"
+        }
+      },
+      "host": {
+        "cloud_image_utils": {
+          "approved_deb_sha256": "c4203167b5f2ccc8d7e2ff66f6ed5bb55d1ce467511d27732b91e1389e15cd9e",
+          "binary_sha256": "936eeaf470b208418689a604a1ae7d0dac3f45ea24d68c2c187eac8957543157",
+          "dpkg_verified": true,
+          "package": "cloud-image-utils",
+          "package_version": "0.33-1",
+          "path": "/usr/bin/cloud-localds"
+        },
+        "cpu_model": "AMD Ryzen Threadripper 7970X 32-Cores",
+        "host_kernel": "Linux 6.17.0-35-generic x86_64 GNU/Linux",
+        "kvm_access": true,
+        "profile": "current-noble-6.8",
+        "qemu_system_x86": {
+          "approved_deb_sha256": "14602e262627adac030329d2cecfee5f6c0938b34566ff2ea2d4c9a9eb02430d",
+          "binary_sha256": "8a35ccba41582fc6c38b9df85fc9e35fa1d42f414d2d7d8090ee9b2f5e7c0854",
+          "dpkg_verified": true,
+          "package": "qemu-system-x86",
+          "package_version": "1:8.2.2+ds-0ubuntu1.18",
+          "path": "/usr/bin/qemu-system-x86_64",
+          "version_output": "QEMU emulator version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18)"
+        },
+        "schema": 1
+      },
+      "guest": {
+        "after_netns_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "before_netns_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bridge_binary_sha256": "c86b054589236cff6ef011e9099fda4c53a6ab4da8b1fd92170debc61d34e4a2",
+        "ip_binary_sha256": "ea200fcc3a7bf723a8e0e2a21ceb3805324812fef36f6ba0552362a9a9e65f92",
+        "ip_version_output": "ip utility, iproute2-6.1.0, libbpf 1.3.0",
+        "iproute2_package_version": "6.1.0-1ubuntu6.4",
+        "kernel_config_sha256": "01445868698b83907bc6c78e419540bf1358461e918015161ff58d0e825ff68b",
+        "kernel_package_version": "6.8.0-138.138",
+        "kernel_release": "6.8.0-138-generic",
+        "profile": "current-noble-6.8",
+        "schema": 1,
+        "smoke": {
+          "bridge_vlan_filtering": true,
+          "deterministic_cleanup": true,
+          "netns": true,
+          "veth": true,
+          "vlan_10": true,
+          "vlan_20": true
+        },
+        "status": "pass",
+        "uid": 0
+      },
+      "report": {
+        "absolute_skew": {
+          "max_ns": 19039704,
+          "min_ns": 7411,
+          "p50_ns": 2145069,
+          "p95_ns": 15559130,
+          "p99_9_ns": 18605793,
+          "p99_ns": 16766322
+        },
+        "acceptance": null,
+        "ambiguous_tenant": 0,
+        "by_family": {
+          "ipv4": {
+            "absolute_skew": {
+              "max_ns": 2145069,
+              "min_ns": 7411,
+              "p50_ns": 11117,
+              "p95_ns": 138367,
+              "p99_9_ns": 2083427,
+              "p99_ns": 985379
+            },
+            "complete": 2000,
+            "directions": {
+              "fdb_first": {
+                "count": 2000,
+                "rate": 1.0
+              },
+              "neighbor_first": {
+                "count": 0,
+                "rate": 0.0
+              },
+              "simultaneous": {
+                "count": 0,
+                "rate": 0.0
+              }
+            },
+            "expected": 2000,
+            "missing_fdb": 0,
+            "missing_neighbor": 0,
+            "signed_skew": {
+              "max_ns": 2145069,
+              "min_ns": 7411,
+              "p50_ns": 11117,
+              "p95_ns": 138367,
+              "p99_9_ns": 2083427,
+              "p99_ns": 985379
+            }
+          },
+          "ipv6": {
+            "absolute_skew": {
+              "max_ns": 19039704,
+              "min_ns": 9681680,
+              "p50_ns": 13475734,
+              "p95_ns": 16116196,
+              "p99_9_ns": 18735006,
+              "p99_ns": 17169357
+            },
+            "complete": 2000,
+            "directions": {
+              "fdb_first": {
+                "count": 2000,
+                "rate": 1.0
+              },
+              "neighbor_first": {
+                "count": 0,
+                "rate": 0.0
+              },
+              "simultaneous": {
+                "count": 0,
+                "rate": 0.0
+              }
+            },
+            "expected": 2000,
+            "missing_fdb": 0,
+            "missing_neighbor": 0,
+            "signed_skew": {
+              "max_ns": 19039704,
+              "min_ns": 9681680,
+              "p50_ns": 13475734,
+              "p95_ns": 16116196,
+              "p99_9_ns": 18735006,
+              "p99_ns": 17169357
+            }
+          }
+        },
+        "complete": 4000,
+        "descriptive_only": true,
+        "direction": "neighbor-minus-fdb",
+        "directions": {
+          "fdb_first": {
+            "count": 4000,
+            "rate": 1.0
+          },
+          "neighbor_first": {
+            "count": 0,
+            "rate": 0.0
+          },
+          "simultaneous": {
+            "count": 0,
+            "rate": 0.0
+          }
+        },
+        "duplicate_fdb": 0,
+        "duplicate_neighbor": 0,
+        "expected": 4000,
+        "late_delete": 3981,
+        "late_fdb": 0,
+        "late_neighbor": 8,
+        "missing_fdb": 0,
+        "missing_neighbor": 0,
+        "schema": 1,
+        "signed_skew": {
+          "max_ns": 19039704,
+          "min_ns": 7411,
+          "p50_ns": 2145069,
+          "p95_ns": 15559130,
+          "p99_9_ns": 18605793,
+          "p99_ns": 16766322
+        },
+        "wrong_tenant": 0
+      },
+      "observer": {
+        "post_freeze_retired_neighbors_max": 0,
+        "so_rcvbuf_effective_bytes": 8388608,
+        "so_rcvbuf_forced": true,
+        "so_rcvbuf_requested_bytes": 4194304
+      },
+      "sha256": {
+        "outer_manifest": "0eef6cae8fb15543ef8cfaa56f5c7b2dd04a22107df6c7c73c07c81c61df4bb0",
+        "run": "aaa206c2423d8e3d9ea369d912e5f6ba71a70ea4330b9bf8552f12f44dc32dc0",
+        "samples": "67fb34d94ed4f229d21cab69e5d70dc53ce6853803f7c05d287d53b0582e0f63",
+        "report": "76c41a8e007b7719a21688d251d8a134c69f0dd923fcccba853d474a3304856b"
+      }
+    },
+    {
+      "id": "05-burst-32-baseline-jammy-5.15",
+      "request": {
+        "git": {
+          "commit": "fda556c7bc6f4a80eea1918e9b5c8b3864482f69",
+          "dirty": false,
+          "origin_main": "fda556c7bc6f4a80eea1918e9b5c8b3864482f69",
+          "status_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "image": {
+          "sha256": "c0a5af17e6c0f76351fe07e2fffef3011dab1facb8a8ed5701dcf648dabd4f0a",
+          "url": "https://cloud-images.ubuntu.com/releases/jammy/release-20260826/ubuntu-22.04-server-cloudimg-amd64.img"
+        },
+        "profile": "baseline-jammy-5.15",
+        "raw_bridge_skew": {
+          "profile": "burst-32"
+        },
+        "schema": 1,
+        "sources": {
+          "guest": "218409b0ef6c373ebf81c1d12d8ce926567babd51b18913658e59596a9a93e7c",
+          "host_lock": "392ce90dec77e51110ae43202275b0142c37da6a3f4ba12c78d913ab6329520e",
+          "host_quiet": "abb3391cd5e0879c29aabd0aa0c316ea33d5f7c72f6d2a7d111b30025de411fd",
+          "profiles": "8afd90d3470d3aa6e8855289dfeb6f30df730867b66adcd1722c2e579f0ef84b",
+          "raw_bridge_skew": "4cf652c39d0e8cf897a2282135770c26de1d7ada539ca2bbe7ac579c0a9a5670",
+          "runner": "90e0b1fa0f0f7e6965c21cf82424ab935387577ec96f86cf93152c527dd8cb30",
+          "verifier": "cacb1325a5d9b5de3701938ad1025248b3801d6c1865991235cf479ddf06725a"
+        }
+      },
+      "host": {
+        "cloud_image_utils": {
+          "approved_deb_sha256": "c4203167b5f2ccc8d7e2ff66f6ed5bb55d1ce467511d27732b91e1389e15cd9e",
+          "binary_sha256": "936eeaf470b208418689a604a1ae7d0dac3f45ea24d68c2c187eac8957543157",
+          "dpkg_verified": true,
+          "package": "cloud-image-utils",
+          "package_version": "0.33-1",
+          "path": "/usr/bin/cloud-localds"
+        },
+        "cpu_model": "AMD Ryzen Threadripper 7970X 32-Cores",
+        "host_kernel": "Linux 6.17.0-35-generic x86_64 GNU/Linux",
+        "kvm_access": true,
+        "profile": "baseline-jammy-5.15",
+        "qemu_system_x86": {
+          "approved_deb_sha256": "14602e262627adac030329d2cecfee5f6c0938b34566ff2ea2d4c9a9eb02430d",
+          "binary_sha256": "8a35ccba41582fc6c38b9df85fc9e35fa1d42f414d2d7d8090ee9b2f5e7c0854",
+          "dpkg_verified": true,
+          "package": "qemu-system-x86",
+          "package_version": "1:8.2.2+ds-0ubuntu1.18",
+          "path": "/usr/bin/qemu-system-x86_64",
+          "version_output": "QEMU emulator version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18)"
+        },
+        "schema": 1
+      },
+      "guest": {
+        "after_netns_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "before_netns_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bridge_binary_sha256": "d2d958a2c87ba9eab4e32d2b7a36a4b4688796636c6d1e2ec6df1f1bc6f48530",
+        "ip_binary_sha256": "ecfa9ead2da37b4103c2cd56f32f05cb840b96b260820be25baeed9628f209ff",
+        "ip_version_output": "ip utility, iproute2-5.15.0, libbpf 0.5.0",
+        "iproute2_package_version": "5.15.0-1ubuntu2.2",
+        "kernel_config_sha256": "e636f80d13248263236e78816107b03e17cd0e81d5caa2906009cf0f5140e196",
+        "kernel_package_version": "5.15.0-190.200",
+        "kernel_release": "5.15.0-190-generic",
+        "profile": "baseline-jammy-5.15",
+        "schema": 1,
+        "smoke": {
+          "bridge_vlan_filtering": true,
+          "deterministic_cleanup": true,
+          "netns": true,
+          "veth": true,
+          "vlan_10": true,
+          "vlan_20": true
+        },
+        "status": "pass",
+        "uid": 0
+      },
+      "report": {
+        "absolute_skew": {
+          "max_ns": 61013636,
+          "min_ns": 8253,
+          "p50_ns": 1759500,
+          "p95_ns": 35936121,
+          "p99_9_ns": 53229885,
+          "p99_ns": 46800436
+        },
+        "acceptance": null,
+        "ambiguous_tenant": 0,
+        "by_family": {
+          "ipv4": {
+            "absolute_skew": {
+              "max_ns": 1969014,
+              "min_ns": 8253,
+              "p50_ns": 9504,
+              "p95_ns": 56655,
+              "p99_9_ns": 1759500,
+              "p99_ns": 478288
+            },
+            "complete": 2000,
+            "directions": {
+              "fdb_first": {
+                "count": 2000,
+                "rate": 1.0
+              },
+              "neighbor_first": {
+                "count": 0,
+                "rate": 0.0
+              },
+              "simultaneous": {
+                "count": 0,
+                "rate": 0.0
+              }
+            },
+            "expected": 2000,
+            "missing_fdb": 0,
+            "missing_neighbor": 0,
+            "signed_skew": {
+              "max_ns": 1969014,
+              "min_ns": 8253,
+              "p50_ns": 9504,
+              "p95_ns": 56655,
+              "p99_9_ns": 1759500,
+              "p99_ns": 478288
+            }
+          },
+          "ipv6": {
+            "absolute_skew": {
+              "max_ns": 61013636,
+              "min_ns": 10636,
+              "p50_ns": 21268889,
+              "p95_ns": 41684348,
+              "p99_9_ns": 53901443,
+              "p99_ns": 49374940
+            },
+            "complete": 2000,
+            "directions": {
+              "fdb_first": {
+                "count": 2000,
+                "rate": 1.0
+              },
+              "neighbor_first": {
+                "count": 0,
+                "rate": 0.0
+              },
+              "simultaneous": {
+                "count": 0,
+                "rate": 0.0
+              }
+            },
+            "expected": 2000,
+            "missing_fdb": 0,
+            "missing_neighbor": 0,
+            "signed_skew": {
+              "max_ns": 61013636,
+              "min_ns": 10636,
+              "p50_ns": 21268889,
+              "p95_ns": 41684348,
+              "p99_9_ns": 53901443,
+              "p99_ns": 49374940
+            }
+          }
+        },
+        "complete": 4000,
+        "descriptive_only": true,
+        "direction": "neighbor-minus-fdb",
+        "directions": {
+          "fdb_first": {
+            "count": 4000,
+            "rate": 1.0
+          },
+          "neighbor_first": {
+            "count": 0,
+            "rate": 0.0
+          },
+          "simultaneous": {
+            "count": 0,
+            "rate": 0.0
+          }
+        },
+        "duplicate_fdb": 0,
+        "duplicate_neighbor": 0,
+        "expected": 4000,
+        "late_delete": 3936,
+        "late_fdb": 0,
+        "late_neighbor": 32,
+        "missing_fdb": 0,
+        "missing_neighbor": 0,
+        "schema": 1,
+        "signed_skew": {
+          "max_ns": 61013636,
+          "min_ns": 8253,
+          "p50_ns": 1759500,
+          "p95_ns": 35936121,
+          "p99_9_ns": 53229885,
+          "p99_ns": 46800436
+        },
+        "wrong_tenant": 0
+      },
+      "observer": {
+        "post_freeze_retired_neighbors_max": 0,
+        "so_rcvbuf_effective_bytes": 8388608,
+        "so_rcvbuf_forced": true,
+        "so_rcvbuf_requested_bytes": 4194304
+      },
+      "sha256": {
+        "outer_manifest": "861f5d031396b721340e3412b63e303aba459cec0a3f1b3e36f3628b632a3c65",
+        "run": "aedcd85fa96288cbb1a114d68a0a2a60a2b49beefc198d54bbfeb745b9669bfd",
+        "samples": "21324a1980582777857bed2e936fddb0d073349a82646b9da03ad2d35cc1423e",
+        "report": "c1e95fa9dc51cb7344e76f0d0bb44b2756a853c8c0379c3e4f6514ee3c0f45ef"
+      }
+    },
+    {
+      "id": "06-burst-32-current-noble-6.8",
+      "request": {
+        "git": {
+          "commit": "fda556c7bc6f4a80eea1918e9b5c8b3864482f69",
+          "dirty": false,
+          "origin_main": "fda556c7bc6f4a80eea1918e9b5c8b3864482f69",
+          "status_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "image": {
+          "sha256": "d0fe84bb5f80853425fa6be28e2c106f30104c3cfe8611933f2e65c9b63f0e30",
+          "url": "https://cloud-images.ubuntu.com/releases/noble/release-20260826/ubuntu-24.04-server-cloudimg-amd64.img"
+        },
+        "profile": "current-noble-6.8",
+        "raw_bridge_skew": {
+          "profile": "burst-32"
+        },
+        "schema": 1,
+        "sources": {
+          "guest": "218409b0ef6c373ebf81c1d12d8ce926567babd51b18913658e59596a9a93e7c",
+          "host_lock": "392ce90dec77e51110ae43202275b0142c37da6a3f4ba12c78d913ab6329520e",
+          "host_quiet": "abb3391cd5e0879c29aabd0aa0c316ea33d5f7c72f6d2a7d111b30025de411fd",
+          "profiles": "8afd90d3470d3aa6e8855289dfeb6f30df730867b66adcd1722c2e579f0ef84b",
+          "raw_bridge_skew": "4cf652c39d0e8cf897a2282135770c26de1d7ada539ca2bbe7ac579c0a9a5670",
+          "runner": "90e0b1fa0f0f7e6965c21cf82424ab935387577ec96f86cf93152c527dd8cb30",
+          "verifier": "cacb1325a5d9b5de3701938ad1025248b3801d6c1865991235cf479ddf06725a"
+        }
+      },
+      "host": {
+        "cloud_image_utils": {
+          "approved_deb_sha256": "c4203167b5f2ccc8d7e2ff66f6ed5bb55d1ce467511d27732b91e1389e15cd9e",
+          "binary_sha256": "936eeaf470b208418689a604a1ae7d0dac3f45ea24d68c2c187eac8957543157",
+          "dpkg_verified": true,
+          "package": "cloud-image-utils",
+          "package_version": "0.33-1",
+          "path": "/usr/bin/cloud-localds"
+        },
+        "cpu_model": "AMD Ryzen Threadripper 7970X 32-Cores",
+        "host_kernel": "Linux 6.17.0-35-generic x86_64 GNU/Linux",
+        "kvm_access": true,
+        "profile": "current-noble-6.8",
+        "qemu_system_x86": {
+          "approved_deb_sha256": "14602e262627adac030329d2cecfee5f6c0938b34566ff2ea2d4c9a9eb02430d",
+          "binary_sha256": "8a35ccba41582fc6c38b9df85fc9e35fa1d42f414d2d7d8090ee9b2f5e7c0854",
+          "dpkg_verified": true,
+          "package": "qemu-system-x86",
+          "package_version": "1:8.2.2+ds-0ubuntu1.18",
+          "path": "/usr/bin/qemu-system-x86_64",
+          "version_output": "QEMU emulator version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18)"
+        },
+        "schema": 1
+      },
+      "guest": {
+        "after_netns_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "before_netns_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bridge_binary_sha256": "c86b054589236cff6ef011e9099fda4c53a6ab4da8b1fd92170debc61d34e4a2",
+        "ip_binary_sha256": "ea200fcc3a7bf723a8e0e2a21ceb3805324812fef36f6ba0552362a9a9e65f92",
+        "ip_version_output": "ip utility, iproute2-6.1.0, libbpf 1.3.0",
+        "iproute2_package_version": "6.1.0-1ubuntu6.4",
+        "kernel_config_sha256": "01445868698b83907bc6c78e419540bf1358461e918015161ff58d0e825ff68b",
+        "kernel_package_version": "6.8.0-138.138",
+        "kernel_release": "6.8.0-138-generic",
+        "profile": "current-noble-6.8",
+        "schema": 1,
+        "smoke": {
+          "bridge_vlan_filtering": true,
+          "deterministic_cleanup": true,
+          "netns": true,
+          "veth": true,
+          "vlan_10": true,
+          "vlan_20": true
+        },
+        "status": "pass",
+        "uid": 0
+      },
+      "report": {
+        "absolute_skew": {
+          "max_ns": 40119239,
+          "min_ns": 7301,
+          "p50_ns": 2324369,
+          "p95_ns": 31851191,
+          "p99_9_ns": 38178377,
+          "p99_ns": 35052666
+        },
+        "acceptance": null,
+        "ambiguous_tenant": 0,
+        "by_family": {
+          "ipv4": {
+            "absolute_skew": {
+              "max_ns": 2324369,
+              "min_ns": 7301,
+              "p50_ns": 15473,
+              "p95_ns": 161542,
+              "p99_9_ns": 2299501,
+              "p99_ns": 401462
+            },
+            "complete": 2000,
+            "directions": {
+              "fdb_first": {
+                "count": 2000,
+                "rate": 1.0
+              },
+              "neighbor_first": {
+                "count": 0,
+                "rate": 0.0
+              },
+              "simultaneous": {
+                "count": 0,
+                "rate": 0.0
+              }
+            },
+            "expected": 2000,
+            "missing_fdb": 0,
+            "missing_neighbor": 0,
+            "signed_skew": {
+              "max_ns": 2324369,
+              "min_ns": 7301,
+              "p50_ns": 15473,
+              "p95_ns": 161542,
+              "p99_9_ns": 2299501,
+              "p99_ns": 401462
+            }
+          },
+          "ipv6": {
+            "absolute_skew": {
+              "max_ns": 40119239,
+              "min_ns": 10993118,
+              "p50_ns": 23148920,
+              "p95_ns": 33420596,
+              "p99_9_ns": 38987030,
+              "p99_ns": 36177844
+            },
+            "complete": 2000,
+            "directions": {
+              "fdb_first": {
+                "count": 2000,
+                "rate": 1.0
+              },
+              "neighbor_first": {
+                "count": 0,
+                "rate": 0.0
+              },
+              "simultaneous": {
+                "count": 0,
+                "rate": 0.0
+              }
+            },
+            "expected": 2000,
+            "missing_fdb": 0,
+            "missing_neighbor": 0,
+            "signed_skew": {
+              "max_ns": 40119239,
+              "min_ns": 10993118,
+              "p50_ns": 23148920,
+              "p95_ns": 33420596,
+              "p99_9_ns": 38987030,
+              "p99_ns": 36177844
+            }
+          }
+        },
+        "complete": 4000,
+        "descriptive_only": true,
+        "direction": "neighbor-minus-fdb",
+        "directions": {
+          "fdb_first": {
+            "count": 4000,
+            "rate": 1.0
+          },
+          "neighbor_first": {
+            "count": 0,
+            "rate": 0.0
+          },
+          "simultaneous": {
+            "count": 0,
+            "rate": 0.0
+          }
+        },
+        "duplicate_fdb": 0,
+        "duplicate_neighbor": 0,
+        "expected": 4000,
+        "late_delete": 3922,
+        "late_fdb": 0,
+        "late_neighbor": 32,
+        "missing_fdb": 0,
+        "missing_neighbor": 0,
+        "schema": 1,
+        "signed_skew": {
+          "max_ns": 40119239,
+          "min_ns": 7301,
+          "p50_ns": 2324369,
+          "p95_ns": 31851191,
+          "p99_9_ns": 38178377,
+          "p99_ns": 35052666
+        },
+        "wrong_tenant": 0
+      },
+      "observer": {
+        "post_freeze_retired_neighbors_max": 0,
+        "so_rcvbuf_effective_bytes": 8388608,
+        "so_rcvbuf_forced": true,
+        "so_rcvbuf_requested_bytes": 4194304
+      },
+      "sha256": {
+        "outer_manifest": "5dd7f57277a43e76570b7f67891929a9f6e5e623bfd406cdeb1f1129ebc4ac24",
+        "run": "aedcd85fa96288cbb1a114d68a0a2a60a2b49beefc198d54bbfeb745b9669bfd",
+        "samples": "4e258cb38512ef8bc8bedad5f152af7beab1ac7a6c3523dfb9d69f652dfef086",
+        "report": "0e7dc01c92eabbd518f387ee3abd44452bfb985bb6225a2d8a9999af7dd784e3"
+      }
+    }
+  ]
+}
