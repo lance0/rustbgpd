@@ -138,6 +138,11 @@ docker run --rm --network none \
     --current-kernel-smoke --output /tmp/raw-bridge-skew-smoke
 ```
 
+## Published descriptive receipt
+
+The six-run 2026-08 evidence set is published with its exact claim boundary in
+the [receipt archive](../../docs/perf/artifacts/raw-bridge-event-skew-2026-08/README.md).
+
 ## Offline verification
 
 No QEMU package, image, KVM access, network, Docker daemon, or privilege is

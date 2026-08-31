@@ -24,6 +24,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Documentation
 
+- Publish a descriptive raw bridge event-skew receipt across six pinned Jammy
+  Linux 5.15 and Noble Linux 6.8 profile tuples. All 24,000 measured pairs
+  completed FDB-first. One run per tuple provides no variance, bound, kernel
+  regression, acceptance, or production-behavior claim.
+
 - Publish the current v0.68.0 benchmark evidence bundle: exact-release
   cross-stack import/convergence, exact-source high-N route-server and RIB
   memory results, exact-release FIB and Enhanced Route Refresh refreshes, and
