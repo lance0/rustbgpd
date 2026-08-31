@@ -1,5 +1,9 @@
 # Realistic-mix IRR reload receipt — announcement overlap — 2026-08
 
+> **Historical receipt.** This earlier implementation is preserved for
+> reproducibility. The current v0.68.0 source-equivalent result is
+> [published separately](irr-reload-v0680-2026-08.md).
+
 What does per-client best-path — the path-hiding mitigation a route
 server runs so each member sees the best route computed *without its
 own announcements hidden by a shared RIB* — actually cost and deliver

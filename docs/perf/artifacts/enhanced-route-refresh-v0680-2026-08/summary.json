@@ -1,0 +1,373 @@
+{
+  "fleet": {
+    "families": [
+      "ipv4_unicast"
+    ],
+    "peers": 1,
+    "prefixes_per_peer": 100000
+  },
+  "memory": {
+    "baseline:settled": {
+      "jemalloc_active_bytes": 72364032,
+      "jemalloc_allocated_bytes": 71414112,
+      "jemalloc_mapped_bytes": 149626880,
+      "jemalloc_resident_bytes": 120397824,
+      "vmhwm_kib": 115348,
+      "vmpeak_kib": 957832,
+      "vmrss_kib": 115348,
+      "vmsize_kib": 957832
+    },
+    "duplicate-borr:post": {
+      "jemalloc_active_bytes": 77901824,
+      "jemalloc_allocated_bytes": 76850096,
+      "jemalloc_mapped_bytes": 152248320,
+      "jemalloc_resident_bytes": 123019264,
+      "vmhwm_kib": 117996,
+      "vmpeak_kib": 957832,
+      "vmrss_kib": 117996,
+      "vmsize_kib": 957832
+    },
+    "duplicate-borr:pre": {
+      "jemalloc_active_bytes": 77963264,
+      "jemalloc_allocated_bytes": 77041536,
+      "jemalloc_mapped_bytes": 149626880,
+      "jemalloc_resident_bytes": 120397824,
+      "vmhwm_kib": 115548,
+      "vmpeak_kib": 957832,
+      "vmrss_kib": 115548,
+      "vmsize_kib": 957832
+    },
+    "eorr:post": {
+      "jemalloc_active_bytes": 79867904,
+      "jemalloc_allocated_bytes": 78717464,
+      "jemalloc_mapped_bytes": 185929728,
+      "jemalloc_resident_bytes": 157224960,
+      "vmhwm_kib": 191432,
+      "vmpeak_kib": 1097608,
+      "vmrss_kib": 145504,
+      "vmsize_kib": 1097608
+    },
+    "eorr:pre": {
+      "jemalloc_active_bytes": 77864960,
+      "jemalloc_allocated_bytes": 76795240,
+      "jemalloc_mapped_bytes": 152113152,
+      "jemalloc_resident_bytes": 122884096,
+      "vmhwm_kib": 117880,
+      "vmpeak_kib": 957832,
+      "vmrss_kib": 117880,
+      "vmsize_kib": 957832
+    },
+    "first-borr:post": {
+      "jemalloc_active_bytes": 78020608,
+      "jemalloc_allocated_bytes": 77056424,
+      "jemalloc_mapped_bytes": 149626880,
+      "jemalloc_resident_bytes": 120397824,
+      "vmhwm_kib": 115500,
+      "vmpeak_kib": 957832,
+      "vmrss_kib": 115500,
+      "vmsize_kib": 957832
+    },
+    "first-borr:pre": {
+      "jemalloc_active_bytes": 72359936,
+      "jemalloc_allocated_bytes": 71412304,
+      "jemalloc_mapped_bytes": 149626880,
+      "jemalloc_resident_bytes": 120397824,
+      "vmhwm_kib": 115348,
+      "vmpeak_kib": 957832,
+      "vmrss_kib": 115348,
+      "vmsize_kib": 957832
+    },
+    "replay-one:post": {
+      "jemalloc_active_bytes": 78004224,
+      "jemalloc_allocated_bytes": 77060112,
+      "jemalloc_mapped_bytes": 149626880,
+      "jemalloc_resident_bytes": 120397824,
+      "vmhwm_kib": 115524,
+      "vmpeak_kib": 957832,
+      "vmrss_kib": 115524,
+      "vmsize_kib": 957832
+    },
+    "replay-one:pre": {
+      "jemalloc_active_bytes": 77975552,
+      "jemalloc_allocated_bytes": 77001336,
+      "jemalloc_mapped_bytes": 149626880,
+      "jemalloc_resident_bytes": 120397824,
+      "vmhwm_kib": 115508,
+      "vmpeak_kib": 957832,
+      "vmrss_kib": 115508,
+      "vmsize_kib": 957832
+    },
+    "restored:post": {
+      "jemalloc_active_bytes": 80003072,
+      "jemalloc_allocated_bytes": 78614824,
+      "jemalloc_mapped_bytes": 184209408,
+      "jemalloc_resident_bytes": 155504640,
+      "vmhwm_kib": 147380,
+      "vmpeak_kib": 1097608,
+      "vmrss_kib": 147380,
+      "vmsize_kib": 1097608
+    },
+    "restored:pre": {
+      "jemalloc_active_bytes": 79847424,
+      "jemalloc_allocated_bytes": 78672616,
+      "jemalloc_mapped_bytes": 185929728,
+      "jemalloc_resident_bytes": 157224960,
+      "vmhwm_kib": 191432,
+      "vmpeak_kib": 1097608,
+      "vmrss_kib": 145504,
+      "vmsize_kib": 1097608
+    },
+    "timeout-borr:post": {
+      "jemalloc_active_bytes": 85602304,
+      "jemalloc_allocated_bytes": 84133704,
+      "jemalloc_mapped_bytes": 189939712,
+      "jemalloc_resident_bytes": 161234944,
+      "vmhwm_kib": 152212,
+      "vmpeak_kib": 1106824,
+      "vmrss_kib": 152212,
+      "vmsize_kib": 1106824
+    },
+    "timeout-borr:pre": {
+      "jemalloc_active_bytes": 79929344,
+      "jemalloc_allocated_bytes": 78539960,
+      "jemalloc_mapped_bytes": 184197120,
+      "jemalloc_resident_bytes": 155492352,
+      "vmhwm_kib": 146880,
+      "vmpeak_kib": 1097608,
+      "vmrss_kib": 146880,
+      "vmsize_kib": 1097608
+    },
+    "timeout-complete:post": {
+      "jemalloc_active_bytes": 79646720,
+      "jemalloc_allocated_bytes": 78293840,
+      "jemalloc_mapped_bytes": 189816832,
+      "jemalloc_resident_bytes": 161112064,
+      "vmhwm_kib": 201548,
+      "vmpeak_kib": 1106824,
+      "vmrss_kib": 123316,
+      "vmsize_kib": 1106824
+    },
+    "timeout-complete:pre": {
+      "jemalloc_active_bytes": 85504000,
+      "jemalloc_allocated_bytes": 84075992,
+      "jemalloc_mapped_bytes": 189259776,
+      "jemalloc_resident_bytes": 160555008,
+      "vmhwm_kib": 152212,
+      "vmpeak_kib": 1106824,
+      "vmrss_kib": 152212,
+      "vmsize_kib": 1106824
+    }
+  },
+  "phases": [
+    {
+      "actor_begin_count": 0.0,
+      "actor_begin_sum_seconds": 0.0,
+      "actor_eorr_count": 0.0,
+      "actor_eorr_sum_seconds": 0.0,
+      "actor_timed_ceiling_seconds": null,
+      "actor_timed_delta_seconds": null,
+      "actor_timed_operation": null,
+      "actor_timeout_count": 0.0,
+      "actor_timeout_sum_seconds": 0.0,
+      "max_prefix_usage": 100000,
+      "phase": "baseline",
+      "refresh_active": 0,
+      "refresh_stale": 0,
+      "rib_prefixes": 100000,
+      "session_established": 1,
+      "session_established_total": 1,
+      "session_flaps_total": 0
+    },
+    {
+      "actor_begin_count": 1.0,
+      "actor_begin_sum_seconds": 0.005267859,
+      "actor_eorr_count": 0.0,
+      "actor_eorr_sum_seconds": 0.0,
+      "actor_timed_ceiling_seconds": 0.025,
+      "actor_timed_delta_seconds": 0.005267859,
+      "actor_timed_operation": "begin",
+      "actor_timeout_count": 0.0,
+      "actor_timeout_sum_seconds": 0.0,
+      "max_prefix_usage": 100000,
+      "phase": "first-borr",
+      "refresh_active": 1,
+      "refresh_stale": 100000,
+      "rib_prefixes": 100000,
+      "session_established": 1,
+      "session_established_total": 1,
+      "session_flaps_total": 0
+    },
+    {
+      "actor_begin_count": 1.0,
+      "actor_begin_sum_seconds": 0.005267859,
+      "actor_eorr_count": 0.0,
+      "actor_eorr_sum_seconds": 0.0,
+      "actor_timed_ceiling_seconds": null,
+      "actor_timed_delta_seconds": null,
+      "actor_timed_operation": null,
+      "actor_timeout_count": 0.0,
+      "actor_timeout_sum_seconds": 0.0,
+      "max_prefix_usage": 100000,
+      "phase": "replay-one",
+      "refresh_active": 1,
+      "refresh_stale": 99999,
+      "rib_prefixes": 100000,
+      "session_established": 1,
+      "session_established_total": 1,
+      "session_flaps_total": 0
+    },
+    {
+      "actor_begin_count": 2.0,
+      "actor_begin_sum_seconds": 0.009410173,
+      "actor_eorr_count": 0.0,
+      "actor_eorr_sum_seconds": 0.0,
+      "actor_timed_ceiling_seconds": 0.025,
+      "actor_timed_delta_seconds": 0.004142314000000001,
+      "actor_timed_operation": "begin",
+      "actor_timeout_count": 0.0,
+      "actor_timeout_sum_seconds": 0.0,
+      "max_prefix_usage": 100000,
+      "phase": "duplicate-borr",
+      "refresh_active": 1,
+      "refresh_stale": 100000,
+      "rib_prefixes": 100000,
+      "session_established": 1,
+      "session_established_total": 1,
+      "session_flaps_total": 0
+    },
+    {
+      "actor_begin_count": 2.0,
+      "actor_begin_sum_seconds": 0.009410173,
+      "actor_eorr_count": 1.0,
+      "actor_eorr_sum_seconds": 0.1637322,
+      "actor_timed_ceiling_seconds": 0.25,
+      "actor_timed_delta_seconds": 0.1637322,
+      "actor_timed_operation": "eorr",
+      "actor_timeout_count": 0.0,
+      "actor_timeout_sum_seconds": 0.0,
+      "max_prefix_usage": 0,
+      "phase": "eorr",
+      "refresh_active": 0,
+      "refresh_stale": 0,
+      "rib_prefixes": 0,
+      "session_established": 1,
+      "session_established_total": 1,
+      "session_flaps_total": 0
+    },
+    {
+      "actor_begin_count": 2.0,
+      "actor_begin_sum_seconds": 0.009410173,
+      "actor_eorr_count": 1.0,
+      "actor_eorr_sum_seconds": 0.1637322,
+      "actor_timed_ceiling_seconds": null,
+      "actor_timed_delta_seconds": null,
+      "actor_timed_operation": null,
+      "actor_timeout_count": 0.0,
+      "actor_timeout_sum_seconds": 0.0,
+      "max_prefix_usage": 100000,
+      "phase": "restored",
+      "refresh_active": 0,
+      "refresh_stale": 0,
+      "rib_prefixes": 100000,
+      "session_established": 1,
+      "session_established_total": 1,
+      "session_flaps_total": 0
+    },
+    {
+      "actor_begin_count": 3.0,
+      "actor_begin_sum_seconds": 0.015811910000000002,
+      "actor_eorr_count": 1.0,
+      "actor_eorr_sum_seconds": 0.1637322,
+      "actor_timed_ceiling_seconds": 0.025,
+      "actor_timed_delta_seconds": 0.006401737000000001,
+      "actor_timed_operation": "begin",
+      "actor_timeout_count": 0.0,
+      "actor_timeout_sum_seconds": 0.0,
+      "max_prefix_usage": 100000,
+      "phase": "timeout-borr",
+      "refresh_active": 1,
+      "refresh_stale": 100000,
+      "rib_prefixes": 100000,
+      "session_established": 1,
+      "session_established_total": 1,
+      "session_flaps_total": 0
+    },
+    {
+      "actor_begin_count": 3.0,
+      "actor_begin_sum_seconds": 0.015811910000000002,
+      "actor_eorr_count": 1.0,
+      "actor_eorr_sum_seconds": 0.1637322,
+      "actor_timed_ceiling_seconds": 0.25,
+      "actor_timed_delta_seconds": 0.155683198,
+      "actor_timed_operation": "timeout",
+      "actor_timeout_count": 1.0,
+      "actor_timeout_sum_seconds": 0.155683198,
+      "max_prefix_usage": 0,
+      "phase": "timeout-complete",
+      "refresh_active": 0,
+      "refresh_stale": 0,
+      "rib_prefixes": 0,
+      "session_established": 1,
+      "session_established_total": 1,
+      "session_flaps_total": 0
+    }
+  ],
+  "sampled_peaks": {
+    "duplicate-borr": {
+      "max_jemalloc_active_bytes": 77983744,
+      "max_jemalloc_allocated_bytes": 77053840,
+      "max_jemalloc_resident_bytes": 123019264,
+      "max_vmrss_kib": 117992,
+      "median_vmrss_kib": 117936,
+      "samples": 4
+    },
+    "eorr": {
+      "max_jemalloc_active_bytes": 79917056,
+      "max_jemalloc_allocated_bytes": 78817120,
+      "max_jemalloc_resident_bytes": 157224960,
+      "max_vmrss_kib": 145504,
+      "median_vmrss_kib": 145476,
+      "samples": 4
+    },
+    "first-borr": {
+      "max_jemalloc_active_bytes": 78151680,
+      "max_jemalloc_allocated_bytes": 77164248,
+      "max_jemalloc_resident_bytes": 120397824,
+      "max_vmrss_kib": 115500,
+      "median_vmrss_kib": 115496,
+      "samples": 4
+    },
+    "replay-one": {
+      "max_jemalloc_active_bytes": 77987840,
+      "max_jemalloc_allocated_bytes": 77045680,
+      "max_jemalloc_resident_bytes": 120397824,
+      "max_vmrss_kib": 115524,
+      "median_vmrss_kib": 115520,
+      "samples": 4
+    },
+    "restored": {
+      "max_jemalloc_active_bytes": 89346048,
+      "max_jemalloc_allocated_bytes": 87687784,
+      "max_jemalloc_resident_bytes": 157442048,
+      "max_vmrss_kib": 147984,
+      "median_vmrss_kib": 147380,
+      "samples": 11
+    },
+    "timeout-borr": {
+      "max_jemalloc_active_bytes": 85655552,
+      "max_jemalloc_allocated_bytes": 84206952,
+      "max_jemalloc_resident_bytes": 161234944,
+      "max_vmrss_kib": 152692,
+      "median_vmrss_kib": 152442,
+      "samples": 4
+    },
+    "timeout-complete": {
+      "max_jemalloc_active_bytes": 146280448,
+      "max_jemalloc_allocated_bytes": 144811976,
+      "max_jemalloc_resident_bytes": 215740416,
+      "max_vmrss_kib": 180188,
+      "median_vmrss_kib": 146432,
+      "samples": 587
+    }
+  }
+}

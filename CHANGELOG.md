@@ -9,6 +9,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Documentation
+
+- Publish the current v0.68.0 benchmark evidence bundle: exact-release
+  cross-stack import/convergence, exact-source high-N route-server and RIB
+  memory results, exact-release FIB and Enhanced Route Refresh refreshes, and
+  source-equivalent IXP, route-server-1000, RR1000, and twelve-root IRR reload
+  receipts with compact checksummed artifacts and explicit claim boundaries.
+
 ## [0.68.0] — 2026-08-30
 
 > **Release framing — broader control surfaces, faster route-server release.**

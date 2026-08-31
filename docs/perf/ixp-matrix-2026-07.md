@@ -756,3 +756,21 @@ the six accepted S3 rows were measured at `f8d619d5` with harness SHA-256
 The compact machine rows are committed as
 [`openbgpd92-v0670-summary.csv`](artifacts/ixp-matrix-2026-07/openbgpd92-v0670-summary.csv);
 the full cell trees remain retained off-repo.
+
+## v0.68.0 source-equivalent refresh — 2026-08-30
+
+Two S2 and two S3 rustbgpd cells passed at `ba5717b4`. The exact v0.68.0
+release commit is `d3e6c3571116261c47039b603ec64db14100ea0e`. Relative to that
+release, the measured source differs only in workflow checkout-depth lines;
+product and harness inputs are identical. All 700 sessions established in 0.7 seconds and
+cold convergence completed in 3.4 seconds. S2 completion p50 was
+1.209–1.350 seconds; S3 reannounce p50 was 0.358–0.393 seconds, with the first
+reannouncement at 0.21 seconds in every round.
+
+Compact status and timing logs are retained under
+[`current-scale-v0680-2026-08`](artifacts/current-scale-v0680-2026-08/README.md).
+Across the retained logs, reload-stall p50 spans 0.384–0.529 seconds and
+flapstorm withdraw p50 spans 0.30–0.43 seconds. S2 settled RSS is 373/372 MiB
+and S3 settled RSS is 440/449 MiB for runs A/B. These source-equivalent rows
+are current rustbgpd observations; BIRD remains dated to the v0.64.0 refresh,
+and OpenBGPD 9.2 to its separate 2026-08-30 amendment.

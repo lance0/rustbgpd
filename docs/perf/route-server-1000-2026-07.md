@@ -128,3 +128,17 @@ The driver emits private raw output below `target/route-server-1000/`. The
 the sanitized config and policies, exact commands and binary hashes, build and
 daemon logs, per-reload rows, continuous readiness/RSS/metrics streams, export
 explain, environment, validation summary, and checksums.
+
+## v0.68.0 source-equivalent refresh — 2026-08-30
+
+The current 1,000-peer, 399,600-route retained run passed at `ba5717b4`. The
+exact v0.68.0 release commit is `d3e6c3571116261c47039b603ec64db14100ea0e`;
+the only measured-source delta is workflow checkout-depth metadata. Sessions
+established in 1.2 seconds, routes converged in 6.5 seconds, and four policy
+reloads recorded 1.963–2.632-second p50 completion. Peak process-tree RSS was
+677,428 KiB. All 1,180 readiness probes returned HTTP 200; the slowest was
+63.31 ms.
+
+The compact [result and provenance](artifacts/current-scale-v0680-2026-08/README.md)
+retain this current source-equivalent observation. It is not an exact-tag run,
+and its RSS is not compared across different daemon defaults.

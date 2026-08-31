@@ -147,3 +147,16 @@ obligation or accepted-BoRR actor observation is removed. The live receipt goes
 red if the RIB snapshot, duplicate resnapshot, EoRR/timeout route sweep,
 max-prefix reconciliation, actor histogram, session continuity, or exact API
 sentinels regress.
+
+## v0.68.0 exact-release refresh — 2026-08-30
+
+The same one-peer, 100,000-route correctness shape passed at exact v0.68.0
+commit `d3e6c3571116261c47039b603ec64db14100ea0e`, with one established session,
+zero flaps, and the expected route/max-prefix/stale inventory at every phase.
+Observed actor durations were 5.268 ms for initial BoRR, 4.142 ms for duplicate
+BoRR, 163.732 ms for EoRR completion, and 155.683 ms for timeout completion.
+Both completion paths remained below the receipt's 250 ms ceiling.
+
+The compact [summary and provenance](artifacts/enhanced-route-refresh-v0680-2026-08/summary.json)
+retain the full phase and memory observations. This is an absolute exact-release
+reproduction, not a cross-release regression claim.

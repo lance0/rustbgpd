@@ -1,0 +1,246 @@
+[
+    {
+        "Architecture": "amd64",
+        "Config": {
+            "Cmd": [
+                "bash"
+            ],
+            "Env": [
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            ],
+            "Labels": {
+                "org.opencontainers.image.base.digest": "sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df",
+                "org.opencontainers.image.base.name": "debian:bookworm-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df",
+                "org.opencontainers.image.revision": "d3e6c3571116261c47039b603ec64db14100ea0e",
+                "org.rustbgpd.bgperf2.builder-base.digest": "sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1",
+                "org.rustbgpd.bgperf2.revision": "d0449574c10966218377ad4ca30da5fc3d783d5c",
+                "org.rustbgpd.bgperf2.rust-toolchain": "1.95"
+            },
+            "WorkingDir": "/root"
+        },
+        "Created": "2026-08-30T12:15:01.541688434-04:00",
+        "Descriptor": {
+            "digest": "sha256:73550c1e040d127d83a555c1a5d38fd28e39c28146a9a69c45ae0f7044e6c7fa",
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "size": 1849
+        },
+        "Id": "sha256:73550c1e040d127d83a555c1a5d38fd28e39c28146a9a69c45ae0f7044e6c7fa",
+        "Metadata": {
+            "LastTagTime": "2026-08-30T16:15:01.638476593Z"
+        },
+        "Os": "linux",
+        "Parent": "sha256:7f42620e6566e5c5114e06ea4c616e2f7446defb34b7ffeea8f8bfc2ba2f3470",
+        "RepoDigests": [
+            "bgperf/rustbgpd@sha256:73550c1e040d127d83a555c1a5d38fd28e39c28146a9a69c45ae0f7044e6c7fa"
+        ],
+        "RepoTags": [
+            "bgperf/rustbgpd:latest"
+        ],
+        "RootFS": {
+            "Layers": [
+                "sha256:b05a96227958df6091396f6fbd5aa4616df631a65626ac8688c91cfa70d1a7e6",
+                "sha256:c46576d00b4aea5c912d0c7a0a4a871743dd51a1fbe32e0c7e681cad546cb1cc",
+                "sha256:2b45bd29dc247107a703c711e0aec0135f680e4d398be9382bcfa08c5b9669ea",
+                "sha256:3eb39ec4801f0c0692f1f2a3b2f70df84a1a8503d89eca03a7a9306b7c58d2c6",
+                "sha256:3a942fed8a17541a72214f8ab5f862c3c49c655d30d1001a906bac543918eb40",
+                "sha256:5366f1e0597c3ec1904e596aad1518d23b3c77c086ec51c21718063fe6c2e4e2",
+                "sha256:be3d497460afa5c1d6f055518228be2682597fa67b1b245e74756ada4e71fc4d"
+            ],
+            "Type": "layers"
+        },
+        "Size": 53049435
+    },
+    {
+        "Architecture": "amd64",
+        "Config": {
+            "Cmd": [
+                "/bin/bash"
+            ],
+            "Env": [
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            ],
+            "Labels": {
+                "org.opencontainers.image.created": "2026-08-17T09:02:45.677319+00:00",
+                "org.opencontainers.image.description": "The Ubuntu container image maintained by Canonical\n\nUbuntu is a Debian-based Linux operating system that runs from the desktop to the cloud, to all your internet connected things.\nIt is the world's most popular operating system across public clouds and OpenStack clouds.\nIt is the number one platform for containers; from Docker to Kubernetes to LXD, Ubuntu can run your containers at scale.\nFast, secure and simple, Ubuntu powers millions of PCs worldwide.\n",
+                "org.opencontainers.image.title": "ubuntu",
+                "org.opencontainers.image.version": "26.04"
+            },
+            "WorkingDir": "/root"
+        },
+        "Created": "2026-08-29T21:30:14.930827802-04:00",
+        "Descriptor": {
+            "digest": "sha256:e5e814ba77bae6cfbc9ced5a0efff591b6c69511deab94d76b13b0dfd8c3d795",
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "size": 1610
+        },
+        "Id": "sha256:e5e814ba77bae6cfbc9ced5a0efff591b6c69511deab94d76b13b0dfd8c3d795",
+        "Metadata": {
+            "LastTagTime": "2026-08-30T01:34:47.008481121Z"
+        },
+        "Os": "linux",
+        "Parent": "sha256:f496d9ea1430c725c84d518fa7f38a4387e26b34f7371e48e4117f12fb06df00",
+        "RepoDigests": [
+            "bgperf/bird@sha256:e5e814ba77bae6cfbc9ced5a0efff591b6c69511deab94d76b13b0dfd8c3d795"
+        ],
+        "RepoTags": [
+            "bgperf/bird:2.19.2",
+            "bgperf/bird:latest"
+        ],
+        "RootFS": {
+            "Layers": [
+                "sha256:b577adbc0b589bb7c1d3be98cc4b703e8228ab4413156754445e8b20a001c5d3",
+                "sha256:168f4b64baaa0d1f3b8a1a27acfa9cd0f29527ebda716df024dfa0e9e8f24ef9",
+                "sha256:df9a88ae41664bd8cfc77cc34940a1ea66900c47829b0967d1e1f831092563e7",
+                "sha256:21af2b2ca7897ca23dae6588f9361ea7621a641ddec1269bea4f77d811d4001c",
+                "sha256:a7c3e180285022a401777682f6676fe48dac1880703979c866e4d8d1da43da34"
+            ],
+            "Type": "layers"
+        },
+        "Size": 226042068
+    },
+    {
+        "Architecture": "amd64",
+        "Config": {
+            "Cmd": [
+                "bash"
+            ],
+            "Env": [
+                "PATH=/go/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "GOLANG_VERSION=1.25.14",
+                "GOTOOLCHAIN=local",
+                "GOPATH=/go"
+            ],
+            "WorkingDir": "/root"
+        },
+        "Created": "2026-08-29T21:30:50.457087676-04:00",
+        "Descriptor": {
+            "digest": "sha256:3b6e240376cb1c6db7c4aae50173eec127ec4f4ac0bd7a0977872182aa3d7f78",
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "size": 2711
+        },
+        "Id": "sha256:3b6e240376cb1c6db7c4aae50173eec127ec4f4ac0bd7a0977872182aa3d7f78",
+        "Metadata": {
+            "LastTagTime": "2026-08-30T01:30:50.535066431Z"
+        },
+        "Os": "linux",
+        "Parent": "sha256:6bb827b34bfbf1215d061524819f58393d17982a7ac6b936463e5e7000594695",
+        "RepoDigests": [
+            "bgperf/gobgp@sha256:3b6e240376cb1c6db7c4aae50173eec127ec4f4ac0bd7a0977872182aa3d7f78"
+        ],
+        "RepoTags": [
+            "bgperf/gobgp:4.8.0"
+        ],
+        "RootFS": {
+            "Layers": [
+                "sha256:63ecca237e30aca8ae79232ae01dddab7d8b42302f654f343f7cc7ddae60d57c",
+                "sha256:e62aadfda549a23e76f5bb43a9a5c652f9e7312aba9edf5c1411f7d0aed54eed",
+                "sha256:3acdb7d9b7ebcd7f62d99a996099a57b8367821f4d9a3f4b52239934425a7b98",
+                "sha256:6278c1f4144901e76b467bbd4cdbd2bce7e026411d615ae510ae8832c56278a2",
+                "sha256:b2fa6852ca3126152f0b8e37ec1c9318fd684702c72caa36bcbb66b83ff4af4f",
+                "sha256:2fad1eb2f9d90c59cab28cda133057efaaff2592ef762f9d7615a87b20ef202e",
+                "sha256:5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef",
+                "sha256:6ceb4d506f1f718fc4867f1deb963306be66a35fc5679af9d45148d230728898",
+                "sha256:b7a3900031c885978c99142bd4b2761a8b866b8474df1745aff6ab916fbc9193",
+                "sha256:f79d10f08d84d16ed24b8b3fa06b82a4b7f25007c7ab3a811c3710ad7a891e4c",
+                "sha256:43696dc4aea4227614fbeb0bc49bc1595bf6b457c29084a2ce18872452f338bf"
+            ],
+            "Type": "layers"
+        },
+        "Size": 462102535
+    },
+    {
+        "Architecture": "amd64",
+        "Config": {
+            "Cmd": [
+                "/bin/bash"
+            ],
+            "Env": [
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "APT_KEY_DONT_WARN_ON_DANGEROUS_USAGE=DontWarn"
+            ],
+            "Labels": {
+                "org.opencontainers.image.version": "22.04"
+            }
+        },
+        "Created": "2026-08-29T21:34:27.237073486-04:00",
+        "Descriptor": {
+            "digest": "sha256:ff575fdfed463c18badd738e430869f3808f1bf81762870b927cde299bc32e97",
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "size": 2058
+        },
+        "Id": "sha256:ff575fdfed463c18badd738e430869f3808f1bf81762870b927cde299bc32e97",
+        "Metadata": {
+            "LastTagTime": "2026-08-30T01:34:27.265561493Z"
+        },
+        "Os": "linux",
+        "Parent": "sha256:f607ec7fa1a26fd2ce68e71f2df448fd1e0c9ac4ccb14799e7ef3bbe17d2a8e8",
+        "RepoDigests": [
+            "bgperf/frr_c@sha256:ff575fdfed463c18badd738e430869f3808f1bf81762870b927cde299bc32e97"
+        ],
+        "RepoTags": [
+            "bgperf/frr_c:10.7.0"
+        ],
+        "RootFS": {
+            "Layers": [
+                "sha256:c0359c5b6ede84d4a083d06d35ee77f0b338dfb17423771854d007d89953fb3e",
+                "sha256:ea0f24acfd2c94a50774e926c8be92c9d77cf8d4a09602a40b251b99a2840a22",
+                "sha256:a24a51bdf51601d0c65ad022cf60be7107562d7f60f112eb1e3bc63587faf7e2",
+                "sha256:d9041b8327f6831e1194101dd72187708307b3f3ad923154731057a6eb92ab2c",
+                "sha256:420aa3212bb7ccabf824fbfda82518dfd38ea07d63e11732e73666f1f03f1a0b",
+                "sha256:3bf0fadc5c1519ff07f607f38ebaf1ee358da796b422f678ee662d6eb398cfce",
+                "sha256:2d00f5ab850d50aeab0e57f8277de4d076d785fb7c5f4cc85e4e143f6bb0d9b4",
+                "sha256:96b327887148b99be3768fc75722b1f70a35c7453b11a90d2478599dc90d269b"
+            ],
+            "Type": "layers"
+        },
+        "Size": 1060213117
+    },
+    {
+        "Architecture": "amd64",
+        "Config": {
+            "Cmd": [
+                "/bin/bash"
+            ],
+            "Env": [
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            ],
+            "Labels": {
+                "org.opencontainers.image.created": "2026-08-17T09:02:45.677319+00:00",
+                "org.opencontainers.image.description": "The Ubuntu container image maintained by Canonical\n\nUbuntu is a Debian-based Linux operating system that runs from the desktop to the cloud, to all your internet connected things.\nIt is the world's most popular operating system across public clouds and OpenStack clouds.\nIt is the number one platform for containers; from Docker to Kubernetes to LXD, Ubuntu can run your containers at scale.\nFast, secure and simple, Ubuntu powers millions of PCs worldwide.\n",
+                "org.opencontainers.image.title": "ubuntu",
+                "org.opencontainers.image.version": "26.04"
+            },
+            "WorkingDir": "/root"
+        },
+        "Created": "2026-08-29T21:30:14.930827802-04:00",
+        "Descriptor": {
+            "digest": "sha256:e5e814ba77bae6cfbc9ced5a0efff591b6c69511deab94d76b13b0dfd8c3d795",
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "size": 1610
+        },
+        "Id": "sha256:e5e814ba77bae6cfbc9ced5a0efff591b6c69511deab94d76b13b0dfd8c3d795",
+        "Metadata": {
+            "LastTagTime": "2026-08-30T01:34:47.008481121Z"
+        },
+        "Os": "linux",
+        "Parent": "sha256:f496d9ea1430c725c84d518fa7f38a4387e26b34f7371e48e4117f12fb06df00",
+        "RepoDigests": [
+            "bgperf/bird@sha256:e5e814ba77bae6cfbc9ced5a0efff591b6c69511deab94d76b13b0dfd8c3d795"
+        ],
+        "RepoTags": [
+            "bgperf/bird:2.19.2",
+            "bgperf/bird:latest"
+        ],
+        "RootFS": {
+            "Layers": [
+                "sha256:b577adbc0b589bb7c1d3be98cc4b703e8228ab4413156754445e8b20a001c5d3",
+                "sha256:168f4b64baaa0d1f3b8a1a27acfa9cd0f29527ebda716df024dfa0e9e8f24ef9",
+                "sha256:df9a88ae41664bd8cfc77cc34940a1ea66900c47829b0967d1e1f831092563e7",
+                "sha256:21af2b2ca7897ca23dae6588f9361ea7621a641ddec1269bea4f77d811d4001c",
+                "sha256:a7c3e180285022a401777682f6676fe48dac1880703979c866e4d8d1da43da34"
+            ],
+            "Type": "layers"
+        },
+        "Size": 226042068
+    }
+]

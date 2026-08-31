@@ -1,0 +1,29 @@
+run_id=20260830T160238Z-69b27812eecc-vs-d3e6c3571116-rib-memory-full
+base_ref=v0.67.0
+base_sha=69b27812eecc66e7affc505fbe887259b48990f5
+head_ref=d3e6c3571116261c47039b603ec64db14100ea0e
+head_sha=d3e6c3571116261c47039b603ec64db14100ea0e
+profile=full
+base_target_dir=<artifact-root>/target/base
+head_target_dir=<artifact-root>/target/head
+
+Linux 6.17.0-35-generic x86_64 GNU/Linux
+
+rustc 1.98.0 (88d9e12ae 2026-08-18)
+binary: rustc
+commit-hash: 88d9e12ae178fab0fb5cc050a94da85685d449ea
+commit-date: 2026-08-18
+host: x86_64-unknown-linux-gnu
+release: 1.98.0
+LLVM version: 22.1.8
+
+cargo 1.98.0 (797e8a9bc 2026-08-05)
+
+model name	: AMD Ryzen Threadripper 7970X 32-Cores
+fail_on_regression=0
+review_threshold_percent=5
+review_threshold_bytes=33554432
+review_rule=percentage_or_absolute
+gate_result=advisory
+review_count=0
+missing_row_count=6

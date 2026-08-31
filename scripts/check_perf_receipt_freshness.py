@@ -87,12 +87,20 @@ def parse_manifest(text: str) -> dict[str, object]:
     for item in raw_receipts:
         if (
             not isinstance(item, dict)
-            or not set(item).issubset({"path", "measured_commit", "release_commit", "measured_on"})
+            or not set(item).issubset(
+                {
+                    "path",
+                    "measured_commit",
+                    "release_commit",
+                    "measured_on",
+                    "source_equivalent",
+                }
+            )
             or not {"path", "measured_commit"}.issubset(item)
         ):
             raise ContractError(
                 "each receipt must contain path and measured_commit plus only "
-                "optional release_commit and measured_on"
+                "optional release_commit, measured_on, and source_equivalent"
             )
         path = safe_repo_path(item["path"], suffix=".md")
         if not path.startswith("docs/perf/") or "/artifacts/" in path:
@@ -103,6 +111,15 @@ def parse_manifest(text: str) -> dict[str, object]:
                 not isinstance(item[key], str) or COMMIT.fullmatch(item[key]) is None
             ):
                 raise ContractError(f"{path} {key} must be a full lowercase commit SHA")
+        if "source_equivalent" in item:
+            if item["source_equivalent"] is not True:
+                raise ContractError(f"{path} source_equivalent must be true when present")
+            if "release_commit" not in item:
+                raise ContractError(f"{path} source_equivalent requires release_commit")
+            if item["measured_commit"] == item["release_commit"]:
+                raise ContractError(
+                    f"{path} source_equivalent requires distinct measured and release commits"
+                )
         if "measured_on" in item:
             try:
                 measured = date.fromisoformat(item["measured_on"])
@@ -179,6 +196,23 @@ def commit_tags(root: Path, commit: str) -> list[str]:
     if resolved != [commit]:
         raise ContractError(f"commit {commit} did not resolve exactly")
     return git_lines(root, "tag", "--contains", commit)
+
+
+def is_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
+    result = subprocess.run(
+        ("git", "merge-base", "--is-ancestor", ancestor, descendant),
+        cwd=root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode in (0, 1):
+        return result.returncode == 0
+    detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+    raise ContractError(
+        f"git merge-base --is-ancestor {ancestor} {descendant} failed: {detail}"
+    )
 
 
 def claim_block(document: str, anchor: str) -> str:
@@ -293,7 +327,10 @@ def check_contract(
         except ContractError as error:
             errors.append(f"{path}: {error}")
             continue
-        if not measured_tags:
+        # An explicitly source-equivalent measurement may live past the tagged
+        # release commit; its distinct release_commit still must resolve to a
+        # stable tag below. Ordinary untagged measurements remain invalid.
+        if not measured_tags and not item.get("source_equivalent", False):
             errors.append(f"{path} measured commit {measured_commit} is contained by no git tag")
         release_commit = item.get("release_commit", measured_commit)
         try:
@@ -307,6 +344,18 @@ def check_contract(
                 f"{path} release commit {release_commit} is contained by no stable release tag"
             )
             continue
+        if item.get("source_equivalent", False):
+            try:
+                release_is_ancestor = is_ancestor(root, release_commit, measured_commit)
+            except ContractError as error:
+                errors.append(f"{path}: {error}")
+                continue
+            if not release_is_ancestor:
+                errors.append(
+                    f"{path} source-equivalent release commit {release_commit} "
+                    f"is not an ancestor of measured commit {measured_commit}"
+                )
+                continue
         first_release = containing[0]
         release_ages[path] = release_names.index(current_release) - release_names.index(
             first_release

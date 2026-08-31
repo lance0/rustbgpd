@@ -1,5 +1,9 @@
 # Grouped per-client best-path IRR reload receipt — ADR-0126 acceptance — 2026-08
 
+> **Historical receipt.** This earlier implementation is preserved for
+> reproducibility. The current v0.68.0 source-equivalent result is
+> [published separately](irr-reload-v0680-2026-08.md).
+
 What does the RFC 7947 path-hiding mitigation cost once it is computed
 per group instead of per member? The sealed
 [realistic-mix receipt](irr-reload-realistic-mix-2026-08.md) priced
