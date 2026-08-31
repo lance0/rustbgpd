@@ -18,9 +18,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- An unexpected exit or panic in the configured RPKI subsystem now triggers
-  coordinated shutdown and exit 1. Ordinary RTR reconnect and data-expiry
-  handling remain non-fatal.
+- RPKI fail-stop receipts now retain the task class behind a panic even when a
+  dependent forwarder returns first. The daemon still performs coordinated
+  shutdown and exits 1; ordinary RTR reconnect and expiry remain non-fatal.
 
 ### Documentation
 
