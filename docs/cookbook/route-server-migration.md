@@ -26,7 +26,7 @@ rbgp config import bird.conf --out config.toml
 #    explicit policy, by name and direction.
 rustbgpd --check config.toml
 
-# 3. Shadow trial (docs/cookbook/route-server.md), then compare the
+# 3. Shadow trial (the cutover checklist below), then compare the
 #    advertised view against the incumbent per member:
 rbgp diff advertised --neighbor 198.51.100.2 --against bird-member.ndjson
 ```
@@ -463,8 +463,12 @@ cutover blockers.
 
 1. Build the candidate config and run `rustbgpd --check --strict`.
 2. Run `rbgp policy check` for every `.rpol` file.
-3. Shadow-peer the same members with a non-production listener so no accidental
-   TCP/179 collision occurs.
+3. Shadow-peer the same members with a non-production listener (or
+   `listen_port = 0`) so no accidental TCP/179 collision occurs, peering to
+   safe member-session copies where possible. Keep
+   `route_server_client = true`, `role = "route_server"`, and the same
+   import/export chains you intend to use after cutover, so the trial
+   exercises the production policy.
 4. Compare received and advertised views:
 
    ```bash
@@ -491,13 +495,25 @@ cutover blockers.
    was refused (incomplete, stale, or over-limit input is never treated
    as equal). Gate each cutover batch on exit code 0 for its members.
 
-5. Confirm counters stay quiet after convergence:
+5. Validate the path-hiding mitigation per member: for Add-Path members,
+   verify multiple candidate paths are present; for non-Add-Path members,
+   verify `Distribution Mode: per-client-best` (`rbgp neighbor <member>`)
+   and inspect the candidate ladder with `--explain`.
+
+6. Confirm counters stay quiet after convergence:
 
    ```bash
+   rbgp policy counters
    rbgp metrics | grep -E 'route_refresh|session_state|update_group'
    ```
 
-6. Cut member sessions in small batches. Keep the incumbent read-only during the
+7. Generate a support bundle before and after the trial:
+
+   ```bash
+   rbgp doctor --output ./support-rs-shadow.tar.gz
+   ```
+
+8. Cut member sessions in small batches. Keep the incumbent read-only during the
    first batch so advertised-view diffs remain available.
 
 [openbgpd-bgpctl-out]: https://man.openbsd.org/OpenBSD-7.7/bgpctl.8#out

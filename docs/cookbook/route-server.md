@@ -272,51 +272,20 @@ $ rbgp neighbor 198.51.100.4 add --remote-asn 64503 \
 
 ## Shadow trial
 
-Use the shadow trial before production cutover. The goal is to prove import
-hygiene and per-member export views without carrying member traffic yet.
+Run rustbgpd beside the incumbent to prove import hygiene and per-member
+export views before any member session moves. Whatever the goal, give the
+shadow a non-production listener or `listen_port = 0` so nothing can
+collide with the incumbent's TCP/179.
 
-1. Run rustbgpd beside the incumbent route server with a non-production listener
-   or `listen_port = 0`, and peer it to safe member-session copies where
-   possible.
-2. Keep `route_server_client = true`, `role = "route_server"`, and the same
-   import/export chains you intend to use after cutover.
-3. Compare the incumbent and rustbgpd views per member:
-
-   ```console
-   $ rbgp rib recv 198.51.100.2
-   $ rbgp rib sent 198.51.100.3
-   $ rbgp rib --prefix 203.0.113.0/24 advertised 198.51.100.3 --explain
-   ```
-
-   For the systematic version — every member, every prefix, every
-   attribute — export the incumbent's advertised view to an NDJSON
-   snapshot and diff it against the live Adj-RIB-Out
-   ([`docs/ribdiff.md`](../ribdiff.md) has the snapshot format and
-   producer snippets):
-
-   ```console
-   $ rbgp diff advertised --against incumbent.ndjson
-   $ echo $?   # 0 in sync, 1 divergent, 2 comparison refused
-   ```
-
-4. For Add-Path members, verify multiple candidate paths are present. For
-   non-Add-Path members, verify `Distribution Mode: per-client-best` and inspect
-   the candidate ladder with `--explain`.
-5. Keep the session counters flat after convergence:
-
-   ```console
-   $ rbgp policy counters
-   $ rbgp metrics | grep -E 'bgp_session_state_transitions_total|route_refresh'
-   ```
-
-6. Generate a support bundle before and after the trial:
-
-   ```console
-   $ rbgp doctor --output ./support-rs-shadow.tar.gz
-   ```
-
-Migration mapping for FRR, BIRD, and ARouteServer lives in
-[`route-server-migration.md`](route-server-migration.md).
+- **Replacing the incumbent:** follow the
+  [cutover checklist](route-server-migration.md#cutover-checklist) — the
+  step-by-step procedure, from shadow-peering through the
+  `rbgp diff advertised` gate to cutting sessions in batches. The same
+  page maps FRR, BIRD, OpenBGPD, and ARouteServer concepts to rustbgpd.
+- **Evaluating with no cutover planned or implied:** run the standing
+  [shadow pilot](route-server-shadow-pilot.md) instead — a receive-only,
+  non-authoritative deployment shaped for weeks-to-months comparison
+  against the incumbent.
 
 ## IRR-driven member filters (arouteserver data)
 
