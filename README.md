@@ -21,6 +21,21 @@ explain, opt-in import-decision explain, retained rejected routes with
 reasons, BMP/MRT/metrics — with receipt-backed interop behind each claimed
 behavior.
 
+## Choose your path
+
+| I want to… | Start here |
+|------------|------------|
+| Run a local demo | [Try it in 60 seconds](#try-it-60-seconds) |
+| Evaluate rustbgpd for an IXP route server | [IXP evaluation](docs/ixp-evaluation.md) |
+| Deploy a proven topology | [Scenario cookbook](docs/cookbook/README.md) |
+| Operate or troubleshoot a daemon | [Operations reference](docs/OPERATIONS.md) |
+| Build against the gRPC API | [API reference](docs/API.md) |
+| Check current boundaries and non-goals | [Limitations](docs/LIMITATIONS.md) |
+| Audit a behavior or performance claim | [Evidence and receipts](docs/RECEIPTS.md) |
+
+<details>
+<summary>Performance evidence and current headline results</summary>
+
 **Measured, not marketed** — every number below links to its published,
 reproducible receipt:
 
@@ -66,6 +81,8 @@ The rustbgpd figures above are current v0.68.0 source-equivalent rows measured
 2026-08-30. BIRD remains the v0.64.0 same-host refresh measured 2026-08-08;
 OpenBGPD 9.2 is a supplemental comparator amendment measured 2026-08-30.
 The mixed-date boundary and earlier bands are preserved in the receipt.
+
+</details>
 
 **Status: public alpha.** Feature-complete for the initial programmable
 control-plane target and expanding toward cloud / AI-scale data-center
