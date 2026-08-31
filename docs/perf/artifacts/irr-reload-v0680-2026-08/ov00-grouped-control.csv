@@ -1,0 +1,9 @@
+repeat,cell,reload,peers_total,peers_changed,peers_stable,prefixes,completion_p50_s,completion_p95_s,completion_max_s,changed_maxgap_p50_ms,changed_maxgap_p95_ms,changed_maxgap_max_ms,all_observer_maxgap_p50_ms,all_observer_maxgap_p95_ms,all_observer_maxgap_max_ms,changed_first_generation_update_p50_ms,changed_first_generation_update_p95_ms,changed_first_generation_update_max_ms,rss_before_mib,rss_after_mib,stable_marker_peers,sessions_up,parse_errors
+A,rustbgpd-sighup-grouped-control,1,320,320,0,183040,0.828950,0.912576,0.927697,172.373,276.461,329.850,172.373,276.461,329.850,635.547,741.649,794.424,480,582,0,320,0
+A,rustbgpd-sighup-grouped-control,2,320,320,0,183040,0.792418,0.887706,0.896131,170.092,343.052,388.549,170.092,343.052,388.549,631.208,836.221,882.082,539,615,0,320,0
+A,rustbgpd-sighup-grouped-control,3,320,320,0,183040,0.779648,0.874782,0.880853,233.761,432.579,475.781,233.761,432.579,475.781,613.266,812.778,856.709,540,628,0,320,0
+A,rustbgpd-sighup-grouped-control,4,320,320,0,183040,0.755583,0.856532,0.864126,178.059,289.893,387.861,178.059,289.893,387.861,611.163,726.989,824.943,538,620,0,320,0
+B,rustbgpd-sighup-grouped-control,1,320,320,0,183040,0.740817,0.825096,0.854221,136.343,172.139,202.588,136.343,172.139,202.588,628.622,662.174,675.299,480,577,0,320,0
+B,rustbgpd-sighup-grouped-control,2,320,320,0,183040,0.760472,0.836074,0.927522,137.132,297.359,324.998,137.132,297.359,324.998,640.668,802.290,829.369,537,614,0,320,0
+B,rustbgpd-sighup-grouped-control,3,320,320,0,183040,0.713930,0.770456,0.777310,149.925,235.525,270.482,149.925,235.525,270.482,605.232,690.929,725.915,539,630,0,320,0
+B,rustbgpd-sighup-grouped-control,4,320,320,0,183040,0.770595,0.840894,0.844871,140.526,195.161,256.712,140.526,195.161,256.712,630.723,646.581,748.176,540,621,0,320,0

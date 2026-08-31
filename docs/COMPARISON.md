@@ -400,28 +400,26 @@ memory-safe-language row refers to.
     multi-path *send* (RFC 7911, route-server mode) and EVPN aliasing ECMP
     (ADR-0059 FDB nexthop groups, default-on) also ship.
 
-## Performance Snapshot (bgperf2 — 2026-08-29)
+## Performance Snapshot (bgperf2 — 2026-08-30)
 
-The freshest published [v0.67.0 cross-stack
-receipt](perf/competitive-bgperf2-v0670-2026-08.md) is an 80-cell,
+The freshest published [v0.68.0 cross-stack
+receipt](perf/competitive-bgperf2-v0680-2026-08.md) is an 80-cell,
 counterbalanced same-host campaign against fresh pinned builds of BIRD 2.19.2,
 FRR 10.7.0, and GoBGP 4.8.0. Values are successful-run medians of
-**convergence seconds / total seconds / peak raw container cgroup GiB**.
+**convergence seconds / total seconds**.
 
-| Scenario | rustbgpd v0.67.0 | BIRD 2.19.2 | FRR 10.7.0 | GoBGP 4.8.0 |
+| Scenario | rustbgpd v0.68.0 | BIRD 2.19.2 | FRR 10.7.0 | GoBGP 4.8.0 |
 |---|---:|---:|---:|---:|
-| 10 peers × 1k prefixes | 2 / 8.22 / 0.029 | 2 / 9.23 / 0.010 | 3 / 9.29 / 0.030 | 4 / 11.38 / 0.114 |
-| 2 peers × 10k prefixes | 2 / 8.26 / 0.038 | 2 / 9.27 / 0.010 | 3 / 9.34 / 0.042 | 3 / 10.39 / 0.076 |
-| 2 peers × 100k prefixes | 3 / 12.44 / 0.197 | 3 / 13.53 / 0.028 | 4 / 13.56 / 0.259 | 4 / 14.59 / 0.388 |
-| 30 peers × 1k prefixes | 3 / 9.81 / 0.104 | 3 / 10.30 / 0.013 | 4 / 10.89 / 0.057 | 4 / 11.44 / 0.577 |
-| 100 peers × 1k prefixes | 3 / 11.91 / 0.248 | 5 / 14.00 / 0.032 | 7 / 16.58 / 0.152 | 16 / 24.75 / 4.902 |
+| 10 peers × 1k prefixes | 2 / 8.25 | 2 / 9.21 | 3 / 10.30 | 4 / 11.36 |
+| 2 peers × 10k prefixes | 2 / 8.24 | 2.5 / 9.81 | 3 / 9.33 | 3 / 10.39 |
+| 2 peers × 100k prefixes | 3 / 12.45 | 3 / 13.47 | 4 / 13.56 | 4 / 14.59 |
+| 30 peers × 1k prefixes | 2.5 / 9.31 | 3 / 9.75 | 4 / 10.91 | 4 / 10.93 |
+| 100 peers × 1k prefixes | 3 / 11.95 | 5 / 14.02 | 7 / 16.55 | 16 / 24.78 |
 
-Rustbgpd's successful repetitions had the lowest median total time in all five
-shapes and tied or had the lowest median convergence time. BIRD had the lowest
-peak raw cgroup usage in all five. Seventy-nine of 80 campaign cells completed:
-one rustbgpd 100-peer cell established no monitor-visible sessions or routes,
-while its next three balanced repetitions and one fresh-bridge focused rerun
-passed. The receipt preserves that failure and the claim boundaries.
+Rustbgpd had the lowest median total time in all five shapes and tied or had the
+lowest median convergence time. All 80 cells reached their exact expected
+route count. These fixed shapes top out at two peers × 100,000 prefixes; this
+is not a full-table campaign, and no CPU or memory ranking is claimed.
 
 ## Historical Performance Snapshot (bgperf2 — 2026-07-26)
 
@@ -477,26 +475,18 @@ matrix](perf/ixp-matrix-2026-07.md) compares rustbgpd, BIRD 3.3.1, and
 OpenBGPD 9.2 head-to-head at 700 peers × 400k prefixes under live churn
 — policy-reload stall and completion, member-flap propagation,
 convergence, and RSS — with identical wire inputs, config disclosure,
-and the losses published alongside the wins. The rustbgpd/BIRD rows were
-measured 2026-08-08; the OpenBGPD 9.2 comparator amendment was measured
+and the losses published alongside the wins. Current rustbgpd
+source-equivalent v0.68.0 rows were measured 2026-08-30; BIRD remains dated,
+measured 2026-08-08, and the OpenBGPD 9.2 comparator amendment was measured
 2026-08-30.
 
-At IRR scale, the [grouped per-client-best IRR reload
-receipt](perf/irr-reload-grouped-per-client-best-2026-08.md), measured 2026-08-08
-(ADR-0126
-acceptance) reloads 320 members × 183,040 prefixes × 3,218,965 IRR filter
-entries through one harness on one host: steady-state reload completion p50
-3.25–3.77 s for rustbgpd (reloads 2–4, both announcement-overlap points) vs
-~11.5–13.6 s for BIRD 3.3.1 and ~56–59 s for OpenBGPD 9.1, with every
-member's received view byte-identical to the ungrouped per-client-best
-baseline. The earlier
-[per-client receipt](perf/irr-reload-comparison-2026-08.md) (measured 2026-08-04)
-measured
-67.2–69.4 s at the same shape; ADR-0126's shared winner walk is what changed
-it. BIRD still holds the lower RSS peak there (1,375–1,420 MiB vs rustbgpd's
-1,972–2,098 MiB), and rustbgpd's first-reload-cheap pattern (completion p50
-2.1–2.3 s at reload 1 vs 3.3–3.8 s after) remains the open item the
-per-client receipt recorded.
+At IRR scale, the [current v0.68.0 receipt](perf/irr-reload-v0680-2026-08.md),
+measured 2026-08-30, retains twelve source-equivalent roots at 320 members ×
+183,040 generated IPv4 prefixes. rustbgpd completion p50 is 0.852–1.085
+seconds across 0%, 10%, and 50% received-view overlap, against BIRD's
+11.861–15.211 seconds and OpenBGPD's 42.939–61.959 seconds. Every retained row
+has 320/320 sessions and zero parse errors, and each overlap quartet passes the
+received-view delta verifier. The older IRR receipts are historical records.
 
 A separate [1,000-peer retained receipt](perf/route-server-1000-2026-07.md),
 measured 2026-07-20, exercises a uniform all-eBGP route-server fleet against

@@ -1,6 +1,6 @@
 # Linux FIB kernel-dump scaling receipt (August 2026)
 
-**Measured on:** 2026-08-25 UTC.
+**Measured on:** 2026-08-30 UTC at exact v0.68.0.
 
 ## Result
 
@@ -14,10 +14,10 @@ This table shows the directly comparable `K=64` cell; timings are p50/p95:
 
 | Unrelated rows | Returned global/strict | Global IPv4 dump | 64 strict table dumps | Largest faster strict K (p50) |
 |---:|---:|---:|---:|---:|
-| 0 | 128 / 128 | 0.131 / 0.139 ms | 2.171 / 2.517 ms | 2 |
-| 1,000 | 1,128 / 128 | 0.918 / 1.228 ms | 2.199 / 2.435 ms | 16 |
-| 5,000 | 5,128 / 128 | 4.104 / 4.165 ms | 1.981 / 2.031 ms | 64 |
-| 20,000 | 20,128 / 128 | 16.137 / 16.630 ms | 2.169 / 2.216 ms | 64 |
+| 0 | 128 / 128 | 0.136 / 0.180 ms | 2.224 / 2.452 ms | 2 |
+| 1,000 | 1,128 / 128 | 0.925 / 1.072 ms | 2.185 / 2.325 ms | 16 |
+| 5,000 | 5,128 / 128 | 4.132 / 4.189 ms | 1.975 / 2.104 ms | 64 |
+| 20,000 | 20,128 / 128 | 16.311 / 16.901 ms | 2.104 / 2.137 ms | 64 |
 
 All 28 cells, including exact returned counts and p50/p95 nanoseconds, are in
 [`results.json`](artifacts/fib-kernel-dump-2026-08/results.json). Exact host,
@@ -42,8 +42,8 @@ netlink error, truncated reply, cardinality mismatch, or `NLM_F_DUMP_INTR`
 aborts without output. The namespace and its routes disappear with the
 harness process, so no host route is mutated.
 
-The retained run used source baseline
-`8f1c920e0f0b9d0adefdc1874ef867c3454a21f9`, AMD Ryzen Threadripper 7970X,
+The retained run used exact v0.68.0 source
+`d3e6c3571116261c47039b603ec64db14100ea0e`, AMD Ryzen Threadripper 7970X,
 Linux 6.17.0-35-generic, Python 3.13.5, and rustc 1.98.0. The Linux
 [`NETLINK_GET_STRICT_CHK` documentation](https://docs.kernel.org/userspace-api/netlink/intro.html#strict-checking)
 defines the opt-in strict-validation contract exercised here.
@@ -60,13 +60,13 @@ latency or generalized to IPv6 and realistic unicast route shapes.
 From an exact checkout, with Docker permission and no other host benchmark:
 
 ```bash
-image=rustbgpd-netns-tests@sha256:49a954d0ed9bc5413983184f33314706626e5f42fc2185f0117abd8ee0c433d8
+image=rustbgpd-netns-tests@sha256:f0633621795e369df02a69802a74dc11aa3ecf46a225c72254b4942dac699e64
 out="$PWD/docs/perf/artifacts/fib-kernel-dump-2026-08"
 mkdir -p "$out"
 docker run --rm --privileged --network none \
   -v "$PWD:/repo:ro" -v "$out:/out" "$image" \
   python3 /repo/bench/run-fib-kernel-dump.py \
   --output /out/results.json --metadata-output /out/metadata.txt \
-  --source-sha 8f1c920e0f0b9d0adefdc1874ef867c3454a21f9 \
+  --source-sha d3e6c3571116261c47039b603ec64db14100ea0e \
   --provenance "$image" --rust-toolchain "$(rustc --version)"
 ```

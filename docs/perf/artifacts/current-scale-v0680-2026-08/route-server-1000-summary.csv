@@ -1,0 +1,2 @@
+peers,total_routes,expected_unique_per_observer,reload_count,sessions_up,parse_errors,sessions_established_s,convergence_s,reload_completion_p50_min_s,reload_completion_p50_max_s,peak_tree_rss_kib,readyz_http_200_probes,readyz_max_ms
+1000,400000,399600,4,1000,0,1.2,6.5,1.962668,2.631599,677428,1180,63.310

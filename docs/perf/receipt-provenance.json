@@ -9,40 +9,44 @@
   ],
   "receipts": [
     {
-      "path": "docs/perf/competitive-bgperf2-v0670-2026-08.md",
-      "measured_commit": "69b27812eecc66e7affc505fbe887259b48990f5",
-      "measured_on": "2026-08-29"
+      "path": "docs/perf/competitive-bgperf2-v0680-2026-08.md",
+      "measured_commit": "d3e6c3571116261c47039b603ec64db14100ea0e",
+      "measured_on": "2026-08-30"
     },
     {
       "path": "docs/perf/fib-kernel-dump-2026-08.md",
-      "measured_commit": "8f1c920e0f0b9d0adefdc1874ef867c3454a21f9",
-      "measured_on": "2026-08-25"
+      "measured_commit": "d3e6c3571116261c47039b603ec64db14100ea0e",
+      "measured_on": "2026-08-30"
     },
     {
-      "path": "docs/perf/irr-reload-comparison-2026-08.md",
-      "measured_commit": "f2a8b0275d22d431ec0b031cb8f58fcf28a95029",
-      "measured_on": "2026-08-04"
+      "path": "docs/perf/high-n-route-server-v0680-2026-08.md",
+      "measured_commit": "d3e6c3571116261c47039b603ec64db14100ea0e",
+      "measured_on": "2026-08-30"
     },
     {
-      "path": "docs/perf/irr-reload-grouped-per-client-best-2026-08.md",
-      "measured_commit": "aa022e18c14fc8e2cf6ec23f9ba88d9e0c090042",
-      "measured_on": "2026-08-08"
+      "path": "docs/perf/irr-reload-v0680-2026-08.md",
+      "measured_commit": "451e3685d676bcc0b4294276a6989891378819d8",
+      "release_commit": "d3e6c3571116261c47039b603ec64db14100ea0e",
+      "measured_on": "2026-08-30",
+      "source_equivalent": true
     },
     {
       "path": "docs/perf/ixp-matrix-2026-07.md",
-      "measured_commit": "295d1f375451d4a58d605006c87770e4743f3011",
-      "measured_on": "2026-08-08"
+      "measured_commit": "ba5717b4ad8f921e85a96168b51e0e9169585271",
+      "release_commit": "d3e6c3571116261c47039b603ec64db14100ea0e",
+      "measured_on": "2026-08-30"
     },
     {
       "path": "docs/perf/route-server-1000-2026-07.md",
-      "measured_commit": "cb2c924f117fe264991f12b24ea44c2b15b132e2",
-      "release_commit": "651923720925f85c9000a8e6907fb1b599767803",
-      "measured_on": "2026-07-20"
+      "measured_commit": "ba5717b4ad8f921e85a96168b51e0e9169585271",
+      "release_commit": "d3e6c3571116261c47039b603ec64db14100ea0e",
+      "measured_on": "2026-08-30"
     },
     {
       "path": "docs/perf/scale-receipt-2026-07.md",
-      "measured_commit": "b26ff11c91e01fc506552267e197c3acd75bd970",
-      "measured_on": "2026-07-03"
+      "measured_commit": "ba5717b4ad8f921e85a96168b51e0e9169585271",
+      "release_commit": "d3e6c3571116261c47039b603ec64db14100ea0e",
+      "measured_on": "2026-08-30"
     },
     {
       "path": "docs/perf/v0.61.0-final-performance-2026-07.md",
@@ -54,12 +58,7 @@
     {
       "source": "README.md",
       "anchor": "- **IRR-scale filter reload**",
-      "receipt": "docs/perf/irr-reload-comparison-2026-08.md"
-    },
-    {
-      "source": "README.md",
-      "anchor": "- **IRR-scale filter reload**",
-      "receipt": "docs/perf/irr-reload-grouped-per-client-best-2026-08.md"
+      "receipt": "docs/perf/irr-reload-v0680-2026-08.md"
     },
     {
       "source": "README.md",
@@ -83,18 +82,28 @@
     },
     {
       "source": "README.md",
-      "anchor": "The freshest published [v0.67.0 cross-stack bgperf2",
-      "receipt": "docs/perf/competitive-bgperf2-v0670-2026-08.md"
-    },
-    {
-      "source": "docs/BENCHMARKS.md",
-      "anchor": "**Freshest published cross-stack receipt: v0.67.0, measured 2026-08-29.**",
-      "receipt": "docs/perf/competitive-bgperf2-v0670-2026-08.md"
+      "anchor": "The freshest published [v0.68.0 cross-stack bgperf2",
+      "receipt": "docs/perf/competitive-bgperf2-v0680-2026-08.md"
     },
     {
       "source": "docs/BENCHMARKS.md",
       "anchor": "`bench/run-fib-kernel-dump.py` is the privileged",
       "receipt": "docs/perf/fib-kernel-dump-2026-08.md"
+    },
+    {
+      "source": "docs/BENCHMARKS.md",
+      "anchor": "| How did the measured releases compare for route import and convergence? | [v0.68.0 cross-stack receipt]",
+      "receipt": "docs/perf/competitive-bgperf2-v0680-2026-08.md"
+    },
+    {
+      "source": "docs/BENCHMARKS.md",
+      "anchor": "| What current high-N shapes have run? |",
+      "receipt": "docs/perf/high-n-route-server-v0680-2026-08.md"
+    },
+    {
+      "source": "docs/BENCHMARKS.md",
+      "anchor": "| What is the current IRR reload result? |",
+      "receipt": "docs/perf/irr-reload-v0680-2026-08.md"
     },
     {
       "source": "docs/COMPARISON.md",
@@ -103,13 +112,8 @@
     },
     {
       "source": "docs/COMPARISON.md",
-      "anchor": "At IRR scale, the [grouped per-client-best IRR reload",
-      "receipt": "docs/perf/irr-reload-comparison-2026-08.md"
-    },
-    {
-      "source": "docs/COMPARISON.md",
-      "anchor": "At IRR scale, the [grouped per-client-best IRR reload",
-      "receipt": "docs/perf/irr-reload-grouped-per-client-best-2026-08.md"
+      "anchor": "At IRR scale, the [current v0.68.0 receipt]",
+      "receipt": "docs/perf/irr-reload-v0680-2026-08.md"
     },
     {
       "source": "docs/COMPARISON.md",
@@ -123,18 +127,13 @@
     },
     {
       "source": "docs/COMPARISON.md",
-      "anchor": "The freshest published [v0.67.0 cross-stack",
-      "receipt": "docs/perf/competitive-bgperf2-v0670-2026-08.md"
+      "anchor": "The freshest published [v0.68.0 cross-stack",
+      "receipt": "docs/perf/competitive-bgperf2-v0680-2026-08.md"
     },
     {
       "source": "docs/ixp-evaluation.md",
       "anchor": "| 7 | Reload at IRR scale |",
-      "receipt": "docs/perf/irr-reload-comparison-2026-08.md"
-    },
-    {
-      "source": "docs/ixp-evaluation.md",
-      "anchor": "| 7 | Reload at IRR scale |",
-      "receipt": "docs/perf/irr-reload-grouped-per-client-best-2026-08.md"
+      "receipt": "docs/perf/irr-reload-v0680-2026-08.md"
     }
   ]
 }

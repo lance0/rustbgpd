@@ -294,3 +294,18 @@ AS 65500 — the M80 fixture's `transit-guard` term rejects it and the
 full-table convergence gauge will never complete; (2) fd budget is
 ~2 sockets per peer plus listeners — raise `ulimit -n` above ~4k for
 1000 peers if your soft limit is the default 1024.
+
+## v0.68.0 source-equivalent RR1000 refresh — 2026-08-30
+
+Three current runs of the 1,000-session, 100,000-prefix, four-source RR1000
+shape passed at `ba5717b4`. The exact v0.68.0 release commit is
+`d3e6c3571116261c47039b603ec64db14100ea0e`; the only measured-source delta is
+workflow checkout-depth metadata. Injection was 32 ms in every run; staged
+completion was 296–313 ms (305 ms median), and first exact wire completion was
+318–341 ms (335 ms median). Sessions remained 1,000/1,000. Direct process RSS
+at wire completion was 383,176–404,892 KiB (384,972 KiB median).
+
+The three machine-readable phase records are retained in the
+[`current-scale-v0680-2026-08`](artifacts/current-scale-v0680-2026-08/README.md)
+bundle. These values describe this fixed shape and do not imply larger-fleet
+scaling.

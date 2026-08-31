@@ -352,10 +352,7 @@ class PerfReceiptFreshnessTests(unittest.TestCase):
 
     def test_each_stale_claim_requires_its_exact_date(self) -> None:
         comparison = text("docs/COMPARISON.md")
-        for old, expected in (
-            ("measured 2026-07-20", "measured 2026-07-20"),
-            ("measured 2026-07-26", "measured 2026-07-26"),
-        ):
+        for old, expected in (("measured 2026-07-26", "measured 2026-07-26"),):
             with self.subTest(old=old):
                 self.assert_red(
                     f"must carry exact phrase '{expected}'",
@@ -364,7 +361,9 @@ class PerfReceiptFreshnessTests(unittest.TestCase):
 
     def test_stale_claim_cannot_hide_behind_a_manifest_exception(self) -> None:
         manifest = copy.deepcopy(MANIFEST)
-        receipt_item(manifest, "docs/perf/route-server-1000-2026-07.md").pop("measured_on")
+        receipt_item(manifest, "docs/perf/v0.61.0-final-performance-2026-07.md").pop(
+            "measured_on"
+        )
         self.assert_red("has no manifested measured_on date", manifest)
 
     def test_fresh_claim_does_not_require_a_date(self) -> None:
@@ -375,7 +374,7 @@ class PerfReceiptFreshnessTests(unittest.TestCase):
         path = "docs/perf/ixp-matrix-2026-07.md"
         self.assert_red(
             "does not record its manifested measured_commit",
-            overrides={path: text(path).replace("295d1f37", "not-a-commit")},
+            overrides={path: text(path).replace("ba5717b4", "not-a-commit")},
         )
 
     def test_temporary_git_unknown_commit_is_red(self) -> None:
@@ -411,6 +410,45 @@ class PerfReceiptFreshnessTests(unittest.TestCase):
             )
             expected = f"release commit {untagged} is contained by no stable release tag"
             self.assertTrue(any(expected in error for error in errors), errors)
+
+    def test_temporary_git_untagged_measurement_requires_source_equivalent(self) -> None:
+        with TemporaryReceiptRepository() as fixture:
+            fixture.run("tag", "-d", fixture.receipt_tag)
+            errors = checker.check_contract(fixture.root, fixture.manifest)
+            expected = (
+                f"measured commit {fixture.measured_commit} is contained by no git tag"
+            )
+            self.assertTrue(any(expected in error for error in errors), errors)
+
+    def test_temporary_git_source_equivalent_sibling_measurement_is_red(self) -> None:
+        with TemporaryReceiptRepository() as fixture:
+            fixture.run("tag", "-d", fixture.receipt_tag)
+            manifest = copy.deepcopy(fixture.manifest)
+            item = receipt_item(manifest, fixture.receipt)
+            item["source_equivalent"] = True
+            errors = checker.check_contract(fixture.root, manifest)
+            expected = (
+                f"source-equivalent release commit {fixture.release_commit} "
+                f"is not an ancestor of measured commit {fixture.measured_commit}"
+            )
+            self.assertTrue(any(expected in error for error in errors), errors)
+
+    def test_temporary_git_source_equivalent_descendant_measurement_is_green(self) -> None:
+        with TemporaryReceiptRepository() as fixture:
+            measured_commit = fixture.commit("post-release measurement", allow_empty=True)
+            manifest = copy.deepcopy(fixture.manifest)
+            item = receipt_item(manifest, fixture.receipt)
+            item["measured_commit"] = measured_commit
+            item["source_equivalent"] = True
+            receipt = (fixture.root / fixture.receipt).read_text(encoding="utf-8")
+            self.assertEqual(
+                checker.check_contract(
+                    fixture.root,
+                    manifest,
+                    {fixture.receipt: receipt + f"\nMeasured commit: `{measured_commit}`\n"},
+                ),
+                [],
+            )
 
     def test_temporary_git_off_main_measurement_and_landed_sibling_are_green(self) -> None:
         with TemporaryReceiptRepository() as fixture:

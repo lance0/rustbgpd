@@ -1,5 +1,9 @@
 # IRR-scale reload comparison — rustbgpd vs BIRD vs OpenBGPD — 2026-08
 
+> **Historical receipt.** This earlier implementation is preserved for
+> reproducibility. The current v0.68.0 source-equivalent result is
+> [published separately](irr-reload-v0680-2026-08.md).
+
 What does the routine IRR filter refresh cost on a live route server —
 in each daemon's own reload idiom, at a realistic policy scale? The
 shape here is 320 members announcing 183,040 /24s, filtered by

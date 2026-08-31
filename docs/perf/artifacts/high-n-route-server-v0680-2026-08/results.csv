@@ -1,0 +1,3 @@
+peers,total_prefixes,prefixes_per_peer,expected_unique_per_observer,completed_observers,sessions_up,establishment_s,convergence_s,parse_errors,daemon_rss_kib,harness_rss_kib,combined_rss_kib
+2500,400000,160,399840,2500,2500,3.5,33.2,0,607228,545568,1152796
+5000,400000,80,399920,5000,5000,9.6,150.9,0,932416,1346160,2278576
