@@ -283,7 +283,10 @@ cargo build --release -p rustbgpd -p rustbgpctl -p rs-config-render -p birdwatch
 ### Docker
 
 Tagged releases publish versioned images to GHCR (for this release,
-`ghcr.io/lance0/rustbgpd:0.68.0`); alternatively, build locally:
+`ghcr.io/lance0/rustbgpd:0.68.0`). The current release workflow can publish a
+single multi-arch (amd64+arm64) manifest on a tagged release, but the existing
+`:0.68.0` and `:0.68` images remain amd64-only; `:latest` inherits the newest
+non-prerelease release's platform set. Alternatively, build locally:
 
 ```bash
 docker build -t rustbgpd .                    # daemon + rbgp + birdwatcher-adapter, nonroot
@@ -323,13 +326,13 @@ two independent campaign runs, losses published alongside wins:
 |---|---|---|---|
 | Sessions Established | **0.7 s** | 18.2–20.5 s | 83.6–105.7 s |
 | Cold start, full table to all members | **3.4 s** | 60.9–63.3 s | 326.0–347.8 s |
-| Policy reload: UPDATE stall | 0.42–0.60 s | 1.70–2.70 s | **0.213–0.238 s** |
+| Policy reload: UPDATE stall | 0.384–0.529 s | 1.70–2.70 s | **0.213–0.238 s** |
 | Policy reload: new policy fully delivered | **1.21–1.35 s** | 64.3–84.5 s | 200.8–206.4 s |
 | IRR-scale filter reload: completion (320 members × 183,040 generated prefixes) | **0.85–1.09 s** | 11.86–15.21 s (3.3.2) | 42.94–61.96 s (9.2) |
-| Flapstorm: withdraw propagation | **0.31–0.47 s** | 0.47–0.61 s | 8.22–9.55 s |
+| Flapstorm: withdraw propagation | **0.30–0.43 s** | 0.47–0.61 s | 8.22–9.55 s |
 | Flapstorm: re-announce | **0.36–0.39 s** | 2.85–3.74 s | 17.36–17.82 s |
-| Settled RSS (S2, runs A/B) | 419 / 419 MiB | 422 / 412 MiB | 795 / 801 MiB |
-| Settled RSS (S3, runs A/B) | 441 / 451 MiB | **337 / 328 MiB** | 831 / 827 MiB |
+| Settled RSS (S2, runs A/B) | 373 / 372 MiB | 422 / 412 MiB | 795 / 801 MiB |
+| Settled RSS (S3, runs A/B) | 440 / 449 MiB | 337 / 328 MiB | 831 / 827 MiB |
 
 The rustbgpd column uses the current source-equivalent v0.68.0 rows where
 available; BIRD remains the v0.64.0 same-host refresh (2026-08-08), and
@@ -339,10 +342,11 @@ rounds two and three before the re-announce clock begins; the receipt publishes
 that pacing separately from fan-out.
 rustbgpd is the only daemon in the matrix holding both a sub-second median
 stall **and** single-digit-seconds completion; OpenBGPD has the smallest
-stall in the current full-shape comparison; the settled-memory picture is
-split — S2 settled RSS is a dead heat (one run each way), while BIRD's S3
-advantage remains
-clear. The receipt includes the full
+stall in the current full-shape comparison. In the mixed-date settled-memory
+rows, current rustbgpd S2 (373 / 372 MiB) is below dated BIRD (422 / 412 MiB),
+while dated BIRD S3 (337 / 328 MiB) is below current rustbgpd (440 / 449 MiB).
+These observations provide context, not a universal or cross-date ranking.
+The receipt includes the full
 method, configuration disclosure, honesty notes, raw artifacts — and a
 post-publication note where the receipt's own tables exposed a rustbgpd
 re-announce plateau that was root-caused, fixed, and rerun (9.5–9.8 s →

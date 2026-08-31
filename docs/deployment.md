@@ -360,22 +360,26 @@ sudo install -m 0755 \
 
 ### Container image
 
-A container image is built and runtime-verified natively on Linux amd64 and
-arm64 for every tagged release, then published as one two-platform manifest on
-GHCR. Three tag flavors are available per the
-`docker/metadata-action` rules in
+The current release workflow can build and runtime-verify images natively on
+Linux amd64 and arm64, then publish a single multi-arch (amd64+arm64) manifest
+on a tagged release. This does not backfill existing images: `:0.68.0` and
+`:0.68` remain amd64-only. `:latest` follows the newest non-prerelease release
+and inherits that release's platform set. The workflow configuration produces
+three tag flavors with `docker/metadata-action` in
 [`.github/workflows/container.yml`](../.github/workflows/container.yml):
 
 | Tag | Resolves to | Updates on |
 |-----|-------------|------------|
-| `:X.Y.Z` | exact version | nothing (immutable) |
-| `:X.Y` | latest patch in the X.Y minor | each X.Y.z release |
-| `:latest` | latest non-prerelease release | each minor or patch release |
+| `:X.Y.Z` | exact version and its published platform set | nothing (immutable) |
+| `:X.Y` | latest patch in the X.Y minor | each X.Y.Z release |
+| `:latest` | latest non-prerelease release, including its platform set | each minor or patch release |
 
 Major-minor is the usual operator default — auto-receives bug-fix
 releases but pins against minor-version churn. The examples in this
-document use `:latest` so they stay copy-pasteable across releases;
-substitute the major-minor tag of the series you standardize on:
+document use `:latest` so the tag stays copy-pasteable across releases, but the
+current `:latest` is amd64-only. On arm64, use it only after it points to a
+release with an arm64 manifest. Substitute the major-minor tag of the series
+you standardize on:
 
 ```sh
 docker pull ghcr.io/lance0/rustbgpd:latest
@@ -614,11 +618,12 @@ For your own deployment:
 
 - **Image name and command**: published GHCR version tags have **no leading
   `v`**: use `ghcr.io/lance0/rustbgpd:0.68.0`, not
-  `ghcr.io/lance0/rustbgpd:v0.68.0`. The production image runs as uid/gid 999
-  and its default command is exactly
-  `rustbgpd /etc/rustbgpd/config.toml`. If the config is mounted under another
-  container filename, pass that filename explicitly after the image, for
-  example `rustbgpd /etc/rustbgpd/router.toml`.
+  `ghcr.io/lance0/rustbgpd:v0.68.0`. That existing `:0.68.0` image is
+  amd64-only; it is not backfilled when a later release publishes multiple
+  platforms. The production image runs as uid/gid 999, and its
+  default command is exactly `rustbgpd /etc/rustbgpd/config.toml`. If the config
+  is mounted under another container filename, pass that filename explicitly
+  after the image, for example `rustbgpd /etc/rustbgpd/router.toml`.
 
 - **Bridge networking and state**: mount a volume at the daemon's
   `runtime_state_dir` so the

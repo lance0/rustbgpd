@@ -274,7 +274,7 @@ memory-safe-language row refers to.
 | Fuzz testing | Yes[^fuzz] | Partial[^fuzz] | No | Yes[^fuzz] | No |
 | Interop test suite | Yes[^interop] | Partial[^interop] | No | Yes[^interop] | Partial[^interop] |
 | FIB/kernel integration | Partial[^fib] | Yes | Yes | Yes | Yes |
-| Route server mode | Yes | Yes | Yes | Yes | Yes |
+| Route server mode | Yes | Yes[^rs-frr] | Yes | Yes | Yes |
 | Dynamic neighbors | Yes | Yes | Yes | Yes | Yes[^dyn-openbgpd] |
 | Looking glass | Yes | No | Yes | No | Yes |
 | BFD integration | Yes[^bfd] | Yes | Yes | Yes | No |
@@ -282,6 +282,20 @@ memory-safe-language row refers to.
 [^dyn-openbgpd]: Prefix-template neighbors: `neighbor 10.0.0.0/8` in
     bgpd.conf(5) accepts any connection from within the network as a cloned
     neighbor, optionally with any remote AS.
+
+[^rs-frr]: FRR 10.7.0's `route-server-client` preserves
+    [NEXT_HOP](https://github.com/FRRouting/frr/blob/frr-10.7.0/bgpd/bgpd.c#L5847-L5858)
+    and suppresses the
+    [eBGP AS_PATH prepend](https://github.com/FRRouting/frr/blob/frr-10.7.0/bgpd/bgp_attr.c#L5491-L5496),
+    but its source has [one RIB array per BGP
+    instance](https://github.com/FRRouting/frr/blob/frr-10.7.0/bgpd/bgpd.h#L831-L838)
+    rather than the per-client Loc-RIBs still described by the
+    [10.7 route-server guide](https://docs.frrouting.org/en/stable-10.7/bgp.html#configuring-frr-as-a-route-server).
+    FRR's [per-client RIB removal](https://github.com/FRRouting/frr/commit/2a3d57318)
+    moved its path-hiding approach to Add-Path. With client-specific policy,
+    operators must account for [RFC 7947 section 2.3 path
+    hiding](https://www.rfc-editor.org/rfc/rfc7947.html#section-2.3) and use a
+    supported mitigation.
 
 [^bfd]: Single-hop **asynchronous** BFD ships (RFC 5880/5881, ADR-0067): an
     in-process, no-GC actor runs sessions over UDP/3784 (TTL/Hop-Limit 255,

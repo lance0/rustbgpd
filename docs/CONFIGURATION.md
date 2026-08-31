@@ -2364,11 +2364,14 @@ Every route receives a validation state based on RPKI data:
 
 Use `match_rpki_validation` in import or export policy statements to filter
 routes by RPKI state. Import validation evaluates against the current VRP
-snapshot at ingress time. Later VRP/ASPA cache updates trigger inbound Route
-Refresh for established peers whose resolved import policy matches validation
-state, so previously denied routes can be reconsidered against the fresh
-snapshot. Peers that are not established evaluate against the fresh snapshot
-when they next receive routes.
+snapshot at ingress time. Each changed VRP/ASPA snapshot asks every affected
+Established peer whose resolved import policy matches validation state to
+replay all negotiated families. This is a full family replay, not a replay
+limited to prefixes covered by the cache delta. When negotiated, Enhanced Route
+Refresh can bracket it with BoRR/EoRR but does not delta-reduce it.
+Reconsidering previously denied routes requires negotiated Route Refresh and
+the peer's replay; peers that cannot be refreshed evaluate against the new
+snapshot when routes are naturally re-advertised or a new session replays them.
 
 Drop RPKI-invalid routes (recommended):
 
@@ -2528,6 +2531,14 @@ chain.
 **Mutual exclusion:** Inline policy and policy chain cannot both be set for the
 same direction on the same neighbor. This is a config validation error.
 
+Automatic import-policy re-evaluation after policy-data changes is peer-scoped,
+not prefix-delta-scoped. Each affected Established peer is asked to replay every
+negotiated family. When negotiated, Enhanced Route Refresh can bracket that
+replay with BoRR/EoRR, but does not reduce it to only affected routes. Active
+recovery of routes previously rejected at import depends on negotiated Route
+Refresh; otherwise, those routes wait for natural re-advertisement or a new
+session's replay.
+
 ### `.rpol` policy files (`rpol_files`, ADR-0096)
 
 Policies written in the rustbgpd policy language
@@ -2624,7 +2635,14 @@ path = "/var/lib/rustbgpd/datasets/customers.list"
   (the refresh trigger — there is no file watcher or dedicated RPC).
   Changed content swaps atomically (generation bump) and refreshes
   only the peers whose chains reference the dataset; unchanged
-  content is a no-op; a file that fails to load or parse **keeps the
+  content is a no-op. For an import-chain reference, each affected
+  Established peer is asked to replay every negotiated family, not
+  only routes matching changed dataset entries. When negotiated,
+  Enhanced Route Refresh can bracket the replay with BoRR/EoRR but does
+  not delta-reduce it; recovery of previously rejected routes depends
+  on negotiated Route Refresh and the peer's replay. Export-chain
+  references instead force outbound re-emission. A file that fails to
+  load or parse **keeps the
   prior snapshot** with a WARN, a
   `bgp_policy_dataset_refresh_errors_total{dataset}` counter
   increment, and a `last refresh FAILED` row in `rbgp policy stats`.
