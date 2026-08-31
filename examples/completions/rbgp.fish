@@ -348,6 +348,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subco
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -l origin-asn -d 'Filter by origin ASN (last ASN in AS_PATH)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -s c -l community -d 'Filter by community (e.g., 65001:100 or BLACKHOLE); may be repeated' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -l large-community -d 'Filter by large community (e.g., 65001:100:200); may be repeated' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -l limit -d 'Return at most this many routes without walking the full table (1-1000)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -s l -l longer -d 'Show longer (more specific) prefixes matching --prefix'
@@ -372,20 +373,32 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subco
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -f -a "delete" -d 'Withdraw a route'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -s a -l family -d 'Address family filter' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -s p -l prefix -d 'Prefix filter (e.g., 10.0.0.0/24)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -l origin-asn -d 'Filter by origin ASN (last ASN in AS_PATH)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -s c -l community -d 'Filter by community (e.g., 65001:100 or BLACKHOLE); may be repeated' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -l large-community -d 'Filter by large community (e.g., 65001:100:200); may be repeated' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -l limit -d 'Return at most this many routes without walking the full table (1-1000)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -l count -d 'Print only the number of matching received routes'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -l age -d 'Append the original route receive age'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -l rejected -d 'Show the retained rejected routes with their reject reasons instead of the accepted Adj-RIB-In (the looking-glass filtered-route view; [policy.reject_retention])'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -s l -l longer -d 'Show longer (more specific) prefixes matching --prefix'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -s a -l family -d 'Address family filter' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -s p -l prefix -d 'Prefix filter (e.g., 10.0.0.0/24)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -l origin-asn -d 'Filter by origin ASN (last ASN in AS_PATH)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -s c -l community -d 'Filter by community (e.g., 65001:100 or BLACKHOLE); may be repeated' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -l large-community -d 'Filter by large community (e.g., 65001:100:200); may be repeated' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -l limit -d 'Return at most this many routes without walking the full table (1-1000)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -l count -d 'Print only the number of matching received routes'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -l age -d 'Append the original route receive age'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -l rejected -d 'Show the retained rejected routes with their reject reasons instead of the accepted Adj-RIB-In (the looking-glass filtered-route view; [policy.reject_retention])'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -s l -l longer -d 'Show longer (more specific) prefixes matching --prefix'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -393,12 +406,18 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -l rd -d 'Route Distinguisher ("asn:nn" or "ip:nn") - explain the VPNv4/VPNv6 export ladder for the (RD, prefix) identity, including the RFC 4684 RT-Constrain membership gate' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -l source-peer -d 'Adj-RIB-In peer that supplied the exact Add-Path candidate to explain; must be paired with --source-path-id' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -l source-path-id -d 'Inbound RFC 7911 path identifier of the exact source candidate; zero is valid and distinct from omitting the selector' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -s p -l prefix -d 'Prefix filter (e.g., 10.0.0.0/24)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -l origin-asn -d 'Filter by origin ASN (last ASN in AS_PATH)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -s c -l community -d 'Filter by community (e.g., 65001:100 or BLACKHOLE); may be repeated' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -l large-community -d 'Filter by large community (e.g., 65001:100:200); may be repeated' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -l limit -d 'Return at most this many routes without walking the full table (1-1000)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -l count -d 'Print only the number of matching advertised routes'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -l age -d 'Append the original route receive age'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -l explain -d 'Explain whether this exact prefix would be advertised to the peer'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -l labeled -d 'Explain the labeled-unicast (SAFI 4, RFC 8277) export ladder for the prefix instead of the plain unicast ladder'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -s l -l longer -d 'Show longer (more specific) prefixes matching --prefix'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -406,12 +425,18 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -l rd -d 'Route Distinguisher ("asn:nn" or "ip:nn") - explain the VPNv4/VPNv6 export ladder for the (RD, prefix) identity, including the RFC 4684 RT-Constrain membership gate' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -l source-peer -d 'Adj-RIB-In peer that supplied the exact Add-Path candidate to explain; must be paired with --source-path-id' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -l source-path-id -d 'Inbound RFC 7911 path identifier of the exact source candidate; zero is valid and distinct from omitting the selector' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -s p -l prefix -d 'Prefix filter (e.g., 10.0.0.0/24)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -l origin-asn -d 'Filter by origin ASN (last ASN in AS_PATH)' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -s c -l community -d 'Filter by community (e.g., 65001:100 or BLACKHOLE); may be repeated' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -l large-community -d 'Filter by large community (e.g., 65001:100:200); may be repeated' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -l limit -d 'Return at most this many routes without walking the full table (1-1000)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -l count -d 'Print only the number of matching advertised routes'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -l age -d 'Append the original route receive age'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -l explain -d 'Explain whether this exact prefix would be advertised to the peer'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -l labeled -d 'Explain the labeled-unicast (SAFI 4, RFC 8277) export ladder for the prefix instead of the plain unicast ladder'
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -s l -l longer -d 'Show longer (more specific) prefixes matching --prefix'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -s h -l help -d 'Print help (see more with \'--help\')'

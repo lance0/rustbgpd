@@ -20,11 +20,21 @@ pub mod proto {
 use crate::connection::connect;
 use crate::error::CliError;
 use crate::output::parse_family;
-use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use clap_complete::{Generator, Shell};
 use std::path::PathBuf;
 
 const BINARY_NAME: &str = "rbgp";
+
+fn parse_route_limit(value: &str) -> Result<u32, String> {
+    let limit = value
+        .parse::<u32>()
+        .map_err(|_| "route limit must be an integer from 1 through 1000".to_string())?;
+    if !(1..=1000).contains(&limit) {
+        return Err("route limit must be from 1 through 1000".to_string());
+    }
+    Ok(limit)
+}
 
 // ======================= CLI conventions =======================
 // New commands and flags must follow these rules (LAN-329):
@@ -206,6 +216,14 @@ enum Command {
         /// Filter by large community (e.g., 65001:100:200); may be repeated
         #[arg(long, value_delimiter = ',')]
         large_community: Vec<String>,
+
+        /// Return at most this many routes without walking the full table (1-1000)
+        #[arg(
+            long,
+            value_parser = parse_route_limit,
+            conflicts_with_all = ["count", "explain"]
+        )]
+        limit: Option<u32>,
     },
 
     /// Show the RFC 9107 ORR topology graph derived from BGP-LS
@@ -1166,6 +1184,33 @@ enum RpkiAction {
     },
 }
 
+#[derive(Args, Default)]
+struct RouteViewArgs {
+    /// Prefix filter (e.g., 10.0.0.0/24)
+    #[arg(short = 'p', long)]
+    prefix: Option<String>,
+
+    /// Show longer (more specific) prefixes matching --prefix
+    #[arg(short = 'l', long, requires = "prefix")]
+    longer: bool,
+
+    /// Filter by origin ASN (last ASN in AS_PATH)
+    #[arg(long)]
+    origin_asn: Option<u32>,
+
+    /// Filter by community (e.g., 65001:100 or BLACKHOLE); may be repeated
+    #[arg(short = 'c', long, value_delimiter = ',')]
+    community: Vec<String>,
+
+    /// Filter by large community (e.g., 65001:100:200); may be repeated
+    #[arg(long, value_delimiter = ',')]
+    large_community: Vec<String>,
+
+    /// Return at most this many routes without walking the full table (1-1000)
+    #[arg(long, value_parser = parse_route_limit, conflicts_with = "count")]
+    limit: Option<u32>,
+}
+
 #[derive(Subcommand)]
 enum RibAction {
     /// Show received routes from a neighbor
@@ -1187,6 +1232,8 @@ enum RibAction {
         /// filtered-route view; [policy.reject_retention])
         #[arg(long, conflicts_with = "count")]
         rejected: bool,
+        #[command(flatten)]
+        filters: RouteViewArgs,
     },
     /// Show advertised routes to a neighbor
     #[command(visible_alias = "sent")]
@@ -1232,6 +1279,8 @@ enum RibAction {
             conflicts_with_all = ["rd", "labeled"]
         )]
         source_path_id: Option<u32>,
+        #[command(flatten)]
+        filters: RouteViewArgs,
     },
     /// Show RFC 7999 BLACKHOLE discard install status
     Blackholes,
@@ -1706,6 +1755,177 @@ fn route_count_requested(parent_count: bool, view_count: bool) -> bool {
 
 fn route_age_requested(parent_age: bool, view_age: bool) -> bool {
     parent_age || view_age
+}
+
+fn merge_scoped_option<T>(
+    flag: &str,
+    parent: Option<T>,
+    view: Option<T>,
+) -> Result<Option<T>, CliError> {
+    if parent.is_some() && view.is_some() {
+        return Err(CliError::Argument(format!(
+            "{flag} may be specified either before or after the route view, not both"
+        )));
+    }
+    Ok(parent.or(view))
+}
+
+fn merge_route_view_filters(
+    mut parent: commands::rib::RouteFilterOpts,
+    view: RouteViewArgs,
+) -> Result<commands::rib::RouteFilterOpts, CliError> {
+    parent.prefix = merge_scoped_option("--prefix", parent.prefix, view.prefix)?;
+    parent.origin_asn = merge_scoped_option("--origin-asn", parent.origin_asn, view.origin_asn)?;
+    parent.limit = merge_scoped_option("--limit", parent.limit, view.limit)?;
+    parent.longer |= view.longer;
+    parent.community.extend(
+        view.community
+            .iter()
+            .map(|value| parse_community_str(value))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(CliError::Argument)?,
+    );
+    parent.large_community.extend(view.large_community);
+    Ok(parent)
+}
+
+fn accepted_route_filters_requested(filters: &commands::rib::RouteFilterOpts) -> bool {
+    filters.prefix.is_some()
+        || filters.longer
+        || filters.origin_asn.is_some()
+        || !filters.community.is_empty()
+        || !filters.large_community.is_empty()
+}
+
+fn route_view_filters_requested(filters: &RouteViewArgs) -> bool {
+    filters.prefix.is_some()
+        || filters.longer
+        || filters.origin_asn.is_some()
+        || !filters.community.is_empty()
+        || !filters.large_community.is_empty()
+}
+
+fn reject_duplicate_route_view_option<T>(
+    flag: &str,
+    parent: &Option<T>,
+    view: &Option<T>,
+) -> Result<(), CliError> {
+    if parent.is_some() && view.is_some() {
+        return Err(CliError::Argument(format!(
+            "{flag} may be specified either before or after the route view, not both"
+        )));
+    }
+    Ok(())
+}
+
+/// Reject route-view combinations before opening the gRPC transport.
+///
+/// Clap catches conflicts within one argument scope, but parent-compatible
+/// flags and their natural post-subcommand forms occupy separate scopes. Keep
+/// those cross-scope checks just as immediate as native Clap diagnostics.
+fn validate_rib_route_view_action(command: &Command) -> Result<(), CliError> {
+    let Command::Rib {
+        action,
+        family,
+        prefix,
+        longer,
+        explain: parent_explain,
+        count: parent_count,
+        origin_asn,
+        community,
+        large_community,
+        limit,
+        ..
+    } = command
+    else {
+        return Ok(());
+    };
+
+    match action {
+        None => {
+            if limit.is_some() && *parent_explain {
+                return Err(CliError::Argument(
+                    "--explain cannot be combined with --limit".into(),
+                ));
+            }
+        }
+        Some(RibAction::Received {
+            family: view_family,
+            count: view_count,
+            rejected,
+            filters,
+            ..
+        }) => {
+            reject_duplicate_route_view_option("--family", family, view_family)?;
+            reject_duplicate_route_view_option("--prefix", prefix, &filters.prefix)?;
+            reject_duplicate_route_view_option("--origin-asn", origin_asn, &filters.origin_asn)?;
+            reject_duplicate_route_view_option("--limit", limit, &filters.limit)?;
+
+            let any_limit = limit.is_some() || filters.limit.is_some();
+            if route_count_requested(*parent_count, *view_count) && any_limit {
+                return Err(CliError::Argument(
+                    "--count cannot be combined with --limit".into(),
+                ));
+            }
+            if *parent_explain {
+                return Err(CliError::Argument(
+                    "--explain is only valid for the default best-routes view (rib --prefix X --explain)".into(),
+                ));
+            }
+            if *rejected
+                && (family.is_some()
+                    || view_family.is_some()
+                    || prefix.is_some()
+                    || *longer
+                    || origin_asn.is_some()
+                    || !community.is_empty()
+                    || !large_community.is_empty()
+                    || limit.is_some()
+                    || route_view_filters_requested(filters)
+                    || filters.limit.is_some())
+            {
+                return Err(CliError::Argument(
+                    "--rejected does not support accepted-route family, prefix, path-attribute, or limit filters".into(),
+                ));
+            }
+        }
+        Some(RibAction::Advertised {
+            family: view_family,
+            count: view_count,
+            explain,
+            filters,
+            ..
+        }) => {
+            reject_duplicate_route_view_option("--family", family, view_family)?;
+            reject_duplicate_route_view_option("--prefix", prefix, &filters.prefix)?;
+            reject_duplicate_route_view_option("--origin-asn", origin_asn, &filters.origin_asn)?;
+            reject_duplicate_route_view_option("--limit", limit, &filters.limit)?;
+
+            let any_limit = limit.is_some() || filters.limit.is_some();
+            if route_count_requested(*parent_count, *view_count) && any_limit {
+                return Err(CliError::Argument(
+                    "--count cannot be combined with --limit".into(),
+                ));
+            }
+            if *parent_explain {
+                return Err(CliError::Argument(
+                    "--explain is only valid for the default best-routes view (rib --prefix X --explain)".into(),
+                ));
+            }
+            if *explain && any_limit {
+                return Err(CliError::Argument(
+                    "--explain cannot be combined with --limit".into(),
+                ));
+            }
+        }
+        Some(_) if limit.is_some() => {
+            return Err(CliError::Argument(
+                "--limit is only valid for best, received, or advertised routes".into(),
+            ));
+        }
+        Some(_) => {}
+    }
+    Ok(())
 }
 
 fn validate_rib_count_action(command: &Command) -> Result<(), CliError> {
@@ -2316,6 +2536,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
     validate_neighbor_compare_action(&cli.command)?;
     validate_rib_count_action(&cli.command)?;
     validate_rib_age_action(&cli.command)?;
+    validate_rib_route_view_action(&cli.command)?;
     if let Command::Events {
         action:
             Some(EventsAction::Watch {
@@ -2537,7 +2758,18 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             origin_asn,
             community,
             large_community,
+            limit,
         } => {
+            if limit.is_some()
+                && !matches!(
+                    &action,
+                    None | Some(RibAction::Received { .. } | RibAction::Advertised { .. })
+                )
+            {
+                return Err(CliError::Argument(
+                    "--limit is only valid for best, received, or advertised routes".into(),
+                ));
+            }
             match action {
                 Some(RibAction::Fib {
                     table,
@@ -2697,10 +2929,16 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 origin_asn,
                 community: parsed_filter_communities,
                 large_community,
+                limit,
             };
             match action {
                 None => {
                     if explain {
+                        if filters.limit.is_some() {
+                            return Err(CliError::Argument(
+                                "--explain cannot be combined with --limit".into(),
+                            ));
+                        }
                         if filters.longer {
                             return Err(CliError::Argument(
                                 "--explain does not support --longer".into(),
@@ -2739,7 +2977,9 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     count: count_received,
                     age: age_received,
                     rejected,
+                    filters: view_filters,
                 }) => {
+                    let filters = merge_route_view_filters(filters, view_filters)?;
                     let count = route_count_requested(count, count_received);
                     let age = route_age_requested(age, age_received);
                     if explain {
@@ -2748,7 +2988,22 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                         ));
                     }
                     if rejected {
+                        if fam.is_some()
+                            || family.is_some()
+                            || accepted_route_filters_requested(&filters)
+                            || filters.limit.is_some()
+                        {
+                            return Err(CliError::Argument(
+                                "--rejected does not support accepted-route family, prefix, path-attribute, or limit filters"
+                                    .into(),
+                            ));
+                        }
                         return commands::rib::rejected(connection, &address, json).await;
+                    }
+                    if count && filters.limit.is_some() {
+                        return Err(CliError::Argument(
+                            "--count cannot be combined with --limit".into(),
+                        ));
                     }
                     let f = resolve_family(&fam.or(family))?;
                     if count {
@@ -2767,7 +3022,9 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     labeled,
                     source_peer,
                     source_path_id,
+                    filters: view_filters,
                 }) => {
+                    let filters = merge_route_view_filters(filters, view_filters)?;
                     let count = route_count_requested(count, count_advertised);
                     let age = route_age_requested(age, age_advertised);
                     if explain {
@@ -2777,6 +3034,11 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     }
                     let f = resolve_family(&fam.or(family))?;
                     if explain_advertised {
+                        if filters.limit.is_some() {
+                            return Err(CliError::Argument(
+                                "--explain cannot be combined with --limit".into(),
+                            ));
+                        }
                         if filters.longer {
                             return Err(CliError::Argument(
                                 "--explain does not support --longer".into(),
@@ -2808,6 +3070,11 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                         )
                         .await
                     } else if count {
+                        if filters.limit.is_some() {
+                            return Err(CliError::Argument(
+                                "--count cannot be combined with --limit".into(),
+                            ));
+                        }
                         commands::rib::count_advertised(connection, &address, f, &filters, json)
                             .await
                     } else {
@@ -4601,6 +4868,227 @@ printf '%s\n' "${COMPREPLY[@]}"
             assert_eq!(address, "10.0.0.1");
         } else {
             panic!("expected Rib Received command");
+        }
+    }
+
+    #[test]
+    fn rib_received_and_advertised_expose_natural_scoped_filters() {
+        let received = Cli::try_parse_from([
+            "rbgp",
+            "rib",
+            "received",
+            "23.111.167.227",
+            "--prefix",
+            "1.1.1.0/24",
+            "--longer",
+            "--origin-asn",
+            "13335",
+            "--community",
+            "13335:100,13335:200",
+            "--large-community",
+            "13335:1:100",
+            "--limit",
+            "50",
+        ])
+        .unwrap();
+        let Command::Rib {
+            action: Some(RibAction::Received {
+                address, filters, ..
+            }),
+            ..
+        } = received.command
+        else {
+            panic!("expected received route view");
+        };
+        assert_eq!(address, "23.111.167.227");
+        assert_eq!(filters.prefix.as_deref(), Some("1.1.1.0/24"));
+        assert!(filters.longer);
+        assert_eq!(filters.origin_asn, Some(13335));
+        assert_eq!(filters.community, ["13335:100", "13335:200"]);
+        assert_eq!(filters.large_community, ["13335:1:100"]);
+        assert_eq!(filters.limit, Some(50));
+
+        let advertised = Cli::try_parse_from([
+            "rbgp",
+            "rib",
+            "advertised",
+            "192.0.2.1",
+            "--prefix",
+            "203.0.113.0/24",
+            "--limit",
+            "25",
+        ])
+        .unwrap();
+        let Command::Rib {
+            action: Some(RibAction::Advertised { filters, .. }),
+            ..
+        } = advertised.command
+        else {
+            panic!("expected advertised route view");
+        };
+        assert_eq!(filters.prefix.as_deref(), Some("203.0.113.0/24"));
+        assert_eq!(filters.limit, Some(25));
+
+        let compatible_parent_form = Cli::try_parse_from([
+            "rbgp",
+            "rib",
+            "--prefix",
+            "198.51.100.0/24",
+            "received",
+            "192.0.2.1",
+        ])
+        .unwrap();
+        assert!(matches!(
+            compatible_parent_form.command,
+            Command::Rib {
+                prefix: Some(prefix),
+                action: Some(RibAction::Received { .. }),
+                ..
+            } if prefix == "198.51.100.0/24"
+        ));
+    }
+
+    #[test]
+    fn rib_route_view_help_lists_operator_filters_and_limit() {
+        let mut command = Cli::command();
+        let rib = command.find_subcommand_mut("rib").unwrap();
+        for view in ["received", "advertised"] {
+            let help = rib
+                .find_subcommand_mut(view)
+                .unwrap()
+                .render_long_help()
+                .to_string();
+            for flag in [
+                "--prefix",
+                "--longer",
+                "--origin-asn",
+                "--community",
+                "--large-community",
+                "--limit",
+            ] {
+                assert!(help.contains(flag), "{view} help omitted {flag}");
+            }
+        }
+    }
+
+    #[test]
+    fn route_view_filters_merge_parent_compatibility_with_natural_flags() {
+        let parent = commands::rib::RouteFilterOpts {
+            prefix: Some("203.0.113.0/24".to_string()),
+            longer: false,
+            origin_asn: None,
+            community: vec![(64496_u32 << 16) | 100],
+            large_community: vec![],
+            limit: None,
+        };
+        let view = RouteViewArgs {
+            longer: true,
+            origin_asn: Some(64496),
+            community: vec!["64496:200".to_string()],
+            large_community: vec!["64496:1:100".to_string()],
+            limit: Some(100),
+            ..Default::default()
+        };
+        let merged = merge_route_view_filters(parent, view).unwrap();
+        assert_eq!(merged.prefix.as_deref(), Some("203.0.113.0/24"));
+        assert!(merged.longer);
+        assert_eq!(merged.origin_asn, Some(64496));
+        assert_eq!(
+            merged.community,
+            [(64496_u32 << 16) | 100, (64496_u32 << 16) | 200]
+        );
+        assert_eq!(merged.large_community, ["64496:1:100"]);
+        assert_eq!(merged.limit, Some(100));
+    }
+
+    #[test]
+    fn rib_route_limit_is_one_server_page() {
+        for value in ["0", "1001", "not-a-number"] {
+            assert!(
+                Cli::try_parse_from(["rbgp", "rib", "received", "192.0.2.1", "--limit", value,])
+                    .is_err(),
+                "invalid route limit unexpectedly parsed: {value}"
+            );
+        }
+        Cli::try_parse_from(["rbgp", "rib", "received", "192.0.2.1", "--limit", "1000"]).unwrap();
+    }
+
+    #[test]
+    fn rib_route_view_cross_scope_conflicts_are_explicit() {
+        for (args, expected) in [
+            (
+                "rbgp rib --family ipv4_unicast received 192.0.2.1 --family ipv6_unicast",
+                "--family may be specified either before or after the route view, not both",
+            ),
+            (
+                "rbgp rib --prefix 203.0.113.0/24 received 192.0.2.1 --prefix 198.51.100.0/24",
+                "--prefix may be specified either before or after the route view, not both",
+            ),
+            (
+                "rbgp rib --count received 192.0.2.1 --limit 10",
+                "--count cannot be combined with --limit",
+            ),
+            (
+                "rbgp rib --limit 10 advertised 192.0.2.1 --count",
+                "--count cannot be combined with --limit",
+            ),
+            (
+                "rbgp rib --limit 10 advertised 192.0.2.1 --explain --prefix 203.0.113.0/24",
+                "--explain cannot be combined with --limit",
+            ),
+            (
+                "rbgp rib received 192.0.2.1 --rejected --prefix 203.0.113.0/24",
+                "--rejected does not support accepted-route family, prefix, path-attribute, or limit filters",
+            ),
+            (
+                "rbgp rib --limit 10 blackholes",
+                "--limit is only valid for best, received, or advertised routes",
+            ),
+        ] {
+            let cli = Cli::try_parse_from(args.split_whitespace()).unwrap();
+            assert_eq!(
+                validate_rib_route_view_action(&cli.command)
+                    .unwrap_err()
+                    .to_string(),
+                expected,
+                "unexpected validation result for {args}"
+            );
+        }
+
+        for args in [
+            "rbgp rib --prefix 203.0.113.0/24 received 192.0.2.1",
+            "rbgp rib received 192.0.2.1 --prefix 203.0.113.0/24 --limit 10",
+            "rbgp rib advertised 192.0.2.1 --origin-asn 64496 --limit 10",
+        ] {
+            let cli = Cli::try_parse_from(args.split_whitespace()).unwrap();
+            validate_rib_route_view_action(&cli.command)
+                .unwrap_or_else(|error| panic!("valid route view rejected for {args}: {error}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn rib_route_view_conflicts_fail_before_transport() {
+        for (args, expected) in [
+            (
+                "rib --count received 192.0.2.1 --limit 10",
+                "--count cannot be combined with --limit",
+            ),
+            (
+                "rib received 192.0.2.1 --rejected --prefix 203.0.113.0/24",
+                "--rejected does not support accepted-route family, prefix, path-attribute, or limit filters",
+            ),
+            (
+                "rib --limit 10 blackholes",
+                "--limit is only valid for best, received, or advertised routes",
+            ),
+        ] {
+            let command = format!("rbgp --addr http://127.0.0.1:1 {args}");
+            let cli = Cli::try_parse_from(command.split_whitespace()).unwrap();
+            assert_eq!(
+                run(cli, BINARY_NAME).await.unwrap_err().to_string(),
+                expected,
+                "{args} reached transport instead of preflight validation"
+            );
         }
     }
 

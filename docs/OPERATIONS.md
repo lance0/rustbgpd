@@ -2514,6 +2514,8 @@ their effective send value is explicitly `inactive`, `unlimited`, or finite.
 
 ```bash
 rbgp rib received 10.0.0.2
+rbgp rib received 10.0.0.2 --prefix 203.0.113.0/24
+rbgp rib received 10.0.0.2 --origin-asn 64496 --limit 100
 rbgp rib received 10.0.0.2 --age
 rbgp rib received 10.0.0.2 --count
 ```
@@ -2530,6 +2532,22 @@ rbgp rib --count
 filters as the full view and renders only the total:
 `Total matching routes: N` in human output, `{"total_count": N}` with
 `--json`.
+
+Received and advertised route filters belong after the view and peer:
+
+```bash
+rbgp rib received PEER --prefix 203.0.113.0/24 --longer
+rbgp rib received PEER --origin-asn 64496
+rbgp rib advertised PEER --community 64496:100
+rbgp rib advertised PEER --large-community 64496:1:100
+```
+
+The parent spelling (`rbgp rib --prefix CIDR received PEER`) remains accepted
+for compatibility. On a continuously changing full table, use a selective
+filter or `--limit 1..1000`. A limited query is exactly one mutation-fenced
+RPC and reports whether the exact matching total was truncated. An unbounded
+query continues to require a version-consistent walk of every page and returns
+an error if the table changes; the CLI does not emit a torn snapshot.
 
 `--age` appends the time since the route was originally received into the RIB.
 It also works on `rbgp rib advertised PEER --age`, where it remains the

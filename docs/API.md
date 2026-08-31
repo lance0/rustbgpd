@@ -1395,6 +1395,14 @@ whole selected view, regardless of page size. This is the contract behind
 `rbgp rib received|advertised <PEER> --count`, which request a single-row
 page and read only `total_count`.
 
+The same contract backs `rbgp rib --limit N`,
+`rbgp rib received PEER --limit N`, and
+`rbgp rib advertised PEER --limit N` for `N` from 1 through 1000. A limited
+query issues one RPC and exposes the exact `total_count` plus whether the
+returned page is complete; it never follows a continuation into a potentially
+changing table. Unbounded CLI listings retain the version-fenced full-walk
+behavior described above.
+
 ### Watch route changes (streaming)
 
 Live route deltas stream through `EventService.WatchEvents` with
