@@ -5542,6 +5542,9 @@ async fn run<T>(
     // bounded attribution report before emitting the single fatal receipt.
     let mut rpki_failure_notice: Option<RpkiFailureNotice> = None;
     let mut rpki_failure_triggered = false;
+    // Set only by the gRPC supervision arm for the same reason: polling a
+    // completed JoinHandle again during coordinated teardown would panic.
+    let mut grpc_exited = false;
     loop {
         if initial_peer_boot_failed {
             break;
@@ -5565,6 +5568,7 @@ async fn run<T>(
             result = &mut grpc_handle => {
                 error!(?result, "gRPC server exited unexpectedly");
                 info!("initiating shutdown due to gRPC server failure");
+                grpc_exited = true;
                 component_failed = true;
                 break;
             }
@@ -6160,6 +6164,12 @@ async fn run<T>(
 
     // 4. Stop the gRPC server
     let _ = grpc_shutdown_tx.send(());
+    // The server owns its bounded listener drain and UDS cleanup. Join it
+    // before closing EHM so active streams cannot outlive their dependencies.
+    if !grpc_exited && let Err(error) = grpc_handle.await {
+        error!(%error, "gRPC server task panicked during shutdown");
+        component_failed = true;
+    }
 
     // 5. Shut down the durable event outbox (ADR-0072) after the
     // producers and gRPC have drained. The RIB-event conversion stage

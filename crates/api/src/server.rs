@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -70,6 +70,7 @@ use rustbgpd_telemetry::BgpMetrics;
 
 const MAX_CONCURRENT_GRPC_TLS_HANDSHAKES: usize = 64;
 const GRPC_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const GRPC_LISTENER_SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 const FULLY_COMPENSATED_STATUS_PREFIX: &str =
     "runtime effects were fully compensated; retry may repeat transient runtime changes:";
 const RUNTIME_CONFIG_OUTCOME_METADATA: &str = "rustbgpd-runtime-config-outcome";
@@ -1479,11 +1480,37 @@ pub async fn serve(
         }
     }
 
-    while let Some(result) = listener_tasks.join_next().await {
-        match result {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => error!(error = %err, "gRPC listener exit during shutdown"),
-            Err(err) => error!(error = %err, "gRPC listener task panicked during shutdown"),
+    // Tonic waits for active streaming RPCs during graceful shutdown. Give
+    // every listener one shared grace deadline, then cancel the stragglers.
+    let listener_shutdown_deadline = tokio::time::Instant::now() + GRPC_LISTENER_SHUTDOWN_GRACE;
+    let graceful_drain = async {
+        while let Some(result) = listener_tasks.join_next().await {
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => error!(error = %err, "gRPC listener exit during shutdown"),
+                Err(err) => error!(error = %err, "gRPC listener task panicked during shutdown"),
+            }
+        }
+    };
+    if tokio::time::timeout_at(listener_shutdown_deadline, graceful_drain)
+        .await
+        .is_err()
+    {
+        warn!(
+            remaining_listeners = listener_tasks.len(),
+            grace_ms = GRPC_LISTENER_SHUTDOWN_GRACE.as_millis(),
+            "gRPC listener shutdown grace expired; aborting remaining listeners"
+        );
+        listener_tasks.abort_all();
+        while let Some(result) = listener_tasks.join_next().await {
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => error!(error = %err, "gRPC listener exit after shutdown abort"),
+                Err(err) if err.is_cancelled() => {}
+                Err(err) => {
+                    error!(error = %err, "gRPC listener task panicked during shutdown abort");
+                }
+            }
         }
     }
 }
@@ -2033,7 +2060,7 @@ async fn run_uds_listener(
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
     stream_plan: Option<Arc<crate::config_service::stream::StreamPlanState>>,
 ) -> Result<(), String> {
-    let uds_listener = bind_uds_listener(&path, mode)?;
+    let (uds_listener, _socket_cleanup) = bind_uds_listener(&path, mode)?;
     let auth_enabled = credential_store
         .load()
         .listener(credential_index)
@@ -2192,7 +2219,7 @@ async fn run_uds_listener(
         interceptor,
     ));
 
-    let result = Server::builder()
+    Server::builder()
         .layer(GrpcAuthzLayer::new(audit_context, metrics.clone()))
         .add_routes(routes.routes())
         .serve_with_incoming_shutdown(
@@ -2200,16 +2227,10 @@ async fn run_uds_listener(
             await_shutdown(shutdown_rx),
         )
         .await
-        .map_err(|e| format!("UDS listener {} failed: {e}", path.display()));
-
-    if let Err(err) = cleanup_uds_socket(&path) {
-        warn!(path = %path.display(), error = %err, "failed to remove gRPC UDS socket");
-    }
-
-    result
+        .map_err(|e| format!("UDS listener {} failed: {e}", path.display()))
 }
 
-fn bind_uds_listener(path: &Path, mode: u32) -> Result<UnixListener, String> {
+fn bind_uds_listener(path: &Path, mode: u32) -> Result<(UnixListener, UdsSocketCleanup), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create UDS parent {}: {e}", parent.display()))?;
@@ -2232,13 +2253,22 @@ fn bind_uds_listener(path: &Path, mode: u32) -> Result<UnixListener, String> {
 
     let listener = UnixListener::bind(path)
         .map_err(|e| format!("failed to bind UDS listener {}: {e}", path.display()))?;
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|e| format!("failed to stat bound UDS listener {}: {e}", path.display()))?;
+    if !metadata.file_type().is_socket() {
+        return Err(format!(
+            "bound UDS listener path {} is not a socket",
+            path.display()
+        ));
+    }
+    let cleanup = UdsSocketCleanup::new(path.to_path_buf(), metadata.dev(), metadata.ino());
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(|e| {
         format!(
             "failed to set permissions on UDS listener {}: {e}",
             path.display()
         )
     })?;
-    Ok(listener)
+    Ok((listener, cleanup))
 }
 
 fn cleanup_uds_socket(path: &Path) -> Result<(), String> {
@@ -2249,6 +2279,65 @@ fn cleanup_uds_socket(path: &Path) -> Result<(), String> {
             "failed to remove UDS socket {}: {e}",
             path.display()
         )),
+    }
+}
+
+/// Removes a bound UDS path whether its listener completes or is cancelled.
+struct UdsSocketCleanup {
+    path: PathBuf,
+    dev: u64,
+    ino: u64,
+}
+
+impl UdsSocketCleanup {
+    fn new(path: PathBuf, dev: u64, ino: u64) -> Self {
+        Self { path, dev, ino }
+    }
+}
+
+impl Drop for UdsSocketCleanup {
+    fn drop(&mut self) {
+        let metadata = match std::fs::symlink_metadata(&self.path) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
+            Err(err) => {
+                warn!(
+                    path = %self.path.display(),
+                    error = %err,
+                    "failed to stat gRPC UDS socket during cleanup; retaining path"
+                );
+                return;
+            }
+        };
+        if !metadata.file_type().is_socket() {
+            warn!(
+                path = %self.path.display(),
+                expected_dev = self.dev,
+                expected_ino = self.ino,
+                current_dev = metadata.dev(),
+                current_ino = metadata.ino(),
+                "gRPC UDS path is no longer a socket; retaining replacement"
+            );
+            return;
+        }
+        if metadata.dev() != self.dev || metadata.ino() != self.ino {
+            warn!(
+                path = %self.path.display(),
+                expected_dev = self.dev,
+                expected_ino = self.ino,
+                current_dev = metadata.dev(),
+                current_ino = metadata.ino(),
+                "gRPC UDS socket identity changed; retaining replacement"
+            );
+            return;
+        }
+        if let Err(err) = cleanup_uds_socket(&self.path) {
+            warn!(
+                path = %self.path.display(),
+                error = %err,
+                "failed to remove gRPC UDS socket"
+            );
+        }
     }
 }
 
@@ -2275,6 +2364,42 @@ mod tests {
     use crate::proto::global_service_client::GlobalServiceClient;
     use crate::proto::{EventCategory, WatchEventsRequest};
     use crate::test_support::{session_event, spawn_fake_peer_manager, spawn_fake_rib};
+
+    #[tokio::test]
+    async fn uds_cleanup_retains_replacement_socket() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("grpc.sock");
+        let moved = temp.path().join("original.sock");
+        let (listener, cleanup) = bind_uds_listener(&path, 0o600).unwrap();
+        std::fs::rename(&path, &moved).unwrap();
+
+        let replacement = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let replacement_metadata = std::fs::symlink_metadata(&path).unwrap();
+        let replacement_identity = (replacement_metadata.dev(), replacement_metadata.ino());
+
+        drop(listener);
+        drop(cleanup);
+
+        let current = std::fs::symlink_metadata(&path).unwrap();
+        assert!(current.file_type().is_socket());
+        assert_eq!((current.dev(), current.ino()), replacement_identity);
+        drop(replacement);
+    }
+
+    #[tokio::test]
+    async fn uds_cleanup_retains_replacement_regular_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("grpc.sock");
+        let moved = temp.path().join("original.sock");
+        let (listener, cleanup) = bind_uds_listener(&path, 0o600).unwrap();
+        std::fs::rename(&path, &moved).unwrap();
+        std::fs::write(&path, b"replacement").unwrap();
+
+        drop(listener);
+        drop(cleanup);
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
+    }
 
     #[test]
     fn config_transaction_deadline_maps_exactly_to_grpc() {
