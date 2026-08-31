@@ -236,7 +236,7 @@ kill $DAEMON_PID
 
 ### Config-init smoke
 
-Every shipped starter — both `--init-config` profiles and every config
+Every shipped starter — all `--init-config` profiles and every config
 under `examples/` — must pass `rustbgpd --check --strict`, exit 0, summary
 `config OK`. Shipping a starter that trips our own unpoliced-eBGP warning
 teaches the operator who runs it first that the warning is noise. Permit-all
@@ -245,7 +245,7 @@ omission.
 
 ```bash
 # Each built-in profile emits a starter config that passes the strict gate.
-for p in lab edge; do
+for p in lab edge route-server; do
   ./target/release/rustbgpd --init-config "$p" > "/tmp/init-$p.toml"
   ./target/release/rustbgpd --check --strict "/tmp/init-$p.toml"  # expect: config OK
 done

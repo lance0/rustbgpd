@@ -9,6 +9,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Add a self-contained IPv4 two-member `--init-config route-server` starter
+  with fail-closed import policy and explicit transparent export.
+
 ### Changed
 
 - Release containers are now built and runtime-verified on native Linux amd64

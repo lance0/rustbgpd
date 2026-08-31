@@ -45,7 +45,7 @@ fn run(args: &[&str]) -> (Option<i32>, String, String) {
 }
 
 /// The `--init-config` profile names, read off the daemon's own rejection of
-/// an unknown profile (`available: lab, edge`). That message is generated
+/// an unknown profile (`available: ...`). That message is generated
 /// from `PROFILE_NAMES`, so adding a profile adds it here too — and the
 /// binary is the only place an integration test can see that list, since the
 /// `config` module is a lib export only under `bench-internals`.

@@ -95,6 +95,19 @@ real config loader before it is printed, and each passes
 `rustbgpd --check --strict` as emitted: `lab` is permit-all in both
 directions, but says so in an explicit chain rather than by omission.
 
+For an installed-release route-server starting point, emit the self-contained
+IPv4 two-member skeleton:
+
+```bash
+rustbgpd --init-config route-server > config.toml
+$EDITOR config.toml
+```
+
+It defaults member import to deny, keeps route-server export explicitly
+transparent, and has no external policy, dataset, RTR, or snapshot dependency.
+Replace both member placeholders and their prefix limits, then install your
+IRR/origin/RPKI import hygiene before accepting routes.
+
 From a source checkout, prefer a checked-in starter file?
 
 <!-- release-install-contract:source-checkout:start -->
@@ -103,9 +116,10 @@ cp examples/minimal/config.toml config.toml
 ```
 <!-- release-install-contract:source-checkout:end -->
 
-For route-server deployments, start from
-[`examples/route-server/config.toml`](../examples/route-server/config.toml) and
-the route-server cookbook.
+For a production route-server, continue with
+[`examples/route-server/config.toml`](../examples/route-server/config.toml),
+the route-server cookbook, and [`rs-config-render`](../tools/rs-config-render)
+for generated member inventories.
 
 ## 3. Validate and run
 

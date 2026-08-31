@@ -528,8 +528,8 @@ described under [`config_epoch`](#config_epoch), which the same `--strict`
 gate counts. `rbgp config import` sets the knob
 in every config it generates,
 since it never translates policy; its report says so. Every shipped starter —
-both `--init-config` profiles and every config under `examples/` — sets it too
-and passes `--check --strict`, so a first run is genuinely clean; where a
+every built-in `--init-config` profile and every config under `examples/` —
+sets it too and passes `--check --strict`, so a first run is genuinely clean; where a
 starter is permit-all by design it says so in a named chain, because
 permit-all by omission is indistinguishable from an oversight.
 

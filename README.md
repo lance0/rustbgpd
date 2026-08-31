@@ -301,6 +301,11 @@ For running rustbgpd on a real host with real peers, see
 `--check` / `--diff`, local UDS access, HTTP probes, runtime peer operations,
 remote mTLS access, standalone Docker, and systemd.
 
+Installed binaries include `--init-config route-server`, a self-contained
+IPv4 two-member skeleton with fail-closed import policy. Replace its member
+placeholders before use; the full route-server example and `rs-config-render`
+cover production policy and generated inventories.
+
 The [cookbook](docs/cookbook/README.md) has complete receipt-proven recipes for
 the common deployment shapes: iBGP route reflector at scale, L3VPN reflection,
 IXP route server, BMP/event/MRT monitoring feed, EVPN fabric RR, and `.rpol`

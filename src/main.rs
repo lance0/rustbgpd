@@ -2341,7 +2341,7 @@ change.
 Output the diff as JSON (only with \fB\-\-diff\fR).
 .TP
 \fB\-\-init\-config\fR \fIPROFILE\fR
-Print a starter config to stdout and exit. Profiles: lab, edge.
+Print a starter config to stdout and exit. Profiles: {profiles}.
 .TP
 \fB\-\-stdout\fR
 Accepted with \fB\-\-init\-config\fR and ignored; output always goes
@@ -2404,7 +2404,8 @@ Default configuration file.
 .SH SEE ALSO
 .BR rbgp (1)
 "#,
-        version = env!("CARGO_PKG_VERSION")
+        version = env!("CARGO_PKG_VERSION"),
+        profiles = crate::config::profiles::PROFILE_NAMES.join(", ")
     )
 }
 
@@ -2447,7 +2448,7 @@ fn main() -> ExitCode {
                --diff PATH           Compare config against PATH and show what SIGHUP would change\n  \
                --json                Output diff as JSON (only with --diff)\n  \
                --init-config PROFILE Print a starter config to stdout and exit.\n                        \
-                                     Profiles: lab, edge\n  \
+                                     Profiles: {}\n  \
                --stdout              Accepted with --init-config and ignored (output always\n                        \
                                      goes to stdout)\n  \
                --dump-config-schema  Print the config JSON Schema to stdout and exit\n  \
@@ -2465,7 +2466,8 @@ fn main() -> ExitCode {
                   gRPC server, BGP listener task, or BGP accept-forwarding task exit)\n  \
                2  Invalid invocation (unknown flag combination, missing argument)\n  \
                70 Internal error",
-                    env!("CARGO_PKG_VERSION")
+                    env!("CARGO_PKG_VERSION"),
+                    crate::config::profiles::PROFILE_NAMES.join(", ")
                 )
             })),
             _ => unreachable!("display mode was matched above"),
