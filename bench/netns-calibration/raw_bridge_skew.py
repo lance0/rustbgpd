@@ -16,10 +16,12 @@ import socket
 import struct
 import subprocess
 import tempfile
+import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Callable, cast
 
 NETLINK_ROUTE = 0
 RTMGRP_NEIGH = 4
@@ -35,11 +37,69 @@ MSG_TRUNC = getattr(socket, "MSG_TRUNC", 0x20)
 MAX_ARTIFACT_BYTES = 10 * 1024 * 1024
 VALID_NUD = 0x02 | 0x04 | 0x40 | 0x80
 INVALID_NUD = 0x01 | 0x08 | 0x10 | 0x20
+NUD_FAILED = 0x20
 CAMPAIGNS = {"serial-1": 1, "burst-8": 8, "burst-32": 32}
+REQUESTED_RECEIVE_BYTES = 4 * 1024 * 1024
+LINUX_RCVBUF_ACCOUNTING = 2
+SO_RCVBUFFORCE = 33
+POST_RETIRE_NEIGHBOR_LIMIT = 0
 
 
 class MeasurementError(RuntimeError):
     """The measurement lost data, identity, or its closed execution boundary."""
+
+
+def _combine_errors(
+    primary: BaseException | None,
+    secondary: BaseException,
+    context: str,
+) -> BaseException:
+    if primary is None:
+        return secondary
+    if str(secondary) in str(primary):
+        return primary
+    return MeasurementError(f"{primary}; additionally {context}: {secondary}")
+
+
+@dataclass(frozen=True)
+class ReceiveCapacity:
+    requested_bytes: int
+    effective_bytes: int
+    forced: bool
+
+
+def _admit_receive_capacity(sock: socket.socket, requested: int) -> ReceiveCapacity:
+    """Prove Linux's doubled receive-buffer accounting before subscribing."""
+    if type(requested) is not int or requested <= 0:
+        raise MeasurementError("receive-buffer request must be a positive integer")
+    required = requested * LINUX_RCVBUF_ACCOUNTING
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, requested)
+        effective = int(sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF))
+    except OSError as exc:
+        raise MeasurementError(f"cannot request NETLINK_ROUTE receive capacity: {exc}") from exc
+    forced = False
+    if effective < required:
+        forced = True
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, SO_RCVBUFFORCE, requested)
+            effective = int(sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF))
+        except OSError as exc:
+            try:
+                effective = int(sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF))
+            except OSError:
+                pass
+            raise MeasurementError(
+                "NETLINK_ROUTE receive capacity is capped "
+                f"at {effective} bytes; {required} bytes are required and "
+                f"SO_RCVBUFFORCE failed: {exc}"
+            ) from exc
+    if effective < required:
+        raise MeasurementError(
+            "NETLINK_ROUTE receive capacity is undersized: "
+            f"got {effective} bytes, require at least {required}"
+        )
+    return ReceiveCapacity(requested, effective, forced)
 
 
 def align4(value: int) -> int:
@@ -117,8 +177,8 @@ def parse_datagram(
         if kind in (NLMSG_OVERRUN, NLMSG_ERROR):
             raise MeasurementError("NLMSG_OVERRUN/ERROR")
         if kind in (RTM_NEWNEIGH, RTM_DELNEIGH):
-            if seq != 0 or pid != 0:
-                raise MeasurementError("relevant event has non-kernel pid/sequence")
+            if seq != 0:
+                raise MeasurementError("relevant event has nonzero sequence")
             if length < 28:
                 raise MeasurementError("short ndmsg")
             family, _pad1, _pad2, ifindex, state, ndflags, _ndtype = struct.unpack_from(
@@ -134,6 +194,15 @@ def parse_datagram(
                 lladdr = attrs.get(NDA_LLADDR)
                 if lladdr is not None and len(lladdr) != 6:
                     raise MeasurementError("bad NDA_LLADDR length")
+                request_correlated_invalidation = (
+                    kind == RTM_NEWNEIGH
+                    and family in (AF_INET, AF_INET6)
+                    and state == NUD_FAILED
+                    and NDA_DST in attrs
+                    and lladdr is None
+                )
+                if pid != 0 and not request_correlated_invalidation:
+                    raise MeasurementError("relevant event has unexpected header pid")
                 events.append(
                     Event(
                         message="new" if kind == RTM_NEWNEIGH else "delete",
@@ -174,23 +243,106 @@ def parse_datagram(
     return events
 
 
+class _Sync:
+    pass
+
+
+class _Closed:
+    pass
+
+
 class Observer:
-    """Exactly one standard-library NETLINK_ROUTE multicast socket."""
+    """One NETLINK_ROUTE socket with a continuously draining receive owner."""
 
-    def __init__(self, receive_bytes: int = 4 * 1024 * 1024):
-        self.socket = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, NETLINK_ROUTE)
-        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, receive_bytes)
-        self.socket.bind((0, RTMGRP_NEIGH))
+    def __init__(self, receive_bytes: int = REQUESTED_RECEIVE_BYTES):
+        netlink = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, NETLINK_ROUTE)
+        try:
+            capacity = _admit_receive_capacity(netlink, receive_bytes)
+            netlink.bind((0, RTMGRP_NEIGH))
+            self._start(netlink, capacity, parse_datagram)
+        except BaseException:
+            netlink.close()
+            raise
 
-    def ready(self, timeout_seconds: float = 0.0) -> bool:
-        readable, _, _ = select.select(
-            [self.socket], [], [], max(0.0, timeout_seconds)
+    @classmethod
+    def _for_test(
+        cls,
+        source: socket.socket,
+        decoder: Callable[[bytes, int, int, int], list[Event]],
+    ) -> "Observer":
+        observer = cls.__new__(cls)
+        observer._start(source, ReceiveCapacity(1, 2, False), decoder)
+        return observer
+
+    def _start(
+        self,
+        netlink: socket.socket,
+        capacity: ReceiveCapacity,
+        decoder: Callable[[bytes, int, int, int], list[Event]],
+    ) -> None:
+        self.socket = netlink
+        self.capacity = capacity
+        self._decoder = decoder
+        self._control_tx, self._control_rx = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._condition = threading.Condition()
+        self._items: deque[object] = deque()
+        self._failure: BaseException | None = None
+        self._started = False
+        self._closed = False
+        self._thread = threading.Thread(
+            target=self._receive_owner,
+            name="raw-bridge-skew-netlink-receiver",
+            daemon=False,
         )
-        return bool(readable)
+        deadline = time.monotonic() + 5
+        started = False
+        try:
+            self._thread.start()
+            started = True
+            with self._condition:
+                while not self._started and self._failure is None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise MeasurementError("observer receive owner did not start")
+                    self._condition.wait(remaining)
+                if self._failure is not None:
+                    raise self._failure
+        except BaseException as exc:
+            if started:
+                teardown_error = self._stop_failed_start()
+            else:
+                self._close_fds()
+                teardown_error = None
+            if teardown_error is not None:
+                raise _combine_errors(exc, teardown_error, "observer start teardown")
+            raise
 
-    def receive(self, timeout_seconds: float | None = None) -> list[Event]:
-        if timeout_seconds is not None and not self.ready(timeout_seconds):
-            return []
+    def _close_fds(self) -> None:
+        self.socket.close()
+        self._control_tx.close()
+        self._control_rx.close()
+
+    def _stop_failed_start(self) -> BaseException | None:
+        try:
+            self._control_tx.sendall(b"X")
+        except OSError:
+            pass
+        self._thread.join(timeout=1)
+        if self._thread.is_alive():
+            self._close_fds()
+            self._thread.join(timeout=5)
+        else:
+            self._close_fds()
+        if self._thread.is_alive():
+            return MeasurementError("observer receive owner survived failed start teardown")
+        return None
+
+    def _publish(self, item: object) -> None:
+        with self._condition:
+            self._items.append(item)
+            self._condition.notify_all()
+
+    def _receive_once(self) -> None:
         try:
             data, _ancillary, flags, address = self.socket.recvmsg(65536)
         except OSError as exc:
@@ -198,10 +350,123 @@ class Observer:
                 raise MeasurementError("NETLINK_ROUTE ENOBUFS") from exc
             raise
         timestamp_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)
-        return parse_datagram(data, address[0], flags, timestamp_ns)
+        sender_pid = address[0] if isinstance(address, tuple) and address else 0
+        events = self._decoder(data, sender_pid, flags, timestamp_ns)
+        if events:
+            self._publish(events)
 
-    def close(self) -> None:
-        self.socket.close()
+    def _drain_source(self) -> None:
+        while select.select([self.socket], [], [], 0.0)[0]:
+            self._receive_once()
+
+    def _receive_owner(self) -> None:
+        try:
+            select.select([self.socket, self._control_rx], [], [], 0.0)
+            with self._condition:
+                self._started = True
+                self._condition.notify_all()
+            while True:
+                readable, _, _ = select.select([self.socket, self._control_rx], [], [])
+                if self.socket in readable:
+                    self._receive_once()
+                if self._control_rx in readable:
+                    command = self._control_rx.recv(1)
+                    if command not in (b"S", b"X"):
+                        raise MeasurementError("observer control channel failed")
+                    self._drain_source()
+                    self._publish(_Closed() if command == b"X" else _Sync())
+                    if command == b"X":
+                        return
+        except BaseException as exc:
+            with self._condition:
+                self._failure = exc
+                self._condition.notify_all()
+
+    def _take(self, deadline: float | None) -> object | None:
+        with self._condition:
+            while True:
+                if self._failure is not None:
+                    raise self._failure
+                if self._items:
+                    return self._items.popleft()
+                if deadline is None:
+                    self._condition.wait()
+                    continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                self._condition.wait(remaining)
+
+    def receive(self, timeout_seconds: float | None = None) -> list[Event]:
+        if self._closed:
+            raise MeasurementError("observer is closed")
+        deadline = None if timeout_seconds is None else time.monotonic() + max(0.0, timeout_seconds)
+        item = self._take(deadline)
+        if item is None:
+            return []
+        if isinstance(item, list):
+            return cast(list[Event], item)
+        raise MeasurementError("observer synchronization marker arrived out of order")
+
+    def _barrier(self, command: bytes) -> list[Event]:
+        if self._closed:
+            raise MeasurementError("observer is closed")
+        try:
+            self._control_tx.sendall(command)
+        except OSError as exc:
+            raise MeasurementError(f"observer control channel failed: {exc}") from exc
+        events: list[Event] = []
+        expected = _Closed if command == b"X" else _Sync
+        deadline = time.monotonic() + 5
+        while True:
+            item = self._take(deadline)
+            if item is None:
+                raise MeasurementError("observer synchronization timed out")
+            if isinstance(item, list):
+                events.extend(cast(list[Event], item))
+            elif isinstance(item, expected):
+                return events
+            elif command == b"X" and isinstance(item, _Sync):
+                continue
+            else:
+                raise MeasurementError("observer synchronization marker arrived out of order")
+
+    def synchronize(self) -> list[Event]:
+        """Return every decoded event queued before a receive-owner barrier."""
+        return self._barrier(b"S")
+
+    def close(self) -> list[Event]:
+        """Drain, join, and return the final ordered event suffix."""
+        if self._closed:
+            return []
+        events: list[Event] = []
+        error: BaseException | None = None
+        try:
+            events = self._barrier(b"X")
+        except BaseException as exc:
+            error = exc
+        self._closed = True
+        self._thread.join(timeout=5)
+        if self._thread.is_alive():
+            try:
+                self._control_tx.sendall(b"X")
+            except OSError:
+                pass
+            self._thread.join(timeout=5)
+        if self._thread.is_alive():
+            self._close_fds()
+            self._thread.join(timeout=5)
+        else:
+            self._close_fds()
+        if self._thread.is_alive():
+            error = _combine_errors(
+                error,
+                MeasurementError("observer receive owner did not terminate"),
+                "observer termination",
+            )
+        if error is not None:
+            raise error
+        return events
 
 
 class Pairer:
@@ -418,6 +683,7 @@ def deterministic_plan(
     profile: str,
     bridge_ifindex: int = 100,
     port_ifindexes: dict[str, list[int]] | None = None,
+    receive_capacity: ReceiveCapacity | None = None,
 ) -> dict[str, object]:
     if profile not in CAMPAIGNS:
         raise MeasurementError("unknown campaign profile")
@@ -463,12 +729,24 @@ def deterministic_plan(
                     }
                 )
     return {
-        "schema": 1,
+        "schema": 2,
         "profile": profile,
         "active_limit": active_limit,
         "censor_seconds": 5,
         "wall_seconds": 1200,
         "acceptance": None,
+        "observer": {
+            "so_rcvbuf_requested_bytes": (
+                receive_capacity.requested_bytes
+                if receive_capacity is not None
+                else REQUESTED_RECEIVE_BYTES
+            ),
+            "so_rcvbuf_effective_bytes": (
+                receive_capacity.effective_bytes if receive_capacity is not None else None
+            ),
+            "so_rcvbuf_forced": (receive_capacity.forced if receive_capacity is not None else None),
+            "post_freeze_retired_neighbors_max": POST_RETIRE_NEIGHBOR_LIMIT,
+        },
         "topology": {
             "bridge_ifindex": bridge_ifindex,
             "port_ifindexes": ports,
@@ -504,12 +782,37 @@ SAMPLE_FIELDS = [
 ]
 
 
+def _validate_runtime_observer(run: dict[str, object]) -> None:
+    if run.get("schema") != 2:
+        raise MeasurementError("runtime receipt requires raw bridge schema 2")
+    observer = run.get("observer")
+    if not isinstance(observer, dict) or set(observer) != {
+        "post_freeze_retired_neighbors_max",
+        "so_rcvbuf_effective_bytes",
+        "so_rcvbuf_forced",
+        "so_rcvbuf_requested_bytes",
+    }:
+        raise MeasurementError("runtime observer provenance shape mismatch")
+    requested = observer["so_rcvbuf_requested_bytes"]
+    effective = observer["so_rcvbuf_effective_bytes"]
+    if type(requested) is not int or requested != REQUESTED_RECEIVE_BYTES:
+        raise MeasurementError("runtime receive-buffer request mismatch")
+    if type(effective) is not int or effective < requested * LINUX_RCVBUF_ACCOUNTING:
+        raise MeasurementError("runtime effective receive capacity is undersized")
+    if type(observer["so_rcvbuf_forced"]) is not bool:
+        raise MeasurementError("runtime receive-buffer force provenance is not boolean")
+    retired_max = observer["post_freeze_retired_neighbors_max"]
+    if type(retired_max) is not int or retired_max != POST_RETIRE_NEIGHBOR_LIMIT:
+        raise MeasurementError("runtime neighbor-retirement bound mismatch")
+
+
 def write_pairer_receipt(run: dict[str, object], pairer: Pairer, output: Path) -> None:
     if output.exists() or output.is_symlink():
         raise MeasurementError("receipt output must be fresh")
     parent = output.parent
     if not parent.is_dir() or parent.is_symlink():
         raise MeasurementError("receipt parent must be a real directory")
+    _validate_runtime_observer(run)
     rows = pairer.rows()
     planned = cast(list[dict[str, object]], run["planned"])
     report = build_report(
@@ -724,6 +1027,63 @@ class TrafficTopology:
             input_text="\n".join(commands) + "\n",
         )
 
+    def _neighbor_inventory(self) -> set[str]:
+        text = _command(["ip", "-j", "neigh", "show", "dev", self.bridge, "nud", "all"])
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise MeasurementError(f"cannot parse bridge neighbor inventory: {exc}") from exc
+        if not isinstance(value, list):
+            raise MeasurementError("bridge neighbor inventory is not a JSON array")
+        destinations: set[str] = set()
+        for row in value:
+            if not isinstance(row, dict) or not isinstance(row.get("dst"), str):
+                raise MeasurementError("bridge neighbor inventory has a malformed row")
+            destination = str(row["dst"])
+            if destination in destinations:
+                raise MeasurementError("bridge neighbor inventory repeats a destination")
+            destinations.add(destination)
+        return destinations
+
+    def _retire_neighbor(self, destination: str) -> None:
+        family = "-6" if ipaddress.ip_address(destination).version == 6 else "-4"
+        result = subprocess.run(
+            [
+                "ip",
+                family,
+                "neigh",
+                "flush",
+                "to",
+                destination,
+                "dev",
+                self.bridge,
+                "nud",
+                "all",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+        if result.returncode == 0 and not result.stdout and not result.stderr:
+            return
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise MeasurementError(
+            f"neighbor retirement failed for {destination}: {detail or result.returncode}"
+        )
+
+    def retire_rows(self, rows: list[dict[str, object]]) -> None:
+        planned = {str(row["ip"]) for row in rows}
+        if len(planned) != len(rows):
+            raise MeasurementError("retirement batch repeats a planned IP")
+        for destination in sorted(planned):
+            self._retire_neighbor(destination)
+        live_planned = planned & self._neighbor_inventory()
+        if len(live_planned) > POST_RETIRE_NEIGHBOR_LIMIT:
+            raise MeasurementError(
+                "planned bridge neighbors survived retirement: " + ", ".join(sorted(live_planned))
+            )
+
     def stimulus(self, rows: list[dict[str, object]]) -> subprocess.Popen[bytes]:
         payload = []
         for row in rows:
@@ -834,10 +1194,13 @@ def _collect_batch(
             pairer.add(event)
 
 
-def _drain_ready(observer: Observer, pairer: Pairer) -> None:
-    while observer.ready():
-        for event in observer.receive():
-            pairer.add(event)
+def _apply_events(pairer: Pairer, events: list[Event]) -> None:
+    for event in events:
+        pairer.add(event)
+
+
+def _synchronize_observer(observer: Observer, pairer: Pairer) -> None:
+    _apply_events(pairer, observer.synchronize())
 
 
 def _finish_process(process: subprocess.Popen[bytes]) -> None:
@@ -853,7 +1216,9 @@ def _finish_process(process: subprocess.Popen[bytes]) -> None:
 
 
 def _smoke_plan(
-    bridge_ifindex: int, port_ifindexes: dict[str, list[int]]
+    bridge_ifindex: int,
+    port_ifindexes: dict[str, list[int]],
+    receive_capacity: ReceiveCapacity,
 ) -> dict[str, object]:
     planned = [
         {
@@ -880,12 +1245,18 @@ def _smoke_plan(
         },
     ]
     return {
-        "schema": 1,
+        "schema": 2,
         "profile": "current-kernel-smoke",
         "active_limit": 1,
         "censor_seconds": 5,
         "wall_seconds": 30,
         "acceptance": None,
+        "observer": {
+            "so_rcvbuf_requested_bytes": receive_capacity.requested_bytes,
+            "so_rcvbuf_effective_bytes": receive_capacity.effective_bytes,
+            "so_rcvbuf_forced": receive_capacity.forced,
+            "post_freeze_retired_neighbors_max": POST_RETIRE_NEIGHBOR_LIMIT,
+        },
         "topology": {
             "bridge_ifindex": bridge_ifindex,
             "port_ifindexes": port_ifindexes,
@@ -899,15 +1270,18 @@ def _execute(profile: str, *, smoke: bool) -> tuple[dict[str, object], Pairer]:
     wall_deadline = time.monotonic() + (30 if smoke else 1200)
     with TrafficTopology(active_limit) as topology:
         bridge_ifindex, port_ifindexes = topology.ifindexes()
-        run = (
-            _smoke_plan(bridge_ifindex, port_ifindexes)
-            if smoke
-            else deterministic_plan(profile, bridge_ifindex, port_ifindexes)
-        )
-        planned = cast(list[dict[str, object]], run["planned"])
-        pairer = Pairer(planned)
         observer = Observer()
+        run: dict[str, object] | None = None
+        pairer: Pairer | None = None
+        run_error: BaseException | None = None
         try:
+            run = (
+                _smoke_plan(bridge_ifindex, port_ifindexes, observer.capacity)
+                if smoke
+                else deterministic_plan(profile, bridge_ifindex, port_ifindexes, observer.capacity)
+            )
+            planned = cast(list[dict[str, object]], run["planned"])
+            pairer = Pairer(planned)
             phases = ["vlan-10-ipv4", "vlan-10-ipv6", "vlan-20-ipv4", "vlan-20-ipv6"]
             for phase in phases:
                 phase_rows = [row for row in planned if row["phase"] == phase]
@@ -915,21 +1289,63 @@ def _execute(profile: str, *, smoke: bool) -> tuple[dict[str, object], Pairer]:
                     if time.monotonic() >= wall_deadline:
                         break
                     batch = phase_rows[start : start + active_limit]
-                    topology.prepare_rows(batch)
-                    process = topology.stimulus(batch)
+                    batch_error: BaseException | None = None
+                    process: subprocess.Popen[bytes] | None = None
                     try:
+                        topology.prepare_rows(batch)
+                        process = topology.stimulus(batch)
                         _collect_batch(
                             observer,
                             pairer,
                             [str(row["sample_id"]) for row in batch],
                             min(wall_deadline, time.monotonic() + 5),
                         )
+                    except BaseException as exc:
+                        batch_error = exc
                     finally:
                         pairer.freeze([str(row["sample_id"]) for row in batch])
-                        _finish_process(process)
-                        _drain_ready(observer, pairer)
+                        if process is not None:
+                            try:
+                                _finish_process(process)
+                            except BaseException as exc:
+                                batch_error = _combine_errors(
+                                    batch_error, exc, "traffic stimulus shutdown"
+                                )
+                        try:
+                            _synchronize_observer(observer, pairer)
+                        except BaseException as exc:
+                            batch_error = _combine_errors(
+                                batch_error, exc, "observer post-stimulus barrier"
+                            )
+                        try:
+                            topology.retire_rows(batch)
+                        except BaseException as exc:
+                            batch_error = _combine_errors(
+                                batch_error, exc, "planned-neighbor retirement"
+                            )
+                        try:
+                            _synchronize_observer(observer, pairer)
+                        except BaseException as exc:
+                            batch_error = _combine_errors(
+                                batch_error, exc, "observer post-retirement barrier"
+                            )
+                    if batch_error is not None:
+                        raise batch_error
+        except BaseException as exc:
+            run_error = exc
         finally:
-            observer.close()
+            try:
+                final_events = observer.close()
+                if pairer is not None:
+                    _apply_events(pairer, final_events)
+                elif final_events:
+                    raise MeasurementError("observer emitted events before plan construction")
+            except BaseException as exc:
+                run_error = _combine_errors(run_error, exc, "observer shutdown")
+        if run_error is not None:
+            raise run_error
+        if run is None or pairer is None:
+            raise MeasurementError("campaign plan was not constructed")
     smoke_ids = ["smoke-vlan10-v4", "smoke-vlan20-v6"]
     if smoke and not pairer.is_complete(smoke_ids):
         raise MeasurementError("current-kernel ARP/ND smoke did not produce both pairs")

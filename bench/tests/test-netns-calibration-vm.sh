@@ -204,7 +204,12 @@ campaign_request = json.loads((campaign / "request.json").read_text())
 campaign_request["raw_bridge_skew"] = {"profile": "burst-8"}
 campaign_request["sources"]["raw_bridge_skew"] = verify.sha256(raw_path)
 write_json(campaign / "request.json", campaign_request)
-raw.write_receipt(raw.deterministic_plan("burst-8"), [], campaign / "guest/skew")
+raw_capacity = raw.ReceiveCapacity(4 * 1024 * 1024, 8 * 1024 * 1024, False)
+raw.write_receipt(
+    raw.deterministic_plan("burst-8", receive_capacity=raw_capacity),
+    [],
+    campaign / "guest/skew",
+)
 expect(True, "valid-campaign-finalize", "receipt", profiles_path, campaign, "--write-manifest")
 expect(True, "valid-campaign-sealed", "receipt", profiles_path, campaign)
 manifest = (campaign / "SHA256SUMS").read_text()
@@ -231,6 +236,49 @@ for name, mutate in {
     "campaign-extra": lambda p: (p / "guest/skew/extra.txt").write_text("extra\n"),
     "campaign-tampered-plan": lambda p: mutate_campaign_json(
         p, "guest/skew/run.json", lambda x: x["planned"][0].update(ip="192.0.2.99")
+    ),
+    "campaign-run-schema": lambda p: mutate_campaign_json(
+        p, "guest/skew/run.json", lambda x: x.update(schema=1)
+    ),
+    "campaign-rcvbuf-request": lambda p: mutate_campaign_json(
+        p,
+        "guest/skew/run.json",
+        lambda x: x["observer"].update(so_rcvbuf_requested_bytes=4 * 1024 * 1024 - 1),
+    ),
+    "campaign-rcvbuf-effective-null": lambda p: mutate_campaign_json(
+        p,
+        "guest/skew/run.json",
+        lambda x: x["observer"].update(so_rcvbuf_effective_bytes=None),
+    ),
+    "campaign-rcvbuf-effective-string": lambda p: mutate_campaign_json(
+        p,
+        "guest/skew/run.json",
+        lambda x: x["observer"].update(so_rcvbuf_effective_bytes="8388608"),
+    ),
+    "campaign-rcvbuf-effective-bool": lambda p: mutate_campaign_json(
+        p,
+        "guest/skew/run.json",
+        lambda x: x["observer"].update(so_rcvbuf_effective_bytes=True),
+    ),
+    "campaign-rcvbuf-effective-small": lambda p: mutate_campaign_json(
+        p,
+        "guest/skew/run.json",
+        lambda x: x["observer"].update(so_rcvbuf_effective_bytes=8 * 1024 * 1024 - 1),
+    ),
+    "campaign-rcvbuf-forced-type": lambda p: mutate_campaign_json(
+        p,
+        "guest/skew/run.json",
+        lambda x: x["observer"].update(so_rcvbuf_forced=1),
+    ),
+    "campaign-retirement-bool": lambda p: mutate_campaign_json(
+        p,
+        "guest/skew/run.json",
+        lambda x: x["observer"].update(post_freeze_retired_neighbors_max=False),
+    ),
+    "campaign-retirement-nonzero": lambda p: mutate_campaign_json(
+        p,
+        "guest/skew/run.json",
+        lambda x: x["observer"].update(post_freeze_retired_neighbors_max=1),
     ),
     "campaign-nonzero-wrong-tenant": lambda p: mutate_campaign_json(
         p, "guest/skew/report.json", lambda x: x.update(wrong_tenant=1)
