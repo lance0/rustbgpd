@@ -15,6 +15,9 @@ DASHBOARD = ROOT / "docs/grafana/rustbgpd-overview.json"
 EVPN_DASHBOARD = ROOT / "docs/grafana/rustbgpd-evpn.json"
 METRICS = ROOT / "crates/telemetry/src/metrics.rs"
 
+EVENT_OUTBOX_QUEUE_DEPTH_NAME = "bgp_event_outbox_queue_depth"
+EVENT_OUTBOX_QUEUE_DEPTH_LABEL = "category"
+
 # Exact registered source contract at the dashboard's Alpha boundary. The
 # ticket's older family count is deliberately not trusted: any telemetry-side
 # add/remove/type/label drift must update this inventory before a panel can use
@@ -638,6 +641,89 @@ def dashboard_metric_references(dashboard: dict[str, Any]) -> dict[str, list[str
     return references
 
 
+def rust_braced_body(source: str, pattern: str, description: str) -> str:
+    """Return the unique balanced Rust brace body matched by ``pattern``."""
+    matches = list(re.finditer(pattern, source))
+    if len(matches) != 1:
+        raise ValueError(f"expected one {description}, found {len(matches)}")
+    opening = source.find("{", matches[0].start(), matches[0].end())
+    if opening < 0:
+        raise ValueError(f"{description} has no opening brace")
+    depth = 1
+    index = opening + 1
+    while index < len(source) and depth:
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+        index += 1
+    if depth:
+        raise ValueError(f"unterminated {description}")
+    return source[opening + 1 : index - 1]
+
+
+def event_outbox_queue_depth_inventory(
+    source: str, strings: list[str]
+) -> dict[str, str]:
+    """Validate the custom scrape-time queue-depth gauge and return its family."""
+    collector = "EventOutboxQueueDepthCollector"
+    contract = "event outbox queue-depth collector"
+    if re.search(rf"\b{collector}\b", source) is None:
+        return {}
+    collector_impl = rust_braced_body(
+        source,
+        rf"\bimpl\s+Collector\s+for\s+{collector}\s*\{{",
+        f"{contract} trait impl",
+    )
+    collect_body = rust_braced_body(
+        collector_impl,
+        r"\bfn\s+collect\s*\(\s*&self\s*\)[^\{]*\{",
+        f"{contract} collect method",
+    )
+    local_gauge = re.compile(
+        r"\blet\s+(\w+)\s*=\s*IntGaugeVec::new\(\s*"
+        r"Opts::new\(\s*__RUST_STRING_(\d+)__\s*,\s*"
+        r"__RUST_STRING_\d+__\s*,?\s*\)\s*,\s*"
+        r"&\[\s*__RUST_STRING_(\d+)__\s*\]\s*,?\s*\)",
+        re.DOTALL,
+    )
+    candidates = [
+        (match, strings[int(name_index)], strings[int(label_index)])
+        for match in local_gauge.finditer(collect_body)
+        for _, name_index, label_index in [match.groups()]
+        if strings[int(name_index)] == EVENT_OUTBOX_QUEUE_DEPTH_NAME
+    ]
+
+    registration = re.compile(
+        rf"\.register\(\s*Box::new\(\s*{collector}::new\(\s*"
+        r"Arc::clone\(\s*&event_outbox_queue_depth_source\s*,?\s*\)\s*,?\s*\)"
+        r"\s*\)\s*\)",
+        re.DOTALL,
+    )
+    if (
+        len(registration.findall(source)) != 1
+        or len(re.findall(rf"\b{collector}::new\s*\(", source)) != 1
+    ):
+        raise ValueError(
+            f"{contract} must have one trait impl and one registration from the current source"
+        )
+    if len(candidates) != 1 or candidates[0][2] != EVENT_OUTBOX_QUEUE_DEPTH_LABEL:
+        raise ValueError(f"{contract} must construct one named category IntGaugeVec")
+    match, _, _ = candidates[0]
+    variable = match.group(1)
+    emissions = list(
+        re.finditer(rf"\b{re.escape(variable)}\.collect\(\)", collect_body)
+    )
+    emitted = f"{variable}.collect()"
+    if (
+        len(emissions) != 1
+        or emissions[0].start() < match.end()
+        or not re.sub(r"\s+", "", collect_body).endswith(emitted)
+    ):
+        raise ValueError(f"{contract} must collect its local gauge exactly once")
+    return {EVENT_OUTBOX_QUEUE_DEPTH_NAME: "ordinary"}
+
+
 def rust_metric_inventory(source: str) -> dict[str, str]:
     source, strings = rust_lex(source)
     source = source.split("#[cfg(test)]", 1)[0]
@@ -659,6 +745,10 @@ def rust_metric_inventory(source: str) -> dict[str, str]:
         if variable not in constructors:
             continue
         name, kind = constructors[variable]
+        if name in inventory:
+            raise ValueError(f"duplicate registered metric name {name}")
+        inventory[name] = kind
+    for name, kind in event_outbox_queue_depth_inventory(source, strings).items():
         if name in inventory:
             raise ValueError(f"duplicate registered metric name {name}")
         inventory[name] = kind

@@ -270,6 +270,97 @@ fn alias_metric(registry: &Registry) {
         with self.assertRaisesRegex(ValueError, "special collector registrations changed"):
             CHECK.workspace_metric_inventory(sources, self.lock_text)
 
+    def test_event_outbox_queue_depth_collector_shape_is_fail_closed(self):
+        telemetry = self.sources[CHECK.TELEMETRY]
+        emitted, variables = CHECK.event_outbox_queue_depth_inventory(telemetry)
+        self.assertEqual(emitted, {"bgp_event_outbox_queue_depth": "ordinary"})
+        self.assertEqual(len(variables), 1)
+        variable = next(iter(variables))
+
+        replacement = f"{variable}_renamed"
+        renamed_declaration = telemetry.replace(
+            f"let {variable} = IntGaugeVec::new(",
+            f"let {replacement} = IntGaugeVec::new(",
+            1,
+        )
+        with self.assertRaisesRegex(ValueError, "populate its local gauge vector"):
+            CHECK.event_outbox_queue_depth_inventory(renamed_declaration)
+
+        renamed_variable = renamed_declaration.replace(
+            f"{variable}\n                .with_label_values",
+            f"{replacement}\n                .with_label_values",
+            1,
+        ).replace(
+            f"{variable}.collect()",
+            f"{replacement}.collect()",
+            1,
+        )
+        renamed_emitted, renamed_variables = CHECK.event_outbox_queue_depth_inventory(
+            renamed_variable
+        )
+        self.assertEqual(renamed_emitted, emitted)
+        self.assertEqual(renamed_variables, {replacement})
+        sources = dict(self.sources)
+        sources[CHECK.TELEMETRY] = renamed_variable
+        self.assertEqual(CHECK.workspace_metric_inventory(sources, self.lock_text), self.inventory)
+
+        renamed = telemetry.replace(
+            '"bgp_event_outbox_queue_depth",',
+            '"bgp_event_outbox_pending_depth",',
+            1,
+        )
+        with self.assertRaisesRegex(ValueError, "exactly one uniquely named local gauge"):
+            CHECK.event_outbox_queue_depth_inventory(renamed)
+
+        relabeled = telemetry.replace(
+            '''&["category"],
+        )
+        .expect("valid metric definition");
+        for (index, category) in EVENT_OUTBOX_QUEUE_DEPTH_CATEGORIES''',
+            '''&["reason"],
+        )
+        .expect("valid metric definition");
+        for (index, category) in EVENT_OUTBOX_QUEUE_DEPTH_CATEGORIES''',
+            1,
+        )
+        with self.assertRaisesRegex(ValueError, "with the category label"):
+            CHECK.event_outbox_queue_depth_inventory(relabeled)
+
+        discarded = telemetry.replace(
+            f"{variable}.collect()",
+            "Vec::new()",
+            1,
+        )
+        with self.assertRaisesRegex(ValueError, "return its local gauge vector exactly once"):
+            CHECK.event_outbox_queue_depth_inventory(discarded)
+
+        unmapped_return = telemetry.replace(
+            "return Vec::new();",
+            "return self.hidden.collect();",
+            1,
+        )
+        with self.assertRaisesRegex(ValueError, "returns families outside"):
+            CHECK.event_outbox_queue_depth_inventory(unmapped_return)
+
+    def test_event_outbox_queue_depth_roster_and_registration_are_pinned(self):
+        sources = dict(self.sources)
+        sources[CHECK.TELEMETRY] = sources[CHECK.TELEMETRY].replace(
+            "impl Collector for EventOutboxQueueDepthCollector",
+            "impl Collector for RenamedEventOutboxQueueDepthCollector",
+            1,
+        )
+        with self.assertRaisesRegex(ValueError, "custom metric collector roster changed"):
+            CHECK.workspace_metric_inventory(sources, self.lock_text)
+
+        sources = dict(self.sources)
+        sources[CHECK.TELEMETRY] = sources[CHECK.TELEMETRY].replace(
+            "EventOutboxQueueDepthCollector::new(",
+            "RenamedEventOutboxQueueDepthCollector::new(",
+            1,
+        )
+        with self.assertRaisesRegex(ValueError, "special collector registrations changed"):
+            CHECK.workspace_metric_inventory(sources, self.lock_text)
+
     def test_process_dependency_drift_is_rejected(self):
         drifted = self.lock_text.replace(
             'name = "prometheus"\nversion = "0.14.0"',

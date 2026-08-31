@@ -51,6 +51,24 @@ class DashboardMetricLinkTests(unittest.TestCase):
 {registration}
 #[cfg(test)] mod tests {{ const OLD: &str = "bgp_old"; }}'''
 
+    def event_outbox_queue_depth_rust(self):
+        return '''impl Collector for EventOutboxQueueDepthCollector {
+    fn collect(&self) -> Vec<MetricFamily> {
+        let gauges = IntGaugeVec::new(
+            Opts::new(
+                "bgp_event_outbox_queue_depth",
+                "queue-depth help",
+            ),
+            &["category"],
+        )
+        .expect("valid metric definition");
+        gauges.collect()
+    }
+}
+registry.register(Box::new(EventOutboxQueueDepthCollector::new(
+    Arc::clone(&event_outbox_queue_depth_source),
+))).unwrap();'''
+
     def refs(self, expression='bgp_ready{instance="$instance"}'):
         dashboard = {
             "templating": {"list": [{"name": "instance", "type": "query",
@@ -137,6 +155,76 @@ let families = self.allocated.collect();'''
         ]:
             with self.subTest(mutation=old), self.assertRaises(ValueError):
                 CHECK.rust_metric_inventory(rust.replace(old, new))
+
+    def test_event_outbox_custom_collector_is_inventoried(self):
+        rust = self.event_outbox_queue_depth_rust()
+        expected = {"bgp_event_outbox_queue_depth": "ordinary"}
+        self.assertEqual(CHECK.rust_metric_inventory(rust), expected)
+        self.assertEqual(
+            CHECK.rust_metric_inventory(rust.replace("queue-depth help", "new help")),
+            expected,
+        )
+        self.assertEqual(
+            CHECK.rust_metric_inventory(rust.replace("gauges", "queue_gauges")),
+            expected,
+        )
+        unrelated = "\nfn inspect(gauges: &OtherCollector) { let _ = gauges.collect(); }"
+        self.assertEqual(CHECK.rust_metric_inventory(rust + unrelated), expected)
+
+    def test_event_outbox_custom_collector_rejects_relocated_work(self):
+        rust = self.event_outbox_queue_depth_rust()
+        start = rust.index("        let gauges = IntGaugeVec::new(")
+        end = rust.index("\n    }\n}", start)
+        gauge_body = rust[start:end]
+        relocated = (
+            rust[:start]
+            + "        Vec::new()"
+            + rust[end:]
+            + f"\nfn unrelated() -> Vec<MetricFamily> {{\n{gauge_body}\n}}"
+        )
+        with self.assertRaisesRegex(ValueError, "construct one named category"):
+            CHECK.rust_metric_inventory(relocated)
+
+        collection_relocated = rust.replace(
+            "        gauges.collect()", "        Vec::new()", 1
+        ) + "\nfn unrelated(gauges: &IntGaugeVec) -> Vec<MetricFamily> { gauges.collect() }"
+        with self.assertRaisesRegex(ValueError, "collect its local gauge exactly once"):
+            CHECK.rust_metric_inventory(collection_relocated)
+
+    def test_event_outbox_custom_collector_mutations_fail_closed(self):
+        rust = self.event_outbox_queue_depth_rust()
+        registration = '''registry.register(Box::new(EventOutboxQueueDepthCollector::new(
+    Arc::clone(&event_outbox_queue_depth_source),
+))).unwrap();'''
+        mutations = (
+            (
+                "registration source",
+                "&event_outbox_queue_depth_source",
+                "&replacement_source",
+            ),
+            (
+                "metric name",
+                "bgp_event_outbox_queue_depth",
+                "bgp_event_outbox_queue_depth_changed",
+            ),
+            ("metric label", '"category"', '"kind"'),
+            ("collector impl", "impl Collector for", "impl OtherTrait for"),
+            ("gauge kind", "IntGaugeVec::new(", "IntCounterVec::new("),
+            ("collection", "gauges.collect()", "Vec::new()"),
+            (
+                "discarded collection",
+                "        gauges.collect()",
+                "        let _ = gauges.collect();\n        Vec::new()",
+            ),
+            ("duplicate registration", registration, f"{registration}\n{registration}"),
+        )
+        for description, old, new in mutations:
+            with self.subTest(mutation=description):
+                self.assertIn(old, rust)
+                with self.assertRaisesRegex(
+                    ValueError, "event outbox queue-depth collector"
+                ):
+                    CHECK.rust_metric_inventory(rust.replace(old, new))
 
     def test_mixed_bare_alias_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "recording_alias"):

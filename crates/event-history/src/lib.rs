@@ -68,7 +68,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
-use rustbgpd_telemetry::BgpMetrics;
+use rustbgpd_telemetry::{BgpMetrics, metrics::EventOutboxQueueDepthSource};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
@@ -375,6 +375,8 @@ pub struct EventHistorySender {
     tx: mpsc::Sender<EventEnvelope>,
     queue_depths: Arc<QueueDepths>,
     metrics: Option<BgpMetrics>,
+    #[cfg(test)]
+    producer_pause: Arc<ProducerPause>,
 }
 
 impl EventHistorySender {
@@ -393,32 +395,90 @@ impl EventHistorySender {
         env: EventEnvelope,
     ) -> Result<(), mpsc::error::TrySendError<EventEnvelope>> {
         let category = env.category;
-        let depth = self.queue_depths.increment(category);
-        set_queue_depth_metric(self.metrics.as_ref(), category, depth);
-        match self.tx.try_send(env) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                let depth = self.queue_depths.decrement(category);
-                set_queue_depth_metric(self.metrics.as_ref(), category, depth);
-                Err(e)
+        let permit = match self.tx.try_reserve() {
+            Ok(permit) => permit,
+            Err(mpsc::error::TrySendError::Full(())) => {
+                return Err(mpsc::error::TrySendError::Full(env));
             }
+            Err(mpsc::error::TrySendError::Closed(())) => {
+                return Err(mpsc::error::TrySendError::Closed(env));
+            }
+        };
+        #[cfg(test)]
+        self.producer_pause.pause_at(ProducerPausePoint::Reserved);
+        let accepted = self.queue_depths.accept(category, || {
+            #[cfg(test)]
+            self.producer_pause
+                .pause_at(ProducerPausePoint::BeforeAdmissionCas);
+        });
+        if !accepted {
+            return Err(mpsc::error::TrySendError::Closed(env));
         }
+        #[cfg(test)]
+        self.producer_pause.pause_at(ProducerPausePoint::Accepted);
+        permit.send(env);
+        #[cfg(test)]
+        self.producer_pause.pause_at(ProducerPausePoint::Sent);
+        Ok(())
     }
 
-    /// Currently-available slots in the underlying mpsc — the
-    /// inverse of "in-flight." Subtract from `max_capacity` to get
-    /// the queue depth (the value the `bgp_event_outbox_queue_depth`
-    /// gauge wants).
+    /// Currently available slots in the underlying mpsc channel. Benchmark
+    /// fences compare this with max_capacity to detect outstanding reservations
+    /// or queued items. The exported queue-depth gauge reads the acceptance
+    /// ledger instead.
     #[must_use]
     pub fn available(&self) -> usize {
         self.tx.capacity()
     }
 
-    /// Total capacity of the underlying mpsc. Paired with
-    /// [`Self::available`] to compute queue depth.
+    /// Total underlying mpsc capacity; paired with available for channel-empty
+    /// fencing.
     #[must_use]
     pub fn max_capacity(&self) -> usize {
         self.tx.max_capacity()
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u64)]
+enum ProducerPausePoint {
+    Reserved = 1,
+    BeforeAdmissionCas = 2,
+    Accepted = 3,
+    Sent = 4,
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct ProducerPause {
+    requested: AtomicU64,
+    reached: AtomicU64,
+    released: AtomicBool,
+}
+
+#[cfg(test)]
+impl ProducerPause {
+    fn arm(&self, point: ProducerPausePoint) {
+        self.released.store(false, Ordering::Release);
+        self.reached.store(0, Ordering::Release);
+        self.requested.store(point as u64, Ordering::Release);
+    }
+
+    fn pause_at(&self, point: ProducerPausePoint) {
+        if self.requested.load(Ordering::Acquire) != point as u64 {
+            return;
+        }
+        self.reached.store(point as u64, Ordering::Release);
+        while self.requested.load(Ordering::Acquire) == point as u64
+            && !self.released.load(Ordering::Acquire)
+        {
+            std::thread::yield_now();
+        }
+    }
+
+    fn release(&self) {
+        self.released.store(true, Ordering::Release);
     }
 }
 
@@ -432,6 +492,12 @@ struct QueueDepths {
     dataplane: AtomicU64,
 }
 
+const QUEUE_CLOSED: u64 = 1 << 63;
+const QUEUE_DEPTH_MASK: u64 = !QUEUE_CLOSED;
+const QUEUE_ADMISSION_SUCCESS_ORDERING: Ordering = Ordering::AcqRel;
+const QUEUE_ADMISSION_FAILURE_ORDERING: Ordering = Ordering::Acquire;
+const QUEUE_CLOSE_ORDERING: Ordering = Ordering::AcqRel;
+
 impl QueueDepths {
     fn counter(&self, category: Category) -> &AtomicU64 {
         match category {
@@ -444,33 +510,63 @@ impl QueueDepths {
         }
     }
 
-    fn increment(&self, category: Category) -> u64 {
-        self.counter(category).fetch_add(1, Ordering::AcqRel) + 1
+    fn accept(&self, category: Category, mut before_cas: impl FnMut()) -> bool {
+        let counter = self.counter(category);
+        let mut observed = counter.load(Ordering::Acquire);
+        loop {
+            if observed & QUEUE_CLOSED != 0 {
+                return false;
+            }
+            let proposed = observed + 1;
+            before_cas();
+            match counter.compare_exchange(
+                observed,
+                proposed,
+                QUEUE_ADMISSION_SUCCESS_ORDERING,
+                QUEUE_ADMISSION_FAILURE_ORDERING,
+            ) {
+                Ok(_) => return true,
+                Err(current) => observed = current,
+            }
+        }
     }
 
     fn decrement(&self, category: Category) -> u64 {
         self.counter(category)
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
-                Some(value.saturating_sub(1))
+                let depth = value & QUEUE_DEPTH_MASK;
+                Some((value & QUEUE_CLOSED) | depth.saturating_sub(1))
             })
-            .map_or(0, |previous| previous.saturating_sub(1))
+            .map_or(0, |previous| {
+                (previous & QUEUE_DEPTH_MASK).saturating_sub(1)
+            })
     }
-}
 
-fn set_queue_depth_metric(metrics: Option<&BgpMetrics>, category: Category, depth: u64) {
-    if let Some(metrics) = metrics {
-        metrics.set_event_outbox_queue_depth(
-            category.as_str(),
-            i64::try_from(depth).unwrap_or(i64::MAX),
-        );
-    }
-}
-
-fn initialize_queue_depth_metrics(metrics: Option<&BgpMetrics>) {
-    if let Some(metrics) = metrics {
+    fn close(&self) {
         for category in Category::ALL {
-            metrics.set_event_outbox_queue_depth(category.as_str(), 0);
+            self.counter(category)
+                .fetch_or(QUEUE_CLOSED, QUEUE_CLOSE_ORDERING);
         }
+    }
+
+    #[cfg(test)]
+    fn is_closed(&self, category: Category) -> bool {
+        self.counter(category).load(Ordering::Acquire) & QUEUE_CLOSED != 0
+    }
+
+    #[cfg(test)]
+    fn depth(&self, category: Category) -> u64 {
+        self.counter(category).load(Ordering::Acquire) & QUEUE_DEPTH_MASK
+    }
+
+    fn take_remaining(&self, category: Category) -> u64 {
+        self.counter(category).swap(QUEUE_CLOSED, Ordering::AcqRel) & QUEUE_DEPTH_MASK
+    }
+}
+
+impl EventOutboxQueueDepthSource for QueueDepths {
+    fn snapshot(&self) -> [u64; 6] {
+        Category::ALL.map(|category| self.counter(category).load(Ordering::Acquire))
     }
 }
 
@@ -790,7 +886,9 @@ impl EventHistoryManager {
         let (broadcast_tx, _) = broadcast::channel(config.broadcast_capacity);
         let (shutdown_tx, shutdown_rx) = watch::channel(None);
         let queue_depths = Arc::new(QueueDepths::default());
-        initialize_queue_depth_metrics(config.metrics.as_ref());
+        if let Some(metrics) = &config.metrics {
+            metrics.bind_event_outbox_queue_depth_source(queue_depths.clone());
+        }
 
         let actor_state = state.clone();
         let actor_store = store_handle.clone();
@@ -830,6 +928,8 @@ impl EventHistoryManager {
                 tx: producer_tx,
                 queue_depths,
                 metrics: config.metrics.clone(),
+                #[cfg(test)]
+                producer_pause: Arc::new(ProducerPause::default()),
             },
             broadcast_tx,
             storage: store_handle,
@@ -950,6 +1050,7 @@ impl EventHistoryManager {
     /// One five-second deadline bounds drain and storage finalization.
     pub async fn shutdown(mut self) {
         let deadline = tokio::time::Instant::now() + SHUTDOWN_TIMEOUT;
+        self.sender.queue_depths.close();
         let _ = self.shutdown_tx.send(Some(deadline));
         if let Some(mut actor) = self.actor.take() {
             let result = match tokio::time::timeout_at(deadline, &mut actor).await {
@@ -965,7 +1066,6 @@ impl EventHistoryManager {
             };
             if let Err(error) = result {
                 warn!(%error, "event-history actor did not complete cleanly during shutdown");
-                reconcile_abandoned_queue(&self.sender.queue_depths, self.sender.metrics.as_ref());
                 if !self
                     .shutdown_progress
                     .accepted_complete
@@ -979,6 +1079,12 @@ impl EventHistoryManager {
                 }
             }
         }
+        finalize_producer_ledger(
+            &self.sender.queue_depths,
+            &self.state,
+            &self.shutdown_progress,
+            self.sender.metrics.as_ref(),
+        );
         let _ = tokio::time::timeout_at(deadline, self.storage.shutdown()).await;
         if let Some(j) = self.storage_join.take() {
             let _ = tokio::time::timeout_at(deadline, j).await;
@@ -1040,14 +1146,8 @@ fn shutdown_deadline_from(
         .unwrap_or_else(|| tokio::time::Instant::now() + SHUTDOWN_TIMEOUT)
 }
 
-fn receive_event(
-    env: EventEnvelope,
-    buffer: &mut Vec<EventEnvelope>,
-    queue_depths: &QueueDepths,
-    metrics: Option<&BgpMetrics>,
-) {
-    let depth = queue_depths.decrement(env.category);
-    set_queue_depth_metric(metrics, env.category, depth);
+fn receive_event(env: EventEnvelope, buffer: &mut Vec<EventEnvelope>, queue_depths: &QueueDepths) {
+    queue_depths.decrement(env.category);
     buffer.push(env);
 }
 
@@ -1073,8 +1173,7 @@ fn discard_accepted_queue(
 ) -> usize {
     let mut dropped = 0;
     while let Ok(env) = rx.try_recv() {
-        let depth = queue_depths.decrement(env.category);
-        set_queue_depth_metric(metrics, env.category, depth);
+        queue_depths.decrement(env.category);
         if let Some(metrics) = metrics {
             metrics.record_event_outbox_drop(env.category.as_str(), "shutdown_timeout");
         }
@@ -1083,10 +1182,32 @@ fn discard_accepted_queue(
     dropped
 }
 
-fn reconcile_abandoned_queue(queue_depths: &QueueDepths, metrics: Option<&BgpMetrics>) {
+fn finalize_producer_ledger(
+    queue_depths: &QueueDepths,
+    state: &EhmState,
+    progress: &ShutdownProgress,
+    metrics: Option<&BgpMetrics>,
+) {
+    let mut lost = 0;
     for category in Category::ALL {
-        queue_depths.counter(category).store(0, Ordering::Release);
-        set_queue_depth_metric(metrics, category, 0);
+        let category_lost = queue_depths.take_remaining(category);
+        lost += category_lost;
+        if category_lost > 0
+            && let Some(metrics) = metrics
+        {
+            metrics.record_event_outbox_drops_by(
+                category.as_str(),
+                "shutdown_timeout",
+                category_lost,
+            );
+        }
+    }
+    if lost > 0 {
+        record_shutdown_loss(state, progress, metrics);
+        warn!(
+            lost,
+            "event-history shutdown abandoned accepted producer events"
+        );
     }
 }
 
@@ -1119,9 +1240,7 @@ async fn run_actor(
         if let Some(deadline) = shutdown_deadline {
             while buffer.len() < config.batch_size && !accepted_drained {
                 match tokio::time::timeout_at(deadline, rx.recv()).await {
-                    Ok(Some(env)) => {
-                        receive_event(env, &mut buffer, &queue_depths, config.metrics.as_ref())
-                    }
+                    Ok(Some(env)) => receive_event(env, &mut buffer, &queue_depths),
                     Ok(None) => accepted_drained = true,
                     Err(_) => {
                         #[cfg(test)]
@@ -1142,7 +1261,6 @@ async fn run_actor(
                             env,
                             &mut buffer,
                             &queue_depths,
-                            config.metrics.as_ref(),
                         ),
                         None => {
                             let deadline = tokio::time::Instant::now() + SHUTDOWN_TIMEOUT;
@@ -1505,6 +1623,52 @@ mod tests {
             .expect("storage request backstop elapsed");
     }
 
+    async fn wait_for_producer_pause(sender: &EventHistorySender, point: ProducerPausePoint) {
+        tokio::time::timeout(TEST_BACKSTOP, async {
+            while sender.producer_pause.reached.load(Ordering::Acquire) != point as u64 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("producer pause backstop elapsed");
+    }
+
+    async fn wait_for_ledger_close(sender: &EventHistorySender, category: Category) {
+        tokio::time::timeout(TEST_BACKSTOP, async {
+            while !sender.queue_depths.is_closed(category) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("producer ledger close backstop elapsed");
+    }
+
+    async fn wait_for_ledger_depth(sender: &EventHistorySender, category: Category, depth: u64) {
+        tokio::time::timeout(TEST_BACKSTOP, async {
+            while sender.queue_depths.depth(category) != depth {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("producer ledger depth backstop elapsed");
+    }
+
+    fn queue_depth_metric(metrics: &BgpMetrics, category: Category) -> f64 {
+        metrics
+            .registry()
+            .gather()
+            .iter()
+            .find(|family| family.name() == "bgp_event_outbox_queue_depth")
+            .and_then(|family| {
+                family.get_metric().iter().find(|metric| {
+                    metric.get_label().iter().any(|label| {
+                        label.name() == "category" && label.value() == category.as_str()
+                    })
+                })
+            })
+            .map_or(0.0, |metric| metric.get_gauge().value())
+    }
+
     #[tokio::test]
     async fn append_error_advances_loss_generation() {
         // Load-bearing break: replacing `record_loss` in the actor's append-error
@@ -1573,7 +1737,7 @@ mod tests {
         }
         for category in Category::ALL {
             assert_eq!(
-                queue_depths.counter(category).load(Ordering::Acquire),
+                queue_depths.depth(category),
                 0,
                 "{category:?} queue depth did not drain"
             );
@@ -1583,6 +1747,195 @@ mod tests {
             Err(mpsc::error::TrySendError::Closed(_))
         ));
         drop(sender);
+    }
+
+    #[tokio::test]
+    async fn shutdown_rejects_a_reserved_but_not_accepted_event() {
+        // A producer with only an mpsc reservation has not crossed the
+        // accepted-handoff ownership boundary.
+        let dir = tempfile::tempdir().unwrap();
+        let manager = EventHistoryManager::start(test_config(dir.path().join("events.db"), 1))
+            .await
+            .unwrap();
+        let sender = manager.sender();
+        let state = manager.state();
+        sender.producer_pause.arm(ProducerPausePoint::Reserved);
+        let producer_sender = sender.clone();
+        let producer = std::thread::spawn(move || {
+            match producer_sender.try_send(event(Category::Route, 41)) {
+                Err(mpsc::error::TrySendError::Closed(env)) => Some(env.payload),
+                _ => None,
+            }
+        });
+        wait_for_producer_pause(&sender, ProducerPausePoint::Reserved).await;
+
+        let shutdown = tokio::spawn(manager.shutdown());
+        wait_for_ledger_close(&sender, Category::Route).await;
+        sender.producer_pause.release();
+        assert_eq!(producer.join().unwrap(), Some(vec![41]));
+        shutdown.await.unwrap();
+
+        assert_eq!(state.latest_event_id(), 0);
+        assert!(!state.degraded());
+        assert_eq!(sender.queue_depths.depth(Category::Route), 0);
+    }
+
+    #[tokio::test]
+    async fn shutdown_drains_an_accepted_producer_handoff() {
+        // An accepted ledger entry stays producer-owned until permit.send
+        // transfers it to the actor, even if shutdown closes in between.
+        let dir = tempfile::tempdir().unwrap();
+        let manager = EventHistoryManager::start(test_config(dir.path().join("events.db"), 1))
+            .await
+            .unwrap();
+        let sender = manager.sender();
+        let state = manager.state();
+        let mut committed = manager.subscribe();
+        sender.producer_pause.arm(ProducerPausePoint::Accepted);
+        let producer_sender = sender.clone();
+        let producer = std::thread::spawn(move || {
+            producer_sender
+                .try_send(event(Category::Session, 42))
+                .is_ok()
+        });
+        wait_for_producer_pause(&sender, ProducerPausePoint::Accepted).await;
+        assert_eq!(sender.queue_depths.depth(Category::Session), 1);
+
+        let shutdown = tokio::spawn(manager.shutdown());
+        wait_for_ledger_close(&sender, Category::Session).await;
+        assert_eq!(sender.queue_depths.depth(Category::Session), 1);
+        sender.producer_pause.release();
+        assert!(producer.join().unwrap());
+        shutdown.await.unwrap();
+
+        assert_eq!(committed.try_recv().unwrap().envelope.payload, vec![42]);
+        assert_eq!(state.latest_event_id(), 1);
+        assert!(!state.degraded());
+        assert_eq!(sender.queue_depths.depth(Category::Session), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_gauge_ignores_a_late_speculative_producer_after_shutdown() {
+        // The collector reads only the ledger. A producer stalled after its
+        // OPEN observation cannot publish stale depth after shutdown wins.
+        let dir = tempfile::tempdir().unwrap();
+        let metrics = BgpMetrics::new();
+        let mut config = test_config(dir.path().join("events.db"), 1);
+        config.metrics = Some(metrics.clone());
+        let manager = EventHistoryManager::start(config).await.unwrap();
+        let sender = manager.sender();
+        let state = manager.state();
+        sender
+            .producer_pause
+            .arm(ProducerPausePoint::BeforeAdmissionCas);
+        let producer_sender = sender.clone();
+        let producer = std::thread::spawn(move || {
+            match producer_sender.try_send(event(Category::Dataplane, 43)) {
+                Err(mpsc::error::TrySendError::Closed(env)) => Some(env.payload),
+                _ => None,
+            }
+        });
+        wait_for_producer_pause(&sender, ProducerPausePoint::BeforeAdmissionCas).await;
+        assert_eq!(sender.queue_depths.depth(Category::Dataplane), 0);
+
+        let shutdown = tokio::spawn(manager.shutdown());
+        wait_for_ledger_close(&sender, Category::Dataplane).await;
+        tokio::time::advance(SHUTDOWN_TIMEOUT + Duration::from_millis(1)).await;
+        shutdown.await.unwrap();
+        assert_eq!(queue_depth_metric(&metrics, Category::Dataplane), 0.0);
+        sender.producer_pause.release();
+        assert_eq!(producer.join().unwrap(), Some(vec![43]));
+
+        assert_eq!(sender.queue_depths.depth(Category::Dataplane), 0);
+        assert_eq!(queue_depth_metric(&metrics, Category::Dataplane), 0.0);
+        assert_eq!(state.latest_event_id(), 0);
+    }
+
+    #[test]
+    fn producer_ledger_uses_the_required_linearization_orderings() {
+        assert_eq!(QUEUE_ADMISSION_SUCCESS_ORDERING, Ordering::AcqRel);
+        assert_eq!(QUEUE_ADMISSION_FAILURE_ORDERING, Ordering::Acquire);
+        assert_eq!(QUEUE_CLOSE_ORDERING, Ordering::AcqRel);
+    }
+
+    #[tokio::test]
+    async fn ledger_collector_tracks_two_producer_aba() {
+        // P1 observes 0, P2 performs 0 -> 1 -> 0, then P1 completes its
+        // compare-exchange. A collector snapshot must expose P1's accepted 1.
+        let dir = tempfile::tempdir().unwrap();
+        let metrics = BgpMetrics::new();
+        let mut config = test_config(dir.path().join("events.db"), 2);
+        config.metrics = Some(metrics.clone());
+        let manager = EventHistoryManager::start(config).await.unwrap();
+        let p1 = manager.sender();
+        let p2 = EventHistorySender {
+            tx: p1.tx.clone(),
+            queue_depths: Arc::clone(&p1.queue_depths),
+            metrics: p1.metrics.clone(),
+            producer_pause: Arc::new(ProducerPause::default()),
+        };
+        p1.producer_pause
+            .arm(ProducerPausePoint::BeforeAdmissionCas);
+        let p1_thread = p1.clone();
+        let producer =
+            std::thread::spawn(move || p1_thread.try_send(event(Category::Dataplane, 45)).is_ok());
+        wait_for_producer_pause(&p1, ProducerPausePoint::BeforeAdmissionCas).await;
+
+        p2.try_send(event(Category::Dataplane, 46)).unwrap();
+        wait_for_ledger_depth(&p1, Category::Dataplane, 0).await;
+        assert_eq!(p1.queue_depths.depth(Category::Dataplane), 0);
+
+        p1.producer_pause.arm(ProducerPausePoint::Accepted);
+        wait_for_producer_pause(&p1, ProducerPausePoint::Accepted).await;
+        assert_eq!(queue_depth_metric(&metrics, Category::Dataplane), 1.0);
+
+        p1.producer_pause.release();
+        assert!(producer.join().unwrap());
+        wait_for_ledger_depth(&p1, Category::Dataplane, 0).await;
+        assert_eq!(queue_depth_metric(&metrics, Category::Dataplane), 0.0);
+        manager.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_finalizer_accounts_for_a_stranded_accepted_handoff() {
+        // If the actor cannot receive an accepted handoff before the shared
+        // deadline, the manager consumes that producer-owned ledger entry.
+        let dir = tempfile::tempdir().unwrap();
+        let metrics = BgpMetrics::new();
+        let mut config = test_config(dir.path().join("events.db"), 1);
+        config.metrics = Some(metrics.clone());
+        let manager = EventHistoryManager::start(config).await.unwrap();
+        let sender = manager.sender();
+        let state = manager.state();
+        sender.producer_pause.arm(ProducerPausePoint::Accepted);
+        let producer_sender = sender.clone();
+        let producer = std::thread::spawn(move || {
+            producer_sender
+                .try_send(event(Category::Session, 44))
+                .is_ok()
+        });
+        wait_for_producer_pause(&sender, ProducerPausePoint::Accepted).await;
+
+        let shutdown = tokio::spawn(manager.shutdown());
+        wait_for_ledger_close(&sender, Category::Session).await;
+        tokio::time::advance(SHUTDOWN_TIMEOUT + Duration::from_millis(1)).await;
+        shutdown.await.unwrap();
+
+        assert!(state.degraded());
+        assert_eq!(sender.queue_depths.depth(Category::Session), 0);
+        assert_eq!(queue_depth_metric(&metrics, Category::Session), 0.0);
+        assert_eq!(
+            metric_value(
+                &metrics,
+                "bgp_event_outbox_dropped_total",
+                Category::Session.as_str()
+            ),
+            Some(1.0),
+            "stranded accepted handoff must be counted exactly once"
+        );
+        sender.producer_pause.release();
+        assert!(producer.join().unwrap());
+        assert_eq!(queue_depth_metric(&metrics, Category::Session), 0.0);
     }
 
     #[tokio::test]
@@ -1627,6 +1980,29 @@ mod tests {
                 .iter()
                 .all(|m| m.get_gauge().value() == 0.0)
         );
+
+        let restart_dir = tempfile::tempdir().unwrap();
+        let mut restart_config = test_config(restart_dir.path().join("events.db"), 1);
+        restart_config.metrics = Some(metrics.clone());
+        let restarted = EventHistoryManager::start(restart_config).await.unwrap();
+        assert_eq!(queue_metrics().get_metric().len(), 6);
+        assert!(
+            queue_metrics()
+                .get_metric()
+                .iter()
+                .all(|m| m.get_gauge().value() == 0.0)
+        );
+
+        sender
+            .queue_depths
+            .counter(Category::Route)
+            .store(7, Ordering::Release);
+        assert_eq!(queue_depth_metric(&metrics, Category::Route), 0.0);
+        assert!(matches!(
+            sender.try_send(event(Category::Route, 4)),
+            Err(mpsc::error::TrySendError::Closed(_))
+        ));
+        restarted.shutdown().await;
     }
 
     #[tokio::test]
@@ -1696,6 +2072,7 @@ mod tests {
         let finished = actor.is_finished();
         store.test_release(Append);
         actor.await.unwrap();
+        manager.shutdown().await;
         assert!(finished, "actor reset the shared deadline");
         assert!(state.degraded());
         assert!(metrics.event_outbox_degraded());
@@ -1722,7 +2099,6 @@ mod tests {
         assert_eq!(progress.loss_latches.load(Ordering::Acquire), 1);
         assert!(!losses.has_changed().unwrap());
         assert_eq!(store.test_append_calls(), 1);
-        manager.shutdown().await;
     }
 
     #[tokio::test(start_paused = true)]
