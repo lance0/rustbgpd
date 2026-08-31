@@ -609,12 +609,13 @@ def verify_skew_receipt(root: Path) -> str:
     for name in files:
         path = root / name
         require(path.is_file() and not path.is_symlink(), f"bad skew artifact: {name}")
-        require(path.stat().st_size <= 10 * 1024 * 1024, f"oversized skew artifact: {name}")
+        limit = SKEW_RECEIPT_FILES[f"guest/skew/{name}"]
+        require(path.stat().st_size <= limit, f"oversized skew artifact: {name}")
     require(sum((root / name).stat().st_size for name in files) <= 10 * 1024 * 1024, "skew artifacts exceed 10 MiB total")
     module_path = Path(__file__).with_name("raw_bridge_skew.py")
     spec = importlib.util.spec_from_file_location("raw_bridge_skew_verify", module_path)
+    require(spec is not None and spec.loader is not None, "cannot load skew recomputer")
     module = importlib.util.module_from_spec(spec)
-    require(spec.loader is not None, "cannot load skew recomputer")
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     run = load_json(root / "run.json")

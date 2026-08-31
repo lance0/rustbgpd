@@ -212,6 +212,15 @@ assert "guest/skew/run.json" in manifest
 assert "guest/skew/samples.csv" in manifest
 assert "guest/skew/report.json" in manifest
 
+oversized_skew = tmp / "skew-oversized-report"
+shutil.copytree(campaign / "guest/skew", oversized_skew)
+report_path = oversized_skew / "report.json"
+padding = verify.SKEW_RECEIPT_FILES["guest/skew/report.json"] + 1 - report_path.stat().st_size
+assert padding > 0
+with report_path.open("a") as stream:
+    stream.write(" " * padding)
+expect(False, "skew-oversized-report", "skew-receipt", oversized_skew)
+
 def mutate_campaign_json(path, relative, mutate):
     value = json.loads((path / relative).read_text())
     mutate(value)
