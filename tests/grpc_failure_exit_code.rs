@@ -149,6 +149,21 @@ fn spawn_daemon_with_env(dir: &Path, config_path: &Path, env: Option<(&str, &str
     }
 }
 
+fn assert_one_rpki_failure_receipt(logs: &str, expected_task: &str) {
+    let receipts = logs
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|event| event["fields"]["message"] == "RPKI subsystem task exited unexpectedly")
+        .collect::<Vec<_>>();
+    assert_eq!(receipts.len(), 1, "expected one RPKI receipt\n{logs}");
+    let fields = &receipts[0]["fields"];
+    assert_eq!(fields["task"], expected_task);
+    assert_eq!(fields["outcome"], "panic");
+    assert_eq!(fields["resolution_complete"], serde_json::Value::Bool(true));
+    assert_eq!(fields["panic_count"], serde_json::Value::from(1));
+    assert_eq!(fields["panic_classes"], expected_task);
+}
+
 fn write_rib_fault_config(dir: &Path) -> PathBuf {
     let config_path = write_config(dir, DAEMON_CHOOSES, DAEMON_CHOOSES);
     let config = std::fs::read_to_string(&config_path)
@@ -528,9 +543,9 @@ fn operations_key_log_table_covers_supervised_failures() {
 
     let rpki_diagnostic = "RPKI subsystem task exited unexpectedly";
     assert_eq!(production.matches(rpki_diagnostic).count(), 1);
-    assert!(production.contains("match rpki_supervisor.as_mut()"));
+    assert!(production.contains("match rpki_failure_rx.as_mut()"));
     assert!(production.contains("None => std::future::pending().await"));
-    assert!(production.contains("rpki_supervisor = None;"));
+    assert!(production.contains("timeout_at(notice.deadline, &mut handle)"));
     assert!(production.contains("component_failed = true;"));
     let expected_row =
         format!("| `{rpki_diagnostic}` | ERROR | Fatal — coordinated shutdown follows |");
@@ -563,6 +578,7 @@ fn rpki_client_panic_uses_common_shutdown_and_exits_nonzero() {
     ] {
         assert!(logs.contains(message), "missing {message:?}\n{logs}");
     }
+    assert_one_rpki_failure_receipt(&logs, "RtrClient");
 
     let reports = std::fs::read_dir(temp.path().join("runtime/crash"))
         .expect("panic report directory")
@@ -571,6 +587,30 @@ fn rpki_client_panic_uses_common_shutdown_and_exits_nonzero() {
         .collect::<Vec<_>>();
     assert_eq!(reports.len(), 1, "one durable panic report: {reports:?}");
     assert!(reports[0].contains("injected RTR client task panic"));
+}
+
+#[test]
+fn rpki_manager_panic_is_attributed_and_exits_nonzero() {
+    let temp = private_tempdir();
+    let config_path = write_rpki_fault_config(temp.path());
+    let mut daemon = spawn_daemon_with_env(
+        temp.path(),
+        &config_path,
+        Some(("RUSTBGPD_TEST_RPKI_TASK_EXIT", "vrp_manager_panic")),
+    );
+    let status = daemon.wait_within(Duration::from_secs(30));
+    let logs = daemon.logs();
+    assert_eq!(status.code(), Some(1), "manager panic must exit 1\n{logs}");
+    assert_one_rpki_failure_receipt(&logs, "VrpManager");
+    assert!(logs.contains("initiating coordinated shutdown"), "{logs}");
+
+    let reports = std::fs::read_dir(temp.path().join("runtime/crash"))
+        .expect("panic report directory")
+        .flatten()
+        .map(|entry| std::fs::read_to_string(entry.path()).expect("read panic report"))
+        .collect::<Vec<_>>();
+    assert_eq!(reports.len(), 1, "one durable panic report: {reports:?}");
+    assert!(reports[0].contains("injected VRP manager task panic"));
 }
 
 #[test]
@@ -592,7 +632,10 @@ fn rpki_supervision_covers_every_task_and_common_teardown() {
         assert!(setup.contains(kind), "missing supervised task class {kind}");
     }
     assert_eq!(setup.matches("rpki_tasks.spawn(").count(), 4);
+    assert_eq!(setup.matches("register_rpki_task_kind(").count(), 4);
     assert!(source.contains("None => std::future::pending().await"));
+    assert!(source.contains("tasks.join_next_with_id()"));
+    assert!(source.contains("tasks.abort_all();"));
     assert!(source.contains("RPKI subsystem task exited unexpectedly"));
     let admission_close = source
         .find("daemon_gate.begin_shutdown();")
@@ -612,8 +655,9 @@ fn rpki_supervision_covers_every_task_and_common_teardown() {
             && teardown_start < settlement_start
     );
     let teardown = &source[teardown_start..settlement_start];
-    assert_eq!(teardown.matches("handle.abort();").count(), 1);
-    assert_eq!(teardown.matches("handle.await").count(), 1);
+    assert!(source.contains("timeout_at(notice.deadline, &mut handle)"));
+    assert!(teardown.contains("handle.abort();"));
+    assert!(teardown.contains("handle.await"));
 }
 
 #[test]
@@ -660,7 +704,7 @@ fn peer_manager_panic_uses_common_shutdown_and_exits_nonzero() {
 #[test]
 fn shutdown_rpc_exits_zero_with_peer_manager_supervised() {
     let temp = private_tempdir();
-    let config_path = write_config(temp.path(), DAEMON_CHOOSES, DAEMON_CHOOSES);
+    let config_path = write_rpki_fault_config(temp.path());
     let hidden = "unknown-value-must-not-be-echoed";
     let mut daemon = spawn_daemon_with_env(
         temp.path(),
@@ -708,6 +752,10 @@ fn shutdown_rpc_exits_zero_with_peer_manager_supervised() {
     );
     assert!(
         !logs.contains("peer manager task exited unexpectedly"),
+        "{logs}"
+    );
+    assert!(
+        !logs.contains("RPKI subsystem task exited unexpectedly"),
         "{logs}"
     );
     assert!(

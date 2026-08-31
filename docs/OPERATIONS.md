@@ -747,6 +747,19 @@ validation-table forwarder, or any configured RTR client task as fatal. It logs
 shutdown, and exits 1 for `Restart=on-failure`. Ordinary cache connection
 failures and data expiry continue through the retry behavior below.
 
+The daemon emits exactly one structured fatal receipt. `task` and `outcome`
+name the primary observed result, preferring a recovered panic
+(`VrpManager`, `VrpForwarder`, `AspaForwarder`, or `RtrClient`);
+`panic_count` is the number of recovered panic results and
+`resolution_complete` is boolean. `first_observed` records the initial
+completion boundary as `<Task>:<outcome>`; it is context, not a claim of causal
+order. After the first exit, the supervisor aborts and accounts for the
+remaining tasks under a single one-second deadline.
+Multiple recovered panics use `task=Multiple` and `outcome=multiple_panics`;
+`panic_classes` is the bounded, sorted set of affected task classes and does
+not claim causal order. An incomplete receipt instead reports the
+still-unaccounted task classes and count.
+
 ### RPKI cache unreachable
 
 Each RTR client reconnects independently after a fixed `retry_interval`

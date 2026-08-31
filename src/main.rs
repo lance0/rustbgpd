@@ -75,7 +75,7 @@ use rustbgpd_transport::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
-use tokio::task::{JoinHandle, JoinSet};
+use tokio::task::{Id, JoinError, JoinHandle, JoinSet};
 use tracing::{error, info, warn};
 
 use crate::config::{
@@ -2986,8 +2986,14 @@ const TEST_INITIAL_PEER_REJECTION_AT_ENV: &str = "RUSTBGPD_TEST_INITIAL_PEER_REJ
 const TEST_PEER_MANAGER_PANIC_ENV: &str = "RUSTBGPD_TEST_PEER_MANAGER_PANIC";
 
 /// Test-only fault injection; never set this in production. The only accepted
-/// value is `rtr_client_panic`; all others are ignored without echoing them.
+/// values are `rtr_client_panic` and `vrp_manager_panic`; all others are
+/// ignored without echoing them.
 const TEST_RPKI_TASK_EXIT_ENV: &str = "RUSTBGPD_TEST_RPKI_TASK_EXIT";
+
+/// One aggregate budget to abort and account for every RPKI task after the
+/// first unexpected exit. This is observability work before the ordinary
+/// fail-stop teardown, not a grace period for live tasks.
+const RPKI_FAILURE_RESOLUTION_DEADLINE: Duration = Duration::from_secs(1);
 
 fn resolve_test_peer_manager_panic() -> bool {
     match std::env::var(TEST_PEER_MANAGER_PANIC_ENV) {
@@ -3000,23 +3006,238 @@ fn resolve_test_peer_manager_panic() -> bool {
     }
 }
 
-fn resolve_test_rpki_client_panic() -> bool {
+fn resolve_test_rpki_task_exit() -> Option<TestRpkiTaskExit> {
     match std::env::var(TEST_RPKI_TASK_EXIT_ENV) {
-        Err(std::env::VarError::NotPresent) => false,
-        Ok(value) if value == "rtr_client_panic" => true,
+        Err(std::env::VarError::NotPresent) => None,
+        Ok(value) if value == "rtr_client_panic" => Some(TestRpkiTaskExit::RtrClientPanic),
+        Ok(value) if value == "vrp_manager_panic" => Some(TestRpkiTaskExit::VrpManagerPanic),
         Ok(_) | Err(std::env::VarError::NotUnicode(_)) => {
-            warn!("ignoring invalid {TEST_RPKI_TASK_EXIT_ENV}; expected rtr_client_panic");
-            false
+            warn!(
+                "ignoring invalid {TEST_RPKI_TASK_EXIT_ENV}; expected rtr_client_panic or \
+                 vrp_manager_panic"
+            );
+            None
         }
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TestRpkiTaskExit {
+    RtrClientPanic,
+    VrpManagerPanic,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum RpkiTaskKind {
+    Unknown,
     VrpManager,
     VrpForwarder,
     AspaForwarder,
     RtrClient,
+}
+
+impl RpkiTaskKind {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Unknown => "Unknown",
+            Self::VrpManager => "VrpManager",
+            Self::VrpForwarder => "VrpForwarder",
+            Self::AspaForwarder => "AspaForwarder",
+            Self::RtrClient => "RtrClient",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RpkiTaskExitOutcome {
+    Returned,
+    Panicked,
+    Cancelled,
+}
+
+impl RpkiTaskExitOutcome {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Returned => "returned",
+            Self::Panicked => "panic",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RpkiTaskExitObservation {
+    task: RpkiTaskKind,
+    outcome: RpkiTaskExitOutcome,
+}
+
+#[derive(Clone, Debug)]
+struct RpkiFailureReport {
+    first_observed: Option<RpkiTaskExitObservation>,
+    panics: Vec<RpkiTaskKind>,
+    resolution_complete: bool,
+    remaining_classes: Vec<RpkiTaskKind>,
+    remaining_count: usize,
+}
+
+impl RpkiFailureReport {
+    fn new(first_observed: Option<RpkiTaskExitObservation>) -> Self {
+        let panics = first_observed
+            .filter(|observation| observation.outcome == RpkiTaskExitOutcome::Panicked)
+            .map_or_else(Vec::new, |observation| vec![observation.task]);
+        Self {
+            first_observed,
+            panics,
+            resolution_complete: false,
+            remaining_classes: Vec::new(),
+            remaining_count: 0,
+        }
+    }
+
+    fn primary(&self) -> (&'static str, &'static str) {
+        match self.panics.as_slice() {
+            [] => self.first_observed.map_or(("Unknown", "unknown"), |first| {
+                (first.task.label(), first.outcome.label())
+            }),
+            [task] => (task.label(), "panic"),
+            _ => ("Multiple", "multiple_panics"),
+        }
+    }
+
+    fn record_remaining(&mut self, registry: &BTreeMap<Id, RpkiTaskKind>) {
+        self.remaining_count = registry.len();
+        self.remaining_classes = registry.values().copied().collect();
+        self.remaining_classes.sort();
+        self.remaining_classes.dedup();
+    }
+}
+
+struct RpkiFailureNotice {
+    deadline: tokio::time::Instant,
+    fallback: RpkiFailureReport,
+}
+
+fn observe_rpki_task_exit(
+    result: Result<(Id, ()), JoinError>,
+    registry: &mut BTreeMap<Id, RpkiTaskKind>,
+) -> RpkiTaskExitObservation {
+    let (id, outcome) = match result {
+        Ok((id, ())) => (id, RpkiTaskExitOutcome::Returned),
+        Err(error) => {
+            let outcome = if error.is_panic() {
+                RpkiTaskExitOutcome::Panicked
+            } else {
+                RpkiTaskExitOutcome::Cancelled
+            };
+            (error.id(), outcome)
+        }
+    };
+    RpkiTaskExitObservation {
+        task: registry.remove(&id).unwrap_or(RpkiTaskKind::Unknown),
+        outcome,
+    }
+}
+
+fn register_rpki_task_kind(registry: &mut BTreeMap<Id, RpkiTaskKind>, id: Id, task: RpkiTaskKind) {
+    assert!(
+        registry.insert(id, task).is_none(),
+        "Tokio reused a live RPKI task ID"
+    );
+}
+
+async fn supervise_rpki_tasks(
+    mut tasks: JoinSet<()>,
+    mut registry: BTreeMap<Id, RpkiTaskKind>,
+    first_exit_tx: oneshot::Sender<RpkiFailureNotice>,
+    resolution_budget: Duration,
+) -> RpkiFailureReport {
+    let first = tasks
+        .join_next_with_id()
+        .await
+        .map(|result| observe_rpki_task_exit(result, &mut registry));
+    let deadline = tokio::time::Instant::now() + resolution_budget;
+    let mut report = RpkiFailureReport::new(first);
+    report.record_remaining(&registry);
+    let _ = first_exit_tx.send(RpkiFailureNotice {
+        deadline,
+        fallback: report.clone(),
+    });
+    let mut mapping_complete =
+        first.is_some_and(|observation| observation.task != RpkiTaskKind::Unknown);
+    tasks.abort_all();
+    loop {
+        match tokio::time::timeout_at(deadline, tasks.join_next_with_id()).await {
+            Ok(Some(result)) => {
+                let observation = observe_rpki_task_exit(result, &mut registry);
+                mapping_complete &= observation.task != RpkiTaskKind::Unknown;
+                if observation.outcome == RpkiTaskExitOutcome::Panicked {
+                    report.panics.push(observation.task);
+                }
+            }
+            Ok(None) => break,
+            Err(_) => {
+                mapping_complete = false;
+                break;
+            }
+        }
+    }
+
+    report.panics.sort();
+    report.record_remaining(&registry);
+    report.resolution_complete = mapping_complete && registry.is_empty();
+    drop(tasks);
+    report
+}
+
+fn log_rpki_failure(report: &RpkiFailureReport) {
+    let (task, outcome) = report.primary();
+    let task_list = |tasks: &[RpkiTaskKind]| {
+        tasks
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(RpkiTaskKind::label)
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let first_observed = report.first_observed.map_or_else(String::new, |first| {
+        format!("{}:{}", first.task.label(), first.outcome.label())
+    });
+    error!(
+        task,
+        outcome,
+        resolution_complete = report.resolution_complete,
+        panic_count = report.panics.len(),
+        panic_classes = %task_list(&report.panics),
+        first_observed = %first_observed,
+        remaining_classes = %task_list(&report.remaining_classes),
+        remaining_count = report.remaining_count,
+        "RPKI subsystem task exited unexpectedly"
+    );
+}
+
+async fn await_rpki_failure_report(
+    mut handle: JoinHandle<RpkiFailureReport>,
+    notice: Option<RpkiFailureNotice>,
+) -> RpkiFailureReport {
+    let Some(notice) = notice else {
+        // A closed notice channel proves the supervisor is ending; do not
+        // manufacture a fresh attribution deadline.
+        handle.abort();
+        return handle
+            .await
+            .unwrap_or_else(|_| RpkiFailureReport::new(None));
+    };
+    match tokio::time::timeout_at(notice.deadline, &mut handle).await {
+        Ok(Ok(report)) => report,
+        Ok(Err(_)) => notice.fallback,
+        Err(_) => {
+            // The supervisor may have completed as this timeout fired.
+            handle.abort();
+            handle.await.unwrap_or(notice.fallback)
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3171,7 +3392,7 @@ async fn run<T>(
     let test_bgp_ingress_exit = resolve_test_bgp_ingress_exit();
     let test_initial_peer_rejection_at = resolve_test_initial_peer_rejection_at();
     let test_peer_manager_panic = resolve_test_peer_manager_panic();
-    let test_rpki_client_panic = resolve_test_rpki_client_panic();
+    let test_rpki_task_exit = resolve_test_rpki_task_exit();
 
     let mut config = accepted.config();
     // Snapshot the gRPC listener config as it was at process start.
@@ -3839,8 +4060,8 @@ async fn run<T>(
     let (peer_mgr_internal_tx, peer_mgr_internal_rx) = mpsc::channel(1);
 
     let mut rpki_cache_queries = None;
-    let mut rpki_supervisor: Option<JoinHandle<Result<RpkiTaskKind, tokio::task::JoinError>>> =
-        None;
+    let mut rpki_supervisor: Option<JoinHandle<RpkiFailureReport>> = None;
+    let mut rpki_failure_rx: Option<oneshot::Receiver<RpkiFailureNotice>> = None;
     // Spawn RPKI subsystem (VRP manager + per-cache RTR clients)
     if let Some(ref rpki_config) = config.rpki
         && !rpki_config.cache_servers.is_empty()
@@ -3869,16 +4090,25 @@ async fn run<T>(
                 readiness_metrics.set_rpki_cache_end_of_data_ready(&server.to_string(), ready);
             });
         let mut rpki_tasks = JoinSet::new();
-        rpki_tasks.spawn(async move {
+        let mut rpki_task_registry = BTreeMap::new();
+        let handle = rpki_tasks.spawn(async move {
+            assert!(
+                test_rpki_task_exit != Some(TestRpkiTaskExit::VrpManagerPanic),
+                "injected VRP manager task panic"
+            );
             vrp_mgr.run().await;
-            RpkiTaskKind::VrpManager
         });
+        register_rpki_task_kind(
+            &mut rpki_task_registry,
+            handle.id(),
+            RpkiTaskKind::VrpManager,
+        );
 
         // Forward VRP table updates to RIB manager + validation watch
         let rpki_rib_tx = rib_tx.clone();
         let rpki_peer_mgr_tx = peer_mgr_tx.clone();
         let validation_tx_vrp = validation_watch_tx.clone();
-        rpki_tasks.spawn(async move {
+        let handle = rpki_tasks.spawn(async move {
             while let Some(update) = rpki_table_rx.recv().await {
                 validation_tx_vrp.send_modify(|snapshot| {
                     snapshot.vrp_table = Some(std::sync::Arc::clone(&update.table));
@@ -3895,14 +4125,18 @@ async fn run<T>(
                 )
                 .await;
             }
-            RpkiTaskKind::VrpForwarder
         });
+        register_rpki_task_kind(
+            &mut rpki_task_registry,
+            handle.id(),
+            RpkiTaskKind::VrpForwarder,
+        );
 
         // Forward ASPA table updates to RIB manager + validation watch
         let aspa_rib_tx = rib_tx.clone();
         let aspa_peer_mgr_tx = peer_mgr_tx.clone();
         let validation_tx_aspa = validation_watch_tx.clone();
-        rpki_tasks.spawn(async move {
+        let handle = rpki_tasks.spawn(async move {
             while let Some(update) = aspa_table_rx.recv().await {
                 validation_tx_aspa.send_modify(|snapshot| {
                     snapshot.aspa_table = Some(std::sync::Arc::clone(&update.table));
@@ -3919,8 +4153,12 @@ async fn run<T>(
                 )
                 .await;
             }
-            RpkiTaskKind::AspaForwarder
         });
+        register_rpki_task_kind(
+            &mut rpki_task_registry,
+            handle.id(),
+            RpkiTaskKind::AspaForwarder,
+        );
 
         // Spawn one RTR client per configured cache server
         for (cache_ordinal, server) in rpki_config.cache_servers.iter().enumerate() {
@@ -3951,21 +4189,28 @@ async fn run<T>(
                     expire_metrics.set_rpki_cache_effective_expire_seconds(&cache_label, secs);
                 });
             info!(server = %addr, "spawning RTR client for RPKI cache");
-            rpki_tasks.spawn(async move {
+            let handle = rpki_tasks.spawn(async move {
                 assert!(
-                    !(test_rpki_client_panic && cache_ordinal == 0),
+                    !(test_rpki_task_exit == Some(TestRpkiTaskExit::RtrClientPanic)
+                        && cache_ordinal == 0),
                     "injected RTR client task panic"
                 );
                 client.run().await;
-                RpkiTaskKind::RtrClient
             });
+            register_rpki_task_kind(
+                &mut rpki_task_registry,
+                handle.id(),
+                RpkiTaskKind::RtrClient,
+            );
         }
-        rpki_supervisor = Some(tokio::spawn(async move {
-            rpki_tasks
-                .join_next()
-                .await
-                .expect("configured RPKI subsystem must contain tasks")
-        }));
+        let (first_exit_tx, first_exit_rx) = oneshot::channel();
+        rpki_failure_rx = Some(first_exit_rx);
+        rpki_supervisor = Some(tokio::spawn(supervise_rpki_tasks(
+            rpki_tasks,
+            rpki_task_registry,
+            first_exit_tx,
+            RPKI_FAILURE_RESOLUTION_DEADLINE,
+        )));
     }
 
     // Spawn MRT manager (periodic TABLE_DUMP_V2 snapshots)
@@ -5292,6 +5537,11 @@ async fn run<T>(
     // Set only by the peer-manager supervision arm, which consumes the
     // JoinHandle; the coordinated teardown below must not join it twice.
     let mut peer_mgr_exited = false;
+    // Set only when the first-exit notification arm wins the shutdown race.
+    // The supervisor remains owned here so the early teardown can collect its
+    // bounded attribution report before emitting the single fatal receipt.
+    let mut rpki_failure_notice: Option<RpkiFailureNotice> = None;
+    let mut rpki_failure_triggered = false;
     loop {
         if initial_peer_boot_failed {
             break;
@@ -5359,15 +5609,15 @@ async fn run<T>(
                 component_failed = true;
                 break;
             }
-            result = async {
-                match rpki_supervisor.as_mut() {
-                    Some(handle) => Some(handle.await),
+            notice = async {
+                match rpki_failure_rx.as_mut() {
+                    Some(receiver) => Some(receiver.await),
                     None => std::future::pending().await,
                 }
             } => {
-                error!(?result, "RPKI subsystem task exited unexpectedly");
                 info!("initiating shutdown due to RPKI subsystem task failure");
-                rpki_supervisor = None;
+                rpki_failure_notice = notice.and_then(Result::ok);
+                rpki_failure_triggered = true;
                 component_failed = true;
                 break;
             }
@@ -5552,8 +5802,15 @@ async fn run<T>(
     runtime_config_lock.close();
     info!("initiating coordinated shutdown");
     if let Some(handle) = rpki_supervisor.take() {
-        handle.abort();
-        let _ = handle.await;
+        if rpki_failure_triggered {
+            let report = await_rpki_failure_report(handle, rpki_failure_notice).await;
+            log_rpki_failure(&report);
+        } else {
+            // Intentional or unrelated shutdown: dropping a JoinHandle would
+            // detach the supervisor and its JoinSet, so cancel and join it.
+            handle.abort();
+            let _ = handle.await;
+        }
     }
     let settlement_wait = runtime_config_settlement.clone();
     tokio::task::spawn_blocking(move || settlement_wait.wait_until_idle_or_fail_stop())
@@ -6187,6 +6444,199 @@ mod tests {
         for raw in ["", "0", " 2", "2 ", "peer-two"] {
             assert_eq!(parse_test_initial_peer_rejection_at(Some(raw)), Err(()));
         }
+    }
+
+    fn spawn_rpki_test_task<F>(
+        tasks: &mut JoinSet<()>,
+        registry: &mut BTreeMap<Id, RpkiTaskKind>,
+        kind: RpkiTaskKind,
+        task: F,
+    ) -> tokio::task::AbortHandle
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let handle = tasks.spawn(task);
+        assert!(registry.insert(handle.id(), kind).is_none());
+        handle
+    }
+
+    #[tokio::test]
+    async fn rpki_join_results_map_success_and_join_error_ids() {
+        let mut tasks = JoinSet::new();
+        let mut registry = BTreeMap::new();
+        let _ = spawn_rpki_test_task(
+            &mut tasks,
+            &mut registry,
+            RpkiTaskKind::VrpForwarder,
+            async {},
+        );
+        let _ = spawn_rpki_test_task(&mut tasks, &mut registry, RpkiTaskKind::VrpManager, async {
+            panic!("mapped panic")
+        });
+
+        let mut observations = Vec::new();
+        while let Some(result) = tasks.join_next_with_id().await {
+            observations.push(observe_rpki_task_exit(result, &mut registry));
+        }
+        assert!(registry.is_empty());
+        assert!(observations.contains(&RpkiTaskExitObservation {
+            task: RpkiTaskKind::VrpForwarder,
+            outcome: RpkiTaskExitOutcome::Returned,
+        }));
+        assert!(observations.contains(&RpkiTaskExitObservation {
+            task: RpkiTaskKind::VrpManager,
+            outcome: RpkiTaskExitOutcome::Panicked,
+        }));
+    }
+
+    #[tokio::test]
+    async fn rpki_abort_drain_prefers_panic_over_clean_first_exit() {
+        let mut tasks = JoinSet::new();
+        let mut registry = BTreeMap::new();
+        let clean = spawn_rpki_test_task(
+            &mut tasks,
+            &mut registry,
+            RpkiTaskKind::VrpForwarder,
+            async {},
+        );
+        while !clean.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        let panic =
+            spawn_rpki_test_task(&mut tasks, &mut registry, RpkiTaskKind::VrpManager, async {
+                panic!("manager panic")
+            });
+        while !panic.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        let _ = spawn_rpki_test_task(
+            &mut tasks,
+            &mut registry,
+            RpkiTaskKind::RtrClient,
+            std::future::pending(),
+        );
+
+        let (notice_tx, notice_rx) = oneshot::channel();
+        let supervisor = tokio::spawn(supervise_rpki_tasks(
+            tasks,
+            registry,
+            notice_tx,
+            Duration::from_secs(1),
+        ));
+        let notice = notice_rx.await.unwrap();
+        assert_eq!(
+            notice.fallback.first_observed,
+            Some(RpkiTaskExitObservation {
+                task: RpkiTaskKind::VrpForwarder,
+                outcome: RpkiTaskExitOutcome::Returned,
+            })
+        );
+        let report = supervisor.await.unwrap();
+        assert_eq!(report.panics, vec![RpkiTaskKind::VrpManager]);
+        assert_eq!(report.primary(), ("VrpManager", "panic"));
+        assert!(report.resolution_complete);
+    }
+
+    #[tokio::test]
+    async fn rpki_abort_drain_sorts_multiple_panics() {
+        let mut tasks = JoinSet::new();
+        let mut registry = BTreeMap::new();
+        let client =
+            spawn_rpki_test_task(&mut tasks, &mut registry, RpkiTaskKind::RtrClient, async {
+                panic!("client panic")
+            });
+        while !client.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        let manager =
+            spawn_rpki_test_task(&mut tasks, &mut registry, RpkiTaskKind::VrpManager, async {
+                panic!("manager panic")
+            });
+        while !manager.is_finished() {
+            tokio::task::yield_now().await;
+        }
+
+        let (notice_tx, _notice_rx) = oneshot::channel();
+        let report = supervise_rpki_tasks(tasks, registry, notice_tx, Duration::from_secs(1)).await;
+        assert_eq!(
+            report.panics,
+            vec![RpkiTaskKind::VrpManager, RpkiTaskKind::RtrClient]
+        );
+        assert_eq!(report.primary(), ("Multiple", "multiple_panics"));
+        assert!(report.resolution_complete);
+    }
+
+    #[tokio::test]
+    async fn rpki_unknown_join_id_is_incomplete() {
+        let mut tasks = JoinSet::new();
+        tasks.spawn(async {});
+        let (notice_tx, _notice_rx) = oneshot::channel();
+        let report =
+            supervise_rpki_tasks(tasks, BTreeMap::new(), notice_tx, Duration::from_secs(1)).await;
+        assert_eq!(report.primary(), ("Unknown", "returned"));
+        assert!(!report.resolution_complete);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rpki_abort_drain_uses_one_deadline_and_reports_remaining_registry() {
+        let mut tasks = JoinSet::new();
+        let mut registry = BTreeMap::new();
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let handle = tasks.spawn_blocking(move || {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        registry.insert(handle.id(), RpkiTaskKind::RtrClient);
+        started_rx.await.unwrap();
+        let clean = spawn_rpki_test_task(
+            &mut tasks,
+            &mut registry,
+            RpkiTaskKind::VrpForwarder,
+            async {},
+        );
+        while !clean.is_finished() {
+            tokio::task::yield_now().await;
+        }
+
+        let budget = Duration::from_secs(1);
+        let started = tokio::time::Instant::now();
+        let (notice_tx, notice_rx) = oneshot::channel();
+        let supervisor = tokio::spawn(supervise_rpki_tasks(tasks, registry, notice_tx, budget));
+        let notice = notice_rx.await.unwrap();
+        assert_eq!(notice.deadline.duration_since(started), budget);
+        tokio::task::yield_now().await;
+        tokio::time::advance(budget).await;
+
+        let report = supervisor.await.unwrap();
+        assert!(!report.resolution_complete);
+        assert_eq!(report.remaining_count, 1);
+        assert_eq!(report.remaining_classes, vec![RpkiTaskKind::RtrClient]);
+        release_tx.send(()).unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rpki_outer_timeout_retains_notice_registry_snapshot() {
+        let mut fallback = RpkiFailureReport::new(Some(RpkiTaskExitObservation {
+            task: RpkiTaskKind::VrpForwarder,
+            outcome: RpkiTaskExitOutcome::Returned,
+        }));
+        fallback.remaining_classes = vec![RpkiTaskKind::RtrClient];
+        fallback.remaining_count = 2;
+        let budget = Duration::from_secs(1);
+        let notice = RpkiFailureNotice {
+            deadline: tokio::time::Instant::now() + budget,
+            fallback,
+        };
+        let supervisor = tokio::spawn(std::future::pending::<RpkiFailureReport>());
+        let waiter = tokio::spawn(await_rpki_failure_report(supervisor, Some(notice)));
+        tokio::task::yield_now().await;
+        tokio::time::advance(budget).await;
+
+        let report = waiter.await.unwrap();
+        assert!(!report.resolution_complete);
+        assert_eq!(report.remaining_classes, vec![RpkiTaskKind::RtrClient]);
+        assert_eq!(report.remaining_count, 2);
     }
 
     #[test]
