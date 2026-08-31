@@ -739,6 +739,14 @@ NOTIFICATIONs where the actor that sends them is still alive), and exits 1 for
 `Restart=on-failure`. An intentional shutdown still stops the peer manager as
 part of the ordered teardown and exits 0.
 
+### RPKI subsystem task exits unexpectedly
+
+The daemon treats an unexpected return or panic from the VRP manager, either
+validation-table forwarder, or any configured RTR client task as fatal. It logs
+`RPKI subsystem task exited unexpectedly`, performs the ordinary coordinated
+shutdown, and exits 1 for `Restart=on-failure`. Ordinary cache connection
+failures and data expiry continue through the retry behavior below.
+
 ### RPKI cache unreachable
 
 Each RTR client reconnects independently after a fixed `retry_interval`
@@ -1781,6 +1789,7 @@ rustbgpd uses structured JSON logging. Key messages to watch for:
 | `gRPC server exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `RIB manager exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `peer manager task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
+| `RPKI subsystem task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `BGP listener task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `BGP accept-forwarding task exited unexpectedly` | ERROR | Fatal — coordinated shutdown follows |
 | `config reload complete` | INFO | SIGHUP reload completed |

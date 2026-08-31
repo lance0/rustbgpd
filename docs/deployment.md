@@ -474,9 +474,10 @@ Notes on the sandbox:
   immediately if legacy BGP mode binds neither family, explicit
   `listen_addresses` cannot bind every configured endpoint, or a configured
   `prometheus_addr` health listener cannot bind. An unexpected gRPC server,
-  RIB manager, peer manager, BGP listener task, or inbound accept-forwarding
-  task exit instead runs the coordinated peer teardown before exit 1. These components are not
-  respawned in place; the supervisor is the recovery path.
+  RIB manager, peer manager, RPKI subsystem task, BGP listener task, or inbound
+  accept-forwarding task exit instead runs the coordinated peer teardown before
+  exit 1. These components are not respawned in place; the supervisor is the
+  recovery path.
   Exit 70 is also a failure: it is the runtime-config settlement watchdog's
   fail-stop recovery request and must remain restartable. `RestartSec=5`
   retries a transient failure, while `StartLimitBurst=5` and

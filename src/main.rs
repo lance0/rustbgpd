@@ -75,7 +75,7 @@ use rustbgpd_transport::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 use tracing::{error, info, warn};
 
 use crate::config::{
@@ -2377,8 +2377,8 @@ reported at least one warning. For
 neither family; explicit
 .B listen_addresses
 mode could not bind every configured endpoint; a configured metrics/readiness
-listener failed to bind; or the RIB manager, peer manager, gRPC server,
-BGP listener task, or BGP accept-forwarding task exited unexpectedly),
+listener failed to bind; or the RIB manager, peer manager, RPKI subsystem,
+gRPC server, BGP listener task, or BGP accept-forwarding task exited unexpectedly),
 so that a supervisor configured
 with
 .B Restart=on\-failure
@@ -2461,8 +2461,8 @@ fn main() -> ExitCode {
                   A running daemon exits 1 on a component failure that ends it\n     \
                   (legacy BGP mode bound neither family; an explicit listen_addresses\n     \
                   endpoint failed to bind; configured metrics/readiness bind failure;\n     \
-                  or unexpected RIB manager, peer manager, gRPC server,\n     \
-                  BGP listener task, or BGP accept-forwarding task exit)\n  \
+                  or unexpected RIB manager, peer manager, RPKI subsystem,\n     \
+                  gRPC server, BGP listener task, or BGP accept-forwarding task exit)\n  \
                2  Invalid invocation (unknown flag combination, missing argument)\n  \
                70 Internal error",
                     env!("CARGO_PKG_VERSION")
@@ -2985,6 +2985,10 @@ const TEST_INITIAL_PEER_REJECTION_AT_ENV: &str = "RUSTBGPD_TEST_INITIAL_PEER_REJ
 /// value is `1`; all others are ignored with a sanitized warning.
 const TEST_PEER_MANAGER_PANIC_ENV: &str = "RUSTBGPD_TEST_PEER_MANAGER_PANIC";
 
+/// Test-only fault injection; never set this in production. The only accepted
+/// value is `rtr_client_panic`; all others are ignored without echoing them.
+const TEST_RPKI_TASK_EXIT_ENV: &str = "RUSTBGPD_TEST_RPKI_TASK_EXIT";
+
 fn resolve_test_peer_manager_panic() -> bool {
     match std::env::var(TEST_PEER_MANAGER_PANIC_ENV) {
         Err(std::env::VarError::NotPresent) => false,
@@ -2994,6 +2998,25 @@ fn resolve_test_peer_manager_panic() -> bool {
             false
         }
     }
+}
+
+fn resolve_test_rpki_client_panic() -> bool {
+    match std::env::var(TEST_RPKI_TASK_EXIT_ENV) {
+        Err(std::env::VarError::NotPresent) => false,
+        Ok(value) if value == "rtr_client_panic" => true,
+        Ok(_) | Err(std::env::VarError::NotUnicode(_)) => {
+            warn!("ignoring invalid {TEST_RPKI_TASK_EXIT_ENV}; expected rtr_client_panic");
+            false
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RpkiTaskKind {
+    VrpManager,
+    VrpForwarder,
+    AspaForwarder,
+    RtrClient,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3148,6 +3171,7 @@ async fn run<T>(
     let test_bgp_ingress_exit = resolve_test_bgp_ingress_exit();
     let test_initial_peer_rejection_at = resolve_test_initial_peer_rejection_at();
     let test_peer_manager_panic = resolve_test_peer_manager_panic();
+    let test_rpki_client_panic = resolve_test_rpki_client_panic();
 
     let mut config = accepted.config();
     // Snapshot the gRPC listener config as it was at process start.
@@ -3815,6 +3839,8 @@ async fn run<T>(
     let (peer_mgr_internal_tx, peer_mgr_internal_rx) = mpsc::channel(1);
 
     let mut rpki_cache_queries = None;
+    let mut rpki_supervisor: Option<JoinHandle<Result<RpkiTaskKind, tokio::task::JoinError>>> =
+        None;
     // Spawn RPKI subsystem (VRP manager + per-cache RTR clients)
     if let Some(ref rpki_config) = config.rpki
         && !rpki_config.cache_servers.is_empty()
@@ -3842,13 +3868,17 @@ async fn run<T>(
             .with_readiness_observer(move |server, ready| {
                 readiness_metrics.set_rpki_cache_end_of_data_ready(&server.to_string(), ready);
             });
-        tokio::spawn(vrp_mgr.run());
+        let mut rpki_tasks = JoinSet::new();
+        rpki_tasks.spawn(async move {
+            vrp_mgr.run().await;
+            RpkiTaskKind::VrpManager
+        });
 
         // Forward VRP table updates to RIB manager + validation watch
         let rpki_rib_tx = rib_tx.clone();
         let rpki_peer_mgr_tx = peer_mgr_tx.clone();
         let validation_tx_vrp = validation_watch_tx.clone();
-        tokio::spawn(async move {
+        rpki_tasks.spawn(async move {
             while let Some(update) = rpki_table_rx.recv().await {
                 validation_tx_vrp.send_modify(|snapshot| {
                     snapshot.vrp_table = Some(std::sync::Arc::clone(&update.table));
@@ -3865,13 +3895,14 @@ async fn run<T>(
                 )
                 .await;
             }
+            RpkiTaskKind::VrpForwarder
         });
 
         // Forward ASPA table updates to RIB manager + validation watch
         let aspa_rib_tx = rib_tx.clone();
         let aspa_peer_mgr_tx = peer_mgr_tx.clone();
         let validation_tx_aspa = validation_watch_tx.clone();
-        tokio::spawn(async move {
+        rpki_tasks.spawn(async move {
             while let Some(update) = aspa_table_rx.recv().await {
                 validation_tx_aspa.send_modify(|snapshot| {
                     snapshot.aspa_table = Some(std::sync::Arc::clone(&update.table));
@@ -3888,10 +3919,11 @@ async fn run<T>(
                 )
                 .await;
             }
+            RpkiTaskKind::AspaForwarder
         });
 
         // Spawn one RTR client per configured cache server
-        for server in &rpki_config.cache_servers {
+        for (cache_ordinal, server) in rpki_config.cache_servers.iter().enumerate() {
             let addr: std::net::SocketAddr = match server.address.parse() {
                 Ok(a) => a,
                 Err(e) => {
@@ -3919,8 +3951,21 @@ async fn run<T>(
                     expire_metrics.set_rpki_cache_effective_expire_seconds(&cache_label, secs);
                 });
             info!(server = %addr, "spawning RTR client for RPKI cache");
-            tokio::spawn(client.run());
+            rpki_tasks.spawn(async move {
+                assert!(
+                    !(test_rpki_client_panic && cache_ordinal == 0),
+                    "injected RTR client task panic"
+                );
+                client.run().await;
+                RpkiTaskKind::RtrClient
+            });
         }
+        rpki_supervisor = Some(tokio::spawn(async move {
+            rpki_tasks
+                .join_next()
+                .await
+                .expect("configured RPKI subsystem must contain tasks")
+        }));
     }
 
     // Spawn MRT manager (periodic TABLE_DUMP_V2 snapshots)
@@ -5225,7 +5270,7 @@ async fn run<T>(
     }
 
     // Wait for shutdown signal, Shutdown RPC, SIGHUP, or an unexpected
-    // supervised-component exit (gRPC, RIB, BGP ingress, peer manager).
+    // supervised-component exit (gRPC, RIB, RPKI, BGP ingress, peer manager).
     //
     // SIGHUP runs `reload_config` on a dedicated tokio task so the
     // signal-arm dispatch returns immediately. Without this, the SIGHUP
@@ -5311,6 +5356,18 @@ async fn run<T>(
                 error!(?result, "peer manager task exited unexpectedly");
                 info!("initiating shutdown due to peer manager task failure");
                 peer_mgr_exited = true;
+                component_failed = true;
+                break;
+            }
+            result = async {
+                match rpki_supervisor.as_mut() {
+                    Some(handle) => Some(handle.await),
+                    None => std::future::pending().await,
+                }
+            } => {
+                error!(?result, "RPKI subsystem task exited unexpectedly");
+                info!("initiating shutdown due to RPKI subsystem task failure");
+                rpki_supervisor = None;
                 component_failed = true;
                 break;
             }
@@ -5494,6 +5551,10 @@ async fn run<T>(
     daemon_gate.begin_shutdown();
     runtime_config_lock.close();
     info!("initiating coordinated shutdown");
+    if let Some(handle) = rpki_supervisor.take() {
+        handle.abort();
+        let _ = handle.await;
+    }
     let settlement_wait = runtime_config_settlement.clone();
     tokio::task::spawn_blocking(move || settlement_wait.wait_until_idle_or_fail_stop())
         .await
