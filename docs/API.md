@@ -1403,6 +1403,14 @@ returned page is complete; it never follows a continuation into a potentially
 changing table. Unbounded CLI listings retain the version-fenced full-walk
 behavior described above.
 
+`Route.validation_state` is the route's recorded RPKI origin-validation
+verdict, not a configuration/readiness sentinel. `not_found` means the
+validation table applied to that route had no covering VRP. It is therefore
+the natural value for every route when no `[rpki]` sources are configured, but
+on a configured and ready deployment it is a real per-route uncovered-origin
+result. Consumers must use the RPKI cache/readiness surfaces when they need to
+distinguish those deployment states; this route field cannot do so by itself.
+
 ### Watch route changes (streaming)
 
 Live route deltas stream through `EventService.WatchEvents` with

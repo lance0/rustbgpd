@@ -196,6 +196,14 @@ This is the bounded inspection path for a live full table. Without `--limit`,
 the CLI still follows every page and fails closed if the table changes; it
 never labels a torn multi-page walk complete.
 
+In JSON route rows, `validation_state` is the route's recorded RPKI
+origin-validation verdict, not an indicator that `[rpki]` is enabled.
+`not_found` means no covering VRP was present when that route was evaluated. A
+daemon with no `[rpki]` sources therefore reports `not_found` for every route;
+with configured and ready sources, the same value is a real uncovered-route
+verdict. Use `rbgp rpki caches` or `rbgp doctor` for validator readiness—the
+route field alone cannot prove it.
+
 The full unary listings (`rib bgpls|vpn|labeled|rtc|blackholes|fib`,
 `flowspec`, `evpn|evpn diagnose`, `topology nodes|links`, `orr`) return the
 whole table in one response and decode up to a finite 64 MiB ceiling (roughly
