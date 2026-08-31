@@ -1205,10 +1205,6 @@ struct RouteViewArgs {
     /// Filter by large community (e.g., 65001:100:200); may be repeated
     #[arg(long, value_delimiter = ',')]
     large_community: Vec<String>,
-
-    /// Return at most this many routes without walking the full table (1-1000)
-    #[arg(long, value_parser = parse_route_limit, conflicts_with = "count")]
-    limit: Option<u32>,
 }
 
 #[derive(Subcommand)]
@@ -1232,6 +1228,9 @@ enum RibAction {
         /// filtered-route view; [policy.reject_retention])
         #[arg(long, conflicts_with = "count")]
         rejected: bool,
+        /// Return at most this many routes without walking the full table (1-1000)
+        #[arg(long, value_parser = parse_route_limit, conflicts_with = "count")]
+        limit: Option<u32>,
         #[command(flatten)]
         filters: RouteViewArgs,
     },
@@ -1279,6 +1278,13 @@ enum RibAction {
             conflicts_with_all = ["rd", "labeled"]
         )]
         source_path_id: Option<u32>,
+        /// Return at most this many routes without walking the full table (1-1000)
+        #[arg(
+            long,
+            value_parser = parse_route_limit,
+            conflicts_with_all = ["count", "explain"]
+        )]
+        limit: Option<u32>,
         #[command(flatten)]
         filters: RouteViewArgs,
     },
@@ -1773,10 +1779,11 @@ fn merge_scoped_option<T>(
 fn merge_route_view_filters(
     mut parent: commands::rib::RouteFilterOpts,
     view: RouteViewArgs,
+    view_limit: Option<u32>,
 ) -> Result<commands::rib::RouteFilterOpts, CliError> {
     parent.prefix = merge_scoped_option("--prefix", parent.prefix, view.prefix)?;
     parent.origin_asn = merge_scoped_option("--origin-asn", parent.origin_asn, view.origin_asn)?;
-    parent.limit = merge_scoped_option("--limit", parent.limit, view.limit)?;
+    parent.limit = merge_scoped_option("--limit", parent.limit, view_limit)?;
     parent.longer |= view.longer;
     parent.community.extend(
         view.community
@@ -1853,19 +1860,20 @@ fn validate_rib_route_view_action(command: &Command) -> Result<(), CliError> {
             family: view_family,
             count: view_count,
             rejected,
+            limit: view_limit,
             filters,
             ..
         }) => {
             reject_duplicate_route_view_option("--family", family, view_family)?;
             reject_duplicate_route_view_option("--prefix", prefix, &filters.prefix)?;
             reject_duplicate_route_view_option("--origin-asn", origin_asn, &filters.origin_asn)?;
-            reject_duplicate_route_view_option("--limit", limit, &filters.limit)?;
+            reject_duplicate_route_view_option("--limit", limit, view_limit)?;
 
             if filters.longer && prefix.is_none() && filters.prefix.is_none() {
                 return Err(CliError::Argument("--longer requires --prefix".into()));
             }
 
-            let any_limit = limit.is_some() || filters.limit.is_some();
+            let any_limit = limit.is_some() || view_limit.is_some();
             if route_count_requested(*parent_count, *view_count) && any_limit {
                 return Err(CliError::Argument(
                     "--count cannot be combined with --limit".into(),
@@ -1886,7 +1894,7 @@ fn validate_rib_route_view_action(command: &Command) -> Result<(), CliError> {
                     || !large_community.is_empty()
                     || limit.is_some()
                     || route_view_filters_requested(filters)
-                    || filters.limit.is_some())
+                    || view_limit.is_some())
             {
                 return Err(CliError::Argument(
                     "--rejected does not support accepted-route family, prefix, path-attribute, or limit filters".into(),
@@ -1897,19 +1905,20 @@ fn validate_rib_route_view_action(command: &Command) -> Result<(), CliError> {
             family: view_family,
             count: view_count,
             explain,
+            limit: view_limit,
             filters,
             ..
         }) => {
             reject_duplicate_route_view_option("--family", family, view_family)?;
             reject_duplicate_route_view_option("--prefix", prefix, &filters.prefix)?;
             reject_duplicate_route_view_option("--origin-asn", origin_asn, &filters.origin_asn)?;
-            reject_duplicate_route_view_option("--limit", limit, &filters.limit)?;
+            reject_duplicate_route_view_option("--limit", limit, view_limit)?;
 
             if filters.longer && prefix.is_none() && filters.prefix.is_none() {
                 return Err(CliError::Argument("--longer requires --prefix".into()));
             }
 
-            let any_limit = limit.is_some() || filters.limit.is_some();
+            let any_limit = limit.is_some() || view_limit.is_some();
             if route_count_requested(*parent_count, *view_count) && any_limit {
                 return Err(CliError::Argument(
                     "--count cannot be combined with --limit".into(),
@@ -2975,9 +2984,10 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     count: count_received,
                     age: age_received,
                     rejected,
+                    limit: view_limit,
                     filters: view_filters,
                 }) => {
-                    let filters = merge_route_view_filters(filters, view_filters)?;
+                    let filters = merge_route_view_filters(filters, view_filters, view_limit)?;
                     let count = route_count_requested(count, count_received);
                     let age = route_age_requested(age, age_received);
                     if explain {
@@ -3020,9 +3030,10 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     labeled,
                     source_peer,
                     source_path_id,
+                    limit: view_limit,
                     filters: view_filters,
                 }) => {
-                    let filters = merge_route_view_filters(filters, view_filters)?;
+                    let filters = merge_route_view_filters(filters, view_filters, view_limit)?;
                     let count = route_count_requested(count, count_advertised);
                     let age = route_age_requested(age, age_advertised);
                     if explain {
@@ -4140,6 +4151,20 @@ printf '%s\n' "${COMPREPLY[@]}"
     }
 
     #[test]
+    fn zsh_advertised_limit_completion_excludes_explain() {
+        let mut generated = Vec::new();
+        generate_completions(Shell::Zsh, BINARY_NAME, &mut generated).unwrap();
+        let generated = String::from_utf8(generated).unwrap();
+        let guarded_limit = "'(--count --explain)--limit=[Return at most this many routes without walking the full table (1-1000)]:LIMIT:_default'";
+
+        assert_eq!(
+            generated.matches(guarded_limit).count(),
+            3,
+            "best, advertised, and sent completions must hide --limit after --explain"
+        );
+    }
+
+    #[test]
     fn test_man_page_is_roff_and_covers_nested_subcommands() {
         let mut output = Vec::new();
         generate_man(BINARY_NAME, &mut output).unwrap();
@@ -4890,9 +4915,13 @@ printf '%s\n' "${COMPREPLY[@]}"
         ])
         .unwrap();
         let Command::Rib {
-            action: Some(RibAction::Received {
-                address, filters, ..
-            }),
+            action:
+                Some(RibAction::Received {
+                    address,
+                    limit,
+                    filters,
+                    ..
+                }),
             ..
         } = received.command
         else {
@@ -4904,7 +4933,7 @@ printf '%s\n' "${COMPREPLY[@]}"
         assert_eq!(filters.origin_asn, Some(13335));
         assert_eq!(filters.community, ["13335:100", "13335:200"]);
         assert_eq!(filters.large_community, ["13335:1:100"]);
-        assert_eq!(filters.limit, Some(50));
+        assert_eq!(limit, Some(50));
 
         let advertised = Cli::try_parse_from([
             "rbgp",
@@ -4918,14 +4947,14 @@ printf '%s\n' "${COMPREPLY[@]}"
         ])
         .unwrap();
         let Command::Rib {
-            action: Some(RibAction::Advertised { filters, .. }),
+            action: Some(RibAction::Advertised { limit, filters, .. }),
             ..
         } = advertised.command
         else {
             panic!("expected advertised route view");
         };
         assert_eq!(filters.prefix.as_deref(), Some("203.0.113.0/24"));
-        assert_eq!(filters.limit, Some(25));
+        assert_eq!(limit, Some(25));
 
         let compatible_parent_form = Cli::try_parse_from([
             "rbgp",
@@ -4996,10 +5025,9 @@ printf '%s\n' "${COMPREPLY[@]}"
             origin_asn: Some(64496),
             community: vec!["64496:200".to_string()],
             large_community: vec!["64496:1:100".to_string()],
-            limit: Some(100),
             ..Default::default()
         };
-        let merged = merge_route_view_filters(parent, view).unwrap();
+        let merged = merge_route_view_filters(parent, view, Some(100)).unwrap();
         assert_eq!(merged.prefix.as_deref(), Some("203.0.113.0/24"));
         assert!(merged.longer);
         assert_eq!(merged.origin_asn, Some(64496));
@@ -5025,6 +5053,26 @@ printf '%s\n' "${COMPREPLY[@]}"
 
     #[test]
     fn rib_route_view_cross_scope_conflicts_are_explicit() {
+        let local_conflict = match Cli::try_parse_from([
+            "rbgp",
+            "rib",
+            "advertised",
+            "192.0.2.1",
+            "--prefix",
+            "203.0.113.0/24",
+            "--explain",
+            "--limit",
+            "10",
+        ]) {
+            Ok(_) => panic!("view-local --explain and --limit unexpectedly parsed"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            local_conflict.kind(),
+            clap::error::ErrorKind::ArgumentConflict,
+            "view-local --explain and --limit must conflict in Clap and generated completions"
+        );
+
         for (args, expected) in [
             (
                 "rbgp rib --family ipv4_unicast received 192.0.2.1 --family ipv6_unicast",

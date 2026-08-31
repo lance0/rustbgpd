@@ -787,13 +787,13 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '-a+[Address family filter]:FAMILY:_default' \
 '--family=[Address family filter]:FAMILY:_default' \
+'(--count)--limit=[Return at most this many routes without walking the full table (1-1000)]:LIMIT:_default' \
 '-p+[Prefix filter (e.g., 10.0.0.0/24)]:PREFIX:_default' \
 '--prefix=[Prefix filter (e.g., 10.0.0.0/24)]:PREFIX:_default' \
 '--origin-asn=[Filter by origin ASN (last ASN in AS_PATH)]:ORIGIN_ASN:_default' \
 '*-c+[Filter by community (e.g., 65001\:100 or BLACKHOLE); may be repeated]:COMMUNITY:_default' \
 '*--community=[Filter by community (e.g., 65001\:100 or BLACKHOLE); may be repeated]:COMMUNITY:_default' \
 '*--large-community=[Filter by large community (e.g., 65001\:100\:200); may be repeated]:LARGE_COMMUNITY:_default' \
-'(--count)--limit=[Return at most this many routes without walking the full table (1-1000)]:LIMIT:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -814,13 +814,13 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '-a+[Address family filter]:FAMILY:_default' \
 '--family=[Address family filter]:FAMILY:_default' \
+'(--count)--limit=[Return at most this many routes without walking the full table (1-1000)]:LIMIT:_default' \
 '-p+[Prefix filter (e.g., 10.0.0.0/24)]:PREFIX:_default' \
 '--prefix=[Prefix filter (e.g., 10.0.0.0/24)]:PREFIX:_default' \
 '--origin-asn=[Filter by origin ASN (last ASN in AS_PATH)]:ORIGIN_ASN:_default' \
 '*-c+[Filter by community (e.g., 65001\:100 or BLACKHOLE); may be repeated]:COMMUNITY:_default' \
 '*--community=[Filter by community (e.g., 65001\:100 or BLACKHOLE); may be repeated]:COMMUNITY:_default' \
 '*--large-community=[Filter by large community (e.g., 65001\:100\:200); may be repeated]:LARGE_COMMUNITY:_default' \
-'(--count)--limit=[Return at most this many routes without walking the full table (1-1000)]:LIMIT:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -844,13 +844,13 @@ _arguments "${_arguments_options[@]}" : \
 '--rd=[Route Distinguisher ("asn\:nn" or "ip\:nn") - explain the VPNv4/VPNv6 export ladder for the (RD, prefix) identity, including the RFC 4684 RT-Constrain membership gate]:RD:_default' \
 '(--rd --labeled)--source-peer=[Adj-RIB-In peer that supplied the exact Add-Path candidate to explain; must be paired with --source-path-id]:PEER:_default' \
 '(--rd --labeled)--source-path-id=[Inbound RFC 7911 path identifier of the exact source candidate; zero is valid and distinct from omitting the selector]:ID:_default' \
+'(--count --explain)--limit=[Return at most this many routes without walking the full table (1-1000)]:LIMIT:_default' \
 '-p+[Prefix filter (e.g., 10.0.0.0/24)]:PREFIX:_default' \
 '--prefix=[Prefix filter (e.g., 10.0.0.0/24)]:PREFIX:_default' \
 '--origin-asn=[Filter by origin ASN (last ASN in AS_PATH)]:ORIGIN_ASN:_default' \
 '*-c+[Filter by community (e.g., 65001\:100 or BLACKHOLE); may be repeated]:COMMUNITY:_default' \
 '*--community=[Filter by community (e.g., 65001\:100 or BLACKHOLE); may be repeated]:COMMUNITY:_default' \
 '*--large-community=[Filter by large community (e.g., 65001\:100\:200); may be repeated]:LARGE_COMMUNITY:_default' \
-'(--count)--limit=[Return at most this many routes without walking the full table (1-1000)]:LIMIT:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -875,13 +875,13 @@ _arguments "${_arguments_options[@]}" : \
 '--rd=[Route Distinguisher ("asn\:nn" or "ip\:nn") - explain the VPNv4/VPNv6 export ladder for the (RD, prefix) identity, including the RFC 4684 RT-Constrain membership gate]:RD:_default' \
 '(--rd --labeled)--source-peer=[Adj-RIB-In peer that supplied the exact Add-Path candidate to explain; must be paired with --source-path-id]:PEER:_default' \
 '(--rd --labeled)--source-path-id=[Inbound RFC 7911 path identifier of the exact source candidate; zero is valid and distinct from omitting the selector]:ID:_default' \
+'(--count --explain)--limit=[Return at most this many routes without walking the full table (1-1000)]:LIMIT:_default' \
 '-p+[Prefix filter (e.g., 10.0.0.0/24)]:PREFIX:_default' \
 '--prefix=[Prefix filter (e.g., 10.0.0.0/24)]:PREFIX:_default' \
 '--origin-asn=[Filter by origin ASN (last ASN in AS_PATH)]:ORIGIN_ASN:_default' \
 '*-c+[Filter by community (e.g., 65001\:100 or BLACKHOLE); may be repeated]:COMMUNITY:_default' \
 '*--community=[Filter by community (e.g., 65001\:100 or BLACKHOLE); may be repeated]:COMMUNITY:_default' \
 '*--large-community=[Filter by large community (e.g., 65001\:100\:200); may be repeated]:LARGE_COMMUNITY:_default' \
-'(--count)--limit=[Return at most this many routes without walking the full table (1-1000)]:LIMIT:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
