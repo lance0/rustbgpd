@@ -1,143 +1,178 @@
 # Architecture Decision Records
 
+> **Document class: CURRENT.** This maintained index describes the current
+> decision inventory; each linked ADR remains a historical record of its
+> stated decision and lifecycle.
+
 Records of significant architectural decisions made during rustbgpd
 development. Each record captures the context, decision, and
 consequences so future contributors understand *why*, not just *what*.
+Measured implementation evidence is indexed separately in the
+[performance evidence index](../perf/README.md).
 
 ## Index
 
-| ADR | Title | Status | Date |
-|-----|-------|--------|------|
-| [0001](0001-typed-raw-hybrid-path-attributes.md) | Typed + raw hybrid model for path attributes | Accepted | 2026-02-27 |
-| [0002](0002-inherent-methods-not-traits-for-codec.md) | Inherent methods, not traits, for codec API | Accepted | 2026-02-27 |
-| [0003](0003-subcodes-as-constants-not-enums.md) | NOTIFICATION subcodes as constants, not enums | Accepted | 2026-02-27 |
-| [0004](0004-proptest-for-property-testing.md) | Proptest for property-based testing | Accepted | 2026-02-27 |
-| [0005](0005-fsm-pure-state-machine.md) | Pure state machine FSM with no Result return | Accepted | 2026-02-27 |
-| [0006](0006-validate-open-returns-notification.md) | validate_open returns Result\<NegotiatedSession, NotificationMessage\> | Accepted | 2026-02-27 |
-| [0007](0007-explicit-prometheus-registry.md) | Explicit Prometheus registry, not global default | Accepted | 2026-02-27 |
-| [0008](0008-single-task-per-peer.md) | Single tokio task per peer for M0 | Accepted | 2026-02-27 |
-| [0009](0009-iterative-action-loop.md) | Iterative action loop to avoid async recursion | Accepted | 2026-02-27 |
-| [0010](0010-minimal-metrics-server.md) | Minimal TCP metrics server, no HTTP framework | Accepted | 2026-02-27 |
-| [0011](0011-unknown-notification-code-variant.md) | Unknown variant for NOTIFICATION error codes | Accepted | 2026-02-27 |
-| [0012](0012-separate-decode-from-validation.md) | Separate structural decode from semantic validation for UPDATEs | Accepted | 2026-02-27 |
-| [0013](0013-single-task-rib-manager.md) | Single-task RIB manager with channel-based ownership | Accepted | 2026-02-27 |
-| [0014](0014-best-path-standalone-function-deterministic-med.md) | Best-path comparison as standalone function with deterministic MED | Accepted | 2026-02-27 |
-| [0015](0015-adj-rib-out-inside-rib-manager.md) | Adj-RIB-Out inside RibManager with per-peer outbound channels | Accepted | 2026-02-27 |
-| [0016](0016-socket2-for-md5-gtsm.md) | socket2 for TCP MD5 and GTSM socket options | Accepted | 2026-02-27 |
-| [0017](0017-peer-manager-channel-based-ownership.md) | PeerManager — channel-based single-task ownership | Accepted | 2026-02-27 |
-| [0018](0018-broadcast-channel-for-watch-routes.md) | Broadcast channel for WatchRoutes streaming | Accepted | 2026-02-27 |
-| [0019](0019-inbound-tcp-listener.md) | Inbound TCP listener for passive peering | Accepted | 2026-02-27 |
-| [0020](0020-global-control-services-coordinated-shutdown.md) | GlobalService, ControlService, and coordinated shutdown | Accepted | 2026-02-27 |
-| [0021](0021-tcp-collision-detection.md) | TCP collision detection via PeerManager coordination | Accepted | 2026-02-28 |
-| [0022](0022-grpc-server-supervision.md) | gRPC server supervision — unexpected exit triggers shutdown | Accepted | 2026-02-28 |
-| [0023](0023-prefix-enum-afi-agnostic-rib.md) | Prefix enum and AFI-agnostic RIB for MP-BGP | Accepted | 2026-02-28 |
-| [0024](0024-graceful-restart.md) | Graceful Restart — Receiving Speaker (RFC 4724) | Accepted | 2026-03-01 |
-| [0025](0025-extended-communities.md) | Extended Communities (RFC 4360) | Accepted | 2026-03-01 |
-| [0026](0026-extended-community-policy.md) | Extended Community Policy Matching | Accepted | 2026-03-01 |
-| [0027](0027-route-refresh.md) | Route Refresh (RFC 2918) | Accepted | 2026-03-02 |
-| [0028](0028-standard-community-policy.md) | Standard Community Policy Matching (RFC 1997) | Accepted | 2026-03-02 |
-| [0029](0029-route-reflector.md) | Route Reflector (RFC 4456) | Accepted | 2026-03-02 |
-| [0030](0030-policy-actions.md) | Policy Actions and AS_PATH Regex | Accepted | 2026-03-02 |
-| [0031](0031-large-communities.md) | Large Communities (RFC 8092) | Accepted | 2026-03-02 |
-| [0032](0032-extended-messages.md) | Extended Messages (RFC 8654) | Accepted | 2026-03-02 |
-| [0033](0033-add-path.md) | Add-Path (RFC 7911) | Accepted | 2026-03-02 |
-| [0034](0034-rpki-origin-validation.md) | RPKI Origin Validation (RFC 6811 + RFC 8210) | Accepted | 2026-03-03 |
-| [0035](0035-flowspec.md) | FlowSpec (RFC 8955 / RFC 8956) | Accepted | 2026-03-03 |
-| [0036](0036-policy-chaining.md) | Policy Chaining + Named Policies | Accepted | 2026-03-04 |
-| [0037](0037-extended-nexthop.md) | Extended Next Hop Encoding (RFC 8950) | Accepted | 2026-03-04 |
-| [0038](0038-enhanced-route-refresh.md) | Enhanced Route Refresh (RFC 7313) | Accepted | 2026-03-04 |
-| [0039](0039-transparent-route-server.md) | Transparent Route Server Mode | Accepted | 2026-03-04 |
-| [0040](0040-gr-restarting-speaker.md) | Graceful Restart — Minimal Restarting Speaker Mode | Accepted | 2026-03-04 |
-| [0041](0041-bmp-exporter.md) | BMP Exporter (RFC 7854) | Accepted | 2026-03-04 |
-| [0042](0042-llgr.md) | Long-Lived Graceful Restart (RFC 9494) | Accepted | 2026-03-05 |
-| [0043](0043-config-persistence.md) | Config Persistence and SIGHUP Reload | Accepted | 2026-03-05 |
-| [0044](0044-mrt-dump-export.md) | MRT Dump Export (RFC 6396) | Accepted | 2026-03-05 |
-| [0045](0045-private-as-removal.md) | Private AS Removal | Accepted | 2026-03-05 |
-| [0046](0046-notification-gr.md) | Notification GR (RFC 8538) | Accepted | 2026-03-05 |
-| [0047](0047-grpc-security-hardening.md) | gRPC Security Hardening | Accepted | 2026-03-06 |
-| [0048](0048-rib-memory-optimizations.md) | RIB Memory Optimizations | Accepted | 2026-03-08 |
-| [0049](0049-aspa-verification.md) | ASPA Path Verification | Accepted | 2026-03-13 |
-| [0050](0050-evpn-route-reflector.md) | EVPN Route Reflector (RFC 7432 Phase 1) | Accepted | 2026-04-23 |
-| [0051](0051-per-peer-outbound-writer-task.md) | Per-peer outbound writer task | Accepted | 2026-04-27 |
-| [0052](0052-evpn-vtep-foundation.md) | EVPN VTEP Foundation — Local EVI/VNI Domain Model | Accepted | 2026-05-01 |
-| [0053](0053-rfc-8326-graceful-shutdown.md) | RFC 8326 BGP Graceful Shutdown | Accepted | 2026-05-04 |
-| [0054](0054-evpn-linux-dataplane-boundary.md) | EVPN Linux Dataplane Boundary | Accepted | 2026-05-04 |
-| [0055](0055-evpn-local-mac-origination.md) | EVPN Local-MAC Origination Boundary | Accepted | 2026-05-06 |
-| [0056](0056-evpn-sticky-macs.md) | EVPN sticky-MAC operator config | Accepted | 2026-05-08 |
-| [0057](0057-evpn-gate-8-observable-df-election.md) | EVPN Gate 8 — observable DF election without forwarding enforcement | Accepted | 2026-05-09 |
-| [0058](0058-evpn-gate-9-irb-l3vni.md) | EVPN Gate 9 — symmetric IRB, L3VNI, Type 5 dataplane | Accepted | 2026-05-10 |
-| [0059](0059-evpn-aliasing-fdb-nexthop-groups.md) | EVPN aliasing dataplane via FDB nexthop groups | Accepted | 2026-05-12 |
-| [0060](0060-rfc-7999-blackhole.md) | RFC 7999 BLACKHOLE receiver scoping and opt-in FIB discard | Accepted | 2026-05-13 |
-| [0061](0061-opt-in-unicast-linux-fib-integration.md) | Opt-in unicast Linux FIB integration | Accepted | 2026-05-14 |
-| [0062](0062-tcp-ao-foundation.md) | TCP-AO foundation | Accepted | 2026-05-16 |
-| [0063](0063-evpn-runtime-instance-mutation.md) | EVPN runtime instance mutation semantics | Accepted | 2026-05-17 |
-| [0064](0064-grpc-authorization.md) | gRPC per-method authorization | Accepted | 2026-05-18 |
-| [0064-annex](0064-threat-model.md) | gRPC authorization threat model (ADR-0064 annex) | Current | 2026-07-26 |
-| [0065](0065-evpn-localbias-split-horizon.md) | EVPN VXLAN local-bias split-horizon (spike-gated) | Accepted | 2026-05-22 |
-| [0066](0066-unicast-multipath-ecmp-fib.md) | Unicast multipath / ECMP FIB install | Accepted | 2026-05-24 |
-| [0067](0067-bfd-single-hop.md) | Single-hop asynchronous BFD for BGP | Accepted | 2026-05-24 |
-| [0068](0068-weighted-multipath.md) | Weighted (unequal-cost) multipath via Link Bandwidth | Accepted | 2026-05-24 |
-| [0069](0069-bgp-unnumbered.md) | BGP unnumbered and IPv6 link-local peering | Accepted | 2026-05-25 |
-| [0070](0070-gnmi-openconfig-telemetry.md) | gNMI / OpenConfig telemetry and Set adapter | Accepted | 2026-05-25 |
-| [0071](0071-bgp-roles-otc.md) | BGP Roles and Only-to-Customer (RFC 9234) | Accepted | 2026-05-26 |
-| [0072](0072-durable-event-history.md) | Durable event history (local outbox) | Accepted | 2026-05-26 |
-| [0073](0073-import-policy-explain.md) | Import policy explain via per-session decision cache | Accepted | 2026-05-28 |
-| [0074](0074-fib-table-crud-authz-tier.md) | Runtime FIB-table CRUD authorization tier | Accepted | 2026-06-01 |
-| [0075](0075-outbound-route-filtering.md) | Receive-side Address-Prefix Outbound Route Filtering (ORF) | Accepted | 2026-06-03 |
-| [0076](0076-config-transaction-model.md) | Config transaction model foundation | Accepted | 2026-06-03 |
-| [0077](0077-mpls-vpn-bgpls-address-family-boundary.md) | MPLS, VPN, and BGP-LS address-family boundary | Accepted | 2026-06-08 |
-| [0078](0078-inbound-rib-backpressure.md) | Inbound transport→RIB backpressure — block, never drop | Accepted | 2026-06-10 |
-| [0079](0079-kernel-state-crash-restart-reconciliation.md) | Kernel-state crash-restart reconciliation via adoption sweeps | Accepted | 2026-06-10 |
-| [0080](0080-cancellation-shielded-runtime-applies.md) | Cancellation-shielded runtime mutation applies | Accepted | 2026-06-10 |
-| [0081](0081-atomic-peer-group-reshape.md) | Atomic peer-group session reshapes on the targeted RPC path | Accepted | 2026-06-10 |
-| [0082](0082-nda-protocol-ownership-stamp.md) | NDA_PROTOCOL ownership stamping for EVPN FDB/neighbor state | Accepted | 2026-06-10 |
-| [0083](0083-evpn-single-active-backup-path.md) | EVPN single-active backup-path pre-install | Accepted | 2026-06-11 |
-| [0084](0084-evpn-ethernet-segment-drain.md) | Runtime Ethernet Segment drain | Accepted | 2026-06-12 |
-| [0085](0085-evpn-es-interface-binding.md) | Ethernet Segment interface binding — link-driven drain and same-ESI local bias | Accepted | 2026-06-12 |
-| [0086](0086-dynamic-peer-group-reconfigure.md) | Peer-group field edits reach live dynamic sessions via post-persist graceful reset | Accepted | 2026-06-12 |
-| [0087](0087-evpn-type5-gateway-ip-overlay-index-origination.md) | Native GW-IP overlay-index Type 5 origination (RFC 9136) | Accepted | 2026-06-12 |
-| [0088](0088-evpn-vlan-aware-bridge-managed-netdev-boundary.md) | EVPN VLAN-aware bridge and managed netdev boundary | Accepted | 2026-06-15 |
-| [0089](0089-evpn-vni-per-bd-vlan-aware-bridge-support.md) | EVPN VNI-per-BD VLAN-aware bridge support | Accepted | 2026-06-15 |
-| [0090](0090-evpn-all-active-esi-overlay-index-type5-receive.md) | All-active ESI overlay-index Type 5 receive | Accepted | 2026-06-17 |
-| [0091](0091-evpn-managed-netdev-creation.md) | rustbgpd-managed netdev creation | Accepted | 2026-06-19 |
-| [0092](0092-evpn-vlan-aware-bundle-service.md) | EVPN VLAN-Aware Bundle service (non-zero Ethernet Tag) | Accepted | 2026-06-19 |
-| [0093](0093-evpn-vlan-macip-fdb-correlation.md) | VLAN MAC+IP attribution via FDB correlation on raw bridge ifindexes | Proposed | 2026-06-19 |
-| [0094](0094-evpn-vxlan-nondf-filtering-l2miss.md) | EVPN VXLAN all-active BUM filtering via kernel l2_miss (revisits ADR-0065) | Accepted (negative result) | 2026-06-29 |
-| [0095](0095-optimal-route-reflection.md) | Optimal Route Reflection via BGP-LS-sourced SPF (RFC 9107) | Accepted | 2026-07-02 |
-| [0096](0096-policy-language.md) | A typed, compiled policy language (`.rpol`) | Accepted | 2026-07-02 |
-| [0097](0097-bmp-monitoring.md) | BMP monitoring — the trio, BMPv4 framing, and path marking | Accepted | 2026-07-03 |
-| [0098](0098-update-groups.md) | RIB-level update groups — shared outbound staging | Accepted | 2026-07-03 |
-| [0099](0099-update-groups-v2.md) | Update groups v2 — per-family keying and RT-aware VPN emit | Accepted | 2026-07-03 |
-| [0100](0100-parallel-rib-manager.md) | Parallelizing the RibManager (research blueprint) | Proposed | 2026-07-03 |
-| [0101](0101-route-server-profile.md) | IXP route-server profile — per-client best-path (RFC 7947 §2.3.2) | Accepted | 2026-07-03 |
-| [0102](0102-evpn-origination-acknowledgement.md) | EVPN origination acknowledgement-awareness (Type 1/2/4) | Accepted | 2026-07-09 |
-| [0103](0103-rpol-execution-model.md) | rpol execution model, purity contract, and evaluation budgets | Accepted | 2026-07-09 |
-| [0104](0104-shutdown-warm-checkpoint-publication.md) | Shutdown warm-checkpoint publication without boot restore | Accepted | 2026-07-13 |
-| [0105](0105-grouped-export-policy-transition.md) | Grouped export-policy transition transaction | Accepted | 2026-07-14 |
-| [0106](0106-warm-checkpoint-restore-decision.md) | Warm checkpoint restore under planned-restart GR | Proposed | 2026-07-14 |
-| [0107](0107-route-server-next-hop-ownership.md) | Route-server NEXT_HOP ownership | Accepted | 2026-07-15 |
-| [0108](0108-per-family-max-prefix-limits.md) | Independent per-family maximum-prefix limits | Accepted | 2026-07-16 |
-| [0109](0109-update-group-shared-encode.md) | Encode-once wire sharing for update-group fanout | Accepted | 2026-07-16 |
-| [0110](0110-irr-peeringdb-filtering-pipeline.md) | IRR/PeeringDB-driven filtering pipeline — ride arouteserver, defer native ingestion | Accepted | 2026-07-17 |
-| [0111](0111-authoritative-policy-replacement-continuation.md) | Actor-owned authoritative export-policy replacement continuation | Rejected (borrow-free Gate 1 NO-GO) | 2026-07-20 |
-| [0112](0112-rfc-8212-ebgp-requires-policy.md) | Opt-in RFC 8212 explicit-policy enforcement for eBGP | Accepted — fully shipped | 2026-07-21 |
-| [0113](0113-outbound-prefix-limits.md) | Per-peer outbound unicast prefix limits | Accepted — released in v0.61.0 | 2026-07-21 |
-| [0114](0114-as4-path-migration.md) | RFC 6793 AS4 path migration across legacy peers | Accepted | 2026-07-21 |
-| [0115](0115-lean-daemon-build-flavors.md) | Lean daemon build flavors | Accepted (no additional flavor) | 2026-07-22 |
-| [0116](0116-rfc-9857-sr-policy-state.md) | RFC 9857 SR Policy state in BGP-LS | Accepted (feature implementation demand-gated) | 2026-07-22 |
-| [0117](0117-authenticated-single-hop-bfd-decision.md) | Authenticated single-hop BFD | Accepted (implementation NO-GO; evidence-gated) | 2026-07-22 |
-| [0118](0118-presence-preserving-runtime-neighbor-create.md) | Presence-preserving runtime neighbor creation | Accepted — fully shipped | 2026-07-29 |
-| [0119](0119-rfc-8212-secure-default-config-epoch.md) | RFC 8212 secure-default config epoch | Accepted (implemented; activation shipped) | 2026-07-29 |
-| [0120](0120-inbound-connection-admission.md) | Inbound connection admission rate limiting | Accepted | 2026-07-30 |
-| [0121](0121-config-history-external-policy-provenance.md) | Config-history external-policy provenance | Accepted — v2 history restore and provenance-bearing commit-confirm v2 shipped | 2026-08-01 |
-| [0122](0122-compatibility-debt-inventory.md) | Compatibility-debt inventory and removal schedule | Accepted | 2026-08-03 |
-| [0123](0123-aspa-v27-mitigation-and-retention.md) | ASPA draft-v27 mitigation requires lossless retention | Proposed (behavior activation NO-GO until retention gates pass) | 2026-08-03 |
-| [0124](0124-bounded-config-history-retention.md) | Bounded config-history retention for oversized snapshots | Proposed (owner decisions recorded; implementation pending) | 2026-08-04 |
-| [0125](0125-v1-stability-contract.md) | v1.0 stability contract | Accepted (tagging remains evidence-gated; no tag is scheduled) | 2026-08-04 |
-| [0126](0126-shared-group-per-client-best.md) | Shared-group per-client best-path — path-hiding mitigation inside update groups | Accepted | 2026-08-05 |
-| [0127](0127-config-transaction-settlement-watchdog.md) | Persisted runtime-config settlement watchdog | Accepted | 2026-08-11 |
-| [0128](0128-route-server-next-hop-translation.md) | Route-server next-hop translation | Accepted (architecture GO if activated; implementation NO-GO, demand-gated) | 2026-08-29 |
-| [0129](0129-prefix-sid-domain-boundary.md) | BGP Prefix-SID administrative-domain boundary | Proposed (no runtime behavior shipped) | 2026-08-29 |
+`Lifecycle` is a navigation aid, not a replacement for the decision's source
+status. Accepted and Current records are Active; rejected records are Rejected.
+A Proposed record is Unstated unless its own text says it is Parked. The
+current proposed records do not, and [ROADMAP's deferred follow-ups](../../ROADMAP.md#deferred-with-rationale)
+do not establish the lifecycle of their associated ADRs. No record currently
+states that the whole decision is Superseded.
+
+| ADR | Title | Status | Date | Lifecycle |
+|-----|-------|--------|------|-----------|
+| [0001](0001-typed-raw-hybrid-path-attributes.md) | Typed + raw hybrid model for path attributes | Accepted | 2026-02-27 | Active |
+| [0002](0002-inherent-methods-not-traits-for-codec.md) | Inherent methods, not traits, for codec API | Accepted | 2026-02-27 | Active |
+| [0003](0003-subcodes-as-constants-not-enums.md) | NOTIFICATION subcodes as constants, not enums | Accepted | 2026-02-27 | Active |
+| [0004](0004-proptest-for-property-testing.md) | Proptest for property-based testing | Accepted | 2026-02-27 | Active |
+| [0005](0005-fsm-pure-state-machine.md) | Pure state machine FSM with no Result return | Accepted | 2026-02-27 | Active |
+| [0006](0006-validate-open-returns-notification.md) | validate_open returns Result\<NegotiatedSession, NotificationMessage\> | Accepted | 2026-02-27 | Active |
+| [0007](0007-explicit-prometheus-registry.md) | Explicit Prometheus registry, not global default | Accepted | 2026-02-27 | Active |
+| [0008](0008-single-task-per-peer.md) | Single tokio task per peer for M0 | Accepted | 2026-02-27 | Active |
+| [0009](0009-iterative-action-loop.md) | Iterative action loop to avoid async recursion | Accepted | 2026-02-27 | Active |
+| [0010](0010-minimal-metrics-server.md) | Minimal TCP metrics server, no HTTP framework | Accepted | 2026-02-27 | Active |
+| [0011](0011-unknown-notification-code-variant.md) | Unknown variant for NOTIFICATION error codes | Accepted | 2026-02-27 | Active |
+| [0012](0012-separate-decode-from-validation.md) | Separate structural decode from semantic validation for UPDATEs | Accepted | 2026-02-27 | Active |
+| [0013](0013-single-task-rib-manager.md) | Single-task RIB manager with channel-based ownership | Accepted | 2026-02-27 | Active |
+| [0014](0014-best-path-standalone-function-deterministic-med.md) | Best-path comparison as standalone function with deterministic MED | Accepted | 2026-02-27 | Active |
+| [0015](0015-adj-rib-out-inside-rib-manager.md) | Adj-RIB-Out inside RibManager with per-peer outbound channels | Accepted | 2026-02-27 | Active |
+| [0016](0016-socket2-for-md5-gtsm.md) | socket2 for TCP MD5 and GTSM socket options | Accepted | 2026-02-27 | Active |
+| [0017](0017-peer-manager-channel-based-ownership.md) | PeerManager — channel-based single-task ownership | Accepted | 2026-02-27 | Active |
+| [0018](0018-broadcast-channel-for-watch-routes.md) | Broadcast channel for WatchRoutes streaming | Accepted | 2026-02-27 | Active |
+| [0019](0019-inbound-tcp-listener.md) | Inbound TCP listener for passive peering | Accepted | 2026-02-27 | Active |
+| [0020](0020-global-control-services-coordinated-shutdown.md) | GlobalService, ControlService, and coordinated shutdown | Accepted | 2026-02-27 | Active |
+| [0021](0021-tcp-collision-detection.md) | TCP collision detection via PeerManager coordination | Accepted | 2026-02-28 | Active |
+| [0022](0022-grpc-server-supervision.md) | gRPC server supervision — unexpected exit triggers shutdown | Accepted | 2026-02-28 | Active |
+| [0023](0023-prefix-enum-afi-agnostic-rib.md) | Prefix enum and AFI-agnostic RIB for MP-BGP | Accepted | 2026-02-28 | Active |
+| [0024](0024-graceful-restart.md) | Graceful Restart — Receiving Speaker (RFC 4724) | Accepted | 2026-03-01 | Active |
+| [0025](0025-extended-communities.md) | Extended Communities (RFC 4360) | Accepted | 2026-03-01 | Active |
+| [0026](0026-extended-community-policy.md) | Extended Community Policy Matching | Accepted | 2026-03-01 | Active |
+| [0027](0027-route-refresh.md) | Route Refresh (RFC 2918) | Accepted | 2026-03-02 | Active |
+| [0028](0028-standard-community-policy.md) | Standard Community Policy Matching (RFC 1997) | Accepted | 2026-03-02 | Active |
+| [0029](0029-route-reflector.md) | Route Reflector (RFC 4456) | Accepted | 2026-03-02 | Active |
+| [0030](0030-policy-actions.md) | Policy Actions and AS_PATH Regex | Accepted | 2026-03-02 | Active |
+| [0031](0031-large-communities.md) | Large Communities (RFC 8092) | Accepted | 2026-03-02 | Active |
+| [0032](0032-extended-messages.md) | Extended Messages (RFC 8654) | Accepted | 2026-03-02 | Active |
+| [0033](0033-add-path.md) | Add-Path (RFC 7911) | Accepted | 2026-03-02 | Active |
+| [0034](0034-rpki-origin-validation.md) | RPKI Origin Validation (RFC 6811 + RFC 8210) | Accepted | 2026-03-03 | Active |
+| [0035](0035-flowspec.md) | FlowSpec (RFC 8955 / RFC 8956) | Accepted | 2026-03-03 | Active |
+| [0036](0036-policy-chaining.md) | Policy Chaining + Named Policies | Accepted | 2026-03-04 | Active |
+| [0037](0037-extended-nexthop.md) | Extended Next Hop Encoding (RFC 8950) | Accepted | 2026-03-04 | Active |
+| [0038](0038-enhanced-route-refresh.md) | Enhanced Route Refresh (RFC 7313) | Accepted | 2026-03-04 | Active |
+| [0039](0039-transparent-route-server.md) | Transparent Route Server Mode | Accepted | 2026-03-04 | Active |
+| [0040](0040-gr-restarting-speaker.md) | Graceful Restart — Minimal Restarting Speaker Mode | Accepted | 2026-03-04 | Active |
+| [0041](0041-bmp-exporter.md) | BMP Exporter (RFC 7854) | Accepted | 2026-03-04 | Active |
+| [0042](0042-llgr.md) | Long-Lived Graceful Restart (RFC 9494) | Accepted | 2026-03-05 | Active |
+| [0043](0043-config-persistence.md) | Config Persistence and SIGHUP Reload | Accepted | 2026-03-05 | Active |
+| [0044](0044-mrt-dump-export.md) | MRT Dump Export (RFC 6396) | Accepted | 2026-03-05 | Active |
+| [0045](0045-private-as-removal.md) | Private AS Removal | Accepted | 2026-03-05 | Active |
+| [0046](0046-notification-gr.md) | Notification GR (RFC 8538) | Accepted | 2026-03-05 | Active |
+| [0047](0047-grpc-security-hardening.md) | gRPC Security Hardening | Accepted | 2026-03-06 | Active |
+| [0048](0048-rib-memory-optimizations.md) | RIB Memory Optimizations | Accepted | 2026-03-08 | Active |
+| [0049](0049-aspa-verification.md) | ASPA Path Verification | Accepted | 2026-03-13 | Active |
+| [0050](0050-evpn-route-reflector.md) | EVPN Route Reflector (RFC 7432 Phase 1) | Accepted | 2026-04-23 | Active |
+| [0051](0051-per-peer-outbound-writer-task.md) | Per-peer outbound writer task | Accepted | 2026-04-27 | Active |
+| [0052](0052-evpn-vtep-foundation.md) | EVPN VTEP Foundation — Local EVI/VNI Domain Model | Accepted | 2026-05-01 | Active |
+| [0053](0053-rfc-8326-graceful-shutdown.md) | RFC 8326 BGP Graceful Shutdown | Accepted | 2026-05-04 | Active |
+| [0054](0054-evpn-linux-dataplane-boundary.md) | EVPN Linux Dataplane Boundary | Accepted | 2026-05-04 | Active |
+| [0055](0055-evpn-local-mac-origination.md) | EVPN Local-MAC Origination Boundary | Accepted | 2026-05-06 | Active |
+| [0056](0056-evpn-sticky-macs.md) | EVPN sticky-MAC operator config | Accepted | 2026-05-08 | Active |
+| [0057](0057-evpn-gate-8-observable-df-election.md) | EVPN Gate 8 — observable DF election without forwarding enforcement | Accepted | 2026-05-09 | Active |
+| [0058](0058-evpn-gate-9-irb-l3vni.md) | EVPN Gate 9 — symmetric IRB, L3VNI, Type 5 dataplane | Accepted | 2026-05-10 | Active |
+| [0059](0059-evpn-aliasing-fdb-nexthop-groups.md) | EVPN aliasing dataplane via FDB nexthop groups | Accepted | 2026-05-12 | Active |
+| [0060](0060-rfc-7999-blackhole.md) | RFC 7999 BLACKHOLE receiver scoping and opt-in FIB discard | Accepted | 2026-05-13 | Active |
+| [0061](0061-opt-in-unicast-linux-fib-integration.md) | Opt-in unicast Linux FIB integration | Accepted | 2026-05-14 | Active |
+| [0062](0062-tcp-ao-foundation.md) | TCP-AO foundation | Accepted | 2026-05-16 | Active |
+| [0063](0063-evpn-runtime-instance-mutation.md) | EVPN runtime instance mutation semantics | Accepted | 2026-05-17 | Active |
+| [0064](0064-grpc-authorization.md) | gRPC per-method authorization | Accepted | 2026-05-18 | Active |
+| [0064-annex](0064-threat-model.md) | gRPC authorization threat model (ADR-0064 annex) | Current | 2026-07-26 | Active |
+| [0065](0065-evpn-localbias-split-horizon.md) | EVPN VXLAN local-bias split-horizon (spike-gated) | Accepted | 2026-05-22 | Active |
+| [0066](0066-unicast-multipath-ecmp-fib.md) | Unicast multipath / ECMP FIB install | Accepted | 2026-05-24 | Active |
+| [0067](0067-bfd-single-hop.md) | Single-hop asynchronous BFD for BGP | Accepted | 2026-05-24 | Active |
+| [0068](0068-weighted-multipath.md) | Weighted (unequal-cost) multipath via Link Bandwidth | Accepted | 2026-05-24 | Active |
+| [0069](0069-bgp-unnumbered.md) | BGP unnumbered and IPv6 link-local peering | Accepted | 2026-05-25 | Active |
+| [0070](0070-gnmi-openconfig-telemetry.md) | gNMI / OpenConfig telemetry and Set adapter | Accepted | 2026-05-25 | Active |
+| [0071](0071-bgp-roles-otc.md) | BGP Roles and Only-to-Customer (RFC 9234) | Accepted | 2026-05-26 | Active |
+| [0072](0072-durable-event-history.md) | Durable event history (local outbox) | Accepted | 2026-05-26 | Active |
+| [0073](0073-import-policy-explain.md) | Import policy explain via per-session decision cache | Accepted | 2026-05-28 | Active |
+| [0074](0074-fib-table-crud-authz-tier.md) | Runtime FIB-table CRUD authorization tier | Accepted | 2026-06-01 | Active |
+| [0075](0075-outbound-route-filtering.md) | Receive-side Address-Prefix Outbound Route Filtering (ORF) | Accepted | 2026-06-03 | Active |
+| [0076](0076-config-transaction-model.md) | Config transaction model foundation | Accepted | 2026-06-03 | Active |
+| [0077](0077-mpls-vpn-bgpls-address-family-boundary.md) | MPLS, VPN, and BGP-LS address-family boundary | Accepted | 2026-06-08 | Active |
+| [0078](0078-inbound-rib-backpressure.md) | Inbound transport→RIB backpressure — block, never drop | Accepted | 2026-06-10 | Active |
+| [0079](0079-kernel-state-crash-restart-reconciliation.md) | Kernel-state crash-restart reconciliation via adoption sweeps | Accepted | 2026-06-10 | Active |
+| [0080](0080-cancellation-shielded-runtime-applies.md) | Cancellation-shielded runtime mutation applies | Accepted | 2026-06-10 | Active |
+| [0081](0081-atomic-peer-group-reshape.md) | Atomic peer-group session reshapes on the targeted RPC path | Accepted | 2026-06-10 | Active |
+| [0082](0082-nda-protocol-ownership-stamp.md) | NDA_PROTOCOL ownership stamping for EVPN FDB/neighbor state | Accepted | 2026-06-10 | Active |
+| [0083](0083-evpn-single-active-backup-path.md) | EVPN single-active backup-path pre-install | Accepted | 2026-06-11 | Active |
+| [0084](0084-evpn-ethernet-segment-drain.md) | Runtime Ethernet Segment drain | Accepted | 2026-06-12 | Active |
+| [0085](0085-evpn-es-interface-binding.md) | Ethernet Segment interface binding — link-driven drain and same-ESI local bias | Accepted | 2026-06-12 | Active |
+| [0086](0086-dynamic-peer-group-reconfigure.md) | Peer-group field edits reach live dynamic sessions via post-persist graceful reset | Accepted | 2026-06-12 | Active |
+| [0087](0087-evpn-type5-gateway-ip-overlay-index-origination.md) | Native GW-IP overlay-index Type 5 origination (RFC 9136) | Accepted | 2026-06-12 | Active |
+| [0088](0088-evpn-vlan-aware-bridge-managed-netdev-boundary.md) | EVPN VLAN-aware bridge and managed netdev boundary | Accepted | 2026-06-15 | Active |
+| [0089](0089-evpn-vni-per-bd-vlan-aware-bridge-support.md) | EVPN VNI-per-BD VLAN-aware bridge support | Accepted | 2026-06-15 | Active |
+| [0090](0090-evpn-all-active-esi-overlay-index-type5-receive.md) | All-active ESI overlay-index Type 5 receive | Accepted | 2026-06-17 | Active |
+| [0091](0091-evpn-managed-netdev-creation.md) | rustbgpd-managed netdev creation | Accepted | 2026-06-19 | Active |
+| [0092](0092-evpn-vlan-aware-bundle-service.md) | EVPN VLAN-Aware Bundle service (non-zero Ethernet Tag) | Accepted | 2026-06-19 | Active |
+| [0093](0093-evpn-vlan-macip-fdb-correlation.md) | VLAN MAC+IP attribution via FDB correlation on raw bridge ifindexes | Proposed | 2026-06-19 | Unstated |
+| [0094](0094-evpn-vxlan-nondf-filtering-l2miss.md) | EVPN VXLAN all-active BUM filtering via kernel l2_miss (revisits ADR-0065) | Accepted (negative result) | 2026-06-29 | Active |
+| [0095](0095-optimal-route-reflection.md) | Optimal Route Reflection via BGP-LS-sourced SPF (RFC 9107) | Accepted | 2026-07-02 | Active |
+| [0096](0096-policy-language.md) | A typed, compiled policy language (`.rpol`) | Accepted | 2026-07-02 | Active |
+| [0097](0097-bmp-monitoring.md) | BMP monitoring — the trio, BMPv4 framing, and path marking | Accepted | 2026-07-03 | Active |
+| [0098](0098-update-groups.md) | RIB-level update groups — shared outbound staging | Accepted | 2026-07-03 | Active |
+| [0099](0099-update-groups-v2.md) | Update groups v2 — per-family keying and RT-aware VPN emit | Accepted | 2026-07-03 | Active |
+| [0100](0100-parallel-rib-manager.md) | Parallelizing the RibManager (research blueprint) | Proposed | 2026-07-03 | Unstated |
+| [0101](0101-route-server-profile.md) | IXP route-server profile — per-client best-path (RFC 7947 §2.3.2) | Accepted | 2026-07-03 | Active |
+| [0102](0102-evpn-origination-acknowledgement.md) | EVPN origination acknowledgement-awareness (Type 1/2/4) | Accepted | 2026-07-09 | Active |
+| [0103](0103-rpol-execution-model.md) | rpol execution model, purity contract, and evaluation budgets | Accepted | 2026-07-09 | Active |
+| [0104](0104-shutdown-warm-checkpoint-publication.md) | Shutdown warm-checkpoint publication without boot restore | Accepted | 2026-07-13 | Active |
+| [0105](0105-grouped-export-policy-transition.md) | Grouped export-policy transition transaction | Accepted | 2026-07-14 | Active |
+| [0106](0106-warm-checkpoint-restore-decision.md) | Warm checkpoint restore under planned-restart GR | Proposed | 2026-07-14 | Unstated |
+| [0107](0107-route-server-next-hop-ownership.md) | Route-server NEXT_HOP ownership | Accepted | 2026-07-15 | Active |
+| [0108](0108-per-family-max-prefix-limits.md) | Independent per-family maximum-prefix limits | Accepted | 2026-07-16 | Active |
+| [0109](0109-update-group-shared-encode.md) | Encode-once wire sharing for update-group fanout | Accepted | 2026-07-16 | Active |
+| [0110](0110-irr-peeringdb-filtering-pipeline.md) | IRR/PeeringDB-driven filtering pipeline — ride arouteserver, defer native ingestion | Accepted | 2026-07-17 | Active |
+| [0111](0111-authoritative-policy-replacement-continuation.md) | Actor-owned authoritative export-policy replacement continuation | Rejected (borrow-free Gate 1 NO-GO) | 2026-07-20 | Rejected |
+| [0112](0112-rfc-8212-ebgp-requires-policy.md) | Opt-in RFC 8212 explicit-policy enforcement for eBGP | Accepted — fully shipped | 2026-07-21 | Active |
+| [0113](0113-outbound-prefix-limits.md) | Per-peer outbound unicast prefix limits | Accepted — released in v0.61.0 | 2026-07-21 | Active |
+| [0114](0114-as4-path-migration.md) | RFC 6793 AS4 path migration across legacy peers | Accepted | 2026-07-21 | Active |
+| [0115](0115-lean-daemon-build-flavors.md) | Lean daemon build flavors | Accepted (no additional flavor) | 2026-07-22 | Active |
+| [0116](0116-rfc-9857-sr-policy-state.md) | RFC 9857 SR Policy state in BGP-LS | Accepted (feature implementation demand-gated) | 2026-07-22 | Active |
+| [0117](0117-authenticated-single-hop-bfd-decision.md) | Authenticated single-hop BFD | Accepted (implementation NO-GO; evidence-gated) | 2026-07-22 | Active |
+| [0118](0118-presence-preserving-runtime-neighbor-create.md) | Presence-preserving runtime neighbor creation | Accepted — fully shipped | 2026-07-29 | Active |
+| [0119](0119-rfc-8212-secure-default-config-epoch.md) | RFC 8212 secure-default config epoch | Accepted (implemented; activation shipped) | 2026-07-29 | Active |
+| [0120](0120-inbound-connection-admission.md) | Inbound connection admission rate limiting | Accepted | 2026-07-30 | Active |
+| [0121](0121-config-history-external-policy-provenance.md) | Config-history external-policy provenance | Accepted — v2 history restore and provenance-bearing commit-confirm v2 shipped | 2026-08-01 | Active |
+| [0122](0122-compatibility-debt-inventory.md) | Compatibility-debt inventory and removal schedule | Accepted | 2026-08-03 | Active |
+| [0123](0123-aspa-v27-mitigation-and-retention.md) | ASPA draft-v27 mitigation requires lossless retention | Proposed (behavior activation NO-GO until retention gates pass) | 2026-08-03 | Unstated |
+| [0124](0124-bounded-config-history-retention.md) | Bounded config-history retention for oversized snapshots | Proposed (owner decisions recorded; implementation pending) | 2026-08-04 | Unstated |
+| [0125](0125-v1-stability-contract.md) | v1.0 stability contract | Accepted (tagging remains evidence-gated; no tag is scheduled) | 2026-08-04 | Active |
+| [0126](0126-shared-group-per-client-best.md) | Shared-group per-client best-path — path-hiding mitigation inside update groups | Accepted | 2026-08-05 | Active |
+| [0127](0127-config-transaction-settlement-watchdog.md) | Persisted runtime-config settlement watchdog | Accepted | 2026-08-11 | Active |
+| [0128](0128-route-server-next-hop-translation.md) | Route-server next-hop translation | Accepted (architecture GO if activated; implementation NO-GO, demand-gated) | 2026-08-29 | Active |
+| [0129](0129-prefix-sid-domain-boundary.md) | BGP Prefix-SID administrative-domain boundary | Proposed (no runtime behavior shipped) | 2026-08-29 | Unstated |
+
+## Supporting records
+
+Supporting records are evidence for an ADR, not separate decisions. Their own
+metadata is indexed independently; `Unstated` is not inferred from the parent
+ADR or from repository history.
+
+| Record | Date stated | Status stated | Workload or shape | Establishes | Does not establish |
+|--------|-------------|---------------|-------------------|-------------|--------------------|
+| [ADR-0103 benchmark spike](0103-rpol-execution-model-spike/README.md) | Unstated | Unstated | Two measurements: the in-tree policy-chain, predicate, and set-heavy Criterion groups; and one 15-term program evaluated as tree-walk, bytecode, and bytecode with fuel over the same deterministic one-million-route stream. | With the counter live, per-instruction fuel cost roughly 0–20% over bare bytecode dispatch; fueled bytecode evaluated at 0.84–0.99 times tree-walk. | Absolute nanoseconds are machine-specific; the ratios are the signal. |
+
+## Lifecycle metadata gaps
+
+The six Proposed records do not state one of the navigation lifecycles above.
+They remain **Unstated** rather than being inferred as Parked:
+
+- [ADR-0093](0093-evpn-vlan-macip-fdb-correlation.md)
+- [ADR-0100](0100-parallel-rib-manager.md)
+- [ADR-0106](0106-warm-checkpoint-restore-decision.md)
+- [ADR-0123](0123-aspa-v27-mitigation-and-retention.md)
+- [ADR-0124](0124-bounded-config-history-retention.md)
+- [ADR-0129](0129-prefix-sid-domain-boundary.md)
 
 ## Template
 
