@@ -13,7 +13,7 @@
 
 /// Profile names accepted by `--init-config`. Kept in sync with
 /// [`profile_toml`] by the `every_listed_profile_resolves` test.
-pub const PROFILE_NAMES: &[&str] = &["lab", "edge"];
+pub const PROFILE_NAMES: &[&str] = &["lab", "edge", "route-server"];
 
 /// Return the curated starter TOML for `name`, or `None` for an unknown
 /// profile.
@@ -22,6 +22,7 @@ pub fn profile_toml(name: &str) -> Option<&'static str> {
     match name {
         "lab" => Some(LAB),
         "edge" => Some(EDGE),
+        "route-server" => Some(ROUTE_SERVER),
         _ => None,
     }
 }
@@ -192,10 +193,90 @@ description = "upstream-transit"
 hold_time = 90
 "#;
 
+/// `route-server` — a self-contained IPv4 route-server skeleton with two
+/// eBGP member placeholders and an explicit fail-closed import posture.
+/// The export chain is deliberately transparent; operators must replace
+/// every placeholder and install site-specific import hygiene before use.
+const ROUTE_SERVER: &str = r#"# rustbgpd "route-server" profile — a self-contained IPv4
+# two-member skeleton. Replace every ASN, address, and member limit before use.
+# The installed starter deliberately has no external policy files, datasets,
+# RTR source, or snapshot dependency. For the full production example and
+# rendered member inventories, see:
+#   https://github.com/lance0/rustbgpd/tree/main/examples/route-server
+#   https://github.com/lance0/rustbgpd/tree/main/tools/rs-config-render
+
+[global]
+asn = 65500
+router_id = "198.51.100.1"
+listen_port = 179
+runtime_state_dir = "/var/lib/rustbgpd"
+# RFC 8212: explicit import and export chains are required for eBGP. Removing
+# either chain below fails closed instead of silently reverting to permit-all.
+# Startup-only — changing this value requires a daemon restart.
+ebgp_requires_policy = true
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+
+# Local control socket for rbgp. The socket is owner-only (mode 0600), so
+# filesystem permissions authenticate access and the socket owner is
+# authorized as the implicit "local-operator" principal at operator tier.
+[global.telemetry.grpc_uds]
+enabled = true
+path = "/var/lib/rustbgpd/grpc.sock"
+mode = 0o600
+
+# Import defaults deny. Before accepting member routes, add site policy that
+# validates IRR-derived member prefixes and origins and applies the intended
+# RPKI hygiene. The full example and rs-config-render links above show the
+# production policy and generated member inventory paths.
+[policy.definitions.rs-member-import]
+default_action = "deny"
+
+# Route-server export is explicitly transparent: selected routes pass to
+# members without the starter inventing an outbound filtering policy.
+[policy.definitions.rs-transparent-export]
+default_action = "permit"
+
+[policy]
+import_chain = ["rs-member-import"]
+export_chain = ["rs-transparent-export"]
+
+# Import-decision explain is disabled: enable it deliberately while debugging
+# and size the per-session cache for the retained member-route workload.
+[policy.explain]
+enabled = false
+
+[[neighbors]]
+address = "198.51.100.2"
+remote_asn = 64501
+description = "member-alpha"
+hold_time = 90
+families = ["ipv4_unicast"]
+route_server_client = true
+role = "route_server"
+next_hop_ownership = "strict_peer"
+# Replace with this member's contracted inbound IPv4 prefix limit.
+max_prefixes = 50000
+
+[[neighbors]]
+address = "198.51.100.3"
+remote_asn = 64502
+description = "member-beta"
+hold_time = 90
+families = ["ipv4_unicast"]
+route_server_client = true
+role = "route_server"
+next_hop_ownership = "strict_peer"
+# Replace with this member's contracted inbound IPv4 prefix limit.
+max_prefixes = 50000
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, GrpcEnforcementConfig};
+    use crate::config::{BgpRoleConfig, Config, GrpcEnforcementConfig, NextHopOwnershipConfig};
 
     #[test]
     fn every_profile_validates() {
@@ -255,6 +336,57 @@ mod tests {
             assert!(
                 toml.contains("local-operator"),
                 "--init-config {name} must explain the implicit local-operator rule"
+            );
+        }
+    }
+
+    #[test]
+    fn route_server_profile_pins_the_self_contained_ipv4_skeleton() {
+        let toml = profile_toml("route-server").expect("route-server profile must resolve");
+        let config = Config::load_toml_with_diagnostics(toml, "route-server")
+            .expect("route-server profile must validate");
+
+        assert_eq!(config.global.ebgp_requires_policy, Some(true));
+        assert_eq!(config.policy.import_chain, ["rs-member-import"]);
+        assert_eq!(config.policy.export_chain, ["rs-transparent-export"]);
+        assert_eq!(config.policy.definitions.len(), 2);
+        assert_eq!(
+            config.policy.definitions["rs-member-import"].default_action,
+            "deny"
+        );
+        assert_eq!(
+            config.policy.definitions["rs-transparent-export"].default_action,
+            "permit"
+        );
+
+        assert!(config.rpki.is_none());
+        assert!(config.policy.rpol_files.is_empty());
+        assert!(config.policy.rpol_roots.is_empty());
+        assert!(config.policy.datasets.is_empty());
+
+        assert_eq!(config.neighbors.len(), 2);
+        for (neighbor, (address, remote_asn)) in config
+            .neighbors
+            .iter()
+            .zip([("198.51.100.2", 64_501), ("198.51.100.3", 64_502)])
+        {
+            assert_eq!(neighbor.address, address);
+            assert_eq!(neighbor.remote_asn, remote_asn);
+            assert_ne!(neighbor.remote_asn, config.global.asn);
+            assert_eq!(neighbor.families, ["ipv4_unicast"]);
+            assert_eq!(neighbor.route_server_client, Some(true));
+            assert_eq!(neighbor.role, Some(BgpRoleConfig::RouteServer));
+            assert_eq!(
+                neighbor.next_hop_ownership,
+                Some(NextHopOwnershipConfig::StrictPeer)
+            );
+            assert_eq!(neighbor.max_prefixes, Some(50_000));
+        }
+
+        for pointer in ["examples/route-server", "tools/rs-config-render"] {
+            assert!(
+                toml.contains(pointer),
+                "route-server profile must point operators to {pointer}"
             );
         }
     }
