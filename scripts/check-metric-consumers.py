@@ -47,12 +47,14 @@ CUSTOM_COLLECTORS = frozenset(
     {
         (TELEMETRY, "JemallocCollector"),
         (TELEMETRY, "SessionNotificationDepthCollector"),
+        (TELEMETRY, "EventOutboxQueueDepthCollector"),
         (SETTLEMENT, "RuntimeConfigSettlementCollector"),
     }
 )
 CUSTOM_COLLECTOR_PREFIXES = {
     (TELEMETRY, "JemallocCollector"): "jemalloc_",
     (TELEMETRY, "SessionNotificationDepthCollector"): "bgp_session_notification_",
+    (TELEMETRY, "EventOutboxQueueDepthCollector"): "bgp_event_outbox_queue_depth",
     (SETTLEMENT, "RuntimeConfigSettlementCollector"): "bgp_runtime_config_settlement_",
 }
 SPECIAL_REGISTRATIONS = {
@@ -60,6 +62,7 @@ SPECIAL_REGISTRATIONS = {
         "prometheus::process_collector::ProcessCollector::for_self()",
         "jemalloc_stats::JemallocCollector::new()",
         "SessionNotificationDepthCollector::new(Arc::clone(&session_notification_outstanding_value),Arc::clone(&session_notification_outstanding_high_watermark_value),)",
+        "EventOutboxQueueDepthCollector::new(Arc::clone(&event_outbox_queue_depth_source,))",
     ),
     SETTLEMENT: (
         "RuntimeConfigSettlementCollector::new(Arc::clone(&self.registry,))",
@@ -406,6 +409,79 @@ def session_notification_depth_inventory(source: str) -> tuple[dict[str, str], s
     return {name: kind for name, kind in emitted.values()}, set(emitted)
 
 
+def event_outbox_queue_depth_inventory(
+    source: str,
+) -> tuple[dict[str, str], set[str]]:
+    """Validate the local gauge vector emitted by the queue-depth collector."""
+    source = production_source(source)
+    syntax, strings = DASHBOARD_CHECK.rust_lex(source)
+    collector_impl = braced_body(
+        syntax,
+        r"\bimpl\s+Collector\s+for\s+EventOutboxQueueDepthCollector\s*\{",
+        "Collector impl for EventOutboxQueueDepthCollector",
+    )
+    collect_body = braced_body(
+        collector_impl,
+        r"\bfn\s+collect\s*\(\s*&self\s*\)\s*->\s*Vec\s*<\s*MetricFamily\s*>\s*\{",
+        "collect method for EventOutboxQueueDepthCollector",
+    )
+    if "MetricFamily" in collect_body:
+        raise ValueError(
+            "EventOutboxQueueDepthCollector constructs MetricFamily values directly"
+        )
+    unexpected_returns = [
+        expression
+        for expression in re.findall(r"\breturn\s+([^;]+);", collect_body)
+        if re.sub(r"\s+", "", expression) != "Vec::new()"
+    ]
+    if unexpected_returns:
+        raise ValueError(
+            "EventOutboxQueueDepthCollector returns families outside its local gauge vector"
+        )
+    expected_name = CUSTOM_COLLECTOR_PREFIXES[(TELEMETRY, "EventOutboxQueueDepthCollector")]
+    constructors = re.findall(
+        r"\blet\s+(\w+)\s*=\s*IntGaugeVec::new\(\s*"
+        r"Opts::new\(\s*__RUST_STRING_(\d+)__\s*,\s*"
+        r"__RUST_STRING_\d+__\s*,?\s*\)\s*,\s*"
+        r"&\[\s*__RUST_STRING_(\d+)__\s*\]\s*,?\s*\)",
+        collect_body,
+    )
+    if len(constructors) != 1:
+        raise ValueError(
+            "EventOutboxQueueDepthCollector must construct exactly one local IntGaugeVec"
+        )
+    variable, name_index, label_index = constructors[0]
+    definitions = static_metric_definitions(source)
+    expected_definition = (expected_name, "ordinary")
+    if (
+        strings[int(name_index)] != expected_name
+        or definitions.get(variable) != expected_definition
+    ):
+        raise ValueError(
+            "EventOutboxQueueDepthCollector must construct exactly one uniquely "
+            f"named local gauge vector for {expected_name}"
+        )
+    if strings[int(label_index)] != "category":
+        raise ValueError(
+            "EventOutboxQueueDepthCollector must construct its local IntGaugeVec "
+            "with the category label"
+        )
+
+    compact = re.sub(r"\s+", "", collect_body)
+    population = f"{variable}.with_label_values(&[category]).set("
+    if compact.count(population) != 1:
+        raise ValueError(
+            "EventOutboxQueueDepthCollector must populate its local gauge vector "
+            "through the category label exactly once"
+        )
+    collect_calls = re.findall(r"\b(\w+)\.collect\(\)", compact)
+    if collect_calls != [variable] or not compact.endswith(f"{variable}.collect()"):
+        raise ValueError(
+            "EventOutboxQueueDepthCollector must return its local gauge vector exactly once"
+        )
+    return {expected_name: "ordinary"}, {variable}
+
+
 def candidate_emitter_sources(root: Path = ROOT) -> dict[str, str]:
     """Discover tracked production Rust files that can define metric families."""
     result = subprocess.run(
@@ -522,8 +598,14 @@ def workspace_metric_inventory(
     session_depth, session_depth_variables = session_notification_depth_inventory(
         sources[TELEMETRY]
     )
+    event_outbox_depth, event_outbox_depth_variables = (
+        event_outbox_queue_depth_inventory(sources[TELEMETRY])
+    )
     expected_registered = (
-        set(telemetry_definitions) - jemalloc_variables - session_depth_variables
+        set(telemetry_definitions)
+        - jemalloc_variables
+        - session_depth_variables
+        - event_outbox_depth_variables
     )
     if registered != expected_registered:
         missing = sorted(
@@ -544,6 +626,7 @@ def workspace_metric_inventory(
     }
     telemetry.update(jemalloc)
     telemetry.update(session_depth)
+    telemetry.update(event_outbox_depth)
 
     settlement = settlement_metric_inventory(sources[SETTLEMENT])
     overlap = sorted(set(telemetry) & set(settlement))

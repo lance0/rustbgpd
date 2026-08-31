@@ -22,6 +22,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   dependent forwarder returns first. The daemon still performs coordinated
   shutdown and exits 1; ordinary RTR reconnect and expiry remain non-fatal.
 
+- Event-history shutdown now reports accepted-but-unreceived terminal loss
+  exactly once by category. A closeable acceptance ledger excludes
+  pre-admission attempts and actor-received work while remaining the sole
+  queue-depth source across shutdown and manager restarts.
+
 ### Documentation
 
 - Publish a descriptive raw bridge event-skew receipt across six pinned Jammy
