@@ -1,5 +1,7 @@
 # Release Checklist
 
+> **Document class: REFERENCE.** This maintained page defines a contract, specification, or reusable procedure; follow any stated version scope.
+
 Pre-publish smoke matrix for every tagged release. All items must pass before
 pushing a version tag.
 

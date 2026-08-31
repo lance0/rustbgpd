@@ -1,5 +1,7 @@
 # Interop Test Results
 
+> **Document class: CURRENT.** This maintained page reflects the project as it is now; dated sections remain bounded to their stated scope.
+
 Tracks interop validation against real BGP implementations. Updated with
 every milestone. "Tested" means validated by a documented containerlab
 or privileged-netns procedure, not "someone tried it once." CI-gated rows

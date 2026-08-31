@@ -1,5 +1,7 @@
 # Runbook: activation exit 5 (manual recovery)
 
+> **Document class: CURRENT.** This maintained page reflects the project as it is now; dated sections remain bounded to their stated scope.
+
 **When this is you:** `rs-config-render activate` or
 `rs-config-render ixp-manager-lifecycle run` returned exit 5 — the activation
 command started, but the helper could not prove the daemon settled on the

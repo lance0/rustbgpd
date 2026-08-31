@@ -1,5 +1,7 @@
 # BGP path-attribute registry audit
 
+> **Document class: REFERENCE.** This maintained page defines a contract, specification, or reusable procedure; follow any stated version scope.
+
 This is an offline audit baseline, not a claim that every registered attribute is
 implemented. It keeps registry data, protocol requirements, observed behavior,
 and executable evidence distinct so a registry update cannot silently become a

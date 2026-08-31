@@ -1,5 +1,7 @@
 # EVPN VTEP troubleshooting runbook
 
+> **Document class: CURRENT.** This maintained page reflects the project as it is now; dated sections remain bounded to their stated scope.
+
 This runbook is for the bidirectional EVPN VTEP alpha path:
 
 - Gate 7b: received Type 2 routes program Linux bridge/VXLAN FDB

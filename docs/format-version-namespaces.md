@@ -1,5 +1,7 @@
 # Format and version namespaces
 
+> **Document class: REFERENCE.** This maintained page defines a contract, specification, or reusable procedure; follow any stated version scope.
+
 rustbgpd does not have one global "v1/v2/v3" format lineage. Each durable or
 machine-readable surface below owns an independent version namespace with its
 own compatibility rules. None of these numbers is comparable with the product

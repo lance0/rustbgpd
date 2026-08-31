@@ -1,5 +1,7 @@
 # gRPC Method Inventory and Authorization Classification
 
+> **Document class: REFERENCE.** This maintained page defines a contract, specification, or reusable procedure; follow any stated version scope.
+
 **Status:** Accepted. Input artifact for ADR-0064 (gRPC authorization)
 and mirrored in `crates/api/src/authz.rs`.
 **Source:** `crates/api/src/authz.rs`, covering `proto/rustbgpd.proto`

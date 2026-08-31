@@ -1,5 +1,7 @@
 # Upstream findings (GoBGP, pmacct, SR Linux)
 
+> **Document class: HISTORICAL.** This page preserves a dated decision or observation; its age and scope are part of the evidence.
+
 Behaviors found in peer/collector/NOS software during rustbgpd interop lab
 development, recorded so they can be reported/patched upstream. Each entry lists the observed behavior,
 a reproduction sketch, the workaround the interop fixtures use, and a severity

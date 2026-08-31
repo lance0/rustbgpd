@@ -1,5 +1,7 @@
 # rustbgpd — Design Document
 
+> **Document class: CURRENT.** This maintained page reflects the project as it is now; dated sections remain bounded to their stated scope.
+
 A modern, API-first BGP daemon in Rust, inspired by GoBGP's ergonomics and "drive it via gRPC" operating model.
 
 **Author:** lance0

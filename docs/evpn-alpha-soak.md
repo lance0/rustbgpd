@@ -1,5 +1,7 @@
 # EVPN VTEP alpha-soak checklist
 
+> **Document class: CURRENT.** This maintained page reflects the project as it is now; dated sections remain bounded to their stated scope.
+
 Post-merge confidence list for the bidirectional EVPN VTEP loop
 (Gates 7a + 7b + 7b+1 in v0.15.0; Gates 7b+2 / 7c / 8 / 8b prep /
 8b enforcement intent + kernel primitive layered in across v0.16.0

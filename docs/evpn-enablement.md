@@ -1,5 +1,7 @@
 # EVPN Enablement Roadmap
 
+> **Document class: CURRENT.** This maintained page reflects the project as it is now; dated sections remain bounded to their stated scope.
+
 For release-by-release feature history, see [CHANGELOG.md](../CHANGELOG.md).
 
 Gate-by-gate plan for turning rustbgpd's Phase 1 EVPN Route Reflector into a

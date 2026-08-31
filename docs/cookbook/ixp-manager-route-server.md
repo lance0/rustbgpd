@@ -1,5 +1,7 @@
 # IXP Manager route server: Foil export → render → activate → lifecycle
 
+> **Document class: CURRENT.** This maintained page reflects the project as it is now; dated sections remain bounded to their stated scope.
+
 **When this is you:** your exchange runs IXP Manager v7.4 as the member and
 router database, and you want a rustbgpd route server that IXP Manager
 provisions the way it provisions your BIRD route servers — members, IRR

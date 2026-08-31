@@ -1,5 +1,7 @@
 # Operational Proof Receipts
 
+> **Document class: CURRENT.** This maintained page reflects the project as it is now; dated sections remain bounded to their stated scope.
+
 This page is the roll-up view of rustbgpd's operational evidence. It links to
 the primary receipts for interop, dataplane, scale, benchmark, memory, and soak
 coverage. Detailed procedures stay in the source documents; this page is the

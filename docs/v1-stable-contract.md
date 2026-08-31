@@ -1,5 +1,7 @@
 # Narrow v1 route-server / route-reflector contract
 
+> **Document class: REFERENCE.** This maintained page defines a contract, specification, or reusable procedure; follow any stated version scope.
+
 rustbgpd remains a public-alpha project overall. This document defines a much
 narrower compatibility promise for deployments that use rustbgpd as an IPv4 /
 IPv6 unicast route server or route reflector. It does not make every protocol,

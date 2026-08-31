@@ -1,5 +1,7 @@
 # Receipts Index
 
+> **Document class: CURRENT.** This maintained page reflects the project as it is now; dated sections remain bounded to their stated scope.
+
 rustbgpd's development rule is simple: **every wire-behavior claim has a lab
 that proves it, and every performance claim has a measured receipt.** A
 feature is not "done" when the code merges — it is done when a containerlab

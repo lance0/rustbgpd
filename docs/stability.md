@@ -1,5 +1,7 @@
 # Stability and compatibility
 
+> **Document class: REFERENCE.** This maintained page defines a contract, specification, or reusable procedure; follow any stated version scope.
+
 rustbgpd remains **public alpha overall**. Features can be shipped, tested, or
 assigned an authorization tier without becoming compatibility promises.
 

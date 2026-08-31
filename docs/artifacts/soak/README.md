@@ -1,5 +1,7 @@
 # Soak evidence artifacts
 
+> **Document class: CURRENT.** This maintained page reflects the project as it is now; dated sections remain bounded to their stated scope.
+
 Frozen run evidence for the long-running soak and scale gates: per-run
 `soak.log`, `run.json`/`report.json` summaries, and `samples.csv` time
 series. Each directory is a single run, named `<gate>-<UTC-timestamp>`.

@@ -1,5 +1,7 @@
 # Use Cases
 
+> **Document class: CURRENT.** This maintained page reflects the project as it is now; dated sections remain bounded to their stated scope.
+
 For release-by-release feature history, see [CHANGELOG.md](../CHANGELOG.md).
 
 Concrete deployment scenarios for rustbgpd, with architecture, example configs,

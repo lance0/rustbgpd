@@ -1,5 +1,7 @@
 # Fuzzing
 
+> **Document class: CURRENT.** This maintained page reflects the project as it is now; dated sections remain bounded to their stated scope.
+
 rustbgpd fuzzes untrusted decode surfaces with
 [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) (libFuzzer). There are
 six fuzz crates, one per fuzzed workspace crate:
