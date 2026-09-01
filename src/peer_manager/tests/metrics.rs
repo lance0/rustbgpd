@@ -565,16 +565,23 @@ async fn peer_presence_reconfigure_keeps_admin_event_but_stays_presence_silent()
         false,
     );
     seed_peer_metric_series(&metrics_view, "10.0.0.2");
+    // A peer installed through the real path also carries its identity row.
+    mgr.publish_peer_info_metric(&key(peer_addr));
     let before = peer_metric_series_count(&metrics_view, "10.0.0.2");
 
     // Reconfigure routes through the same delete primitive, but the
-    // peer continues to exist — its series and history must survive.
+    // peer continues to exist — its series and history must survive, and
+    // the edited description replaces the identity row in place.
     let mut new_config = make_config(peer_addr, 65002);
     new_config.description = "reshaped".to_string();
     mgr.reconfigure_peer(new_config).await.unwrap();
 
     assert!(mgr.peers.contains_key(&key(peer_addr)));
     assert_eq!(peer_metric_series_count(&metrics_view, "10.0.0.2"), before);
+    assert_eq!(
+        peer_info_series(&metrics_view, "10.0.0.2"),
+        vec![peer_info_labels("65002", "reshaped", "")]
+    );
     assert!(
         rib_rx.try_recv().is_err(),
         "no PeerDeleted on a reconfigure"
@@ -602,6 +609,95 @@ async fn peer_presence_reconfigure_keeps_admin_event_but_stays_presence_silent()
     )
     .await;
     assert_eq!(admin.len(), 1, "reconfigure keeps its incarnation fence");
+}
+
+/// Every `bgp_peer_info` label set carrying `peer`, in label-sorted form.
+fn peer_info_series(metrics: &BgpMetrics, peer: &str) -> Vec<Vec<(String, String)>> {
+    metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .filter(|family| family.name() == "bgp_peer_info")
+        .flat_map(|family| {
+            family
+                .get_metric()
+                .iter()
+                .filter(|metric| {
+                    metric
+                        .get_label()
+                        .iter()
+                        .any(|label| label.name() == "peer" && label.value() == peer)
+                })
+                .map(|metric| {
+                    assert!((metric.get_gauge().value() - 1.0).abs() < f64::EPSILON);
+                    metric
+                        .get_label()
+                        .iter()
+                        .map(|label| (label.name().to_owned(), label.value().to_owned()))
+                        .collect()
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn peer_info_labels(
+    remote_asn: &str,
+    description: &str,
+    peer_group: &str,
+) -> Vec<(String, String)> {
+    [
+        ("description", description),
+        ("interface", ""),
+        ("peer", "10.0.0.2"),
+        ("peer_group", peer_group),
+        ("remote_asn", remote_asn),
+    ]
+    .into_iter()
+    .map(|(name, value)| (name.to_owned(), value.to_owned()))
+    .collect()
+}
+
+#[tokio::test(start_paused = true)]
+async fn peer_info_follows_install_reconfigure_and_delete() {
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let metrics_view = metrics.clone();
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+    );
+    let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let mut config = make_config(peer_addr, 65002);
+    config.description = "Example Member".to_string();
+    mgr.add_peer(config, false).await.unwrap();
+
+    assert_eq!(
+        peer_info_series(&metrics_view, "10.0.0.2"),
+        vec![peer_info_labels("65002", "Example Member", "")]
+    );
+
+    // A description edit routes through reconfigure (delete without reap,
+    // then re-add): the new identity replaces the old row instead of
+    // accumulating beside it.
+    let mut renamed = make_config(peer_addr, 65002);
+    renamed.description = "Renamed Member".to_string();
+    mgr.reconfigure_peer(renamed).await.unwrap();
+    assert_eq!(
+        peer_info_series(&metrics_view, "10.0.0.2"),
+        vec![peer_info_labels("65002", "Renamed Member", "")]
+    );
+
+    mgr.delete_peer(key(peer_addr), false).await.unwrap();
+    assert!(peer_info_series(&metrics_view, "10.0.0.2").is_empty());
+    assert_eq!(peer_metric_series_count(&metrics_view, "10.0.0.2"), 0);
 }
 
 #[test]

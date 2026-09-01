@@ -562,6 +562,7 @@ impl PeerManager {
                 self.peers.insert(peer_key.clone(), managed);
                 self.register_session(session_id, &peer_key);
                 self.sync_owned_session_metrics(&peer_key).await;
+                self.publish_peer_info_metric(&peer_key);
                 self.dynamic_peer_count += 1;
                 self.refresh_dynamic_neighbor_capacity_metrics();
                 // ADR-0112: the accepted child carries the range's pinned

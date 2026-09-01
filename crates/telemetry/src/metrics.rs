@@ -133,6 +133,25 @@ impl Collector for EventOutboxQueueDepthCollector {
     }
 }
 
+/// Longest `description` or `peer_group` label value `bgp_peer_info`
+/// exports, in characters; longer configured values are truncated.
+pub const PEER_INFO_LABEL_MAX_CHARS: usize = 128;
+
+/// Scrub one free-text `bgp_peer_info` label value: drop control
+/// characters (newlines, tabs, escapes), trim surrounding whitespace, and
+/// bound the result to [`PEER_INFO_LABEL_MAX_CHARS`] characters.
+#[must_use]
+pub fn scrub_info_label(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect::<String>()
+        .trim()
+        .chars()
+        .take(PEER_INFO_LABEL_MAX_CHARS)
+        .collect()
+}
+
 /// Canonical `peer` label value: the neighbor's bare IP address.
 ///
 /// **Every** `peer`-labeled series exported by this crate uses this one
@@ -409,6 +428,7 @@ struct BgpMetricsInner {
     peer_admin_enabled: IntGaugeVec,
     peer_session_established: IntGaugeVec,
     peer_session_state: IntGaugeVec,
+    peer_info: IntGaugeVec,
     session_down: IntCounterVec,
     stale_timer_events: IntCounterVec,
     session_notification_outstanding_value: Arc<AtomicI64>,
@@ -762,6 +782,21 @@ impl BgpMetrics {
                 "Active-primary BGP FSM state as an exact six-row one-hot gauge",
             ),
             &["peer", "interface", "state"],
+        )
+        .expect("valid metric definition");
+
+        let peer_info = IntGaugeVec::new(
+            Opts::new(
+                "bgp_peer_info",
+                "Configured peer identity for dashboard and alert joins (always 1)",
+            ),
+            &[
+                "peer",
+                "interface",
+                "remote_asn",
+                "description",
+                "peer_group",
+            ],
         )
         .expect("valid metric definition");
 
@@ -2429,6 +2464,9 @@ impl BgpMetrics {
             .register(Box::new(peer_session_state.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(peer_info.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(session_down.clone()))
             .expect("metric not already registered");
         registry
@@ -2998,6 +3036,7 @@ impl BgpMetrics {
             peer_admin_enabled,
             peer_session_established,
             peer_session_state,
+            peer_info,
             session_down,
             stale_timer_events,
             dynamic_neighbor_slots_used,
@@ -3268,6 +3307,7 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.0.peer_admin_enabled, peer);
         Self::reap_peer_series_from_vec(&self.0.peer_session_established, peer);
         Self::reap_peer_series_from_vec(&self.0.peer_session_state, peer);
+        Self::reap_peer_series_from_vec(&self.0.peer_info, peer);
         Self::reap_peer_series_from_vec(&self.0.session_down, peer);
         Self::reap_peer_series_from_vec(&self.0.stale_timer_events, peer);
         Self::reap_peer_series_from_vec(&self.0.bfd_session_up, peer);
@@ -3396,6 +3436,10 @@ impl BgpMetrics {
         let labels = &[peer, interface];
         let _ = self.0.peer_admin_enabled.remove_label_values(labels);
         let _ = self.0.peer_session_established.remove_label_values(labels);
+        Self::reap_label_series_from_vec(
+            &self.0.peer_info,
+            &[("peer", peer), ("interface", interface)],
+        );
         for state in SESSION_STATES {
             let _ = self
                 .0
@@ -3414,11 +3458,11 @@ impl BgpMetrics {
         vec: &prometheus::core::MetricVec<T>,
         peer: &str,
     ) -> usize {
-        Self::reap_label_series_from_vec(vec, "peer", peer)
+        Self::reap_label_series_from_vec(vec, &[("peer", peer)])
     }
 
-    /// Remove every series of one Vec metric whose `label` label equals
-    /// `value`.
+    /// Remove every series of one Vec metric whose labels equal every
+    /// `(label, value)` pair in `matches`.
     ///
     /// The prometheus crate has no wildcard removal —
     /// `remove_label_values` needs the exact, complete label-value
@@ -3429,8 +3473,7 @@ impl BgpMetrics {
     /// remove them one by one.
     fn reap_label_series_from_vec<T: prometheus::core::MetricVecBuilder>(
         vec: &prometheus::core::MetricVec<T>,
-        label: &str,
-        value: &str,
+        matches: &[(&str, &str)],
     ) -> usize {
         use prometheus::core::Collector;
 
@@ -3442,10 +3485,11 @@ impl BgpMetrics {
         for family in vec.collect() {
             for metric in family.get_metric() {
                 let labels = metric.get_label();
-                if !labels
-                    .iter()
-                    .any(|pair| pair.name() == label && pair.value() == value)
-                {
+                if !matches.iter().all(|(label, value)| {
+                    labels
+                        .iter()
+                        .any(|pair| pair.name() == *label && pair.value() == *value)
+                }) {
                     continue;
                 }
                 // Every declared variable label must be present on the
@@ -3501,6 +3545,38 @@ impl BgpMetrics {
             .peer_admin_enabled
             .with_label_values(&[peer, interface])
             .set(i64::from(enabled));
+    }
+
+    /// Publish the configured identity of one exact `(peer, interface)` peer
+    /// for `group_left` joins from dashboards and alert rules.
+    ///
+    /// Any prior `bgp_peer_info` series for that identity is removed first,
+    /// so a reconfigured description or peer group, or an ASN learned from
+    /// OPEN on an accept-any dynamic range, never leaves a stale identity
+    /// beside the current one. `description` and `peer_group` are scrubbed
+    /// by [`scrub_info_label`].
+    pub fn set_peer_info(
+        &self,
+        peer: &str,
+        interface: &str,
+        remote_asn: u32,
+        description: &str,
+        peer_group: &str,
+    ) {
+        Self::reap_label_series_from_vec(
+            &self.0.peer_info,
+            &[("peer", peer), ("interface", interface)],
+        );
+        self.0
+            .peer_info
+            .with_label_values(&[
+                peer,
+                interface,
+                &remote_asn.to_string(),
+                &scrub_info_label(description),
+                &scrub_info_label(peer_group),
+            ])
+            .set(1);
     }
 
     /// Publish whether the active-primary session is Established.
@@ -5565,9 +5641,12 @@ impl BgpMetrics {
     /// (`BmpManager`'s `Drop`) so a collector that leaves the config does
     /// not keep its series alive in a long-lived registry.
     pub fn reap_bmp_collector_series(&self, collector: &str) {
-        Self::reap_label_series_from_vec(&self.0.bmp_collector_drops, "collector", collector);
-        Self::reap_label_series_from_vec(&self.0.bmp_replay_attempts, "collector", collector);
-        Self::reap_label_series_from_vec(&self.0.bmp_control_event_drops, "collector", collector);
+        Self::reap_label_series_from_vec(&self.0.bmp_collector_drops, &[("collector", collector)]);
+        Self::reap_label_series_from_vec(&self.0.bmp_replay_attempts, &[("collector", collector)]);
+        Self::reap_label_series_from_vec(
+            &self.0.bmp_control_event_drops,
+            &[("collector", collector)],
+        );
     }
 
     // ── Event history outbox (ADR-0072) ─────────────────────────
@@ -6259,6 +6338,63 @@ mod tests {
                 .count(),
             6
         );
+    }
+
+    #[test]
+    fn peer_info_replaces_prior_identity_and_reaps_exactly() {
+        let m = BgpMetrics::new();
+        m.set_peer_info("192.0.2.1", "", 64496, "Example Member", "members");
+        m.set_peer_info("fe80::1", "eth0", 64497, "Scoped A", "");
+        m.set_peer_info("fe80::1", "eth1", 64498, "Scoped B", "");
+
+        let text = gather_text(&m);
+        assert!(text.contains(
+            r#"bgp_peer_info{description="Example Member",interface="",peer="192.0.2.1",peer_group="members",remote_asn="64496"} 1"#
+        ));
+
+        // A reconfigured description and a learned ASN replace the series
+        // for that exact identity instead of accumulating beside it.
+        m.set_peer_info("192.0.2.1", "", 64499, "Renamed Member", "members");
+        let text = gather_text(&m);
+        assert!(!text.contains(r#"description="Example Member""#));
+        assert!(text.contains(
+            r#"bgp_peer_info{description="Renamed Member",interface="",peer="192.0.2.1",peer_group="members",remote_asn="64499"} 1"#
+        ));
+        assert_eq!(text.matches(r"bgp_peer_info{").count(), 3);
+
+        // The exact identity reap spares the scoped sibling; the bare
+        // address reap removes whatever remains for the address.
+        m.reap_peer_identity_series("fe80::1", "eth0");
+        let text = gather_text(&m);
+        assert!(!text.contains(r#"description="Scoped A""#));
+        assert!(text.contains(r#"description="Scoped B""#));
+        m.reap_peer_series("fe80::1");
+        let text = gather_text(&m);
+        assert!(!text.contains(r#"peer="fe80::1""#));
+        assert!(text.contains(r#"description="Renamed Member""#));
+    }
+
+    #[test]
+    fn peer_info_scrubs_control_characters_and_bounds_free_text_labels() {
+        assert_eq!(
+            scrub_info_label("  Example\tMember\n\u{7f} "),
+            "ExampleMember"
+        );
+        assert_eq!(scrub_info_label("\u{1b}[31mred\u{1b}[0m"), "[31mred[0m");
+        assert_eq!(scrub_info_label(""), "");
+        let long = "é".repeat(PEER_INFO_LABEL_MAX_CHARS + 1);
+        let bounded = scrub_info_label(&long);
+        assert_eq!(bounded.chars().count(), PEER_INFO_LABEL_MAX_CHARS);
+        assert_eq!(bounded, "é".repeat(PEER_INFO_LABEL_MAX_CHARS));
+        let exact = "x".repeat(PEER_INFO_LABEL_MAX_CHARS);
+        assert_eq!(scrub_info_label(&exact), exact);
+
+        let m = BgpMetrics::new();
+        m.set_peer_info("192.0.2.1", "", 0, "line one\nline two", "grp\u{0}");
+        let text = gather_text(&m);
+        assert!(text.contains(
+            r#"bgp_peer_info{description="line oneline two",interface="",peer="192.0.2.1",peer_group="grp",remote_asn="0"} 1"#
+        ));
     }
 
     #[test]
@@ -8126,6 +8262,7 @@ mod tests {
         m.set_peer_admin_enabled(peer, "", true);
         m.set_peer_session_established(peer, "", false);
         m.set_peer_session_state(peer, "", "established");
+        m.set_peer_info(peer, "", 64496, "Example Member", "members");
         m.record_session_down(
             peer,
             "",
@@ -8217,9 +8354,9 @@ mod tests {
         let m = BgpMetrics::new();
         populate_all_peer_families(&m, "10.0.0.1");
         populate_all_peer_families(&m, "10.0.0.2");
-        // 68 peer-labeled series; state transitions hold two, while exact
+        // 69 peer-labeled series; state transitions hold two, while exact
         // state and down-reason vocabularies materialize six rows each.
-        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 68);
+        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 69);
 
         m.reap_peer_series("10.0.0.1");
 
@@ -8229,7 +8366,7 @@ mod tests {
             "peer-labeled families not reaped: {leftovers:?}"
         );
         // The other peer's series are untouched.
-        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 68);
+        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 69);
     }
 
     /// Load-bearing finite/unlimited proof: removing either finite gauge
@@ -8473,7 +8610,7 @@ mod tests {
     // `gather()`, so no runtime check can catch one that is added and
     // left unpopulated; this list plus the struct doc comment is the
     // practical ceiling.
-    const PEER_LABELED_FAMILIES: [&str; 57] = [
+    const PEER_LABELED_FAMILIES: [&str; 58] = [
         "bfd_session_flaps_total",
         "bfd_session_up",
         "bgp_as_path_loop_detected_total",
@@ -8503,6 +8640,7 @@ mod tests {
         "bgp_outbound_route_drops_total",
         "bgp_path_attribute_discarded_total",
         "bgp_peer_admin_enabled",
+        "bgp_peer_info",
         "bgp_peer_outbound_queue_depth",
         "bgp_peer_session_established",
         "bgp_peer_session_state",

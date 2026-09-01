@@ -62,6 +62,22 @@ impl PeerManager {
         );
     }
 
+    /// Publish the `bgp_peer_info` identity join series from the installed
+    /// [`ManagedPeer`]. A peer that has gone away is skipped; its series are
+    /// dropped by the identity and bare-address reaps on removal.
+    pub(super) fn publish_peer_info_metric(&self, peer: &PeerKey) {
+        let Some(managed) = self.peers.get(peer) else {
+            return;
+        };
+        self.metrics.set_peer_info(
+            &rustbgpd_telemetry::peer_label(peer.address),
+            peer.interface.as_deref().unwrap_or(""),
+            managed.remote_asn,
+            &managed.description,
+            managed.peer_group.as_deref().unwrap_or(""),
+        );
+    }
+
     pub(super) fn seed_peer_truth_metrics(&self, peer: &PeerKey, enabled: bool) {
         let peer_label = rustbgpd_telemetry::peer_label(peer.address);
         let interface = peer.interface.as_deref().unwrap_or("");
@@ -749,6 +765,7 @@ impl PeerManager {
         );
         self.register_session(session_id, &peer_key);
         self.sync_owned_session_metrics(&peer_key).await;
+        self.publish_peer_info_metric(&peer_key);
 
         if let Some(next_config) = next_config {
             self.current_config = next_config;

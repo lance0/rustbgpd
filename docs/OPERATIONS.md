@@ -985,12 +985,18 @@ families keyed by other identities (AFI/SAFI, VRF, VNI, BMP collector) are
 never removed.
 
 The exact `bgp_peer_admin_enabled{peer,interface}`,
-`bgp_peer_session_established{peer,interface}`, and
-`bgp_peer_session_state{peer,interface,state}` identity is removed after its
-session actor terminates, including abort-on-timeout teardown. Its matching
-`bgp_session_down_total{peer,interface,reason}` history is reaped at the same
-identity boundary. If a scoped sibling shares the bare address, its exact rows
-and the shared bare-address history remain.
+`bgp_peer_session_established{peer,interface}`,
+`bgp_peer_session_state{peer,interface,state}`, and
+`bgp_peer_info{peer,interface,remote_asn,description,peer_group}` identity is
+removed after its session actor terminates, including abort-on-timeout
+teardown. Its matching `bgp_session_down_total{peer,interface,reason}` history
+is reaped at the same identity boundary. If a scoped sibling shares the bare
+address, its exact rows and the shared bare-address history remain.
+
+`bgp_peer_info` holds exactly one row per exact `(peer, interface)` identity.
+Editing a neighbor's description or peer group, or learning the ASN from OPEN
+on an accept-any dynamic range, replaces that row rather than adding a second
+one beside it, so `group_left` joins never match two identities for one peer.
 
 ### Health
 
@@ -999,6 +1005,7 @@ and the shared bare-address history remain.
 | `bgp_peer_admin_enabled{peer,interface}` | Authoritative configured administrative intent: 1 enabled, 0 disabled |
 | `bgp_peer_session_established{peer,interface}` | Current active-primary session truth: 1 Established, 0 otherwise |
 | `bgp_peer_session_state{peer,interface,state}` | Exact active-primary one-hot FSM state; `state` is `idle`, `connect`, `active`, `open_sent`, `open_confirm`, or `established` |
+| `bgp_peer_info{peer,interface,remote_asn,description,peer_group}` | Configured identity of each exact peer, always `1`. Join it onto any per-peer family with `* on (instance, peer, interface) group_left(remote_asn, description, peer_group) bgp_peer_info` so dashboards and alerts name the member instead of the bare address. `remote_asn` is the configured ASN, or the ASN learned from OPEN for an accept-any dynamic range (`0` until then); `description` falls back to the neighbor address when none is configured, and dynamic peers without a range description carry `dynamic:<peer_group>`; `peer_group` is empty for ungrouped neighbors. `description` and `peer_group` are scrubbed — control characters dropped, surrounding whitespace trimmed, and bounded to 128 characters |
 | `bgp_session_established_total` | Cumulative sessions that reached Established (per-process counter; resets on restart) |
 | `bgp_session_flaps_total` | Cumulative session flaps |
 | `bgp_session_down_total{peer,interface,reason}` | Established active-primary sessions that ended. `local_notification` means a locally initiated NOTIFICATION teardown even if best-effort delivery failed; `remote_notification` means a received NOTIFICATION; `local_no_notification` includes forced local close such as send-hold expiry; `remote_no_notification` means remote TCP close without a NOTIFICATION; the remaining bounded values are `transport_error` and defensive `unknown`. |

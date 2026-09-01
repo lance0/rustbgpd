@@ -470,6 +470,14 @@ TARGETS = {
     ("BLACKHOLE active rows", "A"): (
         'bgp_blackhole_discard_active{instance=~"$instance"}'
     ),
+    ("Peer identity", "A"): (
+        'bgp_peer_info{instance=~"$instance",peer=~"$peer"}'
+    ),
+    ("Session truth by member identity", "A"): (
+        'bgp_peer_session_established{instance=~"$instance",peer=~"$peer"} '
+        "* on (instance, peer, interface) group_left(remote_asn, description) "
+        'bgp_peer_info{instance=~"$instance",peer=~"$peer"}'
+    ),
 }
 
 REQUIRED_LEGENDS = {
@@ -508,6 +516,9 @@ REQUIRED_LEGENDS = {
     ("BLACKHOLE discard activity", "A"): "{{instance}} installed/s",
     ("BLACKHOLE discard activity", "B"): "{{instance}} withdrawn/s",
     ("BLACKHOLE active rows", "A"): "{{instance}} active",
+    ("Session truth by member identity", "A"): (
+        "{{description}} AS{{remote_asn}} {{peer}} {{interface}}"
+    ),
 }
 
 ROUTE_SAFETY_PANELS = {
@@ -1311,6 +1322,34 @@ def main() -> None:
     }
     if active_options != expected_active_options:
         fail("BLACKHOLE active rows must retain its exact stat reduction options")
+
+    identity_panel = next(
+        (panel for panel in panels if panel.get("title") == "Peer identity"
+         and panel.get("type") != "row"),
+        None,
+    )
+    if identity_panel is None or identity_panel.get("type") != "table":
+        fail("peer identity must be a discrete table panel")
+    identity_target = identity_panel["targets"][0]
+    if identity_target.get("format") != "table" or identity_target.get("instant") is not True:
+        fail("peer identity target must be an instant table query")
+
+    member_panel = next(
+        (panel for panel in panels
+         if panel.get("title") == "Session truth by member identity"),
+        None,
+    )
+    if member_panel is None or member_panel.get("type") != "timeseries":
+        fail("session truth by member identity must be a timeseries panel")
+    member_defaults = member_panel.get("fieldConfig", {}).get("defaults", {})
+    if (
+        member_defaults.get("decimals") != 0
+        or member_defaults.get("min") != 0
+        or member_defaults.get("max") != 1
+    ):
+        fail("session truth by member identity must be pinned to whole 0..1 values")
+    if member_defaults.get("custom", {}).get("lineInterpolation") != "stepAfter":
+        fail("session truth by member identity must use step interpolation")
 
     try:
         references = dashboard_metric_references(dashboard)

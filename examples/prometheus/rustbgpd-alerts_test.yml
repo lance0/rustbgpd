@@ -364,7 +364,9 @@ tests:
 
   # Current-truth matrix for BgpSessionNotEstablished. Historical counters
   # cannot suppress or fabricate the level alert, and interface identity keeps
-  # scoped siblings independent.
+  # scoped siblings independent. Only 192.0.2.10 carries a `bgp_peer_info`
+  # row: its alert must carry the identity labels exactly once, while the
+  # peers without a row must still fire without them.
   - interval: 1m
     input_series:
       # Enabled and never Established.
@@ -372,6 +374,8 @@ tests:
         values: "1x6"
       - series: 'bgp_peer_session_established{peer="192.0.2.10", interface="", instance="edge1:9179"}'
         values: "0x6"
+      - series: 'bgp_peer_info{peer="192.0.2.10", interface="", remote_asn="64496", description="Example Member", peer_group="members", instance="edge1:9179"}'
+        values: "1x6"
       # Established previously, now down.
       - series: 'bgp_peer_admin_enabled{peer="192.0.2.11", interface="", instance="edge1:9179"}'
         values: "1x6"
@@ -416,6 +420,9 @@ tests:
               severity: critical
               peer: 192.0.2.10
               instance: edge1:9179
+              remote_asn: "64496"
+              description: Example Member
+              peer_group: members
             exp_annotations:
               summary: "BGP session to 192.0.2.10 not Established"
               description: >-
