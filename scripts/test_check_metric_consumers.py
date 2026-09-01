@@ -57,7 +57,7 @@ class MetricConsumerContractTests(unittest.TestCase):
         )
         self.assertEqual(len(CHECK.PROCESS_FAMILIES), 7)
         self.assertEqual(len(self.dashboard_refs), 97)
-        self.assertEqual(len(self.rule_refs), 42)
+        self.assertEqual(len(self.rule_refs), 43)
         self.assertEqual(len(self.public_doc_refs), 193)
         self.assertEqual(len(self.doc_refs), 193)
         consumers = self.dashboard_refs | self.rule_refs | self.doc_refs

@@ -96,6 +96,32 @@ groups:
             daemon exits independently when the 30-minute budget plus
             five-second grace expires.
 
+      - alert: BgpSighupReloadKnownPartial
+        expr: >-
+          increase(bgp_sighup_reload_outcomes_total{outcome="known_partial"}[10m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SIGHUP reload completed with partial runtime authority"
+          description: >-
+            A SIGHUP reload on {{ $labels.instance }} reached an authoritative
+            partial result in the last 10 minutes. Inspect the reload logs,
+            correct the reported cause, and reload again to converge.
+
+      - alert: BgpSighupReloadTaskFailed
+        expr: >-
+          increase(bgp_sighup_reload_outcomes_total{outcome="task_failed"}[10m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "SIGHUP reload task failed"
+          description: >-
+            The retained SIGHUP reload task on {{ $labels.instance }} failed in
+            the last 10 minutes. Inspect daemon health and reload logs before
+            attempting another configuration change.
+
       - alert: BgpSessionNotEstablished
         # Exact configured identity join: catches enabled peers that have never
         # Established as well as peers that established previously and went
