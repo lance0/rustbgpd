@@ -301,9 +301,9 @@ async fn reserve_config_event_slot(
     let permit = tokio::time::timeout(CONFIG_PERSIST_RESERVE_TIMEOUT, tx.reserve_owned())
         .await
         .map_err(|_| {
-            Status::internal("config persistence queue busy — refusing mutation to avoid drift")
+            Status::unavailable("config persistence queue busy — refusing mutation to avoid drift")
         })?
-        .map_err(|_| Status::internal("config persistence unavailable"))?;
+        .map_err(|_| Status::unavailable("config persistence unavailable"))?;
 
     Ok(Some(permit))
 }
@@ -783,6 +783,23 @@ mod tests {
     use crate::proto::peer_group_service_server::PeerGroupService as PeerGroupServiceRpc;
     use tokio::sync::mpsc::error::TryRecvError;
 
+    #[tokio::test(start_paused = true)]
+    async fn config_persistence_admission_failures_are_unavailable() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let error = reserve_config_event_slot(Some(tx)).await.unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert_eq!(error.message(), "config persistence unavailable");
+
+        let (tx, _rx) = mpsc::channel(1);
+        let _permit = tx.clone().reserve_owned().await.unwrap();
+        let error = reserve_config_event_slot(Some(tx)).await.unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert_eq!(
+            error.message(),
+            "config persistence queue busy — refusing mutation to avoid drift"
+        );
+    }
     fn sample_definition() -> proto::PeerGroupDefinition {
         proto::PeerGroupDefinition {
             families: vec!["ipv4_unicast".into()],
