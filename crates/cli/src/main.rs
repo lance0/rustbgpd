@@ -2399,6 +2399,33 @@ fn validate_neighbor_compare_action(command: &Command) -> Result<(), CliError> {
     }
 }
 
+fn validate_local_command(command: &Command) -> Result<(), CliError> {
+    match command {
+        Command::Top { interval } if !(1..=60).contains(interval) => Err(CliError::Argument(
+            "interval must be between 1 and 60 seconds".into(),
+        )),
+        Command::Policy {
+            action:
+                PolicyAction::Chain {
+                    action: PolicyChainAction::SetImport { policies, .. },
+                },
+        } if policies.is_empty() => Err(CliError::Argument(
+            "set-import requires at least one policy name; use clear-import to drop the chain"
+                .into(),
+        )),
+        Command::Policy {
+            action:
+                PolicyAction::Chain {
+                    action: PolicyChainAction::SetExport { policies, .. },
+                },
+        } if policies.is_empty() => Err(CliError::Argument(
+            "set-export requires at least one policy name; use clear-export to drop the chain"
+                .into(),
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// Render the whole CLI as one comprehensive `rbgp.1`: the top-level
 /// page, a short SUBCOMMANDS index, then a SYNOPSIS/DESCRIPTION/OPTIONS
 /// block for every subcommand recursively ("RBGP NEIGHBOR DRAIN" style
@@ -2656,6 +2683,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
     validate_rib_count_action(&cli.command)?;
     validate_rib_age_action(&cli.command)?;
     validate_rib_route_view_action(&cli.command)?;
+    validate_local_command(&cli.command)?;
     if let Command::Events {
         action:
             Some(EventsAction::Watch {
@@ -3611,11 +3639,6 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             if json {
                 eprintln!("warning: --json has no effect on `top`; it is an interactive TUI");
             }
-            if !(1..=60).contains(&interval) {
-                return Err(CliError::Argument(
-                    "interval must be between 1 and 60 seconds".into(),
-                ));
-            }
             tui::run(connection, interval).await
         }
         Command::Policy { action } => match action {
@@ -3671,11 +3694,6 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     commands::policy::chain_show(connection, neighbor.as_deref(), json).await
                 }
                 PolicyChainAction::SetImport { neighbor, policies } => {
-                    if policies.is_empty() {
-                        return Err(CliError::Argument(
-                            "set-import requires at least one policy name; use clear-import to drop the chain".into(),
-                        ));
-                    }
                     commands::policy::chain_set(
                         connection,
                         commands::policy::ChainDirection::Import,
@@ -3686,11 +3704,6 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     .await
                 }
                 PolicyChainAction::SetExport { neighbor, policies } => {
-                    if policies.is_empty() {
-                        return Err(CliError::Argument(
-                            "set-export requires at least one policy name; use clear-export to drop the chain".into(),
-                        ));
-                    }
                     commands::policy::chain_set(
                         connection,
                         commands::policy::ChainDirection::Export,
@@ -6884,6 +6897,50 @@ printf '%s\n' "${COMPREPLY[@]}"
             assert_eq!(policies, vec!["p1".to_string(), "p2".to_string()]);
         } else {
             panic!("expected Policy Chain SetImport");
+        }
+    }
+
+    #[test]
+    fn local_command_validation_accepts_boundaries() {
+        for args in [
+            "rbgp top --interval 1",
+            "rbgp top --interval 60",
+            "rbgp policy chain set-import import-policy",
+            "rbgp policy chain set-export export-policy fallback-policy",
+        ] {
+            let cli = Cli::try_parse_from(args.split_whitespace()).unwrap();
+            validate_local_command(&cli.command)
+                .unwrap_or_else(|error| panic!("valid command rejected for {args}: {error}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn local_argument_errors_fail_before_transport() {
+        for (args, expected) in [
+            (
+                "top --interval 0",
+                "interval must be between 1 and 60 seconds",
+            ),
+            (
+                "top --interval 61",
+                "interval must be between 1 and 60 seconds",
+            ),
+            (
+                "policy chain set-import",
+                "set-import requires at least one policy name; use clear-import to drop the chain",
+            ),
+            (
+                "policy chain set-export",
+                "set-export requires at least one policy name; use clear-export to drop the chain",
+            ),
+        ] {
+            let command = format!("rbgp --addr http://127.0.0.1:1 {args}");
+            let cli = Cli::try_parse_from(command.split_whitespace()).unwrap();
+            assert_eq!(
+                run(cli, BINARY_NAME).await.unwrap_err().to_string(),
+                expected,
+                "{args} reached transport instead of local validation"
+            );
         }
     }
 

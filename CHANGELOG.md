@@ -57,6 +57,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Invalid TUI intervals and empty policy-chain replacements now fail locally
+  before the CLI attempts to connect to the daemon.
+
 - The CLI now preserves actionable daemon reasons on mid-RPC gRPC
   `UNAVAILABLE` responses instead of replacing them with a generic diagnostic.
 

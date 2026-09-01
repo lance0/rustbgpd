@@ -801,7 +801,7 @@ fn every_activation_test_acquires_the_process_guard_first() {
             );
         })
         .count();
-    assert_eq!(tests, 13);
+    assert_eq!(tests, 14);
 }
 
 mod prune {
