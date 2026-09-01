@@ -836,8 +836,8 @@ systemd's `Restart=on-failure`. If the config moves the socket, set
   default); if your config moves the socket, set `RUSTBGPD_ADDR` on
   the container to match.
 
-- **Logs**: structured JSON when `[global.telemetry] log_format =
-  "json"` is set; pipe to your log aggregator.
+- **Logs**: `[global.telemetry] log_format = "json"` is required and emits
+  structured JSON; pipe it to your log aggregator.
 
 - **Networking**: Linux FIB integration and BFD require access to the network
   namespace they operate on. For host addresses, use the [root host-network
@@ -1412,8 +1412,9 @@ short version for first deployment:
 
 For deeper investigation, raise the daemon log level globally with the
 `RUST_LOG` environment variable — there is no log-level key in
-`[global.telemetry]`; `log_format` selects the output format, not the
-verbosity. Under systemd, set it in the unit's `[Service]` section:
+`[global.telemetry]`; `log_format` does not select among formats: `"json"` is
+the only accepted value. It does not control verbosity. Under systemd, set the
+log level in the unit's `[Service]` section:
 
 ```ini
 [Service]

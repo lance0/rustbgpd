@@ -1041,7 +1041,7 @@ router_id = "10.0.0.1"
 listen_port = 1179
 
 [global.telemetry]
-log_format = "plain"
+log_format = "json"
 
 [[neighbors]]
 address = "192.0.2.1"
@@ -1196,7 +1196,7 @@ router_id = "10.0.0.1"
 listen_port = 1179
 
 [global.telemetry]
-log_format = "plain"
+log_format = "json"
 
 [[neighbors]]
 address = "192.0.2.1"

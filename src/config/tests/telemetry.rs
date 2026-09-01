@@ -1,6 +1,31 @@
 use super::*;
 
 #[test]
+fn log_format_is_json_only() {
+    let source = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+"#;
+    let invalid = source.replace("log_format = \"json\"", "log_format = \"plain\"");
+    let error = parse(&invalid).unwrap_err().to_string();
+    assert!(error.contains("unknown variant"), "{error}");
+    assert!(error.contains("json"), "{error}");
+
+    let telemetry = parse(source).unwrap().global.telemetry;
+    let encoded = toml::to_string(&telemetry).unwrap();
+    assert!(encoded.contains("log_format = \"json\""));
+    assert_eq!(
+        toml::from_str::<TelemetryConfig>(&encoded).unwrap(),
+        telemetry
+    );
+}
+
+#[test]
 fn bmp_valid_config_accepted() {
     let config = parse(&bmp_toml("")).unwrap();
     let bmp = config.bmp.as_ref().unwrap();
