@@ -1336,10 +1336,16 @@ any `WatchEvents` subscriber is alive.
    reason; fix permissions / free disk / restore from backup, then
    restart. Pre-1.0, `required = true` is the strictest posture — the
    daemon refuses to start when the outbox cannot be opened.
-3. EHM dropped into pass-through mode at runtime because the
-   allocator anchor became unrecoverable (e.g. a moved
-   `.stale-<ts>` quarantine file with no sidecar fallback). Same
-   recovery: check log, fix the underlying I/O issue, restart.
+3. Event-history startup failed because the allocator anchor was unrecoverable
+   (for example, a moved `.stale-<ts>` quarantine file with no sidecar
+   fallback). With `required = false`, the daemon continues live-only without
+   EHM; with `required = true`, startup fails. Check the startup log, fix the
+   underlying I/O issue, and restart.
+
+**`UNAVAILABLE` during `SubscribeFromEvent` replay** means the storage actor
+stopped accepting work or failed to reply. Inspect daemon health and logs,
+restart if necessary, and resume from the last received top-level `event_id`.
+Events already delivered remain valid; the terminal status is emitted once.
 
 **Sizing retention** — `max_events` and `max_bytes` are retention targets
 evaluated during each scheduled pass. The count target is evaluated first and

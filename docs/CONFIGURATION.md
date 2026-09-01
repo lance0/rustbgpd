@@ -4256,12 +4256,11 @@ NATS / Vector / journald sink, then persist
 durable receipt. See `OPERATIONS.md` "Durable Event Cursor"
 for the alert + sizing playbook.
 
-When `enabled = false`, when EHM failed to start with
-`required = false`, or when EHM dropped into pass-through
-mode at runtime, `SubscribeFromEvent` returns
+When `enabled = false` or EHM failed to start with
+`required = false`, `SubscribeFromEvent` returns
 `FAILED_PRECONDITION`. The live `WatchEvents`
 and `List*Events` surfaces are byte-identical
-to pre-ADR-0072 behavior in all three cases — they're
+to pre-ADR-0072 behavior in both cases — they're
 backed by the existing in-memory rings.
 
 **Producer set:** route, EVPN, session-lifecycle,

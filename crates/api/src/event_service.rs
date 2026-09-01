@@ -595,11 +595,11 @@ impl proto::event_service_server::EventService for EventService {
     /// the gap.
     ///
     /// When the daemon was started with `[event_history].enabled =
-    /// false`, when EHM failed to start with
-    /// `required = false`, or when EHM dropped into pass-through
-    /// mode at runtime, returns `Status::failed_precondition`. The
-    /// live `WatchEvents` / `List*Events` surfaces continue to work
-    /// in all those cases.
+    /// false` or EHM failed to start with `required = false`, returns
+    /// `Status::failed_precondition`. Replay storage interruption
+    /// returns `Status::unavailable` unless post-admission producer
+    /// loss takes `Status::data_loss` precedence. The live
+    /// `WatchEvents` / `List*Events` surfaces continue to work.
     async fn subscribe_from_event(
         &self,
         request: Request<proto::SubscribeFromEventRequest>,
@@ -607,10 +607,10 @@ impl proto::event_service_server::EventService for EventService {
         let req = request.into_inner();
         let handle = self.event_history.as_ref().ok_or_else(|| {
             Status::failed_precondition(
-                "durable event history is disabled; \
-                 set [event_history].enabled = true and restart the daemon \
-                 for restart-safe cursor replay (off by default since v0.32.0). \
-                 If enabled, check the bgp_event_outbox_degraded gauge",
+                "durable event history is not active; \
+                 set [event_history].enabled = true and restart the daemon if disabled. \
+                 If already enabled, inspect startup logs and the \
+                 bgp_event_outbox_degraded gauge",
             )
         })?;
         let stream = cursor::subscribe(handle, &req, self.metrics.clone())?;
@@ -2747,7 +2747,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subscribe_from_event_unavailable_returns_failed_precondition() {
+    async fn subscribe_from_event_without_history_returns_failed_precondition() {
         // EventService constructed without `with_event_history` ⇒
         // handle is None ⇒ the handler returns FAILED_PRECONDITION
         // and the legacy WatchEvents surface is unaffected.
@@ -2764,11 +2764,15 @@ mod tests {
             .await
         {
             Ok(_) => panic!("subscribe_from_event must error when EHM is None"),
-            Err(status) => assert_eq!(
-                status.code(),
-                tonic::Code::FailedPrecondition,
-                "expected FAILED_PRECONDITION when event_history handle is None"
-            ),
+            Err(status) => {
+                assert_eq!(
+                    status.code(),
+                    tonic::Code::FailedPrecondition,
+                    "expected FAILED_PRECONDITION when event_history handle is None"
+                );
+                assert!(status.message().contains("not active"));
+                assert!(status.message().contains("If already enabled"));
+            }
         }
 
         // Legacy WatchEvents is unaffected: it still returns a stream.

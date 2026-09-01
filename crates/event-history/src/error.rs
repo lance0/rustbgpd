@@ -43,6 +43,10 @@ pub enum EventHistoryError {
         source: std::io::Error,
     },
 
+    /// The storage actor stopped accepting work or dropped a reply.
+    #[error("event-history storage unavailable")]
+    StorageUnavailable,
+
     /// EHM has been driven into pass-through mode (allocator anchor
     /// unrecoverable) and refuses to issue new event_ids. Operator
     /// resolves explicitly via `rbgp event-history reset-allocator`

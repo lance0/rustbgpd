@@ -56,6 +56,9 @@ async fn drain_subscription(
             Ok(Some(EventSubscriptionItem::RetentionGap(missed))) => {
                 panic!("unexpected retention-gap signal while draining: missed={missed}")
             }
+            Ok(Some(EventSubscriptionItem::Error(err))) => {
+                panic!("unexpected subscription error while draining: {err}")
+            }
             Ok(None) => break,
             Err(_) => break,
         }
@@ -71,6 +74,9 @@ async fn drain_subscription(
                 }
                 Ok(Some(EventSubscriptionItem::RetentionGap(missed))) => {
                     panic!("unexpected retention-gap signal while draining: missed={missed}")
+                }
+                Ok(Some(EventSubscriptionItem::Error(err))) => {
+                    panic!("unexpected subscription error while draining: {err}")
                 }
                 Ok(None) | Err(_) => break,
             }
@@ -483,6 +489,9 @@ async fn retention_gap_emits_as_leading_subscription_item_race_free() {
         }
         EventSubscriptionItem::Lagged(n) => {
             panic!("expected leading RetentionGap, got Lagged({n})")
+        }
+        EventSubscriptionItem::Error(err) => {
+            panic!("expected leading RetentionGap, got subscription error: {err}")
         }
     };
     assert_eq!(

@@ -760,8 +760,9 @@ impl EventHistoryHandle {
     ///
     /// # Errors
     ///
-    /// Returns [`EventHistoryError::PassThrough`] when the storage
-    /// thread has exited or EHM is in pass-through mode.
+    /// Returns [`EventHistoryError::PassThrough`] when EHM is in
+    /// pass-through mode, or [`EventHistoryError::StorageUnavailable`]
+    /// when the storage thread has exited.
     pub async fn oldest_retained_event_id(&self) -> Result<Option<u64>, EventHistoryError> {
         if self.state.pass_through() {
             return Err(EventHistoryError::PassThrough);
@@ -996,8 +997,8 @@ impl EventHistoryManager {
     ///
     /// # Errors
     ///
-    /// Returns [`EventHistoryError::PassThrough`] when the storage
-    /// thread has exited.
+    /// Returns [`EventHistoryError::StorageUnavailable`] when the
+    /// storage thread has exited.
     pub async fn run_retention_pass(&self) -> Result<RetentionOutcome, EventHistoryError> {
         self.storage.retain(self.max_events, self.max_bytes).await
     }

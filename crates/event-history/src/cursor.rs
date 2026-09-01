@@ -154,6 +154,9 @@ impl SubscribeStats {
 /// Item produced by a durable cursor subscription.
 pub enum EventSubscriptionItem {
     Event(CommittedEvent),
+    /// Terminal replay failure. Consumers should surface the status
+    /// once, then stop reading the stream.
+    Error(EventHistoryError),
     /// The per-subscriber broadcast receiver fell behind the live
     /// stream. The producing path is EHM's broadcast; gRPC translates
     /// this to a `StreamLagEvent` payload.
@@ -307,6 +310,7 @@ async fn run_subscription(
                     Ok(o) => o,
                     Err(e) => {
                         warn!(error = %e, "replay first-chunk query failed; aborting subscription");
+                        let _ = out_tx.send(EventSubscriptionItem::Error(e)).await;
                         return;
                     }
                 };
@@ -324,6 +328,7 @@ async fn run_subscription(
                     Ok(r) => r,
                     Err(e) => {
                         warn!(error = %e, "replay chunk query failed; aborting subscription");
+                        let _ = out_tx.send(EventSubscriptionItem::Error(e)).await;
                         return;
                     }
                 }
@@ -457,6 +462,43 @@ async fn emit_retention_gap(out_tx: &mpsc::Sender<EventSubscriptionItem>, missed
 mod tests {
     use super::*;
     use crate::{Category, Severity};
+
+    #[tokio::test]
+    async fn replay_query_failures_emit_one_terminal_error() {
+        for failure in [
+            crate::storage::TestQueryFailure::FirstReply,
+            crate::storage::TestQueryFailure::LaterReply,
+        ] {
+            let (_live_tx, live_rx) = broadcast::channel(1);
+            let (out_tx, mut out_rx) = mpsc::channel(2);
+            run_subscription(
+                SubscribeRequest {
+                    from_event_id: Some(0),
+                    ..SubscribeRequest::default()
+                },
+                2,
+                crate::storage::StoreHandle::test_query_failure(failure),
+                live_rx,
+                out_tx,
+                Arc::new(SubscribeStats::default()),
+            )
+            .await;
+
+            if failure == crate::storage::TestQueryFailure::LaterReply {
+                assert!(matches!(
+                    out_rx.recv().await,
+                    Some(EventSubscriptionItem::Event(_))
+                ));
+            }
+            assert!(matches!(
+                out_rx.recv().await,
+                Some(EventSubscriptionItem::Error(
+                    EventHistoryError::StorageUnavailable
+                ))
+            ));
+            assert!(out_rx.recv().await.is_none());
+        }
+    }
 
     fn make_committed(event_id: u64, category: Category) -> CommittedEvent {
         make_committed_with_peers(event_id, category, crate::EnvelopePeers::default())

@@ -389,6 +389,9 @@ pub(crate) fn map_ehm_err_to_status(err: EventHistoryError) -> Status {
             "event history in pass-through mode; durable cursor unavailable \
              — see [event_history].required + the bgp_event_outbox_degraded gauge",
         ),
+        EventHistoryError::StorageUnavailable => Status::unavailable(
+            "event-history storage unavailable; resume from the last received event_id",
+        ),
         other => Status::internal(format!("event history error: {other}")),
     }
 }
@@ -488,6 +491,11 @@ async fn run_drain(
             }
         };
         let event = match item {
+            EventSubscriptionItem::Error(err) => {
+                let _ =
+                    send_with_loss(Err(map_ehm_err_to_status(err)), &out_tx, &mut loss_rx).await;
+                return;
+            }
             EventSubscriptionItem::Event(committed) => {
                 if !filter.matches_committed(&committed) {
                     continue;
@@ -626,6 +634,61 @@ pub(crate) fn subscribe(
 mod tests {
     use super::*;
 
+    #[test]
+    fn event_history_availability_errors_keep_distinct_statuses() {
+        assert_eq!(
+            map_ehm_err_to_status(EventHistoryError::StorageUnavailable).code(),
+            tonic::Code::Unavailable
+        );
+        assert_eq!(
+            map_ehm_err_to_status(EventHistoryError::PassThrough).code(),
+            tonic::Code::FailedPrecondition
+        );
+    }
+
+    #[tokio::test]
+    async fn storage_failure_is_terminal_and_shutdown_is_clean() {
+        let filter = ProtoFilter::from_request(&proto::SubscribeFromEventRequest::default())
+            .expect("wildcard filter");
+        let (committed_tx, committed_rx) = mpsc::channel(1);
+        committed_tx
+            .send(EventSubscriptionItem::Error(
+                EventHistoryError::StorageUnavailable,
+            ))
+            .await
+            .unwrap();
+        let (out_tx, mut out_rx) = mpsc::channel(1);
+        let (_loss_tx, loss_rx) = watch::channel(0_u64);
+        run_drain(
+            filter.clone(),
+            Some(7),
+            committed_rx,
+            out_tx,
+            loss_rx,
+            BgpMetrics::new(),
+        )
+        .await;
+        let status = out_rx.recv().await.unwrap().unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+        assert!(status.message().contains("last received event_id"));
+        assert!(out_rx.recv().await.is_none());
+
+        let (committed_tx, committed_rx) = mpsc::channel(1);
+        drop(committed_tx);
+        let (out_tx, mut out_rx) = mpsc::channel(1);
+        let (_loss_tx, loss_rx) = watch::channel(0_u64);
+        run_drain(
+            filter,
+            None,
+            committed_rx,
+            out_tx,
+            loss_rx,
+            BgpMetrics::new(),
+        )
+        .await;
+        assert!(out_rx.recv().await.is_none());
+    }
+
     #[tokio::test]
     async fn producer_loss_preempts_blocked_cursor_delivery() {
         // Load-bearing breaks: reversing baseline/admission hides the first loss;
@@ -645,7 +708,9 @@ mod tests {
             .expect("wildcard filter");
         let (committed_tx, committed_rx) = mpsc::channel(1);
         committed_tx
-            .try_send(EventSubscriptionItem::RetentionGap(1))
+            .try_send(EventSubscriptionItem::Error(
+                EventHistoryError::StorageUnavailable,
+            ))
             .unwrap();
         let (out_tx, mut out_rx) = mpsc::channel(1);
         out_tx.try_send(Ok(proto::BgpEvent::default())).unwrap();
