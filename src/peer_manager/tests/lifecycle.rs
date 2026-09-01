@@ -1,5 +1,68 @@
 use super::*;
 
+/// `reset_peer` retires any pending inbound collision candidate before the
+/// enabled primary receives one `AdministrativeReset`; the peer stays enabled,
+/// and unknown or disabled peers are refused without any session command.
+#[tokio::test]
+async fn reset_peer_sends_administrative_reset_and_keeps_peer_enabled() {
+    let mut mgr = test_peer_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let counters = Arc::new(FakePeerCounters::default());
+    let pending = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer(
+        &mut mgr,
+        addr,
+        fake_peer_handle(
+            addr,
+            SessionState::Established,
+            Some(Ipv4Addr::new(10, 0, 0, 2)),
+            counters.clone(),
+        ),
+        false,
+    );
+    attach_test_pending_inbound(
+        &mut mgr,
+        addr,
+        fake_peer_handle(
+            addr,
+            SessionState::OpenConfirm,
+            Some(Ipv4Addr::new(10, 0, 0, 2)),
+            pending.clone(),
+        ),
+        2,
+    );
+
+    let reason = Some(rustbgpd_wire::notification::encode_shutdown_communication(
+        "maintenance",
+    ));
+    mgr.reset_peer(key(addr), reason).await.unwrap();
+    wait_counter(&pending.shutdown, 1).await;
+    wait_counter(&counters.administrative_reset, 1).await;
+    assert_eq!(counters.stop.load(Ordering::SeqCst), 0);
+    assert_eq!(counters.shutdown.load(Ordering::SeqCst), 0);
+    assert_eq!(pending.administrative_reset.load(Ordering::SeqCst), 0);
+    assert_eq!(pending.stop.load(Ordering::SeqCst), 0);
+    let managed = &mgr.peers[&key(addr)];
+    assert!(managed.enabled);
+    assert!(managed.pending_inbound.is_none());
+    assert_eq!(managed.session_id, 1);
+    assert_eq!(mgr.peer_key_for_session(1), Some(key(addr)));
+    assert!(mgr.peer_key_for_session(2).is_none());
+
+    let missing = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    assert!(matches!(
+        mgr.reset_peer(key(missing), None).await,
+        Err(rustbgpd_api::peer_types::PeerLifecycleError::NotFound(_))
+    ));
+
+    mgr.peers.get_mut(&key(addr)).unwrap().enabled = false;
+    assert!(matches!(
+        mgr.reset_peer(key(addr), None).await,
+        Err(rustbgpd_api::peer_types::PeerLifecycleError::RestartRequired(_))
+    ));
+    assert_eq!(counters.administrative_reset.load(Ordering::SeqCst), 1);
+}
+
 #[tokio::test(start_paused = true)]
 async fn manager_shutdown_bounds_many_stalled_peers_by_concurrent_waves() {
     let (tx, rx) = mpsc::channel(1);

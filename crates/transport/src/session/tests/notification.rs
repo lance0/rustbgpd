@@ -712,6 +712,87 @@ async fn purge_reset_sends_administrative_reset_or_hard_reset_and_forces_peer_do
     }
 }
 
+/// An operator reset is a NOTIFICATION teardown that leaves administrative
+/// state alone: Cease/Administrative Reset carries the communication (wrapped
+/// in Cease/Hard Reset when the peer negotiated Notification GR), the actor
+/// keeps running, and the Idle transition arms the ordinary reconnect timer.
+#[tokio::test]
+async fn administrative_reset_sends_cease_with_reason_and_arms_reconnect() {
+    for notification_gr in [false, true] {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        let (client, mut server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        establish_test_session(&mut session, 65002).await;
+        while rib_rx.try_recv().is_ok() {}
+        Arc::make_mut(session.negotiated.as_mut().expect("negotiated")).peer_notification_gr =
+            notification_gr;
+
+        let reason =
+            rustbgpd_wire::notification::encode_shutdown_communication("maintenance window");
+        assert_eq!(
+            session
+                .handle_command(PeerCommand::AdministrativeReset {
+                    reason: Some(reason),
+                })
+                .await,
+            ControlFlow::Continue(())
+        );
+
+        let notification = read_until_notification(&mut server).await;
+        assert_eq!(notification.code, NotificationCode::Cease);
+        let reason_data = if notification_gr {
+            assert_eq!(notification.subcode, cease_subcode::HARD_RESET);
+            assert_eq!(
+                notification.data.get(..2),
+                Some(
+                    &[
+                        NotificationCode::Cease.as_u8(),
+                        cease_subcode::ADMINISTRATIVE_RESET,
+                    ][..]
+                )
+            );
+            &notification.data[2..]
+        } else {
+            assert_eq!(notification.subcode, cease_subcode::ADMINISTRATIVE_RESET);
+            notification.data.as_ref()
+        };
+        assert_eq!(
+            rustbgpd_wire::notification::decode_shutdown_communication(reason_data).unwrap(),
+            "maintenance window"
+        );
+        assert!(matches!(rib_rx.try_recv(), Ok(RibUpdate::PeerDown { .. })));
+        assert_eq!(session.fsm.state(), SessionState::Idle);
+        assert!(
+            !session.stop_requested,
+            "a reset must not latch the administrative stop"
+        );
+        assert!(
+            session.reconnect_timer.is_some(),
+            "the Idle transition must arm the reconnect timer"
+        );
+    }
+}
+
+#[tokio::test]
+async fn administrative_reset_in_idle_is_a_no_op() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+
+    assert_eq!(
+        session
+            .handle_command(PeerCommand::AdministrativeReset { reason: None })
+            .await,
+        ControlFlow::Continue(())
+    );
+
+    assert!(
+        rib_rx.try_recv().is_err(),
+        "an idle session has nothing to tear down"
+    );
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    assert!(session.reconnect_timer.is_none());
+}
+
 #[tokio::test]
 async fn purge_reset_in_idle_clears_routes_retained_by_a_prior_gr_down() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);

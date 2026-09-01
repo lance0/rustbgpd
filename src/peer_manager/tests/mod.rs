@@ -812,6 +812,7 @@ struct FakePeerCounters {
     shutdown: AtomicU32,
     stop: AtomicU32,
     purge_reset: AtomicU32,
+    administrative_reset: AtomicU32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1051,6 +1052,9 @@ fn fake_peer_handle_with_route_refresh_reply(
                 PeerCommand::PurgeReset => {
                     counters.purge_reset.fetch_add(1, Ordering::SeqCst);
                     break;
+                }
+                PeerCommand::AdministrativeReset { .. } => {
+                    counters.administrative_reset.fetch_add(1, Ordering::SeqCst);
                 }
                 _ => {}
             }

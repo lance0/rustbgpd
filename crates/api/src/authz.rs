@@ -255,6 +255,12 @@ pub const METHODS: &[GrpcMethodAuthz] = &[
     ),
     method(
         "rustbgpd.v1.NeighborService",
+        "ResetNeighbor",
+        "/rustbgpd.v1.NeighborService/ResetNeighbor",
+        AuthTier::Mutating,
+    ),
+    method(
+        "rustbgpd.v1.NeighborService",
         "ListDynamicNeighbors",
         "/rustbgpd.v1.NeighborService/ListDynamicNeighbors",
         AuthTier::SensitiveRead,
@@ -795,7 +801,7 @@ mod tests {
     const INVENTORY_JSON: &str = include_str!("../../../docs/grpc-method-inventory.json");
     const INVENTORY_MD: &str = include_str!("../../../docs/grpc-method-inventory.md");
     const READ_TOTAL: &str = "| `read` | 0 | 0.0% |";
-    const SENSITIVE_TOTAL: &str = "| `sensitive_read` | 63 | 58.9% |";
+    const SENSITIVE_TOTAL: &str = "| `sensitive_read` | 63 | 58.3% |";
     const AUTHZ_SOURCE_PATH: &str = "crates/api/src/authz.rs";
     const PRIMARY_PROTO_PATH: &str = "proto/rustbgpd.proto";
     const ADDITIONAL_PROTO_PATHS: &[&str] =
@@ -1027,7 +1033,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(matrix_methods, proto_methods);
-        assert_eq!(METHODS.len(), 107);
+        assert_eq!(METHODS.len(), 108);
     }
 
     #[test]
@@ -1069,7 +1075,7 @@ mod tests {
     fn method_matrix_tier_counts_match_inventory() {
         assert_eq!(method_count_by_tier(AuthTier::Read), 0);
         assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 63);
-        assert_eq!(method_count_by_tier(AuthTier::Mutating), 20);
+        assert_eq!(method_count_by_tier(AuthTier::Mutating), 21);
         assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 24);
     }
 
@@ -1086,6 +1092,16 @@ mod tests {
         assert_eq!(
             method_authz("/rustbgpd.v1.RpkiService/ValidateRouteOrigin").map(|method| method.tier),
             Some(AuthTier::SensitiveRead)
+        );
+    }
+
+    #[test]
+    fn reset_neighbor_is_mutating_like_disable_neighbor() {
+        let reset = method_authz("/rustbgpd.v1.NeighborService/ResetNeighbor").map(|m| m.tier);
+        assert_eq!(reset, Some(AuthTier::Mutating));
+        assert_eq!(
+            reset,
+            method_authz("/rustbgpd.v1.NeighborService/DisableNeighbor").map(|m| m.tier)
         );
     }
 

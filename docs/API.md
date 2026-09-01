@@ -52,7 +52,7 @@ not by itself make it v1-stable.
 |---------|------|---------|
 | `GlobalService` | `GetGlobal` | Daemon identity |
 | `ConfigService` | `DiffRuntimeConfig`, `PlanConfigTransaction`, `StreamPlanConfigTransaction`, `StreamApplyConfigTransaction`, `ApplyConfigTransaction`, `ConfirmConfigTransaction`, `AbortConfigTransaction`, `GetConfigTransactionStatus`, `GetEffectiveConfig`, `ListConfigHistory`, `RollbackConfigTransaction` | Candidate-vs-live config diff, effective running config with defaults resolved (selected default-empty policy lists omitted) and secrets redacted, plus the v1 config-transaction lifecycle: validate/plan, commit/apply (incl. commit-confirmed), confirm, abort, status, and the bounded recorded config history with Junos-style `rollback N` through the same transaction executor; the outside-v1 streams provide bounded large-candidate plan and apply ingress |
-| `NeighborService` | `AddNeighbor`, `DeleteNeighbor`, `ListNeighbors`, `GetNeighborState`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `RefreshOutbound`, `SetGracefulShutdown`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `ListDynamicNeighbors` | Peer lifecycle, inbound soft reset, single-peer outbound re-advertisement, RFC 8326 graceful-shutdown toggle, and dynamic-neighbor CRUD — `AddDynamicNeighbor` / `DeleteDynamicNeighbor` add and remove `[[dynamic_neighbors]]` prefix ranges at runtime (queued to the config file), `ListDynamicNeighbors` for visibility |
+| `NeighborService` | `AddNeighbor`, `DeleteNeighbor`, `ListNeighbors`, `GetNeighborState`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `RefreshOutbound`, `ResetNeighbor`, `SetGracefulShutdown`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `ListDynamicNeighbors` | Peer lifecycle, inbound soft reset, single-peer outbound re-advertisement, outside-v1 administrative session reset, RFC 8326 graceful-shutdown toggle, and dynamic-neighbor CRUD — `AddDynamicNeighbor` / `DeleteDynamicNeighbor` add and remove `[[dynamic_neighbors]]` prefix ranges at runtime (queued to the config file), `ListDynamicNeighbors` for visibility |
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `SetPolicy`, `DeletePolicy`, `ListNeighborSets`, `GetNeighborSet`, `SetNeighborSet`, `DeleteNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain`, `ExplainImportPolicy`, `ListRejectedRoutes`, `TestPolicy`, `GetPolicyStats`, `GetValidationPolicyPosture` | Named policy CRUD, neighbor sets, global/per-neighbor chain attachment, import-policy diagnostics, read-only candidate-policy dry runs, live counters, and bounded invalid-validation disposition posture |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup`, `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` | Peer-group CRUD and neighbor membership assignment |
 | `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainAdvertisedRoute`, `ExplainBestPath`, `LookupBestPath`, `ListFlowSpecRoutes`, `ListEvpnRoutes`, `ListBgpLsRoutes`, `ListTopologyNodes`, `ListTopologyLinks`, `ListOrrStatus`, `ListVpnRoutes`, `ListRtcRoutes`, `ListLabeledRoutes`, `ListBlackholeDiscards`, `ListFibRoutes`, `ListFibTables`, `SetFibTable`, `DeleteFibTable`, `ListRouteEvents` | Query-only RIB route surfaces (incl. EVPN, BGP-LS, VPNv4/v6, RT-Constrain, and labeled-unicast), the RFC 9107 ORR / BGP-LS topology read surface (`ListTopologyNodes` / `ListTopologyLinks` / `ListOrrStatus`), BLACKHOLE discard status, paginated FIB status, runtime FIB-table CRUD, exact explain plus outside-v1 global LPM, and recent route-event history; live route streaming is owned by `EventService.WatchEvents` / `SubscribeFromEvent` |
@@ -205,7 +205,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 |---------|----------------|---------------------------------------|
 | `GlobalService` | `GetGlobal` | — |
 | `ConfigService` | `DiffRuntimeConfig`, `PlanConfigTransaction`, `StreamPlanConfigTransaction`, `GetConfigTransactionStatus`, `GetEffectiveConfig`, `ListConfigHistory` | `StreamApplyConfigTransaction`, `ApplyConfigTransaction` (pure `[[fib_tables]]`, pure `[[dynamic_neighbors]]`, static `[[neighbors]]` add/delete/modify, catalog-only policy/neighbor-set/peer-group/global-chain changes, pure live policy-chain impact for static neighbors and accepted dynamic peers, or peer-group/session reshape impact for static members and live dynamic sessions; mixed or unsupported candidates rejected without mutation), `ConfirmConfigTransaction`, `AbortConfigTransaction`, `RollbackConfigTransaction` |
-| `NeighborService` | `ListNeighbors`, `GetNeighborState`, `ListDynamicNeighbors` | `AddNeighbor`, `DeleteNeighbor`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `RefreshOutbound`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `SetGracefulShutdown` |
+| `NeighborService` | `ListNeighbors`, `GetNeighborState`, `ListDynamicNeighbors` | `AddNeighbor`, `DeleteNeighbor`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `RefreshOutbound`, `ResetNeighbor`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `SetGracefulShutdown` |
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `ListNeighborSets`, `GetNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains`, `ExplainImportPolicy`, `ListRejectedRoutes`, `TestPolicy`, `GetPolicyStats`, `GetValidationPolicyPosture` | `SetPolicy`, `DeletePolicy`, `SetNeighborSet`, `DeleteNeighborSet`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain` |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup` | `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` |
 | `RibService` | All read/list/explain RPCs (incl. `ListFibTables`) | `SetFibTable`, `DeleteFibTable` |
@@ -840,6 +840,7 @@ added at runtime.
 | `DisableNeighbor` | Administratively disable a peer (sends NOTIFICATION) |
 | `SoftResetIn` | Request inbound route refresh (RFC 2918/7313) for one or more families |
 | `RefreshOutbound` | Re-emit one peer's current exportable outbound inventory across all negotiated families, without resetting the session |
+| `ResetNeighbor` | Administratively reset one enabled peer's session (Cease/Administrative Reset with an optional shutdown communication); outside v1 |
 | `AddDynamicNeighbor` | Add a `[[dynamic_neighbors]]` prefix range at runtime; persists the accepted change atomically before returning and rolls back runtime on persistence failure |
 | `DeleteDynamicNeighbor` | Remove a dynamic-neighbor range at runtime (stops future accepts; established peers drain on Idle); waits for the atomic config-file update and rolls runtime back on persistence failure |
 | `ListDynamicNeighbors` | List configured dynamic-neighbor ranges (prefix, peer group, remote ASN, description) |
@@ -943,6 +944,43 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"address": "10.0.0.2"}' \
   localhost:50051 rustbgpd.v1.NeighborService/EnableNeighbor
 ```
+
+### Reset a neighbor's session
+
+```bash
+rbgp neighbor 10.0.0.2 reset --reason "maintenance"
+
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"address": "10.0.0.2", "reason": "maintenance"}' \
+  localhost:50051 rustbgpd.v1.NeighborService/ResetNeighbor
+```
+
+`ResetNeighbor` is the one-shot session bounce (`bgpctl neighbor <peer>
+clear`, `clear bgp <peer>`): the session sends Cease / Administrative Reset
+(RFC 4486 subcode 4) carrying `reason` as an RFC 9003 shutdown communication
+(truncated to 128 bytes at a UTF-8 boundary, like `DisableNeighbor`) and closes
+the TCP connection. The peer's enable/disable state is untouched, so no
+`EnableNeighbor` follow-up is needed. A static active-open peer reconnects on
+its normal schedule. An accepted dynamic peer follows the normal Idle reap
+path and must dial in again; its next inbound connection is resolved from the
+current dynamic-range configuration. Scoped link-local peers pass `interface`
+as for the sibling RPCs.
+
+- Unknown peers return `NOT_FOUND`; administratively disabled peers return
+  `FAILED_PRECONDITION` (enable the peer instead of resetting it).
+- A session that is not `Established` is still accepted: `Connect`/`Active`
+  drop back to `Idle` without a NOTIFICATION and follow the static or dynamic
+  lifecycle above; an `Idle` session is a no-op.
+- When the peer negotiated RFC 8538 Notification Graceful Restart, the reset
+  is sent as Cease / Hard Reset wrapping the Administrative Reset and its
+  communication, so neither side retains stale routes across the bounce.
+- An Established active-primary teardown increments
+  `bgp_session_down_total{reason="local_notification"}`. Pre-established
+  resets do not create an Established-session down sample.
+- The sent NOTIFICATION appears in `EventService` with its on-wire form: code
+  6/subcode 4 normally, or code 6/subcode 9 when Notification GR wraps the
+  Administrative Reset as a Hard Reset. The decoded inner communication is
+  still exposed as `shutdown_reason`; no new event type is introduced.
 
 ### Delete a neighbor
 

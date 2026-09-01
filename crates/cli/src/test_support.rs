@@ -128,6 +128,7 @@ pub(crate) struct MockState {
         Mutex<Option<server_proto::AcceptedDynamicNeighborRange>>,
     pub(crate) last_softreset: Mutex<Option<server_proto::SoftResetInRequest>>,
     pub(crate) last_refresh_outbound: Mutex<Option<server_proto::RefreshOutboundRequest>>,
+    pub(crate) last_reset_neighbor: Mutex<Option<server_proto::ResetNeighborRequest>>,
     pub(crate) refresh_outbound_calls: AtomicUsize,
     pub(crate) refresh_outbound_declined: AtomicBool,
     pub(crate) last_explain_advertised: Mutex<Option<server_proto::ExplainAdvertisedRouteRequest>>,
@@ -1146,6 +1147,14 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
         _request: Request<server_proto::DisableNeighborRequest>,
     ) -> Result<Response<server_proto::DisableNeighborResponse>, Status> {
         Ok(Response::new(server_proto::DisableNeighborResponse {}))
+    }
+
+    async fn reset_neighbor(
+        &self,
+        request: Request<server_proto::ResetNeighborRequest>,
+    ) -> Result<Response<server_proto::ResetNeighborResponse>, Status> {
+        *self.state.last_reset_neighbor.lock().await = Some(request.into_inner());
+        Ok(Response::new(server_proto::ResetNeighborResponse {}))
     }
 
     async fn soft_reset_in(

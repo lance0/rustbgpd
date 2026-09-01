@@ -116,7 +116,7 @@ That includes privileged RPCs such as:
 
 - `Shutdown`
 - `AddNeighbor` / `DeleteNeighbor`
-- `EnableNeighbor` / `DisableNeighbor`
+- `EnableNeighbor` / `DisableNeighbor` / `ResetNeighbor`
 - `SoftResetIn`
 - `RefreshOutbound`
 - `AddPath` / `DeletePath`

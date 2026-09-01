@@ -1360,6 +1360,10 @@ impl PeerManager {
                             let result = self.disable_peer(peer, reason).await;
                             let _ = reply.send(result);
                         }
+                        PeerManagerCommand::ResetPeer { peer, reason, reply } => {
+                            let result = self.reset_peer(peer, reason).await;
+                            let _ = reply.send(result);
+                        }
                         PeerManagerCommand::SoftResetIn { peer, families, reply } => {
                             let result = self.soft_reset_in(peer, families).await;
                             let _ = reply.send(result);

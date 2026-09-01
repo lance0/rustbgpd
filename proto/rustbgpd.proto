@@ -471,6 +471,13 @@ service NeighborService {
   rpc DisableNeighbor(DisableNeighborRequest) returns (DisableNeighborResponse);
   rpc SoftResetIn(SoftResetInRequest) returns (SoftResetInResponse);
   rpc RefreshOutbound(RefreshOutboundRequest) returns (RefreshOutboundResponse);
+  // Administratively reset one enabled neighbor's session: send Cease /
+  // Administrative Reset (RFC 4486 subcode 4) carrying the optional RFC 9003
+  // shutdown communication and close the TCP connection. Static active-open
+  // sessions retry on their normal schedule; accepted dynamic peers are
+  // removed on Idle and must reconnect inbound. Enable/disable state is
+  // unchanged.
+  rpc ResetNeighbor(ResetNeighborRequest) returns (ResetNeighborResponse);
   rpc ListDynamicNeighbors(ListDynamicNeighborsRequest) returns (ListDynamicNeighborsResponse);
   rpc AddDynamicNeighbor(AddDynamicNeighborRequest) returns (AddDynamicNeighborResponse);
   rpc DeleteDynamicNeighbor(DeleteDynamicNeighborRequest) returns (DeleteDynamicNeighborResponse);
@@ -996,6 +1003,16 @@ message RefreshOutboundRequest {
 message RefreshOutboundResponse {
   bool scheduled = 1;
 }
+
+message ResetNeighborRequest {
+  string address = 1;
+  // Optional RFC 9003 shutdown communication; truncated to 128 bytes at a
+  // UTF-8 boundary exactly like DisableNeighborRequest.reason.
+  string reason = 2;
+  string interface = 3;
+}
+
+message ResetNeighborResponse {}
 
 message SetGracefulShutdownRequest {
   // Per-peer toggle. Empty string means apply to every currently-managed peer.
