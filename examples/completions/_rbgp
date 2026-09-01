@@ -759,6 +759,9 @@ _arguments "${_arguments_options[@]}" : \
 '*-c+[Filter by community (e.g., 65001\:100 or BLACKHOLE); may be repeated]:COMMUNITY:_default' \
 '*--community=[Filter by community (e.g., 65001\:100 or BLACKHOLE); may be repeated]:COMMUNITY:_default' \
 '*--large-community=[Filter by large community (e.g., 65001\:100\:200); may be repeated]:LARGE_COMMUNITY:_default' \
+'--rpki-state=[Filter by recorded RPKI verdict]:RPKI_STATE:(valid invalid not_found)' \
+'--aspa-state=[Filter by recorded ASPA verdict]:ASPA_STATE:(valid invalid unknown)' \
+'--as-path-contains=[Filter by exact ASN membership in the represented AS path]:AS_PATH_CONTAINS:_default' \
 '(--count --explain)--limit=[Return at most this many routes without walking the full table (1-1000)]:LIMIT:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
@@ -794,6 +797,9 @@ _arguments "${_arguments_options[@]}" : \
 '*-c+[Filter by community (e.g., 65001\:100 or BLACKHOLE); may be repeated]:COMMUNITY:_default' \
 '*--community=[Filter by community (e.g., 65001\:100 or BLACKHOLE); may be repeated]:COMMUNITY:_default' \
 '*--large-community=[Filter by large community (e.g., 65001\:100\:200); may be repeated]:LARGE_COMMUNITY:_default' \
+'--rpki-state=[Filter by recorded RPKI verdict]:RPKI_STATE:(valid invalid not_found)' \
+'--aspa-state=[Filter by recorded ASPA verdict]:ASPA_STATE:(valid invalid unknown)' \
+'--as-path-contains=[Filter by exact ASN membership in the represented AS path]:AS_PATH_CONTAINS:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -821,6 +827,9 @@ _arguments "${_arguments_options[@]}" : \
 '*-c+[Filter by community (e.g., 65001\:100 or BLACKHOLE); may be repeated]:COMMUNITY:_default' \
 '*--community=[Filter by community (e.g., 65001\:100 or BLACKHOLE); may be repeated]:COMMUNITY:_default' \
 '*--large-community=[Filter by large community (e.g., 65001\:100\:200); may be repeated]:LARGE_COMMUNITY:_default' \
+'--rpki-state=[Filter by recorded RPKI verdict]:RPKI_STATE:(valid invalid not_found)' \
+'--aspa-state=[Filter by recorded ASPA verdict]:ASPA_STATE:(valid invalid unknown)' \
+'--as-path-contains=[Filter by exact ASN membership in the represented AS path]:AS_PATH_CONTAINS:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -851,6 +860,9 @@ _arguments "${_arguments_options[@]}" : \
 '*-c+[Filter by community (e.g., 65001\:100 or BLACKHOLE); may be repeated]:COMMUNITY:_default' \
 '*--community=[Filter by community (e.g., 65001\:100 or BLACKHOLE); may be repeated]:COMMUNITY:_default' \
 '*--large-community=[Filter by large community (e.g., 65001\:100\:200); may be repeated]:LARGE_COMMUNITY:_default' \
+'--rpki-state=[Filter by recorded RPKI verdict]:RPKI_STATE:(valid invalid not_found)' \
+'--aspa-state=[Filter by recorded ASPA verdict]:ASPA_STATE:(valid invalid unknown)' \
+'--as-path-contains=[Filter by exact ASN membership in the represented AS path]:AS_PATH_CONTAINS:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
@@ -882,6 +894,9 @@ _arguments "${_arguments_options[@]}" : \
 '*-c+[Filter by community (e.g., 65001\:100 or BLACKHOLE); may be repeated]:COMMUNITY:_default' \
 '*--community=[Filter by community (e.g., 65001\:100 or BLACKHOLE); may be repeated]:COMMUNITY:_default' \
 '*--large-community=[Filter by large community (e.g., 65001\:100\:200); may be repeated]:LARGE_COMMUNITY:_default' \
+'--rpki-state=[Filter by recorded RPKI verdict]:RPKI_STATE:(valid invalid not_found)' \
+'--aspa-state=[Filter by recorded ASPA verdict]:ASPA_STATE:(valid invalid unknown)' \
+'--as-path-contains=[Filter by exact ASN membership in the represented AS path]:AS_PATH_CONTAINS:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \

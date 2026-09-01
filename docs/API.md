@@ -1356,6 +1356,19 @@ RPCs, `page_size = 0` preserves the legacy behavior and returns the full
 filtered FIB status snapshot. `ListBlackholeDiscards`, `ListFlowSpecRoutes`,
 and `ListBgpLsRoutes` do not support pagination.
 
+Their shared `ListRoutesRequest` also accepts optional recorded-route
+predicates: typed `rpki_validation` (`VALID`, `INVALID`, or `NOT_FOUND`), typed
+`aspa_validation` (`VALID`, `INVALID`, or `UNKNOWN`), and presence-aware
+`as_path_contains` for one exact nonzero ASN. `UNSPECIFIED` means no verdict
+filter; unknown numeric enum values and ASN 0 return `INVALID_ARGUMENT`.
+Predicates are identical across Received, Best, and Advertised, compose AND-wise
+with the existing prefix/origin/community filters, apply to both `total_count`
+and bounded pages, and are part of the opaque continuation-token identity. AS-path
+membership covers exact numeric members of represented `AS_SEQUENCE` and
+`AS_SET` segments only; it is not a regex or policy evaluation. RFC 9774
+rejection of newly received `AS_SET` and `AS_CONFED_SET` forms remains
+unchanged.
+
 ```bash
 # First page (2 routes)
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
@@ -1410,6 +1423,9 @@ the natural value for every route when no `[rpki]` sources are configured, but
 on a configured and ready deployment it is a real per-route uncovered-origin
 result. Consumers must use the RPKI cache/readiness surfaces when they need to
 distinguish those deployment states; this route field cannot do so by itself.
+The `rpki_validation` request filter selects that recorded fact and therefore
+inherits the same distinction. `aspa_validation` likewise selects the recorded
+per-route ASPA fact rather than cache readiness.
 
 ### Watch route changes (streaming)
 

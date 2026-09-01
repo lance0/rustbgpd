@@ -36,6 +36,34 @@ fn parse_route_limit(value: &str) -> Result<u32, String> {
     Ok(limit)
 }
 
+fn parse_nonzero_asn(value: &str) -> Result<u32, String> {
+    let asn = value
+        .parse::<u32>()
+        .map_err(|_| "ASN must be a canonical unsigned decimal integer".to_string())?;
+    if asn == 0 {
+        return Err("ASN 0 is not valid for AS-path membership".to_string());
+    }
+    if asn.to_string() != value {
+        return Err("ASN must use canonical unsigned decimal notation".to_string());
+    }
+    Ok(asn)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum RouteRpkiState {
+    Valid,
+    Invalid,
+    #[value(name = "not_found")]
+    NotFound,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum RouteAspaState {
+    Valid,
+    Invalid,
+    Unknown,
+}
+
 // ======================= CLI conventions =======================
 // New commands and flags must follow these rules (LAN-329):
 //
@@ -216,6 +244,18 @@ enum Command {
         /// Filter by large community (e.g., 65001:100:200); may be repeated
         #[arg(long, value_delimiter = ',')]
         large_community: Vec<String>,
+
+        /// Filter by recorded RPKI verdict
+        #[arg(long)]
+        rpki_state: Option<RouteRpkiState>,
+
+        /// Filter by recorded ASPA verdict
+        #[arg(long)]
+        aspa_state: Option<RouteAspaState>,
+
+        /// Filter by exact ASN membership in the represented AS path
+        #[arg(long, value_parser = parse_nonzero_asn)]
+        as_path_contains: Option<u32>,
 
         /// Return at most this many routes without walking the full table (1-1000)
         #[arg(
@@ -1205,6 +1245,18 @@ struct RouteViewArgs {
     /// Filter by large community (e.g., 65001:100:200); may be repeated
     #[arg(long, value_delimiter = ',')]
     large_community: Vec<String>,
+
+    /// Filter by recorded RPKI verdict
+    #[arg(long)]
+    rpki_state: Option<RouteRpkiState>,
+
+    /// Filter by recorded ASPA verdict
+    #[arg(long)]
+    aspa_state: Option<RouteAspaState>,
+
+    /// Filter by exact ASN membership in the represented AS path
+    #[arg(long, value_parser = parse_nonzero_asn)]
+    as_path_contains: Option<u32>,
 }
 
 #[derive(Subcommand)]
@@ -1727,6 +1779,9 @@ struct RibStatusFilterArgs<'a> {
     origin_asn: Option<u32>,
     community: &'a [String],
     large_community: &'a [String],
+    rpki_state: &'a Option<RouteRpkiState>,
+    aspa_state: &'a Option<RouteAspaState>,
+    as_path_contains: Option<u32>,
 }
 
 fn reject_rib_status_filters(
@@ -1742,6 +1797,9 @@ fn reject_rib_status_filters(
         || filters.origin_asn.is_some()
         || !filters.community.is_empty()
         || !filters.large_community.is_empty()
+        || filters.rpki_state.is_some()
+        || filters.aspa_state.is_some()
+        || filters.as_path_contains.is_some()
     {
         if command == "fib" {
             return Err(CliError::Argument(format!(
@@ -1783,6 +1841,13 @@ fn merge_route_view_filters(
 ) -> Result<commands::rib::RouteFilterOpts, CliError> {
     parent.prefix = merge_scoped_option("--prefix", parent.prefix, view.prefix)?;
     parent.origin_asn = merge_scoped_option("--origin-asn", parent.origin_asn, view.origin_asn)?;
+    parent.rpki_state = merge_scoped_option("--rpki-state", parent.rpki_state, view.rpki_state)?;
+    parent.aspa_state = merge_scoped_option("--aspa-state", parent.aspa_state, view.aspa_state)?;
+    parent.as_path_contains = merge_scoped_option(
+        "--as-path-contains",
+        parent.as_path_contains,
+        view.as_path_contains,
+    )?;
     parent.limit = merge_scoped_option("--limit", parent.limit, view_limit)?;
     parent.longer |= view.longer;
     parent.community.extend(
@@ -1802,6 +1867,9 @@ fn accepted_route_filters_requested(filters: &commands::rib::RouteFilterOpts) ->
         || filters.origin_asn.is_some()
         || !filters.community.is_empty()
         || !filters.large_community.is_empty()
+        || filters.rpki_state.is_some()
+        || filters.aspa_state.is_some()
+        || filters.as_path_contains.is_some()
 }
 
 fn route_view_filters_requested(filters: &RouteViewArgs) -> bool {
@@ -1810,6 +1878,9 @@ fn route_view_filters_requested(filters: &RouteViewArgs) -> bool {
         || filters.origin_asn.is_some()
         || !filters.community.is_empty()
         || !filters.large_community.is_empty()
+        || filters.rpki_state.is_some()
+        || filters.aspa_state.is_some()
+        || filters.as_path_contains.is_some()
 }
 
 fn reject_duplicate_route_view_option<T>(
@@ -1841,6 +1912,9 @@ fn validate_rib_route_view_action(command: &Command) -> Result<(), CliError> {
         origin_asn,
         community,
         large_community,
+        rpki_state,
+        aspa_state,
+        as_path_contains,
         limit,
         ..
     } = command
@@ -1867,6 +1941,13 @@ fn validate_rib_route_view_action(command: &Command) -> Result<(), CliError> {
             reject_duplicate_route_view_option("--family", family, view_family)?;
             reject_duplicate_route_view_option("--prefix", prefix, &filters.prefix)?;
             reject_duplicate_route_view_option("--origin-asn", origin_asn, &filters.origin_asn)?;
+            reject_duplicate_route_view_option("--rpki-state", rpki_state, &filters.rpki_state)?;
+            reject_duplicate_route_view_option("--aspa-state", aspa_state, &filters.aspa_state)?;
+            reject_duplicate_route_view_option(
+                "--as-path-contains",
+                as_path_contains,
+                &filters.as_path_contains,
+            )?;
             reject_duplicate_route_view_option("--limit", limit, view_limit)?;
 
             if filters.longer && prefix.is_none() && filters.prefix.is_none() {
@@ -1892,6 +1973,9 @@ fn validate_rib_route_view_action(command: &Command) -> Result<(), CliError> {
                     || origin_asn.is_some()
                     || !community.is_empty()
                     || !large_community.is_empty()
+                    || rpki_state.is_some()
+                    || aspa_state.is_some()
+                    || as_path_contains.is_some()
                     || limit.is_some()
                     || route_view_filters_requested(filters)
                     || view_limit.is_some())
@@ -1912,6 +1996,13 @@ fn validate_rib_route_view_action(command: &Command) -> Result<(), CliError> {
             reject_duplicate_route_view_option("--family", family, view_family)?;
             reject_duplicate_route_view_option("--prefix", prefix, &filters.prefix)?;
             reject_duplicate_route_view_option("--origin-asn", origin_asn, &filters.origin_asn)?;
+            reject_duplicate_route_view_option("--rpki-state", rpki_state, &filters.rpki_state)?;
+            reject_duplicate_route_view_option("--aspa-state", aspa_state, &filters.aspa_state)?;
+            reject_duplicate_route_view_option(
+                "--as-path-contains",
+                as_path_contains,
+                &filters.as_path_contains,
+            )?;
             reject_duplicate_route_view_option("--limit", limit, view_limit)?;
 
             if filters.longer && prefix.is_none() && filters.prefix.is_none() {
@@ -2775,6 +2866,9 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             origin_asn,
             community,
             large_community,
+            rpki_state,
+            aspa_state,
+            as_path_contains,
             limit,
         } => {
             match action {
@@ -2799,6 +2893,9 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                             origin_asn,
                             community: &community,
                             large_community: &large_community,
+                            rpki_state: &rpki_state,
+                            aspa_state: &aspa_state,
+                            as_path_contains,
                         },
                     )?;
                     return commands::rib::fib(
@@ -2829,6 +2926,9 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                             origin_asn,
                             community: &community,
                             large_community: &large_community,
+                            rpki_state: &rpki_state,
+                            aspa_state: &aspa_state,
+                            as_path_contains,
                         },
                     )?;
                     return commands::rib::blackholes(connection, json).await;
@@ -2850,6 +2950,9 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                             origin_asn,
                             community: &community,
                             large_community: &large_community,
+                            rpki_state: &rpki_state,
+                            aspa_state: &aspa_state,
+                            as_path_contains,
                         },
                     )?;
                     let family = bgpls_family.or(family);
@@ -2878,6 +2981,9 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                             origin_asn,
                             community: &community,
                             large_community: &large_community,
+                            rpki_state: &rpki_state,
+                            aspa_state: &aspa_state,
+                            as_path_contains,
                         },
                     )?;
                     let family = vpn_family.or(family);
@@ -2899,6 +3005,9 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                             origin_asn,
                             community: &community,
                             large_community: &large_community,
+                            rpki_state: &rpki_state,
+                            aspa_state: &aspa_state,
+                            as_path_contains,
                         },
                     )?;
                     let family = labeled_family.or(family);
@@ -2917,6 +3026,9 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                             origin_asn,
                             community: &community,
                             large_community: &large_community,
+                            rpki_state: &rpki_state,
+                            aspa_state: &aspa_state,
+                            as_path_contains,
                         },
                     )?;
                     return commands::rib::rtc(connection, peer, json).await;
@@ -2936,6 +3048,9 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 origin_asn,
                 community: parsed_filter_communities,
                 large_community,
+                rpki_state,
+                aspa_state,
+                as_path_contains,
                 limit,
             };
             match action {
@@ -2954,6 +3069,9 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                         if filters.origin_asn.is_some()
                             || !filters.community.is_empty()
                             || !filters.large_community.is_empty()
+                            || filters.rpki_state.is_some()
+                            || filters.aspa_state.is_some()
+                            || filters.as_path_contains.is_some()
                         {
                             return Err(CliError::Argument(
                                 "--explain does not support route filters other than --prefix"
@@ -3056,6 +3174,9 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                         if filters.origin_asn.is_some()
                             || !filters.community.is_empty()
                             || !filters.large_community.is_empty()
+                            || filters.rpki_state.is_some()
+                            || filters.aspa_state.is_some()
+                            || filters.as_path_contains.is_some()
                         {
                             return Err(CliError::Argument(
                                 "--explain does not support route filters other than --prefix"
@@ -4910,6 +5031,12 @@ printf '%s\n' "${COMPREPLY[@]}"
             "13335:100,13335:200",
             "--large-community",
             "13335:1:100",
+            "--rpki-state",
+            "invalid",
+            "--aspa-state",
+            "unknown",
+            "--as-path-contains",
+            "64500",
             "--limit",
             "50",
         ])
@@ -4933,6 +5060,9 @@ printf '%s\n' "${COMPREPLY[@]}"
         assert_eq!(filters.origin_asn, Some(13335));
         assert_eq!(filters.community, ["13335:100", "13335:200"]);
         assert_eq!(filters.large_community, ["13335:1:100"]);
+        assert_eq!(filters.rpki_state, Some(RouteRpkiState::Invalid));
+        assert_eq!(filters.aspa_state, Some(RouteAspaState::Unknown));
+        assert_eq!(filters.as_path_contains, Some(64500));
         assert_eq!(limit, Some(50));
 
         let advertised = Cli::try_parse_from([
@@ -5003,6 +5133,9 @@ printf '%s\n' "${COMPREPLY[@]}"
                 "--origin-asn",
                 "--community",
                 "--large-community",
+                "--rpki-state",
+                "--aspa-state",
+                "--as-path-contains",
                 "--limit",
             ] {
                 assert!(help.contains(flag), "{view} help omitted {flag}");
@@ -5018,6 +5151,9 @@ printf '%s\n' "${COMPREPLY[@]}"
             origin_asn: None,
             community: vec![(64496_u32 << 16) | 100],
             large_community: vec![],
+            rpki_state: Some(RouteRpkiState::Invalid),
+            aspa_state: None,
+            as_path_contains: None,
             limit: None,
         };
         let view = RouteViewArgs {
@@ -5025,6 +5161,8 @@ printf '%s\n' "${COMPREPLY[@]}"
             origin_asn: Some(64496),
             community: vec!["64496:200".to_string()],
             large_community: vec!["64496:1:100".to_string()],
+            aspa_state: Some(RouteAspaState::Valid),
+            as_path_contains: Some(64500),
             ..Default::default()
         };
         let merged = merge_route_view_filters(parent, view, Some(100)).unwrap();
@@ -5036,7 +5174,27 @@ printf '%s\n' "${COMPREPLY[@]}"
             [(64496_u32 << 16) | 100, (64496_u32 << 16) | 200]
         );
         assert_eq!(merged.large_community, ["64496:1:100"]);
+        assert_eq!(merged.rpki_state, Some(RouteRpkiState::Invalid));
+        assert_eq!(merged.aspa_state, Some(RouteAspaState::Valid));
+        assert_eq!(merged.as_path_contains, Some(64500));
         assert_eq!(merged.limit, Some(100));
+    }
+
+    #[test]
+    fn rib_validation_and_path_filters_reject_bad_vocabulary() {
+        for (flag, value) in [
+            ("--rpki-state", "unknown"),
+            ("--aspa-state", "not_found"),
+            ("--as-path-contains", "0"),
+            ("--as-path-contains", "064496"),
+            ("--as-path-contains", "AS64496"),
+        ] {
+            assert!(
+                Cli::try_parse_from(["rbgp", "rib", "received", "192.0.2.1", flag, value,])
+                    .is_err(),
+                "invalid {flag} value unexpectedly parsed: {value}"
+            );
+        }
     }
 
     #[test]
@@ -5627,6 +5785,9 @@ printf '%s\n' "${COMPREPLY[@]}"
                 origin_asn: None,
                 community: &[],
                 large_community: &[],
+                rpki_state: &None,
+                aspa_state: &None,
+                as_path_contains: None,
             },
         )
         .unwrap_err();
@@ -5647,6 +5808,9 @@ printf '%s\n' "${COMPREPLY[@]}"
                 origin_asn: None,
                 community: &[],
                 large_community: &[],
+                rpki_state: &None,
+                aspa_state: &None,
+                as_path_contains: None,
             },
         )
         .unwrap_err();
@@ -5670,6 +5834,9 @@ printf '%s\n' "${COMPREPLY[@]}"
                 origin_asn: None,
                 community: &[],
                 large_community: &[],
+                rpki_state: &None,
+                aspa_state: &None,
+                as_path_contains: None,
             },
         )
         .unwrap_err();

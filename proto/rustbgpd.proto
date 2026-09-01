@@ -2082,6 +2082,22 @@ message ListRoutesRequest {
   // Large community filter — match routes containing this large community.
   // Format: "global_admin:local_data1:local_data2". Empty = no filter.
   repeated string large_community_filter = 10;
+
+  // Recorded RPKI origin-validation verdict. UNSPECIFIED = no filter.
+  RouteOriginValidation rpki_validation = 11;
+  // Recorded ASPA path-verification verdict. UNSPECIFIED = no filter.
+  RouteAspaValidation aspa_validation = 12;
+  // Exact ASN membership in the represented AS_SEQUENCE/AS_SET path.
+  // Presence is explicit so ASN 0 can be rejected rather than treated as no
+  // filter.
+  optional uint32 as_path_contains = 13;
+}
+
+enum RouteAspaValidation {
+  ROUTE_ASPA_VALIDATION_UNSPECIFIED = 0;
+  ROUTE_ASPA_VALIDATION_VALID = 1;
+  ROUTE_ASPA_VALIDATION_INVALID = 2;
+  ROUTE_ASPA_VALIDATION_UNKNOWN = 3;
 }
 
 // Process-local consistency fence for one route-page response. Both values
