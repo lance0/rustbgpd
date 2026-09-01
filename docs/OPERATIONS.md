@@ -471,11 +471,6 @@ rollback, and live dynamic sessions accepted by an affected
 re-accept under the committed config on reconnect (ADR-0086). Mixed-family
 candidates, dynamic-range peer-group reassignments, mixed policy/session
 effective impact, and unsupported sections are rejected without mutation.
-The same rejection applies to every full-candidate family while the running or
-candidate config references external `.rpol` graphs or policy datasets; use a
-coordinated file deployment plus SIGHUP. Pure `[[fib_tables]]` edits with those
-inputs unchanged remain the targeted exception.
-
 Output is grouped into two actionable sections plus a per-neighbor
 effective-impact view:
 

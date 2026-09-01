@@ -405,7 +405,7 @@ async fn transaction_plan_rejects_dataset_byte_drift_against_accepted_identity()
     let dir = tempfile::tempdir().unwrap();
     let (config_path, _rpol_path, dataset_path) = external_inputs_fixture(dir.path());
     let (mut mgr, _accepted, rib_rx, _keepalive) = accepted_identity_manager(&config_path);
-    let responder = answer_snapshot_queries(rib_rx, 2);
+    let responder = answer_snapshot_queries(rib_rx, 1);
 
     let mut candidate = mgr.current_config.clone();
     candidate.neighbors[0].description = Some("after".to_string());
@@ -502,7 +502,7 @@ async fn verified_plan_reattaches_live_external_state() {
     let dir = tempfile::tempdir().unwrap();
     let (config_path, _rpol_path, _dataset_path) = external_inputs_fixture(dir.path());
     let (mut mgr, _accepted, rib_rx, _keepalive) = accepted_identity_manager(&config_path);
-    let responder = answer_snapshot_queries(rib_rx, 1);
+    let responder = answer_snapshot_queries(rib_rx, 3);
 
     let mut candidate_source = mgr.current_config.clone();
     candidate_source.neighbors[0].description = Some("after".to_string());
@@ -540,6 +540,30 @@ async fn verified_plan_reattaches_live_external_state() {
         &candidate.policy.rpol.policies["edge-in"].file,
         &mgr.current_config.policy.rpol.policies["edge-in"].file
     ));
+    assert!(candidate.policy.external_sources_digest.0.is_none());
+
+    // The live-policy apply path replans the staged snapshot once to return
+    // its post-commit token. That no-op must succeed without reusing the
+    // consumed one-load identity evidence.
+    mgr.current_config = candidate.clone();
+    let post_commit = mgr
+        .plan_preloaded_config_transaction(&mut candidate, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        post_commit.status,
+        rustbgpd_api::peer_types::RuntimeConfigTransactionStatus::Noop
+    );
+
+    candidate.neighbors[0].description = Some("later".to_string());
+    let replay = mgr
+        .plan_preloaded_config_transaction(&mut candidate, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        replay.status,
+        rustbgpd_api::peer_types::RuntimeConfigTransactionStatus::Rejected
+    );
     responder.await.unwrap();
 }
 

@@ -234,7 +234,7 @@ impl PeerManager {
         &self,
         candidate: &mut Config,
     ) -> crate::config::ExternalInputsIdentity {
-        let Some(candidate_digest) = candidate.policy.external_sources_digest.0 else {
+        let Some(candidate_digest) = candidate.policy.external_sources_digest.0.take() else {
             return crate::config::ExternalInputsIdentity::Unverified;
         };
         let Some(accepted_rx) = &self.accepted_rx else {

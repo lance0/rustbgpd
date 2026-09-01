@@ -1,6 +1,6 @@
 # ADR-0130: Identity-Conditional External-Policy Transaction Fence
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-09-01
 
 ## Context

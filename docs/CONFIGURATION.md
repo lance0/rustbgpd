@@ -3480,11 +3480,13 @@ is rejected and rolled back. Dynamic-range peer-group reassignments and mixed
 policy/session effective-impact candidates remain rejected until dedicated
 executors exist.
 When either the running or candidate config references external `.rpol` graphs
-or `[policy.datasets]` snapshots, every full-candidate transaction family is
-also rejected: the external bytes are not staged, tokened, or rollback-safe.
-Use coordinated file deployment plus SIGHUP. A no-op remains a no-op, and a
-pure `[[fib_tables]]` edit with unchanged external inputs remains committable
-because it does not adopt the rest of the candidate snapshot.
+or `[policy.datasets]` snapshots, full-candidate native transactions remain
+available only while those sources are byte-identical to the accepted snapshot
+(ADR-0130). Any drift rejects those transactions without mutation; deploy
+changed TOML and external inputs together with SIGHUP. A no-op remains a no-op,
+and a pure `[[fib_tables]]` transaction remains available because it does not
+adopt the rest of the candidate snapshot. gNMI full-candidate changes remain
+rejected whenever external inputs are present, even unchanged.
 Like SIGHUP and FIB CRUD, FIB transaction apply requires the FIB reconciler to
 already be running: a daemon that started with no `[[fib_tables]]` still needs a
 restart to enable the subsystem.
