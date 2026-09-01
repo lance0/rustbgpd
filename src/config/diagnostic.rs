@@ -472,7 +472,7 @@ router_id = \"1.2.3.4\"
 listen_port = 179
 [global.telemetry]
 prometheus_addr = \"0.0.0.0:9090\"
-log_format = \"text\"
+log_format = \"json\"
 
 [[neighbors]]
 address = \"10.0.0.1\"
@@ -495,7 +495,7 @@ router_id = \"not-an-ip\"
 listen_port = 179
 [global.telemetry]
 prometheus_addr = \"0.0.0.0:9090\"
-log_format = \"text\"
+log_format = \"json\"
 ";
         let error = ConfigError::InvalidRouterId {
             value: "not-an-ip".to_string(),
@@ -720,7 +720,7 @@ listen_port = 179
 
 [global.telemetry]
 prometheus_addr = \"0.0.0.0:9090\"
-log_format = \"text\"
+log_format = \"json\"
 
 [[neighbors]]
 address = \"10.0.0.1\"
@@ -753,7 +753,7 @@ listen_port = 179
 
 [global.telemetry]
 prometheus_addr = \"0.0.0.0:9090\"
-log_format = \"text\"
+log_format = \"json\"
 
 [[neighbours]]
 address = \"10.0.0.1\"
@@ -805,7 +805,7 @@ listen_port = 179
 
 [global.telemetry]
 prometheus_addr = \"0.0.0.0:9090\"
-log_format = \"text\"
+log_format = \"json\"
 
 [[neighbors]]
 address = \"10.0.0.1\"
@@ -831,7 +831,7 @@ listen_port = 179
 
 [global.telemetry]
 prometheus_addr = \"0.0.0.0:9090\"
-log_format = \"text\"
+log_format = \"json\"
 
 [[neighbors]]
 address = \"10.0.0.1\"
@@ -871,7 +871,7 @@ router_id = \"1.2.3.4\"
 listen_port = 179
 [global.telemetry]
 prometheus_addr = \"0.0.0.0:9090\"
-log_format = \"text\"
+log_format = \"json\"
 
 [[neighbors]]
 address = \"10.0.0.1\"

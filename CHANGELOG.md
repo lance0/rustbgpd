@@ -30,6 +30,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Intentionally narrow `[global.telemetry].log_format` to JSON only. Other
+  strings were previously ignored but now fail configuration parsing; migrate
+  them to `log_format = "json"`.
+
 - `rbgp doctor` now describes config freshness as an mtime comparison with the
   daemon's last config-file marker rather than claiming effective runtime
   agreement. The Prometheus alert pack reports authoritative partial

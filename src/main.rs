@@ -8396,7 +8396,7 @@ peer_group = "plain"
                 runtime_state_dir: "/tmp".to_string(),
                 telemetry: crate::config::TelemetryConfig {
                     prometheus_addr: Some("127.0.0.1:9179".to_string()),
-                    log_format: "json".to_string(),
+                    log_format: crate::config::LogFormatConfig::Json,
                     grpc_tcp: None,
                     grpc_uds: None,
                 },
