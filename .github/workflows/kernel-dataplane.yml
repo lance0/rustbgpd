@@ -104,8 +104,8 @@ jobs:
       - name: Restore exact bird3 archive cache
         uses: actions/cache@v6
         with:
-          path: ${{ runner.temp }}/bird3-cache/bird-3.3.1.tar.gz
-          key: bird3-v3.3.1-source-d5a8d651d6184c18252954932bb249dfee1fd213b3665cdd86226ac45edc0190
+          path: ${{ runner.temp }}/bird3-cache/bird-3.3.2.tar.gz
+          key: bird3-v3.3.2-source-21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c
       - name: Prepare exact bird3 archive
         id: prepare
         run: |
@@ -113,7 +113,7 @@ jobs:
           rc=0
           .github/scripts/install-bird3.sh \
             --prepare-archive \
-            "$RUNNER_TEMP/bird3-cache/bird-3.3.1.tar.gz" || rc=$?
+            "$RUNNER_TEMP/bird3-cache/bird-3.3.2.tar.gz" || rc=$?
           case "$rc" in
             0) status=ok ;;
             3) status=unavailable ;;
@@ -128,8 +128,8 @@ jobs:
         if: steps.prepare.outputs.bird3_status == 'ok'
         uses: actions/upload-artifact@v7
         with:
-          name: bird3-v3.3.1-source
-          path: ${{ runner.temp }}/bird3-cache/bird-3.3.1.tar.gz
+          name: bird3-v3.3.2-source
+          path: ${{ runner.temp }}/bird3-cache/bird-3.3.2.tar.gz
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
@@ -430,12 +430,12 @@ jobs:
 
   m43:
     needs: [grpcurl_archive, bird3_archive, prime_dev_image]
-    # No archive means no BIRD 3.3.1 image, so nothing here can run. Skipping
+    # No archive means no BIRD 3.3.2 image, so nothing here can run. Skipping
     # the whole job rather than letting it report success with its lab steps
     # quietly disabled is what lets the check aggregate print the skip and name
     # its cause: a success with a hole in it is invisible coverage loss.
     if: needs.bird3_archive.outputs.bird3_status != 'unavailable'
-    name: M43 — TCP-AO live rotation and crash recovery (BIRD 3.3.1)
+    name: M43 — TCP-AO live rotation and crash recovery (BIRD 3.3.2)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # Every lab step below is gated on the TCP-AO probe, so a runner kernel
@@ -548,14 +548,14 @@ jobs:
         if: steps.tcp_ao.outputs.supported == 'true'
         uses: ./.github/actions/stage-bird3-artifact
 
-      - name: Build BIRD 3.3.1 TCP-AO image
+      - name: Build BIRD 3.3.2 TCP-AO image
         if: steps.tcp_ao.outputs.supported == 'true'
         uses: docker/build-push-action@v7
         with:
           context: tests/interop
           file: tests/interop/Dockerfile.bird3
           load: true
-          tags: bird:3.3.1-tcpao
+          tags: bird:3.3.2-tcpao
           cache-from: type=gha,scope=bird3-tcpao
           cache-to: type=gha,mode=max,scope=bird3-tcpao,ignore-error=true
 
@@ -1006,7 +1006,7 @@ jobs:
           if excused:
               print(
                   "::warning::m43=skipped (bird3 archive unavailable upstream): "
-                  "TCP-AO interop against BIRD 3.3.1 did not run in this Kernel "
+                  "TCP-AO interop against BIRD 3.3.2 did not run in this Kernel "
                   "Dataplane run; this gate passed without that coverage"
               )
           if failed:

@@ -5,7 +5,7 @@
 # with CONFIG_TCP_AO=y.
 #
 # Usage:
-#   docker build -t bird:3.3.1-tcpao -f tests/interop/Dockerfile.bird3 tests/interop
+#   docker build -t bird:3.3.2-tcpao -f tests/interop/Dockerfile.bird3 tests/interop
 #   docker build --target dev -t rustbgpd:dev .
 #   containerlab deploy -t tests/interop/m43-tcp-ao-bird.clab.yml
 #   bash tests/interop/scripts/test-m43-tcp-ao-bird.sh
@@ -35,7 +35,7 @@ topology:
 
     bird:
       kind: linux
-      image: bird:3.3.1-tcpao
+      image: bird:3.3.2-tcpao
       binds:
         - ./configs/bird-m43-tcp-ao.conf:/etc/bird/bird.conf:ro
         - ./configs/bird-m43-tcp-ao-bad.conf:/etc/bird/bird-bad.conf:ro

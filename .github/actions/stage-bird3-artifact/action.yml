@@ -7,15 +7,15 @@ inputs:
   version:
     description: "Exact BIRD source version"
     required: false
-    default: "3.3.1"
+    default: "3.3.2"
   sha256:
     description: "Exact BIRD source archive SHA-256"
     required: false
-    default: "d5a8d651d6184c18252954932bb249dfee1fd213b3665cdd86226ac45edc0190"
+    default: "21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c"
   artifact-name:
     description: "Same-run artifact containing the source archive"
     required: false
-    default: "bird3-v3.3.1-source"
+    default: "bird3-v3.3.2-source"
   stage-directory:
     description: "Directory in the interop Docker build context"
     required: false

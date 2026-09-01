@@ -321,3 +321,70 @@ fn m43_restart_signal_accepts_only_a_positive_decimal_pid() {
         "M43 PID census and signal self-test passed\n"
     );
 }
+
+#[test]
+fn m43_bird_332_identity_and_config_preflight_precedes_both_modes() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let topology = fs::read_to_string(root.join("tests/interop/m43-tcp-ao-bird.clab.yml"))
+        .expect("M43 topology must be readable");
+    let source = fs::read_to_string(root.join("tests/interop/scripts/test-m43-tcp-ao-bird.sh"))
+        .expect("M43 driver must be readable");
+
+    assert!(topology.contains("image: bird:3.3.2-tcpao"));
+    assert!(source.contains("BIRD_VERSION=\"3.3.2\""));
+    assert!(source.contains("BIRD_VERSION_OUTPUT=\"BIRD version ${BIRD_VERSION}\""));
+    let preflight = source
+        .split_once("preflight_bird_container() {")
+        .and_then(|(_, remainder)| remainder.split_once("start_bird() {").map(|(body, _)| body))
+        .expect("M43 BIRD preflight has a bounded source section");
+    for seam in [
+        "{{.Config.Image}}",
+        "{{.Image}}",
+        "docker image inspect --format '{{.Id}}'",
+        "{{json .Config.Cmd}}",
+        "{{.Path}}",
+        "{{json .Args}}",
+        "$BIRD_VERSION_OUTPUT",
+        "bird -p -c \"$conf\"",
+        "\"$GOOD_CONF\" \"$BAD_CONF\" \"$UNSIGNED_CONF\" \"$SUCCESSOR_CONF\"",
+    ] {
+        assert!(preflight.contains(seam), "M43 preflight missing {seam}");
+    }
+    for guarded_probe in [
+        "if ! configured_image=$(docker inspect",
+        "if ! container_image_id=$(docker inspect",
+        "if ! local_image_id=$(docker image inspect",
+        "if ! configured_command=$(docker inspect",
+        "if ! runtime_path=$(docker inspect",
+        "if ! runtime_args=$(docker inspect",
+        "if ! reported_version=$(docker exec",
+    ] {
+        assert!(
+            preflight.contains(guarded_probe),
+            "M43 preflight probe must emit its targeted diagnostic: {guarded_probe}"
+        );
+    }
+
+    for (start, end) in [
+        ("main_uninterrupted() {", "main_crash_restart() {"),
+        (
+            "main_crash_restart() {",
+            "if [ \"${1:-}\" = \"--self-test-pid-signal\" ]",
+        ),
+    ] {
+        let mode = source
+            .split_once(start)
+            .and_then(|(_, remainder)| remainder.split_once(end).map(|(body, _)| body))
+            .expect("M43 mode has a bounded source section");
+        let preflight_position = mode
+            .find("preflight_bird_container")
+            .expect("M43 mode must invoke the BIRD preflight");
+        let start_position = mode
+            .find("start_bird \"$GOOD_CONF\"")
+            .expect("M43 mode must start the verified BIRD config");
+        assert!(
+            preflight_position < start_position,
+            "M43 mode must preflight before starting BIRD"
+        );
+    }
+}

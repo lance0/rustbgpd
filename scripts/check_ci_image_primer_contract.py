@@ -112,8 +112,8 @@ GOBGP_ACTION = "uses: ./.github/actions/stage-gobgp-artifact"
 GOBGP_BUILD = (
     "docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop"
 )
-BIRD3_VERSION = "3.3.1"
-BIRD3_SHA256 = "d5a8d651d6184c18252954932bb249dfee1fd213b3665cdd86226ac45edc0190"
+BIRD3_VERSION = "3.3.2"
+BIRD3_SHA256 = "21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c"
 BIRD3_ARCHIVE = f"bird-{BIRD3_VERSION}.tar.gz"
 BIRD3_ARTIFACT = f"bird3-v{BIRD3_VERSION}-source"
 BIRD3_CACHE_KEY = f"{BIRD3_ARTIFACT}-{BIRD3_SHA256}"
@@ -1537,7 +1537,7 @@ def check(root: Path) -> list[str]:
             errors.append(f"stage-gobgp-artifact permits {forbidden}")
     for seam in (
         "inputs:",
-        'default: "3.3.1"',
+        'default: "3.3.2"',
         f'default: "{BIRD3_SHA256}"',
         f'default: "{BIRD3_ARTIFACT}"',
         'default: "tests/interop/bird3-archive"',
