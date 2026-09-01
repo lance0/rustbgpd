@@ -167,9 +167,9 @@ shape itself does not raise the tier.
 
 | RPC | Tier | Notes |
 |-----|------|-------|
-| `ListReceivedRoutes` | `sensitive_read` | Per-peer received RIB — exposes upstream routing topology and reachability. |
-| `ListBestRoutes` | `sensitive_read` | Daemon-level best paths. |
-| `ListAdvertisedRoutes` | `sensitive_read` | Per-peer advertised RIB. |
+| `ListReceivedRoutes` | `sensitive_read` | Per-peer received RIB with typed recorded RPKI/ASPA verdict and exact AS-path-membership predicates — exposes upstream routing topology and reachability. |
+| `ListBestRoutes` | `sensitive_read` | Daemon-level best paths with the same accepted-route predicates. |
+| `ListAdvertisedRoutes` | `sensitive_read` | Per-peer advertised RIB with the same accepted-route predicates. |
 | `ExplainAdvertisedRoute` | `sensitive_read` | Per-route policy evaluation trace; exposes policy decision logic. |
 | `ExplainBestPath` | `sensitive_read` | Per-route best-path tie-break trace. |
 | `LookupBestPath` | `sensitive_read` | Outside-v1 global-only LPM query. Returns the closest installed Loc-RIB ancestor, its winner, and all alternatives for that one matched prefix from one actor turn. No full-table or peer-scoped view. |

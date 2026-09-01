@@ -111,6 +111,8 @@ rbgp rib --count                            # best-route count only
 rbgp rib received <addr>
 rbgp rib received <addr> --prefix 203.0.113.0/24
 rbgp rib received <addr> --origin-asn 64496 --limit 100
+rbgp rib received <addr> --rpki-state invalid --aspa-state unknown
+rbgp rib received <addr> --as-path-contains 64496
 rbgp rib received <addr> --age
 rbgp rib received <addr> --count
 rbgp rib received <addr> --rejected         # retained rejected routes with reject reasons
@@ -174,19 +176,28 @@ normal output from a current server.
 opt-in: set `[policy.explain] enabled = true` in the daemon config. On a
 stock daemon the command exits nonzero with that hint.
 
-`--count` applies the same family, prefix, longer-prefix, origin-ASN, standard
-community, and large-community filters as the corresponding best, received, or
-advertised route listing. It makes exactly one request and transfers at most one
-route row, rendering `Total matching routes: N` or `{"total_count":N}` with
-`--json`. A filtered count still scans the matching backend view to compute the
-exact total; `--count` bounds response transfer, not server-side query work. It
+`--count` applies the same family, prefix, longer-prefix, origin-ASN, exact
+AS-path membership, standard-community, large-community, RPKI-verdict, and
+ASPA-verdict filters as the corresponding best, received, or advertised route
+listing. It makes exactly one request and transfers at most one route row,
+rendering `Total matching routes: N` or `{"total_count":N}` with `--json`. A
+filtered count still scans the matching backend view to compute the exact
+total; `--count` bounds response transfer, not server-side query work. It
 cannot be combined with the rejected-route or explain views.
 
 The accepted-route filters can be placed after `received PEER` or
 `advertised PEER`, where their `--help` pages list them. The older parent form
 (`rbgp rib --prefix CIDR received PEER`) remains accepted for compatibility.
-Filters compose with AND semantics; repeated community filters require every
-specified value.
+Filter dimensions compose with AND semantics. Repeated standard-community
+values are OR-matched with one another, as are repeated large-community
+values; a route must still satisfy every other requested dimension.
+`--rpki-state` accepts `valid`, `invalid`, or `not_found`; `not_found` is a
+recorded per-route verdict, not a validator-readiness signal. `--aspa-state`
+accepts `valid`, `invalid`, or `unknown`. `--as-path-contains ASN` compares an
+exact nonzero numeric ASN against the represented `AS_SEQUENCE` and `AS_SET`
+members. It does not run policy or a regular expression. RFC 9774 rejection of
+newly received `AS_SET` and `AS_CONFED_SET` forms remains unchanged; this
+inspection filter only sees path forms already represented in the RIB.
 
 `--limit N` returns one server-fenced page, with `N` from 1 through the
 server's 1000-row page cap. Human output says whether it is showing the first

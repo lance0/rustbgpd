@@ -22,7 +22,8 @@ use rustbgpd_rib::{
     VpnRibRoute, route_query_key,
 };
 use rustbgpd_wire::{
-    Afi, AsPathSegment, EvpnRoute, LargeCommunity, PathAttribute, Prefix, bgpls::BgpLsNlriType,
+    Afi, AsPath, AsPathSegment, AspaValidation, EvpnRoute, LargeCommunity, PathAttribute, Prefix,
+    RpkiValidation, bgpls::BgpLsNlriType,
 };
 
 /// Live snapshot provider for daemon-owned BLACKHOLE discard status.
@@ -378,10 +379,17 @@ struct RouteFilters {
     large_community_filter_active: bool,
     /// Canonical large community values to match (OR logic).
     large_communities: Vec<LargeCommunity>,
+    /// Exact recorded RPKI origin-validation verdict.
+    rpki_validation: Option<proto::RouteOriginValidation>,
+    /// Exact recorded ASPA path-verification verdict.
+    aspa_validation: Option<proto::RouteAspaValidation>,
+    /// Exact ASN membership in the represented AS path.
+    as_path_contains: Option<u32>,
 }
 
 struct RouteFilterAttrs<'a> {
     origin_asn: Option<u32>,
+    as_path: Option<&'a AsPath>,
     communities: &'a [u32],
     large_communities: &'a [LargeCommunity],
 }
@@ -389,7 +397,7 @@ struct RouteFilterAttrs<'a> {
 impl<'a> RouteFilterAttrs<'a> {
     fn from_route(route: &'a Route) -> Self {
         let mut origin_asn = None;
-        let mut as_path_seen = false;
+        let mut as_path = None;
         let mut communities = None;
         let mut large_communities = None;
 
@@ -407,9 +415,9 @@ impl<'a> RouteFilterAttrs<'a> {
                 continue;
             }
             match attr {
-                PathAttribute::AsPath(path) if !as_path_seen => {
+                PathAttribute::AsPath(path) if as_path.is_none() => {
                     origin_asn = path.origin_asn();
-                    as_path_seen = true;
+                    as_path = Some(path);
                 }
                 _ => {}
             }
@@ -417,6 +425,7 @@ impl<'a> RouteFilterAttrs<'a> {
 
         Self {
             origin_asn,
+            as_path,
             communities: communities.unwrap_or(&[]),
             large_communities: large_communities.unwrap_or(&[]),
         }
@@ -463,6 +472,32 @@ impl RouteFilters {
             .filter_map(|value| parse_canonical_large_community(value))
             .collect();
 
+        let rpki_validation = match proto::RouteOriginValidation::try_from(req.rpki_validation) {
+            Ok(proto::RouteOriginValidation::Unspecified) => None,
+            Ok(value) => Some(value),
+            Err(_) => {
+                return Err(Status::invalid_argument(format!(
+                    "unknown rpki_validation value {}",
+                    req.rpki_validation
+                )));
+            }
+        };
+        let aspa_validation = match proto::RouteAspaValidation::try_from(req.aspa_validation) {
+            Ok(proto::RouteAspaValidation::Unspecified) => None,
+            Ok(value) => Some(value),
+            Err(_) => {
+                return Err(Status::invalid_argument(format!(
+                    "unknown aspa_validation value {}",
+                    req.aspa_validation
+                )));
+            }
+        };
+        if req.as_path_contains == Some(0) {
+            return Err(Status::invalid_argument(
+                "as_path_contains must be a nonzero ASN",
+            ));
+        }
+
         Ok(Self {
             prefix,
             longer: req.longer_prefixes,
@@ -470,6 +505,9 @@ impl RouteFilters {
             communities: req.community_filter.clone(),
             large_community_filter_active: !req.large_community_filter.is_empty(),
             large_communities,
+            rpki_validation,
+            aspa_validation,
+            as_path_contains: req.as_path_contains,
         })
     }
 
@@ -478,6 +516,9 @@ impl RouteFilters {
             && self.origin_asn == 0
             && self.communities.is_empty()
             && !self.large_community_filter_active
+            && self.rpki_validation.is_none()
+            && self.aspa_validation.is_none()
+            && self.as_path_contains.is_none()
     }
 
     fn matches(&self, route: &Route) -> bool {
@@ -491,13 +532,48 @@ impl RouteFilters {
             }
         }
 
+        if let Some(validation) = self.rpki_validation
+            && !matches!(
+                (validation, route.validation_state),
+                (proto::RouteOriginValidation::Valid, RpkiValidation::Valid)
+                    | (
+                        proto::RouteOriginValidation::Invalid,
+                        RpkiValidation::Invalid
+                    )
+                    | (
+                        proto::RouteOriginValidation::NotFound,
+                        RpkiValidation::NotFound
+                    )
+            )
+        {
+            return false;
+        }
+
+        if let Some(validation) = self.aspa_validation
+            && !matches!(
+                (validation, route.aspa_state),
+                (proto::RouteAspaValidation::Valid, AspaValidation::Valid)
+                    | (proto::RouteAspaValidation::Invalid, AspaValidation::Invalid)
+                    | (proto::RouteAspaValidation::Unknown, AspaValidation::Unknown)
+            )
+        {
+            return false;
+        }
+
         if self.origin_asn != 0
             || !self.communities.is_empty()
             || self.large_community_filter_active
+            || self.as_path_contains.is_some()
         {
             let attrs = RouteFilterAttrs::from_route(route);
 
             if self.origin_asn != 0 && attrs.origin_asn != Some(self.origin_asn) {
+                return false;
+            }
+
+            if let Some(asn) = self.as_path_contains
+                && !attrs.as_path.is_some_and(|path| path.contains_asn(asn))
+            {
                 return false;
             }
 
@@ -807,7 +883,7 @@ fn route_page_query_identity(afi_safi: i32, filters: &RouteFilters) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
 
     let mut bytes = Vec::new();
-    bytes.push(1); // identity encoding version
+    bytes.push(2); // identity encoding version
     bytes.extend_from_slice(&afi_safi.to_be_bytes());
     match filters.prefix {
         None => bytes.push(0),
@@ -856,6 +932,30 @@ fn route_page_query_identity(afi_safi: i32, filters: &RouteFilters) -> String {
         bytes.extend_from_slice(&community.global_admin.to_be_bytes());
         bytes.extend_from_slice(&community.local_data1.to_be_bytes());
         bytes.extend_from_slice(&community.local_data2.to_be_bytes());
+    }
+
+    bytes.extend_from_slice(
+        &(filters
+            .rpki_validation
+            .map_or(proto::RouteOriginValidation::Unspecified as i32, |value| {
+                value as i32
+            }))
+        .to_be_bytes(),
+    );
+    bytes.extend_from_slice(
+        &(filters
+            .aspa_validation
+            .map_or(proto::RouteAspaValidation::Unspecified as i32, |value| {
+                value as i32
+            }))
+        .to_be_bytes(),
+    );
+    match filters.as_path_contains {
+        None => bytes.push(0),
+        Some(asn) => {
+            bytes.push(1);
+            bytes.extend_from_slice(&asn.to_be_bytes());
+        }
     }
 
     let digest = Sha256::digest(bytes);
@@ -3874,6 +3974,9 @@ mod tests {
             origin_asn: 0,
             community_filter: vec![],
             large_community_filter: vec![],
+            rpki_validation: proto::RouteOriginValidation::Unspecified as i32,
+            aspa_validation: proto::RouteAspaValidation::Unspecified as i32,
+            as_path_contains: None,
         }
     }
 
@@ -4102,6 +4205,39 @@ mod tests {
         };
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(err.message().contains("0-128 for IPv6"));
+    }
+
+    #[test]
+    fn route_filters_reject_unknown_typed_verdicts_and_asn_zero() {
+        for (request, field) in [
+            (
+                proto::ListRoutesRequest {
+                    rpki_validation: 99,
+                    ..list_routes_request()
+                },
+                "rpki_validation",
+            ),
+            (
+                proto::ListRoutesRequest {
+                    aspa_validation: 99,
+                    ..list_routes_request()
+                },
+                "aspa_validation",
+            ),
+            (
+                proto::ListRoutesRequest {
+                    as_path_contains: Some(0),
+                    ..list_routes_request()
+                },
+                "as_path_contains",
+            ),
+        ] {
+            let error = RouteFilters::from_request(&request)
+                .err()
+                .expect("invalid typed route filter must fail");
+            assert_eq!(error.code(), tonic::Code::InvalidArgument);
+            assert!(error.message().contains(field));
+        }
     }
 
     #[tokio::test]
@@ -4873,6 +5009,9 @@ mod tests {
             communities: vec![],
             large_community_filter_active: false,
             large_communities: vec![],
+            rpki_validation: None,
+            aspa_validation: None,
+            as_path_contains: None,
         };
         assert!(filters.matches(&route));
 
@@ -4883,6 +5022,9 @@ mod tests {
             communities: vec![],
             large_community_filter_active: false,
             large_communities: vec![],
+            rpki_validation: None,
+            aspa_validation: None,
+            as_path_contains: None,
         };
         assert!(!wrong_prefix.matches(&route));
     }
@@ -4915,6 +5057,9 @@ mod tests {
             communities: vec![community_val],
             large_community_filter_active: false,
             large_communities: vec![],
+            rpki_validation: None,
+            aspa_validation: None,
+            as_path_contains: None,
         };
         assert!(filters.matches(&route));
 
@@ -4925,6 +5070,9 @@ mod tests {
             communities: vec![65002u32 * 65536 + 200],
             large_community_filter_active: false,
             large_communities: vec![],
+            rpki_validation: None,
+            aspa_validation: None,
+            as_path_contains: None,
         };
         assert!(!wrong_community.matches(&route));
     }
@@ -4958,6 +5106,9 @@ mod tests {
             communities: vec![],
             large_community_filter_active: false,
             large_communities: vec![],
+            rpki_validation: None,
+            aspa_validation: None,
+            as_path_contains: None,
         };
         assert!(filters.matches(&route));
 
@@ -4968,6 +5119,9 @@ mod tests {
             communities: vec![],
             large_community_filter_active: false,
             large_communities: vec![],
+            rpki_validation: None,
+            aspa_validation: None,
+            as_path_contains: None,
         };
         assert!(!wrong_asn.matches(&route));
     }
@@ -4991,9 +5145,151 @@ mod tests {
             communities: vec![],
             large_community_filter_active: false,
             large_communities: vec![],
+            rpki_validation: None,
+            aspa_validation: None,
+            as_path_contains: None,
         };
 
         assert!(!filters.matches(&route));
+    }
+
+    #[test]
+    fn route_filters_and_compose_verdicts_and_exact_path_membership() {
+        let mut route = test_route(
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
+            vec![
+                PathAttribute::AsPath(AsPath {
+                    segments: vec![
+                        AsPathSegment::AsSequence(vec![64500, 64501]),
+                        AsPathSegment::AsSet(vec![64510, 64511]),
+                    ],
+                }),
+                PathAttribute::Communities(vec![42]),
+            ],
+        );
+        route.validation_state = RpkiValidation::Invalid;
+        route.aspa_state = AspaValidation::Valid;
+
+        let request = proto::ListRoutesRequest {
+            prefix_filter: "10.0.0.0".to_string(),
+            prefix_filter_length: 24,
+            community_filter: vec![42],
+            rpki_validation: proto::RouteOriginValidation::Invalid as i32,
+            aspa_validation: proto::RouteAspaValidation::Valid as i32,
+            as_path_contains: Some(64510),
+            ..list_routes_request()
+        };
+        assert!(
+            RouteFilters::from_request(&request)
+                .unwrap()
+                .matches(&route)
+        );
+
+        for changed in [
+            proto::ListRoutesRequest {
+                rpki_validation: proto::RouteOriginValidation::Valid as i32,
+                ..request.clone()
+            },
+            proto::ListRoutesRequest {
+                aspa_validation: proto::RouteAspaValidation::Unknown as i32,
+                ..request.clone()
+            },
+            proto::ListRoutesRequest {
+                as_path_contains: Some(6451),
+                ..request.clone()
+            },
+        ] {
+            assert!(
+                !RouteFilters::from_request(&changed)
+                    .unwrap()
+                    .matches(&route)
+            );
+        }
+
+        let absent_path = test_route(route.prefix, vec![PathAttribute::Communities(vec![42])]);
+        let path_only = proto::ListRoutesRequest {
+            as_path_contains: Some(64510),
+            ..list_routes_request()
+        };
+        assert!(
+            !RouteFilters::from_request(&path_only)
+                .unwrap()
+                .matches(&absent_path)
+        );
+    }
+
+    #[test]
+    fn route_filters_match_every_recorded_verdict_and_reject_empty_path() {
+        let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
+
+        for (filter, matching, nonmatching) in [
+            (
+                proto::RouteOriginValidation::Valid,
+                RpkiValidation::Valid,
+                RpkiValidation::Invalid,
+            ),
+            (
+                proto::RouteOriginValidation::Invalid,
+                RpkiValidation::Invalid,
+                RpkiValidation::Valid,
+            ),
+            (
+                proto::RouteOriginValidation::NotFound,
+                RpkiValidation::NotFound,
+                RpkiValidation::Valid,
+            ),
+        ] {
+            let request = proto::ListRoutesRequest {
+                rpki_validation: filter as i32,
+                ..list_routes_request()
+            };
+            let filters = RouteFilters::from_request(&request).unwrap();
+            let mut route = test_route(prefix, vec![]);
+            route.validation_state = matching;
+            assert!(filters.matches(&route), "{filter:?} must match");
+            route.validation_state = nonmatching;
+            assert!(!filters.matches(&route), "{filter:?} must be exact");
+        }
+
+        for (filter, matching, nonmatching) in [
+            (
+                proto::RouteAspaValidation::Valid,
+                AspaValidation::Valid,
+                AspaValidation::Invalid,
+            ),
+            (
+                proto::RouteAspaValidation::Invalid,
+                AspaValidation::Invalid,
+                AspaValidation::Valid,
+            ),
+            (
+                proto::RouteAspaValidation::Unknown,
+                AspaValidation::Unknown,
+                AspaValidation::Valid,
+            ),
+        ] {
+            let request = proto::ListRoutesRequest {
+                aspa_validation: filter as i32,
+                ..list_routes_request()
+            };
+            let filters = RouteFilters::from_request(&request).unwrap();
+            let mut route = test_route(prefix, vec![]);
+            route.aspa_state = matching;
+            assert!(filters.matches(&route), "{filter:?} must match");
+            route.aspa_state = nonmatching;
+            assert!(!filters.matches(&route), "{filter:?} must be exact");
+        }
+
+        let empty_path = test_route(
+            prefix,
+            vec![PathAttribute::AsPath(AsPath { segments: vec![] })],
+        );
+        let filters = RouteFilters::from_request(&proto::ListRoutesRequest {
+            as_path_contains: Some(64500),
+            ..list_routes_request()
+        })
+        .unwrap();
+        assert!(!filters.matches(&empty_path));
     }
 
     #[test]
@@ -5236,6 +5532,15 @@ mod tests {
         let mut changed = base.clone();
         changed.large_community_filter.clear();
         changed_requests.push(changed);
+        let mut changed = base.clone();
+        changed.rpki_validation = proto::RouteOriginValidation::NotFound as i32;
+        changed_requests.push(changed);
+        let mut changed = base.clone();
+        changed.aspa_validation = proto::RouteAspaValidation::Unknown as i32;
+        changed_requests.push(changed);
+        let mut changed = base.clone();
+        changed.as_path_contains = Some(65001);
+        changed_requests.push(changed);
 
         for mut changed in changed_requests {
             let changed_identity = route_page_identity(&changed);
@@ -5399,6 +5704,80 @@ mod tests {
                 2,
             )
         );
+    }
+
+    #[tokio::test]
+    async fn accepted_route_views_push_down_identical_recorded_route_predicates() {
+        for scope in [
+            RouteQueryScope::Received { peer: None },
+            RouteQueryScope::Best,
+            RouteQueryScope::Advertised {
+                peer: "192.0.2.9".parse().unwrap(),
+            },
+        ] {
+            let (tx, mut rx) = mpsc::channel(1);
+            let mut matching = test_route(
+                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
+                vec![PathAttribute::AsPath(AsPath {
+                    segments: vec![AsPathSegment::AsSequence(vec![64500, 64501])],
+                })],
+            );
+            matching.validation_state = RpkiValidation::Invalid;
+            matching.aspa_state = AspaValidation::Unknown;
+            let mut nonmatching = matching.clone();
+            nonmatching.validation_state = RpkiValidation::Valid;
+            let response_route = matching.clone();
+            tokio::spawn(async move {
+                let Some(RibUpdate::QueryRoutesPage {
+                    scope: actual_scope,
+                    filter,
+                    reply,
+                    ..
+                }) = rx.recv().await
+                else {
+                    panic!("expected paged route query");
+                };
+                assert_eq!(actual_scope, scope);
+                let filter = filter.expect("recorded-route predicates are pushed to the actor");
+                assert!(filter(&matching));
+                assert!(!filter(&nonmatching));
+                let _ = reply.send(Ok(RoutePage {
+                    routes: vec![response_route],
+                    total: 1,
+                    has_more: false,
+                    version: RoutePageVersion {
+                        epoch: 1,
+                        generation: 1,
+                    },
+                }));
+            });
+
+            let mut request = proto::ListRoutesRequest {
+                rpki_validation: proto::RouteOriginValidation::Invalid as i32,
+                aspa_validation: proto::RouteAspaValidation::Unknown as i32,
+                as_path_contains: Some(64500),
+                ..list_routes_request()
+            };
+            let service = RibService::new(tx);
+            let response = match scope {
+                RouteQueryScope::Received { .. } => service
+                    .list_received_routes(Request::new(request))
+                    .await
+                    .unwrap(),
+                RouteQueryScope::Best => service
+                    .list_best_routes(Request::new(request))
+                    .await
+                    .unwrap(),
+                RouteQueryScope::Advertised { peer } => {
+                    request.neighbor_address = peer.to_string();
+                    service
+                        .list_advertised_routes(Request::new(request))
+                        .await
+                        .unwrap()
+                }
+            };
+            assert_eq!(response.into_inner().routes.len(), 1);
+        }
     }
 
     #[tokio::test]

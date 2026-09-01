@@ -886,6 +886,7 @@ async fn fetch_advertised_into(
         origin_asn: 0,
         community_filter: Vec::new(),
         large_community_filter: Vec::new(),
+        ..Default::default()
     };
     let mut seen_tokens: HashSet<String> = HashSet::new();
     let mut fetched: u64 = 0;

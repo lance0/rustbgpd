@@ -29,6 +29,9 @@ pub struct RouteFilterOpts {
     pub origin_asn: Option<u32>,
     pub community: Vec<u32>,
     pub large_community: Vec<String>,
+    pub rpki_state: Option<crate::RouteRpkiState>,
+    pub aspa_state: Option<crate::RouteAspaState>,
+    pub as_path_contains: Option<u32>,
     /// Maximum rows returned by a bounded single-page query.
     pub limit: Option<u32>,
 }
@@ -70,6 +73,27 @@ fn make_route_request(
         origin_asn: filters.origin_asn.unwrap_or(0),
         community_filter: filters.community.clone(),
         large_community_filter: filters.large_community.clone(),
+        rpki_validation: match filters.rpki_state {
+            None => crate::proto::RouteOriginValidation::Unspecified as i32,
+            Some(crate::RouteRpkiState::Valid) => crate::proto::RouteOriginValidation::Valid as i32,
+            Some(crate::RouteRpkiState::Invalid) => {
+                crate::proto::RouteOriginValidation::Invalid as i32
+            }
+            Some(crate::RouteRpkiState::NotFound) => {
+                crate::proto::RouteOriginValidation::NotFound as i32
+            }
+        },
+        aspa_validation: match filters.aspa_state {
+            None => crate::proto::RouteAspaValidation::Unspecified as i32,
+            Some(crate::RouteAspaState::Valid) => crate::proto::RouteAspaValidation::Valid as i32,
+            Some(crate::RouteAspaState::Invalid) => {
+                crate::proto::RouteAspaValidation::Invalid as i32
+            }
+            Some(crate::RouteAspaState::Unknown) => {
+                crate::proto::RouteAspaValidation::Unknown as i32
+            }
+        },
+        as_path_contains: filters.as_path_contains,
     })
 }
 
@@ -3467,6 +3491,9 @@ mod tests {
             origin_asn: None,
             community: vec![],
             large_community: vec![],
+            rpki_state: None,
+            aspa_state: None,
+            as_path_contains: None,
             limit: None,
         }
     }
@@ -3494,6 +3521,9 @@ mod tests {
             origin_asn: Some(64512),
             community: vec![(64512_u32 << 16) | 100],
             large_community: vec!["64512:1:100".to_string()],
+            rpki_state: Some(crate::RouteRpkiState::Invalid),
+            aspa_state: Some(crate::RouteAspaState::Unknown),
+            as_path_contains: Some(64496),
             limit: None,
         }
     }
@@ -3524,6 +3554,15 @@ mod tests {
         assert_eq!(request.origin_asn, 64512);
         assert_eq!(request.community_filter, vec![(64512_u32 << 16) | 100]);
         assert_eq!(request.large_community_filter, vec!["64512:1:100"]);
+        assert_eq!(
+            request.rpki_validation,
+            crate::proto::RouteOriginValidation::Invalid as i32
+        );
+        assert_eq!(
+            request.aspa_validation,
+            crate::proto::RouteAspaValidation::Unknown as i32
+        );
+        assert_eq!(request.as_path_contains, Some(64496));
     }
 
     /// Load-bearing output proof: changing the human label, JSON key, or

@@ -11,6 +11,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Accepted received, best, and advertised RIB queries now share typed RPKI and
+  ASPA verdict filters plus exact numeric `AS_SEQUENCE`/`AS_SET` membership via
+  `--as-path-contains`. All predicates compose with count and bounded listing,
+  bind continuation-token identity, and reject unknown verdicts or ASN 0.
+
 - Add a self-contained IPv4 two-member `--init-config route-server` starter
   with fail-closed import policy and explicit transparent export.
 

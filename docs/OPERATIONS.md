@@ -2538,6 +2538,8 @@ Received and advertised route filters belong after the view and peer:
 ```bash
 rbgp rib received PEER --prefix 203.0.113.0/24 --longer
 rbgp rib received PEER --origin-asn 64496
+rbgp rib received PEER --as-path-contains 64496
+rbgp rib received PEER --rpki-state invalid --aspa-state unknown
 rbgp rib advertised PEER --community 64496:100
 rbgp rib advertised PEER --large-community 64496:1:100
 ```
@@ -2548,6 +2550,16 @@ filter or `--limit 1..1000`. A limited query is exactly one mutation-fenced
 RPC and reports whether the exact matching total was truncated. An unbounded
 query continues to require a version-consistent walk of every page and returns
 an error if the table changes; the CLI does not emit a torn snapshot.
+
+All filter dimensions are AND-composed. Repeated values within the standard-
+or large-community dimension are OR-matched. RPKI states are `valid`,
+`invalid`, and `not_found`; the last is the route's recorded uncovered-origin
+verdict, not evidence about cache readiness. ASPA states are `valid`,
+`invalid`, and `unknown`. `--as-path-contains` requires one canonical nonzero
+decimal ASN and matches exact numeric membership in represented `AS_SEQUENCE`
+or `AS_SET` segments. It does not evaluate a regex or policy. RFC 9774
+rejection of newly received `AS_SET` and `AS_CONFED_SET` forms remains
+unchanged; the inspection filter does not reopen them.
 
 `--age` appends the time since the route was originally received into the RIB.
 It also works on `rbgp rib advertised PEER --age`, where it remains the

@@ -348,6 +348,13 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subco
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -l origin-asn -d 'Filter by origin ASN (last ASN in AS_PATH)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -s c -l community -d 'Filter by community (e.g., 65001:100 or BLACKHOLE); may be repeated' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -l large-community -d 'Filter by large community (e.g., 65001:100:200); may be repeated' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -l rpki-state -d 'Filter by recorded RPKI verdict' -r -f -a "valid\t''
+invalid\t''
+not_found\t''"
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -l aspa-state -d 'Filter by recorded ASPA verdict' -r -f -a "valid\t''
+invalid\t''
+unknown\t''"
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -l as-path-contains -d 'Filter by exact ASN membership in the represented AS path' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -l limit -d 'Return at most this many routes without walking the full table (1-1000)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
@@ -378,6 +385,13 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -l origin-asn -d 'Filter by origin ASN (last ASN in AS_PATH)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -s c -l community -d 'Filter by community (e.g., 65001:100 or BLACKHOLE); may be repeated' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -l large-community -d 'Filter by large community (e.g., 65001:100:200); may be repeated' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -l rpki-state -d 'Filter by recorded RPKI verdict' -r -f -a "valid\t''
+invalid\t''
+not_found\t''"
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -l aspa-state -d 'Filter by recorded ASPA verdict' -r -f -a "valid\t''
+invalid\t''
+unknown\t''"
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -l as-path-contains -d 'Filter by exact ASN membership in the represented AS path' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -l count -d 'Print only the number of matching received routes'
@@ -393,6 +407,13 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -l origin-asn -d 'Filter by origin ASN (last ASN in AS_PATH)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -s c -l community -d 'Filter by community (e.g., 65001:100 or BLACKHOLE); may be repeated' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -l large-community -d 'Filter by large community (e.g., 65001:100:200); may be repeated' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -l rpki-state -d 'Filter by recorded RPKI verdict' -r -f -a "valid\t''
+invalid\t''
+not_found\t''"
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -l aspa-state -d 'Filter by recorded ASPA verdict' -r -f -a "valid\t''
+invalid\t''
+unknown\t''"
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -l as-path-contains -d 'Filter by exact ASN membership in the represented AS path' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -l count -d 'Print only the number of matching received routes'
@@ -411,6 +432,13 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -l origin-asn -d 'Filter by origin ASN (last ASN in AS_PATH)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -s c -l community -d 'Filter by community (e.g., 65001:100 or BLACKHOLE); may be repeated' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -l large-community -d 'Filter by large community (e.g., 65001:100:200); may be repeated' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -l rpki-state -d 'Filter by recorded RPKI verdict' -r -f -a "valid\t''
+invalid\t''
+not_found\t''"
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -l aspa-state -d 'Filter by recorded ASPA verdict' -r -f -a "valid\t''
+invalid\t''
+unknown\t''"
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -l as-path-contains -d 'Filter by exact ASN membership in the represented AS path' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -l count -d 'Print only the number of matching advertised routes'
@@ -430,6 +458,13 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -l origin-asn -d 'Filter by origin ASN (last ASN in AS_PATH)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -s c -l community -d 'Filter by community (e.g., 65001:100 or BLACKHOLE); may be repeated' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -l large-community -d 'Filter by large community (e.g., 65001:100:200); may be repeated' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -l rpki-state -d 'Filter by recorded RPKI verdict' -r -f -a "valid\t''
+invalid\t''
+not_found\t''"
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -l aspa-state -d 'Filter by recorded ASPA verdict' -r -f -a "valid\t''
+invalid\t''
+unknown\t''"
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -l as-path-contains -d 'Filter by exact ASN membership in the represented AS path' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -l count -d 'Print only the number of matching advertised routes'
