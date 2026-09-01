@@ -261,6 +261,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   source-equivalent IXP, route-server-1000, RR1000, and twelve-root IRR reload
   receipts with compact checksummed artifacts and explicit claim boundaries.
 
+- Refresh the comparison matrix and GoBGP parity page against current
+  upstream releases: GoBGP re-pinned to v4.9.0 (TCP-AO keychains, JSON
+  logging by default), OpenBGPD credited for OpenMetrics output and its OCI
+  image, BIRD's exporter-based Prometheus path, a defined looking-glass row,
+  a dated latest-release row, and an "Other Rust implementations" section
+  covering zebra-rs, Holo, and RustyBGP.
+
 ### Upgrade notes
 
 - Received `AS_PATH` attributes with more than 750 AS numbers and reachable

@@ -22,6 +22,20 @@ rustbgpd-vs-GoBGP comparison, which records the primary-source verification.
 | Primary interface | gRPC | CLI (vtysh) | CLI (birdc) | gRPC | CLI (bgpctl) |
 | First release | 2026 | 2017 | 1998 | 2014 | 2004 |
 | Multithreaded | Yes (tokio) | No | Yes (BIRD 3) | Yes (goroutines) | Yes (3-process) |
+| Latest release (verified 2026-09-01)[^versions] | v0.68.0 (2026-08-30) | 10.7.1 (2026-08-31) | 3.3.2 (2026-07-30) | v4.9.0 (2026-09-01) | 9.2 (2026-08-06) |
+
+[^versions]: Dates are the upstream release announcements: FRR
+    [frr-10.7.1](https://github.com/FRRouting/frr/releases/tag/frr-10.7.1),
+    BIRD [3.3.2 `NEWS`](https://gitlab.nic.cz/labs/bird/-/blob/v3.3.2/NEWS),
+    GoBGP [v4.9.0](https://github.com/osrg/gobgp/releases/tag/v4.9.0),
+    OpenBGPD [9.2](https://www.mail-archive.com/announce@openbsd.org/msg00601.html),
+    and the rustbgpd [changelog](../CHANGELOG.md). This row does not
+    re-derive the dated footnotes below, which keep the exact version each
+    claim was verified against. Route-server config generation still pins
+    [arouteserver 1.23.2](https://github.com/pierky/arouteserver/releases/tag/v1.23.2)
+    (2025-01-05), the latest release, whose
+    [supported speakers](https://arouteserver.readthedocs.io/en/latest/SUPPORTED_SPEAKERS.html)
+    page still labels BIRD v3 support alpha.
 
 ## Address Families
 
@@ -109,9 +123,9 @@ IPv4/IPv6 `Prefix` routes.
     OTC behavior are intentionally out of scope for v1.
 
 [^gobgp-extmsg]: GoBGP upstream support was added in the exact `v4.7.0` tag
-    and is retained in the exact `v4.8.0` tagged
-    [capability definitions](https://github.com/osrg/gobgp/blob/v4.8.0/pkg/packet/bgp/bgp.go#L406-L438),
-    verified 2026-08-19. This records upstream support, not a rustbgpd/GoBGP
+    and is retained in the exact `v4.9.0` tagged
+    [capability definitions](https://github.com/osrg/gobgp/blob/v4.9.0/pkg/packet/bgp/bgp.go#L410-L424),
+    verified 2026-09-01. This records upstream support, not a rustbgpd/GoBGP
     interoperability receipt.
 
 ## Policy Engine
@@ -148,7 +162,7 @@ IPv4/IPv6 `Prefix` routes.
     and export policy for external BGP; this claim is limited to those release
     lines.
 [^rfc8212-gobgp]: GoBGP
-    [v4.8.0 policy documentation](https://github.com/osrg/gobgp/blob/v4.8.0/docs/sources/policy.md#L886-L899)
+    [v4.9.0 policy documentation](https://github.com/osrg/gobgp/blob/v4.9.0/docs/sources/policy.md#L886-L899)
     says unmatched import and export policy defaults to `accept-route`.
 [^rfc8212-openbgpd]: The
     [OpenBSD-current `bgpd.conf(5)` filter documentation](https://man.openbsd.org/bgpd.conf#FILTER)
@@ -160,7 +174,7 @@ IPv4/IPv6 `Prefix` routes.
 | Feature | rustbgpd | FRR | BIRD | GoBGP | OpenBGPd |
 |---|:---:|:---:|:---:|:---:|:---:|
 | TCP MD5 (RFC 2385) | Yes | Yes | Yes | Yes | Yes |
-| TCP-AO (RFC 5925) | Static + dynamic-prefix keyrings; observation-gated live rotation; deprecated/unselected-key deletion on SIGHUP | No | Yes | No | No |
+| TCP-AO (RFC 5925) | Static + dynamic-prefix keyrings; observation-gated live rotation; deprecated/unselected-key deletion on SIGHUP | No | Yes | Yes[^tcpao-gobgp] | No |
 | GTSM / TTL Security | Configurable hops[^gtsm-distance] | Yes | Yes | Yes | Yes |
 | eBGP multihop enablement | None needed[^multihop-rustbgpd] | Required[^multihop-frr] | Required[^multihop-bird] | Configurable[^multihop-gobgp] | Required[^multihop-openbgpd] |
 | RPKI origin validation | Yes | Yes | Yes | Yes | Yes |
@@ -190,7 +204,7 @@ memory-safe-language row refers to.
     [OpenBSD-current `bgpd.conf(5)` ttl-security documentation](https://man.openbsd.org/bgpd.conf#ttl-security),
     where "for multihop peers, incoming packets are required to have a TTL of
     256 minus multihop distance". GoBGP
-    [v4.8.0](https://github.com/osrg/gobgp/blob/v4.8.0/docs/sources/configuration.md#L166-L171)
+    [v4.9.0](https://github.com/osrg/gobgp/blob/v4.9.0/docs/sources/configuration.md#L166-L171)
     exposes a configurable `ttl-min` but documents TTL security as mutually
     exclusive with `neighbors.ebgp-multihop.config`.
 
@@ -220,7 +234,7 @@ memory-safe-language row refers to.
     claim is limited to that release line.
 
 [^multihop-gobgp]: GoBGP
-    [v4.8.0 configuration documentation](https://github.com/osrg/gobgp/blob/v4.8.0/docs/sources/configuration.md#L83-L85)
+    [v4.9.0 configuration documentation](https://github.com/osrg/gobgp/blob/v4.9.0/docs/sources/configuration.md#L83-L85)
     documents `[neighbors.ebgp-multihop.config]` with `enabled` and
     `multihop-ttl`. The pinned document does not state what happens to a
     non-adjacent peer when the section is omitted, so this cell records the
@@ -233,6 +247,15 @@ memory-safe-language row refers to.
     case the `multihop` statement "defines the maximum hops the neighbor may be
     away".
 
+[^tcpao-gobgp]: GoBGP
+    [v4.9.0](https://github.com/osrg/gobgp/releases/tag/v4.9.0) (2026-09-01)
+    adds a TCP-AO keychain configuration API, keychain management in the
+    server, keychain loading from the configuration file, and HMAC-SHA256
+    profiles, per its release notes; the implementation is Linux-specific
+    with a stub elsewhere (`pkg/server/tcp_ao.go`,
+    `internal/pkg/netutils/tcp_ao_linux.go`). Upstream support per release
+    notes, not a rustbgpd/GoBGP interoperability receipt.
+
 [^aspa]: rustbgpd ships RTR v2 ASPA input, role-aware upstream/downstream path
     verification selected by BGP Roles, best-path preference, policy matching
     for IPv4/IPv6 unicast, and targeted import-policy refresh when validation
@@ -242,8 +265,8 @@ memory-safe-language row refers to.
 
 | Feature | rustbgpd | FRR | BIRD | GoBGP | OpenBGPd |
 |---|:---:|:---:|:---:|:---:|:---:|
-| Prometheus metrics | Yes | Via exporter[^prom-frr] | No | Yes | No |
-| Structured logging (JSON) | Yes | No | No | No | No |
+| Prometheus metrics | Yes | Via exporter[^prom-frr] | Via exporter[^prom-bird] | Yes | OpenMetrics[^prom-openbgpd] |
+| Structured logging (JSON) | Yes | No | No | Yes[^log-gobgp] | No |
 | BMP (RFC 7854) | Yes | Yes | Yes | Yes | No |
 | BMP full trio (7854 + 8671 Adj-RIB-Out + 9069 Loc-RIB) | Yes | No | No | No | No |
 | BMPv4 TLV framing (draft-21; Path Marking awaiting a non-colliding assignment) | Yes | No | No | No | No |
@@ -272,14 +295,32 @@ memory-safe-language row refers to.
 |---|:---:|:---:|:---:|:---:|:---:|
 | Live TUI dashboard | Yes | No | No | No | No |
 | Config error diagnostics | Yes | No | No | No | No |
-| Docker image | Yes | Yes | Yes | Yes | No |
+| Docker image | Yes | Yes | Yes | Yes | Yes[^docker-openbgpd] |
 | Fuzz testing | Yes[^fuzz] | Partial[^fuzz] | No | Yes[^fuzz] | No |
 | Interop test suite | Yes[^interop] | Partial[^interop] | No | Yes[^interop] | Partial[^interop] |
 | FIB/kernel integration | Partial[^fib] | Yes | Yes | Yes | Yes |
 | Route server mode | Yes | Yes[^rs-frr] | Yes | Yes | Yes |
 | Dynamic neighbors | Yes | Yes | Yes | Yes | Yes[^dyn-openbgpd] |
-| Looking glass | Yes | No | Yes | No | Yes |
+| Looking glass | Yes[^lg] | Third-party[^lg] | Third-party[^lg] | Third-party[^lg] | Yes[^lg] |
 | BFD integration | Yes[^bfd] | Yes | Yes | Yes | No |
+
+[^docker-openbgpd]: The OpenBGPD project builds an OCI image from
+    [openbgpd-portable/openbgpd-container](https://github.com/openbgpd-portable/openbgpd-container)
+    and publishes it as
+    [`openbgpd/openbgpd`](https://hub.docker.com/r/openbgpd/openbgpd) on
+    Docker Hub and Quay; the `9.2` tag was pushed 2026-08-30.
+
+[^lg]: This row records a looking-glass surface the project itself
+    ships. rustbgpd's is the in-tree `examples/birdwatcher-adapter`, which
+    serves Birdwatcher-shaped endpoints for Alice-LG from the gRPC API
+    ([OPERATIONS.md](OPERATIONS.md#looking-glass-birdwatcher-shaped-rest-subset));
+    OpenBGPD ships `bgplgd` in its portable tree. FRR, BIRD, and GoBGP
+    rely on third-party frontends:
+    [Alice-LG](https://github.com/alice-lg/alice-lg) has backends for
+    BIRD (birdwatcher), GoBGP (gRPC), and OpenBGPD (`bgplgd` /
+    `openbgpd-state-server`), and
+    [hyperglass](https://hyperglass.dev/platforms) drives FRR, BIRD, and
+    OpenBGPD over SSH.
 
 [^dyn-openbgpd]: Prefix-template neighbors: `neighbor 10.0.0.0/8` in
     bgpd.conf(5) accepts any connection from within the network as a cloned
@@ -317,7 +358,7 @@ memory-safe-language row refers to.
     differs. rustbgpd carries libFuzzer targets in
     `crates/*/fuzz/fuzz_targets` covering the wire decoder along with the
     RPKI, MRT, BFD, EVPN, and policy crates, run nightly by `fuzz.yml`.
-    GoBGP `v4.8.0` carries Go-native fuzz targets covering the BGP, BMP,
+    GoBGP `v4.9.0` carries Go-native fuzz targets covering the BGP, BMP,
     MRT, RTR, and ZAPI decoders plus policy community matchers
     (`pkg/packet/*`, `pkg/zebra/`, `internal/pkg/table/`), with run
     instructions in its `CONTRIBUTING.md`; Go fuzz targets replay their
@@ -335,10 +376,10 @@ memory-safe-language row refers to.
     against a foreign BGP speaker; the breadth differs. rustbgpd runs
     containerlab topologies in `tests/interop/` against FRR, GoBGP, BIRD,
     ExaBGP, and OpenBGPD, gated on every pull request by `interop.yml`. GoBGP
-    `v4.8.0` ships
-    [`test/scenario_test/`](https://github.com/osrg/gobgp/tree/v4.8.0/test/scenario_test)
+    `v4.9.0` ships
+    [`test/scenario_test/`](https://github.com/osrg/gobgp/tree/v4.9.0/test/scenario_test)
     — docker-driven scenario modules with foreign-daemon drivers in
-    [`test/lib/`](https://github.com/osrg/gobgp/tree/v4.8.0/test/lib) (ExaBGP,
+    [`test/lib/`](https://github.com/osrg/gobgp/tree/v4.9.0/test/lib) (ExaBGP,
     Quagga, YABGP, BIRD, bagpipe) — and its `ci.yml` runs each module as its
     own job on every push and pull request. FRR's `tests/topotests` drives
     bgpd against ExaBGP peers through `exabgp.env` / `exabgp.cfg` fixtures
@@ -370,6 +411,25 @@ memory-safe-language row refers to.
     `prometheus-frr-exporter`), which polls the FRR vty sockets and
     serves `/metrics` itself. GoBGP's metrics are native: `gobgpd
     --pprof-host` serves Prometheus metrics on `/metrics`.
+
+[^prom-bird]: BIRD has no native Prometheus endpoint; the external
+    [`bird_exporter`](https://github.com/czerwonk/bird_exporter) (v1.6.2,
+    2026-08-18) reads the BIRD control socket on the same host and serves
+    `/metrics` itself, with BIRD 2 and BIRD 3 supported per its README —
+    the same treatment as FRR's cell.
+
+[^prom-openbgpd]: `bgpctl show metrics` dumps BGP statistics in
+    OpenMetrics text ([bgpctl(8)](https://man.openbsd.org/bgpctl.8)) and the
+    `bgplgd` daemon in the portable tree serves a `/metrics` endpoint; both
+    arrived in
+    [OpenBGPD 7.8](https://www.mail-archive.com/tech@openbsd.org/msg74147.html)
+    (2023-03-17). `bgpd` itself has no scrape listener, so a scraper goes
+    through `bgplgd` or wraps `bgpctl`.
+
+[^log-gobgp]: `gobgpd` logs JSON by default and `--log-plain` selects the
+    text format
+    ([`cmd/gobgpd/main.go`](https://github.com/osrg/gobgp/blob/v4.9.0/cmd/gobgpd/main.go#L63)
+    at v4.9.0; the same default was already present at v4.8.0).
 
 [^gnmi]: rustbgpd ships a native `gnmi.gNMI` target for a strict
     OpenConfig BGP operational-state subset: `Capabilities`, `Get`, and
@@ -520,6 +580,42 @@ all settled grouping, registration, rejection, and writer gates held. Its
 competitor comparison or a causal delta, and neither rewrites the pinned
 `515659b1` campaign above.
 
+## Other Rust implementations
+
+Three other open-source BGP daemons are written in Rust. None is a column
+in the matrix above; each paragraph records capability, scope, license,
+and a pinned release from the project's own release page and README, and
+makes no interoperability claim.
+
+**zebra-rs** (AGPL-3.0) describes itself as a BGP, OSPF, and IS-IS
+routing stack with SRv6, SR-MPLS, L3VPN, and EVPN extensions, configured
+through YANG-modelled candidate/running configuration (`zebra-rs/yang/`)
+and its own CLI, and shipped as prebuilt Ubuntu `.deb` packages with an
+apt channel. Release
+[v26.8.5](https://github.com/zebra-rs/zebra-rs/releases/tag/v26.8.5)
+(2026-08-28) added RFC 7947 route-server mode
+(`neighbor X route-server-client`) and RFC 9234 BGP Roles with
+Only-to-Customer;
+[v26.8.6](https://github.com/zebra-rs/zebra-rs/releases/tag/v26.8.6)
+(2026-08-29) followed a day later, and the project tags releases
+several times a month.
+
+**Holo** (MIT) is a routing-protocol suite whose BGP is IPv4 and IPv6
+unicast. Its README at
+[v0.9.0](https://github.com/holo-routing/holo/blob/v0.9.0/README.md)
+(2026-02-21) lists RFC 4271, RFC 4760 and RFC 2545, standard and large
+communities, RFC 6793, RFC 7606, RFC 8212, and RFC 9774 for BGP, and
+lists no route reflection (RFC 4456), graceful restart (RFC 4724),
+Add-Path (RFC 7911), RPKI (RFC 6811 / RFC 8210), or BMP (RFC 7854).
+
+**RustyBGP** (Apache-2.0) is the osrg project's Rust daemon. Its README
+at [v0.2.0](https://github.com/osrg/rustybgp/blob/v0.2.0/README.md)
+(2026-06-30) states that it supports most of GoBGP's features with the
+same gRPC API and configuration file format, so `rustybgpd` reads a
+`gobgpd.conf` and is managed with the `gobgp` CLI; the README lists
+route reflector, route server, Add-Path, graceful restart, RPKI, BFD,
+BMP, and MRT among its features.
+
 ## Positioning
 
 **rustbgpd** is an API-first BGP daemon targeting data-center fabric, IX
@@ -542,7 +638,15 @@ Best as an SDN controller or route injector rather than a high-performance route
 **OpenBGPd** is security-focused with privilege separation and OpenBSD heritage.
 Deployed at major IXPs (LINX, Netnod). Lean, reliable, and standards-compliant
 with strong RFC coverage including BGP Roles and Extended Messages. No
-programmatic API beyond the CLI socket.
+programmatic API beyond the CLI socket. Its own release announcements
+report an Adj-RIB-Out rewrite in
+[9.0](https://marc.info/?l=openbsd-announce&m=176710395831597&w=2)
+(2025-12-30) for which "a reduction in memory usage of more than 50%
+should be feasible" on large IXP route servers, and filter changes in
+[9.1](https://undeadly.org/cgi?action=article;sid=20260414025522)
+(2026-04-13) that "reduce the initial sync duration of large route
+servers by more than 25%"; those are upstream's figures, not
+measurements from this project.
 
 ### Why reload behavior decided this market
 
