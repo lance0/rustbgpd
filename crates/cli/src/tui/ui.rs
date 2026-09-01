@@ -9,15 +9,17 @@ use crate::commands::neighbor::{
     optional_seconds_label, rfc8212_policy_status_label,
 };
 use crate::output::{format_duration, format_state_with_stale, neighbor_source_label};
-use crate::tui::app::{App, ExplainState, RibPageState, SortColumn, View, neighbor_key};
-use crate::tui::data::{Freshness, RouteEventEntry, RouteEventKind};
+use crate::tui::app::{
+    App, EditorMode, ExplainState, PrefixEditor, RibPageState, SortColumn, View, neighbor_key,
+};
+use crate::tui::data::{Freshness, RibFamily, RouteEventEntry, RouteEventKind};
 use crate::tui::theme::Theme;
 
 pub fn draw(f: &mut Frame, app: &mut App, theme: &Theme) {
     match app.view.clone() {
         View::PeerTable => draw_main(f, app, theme),
         View::PeerDetail(address) => draw_peer_detail(f, app, &address, theme),
-        View::BestRib(peer) => draw_best_rib(f, app, &peer, theme),
+        View::RouteExplorer(peer) => draw_route_explorer(f, app, &peer, theme),
         View::AdvertisedExplain(peer) => draw_advertised_explain(f, app, &peer, theme),
     }
 
@@ -367,7 +369,7 @@ fn draw_peer_detail(f: &mut Frame, app: &mut App, address: &str, theme: &Theme) 
     };
 
     let cfg = neighbor.config.as_ref();
-    let title = format!(" Peer Detail: {address} | r Best RIB | Esc back | j/k scroll ");
+    let title = format!(" Peer Detail: {address} | r Routes | Esc peer table | j/k scroll ");
 
     let block = Block::default()
         .title(title)
@@ -639,100 +641,307 @@ fn draw_peer_detail(f: &mut Frame, app: &mut App, address: &str, theme: &Theme) 
     f.render_widget(paragraph, inner);
 }
 
-fn draw_best_rib(f: &mut Frame, app: &mut App, peer: &str, theme: &Theme) {
+fn draw_route_explorer(f: &mut Frame, app: &mut App, peer: &str, theme: &Theme) {
+    let scope = if app.rib_view.peer_scoped() {
+        format!("peer {peer}")
+    } else {
+        format!("global | explain target {peer}")
+    };
+    let filter = app.rib_filter.map_or_else(
+        || "no filter".to_string(),
+        |filter| format!("filter {}", filter.label()),
+    );
     let block = Block::default()
-        .title(format!(" Best RIB (point-in-time) | target {peer} "))
+        .title(format!(
+            " Routes: {} | {scope} | {} | {filter} ",
+            app.rib_view.label(),
+            app.rib_family.label()
+        ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.border));
     let inner = block.inner(f.area());
     f.render_widget(block, f.area());
+    let chunks = Layout::vertical([
+        Constraint::Min(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+    let (body, status_area, keys_area) = (chunks[0], chunks[1], chunks[2]);
+    // One header row; the rest are data rows Space/PgDn move across.
+    app.set_rib_layout(usize::from(body.height.saturating_sub(1)));
+
+    let dim = Style::default().fg(theme.text_dim);
+    let header_style = Style::default()
+        .fg(theme.header_fg)
+        .add_modifier(Modifier::BOLD);
+    let highlight = Style::default()
+        .fg(theme.highlight)
+        .add_modifier(Modifier::BOLD);
+    let notice = app
+        .rib_notice
+        .map_or(String::new(), |notice| format!(" | {notice}"));
+    let row = app.rib_table_state.selected().map_or(0, |i| i + 1);
+    let view_lower = app.rib_view.label().to_ascii_lowercase();
+
     match app.rib_page.as_ref() {
         Some(RibPageState::Loading) | None => {
-            f.render_widget(Paragraph::new("Loading routes..."), inner)
+            f.render_widget(Paragraph::new("Loading routes..."), body)
         }
         Some(RibPageState::Error(message)) => f.render_widget(
             Paragraph::new(message.as_str()).style(Style::default().fg(theme.error)),
-            inner,
+            body,
         ),
-        Some(RibPageState::Ready(page)) if page.routes.is_empty() => {
-            let message = if page.total_count == 0 {
-                "No best routes"
-            } else {
-                "Empty page"
-            };
-            f.render_widget(Paragraph::new(format!("{message}\n\nEsc Back")), inner);
-        }
         Some(RibPageState::Ready(page)) => {
-            let rows = page.routes.iter().take(100).map(|route| {
-                Row::new(vec![
-                    Cell::from(format!("{}/{}", route.prefix, route.prefix_length)),
-                    Cell::from(route.next_hop.clone()),
-                    Cell::from(route.peer_address.clone()),
-                    Cell::from(
-                        route
-                            .as_path
-                            .iter()
-                            .map(u32::to_string)
-                            .collect::<Vec<_>>()
-                            .join(" "),
-                    ),
-                    Cell::from(optional_u32(route.local_pref_attr)),
-                    Cell::from(optional_u32(route.med_attr)),
-                    Cell::from(route.validation_state.clone()),
-                    Cell::from(route.aspa_state.clone()),
-                ])
-            });
-            let footer = format!(
-                "row {}/{} | page rows {} | total {} | n Next | p Previous | Enter Explain | Esc Back",
-                app.rib_table_state.selected().map_or(0, |i| i + 1),
+            let status = format!(
+                "row {row}/{} | server page {} | total {} | snapshot {}{notice}",
                 page.routes.len(),
-                page.routes.len(),
-                page.total_count
-            );
-            let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
-            let table = Table::new(
-                rows,
-                [
-                    Constraint::Min(16),
-                    Constraint::Min(13),
-                    Constraint::Min(13),
-                    Constraint::Min(12),
-                    Constraint::Length(9),
-                    Constraint::Length(7),
-                    Constraint::Length(9),
-                    Constraint::Length(8),
-                ],
-            )
-            .header(
-                Row::new([
-                    "Prefix",
-                    "Next Hop",
-                    "Source Peer",
-                    "AS Path",
-                    "LocalPref",
-                    "MED",
-                    "RPKI",
-                    "ASPA",
-                ])
-                .style(
-                    Style::default()
-                        .fg(theme.header_fg)
-                        .add_modifier(Modifier::BOLD),
+                app.rib_previous_tokens.len() + 1,
+                page.total_count,
+                page.page_version.as_ref().map_or_else(
+                    || "unfenced".to_string(),
+                    |version| format!("{}.{}", version.epoch, version.generation)
                 ),
-            )
-            .row_highlight_style(
-                Style::default()
-                    .fg(theme.highlight)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .highlight_symbol("> ");
-            f.render_stateful_widget(table, chunks[0], &mut app.rib_table_state);
-            f.render_widget(
-                Paragraph::new(footer).style(Style::default().fg(theme.text_dim)),
-                chunks[1],
             );
+            if page.routes.is_empty() {
+                let message = match (page.total_count, app.rib_filter) {
+                    (0, Some(filter)) => {
+                        format!("No {view_lower} routes match {}", filter.label())
+                    }
+                    (0, None) => format!("No {view_lower} routes"),
+                    _ => "Empty page".to_string(),
+                };
+                f.render_widget(Paragraph::new(message), body);
+            } else {
+                let rows = page.routes.iter().map(|route| {
+                    Row::new(vec![
+                        Cell::from(format!("{}/{}", route.prefix, route.prefix_length)),
+                        Cell::from(route.next_hop.clone()),
+                        Cell::from(route.peer_address.clone()),
+                        Cell::from(
+                            route
+                                .as_path
+                                .iter()
+                                .map(u32::to_string)
+                                .collect::<Vec<_>>()
+                                .join(" "),
+                        ),
+                        Cell::from(if route.path_id == 0 {
+                            String::new()
+                        } else {
+                            route.path_id.to_string()
+                        }),
+                        Cell::from(optional_u32(route.local_pref_attr)),
+                        Cell::from(optional_u32(route.med_attr)),
+                        Cell::from(route.validation_state.clone()),
+                        Cell::from(route.aspa_state.clone()),
+                    ])
+                });
+                let table = Table::new(
+                    rows,
+                    [
+                        Constraint::Min(16),
+                        Constraint::Min(13),
+                        Constraint::Min(13),
+                        Constraint::Min(12),
+                        Constraint::Length(10),
+                        Constraint::Length(9),
+                        Constraint::Length(7),
+                        Constraint::Length(9),
+                        Constraint::Length(8),
+                    ],
+                )
+                .header(
+                    Row::new([
+                        "Prefix",
+                        "Next Hop",
+                        "Source Peer",
+                        "AS Path",
+                        "PathID",
+                        "LocalPref",
+                        "MED",
+                        "RPKI",
+                        "ASPA",
+                    ])
+                    .style(header_style),
+                )
+                .row_highlight_style(highlight)
+                .highlight_symbol("> ");
+                f.render_stateful_widget(table, body, &mut app.rib_table_state);
+            }
+            f.render_widget(Paragraph::new(status).style(dim), status_area);
+        }
+        Some(RibPageState::Rejected { page, retained }) => {
+            let evictions = page
+                .evictions_since_reset
+                .map_or_else(|| "unknown".to_string(), |count| count.to_string());
+            let status = format!(
+                "row {row}/{} | page 1 of 1 | matched {} of {retained} retained (cap {}) | evictions {evictions}{notice}",
+                page.routes.len(),
+                page.routes.len(),
+                page.capacity,
+            );
+            if !page.retention_enabled {
+                f.render_widget(
+                    Paragraph::new(
+                        "Rejected-route retention is disabled for this peer ([policy.reject_retention])",
+                    ),
+                    body,
+                );
+            } else if page.routes.is_empty() {
+                let message = if *retained == 0 {
+                    "No retained rejected routes".to_string()
+                } else {
+                    format!(
+                        "No retained rejected routes match {}{}",
+                        app.rib_family.label(),
+                        app.rib_filter
+                            .map_or(String::new(), |filter| format!(" {}", filter.label()))
+                    )
+                };
+                f.render_widget(Paragraph::new(message), body);
+            } else {
+                let rows = page.routes.iter().map(|route| {
+                    Row::new(vec![
+                        Cell::from(format!("{}/{}", route.prefix, route.prefix_length)),
+                        Cell::from(route.path_id.to_string()),
+                        Cell::from(route.reason.clone()),
+                        Cell::from(rejected_cell(&route.reason_detail)),
+                        Cell::from(rejected_cell(&route.next_hop)),
+                        Cell::from(rejected_cell(&route.rpki_validation)),
+                        Cell::from(rejected_cell(&route.aspa_validation)),
+                        Cell::from(route.as_path.clone()),
+                    ])
+                });
+                let table = Table::new(
+                    rows,
+                    [
+                        Constraint::Min(16),
+                        Constraint::Length(10),
+                        Constraint::Min(14),
+                        Constraint::Min(14),
+                        Constraint::Min(13),
+                        Constraint::Length(9),
+                        Constraint::Length(10),
+                        Constraint::Min(12),
+                    ],
+                )
+                .header(
+                    Row::new([
+                        "Prefix", "PathID", "Reason", "Detail", "Next Hop", "RPKI", "ASPA",
+                        "AS Path",
+                    ])
+                    .style(header_style),
+                )
+                .row_highlight_style(highlight)
+                .highlight_symbol("> ");
+                f.render_stateful_widget(table, body, &mut app.rib_table_state);
+            }
+            f.render_widget(Paragraph::new(status).style(dim), status_area);
         }
     }
+
+    let explain_hint = if app.rib_view.explains_rows() {
+        "Enter Explain"
+    } else {
+        "Enter n/a (row explain from Best; use e)"
+    };
+    let keys = format!(
+        "v View | f Family | / Filter | e Explain prefix | Space/PgDn screen | n/p server page | {explain_hint} | r Refresh | Esc Back"
+    );
+    f.render_widget(Paragraph::new(keys).style(dim), keys_area);
+
+    if let Some(editor) = app.rib_editor.as_ref() {
+        draw_prefix_editor(f, editor, app.rib_family, peer, theme);
+    }
+}
+
+fn rejected_cell(value: &str) -> String {
+    if value.is_empty() {
+        "-".to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn draw_prefix_editor(
+    f: &mut Frame,
+    editor: &PrefixEditor,
+    family: RibFamily,
+    peer: &str,
+    theme: &Theme,
+) {
+    let area = f.area();
+    let width = 64.min(area.width.saturating_sub(2));
+    let height = 7;
+    if width < 24 || area.height < height {
+        return;
+    }
+    let modal = Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    };
+    f.render_widget(Clear, modal);
+    let title = match editor.mode {
+        EditorMode::Filter => " Prefix filter ".to_string(),
+        EditorMode::Explain => format!(" Explain prefix to {peer} "),
+    };
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.accent));
+    let inner = block.inner(modal);
+    f.render_widget(block, modal);
+
+    let dim = Style::default().fg(theme.text_dim);
+    let text = Style::default().fg(theme.text);
+    let (before, after) = editor.input.split_at(editor.cursor);
+    let input_line = Line::from(vec![
+        Span::styled("> ", dim),
+        Span::styled(before, text),
+        Span::styled("\u{2502}", Style::default().fg(theme.accent)),
+        Span::styled(after, text),
+    ]);
+    let options = match editor.mode {
+        EditorMode::Filter => Line::styled(
+            format!(
+                "[{}] longer prefixes (Tab)",
+                if editor.longer { "x" } else { " " }
+            ),
+            text,
+        ),
+        EditorMode::Explain => Line::styled(
+            "Runs ExplainAdvertisedRoute even when the prefix is absent from Adj-RIB-Out",
+            dim,
+        ),
+    };
+    let example = match family {
+        RibFamily::Ipv4Unicast => "203.0.113.0/24",
+        RibFamily::Ipv6Unicast => "2001:db8::/32",
+    };
+    let status = match &editor.error {
+        Some(error) => Line::styled(error.clone(), Style::default().fg(theme.error)),
+        None => Line::styled(
+            format!("exact {} prefix, e.g. {example}", family.label()),
+            dim,
+        ),
+    };
+    let hint = match editor.mode {
+        EditorMode::Filter => "Enter apply (empty clears) | Esc cancel",
+        EditorMode::Explain => "Enter explain | Esc cancel",
+    };
+    f.render_widget(
+        Paragraph::new(vec![
+            input_line,
+            options,
+            status,
+            Line::from(""),
+            Line::styled(hint, dim),
+        ]),
+        inner,
+    );
 }
 
 fn draw_advertised_explain(f: &mut Frame, app: &mut App, peer: &str, theme: &Theme) {
@@ -941,7 +1150,7 @@ fn explain_lines(
 }
 
 fn draw_help_overlay(f: &mut Frame, theme: &Theme) {
-    let area = centered_rect(50, 60, f.area());
+    let area = centered_rect(60, 75, f.area());
     f.render_widget(Clear, area);
 
     let block = Block::default()
@@ -972,7 +1181,10 @@ fn draw_help_overlay(f: &mut Frame, theme: &Theme) {
         ]),
         Line::from(vec![
             Span::styled("  e           ", Style::default().fg(theme.accent)),
-            Span::styled("Toggle route events panel", Style::default().fg(theme.text)),
+            Span::styled(
+                "Toggle route events panel (peer table)",
+                Style::default().fg(theme.text),
+            ),
         ]),
         Line::from(vec![
             Span::styled("  s           ", Style::default().fg(theme.accent)),
@@ -993,24 +1205,51 @@ fn draw_help_overlay(f: &mut Frame, theme: &Theme) {
         Line::from(vec![
             Span::styled("  Enter       ", Style::default().fg(theme.accent)),
             Span::styled(
-                "Show detail / explain selected route",
+                "Show peer detail / explain selected Best row",
                 Style::default().fg(theme.text),
             ),
         ]),
         Line::from(vec![
             Span::styled("  r           ", Style::default().fg(theme.accent)),
             Span::styled(
-                "Open point-in-time Best RIB",
+                "Open Routes from peer detail / refresh explorer",
+                Style::default().fg(theme.text),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  v / f       ", Style::default().fg(theme.accent)),
+            Span::styled(
+                "Cycle Best/Received/Advertised/Rejected / toggle IPv4/IPv6",
+                Style::default().fg(theme.text),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  / and e     ", Style::default().fg(theme.accent)),
+            Span::styled(
+                "Exact prefix filter / explain a typed prefix (route explorer)",
+                Style::default().fg(theme.text),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Space/PgDn  ", Style::default().fg(theme.accent)),
+            Span::styled(
+                "Move one screen within the server page",
                 Style::default().fg(theme.text),
             ),
         ]),
         Line::from(vec![
             Span::styled("  n / p       ", Style::default().fg(theme.accent)),
-            Span::styled("Next / previous RIB page", Style::default().fg(theme.text)),
+            Span::styled(
+                "Next / previous server page",
+                Style::default().fg(theme.text),
+            ),
         ]),
         Line::from(vec![
             Span::styled("  Esc         ", Style::default().fg(theme.accent)),
-            Span::styled("Back to peer table", Style::default().fg(theme.text)),
+            Span::styled(
+                "Back one view / cancel editor",
+                Style::default().fg(theme.text),
+            ),
         ]),
         Line::from(""),
         Line::from(Span::styled(
@@ -1316,7 +1555,7 @@ mod tests {
         rich.on_data(snapshot(vec![safety_neighbor()], Freshness::Fresh));
         rich.view = View::PeerDetail("192.0.2.2".into());
         let rendered = rendered_detail(&mut rich, 130, 50);
-        assert!(rendered.contains("r Best RIB"));
+        assert!(rendered.contains("r Routes"));
 
         for (label, expected) in [
             ("Configured Hold Time:", "90s"),
@@ -1584,7 +1823,7 @@ mod tests {
     #[test]
     fn best_rib_test_backend_renders_all_states_and_columns_without_tiny_panic() {
         let mut app = App::new();
-        app.view = View::BestRib("198.51.100.1".into());
+        app.view = View::RouteExplorer("198.51.100.1".into());
         app.rib_page = Some(RibPageState::Loading);
         assert!(rendered_app(&mut app, 100, 8).contains("Loading routes"));
         app.rib_page = Some(RibPageState::Error("RIB unavailable: down".into()));
@@ -1601,6 +1840,7 @@ mod tests {
                 next_hop: "192.0.2.1".into(),
                 peer_address: "192.0.2.2".into(),
                 as_path: vec![64512, 64496],
+                path_id: u32::MAX,
                 local_pref: 100,
                 med_attr: Some(0),
                 validation_state: "valid".into(),
@@ -1613,10 +1853,15 @@ mod tests {
         app.rib_table_state.select(Some(0));
         let rendered = rendered_app(&mut app, 150, 8);
         for text in [
-            "Best RIB (point-in-time)",
+            "Routes: Best",
+            "global | explain target 198.51.100.1",
+            "IPv4 unicast",
+            "no filter",
             "203.0.113.0/24",
             "192.0.2.1",
             "64512 64496",
+            "PathID",
+            "4294967295",
             "LocalPref",
             "MED",
             "RPKI",
@@ -1625,6 +1870,168 @@ mod tests {
         ] {
             assert!(rendered.contains(text), "missing {text}");
         }
+        let _ = rendered_app(&mut app, 1, 1);
+    }
+
+    #[test]
+    fn route_explorer_renders_every_view_status_rejected_rows_and_editor() {
+        use crate::tui::app::RIB_RESTART_NOTICE;
+        use crate::tui::data::{PrefixFilter, RibView};
+
+        let mut app = App::new();
+        app.view = View::RouteExplorer("198.51.100.1".into());
+        for (view, expected) in [
+            (RibView::Best, "No best routes"),
+            (RibView::Received, "No received routes"),
+            (RibView::Advertised, "No advertised routes"),
+        ] {
+            app.rib_view = view;
+            app.rib_page = Some(RibPageState::Ready(crate::proto::ListRoutesResponse {
+                total_count: 0,
+                ..Default::default()
+            }));
+            let rendered = rendered_app(&mut app, 120, 10);
+            assert!(rendered.contains(expected), "missing {expected}");
+            assert!(rendered.contains(&format!("Routes: {}", view.label())));
+        }
+        app.rib_view = RibView::Best;
+        assert!(rendered_app(&mut app, 120, 10).contains("Enter Explain"));
+        app.rib_view = RibView::Received;
+        let rendered = rendered_app(&mut app, 120, 10);
+        assert!(rendered.contains("peer 198.51.100.1"));
+        assert!(rendered.contains("Enter n/a"));
+
+        app.rib_view = RibView::Best;
+        app.rib_family = RibFamily::Ipv6Unicast;
+        app.rib_filter = Some(PrefixFilter {
+            addr: "2001:db8::".parse().unwrap(),
+            len: 32,
+            longer: true,
+        });
+        app.rib_notice = Some(RIB_RESTART_NOTICE);
+        app.rib_previous_tokens = vec![String::new(), "a".into()];
+        app.rib_page = Some(RibPageState::Ready(crate::proto::ListRoutesResponse {
+            routes: vec![crate::proto::Route {
+                prefix: "2001:db8:1::".into(),
+                prefix_length: 48,
+                ..Default::default()
+            }],
+            total_count: 42,
+            page_version: Some(crate::proto::RoutePageVersion {
+                epoch: 7,
+                generation: 77,
+            }),
+            ..Default::default()
+        }));
+        app.rib_table_state.select(Some(0));
+        let rendered = rendered_app(&mut app, 170, 10);
+        for text in [
+            "IPv6 unicast",
+            "filter 2001:db8::/32 +longer",
+            "row 1/1",
+            "server page 3",
+            "total 42",
+            "snapshot 7.77",
+            RIB_RESTART_NOTICE,
+            "Space/PgDn screen",
+            "n/p server page",
+            "Enter Explain",
+        ] {
+            assert!(rendered.contains(text), "missing {text}");
+        }
+        // 10 rows - 2 borders - status - keys - header = 5 data rows.
+        assert_eq!(app.rib_page_height, 5);
+        app.rib_page = Some(RibPageState::Ready(crate::proto::ListRoutesResponse {
+            total_count: 0,
+            ..Default::default()
+        }));
+        assert!(
+            rendered_app(&mut app, 120, 10).contains("No best routes match 2001:db8::/32 +longer")
+        );
+
+        app.rib_view = RibView::Rejected;
+        let rejected =
+            |routes: Vec<crate::proto::RejectedRoute>, retained: usize| RibPageState::Rejected {
+                page: crate::proto::ListRejectedRoutesResponse {
+                    peer_address: "198.51.100.1".into(),
+                    retention_enabled: true,
+                    capacity: 1024,
+                    routes,
+                    evictions_since_reset: Some(2),
+                },
+                retained,
+            };
+        app.rib_page = Some(rejected(
+            vec![crate::proto::RejectedRoute {
+                prefix: "203.0.113.0".into(),
+                prefix_length: 24,
+                path_id: u32::MAX,
+                reason: "policy_reject".into(),
+                reason_detail: "deny-bogons:term1".into(),
+                next_hop: "192.0.2.1".into(),
+                as_path: "64512 64496".into(),
+                rpki_validation: "invalid".into(),
+                ..Default::default()
+            }],
+            5,
+        ));
+        app.rib_table_state.select(Some(0));
+        let rendered = rendered_app(&mut app, 180, 10);
+        for text in [
+            "Routes: Rejected",
+            "PathID",
+            "4294967295",
+            "203.0.113.0/24",
+            "policy_reject",
+            "deny-bogons:term1",
+            "invalid",
+            "page 1 of 1",
+            "matched 1 of 5 retained (cap 1024)",
+            "evictions 2",
+            "Enter n/a",
+        ] {
+            assert!(rendered.contains(text), "missing {text}");
+        }
+        app.rib_page = Some(rejected(Vec::new(), 3));
+        assert!(rendered_app(&mut app, 120, 10).contains("No retained rejected routes match"));
+        app.rib_page = Some(rejected(Vec::new(), 0));
+        assert!(rendered_app(&mut app, 120, 10).contains("No retained rejected routes"));
+        if let Some(RibPageState::Rejected { page, .. }) = app.rib_page.as_mut() {
+            page.retention_enabled = false;
+            page.evictions_since_reset = None;
+        }
+        let rendered = rendered_app(&mut app, 120, 10);
+        assert!(rendered.contains("retention is disabled"));
+        assert!(rendered.contains("evictions unknown"));
+
+        app.rib_editor = Some(PrefixEditor {
+            mode: EditorMode::Filter,
+            input: "2001:db8::/3".into(),
+            cursor: 12,
+            longer: true,
+            error: None,
+        });
+        let rendered = rendered_app(&mut app, 120, 12);
+        for text in [
+            "Prefix filter",
+            "2001:db8::/3",
+            "[x] longer prefixes (Tab)",
+            "exact IPv6 unicast prefix",
+            "Enter apply (empty clears)",
+        ] {
+            assert!(rendered.contains(text), "missing {text}");
+        }
+        app.rib_editor = Some(PrefixEditor {
+            mode: EditorMode::Explain,
+            input: String::new(),
+            cursor: 0,
+            longer: false,
+            error: Some("enter a prefix".into()),
+        });
+        let rendered = rendered_app(&mut app, 120, 12);
+        assert!(rendered.contains("Explain prefix to 198.51.100.1"));
+        assert!(rendered.contains("enter a prefix"));
+        assert!(rendered.contains("Enter explain"));
         let _ = rendered_app(&mut app, 1, 1);
     }
 

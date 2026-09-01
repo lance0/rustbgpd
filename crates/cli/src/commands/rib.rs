@@ -105,22 +105,64 @@ pub(crate) type RibClient = RibServiceClient<
     >,
 >;
 
-/// Fetch one bounded, unfiltered Best-RIB page for the interactive TUI.
+pub(crate) type PolicyClient = PolicyServiceClient<
+    tonic::service::interceptor::InterceptedService<
+        tonic::transport::Channel,
+        crate::connection::AuthInterceptor,
+    >,
+>;
+
+/// Page size the interactive TUI explorer requests from every unicast
+/// route-listing RPC.
+pub(crate) const TUI_ROUTE_PAGE_SIZE: u32 = 100;
+
+/// Fetch one bounded unicast route page for the interactive TUI explorer.
 ///
-/// Pagination tokens are opaque server state. Keep the caller's bytes intact
-/// and return the server response verbatim; navigation belongs to the view.
-pub(crate) async fn fetch_tui_best_route_page(
+/// The caller supplies the family, prefix filter, and continuation token on
+/// `request`; this helper owns the peer scope (`None` = global Best-RIB) and
+/// the page size. Pagination tokens are opaque server state: keep the
+/// caller's bytes intact and return the server response verbatim, navigation
+/// belongs to the view.
+pub(crate) async fn fetch_tui_route_page(
     client: &mut RibClient,
-    page_token: String,
+    rpc: RouteListRpc,
+    peer_address: Option<&str>,
+    mut request: ListRoutesRequest,
 ) -> Result<crate::proto::ListRoutesResponse, tonic::Status> {
-    client
-        .list_best_routes(ListRoutesRequest {
-            page_size: 100,
-            page_token,
-            ..Default::default()
+    request.neighbor_address = peer_address
+        .map(bare_ip_rpc_address)
+        .unwrap_or_default()
+        .to_string();
+    request.page_size = TUI_ROUTE_PAGE_SIZE;
+    let response = match rpc {
+        RouteListRpc::Best => client.list_best_routes(request).await?,
+        RouteListRpc::Received => client.list_received_routes(request).await?,
+        RouteListRpc::Advertised => client.list_advertised_routes(request).await?,
+    };
+    let mut response = response.into_inner();
+    for route in &mut response.routes {
+        restore_matching_scoped_address(peer_address, &mut route.peer_address);
+    }
+    Ok(response)
+}
+
+/// Fetch the selected peer's retained rejected routes for the TUI explorer.
+///
+/// `ListRejectedRoutes` has no server-side paging or filters; the view
+/// applies family and prefix filters client-side. Scoped link-local peer
+/// rendering follows the CLI path exactly.
+pub(crate) async fn fetch_tui_rejected_routes(
+    client: &mut PolicyClient,
+    peer_address: &str,
+) -> Result<ListRejectedRoutesResponse, tonic::Status> {
+    let mut response = client
+        .list_rejected_routes(ListRejectedRoutesRequest {
+            peer_address: bare_ip_rpc_address(peer_address).to_string(),
         })
-        .await
-        .map(tonic::Response::into_inner)
+        .await?
+        .into_inner();
+    restore_matching_scoped_address(Some(peer_address), &mut response.peer_address);
+    Ok(response)
 }
 
 /// Explain export of one Best-RIB prefix to the selected TUI peer.
@@ -148,8 +190,10 @@ pub(crate) async fn fetch_tui_explain_advertised(
     Ok(response)
 }
 
-/// Which unicast route-listing RPC [`fetch_all_route_pages`] drives.
-enum RouteListRpc {
+/// Which unicast route-listing RPC [`fetch_all_route_pages`] and the TUI
+/// explorer drive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RouteListRpc {
     Best,
     Received,
     Advertised,

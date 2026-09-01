@@ -17,11 +17,14 @@ rbgp metrics      # Prometheus metrics snapshot
 rbgp top          # live terminal dashboard
 ```
 
-In `rbgp top`, select a peer and open its detail, then press `r` to browse a
-point-in-time page of the global unicast Best-RIB with that peer retained as
-the export target. Use `n`/`p` for pages and `Enter` to run the existing export
-explanation for the highlighted prefix and peer. This view is on demand; it
-does not continuously poll the RIB.
+In `rbgp top`, select a peer and open its detail, then press `r` to open the
+on-demand route explorer. `v` cycles the global unicast Best table and the
+peer's Received, Advertised, and Rejected tables, `f` toggles IPv4/IPv6
+unicast, `/` sets an exact prefix filter (with a longer-prefixes toggle), and
+`n`/`p` follow server pages while `Space`/`PgDn` move within one. `Enter` on a
+Best row, or `e` with a typed or selected prefix, runs the existing export
+explanation for that prefix and peer. The view is on demand; it does not
+continuously poll the RIB.
 
 ### Config Transactions
 
