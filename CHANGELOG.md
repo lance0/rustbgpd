@@ -11,6 +11,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `rbgp rib lookup <IP|CIDR>` now performs one atomic IPv4/IPv6
+  longest-prefix match against the global Loc-RIB and renders the existing
+  best-path explanation in human or JSON form. Invalid targets, no covering
+  route, and daemons without the outside-v1 RPC remain distinct failures; the
+  CLI never falls back to a route-table scan.
+
 - Accepted received, best, and advertised RIB queries now share typed RPKI and
   ASPA verdict filters plus exact numeric `AS_SEQUENCE`/`AS_SET` membership via
   `--as-path-contains`. All predicates compose with count and bounded listing,

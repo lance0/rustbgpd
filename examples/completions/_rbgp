@@ -786,7 +786,20 @@ _arguments "${_arguments_options[@]}" : \
         (( CURRENT += 1 ))
         curcontext="${curcontext%:*:*}:rbgp-rib-command-$line[1]:"
         case $line[1] in
-            (received)
+            (lookup)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':target -- IPv4 or IPv6 host address or CIDR prefix:_default' \
+&& ret=0
+;;
+(received)
 _arguments "${_arguments_options[@]}" : \
 '-a+[Address family filter]:FAMILY:_default' \
 '--family=[Address family filter]:FAMILY:_default' \
@@ -1073,7 +1086,11 @@ _arguments "${_arguments_options[@]}" : \
         (( CURRENT += 1 ))
         curcontext="${curcontext%:*:*}:rbgp-rib-help-command-$line[1]:"
         case $line[1] in
-            (received)
+            (lookup)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(received)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -3209,7 +3226,11 @@ _arguments "${_arguments_options[@]}" : \
         (( CURRENT += 1 ))
         curcontext="${curcontext%:*:*}:rbgp-help-rib-command-$line[1]:"
         case $line[1] in
-            (received)
+            (lookup)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(received)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -5180,6 +5201,7 @@ _rbgp__subcmd__help__subcmd__policy__subcmd__test_commands() {
 (( $+functions[_rbgp__subcmd__help__subcmd__rib_commands] )) ||
 _rbgp__subcmd__help__subcmd__rib_commands() {
     local commands; commands=(
+'lookup:Find the longest-prefix match in the global best-route table' \
 'received:Show received routes from a neighbor' \
 'advertised:Show advertised routes to a neighbor' \
 'blackholes:Show RFC 7999 BLACKHOLE discard install status' \
@@ -5227,6 +5249,11 @@ _rbgp__subcmd__help__subcmd__rib__subcmd__fib_commands() {
 _rbgp__subcmd__help__subcmd__rib__subcmd__labeled_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp help rib labeled commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__rib__subcmd__lookup_commands] )) ||
+_rbgp__subcmd__help__subcmd__rib__subcmd__lookup_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help rib lookup commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__help__subcmd__rib__subcmd__received_commands] )) ||
 _rbgp__subcmd__help__subcmd__rib__subcmd__received_commands() {
@@ -5811,6 +5838,7 @@ _rbgp__subcmd__policy__subcmd__test_commands() {
 (( $+functions[_rbgp__subcmd__rib_commands] )) ||
 _rbgp__subcmd__rib_commands() {
     local commands; commands=(
+'lookup:Find the longest-prefix match in the global best-route table' \
 'received:Show received routes from a neighbor' \
 'recv:Show received routes from a neighbor' \
 'advertised:Show advertised routes to a neighbor' \
@@ -5861,6 +5889,7 @@ _rbgp__subcmd__rib__subcmd__fib_commands() {
 (( $+functions[_rbgp__subcmd__rib__subcmd__help_commands] )) ||
 _rbgp__subcmd__rib__subcmd__help_commands() {
     local commands; commands=(
+'lookup:Find the longest-prefix match in the global best-route table' \
 'received:Show received routes from a neighbor' \
 'advertised:Show advertised routes to a neighbor' \
 'blackholes:Show RFC 7999 BLACKHOLE discard install status' \
@@ -5915,6 +5944,11 @@ _rbgp__subcmd__rib__subcmd__help__subcmd__labeled_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp rib help labeled commands' commands "$@"
 }
+(( $+functions[_rbgp__subcmd__rib__subcmd__help__subcmd__lookup_commands] )) ||
+_rbgp__subcmd__rib__subcmd__help__subcmd__lookup_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rib help lookup commands' commands "$@"
+}
 (( $+functions[_rbgp__subcmd__rib__subcmd__help__subcmd__received_commands] )) ||
 _rbgp__subcmd__rib__subcmd__help__subcmd__received_commands() {
     local commands; commands=()
@@ -5934,6 +5968,11 @@ _rbgp__subcmd__rib__subcmd__help__subcmd__vpn_commands() {
 _rbgp__subcmd__rib__subcmd__labeled_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp rib labeled commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__rib__subcmd__lookup_commands] )) ||
+_rbgp__subcmd__rib__subcmd__lookup_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp rib lookup commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__rib__subcmd__received_commands] )) ||
 _rbgp__subcmd__rib__subcmd__received_commands() {

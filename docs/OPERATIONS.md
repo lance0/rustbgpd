@@ -2533,6 +2533,23 @@ filters as the full view and renders only the total:
 `Total matching routes: N` in human output, `{"total_count": N}` with
 `--json`.
 
+### Find the route covering an address or prefix
+
+```bash
+rbgp rib lookup 203.0.113.99
+rbgp rib lookup 2001:db8::7
+rbgp --json rib lookup 203.0.113.64/26
+```
+
+`rib lookup` asks the daemon for the global Loc-RIB longest-prefix match in one
+atomic RPC. Bare IPv4 and IPv6 addresses become `/32` and `/128`; an explicit
+CIDR keeps its mask. The response is the normal best-path explanation for the
+matched prefix, including the winner, every alternative for that prefix, and
+their comparison reasons, so the displayed prefix can be less specific than
+the input. No covering route is a `not found` error. `not supported by this
+daemon` means that daemon predates the outside-v1 `LookupBestPath` method; the
+CLI does not hide that boundary by scanning a route listing.
+
 Received and advertised route filters belong after the view and peer:
 
 ```bash

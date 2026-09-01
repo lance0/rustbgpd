@@ -14,8 +14,8 @@ use crate::proto::{
     ExplainDecision, ExportGateVerdict, FibRouteState, LabeledRouteEntry, ListBgpLsRequest,
     ListBlackholeDiscardsRequest, ListFibRoutesRequest, ListFibRoutesResponse,
     ListLabeledRoutesRequest, ListRejectedRoutesRequest, ListRejectedRoutesResponse,
-    ListRoutesRequest, ListRtcRoutesRequest, ListVpnRoutesRequest, Route, RtcRouteEntry,
-    VpnRouteEntry,
+    ListRoutesRequest, ListRtcRoutesRequest, ListVpnRoutesRequest, LookupBestPathRequest, Route,
+    RtcRouteEntry, VpnRouteEntry,
 };
 use serde::Serialize;
 use serde::ser::{SerializeMap, SerializeSeq, Serializer};
@@ -1762,6 +1762,29 @@ pub async fn explain_best_path(
     print_explain_best_path(&resp, json)
 }
 
+/// Find the global Loc-RIB longest-prefix match for an IPv4/IPv6 host or CIDR.
+///
+/// The daemon performs the bounded lookup and returns its atomic best-path
+/// explanation. Keep this as one RPC and reuse the exact explain projection so
+/// human and JSON output do not develop a second route-inspection contract.
+pub async fn lookup_best_path(
+    connection: Connection,
+    target: &str,
+    json: bool,
+) -> Result<(), CliError> {
+    let (addr, len) = output::parse_prefix(target).map_err(CliError::Argument)?;
+    let mut client =
+        RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let resp = client
+        .lookup_best_path(LookupBestPathRequest {
+            prefix: addr,
+            prefix_length: len,
+        })
+        .await?
+        .into_inner();
+    print_explain_best_path(&resp, json)
+}
+
 pub async fn best(
     connection: Connection,
     family: Option<i32>,
@@ -2229,6 +2252,7 @@ mod tests {
     use super::*;
     use crate::connection::connect;
     use crate::test_support::spawn_mock_server;
+    use prost::Message;
 
     fn legacy_route_to_json(r: &Route) -> output::JsonRoute {
         output::JsonRoute {
@@ -2539,6 +2563,249 @@ mod tests {
             .clone()
             .expect("explain best-path request captured");
         assert_eq!(req.peer_address, "fe80:0:0:0:0:0:0:1");
+    }
+
+    fn lookup_response(prefix: &str, prefix_length: u32) -> ExplainBestPathResponse {
+        let mut best = route_for_json(7, "valid");
+        best.prefix = prefix.to_string();
+        best.prefix_length = prefix_length;
+        let mut alternative = route_for_json(9, "invalid");
+        alternative.prefix = prefix.to_string();
+        alternative.prefix_length = prefix_length;
+        alternative.best = false;
+        if prefix.contains(':') {
+            best.next_hop = "2001:db8:ffff::1".to_string();
+            best.peer_address = "2001:db8:ffff::10".to_string();
+            alternative.next_hop = "2001:db8:ffff::2".to_string();
+            alternative.peer_address = "2001:db8:ffff::20".to_string();
+        }
+        ExplainBestPathResponse {
+            prefix: prefix.to_string(),
+            prefix_length,
+            best_route: Some(best),
+            candidates: vec![crate::proto::BestPathCandidate {
+                route: Some(alternative),
+                vs_best_reason: "higher_local_pref".to_string(),
+                vs_best_detail: "local_pref 100 < 200".to_string(),
+                vs_best_ordering: "worse".to_string(),
+                multipath: "none".to_string(),
+                advertised_path_id: 0,
+            }],
+            best_reason: "higher_local_pref".to_string(),
+            best_reason_detail: "local_pref 200 > 100".to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// Seed and consume four distinct RPC responses so the request and matched
+    /// prefix cannot accidentally share one canned family/shape. The existing
+    /// explain JSON projection pins the exact response that the command prints.
+    #[tokio::test]
+    async fn lookup_best_path_renders_v4_v6_exact_and_less_specific_matches() {
+        struct Case {
+            target: &'static str,
+            request_prefix: &'static str,
+            request_length: u32,
+            matched_prefix: &'static str,
+            matched_length: u32,
+        }
+
+        let server = spawn_mock_server(None).await;
+        let cases = [
+            Case {
+                target: "203.0.113.0/24",
+                request_prefix: "203.0.113.0",
+                request_length: 24,
+                matched_prefix: "203.0.113.0",
+                matched_length: 24,
+            },
+            Case {
+                target: "203.0.113.99",
+                request_prefix: "203.0.113.99",
+                request_length: 32,
+                matched_prefix: "203.0.112.0",
+                matched_length: 23,
+            },
+            Case {
+                target: "2001:0db8:1::/48",
+                request_prefix: "2001:db8:1::",
+                request_length: 48,
+                matched_prefix: "2001:db8:1::",
+                matched_length: 48,
+            },
+            Case {
+                target: "2001:db8:1::7",
+                request_prefix: "2001:db8:1::7",
+                request_length: 128,
+                matched_prefix: "2001:db8::",
+                matched_length: 32,
+            },
+        ];
+
+        for case in &cases {
+            let response = lookup_response(case.matched_prefix, case.matched_length);
+            let rendered = serde_json::to_value(explain_best_path_to_json(&response)).unwrap();
+            let expected_match = format!("{}/{}", case.matched_prefix, case.matched_length);
+            assert_eq!(rendered["prefix"], expected_match, "{}", case.target);
+            assert_eq!(
+                rendered["best_route"]["prefix"], expected_match,
+                "{}",
+                case.target
+            );
+            assert_eq!(
+                rendered["candidates"][0]["route"]["prefix"], expected_match,
+                "{}",
+                case.target
+            );
+            assert_eq!(
+                rendered["candidates"][0]["vs_best_ordering"], "worse",
+                "{}",
+                case.target
+            );
+
+            let server_response = rustbgpd_api::proto::ExplainBestPathResponse::decode(
+                response.encode_to_vec().as_slice(),
+            )
+            .unwrap();
+            *server.state.lookup_best_path_response.lock().await = Some(server_response);
+            let calls_before = server
+                .state
+                .lookup_best_path_calls
+                .load(std::sync::atomic::Ordering::SeqCst);
+            lookup_best_path(
+                connect(&server.addr, None).await.unwrap(),
+                case.target,
+                true,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                server
+                    .state
+                    .lookup_best_path_calls
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                calls_before + 1,
+                "{} issued more than one lookup RPC",
+                case.target
+            );
+            assert!(
+                server
+                    .state
+                    .lookup_best_path_response
+                    .lock()
+                    .await
+                    .is_none(),
+                "{} did not consume its seeded matched-prefix response",
+                case.target
+            );
+            let request = server
+                .state
+                .last_lookup_best_path
+                .lock()
+                .await
+                .clone()
+                .expect("lookup request captured");
+            assert_eq!(request.prefix, case.request_prefix, "{}", case.target);
+            assert_eq!(
+                request.prefix_length, case.request_length,
+                "{}",
+                case.target
+            );
+        }
+
+        assert_eq!(
+            server
+                .state
+                .lookup_best_path_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            cases.len()
+        );
+        assert_eq!(
+            server
+                .state
+                .list_best_route_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "lookup must not scan the best-route listing"
+        );
+        assert!(
+            server.state.last_explain_best_path.lock().await.is_none(),
+            "lookup must not substitute the exact-prefix explain RPC"
+        );
+    }
+
+    #[tokio::test]
+    async fn lookup_best_path_preserves_not_found_and_unimplemented_errors() {
+        let server = spawn_mock_server(None).await;
+        *server.state.lookup_best_path_error.lock().await = Some((
+            tonic::Code::NotFound,
+            "no covering Loc-RIB route for 203.0.113.99/32".to_string(),
+        ));
+        let error = lookup_best_path(
+            connect(&server.addr, None).await.unwrap(),
+            "203.0.113.99",
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "not found: no covering Loc-RIB route for 203.0.113.99/32"
+        );
+
+        *server.state.lookup_best_path_error.lock().await = Some((
+            tonic::Code::Unimplemented,
+            "LookupBestPath is unavailable".to_string(),
+        ));
+        let error = lookup_best_path(
+            connect(&server.addr, None).await.unwrap(),
+            "2001:db8::1",
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "not supported by this daemon: LookupBestPath is unavailable"
+        );
+        assert_eq!(
+            server
+                .state
+                .lookup_best_path_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+        assert_eq!(
+            server
+                .state
+                .list_best_route_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "RPC errors must not trigger a client-side scan"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_lookup_target_fails_before_any_lookup_rpc() {
+        let server = spawn_mock_server(None).await;
+        let error = lookup_best_path(
+            connect(&server.addr, None).await.unwrap(),
+            "definitely-not-an-ip",
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid IP address in prefix: definitely-not-an-ip"
+        );
+        assert_eq!(
+            server
+                .state
+                .lookup_best_path_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
     }
 
     #[tokio::test]

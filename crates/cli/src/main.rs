@@ -49,6 +49,11 @@ fn parse_nonzero_asn(value: &str) -> Result<u32, String> {
     Ok(asn)
 }
 
+fn parse_lookup_target(value: &str) -> Result<String, String> {
+    output::parse_prefix(value)?;
+    Ok(value.to_string())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum RouteRpkiState {
     Valid,
@@ -1261,6 +1266,12 @@ struct RouteViewArgs {
 
 #[derive(Subcommand)]
 enum RibAction {
+    /// Find the longest-prefix match in the global best-route table
+    Lookup {
+        /// IPv4 or IPv6 host address or CIDR prefix
+        #[arg(value_name = "IP|CIDR", value_parser = parse_lookup_target)]
+        target: String,
+    },
     /// Show received routes from a neighbor
     #[command(visible_alias = "recv")]
     Received {
@@ -2872,6 +2883,26 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             limit,
         } => {
             match action {
+                Some(RibAction::Lookup { target }) => {
+                    reject_rib_status_filters(
+                        binary_name,
+                        "lookup",
+                        RibStatusFilterArgs {
+                            family: &family,
+                            prefix: &prefix,
+                            longer,
+                            explain,
+                            explain_peer: &explain_peer,
+                            origin_asn,
+                            community: &community,
+                            large_community: &large_community,
+                            rpki_state: &rpki_state,
+                            aspa_state: &aspa_state,
+                            as_path_contains,
+                        },
+                    )?;
+                    return commands::rib::lookup_best_path(connection, &target, json).await;
+                }
                 Some(RibAction::Fib {
                     table,
                     state,
@@ -3214,6 +3245,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 }
                 Some(
                     RibAction::Blackholes
+                    | RibAction::Lookup { .. }
                     | RibAction::Fib { .. }
                     | RibAction::BgpLs { .. }
                     | RibAction::Vpn { .. }
@@ -4999,6 +5031,95 @@ printf '%s\n' "${COMPREPLY[@]}"
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn rib_lookup_parses_v4_v6_host_and_cidr_targets() {
+        for target in [
+            "203.0.113.99",
+            "203.0.113.64/26",
+            "2001:db8::7",
+            "2001:db8:abcd::/48",
+        ] {
+            let cli = Cli::try_parse_from(["rbgp", "rib", "lookup", target]).unwrap();
+            assert!(matches!(
+                cli.command,
+                Command::Rib {
+                    action: Some(RibAction::Lookup { target: parsed }),
+                    ..
+                } if parsed == target
+            ));
+        }
+    }
+
+    #[test]
+    fn rib_lookup_rejects_malformed_target_during_argument_parsing() {
+        let error = match Cli::try_parse_from(["rbgp", "rib", "lookup", "not-an-ip"]) {
+            Ok(_) => panic!("malformed lookup target parsed"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+        assert!(
+            error
+                .to_string()
+                .contains("invalid IP address in prefix: not-an-ip")
+        );
+    }
+
+    #[tokio::test]
+    async fn rib_lookup_rejects_inherited_listing_and_explain_options() {
+        let server = spawn_mock_server(None).await;
+        let cases: &[&[&str]] = &[
+            &["--family", "ipv4_unicast"],
+            &["--prefix", "203.0.113.0/24"],
+            &["--prefix", "203.0.113.0/24", "--longer"],
+            &["--prefix", "203.0.113.0/24", "--explain"],
+            &[
+                "--prefix",
+                "203.0.113.0/24",
+                "--explain",
+                "--explain-peer",
+                "192.0.2.1",
+            ],
+            &["--count"],
+            &["--age"],
+            &["--origin-asn", "64496"],
+            &["--community", "64496:100"],
+            &["--large-community", "64496:1:100"],
+            &["--rpki-state", "valid"],
+            &["--aspa-state", "valid"],
+            &["--as-path-contains", "64496"],
+            &["--limit", "1"],
+        ];
+
+        for inherited in cases {
+            let mut args = vec![
+                "rbgp".to_string(),
+                "--addr".to_string(),
+                server.addr.clone(),
+                "rib".to_string(),
+            ];
+            args.extend(inherited.iter().map(|arg| (*arg).to_string()));
+            args.extend(["lookup".to_string(), "203.0.113.99".to_string()]);
+            let error = run(Cli::try_parse_from(args).unwrap(), BINARY_NAME)
+                .await
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("only valid")
+                    || error.to_string().contains("cannot be combined")
+                    || error.to_string().contains("does not support"),
+                "unexpected rejection for {inherited:?}: {error}"
+            );
+        }
+
+        assert_eq!(
+            server
+                .state
+                .lookup_best_path_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "invalid inherited options must not reach LookupBestPath"
+        );
     }
 
     #[test]

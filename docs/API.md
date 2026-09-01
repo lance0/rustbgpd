@@ -1333,6 +1333,28 @@ unchanged. Unknown `peer_address` → `NOT_FOUND`. Import explain is available v
 `PolicyService.ExplainImportPolicy` (ADR-0073), including structured
 statement/term traces for matched policies.
 
+### Longest-prefix lookup in the global Loc-RIB
+
+```bash
+rbgp rib lookup 203.0.113.99
+rbgp --json rib lookup 2001:db8::7/128
+
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"prefix":"203.0.113.99","prefix_length":32}' \
+  localhost:50051 rustbgpd.v1.RibService/LookupBestPath
+```
+
+`rbgp rib lookup <IP|CIDR>` issues exactly one `LookupBestPath` request. Bare
+IPv4 and IPv6 addresses use `/32` and `/128`; an explicit CIDR keeps its mask.
+The daemon performs bounded ancestor probes and returns the closest installed
+global Loc-RIB winner plus every alternative for that matched prefix from one
+actor turn. The response therefore uses the existing best-path explanation
+shape, and its prefix may be less specific than the query. There is no
+peer-scoped mode and no client-side listing fallback. A syntactically invalid
+target is rejected locally, no covering route returns `NOT_FOUND`, and a
+daemon without the outside-v1 method returns `UNIMPLEMENTED` (`not supported
+by this daemon` in the CLI).
+
 ### Address family filtering
 
 Route-listing RPCs and the route-event surfaces (`ListReceivedRoutes`,
