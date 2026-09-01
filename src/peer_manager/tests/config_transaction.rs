@@ -81,11 +81,15 @@ log_format = "json"
             })
             .unwrap();
     });
-    let planned = mgr.plan_config_transaction(&candidate, None).await.unwrap();
+    let planned = mgr
+        .plan_config_transaction(&candidate, None, true)
+        .await
+        .unwrap();
     let error = mgr
         .plan_config_transaction(
             "this is not valid TOML =",
             Some(&planned.runtime_snapshot_token),
+            true,
         )
         .await
         .unwrap_err();
@@ -145,7 +149,7 @@ remote_asn = 65002
     });
 
     let error = mgr
-        .plan_config_transaction(&candidate, None)
+        .plan_config_transaction(&candidate, None, true)
         .await
         .unwrap_err();
 
@@ -237,7 +241,10 @@ import_policy_chain = ["edge-in"]
             .unwrap();
     });
 
-    let plan = mgr.plan_config_transaction(&candidate, None).await.unwrap();
+    let plan = mgr
+        .plan_config_transaction(&candidate, None, true)
+        .await
+        .unwrap();
 
     assert_eq!(
         plan.status,
@@ -252,6 +259,287 @@ import_policy_chain = ["edge-in"]
     );
     assert_eq!(live_dataset.status(), live_status);
     assert_eq!(live_dataset.pin().data.records(), 1);
+    responder.await.unwrap();
+}
+
+/// Write an rpol + dataset + config-file fixture and return the paths as
+/// `(config, rpol, dataset)`. All references in the TOML are absolute so a
+/// candidate serialized from the loaded config re-resolves the same files.
+fn external_inputs_fixture(
+    dir: &std::path::Path,
+) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+    let rpol_path = dir.join("edge.rpol");
+    let dataset_path = dir.join("customers.list");
+    std::fs::write(
+        &rpol_path,
+        r"
+dataset asn-set customers
+
+policy edge-in {
+    term customer { if route.origin-as in customers { accept } }
+    term rest { reject }
+}
+",
+    )
+    .unwrap();
+    std::fs::write(&dataset_path, "64500\n").unwrap();
+    let config_toml = crate::test_support::tier_authorized_uds_test_config(&format!(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[policy]
+rpol_files = [{rpol_path:?}]
+
+[policy.datasets.customers]
+path = {dataset_path:?}
+
+[[neighbors]]
+address = "192.0.2.1"
+remote_asn = 65002
+description = "before"
+import_policy_chain = ["edge-in"]
+"#,
+        rpol_path = rpol_path.display().to_string(),
+        dataset_path = dataset_path.display().to_string()
+    ));
+    let config_path = dir.join("config.toml");
+    std::fs::write(&config_path, config_toml).unwrap();
+    (config_path, rpol_path, dataset_path)
+}
+
+/// A manager whose running config came from an accepted snapshot load and
+/// that holds the accepted-identity watch (ADR-0130), plus the RIB channel
+/// and the sender halves the manager must keep alive.
+#[expect(
+    clippy::type_complexity,
+    reason = "test fixture returns every channel half the scenario must keep alive"
+)]
+fn accepted_identity_manager(
+    config_path: &std::path::Path,
+) -> (
+    PeerManager,
+    Arc<crate::config::AcceptedConfigSnapshot>,
+    mpsc::Receiver<RibUpdate>,
+    (
+        mpsc::Sender<PeerManagerCommand>,
+        mpsc::Sender<InternalCommand>,
+        watch::Sender<Arc<crate::config::AcceptedConfigSnapshot>>,
+    ),
+) {
+    let accepted = Arc::new(
+        crate::config::AcceptedConfigSnapshot::load(config_path, None).expect("accepted load"),
+    );
+    let (accepted_tx, accepted_rx) = watch::channel(Arc::clone(&accepted));
+    let (tx, rx) = mpsc::channel(4);
+    let (internal_tx, internal_rx) = mpsc::channel(1);
+    let (rib_tx, rib_rx) = mpsc::channel(4);
+    let mgr = PeerManager::new_with_config(
+        rx,
+        internal_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+        None,
+        accepted.config(),
+    )
+    .with_accepted_identity(accepted_rx);
+    (mgr, accepted, rib_rx, (tx, internal_tx, accepted_tx))
+}
+
+fn answer_snapshot_queries(
+    mut rib_rx: mpsc::Receiver<RibUpdate>,
+    count: usize,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        for _ in 0..count {
+            let Some(RibUpdate::QueryUpdateGroupSnapshot { reply }) = rib_rx.recv().await else {
+                panic!("plan snapshot query missing");
+            };
+            reply
+                .send(rustbgpd_rib::UpdateGroupSnapshot::default())
+                .unwrap();
+        }
+    })
+}
+
+#[tokio::test]
+async fn transaction_plan_supports_full_snapshot_family_with_unchanged_external_inputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config_path, _rpol_path, _dataset_path) = external_inputs_fixture(dir.path());
+    let (mut mgr, _accepted, rib_rx, _keepalive) = accepted_identity_manager(&config_path);
+    let responder = answer_snapshot_queries(rib_rx, 1);
+
+    let mut candidate = mgr.current_config.clone();
+    candidate.neighbors[0].description = Some("after".to_string());
+    let candidate = toml::to_string_pretty(&candidate).unwrap();
+
+    let plan = mgr
+        .plan_config_transaction(&candidate, None, true)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        plan.status,
+        rustbgpd_api::peer_types::RuntimeConfigTransactionStatus::Committable,
+        "{:?}",
+        plan.unsupported_sections
+    );
+    assert_eq!(plan.supported_sections, vec!["[[neighbors]] modify"]);
+    assert!(plan.unsupported_sections.is_empty());
+    responder.await.unwrap();
+}
+
+#[tokio::test]
+async fn transaction_plan_rejects_dataset_byte_drift_against_accepted_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config_path, _rpol_path, dataset_path) = external_inputs_fixture(dir.path());
+    let (mut mgr, _accepted, rib_rx, _keepalive) = accepted_identity_manager(&config_path);
+    let responder = answer_snapshot_queries(rib_rx, 2);
+
+    let mut candidate = mgr.current_config.clone();
+    candidate.neighbors[0].description = Some("after".to_string());
+    let candidate = toml::to_string_pretty(&candidate).unwrap();
+
+    // A real content edit between the accepted load and the candidate plan.
+    // The dataset binding declaration is unchanged, so only the ADR-0130
+    // identity comparison can catch this.
+    std::fs::write(&dataset_path, "64500\n64999\n").unwrap();
+    let plan = mgr
+        .plan_config_transaction(&candidate, None, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        plan.status,
+        rustbgpd_api::peer_types::RuntimeConfigTransactionStatus::Rejected
+    );
+    assert_eq!(plan.supported_sections, vec!["[[neighbors]] modify"]);
+    assert!(plan.unsupported_sections[0].contains("external inputs"));
+
+    // Byte identity, not parse identity: a semantically equal rewrite is
+    // still drift and still rejected.
+    std::fs::write(&dataset_path, "# same set\n64500\n").unwrap();
+    let plan = mgr
+        .plan_config_transaction(&candidate, None, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        plan.status,
+        rustbgpd_api::peer_types::RuntimeConfigTransactionStatus::Rejected
+    );
+    assert!(plan.unsupported_sections[0].contains("external inputs"));
+    responder.await.unwrap();
+}
+
+#[tokio::test]
+async fn transaction_plan_rejects_rpol_byte_drift_against_accepted_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config_path, rpol_path, _dataset_path) = external_inputs_fixture(dir.path());
+    let (mut mgr, _accepted, rib_rx, _keepalive) = accepted_identity_manager(&config_path);
+    let responder = answer_snapshot_queries(rib_rx, 1);
+
+    let mut candidate = mgr.current_config.clone();
+    candidate.neighbors[0].description = Some("after".to_string());
+    let candidate = toml::to_string_pretty(&candidate).unwrap();
+
+    // Comment-only edit: compiled policy content is unchanged, but the
+    // source bytes are not the accepted bytes.
+    let source = std::fs::read_to_string(&rpol_path).unwrap();
+    std::fs::write(&rpol_path, format!("# touched\n{source}")).unwrap();
+    let plan = mgr
+        .plan_config_transaction(&candidate, None, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        plan.status,
+        rustbgpd_api::peer_types::RuntimeConfigTransactionStatus::Rejected
+    );
+    assert!(
+        plan.unsupported_sections
+            .iter()
+            .any(|section| section.contains("external inputs")),
+        "{:?}",
+        plan.unsupported_sections
+    );
+    responder.await.unwrap();
+}
+
+#[tokio::test]
+async fn transaction_plan_fails_closed_when_external_source_is_unreadable() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config_path, _rpol_path, dataset_path) = external_inputs_fixture(dir.path());
+    let (mut mgr, _accepted, rib_rx, _keepalive) = accepted_identity_manager(&config_path);
+    let responder = answer_snapshot_queries(rib_rx, 1);
+
+    let mut candidate = mgr.current_config.clone();
+    candidate.neighbors[0].description = Some("after".to_string());
+    let candidate = toml::to_string_pretty(&candidate).unwrap();
+
+    std::fs::remove_file(&dataset_path).unwrap();
+    let error = mgr
+        .plan_config_transaction(&candidate, None, true)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        rustbgpd_api::peer_types::RuntimeConfigTransactionPlanError::InvalidCandidate(_)
+    ));
+    responder.await.unwrap();
+}
+
+#[tokio::test]
+async fn verified_plan_reattaches_live_external_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config_path, _rpol_path, _dataset_path) = external_inputs_fixture(dir.path());
+    let (mut mgr, _accepted, rib_rx, _keepalive) = accepted_identity_manager(&config_path);
+    let responder = answer_snapshot_queries(rib_rx, 1);
+
+    let mut candidate_source = mgr.current_config.clone();
+    candidate_source.neighbors[0].description = Some("after".to_string());
+    let candidate_toml = toml::to_string_pretty(&candidate_source).unwrap();
+    // A captured load builds detached rpol storage and fresh dataset handles.
+    let mut candidate = Config::load_toml_candidate_captured(&candidate_toml, "candidate").unwrap();
+    let fresh_handle = Arc::clone(candidate.policy.dataset_bindings.get("customers").unwrap());
+    let live_handle = Arc::clone(
+        mgr.current_config
+            .policy
+            .dataset_bindings
+            .get("customers")
+            .unwrap(),
+    );
+    assert!(!Arc::ptr_eq(&fresh_handle, &live_handle));
+
+    let plan = mgr
+        .plan_preloaded_config_transaction(&mut candidate, None)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        plan.status,
+        rustbgpd_api::peer_types::RuntimeConfigTransactionStatus::Committable
+    );
+    // The verified candidate's freshly loaded external state is verification
+    // evidence only: the plan re-attached the live dataset handle and shared
+    // rpol storage, so adopting the candidate cannot detach live policy
+    // state (ADR-0121 §8 / ADR-0130).
+    assert!(Arc::ptr_eq(
+        candidate.policy.dataset_bindings.get("customers").unwrap(),
+        &live_handle
+    ));
+    assert!(Arc::ptr_eq(
+        &candidate.policy.rpol.policies["edge-in"].file,
+        &mgr.current_config.policy.rpol.policies["edge-in"].file
+    ));
     responder.await.unwrap();
 }
 
@@ -332,7 +620,10 @@ route_server_client = true
             .unwrap();
     });
 
-    let plan = mgr.plan_config_transaction(&candidate, None).await.unwrap();
+    let plan = mgr
+        .plan_config_transaction(&candidate, None, true)
+        .await
+        .unwrap();
 
     assert_eq!(
         plan.status,
@@ -482,11 +773,11 @@ export_policy_chain = ["dataset-export"]
     });
 
     let noop = mgr
-        .plan_config_transaction(&noop_candidate, None)
+        .plan_config_transaction(&noop_candidate, None, true)
         .await
         .unwrap();
     let fib = mgr
-        .plan_config_transaction(&fib_candidate, None)
+        .plan_config_transaction(&fib_candidate, None, true)
         .await
         .unwrap();
 
@@ -540,7 +831,10 @@ export_policy_chain = ["dataset-export"]
         committed.contains("ebgp_requires_policy = false"),
         "{committed}"
     );
-    let chained = mgr.plan_config_transaction(committed, None).await.unwrap();
+    let chained = mgr
+        .plan_config_transaction(committed, None, true)
+        .await
+        .unwrap();
     assert_eq!(
         chained.post_commit_runtime_snapshot_token,
         fib.post_commit_runtime_snapshot_token
@@ -1270,7 +1564,7 @@ log_format = "json"
 
     // Unary Apply seam: the epoch-cell tuple materializes canonically.
     let plan = mgr
-        .plan_config_transaction(&fib_candidate_toml, None)
+        .plan_config_transaction(&fib_candidate_toml, None, true)
         .await
         .unwrap();
     assert_eq!(
@@ -1312,7 +1606,7 @@ log_format = "json"
 
     // Effective drift out of the activated cell stays restart-required.
     let rejected = mgr
-        .plan_config_transaction(&drift_candidate_toml, None)
+        .plan_config_transaction(&drift_candidate_toml, None, true)
         .await
         .unwrap();
     assert_eq!(

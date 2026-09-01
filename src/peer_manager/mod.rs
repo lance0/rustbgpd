@@ -445,6 +445,11 @@ pub struct PeerManager {
     /// from acting as an offline oracle for config secrets. See
     /// [`crate::config::RuntimeSnapshotKey`].
     snapshot_key: crate::config::RuntimeSnapshotKey,
+    /// Accepted-config authority (ADR-0121) for external-input identity
+    /// verification on the config-transaction plan path. `None` (no config
+    /// file, tests) keeps every candidate `Unverified`, i.e. the presence
+    /// fence.
+    accepted_rx: Option<watch::Receiver<Arc<crate::config::AcceptedConfigSnapshot>>>,
     /// Test-only deterministic fault injection: `reconfigure_peer` against
     /// a mapped key fails up front, before the delete/re-add cycle, once the
     /// key's budget of remaining successful calls reaches zero (a value of 0
@@ -550,6 +555,17 @@ impl PeerManager {
                 inbound_admission: crate::config::InboundAdmissionConfig::default(),
             },
         )
+    }
+
+    /// Install the accepted-config authority used to verify a transaction
+    /// candidate's captured external-input identity (ADR-0130).
+    #[must_use]
+    pub fn with_accepted_identity(
+        mut self,
+        accepted_rx: watch::Receiver<Arc<crate::config::AcceptedConfigSnapshot>>,
+    ) -> Self {
+        self.accepted_rx = Some(accepted_rx);
+        self
     }
 
     /// Install the dedicated read-only readiness-query receiver.
@@ -763,6 +779,7 @@ impl PeerManager {
             event_history: None,
             transport_event_sink: None,
             snapshot_key: crate::config::RuntimeSnapshotKey::random(),
+            accepted_rx: None,
             #[cfg(test)]
             inject_reconfigure_failures: std::collections::BTreeMap::new(),
             #[cfg(test)]
@@ -1240,11 +1257,13 @@ impl PeerManager {
                         PeerManagerCommand::PlanConfigTransaction {
                             candidate_toml,
                             expected_runtime_snapshot_token,
+                            verify_external_inputs,
                             mut reply,
                         } => {
                             let planning = self.plan_config_transaction(
                                 &candidate_toml,
                                 expected_runtime_snapshot_token.as_deref(),
+                                verify_external_inputs,
                             );
                             tokio::pin!(planning);
                             let result = tokio::select! {
@@ -1838,6 +1857,15 @@ impl PeerManager {
                             reply,
                         }) => {
                             let mut candidate = snapshot.config();
+                            // A retained/prior snapshot carries its own
+                            // captured external-source manifest; seed the
+                            // candidate's identity from it so the ADR-0130
+                            // verification compares that capture against the
+                            // current accepted authority.
+                            candidate.policy.external_sources_digest =
+                                crate::config::ExternalSourcesDigest(Some(
+                                    snapshot.source_manifest().external_sources_sha256(),
+                                ));
                             let result = self
                                 .plan_preloaded_config_transaction(
                                     &mut candidate,

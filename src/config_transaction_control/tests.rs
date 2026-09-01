@@ -2135,6 +2135,7 @@ async fn fake_live_policy_peer_manager(
             PeerManagerCommand::PlanConfigTransaction {
                 candidate_toml,
                 expected_runtime_snapshot_token,
+                verify_external_inputs: _,
                 reply,
             } => {
                 let mut response = attach_committed_candidate(plan.clone(), &candidate_toml);
@@ -5149,6 +5150,7 @@ async fn apply_commits_live_policy_impact_after_persist_ack() {
         &peer_tx,
         candidate_toml.clone(),
         response.runtime_snapshot_token.clone(),
+        true,
     )
     .await
     .expect("returned post-commit token must chain into a second plan");
@@ -7575,7 +7577,7 @@ async fn config_transaction_plan_matches_real_post_apply_update_groups() {
     let before = query_real_update_group_snapshot(&rib_tx).await;
     assert_eq!(before.peers.len(), 5, "all real PeerUp rows are visible");
 
-    let planned = plan_candidate(&peer_tx, candidate_toml.clone(), String::new())
+    let planned = plan_candidate(&peer_tx, candidate_toml.clone(), String::new(), true)
         .await
         .expect("real PlanConfigTransaction flow must succeed");
     assert_eq!(planned.status, RuntimeConfigTransactionStatus::Committable);
@@ -7793,7 +7795,7 @@ async fn config_transaction_plan_matches_real_post_apply_update_groups() {
         assert_eq!(acks.route_refreshes(), 0, "export-only peer {peer}");
     }
 
-    let replanned = plan_candidate(&peer_tx, committed_candidate_toml, String::new())
+    let replanned = plan_candidate(&peer_tx, committed_candidate_toml, String::new(), true)
         .await
         .expect("re-plan of the committed candidate must succeed");
     assert_eq!(replanned.status, RuntimeConfigTransactionStatus::Noop);
@@ -7929,7 +7931,7 @@ async fn config_transaction_plan_matches_real_post_apply_heterogeneous_update_gr
     let before = query_real_update_group_snapshot(&rib_tx).await;
     assert_eq!(before.peers.len(), 5, "all heterogeneous peers are live");
     while outbound_rx.try_recv().is_ok() {}
-    let planned = plan_candidate(&peer_tx, candidate_toml.clone(), String::new())
+    let planned = plan_candidate(&peer_tx, candidate_toml.clone(), String::new(), true)
         .await
         .expect("heterogeneous plan must succeed");
     assert_eq!(planned.status, RuntimeConfigTransactionStatus::Committable);
@@ -8051,7 +8053,7 @@ async fn config_transaction_plan_matches_real_post_apply_heterogeneous_update_gr
         assert_eq!((acks.import_updates(), acks.route_refreshes()), (0, 0));
     }
 
-    let replanned = plan_candidate(&peer_tx, committed_candidate_toml, String::new())
+    let replanned = plan_candidate(&peer_tx, committed_candidate_toml, String::new(), true)
         .await
         .expect("re-plan of the committed candidate must succeed");
     assert_eq!(replanned.status, RuntimeConfigTransactionStatus::Noop);

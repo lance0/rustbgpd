@@ -579,8 +579,12 @@ fn rfc8212_transaction_materialization_requires_real_mutation_and_exact_posture(
     ] {
         let live = rfc8212_transaction_fixture(live_epoch, live_policy, false);
         let mut candidate = rfc8212_transaction_fixture(candidate_epoch, candidate_policy, true);
-        let operational = materialize_rfc8212_transaction_candidate(&live, &mut candidate)
-            .unwrap_or_else(|| panic!("{label} must materialize"));
+        let operational = materialize_rfc8212_transaction_candidate(
+            &live,
+            &mut candidate,
+            crate::config::ExternalInputsIdentity::Unverified,
+        )
+        .unwrap_or_else(|| panic!("{label} must materialize"));
         assert_eq!(
             classify_config_transaction_v1(&operational).supported_sections,
             vec!["[[neighbors]] add"],
@@ -643,7 +647,12 @@ fn rfc8212_transaction_materialization_requires_real_mutation_and_exact_posture(
         let mut candidate = rfc8212_transaction_fixture(candidate_epoch, candidate_policy, mutate);
         let before = candidate.rfc8212_posture();
         assert!(
-            materialize_rfc8212_transaction_candidate(&live, &mut candidate).is_none(),
+            materialize_rfc8212_transaction_candidate(
+                &live,
+                &mut candidate,
+                crate::config::ExternalInputsIdentity::Unverified,
+            )
+            .is_none(),
             "{label}"
         );
         assert_eq!(candidate.rfc8212_posture(), before, "{label}");

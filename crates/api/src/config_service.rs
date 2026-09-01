@@ -253,6 +253,7 @@ impl proto::config_service_server::ConfigService for ConfigService {
             |reply| PeerManagerCommand::PlanConfigTransaction {
                 candidate_toml: request.candidate_toml,
                 expected_runtime_snapshot_token,
+                verify_external_inputs: true,
                 reply,
             },
             "peer manager dropped config transaction plan reply",
@@ -772,6 +773,7 @@ mod tests {
             let Some(PeerManagerCommand::PlanConfigTransaction {
                 candidate_toml,
                 expected_runtime_snapshot_token,
+                verify_external_inputs: true,
                 reply,
             }) = rx.recv().await
             else {

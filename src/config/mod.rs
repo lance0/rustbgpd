@@ -699,6 +699,38 @@ impl Config {
         Self::load_from_toml_source(content, source_name, None)
     }
 
+    /// [`Self::load_toml_with_diagnostics`] additionally capturing the
+    /// byte identity of every external policy source the load actually
+    /// read (`.rpol` module graphs and dataset files) into
+    /// `policy.external_sources_digest` (ADR-0121 v2 framing).
+    ///
+    /// Only the config-transaction plan and apply paths use this loader:
+    /// the captured digest lets the planner admit a full-snapshot
+    /// candidate whose external inputs are byte-identical to the
+    /// accepted snapshot's, and every other load path leaves the digest
+    /// empty so classification falls back to the presence fence.
+    pub(crate) fn load_toml_candidate_captured(
+        content: &str,
+        source_name: &str,
+    ) -> Result<Self, String> {
+        let mut capture = source_provenance::SourceCapture::default();
+        let mut config = Self::load_from_toml_source_with_capture(
+            content,
+            source_name,
+            None,
+            None,
+            DatasetBindMode::Apply,
+            Some(&mut capture),
+            None,
+            None,
+        )?;
+        // The document hash is irrelevant here: only the external-source
+        // frames feed the digest.
+        config.policy.external_sources_digest =
+            ExternalSourcesDigest(Some(capture.finish([0; 32]).external_sources_sha256()));
+        Ok(config)
+    }
+
     /// Load config and, on failure, render a diagnostic with source context.
     ///
     /// Returns the rendered diagnostic string on error (suitable for direct
@@ -1933,6 +1965,34 @@ pub struct PolicyDiff {
     #[serde(skip)]
     #[doc(hidden)]
     pub external_inputs_present: bool,
+    /// Whether a transaction planner verified the candidate's freshly
+    /// captured external policy sources as byte-identical to the accepted
+    /// snapshot's. `diff_config` always initializes this to
+    /// [`ExternalInputsIdentity::Unverified`]; only the config-transaction
+    /// plan path upgrades it after an actual digest comparison, so a
+    /// caller that never verifies keeps the presence fence. Kept out of
+    /// serialized diff output like `external_inputs_present`.
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub external_inputs_identity: ExternalInputsIdentity,
+}
+
+/// Identity verdict for a candidate's declared external policy inputs
+/// (`[policy] rpol_files` / `[policy.datasets]`), consumed by
+/// [`classify_config_transaction_v1`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExternalInputsIdentity {
+    /// No verification was performed (the safe default): the presence of
+    /// external inputs fences every transaction that would adopt the full
+    /// candidate snapshot (#1370). The gNMI Set bridge and every
+    /// non-transaction caller stay here.
+    #[default]
+    Unverified,
+    /// The candidate load's captured `.rpol` + dataset byte identity
+    /// equals the accepted snapshot's manifest identity (domain-separated
+    /// digest match), so adopting the candidate snapshot cannot change
+    /// external policy content.
+    VerifiedUnchanged,
 }
 
 impl PolicyDiff {
@@ -2962,6 +3022,7 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
         push_transaction_external_policy_inputs_reason(&mut class);
     }
     if diff.policy.external_inputs_present
+        && diff.policy.external_inputs_identity == ExternalInputsIdentity::Unverified
         && transaction_stages_full_candidate_snapshot(&class.supported_sections)
     {
         // Every v1 executor except the targeted FIB path adopts the full
@@ -2971,6 +3032,14 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
         // content that was never part of the transaction. A true no-op has no
         // supported family and remains a no-op; pure FIB substitutes only the
         // table set and is therefore safe with unchanged external inputs.
+        //
+        // ADR-0130 narrows the fence to identity: when the config-transaction
+        // plan path has captured the candidate's external sources and proven
+        // them byte-identical to the accepted snapshot's manifest
+        // (`VerifiedUnchanged`), the content the executor would adopt IS the
+        // accepted content and the silent-adoption hazard cannot arise. Every
+        // caller that does not verify — the gNMI Set bridge included — stays
+        // `Unverified` and keeps the presence fence (#1370).
         push_transaction_external_policy_inputs_reason(&mut class);
     }
     if diff.honor_graceful_shutdown_changed {
@@ -3107,6 +3176,7 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
 pub(crate) fn materialize_rfc8212_transaction_candidate(
     live: &Config,
     candidate: &mut Config,
+    external_inputs: ExternalInputsIdentity,
 ) -> Option<ConfigDiff> {
     let live_posture = live.rfc8212_posture();
     let candidate_posture = candidate.rfc8212_posture();
@@ -3136,7 +3206,8 @@ pub(crate) fn materialize_rfc8212_transaction_candidate(
     // this helper from using its own representation change as authorization.
     candidate.config_epoch = live_raw.0;
     candidate.global.ebgp_requires_policy = live_raw.1;
-    let operational_diff = diff_config(live, candidate);
+    let mut operational_diff = diff_config(live, candidate);
+    operational_diff.policy.external_inputs_identity = external_inputs;
     let mutation = classify_config_transaction_v1(&operational_diff);
     candidate.config_epoch = candidate_raw.0;
     candidate.global.ebgp_requires_policy = candidate_raw.1;
@@ -5014,6 +5085,7 @@ pub fn diff_policy(old: &PolicyConfig, new: &PolicyConfig) -> PolicyDiff {
             || !new.rpol_files.is_empty()
             || !old.datasets.is_empty()
             || !new.datasets.is_empty(),
+        external_inputs_identity: ExternalInputsIdentity::Unverified,
     }
 }
 

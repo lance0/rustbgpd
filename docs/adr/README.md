@@ -151,6 +151,7 @@ states that the whole decision is Superseded.
 | [0127](0127-config-transaction-settlement-watchdog.md) | Persisted runtime-config settlement watchdog | Accepted | 2026-08-11 | Active |
 | [0128](0128-route-server-next-hop-translation.md) | Route-server next-hop translation | Accepted (architecture GO if activated; implementation NO-GO, demand-gated) | 2026-08-29 | Active |
 | [0129](0129-prefix-sid-domain-boundary.md) | BGP Prefix-SID administrative-domain boundary | Proposed (no runtime behavior shipped) | 2026-08-29 | Unstated |
+| [0130](0130-identity-conditional-external-policy-fence.md) | Identity-conditional external-policy transaction fence | Proposed | 2026-09-01 | Unstated |
 
 ## Supporting records
 

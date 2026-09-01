@@ -4250,6 +4250,17 @@ async fn run<T>(
     let (bfd_desired_tx, bfd_desired_rx) = tokio::sync::watch::channel(bfd_initial.clone());
     let (bfd_state_change_tx, bfd_state_change_rx) = bfd_runtime::state_change_channel();
 
+    // Accepted-config authority watch (ADR-0121), created before the peer
+    // manager so the config-transaction planner can verify a candidate's
+    // captured external-input identity against the accepted snapshot
+    // (ADR-0130). The sender is handed to the config bridge below; without a
+    // config file there is no accepted authority and every candidate stays
+    // unverified (presence-fenced).
+    let mut accepted_watch = config
+        .file_path
+        .is_some()
+        .then(|| watch::channel(Arc::clone(&accepted)));
+
     let peer_mgr = PeerManager::new_with_config(
         peer_mgr_rx,
         peer_mgr_internal_rx,
@@ -4268,6 +4279,11 @@ async fn run<T>(
     .with_transport_event_sink(event_history_handle.clone().map(|handle| {
         rustbgpd_api::event_history_sinks::make_transport_event_sink(handle, metrics.clone())
     }));
+    let peer_mgr = if let Some((_, accepted_identity_rx)) = &accepted_watch {
+        peer_mgr.with_accepted_identity(accepted_identity_rx.clone())
+    } else {
+        peer_mgr
+    };
     // Wire BFD coupling only when BFD is configured; otherwise the unused ends
     // are dropped (the actor won't spawn either). PeerManager holds the desired
     // sender for life and never recreates it (the actor treats sender drop as
@@ -4314,7 +4330,9 @@ async fn run<T>(
         let (event_tx, event_rx) = mpsc::channel::<rustbgpd_api::peer_types::ConfigEvent>(64);
         let (mutation_tx, mutation_rx) = mpsc::channel::<ConfigMutation>(64);
         let (bridge_replace_tx, bridge_replace_rx) = mpsc::channel(1);
-        let (accepted_tx, accepted_rx) = watch::channel(Arc::clone(&accepted));
+        let (accepted_tx, accepted_rx) = accepted_watch
+            .take()
+            .expect("accepted watch is created whenever a config file path exists");
         let persister = ConfigPersister::new_accepted(
             mutation_rx,
             path.clone(),

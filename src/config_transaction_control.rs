@@ -466,7 +466,7 @@ impl ConfigTransactionController {
         if let Some(confirmed) = confirmed {
             self.begin_confirmed_apply(&confirmed.confirm_id).await?;
             let result = self
-                .apply_confirmed_locked(request, confirmed.clone(), preloaded, progress)
+                .apply_confirmed_locked(request, confirmed.clone(), preloaded, progress, true)
                 .await;
             if !matches!(
                 result,
@@ -492,11 +492,12 @@ impl ConfigTransactionController {
                 Some(preloaded),
                 Some(peer_mgr_internal_tx),
                 progress,
+                true,
             )
             .await
             .map_err(ApplyFailure::into_apply_error)
         } else {
-            self.apply_locked(request, None, progress).await
+            self.apply_locked(request, None, progress, true).await
         }
     }
 
@@ -669,6 +670,7 @@ impl ConfigTransactionController {
                         request,
                         confirmed,
                         &RuntimeConfigMutationProgress::default(),
+                        true,
                     )
                     .await;
                 drop(context);
@@ -704,7 +706,7 @@ impl ConfigTransactionController {
                 ));
             }
             let progress = RuntimeConfigMutationProgress::owned(&operation);
-            let result = self.apply_locked(request, confirmed, &progress).await;
+            let result = self.apply_locked(request, confirmed, &progress, true).await;
             if let Err(ConfigTransactionApplyError::RecoveryRequired { reason, .. }) = &result {
                 let _ = operation.fence_recovery(*reason);
                 std::future::pending::<()>().await;
@@ -797,7 +799,11 @@ impl ConfigTransactionController {
                                 .map_err(apply_error_to_owned_gnmi_set_error)?;
                             // A confirmed gNMI candidate is derived from the live
                             // config. The ordinary planner must still fence external
-                            // declarations after constructing the full snapshot.
+                            // declarations after constructing the full snapshot:
+                            // gNMI applies below run without external-input
+                            // verification, so gNMI full-snapshot candidates stay
+                            // presence-fenced (#1370) even when the sources are
+                            // unchanged on disk (ADR-0130 scope).
                         }
                         None => {
                             self_
@@ -844,7 +850,7 @@ impl ConfigTransactionController {
                         .map_err(apply_error_to_owned_gnmi_set_error)?;
                     let response = if confirmed.is_some() {
                         self_
-                            .apply_locked(request, confirmed, &progress)
+                            .apply_locked(request, confirmed, &progress, false)
                             .await
                             .map_err(apply_error_to_owned_gnmi_set_error)?
                     } else {
@@ -863,6 +869,7 @@ impl ConfigTransactionController {
                             request,
                             Some(peer_mgr_internal_tx),
                             &progress,
+                            false,
                         )
                         .await
                         .map_err(|failure| match failure.fence_reason {
@@ -894,11 +901,18 @@ impl ConfigTransactionController {
         request: proto::ApplyConfigTransactionRequest,
         confirmed: Option<ConfirmedApplyMode>,
         progress: &RuntimeConfigMutationProgress,
+        verify_external_inputs: bool,
     ) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
         if let Some(confirmed) = confirmed {
             self.begin_confirmed_apply(&confirmed.confirm_id).await?;
             let result = self
-                .apply_confirmed_locked(request, confirmed.clone(), None, progress)
+                .apply_confirmed_locked(
+                    request,
+                    confirmed.clone(),
+                    None,
+                    progress,
+                    verify_external_inputs,
+                )
                 .await;
             if !matches!(
                 result,
@@ -918,6 +932,7 @@ impl ConfigTransactionController {
                 request,
                 self.peer_mgr_internal_tx.as_ref(),
                 progress,
+                verify_external_inputs,
             )
             .await
             .map_err(ApplyFailure::into_apply_error)
@@ -934,6 +949,7 @@ impl ConfigTransactionController {
         confirmed: ConfirmedApplyMode,
         preloaded: Option<PlannedTransactionConfig>,
         progress: &RuntimeConfigMutationProgress,
+        verify_external_inputs: bool,
     ) -> Result<proto::ConfigTransactionApplyResponse, ConfigTransactionApplyError> {
         let prior_snapshot = self
             .accepted_prior_snapshot()
@@ -1042,6 +1058,7 @@ impl ConfigTransactionController {
             preloaded,
             self.peer_mgr_internal_tx.as_ref(),
             progress,
+            verify_external_inputs,
         )
         .await
         {
@@ -1793,6 +1810,7 @@ impl ConfigTransactionController {
             Some(plan),
             Some(peer_mgr_internal_tx),
             progress,
+            true,
         )
         .await;
         let response = result.map_err(ApplyFailure::into_apply_error)?;
@@ -2185,6 +2203,7 @@ async fn apply_config_transaction(
             request,
             None,
             &RuntimeConfigMutationProgress::default(),
+            true,
         )
         .await
         .map_err(ApplyFailure::into_apply_error)
@@ -2211,6 +2230,7 @@ async fn apply_config_transaction_with_internal(
             request,
             Some(&peer_mgr_internal_tx),
             &RuntimeConfigMutationProgress::default(),
+            true,
         )
         .await
         .map_err(ApplyFailure::into_apply_error)
@@ -2227,6 +2247,7 @@ async fn apply_config_transaction_locked(
     request: proto::ApplyConfigTransactionRequest,
     peer_mgr_internal_tx: Option<&mpsc::Sender<InternalCommand>>,
     progress: &RuntimeConfigMutationProgress,
+    verify_external_inputs: bool,
 ) -> Result<proto::ConfigTransactionApplyResponse, ApplyFailure> {
     apply_config_transaction_locked_with_preloaded(
         deps,
@@ -2234,6 +2255,7 @@ async fn apply_config_transaction_locked(
         None,
         peer_mgr_internal_tx,
         progress,
+        verify_external_inputs,
     )
     .await
 }
@@ -2248,19 +2270,32 @@ async fn apply_config_transaction_locked_with_preloaded(
     preloaded: Option<PlannedTransactionConfig>,
     peer_mgr_internal_tx: Option<&mpsc::Sender<InternalCommand>>,
     progress: &RuntimeConfigMutationProgress,
+    verify_external_inputs: bool,
 ) -> Result<proto::ConfigTransactionApplyResponse, ApplyFailure> {
     let (plan, candidate, typed_plan) = if let Some(planned) = preloaded {
         (planned.plan, planned.candidate, true)
     } else {
-        let candidate = Config::load_toml_with_diagnostics(
-            &request.candidate_toml,
-            "candidate runtime config transaction",
-        )
+        // The config-transaction path loads the candidate with external-source
+        // capture so the typed plan below can verify identity against the
+        // accepted snapshot (ADR-0130); the gNMI Set bridge loads plain and
+        // stays behind the presence fence.
+        let candidate = if verify_external_inputs {
+            Config::load_toml_candidate_captured(
+                &request.candidate_toml,
+                "candidate runtime config transaction",
+            )
+        } else {
+            Config::load_toml_with_diagnostics(
+                &request.candidate_toml,
+                "candidate runtime config transaction",
+            )
+        }
         .map_err(ConfigTransactionApplyError::InvalidArgument)?;
         let plan = plan_candidate(
             &deps.peer_mgr_tx,
             request.candidate_toml.clone(),
             request.expected_runtime_snapshot_token.clone(),
+            verify_external_inputs,
         )
         .await?;
         (plan, Box::new(candidate), false)
@@ -2893,12 +2928,14 @@ async fn plan_candidate(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     candidate_toml: String,
     expected_runtime_snapshot_token: String,
+    verify_external_inputs: bool,
 ) -> Result<rustbgpd_api::peer_types::RuntimeConfigTransactionPlan, ConfigTransactionApplyError> {
     let (reply_tx, reply_rx) = oneshot::channel();
     peer_mgr_tx
         .send(PeerManagerCommand::PlanConfigTransaction {
             candidate_toml,
             expected_runtime_snapshot_token: Some(expected_runtime_snapshot_token),
+            verify_external_inputs,
             reply: reply_tx,
         })
         .await

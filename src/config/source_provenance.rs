@@ -19,6 +19,7 @@ use sha2::{Digest, Sha256};
 use super::{Config, DatasetBindMode, persisted_config_document_bounded};
 
 const SOURCE_DIGEST_DOMAIN: &[u8] = b"rustbgpd.config-source.v2\0";
+const EXTERNAL_SOURCES_DIGEST_DOMAIN: &[u8] = b"rustbgpd.config-external-sources.v2\0";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SourceManifest {
@@ -120,7 +121,7 @@ impl SourceCapture {
         Ok(())
     }
 
-    fn finish(mut self, toml_sha256: [u8; 32]) -> SourceManifest {
+    pub(super) fn finish(mut self, toml_sha256: [u8; 32]) -> SourceManifest {
         self.datasets
             .sort_by(|left, right| left.name.as_bytes().cmp(right.name.as_bytes()));
         SourceManifest {
@@ -142,28 +143,45 @@ impl SourceManifest {
         let mut digest = Sha256::new();
         digest.update(SOURCE_DIGEST_DOMAIN);
         frame(&mut digest, &self.toml_sha256);
-        frame_u64(&mut digest, self.rpol_units.len());
+        self.frame_external_sources(&mut digest);
+        digest.finalize().into()
+    }
+
+    /// Domain-separated digest over the external-source rosters alone
+    /// (the `.rpol` module fingerprints and dataset fingerprints, in the
+    /// exact `source_sha256` framing with the document hash excluded).
+    /// Two manifests produce the same value exactly when substituting one
+    /// document hash into the other yields the same `source_sha256` —
+    /// i.e. when their captured external inputs are byte-identical.
+    pub(crate) fn external_sources_sha256(&self) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        digest.update(EXTERNAL_SOURCES_DIGEST_DOMAIN);
+        self.frame_external_sources(&mut digest);
+        digest.finalize().into()
+    }
+
+    fn frame_external_sources(&self, digest: &mut Sha256) {
+        frame_u64(digest, self.rpol_units.len());
         for unit in &self.rpol_units {
-            frame_u64(&mut digest, unit.modules.len());
+            frame_u64(digest, unit.modules.len());
             for module in &unit.modules {
-                frame_path(&mut digest, &module.path);
-                frame_u64_value(&mut digest, module.length);
-                frame(&mut digest, &module.sha256);
-                frame_u64(&mut digest, module.imports.len());
+                frame_path(digest, &module.path);
+                frame_u64_value(digest, module.length);
+                frame(digest, &module.sha256);
+                frame_u64(digest, module.imports.len());
                 for &import in &module.imports {
-                    frame(&mut digest, &import.to_be_bytes());
+                    frame(digest, &import.to_be_bytes());
                 }
             }
         }
-        frame_u64(&mut digest, self.datasets.len());
+        frame_u64(digest, self.datasets.len());
         for dataset in &self.datasets {
-            frame(&mut digest, dataset.name.as_bytes());
-            frame(&mut digest, dataset.kind.as_str().as_bytes());
-            frame_path(&mut digest, &dataset.path);
-            frame_u64_value(&mut digest, dataset.length);
-            frame(&mut digest, &dataset.sha256);
+            frame(digest, dataset.name.as_bytes());
+            frame(digest, dataset.kind.as_str().as_bytes());
+            frame_path(digest, &dataset.path);
+            frame_u64_value(digest, dataset.length);
+            frame(digest, &dataset.sha256);
         }
-        digest.finalize().into()
     }
 }
 
@@ -1189,6 +1207,52 @@ log_format = "json"
                 0x4c, 0x7e, 0x60, 0x09,
             ]
         );
+    }
+
+    #[test]
+    fn external_sources_digest_ignores_document_but_not_source_bytes() {
+        let manifest = SourceManifest {
+            toml_sha256: [0x11; 32],
+            rpol_units: vec![RpolUnitSource {
+                modules: vec![RpolModuleSource {
+                    path: PathBuf::from("/policy"),
+                    length: 3,
+                    sha256: [0x22; 32],
+                    imports: vec![0, 1],
+                }],
+            }],
+            datasets: vec![DatasetSource {
+                name: "customers".to_string(),
+                kind: DatasetKind::Asn,
+                path: PathBuf::from("/dataset"),
+                length: 4,
+                sha256: [0x33; 32],
+            }],
+        };
+        let mut document_only = manifest.clone();
+        document_only.toml_sha256 = [0x44; 32];
+        assert_eq!(
+            manifest.external_sources_sha256(),
+            document_only.external_sources_sha256(),
+            "a document-only edit is not an external-source change"
+        );
+        assert_ne!(manifest.source_sha256(), document_only.source_sha256());
+
+        let mut dataset_edit = manifest.clone();
+        dataset_edit.datasets[0].sha256 = [0x55; 32];
+        assert_ne!(
+            manifest.external_sources_sha256(),
+            dataset_edit.external_sources_sha256()
+        );
+        let mut rpol_edit = manifest.clone();
+        rpol_edit.rpol_units[0].modules[0].sha256 = [0x66; 32];
+        assert_ne!(
+            manifest.external_sources_sha256(),
+            rpol_edit.external_sources_sha256()
+        );
+        // Distinct domain separation from the full source digest even for
+        // identical rosters.
+        assert_ne!(manifest.external_sources_sha256(), manifest.source_sha256());
     }
 
     #[test]
