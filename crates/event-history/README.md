@@ -46,7 +46,7 @@ one SQLite transaction, and serves cursor-based replay through the
   sidecar (`events.last_id`) atomic write, matching the
   `fib-owned.json` pattern in `src/fib_runtime.rs`.
 - `error.rs` — `EventHistoryError`. Single type covering SQL,
-  schema, allocator, I/O, and `PassThrough`.
+  schema, allocator, I/O, unavailable storage, and `PassThrough`.
 
 ## Invariants
 
@@ -70,6 +70,9 @@ one SQLite transaction, and serves cursor-based replay through the
   EHM commits a batch BEFORE broadcasting; live subscribers and
   cursor-replay subscribers observing the same `event_id` see the
   same envelope.
+- **Storage loss is not pass-through.** A closed storage mailbox or dropped
+  reply terminates cursor replay with `StorageUnavailable`; `PassThrough` is
+  reserved for an unrecoverable allocator anchor.
 - **Allocator recovery ladder.** Primary DB → quarantine fallback.
   `events.last_id` is a diagnostic hint only in v1 because it can lag
   committed events. If both authoritative sources fail AND prior

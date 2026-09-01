@@ -397,14 +397,15 @@ fn default_inbound_admission_table_capacity() -> usize {
 #[serde(deny_unknown_fields)]
 pub struct EventHistoryConfig {
     /// Enable the durable outbox. **Default `false` (opt-in as of
-    /// v0.32.0).** When `false`, EHM runs in pass-through mode (live
-    /// broadcasts only, no persistence) and `SubscribeFromEvent`
-    /// returns `FAILED_PRECONDITION`. Set `true` for restart-safe event
-    /// replay — it costs memory / CPU / disk (see `docs/BENCHMARKS.md`).
+    /// v0.32.0).** When `false`, the daemon does not start EHM;
+    /// live broadcasts remain available without persistence, and
+    /// `SubscribeFromEvent` returns `FAILED_PRECONDITION`. Set `true`
+    /// for restart-safe event replay — it costs memory / CPU / disk
+    /// (see `docs/BENCHMARKS.md`).
     #[serde(default = "default_event_history_enabled")]
     pub enabled: bool,
     /// Fail to start if the events DB cannot be opened or recovered.
-    /// Default `false` — degrade to pass-through with the
+    /// Default `false` — continue in live-only mode with the
     /// `bgp_event_outbox_degraded` flag set.
     #[serde(default)]
     pub required: bool,

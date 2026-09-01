@@ -1765,9 +1765,10 @@ category and type filters select every EHM-fed category on this RPC: route,
 EVPN, session lifecycle, session notifications, policy, dataplane, and BFD.
 Dataplane summary and per-route FIB apply events remain live on `WatchEvents`
 and are also replayable through `SubscribeFromEvent` when event history is
-enabled. When event history is disabled or unavailable, the RPC returns
-`FAILED_PRECONDITION`; legacy live and `List*Events` RPCs are unaffected.
-That availability result takes precedence over filter validation.
+enabled. When event history is disabled or startup fell back to live-only
+operation, the RPC returns `FAILED_PRECONDITION` at admission; legacy live and
+`List*Events` RPCs are unaffected. That admission result takes precedence over
+filter validation.
 
 Pre-admission loss is the baseline; later loss wins delivery races and ends with
 `DATA_LOSS`. Cursors cannot replay pre-commit loss, so reconcile state first.
@@ -1794,6 +1795,12 @@ Live `WatchEvents` compatibility:
 | BFD | `BGP_EVENT_TYPE_BFD_SESSION_UP`, `BGP_EVENT_TYPE_BFD_SESSION_DOWN`, `BGP_EVENT_TYPE_BFD_SESSION_STATE_CHANGED`, `BGP_EVENT_TYPE_STREAM_LAGGED` |
 
 Durable `SubscribeFromEvent` compatibility:
+
+If the storage actor becomes unavailable after admission and no producer loss
+has been observed, the stream ends with gRPC `UNAVAILABLE`. Resume from the
+last received top-level `event_id` after restoring the daemon. Allocator
+pass-through remains `FAILED_PRECONDITION`; post-admission producer loss retains
+`DATA_LOSS` precedence.
 
 | Category | Compatible event types |
 |----------|------------------------|

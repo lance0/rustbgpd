@@ -613,7 +613,7 @@
           "minimum": 0
         },
         "enabled": {
-          "description": "Enable the durable outbox. **Default `false` (opt-in as of\nv0.32.0).** When `false`, EHM runs in pass-through mode (live\nbroadcasts only, no persistence) and `SubscribeFromEvent`\nreturns `FAILED_PRECONDITION`. Set `true` for restart-safe event\nreplay — it costs memory / CPU / disk (see `docs/BENCHMARKS.md`).",
+          "description": "Enable the durable outbox. **Default `false` (opt-in as of\nv0.32.0).** When `false`, the daemon does not start EHM;\nlive broadcasts remain available without persistence, and\n`SubscribeFromEvent` returns `FAILED_PRECONDITION`. Set `true`\nfor restart-safe event replay — it costs memory / CPU / disk\n(see `docs/BENCHMARKS.md`).",
           "type": "boolean",
           "default": false
         },
@@ -649,7 +649,7 @@
           "minimum": 0
         },
         "required": {
-          "description": "Fail to start if the events DB cannot be opened or recovered.\nDefault `false` — degrade to pass-through with the\n`bgp_event_outbox_degraded` flag set.",
+          "description": "Fail to start if the events DB cannot be opened or recovered.\nDefault `false` — continue in live-only mode with the\n`bgp_event_outbox_degraded` flag set.",
           "type": "boolean",
           "default": false
         },

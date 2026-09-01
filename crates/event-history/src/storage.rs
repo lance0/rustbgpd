@@ -224,6 +224,13 @@ pub(crate) enum TestStoreOp {
 }
 
 #[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TestQueryFailure {
+    FirstReply,
+    LaterReply,
+}
+
+#[cfg(test)]
 impl PauseHook {
     async fn after_send(&self) {
         if self.armed.swap(false, Ordering::AcqRel) {
@@ -234,6 +241,48 @@ impl PauseHook {
 }
 
 impl StoreHandle {
+    #[cfg(test)]
+    pub(crate) fn test_query_failure(failure: TestQueryFailure) -> Self {
+        let (tx, mut rx) = mpsc::channel(1);
+        tokio::spawn(async move {
+            while let Some(op) = rx.recv().await {
+                match op {
+                    StoreOp::QueryWithFloor { reply, .. } => match failure {
+                        TestQueryFailure::FirstReply => drop(reply),
+                        TestQueryFailure::LaterReply => {
+                            let _ = reply.send(Ok(QueryWithFloorOutcome {
+                                rows: vec![PersistedEvent {
+                                    event_id: 1,
+                                    timestamp_ns: 0,
+                                    category: Category::Route,
+                                    event_type: "test".to_string(),
+                                    peer: None,
+                                    previous_peer: None,
+                                    target_peer: None,
+                                    afi_safi: None,
+                                    prefix: None,
+                                    rd: None,
+                                    evpn_route_type: None,
+                                    severity: Severity::Info,
+                                    daemon_boot_id: "test".to_string(),
+                                    payload_codec: "opaque".to_string(),
+                                    payload: Vec::new(),
+                                }],
+                                floor: Some(1),
+                            }));
+                        }
+                    },
+                    StoreOp::Query { reply, .. } => drop(reply),
+                    _ => unreachable!("query failure test received a non-query operation"),
+                }
+            }
+        });
+        Self {
+            tx,
+            test_hooks: Arc::new(StoreTestHooks::default()),
+        }
+    }
+
     pub(crate) async fn append(
         &self,
         envelopes: Vec<Arc<EventEnvelope>>,
@@ -244,10 +293,11 @@ impl StoreHandle {
         self.tx
             .send(StoreOp::Append { envelopes, reply })
             .await
-            .map_err(|_| EventHistoryError::PassThrough)?;
+            .map_err(|_| EventHistoryError::StorageUnavailable)?;
         #[cfg(test)]
         self.test_hooks.append.after_send().await;
-        rx.await.map_err(|_| EventHistoryError::PassThrough)?
+        rx.await
+            .map_err(|_| EventHistoryError::StorageUnavailable)?
     }
 
     pub(crate) async fn query(
@@ -267,8 +317,9 @@ impl StoreHandle {
                 reply,
             })
             .await
-            .map_err(|_| EventHistoryError::PassThrough)?;
-        rx.await.map_err(|_| EventHistoryError::PassThrough)?
+            .map_err(|_| EventHistoryError::StorageUnavailable)?;
+        rx.await
+            .map_err(|_| EventHistoryError::StorageUnavailable)?
     }
 
     /// `Query` plus the live `MIN(event_id)` evaluated under the same
@@ -293,8 +344,9 @@ impl StoreHandle {
                 reply,
             })
             .await
-            .map_err(|_| EventHistoryError::PassThrough)?;
-        rx.await.map_err(|_| EventHistoryError::PassThrough)?
+            .map_err(|_| EventHistoryError::StorageUnavailable)?;
+        rx.await
+            .map_err(|_| EventHistoryError::StorageUnavailable)?
     }
 
     pub(crate) async fn retain(
@@ -310,8 +362,9 @@ impl StoreHandle {
                 reply,
             })
             .await
-            .map_err(|_| EventHistoryError::PassThrough)?;
-        rx.await.map_err(|_| EventHistoryError::PassThrough)?
+            .map_err(|_| EventHistoryError::StorageUnavailable)?;
+        rx.await
+            .map_err(|_| EventHistoryError::StorageUnavailable)?
     }
 
     pub(crate) async fn flush_sidecar(&self) -> Result<u64, EventHistoryError> {
@@ -319,10 +372,11 @@ impl StoreHandle {
         self.tx
             .send(StoreOp::FlushSidecar { reply })
             .await
-            .map_err(|_| EventHistoryError::PassThrough)?;
+            .map_err(|_| EventHistoryError::StorageUnavailable)?;
         #[cfg(test)]
         self.test_hooks.flush.after_send().await;
-        rx.await.map_err(|_| EventHistoryError::PassThrough)?
+        rx.await
+            .map_err(|_| EventHistoryError::StorageUnavailable)?
     }
 
     /// `MIN(event_id)` over the live table, or `None` when the table
@@ -333,8 +387,9 @@ impl StoreHandle {
         self.tx
             .send(StoreOp::OldestEventId { reply })
             .await
-            .map_err(|_| EventHistoryError::PassThrough)?;
-        rx.await.map_err(|_| EventHistoryError::PassThrough)?
+            .map_err(|_| EventHistoryError::StorageUnavailable)?;
+        rx.await
+            .map_err(|_| EventHistoryError::StorageUnavailable)?
     }
 
     pub(crate) async fn shutdown(&self) {
@@ -1068,4 +1123,31 @@ fn oldest_event_id_blocking(conn: &Connection) -> Result<Option<u64>, EventHisto
     // SQLite's INTEGER column type is i64; the runtime invariant gives
     // us a safe `as u64` cast.
     Ok(row.map(|v| v as u64))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn closed_store_and_dropped_reply_are_storage_unavailable() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let closed = StoreHandle {
+            tx,
+            test_hooks: Arc::new(StoreTestHooks::default()),
+        };
+        assert!(matches!(
+            closed.oldest_event_id().await,
+            Err(EventHistoryError::StorageUnavailable)
+        ));
+
+        let dropped = StoreHandle::test_query_failure(TestQueryFailure::FirstReply);
+        assert!(matches!(
+            dropped
+                .query_with_floor(0, 1, 1, QueryFilter::default())
+                .await,
+            Err(EventHistoryError::StorageUnavailable)
+        ));
+    }
 }

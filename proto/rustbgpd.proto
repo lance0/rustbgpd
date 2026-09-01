@@ -2042,9 +2042,10 @@ service EventService {
   // SubscribeFromEvent semantics (all EHM-fed categories), not WatchEvents
   // live-stream defaults.
   //
-  // Returns FAILED_PRECONDITION when durable history is disabled, unavailable,
-  // or in pass-through mode. Availability is checked before category/type
-  // filter validation.
+  // Returns FAILED_PRECONDITION at admission when durable history is disabled
+  // or startup fell back to live-only operation. Replay storage interruption
+  // ends the stream with UNAVAILABLE unless post-admission producer loss takes
+  // DATA_LOSS precedence. Admission is checked before category/type validation.
   rpc SubscribeFromEvent(SubscribeFromEventRequest) returns (stream BgpEvent);
 }
 
