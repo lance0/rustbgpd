@@ -11,6 +11,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `rbgp --pager auto|always|never` now provides terminal-aware paging for
+  complete human best, received, and advertised unicast RIB listings.
+
 - `rbgp rib lookup <IP|CIDR>` now performs one atomic IPv4/IPv6
   longest-prefix match against the global Loc-RIB and renders the existing
   best-path explanation in human or JSON form. Invalid targets, no covering
@@ -38,6 +41,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rollback across an external-content change still rejects without mutation,
   and gNMI Set full-snapshot candidates remain rejected whenever external
   inputs are present.
+
+- Intentionally narrow `[global.telemetry].log_format` to JSON only. Other
+  strings were previously ignored but now fail configuration parsing; migrate
+  them to `log_format = "json"`.
 
 - `rbgp doctor` now describes config freshness as an mtime comparison with the
   daemon's last config-file marker rather than claiming effective runtime
@@ -68,6 +75,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   without registry authentication or publication.
 
 ### Fixed
+
+- Redirected daemon diffs no longer contain terminal color escapes, and the
+  interactive CLI restores normal terminal mode if alternate-screen entry fails.
 
 - Invalid TUI intervals and empty policy-chain replacements now fail locally
   before the CLI attempts to connect to the daemon.

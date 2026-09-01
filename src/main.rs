@@ -2004,14 +2004,24 @@ fn warn_unpoliced_ebgp(config: &Config) -> usize {
 }
 
 fn write_config_diff(writer: &mut dyn io::Write, diff: &config::ConfigDiff) -> io::Result<()> {
-    use owo_colors::OwoColorize;
+    use owo_colors::{OwoColorize, Stream::Stdout};
 
-    let reload_header = "Reload-applied changes:".green().to_string();
-    let restart_header = "Restart-required changes:".yellow().to_string();
-    let add_marker = "+".green().to_string();
-    let remove_marker = "-".red().to_string();
-    let change_marker = "~".yellow().to_string();
-    let restart_marker = "!".yellow().to_string();
+    let reload_header = "Reload-applied changes:"
+        .if_supports_color(Stdout, OwoColorize::green)
+        .to_string();
+    let restart_header = "Restart-required changes:"
+        .if_supports_color(Stdout, OwoColorize::yellow)
+        .to_string();
+    let add_marker = "+"
+        .if_supports_color(Stdout, OwoColorize::green)
+        .to_string();
+    let remove_marker = "-".if_supports_color(Stdout, OwoColorize::red).to_string();
+    let change_marker = "~"
+        .if_supports_color(Stdout, OwoColorize::yellow)
+        .to_string();
+    let restart_marker = "!"
+        .if_supports_color(Stdout, OwoColorize::yellow)
+        .to_string();
     let style = config::ConfigDiffTextStyle {
         reload_header: reload_header.into(),
         restart_header: restart_header.into(),
@@ -8404,7 +8414,7 @@ peer_group = "plain"
                 runtime_state_dir: "/tmp".to_string(),
                 telemetry: crate::config::TelemetryConfig {
                     prometheus_addr: Some("127.0.0.1:9179".to_string()),
-                    log_format: "json".to_string(),
+                    log_format: crate::config::LogFormatConfig::Json,
                     grpc_tcp: None,
                     grpc_uds: None,
                 },

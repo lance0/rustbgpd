@@ -31,8 +31,8 @@ impl Drop for TerminalGuard {
 
 pub async fn run(connection: Connection, interval: u64) -> Result<(), CliError> {
     enable_raw_mode()?;
-    io::stdout().execute(EnterAlternateScreen)?;
     let _guard = TerminalGuard;
+    io::stdout().execute(EnterAlternateScreen)?;
 
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;

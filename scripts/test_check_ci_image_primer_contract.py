@@ -230,6 +230,19 @@ class PrimerContractTests(unittest.TestCase):
             with self.subTest(seam=old):
                 self.mutate(".github/workflows/ci.yml", old, new)
 
+    def test_v064_core_tests_consumer_is_load_bearing(self):
+        cases = (
+            ("    needs: v064_validator\n", "    needs: []\n"),
+            (
+                "uses: actions/download-artifact@v8",
+                "uses: actions/download-artifact@main",
+            ),
+            ("--install-archive", "--prepare-archive"),
+        )
+        for old, new in cases:
+            with self.subTest(seam=old):
+                self.mutate(".github/workflows/ci.yml", old, new)
+
     def test_empty_flow_needs_is_empty(self):
         self.assertEqual([], _list_needs("    needs: []\n"))
         self.assertEqual(

@@ -5,6 +5,7 @@ use crate::output::{
     self, JsonExplainAdvertisedRoute, JsonExplainModifications, JsonExplainReason,
     JsonOrrExplainCandidate, JsonRouteSourceIdentity,
 };
+use crate::pager;
 use crate::proto::injection_service_client::InjectionServiceClient;
 use crate::proto::policy_service_client::PolicyServiceClient;
 use crate::proto::rib_service_client::RibServiceClient;
@@ -434,12 +435,16 @@ struct JsonBoundedRoutes<'a> {
     complete: bool,
 }
 
-fn print_route_listing(listing: &RouteListing, show_age: bool, json: bool) -> Result<(), CliError> {
-    let Some(limit) = listing.limit else {
-        return print_routes(&listing.routes, show_age, json);
-    };
-
+fn print_route_listing(
+    listing: &RouteListing,
+    show_age: bool,
+    json: bool,
+    pager_mode: pager::PagerMode,
+) -> Result<(), CliError> {
     if json {
+        if listing.limit.is_none() {
+            return print_routes(&listing.routes, show_age, true);
+        }
         return output::print_json_pretty(&JsonBoundedRoutes {
             routes: JsonRoutes(&listing.routes),
             returned_count: listing.routes.len() as u64,
@@ -448,23 +453,37 @@ fn print_route_listing(listing: &RouteListing, show_age: bool, json: bool) -> Re
         });
     }
 
+    pager::write_payload(pager_mode, &render_human_route_listing(listing, show_age))
+}
+
+fn render_human_route_listing(listing: &RouteListing, show_age: bool) -> String {
+    let Some(limit) = listing.limit else {
+        return if listing.routes.is_empty() {
+            "No routes\n".to_string()
+        } else {
+            output::render_route_table_text(&listing.routes, show_age)
+        };
+    };
+
     if listing.routes.is_empty() {
-        println!("No matching routes.");
-        return Ok(());
+        return "No matching routes.\n".to_string();
     }
 
-    print_routes(&listing.routes, show_age, false)?;
+    let mut payload = output::render_route_table_text(&listing.routes, show_age);
     if listing.complete {
-        println!("Showing all {} matching routes.", listing.total_count);
+        payload.push_str(&format!(
+            "Showing all {} matching routes.\n",
+            listing.total_count
+        ));
     } else {
-        println!(
-            "Showing first {} of {} matching routes (--limit {}).",
+        payload.push_str(&format!(
+            "Showing first {} of {} matching routes (--limit {}).\n",
             listing.routes.len(),
             listing.total_count,
             limit
-        );
+        ));
     }
-    Ok(())
+    payload
 }
 
 fn print_bgpls_routes(routes: &[BgpLsRouteEntry], json: bool) -> Result<(), CliError> {
@@ -1791,6 +1810,7 @@ pub async fn best(
     filters: &RouteFilterOpts,
     show_age: bool,
     json: bool,
+    pager_mode: pager::PagerMode,
 ) -> Result<(), CliError> {
     let mut client =
         RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
@@ -1801,7 +1821,7 @@ pub async fn best(
         filters.limit,
     )
     .await?;
-    print_route_listing(&listing, show_age, json)
+    print_route_listing(&listing, show_age, json, pager_mode)
 }
 
 pub async fn count_best(
@@ -1918,6 +1938,7 @@ pub async fn received(
     filters: &RouteFilterOpts,
     show_age: bool,
     json: bool,
+    pager_mode: pager::PagerMode,
 ) -> Result<(), CliError> {
     let mut client =
         RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
@@ -1931,7 +1952,7 @@ pub async fn received(
     for route in &mut listing.routes {
         restore_matching_scoped_address(Some(address), &mut route.peer_address);
     }
-    print_route_listing(&listing, show_age, json)
+    print_route_listing(&listing, show_age, json, pager_mode)
 }
 
 pub async fn count_received(
@@ -2109,6 +2130,7 @@ pub async fn advertised(
     filters: &RouteFilterOpts,
     show_age: bool,
     json: bool,
+    pager_mode: pager::PagerMode,
 ) -> Result<(), CliError> {
     let mut client =
         RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
@@ -2122,7 +2144,7 @@ pub async fn advertised(
     for route in &mut listing.routes {
         restore_matching_scoped_address(Some(address), &mut route.peer_address);
     }
-    print_route_listing(&listing, show_age, json)
+    print_route_listing(&listing, show_age, json, pager_mode)
 }
 
 pub async fn count_advertised(
@@ -3975,6 +3997,7 @@ mod tests {
             &filters,
             false,
             true,
+            pager::PagerMode::Never,
         )
         .await
         .unwrap();
@@ -3985,6 +4008,7 @@ mod tests {
             &filters,
             false,
             true,
+            pager::PagerMode::Never,
         )
         .await
         .unwrap();
@@ -4030,6 +4054,7 @@ mod tests {
             &no_route_filters(),
             false,
             false,
+            pager::PagerMode::Never,
         )
         .await
         .unwrap();
@@ -4064,6 +4089,7 @@ mod tests {
             &filters,
             false,
             true,
+            pager::PagerMode::Never,
         )
         .await
         .unwrap();
@@ -4099,6 +4125,25 @@ mod tests {
         assert_eq!(value["routes"][0]["prefix"], "10.0.0.0/24");
     }
 
+    #[test]
+    fn bounded_human_listing_keeps_table_then_footer_bytes() {
+        let listing = RouteListing {
+            routes: vec![crate::proto::Route {
+                prefix: "10.0.0.0".to_string(),
+                prefix_length: 24,
+                ..Default::default()
+            }],
+            total_count: 42,
+            complete: false,
+            limit: Some(1),
+        };
+        let table = output::render_route_table_text(&listing.routes, false);
+        assert_eq!(
+            render_human_route_listing(&listing, false),
+            format!("{table}Showing first 1 of 42 matching routes (--limit 1).\n")
+        );
+    }
+
     /// `rbgp best` stops after a single page when the server reports
     /// the listing complete (empty `next_page_token`).
     #[tokio::test]
@@ -4110,9 +4155,16 @@ mod tests {
         }
 
         let connection = connect(&server.addr, None).await.unwrap();
-        best(connection, None, &no_route_filters(), false, false)
-            .await
-            .unwrap();
+        best(
+            connection,
+            None,
+            &no_route_filters(),
+            false,
+            false,
+            pager::PagerMode::Never,
+        )
+        .await
+        .unwrap();
 
         let requests = server.state.list_route_requests.lock().await;
         assert_eq!(requests.len(), 1);

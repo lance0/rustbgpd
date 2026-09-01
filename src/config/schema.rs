@@ -948,13 +948,19 @@ pub struct TelemetryConfig {
     #[serde(default)]
     pub prometheus_addr: Option<String>,
     /// Log output format (`"json"`).
-    pub log_format: String,
+    pub log_format: LogFormatConfig,
     /// gRPC TCP listener.
     #[serde(default)]
     pub grpc_tcp: Option<GrpcTcpListenerConfig>,
     /// gRPC Unix-domain-socket listener.
     #[serde(default)]
     pub grpc_uds: Option<GrpcUdsListenerConfig>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LogFormatConfig {
+    Json,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

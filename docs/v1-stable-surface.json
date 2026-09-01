@@ -63,7 +63,7 @@
     "stable_fields": [
       {"definition": "Config", "fields": ["bmp", "dynamic_neighbors", "event_history", "global", "mrt", "neighbors", "peer_groups", "policy", "rpki", "security"], "schema_sha256": "f18e9cf437e78c8fb48be7a51de93f9142fdf26c229ef040b2b44c5655015b3e"},
       {"definition": "Global", "fields": ["asn", "cluster_id", "dynamic_neighbor_limit", "honor_graceful_shutdown", "listen_port", "multipath_relax", "router_id", "runtime_state_dir", "telemetry"], "schema_sha256": "0c466a203cb6519f865d6fe3fc9a81921cef27942240e38125738259aa73eb5d"},
-      {"definition": "TelemetryConfig", "fields": ["grpc_tcp", "grpc_uds", "log_format", "prometheus_addr"], "schema_sha256": "95ed5115adecb2c4fda72873482c6fee1d8b7df7a0844712a5408f04505e793d"},
+      {"definition": "TelemetryConfig", "fields": ["grpc_tcp", "grpc_uds", "log_format", "prometheus_addr"], "schema_sha256": "57dd4b53da31e8ee50be7491812f1bff0e813651635480084678a9e4017319ea"},
       {"definition": "GrpcTcpListenerConfig", "fields": ["access_mode", "address", "enabled", "max_tier", "principal", "tls_cert_file", "tls_client_ca_file", "tls_key_file", "token_file"], "schema_sha256": "2c5304b180fea247a211160087b6eed583e2834558faa02efc3473410a8695b2"},
       {"definition": "GrpcUdsListenerConfig", "fields": ["access_mode", "enabled", "max_tier", "mode", "path", "principal", "token_file"], "schema_sha256": "1616e6489f89848d729f1e0cc11f5150539bc22d6f548a09b4519735ebf1b6c0"},
       {"definition": "SecurityConfig", "fields": ["grpc"], "schema_sha256": "c0bb19eb23bdf4b585a75cb193f37490b52233aefb263c1d451d635db8f27847"},
@@ -92,7 +92,8 @@
       {"definition": "GrpcAccessModeConfig", "schema_sha256": "83c96eb88d57e5c0b689443bb415086df4ed403fae8e5ccc77a5dd0fe7b7c577"},
       {"definition": "GrpcEnforcementConfig", "schema_sha256": "191a2c9e85eefb3a60509df99e81edc496c422170b0bbd24961d9030de42f588"},
       {"definition": "GrpcMaxTierConfig", "schema_sha256": "244b9b776ca119f3c7af0e3fcfafac568318e3d830a9086e5de9646b923b83c8"},
-      {"definition": "GrpcRoleConfig", "schema_sha256": "46719dcd128578a3754ea0bfcce98b7cbfb1c361aa941edacaf7fc4d2ac528a5"}
+      {"definition": "GrpcRoleConfig", "schema_sha256": "46719dcd128578a3754ea0bfcce98b7cbfb1c361aa941edacaf7fc4d2ac528a5"},
+      {"definition": "LogFormatConfig", "schema_sha256": "2ffe2bc41781cd4765f757cf5a495bb37b338a57b3b6bbad802deffb1d5c213b"}
     ],
     "effective_defaults": {
       "paths": [

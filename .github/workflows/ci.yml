@@ -54,7 +54,6 @@ jobs:
           compression-level: 0
 
   core:
-    needs: v064_validator
     runs-on: ubuntu-latest
     # Bound any wedge (e.g. a rustdoc hang) so a stuck step fails fast
     # instead of running to GitHub's 6-hour default. The last serial run
@@ -110,17 +109,6 @@ jobs:
           bash -n .github/scripts/install-grpcurl.sh
           shellcheck .github/scripts/install-grpcurl.sh
           bash .github/scripts/install-grpcurl.sh --self-test
-      - name: Download verified v0.64 validator archive
-        uses: actions/download-artifact@v8
-        with:
-          name: rustbgpd-v0.64.0-linux-amd64
-          path: ${{ runner.temp }}/rustbgpd-v064-artifact
-      - name: Install exact v0.64 config migration validator offline
-        run: |
-          .github/scripts/install-rustbgpd-v064-validator.sh \
-            --install-archive \
-            "$RUNNER_TEMP/rustbgpd-v064-artifact/rustbgpd-linux-amd64.tar.gz" \
-            "$RUNNER_TEMP/rustbgpd-v064"
       - name: Prove CI image-primer contract
         run: |
           python3 -m unittest -v scripts/test_check_ci_image_primer_contract.py

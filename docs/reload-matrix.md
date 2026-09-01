@@ -277,7 +277,7 @@ pinned per ADR-0057.
 | Field | Class | Notes |
 |---|---|---|
 | `prometheus_addr` | restart-required | The exporter listener binds at startup. |
-| `log_format` | restart-required | The `tracing` subscriber is initialized at startup. |
+| `log_format` | rejected-before-mutation | Only `"json"` is accepted; other values fail config parsing before reload mutation. |
 
 ### `[global.telemetry.grpc_tcp]` and `[global.telemetry.grpc_uds]`
 
