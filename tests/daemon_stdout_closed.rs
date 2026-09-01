@@ -147,7 +147,7 @@ fn healthy_check_and_diff_bytes_streams_and_statuses_are_exact() {
     assert!(text.stderr.is_empty());
     assert_eq!(
         text.stdout,
-        b"\x1b[33mRestart-required changes:\x1b[39m\n  \x1b[33m!\x1b[39m [global] changed\n\n\
+        b"Restart-required changes:\n  ! [global] changed\n\n\
           Plan: no neighbor changes \xc2\xb7 daemon restart required for some changes\n"
     );
 

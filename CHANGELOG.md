@@ -57,6 +57,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Redirected daemon diffs no longer contain terminal color escapes, and the
+  interactive CLI restores normal terminal mode if alternate-screen entry fails.
+
 - Invalid TUI intervals and empty policy-chain replacements now fail locally
   before the CLI attempts to connect to the daemon.
 
