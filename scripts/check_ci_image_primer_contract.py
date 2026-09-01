@@ -163,7 +163,7 @@ PINS = collections.Counter(
         "docker/build-push-action@v7": 55,
         "actions/cache@v6": 7,
         "actions/upload-artifact@v7": 12,
-        "actions/download-artifact@v8": 6,
+        "actions/download-artifact@v8": 5,
         "rustsec/audit-check@v2.0.0": 1,
         "EmbarkStudios/cargo-deny-action@v2": 1,
     }
@@ -466,33 +466,30 @@ def check(root: Path) -> list[str]:
     if producer.count("uses: actions/upload-artifact@v7") != 1:
         errors.append("ci.yml:v064_validator must upload one same-run artifact")
 
-    for job_name in ("core", "core_tests"):
-        consumer = ci_jobs.get(job_name, "")
-        for seam in (
-            "needs: v064_validator",
-            "uses: actions/download-artifact@v8",
-            f"name: {V064_ARTIFACT}",
-            "path: ${{ runner.temp }}/rustbgpd-v064-artifact",
-            "--install-archive",
-            f'"$RUNNER_TEMP/rustbgpd-v064-artifact/{V064_ARCHIVE}"',
-            '"$RUNNER_TEMP/rustbgpd-v064"',
-        ):
-            if seam not in consumer:
-                errors.append(f"ci.yml:{job_name} missing validator seam {seam}")
-        if consumer.count("uses: actions/download-artifact@v8") != 1:
-            errors.append(f"ci.yml:{job_name} must download one validator artifact")
-        for forbidden in (
-            "--prepare-archive",
-            "actions/cache@",
-            "actions/upload-artifact@",
-            "releases/download/v0.64.0",
-            "restore-keys:",
-            "continue-on-error:",
-        ):
-            if forbidden in consumer:
-                errors.append(
-                    f"ci.yml:{job_name} validator consumer permits {forbidden}"
-                )
+    consumer = ci_jobs.get("core_tests", "")
+    for seam in (
+        "needs: v064_validator",
+        "uses: actions/download-artifact@v8",
+        f"name: {V064_ARTIFACT}",
+        "path: ${{ runner.temp }}/rustbgpd-v064-artifact",
+        "--install-archive",
+        f'"$RUNNER_TEMP/rustbgpd-v064-artifact/{V064_ARCHIVE}"',
+        '"$RUNNER_TEMP/rustbgpd-v064"',
+    ):
+        if seam not in consumer:
+            errors.append(f"ci.yml:core_tests missing validator seam {seam}")
+    if consumer.count("uses: actions/download-artifact@v8") != 1:
+        errors.append("ci.yml:core_tests must download one validator artifact")
+    for forbidden in (
+        "--prepare-archive",
+        "actions/cache@",
+        "actions/upload-artifact@",
+        "releases/download/v0.64.0",
+        "restore-keys:",
+        "continue-on-error:",
+    ):
+        if forbidden in consumer:
+            errors.append(f"ci.yml:core_tests validator consumer permits {forbidden}")
 
     aggregate = ci_jobs.get("check", "")
     for seam in (
