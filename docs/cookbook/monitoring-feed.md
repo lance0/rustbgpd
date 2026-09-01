@@ -136,6 +136,17 @@ $ rbgp events watch --from-event-id 0
 $ rbgp events watch --category route,session --from-event-id 41236
 ```
 
+While this CLI process remains running, a clean stream end or gRPC
+`UNAVAILABLE` reconnects from the highest successfully flushed top-level
+`BgpEvent.event_id`. Reconnect delay starts at 1 second, doubles to a 30-second
+cap, and resets after a complete human or JSON record plus newline has been
+written and stdout has been flushed. The CLI preserves the full filter set on
+every request. Lag frames without a top-level event ID do not move the cursor;
+all other RPC statuses and output failures are terminal. Cursorless OTC
+subscriptions and ordinary `WatchEvents` streams remain one-shot. This
+process-local retry does not replace the bridge's downstream-confirmed,
+persisted cursor across CLI restarts.
+
 The same contract over raw gRPC is
 `EventService.SubscribeFromEvent` — see
 [`examples/event-bridge/`](../../examples/event-bridge/) for a

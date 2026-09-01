@@ -27,6 +27,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `rbgp events watch --from-event-id` now resumes after clean stream EOF or
+  gRPC `UNAVAILABLE`, preserving every filter and reconnecting from the highest
+  fully written and flushed top-level event ID with 1-to-30-second exponential
+  backoff. Lag frames do not advance the cursor; all other RPC and output
+  failures remain terminal, and cursorless event watches remain one-shot.
+
 - Release containers are now built and runtime-verified on native Linux amd64
   and arm64 runners before a single exact two-platform GHCR manifest is
   published. A fail-closed dry-run dispatch exercises both native builds

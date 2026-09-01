@@ -26,6 +26,16 @@ use rustbgpd_api::proto::peer_group_service_server::PeerGroupServiceServer;
 use rustbgpd_api::proto::policy_service_server::PolicyServiceServer;
 use rustbgpd_api::proto::rib_service_server::RibServiceServer;
 
+pub(crate) enum MockSubscribeFromEventPlan {
+    AdmissionError(Code, String),
+    PendingAdmission,
+    Stream {
+        events: Vec<server_proto::BgpEvent>,
+        stream_error: Option<(Code, String)>,
+        clean_end: bool,
+    },
+}
+
 #[derive(Default)]
 pub(crate) struct MockState {
     pub(crate) bfd_calls: AtomicUsize,
@@ -47,6 +57,12 @@ pub(crate) struct MockState {
     pub(crate) watch_events_stream_error: Mutex<Option<(Code, String)>>,
     pub(crate) watch_events_response: Mutex<Vec<server_proto::BgpEvent>>,
     pub(crate) last_watch_events: Mutex<Option<server_proto::WatchEventsRequest>>,
+    pub(crate) subscribe_from_event_calls: AtomicUsize,
+    pub(crate) subscribe_from_event_active: AtomicUsize,
+    pub(crate) subscribe_from_event_terminations: AtomicUsize,
+    pub(crate) subscribe_from_event_requests: Mutex<Vec<server_proto::SubscribeFromEventRequest>>,
+    pub(crate) subscribe_from_event_plans:
+        Mutex<std::collections::VecDeque<MockSubscribeFromEventPlan>>,
     pub(crate) list_session_events_calls: AtomicUsize,
     pub(crate) list_policy_events_calls: AtomicUsize,
     pub(crate) config_diff_calls: AtomicUsize,
@@ -1304,6 +1320,35 @@ struct MockWatchEventsStream {
     clean_end: bool,
 }
 
+struct MockSubscribeFromEventStream {
+    state: Arc<MockState>,
+    events: std::collections::VecDeque<Result<server_proto::BgpEvent, Status>>,
+    clean_end: bool,
+}
+
+impl Stream for MockSubscribeFromEventStream {
+    type Item = Result<server_proto::BgpEvent, Status>;
+
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.events.pop_front() {
+            Some(event) => Poll::Ready(Some(event)),
+            None if self.clean_end => Poll::Ready(None),
+            None => Poll::Pending,
+        }
+    }
+}
+
+impl Drop for MockSubscribeFromEventStream {
+    fn drop(&mut self) {
+        self.state
+            .subscribe_from_event_active
+            .fetch_sub(1, Ordering::SeqCst);
+        self.state
+            .subscribe_from_event_terminations
+            .fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 impl Stream for MockWatchEventsStream {
     type Item = Result<server_proto::BgpEvent, Status>;
 
@@ -1610,9 +1655,53 @@ impl rustbgpd_api::proto::event_service_server::EventService for MockEventServic
 
     async fn subscribe_from_event(
         &self,
-        _request: Request<server_proto::SubscribeFromEventRequest>,
+        request: Request<server_proto::SubscribeFromEventRequest>,
     ) -> Result<Response<Self::SubscribeFromEventStream>, Status> {
-        Err(Status::unimplemented("not used in CLI tests"))
+        self.state
+            .subscribe_from_event_calls
+            .fetch_add(1, Ordering::SeqCst);
+        self.state
+            .subscribe_from_event_requests
+            .lock()
+            .await
+            .push(request.into_inner());
+        let plan = self
+            .state
+            .subscribe_from_event_plans
+            .lock()
+            .await
+            .pop_front()
+            .unwrap_or_else(|| {
+                MockSubscribeFromEventPlan::AdmissionError(
+                    Code::Unimplemented,
+                    "not configured in CLI mock".into(),
+                )
+            });
+        match plan {
+            MockSubscribeFromEventPlan::AdmissionError(code, message) => {
+                Err(Status::new(code, message))
+            }
+            MockSubscribeFromEventPlan::PendingAdmission => std::future::pending().await,
+            MockSubscribeFromEventPlan::Stream {
+                events,
+                stream_error,
+                clean_end,
+            } => {
+                let mut events: std::collections::VecDeque<Result<server_proto::BgpEvent, Status>> =
+                    events.into_iter().map(Ok).collect();
+                if let Some((code, message)) = stream_error {
+                    events.push_back(Err(Status::new(code, message)));
+                }
+                self.state
+                    .subscribe_from_event_active
+                    .fetch_add(1, Ordering::SeqCst);
+                Ok(Response::new(Box::pin(MockSubscribeFromEventStream {
+                    state: Arc::clone(&self.state),
+                    events,
+                    clean_end,
+                })))
+            }
+        }
     }
 
     async fn list_evpn_events(

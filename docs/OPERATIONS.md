@@ -1259,6 +1259,18 @@ exposes a monotonic `event_id` cursor. The legacy live surfaces above
 (`WatchEvents` / `List*Events`) keep their existing
 ring-backed behavior and are unaffected by this section.
 
+While `rbgp events watch --from-event-id <N>` remains running, it reconnects
+only after clean EOF or gRPC `UNAVAILABLE`. Backoff starts at 1 second, doubles
+to a 30-second cap, and resets after a complete human or JSON record plus
+newline is written and stdout is flushed. Each request preserves the original
+category, type, neighbor, family, and prefix filters; only the cursor changes.
+The cursor uses the highest flushed top-level `BgpEvent.event_id`, so lag frames
+without that field do not advance it. Every other RPC status and any output
+failure is terminal. This cursor lives only for the running CLI process; use
+the event bridge when a downstream-confirmed cursor must survive CLI restart.
+Cursorless OTC subscriptions and ordinary `WatchEvents` streams remain
+one-shot.
+
 **Opt-in — default off as of v0.32.0.** The outbox is disabled by default
 (v0.32.0 benchmarking measured ~62 MB RSS plus roughly double the peak CPU at
 2p/100k — too much to impose on operators who never consume the cursor). Enable
@@ -2419,6 +2431,13 @@ EHM is enabled, those categories — including per-route FIB dataplane events �
 can instead be replayed durably with `SubscribeFromEvent` or
 `rbgp events watch --from-event-id <N>`. Use `rbgp rib fib` for the current
 route ownership snapshot after a reconnect.
+
+For the cursorful CLI form, clean EOF and gRPC `UNAVAILABLE` reconnect from the
+highest complete record flushed to stdout, using 1-second exponential backoff
+capped at 30 seconds. Other statuses and output failures stop the command; lag
+frames without a top-level `BgpEvent.event_id` do not advance its process-local
+cursor. All filters are preserved on reconnect. Cursorless OTC subscriptions
+and ordinary `WatchEvents` streams remain one-shot.
 
 Category/type values are ORed within each dimension and ANDed across them. The
 CLI rejects impossible combinations locally before connecting. On the server,

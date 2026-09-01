@@ -6,11 +6,15 @@ use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
     AddressFamily, BgpEvent, BgpEventType, EventCategory, EvpnRouteEntry, ListEvpnEventsRequest,
     ListPolicyEventsRequest, ListRouteEventsRequest, ListSessionEventsRequest, RouteEvent,
-    RouteEventType, StreamLagEvent, WatchEventsRequest,
+    RouteEventType, StreamLagEvent, SubscribeFromEventRequest, WatchEventsRequest,
 };
 use serde::Serialize;
 use serde::ser::{SerializeMap, Serializer};
+use std::future::Future;
+use std::io::Write;
 use std::net::IpAddr;
+use std::time::Duration;
+use tonic::Code;
 
 pub struct EventsWatchOptions {
     pub categories: Vec<String>,
@@ -633,6 +637,97 @@ fn print_bgp_event(event: &BgpEvent, json: bool) -> Result<(), CliError> {
     Ok(())
 }
 
+fn write_bgp_event<W: Write + ?Sized>(
+    writer: &mut W,
+    event: &BgpEvent,
+    json: bool,
+) -> Result<(), CliError> {
+    if json {
+        output::write_json_line(writer, &JsonBgpEvent(event))
+    } else {
+        output::write_text_line(writer, &format_bgp_event_line(event))
+    }
+}
+
+const DURABLE_RECONNECT_INITIAL_SECS: u64 = 1;
+const DURABLE_RECONNECT_MAX_SECS: u64 = 30;
+
+fn durable_retryable_status(status: &tonic::Status) -> bool {
+    status.code() == Code::Unavailable
+}
+
+/// Keep one cursorful durable subscription alive without weakening terminal
+/// RPC or output failures. The injected cancellation future makes admission,
+/// stream waits, and backoff independently interruptible.
+async fn durable_subscribe_from_event<W, C>(
+    connection: Connection,
+    base_request: SubscribeFromEventRequest,
+    json: bool,
+    writer: &mut W,
+    cancellation: C,
+) -> Result<(), CliError>
+where
+    W: Write + ?Sized,
+    C: Future<Output = ()>,
+{
+    let mut client =
+        EventServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let mut cursor = base_request.from_event_id;
+    let mut backoff_secs = DURABLE_RECONNECT_INITIAL_SECS;
+    tokio::pin!(cancellation);
+
+    loop {
+        let mut request = base_request.clone();
+        request.from_event_id = cursor;
+        let response = tokio::select! {
+            biased;
+            () = &mut cancellation => return Ok(()),
+            response = client.subscribe_from_event(request) => response,
+        };
+
+        let mut stream = match response {
+            Ok(response) => response.into_inner(),
+            Err(status) if durable_retryable_status(&status) => {
+                tokio::select! {
+                    biased;
+                    () = &mut cancellation => return Ok(()),
+                    () = tokio::time::sleep(Duration::from_secs(backoff_secs)) => {}
+                }
+                backoff_secs = (backoff_secs * 2).min(DURABLE_RECONNECT_MAX_SECS);
+                continue;
+            }
+            Err(status) => return Err(status.into()),
+        };
+
+        loop {
+            let next = tokio::select! {
+                biased;
+                () = &mut cancellation => return Ok(()),
+                next = stream.message() => next,
+            };
+            match next {
+                Ok(Some(event)) => {
+                    write_bgp_event(writer, &event, json)?;
+                    if let Some(event_id) = event.event_id {
+                        cursor = Some(cursor.map_or(event_id, |current| current.max(event_id)));
+                    }
+                    backoff_secs = DURABLE_RECONNECT_INITIAL_SECS;
+                }
+                Ok(None) => break,
+                Err(status) if durable_retryable_status(&status) => break,
+                Err(status) => return Err(status.into()),
+            }
+        }
+
+        tokio::select! {
+            biased;
+            () = &mut cancellation => return Ok(()),
+            () = tokio::time::sleep(Duration::from_secs(backoff_secs)) => {}
+        }
+        backoff_secs = (backoff_secs * 2).min(DURABLE_RECONNECT_MAX_SECS);
+    }
+}
+
 fn json_route_stream_lag_event(event: &BgpEvent, lag: &StreamLagEvent) -> JsonRouteEvent {
     JsonRouteEvent {
         event_id: 0,
@@ -1033,11 +1128,34 @@ pub async fn events_watch(
     // which the CLI surfaces as a clear error rather than the
     // silent zero-event-stream the legacy path would produce.
     let request_requires_ehm = event_types.contains(&(BgpEventType::OtcRouteBlocked as i32));
-    if from_event_id.is_some() || request_requires_ehm {
+    if let Some(from_event_id) = from_event_id {
+        let request = SubscribeFromEventRequest {
+            from_event_id: Some(from_event_id),
+            categories,
+            event_types,
+            neighbor_address: neighbor.unwrap_or_default(),
+            afi_safi: family.unwrap_or(0),
+            prefix,
+            prefix_length,
+        };
+        let stdout = std::io::stdout();
+        // The process keeps its existing OS signal behavior: SIGINT terminates
+        // the CLI. The helper's injected cancellation seam independently proves
+        // prompt cancellation at RPC admission, stream wait, and retry backoff.
+        return durable_subscribe_from_event(
+            connection,
+            request,
+            json,
+            &mut stdout.lock(),
+            std::future::pending(),
+        )
+        .await;
+    }
+    if request_requires_ehm {
         let mut client =
             EventServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-        let request = crate::proto::SubscribeFromEventRequest {
-            from_event_id,
+        let request = SubscribeFromEventRequest {
+            from_event_id: None,
             categories,
             event_types,
             neighbor_address: neighbor.unwrap_or_default(),
@@ -1264,6 +1382,12 @@ pub async fn evpn_history(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::connection::connect;
+    use crate::test_support::{MockState, MockSubscribeFromEventPlan, spawn_mock_server};
+    use prost::Message;
+    use std::sync::atomic::Ordering;
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tokio::sync::oneshot;
 
     #[test]
     fn empty_json_history_preserves_exact_bytes() {
@@ -1315,6 +1439,580 @@ mod tests {
     fn empty_json_history_flush_failure_returns_io_error() {
         let error = write_empty_json_history(&mut FlushFailure).unwrap_err();
         assert!(matches!(error, CliError::Io(_)));
+    }
+
+    #[derive(Clone, Default)]
+    struct SharedWriter(Arc<StdMutex<Vec<u8>>>);
+
+    impl SharedWriter {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    impl Write for SharedWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct FailingRecordWriter {
+        fail_write: bool,
+    }
+
+    impl Write for FailingRecordWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.fail_write {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            } else {
+                Ok(bytes.len())
+            }
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::other("flush failed"))
+        }
+    }
+
+    fn durable_request(from_event_id: u64) -> SubscribeFromEventRequest {
+        SubscribeFromEventRequest {
+            from_event_id: Some(from_event_id),
+            categories: vec![EventCategory::Route as i32, EventCategory::Policy as i32],
+            event_types: vec![
+                BgpEventType::RouteAdded as i32,
+                BgpEventType::PolicyChanged as i32,
+            ],
+            neighbor_address: "192.0.2.7".into(),
+            afi_safi: AddressFamily::Ipv4Unicast as i32,
+            prefix: "203.0.113.0".into(),
+            prefix_length: 24,
+        }
+    }
+
+    fn durable_event(event_id: Option<u64>, summary: &str) -> BgpEvent {
+        BgpEvent {
+            event_id,
+            timestamp: "2026-08-31T12:00:00Z".into(),
+            category: EventCategory::Route as i32,
+            event_type: BgpEventType::RouteAdded as i32,
+            summary: summary.into(),
+            ..Default::default()
+        }
+    }
+
+    fn durable_lag_event() -> BgpEvent {
+        BgpEvent {
+            event_id: None,
+            timestamp: "2026-08-31T12:00:00Z".into(),
+            category: EventCategory::Route as i32,
+            event_type: BgpEventType::StreamLagged as i32,
+            summary: "retention gap".into(),
+            payload: Some(crate::proto::bgp_event::Payload::StreamLag(
+                StreamLagEvent {
+                    missed_count: 3,
+                    reason: "retention_floor".into(),
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        }
+    }
+
+    fn server_event(event: &BgpEvent) -> rustbgpd_api::proto::BgpEvent {
+        rustbgpd_api::proto::BgpEvent::decode(event.encode_to_vec().as_slice()).unwrap()
+    }
+
+    async fn queue_subscribe_plan(state: &MockState, plan: MockSubscribeFromEventPlan) {
+        state
+            .subscribe_from_event_plans
+            .lock()
+            .await
+            .push_back(plan);
+    }
+
+    async fn wait_for_subscribe_calls(state: &MockState, expected: usize) {
+        for _ in 0..1_000 {
+            if state.subscribe_from_event_calls.load(Ordering::SeqCst) >= expected {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!(
+            "expected {expected} SubscribeFromEvent calls, observed {}",
+            state.subscribe_from_event_calls.load(Ordering::SeqCst)
+        );
+    }
+
+    async fn wait_for_counter(counter: &std::sync::atomic::AtomicUsize, expected: usize) {
+        for _ in 0..1_000 {
+            if counter.load(Ordering::SeqCst) >= expected {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!(
+            "expected counter to reach {expected}, observed {}",
+            counter.load(Ordering::SeqCst)
+        );
+    }
+
+    async fn settle_mock_rpc() {
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    fn spawn_durable_watch(
+        connection: Connection,
+        request: SubscribeFromEventRequest,
+        writer: SharedWriter,
+    ) -> (
+        tokio::task::JoinHandle<Result<(), CliError>>,
+        oneshot::Sender<()>,
+    ) {
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let mut writer = writer;
+            durable_subscribe_from_event(connection, request, true, &mut writer, async move {
+                let _ = cancel_rx.await;
+            })
+            .await
+        });
+        (task, cancel_tx)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn durable_cursor_preserves_filters_after_eof_and_unavailable_without_duplicates() {
+        let keep_runtime_busy = tokio::spawn(async {
+            loop {
+                tokio::task::yield_now().await;
+            }
+        });
+        for stream_error in [None, Some((Code::Unavailable, "restart".into()))] {
+            let server = spawn_mock_server(None).await;
+            queue_subscribe_plan(
+                &server.state,
+                MockSubscribeFromEventPlan::Stream {
+                    events: vec![
+                        server_event(&durable_event(Some(41), "committed")),
+                        server_event(&durable_event(Some(39), "out-of-order")),
+                    ],
+                    stream_error,
+                    clean_end: true,
+                },
+            )
+            .await;
+            queue_subscribe_plan(
+                &server.state,
+                MockSubscribeFromEventPlan::Stream {
+                    events: vec![],
+                    stream_error: None,
+                    clean_end: false,
+                },
+            )
+            .await;
+            let connection = connect(&server.addr, None).await.unwrap();
+            let output = SharedWriter::default();
+            let (task, cancel) =
+                spawn_durable_watch(connection, durable_request(40), output.clone());
+
+            wait_for_subscribe_calls(&server.state, 1).await;
+            settle_mock_rpc().await;
+            tokio::time::advance(Duration::from_secs(1)).await;
+            wait_for_subscribe_calls(&server.state, 2).await;
+            cancel.send(()).unwrap();
+            task.await.unwrap().unwrap();
+
+            let requests = server.state.subscribe_from_event_requests.lock().await;
+            assert_eq!(requests.len(), 2);
+            let mut expected = requests[0].clone();
+            expected.from_event_id = Some(41);
+            assert_eq!(requests[1], expected);
+            let lines = output.text();
+            assert_eq!(lines.lines().count(), 2, "{lines}");
+            assert_eq!(lines.matches("\"event_id\":41").count(), 1, "{lines}");
+            assert_eq!(lines.matches("\"event_id\":39").count(), 1, "{lines}");
+        }
+        keep_runtime_busy.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn durable_lag_frame_does_not_advance_the_cursor() {
+        let keep_runtime_busy = tokio::spawn(async {
+            loop {
+                tokio::task::yield_now().await;
+            }
+        });
+        let server = spawn_mock_server(None).await;
+        queue_subscribe_plan(
+            &server.state,
+            MockSubscribeFromEventPlan::Stream {
+                events: vec![server_event(&durable_lag_event())],
+                stream_error: None,
+                clean_end: true,
+            },
+        )
+        .await;
+        queue_subscribe_plan(
+            &server.state,
+            MockSubscribeFromEventPlan::Stream {
+                events: vec![],
+                stream_error: None,
+                clean_end: false,
+            },
+        )
+        .await;
+        let output = SharedWriter::default();
+        let (task, cancel) = spawn_durable_watch(
+            connect(&server.addr, None).await.unwrap(),
+            durable_request(40),
+            output.clone(),
+        );
+        wait_for_subscribe_calls(&server.state, 1).await;
+        settle_mock_rpc().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_for_subscribe_calls(&server.state, 2).await;
+        cancel.send(()).unwrap();
+        task.await.unwrap().unwrap();
+
+        let requests = server.state.subscribe_from_event_requests.lock().await;
+        assert_eq!(requests[0].from_event_id, Some(40));
+        assert_eq!(requests[1].from_event_id, Some(40));
+        assert_eq!(output.text().lines().count(), 1);
+        keep_runtime_busy.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn durable_backoff_doubles_and_caps_at_thirty_seconds() {
+        let keep_runtime_busy = tokio::spawn(async {
+            loop {
+                tokio::task::yield_now().await;
+            }
+        });
+        let server = spawn_mock_server(None).await;
+        for _ in 0..8 {
+            queue_subscribe_plan(
+                &server.state,
+                MockSubscribeFromEventPlan::AdmissionError(
+                    Code::Unavailable,
+                    "daemon restarting".into(),
+                ),
+            )
+            .await;
+        }
+        queue_subscribe_plan(&server.state, MockSubscribeFromEventPlan::PendingAdmission).await;
+        let (task, cancel) = spawn_durable_watch(
+            connect(&server.addr, None).await.unwrap(),
+            durable_request(40),
+            SharedWriter::default(),
+        );
+        wait_for_subscribe_calls(&server.state, 1).await;
+        for (index, delay) in [1_u64, 2, 4, 8, 16, 30, 30, 30].into_iter().enumerate() {
+            settle_mock_rpc().await;
+            tokio::time::advance(Duration::from_millis(delay * 1_000 - 1)).await;
+            tokio::task::yield_now().await;
+            assert_eq!(
+                server
+                    .state
+                    .subscribe_from_event_calls
+                    .load(Ordering::SeqCst),
+                index + 1
+            );
+            tokio::time::advance(Duration::from_millis(1)).await;
+            wait_for_subscribe_calls(&server.state, index + 2).await;
+        }
+        cancel.send(()).unwrap();
+        task.await.unwrap().unwrap();
+        keep_runtime_busy.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn durable_successful_flush_resets_backoff() {
+        let keep_runtime_busy = tokio::spawn(async {
+            loop {
+                tokio::task::yield_now().await;
+            }
+        });
+        let server = spawn_mock_server(None).await;
+        for _ in 0..2 {
+            queue_subscribe_plan(
+                &server.state,
+                MockSubscribeFromEventPlan::AdmissionError(
+                    Code::Unavailable,
+                    "daemon restarting".into(),
+                ),
+            )
+            .await;
+        }
+        queue_subscribe_plan(
+            &server.state,
+            MockSubscribeFromEventPlan::Stream {
+                events: vec![server_event(&durable_event(Some(41), "committed"))],
+                stream_error: Some((Code::Unavailable, "restart".into())),
+                clean_end: false,
+            },
+        )
+        .await;
+        queue_subscribe_plan(&server.state, MockSubscribeFromEventPlan::PendingAdmission).await;
+        let (task, cancel) = spawn_durable_watch(
+            connect(&server.addr, None).await.unwrap(),
+            durable_request(40),
+            SharedWriter::default(),
+        );
+        wait_for_subscribe_calls(&server.state, 1).await;
+        settle_mock_rpc().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_for_subscribe_calls(&server.state, 2).await;
+        settle_mock_rpc().await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        wait_for_subscribe_calls(&server.state, 3).await;
+        settle_mock_rpc().await;
+        tokio::time::advance(Duration::from_millis(999)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            server
+                .state
+                .subscribe_from_event_calls
+                .load(Ordering::SeqCst),
+            3
+        );
+        tokio::time::advance(Duration::from_millis(1)).await;
+        wait_for_subscribe_calls(&server.state, 4).await;
+        assert_eq!(
+            server.state.subscribe_from_event_requests.lock().await[3].from_event_id,
+            Some(41)
+        );
+        cancel.send(()).unwrap();
+        task.await.unwrap().unwrap();
+        keep_runtime_busy.abort();
+    }
+
+    #[tokio::test]
+    async fn durable_write_and_flush_failures_are_terminal() {
+        for fail_write in [true, false] {
+            let server = spawn_mock_server(None).await;
+            queue_subscribe_plan(
+                &server.state,
+                MockSubscribeFromEventPlan::Stream {
+                    events: vec![server_event(&durable_event(Some(41), "committed"))],
+                    stream_error: None,
+                    clean_end: true,
+                },
+            )
+            .await;
+            queue_subscribe_plan(&server.state, MockSubscribeFromEventPlan::PendingAdmission).await;
+            let mut writer = FailingRecordWriter { fail_write };
+            let error = durable_subscribe_from_event(
+                connect(&server.addr, None).await.unwrap(),
+                durable_request(40),
+                true,
+                &mut writer,
+                std::future::pending(),
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(error, CliError::Io(_)));
+            assert_eq!(
+                server
+                    .state
+                    .subscribe_from_event_calls
+                    .load(Ordering::SeqCst),
+                1
+            );
+            assert_eq!(
+                server.state.subscribe_from_event_plans.lock().await.len(),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn durable_nonretry_statuses_are_terminal_at_admission_and_in_stream() {
+        let statuses = [
+            Code::Cancelled,
+            Code::Unknown,
+            Code::InvalidArgument,
+            Code::DeadlineExceeded,
+            Code::NotFound,
+            Code::AlreadyExists,
+            Code::PermissionDenied,
+            Code::ResourceExhausted,
+            Code::FailedPrecondition,
+            Code::Aborted,
+            Code::OutOfRange,
+            Code::Unimplemented,
+            Code::Internal,
+            Code::DataLoss,
+            Code::Unauthenticated,
+        ];
+        for code in statuses {
+            for in_stream in [false, true] {
+                let server = spawn_mock_server(None).await;
+                let plan = if in_stream {
+                    MockSubscribeFromEventPlan::Stream {
+                        events: vec![],
+                        stream_error: Some((code, "terminal".into())),
+                        clean_end: false,
+                    }
+                } else {
+                    MockSubscribeFromEventPlan::AdmissionError(code, "terminal".into())
+                };
+                queue_subscribe_plan(&server.state, plan).await;
+                let mut writer = Vec::new();
+                let error = durable_subscribe_from_event(
+                    connect(&server.addr, None).await.unwrap(),
+                    durable_request(40),
+                    true,
+                    &mut writer,
+                    std::future::pending(),
+                )
+                .await
+                .unwrap_err();
+                assert!(matches!(error, CliError::Rpc(_)), "{code:?}: {error}");
+                assert_eq!(
+                    server
+                        .state
+                        .subscribe_from_event_calls
+                        .load(Ordering::SeqCst),
+                    1,
+                    "{code:?}, in_stream={in_stream}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn durable_cancellation_interrupts_admission_stream_wait_and_backoff() {
+        for mode in 0..3 {
+            let server = spawn_mock_server(None).await;
+            let plan = match mode {
+                0 => MockSubscribeFromEventPlan::PendingAdmission,
+                1 => MockSubscribeFromEventPlan::Stream {
+                    events: vec![],
+                    stream_error: None,
+                    clean_end: false,
+                },
+                2 => MockSubscribeFromEventPlan::Stream {
+                    events: vec![],
+                    stream_error: None,
+                    clean_end: true,
+                },
+                _ => unreachable!(),
+            };
+            queue_subscribe_plan(&server.state, plan).await;
+            let (task, cancel) = spawn_durable_watch(
+                connect(&server.addr, None).await.unwrap(),
+                durable_request(40),
+                SharedWriter::default(),
+            );
+            wait_for_subscribe_calls(&server.state, 1).await;
+            match mode {
+                0 => {}
+                1 => {
+                    wait_for_counter(&server.state.subscribe_from_event_active, 1).await;
+                    settle_mock_rpc().await;
+                }
+                2 => {
+                    wait_for_counter(&server.state.subscribe_from_event_terminations, 1).await;
+                    settle_mock_rpc().await;
+                }
+                _ => unreachable!(),
+            }
+            cancel.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(1), task)
+                .await
+                .expect("cancellation must be prompt")
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                server
+                    .state
+                    .subscribe_from_event_calls
+                    .load(Ordering::SeqCst),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cursorless_otc_and_ordinary_watch_events_remain_one_shot_and_isolated() {
+        let otc_server = spawn_mock_server(None).await;
+        queue_subscribe_plan(
+            &otc_server.state,
+            MockSubscribeFromEventPlan::Stream {
+                events: vec![],
+                stream_error: None,
+                clean_end: true,
+            },
+        )
+        .await;
+        events_watch(
+            connect(&otc_server.addr, None).await.unwrap(),
+            EventsWatchOptions {
+                categories: vec!["policy".into()],
+                event_types: vec!["otc_route_blocked".into()],
+                neighbor: None,
+                family: None,
+                prefix: None,
+                backfill: 0,
+                from_event_id: None,
+                json: true,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            otc_server
+                .state
+                .subscribe_from_event_calls
+                .load(Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            otc_server.state.watch_events_calls.load(Ordering::SeqCst),
+            0
+        );
+        assert_eq!(
+            otc_server.state.subscribe_from_event_requests.lock().await[0].from_event_id,
+            None
+        );
+
+        let watch_server = spawn_mock_server(None).await;
+        watch_server
+            .state
+            .watch_events_clean_end
+            .store(true, Ordering::SeqCst);
+        events_watch(
+            connect(&watch_server.addr, None).await.unwrap(),
+            EventsWatchOptions {
+                categories: vec![],
+                event_types: vec![],
+                neighbor: None,
+                family: None,
+                prefix: None,
+                backfill: 0,
+                from_event_id: None,
+                json: true,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            watch_server.state.watch_events_calls.load(Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            watch_server
+                .state
+                .subscribe_from_event_calls
+                .load(Ordering::SeqCst),
+            0
+        );
     }
 
     // Frozen reference: builds the `serde_json::Value` exactly as the pre-#515
