@@ -1499,50 +1499,54 @@ tests:
         alertname: BgpSendHoldExpired
         exp_alerts: []
 
-  # ── BgpSessionLifecycleSourceDrops ────────────────────────
+  # ── BgpSessionEventSourceDrops ────────────────────────────
   - interval: 1m
     input_series:
-      - series: 'bgp_session_lifecycle_source_dropped_total{reason="channel_full", instance="edge1:9179"}'
+      - series: 'bgp_session_event_source_dropped_total{kind="state_change", reason="channel_full", instance="edge1:9179"}'
         values: "0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
-      - series: 'bgp_session_lifecycle_source_dropped_total{reason="channel_closed", instance="edge2:9179"}'
+      - series: 'bgp_session_event_source_dropped_total{kind="notification", reason="channel_closed", instance="edge2:9179"}'
         values: "0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
-      - series: 'bgp_session_lifecycle_source_dropped_total{reason="channel_full", instance="edge3:9179"}'
+      - series: 'bgp_session_event_source_dropped_total{kind="state_change", reason="channel_full", instance="edge3:9179"}'
         values: "7x22"
       - series: 'bgp_event_stream_lagged_total{service="watch_events", source="session", instance="edge4:9179"}'
         values: "0 0 0 0 0 0 0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1"
     alert_rule_test:
       - eval_time: 2m
-        alertname: BgpSessionLifecycleSourceDrops
+        alertname: BgpSessionEventSourceDrops
         exp_alerts: []
       - eval_time: 10m
-        alertname: BgpSessionLifecycleSourceDrops
+        alertname: BgpSessionEventSourceDrops
         exp_alerts:
           - exp_labels:
               severity: warning
+              kind: state_change
               reason: channel_full
               instance: edge1:9179
             exp_annotations:
-              summary: "Session lifecycle source dropped events (channel_full)"
+              summary: "Session event source dropped state_change events (channel_full)"
               description: >-
-                bgp_session_lifecycle_source_dropped_total for reason
-                channel_full on edge1:9179 increased by 1 in the last 10
-                minutes. Session event history, live delivery, and durable
-                history may be incomplete; resnapshot current neighbor state
-                before consuming further incremental session events.
+                bgp_session_event_source_dropped_total for kind state_change
+                and reason channel_full on edge1:9179 increased by 1 in the
+                last 10 minutes. For state_change loss, take a fresh neighbor
+                snapshot before consuming further incremental state events.
+                For notification loss, consult the structured daemon logs for
+                the corresponding BGP NOTIFICATION or local teardown cause.
           - exp_labels:
               severity: warning
+              kind: notification
               reason: channel_closed
               instance: edge2:9179
             exp_annotations:
-              summary: "Session lifecycle source dropped events (channel_closed)"
+              summary: "Session event source dropped notification events (channel_closed)"
               description: >-
-                bgp_session_lifecycle_source_dropped_total for reason
-                channel_closed on edge2:9179 increased by 1 in the last 10
-                minutes. Session event history, live delivery, and durable
-                history may be incomplete; resnapshot current neighbor state
-                before consuming further incremental session events.
+                bgp_session_event_source_dropped_total for kind notification
+                and reason channel_closed on edge2:9179 increased by 1 in the
+                last 10 minutes. For state_change loss, take a fresh neighbor
+                snapshot before consuming further incremental state events.
+                For notification loss, consult the structured daemon logs for
+                the corresponding BGP NOTIFICATION or local teardown cause.
       - eval_time: 21m
-        alertname: BgpSessionLifecycleSourceDrops
+        alertname: BgpSessionEventSourceDrops
         exp_alerts: []
 
   # ── BgpEventStreamLagged ──────────────────────────────────

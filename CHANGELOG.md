@@ -33,6 +33,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Replace `bgp_session_lifecycle_source_dropped_total{reason}` with
+  `bgp_session_event_source_dropped_total{kind,reason}` so dropped state changes
+  and notifications are counted separately before peer-manager publication.
+
 - **Operator-visible:** config transactions no longer reject a full-snapshot
   candidate merely because `[policy] rpol_files` / `[policy.datasets]` are
   declared. The planner now captures every declared external file at plan and

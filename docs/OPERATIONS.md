@@ -1196,16 +1196,18 @@ signal.
 
 | Metric | What it tells you |
 |--------|-------------------|
-| `bgp_session_lifecycle_source_dropped_total{reason}` | Session state changes dropped before process-local, live, or durable event history because the bounded source channel was `channel_full` or `channel_closed`. Both reason series exist at zero from startup. |
+| `bgp_session_event_source_dropped_total{kind,reason}` | Session `state_change` or `notification` events dropped before peer-manager publication because the bounded source channel was `channel_full` or `channel_closed`. All four bounded series exist at zero from startup. |
 | `bgp_event_stream_lagged_total{service,source}` | Events skipped because a live stream subscriber fell behind the bounded broadcast channel. `service` is `watch_events`; `source` is `route`, `session`, `policy`, `evpn`, `dataplane`, `dataplane_route`, or `bfd` where applicable |
 | `bgp_event_stream_subscribers{service,source}` | Current live stream subscriber count by service/source |
 | `bgp_route_event_history_depth` | Current number of unicast route events retained for `ListRouteEvents` / `rbgp events` history queries |
 | `bgp_route_event_history_capacity` | Fixed capacity of the bounded unicast route-event history ring |
 
 These counters identify distinct loss boundaries. A non-zero
-`bgp_session_lifecycle_source_dropped_total` means the peer manager never
-received a state change, so process-local event history, live delivery, and
-durable history may all be incomplete; resnapshot current neighbor state.
+`bgp_session_event_source_dropped_total` means the peer manager never received
+the named event kind. For `state_change`, take a fresh neighbor snapshot before
+consuming further incremental state events. For `notification`, consult the
+structured daemon logs for the corresponding BGP NOTIFICATION or local
+teardown cause.
 `WatchEvents` is a live tail, not a durable queue. Non-zero
 `bgp_event_stream_lagged_total` means at least one live subscriber fell behind
 after the event reached the peer manager; combine a fresh snapshot or `ListRouteEvents`

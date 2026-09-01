@@ -97,7 +97,7 @@ authoritative partial SIGHUP reloads and failed retained reload tasks,
 dynamic-neighbor admission near-limit and rejection,
 actor polls above 200ms, exact-export rejection, malformed UPDATE disposition,
 selection-deferral timeout and ledger overflow, outbound route loss, RFC 9687
-send-hold teardown, session lifecycle source loss, live event-stream
+send-hold teardown, session event source loss, live event-stream
 lag/desynchronization, BMP feed loss,
 stale MRT dumps, and daemon down)
 ships at
@@ -125,12 +125,13 @@ the last increment ages out:
   incremental events. Treat that consumer's local view as desynchronized:
   take a fresh authoritative snapshot for the named service and source, then
   restart the live watch. Use a durable cursor only when that API supports one.
-- `BgpSessionLifecycleSourceDrops` is warning severity because a session state
-  change was lost before process-local, live, and durable event history. The
-  `reason` label distinguishes a full source channel from a closed receiver.
-  Treat all incremental session history as potentially incomplete and
-  resnapshot current neighbor state. The alert clears after the last source
-  drop ages out of its 10-minute window; a flat historical counter stays quiet.
+- `BgpSessionEventSourceDrops` is warning severity because a session event was
+  lost before peer-manager publication. The `kind` label distinguishes
+  `state_change` from `notification`; `reason` distinguishes a full source
+  channel from a closed receiver. For state-change loss, take a fresh neighbor
+  snapshot. For notification loss, consult the structured daemon logs. The
+  alert clears after the last source drop ages out of its 10-minute window; a
+  flat historical counter stays quiet.
 - `BmpSourceDrops`, `BmpLocRibSourceDrops`, and `BmpCollectorDrops` are warning
   severity because routing is unaffected. For `BmpSourceDrops`,
   `channel_full` and `channel_closed` mean a source-channel event or report was

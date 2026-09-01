@@ -491,22 +491,23 @@ groups:
             socket, so rustbgpd tore down the session without a NOTIFICATION;
             inspect the writer and peer before allowing the session to recover.
 
-      - alert: BgpSessionLifecycleSourceDrops
-        # Source loss happens before process-local, live, and durable session-event history.
-        expr: increase(bgp_session_lifecycle_source_dropped_total[10m]) > 0
+      - alert: BgpSessionEventSourceDrops
+        # Source loss happens before peer-manager publication.
+        expr: increase(bgp_session_event_source_dropped_total[10m]) > 0
         for: 0m
         labels:
           severity: warning
         annotations:
           summary: >-
-            Session lifecycle source dropped events ({{ $labels.reason }})
+            Session event source dropped {{ $labels.kind }} events ({{ $labels.reason }})
           description: >-
-            bgp_session_lifecycle_source_dropped_total for reason
-            {{ $labels.reason }} on {{ $labels.instance }} increased by
-            {{ $value | printf "%.0f" }} in the last 10 minutes. Session event
-            history, live delivery, and durable history may be incomplete;
-            resnapshot current neighbor state before consuming further
-            incremental session events.
+            bgp_session_event_source_dropped_total for kind {{ $labels.kind }}
+            and reason {{ $labels.reason }} on {{ $labels.instance }} increased
+            by {{ $value | printf "%.0f" }} in the last 10 minutes. For
+            state_change loss, take a fresh neighbor snapshot before consuming
+            further incremental state events. For notification loss, consult
+            the structured daemon logs for the corresponding BGP NOTIFICATION
+            or local teardown cause.
 
       - alert: BgpEventStreamLagged
         # A live subscriber that falls behind misses events and can no longer

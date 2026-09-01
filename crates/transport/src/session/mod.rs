@@ -1665,8 +1665,16 @@ impl PeerSession {
 
         if let Err(e) = tx.try_send(event) {
             let reason = match e {
-                tokio::sync::mpsc::error::TrySendError::Full(_) => "channel_full",
-                tokio::sync::mpsc::error::TrySendError::Closed(_) => "channel_closed",
+                tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                    self.metrics
+                        .record_session_notification_source_channel_full();
+                    "channel_full"
+                }
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                    self.metrics
+                        .record_session_notification_source_channel_closed();
+                    "channel_closed"
+                }
             };
             debug!(
                 peer = %self.peer_label,

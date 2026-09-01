@@ -934,7 +934,8 @@ impl PeerSession {
             }) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(_)) => {
-                    self.metrics.record_session_lifecycle_source_channel_full();
+                    self.metrics
+                        .record_session_state_change_source_channel_full();
                     debug!(
                         peer = %self.peer_label,
                         "dropped StateChanged lifecycle event because channel is full"
@@ -942,7 +943,7 @@ impl PeerSession {
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
                     self.metrics
-                        .record_session_lifecycle_source_channel_closed();
+                        .record_session_state_change_source_channel_closed();
                     debug!(
                         peer = %self.peer_label,
                         "dropped StateChanged lifecycle event because channel is closed"
