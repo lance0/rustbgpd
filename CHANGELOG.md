@@ -79,6 +79,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Policy and peer-group mutations now report unavailable when configuration
+  persistence admission is closed or temporarily full.
+
 - Redirected daemon diffs no longer contain terminal color escapes, and the
   interactive CLI restores normal terminal mode if alternate-screen entry fails.
 
