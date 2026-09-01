@@ -272,6 +272,7 @@ rbgp evpn delete-ip-prefix ...
 ```bash
 rbgp events watch
 rbgp events watch --backfill 50
+rbgp events watch --from-event-id 41236
 rbgp events watch --category bfd --type bfd_up,bfd_down,bfd_state_changed
 rbgp events sessions
 rbgp events policy
@@ -286,6 +287,18 @@ rbgp shutdown
 rbgp completions bash
 rbgp man                # man page (roff) on stdout: rbgp man | man -l -
 ```
+
+`events watch --from-event-id N` durably replays events after `N` and tails
+the outbox. While the command remains running, a clean stream end or gRPC
+`UNAVAILABLE` reconnects with a 1-second exponential backoff capped at 30
+seconds. Every category, type, neighbor, family, and prefix filter is preserved.
+The resume cursor advances from the top-level `BgpEvent.event_id` only after the
+complete human or JSON record, newline, and stdout flush succeed; a lag frame
+without that ID does not advance it. Other RPC statuses and output failures are
+terminal. This is a process-local resume cursor, not a persisted downstream
+checkpoint; use the event-bridge pattern when the consumer must store its own
+confirmed cursor. Cursorless OTC subscriptions and ordinary `WatchEvents`
+streams remain one-shot.
 
 Most data-oriented commands support `--json` for machine-parseable output.
 Commands with fixed formats, such as `metrics`, `completions`, and `top`, keep

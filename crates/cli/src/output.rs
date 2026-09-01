@@ -1096,6 +1096,14 @@ fn write_line<W: Write + ?Sized>(writer: &mut W, bytes: &[u8]) -> Result<(), Cli
     Ok(())
 }
 
+/// Write one complete text record followed by a newline, then flush it.
+pub(crate) fn write_text_line<W: Write + ?Sized>(
+    writer: &mut W,
+    text: &str,
+) -> Result<(), CliError> {
+    write_line(writer, text.as_bytes())
+}
+
 /// Write already-rendered output byte-for-byte and flush it.
 pub(crate) fn write_bytes<W: Write + ?Sized>(writer: &mut W, bytes: &[u8]) -> Result<(), CliError> {
     writer.write_all(bytes)?;
