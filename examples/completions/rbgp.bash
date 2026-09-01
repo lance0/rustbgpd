@@ -781,6 +781,9 @@ _rbgp() {
             rbgp__subcmd__help__subcmd__rib,labeled)
                 cmd="rbgp__subcmd__help__subcmd__rib__subcmd__labeled"
                 ;;
+            rbgp__subcmd__help__subcmd__rib,lookup)
+                cmd="rbgp__subcmd__help__subcmd__rib__subcmd__lookup"
+                ;;
             rbgp__subcmd__help__subcmd__rib,received)
                 cmd="rbgp__subcmd__help__subcmd__rib__subcmd__received"
                 ;;
@@ -1063,6 +1066,9 @@ _rbgp() {
             rbgp__subcmd__rib,labeled)
                 cmd="rbgp__subcmd__rib__subcmd__labeled"
                 ;;
+            rbgp__subcmd__rib,lookup)
+                cmd="rbgp__subcmd__rib__subcmd__lookup"
+                ;;
             rbgp__subcmd__rib,received)
                 cmd="rbgp__subcmd__rib__subcmd__received"
                 ;;
@@ -1101,6 +1107,9 @@ _rbgp() {
                 ;;
             rbgp__subcmd__rib__subcmd__help,labeled)
                 cmd="rbgp__subcmd__rib__subcmd__help__subcmd__labeled"
+                ;;
+            rbgp__subcmd__rib__subcmd__help,lookup)
+                cmd="rbgp__subcmd__rib__subcmd__help__subcmd__lookup"
                 ;;
             rbgp__subcmd__rib__subcmd__help,received)
                 cmd="rbgp__subcmd__rib__subcmd__help__subcmd__received"
@@ -5594,7 +5603,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__help__subcmd__rib)
-            opts="received advertised blackholes fib bgpls vpn labeled rtc add delete"
+            opts="lookup received advertised blackholes fib bgpls vpn labeled rtc add delete"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -5692,6 +5701,20 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__help__subcmd__rib__subcmd__labeled)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__help__subcmd__rib__subcmd__lookup)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -7756,7 +7779,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__rib)
-            opts="-a -p -l -c -s -j -h --family --prefix --longer --explain --count --age --explain-peer --origin-asn --community --large-community --rpki-state --aspa-state --as-path-contains --limit --addr --token-file --json --no-color --help received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help"
+            opts="-a -p -l -c -s -j -h --family --prefix --longer --explain --count --age --explain-peer --origin-asn --community --large-community --rpki-state --aspa-state --as-path-contains --limit --addr --token-file --json --no-color --help lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -8138,7 +8161,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__rib__subcmd__help)
-            opts="received advertised blackholes fib bgpls vpn labeled rtc add delete help"
+            opts="lookup received advertised blackholes fib bgpls vpn labeled rtc add delete help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -8263,6 +8286,20 @@ _rbgp() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        rbgp__subcmd__rib__subcmd__help__subcmd__lookup)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         rbgp__subcmd__rib__subcmd__help__subcmd__received)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
@@ -8328,6 +8365,32 @@ _rbgp() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --addr)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -s)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --token-file)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__rib__subcmd__lookup)
+            opts="-s -j -h --addr --token-file --json --no-color --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
                 --addr)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0

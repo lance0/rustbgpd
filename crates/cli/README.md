@@ -108,6 +108,8 @@ that field.
 rbgp rib
 rbgp rib --age                              # append original receive age
 rbgp rib --count                            # best-route count only
+rbgp rib lookup 203.0.113.99                # global Loc-RIB longest-prefix match
+rbgp --json rib lookup 2001:db8::7/128      # same best-path explanation as JSON
 rbgp rib received <addr>
 rbgp rib received <addr> --prefix 203.0.113.0/24
 rbgp rib received <addr> --origin-asn 64496 --limit 100
@@ -184,6 +186,15 @@ rendering `Total matching routes: N` or `{"total_count":N}` with `--json`. A
 filtered count still scans the matching backend view to compute the exact
 total; `--count` bounds response transfer, not server-side query work. It
 cannot be combined with the rejected-route or explain views.
+
+`rib lookup <IP|CIDR>` performs one atomic longest-prefix-match query against
+the global IPv4/IPv6 Loc-RIB. A bare address is queried as `/32` or `/128`; a
+CIDR keeps its supplied mask. The returned prefix can therefore be less
+specific than the input. Human and JSON output use the same best-route explain
+shape as `rib --prefix CIDR --explain`, including the winner, alternatives,
+and comparison reasons. No covering route returns `not found`; a daemon that
+predates `LookupBestPath` returns `not supported by this daemon`. The CLI does
+not fall back to downloading or scanning the route table.
 
 The accepted-route filters can be placed after `received PEER` or
 `advertised PEER`, where their `--help` pages list them. The older parent form
@@ -290,6 +301,7 @@ a non-TTY.
 | Received routes | `rbgp rib received <peer>` or `rbgp rib recv <peer>` |
 | Advertised routes | `rbgp rib advertised <peer>` or `rbgp rib sent <peer>` |
 | Count matching best/received/advertised routes | add `--count` to the corresponding command |
+| Longest-prefix match for an address or CIDR | `rbgp rib lookup <IP|CIDR>` |
 | Explain best path | `rbgp rib --prefix <cidr> --explain` |
 | Explain export policy / gates | `rbgp rib --prefix <cidr> advertised <peer> --explain` |
 | Explain import policy | `rbgp policy explain --neighbor <peer> --prefix <cidr>` |

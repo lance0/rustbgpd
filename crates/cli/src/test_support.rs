@@ -116,6 +116,10 @@ pub(crate) struct MockState {
     pub(crate) refresh_outbound_declined: AtomicBool,
     pub(crate) last_explain_advertised: Mutex<Option<server_proto::ExplainAdvertisedRouteRequest>>,
     pub(crate) last_explain_best_path: Mutex<Option<server_proto::ExplainBestPathRequest>>,
+    pub(crate) last_lookup_best_path: Mutex<Option<server_proto::LookupBestPathRequest>>,
+    pub(crate) lookup_best_path_calls: AtomicUsize,
+    pub(crate) lookup_best_path_error: Mutex<Option<(Code, String)>>,
+    pub(crate) lookup_best_path_response: Mutex<Option<server_proto::ExplainBestPathResponse>>,
     // Canned pages served in order by the unicast route-listing RPCs
     // (received/best/advertised) — drives the CLI pagination loop.
     // Empty = every call returns an empty final page.
@@ -1736,9 +1740,52 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
 
     async fn lookup_best_path(
         &self,
-        _request: Request<server_proto::LookupBestPathRequest>,
+        request: Request<server_proto::LookupBestPathRequest>,
     ) -> Result<Response<server_proto::ExplainBestPathResponse>, Status> {
-        Err(Status::unimplemented("not used in CLI tests"))
+        self.state
+            .lookup_best_path_calls
+            .fetch_add(1, Ordering::SeqCst);
+        *self.state.last_lookup_best_path.lock().await = Some(request.into_inner());
+        if let Some((code, message)) = self.state.lookup_best_path_error.lock().await.clone() {
+            return Err(Status::new(code, message));
+        }
+        let response = self
+            .state
+            .lookup_best_path_response
+            .lock()
+            .await
+            .take()
+            .unwrap_or_else(|| server_proto::ExplainBestPathResponse {
+                prefix: "203.0.113.0".to_string(),
+                prefix_length: 24,
+                best_route: Some(server_proto::Route {
+                    prefix: "203.0.113.0".to_string(),
+                    prefix_length: 24,
+                    next_hop: "198.51.100.1".to_string(),
+                    peer_address: "198.51.100.1".to_string(),
+                    ..Default::default()
+                }),
+                candidates: vec![server_proto::BestPathCandidate {
+                    route: Some(server_proto::Route {
+                        prefix: "203.0.113.0".to_string(),
+                        prefix_length: 24,
+                        next_hop: "198.51.100.2".to_string(),
+                        peer_address: "198.51.100.2".to_string(),
+                        ..Default::default()
+                    }),
+                    vs_best_reason: "higher_local_pref".to_string(),
+                    vs_best_ordering: "worse".to_string(),
+                    advertised_path_id: 0,
+                    vs_best_detail: "local_pref 100 < 200".to_string(),
+                    multipath: "none".to_string(),
+                }],
+                peer_address: String::new(),
+                add_path_send_max: 0,
+                orr_vantage: String::new(),
+                best_reason: "higher_local_pref".to_string(),
+                best_reason_detail: "local_pref 200 > 100".to_string(),
+            });
+        Ok(Response::new(response))
     }
 
     async fn explain_advertised_route(
