@@ -44,8 +44,9 @@ else
     source "$SCRIPT_DIR/test-lib.sh"
 fi
 BIRD="clab-${TOPO}-bird"
-BIRD_IMAGE="bird:3.3.2-tcpao"
-BIRD_VERSION_OUTPUT="BIRD version 3.3.2"
+BIRD_VERSION="3.3.2"
+BIRD_IMAGE="bird:${BIRD_VERSION}-tcpao"
+BIRD_VERSION_OUTPUT="BIRD version ${BIRD_VERSION}"
 GOOD_CONF="/etc/bird/bird.conf"
 BAD_CONF="/etc/bird/bird-bad.conf"
 UNSIGNED_CONF="/etc/bird/bird-unsigned.conf"
@@ -115,39 +116,60 @@ preflight_bird_container() {
     local configured_image container_image_id local_image_id configured_command
     local runtime_path runtime_args reported_version conf
 
-    configured_image=$(docker inspect --format '{{.Config.Image}}' "$BIRD")
+    if ! configured_image=$(docker inspect --format '{{.Config.Image}}' "$BIRD"); then
+        fail "Could not inspect BIRD container image tag"
+        return 1
+    fi
     if [ "$configured_image" != "$BIRD_IMAGE" ]; then
         fail "BIRD container image tag drifted: $configured_image (expected $BIRD_IMAGE)"
         return 1
     fi
-    container_image_id=$(docker inspect --format '{{.Image}}' "$BIRD")
-    local_image_id=$(docker image inspect --format '{{.Id}}' "$BIRD_IMAGE")
+    if ! container_image_id=$(docker inspect --format '{{.Image}}' "$BIRD"); then
+        fail "Could not inspect BIRD container image ID"
+        return 1
+    fi
+    if ! local_image_id=$(docker image inspect --format '{{.Id}}' "$BIRD_IMAGE"); then
+        fail "Could not inspect local $BIRD_IMAGE image ID"
+        return 1
+    fi
     if [ "$container_image_id" != "$local_image_id" ]; then
         fail "BIRD container image ID differs from local $BIRD_IMAGE"
         return 1
     fi
 
-    configured_command=$(docker inspect --format '{{json .Config.Cmd}}' "$BIRD")
-    runtime_path=$(docker inspect --format '{{.Path}}' "$BIRD")
-    runtime_args=$(docker inspect --format '{{json .Args}}' "$BIRD")
+    if ! configured_command=$(docker inspect --format '{{json .Config.Cmd}}' "$BIRD"); then
+        fail "Could not inspect BIRD container configured command"
+        return 1
+    fi
+    if ! runtime_path=$(docker inspect --format '{{.Path}}' "$BIRD"); then
+        fail "Could not inspect BIRD container runtime path"
+        return 1
+    fi
+    if ! runtime_args=$(docker inspect --format '{{json .Args}}' "$BIRD"); then
+        fail "Could not inspect BIRD container runtime arguments"
+        return 1
+    fi
     if [ "$configured_command" != '["sleep","infinity"]' ] || \
         [ "$runtime_path" != sleep ] || [ "$runtime_args" != '["infinity"]' ]; then
         fail "BIRD container command is not the pinned sleeping command"
         return 1
     fi
 
-    reported_version=$(docker exec "$BIRD" bird --version 2>&1)
+    if ! reported_version=$(docker exec "$BIRD" bird --version 2>&1); then
+        fail "Could not execute the BIRD runtime version check"
+        return 1
+    fi
     if [ "$reported_version" != "$BIRD_VERSION_OUTPUT" ]; then
         fail "BIRD runtime version drifted: $reported_version (expected $BIRD_VERSION_OUTPUT)"
         return 1
     fi
     for conf in "$GOOD_CONF" "$BAD_CONF" "$UNSIGNED_CONF" "$SUCCESSOR_CONF"; do
         if ! docker exec "$BIRD" bird -p -c "$conf" >/dev/null; then
-            fail "BIRD 3.3.2 rejected bound configuration $conf"
+            fail "BIRD $BIRD_VERSION rejected bound configuration $conf"
             return 1
         fi
     done
-    ok "BIRD 3.3.2 image identity, sleeping command, and four configs preflighted"
+    ok "BIRD $BIRD_VERSION image identity, sleeping command, and four configs preflighted"
 }
 
 start_bird() {
@@ -1147,7 +1169,7 @@ prove_dynamic_range_accept_boundary() {
 }
 
 main_uninterrupted() {
-    log "M43 interop test: TCP-AO full live key rotation with BIRD 3.3.2"
+    log "M43 interop test: TCP-AO full live key rotation with BIRD $BIRD_VERSION"
     log "Topology: $TOPO"
 
     resolve_grpc_addr
@@ -1263,7 +1285,7 @@ main_uninterrupted() {
 }
 
 main_crash_restart() {
-    log "M43 crash-restart proof: durable TCP-AO rotation recovery with BIRD 3.3.2"
+    log "M43 crash-restart proof: durable TCP-AO rotation recovery with BIRD $BIRD_VERSION"
     log "Topology: $TOPO"
 
     # Load-bearing mutation receipts:

@@ -331,7 +331,8 @@ fn m43_bird_332_identity_and_config_preflight_precedes_both_modes() {
         .expect("M43 driver must be readable");
 
     assert!(topology.contains("image: bird:3.3.2-tcpao"));
-    assert!(source.contains("BIRD_VERSION_OUTPUT=\"BIRD version 3.3.2\""));
+    assert!(source.contains("BIRD_VERSION=\"3.3.2\""));
+    assert!(source.contains("BIRD_VERSION_OUTPUT=\"BIRD version ${BIRD_VERSION}\""));
     let preflight = source
         .split_once("preflight_bird_container() {")
         .and_then(|(_, remainder)| remainder.split_once("start_bird() {").map(|(body, _)| body))
@@ -348,6 +349,20 @@ fn m43_bird_332_identity_and_config_preflight_precedes_both_modes() {
         "\"$GOOD_CONF\" \"$BAD_CONF\" \"$UNSIGNED_CONF\" \"$SUCCESSOR_CONF\"",
     ] {
         assert!(preflight.contains(seam), "M43 preflight missing {seam}");
+    }
+    for guarded_probe in [
+        "if ! configured_image=$(docker inspect",
+        "if ! container_image_id=$(docker inspect",
+        "if ! local_image_id=$(docker image inspect",
+        "if ! configured_command=$(docker inspect",
+        "if ! runtime_path=$(docker inspect",
+        "if ! runtime_args=$(docker inspect",
+        "if ! reported_version=$(docker exec",
+    ] {
+        assert!(
+            preflight.contains(guarded_probe),
+            "M43 preflight probe must emit its targeted diagnostic: {guarded_probe}"
+        );
     }
 
     for (start, end) in [
