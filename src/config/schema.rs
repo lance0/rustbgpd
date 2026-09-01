@@ -2192,6 +2192,16 @@ pub struct PolicyConfig {
     /// the dependency-scoped peer refresh and `failed` into metrics.
     #[serde(skip)]
     pub dataset_events: DatasetLoadEvents,
+    /// Domain-separated digest of the external policy sources this load
+    /// actually read (`.rpol` module graphs and dataset files, in the
+    /// ADR-0121 v2 manifest framing). Populated only by capturing
+    /// candidate loads on the config-transaction path; every other load
+    /// leaves it empty, which the transaction planner treats as
+    /// unverified. Not serialized and excluded from equality like
+    /// `dataset_events`: it records what one load observed, not
+    /// configuration identity.
+    #[serde(skip)]
+    pub external_sources_digest: ExternalSourcesDigest,
 }
 
 fn default_rpol_max_graph_bytes() -> usize {
@@ -2214,6 +2224,7 @@ impl Default for PolicyConfig {
             datasets: HashMap::new(),
             dataset_bindings: rustbgpd_policy::datasets::DatasetBindings::default(),
             dataset_events: DatasetLoadEvents::default(),
+            external_sources_digest: ExternalSourcesDigest::default(),
         }
     }
 }
@@ -2250,6 +2261,23 @@ impl PartialEq for DatasetLoadEvents {
 }
 
 impl Eq for DatasetLoadEvents {}
+
+/// Captured external-source byte identity of one config load: the
+/// domain-separated SHA-256 over the load's `.rpol` module fingerprints
+/// and dataset file fingerprints in ADR-0121 v2 manifest framing (the
+/// document hash excluded). `None` when the load did not capture.
+/// Excluded from config equality like [`DatasetLoadEvents`] — it is a
+/// load observation, not configuration identity.
+#[derive(Debug, Clone, Default)]
+pub struct ExternalSourcesDigest(pub Option<[u8; 32]>);
+
+impl PartialEq for ExternalSourcesDigest {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for ExternalSourcesDigest {}
 
 /// Tuning for the per-session import-decision cache that backs
 /// `rbgp policy explain` / `PolicyService.ExplainImportPolicy`

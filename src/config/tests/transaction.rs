@@ -1,6 +1,68 @@
 use super::*;
 
 #[test]
+fn external_inputs_identity_gates_full_snapshot_families() {
+    let with_description = |description: &str| {
+        format!(
+            r#"
+{}
+
+[[neighbors]]
+address = "10.0.0.99"
+remote_asn = 65099
+description = "{description}"
+"#,
+            valid_toml()
+        )
+    };
+    let old = parse(&with_description("before")).unwrap();
+    let new = parse(&with_description("after")).unwrap();
+    let mut diff = diff_config(&old, &new);
+    assert_eq!(
+        diff.policy.external_inputs_identity,
+        ExternalInputsIdentity::Unverified,
+        "diff_config must always start unverified"
+    );
+
+    // Presence-fenced: external inputs present and no identity verification
+    // rejects every full-snapshot family. This is the #1370 behavior every
+    // non-verifying caller keeps — the gNMI Set bridge included.
+    diff.policy.external_inputs_present = true;
+    let fenced = classify_config_transaction_v1(&diff);
+    assert_eq!(fenced.supported_sections, vec!["[[neighbors]] modify"]);
+    assert!(
+        fenced
+            .unsupported_sections
+            .iter()
+            .any(|section| section.contains("external inputs")),
+        "{fenced:?}"
+    );
+    assert!(!fenced.is_committable());
+
+    // Identity-verified (ADR-0130): the same diff becomes committable once
+    // the plan path has proven the candidate's external sources
+    // byte-identical to the accepted snapshot's.
+    diff.policy.external_inputs_identity = ExternalInputsIdentity::VerifiedUnchanged;
+    let verified = classify_config_transaction_v1(&diff);
+    assert_eq!(verified.supported_sections, vec!["[[neighbors]] modify"]);
+    assert!(verified.unsupported_sections.is_empty(), "{verified:?}");
+    assert!(verified.is_committable());
+
+    // A declared-roster change stays rejected regardless of the verdict:
+    // identity only lifts the presence clause, never the rpol/datasets
+    // change clauses.
+    diff.policy.rpol_changed = true;
+    let changed = classify_config_transaction_v1(&diff);
+    assert!(
+        changed
+            .unsupported_sections
+            .iter()
+            .any(|section| section.contains("external inputs")),
+        "{changed:?}"
+    );
+}
+
+#[test]
 fn transaction_v1_classifies_noop_candidate() {
     let config = parse(valid_toml()).unwrap();
     let diff = diff_config(&config, &config);

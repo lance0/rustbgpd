@@ -30,6 +30,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Operator-visible:** config transactions no longer reject a full-snapshot
+  candidate merely because `[policy] rpol_files` / `[policy.datasets]` are
+  declared. The planner now captures every declared external file at plan and
+  apply time and admits the transaction when its byte identity matches the
+  accepted snapshot's recorded identity (ADR-0130) — restoring plan, apply,
+  commit-confirm, and rollback for `.rpol`/dataset deployments whose external
+  sources are unchanged on disk. Any drift (an edited dataset or `.rpol`
+  module, including comment-only rewrites), a missing/unreadable file, or a
+  rollback across an external-content change still rejects without mutation,
+  and gNMI Set full-snapshot candidates remain rejected whenever external
+  inputs are present.
+
 - Intentionally narrow `[global.telemetry].log_format` to JSON only. Other
   strings were previously ignored but now fail configuration parsing; migrate
   them to `log_format = "json"`.

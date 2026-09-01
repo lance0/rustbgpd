@@ -2595,14 +2595,18 @@ import_policy_chain = ["customer-in(200)", "bogon-filter", "toml-defined"]
   for materially changed import chains — same mechanism as
   `[policy.definitions]` edits). `rbgp config diff` reports the change
   under the policy section.
-- **Scope notes:** config transactions fail closed while either the running or
-  candidate config references external `.rpol` graphs or policy datasets if
-  the selected executor would adopt the full candidate snapshot. The files
-  live outside the candidate TOML, transaction token, and rollback payload.
-  This applies to native apply/rollback and gNMI Set. Deploy TOML, `.rpol`
-  graphs, and datasets together, then use SIGHUP. True no-ops and pure
-  `[[fib_tables]]` transactions with unchanged external inputs remain
-  available because the FIB executor substitutes only its targeted table set.
+- **Scope notes:** with external `.rpol` graphs or policy datasets declared,
+  native config transactions (plan/apply/rollback, commit-confirm included)
+  are admitted only when the planner's fresh capture of every declared
+  external file is byte-identical to the accepted snapshot's recorded
+  identity (ADR-0130). The files live outside the candidate TOML,
+  transaction token, and rollback payload, so any drift — including a
+  comment-only rewrite — fails closed without mutation; deploy changed TOML,
+  `.rpol` graphs, and datasets together, then use SIGHUP. gNMI Set never
+  verifies external inputs and stays fully fenced while they are present.
+  True no-ops and pure `[[fib_tables]]` transactions with unchanged external
+  inputs remain available because the FIB executor substitutes only its
+  targeted table set.
   `rbgp policy explain` statement
   traces cover `.rpol` chain members at term granularity, and
   `rbgp policy stats` reads the installed chains' live per-term hit
@@ -3476,11 +3480,13 @@ is rejected and rolled back. Dynamic-range peer-group reassignments and mixed
 policy/session effective-impact candidates remain rejected until dedicated
 executors exist.
 When either the running or candidate config references external `.rpol` graphs
-or `[policy.datasets]` snapshots, every full-candidate transaction family is
-also rejected: the external bytes are not staged, tokened, or rollback-safe.
-Use coordinated file deployment plus SIGHUP. A no-op remains a no-op, and a
-pure `[[fib_tables]]` edit with unchanged external inputs remains committable
-because it does not adopt the rest of the candidate snapshot.
+or `[policy.datasets]` snapshots, full-candidate native transactions remain
+available only while those sources are byte-identical to the accepted snapshot
+(ADR-0130). Any drift rejects those transactions without mutation; deploy
+changed TOML and external inputs together with SIGHUP. A no-op remains a no-op,
+and a pure `[[fib_tables]]` transaction remains available because it does not
+adopt the rest of the candidate snapshot. gNMI full-candidate changes remain
+rejected whenever external inputs are present, even unchanged.
 Like SIGHUP and FIB CRUD, FIB transaction apply requires the FIB reconciler to
 already be running: a daemon that started with no `[[fib_tables]]` still needs a
 restart to enable the subsystem.

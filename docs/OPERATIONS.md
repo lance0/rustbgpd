@@ -411,10 +411,12 @@ unreadable/mismatched rows fail closed before mutation. An eligible
 row is routed through the **same transaction path as
 `config apply`**: the same plan classification, the same reload-impact and
 update-group annotations, and the same receipts. Confirmed rollback remains
-subject to that planner: full-snapshot external-policy adoption is still
-fenced, while an unchanged-external-input pure-`[[fib_tables]]` rollback can
-carry the provenance-verified v2 history row's exact accepted prior snapshot
-through v3 authority.
+subject to that planner: a full-snapshot rollback with external policy inputs
+is admitted only when the verified history row's `.rpol`/dataset identity is
+byte-identical to the currently accepted one, and an unchanged-external-input
+pure-`[[fib_tables]]` rollback can carry the provenance-verified v2 history
+row's exact accepted prior snapshot through v3 authority. Rolling back across
+an external-content change stays rejected — reload the sources first.
 There is no second apply engine —
 a rollback whose entry contains sections the transaction executor cannot
 commit live (for example restart-required `[global]` fields) is rejected
@@ -428,13 +430,20 @@ detached load and requires the live sources to reproduce that identity exactly.
 Keep the operator-authored TOML, `.rpol` graph, and datasets under version control or
 another coordinated deployment system.
 
-Do not use native config apply/rollback or gNMI Set for a full-candidate change
-while either side references `.rpol` or `[policy.datasets]` files. Those bytes
-are outside the transaction token and rollback payload, so the planner rejects
-the change without mutation. Deploy the TOML and external inputs together and
-send SIGHUP instead. External-input no-ops still return `NOOP`; a pure
-`[[fib_tables]]` transaction with unchanged external inputs remains safe and
-committable because it stages only the FIB table set.
+With `.rpol` or `[policy.datasets]` files declared, native config
+plan/apply/rollback (commit-confirm included) work as long as the external
+sources on disk are byte-identical to the accepted ones: the planner captures
+every declared external file at plan and apply time and compares its identity
+(canonical path, length, content digest — ADR-0130) against the accepted
+snapshot before admitting any full-candidate change. Any drift — an edited
+dataset, a touched `.rpol` module, even a comment-only rewrite — rejects the
+transaction without mutation, and a missing or unreadable file fails the
+candidate load. Changed external content still deploys the old way: update the
+TOML and external inputs together and send SIGHUP. gNMI Set is stricter — it
+never verifies external inputs, so a gNMI full-candidate change is rejected
+whenever they are present, even unchanged. External-input no-ops still return
+`NOOP`; a pure `[[fib_tables]]` transaction with unchanged external inputs
+remains safe and committable because it stages only the FIB table set.
 
 For a static-neighbor edit, change the neighbor in the candidate file (for
 example `hold_time`, `max_prefixes`, policy-chain refs, or ORF receive), run
@@ -462,11 +471,6 @@ rollback, and live dynamic sessions accepted by an affected
 re-accept under the committed config on reconnect (ADR-0086). Mixed-family
 candidates, dynamic-range peer-group reassignments, mixed policy/session
 effective impact, and unsupported sections are rejected without mutation.
-The same rejection applies to every full-candidate family while the running or
-candidate config references external `.rpol` graphs or policy datasets; use a
-coordinated file deployment plus SIGHUP. Pure `[[fib_tables]]` edits with those
-inputs unchanged remain the targeted exception.
-
 Output is grouped into two actionable sections plus a per-neighbor
 effective-impact view:
 

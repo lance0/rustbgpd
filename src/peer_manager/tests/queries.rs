@@ -601,6 +601,7 @@ log_format = "json"
     tx.send(PeerManagerCommand::PlanConfigTransaction {
         candidate_toml: candidate,
         expected_runtime_snapshot_token: None,
+        verify_external_inputs: true,
         reply: plan_reply,
     })
     .await

@@ -633,6 +633,7 @@ async fn run_detached_plan(
             .send(PeerManagerCommand::PlanConfigTransaction {
                 candidate_toml,
                 expected_runtime_snapshot_token,
+                verify_external_inputs: true,
                 reply,
             })
             .await
@@ -1236,6 +1237,7 @@ mod tests {
         let PeerManagerCommand::PlanConfigTransaction {
             candidate_toml,
             expected_runtime_snapshot_token,
+            verify_external_inputs: true,
             reply,
         } = peer_rx.recv().await.unwrap()
         else {

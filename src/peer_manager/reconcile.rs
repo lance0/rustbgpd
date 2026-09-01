@@ -157,20 +157,31 @@ impl PeerManager {
         &mut self,
         candidate_toml: &str,
         expected_runtime_snapshot_token: Option<&str>,
+        verify_external_inputs: bool,
     ) -> Result<RuntimeConfigTransactionPlan, RuntimeConfigTransactionPlanError> {
         let (live_snapshot, live_snapshot_identity, runtime_snapshot_token) = self
             .config_transaction_plan_context(expected_runtime_snapshot_token)
             .await?;
-        let mut candidate =
+        // Only the config-transaction path captures the candidate's external
+        // sources for identity verification (ADR-0130). The gNMI Set bridge
+        // plans with the plain loader, so its candidates classify as
+        // `Unverified` and keep the #1370 presence fence.
+        let mut candidate = if verify_external_inputs {
+            Config::load_toml_candidate_captured(candidate_toml, "candidate runtime config")
+        } else {
             Config::load_toml_with_diagnostics(candidate_toml, "candidate runtime config")
-                .map_err(RuntimeConfigTransactionPlanError::InvalidCandidate)?;
+        }
+        .map_err(RuntimeConfigTransactionPlanError::InvalidCandidate)?;
+        let external_inputs = self.verified_external_inputs(&mut candidate);
         let materialization = crate::config::materialize_rfc8212_transaction_candidate(
             &self.current_config,
             &mut candidate,
+            external_inputs,
         );
         self.finish_config_transaction_plan(
             &mut candidate,
             materialization.as_ref(),
+            external_inputs,
             live_snapshot,
             live_snapshot_identity,
             runtime_snapshot_token,
@@ -185,6 +196,7 @@ impl PeerManager {
         let (live_snapshot, live_snapshot_identity, runtime_snapshot_token) = self
             .config_transaction_plan_context(expected_runtime_snapshot_token)
             .await?;
+        let external_inputs = self.verified_external_inputs(candidate);
         // A retained snapshot is trusted rollback authority. Preserve every
         // non-tuple field, but carry forward an unchanged live tuple.
         let live_posture = self.current_config.rfc8212_posture();
@@ -198,14 +210,50 @@ impl PeerManager {
         let materialization = crate::config::materialize_rfc8212_transaction_candidate(
             &self.current_config,
             candidate,
+            external_inputs,
         );
         self.finish_config_transaction_plan(
             candidate,
             materialization.as_ref(),
+            external_inputs,
             live_snapshot,
             live_snapshot_identity,
             runtime_snapshot_token,
         )
+    }
+
+    /// Compare the candidate's captured external-source digest against the
+    /// accepted snapshot's manifest (ADR-0130). On a byte-identical match the
+    /// candidate's freshly loaded external state is verification evidence
+    /// only: the running compiled `.rpol` storage and live dataset handles
+    /// are re-attached in its place, so an adopted candidate cannot detach
+    /// live policy state (the ADR-0121 §8 concern). Any missing digest,
+    /// missing authority, or mismatch stays `Unverified` — the presence
+    /// fence.
+    fn verified_external_inputs(
+        &self,
+        candidate: &mut Config,
+    ) -> crate::config::ExternalInputsIdentity {
+        let Some(candidate_digest) = candidate.policy.external_sources_digest.0.take() else {
+            return crate::config::ExternalInputsIdentity::Unverified;
+        };
+        let Some(accepted_rx) = &self.accepted_rx else {
+            return crate::config::ExternalInputsIdentity::Unverified;
+        };
+        let accepted = accepted_rx.borrow().clone();
+        if accepted.source_manifest().external_sources_sha256() != candidate_digest {
+            return crate::config::ExternalInputsIdentity::Unverified;
+        }
+        // Re-attach the running external state. A candidate whose declared
+        // roster diverges from the running config is rejected by the
+        // rpol/dataset diff clauses before any executor adopts it, so a
+        // rebind on such a candidate is discarded with the plan.
+        candidate
+            .policy
+            .rpol
+            .reuse_unchanged_files_from(&self.current_config.policy.rpol);
+        candidate.policy.dataset_bindings = self.current_config.policy.dataset_bindings.clone();
+        crate::config::ExternalInputsIdentity::VerifiedUnchanged
     }
 
     async fn config_transaction_plan_context(
@@ -247,6 +295,7 @@ impl PeerManager {
         &mut self,
         candidate: &mut Config,
         materialization: Option<&crate::config::ConfigDiff>,
+        external_inputs: crate::config::ExternalInputsIdentity,
         live_snapshot: rustbgpd_rib::UpdateGroupSnapshot,
         live_snapshot_identity: [u8; 8],
         runtime_snapshot_token: String,
@@ -261,7 +310,8 @@ impl PeerManager {
                     RuntimeConfigTransactionPlanError::Internal(message)
                 }
             })?;
-        let committed_diff = crate::config::diff_config(&self.current_config, candidate);
+        let mut committed_diff = crate::config::diff_config(&self.current_config, candidate);
+        committed_diff.policy.external_inputs_identity = external_inputs;
         let operational_diff = materialization.unwrap_or(&committed_diff);
         let classification = crate::config::classify_config_transaction_v1(operational_diff);
         let status = if classification.is_noop() {

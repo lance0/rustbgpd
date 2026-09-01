@@ -781,6 +781,13 @@ pub enum PeerManagerCommand {
         /// Optional optimistic-concurrency token the caller expects to plan
         /// against.
         expected_runtime_snapshot_token: Option<String>,
+        /// Whether the planner may capture the candidate's declared external
+        /// policy sources and, on a byte-identical match with the accepted
+        /// snapshot, classify them as verified-unchanged. The
+        /// config-transaction plan/apply paths set this; the gNMI Set bridge
+        /// leaves it false so gNMI full-snapshot candidates keep the
+        /// external-input presence fence.
+        verify_external_inputs: bool,
         /// Reply channel returning the transaction plan.
         reply: oneshot::Sender<
             Result<RuntimeConfigTransactionPlan, RuntimeConfigTransactionPlanError>,
