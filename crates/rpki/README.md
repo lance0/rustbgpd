@@ -13,7 +13,9 @@ newer. Release-by-release crate changes are recorded in the
   validation plus a deterministic, 256-row-bounded covering-VRP diagnostic.
 - **RTR client** — an asynchronous client that prefers the ASPA-capable
   protocol v2 shape and falls back to RFC 8210 version 1 when the cache
-  explicitly rejects v2. `RtrClientConfig::max_expire_interval` adds an
+  explicitly rejects v2. Version 2 rejects IPv4 and IPv6 Prefix PDUs with
+  nonzero host bits as corrupt data; RFC 8210 v1 compatibility is unchanged.
+  `RtrClientConfig::max_expire_interval` adds an
   optional operator freshness ceiling: it clamps both the configured
   `expire_interval` and a cache-advertised End of Data expire down, never raises
   a lower value, and when unset leaves the configured interval unchanged while

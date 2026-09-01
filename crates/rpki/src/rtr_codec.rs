@@ -115,6 +115,9 @@ pub enum RtrDecodeError {
     /// Prefix length or max-length out of range.
     #[error("invalid prefix")]
     InvalidPrefix,
+    /// RTR v2 Prefix PDU contains nonzero bits beyond Prefix Length.
+    #[error("noncanonical prefix")]
+    NonCanonicalPrefix,
     /// Error report text is not valid UTF-8.
     #[error("invalid UTF-8 in error text")]
     Utf8Error,
@@ -181,6 +184,21 @@ fn checked_counted_len(
             len: usize::MAX,
         })?;
     checked_total_len(field, base, &[body_len])
+}
+
+fn prefix_host_bits_are_zero(octets: &[u8], prefix_len: u8) -> bool {
+    let whole_octets = usize::from(prefix_len / 8);
+    let partial_bits = prefix_len % 8;
+    let host_start = whole_octets + usize::from(partial_bits != 0);
+
+    if partial_bits != 0 {
+        let host_mask = (1u8 << (8 - partial_bits)) - 1;
+        if octets[whole_octets] & host_mask != 0 {
+            return false;
+        }
+    }
+
+    octets[host_start..].iter().all(|octet| *octet == 0)
 }
 
 impl RtrPdu {
@@ -265,6 +283,11 @@ impl RtrPdu {
                 if prefix_len > 32 || max_len > 32 || max_len < prefix_len {
                     return Err(RtrDecodeError::InvalidPrefix);
                 }
+                if version == RTR_VERSION_2
+                    && !prefix_host_bits_are_zero(&prefix.octets(), prefix_len)
+                {
+                    return Err(RtrDecodeError::NonCanonicalPrefix);
+                }
                 RtrPdu::Ipv4Prefix {
                     flags,
                     prefix_len,
@@ -287,6 +310,11 @@ impl RtrPdu {
                 let asn = u32::from_be_bytes([buf[28], buf[29], buf[30], buf[31]]);
                 if prefix_len > 128 || max_len > 128 || max_len < prefix_len {
                     return Err(RtrDecodeError::InvalidPrefix);
+                }
+                if version == RTR_VERSION_2
+                    && !prefix_host_bits_are_zero(&prefix.octets(), prefix_len)
+                {
+                    return Err(RtrDecodeError::NonCanonicalPrefix);
                 }
                 RtrPdu::Ipv6Prefix {
                     flags,
@@ -794,6 +822,102 @@ mod tests {
             RtrPdu::decode(&buf).unwrap_err(),
             RtrDecodeError::InvalidPrefix
         );
+    }
+
+    #[test]
+    fn v2_rejects_noncanonical_ipv4_host_bits_but_v1_accepts_them() {
+        let cases = [
+            (0, Ipv4Addr::new(0, 0, 0, 1)),
+            (8, Ipv4Addr::new(10, 0, 0, 1)),
+            (9, Ipv4Addr::new(10, 64, 0, 0)),
+            (31, Ipv4Addr::new(192, 0, 2, 1)),
+        ];
+
+        for (prefix_len, prefix) in cases {
+            let pdu = RtrPdu::Ipv4Prefix {
+                flags: 1,
+                prefix_len,
+                max_len: 32,
+                prefix,
+                asn: 65001,
+            };
+            let mut v2 = Vec::new();
+            pdu.encode_with_version(&mut v2, RTR_VERSION_2).unwrap();
+            assert_eq!(RtrPdu::decode(&v2), Err(RtrDecodeError::NonCanonicalPrefix));
+
+            let mut v1 = Vec::new();
+            pdu.encode_with_version(&mut v1, RTR_VERSION).unwrap();
+            assert!(RtrPdu::decode(&v1).is_ok());
+        }
+    }
+
+    #[test]
+    fn v2_accepts_canonical_ipv4_prefix_boundaries() {
+        for (prefix_len, prefix) in [
+            (0, Ipv4Addr::UNSPECIFIED),
+            (8, Ipv4Addr::new(10, 0, 0, 0)),
+            (9, Ipv4Addr::new(10, 128, 0, 0)),
+            (32, Ipv4Addr::new(192, 0, 2, 1)),
+        ] {
+            let pdu = RtrPdu::Ipv4Prefix {
+                flags: 1,
+                prefix_len,
+                max_len: 32,
+                prefix,
+                asn: 65001,
+            };
+            let mut buf = Vec::new();
+            pdu.encode_with_version(&mut buf, RTR_VERSION_2).unwrap();
+            assert!(RtrPdu::decode(&buf).is_ok());
+        }
+    }
+
+    #[test]
+    fn v2_rejects_noncanonical_ipv6_host_bits_but_v1_accepts_them() {
+        let cases = [
+            (0, "::1"),
+            (32, "2001:db8::1"),
+            (33, "2001:db8:4000::"),
+            (127, "2001:db8::1"),
+        ];
+
+        for (prefix_len, prefix) in cases {
+            let pdu = RtrPdu::Ipv6Prefix {
+                flags: 1,
+                prefix_len,
+                max_len: 128,
+                prefix: prefix.parse().unwrap(),
+                asn: 65002,
+            };
+            let mut v2 = Vec::new();
+            pdu.encode_with_version(&mut v2, RTR_VERSION_2).unwrap();
+            assert_eq!(RtrPdu::decode(&v2), Err(RtrDecodeError::NonCanonicalPrefix));
+
+            let mut v1 = Vec::new();
+            pdu.encode_with_version(&mut v1, RTR_VERSION).unwrap();
+            assert!(RtrPdu::decode(&v1).is_ok());
+        }
+    }
+
+    #[test]
+    fn v2_accepts_canonical_ipv6_prefix_boundaries() {
+        for (prefix_len, prefix) in [
+            (0, "::"),
+            (32, "2001:db8::"),
+            (33, "2001:db8:8000::"),
+            (128, "2001:db8::1"),
+        ] {
+            let pdu = RtrPdu::Ipv6Prefix {
+                flags: 1,
+                prefix_len,
+                max_len: 128,
+                prefix: prefix.parse().unwrap(),
+                asn: 65002,
+            };
+            let mut buf = Vec::new();
+            pdu.encode_with_version(&mut buf, RTR_VERSION_2).unwrap();
+            assert!(RtrPdu::decode(&buf).is_ok());
+        }
     }
 
     #[test]
