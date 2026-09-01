@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::net::IpAddr;
 use std::time::Instant;
@@ -38,6 +38,35 @@ use super::{
 /// route-server-scale fleet (hundreds of members) logs a handful of `info!`
 /// lines instead of either silence or one line per peer.
 const COHORT_SETUP_PROGRESS_INTERVAL: usize = 64;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct InstalledPolicyRoutesReachability {
+    scopes: BTreeMap<(String, String), InstalledPolicyRoutesScope>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct InstalledPolicyRoutesScope {
+    reachable: BTreeSet<(String, String)>,
+    clean: bool,
+}
+
+pub(super) fn policy_routes_reachable_labels(
+    chain: Option<&PolicyChain>,
+) -> BTreeSet<(String, String)> {
+    let Some(chain) = chain.filter(|chain| !chain.policies.is_empty()) else {
+        return BTreeSet::from([("inline".to_string(), "permit".to_string())]);
+    };
+
+    let mut reachable =
+        BTreeSet::from([("chain_default_permit".to_string(), "permit".to_string())]);
+    for policy in &chain.policies {
+        reachable.insert((
+            policy.name.as_deref().unwrap_or("inline").to_string(),
+            "deny".to_string(),
+        ));
+    }
+    reachable
+}
 
 #[derive(Default)]
 struct PolicySnapshotPhaseTimings {
@@ -351,6 +380,55 @@ fn record_import_validation_refresh_metrics(
 }
 
 impl PeerManager {
+    pub(super) fn installed_policy_routes_reachability(&self) -> InstalledPolicyRoutesReachability {
+        let mut snapshot = InstalledPolicyRoutesReachability::default();
+        for (peer, managed) in &self.peers {
+            let peer_label = rustbgpd_telemetry::peer_label(peer.address);
+            for (direction, chain, clean) in [
+                (
+                    "import",
+                    managed.import_policy.as_ref(),
+                    !managed.pending_refresh,
+                ),
+                (
+                    "export",
+                    managed.export_policy.as_ref(),
+                    !managed.pending_export_apply,
+                ),
+            ] {
+                let scope = snapshot
+                    .scopes
+                    .entry((peer_label.clone(), direction.to_string()))
+                    .or_insert_with(|| InstalledPolicyRoutesScope {
+                        reachable: BTreeSet::new(),
+                        clean: true,
+                    });
+                scope
+                    .reachable
+                    .extend(policy_routes_reachable_labels(chain));
+                scope.clean &= clean;
+            }
+        }
+        snapshot
+    }
+
+    pub(super) fn reap_retired_policy_routes(
+        &self,
+        before: &InstalledPolicyRoutesReachability,
+    ) -> usize {
+        let current = self.installed_policy_routes_reachability();
+        let mut selected = rustbgpd_telemetry::metrics::PolicyRoutesReachability::new();
+        for (key, prior) in &before.scopes {
+            let Some(installed) = current.scopes.get(key) else {
+                continue;
+            };
+            if installed.clean && prior.reachable != installed.reachable {
+                selected.insert(key.clone(), installed.reachable.clone());
+            }
+        }
+        self.metrics.reap_unreachable_policy_routes(&selected)
+    }
+
     /// ADR-0112: would installing `candidate_import` flip this peer's RFC 8212
     /// import-presence verdict?
     ///

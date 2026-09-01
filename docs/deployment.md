@@ -1063,8 +1063,11 @@ completes without rejection uses the bounded
 label for an inline Deny or a Permit from an absent / genuinely empty chain.
 Initial table dumps, route refreshes, dirty resyncs, and forced outbound
 refreshes can increment export counters because they re-evaluate export
-policy. The Prometheus counter is **monotonic for the lifetime of the
-daemon process** — use Prometheus `rate()` / `increase()` to read it.
+policy. Each label identity remains monotonic while its policy/action is
+reachable from the installed chain. After a successful policy replacement,
+an unreachable identity is retired and goes stale; reinstalling that exact
+identity creates a fresh counter starting from zero. Prometheus `rate()` and
+`increase()` handle the resulting counter reset.
 
 ```promql
 # Routes denied by a named filter on each peer's import side:

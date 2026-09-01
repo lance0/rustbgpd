@@ -6,9 +6,10 @@ use std::time::{Duration, Instant};
 
 use futures::stream::{self, StreamExt};
 use rustbgpd_api::peer_types::{
-    ConfigEvent, DynamicNeighborInfo, OwnedCatalogMutation, OwnedNeighborMutation,
-    OwnedNeighborMutationError, OwnedNeighborMutationOutcome, PeerKey, PeerManagerCommand,
-    PeerManagerNeighborConfig, PeerManagerReadinessQuery, PolicyDatasetStatusRow, PolicyEvent,
+    ConfigEvent, DynamicNeighborInfo, OwnedCatalogMutation, OwnedCatalogMutationOutcome,
+    OwnedHotUpdatePeerOutcome, OwnedNeighborMutation, OwnedNeighborMutationError,
+    OwnedNeighborMutationOutcome, PeerKey, PeerManagerCommand, PeerManagerNeighborConfig,
+    PeerManagerReadinessQuery, PeerReconcileAuthority, PolicyDatasetStatusRow, PolicyEvent,
     RuntimeConfigTransactionPlanError, SessionEvent, SessionLifecycleEvent,
 };
 use rustbgpd_bmp::BmpEvent;
@@ -387,6 +388,10 @@ pub struct PeerManager {
     /// in this window so candidate-only ranges cannot create live peers before
     /// the candidate is durable.
     config_snapshot_staged: bool,
+    /// Installed policy-route metric reachability before a successful staged
+    /// config transaction. Consumed only by commit; restore/replacement clear
+    /// it without retiring series.
+    staged_policy_routes_prior: Option<policy::InstalledPolicyRoutesReachability>,
     /// Resolved dynamic neighbor ranges for prefix-based auto-accept.
     dynamic_ranges: Vec<DynamicRange>,
     /// Current number of active dynamic peers (for limit enforcement).
@@ -740,6 +745,7 @@ impl PeerManager {
             policy_events_tx,
             policy_event_history: VecDeque::new(),
             config_snapshot_staged: false,
+            staged_policy_routes_prior: None,
             dynamic_ranges: Self::parse_dynamic_ranges(&current_config),
             dynamic_peer_count: 0,
             dynamic_neighbor_limit: current_config.effective_dynamic_neighbor_limit(),
@@ -1067,6 +1073,8 @@ impl PeerManager {
                             let _ = reply.send(outcome);
                         }
                         PeerManagerCommand::OwnedCatalogMutation { mutation, reply } => {
+                            let policy_routes_prior =
+                                self.installed_policy_routes_reachability();
                             let outcome = match mutation {
                                 OwnedCatalogMutation::SetPeerGroup { name, definition } => {
                                     let event = ConfigEvent::SetPeerGroup {
@@ -1188,6 +1196,9 @@ impl PeerManager {
                                     ).await
                                 }
                             };
+                            if matches!(&outcome, OwnedCatalogMutationOutcome::Success) {
+                                self.reap_retired_policy_routes(&policy_routes_prior);
+                            }
                             let _ = reply.send(outcome);
                         }
                         PeerManagerCommand::ReconfigurePeer { config, reply } => {
@@ -1244,6 +1255,9 @@ impl PeerManager {
                             let _ = reply.send(result);
                         }
                         PeerManagerCommand::CommitConfigSnapshotStage { reply } => {
+                            if let Some(prior) = self.staged_policy_routes_prior.take() {
+                                self.reap_retired_policy_routes(&prior);
+                            }
                             self.config_snapshot_staged = false;
                             let _ = reply.send(());
                         }
@@ -1361,11 +1375,24 @@ impl PeerManager {
                             let _ = reply.send(Ok(()));
                         }
                         PeerManagerCommand::ReconcilePeers { added, removed, changed, reply } => {
+                            let policy_routes_prior =
+                                self.installed_policy_routes_reachability();
                             let result = self.reconcile_peers(added, removed, changed).await;
+                            if result.authority == PeerReconcileAuthority::Known
+                                && result.failures.is_empty()
+                            {
+                                self.reap_retired_policy_routes(&policy_routes_prior);
+                            }
                             let _ = reply.send(result);
                         }
                         PeerManagerCommand::HotUpdatePeer { config, reply } => {
-                            let _ = reply.send(self.hot_update_peer_owned(config).await);
+                            let policy_routes_prior =
+                                self.installed_policy_routes_reachability();
+                            let outcome = self.hot_update_peer_owned(config).await;
+                            if matches!(&outcome, OwnedHotUpdatePeerOutcome::Success) {
+                                self.reap_retired_policy_routes(&policy_routes_prior);
+                            }
+                            let _ = reply.send(outcome);
                         }
                         PeerManagerCommand::SyncExplainConfig {
                             enabled,
@@ -1614,11 +1641,21 @@ impl PeerManager {
                             let _ = reply.send(result);
                         }
                         PeerManagerCommand::SetHonorGracefulShutdown { enabled, reply } => {
+                            let policy_routes_prior =
+                                self.installed_policy_routes_reachability();
                             let result = self.set_honor_graceful_shutdown(enabled).await;
+                            if result.is_ok() {
+                                self.reap_retired_policy_routes(&policy_routes_prior);
+                            }
                             let _ = reply.send(result);
                         }
                         PeerManagerCommand::SetHonorBlackhole { enabled, reply } => {
+                            let policy_routes_prior =
+                                self.installed_policy_routes_reachability();
                             let result = self.set_honor_blackhole(enabled).await;
+                            if result.is_ok() {
+                                self.reap_retired_policy_routes(&policy_routes_prior);
+                            }
                             let _ = reply.send(result);
                         }
                         PeerManagerCommand::GetNeighborPolicyChains { address, reply } => {
@@ -1776,6 +1813,7 @@ impl PeerManager {
                         Some(InternalCommand::ReplaceConfigSnapshot { config, ack }) => {
                             self.current_config = *config;
                             self.config_snapshot_staged = false;
+                            self.staged_policy_routes_prior = None;
                         // #338: rebuild the live dynamic-neighbor accept-matcher so
                         // [[dynamic_neighbors]] edits applied via SIGHUP take effect
                         // (previously only `current_config` was swapped). The shared
@@ -1831,6 +1869,9 @@ impl PeerManager {
                             scope,
                             reply,
                         }) => {
+                            self.staged_policy_routes_prior = None;
+                            let policy_routes_prior =
+                                self.installed_policy_routes_reachability();
                             let result = match scope {
                                 TransactionConfigScope::Full => Ok(*candidate),
                                 TransactionConfigScope::FibTablesOnly => {
@@ -1854,6 +1895,7 @@ impl PeerManager {
                                         Self::parse_dynamic_ranges(&self.current_config);
                                     self.reconcile_stale_dynamic_max_prefix_restarts();
                                     self.config_snapshot_staged = true;
+                                    self.staged_policy_routes_prior = Some(policy_routes_prior);
                                     self.metrics.record_policy_generation_loaded();
                                     TransactionConfigRollbackToken::capture(
                                         Box::new(previous),
@@ -1870,6 +1912,7 @@ impl PeerManager {
                             self.dynamic_ranges = Self::parse_dynamic_ranges(&self.current_config);
                             self.reconcile_stale_dynamic_max_prefix_restarts();
                             self.config_snapshot_staged = false;
+                            self.staged_policy_routes_prior = None;
                             self.metrics.record_policy_generation_loaded();
                             if rollback.scope == TransactionConfigScope::Full {
                                 self.reap_dynamic_peers_not_allowed_by_current_ranges()

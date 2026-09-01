@@ -886,6 +886,160 @@ async fn apply_resolved_policy_snapshot_skips_non_live_targets() {
 }
 
 #[tokio::test]
+async fn actor_hot_update_reaps_only_successful_policy_identity_changes() {
+    use rustbgpd_api::peer_types::OwnedHotUpdatePeerOutcome;
+
+    let (tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(16);
+    let metrics = BgpMetrics::new();
+    let successful: IpAddr = "192.0.2.143".parse().unwrap();
+    let divergent: IpAddr = "192.0.2.144".parse().unwrap();
+    let mut manager = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics.clone(),
+        rib_tx,
+        None,
+    );
+    for address in [successful, divergent] {
+        insert_test_managed_peer(
+            &mut manager,
+            address,
+            acking_policy_handle(address, SessionState::Established),
+            false,
+        );
+        manager.peers.get_mut(&key(address)).unwrap().import_policy =
+            Some(named_deny_policy_chain(&[Some("hot-old")]));
+        metrics.record_policy_routes(&address.to_string(), "hot-old", "import", "deny");
+    }
+    manager.inject_hot_update_failures.insert(key(divergent), 0);
+    let handle = tokio::spawn(manager.run());
+
+    for (address, expect_success) in [(successful, true), (divergent, false)] {
+        let mut config = make_config(address, 65002);
+        config.import_policy = Some(named_deny_policy_chain(&[Some("hot-new")]));
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(PeerManagerCommand::HotUpdatePeer {
+            config,
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        let outcome = reply_rx.await.unwrap();
+        assert_eq!(
+            matches!(outcome, OwnedHotUpdatePeerOutcome::Success),
+            expect_success,
+            "unexpected owned hot-update outcome: {outcome:?}"
+        );
+    }
+
+    assert_eq!(
+        policy_route_counter(
+            &metrics,
+            &successful.to_string(),
+            "hot-old",
+            "import",
+            "deny"
+        ),
+        None,
+        "a successful actor outcome retires the old installed identity"
+    );
+    assert_eq!(
+        policy_route_counter(
+            &metrics,
+            &divergent.to_string(),
+            "hot-old",
+            "import",
+            "deny"
+        ),
+        Some(1.0),
+        "KnownDivergence is not a definitive retirement boundary"
+    );
+
+    tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn actor_honor_toggle_reaps_clean_success_but_retains_partial_batch_history() {
+    async fn run_case(partial: bool) -> (Result<(), String>, BgpMetrics, IpAddr) {
+        let (tx, rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let metrics = BgpMetrics::new();
+        let successful: IpAddr = if partial {
+            "192.0.2.145".parse().unwrap()
+        } else {
+            "192.0.2.146".parse().unwrap()
+        };
+        let failing: IpAddr = "192.0.2.147".parse().unwrap();
+        let mut manager = PeerManager::new(
+            rx,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            metrics.clone(),
+            rib_tx,
+            None,
+        );
+        let mut addresses = vec![successful];
+        if partial {
+            addresses.push(failing);
+        }
+        manager.current_config.neighbors = addresses
+            .iter()
+            .copied()
+            .map(|address| config_neighbor(address, 65002))
+            .collect();
+        for address in addresses {
+            let peer_handle = if partial && address == failing {
+                route_refresh_failing_handle(address, SessionState::Established)
+            } else {
+                acking_policy_handle(address, SessionState::Established)
+            };
+            insert_test_managed_peer(&mut manager, address, peer_handle, false);
+            manager.peers.get_mut(&key(address)).unwrap().import_policy =
+                Some(named_deny_policy_chain(&[Some("honor-old")]));
+            metrics.record_policy_routes(&address.to_string(), "honor-old", "import", "deny");
+        }
+        let handle = tokio::spawn(manager.run());
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(PeerManagerCommand::SetHonorGracefulShutdown {
+            enabled: true,
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        let result = reply_rx.await.unwrap();
+        tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+        handle.await.unwrap();
+        (result, metrics, successful)
+    }
+
+    let (result, metrics, peer) = run_case(false).await;
+    assert!(result.is_ok(), "clean toggle failed: {result:?}");
+    assert_eq!(
+        policy_route_counter(&metrics, &peer.to_string(), "honor-old", "import", "deny"),
+        None,
+        "a clean honor toggle retires the superseded identity"
+    );
+
+    let (result, metrics, peer) = run_case(true).await;
+    assert!(
+        result.is_err(),
+        "injected partial toggle unexpectedly succeeded"
+    );
+    assert_eq!(
+        policy_route_counter(&metrics, &peer.to_string(), "honor-old", "import", "deny"),
+        Some(1.0),
+        "a partial batch is not a definitive retirement boundary"
+    );
+}
+
+#[tokio::test]
 async fn apply_policy_impact_snapshot_expands_dynamic_range_targets() {
     let mut mgr = live_policy_test_manager();
     let candidate_toml = tier_authorized_uds_test_config(
