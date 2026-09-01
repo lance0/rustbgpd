@@ -44,11 +44,14 @@ impl From<tonic::Status> for CliError {
         // message reads as the sentence.
         let prefix = match s.code() {
             // Connect-time unreachability is handled by `CliError::Connect`
-            // (with address + failure class); an UNAVAILABLE that surfaces
-            // mid-RPC means the daemon went away, and the raw transport
-            // detail is intentionally suppressed.
+            // (with address + failure class). Mid-RPC UNAVAILABLE statuses
+            // retain an actionable daemon message when one is present.
             tonic::Code::Unavailable => {
-                return CliError::Rpc("daemon is not running or unreachable".into());
+                return CliError::Rpc(if s.message().trim().is_empty() {
+                    "temporarily unavailable".into()
+                } else {
+                    format!("temporarily unavailable: {}", s.message())
+                });
             }
             tonic::Code::NotFound => "not found",
             tonic::Code::InvalidArgument => "invalid argument",
@@ -116,13 +119,24 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_is_reported_as_generic_unreachable() {
-        // The raw transport detail is intentionally suppressed: an
-        // operator seeing UNAVAILABLE almost always just means the daemon
-        // is down, so we never leak the noisy inner message.
-        let err = CliError::from(Status::unavailable("connection reset by peer"));
+    fn unavailable_preserves_nonempty_server_reason() {
+        let err = CliError::from(Status::unavailable(
+            "config persistence queue busy — refusing mutation to avoid drift",
+        ));
         assert!(matches!(err, CliError::Rpc(_)));
-        assert_eq!(err.to_string(), "daemon is not running or unreachable");
+        assert_eq!(
+            err.to_string(),
+            "temporarily unavailable: config persistence queue busy — refusing mutation to avoid drift"
+        );
+    }
+
+    #[test]
+    fn unavailable_without_reason_uses_bounded_fallback() {
+        for message in ["", " \t\n"] {
+            let err = CliError::from(Status::unavailable(message));
+            assert!(matches!(err, CliError::Rpc(_)));
+            assert_eq!(err.to_string(), "temporarily unavailable");
+        }
     }
 
     #[test]

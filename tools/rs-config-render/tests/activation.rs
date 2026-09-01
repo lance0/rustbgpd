@@ -110,6 +110,7 @@ case "$*" in
     case "$(cat "$root/health-mode")" in
       malformed) printf 'not-json\n'; exit 0 ;;
       auth) printf 'Error: permission denied\n' >&2; exit 1 ;;
+      rpc-unavailable) printf 'Error: temporarily unavailable: config persistence unavailable\n' >&2; exit 1 ;;
     esac
     if [ ! -f "$root/runtime" ]; then
       printf 'Error: cannot reach rustbgpd at test (connection refused)\n' >&2
@@ -370,6 +371,21 @@ fn initial_activation_and_noop_are_private_exact_and_secret_free() {
     });
     assert_refused(result);
     assert!(!second_state.join("current").exists());
+}
+
+#[test]
+fn initial_rpc_unavailable_is_invalid_not_unreachable() {
+    let _serial = activation_test_guard();
+    let rig = Rig::new();
+    let candidate = rig.candidate("candidate-rpc-unavailable", 101);
+    rig.set("health-mode", "rpc-unavailable");
+
+    assert!(matches!(
+        rig.run(&candidate, true, &rig.activation),
+        Err(Error::Refused(message)) if message == "--initial requires no reachable daemon"
+    ));
+    assert!(!rig.state.join("current").exists());
+    assert!(!rig.root.join("activation.log").exists());
 }
 
 #[test]

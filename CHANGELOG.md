@@ -57,6 +57,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The CLI now preserves actionable daemon reasons on mid-RPC gRPC
+  `UNAVAILABLE` responses instead of replacing them with a generic diagnostic.
+
 - Session enqueue attempts without an active writer now report `WriterClosed`
   instead of falsely reporting success.
 
