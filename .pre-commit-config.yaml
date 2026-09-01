@@ -15,6 +15,8 @@
 # cache and pushes paid a full workspace re-doc.
 #
 # Setup: see CONTRIBUTING.md "Pre-commit hooks".
+default_install_hook_types: [pre-commit, pre-push]
+
 repos:
   - repo: local
     hooks:
@@ -27,22 +29,24 @@ repos:
 
       - id: cargo-clippy
         name: cargo clippy
-        entry: cargo clippy --workspace --all-targets -- -D warnings
+        entry: cargo clippy --locked --workspace --all-targets -- -D warnings
         language: system
-        types: [rust]
+        files: '(^|/)([^/]+\.rs|Cargo\.toml|Cargo\.lock)$'
+        types: [file]
         pass_filenames: false
 
       - id: cargo-test
         name: cargo test
-        entry: cargo test --workspace --lib
+        entry: cargo test --locked --workspace --lib
         language: system
-        types: [rust]
+        files: '(^|/)([^/]+\.rs|Cargo\.toml|Cargo\.lock)$'
+        types: [file]
         pass_filenames: false
         stages: [pre-push]
 
       - id: cargo-doc
         name: cargo doc
-        entry: cargo doc --workspace --lib --no-deps
+        entry: cargo doc --locked --workspace --lib --no-deps
         language: system
         always_run: true
         pass_filenames: false

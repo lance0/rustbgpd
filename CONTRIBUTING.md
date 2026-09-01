@@ -198,8 +198,8 @@ remain responsible for shell scripts.
 ### Pre-commit hooks
 
 We ship a `.pre-commit-config.yaml` that runs `cargo fmt` and
-`cargo clippy --workspace --all-targets -- -D warnings` on every
-commit and `cargo test --workspace --lib` on every push. The
+`cargo clippy --locked --workspace --all-targets -- -D warnings` on every
+commit and `cargo test --locked --workspace --lib` on every push. The
 hooks are a fast local subset, not an exact CI mirror or a guarantee that a
 pull request is ready. `cargo test` is gated to pre-push (not pre-commit) so
 commits stay fast.
@@ -209,10 +209,12 @@ Set it up once:
 ```bash
 # Recommended: prek (fast Rust port, drop-in compatible)
 cargo install --locked prek
-prek install
 
 # Or via standalone installer (no Rust toolchain needed)
 curl -LsSf https://github.com/j178/prek/releases/latest/download/prek-installer.sh | sh
+
+# Both prek installation methods use the configured hook types
+prek install
 
 # Or with the original Python pre-commit
 pipx install pre-commit
