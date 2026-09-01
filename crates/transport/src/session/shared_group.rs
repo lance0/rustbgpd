@@ -433,8 +433,8 @@ impl PeerSession {
     }
 
     /// Returns `true` when this envelope was fully handled through the
-    /// shared bytes (including an enqueue failure, whose saturation/teardown
-    /// policy already ran — re-encoding locally would duplicate the stream).
+    /// shared bytes (including an enqueue failure: saturation tears down
+    /// inside enqueue, while a missing or closed writer is already exiting).
     /// `false` = fall back to the ordinary path, which re-runs the snapshot
     /// trust checks and owns their teardown. Mid-stream `false` (truncated
     /// stream) is safe: every prefix sent so far carries exactly the
@@ -514,9 +514,9 @@ impl PeerSession {
         let mut order: Vec<usize> = (0..update.announce.len()).collect();
         order.sort_unstable_by_key(|&i| update.announce[i].peer);
         // Keep publishing for the group even after this session's own writer
-        // saturates: the group's stream must not depend on one member's
-        // channel health. The saturation/teardown policy for this session
-        // already ran inside the failed enqueue.
+        // fails: the group's stream must not depend on one member's channel
+        // health. Saturation tears down inside enqueue; a missing or closed
+        // writer is already driving session teardown.
         let mut own_send_healthy = true;
         let mut sent: u64 = 0;
         let mut idx = 0;
@@ -586,8 +586,9 @@ impl PeerSession {
                     continue;
                 }
                 if self.enqueue_bulk_encoded(chunk.bytes, true).is_err() {
-                    // Saturation teardown / writer-closed policy already ran
-                    // inside; abort like the ordinary chunked senders.
+                    // Saturation tears down inside enqueue; a missing or
+                    // closed writer is already driving session teardown.
+                    // Abort like the ordinary chunked senders.
                     return true;
                 }
                 self.updates_sent += 1;

@@ -57,6 +57,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Session enqueue attempts without an active writer now report `WriterClosed`
+  instead of falsely reporting success.
+
 - Durable event replay now reports a closed storage mailbox or dropped reply
   as one terminal gRPC `UNAVAILABLE` status with resume guidance instead of a
   clean end-of-stream. Allocator pass-through remains `FAILED_PRECONDITION`,

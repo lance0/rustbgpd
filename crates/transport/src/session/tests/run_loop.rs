@@ -896,6 +896,8 @@ async fn inbound_extended_message_accepted_from_peer_without_capability() {
 #[tokio::test]
 async fn outbound_extended_message_gated_on_peer_capability() {
     let mut session = make_test_session(65001, 65002);
+    let (priority_tx, _priority_rx) = mpsc::unbounded_channel();
+    session.writer_priority_tx = Some(priority_tx);
     session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
     assert_eq!(
         session.outbound_max_message_len(),
@@ -921,6 +923,36 @@ async fn outbound_extended_message_gated_on_peer_capability() {
         session.enqueue_priority(&big).is_ok(),
         "the peer advertised Extended Messages — the extended limit applies"
     );
+}
+
+#[test]
+fn enqueue_priority_without_writer_returns_writer_closed() {
+    let mut session = make_test_session(65001, 65002);
+    assert!(matches!(
+        session.enqueue_priority(&Message::Keepalive),
+        Err(TransportError::WriterClosed)
+    ));
+}
+
+#[test]
+fn enqueue_bulk_without_writer_returns_writer_closed() {
+    let mut session = make_test_session(65001, 65002);
+    assert!(matches!(
+        session.enqueue_bulk(&Message::RouteRefresh(RouteRefreshMessage::new(
+            Afi::Ipv4,
+            Safi::Unicast,
+        ))),
+        Err(TransportError::WriterClosed)
+    ));
+}
+
+#[test]
+fn enqueue_bulk_encoded_without_writer_returns_writer_closed() {
+    let mut session = make_test_session(65001, 65002);
+    assert!(matches!(
+        session.enqueue_bulk_encoded(Bytes::new(), false),
+        Err(TransportError::WriterClosed)
+    ));
 }
 
 // ─────────────────────────────────────────────────────────────────────
