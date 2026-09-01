@@ -11,6 +11,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `rbgp --pager auto|always|never` now provides terminal-aware paging for
+  complete human best, received, and advertised unicast RIB listings.
+
 - `rbgp rib lookup <IP|CIDR>` now performs one atomic IPv4/IPv6
   longest-prefix match against the global Loc-RIB and renders the existing
   best-path explanation in human or JSON form. Invalid targets, no covering

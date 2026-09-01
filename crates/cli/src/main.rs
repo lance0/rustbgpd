@@ -4,6 +4,7 @@ mod commands;
 mod connection;
 mod error;
 mod output;
+mod pager;
 #[cfg(test)]
 mod test_support;
 mod tui;
@@ -23,6 +24,8 @@ use crate::output::parse_family;
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use clap_complete::{Generator, Shell};
 use std::path::PathBuf;
+
+use pager::PagerMode;
 
 const BINARY_NAME: &str = "rbgp";
 
@@ -146,6 +149,10 @@ struct Cli {
     /// presence disables color without requiring a boolean value.
     #[arg(long, global = true)]
     no_color: bool,
+
+    /// Page complete human unicast RIB listings
+    #[arg(long, value_enum, default_value_t = PagerMode::Auto, global = true)]
+    pager: PagerMode,
 
     #[command(subcommand)]
     command: Command,
@@ -2507,7 +2514,35 @@ fn flush_stdout_result<W: std::io::Write + ?Sized>(
     result
 }
 
+fn pager_supported(command: &Command) -> bool {
+    let Command::Rib {
+        action,
+        explain,
+        count,
+        ..
+    } = command
+    else {
+        return false;
+    };
+    match action {
+        None => !explain && !count,
+        Some(RibAction::Received {
+            count: view_count,
+            rejected,
+            ..
+        }) => !explain && !count && !view_count && !rejected,
+        Some(RibAction::Advertised {
+            count: view_count,
+            explain: view_explain,
+            ..
+        }) => !explain && !count && !view_count && !view_explain,
+        _ => false,
+    }
+}
+
 async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
+    pager::validate_request(cli.pager, cli.json, pager_supported(&cli.command))?;
+
     // Shell completions don't need a gRPC connection.
     if let Command::Completions { shell } = cli.command {
         generate_completions(shell, binary_name, &mut std::io::stdout()).map_err(CliError::Io)?;
@@ -3152,7 +3187,8 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     } else if count {
                         commands::rib::count_best(connection, family_val, &filters, json).await
                     } else {
-                        commands::rib::best(connection, family_val, &filters, age, json).await
+                        commands::rib::best(connection, family_val, &filters, age, json, cli.pager)
+                            .await
                     }
                 }
                 Some(RibAction::Received {
@@ -3194,7 +3230,10 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     if count {
                         commands::rib::count_received(connection, &address, f, &filters, json).await
                     } else {
-                        commands::rib::received(connection, &address, f, &filters, age, json).await
+                        commands::rib::received(
+                            connection, &address, f, &filters, age, json, cli.pager,
+                        )
+                        .await
                     }
                 }
                 Some(RibAction::Advertised {
@@ -3267,8 +3306,10 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                         commands::rib::count_advertised(connection, &address, f, &filters, json)
                             .await
                     } else {
-                        commands::rib::advertised(connection, &address, f, &filters, age, json)
-                            .await
+                        commands::rib::advertised(
+                            connection, &address, f, &filters, age, json, cli.pager,
+                        )
+                        .await
                     }
                 }
                 Some(
@@ -7224,5 +7265,44 @@ printf '%s\n' "${COMPREPLY[@]}"
                 },
             } if prefix == "192.0.2.0/24"
         ));
+    }
+
+    #[test]
+    fn pager_support_is_limited_to_human_unicast_route_lists() {
+        for args in [
+            "rbgp rib",
+            "rbgp rib received 192.0.2.1 --limit 10",
+            "rbgp rib advertised 192.0.2.1 --age",
+        ] {
+            let cli = Cli::try_parse_from(args.split_ascii_whitespace()).unwrap();
+            assert!(pager_supported(&cli.command), "{args}");
+        }
+        for args in [
+            "rbgp rib --count",
+            "rbgp rib received 192.0.2.1 --rejected",
+            "rbgp rib advertised 192.0.2.1 --count",
+            "rbgp rib blackholes",
+            "rbgp top",
+        ] {
+            let cli = Cli::try_parse_from(args.split_ascii_whitespace()).unwrap();
+            assert!(!pager_supported(&cli.command), "{args}");
+        }
+    }
+
+    #[test]
+    fn pager_modes_parse_and_invalid_spelling_is_rejected() {
+        for (value, expected) in [
+            ("auto", PagerMode::Auto),
+            ("always", PagerMode::Always),
+            ("never", PagerMode::Never),
+        ] {
+            let cli = Cli::try_parse_from(["rbgp", "--pager", value, "rib"]).unwrap();
+            assert_eq!(cli.pager, expected);
+        }
+        assert!(Cli::try_parse_from(["rbgp", "--pager", "sometimes", "rib"]).is_err());
+        assert_eq!(
+            Cli::try_parse_from(["rbgp", "rib"]).unwrap().pager,
+            PagerMode::Auto
+        );
     }
 }

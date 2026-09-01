@@ -1,6 +1,6 @@
 # Print an optspec for argparse to handle cmd's options that are independent of any subcommand.
 function __fish_rbgp_global_optspecs
-    string join \n s/addr= token-file= j/json no-color h/help V/version
+    string join \n s/addr= token-file= j/json no-color pager= h/help V/version
 end
 
 function __fish_rbgp_needs_command
@@ -26,6 +26,9 @@ end
 
 complete -c rbgp -n "__fish_rbgp_needs_command" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_needs_command" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_needs_command" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_needs_command" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_needs_command" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_needs_command" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -61,11 +64,17 @@ complete -c rbgp -n "__fish_rbgp_needs_command" -f -a "man" -d 'Print the rbgp m
 complete -c rbgp -n "__fish_rbgp_needs_command" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand global" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand global" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand global" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand global" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand global" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand global" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status history rollback effective import help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status history rollback effective import help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status history rollback effective import help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status history rollback effective import help" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status history rollback effective import help" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status history rollback effective import help" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -82,12 +91,18 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_su
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and not __fish_seen_subcommand_from diff plan apply confirm abort status history rollback effective import help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from diff" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from diff" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from diff" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from diff" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from diff" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from diff" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from plan" -l expected-runtime-snapshot-token -d 'Optional runtime snapshot token to check while planning' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from plan" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from plan" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from plan" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from plan" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from plan" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from plan" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -99,26 +114,41 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from apply" -l confirm-timeout -d 'Confirmed-commit timeout in seconds; daemon default is 600, max is 86400' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from apply" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from apply" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from apply" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from apply" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from apply" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from apply" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from confirm" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from confirm" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from confirm" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from confirm" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from confirm" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from confirm" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from abort" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from abort" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from abort" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from abort" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from abort" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from abort" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from status" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from status" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from status" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from status" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from status" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from status" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from history" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from history" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from history" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from history" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from history" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from history" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -129,11 +159,17 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from rollback" -l confirm-timeout -d 'Confirmed-commit timeout in seconds; daemon default is 600, max is 86400' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from rollback" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from rollback" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from rollback" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from rollback" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from rollback" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from rollback" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from effective" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from effective" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from effective" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from effective" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from effective" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from effective" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -143,6 +179,9 @@ gobgp\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from import" -l out -d 'Write the translated config here (default: stdout; required with --json)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from import" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from import" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from import" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from import" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from import" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcommand_from import" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -160,6 +199,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand config; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -l compare -d 'Compare this peer\'s live update-group membership with another configured peer without exposing internal group identifiers' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -l wide -d 'Append summary columns to the list: MsgRcvd, MsgSent, Flaps, RRC (route-reflector client), Slow (`!` marks a slow peer), and State/PfxRcd (prefix count when Established). Display-only; JSON is unaffected by --wide and may omit optional false healthy-state fields'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -l no-color -d 'Disable colored output'
@@ -186,6 +228,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l paths-limit-receive-max -d 'Experimental Paths-Limit preference for Add-Path receive families' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l route-server-client -d 'Enable transparent route-server client mode (eBGP only)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l no-route-server-client -d 'Explicitly disable inherited transparent route-server client mode'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -l per-client-best -d 'RFC 7947 per-client best-path (path-hiding mitigation); effective route-server-client mode is validated by the daemon'
@@ -200,28 +245,43 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from add" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from delete" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from delete" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from delete" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from delete" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from delete" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from delete" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from enable" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from enable" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from enable" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from enable" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from enable" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from enable" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from disable" -l reason -d 'Disable reason' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from disable" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from disable" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from disable" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from disable" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from disable" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from disable" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from softreset" -s a -l family -d 'Address family to refresh' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from softreset" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from softreset" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from softreset" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from softreset" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from softreset" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from softreset" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from refresh-out" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from refresh-out" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from refresh-out" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from refresh-out" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from refresh-out" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subcommand_from refresh-out" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -235,6 +295,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor; and __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -l compare -d 'Compare this peer\'s live update-group membership with another configured peer without exposing internal group identifiers' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -l wide -d 'Append summary columns to the list: MsgRcvd, MsgSent, Flaps, RRC (route-reflector client), Slow (`!` marks a slow peer), and State/PfxRcd (prefix count when Established). Display-only; JSON is unaffected by --wide and may omit optional false healthy-state fields'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and not __fish_seen_subcommand_from add delete enable disable softreset refresh-out help" -l no-color -d 'Disable colored output'
@@ -261,6 +324,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subco
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l paths-limit-receive-max -d 'Experimental Paths-Limit preference for Add-Path receive families' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l route-server-client -d 'Enable transparent route-server client mode (eBGP only)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l no-route-server-client -d 'Explicitly disable inherited transparent route-server client mode'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -l per-client-best -d 'RFC 7947 per-client best-path (path-hiding mitigation); effective route-server-client mode is validated by the daemon'
@@ -275,28 +341,43 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subco
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from add" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from delete" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from delete" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from delete" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from delete" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from delete" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from delete" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from enable" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from enable" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from enable" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from enable" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from enable" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from enable" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from disable" -l reason -d 'Disable reason' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from disable" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from disable" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from disable" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from disable" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from disable" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from disable" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from softreset" -s a -l family -d 'Address family to refresh' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from softreset" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from softreset" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from softreset" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from softreset" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from softreset" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from softreset" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from refresh-out" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from refresh-out" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from refresh-out" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from refresh-out" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from refresh-out" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from refresh-out" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -309,6 +390,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subco
 complete -c rbgp -n "__fish_rbgp_using_subcommand summary; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and not __fish_seen_subcommand_from show help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and not __fish_seen_subcommand_from show help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and not __fish_seen_subcommand_from show help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and not __fish_seen_subcommand_from show help" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and not __fish_seen_subcommand_from show help" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and not __fish_seen_subcommand_from show help" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -316,6 +400,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and not __fish_seen_subco
 complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and not __fish_seen_subcommand_from show help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and __fish_seen_subcommand_from show" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and __fish_seen_subcommand_from show" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and __fish_seen_subcommand_from show" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and __fish_seen_subcommand_from show" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and __fish_seen_subcommand_from show" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and __fish_seen_subcommand_from show" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -323,6 +410,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand bfd; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from caches validate help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from caches validate help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from caches validate help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from caches validate help" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from caches validate help" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from caches validate help" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -331,11 +421,17 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and not __fish_seen_subcommand_from caches validate help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from caches" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from caches" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from caches" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from caches" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from caches" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from caches" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from validate" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from validate" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from validate" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from validate" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from validate" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rpki; and __fish_seen_subcommand_from validate" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -358,6 +454,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subco
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -l limit -d 'Return at most this many routes without walking the full table (1-1000)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -s l -l longer -d 'Show longer (more specific) prefixes matching --prefix'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -l explain -d 'Show why the best route was selected (requires --prefix)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -l count -d 'Print only the number of matching best, received, or advertised routes'
@@ -382,6 +481,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subco
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and not __fish_seen_subcommand_from lookup received recv advertised sent blackholes fib bgpls bgp-ls vpn labeled rtc add delete help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from lookup" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from lookup" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from lookup" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from lookup" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from lookup" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from lookup" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -400,6 +502,9 @@ unknown\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -l as-path-contains -d 'Filter by exact ASN membership in the represented AS path' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -l count -d 'Print only the number of matching received routes'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -l age -d 'Append the original route receive age'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from received" -l rejected -d 'Show the retained rejected routes with their reject reasons instead of the accepted Adj-RIB-In (the looking-glass filtered-route view; [policy.reject_retention])'
@@ -422,6 +527,9 @@ unknown\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -l as-path-contains -d 'Filter by exact ASN membership in the represented AS path' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -l count -d 'Print only the number of matching received routes'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -l age -d 'Append the original route receive age'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from recv" -l rejected -d 'Show the retained rejected routes with their reject reasons instead of the accepted Adj-RIB-In (the looking-glass filtered-route view; [policy.reject_retention])'
@@ -447,6 +555,9 @@ unknown\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -l as-path-contains -d 'Filter by exact ASN membership in the represented AS path' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -l count -d 'Print only the number of matching advertised routes'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -l age -d 'Append the original route receive age'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from advertised" -l explain -d 'Explain whether this exact prefix would be advertised to the peer'
@@ -473,6 +584,9 @@ unknown\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -l as-path-contains -d 'Filter by exact ASN membership in the represented AS path' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -l count -d 'Print only the number of matching advertised routes'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -l age -d 'Append the original route receive age'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -l explain -d 'Explain whether this exact prefix would be advertised to the peer'
@@ -483,6 +597,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from sent" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from blackholes" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from blackholes" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from blackholes" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from blackholes" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from blackholes" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from blackholes" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -495,6 +612,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from fib" -l page-token -d 'Page token returned by a previous paginated FIB status query' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from fib" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from fib" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from fib" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from fib" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from fib" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from fib" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -503,6 +623,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from bgpls" -l nlri-type -d 'NLRI type filter (1=node, 2=link, 3=IPv4 prefix, 4=IPv6 prefix)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from bgpls" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from bgpls" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from bgpls" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from bgpls" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from bgpls" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from bgpls" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -511,6 +634,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from bgp-ls" -l nlri-type -d 'NLRI type filter (1=node, 2=link, 3=IPv4 prefix, 4=IPv6 prefix)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from bgp-ls" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from bgp-ls" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from bgp-ls" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from bgp-ls" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from bgp-ls" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from bgp-ls" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -518,6 +644,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from vpn" -l neighbor -l peer -d 'Neighbor IP address filter' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from vpn" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from vpn" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from vpn" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from vpn" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from vpn" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from vpn" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -525,12 +654,18 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from labeled" -l neighbor -l peer -d 'Neighbor IP address filter' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from labeled" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from labeled" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from labeled" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from labeled" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from labeled" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from labeled" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from rtc" -l neighbor -l peer -d 'Neighbor IP address filter' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from rtc" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from rtc" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from rtc" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from rtc" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from rtc" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from rtc" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -544,12 +679,18 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from add" -l path-id -d 'Path ID for Add-Path' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from add" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from add" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from add" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from add" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from add" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from add" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from delete" -l path-id -d 'Path ID for Add-Path' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from delete" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from delete" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from delete" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from delete" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from delete" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from delete" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -567,6 +708,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcomman
 complete -c rbgp -n "__fish_rbgp_using_subcommand rib; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and not __fish_seen_subcommand_from nodes links help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and not __fish_seen_subcommand_from nodes links help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and not __fish_seen_subcommand_from nodes links help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and not __fish_seen_subcommand_from nodes links help" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and not __fish_seen_subcommand_from nodes links help" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and not __fish_seen_subcommand_from nodes links help" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -575,11 +719,17 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and not __fish_seen_
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and not __fish_seen_subcommand_from nodes links help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and __fish_seen_subcommand_from nodes" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and __fish_seen_subcommand_from nodes" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and __fish_seen_subcommand_from nodes" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and __fish_seen_subcommand_from nodes" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and __fish_seen_subcommand_from nodes" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and __fish_seen_subcommand_from nodes" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and __fish_seen_subcommand_from links" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and __fish_seen_subcommand_from links" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and __fish_seen_subcommand_from links" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and __fish_seen_subcommand_from links" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and __fish_seen_subcommand_from links" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and __fish_seen_subcommand_from links" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -588,11 +738,17 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand topology; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand orr" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand orr" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand orr" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand orr" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand orr" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand orr" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshot help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshot help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshot help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshot help" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshot help" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and not __fish_seen_subcommand_from advertised snapshot help" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -609,11 +765,17 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from advertised" -l deadline -d 'Aggregate wall-clock budget for the live query phase, starting after bounded local snapshot parsing and shared by neighbor discovery and every advertised-route page; expiry refuses the comparison (exit 2)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from advertised" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from advertised" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from advertised" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from advertised" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from advertised" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from advertised" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from snapshot" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from snapshot" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from snapshot" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from snapshot" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from snapshot" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcommand_from snapshot" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -626,6 +788,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand diff; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from add delete help" -s a -l family -d 'Address family (ipv4_flowspec, ipv6_flowspec)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from add delete help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from add delete help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from add delete help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from add delete help" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from add delete help" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and not __fish_seen_subcommand_from add delete help" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -637,6 +802,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from add" -l action -d 'Actions (e.g., drop, rate=1000, redirect=65001:100)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from add" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from add" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from add" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from add" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from add" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from add" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -644,6 +812,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -l match -d 'Match components identifying the rule' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand flowspec; and __fish_seen_subcommand_from delete" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -655,6 +826,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subc
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -l rd -d 'Route Distinguisher filter (list mode only), e.g. "65000:100"' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and not __fish_seen_subcommand_from add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -684,6 +858,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-mac-ip" -l rt -d 'Optional route targets, each "asn:value"' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-mac-ip" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-mac-ip" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-mac-ip" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-mac-ip" -l no-vxlan-encap -d 'Disable the RFC 8365 VXLAN encapsulation ext community'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-mac-ip" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-mac-ip" -l no-color -d 'Disable colored output'
@@ -695,6 +872,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l rt -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l no-vxlan-encap
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-imet" -l no-color -d 'Disable colored output'
@@ -709,6 +889,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l rt -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l no-vxlan-encap
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from add-ip-prefix" -l no-color -d 'Disable colored output'
@@ -719,6 +902,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -l ip -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-mac-ip" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -727,6 +913,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -l ip -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-imet" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -735,6 +924,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-ip-prefix" -l prefix -d 'IP prefix, e.g. "10.0.0.0/24" or "2001:db8::/48"' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-ip-prefix" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-ip-prefix" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-ip-prefix" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-ip-prefix" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-ip-prefix" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from delete-ip-prefix" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -742,16 +934,25 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from clear-duplicate-mac" -l mac -d 'MAC address "aa:bb:cc:dd:ee:ff"' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from clear-duplicate-mac" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from clear-duplicate-mac" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from clear-duplicate-mac" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from clear-duplicate-mac" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from clear-duplicate-mac" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from clear-duplicate-mac" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from duplicate-mac-quarantines" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from duplicate-mac-quarantines" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from duplicate-mac-quarantines" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from duplicate-mac-quarantines" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from duplicate-mac-quarantines" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from duplicate-mac-quarantines" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from es" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from es" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from es" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from es" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from es" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from es" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -761,31 +962,49 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from es" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from runtime" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from runtime" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from runtime" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from runtime" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from runtime" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from runtime" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from instances" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from instances" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from instances" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from instances" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from instances" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from instances" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from nexthops" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from nexthops" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from nexthops" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from nexthops" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from nexthops" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from nexthops" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from managed-netdevs" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from managed-netdevs" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from managed-netdevs" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from managed-netdevs" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from managed-netdevs" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from managed-netdevs" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from vrfs" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from vrfs" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from vrfs" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from vrfs" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from vrfs" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from vrfs" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from diagnose" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from diagnose" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from diagnose" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from diagnose" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from diagnose" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcommand_from diagnose" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -808,6 +1027,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand evpn; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand watch" -s a -l family -d 'Address family filter' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand watch" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand watch" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand watch" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand watch" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand watch" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand watch" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -817,6 +1039,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_su
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -s l -l limit -d 'Maximum recent route events to return (default 100; route history only)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and not __fish_seen_subcommand_from watch sessions policy evpn help" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -834,6 +1059,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l from-event-id -d 'ADR-0072 durable cursor: replay committed events with `event_id > N` from the daemon\'s local event outbox, then tail the live stream. `0` replays everything retained. Survives daemon restart. Returns `FAILED_PRECONDITION` when the daemon was started with `[event_history].enabled = false` or EHM is unavailable' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from watch" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -842,6 +1070,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -s l -l limit -d 'Maximum recent session events to return (default 100; explicit 0 requests the daemon\'s full bounded window)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from sessions" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -850,6 +1081,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -s l -l limit -d 'Maximum recent policy events to return (default 100; explicit 0 requests the daemon\'s full bounded window)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from policy" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -860,6 +1094,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -s l -l limit -d 'Maximum recent EVPN events to return (default 100; explicit 0 requests the daemon\'s full bounded window)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from evpn" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -870,6 +1107,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand events; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand health" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand health" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand health" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand health" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand health" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand health" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -877,28 +1117,43 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand doctor" -l output -d 'Output t
 complete -c rbgp -n "__fish_rbgp_using_subcommand doctor" -l log-file -d 'Daemon log file to tail (last 1000 lines) into the bundle. Without it the manifest records that the daemon logs to stdout/journald' -r -F
 complete -c rbgp -n "__fish_rbgp_using_subcommand doctor" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand doctor" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand doctor" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand doctor" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand doctor" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand doctor" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand metrics" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand metrics" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand metrics" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand metrics" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand metrics" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand metrics" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand shutdown" -l reason -d 'Shutdown reason' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand shutdown" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand shutdown" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand shutdown" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand shutdown" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand shutdown" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand shutdown" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand mrt-dump" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand mrt-dump" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand mrt-dump" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand mrt-dump" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand mrt-dump" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand mrt-dump" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -l neighbor -l peer -d 'Neighbor address; omit to toggle for all peers' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -l clear -d 'Clear instead of enabling'
 complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -l no-color -d 'Disable colored output'
@@ -906,11 +1161,17 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand gshut" -s h -l help -d 'Print 
 complete -c rbgp -n "__fish_rbgp_using_subcommand top" -s i -l interval -d 'Poll interval in seconds (1-60)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand top" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand top" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand top" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand top" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand top" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand top" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and not __fish_seen_subcommand_from list check fmt test get set delete chain stats counters explain help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and not __fish_seen_subcommand_from list check fmt test get set delete chain stats counters explain help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and not __fish_seen_subcommand_from list check fmt test get set delete chain stats counters explain help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and not __fish_seen_subcommand_from list check fmt test get set delete chain stats counters explain help" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and not __fish_seen_subcommand_from list check fmt test get set delete chain stats counters explain help" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and not __fish_seen_subcommand_from list check fmt test get set delete chain stats counters explain help" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -928,6 +1189,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and not __fish_seen_su
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and not __fish_seen_subcommand_from list check fmt test get set delete chain stats counters explain help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from list" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from list" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from list" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from list" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from list" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from list" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -936,6 +1200,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -l coverage-min -d 'Minimum acceptable exercised-term percentage (implies --coverage): exit 3 when coverage falls below PCT (CI gate). Diagnostics (1) and test failures (2) take precedence' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -l list-deps -d 'Print the resolved import graph — each module\'s path, SHA-256 content hash, and imports — instead of running tests (audit/packaging aid)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -l coverage -d 'Report which policy terms the in-language tests exercised (evaluated vs. matched, per term) plus static lints (unused sets/datasets/fns, unreachable terms, unreferenced policies). A report only — it never changes the exit code by itself'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -s j -l json -d 'Output in JSON format'
@@ -943,6 +1210,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from check" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from fmt" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from fmt" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from fmt" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from fmt" -l check -d 'Rewrite nothing; print a diff and exit 1 when any file is not canonically formatted (CI mode)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from fmt" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from fmt" -l no-color -d 'Disable colored output'
@@ -955,27 +1225,42 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -l show-changes -d 'Maximum before/after attribute diffs to show' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from test" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from get" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from get" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from get" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from get" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from get" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from get" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from set" -l from-file -d 'JSON file containing the PolicyDefinition shape' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from set" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from set" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from set" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from set" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from set" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from set" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from delete" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from delete" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from delete" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from delete" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from delete" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from delete" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from chain" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from chain" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from chain" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from chain" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from chain" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from chain" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -991,6 +1276,9 @@ export\t''
 both\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from stats" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from stats" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from stats" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from stats" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from stats" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from stats" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -1000,6 +1288,9 @@ export\t''
 both\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from counters" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from counters" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from counters" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from counters" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from counters" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from counters" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -1008,6 +1299,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from explain" -l path-id -d 'Add-Path identifier; omit to show every matching path' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from explain" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from explain" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from explain" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from explain" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from explain" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from explain" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -1024,6 +1318,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and not __fish_seen_subcommand_from list get set delete help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and not __fish_seen_subcommand_from list get set delete help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and not __fish_seen_subcommand_from list get set delete help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and not __fish_seen_subcommand_from list get set delete help" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and not __fish_seen_subcommand_from list get set delete help" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and not __fish_seen_subcommand_from list get set delete help" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -1034,22 +1331,34 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and not __fish_s
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and not __fish_seen_subcommand_from list get set delete help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from list" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from list" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from list" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from list" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from list" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from list" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from get" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from get" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from get" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from get" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from get" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from get" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from set" -l from-file -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from set" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from set" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from set" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from set" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from set" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from set" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from delete" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from delete" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from delete" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from delete" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from delete" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from delete" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -1060,6 +1369,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and not __fish_seen_subcommand_from list get set delete attach detach help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and not __fish_seen_subcommand_from list get set delete attach detach help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and not __fish_seen_subcommand_from list get set delete attach detach help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and not __fish_seen_subcommand_from list get set delete attach detach help" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and not __fish_seen_subcommand_from list get set delete attach detach help" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and not __fish_seen_subcommand_from list get set delete attach detach help" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -1072,33 +1384,51 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and not __fish_see
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and not __fish_seen_subcommand_from list get set delete attach detach help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from list" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from list" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from list" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from list" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from list" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from list" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from get" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from get" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from get" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from get" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from get" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from get" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from set" -l from-file -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from set" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from set" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from set" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from set" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from set" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from set" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from delete" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from delete" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from delete" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from delete" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from delete" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from delete" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from attach" -l group -d 'Peer-group name' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from attach" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from attach" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from attach" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from attach" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from attach" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from attach" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from detach" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from detach" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from detach" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from detach" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from detach" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from detach" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -1111,6 +1441,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_su
 complete -c rbgp -n "__fish_rbgp_using_subcommand peer-group; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and not __fish_seen_subcommand_from list add delete help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and not __fish_seen_subcommand_from list add delete help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and not __fish_seen_subcommand_from list add delete help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and not __fish_seen_subcommand_from list add delete help" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and not __fish_seen_subcommand_from list add delete help" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and not __fish_seen_subcommand_from list add delete help" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -1120,6 +1453,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and not __fi
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and not __fish_seen_subcommand_from list add delete help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from list" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from list" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from list" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from list" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from list" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from list" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -1128,11 +1464,17 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_s
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from add" -l description -d 'Optional description' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from add" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from add" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from add" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from add" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from add" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from add" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from delete" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from delete" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from delete" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from delete" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from delete" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from delete" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -1142,6 +1484,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_s
 complete -c rbgp -n "__fish_rbgp_using_subcommand dynamic-neighbor; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and not __fish_seen_subcommand_from list set delete help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and not __fish_seen_subcommand_from list set delete help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and not __fish_seen_subcommand_from list set delete help" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and not __fish_seen_subcommand_from list set delete help" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and not __fish_seen_subcommand_from list set delete help" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and not __fish_seen_subcommand_from list set delete help" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -1151,6 +1496,9 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and not __fish_seen
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and not __fish_seen_subcommand_from list set delete help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from list" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from list" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from list" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from list" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from list" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from list" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -1165,11 +1513,17 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_sub
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from set" -l maximum-paths-ibgp -d 'Per-class iBGP ECMP cap (overrides maximum_paths for iBGP)' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from set" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from set" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from set" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from set" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from set" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from set" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from delete" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from delete" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from delete" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from delete" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from delete" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from delete" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -1179,11 +1533,17 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_sub
 complete -c rbgp -n "__fish_rbgp_using_subcommand fib-table; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand completions" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand completions" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand completions" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand completions" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand completions" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand completions" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c rbgp -n "__fish_rbgp_using_subcommand man" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand man" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand man" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
+always\t''
+never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand man" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand man" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand man" -s h -l help -d 'Print help (see more with \'--help\')'

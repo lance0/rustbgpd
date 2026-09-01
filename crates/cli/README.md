@@ -158,6 +158,19 @@ rbgp fib-table list
 rbgp fib-table set edge --table-id 1000 --metric 200 --families ipv4_unicast,ipv6_unicast
 ```
 
+Complete human `rib`, `rib received`, and `rib advertised` unicast listings
+use `--pager auto` by default: a pager starts only when stdout is a terminal,
+the terminal height is known, and the complete rendered table plus any
+`--limit` footer is taller than the terminal. `--pager never` always writes
+directly. `--pager always` requires a terminal and one of those three human
+listings; JSON and all other commands are rejected before connecting.
+
+The pager command is the first non-empty value of `RBGP_PAGER`, then `PAGER`,
+split on ASCII whitespace without a shell. With neither set, auto mode uses
+`less -FRSX` and always mode uses `less -RSX`. If auto mode cannot find the
+pager executable, it writes the same rendered bytes directly; other pager
+startup failures and unsuccessful exits are errors.
+
 `rib received <addr> --rejected` reads a bounded per-peer retention buffer, not
 a guaranteed complete history of rejected routes. Plain-text output reports
 incomplete or unknown completeness with these warnings (using three evictions
