@@ -42,6 +42,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Reject AS 0 in received and locally encoded AS paths and aggregators per RFC
+  7607. Malformed ordinary paths are treated as withdraw, while affected AS4
+  compatibility and aggregator attributes are discarded without entering
+  canonical route state.
+
 - Replace `bgp_session_lifecycle_source_dropped_total{reason}` with
   `bgp_session_event_source_dropped_total{kind,reason}` so dropped state changes
   and notifications are counted separately before peer-manager publication.

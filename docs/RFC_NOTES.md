@@ -386,6 +386,15 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
   generated AS4 bytes count against the negotiated message ceiling before
   Adj-RIB-Out advances. See [ADR-0114](adr/0114-as4-path-migration.md).
 
+## RFC 7607 — AS 0 Rejection
+
+- Strict decoding rejects AS 0 in `AS_PATH`, `AS4_PATH`, `AGGREGATOR`, and
+  `AS4_AGGREGATOR`. Revised decoding maps ordinary `AS_PATH` to
+  treat-as-withdraw and discards the other three attributes.
+- AS 0 never participates in RFC 6793 reconstruction or canonical route
+  state. Canonical encoding rejects it before deriving type 17/18
+  compatibility attributes.
+
 ## RFC 9774 — AS_SET / AS_CONFED_SET Deprecation
 
 - The revised inbound attribute decoder inspects raw AS_PATH and AS4_PATH

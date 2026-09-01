@@ -5,6 +5,11 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+- Reject AS 0 per RFC 7607 in `AS_PATH`, `AS4_PATH`, `AGGREGATOR`, and
+  `AS4_AGGREGATOR`. Revised decoding treats an ordinary path containing AS 0
+  as withdraw and discards affected compatibility and aggregator attributes;
+  canonical encoding rejects AS 0 before compatibility sidecars are derived.
+
 ## 0.19.0 - 2026-08-30
 
 - Enforced Partial clear on typed MED, ORIGINATOR_ID, and CLUSTER_LIST. The

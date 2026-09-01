@@ -1186,6 +1186,8 @@ pub(crate) fn decode_path_attributes_revised_observed(
                 },
             });
         }
+        let as_path_zero = type_code == attr_type::AS_PATH
+            && as_path_contains_zero(value, if four_octet_as { 4 } else { 2 });
         let duplicate = std::mem::replace(&mut seen[usize::from(type_code)], true);
         if duplicate {
             // RFC 7606 §3 (g): duplicate MP_REACH/MP_UNREACH is fatal.
@@ -1201,6 +1203,19 @@ pub(crate) fn decode_path_attributes_revised_observed(
                 attr_type::MP_REACH_NLRI | attr_type::MP_UNREACH_NLRI
             ) {
                 return Err(error);
+            }
+            // RFC 7607: a later AS_PATH containing AS 0 still contributes
+            // treat-as-withdraw before RFC 7606 discards the duplicate.
+            if as_path_zero {
+                malformed.push(MalformedAttribute {
+                    type_code,
+                    disposition: ErrorDisposition::TreatAsWithdraw,
+                    error: DecodeError::UpdateAttributeError {
+                        subcode: update_subcode::MALFORMED_AS_PATH,
+                        data: attr_error_data(flags, type_code, value),
+                        detail: "RFC 7607 prohibits AS 0 in AS_PATH".to_string(),
+                    },
+                });
             }
             malformed.push(MalformedAttribute {
                 type_code,
@@ -1540,10 +1555,13 @@ fn decode_as4_path(raw: &RawAttribute) -> Result<(AsPath, bool), DecodeError> {
                 "AS4_PATH segment length is not a multiple of 4".to_string(),
             ));
         };
-        let asns = chunks
+        let asns: Vec<u32> = chunks
             .iter()
             .map(|asn| u32::from_be_bytes([asn[0], asn[1], asn[2], asn[3]]))
             .collect();
+        if asns.contains(&0) {
+            return Err(malformed("RFC 7607 prohibits AS 0 in AS4_PATH".to_string()));
+        }
         value = &value[needed..];
         match segment_type {
             1 | 4 => {
@@ -1573,8 +1591,16 @@ fn decode_as4_aggregator(raw: &RawAttribute) -> Result<Aggregator, DecodeError> 
             detail: format!("AS4_AGGREGATOR length {} (expected 8)", raw.data.len()),
         });
     }
+    let asn = u32::from_be_bytes([raw.data[0], raw.data[1], raw.data[2], raw.data[3]]);
+    if asn == 0 {
+        return Err(DecodeError::UpdateAttributeError {
+            subcode: update_subcode::OPTIONAL_ATTRIBUTE_ERROR,
+            data: attr_error_data(raw.flags, raw.type_code, &raw.data),
+            detail: "RFC 7607 prohibits AS 0 in AS4_AGGREGATOR".to_string(),
+        });
+    }
     Ok(Aggregator {
-        asn: u32::from_be_bytes([raw.data[0], raw.data[1], raw.data[2], raw.data[3]]),
+        asn,
         router_id: Ipv4Addr::new(raw.data[4], raw.data[5], raw.data[6], raw.data[7]),
         partial: raw.flags & attr_flags::PARTIAL != 0,
     })
@@ -1658,6 +1684,27 @@ fn prohibited_as_set(mut value: &[u8], asn_width: usize) -> Option<u8> {
         value = next;
     }
     None
+}
+
+/// Return whether a structurally complete AS path contains AS 0.
+fn as_path_contains_zero(mut value: &[u8], asn_width: usize) -> bool {
+    while value.len() >= 2 {
+        let count = usize::from(value[1]);
+        let Some(segment_len) = count.checked_mul(asn_width) else {
+            return false;
+        };
+        let Some(segment) = value.get(2..2 + segment_len) else {
+            return false;
+        };
+        if segment
+            .chunks_exact(asn_width)
+            .any(|asn| asn.iter().all(|byte| *byte == 0))
+        {
+            return true;
+        }
+        value = &value[2 + segment_len..];
+    }
+    false
 }
 /// Decode a single attribute value given its flags, type code, and raw bytes.
 #[expect(
@@ -1743,6 +1790,15 @@ fn decode_attribute_value(
                     detail: e.to_string(),
                 }
             })?;
+            if segments.iter().any(|segment| match segment {
+                AsPathSegment::AsSequence(asns) | AsPathSegment::AsSet(asns) => asns.contains(&0),
+            }) {
+                return Err(DecodeError::UpdateAttributeError {
+                    subcode: update_subcode::MALFORMED_AS_PATH,
+                    data: attr_error_data(flags, type_code, value),
+                    detail: "RFC 7607 prohibits AS 0 in AS_PATH".to_string(),
+                });
+            }
             Ok(PathAttribute::AsPath(AsPath { segments }))
         }
         attr_type::AGGREGATOR => {
@@ -1768,6 +1824,13 @@ fn decode_attribute_value(
                     Ipv4Addr::new(value[2], value[3], value[4], value[5]),
                 )
             };
+            if asn == 0 {
+                return Err(DecodeError::UpdateAttributeError {
+                    subcode: update_subcode::OPTIONAL_ATTRIBUTE_ERROR,
+                    data: attr_error_data(flags, type_code, value),
+                    detail: "RFC 7607 prohibits AS 0 in AGGREGATOR".to_string(),
+                });
+            }
             Ok(PathAttribute::Aggregator(Aggregator {
                 asn,
                 router_id,
@@ -2959,6 +3022,12 @@ fn encode_path_attributes_with_scratch<'a>(
                         value: "AS_SET cannot be projected under RFC 9774".to_string(),
                     });
                 }
+                if as_path.asns().any(|asn| asn == 0) {
+                    return Err(EncodeError::ValueOutOfRange {
+                        field: "AS_PATH",
+                        value: "AS 0 is prohibited by RFC 7607".to_string(),
+                    });
+                }
                 flags = attr_flags::TRANSITIVE;
                 type_code = attr_type::AS_PATH;
                 encode_as_path(as_path, value_scratch, four_octet_as);
@@ -2973,6 +3042,12 @@ fn encode_path_attributes_with_scratch<'a>(
                 }
             }
             PathAttribute::Aggregator(aggregator) => {
+                if aggregator.asn == 0 {
+                    return Err(EncodeError::ValueOutOfRange {
+                        field: "AGGREGATOR",
+                        value: "AS 0 is prohibited by RFC 7607".to_string(),
+                    });
+                }
                 flags = attr_flags::OPTIONAL
                     | attr_flags::TRANSITIVE
                     | if aggregator.partial {
@@ -8231,6 +8306,192 @@ mod tests {
                     ..
                 }
             ));
+        }
+    }
+
+    fn rfc7607_revised(value: &[u8], four_octet_as: bool) -> RevisedAttributeDecode {
+        decode_path_attributes_revised(value, four_octet_as, false, &[]).unwrap()
+    }
+
+    #[test]
+    fn rfc7607_as_path_zero_is_rejected_at_both_peer_widths() {
+        let cases = [
+            (false, vec![2, 1, 0, 0]),
+            (false, vec![2, 3, 0, 1, 0, 0, 0, 2]),
+            (true, vec![2, 1, 0, 0, 0, 0]),
+            (true, vec![2, 3, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2]),
+        ];
+        for (four_octet_as, value) in cases {
+            let wire = attr_bytes(attr_flags::TRANSITIVE, attr_type::AS_PATH, &value);
+            assert!(decode_path_attributes(&wire, four_octet_as, &[]).is_err());
+            let revised = rfc7607_revised(&wire, four_octet_as);
+            assert!(revised.attributes.is_empty());
+            assert!(revised.malformed.iter().any(|malformed| {
+                malformed.type_code == attr_type::AS_PATH
+                    && malformed.disposition == ErrorDisposition::TreatAsWithdraw
+            }));
+        }
+    }
+
+    #[test]
+    fn rfc7607_as_path_set_zero_and_duplicate_zero_are_treat_as_withdraw() {
+        let set_zero = attr_bytes(
+            attr_flags::TRANSITIVE,
+            attr_type::AS_PATH,
+            &[1, 2, 0, 1, 0, 0],
+        );
+        assert!(decode_path_attributes(&set_zero, false, &[]).is_err());
+        let revised = rfc7607_revised(&set_zero, false);
+        assert!(revised.attributes.is_empty());
+        assert!(revised.malformed.iter().any(|malformed| {
+            malformed.type_code == attr_type::AS_PATH
+                && malformed.disposition == ErrorDisposition::TreatAsWithdraw
+        }));
+
+        let mut duplicate = attr_bytes(attr_flags::TRANSITIVE, attr_type::AS_PATH, &[2, 1, 0, 1]);
+        duplicate.extend(attr_bytes(
+            attr_flags::TRANSITIVE,
+            attr_type::AS_PATH,
+            &[2, 1, 0, 0],
+        ));
+        let revised = rfc7607_revised(&duplicate, false);
+        assert_eq!(revised.attributes, vec![as_path(&[1])]);
+        assert!(revised.malformed.iter().any(|malformed| {
+            malformed.type_code == attr_type::AS_PATH
+                && malformed.disposition == ErrorDisposition::TreatAsWithdraw
+        }));
+    }
+
+    #[test]
+    fn rfc7607_as4_path_zero_is_discarded_without_reconstruction() {
+        for (four_octet_as, as_path_value) in [
+            (false, &[2, 1, 0x5b, 0xa0][..]),
+            (true, &[2, 1, 0, 0, 0x5b, 0xa0][..]),
+        ] {
+            for value in [
+                &[2, 1, 0, 0, 0, 0][..],
+                &[2, 3, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2][..],
+            ] {
+                let mut wire =
+                    attr_bytes(attr_flags::TRANSITIVE, attr_type::AS_PATH, as_path_value);
+                wire.extend(attr_bytes(
+                    attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+                    attr_type::AS4_PATH,
+                    value,
+                ));
+                assert!(decode_path_attributes(&wire, four_octet_as, &[]).is_err());
+                let revised = rfc7607_revised(&wire, four_octet_as);
+                assert_eq!(
+                    revised.attributes,
+                    vec![as_path(&[u32::from(crate::constants::AS_TRANS)])]
+                );
+                let [malformed] = revised.malformed.as_slice() else {
+                    panic!("expected exact AS4_PATH discard");
+                };
+                assert_eq!(malformed.type_code, attr_type::AS4_PATH);
+                assert_eq!(malformed.disposition, ErrorDisposition::AttributeDiscard);
+            }
+        }
+
+        let mut new_speaker = attr_bytes(
+            attr_flags::TRANSITIVE,
+            attr_type::AS_PATH,
+            &[2, 1, 0, 0, 0, 1],
+        );
+        new_speaker.extend(attr_bytes(
+            attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+            attr_type::AS4_PATH,
+            &[2, 1, 0, 0, 0, 0],
+        ));
+        assert!(decode_path_attributes(&new_speaker, true, &[]).is_err());
+        let revised = rfc7607_revised(&new_speaker, true);
+        assert_eq!(revised.attributes, vec![as_path(&[1])]);
+        let [malformed] = revised.malformed.as_slice() else {
+            panic!("expected exact new-speaker AS4_PATH discard");
+        };
+        assert_eq!(malformed.type_code, attr_type::AS4_PATH);
+        assert_eq!(malformed.disposition, ErrorDisposition::AttributeDiscard);
+    }
+
+    #[test]
+    fn rfc7607_aggregator_zero_is_discarded_at_both_widths() {
+        for (four_octet_as, value) in [
+            (false, &[0, 0, 10, 0, 0, 1][..]),
+            (true, &[0, 0, 0, 0, 10, 0, 0, 1][..]),
+        ] {
+            let wire = attr_bytes(
+                attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+                attr_type::AGGREGATOR,
+                value,
+            );
+            assert!(decode_path_attributes(&wire, four_octet_as, &[]).is_err());
+            let revised = rfc7607_revised(&wire, four_octet_as);
+            assert!(revised.attributes.is_empty());
+            let [malformed] = revised.malformed.as_slice() else {
+                panic!("expected exact AGGREGATOR discard");
+            };
+            assert_eq!(malformed.type_code, attr_type::AGGREGATOR);
+            assert_eq!(malformed.disposition, ErrorDisposition::AttributeDiscard);
+        }
+    }
+
+    #[test]
+    fn rfc7607_as4_aggregator_zero_is_discarded() {
+        let wire = attr_bytes(
+            attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+            attr_type::AS4_AGGREGATOR,
+            &[0, 0, 0, 0, 10, 0, 0, 1],
+        );
+        for four_octet_as in [false, true] {
+            assert!(decode_path_attributes(&wire, four_octet_as, &[]).is_err());
+            let revised = rfc7607_revised(&wire, four_octet_as);
+            assert!(revised.attributes.is_empty());
+            let [malformed] = revised.malformed.as_slice() else {
+                panic!("expected exact AS4_AGGREGATOR discard");
+            };
+            assert_eq!(malformed.type_code, attr_type::AS4_AGGREGATOR);
+            assert_eq!(malformed.disposition, ErrorDisposition::AttributeDiscard);
+        }
+    }
+
+    #[test]
+    fn rfc7607_as_one_remains_valid() {
+        for (four_octet_as, value) in [(false, &[2, 1, 0, 1][..]), (true, &[2, 1, 0, 0, 0, 1][..])]
+        {
+            let wire = attr_bytes(attr_flags::TRANSITIVE, attr_type::AS_PATH, value);
+            assert_eq!(
+                decode_path_attributes(&wire, four_octet_as, &[]).unwrap(),
+                vec![as_path(&[1])]
+            );
+            assert!(rfc7607_revised(&wire, four_octet_as).malformed.is_empty());
+        }
+    }
+
+    #[test]
+    fn rfc7607_encoder_rejects_zero_before_sidecar_projection() {
+        let attributes = [
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![0, 4_200_000_001])],
+            }),
+            PathAttribute::Aggregator(Aggregator {
+                asn: 0,
+                router_id: Ipv4Addr::new(10, 0, 0, 1),
+                partial: false,
+            }),
+        ];
+        for attribute in attributes {
+            for four_octet_as in [false, true] {
+                let mut encoded = Vec::new();
+                let error = encode_path_attributes(
+                    std::slice::from_ref(&attribute),
+                    &mut encoded,
+                    four_octet_as,
+                    false,
+                )
+                .unwrap_err();
+                assert!(matches!(error, EncodeError::ValueOutOfRange { .. }));
+                assert!(encoded.is_empty());
+            }
         }
     }
 
