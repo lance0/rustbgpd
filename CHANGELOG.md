@@ -27,6 +27,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `rbgp doctor` now describes config freshness as an mtime comparison with the
+  daemon's last config-file marker rather than claiming effective runtime
+  agreement. The Prometheus alert pack reports authoritative partial
+  SIGHUP reloads and failed retained reload tasks over a reset-safe ten-minute
+  window.
+
 - The rrtransport receipt verifier now tolerates at most 4 MiB of Linux
   `/proc` `VmHWM` accounting drift between checkpoints while retaining raw
   observations. `VmHWM` below `VmRSS`, larger regressions, and the 2 GiB RSS

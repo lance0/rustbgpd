@@ -172,7 +172,62 @@ tests:
                 the daemon exits independently when the 30-minute budget plus
                 five-second grace expires.
 
-  # ── Session rules ─────────────────────────────────────────────
+  # SIGHUP reload outcomes use bounded, reset-safe counter windows.
+  - interval: 1m
+    input_series:
+      - series: 'bgp_sighup_reload_outcomes_total{outcome="known_partial", instance="edge1:9179"}'
+        values: "0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_sighup_reload_outcomes_total{outcome="task_failed", instance="edge2:9179"}'
+        values: "10 10 10 10 10 10 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_sighup_reload_outcomes_total{outcome="complete", instance="edge3:9179"}'
+        values: "0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_sighup_reload_outcomes_total{outcome="known_partial", instance="edge4:9179"}'
+        values: "7x22"
+      - series: 'bgp_sighup_reload_outcomes_total{outcome="rejected_no_effect", instance="edge5:9179"}'
+        values: "0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
+      - series: 'bgp_sighup_reload_outcomes_total{outcome="ignored_in_flight", instance="edge6:9179"}'
+        values: "0 0 0 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: BgpSighupReloadKnownPartial
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: BgpSighupReloadTaskFailed
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: BgpSighupReloadKnownPartial
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              outcome: known_partial
+              instance: edge1:9179
+            exp_annotations:
+              summary: "SIGHUP reload completed with partial runtime authority"
+              description: >-
+                A SIGHUP reload on edge1:9179 reached an authoritative partial
+                result in the last 10 minutes. Inspect the reload logs, correct
+                the reported cause, and reload again to converge.
+      - eval_time: 10m
+        alertname: BgpSighupReloadTaskFailed
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              outcome: task_failed
+              instance: edge2:9179
+            exp_annotations:
+              summary: "SIGHUP reload task failed"
+              description: >-
+                The retained SIGHUP reload task on edge2:9179 failed in the
+                last 10 minutes. Inspect daemon health and reload logs before
+                attempting another configuration change.
+      - eval_time: 21m
+        alertname: BgpSighupReloadKnownPartial
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: BgpSighupReloadTaskFailed
+        exp_alerts: []
+
+  # Session rules.
   # Every series carries the bare neighbor address in `peer`, matching
   # the daemon's real export, so the session/RIB join needs no rewrite.
   # 192.0.2.1 — flapped down and stayed down (stale counters say up)

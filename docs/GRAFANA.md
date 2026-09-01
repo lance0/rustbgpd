@@ -93,6 +93,7 @@ A ready-to-load Prometheus alert-rule pack (session down/flapping,
 empty Adj-RIB-In, max-prefix near-limit and breach, empty RPKI VRP table, event-outbox
 degradation, update-group residue growth, stalled policy transition, a slow
 peer, RFC 8212 missing import/export policy, sustained outbound-prefix blocking,
+authoritative partial SIGHUP reloads and failed retained reload tasks,
 dynamic-neighbor admission near-limit and rejection,
 actor polls above 200ms, exact-export rejection, malformed UPDATE disposition,
 selection-deferral timeout and ledger overflow, outbound route loss, RFC 9687

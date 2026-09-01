@@ -1923,7 +1923,7 @@ First-deploy checks (network probes are bounded to a 2s timeout; all are read-on
 | `gnmi_dialout.<name>.reachable_from_cli` | TCP connect from the `rbgp` process to each `[gnmi_dialout] targets` entry | yellow on failure because the daemon may have a different network vantage; inspect `gnmi_dialout_connected` and daemon logs for actual dial-out state |
 | `state_dir.writable` / `state_dir.disk` | `runtime_state_dir` writability and free space (yellow < 1 GiB, red < 100 MiB) | journal, MRT dumps, crash reports, and the event-history DB write there |
 | `host.run_context` | systemd / container / unknown from pid-1 facts | tailors remediation lines (e.g. `LimitNOFILE=` vs container ulimits) |
-| `daemon.config_freshness.<pid>` | config file mtime vs. local daemon start time | yellow when on-disk edits are pending; validate with `rustbgpd --check` then reload with SIGHUP |
+| `daemon.config_freshness.<pid>` | whether config file mtime is newer than the daemon's last config-file marker (process start fallback) | yellow means on-disk changes may be pending; green does not prove effective runtime agreement |
 
 Probe targets come from the daemon's effective config when it is up; when
 it is down, from the local config file (the path a local daemon process

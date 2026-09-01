@@ -1778,8 +1778,8 @@ fn config_freshness_reference(state_dir: &Path, pid: u32) -> Option<u64> {
     last_persist_unix(state_dir).or_else(|| proc_start_unix(pid))
 }
 
-/// Pure freshness verdict: the config file was modified after the daemon last
-/// read or wrote it, so on-disk edits are pending until a reload.
+/// Pure freshness verdict: warn when the config mtime is newer than the
+/// daemon's marker without claiming that the file contents diverge.
 fn config_freshness_check(
     pid: u32,
     config_path: &str,
@@ -1790,15 +1790,18 @@ fn config_freshness_check(
         (
             CheckStatus::Warn,
             format!(
-                "config {config_path} was modified after daemon pid {pid} last applied it — \
-                 on-disk changes are not applied; validate with `rustbgpd --check \
+                "config {config_path} is newer than daemon pid {pid}'s last config-file marker — \
+                 on-disk changes may be pending; validate with `rustbgpd --check \
                  {config_path}` and reload with SIGHUP (systemctl reload rustbgpd)"
             ),
         )
     } else {
         (
             CheckStatus::Ok,
-            format!("config {config_path} matches what daemon pid {pid} last applied"),
+            format!(
+                "config {config_path} is not newer than daemon pid {pid}'s last config-file \
+                 marker; this does not prove effective runtime agreement"
+            ),
         )
     };
     Check {
@@ -4099,6 +4102,19 @@ paths = ["x"]
         assert!(stale.detail.contains("--check"), "{}", stale.detail);
         let fresh = config_freshness_check(7, "/etc/rustbgpd/config.toml", 1_000, 1_000);
         assert_eq!(fresh.status, CheckStatus::Ok);
+        assert!(
+            fresh.detail.contains("config-file marker"),
+            "{}",
+            fresh.detail
+        );
+        assert!(
+            fresh
+                .detail
+                .contains("does not prove effective runtime agreement"),
+            "{}",
+            fresh.detail
+        );
+        assert!(!fresh.detail.contains("last applied"), "{}", fresh.detail);
     }
 
     /// The regression: the daemon rewrites its own config file on every
