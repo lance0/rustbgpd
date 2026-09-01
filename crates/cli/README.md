@@ -22,7 +22,7 @@ on-demand route explorer. `v` cycles the global unicast Best table and the
 peer's Received, Advertised, and Rejected tables, `f` toggles IPv4/IPv6
 unicast, `/` sets an exact prefix filter (with a longer-prefixes toggle), and
 `n`/`p` follow server pages while `Space`/`PgDn` move within one. `Enter` on a
-Best or Advertised row, or `e` with a typed prefix, runs the existing export
+Best row, or `e` with a typed or selected prefix, runs the existing export
 explanation for that prefix and peer. The view is on demand; it does not
 continuously poll the RIB.
 

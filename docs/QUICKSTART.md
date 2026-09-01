@@ -166,7 +166,7 @@ From the TUI peer detail, press `r` to open the on-demand route explorer: `v`
 cycles the global Best table and the peer's Received, Advertised, and Rejected
 tables, `f` toggles IPv4/IPv6 unicast, `/` sets an exact prefix filter, and
 `n`/`p` follow server pages (`Space`/`PgDn` move within one). `Enter` on a
-Best or Advertised row, or `e` with a typed prefix, shows whether the prefix
+Best row, or `e` with a typed or selected prefix, shows whether the prefix
 would be advertised to that peer or denied, including the ordered export gates
 and policy reasons. This is an on-demand view, not a live RIB feed.
 

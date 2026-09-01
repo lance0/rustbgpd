@@ -2375,17 +2375,17 @@ point-in-time server page (100 routes) of one unicast table at a time:
 - `Space`/`PgDn` and `PgUp` move the highlight one screen within the current
   server page; `n` and `p` follow the server's opaque page tokens to the next
   or previous server page.
-- `Enter` evaluates the highlighted Best or Advertised prefix with
-  `ExplainAdvertisedRoute`; `e` opens the same editor to explain any typed
+- `Enter` evaluates the highlighted Best prefix with `ExplainAdvertisedRoute`;
+  `e` opens the same editor, prefilled from any selected row, to explain a
   prefix for the selected peer, including one absent from Adj-RIB-Out. The
   result shows advertise or deny, ordered gates and reasons, policy
-  attribution, and route modifications. `Enter` does nothing on Received or
-  Rejected rows.
+  attribution, and route modifications. `Enter` does nothing on Received,
+  Advertised, or Rejected rows.
 - `r` re-runs page 1 of the current table.
 
-The status line reports the exact server `total_count`, the table, the peer
-(or `global` for Best), the family, the active filter, the server page index,
-and the snapshot fence (`page_version`).
+The title and status line expose the table, peer scope (or `global` for Best),
+family, active filter, server page index, exact server `total_count`, and
+snapshot fence (`page_version`).
 
 Best, Received, and Advertised pass the family and prefix filter to the
 daemon's `ListBestRoutes`, `ListReceivedRoutes`, and `ListAdvertisedRoutes`

@@ -139,7 +139,11 @@ pub(crate) async fn fetch_tui_route_page(
         RouteListRpc::Received => client.list_received_routes(request).await?,
         RouteListRpc::Advertised => client.list_advertised_routes(request).await?,
     };
-    Ok(response.into_inner())
+    let mut response = response.into_inner();
+    for route in &mut response.routes {
+        restore_matching_scoped_address(peer_address, &mut route.peer_address);
+    }
+    Ok(response)
 }
 
 /// Fetch the selected peer's retained rejected routes for the TUI explorer.

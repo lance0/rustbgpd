@@ -16,7 +16,7 @@ backends.
 The TUI exposes one focused part of this catalog: from a selected peer's detail,
 press `r` to open the on-demand route explorer over the global unicast Best
 table and the peer's Received, Advertised, and Rejected tables, with an exact
-prefix filter. `Enter` on a Best or Advertised row, or `e` with a typed prefix,
+prefix filter. `Enter` on a Best row, or `e` with a typed or selected prefix,
 explains the export decision for that prefix and peer: advertise/deny, ordered
 gates and policy reasons, and modifications, including denials absent from
 Adj-RIB-Out. It is not a live RIB feed and does not cover best-path comparison,

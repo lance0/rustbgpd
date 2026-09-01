@@ -61,9 +61,9 @@ impl RibView {
         self != RibView::Best
     }
 
-    /// Only tables whose rows are export candidates explain on `Enter`.
+    /// Only Best rows identify the winner used by export explanation.
     pub fn explains_rows(self) -> bool {
-        matches!(self, RibView::Best | RibView::Advertised)
+        self == RibView::Best
     }
 
     fn route_list(self) -> Option<RouteListRpc> {
@@ -840,6 +840,15 @@ mod tests {
     #[tokio::test]
     async fn rib_query_lane_scopes_received_advertised_and_keeps_best_global() {
         let server = spawn_mock_server(None).await;
+        *server.state.list_route_pages.lock().await = (0..3)
+            .map(|_| rustbgpd_api::proto::ListRoutesResponse {
+                routes: vec![rustbgpd_api::proto::Route {
+                    peer_address: "fe80::1".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .collect();
         let connection = connect(&server.addr, None).await.unwrap();
         let (lane, mut results) = spawn_rib_query_lane(connection);
         let filter = PrefixFilter {
@@ -860,7 +869,15 @@ mod tests {
             lane.query(3, "fe80::1%eth0".into(), query.clone()).unwrap();
             let result = receive_result(&mut results).await;
             assert_eq!(result.identity.query, query);
-            assert!(matches!(result.result, Ok(RibQueryResponse::Page(_))));
+            let RibQueryResponse::Page(page) = result.result.unwrap() else {
+                panic!("expected route page")
+            };
+            let expected_peer = if view.peer_scoped() {
+                "fe80::1%eth0"
+            } else {
+                "fe80::1"
+            };
+            assert_eq!(page.routes[0].peer_address, expected_peer);
             assert_eq!(calls.load(Ordering::SeqCst), 1);
         }
         let expected = |neighbor: &str| rustbgpd_api::proto::ListRoutesRequest {

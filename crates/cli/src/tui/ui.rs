@@ -369,7 +369,7 @@ fn draw_peer_detail(f: &mut Frame, app: &mut App, address: &str, theme: &Theme) 
     };
 
     let cfg = neighbor.config.as_ref();
-    let title = format!(" Peer Detail: {address} | r Best RIB | Esc back | j/k scroll ");
+    let title = format!(" Peer Detail: {address} | r Routes | Esc peer table | j/k scroll ");
 
     let block = Block::default()
         .title(title)
@@ -837,7 +837,7 @@ fn draw_route_explorer(f: &mut Frame, app: &mut App, peer: &str, theme: &Theme) 
     let explain_hint = if app.rib_view.explains_rows() {
         "Enter Explain"
     } else {
-        "Enter n/a (explain from Best/Advertised, or e)"
+        "Enter n/a (row explain from Best; use e)"
     };
     let keys = format!(
         "v View | f Family | / Filter | e Explain prefix | Space/PgDn screen | n/p server page | {explain_hint} | r Refresh | Esc Back"
@@ -1195,14 +1195,14 @@ fn draw_help_overlay(f: &mut Frame, theme: &Theme) {
         Line::from(vec![
             Span::styled("  Enter       ", Style::default().fg(theme.accent)),
             Span::styled(
-                "Show detail / explain selected route",
+                "Show peer detail / explain selected Best row",
                 Style::default().fg(theme.text),
             ),
         ]),
         Line::from(vec![
             Span::styled("  r           ", Style::default().fg(theme.accent)),
             Span::styled(
-                "Open route explorer (detail) / refresh (explorer)",
+                "Open Routes from peer detail / refresh explorer",
                 Style::default().fg(theme.text),
             ),
         ]),
@@ -1236,7 +1236,10 @@ fn draw_help_overlay(f: &mut Frame, theme: &Theme) {
         ]),
         Line::from(vec![
             Span::styled("  Esc         ", Style::default().fg(theme.accent)),
-            Span::styled("Back to peer table", Style::default().fg(theme.text)),
+            Span::styled(
+                "Back one view / cancel editor",
+                Style::default().fg(theme.text),
+            ),
         ]),
         Line::from(""),
         Line::from(Span::styled(
@@ -1542,7 +1545,7 @@ mod tests {
         rich.on_data(snapshot(vec![safety_neighbor()], Freshness::Fresh));
         rich.view = View::PeerDetail("192.0.2.2".into());
         let rendered = rendered_detail(&mut rich, 130, 50);
-        assert!(rendered.contains("r Best RIB"));
+        assert!(rendered.contains("r Routes"));
 
         for (label, expected) in [
             ("Configured Hold Time:", "90s"),
@@ -1878,6 +1881,7 @@ mod tests {
             assert!(rendered.contains(expected), "missing {expected}");
             assert!(rendered.contains(&format!("Routes: {}", view.label())));
         }
+        app.rib_view = RibView::Best;
         assert!(rendered_app(&mut app, 120, 10).contains("Enter Explain"));
         app.rib_view = RibView::Received;
         let rendered = rendered_app(&mut app, 120, 10);

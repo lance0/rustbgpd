@@ -439,6 +439,10 @@ impl App {
                 .routes
                 .get(selected)
                 .map(|route| (route.prefix.clone(), route.prefix_length)),
+            Some(RibPageState::Rejected { page, .. }) => page
+                .routes
+                .get(selected)
+                .map(|route| (route.prefix.clone(), route.prefix_length)),
             _ => None,
         }
     }
@@ -2059,6 +2063,9 @@ mod tests {
         app.on_key(key(KeyCode::Enter));
         assert!(app.take_rib_intent().is_none());
         assert_eq!(app.view, View::RouteExplorer("198.51.100.1".into()));
+        app.on_key(key(KeyCode::Char('e')));
+        assert_eq!(app.rib_editor.as_ref().unwrap().input, "203.0.113.0/24");
+        app.on_key(key(KeyCode::Esc));
         app.on_key(key(KeyCode::Char('n')));
         assert!(app.take_rib_intent().is_none(), "rejected has one page");
 
@@ -2202,7 +2209,7 @@ mod tests {
     }
 
     #[test]
-    fn explorer_explain_uses_typed_prefix_and_enter_only_on_export_candidates() {
+    fn explorer_explain_uses_typed_prefix_and_enter_only_on_best() {
         let mut app = App::new();
         let first = open_rib(&mut app);
         app.on_rib_result(RibQueryResult {
@@ -2266,13 +2273,7 @@ mod tests {
         assert_eq!(app.view, View::RouteExplorer("198.51.100.1".into()));
         app.rib_view = RibView::Advertised;
         app.on_key(key(KeyCode::Enter));
-        assert!(matches!(
-            app.take_rib_intent(),
-            Some(RibIntent::Query {
-                query: RibQueryKind::ExplainAdvertised { .. },
-                ..
-            })
-        ));
-        assert_eq!(app.view, View::AdvertisedExplain("198.51.100.1".into()));
+        assert!(app.take_rib_intent().is_none());
+        assert_eq!(app.view, View::RouteExplorer("198.51.100.1".into()));
     }
 }
