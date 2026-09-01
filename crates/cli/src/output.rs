@@ -880,15 +880,16 @@ fn format_med(med_attr: Option<u32>) -> String {
 
 /// Print route table with dynamic column widths and colored best marker.
 pub fn print_route_table(routes: &[proto::Route], show_age: bool) {
-    print!(
-        "{}",
-        render_route_table_with_clock(routes, show_age, || {
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs()
-        })
-    );
+    print!("{}", render_route_table_text(routes, show_age));
+}
+
+pub(crate) fn render_route_table_text(routes: &[proto::Route], show_age: bool) -> String {
+    render_route_table_with_clock(routes, show_age, || {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    })
 }
 
 fn render_route_table_with_clock<F>(routes: &[proto::Route], show_age: bool, clock: F) -> String
