@@ -14,7 +14,9 @@ newer. Release-by-release crate changes are recorded in the
 - **RTR client** — an asynchronous client that prefers the ASPA-capable
   protocol v2 shape and falls back to RFC 8210 version 1 when the cache
   explicitly rejects v2. Version 2 rejects IPv4 and IPv6 Prefix PDUs with
-  nonzero host bits as corrupt data; RFC 8210 v1 compatibility is unchanged.
+  nonzero host bits as corrupt data; RFC 8210 v1 continues to accept those
+  host bits. Invalid prefix-length and max-length PDUs on either version share
+  the same fatal code-0 flush disposition as other corrupt Prefix PDUs.
   `RtrClientConfig::max_expire_interval` adds an
   optional operator freshness ceiling: it clamps both the configured
   `expire_interval` and a cache-advertised End of Data expire down, never raises

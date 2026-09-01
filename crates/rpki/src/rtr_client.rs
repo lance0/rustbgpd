@@ -1465,7 +1465,7 @@ impl RtrError {
             // §6 expiry and §12 fatal corrupt Prefix PDUs (reported as
             // code 0) both flush the cache's data and clear the epoch
             // before the next Reset Query.
-            RtrError::Expired | RtrError::Decode(RtrDecodeError::NonCanonicalPrefix) => {
+            RtrError::Expired | RtrError::Decode(RtrDecodeError::InvalidPrefix) => {
                 SessionEndDisposition::FlushAndDrop
             }
             // A session-identity failure voids the epoch, not the data.
@@ -2380,7 +2380,7 @@ mod tests {
             "incomplete malformed transaction was published"
         );
         assert_eq!(
-            RtrError::Decode(RtrDecodeError::NonCanonicalPrefix).disposition(),
+            RtrError::Decode(RtrDecodeError::InvalidPrefix).disposition(),
             SessionEndDisposition::FlushAndDrop
         );
 
@@ -3727,13 +3727,8 @@ mod tests {
         // Transport loss and local guards retain until expiry.
         assert_eq!(RtrError::ConnectionClosed.disposition(), RetainAndRetry);
         assert_eq!(
-            RtrError::Decode(RtrDecodeError::NonCanonicalPrefix).disposition(),
-            FlushAndDrop
-        );
-        assert_eq!(
             RtrError::Decode(RtrDecodeError::InvalidPrefix).disposition(),
-            RetainAndRetry,
-            "legacy invalid-length disposition remains unchanged"
+            FlushAndDrop
         );
         assert_eq!(RtrError::TransactionTimeout.disposition(), RetainAndRetry);
         assert_eq!(

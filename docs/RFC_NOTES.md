@@ -1059,7 +1059,9 @@ carries inactive (absent), unlimited (zero), or finite.
   Error Report code 0); negotiated-v2 IPv4 and IPv6 Prefix PDUs must carry
   canonical network addresses (nonzero host bits draw code 0 with the
   offending frame, close the session, flush that cache's held data, and publish
-  none of the incomplete transaction; v1 decoding is unchanged); End of
+  none of the incomplete transaction; v1 still accepts nonzero host bits, while
+  invalid prefix-length and max-length PDUs on either version share the fatal
+  code-0 flush disposition); End of
   Data timers are bounded to the §6 legal
   ranges (zeros mean "not provided"; above-maximum values clamp down
   with a warning; an expire below the 600 s minimum is honored as-is,
