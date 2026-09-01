@@ -516,6 +516,34 @@ remote_asn = 65001
 peer_group = "rr"
 "#;
 
+#[test]
+fn global_max_as_path_length_defaults_and_zero_disables_the_ceiling_per_session() {
+    let default = parse_strict(V1_EFFECTIVE_DEFAULTS_TOML).expect("default fixture must load");
+    assert_eq!(
+        default.global.max_as_path_length,
+        rustbgpd_transport::DEFAULT_MAX_AS_PATH_LENGTH
+    );
+    assert_eq!(
+        default
+            .resolve_neighbor(&default.neighbors[0])
+            .expect("bare neighbor must resolve")
+            .transport_config
+            .max_as_path_length,
+        rustbgpd_transport::DEFAULT_MAX_AS_PATH_LENGTH
+    );
+    let toml = V1_EFFECTIVE_DEFAULTS_TOML.replacen(
+        "listen_port = 179",
+        "listen_port = 179\nmax_as_path_length = 0",
+        1,
+    );
+    let config = parse_strict(&toml).expect("explicit ceiling fixture must load");
+    assert_eq!(config.global.max_as_path_length, 0);
+    let bare = config
+        .resolve_neighbor(&config.neighbors[0])
+        .expect("bare neighbor must resolve");
+    assert_eq!(bare.transport_config.max_as_path_length, 0);
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "the v1 inventory checker requires all contextual-default proofs in one named test"

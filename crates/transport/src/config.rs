@@ -496,6 +496,12 @@ pub struct TransportConfig {
     pub remove_private_as: RemovePrivateAs,
     /// Canonical inbound attribute type codes discarded after safety checks.
     pub discard_path_attributes: std::sync::Arc<[u8]>,
+    /// Maximum number of AS numbers accepted in a received `AS_PATH`;
+    /// prepends and individual `AS_SET` members each count. An over-ceiling
+    /// path carrying reachable NLRI is RFC 7606 treat-as-withdraw; without
+    /// reachable NLRI, RFC 7606 section 5.2 requires a session reset. `0`
+    /// disables the ceiling.
+    pub max_as_path_length: u16,
     /// Local cluster ID for route reflection. `Some` means this speaker is a
     /// route reflector; used for `CLUSTER_LIST` prepend and loop detection.
     pub cluster_id: Option<Ipv4Addr>,
@@ -551,6 +557,9 @@ pub const DEFAULT_SLOW_PEER_THRESHOLD_PCT: u8 = 50;
 /// Default slow-peer persistence duration (seconds) before the flag is
 /// raised.
 pub const DEFAULT_SLOW_PEER_DURATION_SECS: u32 = 30;
+/// Default ceiling on the number of AS numbers accepted in a received
+/// `AS_PATH`.
+pub const DEFAULT_MAX_AS_PATH_LENGTH: u16 = 750;
 
 impl TransportConfig {
     /// Default TCP connect timeout (30 seconds).
@@ -590,6 +599,7 @@ impl TransportConfig {
             rs_control_communities: false,
             remove_private_as: RemovePrivateAs::Disabled,
             discard_path_attributes: std::sync::Arc::from([]),
+            max_as_path_length: DEFAULT_MAX_AS_PATH_LENGTH,
             cluster_id: None,
             explain_enabled: false,
             explain_cache_size: crate::session::import_decision_cache::DEFAULT_EXPLAIN_CACHE_SIZE,

@@ -193,6 +193,7 @@ Required. Defines the local BGP speaker identity.
 | `listen_port`       | u16    | yes      | --                   | TCP port to listen on (typically 179). When `listen_addresses` is absent, the daemon uses `0.0.0.0` and `[::]`; an unavailable family is skipped while the other keeps serving, and startup fails only when neither binds. Explicit endpoints instead bind atomically |
 | `listen_addresses`  | array of IP strings | no | -- | Exact local BGP endpoints and active-open source addresses. Omission preserves the tolerant dual-wildcard listener. When present, the list must be nonempty with at most one address per family; every listed address must be a usable unicast endpoint (unspecified, multicast, IPv4 broadcast, IPv4-mapped IPv6, and IPv6 link-local are rejected); every configured peer and dynamic range must use a listed family; and every bind is atomic. Scoped IPv6 link-local `[[neighbors]]` and `[[dynamic_neighbors]]` entries are not supported alongside an explicit list — keep those deployments on the default dual-wildcard listener. **Restart-required.** |
 | `dynamic_neighbor_limit` | u32 | no     | `100`                | Maximum number of auto-accepted dynamic peers (must be > 0) |
+| `max_as_path_length` | u16 | no       | `750`                | Maximum number of AS numbers accepted in a received `AS_PATH`, counted across every segment with prepends and `AS_SET` members included. A longer path carrying reachable NLRI is handled as RFC 7606 treat-as-withdraw (subcode 11): its routes are withdrawn, the session stays Established, and `bgp_update_malformed_total{disposition="treat_as_withdraw"}` increments. Without reachable NLRI, RFC 7606 section 5.2 requires a session reset. `0` disables the ceiling. Distinct from the `as_path_length` policy match, which filters without withdrawing. **Restart-required.** |
 | `worker_threads`    | usize  | no       | `min(cores, 8)`      | Tokio runtime worker threads. Unset caps to `min(CPU parallelism, 8)` to avoid over-provisioning the async runtime (one worker + stack reservation per core) on a high-core host for this I/O-bound daemon — reduces virtual-address reservation and scheduler footprint (RSS-neutral in benchmarks). `0` means unset. `RUSTBGPD_WORKER_THREADS` overrides. **Restart-required** (runtime built once at startup). |
 | `runtime_state_dir` | string | no       | `"/var/lib/rustbgpd"` | Directory for daemon-owned runtime state (GR restart marker, optional warm checkpoint, FIB and BLACKHOLE ownership receipts, and gRPC socket) |
 | `warm_cache_checkpoint_on_shutdown` | bool | no | `false`             | Publish a bounded daemon-private routing checkpoint during coordinated shutdown. **Restart-required.** Publication only; startup does not restore routes. |
@@ -224,6 +225,7 @@ listen_port = 179
 # listen_addresses = ["192.0.2.10", "2001:db8::10"]
 runtime_state_dir = "/var/lib/rustbgpd"
 warm_cache_checkpoint_on_shutdown = false
+max_as_path_length = 750
 honor_graceful_shutdown = true
 honor_blackhole = true
 install_blackhole_discard = false

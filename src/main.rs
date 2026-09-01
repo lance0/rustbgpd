@@ -8493,6 +8493,7 @@ peer_group = "plain"
                 blackhole_discard_install_burst: None,
                 ebgp_requires_policy: None,
                 warm_cache_checkpoint_on_shutdown: false,
+                max_as_path_length: rustbgpd_transport::DEFAULT_MAX_AS_PATH_LENGTH,
             },
             security: crate::config::SecurityConfig::default(),
             neighbors: vec![

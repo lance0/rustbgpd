@@ -1097,6 +1097,14 @@
           "maximum": 65535,
           "minimum": 0
         },
+        "max_as_path_length": {
+          "description": "Maximum number of AS numbers accepted in a received `AS_PATH`,\ncounted across every segment with prepends and `AS_SET` members\nincluded. An over-ceiling path carrying reachable NLRI is RFC 7606\ntreat-as-withdraw; without reachable NLRI, RFC 7606 section 5.2\nrequires a session reset. `0` disables the ceiling.",
+          "type": "integer",
+          "format": "uint16",
+          "default": 750,
+          "maximum": 65535,
+          "minimum": 0
+        },
         "multipath_relax": {
           "description": "ADR-0066 multipath-relax (FRR's `bgp bestpath as-path multipath-relax`).\nWhen `true`, unicast ECMP groups equal-cost candidates by `AS_PATH`\n*length* instead of an exact `AS_PATH` match, so equal-length paths through\ndifferent ASes co-install as multipath. Off by default (exact match). It\nis a best-path-wide knob, so it lives here rather than per\n`[[fib_tables]]`; it is inert unless a table sets `maximum_paths`,\n`maximum_paths_ebgp`, or `maximum_paths_ibgp` above 1.",
           "type": "boolean",

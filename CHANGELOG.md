@@ -183,6 +183,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `rbgp neighbor <addr>` detail row `Reconnect In`, and its JSON key
   `reconnect_in_seconds` report the remaining wait. Older daemons leave the
   API field absent; JSON omits the value when absent or zero.
+- Add `[global] max_as_path_length` (default `750`, `0` disables), a ceiling
+  on the number of AS numbers accepted in a received `AS_PATH`. A longer path
+  carrying reachable NLRI is handled as RFC 7606 treat-as-withdraw and counted
+  under `bgp_update_malformed_total{disposition="treat_as_withdraw"}`; without
+  reachable NLRI, RFC 7606 section 5.2 requires a session reset.
 
 ### Fixed
 
@@ -255,6 +260,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   memory results, exact-release FIB and Enhanced Route Refresh refreshes, and
   source-equivalent IXP, route-server-1000, RR1000, and twelve-root IRR reload
   receipts with compact checksummed artifacts and explicit claim boundaries.
+
+### Upgrade notes
+
+- Received `AS_PATH` attributes with more than 750 AS numbers and reachable
+  NLRI are now treated as withdraw by default; without reachable NLRI, the
+  session resets. Deployments that must relay arbitrarily long paths set
+  `[global] max_as_path_length = 0` to keep the previous behavior.
 
 ## [0.68.0] — 2026-08-30
 

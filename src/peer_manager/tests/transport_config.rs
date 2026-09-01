@@ -56,6 +56,34 @@ fn build_transport_config_threads_policy_explain_settings() {
 }
 
 #[test]
+fn build_transport_config_threads_max_as_path_length() {
+    // Same field-threading hazard as the explain knobs: a missed line
+    // would leave every session at the TransportConfig::new default and
+    // silently ignore an operator's `0` (off) or tighter ceiling.
+    let (_, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+    );
+    mgr.current_config.global.max_as_path_length = 0;
+
+    let config = make_config(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 65002);
+    let transport = mgr.build_transport_config(&config);
+    assert_eq!(
+        transport.max_as_path_length, 0,
+        "max_as_path_length must propagate"
+    );
+}
+
+#[test]
 fn build_transport_config_threads_reject_retention_settings() {
     // LAN-472: both [policy.reject_retention] knobs must propagate from
     // the daemon config snapshot into the per-session TransportConfig —

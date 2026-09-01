@@ -9,6 +9,9 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
   `AS4_AGGREGATOR`. Revised decoding treats an ordinary path containing AS 0
   as withdraw and discards affected compatibility and aggregator attributes;
   canonical encoding rejects AS 0 before compatibility sidecars are derived.
+- Add `validate_as_path_ceiling`, an optional bounded ceiling on the number of
+  AS numbers in `AS_PATH`, enforced as treat-as-withdraw (subcode 11). `0`
+  leaves validation unchanged.
 
 ## 0.19.0 - 2026-08-30
 

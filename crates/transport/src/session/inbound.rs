@@ -1385,17 +1385,25 @@ impl PeerSession {
                 && self.use_extended_nexthop_ipv4(),
         };
         let mut validation_payload: Option<(u8, Vec<u8>)> = None;
-        if let Err(update_err) = rustbgpd_wire::validate::validate_update_attributes_with_options(
+        let validation = rustbgpd_wire::validate::validate_update_attributes_with_options(
             &parsed.attributes,
             has_nlri,
             has_body_nlri,
             is_ebgp,
             validation_options,
-        ) {
+        )
+        .and_then(|()| {
+            rustbgpd_wire::validate::validate_as_path_ceiling(
+                &parsed.attributes,
+                self.config.max_as_path_length,
+            )
+        });
+        if let Err(update_err) = validation {
             warn!(
                 peer = %self.peer_label,
                 subcode = update_err.subcode,
                 disposition = update_err.disposition.as_str(),
+                max_as_path_length = self.config.max_as_path_length,
                 "UPDATE validation error"
             );
             self.debug_dump_malformed_update(&update, &parsed);

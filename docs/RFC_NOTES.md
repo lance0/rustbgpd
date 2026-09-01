@@ -407,6 +407,20 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
   state. Canonical encoding rejects it before deriving type 17/18
   compatibility attributes.
 
+## AS_PATH Element Ceiling (`max_as_path_length`)
+
+- `[global] max_as_path_length` (default 750, `0` disables) bounds the
+  number of AS numbers accepted in a received `AS_PATH`, counted across every
+  segment with prepends and `AS_SET` members included. A longer path carrying
+  reachable NLRI is treat-as-withdraw through the RFC 7606 validation path
+  (subcode 11): its routes are withdrawn, the session stays Established, and
+  `bgp_update_malformed_total{disposition="treat_as_withdraw"}` increments.
+  Without reachable NLRI, RFC 7606 section 5.2 requires a session reset. The
+  log line carries the ceiling, never the path.
+- The ceiling is an operational guard (draft-ietf-grow-bgpopsecupd), not an
+  RFC requirement; OpenBGPD applies the same 750-element limit. The wire
+  crate exposes `validate_as_path_ceiling`; `0` leaves it off.
+
 ## RFC 9774 — AS_SET / AS_CONFED_SET Deprecation
 
 - The revised inbound attribute decoder inspects raw AS_PATH and AS4_PATH

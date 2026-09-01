@@ -524,6 +524,7 @@ impl PeerManager {
                     blackhole_discard_install_burst: None,
                     ebgp_requires_policy: None,
                     warm_cache_checkpoint_on_shutdown: false,
+                    max_as_path_length: rustbgpd_transport::DEFAULT_MAX_AS_PATH_LENGTH,
                 },
                 // PeerManager::new constructs an in-memory baseline
                 // Config before the operator's TOML is applied. The
@@ -932,6 +933,7 @@ impl PeerManager {
         transport.remove_private_as = config.remove_private_as;
         transport.discard_path_attributes = config.discard_path_attributes.clone();
         transport.cluster_id = self.cluster_id;
+        transport.max_as_path_length = self.current_config.global.max_as_path_length;
         // ADR-0073: per-session import-decision explain cache wiring.
         // Both the enable flag and the capacity must be threaded — a
         // missing `explain_enabled` here would silently leave the
