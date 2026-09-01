@@ -21,6 +21,7 @@ This document is the contract for embedders: which crate to depend on, what the
 |---------|---------------|-----------------------------------------|------|
 | `birdwatcher-adapter` | Disabled | `rustbgpd-api` | Birdwatcher-compatible REST adapter backed by the daemon gRPC API. |
 | `event-bridge` | Disabled | `rustbgpd-api` | Reference durable-event collector bridge. |
+| `peer-loop` | Disabled | `rustbgpd-fsm`, `rustbgpd-wire` | Minimal BGP speaker embedding the published codec and FSM crates. |
 | `rs-config-render` | Disabled | `rustbgpd-policy` | Route-server configuration rendering tool. |
 | `rustbgpctl` | Disabled | `rustbgpd-policy`, `rustbgpd-wire` | Thin gRPC management CLI and support library. |
 | `rustbgpd` | Disabled | `rustbgpd-api`, `rustbgpd-bfd`, `rustbgpd-bmp`, `rustbgpd-event-history`, `rustbgpd-evpn`, `rustbgpd-evpn-linux`, `rustbgpd-fsm`, `rustbgpd-mrt`, `rustbgpd-policy`, `rustbgpd-rib`, `rustbgpd-rpki`, `rustbgpd-telemetry`, `rustbgpd-transport`, `rustbgpd-wire` | Daemon binary and internal assembly library. |
@@ -272,6 +273,13 @@ The FSM does not touch the network. It is `(State, Event) -> (State, Vec<Action>
 This makes it trivially testable and lets a sidecar plug in any transport
 (TCP, TLS, a Unix socket for tests, a virtual link in a simulator).
 
+The in-tree [`examples/peer-loop`](../examples/peer-loop/README.md) binary is
+this consumer end to end: its rustbgpd dependencies are `rustbgpd-wire` and
+`rustbgpd-fsm`. It dials one peer, drives the FSM to Established, handles the
+required socket, timer, and session actions, and prints successfully parsed
+UPDATEs. Its loopback tests assert Established, one UPDATE round-trip, and the
+NOTIFICATION and hold-expiry exits.
+
 ### 3.4 Validate an origin (RPKI table — the synchronous consumer)
 
 An analyzer or policy controller that already has validated ROA payloads can
@@ -516,7 +524,7 @@ current paired boundary, `rpki` on its first release. `rib`, `bmp`, `mrt`, and
 
 | # | Consumer | What it does today | What it links from rustbgpd | API surface it needs | Honest read |
 |---|----------|-------------------|-----------------------------|----------------------|--------------|
-| 1 | **BGP test harness / fuzzer** (à la GoBGP's `internal/testing`, or a Rust peer for FRR interop CI) | Replays PCAPs/MRT, speaks BGP to a device under test, asserts on received UPDATEs | `rustbgpd-wire` (decode/encode), `rustbgpd-fsm` (drive a peer) | `decode_message`, `encode_message`, `Message`/`ParsedUpdate`, `Session::handle_event` | **Highest-leverage, lowest-friction.** Pure codec + pure FSM. No network state, no RIB. This is the crate's natural first friend — we should ship one in-tree as `examples/peer-loop/` to prove the embedding story. |
+| 1 | **BGP test harness / fuzzer** (à la GoBGP's `internal/testing`, or a Rust peer for FRR interop CI) | Replays PCAPs/MRT, speaks BGP to a device under test, asserts on received UPDATEs | `rustbgpd-wire` (decode/encode), `rustbgpd-fsm` (drive a peer) | `decode_message`, `encode_message`, `Message`/`ParsedUpdate`, `Session::handle_event` | **Highest-leverage, lowest-friction.** Pure codec + pure FSM. No network state, no RIB. The checked-in `examples/peer-loop/` proves this embedding boundary. |
 | 2 | **MRT route collector / analyzer** (à la BGPKIT-parser use case, but with *encode* too) | Reads RFC 6396 dumps, decodes UPDATEs, builds reports; some also synthesize test traffic | `rustbgpd-wire` for decode; optionally `rustbgpd-mrt` later for the dump container | `decode_message`, `ParsedUpdate`, `PathAttribute`, `Prefix`, EVPN/FlowSpec/BGP-LS NLRI types | **Strong fit.** The wire crate already decodes everything BGPKIT-parser parses *plus* BGP-LS, ORF, PMSI, OTC. The gap is the MRT container — `rustbgpd-mrt` closes it but is not yet published. |
 | 3 | **k8s BGP sidecar / minimal speaker** (the Cilium-embeds-GoBGP niche, in Rust) | Advertises pod/service CIDRs to a top-of-rack router; needs a *speaker*, not a router | `rustbgpd-wire` + `rustbgpd-fsm` (+ `rustbgpd-rpki` for origin validation) | `Session`, `PeerConfig`, `Action`, `encode_message`, `VrpTable` | **Real but hard.** This is GoBGP's library-reach moat: Cilium embeds the full GoBGP library (not just the codec) to get a session runtime + RIB + policy. rustbgpd offers only codec+FSM as a library today; the sidecar would have to own the RIB-less "speaker" path itself. Honest: we are not displacing Cilium's GoBGP embedding in 2026; we are the option for a *Rust-native* sidecar that wants no CGo and a smaller blast radius. |
 | 4 | **RPKI validator / RTR cache client** (à la Routinator consumer, or a VRP-driven policy gate) | Maintains a VRP table from one or more RTR caches; validates origins | `rustbgpd-rpki` (`VrpTable`, `RtrClient`, `VrpManager`), `rustbgpd-wire` (`RpkiValidation`) | `VrpTable::validate`, `RtrClient` async session, `VrpManager` merge | **Strong fit, resolvable from crates.io today.** Table validation is synchronous; cache acquisition and merging are Tokio-coupled. The validation-state type lives in the compatible wire line. |
@@ -535,11 +543,14 @@ can link without dragging in the daemon stack.
 
 To be the de facto Rust BGP codec, the concrete gaps:
 
-1. **Ship an in-tree embedder as proof.** Add `examples/peer-loop/`: a ~150-line
-   binary that links `wire + fsm`, opens one TCP session to a configured peer,
-   drives the FSM, and prints every received UPDATE. This is the "it works"
-   receipt for consumers #1 and #3. The `event-bridge` example already proves the
-   gRPC-client shape; this proves the library-embedding shape.
+1. **Ship an in-tree embedder as proof.** Done: `examples/peer-loop/` uses
+   `wire + fsm` as its rustbgpd dependencies, opens one TCP session to a
+   configured peer, drives the FSM to Established, handles the required socket,
+   timer, and session actions, and prints successfully parsed UPDATEs; its
+   loopback tests assert Established, one UPDATE round-trip, and the
+   NOTIFICATION and hold-expiry exits. This is the "it works" receipt for
+   consumers #1 and #3. The `event-bridge` example proves the gRPC-client shape;
+   this proves the library-embedding shape.
 2. **Add a `tokio_util::codec::Decoder/Encoder` impl.** Done: the default-off
    `tokio-codec` feature exports typed
    `BgpCodec` / `BgpCodecError` framing with independent inbound and outbound
