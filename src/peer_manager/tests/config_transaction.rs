@@ -978,6 +978,143 @@ async fn runtime_config_snapshot_returns_current_staged_config() {
     handle.await.unwrap();
 }
 
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one actor test contrasts staged restore and commit retirement boundaries"
+)]
+async fn policy_route_series_retire_only_when_a_staged_snapshot_commits() {
+    use rustbgpd_api::peer_types::ResolvedPeerPolicy;
+
+    let (tx, rx) = mpsc::channel(16);
+    let (internal_tx, internal_rx) = mpsc::channel(2);
+    let (rib_tx, _rib_rx) = mpsc::channel(16);
+    let config = make_dynamic_manager_config();
+    let candidate = config.clone();
+    let metrics = BgpMetrics::new();
+    let address: IpAddr = "192.0.2.142".parse().unwrap();
+    let mut manager = PeerManager::new_with_config(
+        rx,
+        internal_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics.clone(),
+        rib_tx,
+        None,
+        None,
+        config,
+    );
+    insert_test_managed_peer(
+        &mut manager,
+        address,
+        acking_policy_handle(address, SessionState::Established),
+        false,
+    );
+    manager.peers.get_mut(&key(address)).unwrap().import_policy =
+        Some(named_deny_policy_chain(&[Some("staged-old")]));
+    metrics.record_policy_routes("192.0.2.142", "staged-old", "import", "deny");
+    let handle = tokio::spawn(manager.run());
+
+    let (stage_tx, stage_rx) = oneshot::channel();
+    internal_tx
+        .send(InternalCommand::StageTransactionConfig {
+            candidate: Box::new(candidate.clone()),
+            scope: TransactionConfigScope::Full,
+            reply: stage_tx,
+        })
+        .await
+        .unwrap();
+    let rollback = stage_rx.await.unwrap().unwrap();
+
+    let (apply_tx, apply_rx) = oneshot::channel();
+    tx.send(PeerManagerCommand::ApplyResolvedPolicySnapshot {
+        targets: vec![ResolvedPeerPolicy {
+            address,
+            interface: None,
+            import_policy: Some(named_deny_policy_chain(&[Some("staged-new")])),
+            export_policy: None,
+        }],
+        reply: apply_tx,
+    })
+    .await
+    .unwrap();
+    apply_rx.await.unwrap().unwrap();
+    assert_eq!(
+        policy_route_counter(&metrics, "192.0.2.142", "staged-old", "import", "deny"),
+        Some(1.0),
+        "staged installation is not yet a durable retirement boundary"
+    );
+
+    let (restore_tx, restore_rx) = oneshot::channel();
+    internal_tx
+        .send(InternalCommand::RestoreTransactionConfig {
+            rollback,
+            reply: restore_tx,
+        })
+        .await
+        .unwrap();
+    restore_rx.await.unwrap();
+    assert_eq!(
+        policy_route_counter(&metrics, "192.0.2.142", "staged-old", "import", "deny"),
+        Some(1.0),
+        "restore discards the staged snapshot without retiring history"
+    );
+
+    let (reset_tx, reset_rx) = oneshot::channel();
+    tx.send(PeerManagerCommand::ApplyResolvedPolicySnapshot {
+        targets: vec![ResolvedPeerPolicy {
+            address,
+            interface: None,
+            import_policy: Some(named_deny_policy_chain(&[Some("staged-old")])),
+            export_policy: None,
+        }],
+        reply: reset_tx,
+    })
+    .await
+    .unwrap();
+    reset_rx.await.unwrap().unwrap();
+
+    let (stage_tx, stage_rx) = oneshot::channel();
+    internal_tx
+        .send(InternalCommand::StageTransactionConfig {
+            candidate: Box::new(candidate),
+            scope: TransactionConfigScope::Full,
+            reply: stage_tx,
+        })
+        .await
+        .unwrap();
+    stage_rx.await.unwrap().unwrap();
+    let (apply_tx, apply_rx) = oneshot::channel();
+    tx.send(PeerManagerCommand::ApplyResolvedPolicySnapshot {
+        targets: vec![ResolvedPeerPolicy {
+            address,
+            interface: None,
+            import_policy: Some(named_deny_policy_chain(&[Some("staged-new")])),
+            export_policy: None,
+        }],
+        reply: apply_tx,
+    })
+    .await
+    .unwrap();
+    apply_rx.await.unwrap().unwrap();
+
+    let (commit_tx, commit_rx) = oneshot::channel();
+    tx.send(PeerManagerCommand::CommitConfigSnapshotStage { reply: commit_tx })
+        .await
+        .unwrap();
+    commit_rx.await.unwrap();
+    assert_eq!(
+        policy_route_counter(&metrics, "192.0.2.142", "staged-old", "import", "deny"),
+        None,
+        "commit consumes the prior installed snapshot and retires stale labels"
+    );
+
+    tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    handle.await.unwrap();
+}
+
 #[test]
 fn runtime_config_diff_compares_candidate_against_live_snapshot_and_redacts_secret() {
     let (_tx, rx) = mpsc::channel(16);

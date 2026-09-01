@@ -1130,3 +1130,199 @@ async fn periodic_bmp_stats_channel_full_records_the_source_drop() {
         Some(1.0)
     );
 }
+
+#[tokio::test]
+async fn policy_route_reaper_unions_scoped_siblings_and_waits_for_current_settlement() {
+    let mut mgr = test_peer_manager();
+    let metrics = mgr.metrics.clone();
+    let address: IpAddr = "fe80::1425".parse().unwrap();
+    let eth0 = scoped_key(address, "eth0");
+    let eth1 = scoped_key(address, "eth1");
+    for peer in [&eth0, &eth1] {
+        insert_test_managed_peer_for_key(
+            &mut mgr,
+            peer,
+            65002,
+            acking_policy_handle(address, SessionState::Idle),
+            false,
+        );
+        mgr.peers.get_mut(peer).unwrap().import_policy =
+            Some(named_deny_policy_chain(&[Some("old-import")]));
+    }
+    metrics.record_policy_routes("fe80::1425", "old-import", "import", "deny");
+    let prior = mgr.installed_policy_routes_reachability();
+
+    mgr.peers.get_mut(&eth0).unwrap().import_policy =
+        Some(named_deny_policy_chain(&[Some("new-import")]));
+    assert_eq!(mgr.reap_retired_policy_routes(&prior), 0);
+    assert_eq!(
+        policy_route_counter(&metrics, "fe80::1425", "old-import", "import", "deny"),
+        Some(1.0),
+        "one sibling can still emit the bare-IP metric identity"
+    );
+
+    let sibling_prior = mgr.installed_policy_routes_reachability();
+    let sibling = mgr.peers.get_mut(&eth1).unwrap();
+    sibling.import_policy = Some(named_deny_policy_chain(&[Some("new-import")]));
+    sibling.pending_refresh = true;
+    assert_eq!(mgr.reap_retired_policy_routes(&sibling_prior), 0);
+    assert_eq!(
+        policy_route_counter(&metrics, "fe80::1425", "old-import", "import", "deny"),
+        Some(1.0),
+        "any pending current sibling fences the whole aliased scope"
+    );
+
+    mgr.peers.get_mut(&eth1).unwrap().pending_refresh = false;
+    assert_eq!(mgr.reap_retired_policy_routes(&sibling_prior), 1);
+    assert_eq!(
+        policy_route_counter(&metrics, "fe80::1425", "old-import", "import", "deny"),
+        None
+    );
+}
+
+#[tokio::test]
+async fn policy_route_reaper_heals_prior_pending_and_tracks_bare_scope_across_interface_move() {
+    let mut mgr = test_peer_manager();
+    let metrics = mgr.metrics.clone();
+    let address: IpAddr = "fe80::1425".parse().unwrap();
+    let eth0 = scoped_key(address, "eth0");
+    insert_test_managed_peer_for_key(
+        &mut mgr,
+        &eth0,
+        65002,
+        acking_policy_handle(address, SessionState::Idle),
+        true,
+    );
+    mgr.peers.get_mut(&eth0).unwrap().import_policy =
+        Some(named_deny_policy_chain(&[Some("pending-old")]));
+    metrics.record_policy_routes("fe80::1425", "pending-old", "import", "deny");
+    let pending_prior = mgr.installed_policy_routes_reachability();
+
+    let peer = mgr.peers.get_mut(&eth0).unwrap();
+    peer.import_policy = Some(named_deny_policy_chain(&[Some("settled-new")]));
+    peer.pending_refresh = false;
+    assert_eq!(mgr.reap_retired_policy_routes(&pending_prior), 1);
+    assert_eq!(
+        policy_route_counter(&metrics, "fe80::1425", "pending-old", "import", "deny"),
+        None,
+        "a successful clean state can retire history captured while pending"
+    );
+
+    metrics.record_policy_routes("fe80::1425", "settled-new", "import", "deny");
+    let interface_prior = mgr.installed_policy_routes_reachability();
+    mgr.peers.remove(&eth0);
+    let eth9 = scoped_key(address, "eth9");
+    insert_test_managed_peer_for_key(
+        &mut mgr,
+        &eth9,
+        65002,
+        acking_policy_handle(address, SessionState::Idle),
+        false,
+    );
+    mgr.peers.get_mut(&eth9).unwrap().import_policy =
+        Some(named_deny_policy_chain(&[Some("moved-new")]));
+    assert_eq!(mgr.reap_retired_policy_routes(&interface_prior), 1);
+    assert_eq!(
+        policy_route_counter(&metrics, "fe80::1425", "settled-new", "import", "deny"),
+        None,
+        "metric identity follows the bare-IP scope across interface replacement"
+    );
+}
+
+#[test]
+fn policy_route_reachability_uses_exact_bounded_policy_action_pairs() {
+    use crate::peer_manager::policy::policy_routes_reachable_labels;
+
+    let inline_permit = BTreeSet::from([("inline".to_string(), "permit".to_string())]);
+    assert_eq!(policy_routes_reachable_labels(None), inline_permit);
+    assert_eq!(
+        policy_routes_reachable_labels(Some(&PolicyChain::new(Vec::new()))),
+        inline_permit
+    );
+
+    let chain = named_deny_policy_chain(&[Some("named-deny"), None]);
+    assert_eq!(
+        policy_routes_reachable_labels(Some(&chain)),
+        BTreeSet::from([
+            ("chain_default_permit".to_string(), "permit".to_string()),
+            ("inline".to_string(), "deny".to_string()),
+            ("named-deny".to_string(), "deny".to_string()),
+        ])
+    );
+}
+
+#[test]
+fn policy_route_retirement_actor_fences_are_definitive_and_staged() {
+    let source = include_str!("../mod.rs");
+    let arm = |start: &str, end: &str| {
+        source
+            .split_once(start)
+            .unwrap_or_else(|| panic!("missing actor arm {start}"))
+            .1
+            .split_once(end)
+            .unwrap_or_else(|| panic!("missing actor boundary after {start}"))
+            .0
+    };
+
+    let catalog = arm(
+        "PeerManagerCommand::OwnedCatalogMutation { mutation, reply } => {",
+        "PeerManagerCommand::ReconfigurePeer",
+    );
+    assert!(catalog.contains("OwnedCatalogMutationOutcome::Success"));
+    assert_eq!(catalog.matches("reap_retired_policy_routes").count(), 1);
+
+    let reconcile = arm(
+        "PeerManagerCommand::ReconcilePeers { added, removed, changed, reply } => {",
+        "PeerManagerCommand::HotUpdatePeer",
+    );
+    assert!(reconcile.contains("result.authority == PeerReconcileAuthority::Known"));
+    assert!(reconcile.contains("result.failures.is_empty()"));
+    assert_eq!(reconcile.matches("reap_retired_policy_routes").count(), 1);
+
+    let hot = arm(
+        "PeerManagerCommand::HotUpdatePeer { config, reply } => {",
+        "PeerManagerCommand::SyncExplainConfig",
+    );
+    assert!(hot.contains("OwnedHotUpdatePeerOutcome::Success"));
+    assert_eq!(hot.matches("reap_retired_policy_routes").count(), 1);
+
+    for (start, end) in [
+        (
+            "PeerManagerCommand::SetHonorGracefulShutdown { enabled, reply } => {",
+            "PeerManagerCommand::SetHonorBlackhole",
+        ),
+        (
+            "PeerManagerCommand::SetHonorBlackhole { enabled, reply } => {",
+            "PeerManagerCommand::GetNeighborPolicyChains",
+        ),
+    ] {
+        let honor = arm(start, end);
+        assert!(honor.contains("if result.is_ok()"));
+        assert_eq!(honor.matches("reap_retired_policy_routes").count(), 1);
+    }
+
+    let commit = arm(
+        "PeerManagerCommand::CommitConfigSnapshotStage { reply } => {",
+        "PeerManagerCommand::RuntimeConfigSnapshot",
+    );
+    assert!(commit.contains("staged_policy_routes_prior.take()"));
+    assert_eq!(commit.matches("reap_retired_policy_routes").count(), 1);
+    let stage = arm(
+        "Some(InternalCommand::StageTransactionConfig {",
+        "Some(InternalCommand::RestoreTransactionConfig",
+    );
+    assert!(stage.contains("self.staged_policy_routes_prior = None"));
+    assert!(stage.contains("self.staged_policy_routes_prior = Some(policy_routes_prior)"));
+    let restore = arm(
+        "Some(InternalCommand::RestoreTransactionConfig {",
+        "None => {}",
+    );
+    assert!(restore.contains("self.staged_policy_routes_prior = None"));
+    assert!(!restore.contains("reap_retired_policy_routes"));
+    let replace = arm(
+        "Some(InternalCommand::ReplaceConfigSnapshot { config, ack }) => {",
+        "Some(InternalCommand::PlanAcceptedTransactionConfig",
+    );
+    assert!(replace.contains("self.staged_policy_routes_prior = None"));
+    assert!(!replace.contains("reap_retired_policy_routes"));
+}

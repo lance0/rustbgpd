@@ -308,6 +308,56 @@ fn deny_policy_chain() -> PolicyChain {
     }])
 }
 
+fn named_deny_policy_chain(names: &[Option<&str>]) -> PolicyChain {
+    use rustbgpd_policy::{NamedPolicy, Policy, PolicyAction};
+
+    PolicyChain::from_named(
+        names
+            .iter()
+            .map(|name| NamedPolicy {
+                name: name.map(str::to_string),
+                policy: Policy {
+                    entries: Vec::new(),
+                    default_action: PolicyAction::Deny,
+                },
+                rpol: None,
+            })
+            .collect(),
+    )
+}
+
+fn policy_route_counter(
+    metrics: &BgpMetrics,
+    peer: &str,
+    policy: &str,
+    direction: &str,
+    action: &str,
+) -> Option<f64> {
+    metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .find(|family| family.name() == "bgp_policy_routes_total")
+        .and_then(|family| {
+            family.get_metric().iter().find_map(|metric| {
+                let labels = metric.get_label();
+                [
+                    ("peer", peer),
+                    ("policy", policy),
+                    ("direction", direction),
+                    ("action", action),
+                ]
+                .iter()
+                .all(|(name, value)| {
+                    labels
+                        .iter()
+                        .any(|label| label.name() == *name && label.value() == *value)
+                })
+                .then(|| metric.get_counter().value())
+            })
+        })
+}
+
 /// A deny chain padded to `depth + 1` copies of the deny policy —
 /// content-distinct per depth. Per-peer distinct export targets keep a
 /// snapshot off the import-tolerant export cohort (LAN-462 relaxed its
@@ -372,7 +422,7 @@ fn insert_test_managed_peer(
     handle: PeerHandle,
     pending_refresh: bool,
 ) {
-    insert_test_managed_peer_with_asn(mgr, addr, 65002, handle, pending_refresh);
+    insert_test_managed_peer_for_key(mgr, &key(addr), 65002, handle, pending_refresh);
 }
 
 fn insert_test_managed_peer_with_asn(
@@ -382,15 +432,26 @@ fn insert_test_managed_peer_with_asn(
     handle: PeerHandle,
     pending_refresh: bool,
 ) {
-    let peer_config = make_config(addr, remote_asn);
+    insert_test_managed_peer_for_key(mgr, &key(addr), remote_asn, handle, pending_refresh);
+}
+
+fn insert_test_managed_peer_for_key(
+    mgr: &mut PeerManager,
+    peer_key: &PeerKey,
+    remote_asn: u32,
+    handle: PeerHandle,
+    pending_refresh: bool,
+) {
+    let mut peer_config = make_config(peer_key.address, remote_asn);
+    peer_config.interface.clone_from(&peer_key.interface);
     let transport = mgr.build_transport_config(&peer_config);
     let hold = transport.peer.hold_time;
-    let peer_key = key(addr);
+    let session_id = u64::try_from(mgr.peers.len()).unwrap_or(u64::MAX - 1) + 1;
     mgr.peers.insert(
         peer_key.clone(),
         ManagedPeer {
             handle,
-            session_id: 1,
+            session_id,
             remote_asn,
             description: "test".to_string(),
             peer_group: None,
@@ -412,7 +473,7 @@ fn insert_test_managed_peer_with_asn(
             advertise_graceful_shutdown: false,
         },
     );
-    mgr.register_session(1, &peer_key);
+    mgr.register_session(session_id, peer_key);
 }
 
 fn stalled_policy_query_handle() -> PeerHandle {

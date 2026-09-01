@@ -681,8 +681,10 @@ impl RibManager {
         // counters reset on session-down (they live on PeerSessionState),
         // and the export-side aggregates do too — same per-session
         // contract in both directions. Operators that need across-flap
-        // totals can subtract Prometheus snapshots
-        // (`bgp_policy_routes_total` is monotonic per process).
+        // totals can use `rate()` / `increase()` over
+        // `bgp_policy_routes_total`: each installed label identity is
+        // monotonic, while a successfully retired identity goes stale and
+        // restarts from zero if that exact identity is later installed again.
         self.export_policy_stats.remove(&peer);
         self.pending_regroup_baseline.remove(&peer);
         self.pending_extra_withdraws.remove(&peer);

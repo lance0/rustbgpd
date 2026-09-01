@@ -40,6 +40,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `bgp_policy_routes_total` now retires stale policy/action label identities
+  after successful settled policy replacement while preserving exact values
+  for every identity the installed peer chains can still emit.
+
 - RTR v2 now rejects IPv4 and IPv6 Prefix PDUs with nonzero host bits as
   corrupt data, sends Error Report code 0 with the offending frame, and avoids
   publishing the incomplete transaction while flushing that cache's previously

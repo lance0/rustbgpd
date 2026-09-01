@@ -1,6 +1,7 @@
 //! Prometheus metrics for session, RIB, policy, EVPN, GR, and RPKI counters/gauges.
 
 use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -184,12 +185,20 @@ pub fn non_canonical_peer_labels(registry: &Registry) -> Vec<(String, String)> {
 /// across clones.
 static NEXT_METRICS_INSTANCE_ID: AtomicU64 = AtomicU64::new(0);
 
-/// Bumped whenever peer series are reaped ([`BgpMetrics::reap_peer_series`]),
+/// Bumped once after a reap batch actually removes policy-route children,
 /// invalidating every thread's [`POLICY_ROUTES_MEMO`]. Without this, a
 /// memoized handle would keep incrementing a child detached from the
 /// vec — invisible to scrapes — instead of re-resolving (and thereby
 /// recreating, from zero) the series like `with_label_values` does.
 static POLICY_ROUTES_REAP_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// Installed policy/action identities reachable for selected
+/// `(peer, direction)` metric scopes.
+///
+/// This is deliberately specific to `bgp_policy_routes_total`: the outer key
+/// selects exact scopes eligible for retirement and the inner set preserves
+/// every policy/action tuple that the installed chains can still emit.
+pub type PolicyRoutesReachability = BTreeMap<(String, String), BTreeSet<(String, String)>>;
 
 /// Current unix time in whole seconds, saturating at the `i64` gauge
 /// range (0 if the clock reads before the epoch).
@@ -3301,7 +3310,7 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.0.update_malformed, peer);
         Self::reap_peer_series_from_vec(&self.0.otc_routes_blocked, peer);
         Self::reap_peer_series_from_vec(&self.0.role_mismatch, peer);
-        Self::reap_peer_series_from_vec(&self.0.policy_routes, peer);
+        let policy_routes_removed = Self::reap_peer_series_from_vec(&self.0.policy_routes, peer);
         Self::reap_peer_series_from_vec(&self.0.gr_active_peers, peer);
         Self::reap_peer_series_from_vec(&self.0.gr_stale_routes, peer);
         Self::reap_peer_series_from_vec(&self.0.gr_timer_expired, peer);
@@ -3316,7 +3325,65 @@ impl BgpMetrics {
         // vec. An increment racing the removal itself can still be
         // lost, exactly as a bare `with_label_values` racing
         // `remove_label_values` could before the memo existed.
-        POLICY_ROUTES_REAP_EPOCH.fetch_add(1, Ordering::Release);
+        if policy_routes_removed > 0 {
+            POLICY_ROUTES_REAP_EPOCH.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    /// Retire policy-route counter identities that selected installed scopes
+    /// can no longer emit.
+    ///
+    /// The metric family is collected once, surviving children are untouched,
+    /// and memoized handles are invalidated exactly once after a batch that
+    /// actually removed at least one child. Returning to a retired identity
+    /// therefore creates a fresh counter starting at zero.
+    pub fn reap_unreachable_policy_routes(&self, reachable: &PolicyRoutesReachability) -> usize {
+        use prometheus::core::Collector;
+
+        let mut retired = Vec::new();
+        for family in self.0.policy_routes.collect() {
+            for metric in family.get_metric() {
+                let labels = metric.get_label();
+                let value = |name: &str| {
+                    labels
+                        .iter()
+                        .find(|label| label.name() == name)
+                        .map(prometheus::proto::LabelPair::value)
+                };
+                let (Some(peer), Some(policy), Some(direction), Some(action)) = (
+                    value("peer"),
+                    value("policy"),
+                    value("direction"),
+                    value("action"),
+                ) else {
+                    continue;
+                };
+                let scope = (peer.to_owned(), direction.to_owned());
+                let Some(scope_reachable) = reachable.get(&scope) else {
+                    continue;
+                };
+                if !scope_reachable.contains(&(policy.to_owned(), action.to_owned())) {
+                    retired.push([
+                        peer.to_owned(),
+                        policy.to_owned(),
+                        direction.to_owned(),
+                        action.to_owned(),
+                    ]);
+                }
+            }
+        }
+
+        let mut removed = 0;
+        for labels in retired {
+            let labels = labels.iter().map(String::as_str).collect::<Vec<_>>();
+            if self.0.policy_routes.remove_label_values(&labels).is_ok() {
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            POLICY_ROUTES_REAP_EPOCH.fetch_add(1, Ordering::Release);
+        }
+        removed
     }
 
     /// Remove the exact configured-peer gauge identity.
@@ -3344,8 +3411,8 @@ impl BgpMetrics {
     fn reap_peer_series_from_vec<T: prometheus::core::MetricVecBuilder>(
         vec: &prometheus::core::MetricVec<T>,
         peer: &str,
-    ) {
-        Self::reap_label_series_from_vec(vec, "peer", peer);
+    ) -> usize {
+        Self::reap_label_series_from_vec(vec, "peer", peer)
     }
 
     /// Remove every series of one Vec metric whose `label` label equals
@@ -3362,13 +3429,14 @@ impl BgpMetrics {
         vec: &prometheus::core::MetricVec<T>,
         label: &str,
         value: &str,
-    ) {
+    ) -> usize {
         use prometheus::core::Collector;
 
         let descs = vec.desc();
         let Some(desc) = descs.first() else {
-            return;
+            return 0;
         };
+        let mut removed = 0;
         for family in vec.collect() {
             for metric in family.get_metric() {
                 let labels = metric.get_label();
@@ -3397,9 +3465,12 @@ impl BgpMetrics {
                 };
                 // Removal can only fail for a tuple that no longer
                 // exists (e.g. removed concurrently) — ignore.
-                let _ = vec.remove_label_values(&values);
+                if vec.remove_label_values(&values).is_ok() {
+                    removed += 1;
+                }
             }
         }
+        removed
     }
 
     // ── Recording methods ──────────────────────────────────────────
@@ -5690,8 +5761,13 @@ mod jemalloc_stats {
 #[cfg(test)]
 mod tests {
     use std::net::Ipv4Addr;
+    use std::sync::Mutex;
 
     use prometheus::{Encoder, core::Collector};
+
+    /// Epoch assertions and peer reaps share one process-global memo epoch.
+    /// Serialize only tests that can advance it; production remains lock-free.
+    static POLICY_ROUTES_REAP_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn unlabeled_gauge(metrics: &BgpMetrics, name: &str) -> f64 {
         metrics
@@ -6687,6 +6763,7 @@ mod tests {
     /// recreated from zero), never increments the detached child.
     #[test]
     fn policy_routes_memo_invalidated_by_reap() {
+        let _reap_guard = POLICY_ROUTES_REAP_TEST_LOCK.lock().unwrap();
         let m = BgpMetrics::new();
         m.record_policy_routes("10.0.0.2", "ingress-filter", "import", "permit");
         m.record_policy_routes("10.0.0.2", "ingress-filter", "import", "permit");
@@ -6706,6 +6783,92 @@ mod tests {
                 .get(),
             1,
             "post-reap series restarts from zero and receives the increment"
+        );
+    }
+
+    #[test]
+    fn policy_routes_batch_reap_is_exact_and_invalidates_memo_once() {
+        let _reap_guard = POLICY_ROUTES_REAP_TEST_LOCK.lock().unwrap();
+        let m = BgpMetrics::new();
+        let peer = "10.0.0.2";
+        let other = "10.0.0.3";
+
+        for _ in 0..2 {
+            m.record_policy_routes(peer, "renamed-v1", "import", "deny");
+            m.record_policy_routes(peer, "renamed-v2", "import", "deny");
+        }
+        for _ in 0..5 {
+            m.record_policy_routes(peer, "keep", "import", "deny");
+        }
+        m.record_policy_routes(peer, "keep", "import", "permit");
+        m.record_policy_routes(peer, "renamed-v1", "export", "deny");
+        m.record_policy_routes(other, "renamed-v1", "import", "deny");
+        m.record_policy_routes(peer, "bulk-old", "import", "deny");
+        // Keep this identity in the single-slot memo when the batch removes it.
+        m.record_policy_routes(peer, "memo-old", "import", "deny");
+        m.record_policy_routes(peer, "memo-old", "import", "deny");
+
+        let reachable = PolicyRoutesReachability::from([(
+            (peer.to_string(), "import".to_string()),
+            BTreeSet::from([("keep".to_string(), "deny".to_string())]),
+        )]);
+        let before_epoch = POLICY_ROUTES_REAP_EPOCH.load(Ordering::Acquire);
+        assert_eq!(m.reap_unreachable_policy_routes(&reachable), 5);
+        assert_eq!(
+            POLICY_ROUTES_REAP_EPOCH.load(Ordering::Acquire),
+            before_epoch + 1,
+            "one batch with removals advances the memo epoch exactly once"
+        );
+        assert_eq!(m.reap_unreachable_policy_routes(&reachable), 0);
+        assert_eq!(
+            POLICY_ROUTES_REAP_EPOCH.load(Ordering::Acquire),
+            before_epoch + 1,
+            "a no-op batch must not advance the epoch"
+        );
+
+        assert_eq!(
+            m.0.policy_routes
+                .with_label_values(&[peer, "keep", "import", "deny"])
+                .get(),
+            5,
+            "a surviving child keeps its exact monotonic value"
+        );
+        assert_eq!(
+            m.0.policy_routes
+                .with_label_values(&[peer, "renamed-v1", "export", "deny"])
+                .get(),
+            1,
+            "an unselected direction is isolated"
+        );
+        assert_eq!(
+            m.0.policy_routes
+                .with_label_values(&[other, "renamed-v1", "import", "deny"])
+                .get(),
+            1,
+            "an unselected peer is isolated"
+        );
+        assert!(
+            !gather_text(&m).contains(
+                "bgp_policy_routes_total{action=\"permit\",direction=\"import\",peer=\"10.0.0.2\",policy=\"keep\"}"
+            ),
+            "policy identity alone is insufficient: action is part of reachability"
+        );
+
+        m.record_policy_routes(peer, "memo-old", "import", "deny");
+        assert_eq!(
+            m.0.policy_routes
+                .with_label_values(&[peer, "memo-old", "import", "deny"])
+                .get(),
+            1,
+            "a memoized retired identity returns on a fresh child"
+        );
+        m.record_policy_routes_by(peer, "bulk-old", "import", "deny", 7);
+        assert_eq!(
+            m.0.policy_routes
+                .with_label_values(&[peer, "bulk-old", "import", "deny"])
+                .get(),
+            7,
+            "a bulk-recorded retired identity returns at the requested increment"
         );
     }
 
@@ -7987,6 +8150,7 @@ mod tests {
 
     #[test]
     fn reap_peer_series_removes_every_peer_labeled_family() {
+        let _reap_guard = POLICY_ROUTES_REAP_TEST_LOCK.lock().unwrap();
         let m = BgpMetrics::new();
         populate_all_peer_families(&m, "10.0.0.1");
         populate_all_peer_families(&m, "10.0.0.2");
