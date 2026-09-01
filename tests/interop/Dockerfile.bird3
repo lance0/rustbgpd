@@ -1,6 +1,6 @@
 FROM debian:trixie-slim
 
-ARG BIRD_VERSION=3.3.1
+ARG BIRD_VERSION=3.3.2
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bison \
@@ -26,7 +26,7 @@ COPY bird3-archive/ /tmp/bird3-archive/
 WORKDIR /tmp/bird
 
 RUN set -eux; \
-    checksum="d5a8d651d6184c18252954932bb249dfee1fd213b3665cdd86226ac45edc0190"; \
+    checksum="21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c"; \
     archive="bird-${BIRD_VERSION}.tar.gz"; \
     if [ ! -f "/tmp/bird3-archive/${archive}" ]; then \
         attempt=1; \

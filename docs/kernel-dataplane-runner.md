@@ -78,7 +78,7 @@ issue #187) so reviewers can distinguish real stability from flake masking.
   against two FRR peers over unnumbered links.
 - M51: ADR-0067 single-hop BFD + RFC 5882 coupling against FRR `bfdd`.
 - M43: TCP-AO dynamic `/24` queued-child reconciliation plus full live
-  add/select/deprecate/delete rotation against BIRD 3.3.1 (conditional on the
+  add/select/deprecate/delete rotation against BIRD 3.3.2 (conditional on the
   runner advertising `CONFIG_TCP_AO=y`). The deletion phase proves the exact
   sole-survivor inventory, unchanged session, the route present at every sample
   from a 100 ms polling oracle, and authenticated post-delete traffic. A

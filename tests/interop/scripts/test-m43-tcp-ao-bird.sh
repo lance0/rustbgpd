@@ -20,7 +20,7 @@
 #
 # Prerequisites:
 #   - BIRD image built:
-#       docker build -t bird:3.3.1-tcpao -f tests/interop/Dockerfile.bird3 tests/interop
+#       docker build -t bird:3.3.2-tcpao -f tests/interop/Dockerfile.bird3 tests/interop
 #   - rustbgpd image built:
 #       docker build --target dev -t rustbgpd:dev .
 #   - containerlab deployed:
@@ -44,9 +44,12 @@ else
     source "$SCRIPT_DIR/test-lib.sh"
 fi
 BIRD="clab-${TOPO}-bird"
+BIRD_IMAGE="bird:3.3.2-tcpao"
+BIRD_VERSION_OUTPUT="BIRD version 3.3.2"
 GOOD_CONF="/etc/bird/bird.conf"
 BAD_CONF="/etc/bird/bird-bad.conf"
 UNSIGNED_CONF="/etc/bird/bird-unsigned.conf"
+SUCCESSOR_CONF="/etc/bird/bird-successor.conf"
 DYNAMIC_CONFIG="/etc/rustbgpd/config-dynamic.toml"
 TEST_PREFIX="203.0.113.43"
 POST_DELETE_PROBE_PREFIX="203.0.113.44"
@@ -106,6 +109,45 @@ stop_bird() {
         find /run/bird -name bird.ctl -delete 2>/dev/null || true
     ' \
         >/dev/null 2>&1 || true
+}
+
+preflight_bird_container() {
+    local configured_image container_image_id local_image_id configured_command
+    local runtime_path runtime_args reported_version conf
+
+    configured_image=$(docker inspect --format '{{.Config.Image}}' "$BIRD")
+    if [ "$configured_image" != "$BIRD_IMAGE" ]; then
+        fail "BIRD container image tag drifted: $configured_image (expected $BIRD_IMAGE)"
+        return 1
+    fi
+    container_image_id=$(docker inspect --format '{{.Image}}' "$BIRD")
+    local_image_id=$(docker image inspect --format '{{.Id}}' "$BIRD_IMAGE")
+    if [ "$container_image_id" != "$local_image_id" ]; then
+        fail "BIRD container image ID differs from local $BIRD_IMAGE"
+        return 1
+    fi
+
+    configured_command=$(docker inspect --format '{{json .Config.Cmd}}' "$BIRD")
+    runtime_path=$(docker inspect --format '{{.Path}}' "$BIRD")
+    runtime_args=$(docker inspect --format '{{json .Args}}' "$BIRD")
+    if [ "$configured_command" != '["sleep","infinity"]' ] || \
+        [ "$runtime_path" != sleep ] || [ "$runtime_args" != '["infinity"]' ]; then
+        fail "BIRD container command is not the pinned sleeping command"
+        return 1
+    fi
+
+    reported_version=$(docker exec "$BIRD" bird --version 2>&1)
+    if [ "$reported_version" != "$BIRD_VERSION_OUTPUT" ]; then
+        fail "BIRD runtime version drifted: $reported_version (expected $BIRD_VERSION_OUTPUT)"
+        return 1
+    fi
+    for conf in "$GOOD_CONF" "$BAD_CONF" "$UNSIGNED_CONF" "$SUCCESSOR_CONF"; do
+        if ! docker exec "$BIRD" bird -p -c "$conf" >/dev/null; then
+            fail "BIRD 3.3.2 rejected bound configuration $conf"
+            return 1
+        fi
+    done
+    ok "BIRD 3.3.2 image identity, sleeping command, and four configs preflighted"
 }
 
 start_bird() {
@@ -1105,10 +1147,11 @@ prove_dynamic_range_accept_boundary() {
 }
 
 main_uninterrupted() {
-    log "M43 interop test: TCP-AO full live key rotation with BIRD 3.3.1"
+    log "M43 interop test: TCP-AO full live key rotation with BIRD 3.3.2"
     log "Topology: $TOPO"
 
     resolve_grpc_addr
+    preflight_bird_container
     start_bird "$GOOD_CONF"
     docker exec "$RUSTBGPD" cp /etc/rustbgpd/config.toml /tmp/m43-config.toml
     start_rustbgpd "exec /usr/local/bin/rustbgpd /tmp/m43-config.toml"
@@ -1220,7 +1263,7 @@ main_uninterrupted() {
 }
 
 main_crash_restart() {
-    log "M43 crash-restart proof: durable TCP-AO rotation recovery with BIRD 3.3.1"
+    log "M43 crash-restart proof: durable TCP-AO rotation recovery with BIRD 3.3.2"
     log "Topology: $TOPO"
 
     # Load-bearing mutation receipts:
@@ -1234,6 +1277,7 @@ main_crash_restart() {
     #   assertion because the named protocol row must remain observable.
 
     resolve_grpc_addr
+    preflight_bird_container
     start_bird "$GOOD_CONF"
     docker exec "$RUSTBGPD" cp /etc/rustbgpd/config.toml /tmp/m43-config.toml
     start_rustbgpd "exec /usr/local/bin/rustbgpd /tmp/m43-config.toml"

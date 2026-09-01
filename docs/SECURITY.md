@@ -268,7 +268,7 @@ key definitions, and the selected MKT; any ambiguous partial session mutation
 discards the whole changed cohort. Removing a protected neighbor/owner,
 editing/reordering keys, or deleting a selected or non-deprecated MKT remains
 restart-gated.
-Static-neighbor protected interop is validated by M43 against BIRD 3.3.1:
+Static-neighbor protected interop is validated by M43 against BIRD 3.3.2:
 matching keys establish and import a route, a nonpreferred successor is added
 with SIGHUP, a later generation selects it and deprecates both predecessors,
 and a final generation deletes the deprecated MKTs without flapping the session
@@ -537,7 +537,7 @@ the roadmap:
   deprecates its predecessor. A still-later SIGHUP can delete deprecated MKTs
   that are neither Current nor RNext. Edits/reordering, selected or
   non-deprecated-key deletion, and protected-owner CRUD require a restart.
-  Protected static-neighbor interop is covered by M43 against BIRD 3.3.1 on
+  Protected static-neighbor interop is covered by M43 against BIRD 3.3.2 on
   Linux with `CONFIG_TCP_AO=y`, including the full no-flap
   add/select/deprecate/delete lifecycle and authenticated traffic on the sole
   survivor.

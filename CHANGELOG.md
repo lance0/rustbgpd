@@ -27,6 +27,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The hosted M43 TCP-AO rotation and crash-recovery proof now uses
+  checksum-built BIRD 3.3.2. Before either mode starts BIRD, it verifies the
+  exact container image, sleeping command, runtime version, and all four bound
+  configurations; the existing proof semantics and archive-unavailable
+  tolerance remain unchanged.
+
 - `rbgp events watch --from-event-id` now resumes after clean stream EOF or
   gRPC `UNAVAILABLE`, preserving every filter and reconnecting from the highest
   fully written and flushed top-level event ID with 1-to-30-second exponential

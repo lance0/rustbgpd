@@ -855,12 +855,12 @@ class PrimerContractTests(unittest.TestCase):
                         self.mutate(relative, call, f"{call}\n{field}")
 
     def test_bird3_producer_and_stage_consumer_are_load_bearing(self):
-        checksum = "d5a8d651d6184c18252954932bb249dfee1fd213b3665cdd86226ac45edc0190"
+        checksum = "21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c"
         relative = ".github/workflows/kernel-dataplane.yml"
         for old, new in (
             ("  bird3_archive:\n", "  removed_bird3_archive:\n"),
-            (f"key: bird3-v3.3.1-source-{checksum}", "key: bird3-latest"),
-            ("name: bird3-v3.3.1-source", "name: bird3-latest"),
+            (f"key: bird3-v3.3.2-source-{checksum}", "key: bird3-latest"),
+            ("name: bird3-v3.3.2-source", "name: bird3-latest"),
             (
                 "needs: [grpcurl_archive, bird3_archive, prime_dev_image]",
                 "needs: [grpcurl_archive, prime_dev_image]",
@@ -885,7 +885,7 @@ class PrimerContractTests(unittest.TestCase):
             with self.subTest(seam=f"bird3 producer {seam}"):
                 self.mutate(relative, seam, replacement)
         exact_path = (
-            "path: ${{ runner.temp }}/bird3-cache/bird-3.3.1.tar.gz"
+            "path: ${{ runner.temp }}/bird3-cache/bird-3.3.2.tar.gz"
         )
         for occurrence in (0, 1):
             with self.subTest(seam="bird3 exact path", occurrence=occurrence):
@@ -902,14 +902,14 @@ class PrimerContractTests(unittest.TestCase):
             "        uses: ./.github/actions/stage-bird3-artifact\n"
         )
         build_step = (
-            "      - name: Build BIRD 3.3.1 TCP-AO image\n"
+            "      - name: Build BIRD 3.3.2 TCP-AO image\n"
             "        if: steps.tcp_ao.outputs.supported == 'true'\n"
             "        uses: docker/build-push-action@v7\n"
             "        with:\n"
             "          context: tests/interop\n"
             "          file: tests/interop/Dockerfile.bird3\n"
             "          load: true\n"
-            "          tags: bird:3.3.1-tcpao\n"
+            "          tags: bird:3.3.2-tcpao\n"
             "          cache-from: type=gha,scope=bird3-tcpao\n"
             "          cache-to: type=gha,mode=max,scope=bird3-tcpao,ignore-error=true\n"
         )
@@ -923,7 +923,7 @@ class PrimerContractTests(unittest.TestCase):
         action = ".github/actions/stage-bird3-artifact/action.yml"
         for old, new in (
             ("actions/download-artifact@v8", "actions/download-artifact@main"),
-            ('default: "bird3-v3.3.1-source"', 'default: "bird3-latest"'),
+            ('default: "bird3-v3.3.2-source"', 'default: "bird3-latest"'),
             ("--stage-archive", "--prepare-archive"),
             (
                 "set -euo pipefail",
@@ -935,7 +935,7 @@ class PrimerContractTests(unittest.TestCase):
 
         installer = ".github/scripts/install-bird3.sh"
         for old, new in (
-            ('BIRD3_VERSION="3.3.1"', 'BIRD3_VERSION="latest"'),
+            ('BIRD3_VERSION="3.3.2"', 'BIRD3_VERSION="latest"'),
             (checksum, "0" * 64),
             ("curl -fsSL", "curl -sL"),
             ("--connect-timeout 10", "--connect-timeout 0"),
@@ -1007,12 +1007,12 @@ class PrimerContractTests(unittest.TestCase):
     def test_parameterized_bird_stage_action_is_load_bearing(self):
         relative = ".github/actions/stage-bird3-artifact/action.yml"
         for old, new in (
-            ("name: ${{ inputs.artifact-name }}", "name: bird3-v3.3.1-source"),
-            ('--version "${{ inputs.version }}"', "--version 3.3.1"),
+            ("name: ${{ inputs.artifact-name }}", "name: bird3-v3.3.2-source"),
+            ('--version "${{ inputs.version }}"', "--version 3.3.2"),
             ('--sha256 "${{ inputs.sha256 }}"', "--sha256 " + "0" * 64),
             (
                 '"$RUNNER_TEMP/bird3-artifact/bird-${{ inputs.version }}.tar.gz"',
-                '"$RUNNER_TEMP/bird3-artifact/bird-3.3.1.tar.gz"',
+                '"$RUNNER_TEMP/bird3-artifact/bird-3.3.2.tar.gz"',
             ),
             ('"${{ inputs.stage-directory }}"', "tests/interop/bird3-archive"),
         ):
@@ -2074,9 +2074,9 @@ class PrimerContractTests(unittest.TestCase):
 
     def test_bird3_source_archive_contract_is_load_bearing(self):
         relative = "tests/interop/Dockerfile.bird3"
-        checksum = "d5a8d651d6184c18252954932bb249dfee1fd213b3665cdd86226ac45edc0190"
+        checksum = "21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c"
         cases = (
-            ("ARG BIRD_VERSION=3.3.1", "ARG BIRD_VERSION=latest"),
+            ("ARG BIRD_VERSION=3.3.2", "ARG BIRD_VERSION=latest"),
             (
                 f'checksum="{checksum}"',
                 f'checksum="{checksum[::-1]}"',
