@@ -726,6 +726,11 @@ fn draw_route_explorer(f: &mut Frame, app: &mut App, peer: &str, theme: &Theme) 
                                 .collect::<Vec<_>>()
                                 .join(" "),
                         ),
+                        Cell::from(if route.path_id == 0 {
+                            String::new()
+                        } else {
+                            route.path_id.to_string()
+                        }),
                         Cell::from(optional_u32(route.local_pref_attr)),
                         Cell::from(optional_u32(route.med_attr)),
                         Cell::from(route.validation_state.clone()),
@@ -739,6 +744,7 @@ fn draw_route_explorer(f: &mut Frame, app: &mut App, peer: &str, theme: &Theme) 
                         Constraint::Min(13),
                         Constraint::Min(13),
                         Constraint::Min(12),
+                        Constraint::Length(10),
                         Constraint::Length(9),
                         Constraint::Length(7),
                         Constraint::Length(9),
@@ -751,6 +757,7 @@ fn draw_route_explorer(f: &mut Frame, app: &mut App, peer: &str, theme: &Theme) 
                         "Next Hop",
                         "Source Peer",
                         "AS Path",
+                        "PathID",
                         "LocalPref",
                         "MED",
                         "RPKI",
@@ -810,7 +817,7 @@ fn draw_route_explorer(f: &mut Frame, app: &mut App, peer: &str, theme: &Theme) 
                     rows,
                     [
                         Constraint::Min(16),
-                        Constraint::Length(6),
+                        Constraint::Length(10),
                         Constraint::Min(14),
                         Constraint::Min(14),
                         Constraint::Min(13),
@@ -821,7 +828,7 @@ fn draw_route_explorer(f: &mut Frame, app: &mut App, peer: &str, theme: &Theme) 
                 )
                 .header(
                     Row::new([
-                        "Prefix", "PathId", "Reason", "Detail", "Next Hop", "RPKI", "ASPA",
+                        "Prefix", "PathID", "Reason", "Detail", "Next Hop", "RPKI", "ASPA",
                         "AS Path",
                     ])
                     .style(header_style),
@@ -1174,7 +1181,10 @@ fn draw_help_overlay(f: &mut Frame, theme: &Theme) {
         ]),
         Line::from(vec![
             Span::styled("  e           ", Style::default().fg(theme.accent)),
-            Span::styled("Toggle route events panel", Style::default().fg(theme.text)),
+            Span::styled(
+                "Toggle route events panel (peer table)",
+                Style::default().fg(theme.text),
+            ),
         ]),
         Line::from(vec![
             Span::styled("  s           ", Style::default().fg(theme.accent)),
@@ -1216,7 +1226,7 @@ fn draw_help_overlay(f: &mut Frame, theme: &Theme) {
         Line::from(vec![
             Span::styled("  / and e     ", Style::default().fg(theme.accent)),
             Span::styled(
-                "Exact prefix filter / explain a typed prefix",
+                "Exact prefix filter / explain a typed prefix (route explorer)",
                 Style::default().fg(theme.text),
             ),
         ]),
@@ -1830,6 +1840,7 @@ mod tests {
                 next_hop: "192.0.2.1".into(),
                 peer_address: "192.0.2.2".into(),
                 as_path: vec![64512, 64496],
+                path_id: u32::MAX,
                 local_pref: 100,
                 med_attr: Some(0),
                 validation_state: "valid".into(),
@@ -1849,6 +1860,8 @@ mod tests {
             "203.0.113.0/24",
             "192.0.2.1",
             "64512 64496",
+            "PathID",
+            "4294967295",
             "LocalPref",
             "MED",
             "RPKI",
@@ -1952,7 +1965,7 @@ mod tests {
             vec![crate::proto::RejectedRoute {
                 prefix: "203.0.113.0".into(),
                 prefix_length: 24,
-                path_id: 3,
+                path_id: u32::MAX,
                 reason: "policy_reject".into(),
                 reason_detail: "deny-bogons:term1".into(),
                 next_hop: "192.0.2.1".into(),
@@ -1966,7 +1979,8 @@ mod tests {
         let rendered = rendered_app(&mut app, 180, 10);
         for text in [
             "Routes: Rejected",
-            "PathId",
+            "PathID",
+            "4294967295",
             "203.0.113.0/24",
             "policy_reject",
             "deny-bogons:term1",

@@ -119,6 +119,7 @@ ureq = { version = "=3.4.0", default-features = false, features = ["rustls", "pl
 name = "rustbgpd"
 description = "API-first BGP daemon with gRPC control plane"
 publish = false
+exclude = ["docs/tui-demo.tape", "docs/images/tui-demo.gif"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

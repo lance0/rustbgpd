@@ -126,7 +126,7 @@ docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 rib
 docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 top
 ```
 
-![rbgp top — live TUI dashboard](docs/images/tui-screenshot.png)
+![rbgp top — on-demand route explorer](docs/images/tui-demo.gif)
 
 Select a peer, open its detail, then press `r` to explore the unicast Best,
 Received, Advertised, and Rejected tables on demand and explain export
