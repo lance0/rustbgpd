@@ -24,6 +24,7 @@ enum InputFormat {
 #[derive(Parser)]
 #[command(
     name = "rs-config-render activate",
+    bin_name = "rs-config-render activate",
     about = "Atomically publish and settle a validated local candidate"
 )]
 struct ActivateArgs {
@@ -55,6 +56,7 @@ struct ActivateArgs {
 #[derive(Parser)]
 #[command(
     name = "rs-config-render prune",
+    bin_name = "rs-config-render prune",
     about = "Remove activation generations no retention rule keeps (dry run unless --apply)"
 )]
 struct PruneArgs {
@@ -72,6 +74,7 @@ struct PruneArgs {
 #[derive(Parser)]
 #[command(
     name = "rs-config-render status",
+    bin_name = "rs-config-render status",
     about = "Report activation and lifecycle state for one handle without changing it"
 )]
 struct StatusArgs {
@@ -86,6 +89,7 @@ struct StatusArgs {
 #[derive(Parser)]
 #[command(
     name = "rs-config-render recover",
+    bin_name = "rs-config-render recover",
     about = "Resolve manual-recovery (exit 5) state; every verb is a dry run unless --apply"
 )]
 struct RecoverArgs {
@@ -218,6 +222,7 @@ impl HostBindingArgs {
 #[derive(Parser)]
 #[command(
     name = "rs-config-render ixp-manager-lifecycle",
+    bin_name = "rs-config-render ixp-manager-lifecycle",
     about = "Run the authenticated IXP Manager v7.4 router lifecycle"
 )]
 struct LifecycleArgs {
@@ -291,7 +296,8 @@ struct LifecycleResumeArgs {
 #[command(
     name = "rs-config-render",
     version,
-    about = "Render rustbgpd route-server configuration from supported upstream exports"
+    about = "Render rustbgpd route-server configuration from supported upstream exports",
+    after_help = "Operational modes:\n  rs-config-render --context <CONTEXT> --out-dir <OUT_DIR>\n  rs-config-render activate --help\n  rs-config-render status --help\n  rs-config-render prune --help\n  rs-config-render recover keep-current --help\n  rs-config-render recover rollback --help\n  rs-config-render recover release-lock --help\n  rs-config-render recover clear --help\n  rs-config-render ixp-manager-lifecycle run --help\n  rs-config-render ixp-manager-lifecycle resume --help"
 )]
 struct Cli {
     /// Input document format

@@ -11,6 +11,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `rs-config-render --help` now lists its rendering, activation, status,
+  pruning, recovery, and IXP Manager lifecycle command paths.
+
 - `rbgp --pager auto|always|never` now provides terminal-aware paging for
   complete human best, received, and advertised unicast RIB listings.
 
