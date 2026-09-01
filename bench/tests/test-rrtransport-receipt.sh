@@ -484,7 +484,13 @@ expect_red wrong-peer mutate -c 'import pathlib,sys;p=pathlib.Path(sys.argv[1])/
 expect_red wire-max mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/"phase.json";d=json.loads(p.read_text());d["wire_ms"]=4;p.write_text(json.dumps(d))'
 expect_red phase-rss mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/"phase.json";d=json.loads(p.read_text());d["resource_observer"]["staged"]["direct_pid_vmrss_kib"]=111;p.write_text(json.dumps(d))'
 expect_red hwm-below-rss mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1]);[(lambda f,d:(d["checkpoints" if f.name=="rss.json" else "resource_observer"]["wire"].__setitem__("direct_pid_vmhwm_kib",119),f.write_text(json.dumps(d))))(f,json.loads(f.read_text())) for f in (p/"rss.json",p/"phase.json")]'
-expect_red hwm-nonmonotonic mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1]);[(lambda f,d:(d["checkpoints" if f.name=="rss.json" else "resource_observer"]["staged"].__setitem__("direct_pid_vmhwm_kib",126),f.write_text(json.dumps(d))))(f,json.loads(f.read_text())) for f in (p/"rss.json",p/"phase.json")]'
+cp -a "$tmp/accepted" "$tmp/hwm-tolerance-boundary"
+mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1]);values={"established":5000,"staged":5000,"wire":904};[(lambda f,d:(d["checkpoints" if f.name=="rss.json" else "resource_observer"].update({name:{**d["checkpoints" if f.name=="rss.json" else "resource_observer"][name],"direct_pid_vmhwm_kib":value} for name,value in values.items()}),f.write_text(json.dumps(d))))(f,json.loads(f.read_text())) for f in (p/"rss.json",p/"phase.json")]' \
+  "$tmp/hwm-tolerance-boundary"
+python3 "$verifier" "$tmp/hwm-tolerance-boundary"
+expect_red hwm-material-regression mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1]);[(lambda f,d:(d["checkpoints" if f.name=="rss.json" else "resource_observer"]["staged"].__setitem__("direct_pid_vmhwm_kib",4222),f.write_text(json.dumps(d))))(f,json.loads(f.read_text())) for f in (p/"rss.json",p/"phase.json")]'
+grep -Fxq "FAIL: VmHWM regression exceeds 4096 KiB accounting tolerance" \
+  "$tmp/hwm-material-regression.result"
 expect_red no-external-sample mutate -c 'import pathlib,sys;p=pathlib.Path(sys.argv[1])/"rss.tsv";p.write_text("\n".join(x for x in p.read_text().splitlines() if not x.startswith("process_tree_target_rss_sample"))+"\n")'
 expect_red legacy-sample-name mutate -c 'import pathlib,sys;p=pathlib.Path(sys.argv[1])/"rss.tsv";s=p.read_text();p.write_text(s.replace("process_tree_target_rss_sample","sample",1))'
 expect_red sampler-max mutate -c 'import json,pathlib,sys;p=pathlib.Path(sys.argv[1])/"rss.json";d=json.loads(p.read_text());d["process_tree_sampler_max_rss_kib"]=124;p.write_text(json.dumps(d))'

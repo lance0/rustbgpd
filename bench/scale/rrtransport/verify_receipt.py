@@ -14,6 +14,10 @@ SOURCES = 4
 WORKERS = 12
 TOTAL_NLRI = PEERS * PREFIXES
 RSS_LIMIT_KIB = 2 * 1024 * 1024
+# Linux documents /proc RSS accounting as asynchronous and imprecise. Keep raw
+# checkpoint values, but tolerate only the same 4 MiB VmHWM dip already used by
+# the persisted-config receipt verifier: 0.2% of this harness's RSS ceiling.
+VMHWM_REGRESSION_TOLERANCE_KIB = 4 * 1024
 # Seeded from a three-attempt full campaign on 2026-08-29: staged
 # 295/300/307 ms and wire 330/334/329 ms. Each limit is ceil(1.15 * max).
 STAGED_MS_LIMIT = 354
@@ -196,8 +200,16 @@ def verify(directory, tiny=False):
         fail(f"RSS ceiling exceeded: process_tree_sampler_max_rss_kib={sampler_max} KiB")
     hwms = [observer[name]["direct_pid_vmhwm_kib"] for name in ("established", "staged", "wire")]
     values = [observer[name]["direct_pid_vmrss_kib"] for name in ("established", "staged", "wire")]
-    if hwms != sorted(hwms) or any(hwm < value for hwm, value in zip(hwms, values)):
-        fail("VmHWM is non-monotonic or below VmRSS")
+    if any(hwm < value for hwm, value in zip(hwms, values)):
+        fail("VmHWM is below VmRSS")
+    if any(
+        current + VMHWM_REGRESSION_TOLERANCE_KIB < previous
+        for previous, current in zip(hwms, hwms[1:])
+    ):
+        fail(
+            "VmHWM regression exceeds "
+            f"{VMHWM_REGRESSION_TOLERANCE_KIB} KiB accounting tolerance"
+        )
     with (directory / "rss.tsv").open(encoding="utf-8") as stream:
         lines = stream.read().splitlines()
     if not lines or lines[0] != "observer\trss_kib":

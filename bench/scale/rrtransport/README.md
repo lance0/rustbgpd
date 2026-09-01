@@ -76,6 +76,12 @@ written only after all three attempts pass the semantic verifier. Results are
 not comparable to the historical unavailable scratch harness and must not be
 published as an A/B.
 
+Raw `VmHWM` checkpoints retain Linux's asynchronous `/proc` observations. The
+verifier always requires `VmHWM >= VmRSS`, permits at most a 4 MiB apparent
+high-water regression between checkpoints, and rejects any larger dip. The
+tolerance is 0.2% of the harness's 2 GiB RSS ceiling and matches the existing
+persisted-config receipt convention.
+
 A three-attempt full campaign on 2026-08-29 ran at repository commit
 `05a71687ff3f4787eb1eb90a180fa7bd817e36c5`. Its three staged-convergence
 times were 295, 300, and 307 ms; exact wire-convergence times were 330, 334,

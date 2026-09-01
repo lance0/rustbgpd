@@ -27,6 +27,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The rrtransport receipt verifier now tolerates at most 4 MiB of Linux
+  `/proc` `VmHWM` accounting drift between checkpoints while retaining raw
+  observations. `VmHWM` below `VmRSS`, larger regressions, and the 2 GiB RSS
+  ceiling remain fail-closed.
+
 - The hosted M43 TCP-AO rotation and crash-recovery proof now uses
   checksum-built BIRD 3.3.2. Before either mode starts BIRD, it verifies the
   exact container image, sleeping command, runtime version, and all four bound
