@@ -239,25 +239,58 @@ fn make_test_session_with_lifecycle(
     )
 }
 
-fn lifecycle_source_drop_value(metrics: &BgpMetrics, reason: &str) -> f64 {
-    counter_samples(metrics, "bgp_session_lifecycle_source_dropped_total")
-        .into_iter()
-        .find_map(|(labels, value)| {
-            (labels.get("reason").map(String::as_str) == Some(reason)).then_some(value)
-        })
-        .expect("preinitialized lifecycle source-drop series")
+fn make_test_session_with_event_source(
+    metrics: BgpMetrics,
+    event_tx: mpsc::Sender<SessionNotificationEvent>,
+) -> PeerSession {
+    let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (rib_tx, _rib_rx) = mpsc::channel(8);
+    PeerSession::new_with_identity_and_lifecycle(
+        config,
+        metrics,
+        cmd_rx,
+        rib_tx,
+        None,
+        None,
+        None,
+        Some(event_tx),
+        None,
+        None,
+        None,
+        false,
+        SessionIdentity::default(),
+    )
 }
 
-fn assert_lifecycle_source_drop_value(metrics: &BgpMetrics, reason: &str, expected: f64) {
-    let actual = lifecycle_source_drop_value(metrics, reason);
+fn session_event_source_drop_value(metrics: &BgpMetrics, kind: &str, reason: &str) -> f64 {
+    counter_samples(metrics, "bgp_session_event_source_dropped_total")
+        .into_iter()
+        .find_map(|(labels, value)| {
+            (labels.get("kind").map(String::as_str) == Some(kind)
+                && labels.get("reason").map(String::as_str) == Some(reason))
+            .then_some(value)
+        })
+        .expect("preinitialized session event source-drop series")
+}
+
+fn assert_session_event_source_drop_value(
+    metrics: &BgpMetrics,
+    kind: &str,
+    reason: &str,
+    expected: f64,
+) {
+    let actual = session_event_source_drop_value(metrics, kind, reason);
     assert!(
         (actual - expected).abs() < f64::EPSILON,
-        "expected lifecycle source-drop reason {reason} to equal {expected}, got {actual}"
+        "expected session event source-drop {kind}/{reason} to equal {expected}, got {actual}"
     );
 }
 
 #[tokio::test]
-async fn lifecycle_source_channel_full_records_one_drop() {
+async fn session_event_source_state_change_channel_full_records_one_drop() {
     let metrics = BgpMetrics::new();
     let (tx, _rx) = mpsc::channel(1);
     tx.try_send(SessionLifecycleNotification::StateChanged {
@@ -273,12 +306,12 @@ async fn lifecycle_source_channel_full_records_one_drop() {
 
     session.try_send_lifecycle_state_changed(SessionState::Idle, SessionState::Connect);
 
-    assert_lifecycle_source_drop_value(&metrics, "channel_full", 1.0);
-    assert_lifecycle_source_drop_value(&metrics, "channel_closed", 0.0);
+    assert_session_event_source_drop_value(&metrics, "state_change", "channel_full", 1.0);
+    assert_session_event_source_drop_value(&metrics, "state_change", "channel_closed", 0.0);
 }
 
 #[tokio::test]
-async fn lifecycle_source_channel_closed_records_one_drop() {
+async fn session_event_source_state_change_channel_closed_records_one_drop() {
     let metrics = BgpMetrics::new();
     let (tx, rx) = mpsc::channel(1);
     drop(rx);
@@ -286,12 +319,12 @@ async fn lifecycle_source_channel_closed_records_one_drop() {
 
     session.try_send_lifecycle_state_changed(SessionState::Idle, SessionState::Connect);
 
-    assert_lifecycle_source_drop_value(&metrics, "channel_full", 0.0);
-    assert_lifecycle_source_drop_value(&metrics, "channel_closed", 1.0);
+    assert_session_event_source_drop_value(&metrics, "state_change", "channel_full", 0.0);
+    assert_session_event_source_drop_value(&metrics, "state_change", "channel_closed", 1.0);
 }
 
 #[tokio::test]
-async fn lifecycle_source_success_delivers_exact_event_without_drop() {
+async fn session_event_source_state_change_success_delivers_exact_event_without_drop() {
     let metrics = BgpMetrics::new();
     let (tx, mut rx) = mpsc::channel(1);
     let session = make_test_session_with_lifecycle(metrics.clone(), Some(tx));
@@ -313,19 +346,89 @@ async fn lifecycle_source_success_delivers_exact_event_without_drop() {
     assert_eq!(peer_asn, None);
     assert_eq!(old, SessionState::Idle);
     assert_eq!(new, SessionState::Connect);
-    assert_lifecycle_source_drop_value(&metrics, "channel_full", 0.0);
-    assert_lifecycle_source_drop_value(&metrics, "channel_closed", 0.0);
+    assert_session_event_source_drop_value(&metrics, "state_change", "channel_full", 0.0);
+    assert_session_event_source_drop_value(&metrics, "state_change", "channel_closed", 0.0);
 }
 
 #[test]
-fn absent_lifecycle_source_records_no_drop() {
+fn absent_session_event_source_records_no_drop() {
     let metrics = BgpMetrics::new();
     let session = make_test_session_with_lifecycle(metrics.clone(), None);
 
     session.try_send_lifecycle_state_changed(SessionState::Idle, SessionState::Connect);
 
-    assert_lifecycle_source_drop_value(&metrics, "channel_full", 0.0);
-    assert_lifecycle_source_drop_value(&metrics, "channel_closed", 0.0);
+    assert_session_event_source_drop_value(&metrics, "state_change", "channel_full", 0.0);
+    assert_session_event_source_drop_value(&metrics, "state_change", "channel_closed", 0.0);
+}
+
+fn test_notification() -> NotificationMessage {
+    NotificationMessage {
+        code: NotificationCode::Cease,
+        subcode: 0,
+        data: Bytes::new(),
+    }
+}
+
+#[test]
+fn session_event_source_notification_channel_full_records_one_drop() {
+    let metrics = BgpMetrics::new();
+    let (tx, _rx) = mpsc::channel(1);
+    tx.try_send(SessionNotificationEvent {
+        session_id: 1,
+        role: SessionRole::Primary,
+        peer_addr: "192.0.2.1".parse().unwrap(),
+        direction: SessionNotificationDirection::Received,
+        code: 6,
+        subcode: 0,
+        description: "test".to_string(),
+        shutdown_reason: None,
+        failure_cause: None,
+    })
+    .unwrap();
+    let session = make_test_session_with_event_source(metrics.clone(), tx);
+
+    session.emit_notification_event(
+        SessionNotificationDirection::Received,
+        &test_notification(),
+        None,
+    );
+
+    assert_session_event_source_drop_value(&metrics, "notification", "channel_full", 1.0);
+    assert_session_event_source_drop_value(&metrics, "notification", "channel_closed", 0.0);
+}
+
+#[test]
+fn session_event_source_notification_channel_closed_records_one_drop() {
+    let metrics = BgpMetrics::new();
+    let (tx, rx) = mpsc::channel(1);
+    drop(rx);
+    let session = make_test_session_with_event_source(metrics.clone(), tx);
+
+    session.emit_notification_event(
+        SessionNotificationDirection::Received,
+        &test_notification(),
+        None,
+    );
+
+    assert_session_event_source_drop_value(&metrics, "notification", "channel_full", 0.0);
+    assert_session_event_source_drop_value(&metrics, "notification", "channel_closed", 1.0);
+}
+
+#[tokio::test]
+async fn session_event_source_notification_success_delivers_without_drop() {
+    let metrics = BgpMetrics::new();
+    let (tx, mut rx) = mpsc::channel(1);
+    let session = make_test_session_with_event_source(metrics.clone(), tx);
+
+    session.emit_notification_event(
+        SessionNotificationDirection::Received,
+        &test_notification(),
+        None,
+    );
+
+    assert!(rx.recv().await.is_some());
+    assert_session_event_source_drop_value(&metrics, "notification", "channel_full", 0.0);
+    assert_session_event_source_drop_value(&metrics, "notification", "channel_closed", 0.0);
 }
 
 fn make_test_session_with_channels(

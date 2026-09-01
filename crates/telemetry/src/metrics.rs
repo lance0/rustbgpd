@@ -466,7 +466,7 @@ struct BgpMetricsInner {
     // ── Event streams ───────────────────────────────────────────
     event_stream_lagged: IntCounterVec,
     event_stream_subscribers: IntGaugeVec,
-    session_lifecycle_source_dropped: IntCounterVec,
+    session_event_source_dropped: IntCounterVec,
     grpc_authz_decisions: IntCounterVec,
     grpc_credential_reloads: IntCounterVec,
     sighup_reload_outcomes: IntCounterVec,
@@ -1090,18 +1090,20 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
-        let session_lifecycle_source_dropped = IntCounterVec::new(
+        let session_event_source_dropped = IntCounterVec::new(
             Opts::new(
-                "bgp_session_lifecycle_source_dropped_total",
-                "Session lifecycle events dropped before process-local, live, and durable event history, by bounded reason.",
+                "bgp_session_event_source_dropped_total",
+                "Session events dropped before peer-manager publication, by bounded kind and reason.",
             ),
-            &["reason"],
+            &["kind", "reason"],
         )
         .expect("valid metric definition");
-        for reason in ["channel_full", "channel_closed"] {
-            session_lifecycle_source_dropped
-                .with_label_values(&[reason])
-                .inc_by(0);
+        for kind in ["state_change", "notification"] {
+            for reason in ["channel_full", "channel_closed"] {
+                session_event_source_dropped
+                    .with_label_values(&[kind, reason])
+                    .inc_by(0);
+            }
         }
 
         let grpc_authz_decisions = IntCounterVec::new(
@@ -2538,7 +2540,7 @@ impl BgpMetrics {
             .register(Box::new(event_stream_subscribers.clone()))
             .expect("metric not already registered");
         registry
-            .register(Box::new(session_lifecycle_source_dropped.clone()))
+            .register(Box::new(session_event_source_dropped.clone()))
             .expect("metric not already registered");
         registry
             .register(Box::new(grpc_authz_decisions.clone()))
@@ -3033,7 +3035,7 @@ impl BgpMetrics {
             orr_input_objects,
             event_stream_lagged,
             event_stream_subscribers,
-            session_lifecycle_source_dropped,
+            session_event_source_dropped,
             grpc_authz_decisions,
             grpc_credential_reloads,
             sighup_reload_outcomes,
@@ -3925,19 +3927,35 @@ impl BgpMetrics {
             .inc_by(missed);
     }
 
-    /// Record one session lifecycle event dropped because its source channel was full.
-    pub fn record_session_lifecycle_source_channel_full(&self) {
+    /// Record one session state change dropped because its source channel was full.
+    pub fn record_session_state_change_source_channel_full(&self) {
         self.0
-            .session_lifecycle_source_dropped
-            .with_label_values(&["channel_full"])
+            .session_event_source_dropped
+            .with_label_values(&["state_change", "channel_full"])
             .inc();
     }
 
-    /// Record one session lifecycle event dropped because its source channel was closed.
-    pub fn record_session_lifecycle_source_channel_closed(&self) {
+    /// Record one session state change dropped because its source channel was closed.
+    pub fn record_session_state_change_source_channel_closed(&self) {
         self.0
-            .session_lifecycle_source_dropped
-            .with_label_values(&["channel_closed"])
+            .session_event_source_dropped
+            .with_label_values(&["state_change", "channel_closed"])
+            .inc();
+    }
+
+    /// Record one session notification dropped because its source channel was full.
+    pub fn record_session_notification_source_channel_full(&self) {
+        self.0
+            .session_event_source_dropped
+            .with_label_values(&["notification", "channel_full"])
+            .inc();
+    }
+
+    /// Record one session notification dropped because its source channel was closed.
+    pub fn record_session_notification_source_channel_closed(&self) {
+        self.0
+            .session_event_source_dropped
+            .with_label_values(&["notification", "channel_closed"])
             .inc();
     }
 
@@ -6472,21 +6490,24 @@ mod tests {
     }
 
     #[test]
-    fn session_lifecycle_source_drop_series_are_bounded_and_accumulate_independently() {
+    fn session_event_source_drop_series_are_bounded_and_accumulate_independently() {
         let m = BgpMetrics::new();
 
         let samples = m
             .registry()
             .gather()
             .into_iter()
-            .find(|family| family.name() == "bgp_session_lifecycle_source_dropped_total")
-            .expect("session lifecycle source-drop metric registered")
+            .find(|family| family.name() == "bgp_session_event_source_dropped_total")
+            .expect("session event source-drop metric registered")
             .metric
             .into_iter()
             .map(|metric| {
-                assert_eq!(metric.get_label().len(), 1, "only reason label");
+                assert_eq!(metric.get_label().len(), 2, "kind and reason labels");
                 (
-                    metric.get_label()[0].value().to_owned(),
+                    (
+                        metric.get_label()[0].value().to_owned(),
+                        metric.get_label()[1].value().to_owned(),
+                    ),
                     metric.get_counter().value(),
                 )
             })
@@ -6494,23 +6515,51 @@ mod tests {
         assert_eq!(
             samples,
             std::collections::BTreeMap::from([
-                ("channel_closed".to_string(), 0.0),
-                ("channel_full".to_string(), 0.0),
+                (
+                    ("notification".to_string(), "channel_closed".to_string()),
+                    0.0
+                ),
+                (
+                    ("notification".to_string(), "channel_full".to_string()),
+                    0.0
+                ),
+                (
+                    ("state_change".to_string(), "channel_closed".to_string()),
+                    0.0
+                ),
+                (
+                    ("state_change".to_string(), "channel_full".to_string()),
+                    0.0
+                ),
             ])
         );
 
-        m.record_session_lifecycle_source_channel_full();
-        m.record_session_lifecycle_source_channel_full();
-        m.record_session_lifecycle_source_channel_closed();
+        m.record_session_state_change_source_channel_full();
+        m.record_session_state_change_source_channel_full();
+        m.record_session_state_change_source_channel_closed();
+        m.record_session_notification_source_channel_full();
+        m.record_session_notification_source_channel_closed();
         assert_eq!(
-            m.0.session_lifecycle_source_dropped
-                .with_label_values(&["channel_full"])
+            m.0.session_event_source_dropped
+                .with_label_values(&["state_change", "channel_full"])
                 .get(),
             2
         );
         assert_eq!(
-            m.0.session_lifecycle_source_dropped
-                .with_label_values(&["channel_closed"])
+            m.0.session_event_source_dropped
+                .with_label_values(&["state_change", "channel_closed"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            m.0.session_event_source_dropped
+                .with_label_values(&["notification", "channel_full"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            m.0.session_event_source_dropped
+                .with_label_values(&["notification", "channel_closed"])
                 .get(),
             1
         );
