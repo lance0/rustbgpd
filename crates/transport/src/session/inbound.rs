@@ -1483,7 +1483,7 @@ impl PeerSession {
             self.metrics
                 .record_update_malformed(&self.peer_label, malformed_disposition_label(applied));
         }
-        // draft-ietf-sidrops-aspa-verification-27 §5: an AS_PATH whose most
+        // draft-ietf-sidrops-aspa-verification-28 §5.1: an AS_PATH whose most
         // recently added AS is not the negotiated eBGP neighbor AS is
         // semantically invalid and SHALL use RFC 7606 treat-as-withdraw. For
         // an RFC 6793 OLD peer, `parse_revised` has already reconstructed the

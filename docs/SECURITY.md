@@ -249,8 +249,11 @@ strings, compiler-created copies, or the key copied into the kernel.
 
 ## TCP-AO
 
-TCP-AO (RFC 5925) is the intended successor to TCP MD5. rustbgpd has an
-internal Linux socket primitive and capability probe for TCP-AO (ADR-0062),
+TCP-AO (RFC 5925) is the intended successor to TCP MD5. It needs mainline
+Linux 6.7 or newer, or a downstream kernel with TCP-AO backported, built with
+`CONFIG_TCP_AO=y`; the `TCP_AO_*` socket options entered mainline in 6.7.
+rustbgpd has an internal Linux socket primitive and capability probe for
+TCP-AO (ADR-0062),
 plus static-neighbor and direct dynamic-range `tcp_ao` TOML
 parsing/validation and startup runtime installation. A selector may configure
 an ordered keyring of one to 256 MKTs; the legacy singleton table remains

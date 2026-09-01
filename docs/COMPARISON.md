@@ -582,10 +582,10 @@ competitor comparison or a causal delta, and neither rewrites the pinned
 
 ## Other Rust implementations
 
-Three other open-source BGP daemons are written in Rust. None is a column
-in the matrix above; each paragraph records capability, scope, license,
-and a pinned release from the project's own release page and README, and
-makes no interoperability claim.
+The following three open-source BGP daemons are examples written in Rust,
+not an exhaustive inventory. None is a column in the matrix above; each
+paragraph records capability, scope, license, and a pinned release from the
+project's own release page and README, and makes no interoperability claim.
 
 **zebra-rs** (AGPL-3.0) describes itself as a BGP, OSPF, and IS-IS
 routing stack with SRv6, SR-MPLS, L3VPN, and EVPN extensions, configured

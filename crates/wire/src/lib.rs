@@ -204,7 +204,7 @@ pub enum AspaValidation {
 /// Session context needed to choose and replay ASPA path verification.
 ///
 /// ASPA verification is role-aware in
-/// `draft-ietf-sidrops-aspa-verification-27`: routes received from a
+/// `draft-ietf-sidrops-aspa-verification-28`: routes received from a
 /// provider use downstream verification, while customer/peer/route-server
 /// shapes use upstream verification. Stored routes keep this compact context
 /// so RTR cache updates can revalidate them with the same relationship

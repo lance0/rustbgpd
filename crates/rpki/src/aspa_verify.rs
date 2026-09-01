@@ -92,7 +92,7 @@ fn leftmost_as_matches_neighbor(hops: &[u32], neighbor_asn: Option<u32>) -> bool
 }
 
 /// Verify an `AS_PATH` using the role-aware ASPA procedures from
-/// `draft-ietf-sidrops-aspa-verification-27` §5.4 and §5.5.
+/// `draft-ietf-sidrops-aspa-verification-28` §5.5 and §5.6.
 ///
 /// With no configured role, rustbgpd uses upstream verification; the session
 /// boundary independently enforces the current draft's first-AS precondition.
@@ -120,7 +120,7 @@ pub fn verify_detailed(
 }
 
 /// Verify an `AS_PATH` using upstream ASPA verification per
-/// `draft-ietf-sidrops-aspa-verification-27` §5.4.
+/// `draft-ietf-sidrops-aspa-verification-28` §5.5.
 ///
 /// The compressed path is indexed as `hop[0]` = neighbor AS (closest),
 /// `hop[N-1]` = origin AS (farthest). The algorithm walks from origin
@@ -132,12 +132,12 @@ pub fn verify_detailed(
 /// - `Invalid` — at least one hop has a proven non-provider relationship
 /// - `Unknown` — verification incomplete due to missing ASPA records
 ///
-/// # Equivalence to the §5.3 bounds-checker form
+/// # Equivalence to the §5.4 bounds-checker form
 ///
-/// The spec describes the algorithm in §5.3 as a bounds-check that
+/// The spec describes the algorithm in §5.4 as a bounds-check that
 /// computes `max_up_ramp` (treating `NoAttestation` as optimistic-pass)
 /// and `min_up_ramp` (strict) walking from origin toward neighbor. For
-/// *upstream* verification (§5.4 with `max_down_ramp = min_down_ramp =
+/// *upstream* verification (§5.5 with `max_down_ramp = min_down_ramp =
 /// 0`) the bounds form collapses into the pairwise walk here, because:
 ///
 /// - "any pair `NotProviderPlus`" ⇔ "`max_up_ramp > 0`" — `max_up_ramp`

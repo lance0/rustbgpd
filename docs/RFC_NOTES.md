@@ -1116,6 +1116,18 @@ carries inactive (absent), unlimited (zero), or finite.
 - Best-path step 0.5: Valid > NotFound > Invalid (between stale demotion
   and LOCAL_PREF).
 - `match_rpki_validation` in policy.
+- draft-ietf-sidrops-avoid-rpki-state-in-bgp-12 (BCP, RFC Editor queue):
+  the daemon does not automatically encode RPKI- or ASPA-derived validation
+  state in any Path Attribute. Validation state lives in the RIB, policy predicates
+  (`match_rpki_validation`, `match_aspa_validation`, `route.rpki` /
+  `route.aspa`), and the API/CLI. Explicit operator policy can attach the
+  RFC 8097 `OV_*` extended-community aliases; type `0x43` is non-transitive,
+  so ordinary eBGP export strips it
+  under the non-transitive rule in "Extended Communities — non-transitive
+  eBGP export" below unless `send_non_transitive_extended_communities =
+  true`, while route-server-client export preserves it — an operator who
+  tags RS-client exports with `OV_*` owns the draft's §6 removal
+  requirement.
 - See ADR-0034.
 
 ---
@@ -1139,6 +1151,12 @@ carries inactive (absent), unlimited (zero), or finite.
 - Peer Up replay on collector reconnect.
 - Periodic Stats Report (type 7: Adj-RIB-In route count, 60s interval).
 - Coordinated Termination on daemon shutdown.
+- RFC 9736 (Peer Up message namespace) is satisfied by construction: Peer
+  Up stays message type 3, the ordinary Peer Up carries no Information
+  TLVs, and the RFC 9069 Loc-RIB Peer Up carries only the VRF/Table Name
+  TLV (type 3), which keeps that value in the new Peer Up registry; no
+  Initiation-only TLV type is emitted in a Peer Up (`encode_peer_up` /
+  `encode_loc_rib_peer_up` in `crates/bmp/src/codec.rs`).
 - Raw UPDATE PDU capture via `Bytes` refcount clone (zero overhead when
   unconfigured).
 - Per-collector view selection: `monitor = ["rib_in_pre",

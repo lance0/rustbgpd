@@ -1030,8 +1030,12 @@ one to 256 Master Key Tuples (MKTs). The legacy singleton table remains valid
 and is also the canonical serialized shape for a one-key ring. Configure two or
 more keys as an ordered array of inline tables.
 
-On Linux, rustbgpd installs every configured key on outbound active-open
-sockets before `connect()` and on the passive BGP listener before `listen()`
+TCP-AO needs mainline Linux 6.7 or newer, or a downstream kernel with TCP-AO
+backported, built with `CONFIG_TCP_AO=y`. The `TCP_AO_*` socket options
+rustbgpd uses entered mainline in kernel 6.7 (released 2024-01-07). On Linux,
+rustbgpd installs every configured key on outbound
+active-open sockets before `connect()` and on the passive BGP listener
+before `listen()`
 when the peer address family matches the configured listener socket. If any
 listener key cannot be installed, startup fails closed instead of running a
 partially protected listener. Any active-open installation or kernel-inventory
@@ -2811,7 +2815,7 @@ the member's AS_PATH without adding its own ASN. RFC 6793 OLD peers are checked
 after AS_PATH reconstruction. Routes learned over iBGP
 always present `aspa = "unknown"` to import policy and keep that state across
 ASPA cache revalidation, following
-`draft-ietf-sidrops-aspa-verification-27` §6.2's recommendation against
+`draft-ietf-sidrops-aspa-verification-28` §6.2's recommendation against
 internal-session verification.
 
 ### Route modifications (set actions)

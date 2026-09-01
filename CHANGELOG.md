@@ -268,6 +268,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a dated latest-release row, and an "Other Rust implementations" section
   covering zebra-rs, Holo, and RustyBGP.
 
+- Refresh standards pins: the ASPA conformance page, a dated ADR-0123
+  amendment, rustdoc, and the M59 interop note follow
+  draft-ietf-sidrops-aspa-verification-28 (new §5.1 prerequisite AS_PATH
+  checks, §5.2–§5.7 renumbering; no verifier change); TCP-AO documentation
+  states the mainline Linux 6.7 or downstream-backport requirement;
+  RFC_NOTES records the non-automatic validation-state encoding boundary
+  from draft-ietf-sidrops-avoid-rpki-state-in-bgp and RFC 9736; the
+  rs-config-render README corrects the RTT-community refusal rationale.
+
 ### Upgrade notes
 
 - Received `AS_PATH` attributes with more than 750 AS numbers and reachable

@@ -177,3 +177,17 @@ release notes, or roadmap changed.
   and [Section 5, Operational Recommendations](https://www.rfc-editor.org/rfc/rfc9324.html#section-5)
 - [ADR-0049](0049-aspa-verification.md), ASPA path verification and the
   currently shipped selection policy
+
+## Amendments
+
+### 2026-09-01 — draft -28 renumbering
+
+draft-ietf-sidrops-aspa-verification-28 (2026-08-24) inserted a new §5.1,
+"Prerequisite AS_PATH Checks", and renumbered the former §5.6 Mitigation
+Policy to
+[§5.7](https://datatracker.ietf.org/doc/html/draft-ietf-sidrops-aspa-verification-28#section-5.7).
+The requirement text this ADR quotes — Invalid SHOULD be ineligible for
+selection and MUST be kept in Adj-RIB-In, Unknown SHOULD be treated at the
+same preference level as Valid — is unchanged in -28. The body above keeps
+its -27 section references as written on the decision date; the status,
+gates, and shipped boundary are unaffected.
