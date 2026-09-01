@@ -2359,24 +2359,56 @@ initially unavailable inventory, and a retained stale count; failure of this
 optional inventory does not mark the core connection disconnected.
 Press `h` for keybindings.
 
-From peer detail, `r` opens the unicast export-explain browser. It takes a
-point-in-time page of the global Best-RIB (100 routes per page) while retaining
-the selected peer only as the export target. Use `n` and `p` to follow the
-server's opaque page tokens, and `Enter` to evaluate the highlighted prefix
-with `ExplainAdvertisedRoute`. The result shows advertise or deny, ordered
-gates and reasons, policy attribution, and route modifications. A denial is
-explainable even when the route is absent from Adj-RIB-Out.
+From peer detail, `r` opens the on-demand route explorer. It shows one
+point-in-time server page (100 routes) of one unicast table at a time:
 
-The browser does not poll the RIB or retry general failures automatically.
-Leaving or quitting the view, or removal of the selected peer on a fresh
-snapshot, cancels its request. If pagination becomes stale and the daemon
-returns `ABORTED`, the browser restarts at page 1 once. Both the Best-RIB list
-and export-explain requests use the existing bearer credentials and require
-`SensitiveRead` authorization.
+- `v` cycles the table: **Best** (the global Loc-RIB, with the selected peer
+  retained only as the export-explain target), **Received**, **Advertised**,
+  and **Rejected** (the last three are scoped to the selected peer).
+- `f` toggles IPv4 unicast / IPv6 unicast. Toggling drops a prefix filter
+  from the other family.
+- `/` opens the prefix editor for one exact prefix such as `203.0.113.0/24`.
+  `Tab` toggles the longer-prefixes match inside the editor, `Enter` applies,
+  `Esc` cancels without changing the active filter, and an empty submission
+  clears it. A prefix that does not parse, or whose family does not match the
+  selected family, is reported inline and sends no request.
+- `Space`/`PgDn` and `PgUp` move the highlight one screen within the current
+  server page; `n` and `p` follow the server's opaque page tokens to the next
+  or previous server page.
+- `Enter` evaluates the highlighted Best or Advertised prefix with
+  `ExplainAdvertisedRoute`; `e` opens the same editor to explain any typed
+  prefix for the selected peer, including one absent from Adj-RIB-Out. The
+  result shows advertise or deny, ordered gates and reasons, policy
+  attribution, and route modifications. `Enter` does nothing on Received or
+  Rejected rows.
+- `r` re-runs page 1 of the current table.
 
-This view deliberately does not provide arbitrary search, import/rejected-route
-browsing, best-path comparison, VPN, labeled-unicast, or source-candidate
-explanations. It also does not imply that a route must exist in Adj-RIB-Out.
+The status line reports the exact server `total_count`, the table, the peer
+(or `global` for Best), the family, the active filter, the server page index,
+and the snapshot fence (`page_version`).
+
+Best, Received, and Advertised pass the family and prefix filter to the
+daemon's `ListBestRoutes`, `ListReceivedRoutes`, and `ListAdvertisedRoutes`
+RPCs. Rejected uses `ListRejectedRoutes`, which has no server-side paging or
+filters: the explorer fetches the peer's retained rejections once, applies the
+family and prefix filter client-side, and shows `page 1 of 1` with the
+matched, retained, capacity, and eviction counts.
+
+The explorer does not poll the RIB, walk pages automatically, or retry general
+failures. Changing the table, family, filter, or peer, leaving the view, or
+removal of the selected peer on a fresh snapshot cancels the in-flight request
+and discards any late result for the previous scope; every such change
+restarts at page 1 with an empty token stack. Continuation tokens and their
+`page_version` fence stay authoritative, so pages are never stitched across
+generations. If a token becomes stale and the daemon returns `ABORTED`, the
+explorer restarts at page 1 once and names it in the status line (`table
+changed — refreshed at page 1`); a second `ABORTED` in the same scope is shown
+as an error. All four listing RPCs and the export-explain request use the
+existing bearer credentials and require `SensitiveRead` authorization.
+
+The explorer covers unicast tables only. It does not offer EVPN, VPN,
+labeled-unicast, or FlowSpec tables, community or origin-ASN query builders,
+best-path comparison, source-candidate explanations, or streaming updates.
 Use the CLI explain catalog for those broader questions.
 
 ### Watch live events

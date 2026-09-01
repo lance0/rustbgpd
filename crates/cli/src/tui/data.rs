@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -7,23 +8,160 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::commands::control::rpki_vrp_count_sum;
-use crate::commands::rib::{RibClient, fetch_tui_best_route_page, fetch_tui_explain_advertised};
+use crate::commands::rib::{
+    PolicyClient, RibClient, RouteListRpc, fetch_tui_explain_advertised, fetch_tui_rejected_routes,
+    fetch_tui_route_page,
+};
 use crate::connection::Connection;
 use crate::proto::control_service_client::ControlServiceClient;
 use crate::proto::event_service_client::EventServiceClient;
 use crate::proto::global_service_client::GlobalServiceClient;
 use crate::proto::neighbor_service_client::NeighborServiceClient;
+use crate::proto::policy_service_client::PolicyServiceClient;
 use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
-    BgpEvent, BgpEventType, EventCategory, ExplainAdvertisedRouteResponse, GetGlobalRequest,
-    GlobalState, HealthRequest, HealthResponse, ListDynamicNeighborsRequest, ListNeighborsRequest,
-    ListRoutesResponse, MetricsRequest, NeighborState, RouteEvent, WatchEventsRequest, bgp_event,
+    AddressFamily, BgpEvent, BgpEventType, EventCategory, ExplainAdvertisedRouteResponse,
+    GetGlobalRequest, GlobalState, HealthRequest, HealthResponse, ListDynamicNeighborsRequest,
+    ListNeighborsRequest, ListRejectedRoutesResponse, ListRoutesRequest, ListRoutesResponse,
+    MetricsRequest, NeighborState, RouteEvent, WatchEventsRequest, bgp_event,
 };
+
+/// Which route table the TUI explorer lists.
+///
+/// `Best` is the global Loc-RIB with the selected peer retained only as the
+/// export-explain target; the other three are scoped to the selected peer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RibView {
+    Best,
+    Received,
+    Advertised,
+    Rejected,
+}
+
+impl RibView {
+    pub fn next(self) -> Self {
+        match self {
+            RibView::Best => RibView::Received,
+            RibView::Received => RibView::Advertised,
+            RibView::Advertised => RibView::Rejected,
+            RibView::Rejected => RibView::Best,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            RibView::Best => "Best",
+            RibView::Received => "Received",
+            RibView::Advertised => "Advertised",
+            RibView::Rejected => "Rejected",
+        }
+    }
+
+    pub fn peer_scoped(self) -> bool {
+        self != RibView::Best
+    }
+
+    /// Only tables whose rows are export candidates explain on `Enter`.
+    pub fn explains_rows(self) -> bool {
+        matches!(self, RibView::Best | RibView::Advertised)
+    }
+
+    fn route_list(self) -> Option<RouteListRpc> {
+        match self {
+            RibView::Best => Some(RouteListRpc::Best),
+            RibView::Received => Some(RouteListRpc::Received),
+            RibView::Advertised => Some(RouteListRpc::Advertised),
+            RibView::Rejected => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RibFamily {
+    Ipv4Unicast,
+    Ipv6Unicast,
+}
+
+impl RibFamily {
+    pub fn toggle(self) -> Self {
+        match self {
+            RibFamily::Ipv4Unicast => RibFamily::Ipv6Unicast,
+            RibFamily::Ipv6Unicast => RibFamily::Ipv4Unicast,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            RibFamily::Ipv4Unicast => "IPv4 unicast",
+            RibFamily::Ipv6Unicast => "IPv6 unicast",
+        }
+    }
+
+    pub fn afi_safi(self) -> i32 {
+        match self {
+            RibFamily::Ipv4Unicast => AddressFamily::Ipv4Unicast as i32,
+            RibFamily::Ipv6Unicast => AddressFamily::Ipv6Unicast as i32,
+        }
+    }
+
+    pub fn matches(self, addr: IpAddr) -> bool {
+        match self {
+            RibFamily::Ipv4Unicast => addr.is_ipv4(),
+            RibFamily::Ipv6Unicast => addr.is_ipv6(),
+        }
+    }
+}
+
+/// One exact prefix, optionally widened to every longer-or-equal match.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct PrefixFilter {
+    pub addr: IpAddr,
+    pub len: u32,
+    pub longer: bool,
+}
+
+impl PrefixFilter {
+    pub fn label(&self) -> String {
+        let suffix = if self.longer { " +longer" } else { "" };
+        format!("{}/{}{suffix}", self.addr, self.len)
+    }
+
+    /// Client-side equivalent of the server's `prefix_filter` semantics.
+    pub fn matches(&self, addr: IpAddr, len: u32) -> bool {
+        let within = if self.longer {
+            len >= self.len
+        } else {
+            len == self.len
+        };
+        within
+            && addr.is_ipv4() == self.addr.is_ipv4()
+            && network_bits(self.addr, self.len).is_some()
+            && network_bits(self.addr, self.len) == network_bits(addr, self.len)
+    }
+}
+
+fn network_bits(addr: IpAddr, len: u32) -> Option<u128> {
+    let (bits, width) = match addr {
+        IpAddr::V4(v4) => (u128::from(u32::from(v4)), 32),
+        IpAddr::V6(v6) => (u128::from(v6), 128),
+    };
+    (len <= width).then(|| if len == 0 { 0 } else { bits >> (width - len) })
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum RibQueryKind {
-    BestPage { page_token: String },
-    ExplainAdvertised { prefix: String, prefix_length: u32 },
+    /// One page of the selected table. `page_token` is always empty for
+    /// `RibView::Rejected`, whose RPC has no paging.
+    List {
+        view: RibView,
+        family: RibFamily,
+        filter: Option<PrefixFilter>,
+        page_token: String,
+    },
+    ExplainAdvertised {
+        prefix: String,
+        prefix_length: u32,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -36,7 +174,8 @@ pub(super) struct RibQueryIdentity {
 
 #[derive(Debug)]
 pub(super) enum RibQueryResponse {
-    BestPage(ListRoutesResponse),
+    Page(ListRoutesResponse),
+    Rejected(ListRejectedRoutesResponse),
     ExplainAdvertised(Box<ExplainAdvertisedRouteResponse>),
 }
 
@@ -126,14 +265,34 @@ pub(super) fn spawn_rib_query_lane(
 
 async fn run_rib_query(
     client: &mut RibClient,
+    policy: &mut PolicyClient,
     identity: &RibQueryIdentity,
 ) -> Result<RibQueryResponse, tonic::Status> {
     match &identity.query {
-        RibQueryKind::BestPage { page_token } => {
-            fetch_tui_best_route_page(client, page_token.clone())
+        RibQueryKind::List {
+            view,
+            family,
+            filter,
+            page_token,
+        } => match view.route_list() {
+            None => fetch_tui_rejected_routes(policy, &identity.peer_address)
                 .await
-                .map(RibQueryResponse::BestPage)
-        }
+                .map(RibQueryResponse::Rejected),
+            Some(rpc) => {
+                let request = ListRoutesRequest {
+                    afi_safi: family.afi_safi(),
+                    page_token: page_token.clone(),
+                    prefix_filter: filter.map(|f| f.addr.to_string()).unwrap_or_default(),
+                    prefix_filter_length: filter.map_or(0, |f| f.len),
+                    longer_prefixes: filter.is_some_and(|f| f.longer),
+                    ..Default::default()
+                };
+                let peer = view.peer_scoped().then_some(identity.peer_address.as_str());
+                fetch_tui_route_page(client, rpc, peer, request)
+                    .await
+                    .map(RibQueryResponse::Page)
+            }
+        },
         RibQueryKind::ExplainAdvertised {
             prefix,
             prefix_length,
@@ -156,6 +315,8 @@ async fn rib_query_loop(
 ) {
     let mut client =
         RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let mut policy =
+        PolicyServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let mut pending = None;
     loop {
         let command = match pending.take() {
@@ -172,7 +333,7 @@ async fn rib_query_loop(
             continue;
         };
 
-        let mut rpc = std::pin::pin!(run_rib_query(&mut client, &identity));
+        let mut rpc = std::pin::pin!(run_rib_query(&mut client, &mut policy, &identity));
         tokio::select! {
             biased;
             _ = result_tx.closed() => return,
@@ -575,10 +736,22 @@ mod tests {
     use crate::connection::connect;
     use crate::test_support::spawn_mock_server;
 
-    fn best_query(token: &str) -> RibQueryKind {
-        RibQueryKind::BestPage {
+    fn list_query(
+        view: RibView,
+        family: RibFamily,
+        filter: Option<PrefixFilter>,
+        token: &str,
+    ) -> RibQueryKind {
+        RibQueryKind::List {
+            view,
+            family,
+            filter,
             page_token: token.to_string(),
         }
+    }
+
+    fn best_query(token: &str) -> RibQueryKind {
+        list_query(RibView::Best, RibFamily::Ipv4Unicast, None, token)
     }
 
     async fn receive_result(
@@ -636,7 +809,7 @@ mod tests {
         assert_eq!(result.identity.view_id, 9);
         assert_eq!(result.identity.peer_address, "fe80::1%eth0");
         assert_eq!(result.identity.query, best_query("opaque-in\0token"));
-        let RibQueryResponse::BestPage(page) = result.result.unwrap() else {
+        let RibQueryResponse::Page(page) = result.result.unwrap() else {
             panic!("expected Best-RIB page");
         };
         assert_eq!(page.routes.len(), 1);
@@ -654,11 +827,136 @@ mod tests {
         assert_eq!(
             requests[0],
             rustbgpd_api::proto::ListRoutesRequest {
+                afi_safi: rustbgpd_api::proto::AddressFamily::Ipv4Unicast as i32,
                 page_size: 100,
                 page_token: "opaque-in\0token".into(),
                 ..Default::default()
             }
         );
+    }
+
+    /// Received and Advertised carry the peer scope, family, and prefix
+    /// filter on their own RPCs; Best sends the same filter with no scope.
+    #[tokio::test]
+    async fn rib_query_lane_scopes_received_advertised_and_keeps_best_global() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+        let (lane, mut results) = spawn_rib_query_lane(connection);
+        let filter = PrefixFilter {
+            addr: "2001:db8::".parse().unwrap(),
+            len: 32,
+            longer: true,
+        };
+
+        for (view, calls) in [
+            (RibView::Received, &server.state.list_received_route_calls),
+            (
+                RibView::Advertised,
+                &server.state.list_advertised_route_calls,
+            ),
+            (RibView::Best, &server.state.list_best_route_calls),
+        ] {
+            let query = list_query(view, RibFamily::Ipv6Unicast, Some(filter), "opaque\0in");
+            lane.query(3, "fe80::1%eth0".into(), query.clone()).unwrap();
+            let result = receive_result(&mut results).await;
+            assert_eq!(result.identity.query, query);
+            assert!(matches!(result.result, Ok(RibQueryResponse::Page(_))));
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
+        let expected = |neighbor: &str| rustbgpd_api::proto::ListRoutesRequest {
+            neighbor_address: neighbor.into(),
+            afi_safi: rustbgpd_api::proto::AddressFamily::Ipv6Unicast as i32,
+            page_size: 100,
+            page_token: "opaque\0in".into(),
+            prefix_filter: "2001:db8::".into(),
+            prefix_filter_length: 32,
+            longer_prefixes: true,
+            ..Default::default()
+        };
+        let requests = server.state.list_route_requests.lock().await;
+        assert_eq!(
+            *requests,
+            vec![expected("fe80::1"), expected("fe80::1"), expected("")]
+        );
+    }
+
+    #[tokio::test]
+    async fn rib_query_lane_rejected_carries_bare_peer_and_restores_scope() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+        let (lane, mut results) = spawn_rib_query_lane(connection);
+        let query = list_query(RibView::Rejected, RibFamily::Ipv4Unicast, None, "");
+
+        lane.query(4, "fe80::1%eth0".into(), query.clone()).unwrap();
+        let result = receive_result(&mut results).await;
+
+        assert_eq!(result.identity.query, query);
+        let RibQueryResponse::Rejected(page) = result.result.unwrap() else {
+            panic!("expected rejected listing");
+        };
+        assert_eq!(page.peer_address, "fe80::1%eth0");
+        assert!(page.retention_enabled);
+        let request = server
+            .state
+            .last_list_rejected
+            .lock()
+            .await
+            .clone()
+            .unwrap();
+        assert_eq!(request.peer_address, "fe80::1");
+        assert_eq!(
+            server
+                .state
+                .list_rejected_route_calls
+                .load(Ordering::SeqCst),
+            1
+        );
+        assert!(server.state.list_route_requests.lock().await.is_empty());
+    }
+
+    #[test]
+    fn prefix_filter_matches_exact_and_longer_within_family() {
+        let exact = PrefixFilter {
+            addr: "203.0.113.0".parse().unwrap(),
+            len: 24,
+            longer: false,
+        };
+        assert!(exact.matches("203.0.113.0".parse().unwrap(), 24));
+        assert!(!exact.matches("203.0.113.0".parse().unwrap(), 25));
+        assert!(!exact.matches("203.0.114.0".parse().unwrap(), 24));
+        assert_eq!(exact.label(), "203.0.113.0/24");
+
+        let longer = PrefixFilter {
+            longer: true,
+            ..exact
+        };
+        assert!(longer.matches("203.0.113.128".parse().unwrap(), 25));
+        assert!(!longer.matches("203.0.113.0".parse().unwrap(), 23));
+        assert!(!longer.matches("2001:db8::".parse().unwrap(), 32));
+        assert_eq!(longer.label(), "203.0.113.0/24 +longer");
+
+        let v6 = PrefixFilter {
+            addr: "2001:db8::".parse().unwrap(),
+            len: 32,
+            longer: true,
+        };
+        assert!(v6.matches("2001:db8:1::".parse().unwrap(), 48));
+        assert!(!v6.matches("2001:db9::".parse().unwrap(), 48));
+
+        let default_route = PrefixFilter {
+            addr: "0.0.0.0".parse().unwrap(),
+            len: 0,
+            longer: true,
+        };
+        assert!(default_route.matches("198.51.100.0".parse().unwrap(), 24));
+        assert!(!default_route.matches("::".parse().unwrap(), 0));
+
+        let overlong = PrefixFilter {
+            addr: "203.0.113.0".parse().unwrap(),
+            len: 33,
+            longer: false,
+        };
+        assert!(!overlong.matches("203.0.113.0".parse().unwrap(), 33));
     }
 
     #[tokio::test]
@@ -845,6 +1143,14 @@ mod tests {
             .unwrap();
             let explain_error = receive_result(&mut results).await.result.unwrap_err();
             assert_eq!(explain_error, error);
+            lane.query(
+                1,
+                "192.0.2.1".into(),
+                list_query(RibView::Rejected, RibFamily::Ipv4Unicast, None, ""),
+            )
+            .unwrap();
+            let rejected_error = receive_result(&mut results).await.result.unwrap_err();
+            assert_eq!(rejected_error, error);
         }
     }
 

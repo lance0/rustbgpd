@@ -31,6 +31,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Add a self-contained IPv4 two-member `--init-config route-server` starter
   with fail-closed import policy and explicit transparent export.
 
+- `rbgp top` now opens an on-demand route explorer from peer detail: `v`
+  cycles the global unicast Best table and the selected peer's Received,
+  Advertised, and Rejected tables, `f` toggles IPv4/IPv6 unicast, `/` applies
+  an exact prefix filter with a longer-prefixes toggle, `Space`/`PgDn` move
+  within a server page while `n`/`p` follow server page tokens, and `e`
+  explains any typed prefix for the peer. Every scope change cancels the
+  in-flight request and restarts at page 1; a stale page token restarts once
+  and is named in the status line.
+
 ### Changed
 
 - Replace `bgp_session_lifecycle_source_dropped_total{reason}` with

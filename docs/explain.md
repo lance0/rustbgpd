@@ -14,12 +14,14 @@ Every command below also takes `--json` for scripting and portal
 backends.
 
 The TUI exposes one focused part of this catalog: from a selected peer's detail,
-press `r` to browse the point-in-time global unicast Best-RIB, then `Enter` to
-explain the export decision for that prefix and peer. It shows advertise/deny,
-ordered gates and policy reasons, and modifications, including denials absent
-from Adj-RIB-Out. It is not a live RIB feed and does not cover import/rejected
-routes, best-path comparison, VPN, labeled-unicast, or source candidates; use
-the commands below for the full catalog.
+press `r` to open the on-demand route explorer over the global unicast Best
+table and the peer's Received, Advertised, and Rejected tables, with an exact
+prefix filter. `Enter` on a Best or Advertised row, or `e` with a typed prefix,
+explains the export decision for that prefix and peer: advertise/deny, ordered
+gates and policy reasons, and modifications, including denials absent from
+Adj-RIB-Out. It is not a live RIB feed and does not cover best-path comparison,
+VPN, labeled-unicast, or source candidates; use the commands below for the full
+catalog.
 
 | Question | Command |
 |----------|---------|
