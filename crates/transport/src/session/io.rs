@@ -212,7 +212,7 @@ impl PeerSession {
                 msg_type = %msg.message_type(),
                 "cannot send — not connected (priority)"
             );
-            return Ok(());
+            return Err(TransportError::WriterClosed);
         };
         tx.send(Bytes::from(encoded))
             .map_err(|_| TransportError::WriterClosed)
@@ -233,7 +233,7 @@ impl PeerSession {
                 msg_type = %msg.message_type(),
                 "cannot send — not connected (bulk)"
             );
-            return Ok(());
+            return Err(TransportError::WriterClosed);
         }
         self.enqueue_bulk_encoded(Bytes::from(encoded), matches!(msg, Message::Update(_)))
     }
@@ -254,7 +254,7 @@ impl PeerSession {
                 peer = %self.peer_label,
                 "cannot send — not connected (bulk)"
             );
-            return Ok(());
+            return Err(TransportError::WriterClosed);
         };
         // RFC 8671 post-policy Adj-RIB-Out tap: every outbound UPDATE
         // (announcements, withdraws, EoR markers — all families) funnels
