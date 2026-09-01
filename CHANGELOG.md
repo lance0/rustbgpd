@@ -26,7 +26,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - RTR v2 now rejects IPv4 and IPv6 Prefix PDUs with nonzero host bits as
   corrupt data, sends Error Report code 0 with the offending frame, and avoids
   publishing the incomplete transaction while flushing that cache's previously
-  learned data as required for a fatal error. RTR v1 decoding remains unchanged.
+  learned data as required for a fatal error. RTR v1 continues accepting nonzero
+  host bits; invalid prefix-length and max-length PDUs on either version now
+  share the same fatal code-0 flush disposition.
 
 - `rbgp rib received` and `rbgp rib advertised` now expose their prefix,
   longer-prefix, origin-ASN, standard-community, and large-community filters

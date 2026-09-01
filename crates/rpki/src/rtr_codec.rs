@@ -115,9 +115,6 @@ pub enum RtrDecodeError {
     /// Prefix length or max-length out of range.
     #[error("invalid prefix")]
     InvalidPrefix,
-    /// RTR v2 Prefix PDU contains nonzero bits beyond Prefix Length.
-    #[error("noncanonical prefix")]
-    NonCanonicalPrefix,
     /// Error report text is not valid UTF-8.
     #[error("invalid UTF-8 in error text")]
     Utf8Error,
@@ -286,7 +283,7 @@ impl RtrPdu {
                 if version == RTR_VERSION_2
                     && !prefix_host_bits_are_zero(&prefix.octets(), prefix_len)
                 {
-                    return Err(RtrDecodeError::NonCanonicalPrefix);
+                    return Err(RtrDecodeError::InvalidPrefix);
                 }
                 RtrPdu::Ipv4Prefix {
                     flags,
@@ -314,7 +311,7 @@ impl RtrPdu {
                 if version == RTR_VERSION_2
                     && !prefix_host_bits_are_zero(&prefix.octets(), prefix_len)
                 {
-                    return Err(RtrDecodeError::NonCanonicalPrefix);
+                    return Err(RtrDecodeError::InvalidPrefix);
                 }
                 RtrPdu::Ipv6Prefix {
                     flags,
@@ -843,7 +840,7 @@ mod tests {
             };
             let mut v2 = Vec::new();
             pdu.encode_with_version(&mut v2, RTR_VERSION_2).unwrap();
-            assert_eq!(RtrPdu::decode(&v2), Err(RtrDecodeError::NonCanonicalPrefix));
+            assert_eq!(RtrPdu::decode(&v2), Err(RtrDecodeError::InvalidPrefix));
 
             let mut v1 = Vec::new();
             pdu.encode_with_version(&mut v1, RTR_VERSION).unwrap();
@@ -891,7 +888,7 @@ mod tests {
             };
             let mut v2 = Vec::new();
             pdu.encode_with_version(&mut v2, RTR_VERSION_2).unwrap();
-            assert_eq!(RtrPdu::decode(&v2), Err(RtrDecodeError::NonCanonicalPrefix));
+            assert_eq!(RtrPdu::decode(&v2), Err(RtrDecodeError::InvalidPrefix));
 
             let mut v1 = Vec::new();
             pdu.encode_with_version(&mut v1, RTR_VERSION).unwrap();
