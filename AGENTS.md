@@ -53,7 +53,8 @@ is shared or user-visible.
 - Run focused package or test targets while iterating.
 - Run `just gate` as the broad local baseline before submitting a substantive change.
 - Run `just gate-rib` after changing feature-gated RIB, transport, API, or benchmark internals.
-- Run `just gate-deps` after changing the standalone scale harnesses or their separate lockfile.
+- Run `just gate-deps` after changing `bench/scale/`, any dependency declaration or lockfile that
+  can affect it, or public APIs consumed by the scale harnesses.
 - Run `just gate-contract` after changing Criterion benchmark code or its shared dependencies.
 - Run a checker's companion tests before relying on that checker after changing it.
 
