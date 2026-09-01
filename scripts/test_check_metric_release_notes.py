@@ -25,20 +25,8 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
 
         added, removed = check.validate_release_notes(baseline, current, section)
 
-        self.assertEqual(len(baseline), 196)
-        self.assertEqual(
-            added,
-            {
-                "bgp_evpn_nlri_discarded_total",
-                "bgp_dataplane_reconcile_planning_failures_total",
-                "bgp_path_attribute_discarded_total",
-                "bgp_peer_session_state",
-                "bgp_rib_policy_transition_total",
-                "bgp_session_down_total",
-                "bgp_session_lifecycle_source_dropped_total",
-                "bgp_sighup_reload_outcomes_total",
-            },
-        )
+        self.assertEqual(len(baseline), 204)
+        self.assertEqual(added, set())
         self.assertEqual(removed, set())
 
     def test_consumed_new_family_without_release_note_fails(self):
@@ -111,28 +99,40 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
         self.assertEqual(added, {"bgp_new_name"})
         self.assertEqual(removed, {"bgp_old_name", "bgp_removed"})
 
-    def test_only_current_release_section_counts(self):
+    def test_released_section_cannot_satisfy_unreleased_metric_changes(self):
         changelog = """# Changelog
 
 ## [Unreleased]
 
-- `bgp_new_total`
+- Other change.
 
 ## [0.68.0] - 2026-08-30
 
-- Other change.
-
-## [0.67.0] - 2026-08-26
-
-- `bgp_new_total`
-
-## [0.66.0] - 2026-08-22
-
-- `bgp_new_total`
+- Rename `bgp_old_name` to `bgp_new_name`; remove `bgp_removed`.
 """
         section = check.release_section(changelog, check.TARGET_CHANGELOG_SECTION)
-        with self.assertRaisesRegex(ValueError, "added=bgp_new_total"):
-            check.validate_release_notes(set(), {"bgp_new_total"}, section, {})
+        with self.assertRaisesRegex(
+            ValueError,
+            "added=bgp_new_name; removed=bgp_old_name, bgp_removed",
+        ):
+            check.validate_release_notes(
+                {"bgp_stable", "bgp_old_name", "bgp_removed"},
+                {"bgp_stable", "bgp_new_name"},
+                section,
+                {},
+            )
+
+    def test_unreleased_must_name_every_changed_metric_family(self):
+        section = "\n- Rename a metric to `bgp_new_name`.\n"
+        with self.assertRaisesRegex(
+            ValueError, "removed=bgp_old_name, bgp_removed"
+        ):
+            check.validate_release_notes(
+                {"bgp_stable", "bgp_old_name", "bgp_removed"},
+                {"bgp_stable", "bgp_new_name"},
+                section,
+                {},
+            )
 
     def test_workspace_release_change_requires_explicit_target_review(self):
         check.validate_workspace_release("0.68.0")
@@ -166,21 +166,21 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
     def test_baseline_metadata_ordering_and_names_fail_closed(self):
         cases = (
             (
-                '{"release":"v0.65.0","source_commit":"x","families":["bgp_a"]}',
+                '{"release":"v0.67.0","source_commit":"x","families":["bgp_a"]}',
                 "release must be",
             ),
             (
-                '{"release":"v0.67.0","source_commit":"x","families":["bgp_a"]}',
+                '{"release":"v0.68.0","source_commit":"x","families":["bgp_a"]}',
                 "commit must be",
             ),
             (
-                '{"release":"v0.67.0","source_commit":"'
+                '{"release":"v0.68.0","source_commit":"'
                 + check.BASELINE_COMMIT
                 + '","families":["bgp_b","bgp_a"]}',
                 "sorted and unique",
             ),
             (
-                '{"release":"v0.67.0","source_commit":"'
+                '{"release":"v0.68.0","source_commit":"'
                 + check.BASELINE_COMMIT
                 + '","families":["not a metric"]}',
                 "invalid family name",
