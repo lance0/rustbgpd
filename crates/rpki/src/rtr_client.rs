@@ -1462,11 +1462,12 @@ impl RtrError {
     /// ends the session. See [`SessionEndDisposition`].
     fn disposition(&self) -> SessionEndDisposition {
         match self {
-            // §6: "The router MUST NOT retain the data past the time
-            // indicated by this parameter." The expire interval is the
-            // deadline that bounds staleness, and the only clock that
-            // drops validated data on its own.
-            RtrError::Expired => SessionEndDisposition::FlushAndDrop,
+            // §6 expiry and §12 fatal corrupt Prefix PDUs (reported as
+            // code 0) both flush the cache's data and clear the epoch
+            // before the next Reset Query.
+            RtrError::Expired | RtrError::Decode(RtrDecodeError::NonCanonicalPrefix) => {
+                SessionEndDisposition::FlushAndDrop
+            }
             // A session-identity failure voids the epoch, not the data.
             // §5.3 names the cache's signal for a Serial Query bearing
             // "a session ID [that] designates a session that is no
@@ -1495,9 +1496,8 @@ impl RtrError {
                 2 | 4 | 12 => SessionEndDisposition::RetainAndRetry,
                 _ => SessionEndDisposition::FlushAndDrop,
             },
-            // Transport loss, budgets, and locally detected garbage:
-            // the held data is still the most recent validated cache
-            // state; keep it until the expire interval says otherwise.
+            // Other local decode/transport guards retain the most recent
+            // validated cache state under their existing dispositions.
             RtrError::Io(_)
             | RtrError::Decode(_)
             | RtrError::Encode(_)
@@ -2305,6 +2305,87 @@ mod tests {
         )
         .await;
         let _ = vrp_rx.recv().await.unwrap();
+    }
+
+    /// 8210bis v2 requires Prefix PDUs to carry the canonical network
+    /// address. A host bit is fatal corrupt data: code 0 embeds the exact
+    /// frame, the session closes, held data is flushed, and the incomplete
+    /// transaction is never published.
+    #[tokio::test]
+    async fn v2_noncanonical_prefix_sends_error_report_flushes_and_is_not_published() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = RtrClient::new(test_config(addr, 60, 0, 3600), vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        establish_epoch_with_timers(&mut stream, &mut vrp_rx, 0, 3600).await;
+        write_pdu(
+            &mut stream,
+            RtrPdu::SerialNotify {
+                session_id: 7,
+                serial: 101,
+            },
+        )
+        .await;
+        assert_eq!(
+            read_pdu(&mut stream).await,
+            RtrPdu::SerialQuery {
+                session_id: 7,
+                serial: 100,
+            }
+        );
+        write_pdu(&mut stream, RtrPdu::CacheResponse { session_id: 7 }).await;
+
+        let malformed = RtrPdu::Ipv4Prefix {
+            flags: 1,
+            prefix_len: 24,
+            max_len: 24,
+            prefix: Ipv4Addr::new(203, 0, 113, 1),
+            asn: 65001,
+        };
+        let mut offending = Vec::new();
+        malformed
+            .encode_with_version(&mut offending, crate::rtr_codec::RTR_VERSION_2)
+            .unwrap();
+        stream.write_all(&offending).await.unwrap();
+
+        assert_eq!(
+            read_pdu(&mut stream).await,
+            RtrPdu::ErrorReport {
+                code: 0,
+                pdu: offending,
+                text: "corrupt PDU".to_string(),
+            }
+        );
+        let mut buf = [0u8; 1];
+        assert_eq!(
+            timeout(Duration::from_secs(2), stream.read(&mut buf))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            timeout(Duration::from_secs(2), vrp_rx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            VrpUpdate::ServerDown { server: addr },
+            "fatal corrupt data must flush the cache's previously learned data"
+        );
+        assert!(
+            vrp_rx.try_recv().is_err(),
+            "incomplete malformed transaction was published"
+        );
+        assert_eq!(
+            RtrError::Decode(RtrDecodeError::NonCanonicalPrefix).disposition(),
+            SessionEndDisposition::FlushAndDrop
+        );
+
+        client_handle.abort();
+        let _ = client_handle.await;
     }
 
     /// 8210bis §5.1: a Serial Query answered from a DIFFERENT session is
@@ -3596,7 +3677,7 @@ mod tests {
     /// invalid-Error-Report rule — is fatal (flush). Code 0 is the one
     /// code whose two consequences differ: §5.3 makes it a report of a
     /// stale session, so the epoch goes but the data stays. Data expiry
-    /// flushes; transport loss and locally detected garbage retain.
+    /// flushes; transport loss and other local guards retain.
     #[test]
     fn error_code_disposition_table() {
         use SessionEndDisposition::{FlushAndDrop, ResyncAndRetain, RetainAndRetry};
@@ -3645,6 +3726,15 @@ mod tests {
         );
         // Transport loss and local guards retain until expiry.
         assert_eq!(RtrError::ConnectionClosed.disposition(), RetainAndRetry);
+        assert_eq!(
+            RtrError::Decode(RtrDecodeError::NonCanonicalPrefix).disposition(),
+            FlushAndDrop
+        );
+        assert_eq!(
+            RtrError::Decode(RtrDecodeError::InvalidPrefix).disposition(),
+            RetainAndRetry,
+            "legacy invalid-length disposition remains unchanged"
+        );
         assert_eq!(RtrError::TransactionTimeout.disposition(), RetainAndRetry);
         assert_eq!(
             RtrError::TransactionLimit("record budget exceeded").disposition(),

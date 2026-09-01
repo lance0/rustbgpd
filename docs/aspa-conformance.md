@@ -22,16 +22,15 @@ enforcement or lossless Adj-RIB-In retention.
   editorial; the meaningful -25→-26 clarifications
   (consecutive-duplicate compression, semantic-invalid first-AS
   handling) are implemented and covered below.
-- **draft-ietf-sidrops-8210bis-26** — the RTR client's ASPA transport
-  (PDU shape enforcement, timers, error dispositions) was implemented
-  and drift-checked against revision 26. Revision 27 (13 August 2026)
-  was diff-reviewed against 26: PDU type assignments are unchanged
-  (End of Data 7, Cache Reset 8, ASPA 11), and the two
-  router-affecting tightenings — treating sessions that differ in
-  protocol version as distinct sessions, and mandatory Error Report
-  code 9 for malformed ASPA PDUs — were already implemented under
-  26. No code change was required; the transport table below cites 26
-  as the implemented revision.
+- **draft-ietf-sidrops-8210bis-27** (13 August 2026) — the RTR client's
+  ASPA transport is drift-checked against revision 27. PDU type assignments
+  remain unchanged (End of Data 7, Cache Reset 8, ASPA 11), and the prior
+  session-version and malformed-ASPA tightenings remain implemented. Revision
+  27 also requires a router client to reject noncanonical host bits in IPv4
+  and IPv6 Prefix PDUs; that negotiated-v2 boundary is implemented below.
+  The new paragraph labels Error Code 1 as "Corrupt Data" even though the
+  draft's registry assigns Corrupt Data to code 0, so rustbgpd follows the
+  internally consistent registry value.
 
 **Refresh trigger:** re-verify this page when either draft is
 published as an RFC, and review the revision delta whenever either
@@ -109,7 +108,7 @@ together behind that gate or not at all, because an intermediate
 ranking would create a behavior epoch without satisfying the draft's
 complete mitigation.
 
-## ASPA transport over RTR v2 (draft-ietf-sidrops-8210bis-26)
+## ASPA transport over RTR v2 (draft-ietf-sidrops-8210bis-27)
 
 | # | Requirement | Status | What exists | Evidence |
 |---|-------------|--------|-------------|----------|
@@ -117,6 +116,7 @@ complete mitigation.
 | 2 | §5.12 replacement semantics | Implemented | Within one cache an announcement replaces the customer's provider set (never merges) and a withdrawal removes the customer ASN; proven live, including a valid→invalid REPLACE that a merge would have left valid. | `crates/rpki/src/aspa.rs` · M84 row in [INTEROP.md](INTEROP.md) |
 | 3 | §7 version negotiation with v1 fallback | Implemented | Each fresh connection probes v2; an Unsupported Protocol Version error lands v1 for that attempt. At v1 no ASPA PDUs arrive and routes stay Unknown. Proven against StayRTR (v1-only) alongside Routinator (v2) and a deterministic v2 ASPA source. | M84 row in [INTEROP.md](INTEROP.md) |
 | 4 | Per-cache session/serial epoch with retention across resync | Implemented | Cache state is one per-cache `(version, session ID, serial)` epoch advanced only at validated End of Data; identity mismatches force a Reset Query resync while validated data (including ASPA) is retained until replaced or expired. | M84 row in [INTEROP.md](INTEROP.md) · [RTR notes in RFC_NOTES.md](RFC_NOTES.md#rfc-6811--rpki-origin-validation--rfc-8210--rtr) |
+| 5 | §5.9/§5.10 canonical Prefix PDU network addresses | Implemented | Under negotiated v2, IPv4 and IPv6 Prefix PDUs with nonzero host bits are fatal corrupt data: the client sends Error Report code 0 with the offending frame, closes, flushes that cache's previously learned data, and publishes none of the incomplete transaction. RTR v1 decoding remains compatible. | Codec boundary tables and end-to-end client test in `crates/rpki/src/rtr_codec.rs` and `crates/rpki/src/rtr_client.rs` |
 
 The full RTR conformance notes — timer bounds, error-code
 dispositions, and the two documented deviations (Error Codes 6 and 7

@@ -1054,9 +1054,13 @@ carries inactive (absent), unlimited (zero), or finite.
   record/byte budgets.
 - ASPA over RTR v2 uses 8210bis replacement semantics: announce replaces
   the customer's provider set; withdraw removes the customer ASN.
-- Strict acceptance limits (8210bis-26): per-PDU length is capped at
+- Strict acceptance limits (8210bis-27): per-PDU length is capped at
   65,535 octets (§5 — an over-limit length field is corrupt framing,
-  Error Report code 0); End of Data timers are bounded to the §6 legal
+  Error Report code 0); negotiated-v2 IPv4 and IPv6 Prefix PDUs must carry
+  canonical network addresses (nonzero host bits draw code 0 with the
+  offending frame, close the session, flush that cache's held data, and publish
+  none of the incomplete transaction; v1 decoding is unchanged); End of
+  Data timers are bounded to the §6 legal
   ranges (zeros mean "not provided"; above-maximum values clamp down
   with a warning; an expire below the 600 s minimum is honored as-is,
   since expiring early is safe; a refresh/retry not below the expire is
