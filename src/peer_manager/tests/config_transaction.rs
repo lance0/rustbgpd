@@ -405,7 +405,7 @@ async fn transaction_plan_rejects_dataset_byte_drift_against_accepted_identity()
     let dir = tempfile::tempdir().unwrap();
     let (config_path, _rpol_path, dataset_path) = external_inputs_fixture(dir.path());
     let (mut mgr, _accepted, rib_rx, _keepalive) = accepted_identity_manager(&config_path);
-    let responder = answer_snapshot_queries(rib_rx, 1);
+    let responder = answer_snapshot_queries(rib_rx, 2);
 
     let mut candidate = mgr.current_config.clone();
     candidate.neighbors[0].description = Some("after".to_string());
