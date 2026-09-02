@@ -18,6 +18,7 @@ members = [
     "bench/evpn-load",
     "examples/event-bridge",
     "examples/birdwatcher-adapter",
+    "examples/peer-loop",
     "tools/rs-config-render",
 ]
 resolver = "2"

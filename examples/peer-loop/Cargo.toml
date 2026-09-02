@@ -1,0 +1,20 @@
+[package]
+name = "peer-loop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Minimal BGP speaker using rustbgpd-wire and rustbgpd-fsm: dials one peer, drives the FSM to Established, and prints successfully parsed UPDATEs."
+
+[[bin]]
+name = "peer-loop"
+path = "src/main.rs"
+
+[dependencies]
+rustbgpd-wire = { workspace = true, features = ["tokio-codec"] }
+rustbgpd-fsm.workspace = true
+bytes.workspace = true
+clap = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["macros", "rt", "net", "time", "io-util"] }
+tokio-util = { workspace = true, features = ["codec"] }

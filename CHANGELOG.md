@@ -50,6 +50,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `TimeoutStartSec=10min`;
   `Restart=on-failure` already covers a watchdog kill. Without `NOTIFY_SOCKET`
   nothing changes.
+- `examples/peer-loop`: a minimal BGP speaker whose rustbgpd dependencies are
+  `rustbgpd-wire` and `rustbgpd-fsm`. It dials one peer, drives the FSM to
+  Established, performs the required socket, timer, and session actions,
+  sends KEEPALIVEs on the negotiated timer, and prints each successfully
+  parsed UPDATE. Its loopback tests exercise the library-embedding shape in
+  `docs/EMBEDDING.md`.
 
 - `rs-config-render --help` now lists its rendering, activation, status,
   pruning, recovery, and IXP Manager lifecycle command paths.
