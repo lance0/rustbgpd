@@ -156,6 +156,22 @@ mode = 0o600
 [policy.definitions.accept-all]
 default_action = "permit"
 
+# Runtime-only fifth member for the populated Alice-LG filtered proof: its
+# import policy denies one deliberately announced prefix.
+[policy.definitions.alice-deny-198-18-1]
+default_action = "permit"
+[[policy.definitions.alice-deny-198-18-1.statements]]
+prefix = "198.18.1.0/24"
+action = "deny"
+
+[peer_groups.alice-filtered]
+route_server_client = true
+graceful_restart = false
+hold_time = 240
+families = ["ipv4_unicast"]
+import_policy_chain = ["alice-deny-198-18-1"]
+export_policy_chain = ["accept-all"]
+
 [[neighbors]]
 address = "198.51.100.2"
 remote_asn = 64496
@@ -250,6 +266,41 @@ while [ "$(date +%s)" -lt "$alice_deadline" ]; do
   sleep 1
 done
 alice_ready || exit 1
+# Alice's routes store (prefix lookup) refreshes on its own interval with
+# random jitter, so every lookup assertion waits for a refresh that already
+# saw the expected accepted and filtered totals.
+alice_store_ready() {
+  curl --fail --silent --max-time 2 "$alice_api/status" | python3 -c \
+    'import json,sys; totals=json.load(sys.stdin)["routes"]["total_routes"]; expected={"imported": int(sys.argv[1]), "filtered": int(sys.argv[2])}; raise SystemExit(totals != expected)' \
+    "$1" "$2" >/dev/null 2>&1
+}
+wait_alice_store() {
+  store_deadline=$(($(date +%s) + 180))
+  while [ "$(date +%s)" -lt "$store_deadline" ]; do
+    if alice_store_ready "$1" "$2"; then return 0; fi
+    kill -0 "$daemon_pid" 2>/dev/null \
+      && kill -0 "$adapter_pid" 2>/dev/null \
+      && topology_containers_running \
+      && container_running "$alice" || return 1
+    sleep 1
+  done
+  echo "Alice routes store did not reach imported=$1 filtered=$2: $(curl --silent --max-time 2 "$alice_api/status")" >&2
+  return 1
+}
+# Alice's logged refresh duration starts at its refresh lock, before its
+# 0-30 s start jitter, so the adapter's four table dumps are timed directly.
+alice_refresh_cost() {
+  refresh_line=$(docker logs "$alice" 2>&1 | grep -F '[routes store] refreshed routes from' | tail -n 1)
+  [ -n "$refresh_line" ] || { echo 'Alice did not log a completed routes-store refresh' >&2; return 1; }
+  dump_seconds=
+  for path in routes/table/master4 routes/table/master4/filtered \
+    routes/table/master6 routes/table/master6/filtered; do
+    seconds=$(curl --fail --silent --max-time 10 --output /dev/null \
+      --write-out '%{time_total}' "$live_api/$path") || return 1
+    dump_seconds="$dump_seconds $path=${seconds}s"
+  done
+  echo "alice routes store refresh ($1): ${refresh_line#*] } including Alice's 0-30 s start jitter; adapter dumps:$dump_seconds" >&2
+}
 
 # Both legs must hold every route from both announcers in both tables before
 # the consumer reads them: 4 IPv4 (3 + 1) and 3 IPv6 (2 + 1).
@@ -281,7 +332,9 @@ fi
 # stable snapshot before reading.
 sleep 3
 
-alice_proof="alice consumer proof: Alice-LG $alice_version read rs0 with 4 up neighbors, 7 accepted routes, 0 filtered routes, and the labeled split-horizon noexport route"
+wait_alice_store 7 0 || exit 1
+alice_refresh_cost 'four peers, 7 accepted, 0 filtered' || exit 1
+alice_proof="alice consumer proof: Alice-LG $alice_version read rs0 with 4 up neighbors, 7 accepted routes, 0 filtered routes, the labeled split-horizon noexport route, and one accepted prefix-lookup hit"
 timeout 60s python3 "$root/alice-consumer.py" "$alice_api" "$alice_version" >"$tmp/alice-consumer.out"
 [ "$(grep -Fxc "$alice_proof" "$tmp/alice-consumer.out")" -eq 1 ]
 tail -n 20 "$tmp/alice-consumer.out" >&2
@@ -358,7 +411,8 @@ live_capture_sha256=$(capture_sha256 "$capture_output/populated-live.raw.json") 
 "$repo/target/debug/rbgp" -s "unix://$socket" \
   neighbor 198.51.100.6 add --remote-asn 64498 \
   --description 'filtered Alice proof AS64498' --hold-time 240 \
-  --families ipv4_unicast --route-server-client >"$tmp/add-neighbor.out"
+  --families ipv4_unicast --route-server-client \
+  --peer-group alice-filtered >"$tmp/add-neighbor.out"
 
 aliases_next=$tmp/protocol-aliases.next
 cp "$aliases" "$aliases_next"
@@ -407,9 +461,9 @@ ready = (
     row.get("state") == "up"
     and row.get("neighbor_as") == 64498
     and row.get("routes", {}).get("imported") == 0
-    and row.get("routes", {}).get("filtered") == 1
+    and row.get("routes", {}).get("filtered") == 2
     and isinstance(routes, list)
-    and len(routes) == 1
+    and len(routes) == 2
 )
 raise SystemExit(0 if ready else 1)
 PY
@@ -424,9 +478,49 @@ while [ "$(date +%s)" -lt "$filtered_deadline" ]; do
   sleep 1
 done
 if ! filtered_backend_ready; then
-  echo 'live adapter did not expose the retained AS64498 rejection' >&2
+  echo 'live adapter did not expose the retained AS64498 rejections' >&2
   exit 1
 fi
+
+# The table-wide filtered dumps Alice's routes store reads: every retained
+# reject across the table's live sessions with the per-peer envelope, and an
+# honest empty IPv6 table.
+curl --fail --silent --max-time 5 --output "$tmp/table4-filtered.json" \
+  "$live_api/routes/table/master4/filtered"
+curl --fail --silent --max-time 5 --output "$tmp/table6-filtered.json" \
+  "$live_api/routes/table/master6/filtered"
+python3 - "$tmp/table4-filtered.json" "$tmp/table6-filtered.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    table4 = json.load(handle)
+with open(sys.argv[2], encoding="utf-8") as handle:
+    table6 = json.load(handle)
+rows = sorted(
+    (route["network"], route["from_protocol"], route["bgp"]["large_communities"])
+    for route in table4["routes"]
+)
+expected = [
+    ("198.18.0.0/24", "pb_as64498", [[64496, 65520, 4]]),
+    ("198.18.1.0/24", "pb_as64498", [[64496, 65520, 1]]),
+]
+if rows != expected:
+    raise SystemExit(f"table-wide filtered view drifted: {rows!r}")
+retention = table4["retention"]
+if (
+    retention.get("enabled") is not True
+    or retention.get("evictions_since_reset") != 0
+    or retention.get("may_be_incomplete") is not False
+    or not isinstance(retention.get("capacity"), int)
+    or retention["capacity"] < 2
+    or table4["api"]["max_routes"] != retention["capacity"]
+):
+    raise SystemExit(f"table-wide retention envelope drifted: {table4!r}")
+if table6["routes"] != [] or table6["retention"].get("enabled") is not True:
+    raise SystemExit(f"IPv6 table-wide filtered view drifted: {table6!r}")
+PY
+echo 'table-wide filtered proof: master4 serves both AS64498 rejections with a complete retention envelope; master6 is empty' >&2
 
 # Alice caches backend responses in-process. Restart the pinned consumer after
 # the alias/session mutation so every fifth-peer assertion reads one fresh API.
@@ -443,7 +537,9 @@ while [ "$(date +%s)" -lt "$alice_deadline" ]; do
 done
 alice_ready || exit 1
 
-filtered_alice_proof="alice filtered proof: Alice-LG $alice_version read rs0 with 5 up neighbors, preserved 7 accepted routes and 4 empty baseline filtered views, and joined one AS-path-loop rejection to its exact label"
+wait_alice_store 7 2 || exit 1
+alice_refresh_cost 'five peers, 7 accepted, 2 filtered' || exit 1
+filtered_alice_proof="alice filtered proof: Alice-LG $alice_version read rs0 with 5 up neighbors, preserved 7 accepted routes and 4 empty baseline filtered views, joined an AS-path-loop and an import-policy rejection to their exact labels, and found both through prefix lookup"
 timeout 60s python3 "$root/alice-consumer.py" \
   "$alice_api" "$alice_version" --filtered-peer >"$tmp/alice-filtered-consumer.out"
 [ "$(grep -Fxc "$filtered_alice_proof" "$tmp/alice-filtered-consumer.out")" -eq 1 ]

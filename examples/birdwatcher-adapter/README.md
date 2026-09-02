@@ -88,6 +88,7 @@ listener beyond loopback only with the mTLS controls in `docs/SECURITY.md`.
 | `GET /routes/protocol/{id}`  | `RibService.ListReceivedRoutes` (paged, all unicast families) + `ListBestRoutes` identity join for truthful `primary` |
 | `GET /routes/export/{id}`    | `RibService.ListAdvertisedRoutes` (paged, all unicast families) + `ListBestRoutes` identity join for truthful `primary` |
 | `GET /routes/table/{table}`  | One `NeighborService.ListNeighbors` snapshot, then global `RibService.ListReceivedRoutes` + `ListBestRoutes` paged under one generation |
+| `GET /routes/table/{table}/filtered` | One `NeighborService.ListNeighbors` snapshot, `PolicyService.ListRejectedRoutes` for every peer aliased to the table, then a second `ListNeighbors` snapshot for an inventory-stability retry |
 | `GET /route/{prefix}/protocol/{id}` | `RibService.ListReceivedRoutes` (paged; exact prefix, else the view's most-specific covering prefix) + prefix-filtered `ListBestRoutes` for truthful `primary` |
 | `GET /route/{prefix}/export/{id}` | `RibService.ListAdvertisedRoutes` (paged; exact prefix, else the view's most-specific covering prefix) + prefix-filtered `ListBestRoutes` for truthful `primary` |
 | `GET /route/{prefix}/table/{table}` | `RibService.LookupBestPath` (bounded longest-prefix match with one matched-prefix candidate set) |
@@ -295,6 +296,51 @@ Semantics worth knowing:
   retained routes; the adapter synthesizes the community representation at
   the serving edge (below), so the daemon surface stays structured.
 
+### Table-wide filtered view
+
+`/routes/table/{table}/filtered` is the companion of `/routes/table/{table}`
+that Alice-LG's single-table source reads for its routes store: with
+`enable_prefix_lookup = true`, Alice fetches both dumps for each configured
+main table on every `routes_store_refresh_interval` and answers global
+prefix lookups from that store. The view serves every retained reject of
+every peer aliased to the table, rendered exactly as the peer's own filtered
+view (the alias as `from_protocol`, the ARouteServer presentation when
+configured, the synthesized reason community), scoped to the family the
+table's peers infer, in peer order. The envelope is the per-peer one
+aggregated over the table's live sessions: `retention.capacity` and
+`api.max_routes` are the summed capacities (the most rows the view can
+hold), `evictions_since_reset` is the summed loss and `may_be_incomplete`
+its warning, `enabled` is true when any live session retains, and every
+field is `null` when no session in the table is live. A session with
+retention disabled contributes no rows, a peer whose session store the
+daemon reports as gone (`NOT_FOUND`) contributes nothing, an unknown table
+is 404, and the generic `--max-routes` cap does not apply, matching the
+peer view. The endpoint adds no truncation beyond each peer's bounded
+retention store. A configured peer that is still dialing has a session task
+and therefore an empty store whose capacity counts.
+
+The reject stores are session-local and carry no version, so the adapter uses
+an inventory-stability retry: it snapshots the table's
+members (address, session state, staleness, retained count) with one
+`ListNeighbors`, reads each store with one unpaged `ListRejectedRoutes`,
+then re-reads the inventory. Any change between the two snapshots discards
+the capture and retries, at most three attempts, before answering a sanitized
+HTTP 502 after three changed inventories. This detects inventory changes, but
+it is not a generation or content fence for the session-local stores. A
+member whose inventory changes on every attempt therefore fails the request,
+and Alice retries a failed routes-store refresh after ten seconds.
+
+**Cost:** each attempt is `2 + N` RPCs for `N` members aliased to the table.
+With stable `N`, three attempts have a ceiling of `3 × (2 + N)` RPCs. One
+attempt can carry up to `N × capacity` rows (`[policy.reject_retention]`,
+default 1024 per peer). A dual-stack Alice source issues four table dumps
+per refresh (accepted and filtered for each main table), so size
+`routes_store_refresh_interval` and the retention capacity together. The
+pinned compat gate prints the refresh duration Alice logs (which starts at
+its refresh lock and so includes Alice's 0-30 s start jitter) next to the
+adapter's directly timed four dumps at its five-member, nine-route shape;
+those lines are evidence for that shape only, not a production figure.
+
 ### Reject-reason → large-community mapping
 
 Alice-LG identifies why a route was filtered by matching a large community
@@ -457,17 +503,24 @@ the adapter returns `502 Bad Gateway` (the in-daemon server returned
   subset: `cargo test --test birdwatcher_adapter_smoke` (root package;
   spawns a real daemon plus this adapter, announces a clean route and a
   loop-poisoned one from one live peer plus an announce-nothing receiver
-  peer, and asserts the accepted, filtered, and both sides of the noexport
-  views — including received/exported Add-Path multiplicity, order, source
-  alias direction, exact-filter-before-cap, and stable 400/404/502 errors).
+  peer, and asserts the accepted, filtered, table-wide filtered, and both
+  sides of the noexport views — including received/exported Add-Path
+  multiplicity, order, source alias direction, exact-filter-before-cap, the
+  summed retention envelope and its loss warning, and stable 400/404/502
+  errors).
 - Pinned external-consumer proof: the IXP compatibility gate source-builds
-  Alice-LG 6.2.0 and the MANRS IXP validation tool, then requires Alice to
-  consume this adapter's seven populated accepted routes, empty filtered
-  endpoints, and one split-horizon noexport route before MANRS traverses the
-  Alice received-route API. After freezing and hashing those captures, the
-  gate runtime-adds a fifth live peer, atomically reloads its alias, and proves
-  through restarted Alice that one AS-path-loop route appears only in that
-  peer's filtered backend with `64496:65520:4` joined to the exact configured
-  reason label. The original seven accepted routes, four empty filtered
-  endpoints, and noexport route remain unchanged. This is a backend/API proof,
-  not a rendered-browser or certification claim.
+  Alice-LG 6.2.0 (with `enable_prefix_lookup = true`, so its routes store
+  reads `/routes/table/{table}` and `/routes/table/{table}/filtered`) and the
+  MANRS IXP validation tool, then requires Alice to consume this adapter's
+  seven populated accepted routes, empty filtered endpoints, one
+  split-horizon noexport route, and one accepted prefix-lookup hit before
+  MANRS traverses the Alice received-route API. After freezing and hashing
+  those captures, the gate runtime-adds a fifth live peer whose import
+  policy denies one prefix, atomically reloads its alias, and proves through
+  restarted Alice that an AS-path-loop route and a policy-denied route appear
+  only in that peer's filtered backend with `64496:65520:4` and
+  `64496:65520:1` joined to their exact configured reason labels, and that
+  the global prefix lookup finds both as filtered routes. The original seven
+  accepted routes, four empty filtered endpoints, and noexport route remain
+  unchanged. This is a backend/API proof, not a rendered-browser or
+  certification claim.

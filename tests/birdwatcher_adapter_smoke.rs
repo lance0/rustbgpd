@@ -718,8 +718,8 @@ fn ixp_contract_gate_tracks_adapter_and_live_smoke_changes() {
     let route_calls: Vec<_> = router.split(".route(").skip(1).collect();
     assert_eq!(
         route_calls.len(),
-        14,
-        "adapter must retain 14 direct routes"
+        15,
+        "adapter must retain 15 direct routes"
     );
     for alternate in [
         ".route_service(",
@@ -788,6 +788,7 @@ fn ixp_contract_gate_tracks_adapter_and_live_smoke_changes() {
     let expected_paths: Vec<_> = concat!(
         "/status /protocols/bgp /protocol/{id} /symbols ",
         "/routes/protocol/{id} /routes/export/{id} /routes/table/{table} ",
+        "/routes/table/{table}/filtered ",
         "/route/{prefix}/protocol/{id} /route/{prefix}/export/{id} ",
         "/route/{prefix}/table/{table} /routes/peer/{peer} /routes/filtered/{id} ",
         "/routes/lc-zwild/protocol/{id}/{x}/{y} /routes/noexport/{id}",
@@ -975,6 +976,7 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
         "/route/10.99.0.0%2F24/export/pb_0002_as65030",
         "/route/10.99.0.128%2F25/table/master4",
         "/routes/table/master4",
+        "/routes/table/master4/filtered",
     ] {
         wait_for_exact_json_error(adapter_port, path, 502, "Upstream daemon request failed");
     }
@@ -1321,6 +1323,45 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
         "ARouteServer presentation must scrub both configured namespaces: {filtered}"
     );
 
+    // /routes/table/{table}/filtered — Alice-LG's routes-store dump reads
+    // every live session's retained rejects under the same alias and
+    // presentation as the peer view, with the summed capacity as the cap:
+    // every session store the daemon reports for the table counts (a
+    // configured peer that is dialing already has one), so the cap is a
+    // multiple of the per-peer capacity that includes the live peer's.
+    let table_filtered = get_json(adapter_port, "/routes/table/master4/filtered", "adapter");
+    assert_eq!(
+        table_filtered["routes"], filtered["routes"],
+        "table-wide filtered view must render the peer view's rows: {table_filtered}"
+    );
+    let table_capacity = table_filtered["retention"]["capacity"].as_u64().unwrap();
+    assert!(
+        table_capacity >= 2 && table_capacity.is_multiple_of(2),
+        "{table_filtered}"
+    );
+    assert_eq!(
+        table_filtered["api"]["max_routes"], table_capacity,
+        "{table_filtered}"
+    );
+    assert_eq!(
+        table_filtered["retention"]["enabled"], true,
+        "{table_filtered}"
+    );
+    assert_eq!(
+        table_filtered["retention"]["evictions_since_reset"], 0,
+        "{table_filtered}"
+    );
+    assert_eq!(
+        table_filtered["retention"]["may_be_incomplete"], false,
+        "{table_filtered}"
+    );
+    wait_for_exact_json_error(
+        adapter_port,
+        "/routes/table/does_not_exist/filtered",
+        404,
+        "Table not found",
+    );
+
     // IXP Manager v7.4 asks for `{daemon ASN}:1101:*`. The daemon's own
     // rejection namespace uses only retained rejects, strips the peer's
     // forged value in that reserved namespace, preserves unrelated
@@ -1587,6 +1628,31 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
         "{ixp_overflow}"
     );
     assert_eq!(ixp_overflow["retention"], overflow["retention"]);
+    // The table-wide view carries the same loss warning: the one eviction
+    // marks the whole table incomplete while the cap stays the summed
+    // capacity of every reported store.
+    let table_overflow = get_json(adapter_port, "/routes/table/master4/filtered", "adapter");
+    assert_eq!(
+        table_overflow["routes"], overflow["routes"],
+        "{table_overflow}"
+    );
+    let overflow_capacity = table_overflow["retention"]["capacity"].as_u64().unwrap();
+    assert!(
+        overflow_capacity >= 2 && overflow_capacity.is_multiple_of(2),
+        "{table_overflow}"
+    );
+    assert_eq!(
+        table_overflow["api"]["max_routes"], overflow_capacity,
+        "{table_overflow}"
+    );
+    assert_eq!(
+        table_overflow["retention"]["evictions_since_reset"], 1,
+        "{table_overflow}"
+    );
+    assert_eq!(
+        table_overflow["retention"]["may_be_incomplete"], true,
+        "{table_overflow}"
+    );
     let metrics = http_get(metrics_port, "/metrics")
         .expect("scrape daemon metrics")
         .1;
