@@ -107,6 +107,7 @@ fn transport_config(addr: SocketAddr) -> TransportConfig {
         rs_control_communities: false,
         remove_private_as: rustbgpd_transport::RemovePrivateAs::Disabled,
         discard_path_attributes: std::sync::Arc::from([]),
+        max_as_path_length: rustbgpd_transport::DEFAULT_MAX_AS_PATH_LENGTH,
         cluster_id: None,
         explain_enabled: true,
         explain_cache_size: 4096,

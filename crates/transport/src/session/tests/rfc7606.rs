@@ -1665,3 +1665,62 @@ fn malformed_update_dump_is_untruncated_and_enumerates_nlri() {
         "MP family withdrawal enumerated: {listed}"
     );
 }
+
+/// ORIGIN, an `AS_SEQUENCE` of `hops` copies of AS 65002 (four-octet), and
+/// `NEXT_HOP`, for exercising the `max_as_path_length` ceiling.
+fn as_path_attr_bytes(hops: u8) -> Vec<u8> {
+    let mut attrs = vec![0x40, 1, 1, 0]; // ORIGIN = IGP
+    attrs.extend([0x40, 2, 2 + 4 * hops, 2, hops]);
+    for _ in 0..hops {
+        attrs.extend([0, 0, 0xFD, 0xEA]);
+    }
+    attrs.extend([0x40, 3, 4, 10, 0, 0, 2]); // NEXT_HOP 10.0.0.2
+    attrs
+}
+
+/// `max_as_path_length`: a path exactly at the ceiling is accepted; one
+/// element over takes the RFC 7606 treat-as-withdraw path — the replacement
+/// is withdrawn, the session stays Established, and the disposition metric
+/// records exactly one `treat_as_withdraw` row.
+#[tokio::test]
+async fn as_path_ceiling_withdraws_route_and_keeps_session() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    session.config.max_as_path_length = 3;
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    rfc7606_drain(&mut rib_rx);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    session
+        .process_update(rfc7606_update(as_path_attr_bytes(3), &[prefix]))
+        .await;
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected the at-ceiling path to be accepted");
+    };
+    assert_eq!(announced.len(), 1);
+    assert_single_malformed_disposition(&session, "none");
+
+    session
+        .process_update(rfc7606_update(as_path_attr_bytes(4), &[prefix]))
+        .await;
+    let RibUpdate::RoutesReceived {
+        announced,
+        withdrawn,
+        ..
+    } = rib_rx.try_recv().unwrap()
+    else {
+        panic!("expected treat-as-withdraw RoutesReceived");
+    };
+    assert!(
+        announced.is_empty(),
+        "a path over the ceiling must not admit any announcement"
+    );
+    assert_eq!(withdrawn, vec![(Prefix::V4(prefix), 0)]);
+    assert_eq!(session.known_prefix_count(), 0);
+    assert_eq!(
+        session.fsm.state(),
+        SessionState::Established,
+        "the ceiling must keep the session Established"
+    );
+    assert_single_malformed_disposition(&session, "treat_as_withdraw");
+}

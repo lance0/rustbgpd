@@ -169,6 +169,7 @@ fn transport_config(remote: SocketAddr) -> TransportConfig {
         rs_control_communities: false,
         remove_private_as: RemovePrivateAs::Disabled,
         discard_path_attributes: Arc::from([]),
+        max_as_path_length: rustbgpd_transport::DEFAULT_MAX_AS_PATH_LENGTH,
         cluster_id: Some(Ipv4Addr::new(127, 255, 0, 1)),
         explain_enabled: false,
         explain_cache_size: 0,

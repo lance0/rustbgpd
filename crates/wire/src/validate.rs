@@ -341,6 +341,40 @@ fn check_as_path(path: &AsPath) -> Result<(), UpdateError> {
     }
     Ok(())
 }
+
+/// Enforce an operational ceiling on received `AS_PATH` elements.
+///
+/// Every sequence occurrence is counted, including prepends, and every
+/// `AS_SET` member counts individually. `0` disables the ceiling. Call this
+/// after [`validate_update_attributes`] or
+/// [`validate_update_attributes_with_options`] so ordinary RFC validation
+/// takes precedence.
+///
+/// # Errors
+///
+/// Returns malformed-AS_PATH with treat-as-withdraw when the path exceeds
+/// `max_as_path_length`.
+pub fn validate_as_path_ceiling(
+    attrs: &[PathAttribute],
+    max_as_path_length: u16,
+) -> Result<(), UpdateError> {
+    if max_as_path_length == 0 {
+        return Ok(());
+    }
+    let limit = usize::from(max_as_path_length);
+    let exceeds_limit = attrs.iter().any(|attr| match attr {
+        PathAttribute::AsPath(path) => path.asns().nth(limit).is_some(),
+        _ => false,
+    });
+    if exceeds_limit {
+        return Err(UpdateError {
+            subcode: update_subcode::MALFORMED_AS_PATH,
+            data: vec![],
+            disposition: ErrorDisposition::TreatAsWithdraw,
+        });
+    }
+    Ok(())
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -988,5 +1022,42 @@ mod tests {
         ];
         let err = validate_update_attributes(&attrs, false, false, true).unwrap_err();
         assert_eq!(err.disposition, ErrorDisposition::SessionReset);
+    }
+    fn as_path_attrs(segments: Vec<AsPathSegment>) -> Vec<PathAttribute> {
+        vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath { segments }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 1)),
+        ]
+    }
+    #[test]
+    fn as_path_ceiling_accepts_at_limit_and_withdraws_one_over() {
+        let at_limit = as_path_attrs(vec![AsPathSegment::AsSequence(vec![65001; 3])]);
+        assert!(validate_as_path_ceiling(&at_limit, 3).is_ok());
+        let one_over = as_path_attrs(vec![AsPathSegment::AsSequence(vec![65001; 4])]);
+        let err = validate_as_path_ceiling(&one_over, 3).unwrap_err();
+        assert_eq!(err.subcode, update_subcode::MALFORMED_AS_PATH);
+        assert_eq!(err.disposition, ErrorDisposition::TreatAsWithdraw);
+        assert!(err.data.is_empty(), "the diagnostic never carries the path");
+    }
+    #[test]
+    fn as_path_ceiling_zero_disables_and_ordinary_validation_is_unchanged() {
+        let long = as_path_attrs(vec![AsPathSegment::AsSequence(vec![65001; 2000])]);
+        assert!(validate_as_path_ceiling(&long, 0).is_ok());
+        assert!(validate_update_attributes(&long, true, true, true).is_ok());
+    }
+    #[test]
+    fn as_path_ceiling_counts_prepends_and_set_members() {
+        // Two prepended sequence members plus two set members are four wire
+        // elements even though RFC 4271 section 9.1.2.2 scores the set as one
+        // hop for best-path selection.
+        let attrs = as_path_attrs(vec![
+            AsPathSegment::AsSequence(vec![65001, 65001]),
+            AsPathSegment::AsSet(vec![65002, 65003]),
+        ]);
+        assert!(validate_as_path_ceiling(&attrs, 4).is_ok());
+        let err = validate_as_path_ceiling(&attrs, 3).unwrap_err();
+        assert_eq!(err.subcode, update_subcode::MALFORMED_AS_PATH);
+        assert_eq!(err.disposition, ErrorDisposition::TreatAsWithdraw);
     }
 }

@@ -1850,6 +1850,7 @@ fn pin_unreconciled_daemon_runtime_fields(new_config: &mut Config, current: &Con
     new_config.global.link_bandwidth_weighted = current.global.link_bandwidth_weighted;
     new_config.global.warm_cache_checkpoint_on_shutdown =
         current.global.warm_cache_checkpoint_on_shutdown;
+    new_config.global.max_as_path_length = current.global.max_as_path_length;
     new_config
         .global
         .runtime_state_dir
@@ -7645,6 +7646,7 @@ honor_blackhole = true
 multipath_relax = true
 link_bandwidth_weighted = true
 warm_cache_checkpoint_on_shutdown = true
+max_as_path_length = 901
 runtime_state_dir = "/tmp/rustbgpd-reload-edited"
 
 [global.telemetry]
@@ -7702,6 +7704,7 @@ hold_time = 90
                 runtime.global.warm_cache_checkpoint_on_shutdown,
                 startup.global.warm_cache_checkpoint_on_shutdown
             );
+            assert_eq!(runtime.global.max_as_path_length, 750);
             assert_eq!(
                 runtime.global.runtime_state_dir,
                 startup.global.runtime_state_dir

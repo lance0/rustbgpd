@@ -927,6 +927,13 @@ pub struct Global {
     /// changing it requires a daemon restart.
     #[serde(default)]
     pub warm_cache_checkpoint_on_shutdown: bool,
+    /// Maximum number of AS numbers accepted in a received `AS_PATH`,
+    /// counted across every segment with prepends and `AS_SET` members
+    /// included. An over-ceiling path carrying reachable NLRI is RFC 7606
+    /// treat-as-withdraw; without reachable NLRI, RFC 7606 section 5.2
+    /// requires a session reset. `0` disables the ceiling.
+    #[serde(default = "default_max_as_path_length")]
+    pub max_as_path_length: u16,
     /// Directory for daemon-owned runtime state files.
     #[serde(default = "default_runtime_state_dir")]
     pub runtime_state_dir: String,
@@ -937,6 +944,10 @@ pub struct Global {
 
 fn default_runtime_state_dir() -> String {
     "/var/lib/rustbgpd".to_string()
+}
+
+fn default_max_as_path_length() -> u16 {
+    rustbgpd_transport::DEFAULT_MAX_AS_PATH_LENGTH
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
