@@ -144,17 +144,27 @@ four up neighbors, all seven accepted routes, empty filtered arrays, and the
 `192.0.2.0/24` split-horizon noexport route with its full-key reason label.
 The pinned MANRS tool then traverses Alice's received-route API with five
 synthetic ROAs and must report exactly one deliberate mismatch: the covering
-`203.0.113.0/24` originated by AS64520. Only after that baseline and both
-populated captures are frozen, the same live leg adds a fifth route-server
-client through the runtime API, atomically reloads its adapter alias, and
-starts a pinned ExaBGP speaker whose sole route contains the receiver AS in
-its path. Restarted Alice must still expose the original seven accepted
-routes, four empty baseline filtered arrays, and labeled noexport route, while
-the fifth peer has no accepted routes and exactly one `198.18.0.0/24`
-filtered route tagged `64496:65520:4`; `/config.reject_reasons` must join that
-community to `Receiver AS appears in AS_PATH`. Hashes require both pre-fifth-
-peer captures to remain unchanged throughout that phase; the existing backend-
-failure journey is appended afterward. This is a backend/API consumer proof,
+`203.0.113.0/24` originated by AS64520. Alice runs with
+`enable_prefix_lookup = true` and one-minute store refresh intervals, so its
+routes store reads the adapter's `/routes/table/<table>` and
+`/routes/table/<table>/filtered` dumps; the harness waits for a refresh that
+saw the expected accepted and filtered totals, prints the refresh duration
+Alice logged, and the consumer proves one accepted prefix-lookup hit. Only
+after that baseline and both populated captures are frozen, the same live
+leg adds a fifth route-server client through the runtime API into a peer
+group whose import policy denies `198.18.1.0/24`, atomically reloads its
+adapter alias, and starts a pinned ExaBGP speaker announcing two routes:
+`198.18.0.0/24` with the receiver AS in its path and `198.18.1.0/24`. The
+adapter's `/routes/table/master4/filtered` dump must serve both rejections
+with a complete retention envelope while `master6` stays empty. Restarted
+Alice must still expose the original seven accepted routes, four empty
+baseline filtered arrays, and labeled noexport route, while the fifth peer
+has no accepted routes and exactly those two filtered routes tagged
+`64496:65520:4` and `64496:65520:1`; `/config.reject_reasons` must join them
+to `Receiver AS appears in AS_PATH` and `Denied by import policy`, and the
+global prefix lookup must find both as filtered routes of `pb_as64498`.
+Hashes require both pre-fifth-peer captures to remain unchanged throughout
+that phase; the existing backend-failure journey is appended afterward. This is a backend/API consumer proof,
 not a rendered-browser proof. It does not prove MANRS certification, rustbgpd
 RPKI enforcement, or route-server policy conformance; those require their own
 gates.
@@ -250,8 +260,8 @@ Counts: **0 exact, 11 served with a divergence, 6 not served, 3 out of scope
 (non-API).** Zero is exact because every response carries the product-identity
 `api.version`, and each served endpoint also has at least one body-level
 difference. The adapter additionally serves `/routes/peer/{peer}`,
-`/routes/filtered/{id}`, and `/routes/noexport/{id}`, which are Birdwatcher,
-not Bird's Eye, endpoints.
+`/routes/filtered/{id}`, `/routes/table/{table}/filtered`, and
+`/routes/noexport/{id}`, which are Birdwatcher, not Bird's Eye, endpoints.
 
 Cross-cutting differences that belong on the allow-list once: the `api` block
 adds Birdwatcher's `Version` and `result_from_cache` and never emits
@@ -488,7 +498,7 @@ owner and refresh relationship.
 |---|---|---|
 | `Dockerfile` | Hand-maintained PHP/Composer environment for the two pinned upstream checkouts | `run.sh` builds the image used by `run-in-container.sh`, `run-adapter-consumer.sh`, and `run-oracle-leg.sh`. |
 | `Dockerfile.oracle` | Hand-maintained BIRD 2.0.12 oracle image | `run-oracle-leg.sh` builds it and verifies the installed BIRD version before the populated comparison. |
-| `Dockerfile.alice`, `alice.conf`, `alice-consumer.py`, `filtered-announcer-as64498.conf` | Pinned-source Alice-LG 6.2.0 build, bounded API assertions, and one live-only AS-path-loop announcement | `run.sh` builds and label-verifies the image; `run-oracle-leg.sh` preserves the four-peer accepted/noexport baseline, then proves the fifth peer's populated filtered backend and exact configured reason label without changing the frozen captures. |
+| `Dockerfile.alice`, `alice.conf`, `alice-consumer.py`, `filtered-announcer-as64498.conf` | Pinned-source Alice-LG 6.2.0 build with prefix lookup enabled, bounded API and lookup assertions, and two live-only rejected announcements (AS-path loop, import-policy deny) | `run.sh` builds and label-verifies the image; `run-oracle-leg.sh` waits for Alice's routes store, preserves the four-peer accepted/noexport baseline, then proves the fifth peer's populated filtered backend, both configured reason labels, and the prefix-lookup hits without changing the frozen captures. |
 | `Dockerfile.manrs`, `manrs-roas.json` | Pinned-source MANRS build and five synthetic ROAs | `run-oracle-leg.sh` requires one exact Alice-derived invalid stanza and the exact 7-route/5-ROA summary. |
 | `birdseye.env` | Hand-maintained production-mode Bird's Eye settings | `run-in-container.sh` copies it unchanged; `run-oracle-leg.sh` changes only `BIRDC` and `MAX_ROUTES` before installing it in the real-BIRD oracle. |
 | `fake-birdc` | Hand-maintained deterministic `birdc` transcript oracle selected by `birdseye.env` | Bird's Eye executes it during `run-in-container.sh`; `verify_capture.py` checks the resulting HTTP capture. The populated oracle does not use it. |

@@ -171,14 +171,15 @@ to gRPC.
 
 The in-daemon looking glass HTTP server has been removed. The external
 `examples/birdwatcher-adapter` binary serves a Birdwatcher-shaped read-only
-surface over the daemon's gRPC API. Its 14 registered HTTP routes disclose:
+surface over the daemon's gRPC API. Its 15 registered HTTP routes disclose:
 
 - Daemon identity and health through `GET /status`.
 - Peer and table identities: `GET /protocols/bgp`, `GET /protocol/{id}`, and
   `GET /symbols`.
 - Received and advertised route views through `GET /routes/protocol/{id}` and
   `GET /routes/export/{id}`, plus the global received-candidate table with
-  Loc-RIB winner attribution through `GET /routes/table/{table}`.
+  Loc-RIB winner attribution through `GET /routes/table/{table}` and every
+  live session's retained rejects through `GET /routes/table/{table}/filtered`.
 - Exact-prefix or most-specific-covering route candidates through
   `GET /route/{prefix}/protocol/{id}`, `GET /route/{prefix}/export/{id}`, and
   `GET /route/{prefix}/table/{table}`.

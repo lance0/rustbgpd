@@ -121,6 +121,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `peer_group` labels with a fallback that still fires for peers without an
   identity row. No existing metric family or label changes.
 
+- **Operator-visible:** `birdwatcher-adapter` serves
+  `GET /routes/table/{table}/filtered`, the table-wide retained-reject dump
+  Alice-LG's single-table source reads for its prefix-lookup routes store.
+  Rows render exactly as the peer filtered view; the retention envelope sums
+  the table's live sessions (capacity, evictions, `may_be_incomplete`) and
+  an inventory-stability retry rechecks the neighbor inventory and returns
+  HTTP 502 after three changed snapshots. The endpoint adds no truncation
+  beyond each peer's bounded retention store. The pinned IXP compatibility
+  gate now runs Alice-LG 6.2.0 with `enable_prefix_lookup = true` and proves an
+  AS-path-loop and an import-policy rejection through Alice's filtered view
+  and global prefix lookup.
+
 ### Changed
 
 - Reject AS 0 in received and locally encoded AS paths and aggregators per RFC

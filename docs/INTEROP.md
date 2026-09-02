@@ -68,20 +68,25 @@ automatically, so adding a member means republishing the alias file and
 signaling it (or restarting it when direct aliases are used).
 
 The populated leg additionally source-builds pinned Alice-LG 6.2.0 and the
-MANRS IXP validation tool from verified temporary checkouts. Alice must consume
-the adapter's existing seven accepted routes across four up neighbors, empty
-filtered endpoints, and one labeled split-horizon noexport route. MANRS then
-walks those Alice received-route endpoints and reports the one deliberate
-synthetic ROA mismatch. After both populated captures are frozen, a runtime-
-added fifth route-server client and an atomically reloaded adapter alias expose
-one retained AS-path-loop rejection from a pinned ExaBGP speaker. Restarted
-Alice must keep the original seven accepted routes, four empty filtered views,
-and noexport route unchanged while its fifth peer exposes no accepted routes,
-exactly one filtered route, `64496:65520:4`, and the matching configured
-`Receiver AS appears in AS_PATH` label. The pre-fifth-peer captures must remain
-hash-identical across that fifth-peer phase. The proof stops at the backend
-APIs: it does not cover rendered browser behavior, MANRS certification,
-rustbgpd RPKI enforcement, or route-server policy conformance.
+MANRS IXP validation tool from verified temporary checkouts. Alice runs with
+prefix lookup enabled, so its routes store reads the adapter's
+`/routes/table/{table}` and `/routes/table/{table}/filtered` dumps; it must
+consume the adapter's existing seven accepted routes across four up
+neighbors, empty filtered endpoints, one labeled split-horizon noexport
+route, and one accepted prefix-lookup hit. MANRS then walks those Alice
+received-route endpoints and reports the one deliberate synthetic ROA
+mismatch. After both populated captures are frozen, a runtime-added fifth
+route-server client with an import policy, and an atomically reloaded adapter
+alias, expose two retained rejections from a pinned ExaBGP speaker: an
+AS-path loop and a policy deny. Restarted Alice must keep the original seven
+accepted routes, four empty filtered views, and noexport route unchanged
+while its fifth peer exposes no accepted routes, exactly those two filtered
+routes tagged `64496:65520:4` and `64496:65520:1` with their configured
+`Receiver AS appears in AS_PATH` and `Denied by import policy` labels, and
+the global prefix lookup finds both as filtered routes. The pre-fifth-peer
+captures must remain hash-identical across that fifth-peer phase. The proof
+stops at the backend APIs: it does not cover rendered browser behavior, MANRS
+certification, rustbgpd RPKI enforcement, or route-server policy conformance.
 
 ### IXP Manager v7.4 manual configuration oracle
 

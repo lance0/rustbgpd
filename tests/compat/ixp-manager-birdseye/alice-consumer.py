@@ -30,6 +30,24 @@ def route_key(route):
     return route.get("network"), tuple(route.get("bgp", {}).get("as_path", []))
 
 
+def lookup(base, prefix):
+    document = get_json(base, "/lookup/prefix?q=" + urllib.parse.quote(prefix, safe=""))
+    imported = document.get("imported", {}).get("routes")
+    filtered = document.get("filtered", {}).get("routes")
+    if not isinstance(imported, list) or not isinstance(filtered, list):
+        fail(f"lookup {prefix} omitted the imported/filtered route arrays")
+    return imported, filtered
+
+
+def lookup_key(route):
+    return (
+        route.get("network"),
+        route.get("state"),
+        route.get("neighbor", {}).get("id"),
+        route.get("routeserver", {}).get("id"),
+    )
+
+
 def nested_label(document, section, community):
     value = document.get(section, {})
     for component in community.split(":"):
@@ -52,10 +70,14 @@ def main():
     status = get_json(base, "/status")
     if status.get("version") != expected_version:
         fail(f"expected Alice-LG {expected_version}, got {status.get('version')!r}")
+    store_totals = status.get("routes", {}).get("total_routes", {})
+    expected_totals = {"imported": 7, "filtered": 2 if filtered_peer else 0}
+    if store_totals != expected_totals:
+        fail(f"routes store totals drifted: {store_totals!r}")
 
     config = get_json(base, "/config")
-    if config.get("prefix_lookup_enabled") is not False:
-        fail("prefix lookup must remain disabled")
+    if config.get("prefix_lookup_enabled") is not True:
+        fail("prefix lookup must be enabled")
     if config.get("noexport", {}).get("load_on_demand") is not True:
         fail("noexport must be load-on-demand")
     reject_labels = {
@@ -144,22 +166,27 @@ def main():
         if received != []:
             fail(f"pb_as64498 accepted view must be empty, got {received!r}")
         filtered = get_json(base, routes_path("pb_as64498", "filtered")).get("filtered")
-        if not isinstance(filtered, list) or len(filtered) != 1:
-            fail(f"pb_as64498 must expose exactly one filtered route, got {filtered!r}")
-        route = filtered[0]
-        if route_key(route) != ("198.18.0.0/24", (64498, 65001)):
-            fail(f"pb_as64498 filtered route identity drifted: {route!r}")
-        reject_community = [64496, 65520, 4]
-        large = route.get("bgp", {}).get("large_communities")
-        if large != [reject_community]:
-            fail(f"pb_as64498 rejection community drifted: {large!r}")
-        reason = nested_label(
-            config,
-            "reject_reasons",
-            ":".join(str(component) for component in reject_community),
-        )
-        if reason != "Receiver AS appears in AS_PATH":
-            fail(f"pb_as64498 rejection label drifted: {reason!r}")
+        if not isinstance(filtered, list) or len(filtered) != 2:
+            fail(f"pb_as64498 must expose exactly two filtered routes, got {filtered!r}")
+        expected_rejections = {
+            ("198.18.0.0/24", (64498, 65001)): (4, "Receiver AS appears in AS_PATH"),
+            ("198.18.1.0/24", (64498,)): (1, "Denied by import policy"),
+        }
+        if {route_key(route) for route in filtered} != set(expected_rejections):
+            fail(f"pb_as64498 filtered route identities drifted: {filtered!r}")
+        for route in filtered:
+            reason_id, label = expected_rejections[route_key(route)]
+            reject_community = [64496, 65520, reason_id]
+            large = route.get("bgp", {}).get("large_communities")
+            if large != [reject_community]:
+                fail(f"pb_as64498 rejection community drifted: {large!r}")
+            reason = nested_label(
+                config,
+                "reject_reasons",
+                ":".join(str(component) for component in reject_community),
+            )
+            if reason != label:
+                fail(f"pb_as64498 rejection label drifted: {reason!r}")
 
     noexport = get_json(base, routes_path("pb_as64497", "not-exported")).get("not_exported")
     if not isinstance(noexport, list) or len(noexport) != 1:
@@ -171,16 +198,45 @@ def main():
     if [64496, 65521, 1] not in large:
         fail(f"split-horizon community missing from {large!r}")
 
+    # Global prefix lookup reads Alice's routes store, filled from the
+    # adapter's /routes/table/<table> and /routes/table/<table>/filtered dumps.
+    imported, filtered = lookup(base, "192.0.2.0/24")
+    if [lookup_key(route) for route in imported] != [
+        ("192.0.2.0/24", "imported", "pb_as64497", "rs0")
+    ]:
+        fail(f"accepted prefix lookup drifted: {imported!r}")
+    if filtered != []:
+        fail(f"accepted prefix lookup must find no filtered route, got {filtered!r}")
+    expected_lookups = {
+        "198.18.0.0/24": [64496, 65520, 4],
+        "198.18.1.0/24": [64496, 65520, 1],
+    }
+    for prefix, community in expected_lookups.items():
+        imported, filtered = lookup(base, prefix)
+        if imported != []:
+            fail(f"{prefix} lookup must find no accepted route, got {imported!r}")
+        if not filtered_peer:
+            if filtered != []:
+                fail(f"{prefix} lookup must be empty before the fifth peer, got {filtered!r}")
+            continue
+        if [lookup_key(route) for route in filtered] != [(prefix, "filtered", "pb_as64498", "rs0")]:
+            fail(f"{prefix} filtered lookup drifted: {filtered!r}")
+        large = filtered[0].get("bgp", {}).get("large_communities")
+        if large != [community]:
+            fail(f"{prefix} filtered lookup community drifted: {large!r}")
+
     if filtered_peer:
         print(
             f"alice filtered proof: Alice-LG {expected_version} read rs0 with 5 up neighbors, "
-            "preserved 7 accepted routes and 4 empty baseline filtered views, and joined one "
-            "AS-path-loop rejection to its exact label"
+            "preserved 7 accepted routes and 4 empty baseline filtered views, joined an "
+            "AS-path-loop and an import-policy rejection to their exact labels, and found "
+            "both through prefix lookup"
         )
     else:
         print(
             f"alice consumer proof: Alice-LG {expected_version} read rs0 with 4 up neighbors, "
-            "7 accepted routes, 0 filtered routes, and the labeled split-horizon noexport route"
+            "7 accepted routes, 0 filtered routes, the labeled split-horizon noexport route, "
+            "and one accepted prefix-lookup hit"
         )
 
 

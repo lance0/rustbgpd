@@ -625,6 +625,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/routes/protocol/{id}", get(routes_protocol))
         .route("/routes/export/{id}", get(routes_export))
         .route("/routes/table/{table}", get(routes_table))
+        .route("/routes/table/{table}/filtered", get(routes_table_filtered))
         .route("/route/{prefix}/protocol/{id}", get(route_protocol))
         .route("/route/{prefix}/export/{id}", get(route_export))
         .route("/route/{prefix}/table/{table}", get(route_table))
@@ -1225,13 +1226,13 @@ fn invalid_table_snapshot() -> HttpError {
 }
 
 fn table_address_family(
-    neighbors: Vec<proto::NeighborState>,
+    neighbors: &[proto::NeighborState],
     identities: &IdentityResolver,
     table: &str,
 ) -> Result<i32, HttpError> {
     let mut families = 0_u8;
     for neighbor in neighbors {
-        let config = neighbor.config.unwrap_or_default();
+        let config = neighbor.config.clone().unwrap_or_default();
         let peer = parse_upstream_peer_address(&config.address)?;
         if identities.identity(peer).table == table {
             families |= if peer.is_ipv4() { 1 } else { 2 };
@@ -1249,7 +1250,7 @@ async fn routes_table(
     State(state): State<AppState>,
     Path(table): Path<String>,
 ) -> Result<Json<Value>, HttpError> {
-    let family = table_address_family(list_neighbors(&state).await?, &state.identities, &table)?;
+    let family = table_address_family(&list_neighbors(&state).await?, &state.identities, &table)?;
     for _ in 0..CAPTURE_ATTEMPTS {
         let mut client = proto::rib_service_client::RibServiceClient::new(state.upstream.clone());
         let mut routes = TableRouteSet::default();
@@ -1929,6 +1930,145 @@ async fn routes_filtered(
         &state.identities,
         state.arouteserver_reject_communities.as_deref(),
     )))
+}
+
+// ---------------------------------------------------------------------------
+// GET /routes/table/{table}/filtered  — Alice-LG single-table routes-store
+//   dump: every retained reject of every peer aliased to the table
+//   →  one NeighborService.ListNeighbors snapshot, one
+//      PolicyService.ListRejectedRoutes per peer, then a second
+//      ListNeighbors snapshot for an inventory-stability retry
+// ---------------------------------------------------------------------------
+
+/// The per-table neighbor facts checked by the inventory-stability retry:
+/// membership, session state, staleness, and the actor-authoritative retained count.
+type TableRejectInventory = Vec<(IpAddr, i32, bool, Option<u64>)>;
+
+fn table_reject_inventory(
+    neighbors: &[proto::NeighborState],
+    identities: &IdentityResolver,
+    table: &str,
+) -> Result<TableRejectInventory, HttpError> {
+    let mut inventory = Vec::new();
+    for neighbor in neighbors {
+        let config = neighbor.config.clone().unwrap_or_default();
+        let peer = parse_upstream_peer_address(&config.address)?;
+        if identities.identity(peer).table == table {
+            inventory.push((
+                peer,
+                neighbor.state,
+                neighbor.stale,
+                neighbor.rejected_routes_retained,
+            ));
+        }
+    }
+    Ok(inventory)
+}
+
+async fn routes_table_filtered(
+    State(state): State<AppState>,
+    Path(table): Path<String>,
+) -> Result<Json<Value>, HttpError> {
+    let mut policy = proto::policy_service_client::PolicyServiceClient::new(state.upstream.clone());
+    for _ in 0..CAPTURE_ATTEMPTS {
+        let neighbors = list_neighbors(&state).await?;
+        let family = table_address_family(&neighbors, &state.identities, &table)?;
+        let inventory = table_reject_inventory(&neighbors, &state.identities, &table)?;
+        let mut stores = Vec::with_capacity(inventory.len());
+        for (peer, ..) in &inventory {
+            let response = match policy
+                .list_rejected_routes(proto::ListRejectedRoutesRequest {
+                    peer_address: peer.to_string(),
+                })
+                .await
+            {
+                Ok(response) => Some(response.into_inner()),
+                // No live session: nothing is retained, nothing is served.
+                Err(status) if status.code() == tonic::Code::NotFound => None,
+                Err(error) => return Err(bad_gateway("ListRejectedRoutes", &error)),
+            };
+            stores.push((*peer, response));
+        }
+        // The session-local reject stores carry no version. Retry when the
+        // surrounding inventory changes; this is not a store-content fence.
+        let after =
+            table_reject_inventory(&list_neighbors(&state).await?, &state.identities, &table)?;
+        if after == inventory {
+            return Ok(Json(filtered_table_body(
+                &stores,
+                family,
+                &state.identities,
+                state.arouteserver_reject_communities.as_deref(),
+                state.max_routes,
+            )));
+        }
+    }
+    Err(invalid_table_snapshot())
+}
+
+/// One table-wide retention envelope in the per-peer shape: capacities
+/// and evictions sum over the live sessions, `enabled` is true when any
+/// session retains, and an older daemon's absent eviction count keeps the
+/// whole view's completeness unknown. `None` when no session is live.
+fn aggregate_retention(
+    stores: &[(IpAddr, Option<proto::ListRejectedRoutesResponse>)],
+) -> Option<proto::ListRejectedRoutesResponse> {
+    let mut aggregate: Option<proto::ListRejectedRoutesResponse> = None;
+    for response in stores.iter().filter_map(|(_, response)| response.as_ref()) {
+        let total = aggregate.get_or_insert_with(|| proto::ListRejectedRoutesResponse {
+            evictions_since_reset: Some(0),
+            ..Default::default()
+        });
+        total.retention_enabled |= response.retention_enabled;
+        total.capacity = total.capacity.saturating_add(response.capacity);
+        total.evictions_since_reset =
+            match (total.evictions_since_reset, response.evictions_since_reset) {
+                (Some(sum), Some(count)) => Some(sum.saturating_add(count)),
+                _ => None,
+            };
+    }
+    aggregate
+}
+
+/// Every retained reject of every live session in the table, rendered
+/// exactly like the peer's own filtered view (alias, ARouteServer
+/// presentation, synthesized reason) and scoped to the table's family.
+fn filtered_table_body(
+    stores: &[(IpAddr, Option<proto::ListRejectedRoutesResponse>)],
+    family: i32,
+    identities: &IdentityResolver,
+    arouteserver: Option<&ArsRejectCommunities>,
+    max_routes: u64,
+) -> Value {
+    let mut routes = Vec::new();
+    for (peer, response) in stores {
+        let Some(response) = response
+            .as_ref()
+            .filter(|response| response.retention_enabled)
+        else {
+            continue;
+        };
+        let arouteserver = arouteserver.filter(|config| config.peers.contains(peer));
+        routes.extend(
+            response
+                .routes
+                .iter()
+                .filter(|route| {
+                    family == proto::AddressFamily::Unspecified as i32 || route.afi_safi == family
+                })
+                .map(|route| rejected_route_to_birdwatcher(route, *peer, identities, arouteserver)),
+        );
+    }
+    let aggregate = aggregate_retention(stores);
+    serde_json::json!({
+        "api": api_block(
+            aggregate
+                .as_ref()
+                .map_or(max_routes, |total| u64::from(total.capacity))
+        ),
+        "routes": routes,
+        "retention": retention_metadata(aggregate.as_ref()),
+    })
 }
 
 const IXP_MANAGER_REJECT_FUNCTION: u64 = 1101;
@@ -3514,6 +3654,266 @@ mod tests {
                 .values()
                 .all(Value::is_null)
         );
+    }
+
+    /// The table-wide filtered view unions every live session's retained
+    /// rejects under the peer's own alias, scopes them to the table's
+    /// family, and aggregates the retention envelope: no live session
+    /// leaves completeness unknown, disabled retention contributes no
+    /// rows, and one eviction anywhere marks the whole view incomplete.
+    #[test]
+    fn filtered_table_body_unions_live_stores_and_aggregates_retention() {
+        let identities = IdentityResolver::parse(&[
+            "pb_as64496=192.0.2.1@master4".into(),
+            "pb6_as64496=2001:db8::1@master4".into(),
+        ])
+        .unwrap();
+        let v4: IpAddr = "192.0.2.1".parse().unwrap();
+        let v6: IpAddr = "2001:db8::1".parse().unwrap();
+        let down: IpAddr = "192.0.2.9".parse().unwrap();
+        let reject =
+            |prefix: &str, length: u32, family: proto::AddressFamily| proto::RejectedRoute {
+                prefix: prefix.into(),
+                prefix_length: length,
+                afi_safi: family as i32,
+                reason: "as_path_loop".into(),
+                ..Default::default()
+            };
+        let store = |routes: Vec<proto::RejectedRoute>, evictions: Option<u64>| {
+            Some(proto::ListRejectedRoutesResponse {
+                retention_enabled: true,
+                capacity: 1024,
+                routes,
+                evictions_since_reset: evictions,
+                ..Default::default()
+            })
+        };
+        let ipv4 = proto::AddressFamily::Ipv4Unicast as i32;
+        let any = proto::AddressFamily::Unspecified as i32;
+        let networks = |body: &Value| {
+            body["routes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|route| {
+                    (
+                        route["network"].as_str().unwrap().to_owned(),
+                        route["from_protocol"].as_str().unwrap().to_owned(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // Empty: no live session, so completeness is unknown and the
+        // generic cap is reported.
+        let empty = filtered_table_body(&[(down, None)], ipv4, &identities, None, 7);
+        assert_eq!(empty["routes"], serde_json::json!([]), "{empty}");
+        assert_eq!(empty["api"]["max_routes"], 7, "{empty}");
+        assert!(
+            empty["retention"]
+                .as_object()
+                .unwrap()
+                .values()
+                .all(Value::is_null),
+            "{empty}"
+        );
+
+        // Populated: two live peers and one down peer, family-scoped and
+        // aliased per peer, with the summed capacity as the cap.
+        let stores = vec![
+            (
+                v4,
+                store(
+                    vec![reject("10.98.0.0", 24, proto::AddressFamily::Ipv4Unicast)],
+                    Some(0),
+                ),
+            ),
+            (down, None),
+            (
+                v6,
+                store(
+                    vec![reject(
+                        "2001:db8:ffff::",
+                        48,
+                        proto::AddressFamily::Ipv6Unicast,
+                    )],
+                    Some(0),
+                ),
+            ),
+        ];
+        let table = filtered_table_body(&stores, ipv4, &identities, None, 7);
+        assert_eq!(
+            networks(&table),
+            [("10.98.0.0/24".to_owned(), "pb_as64496".to_owned())],
+            "{table}"
+        );
+        assert_eq!(
+            table["routes"][0]["reject_reason"], "as_path_loop",
+            "{table}"
+        );
+        assert_eq!(
+            table["routes"][0]["bgp"]["large_communities"],
+            serde_json::json!([[64496, 65520, 4]]),
+            "{table}"
+        );
+        assert_eq!(table["api"]["max_routes"], 2048, "{table}");
+        assert_eq!(
+            table["retention"],
+            serde_json::json!({
+                "enabled": true,
+                "capacity": 2048,
+                "evictions_since_reset": 0,
+                "may_be_incomplete": false,
+            }),
+            "{table}"
+        );
+        let mixed = filtered_table_body(&stores, any, &identities, None, 7);
+        assert_eq!(
+            networks(&mixed),
+            [
+                ("10.98.0.0/24".to_owned(), "pb_as64496".to_owned()),
+                ("2001:db8:ffff::/48".to_owned(), "pb6_as64496".to_owned()),
+            ],
+            "{mixed}"
+        );
+
+        // Capacity warning: one eviction anywhere flags the view, an older
+        // daemon's absent count keeps it unknown, and disabled retention
+        // contributes no rows while the envelope still says enabled.
+        let mut warned = stores.clone();
+        warned[2].1.as_mut().unwrap().evictions_since_reset = Some(3);
+        let flagged = filtered_table_body(&warned, any, &identities, None, 7);
+        assert_eq!(
+            flagged["retention"]["evictions_since_reset"], 3,
+            "{flagged}"
+        );
+        assert_eq!(flagged["retention"]["may_be_incomplete"], true, "{flagged}");
+        warned[0].1.as_mut().unwrap().evictions_since_reset = None;
+        let unknown = filtered_table_body(&warned, any, &identities, None, 7);
+        assert_eq!(unknown["retention"]["evictions_since_reset"], Value::Null);
+        assert_eq!(unknown["retention"]["may_be_incomplete"], Value::Null);
+        warned[0].1.as_mut().unwrap().retention_enabled = false;
+        let disabled = filtered_table_body(&warned, any, &identities, None, 7);
+        assert_eq!(
+            networks(&disabled),
+            [("2001:db8:ffff::/48".to_owned(), "pb6_as64496".to_owned())],
+            "{disabled}"
+        );
+        assert_eq!(disabled["retention"]["enabled"], true, "{disabled}");
+        assert_eq!(disabled["api"]["max_routes"], 2048, "{disabled}");
+    }
+
+    /// The inventory-stability retry behind the table-wide filtered walk:
+    /// only the table's peers count, keepalive-driven counters do not, and any
+    /// membership, state, staleness, or retained-count change between the
+    /// two snapshots triggers a retry.
+    #[test]
+    fn filtered_table_inventory_stability_sees_membership_state_and_count_changes() {
+        let identities = IdentityResolver::parse(&[
+            "pb_as64496=192.0.2.1@master4".into(),
+            "pb_as64497=192.0.2.2@master4".into(),
+        ])
+        .unwrap();
+        let neighbor =
+            |address: &str, state: i32, stale: bool, retained: Option<u64>| proto::NeighborState {
+                config: Some(proto::NeighborConfig {
+                    address: address.into(),
+                    ..Default::default()
+                }),
+                state,
+                stale,
+                rejected_routes_retained: retained,
+                ..Default::default()
+            };
+        let before = vec![
+            neighbor("192.0.2.1", 6, false, Some(1)),
+            neighbor("2001:db8::1", 6, false, Some(4)),
+        ];
+        let inventory = table_reject_inventory(&before, &identities, "master4").unwrap();
+        assert_eq!(
+            inventory,
+            vec![("192.0.2.1".parse::<IpAddr>().unwrap(), 6, false, Some(1))]
+        );
+        assert_eq!(
+            table_reject_inventory(&before, &identities, "master")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            table_reject_inventory(&before, &identities, "master6")
+                .unwrap()
+                .is_empty()
+        );
+        for changed in [
+            vec![neighbor("192.0.2.1", 6, false, Some(2))],
+            vec![neighbor("192.0.2.1", 1, false, Some(1))],
+            vec![neighbor("192.0.2.1", 6, true, Some(1))],
+            vec![neighbor("192.0.2.1", 6, false, None)],
+            vec![],
+            vec![
+                neighbor("192.0.2.1", 6, false, Some(1)),
+                neighbor("192.0.2.2", 6, false, Some(0)),
+            ],
+        ] {
+            assert_ne!(
+                table_reject_inventory(&changed, &identities, "master4").unwrap(),
+                inventory,
+                "{changed:?}"
+            );
+        }
+        let mut busy = before.clone();
+        busy[0].uptime_seconds += 30;
+        busy[0].prefixes_received += 1;
+        assert_eq!(
+            table_reject_inventory(&busy, &identities, "master4").unwrap(),
+            inventory
+        );
+        assert!(
+            table_reject_inventory(&[neighbor("bogus", 6, false, None)], &identities, "master4")
+                .is_err()
+        );
+    }
+
+    /// Source pin for the inventory-stability retry: the handler reads one
+    /// inventory, walks every peer's store once, re-reads the inventory, and
+    /// refuses after bounded changes; the generic RIB cap never applies.
+    #[test]
+    fn filtered_table_handler_uses_inventory_stability_retry() {
+        let source = include_str!("main.rs");
+        assert_eq!(
+            source
+                .matches(".route(\"/routes/table/{table}/filtered\", get(routes_table_filtered))")
+                .count(),
+            1
+        );
+        let body = source
+            .split_once("async fn routes_table_filtered(")
+            .unwrap()
+            .1
+            .split_once("fn aggregate_retention(")
+            .unwrap()
+            .0;
+        assert!(body.contains("for _ in 0..CAPTURE_ATTEMPTS"), "{body}");
+        assert_eq!(
+            body.matches("list_neighbors(&state).await?").count(),
+            2,
+            "{body}"
+        );
+        assert_eq!(body.matches(".list_rejected_routes(").count(), 1, "{body}");
+        assert!(
+            body.find("table_address_family(").unwrap()
+                < body.find(".list_rejected_routes(").unwrap(),
+            "{body}"
+        );
+        assert!(body.contains("if after == inventory"), "{body}");
+        assert_eq!(
+            body.matches("    Err(invalid_table_snapshot())\n}\n")
+                .count(),
+            1,
+            "{body}"
+        );
+        assert!(!body.contains("enforce_max("), "{body}");
     }
 
     /// The set diff behind the noexport view: a route suppressed for the
