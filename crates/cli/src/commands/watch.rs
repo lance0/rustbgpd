@@ -120,6 +120,7 @@ fn parse_bgp_event_type(s: &str) -> Result<i32, CliError> {
         "peer_disabled" => Ok(BgpEventType::PeerDisabled as i32),
         "peer_added" => Ok(BgpEventType::PeerAdded as i32),
         "peer_removed" => Ok(BgpEventType::PeerRemoved as i32),
+        "max_prefix_warning" => Ok(BgpEventType::MaxPrefixWarning as i32),
         "notification_sent" => Ok(BgpEventType::NotificationSent as i32),
         "notification_received" => Ok(BgpEventType::NotificationReceived as i32),
         "policy_changed" => Ok(BgpEventType::PolicyChanged as i32),
@@ -160,7 +161,8 @@ fn parse_session_bgp_event_type(s: &str) -> Result<i32, CliError> {
         | Ok(BgpEventType::PeerEnabled)
         | Ok(BgpEventType::PeerDisabled)
         | Ok(BgpEventType::PeerAdded)
-        | Ok(BgpEventType::PeerRemoved) => Ok(event_type),
+        | Ok(BgpEventType::PeerRemoved)
+        | Ok(BgpEventType::MaxPrefixWarning) => Ok(event_type),
         _ => Err(CliError::Argument(format!(
             "unsupported session event type {s:?}; expected state_changed, established, lost, peer_added, peer_removed, peer_enabled, or peer_disabled"
         ))),
@@ -263,6 +265,7 @@ fn bgp_event_type_json_label(event_type: i32) -> &'static str {
         Ok(BgpEventType::PeerDisabled) => "peer_disabled",
         Ok(BgpEventType::PeerAdded) => "peer_added",
         Ok(BgpEventType::PeerRemoved) => "peer_removed",
+        Ok(BgpEventType::MaxPrefixWarning) => "max_prefix_warning",
         Ok(BgpEventType::NotificationSent) => "notification_sent",
         Ok(BgpEventType::NotificationReceived) => "notification_received",
         Ok(BgpEventType::PolicyChanged) => "policy_changed",
@@ -295,6 +298,7 @@ fn bgp_event_type_display_label(event_type: i32) -> &'static str {
         Ok(BgpEventType::PeerDisabled) => "peer_disabled",
         Ok(BgpEventType::PeerAdded) => "peer_added",
         Ok(BgpEventType::PeerRemoved) => "peer_removed",
+        Ok(BgpEventType::MaxPrefixWarning) => "max_prefix_warning",
         Ok(BgpEventType::NotificationSent) => "notification_sent",
         Ok(BgpEventType::NotificationReceived) => "notification_received",
         Ok(BgpEventType::PolicyChanged) => "policy_changed",
@@ -990,6 +994,7 @@ fn live_event_type_mask(event_type: BgpEventType) -> u8 {
         | BgpEventType::PeerDisabled
         | BgpEventType::PeerAdded
         | BgpEventType::PeerRemoved
+        | BgpEventType::MaxPrefixWarning
         | BgpEventType::NotificationSent
         | BgpEventType::NotificationReceived => 2,
         BgpEventType::PolicyChanged => 4,
@@ -1021,6 +1026,7 @@ fn durable_event_type_mask(event_type: BgpEventType) -> u8 {
         | BgpEventType::PeerDisabled
         | BgpEventType::PeerAdded
         | BgpEventType::PeerRemoved
+        | BgpEventType::MaxPrefixWarning
         | BgpEventType::NotificationSent
         | BgpEventType::NotificationReceived => 2,
         BgpEventType::PolicyChanged | BgpEventType::OtcRouteBlocked => 4,
@@ -3411,6 +3417,7 @@ mod tests {
                 30..=33 => (8, 8),
                 40..=42 => (16, 16),
                 50..=52 => (32, 32),
+                53 => (2, 2),
                 100 => (1 | 2 | 8 | 16 | 32, 0x3f),
                 0 => (0, 0),
                 _ => unreachable!("known enum value covered"),

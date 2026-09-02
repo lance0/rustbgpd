@@ -262,6 +262,43 @@ impl Default for TcpAoRotationStatus {
 /// configuration.
 pub const TCP_AO_MAX_INSPECT_KEYS: usize = 4096;
 
+/// Response to a crossed inbound max-prefix bound (ADR-0108 amendment).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MaxPrefixAction {
+    /// Tear the session down with Cease/1 and latch the peer (the historical
+    /// behavior, optionally followed by one timed restart).
+    #[default]
+    Shutdown,
+    /// Withhold net-new prefixes beyond the bound while the session stays
+    /// Established; nothing already accepted is withdrawn.
+    Block,
+    /// Warn once per crossing and keep accepting.
+    Warning,
+}
+
+impl MaxPrefixAction {
+    /// Stable configuration and API spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Shutdown => "shutdown",
+            Self::Block => "block",
+            Self::Warning => "warning",
+        }
+    }
+
+    /// Parse the configuration spelling; `None` for anything else.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "shutdown" => Some(Self::Shutdown),
+            "block" => Some(Self::Block),
+            "warning" => Some(Self::Warning),
+            _ => None,
+        }
+    }
+}
+
 /// Private AS removal mode for eBGP outbound `AS_PATH` manipulation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RemovePrivateAs {
@@ -425,6 +462,12 @@ pub struct TransportConfig {
     pub max_prefixes_received_ipv4: Option<u32>,
     /// IPv6-unicast sibling of `max_prefixes_received_ipv4`.
     pub max_prefixes_received_ipv6: Option<u32>,
+    /// What a crossed inbound max-prefix bound does (ADR-0108 amendment).
+    pub max_prefix_action: MaxPrefixAction,
+    /// Optional warning threshold as a percentage of each finite bound
+    /// (1..=100). Crossing it emits one warning per crossing without any
+    /// teardown; `None` warns only at the bound under `MaxPrefixAction::Warning`.
+    pub max_prefix_warning_percent: Option<u8>,
     /// Optional peer-group name used for policy matching and operator visibility.
     pub peer_group: Option<String>,
     /// TCP MD5 authentication password (RFC 2385).
@@ -580,6 +623,8 @@ impl TransportConfig {
             max_prefixes_ipv6: None,
             max_prefixes_received_ipv4: None,
             max_prefixes_received_ipv6: None,
+            max_prefix_action: MaxPrefixAction::Shutdown,
+            max_prefix_warning_percent: None,
             peer_group: None,
             md5_password: None,
             tcp_ao: None,

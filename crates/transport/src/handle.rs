@@ -292,6 +292,25 @@ pub enum SessionNotification {
         /// limit, so `count` is announced (accepted plus rejected) prefixes.
         received: bool,
     },
+    /// Usage crossed one scope's max-prefix warning threshold. Emitted once
+    /// per crossing; the session keeps running and nothing is latched.
+    MaxPrefixWarning {
+        /// Peer-manager scoped session generation.
+        session_id: u64,
+        /// Role the session had when the threshold was crossed.
+        role: SessionRole,
+        /// IP address of the remote peer.
+        peer_addr: IpAddr,
+        /// Bound scope: `aggregate`, `ipv4_unicast`, `ipv6_unicast`,
+        /// `ipv4_unicast_received`, or `ipv6_unicast_received`.
+        scope: &'static str,
+        /// Usage that crossed the threshold.
+        usage: usize,
+        /// Configured bound for the scope.
+        bound: u32,
+        /// Threshold percentage that was crossed.
+        percent: u8,
+    },
 }
 
 /// Lossless, nonblocking sender for peer-session coordination notifications.
@@ -419,6 +438,11 @@ pub struct PeerRuntimeConfigUpdate {
     pub max_prefixes_received_ipv4: Option<u32>,
     /// IPv6-unicast sibling of `max_prefixes_received_ipv4`.
     pub max_prefixes_received_ipv6: Option<u32>,
+    /// Response to a crossed bound; switching to `Shutdown` re-evaluates
+    /// every bound immediately.
+    pub max_prefix_action: crate::config::MaxPrefixAction,
+    /// Warning threshold percentage; see `TransportConfig`.
+    pub max_prefix_warning_percent: Option<u8>,
     /// Stale-route retention after peer restart (seconds).
     pub gr_stale_routes_time: u64,
     /// Upper bound on the peer-advertised GR Restart Time.
@@ -673,9 +697,29 @@ pub enum StateQueryOutcome {
     SessionGone,
 }
 
+/// One finite inbound max-prefix bound's live capacity (ADR-0108 amendment).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaxPrefixScopeState {
+    /// `aggregate`, `ipv4_unicast`, `ipv6_unicast`, `ipv4_unicast_received`,
+    /// or `ipv6_unicast_received`.
+    pub scope: &'static str,
+    /// The session actor's enforcement count for the scope.
+    pub usage: usize,
+    /// Configured bound.
+    pub limit: u32,
+    /// Saturating `limit - usage`.
+    pub headroom: u32,
+    /// Whether a `block` episode is open for the scope.
+    pub blocking: bool,
+}
+
 /// O(1) max-prefix accounting captured with a peer's runtime state.
 #[derive(Debug, Clone, Default)]
 pub struct MaxPrefixState {
+    /// One row per finite bound, in enforcement order.
+    pub scopes: Vec<MaxPrefixScopeState>,
+    /// Effective response to a crossed bound.
+    pub action: crate::config::MaxPrefixAction,
     /// Number of accepted unique IPv4-unicast prefixes from this peer.
     pub prefix_count_ipv4: usize,
     /// Number of accepted unique IPv6-unicast prefixes from this peer.
@@ -2063,6 +2107,8 @@ impl PeerHandle {
         max_prefixes_ipv6: Option<u32>,
         max_prefixes_received_ipv4: Option<u32>,
         max_prefixes_received_ipv6: Option<u32>,
+        max_prefix_action: crate::config::MaxPrefixAction,
+        max_prefix_warning_percent: Option<u8>,
         gr_stale_routes_time: u64,
         gr_peer_restart_time_max: u16,
         local_ipv6_nexthop: Option<std::net::Ipv6Addr>,
@@ -2080,6 +2126,8 @@ impl PeerHandle {
                         max_prefixes_ipv6,
                         max_prefixes_received_ipv4,
                         max_prefixes_received_ipv6,
+                        max_prefix_action,
+                        max_prefix_warning_percent,
                         gr_stale_routes_time,
                         gr_peer_restart_time_max,
                         local_ipv6_nexthop,
@@ -2256,6 +2304,7 @@ mod tests {
             SessionNotification::OpenReceived { session_id, .. } => (*session_id, 0),
             SessionNotification::BackToIdle { session_id, .. } => (*session_id, 1),
             SessionNotification::MaxPrefixExceeded { session_id, .. } => (*session_id, 2),
+            SessionNotification::MaxPrefixWarning { session_id, .. } => (*session_id, 3),
         }
     }
 

@@ -497,6 +497,9 @@ struct BgpMetricsInner {
     max_prefix_limit: IntGaugeVec,
     max_prefix_headroom: IntGaugeVec,
     max_prefix_exceeded: IntCounterVec,
+    max_prefix_blocking: IntGaugeVec,
+    max_prefix_blocked: IntCounterVec,
+    max_prefix_warning: IntCounterVec,
     outbound_prefix_usage: IntGaugeVec,
     outbound_prefix_limit: IntGaugeVec,
     outbound_prefix_headroom: IntGaugeVec,
@@ -1184,6 +1187,33 @@ impl BgpMetrics {
                 "Number of times a peer exceeded its max-prefix limit",
             ),
             &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let max_prefix_blocking = IntGaugeVec::new(
+            Opts::new(
+                "bgp_max_prefix_blocking",
+                "1 while an inbound max-prefix block episode is open for this peer and scope.",
+            ),
+            &["peer", "scope"],
+        )
+        .expect("valid metric definition");
+
+        let max_prefix_blocked = IntCounterVec::new(
+            Opts::new(
+                "bgp_max_prefix_blocked_total",
+                "Net-new prefixes withheld from a peer's inbound feed by a full max-prefix bound under the block action.",
+            ),
+            &["peer", "scope"],
+        )
+        .expect("valid metric definition");
+
+        let max_prefix_warning = IntCounterVec::new(
+            Opts::new(
+                "bgp_max_prefix_warning_total",
+                "Max-prefix warning-threshold crossings, one per crossing per scope.",
+            ),
+            &["peer", "scope"],
         )
         .expect("valid metric definition");
 
@@ -2605,6 +2635,15 @@ impl BgpMetrics {
             .register(Box::new(max_prefix_exceeded.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(max_prefix_blocking.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(max_prefix_blocked.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(max_prefix_warning.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(outbound_prefix_usage.clone()))
             .expect("metric not already registered");
         registry
@@ -3083,6 +3122,9 @@ impl BgpMetrics {
             max_prefix_limit,
             max_prefix_headroom,
             max_prefix_exceeded,
+            max_prefix_blocking,
+            max_prefix_blocked,
+            max_prefix_warning,
             outbound_prefix_usage,
             outbound_prefix_limit,
             outbound_prefix_headroom,
@@ -3330,6 +3372,9 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.0.max_prefix_limit, peer);
         Self::reap_peer_series_from_vec(&self.0.max_prefix_headroom, peer);
         Self::reap_peer_series_from_vec(&self.0.max_prefix_exceeded, peer);
+        Self::reap_peer_series_from_vec(&self.0.max_prefix_blocking, peer);
+        Self::reap_peer_series_from_vec(&self.0.max_prefix_blocked, peer);
+        Self::reap_peer_series_from_vec(&self.0.max_prefix_warning, peer);
         Self::reap_peer_series_from_vec(&self.0.outbound_prefix_usage, peer);
         Self::reap_peer_series_from_vec(&self.0.outbound_prefix_limit, peer);
         Self::reap_peer_series_from_vec(&self.0.outbound_prefix_headroom, peer);
@@ -4184,6 +4229,33 @@ impl BgpMetrics {
         let _ = self.0.max_prefix_usage.remove_label_values(&labels);
         let _ = self.0.max_prefix_limit.remove_label_values(&labels);
         let _ = self.0.max_prefix_headroom.remove_label_values(&labels);
+        let _ = self.0.max_prefix_blocking.remove_label_values(&labels);
+    }
+
+    /// Publish whether an inbound `block` episode is open for one scope.
+    pub fn set_max_prefix_blocking(&self, peer: &str, scope: &str, blocking: bool) {
+        self.0
+            .max_prefix_blocking
+            .with_label_values(&[peer, scope])
+            .set(i64::from(blocking));
+    }
+
+    /// Count one net-new prefix withheld by a full bound under `block`.
+    /// Carries no prefix label: the withheld set is the unbounded quantity
+    /// the limit exists to contain.
+    pub fn record_max_prefix_blocked(&self, peer: &str, scope: &str) {
+        self.0
+            .max_prefix_blocked
+            .with_label_values(&[peer, scope])
+            .inc();
+    }
+
+    /// Count one warning-threshold crossing for a scope.
+    pub fn record_max_prefix_warning(&self, peer: &str, scope: &str) {
+        self.0
+            .max_prefix_warning
+            .with_label_values(&[peer, scope])
+            .inc();
     }
 
     /// Remove every max-prefix capacity series owned by one live session.
@@ -4194,6 +4266,7 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.0.max_prefix_usage, peer);
         Self::reap_peer_series_from_vec(&self.0.max_prefix_limit, peer);
         Self::reap_peer_series_from_vec(&self.0.max_prefix_headroom, peer);
+        Self::reap_peer_series_from_vec(&self.0.max_prefix_blocking, peer);
     }
 
     /// Publish one peer's outbound unicast capacity for one family

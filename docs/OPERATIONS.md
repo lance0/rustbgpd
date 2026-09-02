@@ -867,6 +867,31 @@ Prefixes Reached). With the RFC 8538 N-bit, the daemon sends outer Cease/9
 preventing the over-limit routes from being retained as stale. By default the
 peer is not automatically re-enabled — use `rbgp neighbor <addr> enable` or the
 gRPC `EnableNeighbor` RPC to restart it.
+`max_prefix_action` selects a non-teardown response instead. Under `"block"`,
+a net-new prefix that would take a slot beyond a full per-family bound is
+withheld — never installed, never delivered to the RIB — while the session
+stays Established; attribute changes and new Add-Path identities for prefixes
+already accepted still pass. The first withheld prefix opens a blocking episode
+(one warn log line, `bgp_max_prefix_blocking{peer,scope}` = 1, the
+`inbound_prefix_limits[]` row in `rbgp neighbor <addr>` reports
+`blocking=inbound_prefix_limit_reached`) and every withheld prefix increments
+`bgp_max_prefix_blocked_total`. When usage falls back under the bound (a
+withdrawal, an enhanced-refresh sweep, or a raised limit) the episode ends and
+the daemon sends one plain ROUTE-REFRESH so the peer replays what was withheld;
+a replay that overflows again opens a new episode, so a peer churning at its
+bound can trigger repeated full replays — `block` is a containment mode, not a
+steady-state one. Under `"warning"` the daemon only reports and keeps
+accepting. Neither mode latches the peer or sends a NOTIFICATION, and
+`max_prefix_action = "block"` requires the aggregate `max_prefixes` to be
+unset.
+
+`max_prefix_warning_percent` adds a threshold to any action: when a scope's
+usage reaches that percentage of its bound the daemon emits one warn log line
+(`max prefix warning threshold crossed`), one `max_prefix_warning` session event
+(visible in `rbgp watch` and the durable event stream), and one
+`bgp_max_prefix_warning_total{peer,scope}` increment, then stays quiet until
+usage falls back under the threshold and crosses it again.
+
 Setting the inheritable, non-zero `max_prefix_restart_seconds` opts that peer
 into exactly one restart attempt after the hold-down. A second breach creates a
 new hold-down. Failure to deliver the timed session `Start` command consumes
@@ -1071,6 +1096,7 @@ exactly under the floods these drops account for.
 | `bgp_max_prefix_usage{peer,scope}` | Live session-actor max-prefix enforcement count for `aggregate`, `ipv4_unicast`, `ipv6_unicast`, `ipv4_unicast_received`, or `ipv6_unicast_received`; series are absent while the session is down, and the `*_received` scopes are absent while their `max_prefixes_received_*` bound is unset |
 | `bgp_max_prefix_limit{peer,scope}` | Effective finite bound for the same scope; absent means unlimited, never zero |
 | `bgp_max_prefix_headroom{peer,scope}` | Saturating `limit - usage` for a finite scope; absent when unlimited or disconnected |
+| `bgp_max_prefix_blocking{peer,scope}` | 1 while a `max_prefix_action = "block"` episode is open for a finite scope — net-new prefixes are being withheld until usage falls back under the bound; present for every finite scope, reaped with the other capacity series |
 | `bgp_outbound_prefix_usage{peer,family}` | Distinct prefixes admitted into a peer's ADVERTISED unicast state (ADR-0113), `family` = `ipv4_unicast` or `ipv6_unicast`. Post-policy, post-OTC, post-exact-export — the same truth the neighbor API reports, never the shared update-group table's count. Series reaped on session teardown |
 | `bgp_outbound_prefix_limit{peer,family}` | Effective finite `max_prefixes_out_*` for the same family; absent means unlimited, never zero. A family that becomes unlimited drops this series rather than keeping a stale value |
 | `bgp_outbound_prefix_headroom{peer,family}` | Saturating `limit - usage`; absent while the family is unlimited |
@@ -1204,6 +1230,8 @@ without a `reason` label encode the mechanism in the metric name.
 | `bgp_update_malformed_total{peer,disposition}` | Malformed UPDATE messages by the RFC 7606 disposition applied: `attribute_discard` (offending attribute dropped, UPDATE proceeds), `treat_as_withdraw` (every route in the UPDATE handled as withdrawn, session stays Established), or `session_reset` (NOTIFICATION + teardown, retained where the NLRI cannot be trusted — including the §5.2 escalation when a treat-as-withdraw-class error arrives with no reachable NLRI). One increment per malformed UPDATE, labeled with the strongest-action disposition that governed it (§3 (h)). Each increment is accompanied by a warn log line per malformed attribute and, at DEBUG, the §6 full-message hex capture |
 | `bgp_exact_export_rejections_total{peer,family,reason}` | Post-policy announcements rejected before Adj-RIB-Out commit because the session's exact one-route encoder could not produce a legal wire message. `family` is a bounded OpenConfig AFI/SAFI label; `reason` is `encoding`, `missing_ipv6_next_hop`, `ipv4_requires_extended_next_hop`, or `message_too_long`. Alert on a sustained increase, then correlate the peer/family with the warning log's bounded route identity and detail. Series are reaped only when the configured peer is deleted. |
 | `bgp_max_prefix_exceeded_total{peer}` | `max_prefixes` ceiling breaches; each increment is followed by max-prefix teardown: bare Cease/1 without Notification GR, or RFC 8538 Hard Reset encapsulating Cease/1 when the N-bit was negotiated (see "Peer max-prefix exceeded" above) |
+| `bgp_max_prefix_blocked_total{peer,scope}` | Net-new prefixes withheld from a peer's inbound feed by a full bound under `max_prefix_action = "block"`. Carries no prefix label: the withheld set is exactly the unbounded quantity the limit exists to contain — the peer's replay after recovery, or `rbgp rib received <addr>`, shows what is installed |
+| `bgp_max_prefix_warning_total{peer,scope}` | `max_prefix_warning_percent` (or the bound itself under `max_prefix_action = "warning"`) crossings, one per crossing per scope; each is paired with one warn log line and one `max_prefix_warning` session event |
 
 The shipped `BgpMaxPrefixNearLimit` example alert warns after a finite scope
 has remained at or above 80% usage for ten minutes. This threshold lives in the

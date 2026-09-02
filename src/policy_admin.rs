@@ -194,6 +194,8 @@ pub(crate) fn api_peer_group_to_config(definition: PeerGroupDefinition) -> PeerG
         max_prefixes_ipv6: None,
         max_prefixes_received_ipv4: None,
         max_prefixes_received_ipv6: None,
+        max_prefix_action: None,
+        max_prefix_warning_percent: None,
         max_prefixes_out_ipv4: None,
         max_prefixes_out_ipv6: None,
         max_prefix_restart_seconds: definition
@@ -492,6 +494,8 @@ fn raw_neighbor(raw: &PresenceAwareNeighborCreate) -> Result<Neighbor, ConfigErr
         max_prefixes_ipv6: None,
         max_prefixes_received_ipv4: None,
         max_prefixes_received_ipv6: None,
+        max_prefix_action: None,
+        max_prefix_warning_percent: None,
         max_prefixes_out_ipv4: None,
         max_prefixes_out_ipv6: None,
         max_prefix_restart_seconds: raw
@@ -590,6 +594,8 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                     // the per-family accepted bounds above.
                     max_prefixes_received_ipv4: None,
                     max_prefixes_received_ipv6: None,
+                    max_prefix_action: None,
+                    max_prefix_warning_percent: None,
                     // Also absent from the runtime neighbor-add surface:
                     // outbound maxima are edited through the config
                     // transaction / SIGHUP path (ADR-0113).
@@ -1150,6 +1156,8 @@ peer_group = "fabric"
             max_prefixes_ipv6: None,
             max_prefixes_received_ipv4: None,
             max_prefixes_received_ipv6: None,
+            max_prefix_action: rustbgpd_transport::MaxPrefixAction::Shutdown,
+            max_prefix_warning_percent: None,
             max_prefix_restart_seconds: None,
             md5_password: None,
             tcp_ao: Some(

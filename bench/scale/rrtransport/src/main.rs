@@ -15,7 +15,7 @@ use rustbgpd_rib::update::RibUpdate;
 use rustbgpd_rib::RibManager;
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_transport::{
-    PeerHandle, RemovePrivateAs, TransportConfig, DEFAULT_SLOW_PEER_DURATION_SECS,
+    MaxPrefixAction, PeerHandle, RemovePrivateAs, TransportConfig, DEFAULT_SLOW_PEER_DURATION_SECS,
     DEFAULT_SLOW_PEER_THRESHOLD_PCT,
 };
 use rustbgpd_wire::{
@@ -150,6 +150,8 @@ fn transport_config(remote: SocketAddr) -> TransportConfig {
         max_prefixes_ipv6: None,
         max_prefixes_received_ipv4: None,
         max_prefixes_received_ipv6: None,
+        max_prefix_action: MaxPrefixAction::Shutdown,
+        max_prefix_warning_percent: None,
         peer_group: None,
         md5_password: None,
         tcp_ao: None,

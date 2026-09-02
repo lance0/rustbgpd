@@ -1352,6 +1352,36 @@ define_neighbor_and_peer_group_configs! {
                 /// `max_prefixes_received_ipv6`.
             }
         }
+        max_prefix_action: Option<String> {
+            neighbor {
+                /// What a crossed max-prefix bound does: `"shutdown"` (default;
+                /// Cease/1 teardown and latch, optionally followed by a timed
+                /// restart), `"block"` (withhold net-new prefixes beyond the
+                /// bound while the session stays Established), or `"warning"`
+                /// (warn once per crossing and keep accepting). `block` applies
+                /// to the per-family unicast bounds and requires the aggregate
+                /// `max_prefixes` to be unset; `block` and `warning` exclude
+                /// `max_prefix_restart_seconds`.
+            }
+            peer_group {
+                /// Max-prefix action inherited by neighbors in this group. See
+                /// the neighbor-level `max_prefix_action`.
+            }
+        }
+        max_prefix_warning_percent: Option<u8> {
+            neighbor {
+                /// Warning threshold as a percentage (1..=100) of every finite
+                /// max-prefix bound. Crossing it emits one warning log line,
+                /// one session event, and one counter increment per crossing,
+                /// re-armed when usage falls back under; never a teardown.
+                /// Unset warns only at the bound under `max_prefix_action =
+                /// "warning"`.
+            }
+            peer_group {
+                /// Warning threshold inherited by neighbors in this group. See
+                /// the neighbor-level `max_prefix_warning_percent`.
+            }
+        }
         max_prefixes_out_ipv4: Option<NonZeroU32> {
             neighbor {
                 /// Maximum distinct IPv4-unicast prefixes advertised TO this peer
@@ -1780,6 +1810,11 @@ impl fmt::Debug for Neighbor {
                 "max_prefixes_received_ipv6",
                 &self.max_prefixes_received_ipv6,
             )
+            .field("max_prefix_action", &self.max_prefix_action)
+            .field(
+                "max_prefix_warning_percent",
+                &self.max_prefix_warning_percent,
+            )
             .field("max_prefixes_out_ipv4", &self.max_prefixes_out_ipv4)
             .field("max_prefixes_out_ipv6", &self.max_prefixes_out_ipv6)
             .field(
@@ -1970,6 +2005,11 @@ impl fmt::Debug for PeerGroupConfig {
             .field(
                 "max_prefixes_received_ipv6",
                 &self.max_prefixes_received_ipv6,
+            )
+            .field("max_prefix_action", &self.max_prefix_action)
+            .field(
+                "max_prefix_warning_percent",
+                &self.max_prefix_warning_percent,
             )
             .field("max_prefixes_out_ipv4", &self.max_prefixes_out_ipv4)
             .field("max_prefixes_out_ipv6", &self.max_prefixes_out_ipv6)

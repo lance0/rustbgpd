@@ -707,3 +707,132 @@ fn received_max_prefix_edit_is_hot_applicable() {
             .all(|change| change.impact == Some(super::ConfigFieldImpact::HotApplied))
     );
 }
+
+fn max_prefix_mode_config(neighbor_extra: &str, group_extra: &str) -> String {
+    format!(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.ixp-members]
+max_prefixes_ipv4 = 100
+{group_extra}
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "ixp-members"
+{neighbor_extra}
+"#
+    )
+}
+
+#[test]
+fn max_prefix_modes_are_accepted_inherited_and_resolved() {
+    let config = parse(&max_prefix_mode_config(
+        "",
+        "max_prefix_action = \"block\"\nmax_prefix_warning_percent = 80",
+    ))
+    .unwrap();
+    let peers = config.to_peer_configs().unwrap();
+    assert_eq!(
+        peers[0].0.max_prefix_action,
+        rustbgpd_transport::MaxPrefixAction::Block,
+        "group action inherited"
+    );
+    assert_eq!(peers[0].0.max_prefix_warning_percent, Some(80));
+
+    let config = parse(&max_prefix_mode_config(
+        "max_prefix_action = \"warning\"",
+        "max_prefix_action = \"block\"",
+    ))
+    .unwrap();
+    let peers = config.to_peer_configs().unwrap();
+    assert_eq!(
+        peers[0].0.max_prefix_action,
+        rustbgpd_transport::MaxPrefixAction::Warning,
+        "neighbor overrides the group"
+    );
+    assert_eq!(peers[0].0.max_prefix_warning_percent, None);
+
+    // `warning` may coexist with the aggregate and a threshold at the edges.
+    for extra in [
+        "max_prefixes = 500\nmax_prefix_action = \"warning\"",
+        "max_prefix_warning_percent = 1",
+        "max_prefix_warning_percent = 100",
+        "max_prefix_action = \"shutdown\"\nmax_prefix_restart_seconds = 60",
+    ] {
+        assert!(
+            parse(&max_prefix_mode_config(extra, "")).is_ok(),
+            "{extra} must be accepted"
+        );
+    }
+    let config = parse(&max_prefix_mode_config("", "")).unwrap();
+    assert_eq!(
+        config.to_peer_configs().unwrap()[0].0.max_prefix_action,
+        rustbgpd_transport::MaxPrefixAction::Shutdown,
+        "absent action keeps the historical shutdown"
+    );
+}
+
+#[test]
+fn max_prefix_modes_reject_unknown_actions_and_conflicting_fields() {
+    for (neighbor_extra, group_extra, marker) in [
+        ("max_prefix_action = \"drop\"", "", "unknown value \"drop\""),
+        ("", "max_prefix_action = \"drop\"", "unknown value \"drop\""),
+        (
+            "max_prefixes = 500\nmax_prefix_action = \"block\"",
+            "",
+            "per-family unicast bounds only",
+        ),
+        (
+            "max_prefix_action = \"block\"",
+            "max_prefixes = 500",
+            "per-family unicast bounds only",
+        ),
+        (
+            "max_prefix_action = \"warning\"\nmax_prefix_restart_seconds = 60",
+            "",
+            "excludes max_prefix_restart_seconds",
+        ),
+        (
+            "max_prefix_action = \"block\"",
+            "max_prefix_restart_seconds = 60",
+            "excludes max_prefix_restart_seconds",
+        ),
+        ("max_prefix_warning_percent = 0", "", "outside 1..=100"),
+        ("", "max_prefix_warning_percent = 101", "outside 1..=100"),
+        ("max_prefix_warning_percent = 256", "", ""),
+    ] {
+        let error = match parse(&max_prefix_mode_config(neighbor_extra, group_extra)) {
+            Ok(_) => panic!("{neighbor_extra:?} / {group_extra:?} must be rejected"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains(marker),
+            "{neighbor_extra:?} / {group_extra:?}: {error}"
+        );
+    }
+}
+
+#[test]
+fn max_prefix_mode_edits_are_hot_applicable() {
+    let old = test_neighbor("10.0.0.2", 65002);
+    let mut hot = old.clone();
+    hot.max_prefix_action = Some("warning".to_string());
+    hot.max_prefix_warning_percent = Some(90);
+    assert!(super::neighbor_change_hot_applicable(&old, &hot));
+    let changes = super::describe_neighbor_changes(&old, &hot);
+    assert_eq!(changes.len(), 2);
+    assert!(
+        changes
+            .iter()
+            .all(|change| change.impact == Some(super::ConfigFieldImpact::HotApplied))
+    );
+}

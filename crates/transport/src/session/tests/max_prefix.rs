@@ -236,6 +236,8 @@ async fn max_prefix_capacity_metrics_follow_updates_and_runtime_limits() {
                     max_prefixes_ipv6: None,
                     max_prefixes_received_ipv4: None,
                     max_prefixes_received_ipv6: None,
+                    max_prefix_action: crate::config::MaxPrefixAction::Shutdown,
+                    max_prefix_warning_percent: None,
                     gr_stale_routes_time: session.config.gr_stale_routes_time,
                     gr_peer_restart_time_max: session.config.gr_peer_restart_time_max,
                     local_ipv6_nexthop: session.config.local_ipv6_nexthop,
@@ -852,6 +854,8 @@ async fn runtime_lowering_per_family_limit_enforces_immediately() {
                     max_prefixes_ipv6: None,
                     max_prefixes_received_ipv4: None,
                     max_prefixes_received_ipv6: None,
+                    max_prefix_action: crate::config::MaxPrefixAction::Shutdown,
+                    max_prefix_warning_percent: None,
                     gr_stale_routes_time: 360,
                     gr_peer_restart_time_max: 4095,
                     local_ipv6_nexthop: None,
@@ -904,6 +908,8 @@ async fn runtime_lowering_aggregate_limit_keeps_next_update_semantics() {
                     max_prefixes_ipv6: None,
                     max_prefixes_received_ipv4: None,
                     max_prefixes_received_ipv6: None,
+                    max_prefix_action: crate::config::MaxPrefixAction::Shutdown,
+                    max_prefix_warning_percent: None,
                     gr_stale_routes_time: 360,
                     gr_peer_restart_time_max: 4095,
                     local_ipv6_nexthop: None,
@@ -1123,6 +1129,8 @@ fn received_runtime_update(
         max_prefixes_ipv6: None,
         max_prefixes_received_ipv4,
         max_prefixes_received_ipv6: None,
+        max_prefix_action: session.config.max_prefix_action,
+        max_prefix_warning_percent: session.config.max_prefix_warning_percent,
         gr_stale_routes_time: session.config.gr_stale_routes_time,
         gr_peer_restart_time_max: session.config.gr_peer_restart_time_max,
         local_ipv6_nexthop: session.config.local_ipv6_nexthop,
@@ -1679,4 +1687,516 @@ async fn received_limit_notification_marks_the_received_bound() {
     ));
     let notification = read_until_notification(&mut server).await;
     assert_eq!(notification.subcode, cease_subcode::MAX_PREFIXES);
+}
+
+fn counter_value(metrics: &BgpMetrics, name: &str, peer: &str, scope: &str) -> Option<f64> {
+    counter_samples(metrics, name)
+        .into_iter()
+        .find(|(labels, _)| {
+            labels.get("peer").map(String::as_str) == Some(peer)
+                && labels.get("scope").map(String::as_str) == Some(scope)
+        })
+        .map(|(_, value)| value)
+}
+
+fn mode_runtime_update(
+    session: &PeerSession,
+    max_prefixes_ipv4: Option<u32>,
+    max_prefix_action: crate::config::MaxPrefixAction,
+) -> crate::handle::PeerRuntimeConfigUpdate {
+    crate::handle::PeerRuntimeConfigUpdate {
+        max_prefixes: None,
+        max_prefixes_ipv4,
+        max_prefixes_ipv6: None,
+        max_prefixes_received_ipv4: session.config.max_prefixes_received_ipv4,
+        max_prefixes_received_ipv6: None,
+        max_prefix_action,
+        max_prefix_warning_percent: session.config.max_prefix_warning_percent,
+        gr_stale_routes_time: session.config.gr_stale_routes_time,
+        gr_peer_restart_time_max: session.config.gr_peer_restart_time_max,
+        local_ipv6_nexthop: session.config.local_ipv6_nexthop,
+        remove_private_as: session.config.remove_private_as,
+    }
+}
+
+/// Established session with the lossless notification lane attached.
+async fn notifying_session(
+    config: TransportConfig,
+) -> (
+    PeerSession,
+    mpsc::Receiver<RibUpdate>,
+    crate::handle::SessionNotificationReceiver,
+    TcpStream,
+) {
+    let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let (notify_tx, mut notify_rx) = crate::session_notification_channel(metrics.clone());
+    let mut session = PeerSession::new_with_identity_and_lifecycle(
+        config,
+        metrics,
+        cmd_rx,
+        rib_tx,
+        None,
+        None,
+        Some(notify_tx),
+        None,
+        None,
+        None,
+        None,
+        false,
+        SessionIdentity::primary(79),
+    );
+    let (client, server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    while rib_rx.try_recv().is_ok() {}
+    while notify_rx.try_recv().is_ok() {}
+    (session, rib_rx, notify_rx, server)
+}
+
+fn mode_config(action: crate::config::MaxPrefixAction) -> TransportConfig {
+    let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.connect_retry_secs = 1;
+    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    let mut config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    config.max_prefix_action = action;
+    config
+}
+
+/// Mutant: dropping the per-scope latch warns on every UPDATE; never
+/// re-arming the latch warns once per session instead of once per crossing;
+/// evaluating the threshold as a teardown breaks the `read_half` assertion.
+#[tokio::test]
+async fn warning_threshold_warns_once_per_crossing_and_never_tears_down() {
+    let mut config = mode_config(crate::config::MaxPrefixAction::Shutdown);
+    config.max_prefixes_ipv4 = Some(4);
+    config.max_prefix_warning_percent = Some(50);
+    let (mut session, mut rib_rx, mut notify_rx, _server) = notifying_session(config).await;
+    install_dual_stack_session(&mut session, false);
+
+    session
+        .process_update(ipv4_announce(v4_prefix(1), 0, false))
+        .await;
+    assert!(notify_rx.try_recv().is_err(), "25% is under the threshold");
+    session
+        .process_update(ipv4_announce(v4_prefix(2), 0, false))
+        .await;
+    assert!(matches!(
+        notify_rx.try_recv(),
+        Ok(SessionNotification::MaxPrefixWarning {
+            session_id: 79,
+            scope: "ipv4_unicast",
+            usage: 2,
+            bound: 4,
+            percent: 50,
+            ..
+        })
+    ));
+    session
+        .process_update(ipv4_announce(v4_prefix(3), 0, false))
+        .await;
+    assert!(
+        notify_rx.try_recv().is_err(),
+        "staying above the threshold must not warn again"
+    );
+    assert_eq!(
+        counter_value(
+            &session.metrics,
+            "bgp_max_prefix_warning_total",
+            &session.peer_label,
+            "ipv4_unicast"
+        ),
+        Some(1.0)
+    );
+    while rib_rx.try_recv().is_ok() {}
+
+    session
+        .process_update(ipv4_withdraw(v4_prefix(2), 0, false))
+        .await;
+    session
+        .process_update(ipv4_withdraw(v4_prefix(3), 0, false))
+        .await;
+    assert_eq!(session.known_unicast_v4, 1);
+    session
+        .process_update(ipv4_announce(v4_prefix(2), 0, false))
+        .await;
+    assert!(
+        matches!(
+            notify_rx.try_recv(),
+            Ok(SessionNotification::MaxPrefixWarning { usage: 2, .. })
+        ),
+        "falling under the threshold re-arms the latch"
+    );
+    assert_eq!(
+        counter_value(
+            &session.metrics,
+            "bgp_max_prefix_warning_total",
+            &session.peer_label,
+            "ipv4_unicast"
+        ),
+        Some(2.0)
+    );
+    assert!(
+        session.read_half.is_some(),
+        "a warning threshold never tears down"
+    );
+    assert!(!session.stop_requested);
+}
+
+/// Mutant: treating `warning` as `shutdown` tears down at the second
+/// prefix; defaulting the threshold to 0 warns before the bound is reached.
+#[tokio::test]
+async fn warning_action_reports_at_the_bound_and_keeps_accepting() {
+    let mut config = mode_config(crate::config::MaxPrefixAction::Warning);
+    config.max_prefixes_ipv4 = Some(1);
+    let (mut session, mut rib_rx, mut notify_rx, _server) = notifying_session(config).await;
+    install_dual_stack_session(&mut session, false);
+
+    session
+        .process_update(ipv4_announce(v4_prefix(1), 0, false))
+        .await;
+    assert!(matches!(
+        notify_rx.try_recv(),
+        Ok(SessionNotification::MaxPrefixWarning {
+            scope: "ipv4_unicast",
+            usage: 1,
+            bound: 1,
+            percent: 100,
+            ..
+        })
+    ));
+    session
+        .process_update(ipv4_announce(v4_prefix(2), 0, false))
+        .await;
+    assert!(notify_rx.try_recv().is_err(), "one warning per crossing");
+    assert!(
+        matches!(rib_rx.try_recv(), Ok(RibUpdate::RoutesReceived { .. })),
+        "the over-limit route is still accepted"
+    );
+    assert_eq!(session.known_unicast_v4, 2);
+    assert!(session.read_half.is_some());
+    assert!(!session.stop_requested);
+    assert_max_prefix_gauge(&session, "bgp_max_prefix_usage", "ipv4_unicast", Some(2.0));
+    assert_max_prefix_gauge(
+        &session,
+        "bgp_max_prefix_headroom",
+        "ipv4_unicast",
+        Some(0.0),
+    );
+}
+
+/// Mutant: gating before withdrawals are applied blocks a prefix whose slot
+/// the same UPDATE freed; forgetting the episode latch logs per prefix and
+/// never publishes `blocking`; skipping the recovery refresh leaves the
+/// withheld prefix unknown to the peer; admitting on `has_rejected` alone
+/// lets an attribute change for an unadmitted prefix through.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one withhold, attribute-change, swap, and recovery sequence against a single session"
+)]
+#[tokio::test]
+async fn block_action_withholds_net_new_prefixes_and_recovers_with_a_refresh() {
+    let mut config = mode_config(crate::config::MaxPrefixAction::Block);
+    config.max_prefixes_ipv4 = Some(2);
+    let (mut session, mut rib_rx, mut notify_rx, mut server) = notifying_session(config).await;
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.peer_route_refresh = true;
+    install_test_negotiated_session(&mut session, negotiated);
+
+    session
+        .process_update(ipv4_announce(v4_prefix(1), 0, false))
+        .await;
+    session
+        .process_update(ipv4_announce(v4_prefix(2), 0, false))
+        .await;
+    while rib_rx.try_recv().is_ok() {}
+    assert_eq!(session.known_unicast_v4, 2);
+    assert!(!session.max_prefix_scope_blocking(MaxPrefixScope::Ipv4));
+
+    session
+        .process_update(ipv4_announce(v4_prefix(3), 0, false))
+        .await;
+    assert_eq!(session.known_unicast_v4, 2, "net-new prefix withheld");
+    assert!(
+        !matches!(
+            rib_rx.try_recv(),
+            Ok(RibUpdate::RoutesReceived { announced, .. }) if !announced.is_empty()
+        ),
+        "a withheld prefix never reaches the RIB"
+    );
+    assert!(session.max_prefix_scope_blocking(MaxPrefixScope::Ipv4));
+    assert_max_prefix_gauge(
+        &session,
+        "bgp_max_prefix_blocking",
+        "ipv4_unicast",
+        Some(1.0),
+    );
+    assert_eq!(
+        counter_value(
+            &session.metrics,
+            "bgp_max_prefix_blocked_total",
+            &session.peer_label,
+            "ipv4_unicast"
+        ),
+        Some(1.0)
+    );
+    assert!(session.read_half.is_some());
+    assert!(
+        notify_rx.try_recv().is_err(),
+        "block never latches or warns"
+    );
+
+    // An attribute change for an admitted prefix passes while blocking.
+    session
+        .process_update(ipv4_announce(v4_prefix(1), 0, false))
+        .await;
+    assert!(matches!(
+        rib_rx.try_recv(),
+        Ok(RibUpdate::RoutesReceived { announced, .. }) if announced.len() == 1
+    ));
+    assert_eq!(session.known_unicast_v4, 2);
+
+    // Withdraw + net-new in one UPDATE: the freed slot is taken.
+    let swap = UpdateMessage::build(
+        &[Ipv4NlriEntry {
+            path_id: 0,
+            prefix: v4_prefix(4),
+        }],
+        &[Ipv4NlriEntry {
+            path_id: 0,
+            prefix: v4_prefix(2),
+        }],
+        &[
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+        ],
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+    session.process_update(swap).await;
+    assert!(
+        session
+            .known_plain_prefixes
+            .contains(&Prefix::V4(v4_prefix(4)))
+    );
+    assert!(
+        !session
+            .known_plain_prefixes
+            .contains(&Prefix::V4(v4_prefix(2)))
+    );
+    assert_eq!(session.known_unicast_v4, 2);
+    assert!(
+        session.max_prefix_scope_blocking(MaxPrefixScope::Ipv4),
+        "usage never fell under the bound, so the episode stays open"
+    );
+    while rib_rx.try_recv().is_ok() {}
+
+    // A plain withdrawal opens capacity: the episode ends with one refresh.
+    session
+        .process_update(ipv4_withdraw(v4_prefix(1), 0, false))
+        .await;
+    assert!(!session.max_prefix_scope_blocking(MaxPrefixScope::Ipv4));
+    assert_max_prefix_gauge(
+        &session,
+        "bgp_max_prefix_blocking",
+        "ipv4_unicast",
+        Some(0.0),
+    );
+    let refresh = loop {
+        if let Message::RouteRefresh(rr) = read_single_bgp_message(&mut server).await {
+            break rr;
+        }
+    };
+    assert_eq!(
+        (refresh.afi_raw, refresh.safi_raw),
+        (Afi::Ipv4 as u16, Safi::Unicast as u8)
+    );
+    // The peer replays the withheld prefix; it is admitted now.
+    session
+        .process_update(ipv4_announce(v4_prefix(3), 0, false))
+        .await;
+    assert_eq!(session.known_unicast_v4, 2);
+    assert!(
+        session
+            .known_plain_prefixes
+            .contains(&Prefix::V4(v4_prefix(3)))
+    );
+    assert!(!session.max_prefix_scope_blocking(MaxPrefixScope::Ipv4));
+}
+
+/// Mutant: counting Add-Path identities at the gate blocks the second path
+/// of an admitted prefix; skipping `has_accepted_identity` blocks it too.
+#[tokio::test]
+async fn block_action_add_path_identities_share_the_admitted_slot() {
+    let mut config = mode_config(crate::config::MaxPrefixAction::Block);
+    config.max_prefixes_ipv4 = Some(1);
+    let (mut session, mut rib_rx, _notify_rx, _server) = notifying_session(config).await;
+    install_dual_stack_session(&mut session, true);
+
+    session
+        .process_update(ipv4_announce(v4_prefix(1), 1, true))
+        .await;
+    session
+        .process_update(ipv4_announce(v4_prefix(1), 2, true))
+        .await;
+    assert_eq!(session.known_unicast_v4, 1);
+    assert_eq!(
+        session.known_paths.len(),
+        2,
+        "a new path ID for an admitted prefix passes"
+    );
+    assert!(!session.max_prefix_scope_blocking(MaxPrefixScope::Ipv4));
+    while rib_rx.try_recv().is_ok() {}
+
+    session
+        .process_update(ipv4_announce(v4_prefix(2), 1, true))
+        .await;
+    assert_eq!(session.known_unicast_v4, 1);
+    assert_eq!(session.known_paths.len(), 2);
+    assert!(session.max_prefix_scope_blocking(MaxPrefixScope::Ipv4));
+}
+
+/// Mutant: recording a received-bound block as a rejected identity grows the
+/// received count past the bound; skipping the gate in
+/// `remember_rejected_path` lets policy rejections bypass `block`.
+#[tokio::test]
+async fn block_action_received_bound_drops_rejections_without_recording_them() {
+    let mut config = mode_config(crate::config::MaxPrefixAction::Block);
+    config.max_prefixes_received_ipv4 = Some(1);
+    let (mut session, mut rib_rx, _notify_rx, _server) = notifying_session(config).await;
+    install_dual_stack_session(&mut session, false);
+    install_deny_all_import_policy(&mut session);
+
+    session
+        .process_update(ipv4_announce(v4_prefix(1), 0, false))
+        .await;
+    assert_eq!(session.received_unicast_v4(), 1);
+    session
+        .process_update(ipv4_announce(v4_prefix(2), 0, false))
+        .await;
+    assert_eq!(
+        session.received_unicast_v4(),
+        1,
+        "withheld rejection takes no slot"
+    );
+    assert_eq!(session.rejected_plain_prefixes.len(), 1);
+    assert!(session.max_prefix_scope_blocking(MaxPrefixScope::Ipv4Received));
+    assert_eq!(
+        counter_value(
+            &session.metrics,
+            "bgp_max_prefix_blocked_total",
+            &session.peer_label,
+            "ipv4_unicast_received"
+        ),
+        Some(1.0)
+    );
+    assert!(session.read_half.is_some());
+    while rib_rx.try_recv().is_ok() {}
+
+    session
+        .process_update(ipv4_withdraw(v4_prefix(1), 0, false))
+        .await;
+    assert_eq!(session.received_unicast_v4(), 0);
+    assert!(!session.max_prefix_scope_blocking(MaxPrefixScope::Ipv4Received));
+}
+
+/// Mutant: letting `block` fall through to the violation check tears the
+/// session down on a runtime lowering; skipping the re-evaluation when the
+/// action returns to `shutdown` leaves an over-limit peer Established.
+#[tokio::test]
+async fn block_never_latches_and_switching_to_shutdown_enforces_immediately() {
+    let mut config = mode_config(crate::config::MaxPrefixAction::Block);
+    config.max_prefixes_ipv4 = Some(10);
+    let (mut session, mut rib_rx, mut notify_rx, mut server) = notifying_session(config).await;
+    install_dual_stack_session(&mut session, false);
+    for index in 1..=3 {
+        session
+            .process_update(ipv4_announce(v4_prefix(index), 0, false))
+            .await;
+    }
+    while rib_rx.try_recv().is_ok() {}
+
+    let (reply, done) = oneshot::channel();
+    let flow = session
+        .handle_command(PeerCommand::UpdateRuntimeConfig {
+            config: Box::new(mode_runtime_update(
+                &session,
+                Some(1),
+                crate::config::MaxPrefixAction::Block,
+            )),
+            reply,
+        })
+        .await;
+    assert_eq!(flow, ControlFlow::Continue(()));
+    done.await.unwrap().unwrap();
+    assert!(
+        session.read_half.is_some(),
+        "lowering under block never tears down"
+    );
+    assert!(!session.stop_requested);
+    assert!(notify_rx.try_recv().is_err());
+    assert_eq!(session.known_unicast_v4, 3, "lowering never prunes");
+    session
+        .process_update(ipv4_announce(v4_prefix(4), 0, false))
+        .await;
+    assert_eq!(
+        session.known_unicast_v4, 3,
+        "net-new withheld while over the bound"
+    );
+    assert!(session.max_prefix_scope_blocking(MaxPrefixScope::Ipv4));
+    let (reply, done) = oneshot::channel();
+    let flow = session
+        .handle_command(PeerCommand::QueryState { reply })
+        .await;
+    assert_eq!(flow, ControlFlow::Continue(()));
+    let state = done.await.unwrap();
+    let row = state
+        .max_prefix
+        .scopes
+        .iter()
+        .find(|row| row.scope == "ipv4_unicast")
+        .expect("ipv4 row");
+    assert_eq!(
+        (row.usage, row.limit, row.headroom, row.blocking),
+        (3, 1, 0, true)
+    );
+    assert_eq!(
+        state.max_prefix.action,
+        crate::config::MaxPrefixAction::Block
+    );
+
+    let (reply, done) = oneshot::channel();
+    let flow = session
+        .handle_command(PeerCommand::UpdateRuntimeConfig {
+            config: Box::new(mode_runtime_update(
+                &session,
+                Some(1),
+                crate::config::MaxPrefixAction::Shutdown,
+            )),
+            reply,
+        })
+        .await;
+    assert_eq!(flow, ControlFlow::Continue(()));
+    done.await.unwrap().unwrap();
+    assert!(
+        session.read_half.is_none(),
+        "returning to shutdown re-evaluates the per-family bound immediately"
+    );
+    assert!(session.stop_requested);
+    assert!(matches!(
+        notify_rx.try_recv(),
+        Ok(SessionNotification::MaxPrefixExceeded {
+            count: 3,
+            bound: 1,
+            received: false,
+            ..
+        })
+    ));
+    let notif = read_until_notification(&mut server).await;
+    assert_eq!(notif.subcode, cease_subcode::MAX_PREFIXES);
 }

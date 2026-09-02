@@ -3,9 +3,10 @@ use std::io::Write;
 use crate::connection::Connection;
 use crate::error::CliError;
 use crate::output::{
-    self, JsonEffectiveNeighborPosture, JsonNegotiatedGracefulRestart, JsonNegotiatedSession,
-    JsonNeighbor, JsonNeighborDetail, JsonOutboundPrefixLimit, JsonPathsLimit,
-    JsonSelectionDeferralFamily, JsonTcpAoKeyState, JsonTcpAoState, JsonUpdateGroupComparison,
+    self, JsonEffectiveNeighborPosture, JsonInboundPrefixLimit, JsonNegotiatedGracefulRestart,
+    JsonNegotiatedSession, JsonNeighbor, JsonNeighborDetail, JsonOutboundPrefixLimit,
+    JsonPathsLimit, JsonSelectionDeferralFamily, JsonTcpAoKeyState, JsonTcpAoState,
+    JsonUpdateGroupComparison,
 };
 use crate::proto::neighbor_service_client::NeighborServiceClient;
 use crate::proto::{
@@ -470,6 +471,18 @@ pub async fn show(
                     reason: row.reason.clone(),
                 })
                 .collect(),
+            inbound_prefix_limits: n
+                .inbound_prefix_limits
+                .iter()
+                .map(|row| JsonInboundPrefixLimit {
+                    scope: row.scope.clone(),
+                    usage: row.usage,
+                    limit: row.limit,
+                    headroom: row.headroom,
+                    blocking: row.blocking,
+                    reason: row.reason.clone(),
+                })
+                .collect(),
         };
         emit_neighbor_detail_json(&out, n.negotiated_session.as_ref())?;
     } else {
@@ -786,6 +799,19 @@ pub async fn show(
                 println!(
                     "  {:<14} usage={}; {capacity}{blocking}",
                     row.family, row.usage
+                );
+            }
+        }
+        if !n.inbound_prefix_limits.is_empty() {
+            println!("Inbound Prefix Limits:");
+            for row in &n.inbound_prefix_limits {
+                let blocking = row
+                    .reason
+                    .as_deref()
+                    .map_or_else(String::new, |reason| format!("; blocking={reason}"));
+                println!(
+                    "  {:<22} usage={}; limit={}; headroom={}{blocking}",
+                    row.scope, row.usage, row.limit, row.headroom
                 );
             }
         }

@@ -8,8 +8,9 @@ use rustbgpd_fsm::{PeerConfig, SessionState};
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_transport::{
-    PeerHandle, SessionIdentity, SessionLifecycleNotification, SessionNotification,
-    SessionNotificationDirection, TransportConfig, session_notification_channel,
+    MaxPrefixAction, PeerHandle, SessionIdentity, SessionLifecycleNotification,
+    SessionNotification, SessionNotificationDirection, TransportConfig,
+    session_notification_channel,
 };
 use rustbgpd_wire::{
     Afi, Capability, Message, NotificationMessage, OpenMessage, Safi, decode_message,
@@ -88,6 +89,8 @@ fn transport_config(addr: SocketAddr) -> TransportConfig {
         max_prefixes_ipv6: None,
         max_prefixes_received_ipv4: None,
         max_prefixes_received_ipv6: None,
+        max_prefix_action: MaxPrefixAction::Shutdown,
+        max_prefix_warning_percent: None,
         md5_password: None,
         tcp_ao: None,
         ttl_security_hops: None,

@@ -43,7 +43,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Sleep;
 use tracing::{debug, error, info, warn};
 
-use crate::config::{RemovePrivateAs, TransportConfig};
+use crate::config::{MaxPrefixAction, RemovePrivateAs, TransportConfig};
 use crate::error::TransportError;
 use crate::event_sink::{NoopTransportEventSink, TransportEventSink};
 use crate::framing::ReadBuffer;
@@ -470,6 +470,14 @@ pub(crate) struct PeerSession {
     rejected_only_v4: usize,
     /// IPv6-unicast sibling of `rejected_only_v4`.
     rejected_only_v6: usize,
+    /// Per-scope warning latch: set when usage crosses the warning threshold,
+    /// cleared when it falls back under, so each crossing warns once.
+    max_prefix_warned: [bool; MaxPrefixScope::ALL.len()],
+    /// Per-scope blocking episode under `MaxPrefixAction::Block`: set by the
+    /// first dropped net-new prefix, cleared when usage falls back under the
+    /// bound (which also requests one route refresh so the peer replays what
+    /// was withheld).
+    max_prefix_blocking: [bool; MaxPrefixScope::ALL.len()],
     /// Accepted `FlowSpec` rules from this peer. Counted toward
     /// max-prefix enforcement so a peer can't bypass the cap by
     /// flooding `FlowSpec` rules.
@@ -595,6 +603,49 @@ struct MaxPrefixViolation {
     /// The pre-policy received bound (`max_prefixes_received_*`) rather than
     /// an accepted-route bound.
     received: bool,
+}
+
+/// One inbound max-prefix bound, in enforcement order. The index doubles as
+/// the per-scope latch slot and `as_str` as the metric `scope` label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MaxPrefixScope {
+    Aggregate,
+    Ipv4,
+    Ipv6,
+    Ipv4Received,
+    Ipv6Received,
+}
+
+impl MaxPrefixScope {
+    pub(super) const ALL: [Self; 5] = [
+        Self::Aggregate,
+        Self::Ipv4,
+        Self::Ipv6,
+        Self::Ipv4Received,
+        Self::Ipv6Received,
+    ];
+
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Aggregate => "aggregate",
+            Self::Ipv4 => "ipv4_unicast",
+            Self::Ipv6 => "ipv6_unicast",
+            Self::Ipv4Received => "ipv4_unicast_received",
+            Self::Ipv6Received => "ipv6_unicast_received",
+        }
+    }
+
+    const fn index(self) -> usize {
+        self as usize
+    }
+
+    const fn family(self) -> Option<Afi> {
+        match self {
+            Self::Aggregate => None,
+            Self::Ipv4 | Self::Ipv4Received => Some(Afi::Ipv4),
+            Self::Ipv6 | Self::Ipv6Received => Some(Afi::Ipv6),
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -813,23 +864,202 @@ impl PeerSession {
         // The received scopes exist only while their bound is configured:
         // without one, rejected identities are not tracked and the usage
         // would silently equal the accepted count.
-        for (scope, usage, limit) in [
-            (
-                "ipv4_unicast_received",
+        for scope in [MaxPrefixScope::Ipv4Received, MaxPrefixScope::Ipv6Received] {
+            let (usage, limit) = self.max_prefix_scope_usage(scope);
+            if limit.is_some() {
+                self.metrics.set_max_prefix_capacity(
+                    &self.peer_label,
+                    scope.as_str(),
+                    usage,
+                    limit,
+                );
+            } else {
+                self.metrics
+                    .remove_max_prefix_capacity(&self.peer_label, scope.as_str());
+            }
+        }
+        for scope in MaxPrefixScope::ALL {
+            if self.max_prefix_scope_usage(scope).1.is_some() {
+                self.metrics.set_max_prefix_blocking(
+                    &self.peer_label,
+                    scope.as_str(),
+                    self.max_prefix_blocking[scope.index()],
+                );
+            }
+        }
+    }
+
+    /// Current usage and configured bound of one scope.
+    pub(super) fn max_prefix_scope_usage(&self, scope: MaxPrefixScope) -> (usize, Option<u32>) {
+        match scope {
+            MaxPrefixScope::Aggregate => (self.known_prefix_count(), self.config.max_prefixes),
+            MaxPrefixScope::Ipv4 => (self.known_unicast_v4, self.config.max_prefixes_ipv4),
+            MaxPrefixScope::Ipv6 => (self.known_unicast_v6, self.config.max_prefixes_ipv6),
+            MaxPrefixScope::Ipv4Received => (
                 self.received_unicast_v4(),
                 self.config.max_prefixes_received_ipv4,
             ),
-            (
-                "ipv6_unicast_received",
+            MaxPrefixScope::Ipv6Received => (
                 self.received_unicast_v6(),
                 self.config.max_prefixes_received_ipv6,
             ),
-        ] {
-            if limit.is_some() {
-                self.metrics
-                    .set_max_prefix_capacity(&self.peer_label, scope, usage, limit);
+        }
+    }
+
+    pub(super) fn max_prefix_scope_blocking(&self, scope: MaxPrefixScope) -> bool {
+        self.max_prefix_blocking[scope.index()]
+    }
+
+    /// Warning threshold in percent for the configured action: an explicit
+    /// percentage, else the bound itself under `Warning`, else none.
+    fn max_prefix_warning_percent(&self) -> Option<u8> {
+        self.config
+            .max_prefix_warning_percent
+            .or_else(|| (self.config.max_prefix_action == MaxPrefixAction::Warning).then_some(100))
+    }
+
+    /// Evaluate the non-teardown max-prefix modes against current accounting:
+    /// warning-threshold crossings (latched once per crossing per scope) and
+    /// block-episode recovery (usage fell back under the bound). Runs at every
+    /// accounting boundary before the capacity gauges are published.
+    fn reconcile_max_prefix_modes(&mut self) {
+        let percent = self.max_prefix_warning_percent();
+        let mut recovered_families: Vec<Afi> = Vec::new();
+        for scope in MaxPrefixScope::ALL {
+            let (usage, Some(bound)) = self.max_prefix_scope_usage(scope) else {
+                self.max_prefix_warned[scope.index()] = false;
+                self.max_prefix_blocking[scope.index()] = false;
+                continue;
+            };
+            if let Some(percent) = percent {
+                let crossed = (usage as u64) * 100 >= u64::from(bound) * u64::from(percent);
+                let warned = &mut self.max_prefix_warned[scope.index()];
+                if crossed && !*warned {
+                    *warned = true;
+                    warn!(
+                        peer = %self.peer_label,
+                        scope = scope.as_str(),
+                        usage,
+                        bound,
+                        percent,
+                        "max prefix warning threshold crossed"
+                    );
+                    self.metrics
+                        .record_max_prefix_warning(&self.peer_label, scope.as_str());
+                    if let Some(ref notify_tx) = self.session_notify_tx
+                        && let Err(error) = notify_tx.send(SessionNotification::MaxPrefixWarning {
+                            session_id: self.session_identity.id,
+                            role: self.session_identity.role,
+                            peer_addr: self.peer_ip,
+                            scope: scope.as_str(),
+                            usage,
+                            bound,
+                            percent,
+                        })
+                    {
+                        warn!(
+                            peer = %self.peer_label,
+                            %error,
+                            "failed to send max-prefix warning notification"
+                        );
+                    }
+                } else if !crossed && *warned {
+                    *warned = false;
+                    debug!(
+                        peer = %self.peer_label,
+                        scope = scope.as_str(),
+                        usage,
+                        bound,
+                        "max prefix warning threshold re-armed"
+                    );
+                }
+            }
+            if self.max_prefix_blocking[scope.index()] && usage < bound as usize {
+                self.max_prefix_blocking[scope.index()] = false;
+                info!(
+                    peer = %self.peer_label,
+                    scope = scope.as_str(),
+                    usage,
+                    bound,
+                    "max prefix blocking ended; requesting route refresh"
+                );
+                if let Some(afi) = scope.family()
+                    && !recovered_families.contains(&afi)
+                {
+                    recovered_families.push(afi);
+                }
             }
         }
+        for afi in recovered_families {
+            self.request_received_recount(afi);
+        }
+    }
+
+    /// Record one dropped net-new prefix under `MaxPrefixAction::Block`,
+    /// opening the scope's blocking episode on the first drop.
+    fn note_max_prefix_block(&mut self, scope: MaxPrefixScope) {
+        self.metrics
+            .record_max_prefix_blocked(&self.peer_label, scope.as_str());
+        if !self.max_prefix_blocking[scope.index()] {
+            self.max_prefix_blocking[scope.index()] = true;
+            let (usage, bound) = self.max_prefix_scope_usage(scope);
+            warn!(
+                peer = %self.peer_label,
+                scope = scope.as_str(),
+                usage,
+                bound = bound.unwrap_or(0),
+                "max prefix blocking started; net-new prefixes are withheld"
+            );
+        }
+    }
+
+    fn blocks_over_limit(&self) -> bool {
+        self.config.max_prefix_action == MaxPrefixAction::Block
+    }
+
+    /// Under `Block`, whether a prefix with no accepted or rejected identity
+    /// may take a pre-policy received slot in its family.
+    fn received_slot_available(&self, prefix: Prefix) -> bool {
+        let scope = match prefix {
+            Prefix::V4(_) => MaxPrefixScope::Ipv4Received,
+            Prefix::V6(_) => MaxPrefixScope::Ipv6Received,
+        };
+        let (usage, bound) = self.max_prefix_scope_usage(scope);
+        bound.is_none_or(|bound| usage < bound as usize)
+    }
+
+    /// Under `Block`, drop every announced unicast route whose prefix would
+    /// take a net-new slot beyond a full bound. A prefix already accepted
+    /// (attribute change, new Add-Path identity) always passes; a prefix
+    /// blocked by its accepted-route bound is still a received rejection.
+    fn block_over_limit_announcements(&mut self, announced: &mut Vec<Route>) {
+        if !self.blocks_over_limit() || announced.is_empty() {
+            return;
+        }
+        let mut kept = Vec::with_capacity(announced.len());
+        for route in announced.drain(..) {
+            let prefix = route.prefix;
+            if self.has_accepted_identity(prefix) {
+                kept.push(route);
+                continue;
+            }
+            let (accepted_scope, received_scope) = match prefix {
+                Prefix::V4(_) => (MaxPrefixScope::Ipv4, MaxPrefixScope::Ipv4Received),
+                Prefix::V6(_) => (MaxPrefixScope::Ipv6, MaxPrefixScope::Ipv6Received),
+            };
+            if !self.has_rejected_identity(prefix) && !self.received_slot_available(prefix) {
+                self.note_max_prefix_block(received_scope);
+                continue;
+            }
+            let (usage, bound) = self.max_prefix_scope_usage(accepted_scope);
+            if bound.is_some_and(|bound| usage >= bound as usize) {
+                self.note_max_prefix_block(accepted_scope);
+                self.remember_rejected_path(prefix, route.path_id);
+                continue;
+            }
+            kept.push(route);
+        }
+        *announced = kept;
     }
 
     fn reap_max_prefix_capacity_metrics(&self) {
@@ -903,7 +1133,13 @@ impl PeerSession {
     /// (4 octets); the aggregate keeps its historical empty data. Returns
     /// `true` when a teardown was driven.
     async fn enforce_max_prefix_limits(&mut self, include_aggregate: bool) -> bool {
+        self.reconcile_max_prefix_modes();
         self.sync_max_prefix_capacity_metrics();
+        if self.config.max_prefix_action != MaxPrefixAction::Shutdown {
+            // `Block` withholds at admission and `Warning` only reports;
+            // neither tears the session down or latches the peer.
+            return false;
+        }
         let Some(violation) = self.max_prefix_violation(include_aggregate) else {
             return false;
         };
@@ -1115,6 +1351,17 @@ impl PeerSession {
         if !self.tracks_received(prefix) {
             return false;
         }
+        if self.blocks_over_limit()
+            && !self.has_accepted_identity(prefix)
+            && !self.has_rejected_identity(prefix)
+            && !self.received_slot_available(prefix)
+        {
+            self.note_max_prefix_block(match prefix {
+                Prefix::V4(_) => MaxPrefixScope::Ipv4Received,
+                Prefix::V6(_) => MaxPrefixScope::Ipv6Received,
+            });
+            return false;
+        }
         self.refresh_accounting_replay_rejected(prefix, path_id);
         if !self.receives_add_path_for_prefix(prefix) {
             let inserted = self.rejected_plain_prefixes.insert(prefix);
@@ -1275,6 +1522,8 @@ impl PeerSession {
         self.rejected_prefix_refcounts.clear();
         self.rejected_only_v4 = 0;
         self.rejected_only_v6 = 0;
+        self.max_prefix_warned = [false; MaxPrefixScope::ALL.len()];
+        self.max_prefix_blocking = [false; MaxPrefixScope::ALL.len()];
         self.known_flowspec.clear();
         self.known_evpn.clear();
         self.known_bgpls.clear();
@@ -1475,6 +1724,8 @@ impl PeerSession {
             rejected_prefix_refcounts: HashMap::new(),
             rejected_only_v4: 0,
             rejected_only_v6: 0,
+            max_prefix_warned: [false; MaxPrefixScope::ALL.len()],
+            max_prefix_blocking: [false; MaxPrefixScope::ALL.len()],
             known_flowspec: HashSet::new(),
             known_evpn: HashSet::new(),
             known_bgpls: HashSet::new(),
@@ -1651,6 +1902,8 @@ impl PeerSession {
             rejected_prefix_refcounts: HashMap::new(),
             rejected_only_v4: 0,
             rejected_only_v6: 0,
+            max_prefix_warned: [false; MaxPrefixScope::ALL.len()],
+            max_prefix_blocking: [false; MaxPrefixScope::ALL.len()],
             known_flowspec: HashSet::new(),
             known_evpn: HashSet::new(),
             known_bgpls: HashSet::new(),

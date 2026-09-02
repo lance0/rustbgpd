@@ -9,8 +9,8 @@ use rustbgpd_policy::{
     RouteModifications,
 };
 use rustbgpd_transport::{
-    RemovePrivateAs, TcpAoAlgorithm, TcpAoConfig as TransportTcpAoConfig, TcpAoKeyring,
-    TransportConfig,
+    MaxPrefixAction, RemovePrivateAs, TcpAoAlgorithm, TcpAoConfig as TransportTcpAoConfig,
+    TcpAoKeyring, TransportConfig,
 };
 use rustbgpd_wire::{Afi, Safi};
 
@@ -764,6 +764,17 @@ impl Config {
         transport.max_prefixes_received_ipv6 = neighbor
             .max_prefixes_received_ipv6
             .or_else(|| group.and_then(|g| g.max_prefixes_received_ipv6));
+        // Spelling and cross-field rules are enforced in `Config::validate`;
+        // an unparseable value cannot reach a loaded configuration.
+        transport.max_prefix_action = neighbor
+            .max_prefix_action
+            .as_deref()
+            .or_else(|| group.and_then(|g| g.max_prefix_action.as_deref()))
+            .and_then(MaxPrefixAction::parse)
+            .unwrap_or_default();
+        transport.max_prefix_warning_percent = neighbor
+            .max_prefix_warning_percent
+            .or_else(|| group.and_then(|g| g.max_prefix_warning_percent));
         transport.peer_group.clone_from(&neighbor.peer_group);
         transport.md5_password = neighbor
             .md5_password
@@ -959,6 +970,8 @@ impl Config {
             max_prefixes_ipv6: None,
             max_prefixes_received_ipv4: None,
             max_prefixes_received_ipv6: None,
+            max_prefix_action: None,
+            max_prefix_warning_percent: None,
             max_prefixes_out_ipv4: None,
             max_prefixes_out_ipv6: None,
             max_prefix_restart_seconds: None,

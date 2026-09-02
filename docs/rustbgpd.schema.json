@@ -2012,6 +2012,13 @@
             "null"
           ]
         },
+        "max_prefix_action": {
+          "description": "What a crossed max-prefix bound does: `\"shutdown\"` (default;\nCease/1 teardown and latch, optionally followed by a timed\nrestart), `\"block\"` (withhold net-new prefixes beyond the\nbound while the session stays Established), or `\"warning\"`\n(warn once per crossing and keep accepting). `block` applies\nto the per-family unicast bounds and requires the aggregate\n`max_prefixes` to be unset; `block` and `warning` exclude\n`max_prefix_restart_seconds`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "max_prefix_restart_seconds": {
           "description": "Optional hold-down before one automatic restart attempt after any\nmax-prefix shutdown. Unset preserves the fail-closed operator latch.",
           "type": [
@@ -2020,6 +2027,16 @@
           ],
           "format": "uint32",
           "minimum": 1
+        },
+        "max_prefix_warning_percent": {
+          "description": "Warning threshold as a percentage (1..=100) of every finite\nmax-prefix bound. Crossing it emits one warning log line,\none session event, and one counter increment per crossing,\nre-armed when usage falls back under; never a teardown.\nUnset warns only at the bound under `max_prefix_action =\n\"warning\"`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
         },
         "max_prefixes": {
           "description": "Maximum prefixes accepted from this peer before the session is\ntorn down. Unset = unlimited.",
@@ -2502,6 +2519,13 @@
             "null"
           ]
         },
+        "max_prefix_action": {
+          "description": "Max-prefix action inherited by neighbors in this group. See\nthe neighbor-level `max_prefix_action`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "max_prefix_restart_seconds": {
           "description": "Max-prefix restart hold-down inherited by neighbors in this group.\nSee the neighbor-level `max_prefix_restart_seconds`.",
           "type": [
@@ -2510,6 +2534,16 @@
           ],
           "format": "uint32",
           "minimum": 1
+        },
+        "max_prefix_warning_percent": {
+          "description": "Warning threshold inherited by neighbors in this group. See\nthe neighbor-level `max_prefix_warning_percent`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
         },
         "max_prefixes": {
           "description": "Prefix limit inherited by neighbors in this group. See the\nneighbor-level `max_prefixes`.",

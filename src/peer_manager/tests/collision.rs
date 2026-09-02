@@ -259,7 +259,8 @@ async fn simultaneous_active_open_runs_inbound_candidate_before_primary_idle() {
             assert_eq!(*peer_asn, 65002);
         }
         other @ (SessionNotification::BackToIdle { .. }
-        | SessionNotification::MaxPrefixExceeded { .. }) => {
+        | SessionNotification::MaxPrefixExceeded { .. }
+        | SessionNotification::MaxPrefixWarning { .. }) => {
             panic!("expected OpenReceived from candidate, got {other:?}");
         }
     }

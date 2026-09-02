@@ -703,6 +703,10 @@ message NeighborState {
   // failures lengthen this wait; 0 when no reconnect is pending. Absence
   // means the daemon predates this field.
   optional uint64 reconnect_in_seconds = 57;
+  // ADR-0108 amendment: one row per finite inbound max-prefix bound, in
+  // enforcement order. Empty from an older daemon, a stale peer-session
+  // snapshot, or a peer with no finite bound.
+  repeated InboundPrefixLimitState inbound_prefix_limits = 58;
 }
 
 message AcceptedDynamicNeighborRange {
@@ -763,6 +767,26 @@ message OutboundPrefixLimitState {
   // Whether a blocking episode is currently open for this family.
   bool blocking = 5;
   // Stable reason while blocking: "outbound_prefix_limit_reached". Absent
+  // otherwise.
+  optional string reason = 6;
+}
+
+// One finite inbound max-prefix bound's live capacity for a neighbor
+// (ADR-0108 amendment).
+message InboundPrefixLimitState {
+  // "aggregate", "ipv4_unicast", "ipv6_unicast", "ipv4_unicast_received", or
+  // "ipv6_unicast_received".
+  string scope = 1;
+  // The session actor's enforcement count for the scope.
+  uint64 usage = 2;
+  // Configured bound.
+  uint32 limit = 3;
+  // Saturating limit - usage.
+  uint32 headroom = 4;
+  // Whether a `block` episode is open: net-new prefixes are being withheld
+  // until usage falls back under the bound.
+  bool blocking = 5;
+  // Stable reason while blocking: "inbound_prefix_limit_reached". Absent
   // otherwise.
   optional string reason = 6;
 }
@@ -2728,6 +2752,10 @@ enum BgpEventType {
   BGP_EVENT_TYPE_BFD_SESSION_UP = 50;
   BGP_EVENT_TYPE_BFD_SESSION_DOWN = 51;
   BGP_EVENT_TYPE_BFD_SESSION_STATE_CHANGED = 52;
+  // A peer's usage crossed a configured max-prefix warning threshold
+  // (max_prefix_warning_percent, or the bound itself under
+  // max_prefix_action = "warning"); emitted once per crossing, no teardown.
+  BGP_EVENT_TYPE_MAX_PREFIX_WARNING = 53;
   // A stream gap: WatchEvents reports a bounded-source gap and identifies
   // that source category; SubscribeFromEvent reports a global committed-stream
   // gap with both category and source_category UNSPECIFIED.

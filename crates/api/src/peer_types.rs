@@ -126,6 +126,8 @@ pub enum SessionLifecycleEventType {
     PeerEnabled,
     /// Operator disabled a configured peer.
     PeerDisabled,
+    /// A max-prefix warning threshold was crossed (once per crossing).
+    MaxPrefixWarning,
 }
 
 /// Structured session event broadcast by `PeerManager` and bridged by
@@ -210,6 +212,26 @@ pub struct PolicyEvent {
     /// Operator-facing reason/summary.
     pub reason: String,
 }
+
+/// One finite inbound max-prefix bound's live capacity for a neighbor
+/// (ADR-0108 amendment).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboundPrefixLimitState {
+    /// `aggregate`, `ipv4_unicast`, `ipv6_unicast`, `ipv4_unicast_received`,
+    /// or `ipv6_unicast_received`.
+    pub scope: String,
+    /// The session actor's enforcement count for the scope.
+    pub usage: u64,
+    /// Configured bound.
+    pub limit: u32,
+    /// Saturating `limit - usage`.
+    pub headroom: u32,
+    /// Whether a `block` episode is open for the scope.
+    pub blocking: bool,
+}
+
+/// Stable reason reported while an inbound bound is blocking.
+pub const INBOUND_PREFIX_LIMIT_REACHED: &str = "inbound_prefix_limit_reached";
 
 /// Session-scoped event broadcast by `PeerManager`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1933,6 +1955,10 @@ pub struct PeerManagerNeighborConfig {
     pub max_prefixes_received_ipv4: Option<u32>,
     /// IPv6-unicast sibling of `max_prefixes_received_ipv4`.
     pub max_prefixes_received_ipv6: Option<u32>,
+    /// Response to a crossed inbound max-prefix bound (ADR-0108 amendment).
+    pub max_prefix_action: rustbgpd_transport::MaxPrefixAction,
+    /// Warning threshold percentage of every finite bound (1..=100).
+    pub max_prefix_warning_percent: Option<u8>,
     /// Non-zero hold-down before one automatic max-prefix restart attempt.
     /// `None` preserves the fail-closed shutdown latch.
     pub max_prefix_restart_seconds: Option<u32>,
@@ -2420,6 +2446,9 @@ pub struct PeerInfo {
     pub max_prefix_headroom_ipv4: Option<u32>,
     /// IPv6-unicast capacity remaining, absent when unlimited or state is stale.
     pub max_prefix_headroom_ipv6: Option<u32>,
+    /// One row per finite inbound max-prefix bound (ADR-0108 amendment);
+    /// empty when the snapshot is stale or no bound is configured.
+    pub inbound_prefix_limits: Vec<InboundPrefixLimitState>,
     /// Configured hold time override (None = default).
     pub hold_time: Option<u16>,
     /// Configured minimum accepted peer hold time.

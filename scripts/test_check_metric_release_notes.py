@@ -27,7 +27,14 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
 
         self.assertEqual(len(baseline), 204)
         self.assertEqual(
-            added, {"bgp_session_event_source_dropped_total", "bgp_peer_info"}
+            added,
+            {
+                "bgp_max_prefix_blocked_total",
+                "bgp_max_prefix_blocking",
+                "bgp_max_prefix_warning_total",
+                "bgp_peer_info",
+                "bgp_session_event_source_dropped_total",
+            },
         )
         self.assertEqual(removed, {"bgp_session_lifecycle_source_dropped_total"})
 

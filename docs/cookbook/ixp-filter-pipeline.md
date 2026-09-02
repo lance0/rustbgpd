@@ -55,11 +55,13 @@ Install and configure arouteserver itself per its
 [documentation][arouteserver] (`arouteserver setup`, then your
 `general.yml` / `clients.yml`).
 
-rustbgpd implements ARouteServer's shutdown and OpenBGPD-style timed-restart
-actions with post-import-policy prefix accounting. ARouteServer's BIRD target
+rustbgpd implements ARouteServer's shutdown, OpenBGPD-style timed-restart,
+`block`, and `warning` actions. ARouteServer's BIRD target
 restarts immediately and ignores `restart_after`; this is not BIRD timed parity.
-Configure the model explicitly; the renderer refuses `block` and `warning`
-instead of silently changing their behavior:
+`block` renders `max_prefix_action = "block"` (net-new prefixes beyond the
+bound are withheld while the session stays Established) and `warning` renders
+`max_prefix_action = "warning"` (one warning per crossing, no teardown).
+Configure the model explicitly:
 
 ```yaml
 cfg:

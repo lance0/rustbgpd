@@ -2832,6 +2832,10 @@ impl PeerSession {
                 withdrawn.push((prefix, path_id));
             }
         }
+        // `Block`: withhold net-new prefixes beyond a full bound before
+        // they are accounted or delivered; withdrawals above already freed
+        // their slots.
+        self.block_over_limit_announcements(&mut announced);
         // An accepted identity retires its rejected sibling so the
         // pre-policy received count stays one slot per prefix.
         for route in &announced {

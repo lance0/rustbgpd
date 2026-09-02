@@ -129,6 +129,24 @@ pub(super) fn rfc9972_rpki_validation_counts(
 /// `query_state` either timed out (peer parked on TCP write) or its task
 /// has already exited; in both cases we surface `state = Idle, stale =
 /// true` so consumers know the field isn't authoritative.
+/// One `inbound_prefix_limits[]` row per finite bound (ADR-0108 amendment).
+fn inbound_prefix_limit_rows(
+    state: &PeerSessionState,
+) -> Vec<rustbgpd_api::peer_types::InboundPrefixLimitState> {
+    state
+        .max_prefix
+        .scopes
+        .iter()
+        .map(|row| rustbgpd_api::peer_types::InboundPrefixLimitState {
+            scope: row.scope.to_string(),
+            usage: u64::try_from(row.usage).unwrap_or(u64::MAX),
+            limit: row.limit,
+            headroom: row.headroom,
+            blocking: row.blocking,
+        })
+        .collect()
+}
+
 pub(super) fn build_peer_info(
     peer: &PeerKey,
     managed: &ManagedPeer,
@@ -165,14 +183,18 @@ pub(super) fn build_peer_info(
         max_prefix_headroom: session_state.and_then(|s| s.max_prefix.headroom),
         max_prefix_headroom_ipv4: session_state.and_then(|s| s.max_prefix.headroom_ipv4),
         max_prefix_headroom_ipv6: session_state.and_then(|s| s.max_prefix.headroom_ipv6),
+        inbound_prefix_limits: session_state.map_or_else(Vec::new, inbound_prefix_limit_rows),
         hold_time: managed.hold_time,
         min_hold_time: managed.transport_config.peer.min_hold_time,
         send_hold_time: managed.transport_config.peer.send_hold_time,
         max_prefixes: managed.max_prefixes,
-        max_prefix_action: if managed.max_prefix_restart_seconds.is_some() {
-            "restart"
-        } else {
-            "shutdown"
+        max_prefix_action: match managed.transport_config.max_prefix_action {
+            rustbgpd_transport::MaxPrefixAction::Shutdown
+                if managed.max_prefix_restart_seconds.is_some() =>
+            {
+                "restart"
+            }
+            action => action.as_str(),
         }
         .to_string(),
         max_prefix_restart_seconds: managed.max_prefix_restart_seconds,

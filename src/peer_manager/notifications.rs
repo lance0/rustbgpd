@@ -280,6 +280,35 @@ impl PeerManager {
                     }
                 }
             }
+            SessionNotification::MaxPrefixWarning {
+                session_id,
+                role,
+                peer_addr,
+                scope,
+                usage,
+                bound,
+                percent,
+            } => {
+                // Informational: nothing is latched. One durable session event
+                // per crossing so operators can alert on it without a log tail.
+                let peer_label = self
+                    .peer_key_for_session(session_id)
+                    .or_else(|| self.unique_peer_key_for_address(peer_addr))
+                    .map(|key| key.label());
+                let rendered_peer = peer_label.clone().unwrap_or_else(|| peer_addr.to_string());
+                self.publish_lifecycle_event(rustbgpd_api::peer_types::SessionLifecycleEvent {
+                    event_type: rustbgpd_api::peer_types::SessionLifecycleEventType::MaxPrefixWarning,
+                    peer: peer_addr,
+                    peer_label,
+                    timestamp: Self::session_event_timestamp(),
+                    old_state: None,
+                    new_state: None,
+                    session_role: Some(Self::session_role_label(role).to_string()),
+                    reason: format!(
+                        "max-prefix warning for peer {rendered_peer}: {scope} usage {usage} of bound {bound} (threshold {percent}%)"
+                    ),
+                });
+            }
             SessionNotification::MaxPrefixExceeded {
                 session_id,
                 role,

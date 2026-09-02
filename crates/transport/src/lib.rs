@@ -52,10 +52,10 @@ impl ExplainSnapshotBenchCache {
 
 pub use config::{
     DEFAULT_MAX_AS_PATH_LENGTH, DEFAULT_SLOW_PEER_DURATION_SECS, DEFAULT_SLOW_PEER_THRESHOLD_PCT,
-    RemovePrivateAs, TCP_AO_MAX_INSPECT_KEYS, TcpAoAlgorithm, TcpAoConfig, TcpAoKeyring,
-    TcpAoRotationGeneration, TcpAoRotationOperation, TcpAoRotationOwner, TcpAoRotationPhase,
-    TcpAoRotationStatus, TcpAoSessionDeletion, TcpAoSessionGeneration, TcpAoSessionSelection,
-    TransportAuthSecret, TransportConfig,
+    MaxPrefixAction, RemovePrivateAs, TCP_AO_MAX_INSPECT_KEYS, TcpAoAlgorithm, TcpAoConfig,
+    TcpAoKeyring, TcpAoRotationGeneration, TcpAoRotationOperation, TcpAoRotationOwner,
+    TcpAoRotationPhase, TcpAoRotationStatus, TcpAoSessionDeletion, TcpAoSessionGeneration,
+    TcpAoSessionSelection, TransportAuthSecret, TransportConfig,
 };
 pub use error::TransportError;
 pub use event_sink::{
