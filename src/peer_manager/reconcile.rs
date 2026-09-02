@@ -89,7 +89,10 @@ impl PeerManager {
                     peer: addr.clone(),
                     error: e.to_string(),
                 });
-                effects.push(PeerReconcileEffect::RemovedForFailedReplacement(addr));
+                effects.push(PeerReconcileEffect::RemovedForFailedReplacement(
+                    addr.clone(),
+                ));
+                self.reap_deleted_peer_metric_series_for_key(&addr).await;
             } else {
                 effects.push(PeerReconcileEffect::Replaced(addr));
             }
