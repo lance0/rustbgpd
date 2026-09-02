@@ -2498,7 +2498,7 @@ jobs:
           max_attempts: "1"
 
   m107:
-    needs: [prime_dev_image]
+    needs: [grpcurl_archive, prime_dev_image]
     name: M107 — RFC 8950 uniform-fleet route server
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -2509,6 +2509,9 @@ jobs:
 
       - name: Install containerlab
         uses: ./.github/actions/install-containerlab
+
+      - name: Install exact grpcurl offline
+        uses: ./.github/actions/install-grpcurl-artifact
 
       - name: Ensure jq
         run: |
@@ -2559,7 +2562,7 @@ jobs:
         m1 m13 m80 m15 m10
         m14 m17 m73 m74 m75 m76 m77 m78 m79 m22 m24 m81 m82 m83 m85 m94
         m86 m25 m29 m30 m34 m35 m35b m35c m41 m44 m54 m55 m56 m45 m57
-        m63 m64 m26_m27_m28_m59_m91 m92 m84 m99 m100 m101 m102 m103 m104
+        m63 m64 m26_m27_m28_m59_m91 m92 m84 m99 m100 m101 m102 m103 m104 m107
     steps:
       - name: Aggregate required Interop result
         shell: bash

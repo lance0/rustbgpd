@@ -23,15 +23,16 @@
 #         with next hop 2001:db8:107::11; member2 203.0.113.0/24 with next hop
 #         2001:db8:107::12; member1 198.51.100.128/25 with member2's address
 #         as a FOREIGN next hop
-#   17-19 the RS accepted the three owned routes with the wire next hop intact
-#   20    the RS rejected the foreign-next-hop route before policy with reason
+#   17-22 the RS accepted the three owned routes and kept each wire next hop
+#   23    the RS rejected the foreign-next-hop route before policy with reason
 #         next_hop_ownership / foreign_next_hop, naming the violating next hop
-#   21-23 transparent export: member2 holds 198.51.100.0/24 and 2001:db8:1::/48
+#   24    the rejected route is absent from the RS accepted view
+#   25-30 transparent export: member2 holds 198.51.100.0/24 and 2001:db8:1::/48
 #         with next hop 2001:db8:107::11, member1 holds 203.0.113.0/24 with
 #         next hop 2001:db8:107::12 — the originating member's IPv6 address,
 #         never the route server's
-#   24    member2 never receives the foreign-next-hop route
-#   25    both sessions are still Established afterwards
+#   31    member2 never receives the foreign-next-hop route
+#   32    both sessions are still Established afterwards
 #
 # Prerequisites:
 #   - docker build --target dev -t rustbgpd:dev .
@@ -231,19 +232,19 @@ inject_announcements() {
 
 assert_ownership() {
     log "strict_peer at the route server: owned next hops accepted, the foreign one rejected..."
-    local prefix member family nh
+    local prefix member family peer_addr
     for spec in "member1 $MEMBER1_ADDR ipv4 198.51.100.0/24" \
                 "member1 $MEMBER1_ADDR ipv6 2001:db8:1::/48" \
                 "member2 $MEMBER2_ADDR ipv4 203.0.113.0/24"; do
         set -- $spec
-        member=$1; nh=$2; family=$3; prefix=$4
-        poll 15 2 "RS accepted $prefix from $member" rs_received_has "$nh" "$family" "$prefix" || continue
+        member=$1; peer_addr=$2; family=$3; prefix=$4
+        poll 15 2 "RS accepted $prefix from $member" rs_received_has "$peer_addr" "$family" "$prefix" || continue
         local got
-        got=$(rs_received_next_hop "$nh" "$family" "$prefix")
-        if [ "$got" = "$nh" ]; then
+        got=$(rs_received_next_hop "$peer_addr" "$family" "$prefix")
+        if [ "$got" = "$peer_addr" ]; then
             ok "RS keeps the wire next hop $got on $prefix from $member"
         else
-            fail "RS shows next hop '$got' on $prefix from $member, expected $nh"
+            fail "RS shows next hop '$got' on $prefix from $member, expected $peer_addr"
         fi
     done
     poll 15 2 "RS rejected 198.51.100.128/25 from member1: next_hop_ownership / foreign_next_hop naming $MEMBER2_ADDR" \

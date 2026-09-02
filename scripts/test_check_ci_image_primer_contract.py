@@ -1918,6 +1918,10 @@ class PrimerContractTests(unittest.TestCase):
 
     def test_m103_gobgp48_differential_job_is_load_bearing(self):
         relative = ".github/workflows/interop.yml"
+        workflow = (ROOT / relative).read_text()
+        job_start = workflow.index("\n  m103:\n") + 1
+        job_end = workflow.index("\n  m104:\n")
+        job = workflow[job_start:job_end]
         for old in (
             "  m103:\n",
             "      - name: Build gobgp:v4.8.0-m103\n",
@@ -1942,9 +1946,8 @@ class PrimerContractTests(unittest.TestCase):
             '          path: ${{ runner.temp }}/m103-negative\n',
         ):
             with self.subTest(seam=old):
-                count = (ROOT / relative).read_text().count(old)
-                self.assertGreater(count, 0, f"missing M103 seam: {old}")
-                self.mutate(relative, old, occurrence=count - 1)
+                self.assertIn(old, job, f"missing M103 seam: {old}")
+                self.mutate(relative, old, occurrence=workflow[:job_start].count(old))
 
         max_attempt = '          max_attempts: "1"\n'
         count = (ROOT / relative).read_text().count(max_attempt)
@@ -1961,6 +1964,10 @@ class PrimerContractTests(unittest.TestCase):
 
     def test_m104_current_arouteserver_differential_job_is_load_bearing(self):
         relative = ".github/workflows/interop.yml"
+        workflow = (ROOT / relative).read_text()
+        job_start = workflow.index("\n  m104:\n") + 1
+        job_end = workflow.index("\n  m107:\n")
+        job = workflow[job_start:job_end]
         for old in (
             "  m104:\n",
             "    needs: [grpcurl_archive, bird2192_archive, prime_dev_image]\n",
@@ -1990,9 +1997,8 @@ class PrimerContractTests(unittest.TestCase):
             "          script: tests/interop/scripts/test-m104-arouteserver-current-rs-differential.sh\n",
         ):
             with self.subTest(seam=old):
-                count = (ROOT / relative).read_text().count(old)
-                self.assertGreater(count, 0, f"missing M104 seam: {old}")
-                self.mutate(relative, old, occurrence=count - 1)
+                self.assertIn(old, job, f"missing M104 seam: {old}")
+                self.mutate(relative, old, occurrence=workflow[:job_start].count(old))
 
         stage = (
             "      - name: Stage verified BIRD 2.19.2 archive\n"

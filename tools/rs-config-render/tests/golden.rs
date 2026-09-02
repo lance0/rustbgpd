@@ -1161,7 +1161,10 @@ fn m106_sectioned_dump_renders_identically_and_exercises_both_surfaces() {
 fn m107_sectioned_dump_renders_the_uniform_fleet_shape() {
     let real = render(M107_SECTIONED, &Options::default()).expect("real M107 dump renders");
     let hand = render(M107_HAND, &Options::default()).expect("hand-authored M107 context renders");
-    assert_eq!(real.files.len(), hand.files.len());
+    assert_eq!(
+        real.files.keys().collect::<Vec<_>>(),
+        hand.files.keys().collect::<Vec<_>>()
+    );
     for (path, content) in &real.files {
         assert_eq!(
             strip_fingerprint(content),

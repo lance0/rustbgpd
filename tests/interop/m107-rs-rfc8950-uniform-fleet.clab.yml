@@ -10,9 +10,10 @@
 #     announcing IPv4 and IPv6 unicast with its own IPv6 address as the
 #     next hop (RFC 8950 for the IPv4 routes)
 #
-# No node carries an IPv4 address: the lab proves IPv4 reachability
-# information crossing an IPv6-only fabric through a transparent route
-# server that keeps the originating member's IPv6 next hop.
+# No peering or access interface carries IPv4: the lab proves IPv4 reachability
+# information crossing an IPv6-only fabric through a transparent route server
+# that keeps the originating member's IPv6 next hop. Containerlab may assign
+# out-of-band IPv4 addresses on its separate management network.
 #
 # The route-server config is rendered and copied in by the driver
 # script AFTER deploy (docker cp), because the render is part of the

@@ -561,7 +561,7 @@ next-hop translation [ADR-0128](../../docs/adr/0128-route-server-next-hop-transl
 keeps demand-gated — or when `blackhole_filtering.policy_ipv4` is active,
 because the IPv4 blackhole terms are bound to IPv4 sessions.
 [`tests/interop/m107-rs-rfc8950-uniform-fleet/`](../../tests/interop/m107-rs-rfc8950-uniform-fleet/README.md)
-proves the rendered shape on an IPv6-only lab: strict_peer accepts the
+proves the rendered shape on an IPv6-only peering LAN: strict_peer accepts the
 RFC 8950 next hop, rejects a foreign one, and transparent export keeps the
 originator's IPv6 next hop. Blackhole
 policies support `propagate-unchanged` and

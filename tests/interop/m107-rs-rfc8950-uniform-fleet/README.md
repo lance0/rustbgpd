@@ -1,15 +1,16 @@
 # M107 — RFC 8950 uniform-fleet route server
 
-Two GoBGP members exchange IPv4 (and IPv6) unicast over **IPv6-only**
-sessions through a transparent rustbgpd route server whose configuration
+Two GoBGP members exchange IPv4 (and IPv6) unicast over an **IPv6-only
+peering LAN** through a transparent rustbgpd route server whose configuration
 is rendered by [`tools/rs-config-render`](../../../tools/rs-config-render/README.md)
 from an arouteserver site with `rfc8950: True` and only IPv6 members —
 the uniform-fleet shape the renderer emits: every member session carries
 both unicast families (`families = ["ipv4_unicast", "ipv6_unicast"]`, so
 the extended next hop is negotiated) and `next_hop_ownership =
 "strict_peer"` accepts an IPv4 route only with the announcing member's
-own IPv6 address as its next hop. No node in the lab carries an IPv4
-address.
+own IPv6 address as its next hop. Containerlab may assign out-of-band IPv4
+addresses on its management network; no peering or access interface carries
+IPv4.
 
 The lab proves, from the members' own Adj-RIB-In and the route server's
 accepted and rejected views:
@@ -79,9 +80,9 @@ and rustbgpd 0.68.0 built from the change (`rustbgpd:dev`, image ID
 the site was dumped by pinned arouteserver 1.23.2
 (`pierky/arouteserver@sha256:ba0e9c0b541c63acf0765a08fd2e09c2bba9dc64af1f5bbdce7819e8d1c34d66`).
 
-The differential passed 32/32 (the 25-point contract in the driver header
-plus readiness and injection checks): the rendered config carried both
-families, `strict_peer`, and an explicit `rs_control_communities` on both
+The differential passed the 32/32 contract in the driver header: the rendered
+config carried both families, `strict_peer`, and an explicit
+`rs_control_communities` on both
 sessions and passed every gate; both members negotiated the extended next
 hop; the three owned routes were accepted with their wire next hops
 (`2001:db8:107::11` / `::12`) intact; the foreign-next-hop route was
