@@ -48,7 +48,9 @@ impl SdNotify {
     /// notification; the interval is floored at 100 ms.
     pub fn new(socket: Option<&str>, watchdog_interval: Option<Duration>) -> Self {
         let target = socket.and_then(|raw| match socket_addr(raw).and_then(|addr| {
-            UnixDatagram::unbound().map(|datagram| Arc::new((datagram, addr)))
+            let datagram = UnixDatagram::unbound()?;
+            datagram.set_nonblocking(true)?;
+            Ok(Arc::new((datagram, addr)))
         }) {
             Ok(target) => Some(target),
             Err(error) => {
@@ -324,5 +326,56 @@ mod tests {
         let notify = SdNotify::new(Some(&too_long), Some(Duration::from_secs(1)));
         assert!(!notify.is_enabled());
         notify.ready();
+    }
+
+    #[test]
+    #[allow(
+        unsafe_code,
+        reason = "test inspects descriptor flags directly to prove O_NONBLOCK is set"
+    )]
+    fn notifier_socket_is_nonblocking_and_send_does_not_block() {
+        use std::os::unix::io::AsRawFd;
+
+        let (receiver, name) = abstract_socket();
+        let notify = SdNotify::new(Some(&name), None);
+        assert!(notify.is_enabled());
+
+        let target = notify
+            .target
+            .as_ref()
+            .expect("notification target initialized");
+        let (datagram, _) = target.as_ref();
+
+        assert!(matches!(datagram.take_error(), Ok(None)));
+
+        let fd = datagram.as_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        assert_ne!(flags, -1, "fcntl F_GETFL failed");
+        assert_ne!(
+            flags & libc::O_NONBLOCK,
+            0,
+            "systemd notification socket must have O_NONBLOCK set"
+        );
+
+        // Minimise receiver buffer to reliably saturate the queue.
+        let rcvbuf: libc::c_int = 1024;
+        let ret = unsafe {
+            libc::setsockopt(
+                receiver.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_RCVBUF,
+                std::ptr::addr_of!(rcvbuf).cast(),
+                libc::socklen_t::try_from(std::mem::size_of_val(&rcvbuf)).unwrap(),
+            )
+        };
+        assert_eq!(ret, 0, "setsockopt SO_RCVBUF failed");
+
+        // Flooding unread notifications must not block or hang when the socket buffer fills.
+        for _ in 0..5000 {
+            notify.ready();
+        }
+
+        // Datagrams were delivered up to socket capacity.
+        assert_eq!(recv(&receiver).as_deref(), Some("READY=1"));
     }
 }
