@@ -324,14 +324,15 @@ an inventory-stability retry: it snapshots the table's
 members (address, session state, staleness, retained count) with one
 `ListNeighbors`, reads each store with one unpaged `ListRejectedRoutes`,
 then re-reads the inventory. Any change between the two snapshots discards
-the capture and retries, at most three times, before answering a sanitized
-HTTP 502. This detects inventory changes, but it is not a generation or
-content fence for the session-local stores. A member whose inventory changes
-on every attempt therefore fails the request, and Alice retries a failed
-routes-store refresh after ten seconds.
+the capture and retries, at most three attempts, before answering a sanitized
+HTTP 502 after three changed inventories. This detects inventory changes, but
+it is not a generation or content fence for the session-local stores. A
+member whose inventory changes on every attempt therefore fails the request,
+and Alice retries a failed routes-store refresh after ten seconds.
 
-**Cost:** one request is `2 + N` RPCs for `N` members aliased to the table
-and can carry up to `N × capacity` rows (`[policy.reject_retention]`,
+**Cost:** each attempt is `2 + N` RPCs for `N` members aliased to the table.
+With stable `N`, three attempts have a ceiling of `3 × (2 + N)` RPCs. One
+attempt can carry up to `N × capacity` rows (`[policy.reject_retention]`,
 default 1024 per peer). A dual-stack Alice source issues four table dumps
 per refresh (accepted and filtered for each main table), so size
 `routes_store_refresh_interval` and the retention capacity together. The
