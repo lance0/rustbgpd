@@ -126,6 +126,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Operator-visible:** `rs-config-render` now states `rs_control_communities`
+  on every rendered member session instead of inheriting the daemon default:
+  off when the site configures no control community, on only when the site
+  configures exactly the daemon's fixed RFC 7947 §2.3.2 / RFC 8195 matrix.
+  Any differing value, a matrix key left unset while another is configured,
+  or a configured `add_noexport_to_*` / `add_noadvertise_to_*` community is
+  refused (exit 2) naming the key. Previously every rendered session
+  interpreted and scrubbed the daemon's matrix regardless of what the site
+  had declared to arouteserver.
+
 - Policy and peer-group mutations now report unavailable when configuration
   persistence admission is closed or temporarily full.
 

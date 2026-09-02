@@ -75,6 +75,9 @@ path = "datasets/client-as197000-1-origins.list"
 [policy.datasets.client-as197000-1-prefixes]
 path = "datasets/client-as197000-1-prefixes.list"
 
+# The site configures no control communities: member sessions stay fully
+# transparent and interpret nothing (the daemon's own default would be on).
+
 [[neighbors]]
 address = "192.0.2.11"
 remote_asn = 4242
@@ -84,6 +87,7 @@ route_server_client = true
 role = "route_server"
 next_hop_ownership = "strict_peer"
 per_client_best = true
+rs_control_communities = false
 max_prefixes_ipv4 = 5000
 import_policy_chain = ["rs-hygiene", "client-as4242-1"]
 
@@ -97,5 +101,6 @@ role = "route_server"
 next_hop_ownership = "strict_peer"
 ttl_security = true
 per_client_best = true
+rs_control_communities = false
 max_prefixes_ipv6 = 1000
 import_policy_chain = ["rs-hygiene", "client-as197000-1"]

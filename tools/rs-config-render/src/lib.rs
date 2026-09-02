@@ -1525,6 +1525,7 @@ fn check_refusals(ctx: &Context, opts: &Options) -> Result<(), RenderError> {
             "communities.{RPKI_NOT_PERFORMED} is configured; unsupported tagging/scrubbing cannot be rendered"
         ));
     }
+    check_control_communities(cfg, &mut refusals);
     if let Some(tag) = cfg.communities.get(WHITE_LIST_TAG) {
         if tag.ext.is_some() {
             refusals.push(format!("communities.{WHITE_LIST_TAG}.ext is unsupported"));
@@ -1704,6 +1705,97 @@ fn community_configured(value: &CommunityValues) -> bool {
 }
 
 const WHITE_LIST_TAG: &str = "route_validated_via_white_list";
+
+/// The daemon's fixed RFC 7947 §2.3.2 / RFC 8195 control matrix
+/// (`rs_control` in the RIB crate), as arouteserver spells it after
+/// expanding `rs_as`: `(key, std, lrg)`. Standard forms that embed the
+/// route-server ASN exist only when it fits 16 bits.
+fn control_matrix(rs_as: u32) -> [(&'static str, Option<String>, String); 9] {
+    let std16 = |value: String| (rs_as <= u32::from(u16::MAX)).then_some(value);
+    [
+        (
+            "do_not_announce_to_peer",
+            Some("0:peer_as".to_owned()),
+            format!("{rs_as}:0:peer_as"),
+        ),
+        (
+            "announce_to_peer",
+            std16(format!("{rs_as}:peer_as")),
+            format!("{rs_as}:1:peer_as"),
+        ),
+        (
+            "do_not_announce_to_any",
+            std16(format!("0:{rs_as}")),
+            format!("{rs_as}:0:0"),
+        ),
+        ("prepend_once_to_peer", None, format!("{rs_as}:101:peer_as")),
+        (
+            "prepend_twice_to_peer",
+            None,
+            format!("{rs_as}:102:peer_as"),
+        ),
+        (
+            "prepend_thrice_to_peer",
+            None,
+            format!("{rs_as}:103:peer_as"),
+        ),
+        ("prepend_once_to_any", None, format!("{rs_as}:101:0")),
+        ("prepend_twice_to_any", None, format!("{rs_as}:102:0")),
+        ("prepend_thrice_to_any", None, format!("{rs_as}:103:0")),
+    ]
+}
+
+/// Control communities the daemon has no action for; configuring one
+/// would silently drop member intent.
+const UNSUPPORTED_CONTROL_COMMUNITIES: [&str; 4] = [
+    "add_noadvertise_to_any",
+    "add_noadvertise_to_peer",
+    "add_noexport_to_any",
+    "add_noexport_to_peer",
+];
+
+/// True when the site configures any control community the daemon
+/// enforces — the rendered sessions then keep `rs_control_communities` on.
+fn control_communities_enabled(cfg: &Cfg) -> bool {
+    control_matrix(cfg.rs_as)
+        .iter()
+        .any(|(name, _, _)| cfg.communities.get(*name).is_some_and(community_configured))
+}
+
+/// The daemon's matrix is fixed, so an enabled site must configure exactly
+/// it: every key present with the daemon's forms and nothing else. A site
+/// with no control communities renders the knob off instead.
+fn check_control_communities(cfg: &Cfg, refusals: &mut Vec<String>) {
+    for name in UNSUPPORTED_CONTROL_COMMUNITIES {
+        if cfg.communities.get(name).is_some_and(community_configured) {
+            refusals.push(format!(
+                "communities.{name} is configured; the daemon has no equivalent action"
+            ));
+        }
+    }
+    if !control_communities_enabled(cfg) {
+        return;
+    }
+    for (name, std, lrg) in control_matrix(cfg.rs_as) {
+        let values = cfg.communities.get(name);
+        let got_std = values.and_then(|v| v.std.as_deref());
+        let got_lrg = values.and_then(|v| v.lrg.as_deref());
+        let got_ext = values.and_then(|v| v.ext.as_deref());
+        if got_std != std.as_deref() || got_lrg != Some(lrg.as_str()) || got_ext.is_some() {
+            fn show(value: Option<&str>) -> &str {
+                value.unwrap_or("null")
+            }
+            refusals.push(format!(
+                "communities.{name}: the daemon enforces a fixed control matrix; expected \
+                 std={} lrg={lrg} ext=null, got std={} lrg={} ext={}",
+                show(std.as_deref()),
+                show(got_std),
+                show(got_lrg),
+                show(got_ext)
+            ));
+        }
+    }
+}
 
 /// The configured white-list tag, empty unless `irrdb.tag_as_set` is on.
 fn white_list_tag(ctx: &Context) -> Vec<(CommunityKind, String)> {
@@ -2387,6 +2479,15 @@ fn render_toml(
         }
     }
 
+    let rs_control = control_communities_enabled(cfg);
+    out.push_str(if rs_control {
+        "\n# RFC 7947 §2.3.2 control communities: the site configures exactly the\n\
+         # daemon's fixed matrix, so every member session interprets and scrubs them.\n"
+    } else {
+        "\n# The site configures no control communities: member sessions stay fully\n\
+         # transparent and interpret nothing (the daemon's own default would be on).\n"
+    });
+
     for rc in clients {
         let family = if rc.client.ip.contains(':') {
             "ipv6_unicast"
@@ -2411,6 +2512,7 @@ fn render_toml(
             out.push_str("per_client_best = true\n");
         }
         let (limit_key_ipv4, limit_key_ipv6) = rc.max_prefix_limit_keys();
+        let _ = writeln!(out, "rs_control_communities = {rs_control}");
         if let Some(limit) = rc.limit_ipv4 {
             let _ = writeln!(out, "{limit_key_ipv4} = {limit}");
         }

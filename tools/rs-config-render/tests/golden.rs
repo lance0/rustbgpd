@@ -16,6 +16,13 @@ const SECTIONED: &str =
     include_str!("../../../tests/interop/m90-differential/context-sectioned.yml");
 /// The hand-authored single-document context for the same site.
 const M90_HAND: &str = include_str!("../../../tests/interop/m90-differential/context.yml");
+/// The M106 sibling site (IRR white lists plus the daemon's control
+/// matrix), dumped by the same pinned image, and its hand-authored twin.
+const M106_SECTIONED: &str = include_str!(
+    "../../../tests/interop/m106-rs-white-list-control-differential/context-sectioned.yml"
+);
+const M106_HAND: &str =
+    include_str!("../../../tests/interop/m106-rs-white-list-control-differential/context.yml");
 
 fn fixture_value() -> serde_yaml::Value {
     serde_yaml::from_str(FIXTURE).expect("fixture parses")
@@ -1045,6 +1052,51 @@ fn sectioned_dump_renders_identically_to_the_hand_authored_context() {
 }
 
 #[test]
+/// The real dump of the M106 site carries the white lists both raw and as a
+/// synthetic bundle, plus the expanded control matrix; both forms render the
+/// same tagged accept term, datasets, scrub, and explicit knob.
+fn m106_sectioned_dump_renders_identically_and_exercises_both_surfaces() {
+    let real = render(M106_SECTIONED, &Options::default()).expect("real M106 dump renders");
+    let hand = render(M106_HAND, &Options::default()).expect("hand-authored M106 context renders");
+    assert_eq!(real.files.len(), hand.files.len());
+    for (path, content) in &real.files {
+        assert_eq!(
+            strip_fingerprint(content),
+            strip_fingerprint(&hand.files[path]),
+            "render divergence in {path}"
+        );
+    }
+    let config = &real.files["config.toml"];
+    assert_eq!(config.matches("rs_control_communities = true\n").count(), 3);
+    assert!(
+        real.files["datasets/client-as64500-1-prefixes.list"].contains("198.51.100.128/25 le 32\n")
+    );
+    assert_eq!(
+        real.files["datasets/client-as64500-1-origins.list"],
+        "64500\n64510\n"
+    );
+    assert!(real.files["policy/client-as64501-1.rpol"].contains(
+        "term accept-white-list-route-1 { if route.prefix in client-as64501-1-white-list-route-1 && route.origin-as == 64501 { add community 65530:2; add large-community 64496:65530:2; accept } }"
+    ));
+    assert!(real.files["policy/rs-hygiene.rpol"].contains(
+        "term scrub-white-list-tag { remove community 65530:2; remove large-community 64496:65530:2 }"
+    ));
+    for rpol in ["policy/rs-hygiene.rpol", "policy/client-as64501-1.rpol"] {
+        let report = run_rpol_tests(&real.files[rpol]).unwrap();
+        assert!(report.all_passed(), "{rpol}: {:?}", report.failures);
+    }
+    assert_eq!(
+        real.receipt["clients"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["white_list_routes"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        [0, 1, 0]
+    );
+}
+
+#[test]
 fn sectioned_unknown_section_is_refused_and_overridable() {
     let doctored = format!("{SECTIONED}\n\nshiny_new_knob\n--------------\ntrue\n");
     match render(&doctored, &Options::default()) {
@@ -1268,6 +1320,181 @@ test outside-window-is-not-white-listed {
         let items = refusals(render(&to_yaml(&value), &rtr_options()));
         assert!(items.iter().any(|i| i == marker), "{items:?}");
     }
+}
+
+/// The daemon's control matrix as arouteserver spells it for `rs_as`.
+fn set_control_matrix(root: &mut serde_yaml::Value, rs_as: u64) {
+    let std16 = rs_as <= u64::from(u16::MAX);
+    let entries: [(&str, Option<String>, String); 9] = [
+        (
+            "do_not_announce_to_peer",
+            Some("0:peer_as".into()),
+            format!("{rs_as}:0:peer_as"),
+        ),
+        (
+            "announce_to_peer",
+            std16.then(|| format!("{rs_as}:peer_as")),
+            format!("{rs_as}:1:peer_as"),
+        ),
+        (
+            "do_not_announce_to_any",
+            std16.then(|| format!("0:{rs_as}")),
+            format!("{rs_as}:0:0"),
+        ),
+        ("prepend_once_to_peer", None, format!("{rs_as}:101:peer_as")),
+        (
+            "prepend_twice_to_peer",
+            None,
+            format!("{rs_as}:102:peer_as"),
+        ),
+        (
+            "prepend_thrice_to_peer",
+            None,
+            format!("{rs_as}:103:peer_as"),
+        ),
+        ("prepend_once_to_any", None, format!("{rs_as}:101:0")),
+        ("prepend_twice_to_any", None, format!("{rs_as}:102:0")),
+        ("prepend_thrice_to_any", None, format!("{rs_as}:103:0")),
+    ];
+    for (name, std, lrg) in entries {
+        let mut map = serde_yaml::Mapping::new();
+        map.insert(
+            "std".into(),
+            std.map_or(serde_yaml::Value::Null, Into::into),
+        );
+        map.insert("lrg".into(), lrg.into());
+        map.insert("ext".into(), serde_yaml::Value::Null);
+        set_general_community(root, name, serde_yaml::Value::Mapping(map));
+    }
+}
+
+#[test]
+/// Load-bearing: the daemon's control matrix is fixed, so the knob renders
+/// off for a site without control communities and on only when the site
+/// configures exactly that matrix; any other value or an unsupported action
+/// refuses with the offending key.
+fn control_communities_follow_the_daemon_matrix() {
+    use serde_yaml::Value;
+    let off = render(&to_yaml(&healthy_value()), &rtr_options()).expect("render");
+    let config = &off.files["config.toml"];
+    assert_eq!(
+        config.matches("rs_control_communities = false\n").count(),
+        2
+    );
+    assert!(config.contains("# The site configures no control communities"));
+
+    let mut on = healthy_value();
+    set_control_matrix(&mut on, 65500);
+    let config =
+        render(&to_yaml(&on), &rtr_options()).expect("render").files["config.toml"].clone();
+    assert_eq!(config.matches("rs_control_communities = true\n").count(), 2);
+    assert!(!config.contains("rs_control_communities = false"));
+    assert!(
+        config.contains("# RFC 7947 §2.3.2 control communities: the site configures exactly the")
+    );
+
+    let mut missing = on.clone();
+    set_general_community(
+        &mut missing,
+        "prepend_thrice_to_any",
+        serde_yaml::from_str("{std: null, lrg: null, ext: null}").unwrap(),
+    );
+    assert_eq!(
+        refusals(render(&to_yaml(&missing), &rtr_options())),
+        [
+            "communities.prepend_thrice_to_any: the daemon enforces a fixed control matrix; \
+          expected std=null lrg=65500:103:0 ext=null, got std=null lrg=null ext=null"
+        ]
+    );
+
+    let mut differs = on.clone();
+    set_general_community(
+        &mut differs,
+        "prepend_once_to_peer",
+        serde_yaml::from_str("{std: null, lrg: '65500:65504:peer_as', ext: null}").unwrap(),
+    );
+    assert_eq!(
+        refusals(render(&to_yaml(&differs), &rtr_options())),
+        [
+            "communities.prepend_once_to_peer: the daemon enforces a fixed control matrix; \
+          expected std=null lrg=65500:101:peer_as ext=null, got std=null \
+          lrg=65500:65504:peer_as ext=null"
+        ]
+    );
+
+    let mut extended = on.clone();
+    set_general_community(
+        &mut extended,
+        "do_not_announce_to_peer",
+        serde_yaml::from_str("{std: '0:peer_as', lrg: '65500:0:peer_as', ext: 'rt:0:peer_as'}")
+            .unwrap(),
+    );
+    let items = refusals(render(&to_yaml(&extended), &rtr_options()));
+    assert!(
+        items
+            .iter()
+            .any(|i| i.starts_with("communities.do_not_announce_to_peer:")
+                && i.ends_with("ext=rt:0:peer_as")),
+        "{items:?}"
+    );
+
+    // A lone subset is still a mismatch: the daemon would act on the rest.
+    let mut subset = healthy_value();
+    set_general_community(
+        &mut subset,
+        "do_not_announce_to_peer",
+        serde_yaml::from_str("{std: '0:peer_as', lrg: '65500:0:peer_as', ext: null}").unwrap(),
+    );
+    let items = refusals(render(&to_yaml(&subset), &rtr_options()));
+    assert_eq!(items.len(), 8, "{items:?}");
+    assert!(items.iter().all(|i| i.contains("fixed control matrix")));
+
+    for name in [
+        "add_noexport_to_any",
+        "add_noadvertise_to_any",
+        "add_noexport_to_peer",
+        "add_noadvertise_to_peer",
+    ] {
+        let mut value = healthy_value();
+        set_general_community(
+            &mut value,
+            name,
+            serde_yaml::from_str("{std: '65281:peer_as', lrg: null, ext: null}").unwrap(),
+        );
+        assert_eq!(
+            refusals(render(&to_yaml(&value), &rtr_options())),
+            [format!(
+                "communities.{name} is configured; the daemon has no equivalent action"
+            )]
+        );
+    }
+
+    // A 32-bit route-server ASN has no standard form embedding it.
+    let mut wide = healthy_value();
+    set_path(
+        &mut wide,
+        &["cfg", "rs_as"],
+        Value::Number(4_200_000_000u64.into()),
+    );
+    set_control_matrix(&mut wide, 4_200_000_000);
+    let config = render(&to_yaml(&wide), &rtr_options())
+        .expect("render")
+        .files["config.toml"]
+        .clone();
+    assert!(config.contains("rs_control_communities = true\n"));
+    set_general_community(
+        &mut wide,
+        "do_not_announce_to_any",
+        serde_yaml::from_str("{std: '0:65500', lrg: '4200000000:0:0', ext: null}").unwrap(),
+    );
+    assert_eq!(
+        refusals(render(&to_yaml(&wide), &rtr_options())),
+        [
+            "communities.do_not_announce_to_any: the daemon enforces a fixed control matrix; \
+          expected std=null lrg=4200000000:0:0 ext=null, got std=0:65500 \
+          lrg=4200000000:0:0 ext=null"
+        ]
+    );
 }
 
 #[test]

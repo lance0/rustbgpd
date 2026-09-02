@@ -301,6 +301,13 @@ end-to-end walkthrough — including the Alice-LG looking glass — is
 policy:
 [ADR-0110](../adr/0110-irr-peeringdb-filtering-pipeline.md).
 
+The renderer states `rs_control_communities` on every member session: off
+when the arouteserver site configures no control community, on only when
+it configures exactly the matrix above (the daemon's matrix is fixed; any
+other value is refused). IRR white lists render as extra dataset members
+and ordered accept terms, tagged with the site's
+`route_validated_via_white_list` community.
+
 ## Watch
 
 Prometheus (`prometheus_addr`, `/metrics`; dashboards in

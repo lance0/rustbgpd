@@ -410,7 +410,7 @@ and against a live run of the pinned arouteserver image by
 
 | File | Contents |
 |---|---|
-| `config.toml` | RS globals, RPKI cache servers, one `[[neighbors]]` per client: transparent `route_server_client` session, `role = "route_server"`, strict next-hop ownership, per-family max-prefix ceilings and OpenBGPD-style timed restart, per-client import policy chain, `per_client_best` (or Add-Path when the context enables it); plus `ebgp_requires_policy = true` and explicit transparent or blackhole-aware export chains |
+| `config.toml` | RS globals, RPKI cache servers, one `[[neighbors]]` per client: transparent `route_server_client` session, `role = "route_server"`, strict next-hop ownership, an explicit `rs_control_communities` (on only when the site configures exactly the daemon's control matrix, see below), per-family max-prefix ceilings and OpenBGPD-style timed restart, per-client import policy chain, `per_client_best` (or Add-Path when the context enables it); plus `ebgp_requires_policy = true` and explicit transparent or blackhole-aware export chains |
 | `policy/rs-hygiene.rpol` | Shared import hygiene: reject AS_SET segments (always the first term), scrub a configured `route_validated_via_white_list` tag, invalid/private/reserved ASNs in the path, transit-free and never-via-route-servers ASNs, AS_PATH length cap, bogon and black-list prefixes, prefix-length windows, RPKI origin validation with RFC 8097 tagging |
 | `policy/client-<id>.rpol` | Dataset declarations for the client's IRR prefix/origin filters, one ordered accept term per `white_list_route` entry (optionally bound to `route.origin-as`, tagged when the site configures `route_validated_via_white_list` and `tag_as_set`), one accept term (`route.origin-as in … && route.prefix in …`), and an unconditional reject tail |
 | `datasets/client-<id>-origins.list` | Sorted, deduplicated origin ASNs (IRR members plus `white_list_asn`), one canonical entry per line |
@@ -513,6 +513,25 @@ and never silently downgrades an invalid artifact. Extended communities and
 `rejected_route_announced_by` remain refused because the retained route lacks
 authoritative data to reproduce them.
 
+Control communities are rendered by fidelity, not by translation: the
+daemon enforces a fixed RFC 7947 §2.3.2 / RFC 8195 matrix (`0:PEER`,
+`RS:PEER`, `0:RS`, `RS:{0,1,101,102,103}:PEER`, `RS:10x:0`; see the
+[route-server cookbook](../../docs/cookbook/route-server.md#member-set-control-communities)),
+so every rendered session states `rs_control_communities` explicitly.
+A site with none of `do_not_announce_to_peer`, `announce_to_peer`,
+`do_not_announce_to_any`, or `prepend_{once,twice,thrice}_to_{peer,any}`
+configured renders the knob off (fully transparent sessions, the daemon
+default would be on). A site with any of them configured must configure all
+nine exactly as the daemon enforces them — `std` `0:peer_as`, `rs_as:peer_as`,
+`0:rs_as` (the latter two only when `rs_as` fits 16 bits), `lrg`
+`rs_as:0:peer_as`, `rs_as:1:peer_as`, `rs_as:0:0`, `rs_as:10x:peer_as`,
+`rs_as:10x:0`, no `ext` forms — and the knob renders on; any other value,
+or a matrix key left unset while another is configured, is refused naming
+the key and both values, because the daemon would act on a community the
+site never declared (or not act on one it did). `add_noexport_to_*` and
+`add_noadvertise_to_*` have no daemon action and are refused when
+configured.
+
 IRR white lists render rather than refuse: `white_list_pref` and
 `white_list_asn` are extra members of the client's prefix and origin
 datasets (arouteserver folds them into a synthetic bundle too; the union
@@ -524,6 +543,8 @@ path checks. When the site configures `route_validated_via_white_list`
 (standard and/or large forms) and `irrdb.tag_as_set` is on, the accept
 term adds the tag and the hygiene policy scrubs it on entry so members
 cannot pre-tag their own routes.
+[`tests/interop/m106-rs-white-list-control-differential/`](../../tests/interop/m106-rs-white-list-control-differential/README.md)
+proves both surfaces against arouteserver-rendered BIRD.
 
 The renderer also refuses effective nonzero multihop and RFC 8950 on an
 IPv6 session. Blackhole policies support `propagate-unchanged` and

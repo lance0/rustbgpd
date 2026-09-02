@@ -1,0 +1,86 @@
+# M106 differential lab — arouteserver site policy (general.yml).
+#
+# The M90 site (tests/interop/m90-differential/general.yml) plus the two
+# renderer surfaces this lab proves against BIRD:
+#   - the daemon's fixed RFC 7947 §2.3.2 / RFC 8195 control-community
+#     matrix, configured here exactly as the daemon enforces it, so the
+#     rendered sessions keep `rs_control_communities` on;
+#   - a `route_validated_via_white_list` tag for the IRR white lists in
+#     clients.yml.
+# Everything else is the M90 site verbatim (documentation ranges, the
+# lab-local bogons.yml, tag-and-reject with the same reject communities);
+# the M90 fixtures themselves stay untouched — M104 pins their hashes.
+cfg:
+  rs_as: 64496
+  router_id: "192.0.2.10"
+  passive: True
+  path_hiding: True
+  gtsm: False
+  add_path: False
+  communities:
+    # The daemon's control matrix, spelled the arouteserver way. Any other
+    # value, and any key missing while another is set, is refused by
+    # rs-config-render; a site with none of them renders the knob off.
+    do_not_announce_to_peer:
+      std: "0:peer_as"
+      lrg: "rs_as:0:peer_as"
+    announce_to_peer:
+      std: "rs_as:peer_as"
+      lrg: "rs_as:1:peer_as"
+    do_not_announce_to_any:
+      std: "0:rs_as"
+      lrg: "rs_as:0:0"
+    prepend_once_to_peer:
+      lrg: "rs_as:101:peer_as"
+    prepend_twice_to_peer:
+      lrg: "rs_as:102:peer_as"
+    prepend_thrice_to_peer:
+      lrg: "rs_as:103:peer_as"
+    prepend_once_to_any:
+      lrg: "rs_as:101:0"
+    prepend_twice_to_any:
+      lrg: "rs_as:102:0"
+    prepend_thrice_to_any:
+      lrg: "rs_as:103:0"
+    # Informational tag on white-listed routes; deliberately outside the
+    # route server's own administrator so neither daemon scrubs it.
+    route_validated_via_white_list:
+      std: "65530:2"
+      lrg: "rs_as:65530:2"
+    reject_cause:
+      std: "65520:dyn_val"
+      lrg: "rs_as:65520:dyn_val"
+    reject_cause_map:
+      "3":
+        std: "64512:3"
+        lrg: "rs_as:65521:3"
+  filtering:
+    next_hop:
+      policy: "strict"
+    ipv4_pref_len:
+      min: 8
+      max: 28
+    global_black_list_pref:
+      - prefix: "192.0.2.0"
+        length: 24
+        comment: "IXP peering LAN"
+    max_as_path_len: 32
+    # Member ASNs are RFC 5398 documentation ASNs inside the invalid block.
+    reject_invalid_as_in_as_path: False
+    irrdb:
+      enforce_origin_in_as_set: True
+      enforce_prefix_in_as_set: True
+      allow_longer_prefixes: False
+    rpki_bgp_origin_validation:
+      enabled: False
+    never_via_route_servers:
+      peering_db: False
+      asns:
+        - 65551
+    max_prefix:
+      action: "shutdown"
+      count_rejected_routes: False
+      peering_db:
+        enabled: False
+    reject_policy:
+      policy: "tag_and_reject"
