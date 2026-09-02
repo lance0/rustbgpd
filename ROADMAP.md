@@ -324,7 +324,7 @@ proof on the activated cell in hosted CI.
   300-second total engine budget). ClusterFuzzLite is therefore manual-dispatch
   only with a 180-minute cold-start bound and no crash-injection requirement on
   a PR. The existing cargo-fuzz workflow is the sole nightly campaign, while
-  the ordinary PR/push CI check enforces the exact fail-closed 19-target
+  the ordinary PR/push CI check enforces the exact fail-closed
   manifest/source inventory. Batch fuzzing, corpus pruning, storage, and
   coverage are not part of this slice; the official Rust integration currently
   supports AddressSanitizer only.
