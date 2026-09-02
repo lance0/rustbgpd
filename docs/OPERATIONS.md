@@ -1875,10 +1875,12 @@ records for a later outage.
    `reconnect_in_seconds` in the JSON output and in `NeighborState`. The API
    field is absent on older daemons, while JSON omits it when absent or zero.
    The streak clears after the session stays Established for five minutes, on
-   `rbgp neighbor <addr> enable`, or on an administrative reset. Plain TCP
-   connection failures keep the fixed interval and the fast first retries,
-   and a max-prefix shutdown stays latched until an explicit enable. There
-   is no configuration knob for the curve.
+   `rbgp neighbor <addr> enable`, or on an administrative reset. TCP misses
+   in `Connect` or `Active` keep the fast initial retries followed by the
+   existing exponential curve; a TCP loss after `Established` uses the
+   configured fixed Idle interval. Neither advances the NOTIFICATION streak.
+   A max-prefix shutdown stays latched until an explicit enable. There is no
+   configuration knob for the NOTIFICATION curve.
 
 2. **Check logs for the peer:**
    ```bash

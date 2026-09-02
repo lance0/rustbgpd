@@ -324,8 +324,11 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
   the Idle reconnect wait from `connect_retry_secs`, capped at 300s and
   never below the configured interval. The streak clears after the session
   stays Established for five minutes, on an explicit operator enable, or on
-  an administrative reset. TCP-level failures keep the fixed interval and
-  the FSM's fast first retries; there is no configuration knob.
+  an administrative reset. TCP connection misses in Connect or Active keep
+  the fast initial retries followed by the existing exponential curve; a TCP
+  loss after Established uses the configured fixed Idle interval. Neither
+  advances the NOTIFICATION streak, and there is no configuration knob for
+  its curve.
 - Initial hold timer before OPEN negotiation: 240s (RFC 4271 "large
   value"), replaced by negotiated value once OPEN exchange completes.
 - `handle_event` never returns `Result` — every (State, Event) pair
