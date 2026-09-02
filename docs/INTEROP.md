@@ -187,6 +187,13 @@ supports manual dispatch. Neither workflow has a scheduled trigger.
   optional-transitive-partial type-40 UPDATE whose exact `e0 28 01 00` wire
   tuple is attribute-discarded while the route survives to digest-pinned FRR
   10.3.1 (**M101**).
+- **Route-server incumbent and renderer differentials** — a digest-pinned
+  OpenBGPD 9.2 dual-stack member proof (**M102**); the GoBGP 4.7 to 4.8
+  route-server differential revalidation against the immutable M92 artifacts
+  (**M103**); the current-daemon ARouteServer 1.23.2 filtering differential
+  reusing the immutable M90 site read-only (**M104**); and an RFC 8950
+  uniform-fleet route server whose members carry IPv4 and IPv6 unicast over
+  one IPv6-only session each (**M107**).
 - **Core RR against incumbents** — RFC 4456 reflection + RFC 4724 GR helper-truth against BIRD 2.19.2 clients and OpenBGPD 9.1 clients, plus required-family OPEN enforcement against BIRD 2.19.2: **M85**, **M86**, **M93**.
 - **Live policy-presence safety** — ADR-0112 RFC 8212 import-presence transitions qualified for Route Refresh, rejected whole when one peer cannot converge, and converged on the wire when it can: **M95**.
 - **IXP Manager local activation** — pinned v7.4 Foil render, atomic publication, live settlement, and pre-effect restoration against MD5-authenticated FRR: **M96** (local).
@@ -228,8 +235,11 @@ receipt and a separate destructive crash-restart recovery receipt. The
 workflow still probes the selected runner kernel first; a future runner without
 TCP-AO support reports a warning and skips only that topology.
 
-M43 is also the only scenario fed by a third-party source archive
-(`bird-3.3.2.tar.gz`, fetched once per run by the `bird3_archive` job). When
+M43 is fed by a third-party source archive (`bird-3.3.2.tar.gz`, fetched once
+per run by the `bird3_archive` job). It is not the only such scenario:
+`interop.yml` prepares the same pinned BIRD 3.3.2 archive for M101 and a pinned
+`bird-2.19.2.tar.gz` for M83, M85/M93/M95, M100, and M104. M43 is the one whose
+archive outage is tolerated rather than hard-red. When
 that host refuses to serve the pinned tarball, the `check` aggregate tolerates
 `m43=skipped` and prints it as `m43=skipped (bird3 archive unavailable
 upstream)` alongside a `::warning::` and a job-summary line naming the URL, so

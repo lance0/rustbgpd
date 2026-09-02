@@ -28,7 +28,7 @@ deviations; [docs/INTEROP.md](INTEROP.md) has the interop matrix,
 | VPN / MPLS families (RR / controller-feed only, ADR-0077) | RFC 4364/4659 VPNv4/v6 (SAFI 128), RFC 4684 RT-Constrain (SAFI 132), RFC 8277 labeled-unicast (SAFI 4), RFC 9552 BGP-LS (SAFI 71/72) | RD/label/next-hop/RT preserved verbatim; no VRF import, no MPLS FIB, no local BGP-LS production |
 | EVPN (Linux/VXLAN alpha) | RFC 7432, RFC 9135/9136 (symmetric IRB), RFC 9012/8365 (VXLAN encap) | Route types 1-5; RR + VTEP + multi-homing building blocks |
 | Origin / path security | RFC 6811 + RFC 8210 (RPKI/RTR), ASPA, RFC 9234 (Roles + OTC, ADR-0071) | Origin validation, AS-path verification, leak prevention |
-| Transport security | RFC 5925 (TCP-AO), TCP MD5, RFC 5082 (GTSM) | TCP-AO: static-neighbor and direct dynamic-prefix keyrings on Linux; add-only successor installation, observation-gated successor selection/deprecation, then deprecated unselected-MKT deletion on separate SIGHUP generations |
+| Transport security | RFC 5925 (TCP-AO), TCP MD5, RFC 5082 (GTSM) | TCP-AO: static-neighbor and direct dynamic-prefix keyrings on Linux; add-only successor installation, observation-gated successor selection/deprecation, then deprecated unselected-MKT deletion on separate SIGHUP generations; RPKI cache (RTR) sockets take the same MD5 or TCP-AO material |
 | FlowSpec / blackhole | RFC 8955/8956 (FlowSpec, SAFI 133), RFC 7999 (BLACKHOLE) | Receiver scoping + opt-in Linux FIB discard |
 | Liveness | RFC 5880/5881/5882/5883 (BFD), RFC 9384 (BFD Down Cease subcode), RFC 9687 (Send Hold Timer) | Single-hop and multihop async BFD for static neighbors; typed Cease/10 teardown on a genuine BFD Down |
 | Maintenance | RFC 8326 (Graceful Shutdown), RFC 8203 (Admin Shutdown Communication) | Receiver gating + initiator toggle |
@@ -1079,8 +1079,13 @@ carries inactive (absent), unlimited (zero), or finite.
 - VRP table with sorted-Vec binary search for prefix containment.
 - `Arc<VrpTable>` snapshot pattern for lock-free reads.
 - RTR codec: RFC 8210 v1 plus the 8210bis v2 ASPA PDU. Serial/Reset
-  queries, Serial Notify, expire enforcement. Router Key PDUs (BGPsec)
-  and RTR transport security (TLS/SSH) are not implemented.
+  queries, Serial Notify, expire enforcement. Router Key PDUs (BGPsec) are
+  not implemented.
+- RTR cache sockets take the same transport authentication as BGP neighbors:
+  TCP MD5 (RFC 2385, `md5_password`) or a TCP-AO keyring (RFC 5925, `tcp_ao`)
+  per `[[rpki.cache_servers]]`, mutually exclusive, installed before connect
+  and preflighted against the kernel at startup so a refused key is a startup
+  error rather than a reconnect loop. RTR over TLS or SSH is not implemented.
 - Cache state is one per-cache epoch `(version, session ID, serial)`,
   advanced only at a validated End of Data. Identity mismatches (session
   ID, RFC 1982 serial regression) force a Reset Query resync — never a

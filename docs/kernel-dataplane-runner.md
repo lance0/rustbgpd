@@ -93,15 +93,18 @@ issue #187) so reviewers can distinguish real stability from flake masking.
   RNext `13` while BIRD still sends the deprecated key, then `healthy` `3/13`
   only after BIRD switches.
 - M60: ADR-0079 EVPN adoption sweep kill-and-restart against FRR.
-- M61: ADR-0079 EVPN L3 adoption sweep kill-and-restart against FRR.
+- M61: ADR-0079 EVPN L3 adoption sweep kill-and-restart against FRR (uses
+  `vrf`).
 - M62: ADR-0079 blackhole adoption sweep kill-and-restart against FRR.
 - M65: ADR-0083 single-active failover blackout measurement against GoBGP.
 - M66: ADR-0084 ES drain service handover (rustbgpd ×3).
 - M67: ADR-0085 link-driven ES drain failover (rustbgpd ×3).
 - M69: EVPN preference-DF election against FRR.
 - M70: ADR-0089 VLAN-aware bridge FDB attribution against FRR.
-- M71: RFC 9136 §4.3 ESI overlay-index Type 5 single-active receive against GoBGP.
-- M72: RFC 9136 §4.3 ESI overlay-index Type 5 all-active receive against GoBGP.
+- M71: RFC 9136 §4.3 ESI overlay-index Type 5 single-active receive against
+  GoBGP (uses `vrf`).
+- M72: RFC 9136 §4.3 ESI overlay-index Type 5 all-active receive against
+  GoBGP (uses `vrf`).
 - Docker netns selectors, in job order — `fdb_nhg`, `fib_runtime`,
   `bfd_runtime`, `dataplane_vlan_fdb`, `dataplane_remote_mac`,
   `vlan_local_mac_attribution`, `macip_vlan_attribution`, `svd_fdb_vni`,

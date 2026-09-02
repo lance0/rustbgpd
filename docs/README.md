@@ -5,8 +5,8 @@
 The docs are organized by what you are trying to do
 ([Diátaxis](https://diataxis.fr/)): **tutorials** to learn, **how-to
 guides** to get a task done, **reference** to look something up, and
-**explanation** to understand why. Every file in `docs/` is indexed
-below under its primary bucket.
+**explanation** to understand why. Every other Markdown page directly in
+`docs/` is indexed below under its primary bucket.
 
 ## Start with your task
 

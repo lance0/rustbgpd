@@ -630,8 +630,8 @@ fn transport_readme_pins_rejected_route_retention_completeness() {
     for clause in [
         "**On by default:** `TransportConfig::reject_retention_enabled` defaults to `true`",
         "unlike the opt-in import-explain cache above",
-        "The `ListRejectedRoutes` reply reports `enabled`, `capacity`, and `evictions_since_reset`",
-        "`enabled = false` makes an empty result a configuration fact",
+        "The `ListRejectedRoutes` reply reports `retention_enabled`, `capacity`, and `evictions_since_reset`",
+        "`retention_enabled = false` makes an empty result a configuration fact",
         "zero evictions proves no retained rejection was displaced by capacity since the session reset",
         "a nonzero count means the bounded listing may be incomplete",
         "Entries and the eviction count are diagnostic state and reset with the session",
