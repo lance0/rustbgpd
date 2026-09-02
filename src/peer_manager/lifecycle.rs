@@ -479,6 +479,7 @@ impl PeerManager {
             max_prefix_restart_seconds: managed.max_prefix_restart_seconds,
             md5_password: tc.md5_password.clone(),
             tcp_ao: tc.tcp_ao.clone(),
+            tcp_mss: tc.tcp_mss,
             ttl_security_hops: tc.ttl_security_hops,
             families: tc.peer.families.clone(),
             required_families: tc.peer.required_families.clone(),
@@ -565,14 +566,17 @@ impl PeerManager {
             .resolve_neighbor(neighbor)
             .map_err(|error| PeerLifecycleError::Invalid(error.to_string()))?;
         let config = Self::peer_manager_config_from_resolved(resolved, false);
-        // Inbound MD5/GTSM enforcement lives on the BGP listener, which only
-        // startup and SIGHUP reload can update — a runtime-created neighbor
-        // resolving to either would have an unprotected inbound half.
-        if config.md5_password.is_some() || config.ttl_security_hops.is_some() {
+        // Inbound MD5/GTSM/MSS enforcement lives on the BGP listener. Coordinated
+        // SIGHUP can update MD5/GTSM; MSS is startup-only. A runtime-created
+        // neighbor resolving to any of them would have an inconsistent inbound half.
+        if config.md5_password.is_some()
+            || config.ttl_security_hops.is_some()
+            || config.tcp_mss.is_some()
+        {
             return Err(PeerLifecycleError::RestartRequired(format!(
-                "peer {peer} resolves md5_password or ttl_security; inbound listener \
-                 enforcement is updated only by startup or SIGHUP reload — add this neighbor \
-                 through the config file and SIGHUP"
+                "peer {peer} resolves md5_password, ttl_security, or tcp_mss; runtime peer CRUD \
+                 cannot change inbound listener enforcement — use the config file and SIGHUP \
+                 for md5_password/ttl_security, or restart for tcp_mss"
             )));
         }
 
@@ -831,11 +835,12 @@ impl PeerManager {
         if self.peers.get(&peer).is_some_and(|managed| {
             managed.transport_config.md5_password.is_some()
                 || managed.transport_config.ttl_security_hops.is_some()
+                || managed.transport_config.tcp_mss.is_some()
         }) {
             return Err(PeerLifecycleError::RestartRequired(format!(
-                "peer {peer} resolves md5_password or ttl_security; inbound listener \
-                 enforcement is updated only by startup or SIGHUP reload — remove this \
-                 neighbor through the config file and SIGHUP"
+                "peer {peer} resolves md5_password, ttl_security, or tcp_mss; runtime peer CRUD \
+                 cannot change inbound listener enforcement — use the config file and SIGHUP \
+                 for md5_password/ttl_security, or restart for tcp_mss"
             )));
         }
         self.delete_peer(peer, sync_config_snapshot).await
@@ -873,8 +878,8 @@ impl PeerManager {
     /// Runtime (config-transaction) entry to [`Self::reconfigure_peer`].
     /// Unlike SIGHUP reload — which replaces the listener MD5/GTSM inventory
     /// in the same coordinated apply — runtime paths cannot update the BGP
-    /// listener, so a change to either field must fail loudly instead of
-    /// leaving the listener enforcing the old inventory.
+    /// listener, so a change to those fields or startup-owned MSS must fail
+    /// loudly instead of leaving the listener enforcing the old inventory.
     pub(super) async fn reconfigure_peer_runtime(
         &mut self,
         config: PeerManagerNeighborConfig,
@@ -882,12 +887,13 @@ impl PeerManager {
         let peer = PeerKey::new(config.address, config.interface.clone());
         if let Some(managed) = self.peers.get(&peer)
             && (managed.transport_config.md5_password != config.md5_password
-                || managed.transport_config.ttl_security_hops != config.ttl_security_hops)
+                || managed.transport_config.ttl_security_hops != config.ttl_security_hops
+                || managed.transport_config.tcp_mss != config.tcp_mss)
         {
             return Err(PeerLifecycleError::RestartRequired(format!(
-                "peer {peer} changes md5_password or ttl_security; inbound listener \
-                 enforcement is updated only by startup or SIGHUP reload — apply this change \
-                 through the config file and SIGHUP"
+                "peer {peer} changes md5_password, ttl_security, or tcp_mss; runtime peer \
+                 reconfigure cannot change inbound listener enforcement — use the config file \
+                 and SIGHUP for md5_password/ttl_security, or restart for tcp_mss"
             )));
         }
         self.reconfigure_peer(config).await
@@ -1270,19 +1276,21 @@ impl PeerManager {
                     )),
                 );
             }
-            // Inbound MD5 keys and GTSM selectors live on the BGP listener,
-            // which only startup and the SIGHUP reload coordinator can
-            // update. A runtime reshape that changed them would leave the
+            // Inbound MD5 keys and GTSM selectors live on the BGP listener and
+            // require coordinated SIGHUP; MSS is startup-only. A runtime reshape
+            // that changed them would leave the
             // listener enforcing the old inventory (stale password accepted
             // inbound, new password rejected).
             if managed.transport_config.md5_password != target.md5_password
                 || managed.transport_config.ttl_security_hops != target.ttl_security_hops
+                || managed.transport_config.tcp_mss != target.tcp_mss
             {
                 return PeerReshapeSnapshotOutcome::RejectedNoEffect(
                     PeerLifecycleError::RestartRequired(format!(
-                        "peer reshape target {peer} changes md5_password or ttl_security; inbound \
-                     listener enforcement is updated only by startup or SIGHUP reload — apply \
-                     this change through the config file and SIGHUP"
+                        "peer reshape target {peer} changes md5_password, ttl_security, or \
+                         tcp_mss; runtime reshape cannot change inbound listener enforcement — \
+                         use the config file and SIGHUP for md5_password/ttl_security, or restart \
+                         for tcp_mss"
                     )),
                 );
             }

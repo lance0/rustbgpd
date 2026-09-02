@@ -474,6 +474,9 @@ pub struct TransportConfig {
     pub md5_password: Option<TransportAuthSecret>,
     /// TCP-AO authentication key (RFC 5925).
     pub tcp_ao: Option<TcpAoKeyring>,
+    /// TCP maximum segment size clamp (`TCP_MAXSEG`) installed on the
+    /// active-open socket before connect.
+    pub tcp_mss: Option<u16>,
     /// Maximum GTSM peer distance in IP hops. `None` disables GTSM;
     /// `Some(1)` requires an inbound TTL/Hop Limit of exactly 255.
     pub ttl_security_hops: Option<NonZeroU8>,
@@ -627,6 +630,7 @@ impl TransportConfig {
             max_prefix_warning_percent: None,
             peer_group: None,
             md5_password: None,
+            tcp_mss: None,
             tcp_ao: None,
             ttl_security_hops: None,
             local_ipv6_nexthop: None,

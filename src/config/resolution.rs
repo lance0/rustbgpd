@@ -782,6 +782,7 @@ impl Config {
             .or_else(|| group.and_then(|g| g.md5_password.clone()))
             .map(Into::into);
         transport.tcp_ao = neighbor.tcp_ao.as_ref().map(transport_tcp_ao_keyring);
+        transport.tcp_mss = neighbor.tcp_mss.or_else(|| group.and_then(|g| g.tcp_mss));
         let ttl_security = neighbor
             .ttl_security
             .or_else(|| group.and_then(|g| g.ttl_security))
@@ -954,6 +955,7 @@ impl Config {
         peer_group_name: &str,
     ) -> Neighbor {
         Neighbor {
+            tcp_mss: None,
             min_hold_time: None,
             address: addr.to_string(),
             interface: None,

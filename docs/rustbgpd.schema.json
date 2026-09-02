@@ -2271,6 +2271,16 @@
             }
           ]
         },
+        "tcp_mss": {
+          "description": "TCP maximum segment size clamp in bytes (`TCP_MAXSEG`,\n88..=32767); omit to leave it unset. Installed on the\nactive-open socket before connect. The smallest effective\nvalue across resolved static neighbors is installed on\nevery bound passive listener socket before listen, and\nevery accepted child inherits it. Restart-required.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 32767,
+          "minimum": 88
+        },
         "ttl_security": {
           "description": "GTSM TTL security (RFC 5082): require TTL 255 from a directly\nconnected peer.",
           "type": [
@@ -2753,6 +2763,16 @@
             "boolean",
             "null"
           ]
+        },
+        "tcp_mss": {
+          "description": "TCP maximum segment size clamp in bytes (`TCP_MAXSEG`,\n88..=32767) inherited by static neighbors in this group;\nomit to leave it unset. Groups referenced by dynamic\nneighbor ranges cannot set this field. Restart-required.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 32767,
+          "minimum": 88
         },
         "ttl_security": {
           "description": "GTSM TTL security (RFC 5082) inherited by neighbors in this group.",

@@ -155,6 +155,7 @@ fn transport_config(remote: SocketAddr) -> TransportConfig {
         peer_group: None,
         md5_password: None,
         tcp_ao: None,
+        tcp_mss: None,
         ttl_security_hops: None,
         local_ipv6_nexthop: None,
         gr_stale_routes_time: 360,

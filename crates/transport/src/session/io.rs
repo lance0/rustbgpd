@@ -1070,6 +1070,12 @@ where
         debug!(peer = %peer_label, hops = hops.get(), "GTSM / TTL security configured");
     }
 
+    // The clamp must be on the socket before the SYN carries our MSS option.
+    if let Some(mss) = config.tcp_mss {
+        socket.set_tcp_mss(u32::from(mss))?;
+        debug!(peer = %peer_label, mss, "TCP MSS clamp configured");
+    }
+
     socket.set_nonblocking(true)?;
     let addr = socket2::SockAddr::from(config.remote_addr);
     connect_socket(&socket, &addr)?;

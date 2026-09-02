@@ -198,7 +198,13 @@ impl PeerManager {
         if group.bfd.as_ref().is_some_and(|b| b.enabled) {
             return Err(DynamicRangeError::Invalid(format!(
                 "peer_group {peer_group:?} enables BFD, which is not supported for \
-                 dynamic neighbors (static neighbors only in v1 — see ADR-0067)"
+                dynamic neighbors (static neighbors only in v1 — see ADR-0067)"
+            )));
+        }
+        if group.tcp_mss.is_some() {
+            return Err(DynamicRangeError::Invalid(format!(
+                "peer_group {peer_group:?} sets tcp_mss, which is supported for static \
+                 neighbors only"
             )));
         }
         // Inbound MD5 and GTSM for dynamic ranges are enforced on the BGP
@@ -314,9 +320,9 @@ impl PeerManager {
                 key.0, key.1
             )));
         }
-        // The range's inherited MD5 prefix key and GTSM selector live on the
-        // BGP listener, which only startup and SIGHUP reload can update — a
-        // runtime delete would leave the stale prefix key installed
+        // The range's inherited MD5 prefix key, GTSM selector, and TCP MSS
+        // clamp live on the BGP listener. A runtime delete would leave stale
+        // listener state installed
         // (fail-closed, but a delete-then-re-add wedges the re-added range's
         // inbound half until SIGHUP).
         if self.current_config.dynamic_neighbors.iter().any(|range| {
@@ -326,13 +332,15 @@ impl PeerManager {
                     .peer_groups
                     .get(&range.peer_group)
                     .is_some_and(|group| {
-                        group.md5_password.is_some() || group.ttl_security == Some(true)
+                        group.md5_password.is_some()
+                            || group.ttl_security == Some(true)
+                            || group.tcp_mss.is_some()
                     })
         }) {
             return Err(DynamicRangeError::Invalid(format!(
-                "dynamic range {}/{} inherits md5_password or ttl_security; inbound listener \
-                 enforcement is updated only by startup or SIGHUP reload — remove it through \
-                 the config file and SIGHUP",
+                "dynamic range {}/{} inherits md5_password, ttl_security, or tcp_mss; runtime \
+                 range CRUD cannot change inbound listener enforcement — use the config file; \
+                 tcp_mss requires a daemon restart",
                 key.0, key.1
             )));
         }

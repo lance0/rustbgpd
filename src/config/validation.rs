@@ -753,6 +753,9 @@ impl Config {
                     .max_prefix_warning_percent
                     .or_else(|| group.and_then(|group| group.max_prefix_warning_percent)),
             )?;
+            if let Some(mss) = neighbor.tcp_mss {
+                validate_tcp_mss(&neighbor.address, mss)?;
+            }
 
             if let Some(tcp_ao) = &neighbor.tcp_ao {
                 if neighbor.md5_password.is_some() {
@@ -1290,6 +1293,15 @@ impl Config {
                          supported for dynamic neighbors (static neighbors only in v1; \
                          set `bfd = {{ enabled = false }}` on the group or use static \
                          neighbors — see ADR-0067)",
+                        dn.peer_group
+                    ),
+                });
+            }
+            if group.tcp_mss.is_some() {
+                return Err(ConfigError::InvalidDynamicNeighbor {
+                    reason: format!(
+                        "dynamic_neighbors[{i}]: peer_group {:?} sets tcp_mss, but tcp_mss is \
+                         supported for static neighbors only",
                         dn.peer_group
                     ),
                 });
@@ -2701,6 +2713,19 @@ fn tcp_ao_overlap_id_collision(
     None
 }
 
+/// Linux accepts `TCP_MAXSEG` in 88..=32767; reject the rest at load so a bad
+/// clamp is a config error, not a listener bind failure.
+fn validate_tcp_mss(address: &str, mss: u16) -> Result<(), ConfigError> {
+    if !(88..=32767).contains(&mss) {
+        return Err(ConfigError::InvalidNeighborConfig {
+            address: address.to_string(),
+            field: "tcp_mss".to_string(),
+            reason: format!("{mss} is outside the kernel TCP_MAXSEG range 88..=32767"),
+        });
+    }
+    Ok(())
+}
+
 fn validate_tcp_ao_key(address: &str, tcp_ao: &TcpAoConfig) -> Result<(), ConfigError> {
     let key_len = tcp_ao.key.len();
     if key_len == 0 {
@@ -2817,6 +2842,9 @@ fn validate_peer_group(
             field: "ttl_security_hops".to_string(),
             reason: "requires ttl_security = true on the same peer group".to_string(),
         });
+    }
+    if let Some(mss) = group.tcp_mss {
+        validate_tcp_mss(&format!("peer_group.{name}"), mss)?;
     }
 
     let configured_families = (!group.families.is_empty())

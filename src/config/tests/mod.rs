@@ -1000,6 +1000,7 @@ remote_asn = 65003
 
 fn test_neighbor(addr: &str, asn: u32) -> Neighbor {
     Neighbor {
+        tcp_mss: None,
         min_hold_time: None,
         address: addr.to_string(),
         interface: None,
@@ -2159,6 +2160,7 @@ const RELOAD_MATRIX_NEIGHBOR_FIELDS: &[&str] = &[
     "max_prefixes_out_ipv6",
     "md5_password",
     "tcp_ao",
+    "tcp_mss",
     "bfd",
     "ttl_security",
     "ttl_security_hops",
@@ -2199,6 +2201,7 @@ const RELOAD_MATRIX_PEER_GROUP_FIELDS: &[&str] = &[
     "max_prefixes_out_ipv4",
     "max_prefixes_out_ipv6",
     "md5_password",
+    "tcp_mss",
     "bfd",
     "ttl_security",
     "ttl_security_hops",

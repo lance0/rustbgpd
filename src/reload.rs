@@ -225,6 +225,7 @@ pub(crate) fn build_peer_mgr_config(
         max_prefix_restart_seconds,
         md5_password: tc.md5_password.clone(),
         tcp_ao: tc.tcp_ao.clone(),
+        tcp_mss: tc.tcp_mss,
         ttl_security_hops: tc.ttl_security_hops,
         families: tc.peer.families.clone(),
         required_families: tc.peer.required_families.clone(),
@@ -1997,6 +1998,14 @@ pub(crate) async fn reload_config_with_tcp_ao(
     // so restart intent is preserved and the same drift remains visible on
     // every reload.
     pin_unreconciled_daemon_runtime_fields(&mut new_config, current);
+    if config::pin_tcp_mss_startup_only_runtime(&mut new_config, current) {
+        error!(
+            "tcp_mss differs from the live static-neighbor/listener snapshot: active-open and \
+             passive-listener sockets install TCP_MAXSEG only when created. Restart rustbgpd \
+             to add, remove, or change a neighbor or peer-group tcp_mss. The running snapshot \
+             keeps its startup values for this reload."
+        );
+    }
 
     // Compile the immutable TCP-AO candidate before TCP-AO inventory pinning,
     // but do not touch a socket or session yet. The fully pinned runtime
@@ -2076,7 +2085,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
     if let Err(error) = new_config.validate() {
         error!(
             error = %error,
-            "reload pinning produced an invalid runtime configuration; refusing reload before any runtime actor mutation. Restart rustbgpd to change TCP-AO authentication boundaries"
+            "reload pinning produced an invalid runtime configuration; refusing reload before any runtime actor mutation. Restart rustbgpd to change startup-owned TCP authentication or MSS boundaries"
         );
         return clean_reload_failure("reload.validate", error.to_string());
     }
@@ -9465,6 +9474,7 @@ remote_asn = 65002
                     max_prefix_restart_seconds: None,
                     md5_password: None,
                     tcp_ao: None,
+                    tcp_mss: None,
                     ttl_security_hops: None,
                     families: vec![(Afi::Ipv4, Safi::Unicast)],
                     required_families: Vec::new(),
@@ -9583,6 +9593,7 @@ remote_asn = 65002
                     max_prefix_restart_seconds: None,
                     md5_password: None,
                     tcp_ao: None,
+                    tcp_mss: None,
                     ttl_security_hops: None,
                     families: vec![(Afi::Ipv4, Safi::Unicast)],
                     required_families: Vec::new(),

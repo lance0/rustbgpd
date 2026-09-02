@@ -1424,6 +1424,24 @@ define_neighbor_and_peer_group_configs! {
                 /// this group.
             }
         }
+        tcp_mss: Option<u16> {
+            neighbor {
+                /// TCP maximum segment size clamp in bytes (`TCP_MAXSEG`,
+                /// 88..=32767); omit to leave it unset. Installed on the
+                /// active-open socket before connect. The smallest effective
+                /// value across resolved static neighbors is installed on
+                /// every bound passive listener socket before listen, and
+                /// every accepted child inherits it. Restart-required.
+                #[schemars(range(min = 88, max = 32767))]
+            }
+            peer_group {
+                /// TCP maximum segment size clamp in bytes (`TCP_MAXSEG`,
+                /// 88..=32767) inherited by static neighbors in this group;
+                /// omit to leave it unset. Groups referenced by dynamic
+                /// neighbor ranges cannot set this field. Restart-required.
+                #[schemars(range(min = 88, max = 32767))]
+            }
+        }
     }
     bfd: Option<BfdConfig> {
         neighbor {
@@ -1827,6 +1845,7 @@ impl fmt::Debug for Neighbor {
                 "md5_password",
                 &self.md5_password.as_ref().map(|_| "<redacted>"),
             )
+            .field("tcp_mss", &self.tcp_mss)
             .field("tcp_ao", &self.tcp_ao)
             .field("bfd", &self.bfd)
             .field("ttl_security", &self.ttl_security)
@@ -2023,6 +2042,7 @@ impl fmt::Debug for PeerGroupConfig {
                 "md5_password",
                 &self.md5_password.as_ref().map(|_| "<redacted>"),
             )
+            .field("tcp_mss", &self.tcp_mss)
             .field("ttl_security", &self.ttl_security)
             .field("ttl_security_hops", &self.ttl_security_hops)
             .field("bfd", &self.bfd)

@@ -1966,6 +1966,8 @@ pub struct PeerManagerNeighborConfig {
     pub md5_password: Option<TransportAuthSecret>,
     /// Optional ordered TCP-AO keyring for static-neighbor runtime sockets.
     pub tcp_ao: Option<TcpAoKeyring>,
+    /// TCP MSS clamp for active opens; passive accepts inherit the listener-wide minimum.
+    pub tcp_mss: Option<u16>,
     /// Maximum GTSM peer distance in IP hops. `None` disables GTSM.
     pub ttl_security_hops: Option<NonZeroU8>,
     /// Negotiated address families for this peer.

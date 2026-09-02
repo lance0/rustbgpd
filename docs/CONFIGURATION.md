@@ -908,6 +908,7 @@ complete atomic block. There is no probe or automatic legacy fallback.
 | `md5_password`         | string   | no       | --      | TCP MD5 authentication password (RFC 2385, Linux only) |
 | `tcp_ao`               | table or array | no | -- | Ordered TCP-AO keyring for static neighbors (RFC 5925; Linux; append a non-preferred successor, then select it in a later observation-gated SIGHUP generation) |
 | `bfd`                  | table    | no       | --      | Single-hop BFD attachment referencing a `[[bfd_profiles]]` entry (RFC 5880/5881/5882; static neighbors only, including interface-scoped IPv6 link-local peers; restart-required edits) |
+| `tcp_mss`              | u16      | no       | --      | TCP maximum segment size clamp in bytes (`TCP_MAXSEG`, 88..=32767; Linux). Set on the active-open socket before connect; every bound passive listener socket takes the smallest effective value across resolved static neighbors before listen. Dynamic-range peer groups cannot set it. Restart-required |
 | `ttl_security`         | bool     | no       | false   | Enable GTSM / TTL security (RFC 5082, Linux only). Outbound packets use TTL/Hop-Limit 255. Without `ttl_security_hops`, inbound packets must arrive with exactly 255, preserving the historical one-hop policy |
 | `ttl_security_hops`    | non-zero u8 | no    | 1 when GTSM is enabled | Maximum expected peer distance for GTSM (1--255). Requires effective `ttl_security = true`; inbound packets below `256 - ttl_security_hops` are dropped by `IP_MINTTL` / `IPV6_MINHOPCOUNT`. Inherits from peer groups and may be overridden per neighbor |
 | `families`             | [string] | no       | (auto)  | Address families to negotiate (see below)        |
@@ -1170,6 +1171,33 @@ configuration change. Appending a non-preferred successor can be installed
 live on SIGHUP; a later SIGHUP can select that installed successor and
 observation-gate predecessor deprecation in the same immutable generation.
 Deleting an MKT remains restart-coordinated.
+
+### TCP MSS clamp
+
+`tcp_mss` clamps the TCP maximum segment size (`TCP_MAXSEG`, in bytes) for a
+session that crosses a tunnel or another reduced-MTU path. It is inheritable
+from a peer group and accepts the kernel range 88..=32767. Omit it to leave the
+socket unclamped:
+
+```toml
+[peer_groups.tunnel]
+tcp_mss = 1360
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "tunnel"
+```
+
+The value is installed on the active-open socket before connect, so it applies
+to that neighbor's SYN. Passive opens use startup listener state rather than a
+per-neighbor socket option: rustbgpd computes the smallest effective
+`tcp_mss` across resolved static neighbors and installs the same clamp on every
+bound BGP listener socket before listen. Every passive accepted child inherits
+that clamp, including dynamic-range peers and static neighbors without their
+own value. A peer group referenced by a dynamic-neighbor range cannot set
+`tcp_mss`, so dynamic ranges cannot request a different clamp. The field is
+restart-required; SIGHUP retains the startup clamp until the daemon restarts.
 
 ### eBGP multihop and distance-aware `ttl_security`
 
@@ -1447,7 +1475,7 @@ prefix limits (`max_prefixes`, `max_prefixes_ipv4`, `max_prefixes_ipv6`,
 `max_prefixes_out_ipv4`, `max_prefixes_out_ipv6`) and
 `max_prefix_restart_seconds`,
 GR/LLGR, Add-Path, route-server / RR flags, BGP Role / strict-role defaults,
-receive-side Prefix ORF, private-AS handling, MD5/GTSM,
+receive-side Prefix ORF, private-AS handling, MD5/GTSM, `tcp_mss`,
 `local_ipv6_nexthop`, `log_level`, slow-peer detection
 (`slow_peer_threshold_pct`, `slow_peer_duration`, `slow_peer_isolation`),
 and import/export inline policy or named chains. TCP-AO is intentionally not inherited through peer groups; static
