@@ -1003,8 +1003,9 @@ impl PeerSession {
         }
     }
 
-    /// Record one dropped net-new prefix under `MaxPrefixAction::Block`,
-    /// opening the scope's blocking episode on the first drop.
+    /// Open a scope's blocking episode on its first withheld prefix.
+    /// The gauge, log, and counter transition together; later drops in the
+    /// same episode are no-ops until the scope recovers.
     fn note_max_prefix_block(&mut self, scope: MaxPrefixScope) {
         if !self.max_prefix_blocking[scope.index()] {
             self.max_prefix_blocking[scope.index()] = true;
