@@ -3036,6 +3036,81 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "id": 75,
+      "type": "row",
+      "title": "Peer identity",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 200 },
+      "panels": []
+    },
+    {
+      "id": 76,
+      "type": "table",
+      "title": "Peer identity",
+      "description": "Configured identity of every selected peer from bgp_peer_info: remote ASN, description, and peer group. The description falls back to the neighbor address when none is configured; free-text labels are scrubbed and bounded to 128 characters.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 201 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "decimals": 0 },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Value" },
+            "properties": [ { "id": "custom.hidden", "value": true } ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Time" },
+            "properties": [ { "id": "custom.hidden", "value": true } ]
+          }
+        ]
+      },
+      "options": { "showHeader": true },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "bgp_peer_info{instance=~\"$instance\",peer=~\"$peer\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 77,
+      "type": "timeseries",
+      "title": "Session truth by member identity",
+      "description": "The exact active-primary Established state from the session-truth panel, joined to bgp_peer_info so the legend names the member instead of the bare address. A peer with no bgp_peer_info row is absent here and still visible on the session-truth panel.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 201 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "max": 1,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "bgp_peer_session_established{instance=~\"$instance\",peer=~\"$peer\"} * on (instance, peer, interface) group_left(remote_asn, description) bgp_peer_info{instance=~\"$instance\",peer=~\"$peer\"}",
+          "legendFormat": "{{description}} AS{{remote_asn}} {{peer}} {{interface}}",
+          "refId": "A"
+        }
+      ]
     }
   ]
 }

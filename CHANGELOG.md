@@ -71,6 +71,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   configured. Enabling the bound on an Established session requests a route
   refresh so existing rejections are recounted (ADR-0108 amendment).
 
+- **Operator-visible:** export one
+  `bgp_peer_info{peer,interface,remote_asn,description,peer_group}` identity
+  gauge per configured and dynamic peer so dashboards and alerts can name a
+  member instead of its bare address. The row is published on install,
+  replaced in place on a description, peer-group, or learned-ASN change, and
+  reaped with the other per-peer series on delete; `description` and
+  `peer_group` are scrubbed of control characters and bounded to 128
+  characters. The shipped overview dashboard adds a **Peer identity** row
+  with a `group_left(remote_asn, description)` join, and
+  `BgpSessionNotEstablished` now carries `remote_asn`, `description`, and
+  `peer_group` labels with a fallback that still fires for peers without an
+  identity row. No existing metric family or label changes.
+
 ### Changed
 
 - Reject AS 0 in received and locally encoded AS paths and aggregators per RFC

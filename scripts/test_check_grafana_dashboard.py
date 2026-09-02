@@ -417,6 +417,57 @@ let families = self.allocated.collect();'''
         with self.assertRaisesRegex(ValueError, "exactly one.*counts=.*Active DF"):
             self.check_evpn(dashboard)
 
+    def test_peer_identity_join_mutations_fail_closed(self):
+        dashboard = json.loads(CHECK.DASHBOARD.read_text(encoding="utf-8"))
+        panels = CHECK.all_panels(dashboard["panels"])
+        member = next(
+            panel for panel in panels
+            if panel["title"] == "Session truth by member identity"
+        )
+        identity = next(
+            panel for panel in panels
+            if panel["title"] == "Peer identity" and panel["type"] != "row"
+        )
+        join = member["targets"][0]["expr"]
+        self.assertIn("group_left(remote_asn, description)", join)
+        self.assertEqual(
+            CHECK.expression_metric_names(join),
+            {"bgp_peer_session_established", "bgp_peer_info"},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            copy = Path(directory) / "dashboard.json"
+            original, CHECK.DASHBOARD = CHECK.DASHBOARD, copy
+            try:
+                copy.write_text(json.dumps(dashboard), encoding="utf-8")
+                with redirect_stdout(io.StringIO()):
+                    CHECK.main()
+                mutations = (
+                    (member["targets"][0], "expr",
+                     join.replace(" * on (instance, peer, interface) group_left(remote_asn, description) bgp_peer_info{instance=~\"$instance\",peer=~\"$peer\"}", "")),
+                    (member["targets"][0], "expr",
+                     join.replace("group_left(remote_asn, description)", "group_left(remote_asn)")),
+                    (member["targets"][0], "legendFormat", "{{peer}}"),
+                    (member["fieldConfig"]["defaults"], "max", 2),
+                    (identity, "type", "timeseries"),
+                    (identity["targets"][0], "instant", False),
+                    (identity["targets"][0], "expr", 'bgp_peer_admin_enabled{instance=~"$instance",peer=~"$peer"}'),
+                )
+                for subject, field, replacement in mutations:
+                    saved = subject[field]
+                    subject[field] = replacement
+                    copy.write_text(json.dumps(dashboard), encoding="utf-8")
+                    with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+                        CHECK.main()
+                    subject[field] = saved
+                for panel_id in (member["id"], identity["id"]):
+                    self.assertTrue(self.remove_panel(dashboard["panels"], panel_id))
+                    copy.write_text(json.dumps(dashboard), encoding="utf-8")
+                    with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+                        CHECK.main()
+                    dashboard = json.loads(original.read_text(encoding="utf-8"))
+            finally:
+                CHECK.DASHBOARD = original
+
     def test_live_dashboard_presentation_mutations_pass_full_check(self):
         dashboard = json.loads(CHECK.DASHBOARD.read_text(encoding="utf-8"))
         for index, panel in enumerate(CHECK.all_panels(dashboard["panels"])):

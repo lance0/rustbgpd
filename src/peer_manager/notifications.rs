@@ -235,6 +235,7 @@ impl PeerManager {
                             self.peers.insert(peer_key.clone(), managed);
                             self.register_session(session_id, &peer_key);
                             self.seed_peer_truth_metrics(&peer_key, false);
+                            self.publish_peer_info_metric(&peer_key);
                             info!(%peer_addr, "retained dynamic peer disabled after terminal max-prefix signal during retirement");
                         } else {
                             // Auto-removal is authoritative when no terminal
@@ -445,6 +446,9 @@ impl PeerManager {
         {
             managed.remote_asn = peer_asn;
             managed.transport_config.peer.remote_asn = peer_asn;
+            // The learned ASN replaces the accept-any `remote_asn="0"`
+            // identity row.
+            self.publish_peer_info_metric(&peer_key);
         }
         self.publish_state_lifecycle_event(&peer_key, role, old, new);
     }

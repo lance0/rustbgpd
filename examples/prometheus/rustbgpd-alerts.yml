@@ -18,6 +18,9 @@
 # Every `peer` label is the bare neighbor address ("192.0.2.1",
 # "2001:db8::1") in every metric family, so `by (peer)` aggregations and
 # joins across families work without rewriting the label.
+# `bgp_peer_info{peer,interface,remote_asn,description,peer_group}` is the
+# configured identity of each exact peer; BgpSessionNotEstablished joins it
+# so the alert labels carry the member ASN, description, and peer group.
 #
 # Unit tests: rustbgpd-alerts_test.yml (`promtool test rules`).
 
@@ -126,10 +129,24 @@ groups:
         # Exact configured identity join: catches enabled peers that have never
         # Established as well as peers that established previously and went
         # down. Disabled peers and a healthy scoped sibling do not match.
+        # The `bgp_peer_info` join carries the member identity into the alert
+        # labels; a peer without an identity row still fires through the
+        # `or ignoring` fallback, so a missing row can never suppress the alert.
         expr: >-
-          bgp_peer_admin_enabled == 1
-          and on (instance, peer, interface)
-          bgp_peer_session_established == 0
+          (
+            bgp_peer_admin_enabled == 1
+            and on (instance, peer, interface)
+            bgp_peer_session_established == 0
+          )
+          * on (instance, peer, interface)
+            group_left(remote_asn, description, peer_group)
+            bgp_peer_info
+          or ignoring(remote_asn, description, peer_group)
+          (
+            bgp_peer_admin_enabled == 1
+            and on (instance, peer, interface)
+            bgp_peer_session_established == 0
+          )
         for: 2m
         labels:
           severity: critical

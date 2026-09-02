@@ -74,7 +74,13 @@ Template variables:
   identifies a peer the same way, by its bare neighbor address
   (`192.0.2.1`, `2001:db8::1`), so one selector drives every per-peer panel
   and `by (peer)` joins across families match. Supports multiple values
-  and All.
+  and All. The selector value stays the bare address; the member's ASN,
+  description, and peer group live on the
+  `bgp_peer_info{peer,interface,remote_asn,description,peer_group}` identity
+  metric, and the **Peer identity** row joins it onto session truth with
+  `* on (instance, peer, interface) group_left(remote_asn, description)` so a
+  legend can read `Example Member AS64496 192.0.2.1` instead of the address
+  alone. Copy that join onto any other per-peer panel that needs a name.
 
 Per-peer series are reaped when a peer is deleted, so stale values age out after
 the next scrape.
@@ -106,6 +112,12 @@ with per-rule unit tests in
 [`rustbgpd-alerts_test.yml`](../examples/prometheus/rustbgpd-alerts_test.yml)
 (`promtool test rules`). It assumes the scrape config above
 (`job_name: rustbgpd`).
+
+`BgpSessionNotEstablished` joins `bgp_peer_info` with
+`group_left(remote_asn, description, peer_group)`, so its alert labels carry
+the member identity for routing and notification templates. A peer with no
+identity row still fires through an `or ignoring(...)` fallback without those
+labels; the join can add labels but never suppress the alert.
 
 The loss alerts use a 10-minute counter-increase window and clear after
 the last increment ages out:
@@ -172,6 +184,13 @@ inside the bounded window does.
   defensive `unknown`. Local initiation remains the cause when best-effort
   NOTIFICATION delivery fails; neither query adds an alert or overview-dashboard
   panel.
+- **Peer identity** lists every selected `bgp_peer_info` row as an instant
+  table, and **Session truth by member identity** repeats the Established
+  state from the session-truth panel with the joined legend. A peer whose
+  identity row is absent stays visible on the session-truth panel and is
+  simply missing from the joined one. `description` falls back to the
+  neighbor address when none is configured; free-text labels are scrubbed of
+  control characters and bounded to 128 characters.
 - Exact-export rejection and malformed-UPDATE disposition rates share the
   `$peer` selector, like every other per-peer panel.
   Outbound route-drop and RFC 9687 send-hold alerts preserve that same `peer`
