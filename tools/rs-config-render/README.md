@@ -483,8 +483,10 @@ this binding, resumable or unreadable state, an unmet gate — nothing changed),
 and 5 (an `--apply` step did not complete; fence and journal retained, the
 message names the retry).
 
-Refused knobs: RTT-based communities and `rtt_thresholds` (the daemon
-has no RTT source; permanent), configured
+Refused knobs: RTT-based communities and `rtt_thresholds` (ARouteServer
+expands policy at build time from each client's `rtt` value, which its
+`rtt_getter_path` program can populate; the renderer does not consume or
+expand that input; permanent), configured
 `communities.rpki_bgp_origin_validation_not_performed` tagging (the renderer
 cannot reproduce its tagging and inbound anti-spoof scrubbing), `next_hop.policy` other
 than `strict`

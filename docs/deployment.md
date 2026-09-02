@@ -1418,7 +1418,9 @@ short version for first deployment:
   per-tier in TOML. UDS with a restrictive `mode`
   is fine for single-host operator access.
 - **BGP authentication.** TCP-MD5 (RFC 2385) and TCP-AO (RFC 5925) are
-  both supported. TCP-AO is preferred; see ADR-0062.
+  both supported. TCP-AO is preferred and needs mainline Linux 6.7 or newer,
+  or a downstream kernel with TCP-AO backported, built with
+  `CONFIG_TCP_AO=y`; see ADR-0062.
 - **RPKI cache transport.** RTR (RFC 8210) sessions are plain TCP:
   unauthenticated and unencrypted. Run caches on loopback or a trusted
   segment, or tunnel the session (WireGuard, an SSH or stunnel forward).

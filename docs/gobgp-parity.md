@@ -6,15 +6,17 @@ For release-by-release feature history, see [CHANGELOG.md](../CHANGELOG.md).
 
 This document is the canonical source for GoBGP capability claims in the
 project docs (the [comparison matrix](COMPARISON.md) defers to it). GoBGP
-cells are verified against the exact GoBGP `v4.8.0` tag, its
-[release notes](https://github.com/osrg/gobgp/releases/tag/v4.8.0), and the
-tagged [capability definitions](https://github.com/osrg/gobgp/blob/v4.8.0/pkg/packet/bgp/bgp.go#L406-L438):
+cells are verified against the exact GoBGP `v4.9.0` tag (2026-09-01), its
+[release notes](https://github.com/osrg/gobgp/releases/tag/v4.9.0), and the
+tagged [capability definitions](https://github.com/osrg/gobgp/blob/v4.9.0/pkg/packet/bgp/bgp.go#L410-L424):
 Extended Messages (code 6, added in v4.7.0) and Enhanced Route Refresh (code
 70) are present; ORF (code 3), BGP Role (code 9), and Add-Path Paths-Limit
 (code 76) are absent. The latter two remain open upstream as
 [osrg/gobgp#3244](https://github.com/osrg/gobgp/issues/3244) and
 [osrg/gobgp#2786](https://github.com/osrg/gobgp/issues/2786), respectively,
-and the tag contains no ASPA implementation. Verified 2026-08-19. These are
+and the tag contains no ASPA implementation; v4.9.0 adds TCP-AO keychain
+configuration (API, server-side keychain management, config-file loading,
+HMAC-SHA256 profiles) per its release notes. Verified 2026-09-01. These are
 upstream capability claims, not rustbgpd interoperability receipts; receipts
 are identified explicitly where they exist.
 
@@ -110,7 +112,7 @@ releases rather than carried forward from older measurements.
 | Next-hop set/self | Yes | Yes | set_next_hop = "self" or IP |
 | Named policy definitions | Yes | Yes | TOML definitions with configurable default_action |
 | Policy chaining | Yes | Yes | GoBGP-style: permit=continue, deny=stop, implicit permit |
-| Default eBGP policy (RFC 8212) | No | Opt-in | GoBGP [v4.8.0 policy documentation](https://github.com/osrg/gobgp/blob/v4.8.0/docs/sources/policy.md#L886-L899) defaults unmatched import/export policy to `accept-route`; rustbgpd enforces RFC 8212 when opted in, by either `[global] ebgp_requires_policy = true` or the ADR-0119 activated secure default — root `config_epoch = 2` with the boolean omitted resolves to effective `true`. Epoch-less and `config_epoch = 1` omission stay effective `false` |
+| Default eBGP policy (RFC 8212) | No | Opt-in | GoBGP [v4.9.0 policy documentation](https://github.com/osrg/gobgp/blob/v4.9.0/docs/sources/policy.md#L886-L899) defaults unmatched import/export policy to `accept-route`; rustbgpd enforces RFC 8212 when opted in, by either `[global] ebgp_requires_policy = true` or the ADR-0119 activated secure default — root `config_epoch = 2` with the boolean omitted resolves to effective `true`. Epoch-less and `config_epoch = 1` omission stay effective `false` |
 | Scriptable policy language | No | Yes | `.rpol` (ADR-0096): typed + compiled, named prefix/community sets as indexed matchers, parameterized policies, `apply()` composition, in-language unit tests via `rbgp policy check`; route-for-route parity vs FRR route-maps proven in M80 |
 | Policy dry-run against the live RIB | No | Yes | `rbgp policy test` / `TestPolicy` RPC — a candidate `.rpol` policy evaluated read-only over an Adj-RIB-In / Loc-RIB snapshot: counts, per-term hits, before/after diffs |
 | Live per-term policy hit counters | No | Yes | `rbgp policy stats --direction import\|export\|both` / `GetPolicyStats` — since-chain-install counters on installed import and export chains; import rows also carry the session-local policy generation |
@@ -119,7 +121,7 @@ releases rather than carried forward from older measurements.
 
 | Feature | GoBGP | rustbgpd | Notes |
 |---------|:-----:|:--------:|-------|
-| Native gRPC management API | Yes | Yes | Compare GoBGP v4.8.0 [API definitions](https://github.com/osrg/gobgp/tree/v4.8.0/api) with rustbgpd's [native API](../proto/rustbgpd.proto) and [vendored gNMI](../proto/github.com/openconfig/gnmi/proto/gnmi/gnmi.proto) definitions; the rows below state supported operator scope rather than volatile RPC totals |
+| Native gRPC management API | Yes | Yes | Compare GoBGP v4.9.0 [API definitions](https://github.com/osrg/gobgp/tree/v4.9.0/proto/api) with rustbgpd's [native API](../proto/rustbgpd.proto) and [vendored gNMI](../proto/github.com/openconfig/gnmi/proto/gnmi/gnmi.proto) definitions; the rows below state supported operator scope rather than volatile RPC totals |
 | Peer CRUD | Yes | Yes | Add/Delete/List/Enable/Disable |
 | Peer groups | Yes | Yes | `PeerGroupService` + neighbor membership RPCs |
 | Dynamic neighbors (prefix-based) | Yes | Yes | `[[dynamic_neighbors]]` config plus runtime `AddDynamicNeighbor` / `DeleteDynamicNeighbor` / `ListDynamicNeighbors` (add/delete tier `mutating`, persisted to TOML); overlapping ranges resolve by longest-prefix-match |
@@ -146,7 +148,7 @@ releases rather than carried forward from older measurements.
 | Feature | GoBGP | rustbgpd | Notes |
 |---------|:-----:|:--------:|-------|
 | Prometheus metrics | Yes | Yes | rustbgpd has more granular RIB metrics |
-| Structured logging | No | Yes | JSON via tracing-subscriber |
+| Structured logging | Yes | Yes | GoBGP v4.9.0 `gobgpd` logs JSON by default and `--log-plain` opts out (`cmd/gobgpd/main.go`); rustbgpd emits JSON via tracing-subscriber |
 | BMP exporter (RFC 7854) | Yes | Yes | Per-collector TCP client, Initiation/PeerUp/PeerDown/RouteMonitoring/StatsReport/Termination; per-collector view selection (`rib_in_pre` / `rib_out_post` / `loc_rib`) |
 | BMP Adj-RIB-Out (RFC 8671) | No | **Yes** | Post-policy, byte-exact wire PDUs; with RFC 9069 Loc-RIB (collector-connect dump + EoR) this completes the trio no other open-source daemon ships (ADR-0097, M81) |
 | BMPv4 framing (draft, pre-IANA) | No | **Yes** | Per-collector `version = 4` opt-in follows draft-ietf-grow-bmp-tlv-21; Path Marking is temporarily unavailable because its draft type 5 collides with Sequence Number (ADR-0097) |
@@ -161,7 +163,7 @@ releases rather than carried forward from older measurements.
 | Feature | GoBGP | rustbgpd | Notes |
 |---------|:-----:|:--------:|-------|
 | TCP MD5 (RFC 2385) | Yes | Yes | |
-| TCP-AO (RFC 5925) | No | Partial live rotation | rustbgpd applies ordered static-neighbor and direct dynamic-prefix TCP-AO keyrings on Linux, appends non-preferred successor MKTs on SIGHUP, can later select an installed successor with cohort-observed deprecation, and can then delete deprecated unselected MKTs; key edits/reordering and protected-owner CRUD remain restart-required |
+| TCP-AO (RFC 5925) | Yes (v4.9.0) | Partial live rotation | GoBGP v4.9.0 adds a TCP-AO keychain configuration API, server-side keychain management, config-file keychains, and HMAC-SHA256 profiles per its release notes (Linux implementation with a non-Linux stub; upstream support, not an interoperability receipt). rustbgpd applies ordered static-neighbor and direct dynamic-prefix TCP-AO keyrings on Linux, appends non-preferred successor MKTs on SIGHUP, can later select an installed successor with cohort-observed deprecation, and can then delete deprecated unselected MKTs; key edits/reordering and protected-owner CRUD remain restart-required |
 | GTSM / TTL Security (RFC 5082) | Yes | Yes | |
 | BFD (RFC 5880/5881/5882) | Yes | Yes | GoBGP now documents native single-hop async BFD for BGP neighbors with config-file and gRPC API support. rustbgpd ships single-hop async BFD with IPv4 + IPv6 global static neighbors, `[[bfd_profiles]]` / `[neighbors.bfd]`, `GetBfdSessions`, `rbgp bfd`, Prometheus/events, and RFC 5882 strict + non-strict BGP coupling. M51 validates non-strict failover/recovery against FRR `bfdd`. Deferred: multihop, echo/demand, auth, dynamic-neighbor BFD, and IPv6 link-local / unnumbered |
 | RPKI/RTR (RFC 6811/8210) | Yes | Yes | Persistent RTR session with `SerialNotify`, fallback serial polling, and enforced expiry |
@@ -182,8 +184,8 @@ releases rather than carried forward from older measurements.
 | Rustc-style config errors | No | Yes | Source-line spans with column markers on validation errors |
 | Docker image | Yes | Yes | |
 | Route server client mode | Yes | Yes | Transparent eBGP export for unicast plus FlowSpec AS_PATH transparency |
-| Fuzz testing | Yes | Yes | Both ship in-tree targets. GoBGP v4.8.0 has Go-native fuzz targets covering the BGP, BMP, MRT, RTR, and ZAPI decoders plus policy community matchers (`pkg/packet/*`, `pkg/zebra/`, `internal/pkg/table/`), with run instructions in `CONTRIBUTING.md`; Go fuzz targets replay their seed corpus under the ordinary `go test` CI run and extend only under an explicit `-fuzz` invocation. rustbgpd has libFuzzer targets in `crates/*/fuzz/fuzz_targets` covering the `wire`, `rpki`, `mrt`, `bfd`, `evpn`, and `policy` crates, run nightly by `fuzz.yml` |
-| Interop test suite | Yes | Yes | Both ship one. GoBGP v4.8.0 has `test/scenario_test/` — docker-driven scenario modules with foreign-daemon drivers in `test/lib/` (ExaBGP, Quagga, YABGP, BIRD, bagpipe) — and `ci.yml` runs each module as its own job on every push and pull request. rustbgpd has containerlab topologies in `tests/interop/` against FRR, GoBGP, BIRD, ExaBGP, and OpenBGPD, gated per pull request by `interop.yml` |
+| Fuzz testing | Yes | Yes | Both ship in-tree targets. GoBGP v4.9.0 has Go-native fuzz targets covering the BGP, BMP, MRT, RTR, and ZAPI decoders plus policy community matchers (`pkg/packet/*`, `pkg/zebra/`, `internal/pkg/table/`), with run instructions in `CONTRIBUTING.md`; Go fuzz targets replay their seed corpus under the ordinary `go test` CI run and extend only under an explicit `-fuzz` invocation. rustbgpd has libFuzzer targets in `crates/*/fuzz/fuzz_targets` covering the `wire`, `rpki`, `mrt`, `bfd`, `evpn`, and `policy` crates, run nightly by `fuzz.yml` |
+| Interop test suite | Yes | Yes | Both ship one. GoBGP v4.9.0 has `test/scenario_test/` — docker-driven scenario modules with foreign-daemon drivers in `test/lib/` (ExaBGP, Quagga, YABGP, BIRD, bagpipe) — and `ci.yml` runs each module as its own job on every push and pull request. rustbgpd has containerlab topologies in `tests/interop/` against FRR, GoBGP, BIRD, ExaBGP, and OpenBGPD, gated per pull request by `interop.yml` |
 
 ## Best-Path Selection
 
@@ -240,7 +242,6 @@ Competing head-to-head with GoBGP for all use cases:
 
 - **Zero unsafe in application logic** — `deny(unsafe_code)` per-crate
 - **Property testing** — `proptest` suites in the wire, FSM, RIB, and BFD crates; GoBGP's tests are table-driven and its `go.mod` pulls in no property-testing library
-- **Structured logging** — tracing-subscriber JSON vs GoBGP's unstructured logs
 - **RPKI integrated into best-path** — clean architecture vs GoBGP's bolt-on
 - **ASPA path verification** — RTR v2, BGP-Role-selected upstream/downstream
   verification, best-path step 0.7, and import/export policy matching; GoBGP has

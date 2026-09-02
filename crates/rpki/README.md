@@ -101,7 +101,7 @@ runs inside the task the application supplies.
 | RFC 6811 | `Valid`, `Invalid`, and `NotFound` origin validation over every covering VRP. |
 | RFC 8210 | RTR version 1 client and PDU codec, including serial/reset synchronization and expiry. |
 | `draft-ietf-sidrops-8210bis` | Scoped RTR version 2 support for ASPA records, with v1 fallback. Router Key PDUs are not implemented. |
-| `draft-ietf-sidrops-aspa-verification-27` | Role-aware upstream/downstream ASPA path verification for IPv4 and IPv6 unicast. |
+| `draft-ietf-sidrops-aspa-verification-28` | Role-aware upstream/downstream ASPA path verification for IPv4 and IPv6 unicast. |
 
 RTR cache connections use plain TCP. TLS and SSH transports are not implemented.
 Transactions are bounded by time, record count, and byte count; validated data
