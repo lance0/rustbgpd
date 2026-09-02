@@ -1001,6 +1001,8 @@ struct ResolvedClient<'a> {
     pref_len: Option<(u8, u8)>,
     reject_rpki_invalid: bool,
     tag_and_reject: bool,
+    /// IPv4 unicast rides this IPv6 session with an IPv6 next hop.
+    rfc8950: bool,
     /// Session-family `white_list_route` entries, in emission order.
     white_list_routes: Vec<&'a PrefixEntry>,
 }
@@ -1621,11 +1623,24 @@ fn check_refusals(ctx: &Context, opts: &Options) -> Result<(), RenderError> {
                 "{scope}: effective multihop={multihop} is not rendered; set this client to 0 or disable general multihop"
             ));
         }
-        let rfc8950 = client.cfg.rfc8950.unwrap_or(cfg.rfc8950);
-        if ipv6 && rfc8950 {
-            refusals.push(format!(
-                "{scope}: effective rfc8950=true is not rendered on IPv6 sessions"
-            ));
+        if ipv6 && client.cfg.rfc8950.unwrap_or(cfg.rfc8950) {
+            // Transparent export hands the IPv6 next hop of an IPv4 route to
+            // every member verbatim; an IPv4-session member cannot consume it
+            // and the SLAT translation of ADR-0128 is not implemented.
+            if let Some(legacy) = ctx.clients.iter().find(|c| !c.ip.contains(':')) {
+                refusals.push(format!(
+                    "{scope}: effective rfc8950=true needs next-hop translation toward \
+                     IPv4-session client {} (ADR-0128, not implemented); only a uniform \
+                     IPv6 fleet is rendered",
+                    legacy.id
+                ));
+            }
+            if blackhole.policy_ipv4.is_some() {
+                refusals.push(format!(
+                    "{scope}: effective rfc8950=true with blackhole_filtering.policy_ipv4 \
+                     is not rendered; IPv4 blackhole terms are bound to IPv4 sessions"
+                ));
+            }
         }
         if client.cfg.blackhole_filtering.policy_ipv4.is_some()
             || client.cfg.blackhole_filtering.policy_ipv6.is_some()
@@ -2245,14 +2260,15 @@ fn resolve_clients<'a>(
 
         let ipv6 = client.ip.contains(':');
         let blackhole = resolve_blackhole(ctx, client, ipv6);
-        // Like arouteserver, only entries of the session's family are
-        // emitted; the others can never arrive on it.
+        let rfc8950 = ipv6 && client.cfg.rfc8950.unwrap_or(ctx.cfg.rfc8950);
+        // Like arouteserver, only entries of a family the session carries
+        // are emitted; the others can never arrive on it.
         let mut white_list_routes: Vec<&PrefixEntry> = filtering
             .irrdb
             .white_list_route
             .iter()
             .flatten()
-            .filter(|entry| entry.is_ipv6() == ipv6)
+            .filter(|entry| rfc8950 || entry.is_ipv6() == ipv6)
             .collect();
         white_list_routes.sort_by(|a, b| (&a.prefix, a.length).cmp(&(&b.prefix, b.length)));
 
@@ -2290,6 +2306,7 @@ fn resolve_clients<'a>(
             reject_rpki_invalid: ctx.cfg.filtering.rpki_bgp_origin_validation.enabled
                 && ctx.cfg.filtering.rpki_bgp_origin_validation.reject_invalid,
             tag_and_reject,
+            rfc8950,
             white_list_routes,
         });
     }
@@ -2489,19 +2506,28 @@ fn render_toml(
     });
 
     for rc in clients {
-        let family = if rc.client.ip.contains(':') {
-            "ipv6_unicast"
+        let families = if rc.rfc8950 {
+            "\"ipv4_unicast\", \"ipv6_unicast\""
+        } else if rc.client.ip.contains(':') {
+            "\"ipv6_unicast\""
         } else {
-            "ipv4_unicast"
+            "\"ipv4_unicast\""
         };
         let _ = write!(
             out,
             "\n[[neighbors]]\naddress = \"{}\"\nremote_asn = {}\ndescription = \"{}\"\n\
-             families = [\"{family}\"]\nroute_server_client = true\nrole = \"route_server\"\n",
+             families = [{families}]\nroute_server_client = true\nrole = \"route_server\"\n",
             toml_escape(&rc.client.ip),
             rc.client.asn,
             toml_escape(&rc.description),
         );
+        if rc.rfc8950 {
+            out.push_str(
+                "# RFC 8950: IPv4 unicast rides this IPv6 session. The dual-family session\n\
+                 # negotiates the extended next hop, and strict_peer accepts an IPv4 route\n\
+                 # only with this session's own IPv6 address as its next hop.\n",
+            );
+        }
         if rc.strict_next_hop {
             out.push_str("next_hop_ownership = \"strict_peer\"\n");
         }

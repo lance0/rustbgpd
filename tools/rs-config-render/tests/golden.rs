@@ -621,10 +621,26 @@ fn effective_nonzero_multihop_is_refused() {
     }
 }
 
+/// The healthy fixture without its IPv4 member: an IPv6-only fleet.
+fn ipv6_only_value() -> serde_yaml::Value {
+    let mut value = healthy_value();
+    let clients = value["clients"].as_sequence_mut().expect("clients list");
+    clients.retain(|c| c["id"].as_str() != Some("AS4242_1"));
+    value["irrdb_info"]
+        .as_mapping_mut()
+        .expect("irrdb_info mapping")
+        .remove(serde_yaml::Value::String("AS4242_bundle".to_owned()));
+    value
+}
+
+const MIXED_FLEET_REFUSAL: &str = "client AS197000_1: effective rfc8950=true needs next-hop \
+translation toward IPv4-session client AS4242_1 (ADR-0128, not implemented); only a uniform \
+IPv6 fleet is rendered";
+
 #[test]
-/// Load-bearing: dropping parsing, fallback, IPv6 applicability, or explicit
-/// false precedence breaks one of these exact refusal/success verdicts.
-fn effective_rfc8950_is_refused_only_for_ipv6_sessions() {
+/// Load-bearing: an RFC 8950 session renders only inside a uniform IPv6
+/// fleet; a mixed fleet would need the ADR-0128 translation and is refused.
+fn rfc8950_renders_uniform_ipv6_fleets_and_refuses_mixed_ones() {
     use serde_yaml::Value;
     let mut inherited = healthy_value();
     set_path(&mut inherited, &["cfg", "rfc8950"], Value::Bool(true));
@@ -634,14 +650,14 @@ fn effective_rfc8950_is_refused_only_for_ipv6_sessions() {
         .remove(Value::String("rfc8950".into()));
     assert_eq!(
         refusals(render(&to_yaml(&inherited), &rtr_options())),
-        ["client AS197000_1: effective rfc8950=true is not rendered on IPv6 sessions"]
+        [MIXED_FLEET_REFUSAL]
     );
 
     let mut client = healthy_value();
     set_client(&mut client, 1, &["cfg", "rfc8950"], Value::Bool(true));
     assert_eq!(
         refusals(render(&to_yaml(&client), &rtr_options())),
-        ["client AS197000_1: effective rfc8950=true is not rendered on IPv6 sessions"]
+        [MIXED_FLEET_REFUSAL]
     );
 
     let mut inert = healthy_value();
@@ -649,6 +665,43 @@ fn effective_rfc8950_is_refused_only_for_ipv6_sessions() {
     render(&to_yaml(&inert), &rtr_options()).expect("client false overrides general true");
     set_client(&mut inert, 0, &["cfg", "rfc8950"], Value::Bool(true));
     render(&to_yaml(&inert), &rtr_options()).expect("RFC8950 is inert on an IPv4 session");
+
+    let mut uniform = ipv6_only_value();
+    set_client(&mut uniform, 0, &["cfg", "rfc8950"], Value::Bool(true));
+    set_client(
+        &mut uniform,
+        0,
+        &["cfg", "filtering", "irrdb", "white_list_route"],
+        serde_yaml::from_str("[{prefix: 198.51.100.0, length: 24}]").unwrap(),
+    );
+    let rendered = render(&to_yaml(&uniform), &rtr_options()).expect("uniform IPv6 fleet");
+    let expected = "\n[[neighbors]]\naddress = \"2001:db8:0:1::22\"\nremote_asn = 197000\n\
+description = \"member-two-v6\"\nfamilies = [\"ipv4_unicast\", \"ipv6_unicast\"]\n\
+route_server_client = true\nrole = \"route_server\"\n\
+# RFC 8950: IPv4 unicast rides this IPv6 session. The dual-family session\n\
+# negotiates the extended next hop, and strict_peer accepts an IPv4 route\n\
+# only with this session's own IPv6 address as its next hop.\n\
+next_hop_ownership = \"strict_peer\"\nttl_security = true\nper_client_best = true\n\
+rs_control_communities = false\nmax_prefixes_ipv6 = 1000\n\
+import_policy_chain = [\"rs-hygiene\", \"client-as197000-1\"]\n";
+    let config = &rendered.files["config.toml"];
+    assert!(config.contains(expected), "{config}");
+    // The session carries both families, so an IPv4 white-list route is kept.
+    assert!(
+        rendered.files["policy/client-as197000-1.rpol"]
+            .contains("prefix-set client-as197000-1-white-list-route-1 { 198.51.100.0/24 le 32 }")
+    );
+
+    let mut blackhole = ipv6_only_value();
+    set_client(&mut blackhole, 0, &["cfg", "rfc8950"], Value::Bool(true));
+    set_blackhole_policy(&mut blackhole, "policy_ipv4", Some("propagate-unchanged"));
+    assert_eq!(
+        refusals(render(&to_yaml(&blackhole), &rtr_options())),
+        [
+            "client AS197000_1: effective rfc8950=true with blackhole_filtering.policy_ipv4 \
+          is not rendered; IPv4 blackhole terms are bound to IPv4 sessions"
+        ]
+    );
 }
 
 #[test]

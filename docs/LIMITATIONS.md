@@ -39,7 +39,10 @@ surfaces; it does not promote the rest of the project out of alpha.
   SLAT-driven translation for mixed RFC 8950 client fleets is not implemented;
   [ADR-0128](adr/0128-route-server-next-hop-translation.md) keeps it
   demand-gated. Implementation requires either working-group adoption or named
-  IXP demand, plus a real SLAT producer and retained fixtures.
+  IXP demand, plus a real SLAT producer and retained fixtures. A uniform IPv6
+  fleet needs no translation: `rs-config-render` renders an arouteserver
+  `rfc8950` IPv6 session as a dual-family session with `strict_peer`, and
+  refuses the shape as soon as an IPv4-session member is present.
 
 ## EVPN
 

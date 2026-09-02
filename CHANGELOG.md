@@ -21,6 +21,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   client's white-listed routes. A configured `ext` form or a malformed tag
   value is still refused.
 
+- **Operator-visible:** `rs-config-render` now renders an effective
+  `rfc8950: true` IPv6 session for a uniform IPv6 fleet: the session carries
+  both unicast families, so the daemon negotiates the RFC 8950 extended next
+  hop, and `next_hop_ownership = "strict_peer"` binds IPv4 routes to that
+  session's IPv6 address. A fleet that also has IPv4-session members, or an
+  active `blackhole_filtering.policy_ipv4`, is still refused (ADR-0128 keeps
+  next-hop translation demand-gated).
+
 - `rs-config-render --help` now lists its rendering, activation, status,
   pruning, recovery, and IXP Manager lifecycle command paths.
 

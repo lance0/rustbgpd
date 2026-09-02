@@ -410,7 +410,7 @@ and against a live run of the pinned arouteserver image by
 
 | File | Contents |
 |---|---|
-| `config.toml` | RS globals, RPKI cache servers, one `[[neighbors]]` per client: transparent `route_server_client` session, `role = "route_server"`, strict next-hop ownership, an explicit `rs_control_communities` (on only when the site configures exactly the daemon's control matrix, see below), per-family max-prefix ceilings and OpenBGPD-style timed restart, per-client import policy chain, `per_client_best` (or Add-Path when the context enables it); plus `ebgp_requires_policy = true` and explicit transparent or blackhole-aware export chains |
+| `config.toml` | RS globals, RPKI cache servers, one `[[neighbors]]` per client: transparent `route_server_client` session, `role = "route_server"`, strict next-hop ownership, an explicit `rs_control_communities` (on only when the site configures exactly the daemon's control matrix, see below), both unicast families on an RFC 8950 session, per-family max-prefix ceilings and OpenBGPD-style timed restart, per-client import policy chain, `per_client_best` (or Add-Path when the context enables it); plus `ebgp_requires_policy = true` and explicit transparent or blackhole-aware export chains |
 | `policy/rs-hygiene.rpol` | Shared import hygiene: reject AS_SET segments (always the first term), scrub a configured `route_validated_via_white_list` tag, invalid/private/reserved ASNs in the path, transit-free and never-via-route-servers ASNs, AS_PATH length cap, bogon and black-list prefixes, prefix-length windows, RPKI origin validation with RFC 8097 tagging |
 | `policy/client-<id>.rpol` | Dataset declarations for the client's IRR prefix/origin filters, one ordered accept term per `white_list_route` entry (optionally bound to `route.origin-as`, tagged when the site configures `route_validated_via_white_list` and `tag_as_set`), one accept term (`route.origin-as in … && route.prefix in …`), and an unconditional reject tail |
 | `datasets/client-<id>-origins.list` | Sorted, deduplicated origin ASNs (IRR members plus `white_list_asn`), one canonical entry per line |
@@ -546,8 +546,17 @@ cannot pre-tag their own routes.
 [`tests/interop/m106-rs-white-list-control-differential/`](../../tests/interop/m106-rs-white-list-control-differential/README.md)
 proves both surfaces against arouteserver-rendered BIRD.
 
-The renderer also refuses effective nonzero multihop and RFC 8950 on an
-IPv6 session. Blackhole policies support `propagate-unchanged` and
+The renderer also refuses effective nonzero multihop. An effective
+`rfc8950: true` on an IPv6 session renders the uniform-fleet shape only:
+the session carries both unicast families (`families = ["ipv4_unicast",
+"ipv6_unicast"]`, so the daemon negotiates the extended next hop) and
+`next_hop_ownership = "strict_peer"` accepts an IPv4 route only with that
+session's own IPv6 address as its next hop. It is refused when any
+IPv4-session client exists in the same context — a mixed fleet needs the
+next-hop translation [ADR-0128](../../docs/adr/0128-route-server-next-hop-translation.md)
+keeps demand-gated — or when `blackhole_filtering.policy_ipv4` is active,
+because the IPv4 blackhole terms are bound to IPv4 sessions. Blackhole
+policies support `propagate-unchanged` and
 `rewrite-next-hop`. Active-family marked routes must have an IRR-authorized
 origin and fall under a separately widened IRR covering set; this bypasses
 ordinary maximum-length and RPKI rejection only after shared AS-path, bogon,
