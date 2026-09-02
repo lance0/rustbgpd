@@ -1102,36 +1102,171 @@ fn sectioned_malformed_section_body_is_a_parse_error() {
 }
 
 #[test]
-fn client_black_and_white_lists_are_refused() {
+fn client_black_list_is_refused() {
+    let entry: serde_yaml::Value =
+        serde_yaml::from_str("[{prefix: 203.0.113.0, length: 24}]").unwrap();
+    let mut value = healthy_value();
+    set_client(
+        &mut value,
+        0,
+        &["cfg", "filtering", "black_list_pref"],
+        entry,
+    );
+    let items = refusals(render(&to_yaml(&value), &rtr_options()));
+    assert!(
+        items
+            .iter()
+            .any(|i| i.contains("black_list_pref") && i.contains("client AS4242_1")),
+        "{items:?}"
+    );
+}
+
+fn white_listed_value() -> serde_yaml::Value {
+    let mut value = healthy_value();
+    set_client(
+        &mut value,
+        0,
+        &["cfg", "filtering", "irrdb", "white_list_pref"],
+        serde_yaml::from_str("[{prefix: 192.0.2.0, length: 24, max_length: 32}]").unwrap(),
+    );
+    set_client(
+        &mut value,
+        0,
+        &["cfg", "filtering", "irrdb", "white_list_asn"],
+        serde_yaml::from_str("[64500, AS64501]").unwrap(),
+    );
+    set_client(
+        &mut value,
+        0,
+        &["cfg", "filtering", "irrdb", "white_list_route"],
+        serde_yaml::from_str(
+            "[{prefix: 198.51.100.0, length: 25, le: 26, asn: 64502}, \
+             {prefix: 10.0.0.0, length: 8}, {prefix: '2001:db8::', length: 32}]",
+        )
+        .unwrap(),
+    );
+    set_general_community(
+        &mut value,
+        "route_validated_via_white_list",
+        serde_yaml::from_str("{std: '65530:2', lrg: '65500:65530:2', ext: null}").unwrap(),
+    );
+    value
+}
+
+#[test]
+/// Load-bearing: white lists render as extra IRR members plus ordered accept
+/// terms ahead of the fail-closed tail, tagged only when the site tags and
+/// scrubbed in shared hygiene; removing any half breaks an exact assertion.
+fn white_lists_render_as_irr_members_and_ordered_accept_terms() {
     use serde_yaml::Value;
-    let entry: Value = serde_yaml::from_str("[{prefix: 203.0.113.0, length: 24}]").unwrap();
-    let cases: &[(&[&str], &str)] = &[
-        (&["cfg", "filtering", "black_list_pref"], "black_list_pref"),
+    let rendered = render(&to_yaml(&white_listed_value()), &rtr_options()).expect("render");
+    let prefixes = &rendered.files["datasets/client-as4242-1-prefixes.list"];
+    assert!(prefixes.contains("192.0.2.0/24 le 32\n"), "{prefixes}");
+    let origins = &rendered.files["datasets/client-as4242-1-origins.list"];
+    assert_eq!(origins, "4242\n4243\n64500\n64501\n");
+    let client = &rendered.files["policy/client-as4242-1.rpol"];
+    let expected = "dataset asn-set client-as4242-1-origins\n\
+dataset prefix-set client-as4242-1-prefixes\n\
+prefix-set client-as4242-1-white-list-route-1 { 10.0.0.0/8 le 32 }\n\
+prefix-set client-as4242-1-white-list-route-2 { 198.51.100.0/25 le 26 }\n\
+\npolicy client-as4242-1 {\n\
+\x20   # IRR white list: accepted before origin/prefix enforcement.\n\
+\x20   term accept-white-list-route-1 { if route.prefix in client-as4242-1-white-list-route-1 { add community 65530:2; add large-community 65500:65530:2; accept } }\n\
+\x20   term accept-white-list-route-2 { if route.prefix in client-as4242-1-white-list-route-2 && route.origin-as == 64502 { add community 65530:2; add large-community 65500:65530:2; accept } }\n\
+\x20   term accept-authorized {\n";
+    assert!(client.contains(expected), "{client}");
+    assert!(
+        !client.contains("2001:db8::"),
+        "IPv6 entry skipped on an IPv4 session"
+    );
+    assert!(client.contains(
+        "test client-as4242-1-white-listed-route-is-accepted {\n    dataset client-as4242-1-origins { 64498 }\n    dataset client-as4242-1-prefixes { 192.0.2.0/24 }\n    route { prefix 10.0.0.0/8; as-path \"64497\" }\n    expect client-as4242-1 == accept\n}\n"
+    ), "{client}");
+    let cases = r#"
+test wrong-origin-is-not-white-listed {
+    dataset client-as4242-1-origins { 64498 }
+    dataset client-as4242-1-prefixes { 192.0.2.0/24 }
+    route { prefix 198.51.100.0/26; as-path "64503" }
+    expect client-as4242-1 == reject
+}
+test bound-origin-is-white-listed {
+    dataset client-as4242-1-origins { 64498 }
+    dataset client-as4242-1-prefixes { 192.0.2.0/24 }
+    route { prefix 198.51.100.0/26; as-path "64502" }
+    expect client-as4242-1 == accept
+}
+test outside-window-is-not-white-listed {
+    dataset client-as4242-1-origins { 64498 }
+    dataset client-as4242-1-prefixes { 192.0.2.0/24 }
+    route { prefix 198.51.100.0/27; as-path "64502" }
+    expect client-as4242-1 == reject
+}
+"#;
+    let report = run_rpol_tests(&format!("{client}\n{cases}")).unwrap();
+    assert!(report.all_passed(), "{:?}", report.failures);
+    let hygiene = &rendered.files["policy/rs-hygiene.rpol"];
+    assert!(
+        hygiene.contains(
+            "    term reject-as-set { if route.as-path matches \"\\\\{\" { reject } }\n\
+             \x20   # The white-list tag is set by the route server only; members cannot pre-tag.\n\
+             \x20   term scrub-white-list-tag { remove community 65530:2; remove large-community 65500:65530:2 }\n"
+        ),
+        "{hygiene}"
+    );
+    assert!(run_rpol_tests(hygiene).unwrap().all_passed());
+    assert_eq!(rendered.receipt["clients"][0]["white_list_routes"], 2);
+
+    // tag_and_reject keeps the white-list terms ahead of the IRR reject terms.
+    let mut tagged = white_listed_value();
+    set_path(
+        &mut tagged,
+        &["cfg", "filtering", "reject_policy", "policy"],
+        Value::String("tag_and_reject".into()),
+    );
+    set_general_community(
+        &mut tagged,
+        "reject_cause",
+        serde_yaml::from_str("{std: '65520:dyn_val', lrg: null, ext: null}").unwrap(),
+    );
+    let client = render(&to_yaml(&tagged), &rtr_options())
+        .expect("render")
+        .files["policy/client-as4242-1.rpol"]
+        .clone();
+    let white = client.find("term accept-white-list-route-1").unwrap();
+    let origin = client.find("term reject-irrdb-origin-as-filtered").unwrap();
+    assert!(white < origin, "{client}");
+
+    // Without tag_as_set nothing is tagged and nothing needs scrubbing.
+    let mut untagged = white_listed_value();
+    set_path(
+        &mut untagged,
+        &["cfg", "filtering", "irrdb", "tag_as_set"],
+        Value::Bool(false),
+    );
+    let rendered = render(&to_yaml(&untagged), &rtr_options()).expect("render");
+    assert!(rendered.files["policy/client-as4242-1.rpol"].contains(
+        "term accept-white-list-route-1 { if route.prefix in client-as4242-1-white-list-route-1 { accept } }"
+    ));
+    assert!(!rendered.files["policy/rs-hygiene.rpol"].contains("scrub-white-list-tag"));
+
+    for (tag, marker) in [
         (
-            &["cfg", "filtering", "irrdb", "white_list_pref"],
-            "white_list_pref",
+            "{std: '65530:2', lrg: null, ext: 'rt:65530:2'}",
+            "communities.route_validated_via_white_list.ext is unsupported",
         ),
         (
-            &["cfg", "filtering", "irrdb", "white_list_asn"],
-            "white_list_asn",
+            "{std: 'rs_as:2', lrg: null, ext: null}",
+            "communities.route_validated_via_white_list is malformed",
         ),
-        (
-            &["cfg", "filtering", "irrdb", "white_list_route"],
-            "white_list_route",
-        ),
-    ];
-    for (path, marker) in cases {
-        let mut value = healthy_value();
-        let mut clients = value["clients"].clone();
-        set_path(&mut clients[0], path, entry.clone());
-        set_path(&mut value, &["clients"], clients);
-        let items = refusals(render(&to_yaml(&value), &rtr_options()));
-        assert!(
-            items
-                .iter()
-                .any(|i| i.contains(marker) && i.contains("client AS4242_1")),
-            "no refusal containing {marker:?}: {items:?}"
+    ] {
+        let mut value = white_listed_value();
+        set_general_community(
+            &mut value,
+            "route_validated_via_white_list",
+            serde_yaml::from_str(tag).unwrap(),
         );
+        let items = refusals(render(&to_yaml(&value), &rtr_options()));
+        assert!(items.iter().any(|i| i == marker), "{items:?}");
     }
 }
 

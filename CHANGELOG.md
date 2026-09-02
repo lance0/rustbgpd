@@ -11,6 +11,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Operator-visible:** `rs-config-render` now renders arouteserver IRR white
+  lists instead of refusing them: `white_list_pref` and `white_list_asn` join
+  the client's prefix and origin datasets, and each `white_list_route` entry
+  becomes an ordered accept term ahead of IRR enforcement, bound to the
+  entry's origin ASN when given and tagged with the site's
+  `route_validated_via_white_list` community (standard and large forms; the
+  hygiene policy scrubs the tag on entry). The render receipt counts each
+  client's white-listed routes. A configured `ext` form or a malformed tag
+  value is still refused.
+
 - `rs-config-render --help` now lists its rendering, activation, status,
   pruning, recovery, and IXP Manager lifecycle command paths.
 

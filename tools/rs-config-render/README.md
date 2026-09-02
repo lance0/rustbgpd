@@ -411,12 +411,12 @@ and against a live run of the pinned arouteserver image by
 | File | Contents |
 |---|---|
 | `config.toml` | RS globals, RPKI cache servers, one `[[neighbors]]` per client: transparent `route_server_client` session, `role = "route_server"`, strict next-hop ownership, per-family max-prefix ceilings and OpenBGPD-style timed restart, per-client import policy chain, `per_client_best` (or Add-Path when the context enables it); plus `ebgp_requires_policy = true` and explicit transparent or blackhole-aware export chains |
-| `policy/rs-hygiene.rpol` | Shared import hygiene: reject AS_SET segments (always the first term), invalid/private/reserved ASNs in the path, transit-free and never-via-route-servers ASNs, AS_PATH length cap, bogon and black-list prefixes, prefix-length windows, RPKI origin validation with RFC 8097 tagging |
-| `policy/client-<id>.rpol` | Dataset declarations for the client's IRR prefix/origin filters, one accept term (`route.origin-as in … && route.prefix in …`), and an unconditional reject tail |
-| `datasets/client-<id>-origins.list` | Sorted, deduplicated origin ASNs, one canonical entry per line |
-| `datasets/client-<id>-prefixes.list` | Sorted, deduplicated ordinary IRR prefix members, one canonical entry per line |
+| `policy/rs-hygiene.rpol` | Shared import hygiene: reject AS_SET segments (always the first term), scrub a configured `route_validated_via_white_list` tag, invalid/private/reserved ASNs in the path, transit-free and never-via-route-servers ASNs, AS_PATH length cap, bogon and black-list prefixes, prefix-length windows, RPKI origin validation with RFC 8097 tagging |
+| `policy/client-<id>.rpol` | Dataset declarations for the client's IRR prefix/origin filters, one ordered accept term per `white_list_route` entry (optionally bound to `route.origin-as`, tagged when the site configures `route_validated_via_white_list` and `tag_as_set`), one accept term (`route.origin-as in … && route.prefix in …`), and an unconditional reject tail |
+| `datasets/client-<id>-origins.list` | Sorted, deduplicated origin ASNs (IRR members plus `white_list_asn`), one canonical entry per line |
+| `datasets/client-<id>-prefixes.list` | Sorted, deduplicated ordinary IRR prefix members plus `white_list_pref` entries (subtree unless bounded, as arouteserver reads them), one canonical entry per line |
 | `datasets/client-<id>-blackhole-cover.list` | Present only for an active blackhole family; the same-family IRR cover with its effective lower bound and forced `le 32`/`le 128` |
-| `render-receipt.json` | Render timestamp, context fingerprint, per-client set cardinalities, max-prefix ceilings and restart seconds, warnings |
+| `render-receipt.json` | Render timestamp, context fingerprint, per-client set cardinalities and white-listed route count, max-prefix ceilings and restart seconds, warnings |
 
 Generated client `.rpol` files carry fixed synthetic, data-independent dataset
 overrides in their in-language tests. `rbgp policy check` therefore validates
@@ -491,10 +491,9 @@ than `strict`
 (`same-as` needs the deferred fleet-inventory mode), `reject_policy`
 `tag` (it accepts invalid routes into the master table), `prepend_rs_as`,
 `perform_graceful_shutdown`, `max_prefix.action` `block`/`warning`,
-per-client `black_list_pref` and IRR `white_list_*` entries (dropping
-a black list would fail open; dropping a white list would reject
-routes the site intends to accept), and disabling both IRR
-enforcement knobs. `shutdown` emits the positive family ceilings;
+ per-client `black_list_pref` (dropping a black list would fail open),
+ a configured `route_validated_via_white_list.ext` or malformed tag value,
+ and disabling both IRR enforcement knobs. `shutdown` emits the positive family ceilings;
 `restart` additionally requires a positive `restart_after` in minutes, checked
 while converting to `u32` seconds. An absent action or zero family limits emit
 neither ceilings nor a restart timer. The effective
@@ -513,6 +512,18 @@ adapter validates it strictly, refuses files over 1 MiB or 4096 unique peers,
 and never silently downgrades an invalid artifact. Extended communities and
 `rejected_route_announced_by` remain refused because the retained route lacks
 authoritative data to reproduce them.
+
+IRR white lists render rather than refuse: `white_list_pref` and
+`white_list_asn` are extra members of the client's prefix and origin
+datasets (arouteserver folds them into a synthetic bundle too; the union
+dedupes), and each `white_list_route` entry becomes an accept term ahead
+of the IRR origin/prefix terms, bound to `route.origin-as` when the entry
+carries `asn` and limited to the session's family. Shared hygiene still
+runs first, so a white list never bypasses bogon, black-list, length, or
+path checks. When the site configures `route_validated_via_white_list`
+(standard and/or large forms) and `irrdb.tag_as_set` is on, the accept
+term adds the tag and the hygiene policy scrubs it on entry so members
+cannot pre-tag their own routes.
 
 The renderer also refuses effective nonzero multihop and RFC 8950 on an
 IPv6 session. Blackhole policies support `propagate-unchanged` and
