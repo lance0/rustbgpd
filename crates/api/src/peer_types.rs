@@ -1917,6 +1917,11 @@ pub struct PeerManagerNeighborConfig {
     pub max_prefixes_ipv4: Option<u32>,
     /// Independent IPv6-unicast prefix limit (ADR-0108; None = unlimited).
     pub max_prefixes_ipv6: Option<u32>,
+    /// Pre-policy IPv4-unicast received-prefix limit (ADR-0108 amendment;
+    /// None = unlimited). Counts announced prefixes, accepted or rejected.
+    pub max_prefixes_received_ipv4: Option<u32>,
+    /// IPv6-unicast sibling of `max_prefixes_received_ipv4`.
+    pub max_prefixes_received_ipv6: Option<u32>,
     /// Non-zero hold-down before one automatic max-prefix restart attempt.
     /// `None` preserves the fail-closed shutdown latch.
     pub max_prefix_restart_seconds: Option<u32>,

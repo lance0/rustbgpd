@@ -288,6 +288,9 @@ pub enum SessionNotification {
         bound: u32,
         /// Violating family for a per-family limit; `None` for the aggregate.
         family: Option<(Afi, Safi)>,
+        /// The crossed bound was the pre-policy `max_prefixes_received_*`
+        /// limit, so `count` is announced (accepted plus rejected) prefixes.
+        received: bool,
     },
 }
 
@@ -410,6 +413,12 @@ pub struct PeerRuntimeConfigUpdate {
     /// Independent IPv6-unicast prefix limit (ADR-0108). Lowering below the
     /// current count enforces immediately on apply.
     pub max_prefixes_ipv6: Option<u32>,
+    /// Pre-policy IPv4-unicast received-prefix limit (ADR-0108 amendment).
+    /// Enabling it on a live session requests a route refresh so already
+    /// rejected announcements are recounted; lowering enforces immediately.
+    pub max_prefixes_received_ipv4: Option<u32>,
+    /// IPv6-unicast sibling of `max_prefixes_received_ipv4`.
+    pub max_prefixes_received_ipv6: Option<u32>,
     /// Stale-route retention after peer restart (seconds).
     pub gr_stale_routes_time: u64,
     /// Upper bound on the peer-advertised GR Restart Time.
@@ -2020,6 +2029,8 @@ impl PeerHandle {
         max_prefixes: Option<u32>,
         max_prefixes_ipv4: Option<u32>,
         max_prefixes_ipv6: Option<u32>,
+        max_prefixes_received_ipv4: Option<u32>,
+        max_prefixes_received_ipv6: Option<u32>,
         gr_stale_routes_time: u64,
         gr_peer_restart_time_max: u16,
         local_ipv6_nexthop: Option<std::net::Ipv6Addr>,
@@ -2035,6 +2046,8 @@ impl PeerHandle {
                         max_prefixes,
                         max_prefixes_ipv4,
                         max_prefixes_ipv6,
+                        max_prefixes_received_ipv4,
+                        max_prefixes_received_ipv6,
                         gr_stale_routes_time,
                         gr_peer_restart_time_max,
                         local_ipv6_nexthop,
@@ -2200,6 +2213,7 @@ mod tests {
                 count: usize::try_from(producer).unwrap(),
                 bound: 1,
                 family: None,
+                received: false,
             },
             _ => unreachable!(),
         }

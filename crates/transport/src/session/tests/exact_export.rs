@@ -352,6 +352,8 @@ async fn export_profile_generation_changes_once_per_wire_runtime_mutation() {
                         max_prefixes: Some(123),
                         max_prefixes_ipv4: None,
                         max_prefixes_ipv6: None,
+                        max_prefixes_received_ipv4: None,
+                        max_prefixes_received_ipv6: None,
                         gr_stale_routes_time: 999,
                         gr_peer_restart_time_max: 333,
                         local_ipv6_nexthop,

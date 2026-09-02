@@ -851,8 +851,9 @@ synchronous actor work: a clone already running cannot be interrupted.
 
 ### Peer max-prefix exceeded
 
-When a peer exceeds `max_prefixes`, `max_prefixes_ipv4`, or
-`max_prefixes_ipv6`, the daemon sends a NOTIFICATION and tears down the
+When a peer exceeds `max_prefixes`, `max_prefixes_ipv4`, `max_prefixes_ipv6`,
+or the pre-policy `max_prefixes_received_ipv4` / `max_prefixes_received_ipv6`
+bounds, the daemon sends a NOTIFICATION and tears down the
 session. Without negotiated Notification GR this is Cease/1 (Maximum Number of
 Prefixes Reached). With the RFC 8538 N-bit, the daemon sends outer Cease/9
 (Hard Reset) whose data encapsulates the same Cease/1 reason and RFC 4486 data,
@@ -909,11 +910,16 @@ rather than derived from placeholder zero counts.
 Prometheus exposes the same live actor authority as
 `bgp_max_prefix_usage`, `bgp_max_prefix_limit`, and
 `bgp_max_prefix_headroom`, keyed by `peer` and bounded `scope`
-(`aggregate`, `ipv4_unicast`, or `ipv6_unicast`). Usage is the session
+(`aggregate`, `ipv4_unicast`, `ipv6_unicast`, `ipv4_unicast_received`, or
+`ipv6_unicast_received`). Usage is the session
 actor's enforcement count, not an alias for `bgp_rib_prefixes`: in particular,
 unicast Add-Path IDs collapse to one unique prefix while the aggregate also
 includes max-prefix-counted non-unicast identities. Limit and headroom series
-exist only for finite configured bounds. All three capacity families are
+exist only for finite configured bounds. The two `*_received` scopes report
+the pre-policy count bounded by `max_prefixes_received_*` (announced prefixes,
+accepted or rejected) and exist — usage included — only while that bound is
+configured, because rejected identities are not tracked otherwise. All
+capacity families are
 removed when the session goes down and republished from fresh actor state on
 reconnect; GR-retained RIB rows therefore never appear as live session usage.
 
@@ -1048,7 +1054,7 @@ exactly under the floods these drops account for.
 | `bgp_dynamic_neighbor_slots_headroom` | Saturating `limit - used`; zero means the next matching dynamic inbound is rejected |
 | `bgp_dynamic_neighbor_limit_rejections_total` | Matching inbound dynamic connections rejected because the slot limit was already full |
 | `bgp_inbound_connections_dropped_total{reason}` | Accept-path inbound connection drops by bounded reason: `unconfigured`, `rate_limited` (ADR-0120 `[inbound_admission]`), or `dynamic_limit` |
-| `bgp_max_prefix_usage{peer,scope}` | Live session-actor max-prefix enforcement count for `aggregate`, `ipv4_unicast`, or `ipv6_unicast`; series are absent while the session is down |
+| `bgp_max_prefix_usage{peer,scope}` | Live session-actor max-prefix enforcement count for `aggregate`, `ipv4_unicast`, `ipv6_unicast`, `ipv4_unicast_received`, or `ipv6_unicast_received`; series are absent while the session is down, and the `*_received` scopes are absent while their `max_prefixes_received_*` bound is unset |
 | `bgp_max_prefix_limit{peer,scope}` | Effective finite bound for the same scope; absent means unlimited, never zero |
 | `bgp_max_prefix_headroom{peer,scope}` | Saturating `limit - usage` for a finite scope; absent when unlimited or disconnected |
 | `bgp_outbound_prefix_usage{peer,family}` | Distinct prefixes admitted into a peer's ADVERTISED unicast state (ADR-0113), `family` = `ipv4_unicast` or `ipv6_unicast`. Post-policy, post-OTC, post-exact-export — the same truth the neighbor API reports, never the shared update-group table's count. Series reaped on session teardown |

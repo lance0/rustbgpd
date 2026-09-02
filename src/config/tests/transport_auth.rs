@@ -629,3 +629,81 @@ tcp_ao = { key = "secret", send_id = 1, recv_id = 1, algorithm = "hmac(sha1)", t
     let err = parse(toml_str).unwrap_err();
     assert!(matches!(err, ConfigError::Parse(_)));
 }
+
+#[test]
+fn received_max_prefixes_inherit_from_group_and_override_per_neighbor() {
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.ixp-members]
+max_prefixes_ipv4 = 100
+max_prefixes_received_ipv4 = 120
+max_prefixes_received_ipv6 = 60
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "ixp-members"
+max_prefixes_received_ipv4 = 12
+"#;
+    let config = parse(toml_str).unwrap();
+    let peers = config.to_peer_configs().unwrap();
+    assert_eq!(
+        peers[0].0.max_prefixes_received_ipv4,
+        Some(12),
+        "neighbor-level value overrides the group"
+    );
+    assert_eq!(
+        peers[0].0.max_prefixes_received_ipv6,
+        Some(60),
+        "unset neighbor value inherits from the group"
+    );
+    assert_eq!(
+        peers[0].0.max_prefixes_ipv4,
+        Some(100),
+        "the accepted-route bound is independent of the received one"
+    );
+    assert_eq!(peers[0].0.max_prefixes_ipv6, None);
+}
+
+#[test]
+fn received_max_prefixes_reject_non_u32_values() {
+    for value in ["-1", "\"12\"", "4294967296", "1.5"] {
+        let toml_str = format!(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+max_prefixes_received_ipv4 = {value}
+"#
+        );
+        assert!(parse(&toml_str).is_err(), "{value} must be rejected");
+    }
+}
+
+#[test]
+fn received_max_prefix_edit_is_hot_applicable() {
+    let old = test_neighbor("10.0.0.2", 65002);
+    let mut hot = old.clone();
+    hot.max_prefixes_received_ipv4 = Some(10);
+    hot.max_prefixes_received_ipv6 = Some(20);
+    assert!(super::neighbor_change_hot_applicable(&old, &hot));
+    let changes = super::describe_neighbor_changes(&old, &hot);
+    assert_eq!(changes.len(), 2);
+    assert!(
+        changes
+            .iter()
+            .all(|change| change.impact == Some(super::ConfigFieldImpact::HotApplied))
+    );
+}

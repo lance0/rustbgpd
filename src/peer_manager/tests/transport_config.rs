@@ -229,6 +229,8 @@ fn build_transport_config_reflects_every_transport_field() {
         max_prefixes: Some(1000),
         max_prefixes_ipv4: None,
         max_prefixes_ipv6: None,
+        max_prefixes_received_ipv4: None,
+        max_prefixes_received_ipv6: None,
         max_prefix_restart_seconds: Some(30),
         md5_password: Some("hunter2".into()),
         tcp_ao: Some(
@@ -287,6 +289,8 @@ fn build_transport_config_reflects_every_transport_field() {
         max_prefixes,
         max_prefixes_ipv4,
         max_prefixes_ipv6,
+        max_prefixes_received_ipv4,
+        max_prefixes_received_ipv6,
         max_prefix_restart_seconds: _max_prefix_restart_seconds,
         md5_password,
         tcp_ao,
@@ -337,6 +341,14 @@ fn build_transport_config_reflects_every_transport_field() {
     assert_eq!(t.peer.min_hold_time, *min_hold_time, "min_hold_time");
     assert_eq!(t.max_prefixes_ipv4, *max_prefixes_ipv4, "max_prefixes_ipv4");
     assert_eq!(t.max_prefixes_ipv6, *max_prefixes_ipv6, "max_prefixes_ipv6");
+    assert_eq!(
+        t.max_prefixes_received_ipv4, *max_prefixes_received_ipv4,
+        "max_prefixes_received_ipv4"
+    );
+    assert_eq!(
+        t.max_prefixes_received_ipv6, *max_prefixes_received_ipv6,
+        "max_prefixes_received_ipv6"
+    );
     assert_eq!(
         t.peer.send_hold_time,
         send_hold_time.unwrap(),

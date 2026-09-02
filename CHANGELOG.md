@@ -40,6 +40,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in-flight request and restarts at page 1; a stale page token restarts once
   and is named in the status line.
 
+- **Operator-visible:** `max_prefixes_received_ipv4` / `max_prefixes_received_ipv6`
+  (neighbor and peer-group, hot-applied) bound the unique unicast prefixes a
+  peer announces **before** import policy: accepted and rejected prefixes count
+  once each, Add-Path identities share one slot, and withdrawals and
+  enhanced-route-refresh sweeps release slots exactly. Violations use the same
+  latched Cease/1 teardown, RFC 4486 data, Notification GR encapsulation, and
+  timed-restart contract as the accepted-route bounds, and the
+  `bgp_max_prefix_usage`/`_limit`/`_headroom` gauges gain the
+  `ipv4_unicast_received` and `ipv6_unicast_received` scopes while the bound is
+  configured. Enabling the bound on an Established session requests a route
+  refresh so existing rejections are recounted (ADR-0108 amendment).
+
 ### Changed
 
 - Reject AS 0 in received and locally encoded AS paths and aggregators per RFC
@@ -94,6 +106,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and arm64 runners before a single exact two-platform GHCR manifest is
   published. A fail-closed dry-run dispatch exercises both native builds
   without registry authentication or publication.
+
+- **Operator-visible:** `rs-config-render` accepts ARouteServer's
+  `max_prefix.count_rejected_routes: true` (its default) instead of refusing it:
+  an effective `true` renders the pre-policy `max_prefixes_received_ipv4`/`_ipv6`
+  bounds and `false` renders the accepted-route `max_prefixes_ipv4`/`_ipv6`
+  bounds. The render receipt reports each client's limits under the emitted key
+  and `null` under the other.
 
 ### Fixed
 

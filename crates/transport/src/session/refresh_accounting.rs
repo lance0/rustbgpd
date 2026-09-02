@@ -24,6 +24,11 @@ pub(super) struct RefreshMaxPrefixAccounting {
 struct RefreshMaxPrefixWindow {
     deadline: Instant,
     stale: RefreshStaleIdentities,
+    /// Rejected unicast identities announced before `BoRR` and not yet
+    /// re-announced in this window (plain families use path ID 0). Only
+    /// populated while the family's `max_prefixes_received_*` bound is set;
+    /// swept through `forget_rejected_path` at the boundary.
+    stale_rejected: HashSet<(Prefix, u32)>,
 }
 
 enum RefreshStaleIdentities {
@@ -58,6 +63,22 @@ impl PeerSession {
     /// fresh snapshot and deadline.
     pub(super) fn begin_refresh_accounting(&mut self, afi: Afi, safi: Safi) {
         let family = (afi, safi);
+        let stale_rejected = match family {
+            (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast) if self.receives_add_path_for_family(family) => {
+                self.rejected_paths
+                    .iter()
+                    .copied()
+                    .filter(|(prefix, _)| unicast_family(*prefix) == family)
+                    .collect()
+            }
+            (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast) => self
+                .rejected_plain_prefixes
+                .iter()
+                .filter(|prefix| unicast_family(**prefix) == family)
+                .map(|prefix| (*prefix, 0))
+                .collect(),
+            _ => HashSet::new(),
+        };
         let stale = match family {
             (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast) if self.receives_add_path_for_family(family) => {
                 RefreshStaleIdentities::UnicastAddPath(
@@ -112,6 +133,7 @@ impl PeerSession {
             RefreshMaxPrefixWindow {
                 deadline: Instant::now() + rustbgpd_rib::ERR_REFRESH_TIMEOUT,
                 stale,
+                stale_rejected,
             },
         );
         self.arm_refresh_accounting_timer();
@@ -125,7 +147,25 @@ impl PeerSession {
         };
         self.arm_refresh_accounting_timer();
         self.sweep_refresh_accounting(window.stale);
+        for (prefix, path_id) in window.stale_rejected {
+            self.forget_rejected_path(prefix, path_id);
+        }
         self.sync_max_prefix_capacity_metrics();
+    }
+
+    /// A rejected announcement inside an open window is a replay of that
+    /// identity: it must survive the boundary sweep. Rejections never reach
+    /// the RIB, so unlike the accepted delta this is applied immediately.
+    pub(super) fn refresh_accounting_replay_rejected(&mut self, prefix: Prefix, path_id: u32) {
+        let family = unicast_family(prefix);
+        if let Some(window) = self.refresh_accounting.windows.get_mut(&family) {
+            let path_id = if self.add_path_receive_families.contains(&family) {
+                path_id
+            } else {
+                0
+            };
+            window.stale_rejected.remove(&(prefix, path_id));
+        }
     }
 
     /// Reconcile every due family. Called before each buffered PDU decode and
@@ -480,6 +520,14 @@ impl PeerSession {
     #[cfg(test)]
     pub(super) fn refresh_accounting_has_window(&self, family: Family) -> bool {
         self.refresh_accounting.windows.contains_key(&family)
+    }
+
+    #[cfg(test)]
+    pub(super) fn refresh_accounting_stale_rejected_count(&self, family: Family) -> Option<usize> {
+        self.refresh_accounting
+            .windows
+            .get(&family)
+            .map(|window| window.stale_rejected.len())
     }
 
     #[cfg(test)]

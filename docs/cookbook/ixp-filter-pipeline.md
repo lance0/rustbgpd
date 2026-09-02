@@ -58,8 +58,8 @@ Install and configure arouteserver itself per its
 rustbgpd implements ARouteServer's shutdown and OpenBGPD-style timed-restart
 actions with post-import-policy prefix accounting. ARouteServer's BIRD target
 restarts immediately and ignores `restart_after`; this is not BIRD timed parity.
-Configure the model explicitly; the renderer refuses `block`, `warning`, or
-rejected-route counting instead of silently changing their behavior:
+Configure the model explicitly; the renderer refuses `block` and `warning`
+instead of silently changing their behavior:
 
 ```yaml
 cfg:
@@ -73,9 +73,11 @@ cfg:
 An absent effective action disables max-prefix enforcement even when
 ARouteServer leaves resolved limit values in the context; a zero family
 limit is likewise treated as unset, and a restart timer is emitted only with a
-positive family limit. ARouteServer 1.23.2 defaults `count_rejected_routes` to
-`true`, so an active positive shutdown or restart limit must set it explicitly
-to `false` for rustbgpd's accepted-route accounting model.
+positive family limit. `count_rejected_routes` selects the counting model:
+ARouteServer 1.23.2 defaults it to `true`, which renders the pre-policy
+`max_prefixes_received_ipv4`/`_ipv6` bounds (every unicast prefix the member
+announces counts, accepted or rejected); `false` renders the accepted-route
+`max_prefixes_ipv4`/`_ipv6` bounds.
 
 The command's output format is arouteserver's, not ours: 1.23.2 emits
 a *sectioned report* (per-key heading plus a YAML fragment). The

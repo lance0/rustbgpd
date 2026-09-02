@@ -234,6 +234,8 @@ async fn max_prefix_capacity_metrics_follow_updates_and_runtime_limits() {
                     max_prefixes: None,
                     max_prefixes_ipv4: None,
                     max_prefixes_ipv6: None,
+                    max_prefixes_received_ipv4: None,
+                    max_prefixes_received_ipv6: None,
                     gr_stale_routes_time: session.config.gr_stale_routes_time,
                     gr_peer_restart_time_max: session.config.gr_peer_restart_time_max,
                     local_ipv6_nexthop: session.config.local_ipv6_nexthop,
@@ -292,6 +294,8 @@ async fn collision_candidate_cannot_overwrite_or_reap_primary_capacity_metrics()
         make_test_session_with_metrics_and_identity(metrics.clone(), SessionIdentity::primary(1));
     let (mut candidate, mut candidate_rib_rx) =
         make_test_session_with_metrics_and_identity(metrics, SessionIdentity::inbound_candidate(2));
+    primary.config.max_prefixes_received_ipv4 = Some(10);
+    candidate.config.max_prefixes_received_ipv4 = Some(10);
     let (primary_client, _primary_server) = connected_stream_pair().await;
     primary.test_install_stream(primary_client);
     establish_test_session(&mut primary, 65002).await;
@@ -320,6 +324,12 @@ async fn collision_candidate_cannot_overwrite_or_reap_primary_capacity_metrics()
         .process_update(ipv4_announce(v4_prefix(3), 0, false))
         .await;
     assert_max_prefix_gauge(&primary, "bgp_max_prefix_usage", "aggregate", Some(2.0));
+    assert_max_prefix_gauge(
+        &primary,
+        "bgp_max_prefix_usage",
+        "ipv4_unicast_received",
+        Some(2.0),
+    );
     assert_eq!(
         peer_truth_gauge(
             &primary.metrics,
@@ -329,6 +339,15 @@ async fn collision_candidate_cannot_overwrite_or_reap_primary_capacity_metrics()
         ),
         Some(1.0),
         "inactive candidate must not overwrite active-primary truth"
+    );
+
+    candidate.config.max_prefixes_received_ipv4 = None;
+    candidate.drop_received_tracking(Afi::Ipv4);
+    assert_max_prefix_gauge(
+        &primary,
+        "bgp_max_prefix_usage",
+        "ipv4_unicast_received",
+        Some(2.0),
     );
 
     drop(candidate);
@@ -831,6 +850,8 @@ async fn runtime_lowering_per_family_limit_enforces_immediately() {
                     max_prefixes: None,
                     max_prefixes_ipv4: Some(1),
                     max_prefixes_ipv6: None,
+                    max_prefixes_received_ipv4: None,
+                    max_prefixes_received_ipv6: None,
                     gr_stale_routes_time: 360,
                     gr_peer_restart_time_max: 4095,
                     local_ipv6_nexthop: None,
@@ -881,6 +902,8 @@ async fn runtime_lowering_aggregate_limit_keeps_next_update_semantics() {
                     max_prefixes: Some(1),
                     max_prefixes_ipv4: None,
                     max_prefixes_ipv6: None,
+                    max_prefixes_received_ipv4: None,
+                    max_prefixes_received_ipv6: None,
                     gr_stale_routes_time: 360,
                     gr_peer_restart_time_max: 4095,
                     local_ipv6_nexthop: None,
@@ -1079,4 +1102,581 @@ async fn rtc_routes_counted_toward_max_prefix() {
         0,
         "teardown must clear max-prefix accounting"
     );
+}
+
+/// Deny-all import policy: every announcement is a policy reject, so the
+/// accepted count stays zero while the pre-policy received count grows.
+fn install_deny_all_import_policy(session: &mut PeerSession) {
+    session.install_import_policy(Some(PolicyChain::new(vec![Policy {
+        entries: vec![],
+        default_action: PolicyAction::Deny,
+    }])));
+}
+
+fn received_runtime_update(
+    session: &PeerSession,
+    max_prefixes_received_ipv4: Option<u32>,
+) -> crate::handle::PeerRuntimeConfigUpdate {
+    crate::handle::PeerRuntimeConfigUpdate {
+        max_prefixes: None,
+        max_prefixes_ipv4: None,
+        max_prefixes_ipv6: None,
+        max_prefixes_received_ipv4,
+        max_prefixes_received_ipv6: None,
+        gr_stale_routes_time: session.config.gr_stale_routes_time,
+        gr_peer_restart_time_max: session.config.gr_peer_restart_time_max,
+        local_ipv6_nexthop: session.config.local_ipv6_nexthop,
+        remove_private_as: session.config.remove_private_as,
+    }
+}
+
+/// Mutant: counting only accepted prefixes never trips the received bound;
+/// dropping `forget_rejected_path` on an explicit withdrawal keeps the
+/// withdrawn slot consumed and tears down one announcement early; dropping
+/// the dedupe double-counts the re-announced prefix.
+#[tokio::test]
+async fn received_limit_counts_rejected_prefixes_and_frees_withdrawn_ones() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    while rib_rx.try_recv().is_ok() {}
+    session.config.max_prefixes_received_ipv4 = Some(2);
+    install_dual_stack_session(&mut session, false);
+    install_deny_all_import_policy(&mut session);
+
+    session
+        .process_update(ipv4_announce(v4_prefix(1), 0, false))
+        .await;
+    session
+        .process_update(ipv4_announce(v4_prefix(2), 0, false))
+        .await;
+    assert_eq!(session.known_unicast_v4, 0, "policy rejected every route");
+    assert_eq!(session.received_unicast_v4(), 2);
+    assert!(
+        session.read_half.is_some(),
+        "at the bound must not tear down"
+    );
+    session
+        .process_update(ipv4_announce(v4_prefix(2), 0, false))
+        .await;
+    assert_eq!(
+        session.received_unicast_v4(),
+        2,
+        "re-announcing a rejected prefix is free"
+    );
+    assert_max_prefix_gauge(
+        &session,
+        "bgp_max_prefix_usage",
+        "ipv4_unicast_received",
+        Some(2.0),
+    );
+    assert_max_prefix_gauge(
+        &session,
+        "bgp_max_prefix_limit",
+        "ipv4_unicast_received",
+        Some(2.0),
+    );
+    assert_max_prefix_gauge(
+        &session,
+        "bgp_max_prefix_headroom",
+        "ipv4_unicast_received",
+        Some(0.0),
+    );
+    assert_max_prefix_gauge(
+        &session,
+        "bgp_max_prefix_usage",
+        "ipv6_unicast_received",
+        None,
+    );
+    assert_max_prefix_gauge(&session, "bgp_max_prefix_usage", "ipv4_unicast", Some(0.0));
+
+    session
+        .process_update(ipv4_withdraw(v4_prefix(1), 0, false))
+        .await;
+    assert_eq!(
+        session.received_unicast_v4(),
+        1,
+        "withdrawing a rejected prefix frees its slot"
+    );
+    session
+        .process_update(ipv4_announce(v4_prefix(3), 0, false))
+        .await;
+    assert_eq!(session.received_unicast_v4(), 2);
+    assert!(session.read_half.is_some());
+    while rib_rx.try_recv().is_ok() {}
+
+    session
+        .process_update(ipv4_announce(v4_prefix(1), 0, false))
+        .await;
+    assert!(
+        session.read_half.is_none(),
+        "exceeding the received bound must tear the session down"
+    );
+    let notif = read_until_notification(&mut server).await;
+    assert_eq!(notif.code, NotificationCode::Cease);
+    assert_eq!(notif.subcode, cease_subcode::MAX_PREFIXES);
+    assert_eq!(
+        notif.data.as_ref(),
+        max_prefix_cease_data(Afi::Ipv4, Safi::Unicast, 2).as_slice(),
+        "Cease/1 data must carry the family and the received bound"
+    );
+    assert_eq!(
+        session.received_unicast_v4(),
+        0,
+        "teardown clears received accounting"
+    );
+    assert!(session.rejected_plain_prefixes.is_empty());
+}
+
+/// Mutant: leaving the accepted-route bounds in the violation order ahead of
+/// the received one is fine, but charging accepted routes twice (once per
+/// bound) trips at two accepted prefixes; dropping the accepted side from the
+/// received count lets three announced prefixes pass a bound of two.
+#[tokio::test]
+async fn received_limit_counts_accepted_and_rejected_prefixes_together() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    while rib_rx.try_recv().is_ok() {}
+    session.config.max_prefixes_received_ipv4 = Some(2);
+    install_dual_stack_session(&mut session, false);
+
+    session
+        .process_update(ipv4_announce(v4_prefix(1), 0, false))
+        .await;
+    assert_eq!(session.known_unicast_v4, 1);
+    assert_eq!(session.received_unicast_v4(), 1);
+    install_deny_all_import_policy(&mut session);
+    session
+        .process_update(ipv4_announce(v4_prefix(2), 0, false))
+        .await;
+    assert_eq!(session.known_unicast_v4, 1);
+    assert_eq!(session.received_unicast_v4(), 2);
+    assert!(session.read_half.is_some());
+    // A rejected re-announcement of the accepted prefix replaces it without
+    // changing the received count.
+    session
+        .process_update(ipv4_announce(v4_prefix(1), 0, false))
+        .await;
+    assert_eq!(session.known_unicast_v4, 0);
+    assert_eq!(session.received_unicast_v4(), 2);
+    assert!(session.read_half.is_some());
+    while rib_rx.try_recv().is_ok() {}
+
+    session
+        .process_update(ipv4_announce(v4_prefix(3), 0, false))
+        .await;
+    assert!(session.read_half.is_none());
+    let notif = read_until_notification(&mut server).await;
+    assert_eq!(notif.subcode, cease_subcode::MAX_PREFIXES);
+    assert_eq!(
+        notif.data.as_ref(),
+        max_prefix_cease_data(Afi::Ipv4, Safi::Unicast, 2).as_slice()
+    );
+}
+
+/// Mutant: counting rejected identities instead of prefixes makes the
+/// received count two after the second path ID; skipping the cross-check
+/// against the accepted side double counts a prefix with one accepted and
+/// one rejected path, or drops it while a rejected path still exists.
+#[test]
+fn received_limit_add_path_identities_share_one_prefix_slot() {
+    let mut session = make_test_session(65001, 65002);
+    session.config.max_prefixes_received_ipv4 = Some(10);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated
+        .add_path_families
+        .insert((Afi::Ipv4, Safi::Unicast), AddPathMode::Both);
+    install_test_negotiated_session(&mut session, negotiated);
+    let prefix = Prefix::V4(v4_prefix(1));
+
+    assert!(session.remember_rejected_path(prefix, 1));
+    assert!(session.remember_rejected_path(prefix, 2));
+    assert!(
+        !session.remember_rejected_path(prefix, 2),
+        "a duplicate rejected identity must not bump the refcount"
+    );
+    assert_eq!(
+        session.received_unicast_v4(),
+        1,
+        "two rejected path IDs share one slot"
+    );
+    assert_eq!(session.known_unicast_v4, 0);
+
+    // Path 1 becomes accepted (the inbound accept order): still one prefix.
+    assert!(session.forget_rejected_path(prefix, 1));
+    assert!(session.remember_known_path(prefix, 1));
+    assert_eq!(session.known_unicast_v4, 1);
+    assert_eq!(session.received_unicast_v4(), 1);
+
+    // Path 1 is rejected again (the inbound reject order): still one prefix.
+    assert!(session.remember_rejected_path(prefix, 1));
+    assert!(session.forget_known_path(prefix, 1));
+    assert_eq!(session.known_unicast_v4, 0);
+    assert_eq!(session.received_unicast_v4(), 1);
+
+    // Accept path 1 again, then withdraw it: the rejected path 2 keeps the slot.
+    assert!(session.forget_rejected_path(prefix, 1));
+    assert!(session.remember_known_path(prefix, 1));
+    assert!(session.forget_known_path(prefix, 1));
+    assert_eq!(session.known_unicast_v4, 0);
+    assert_eq!(session.received_unicast_v4(), 1);
+
+    // Withdrawing the last rejected path frees the slot.
+    assert!(session.forget_rejected_path(prefix, 2));
+    assert!(!session.forget_rejected_path(prefix, 2));
+    assert_eq!(session.received_unicast_v4(), 0);
+    assert!(session.rejected_paths.is_empty());
+    assert!(session.rejected_prefix_refcounts.is_empty());
+}
+
+/// Mutant: tracking rejected identities without a configured received bound
+/// retains per-peer state the operator never asked for.
+#[test]
+fn received_accounting_is_inert_without_a_received_bound() {
+    let mut session = make_test_session(65001, 65002);
+    install_test_negotiated_session(&mut session, negotiated_session(65002, false));
+    let prefix = Prefix::V4(v4_prefix(1));
+    assert!(!session.remember_rejected_path(prefix, 0));
+    assert!(session.rejected_plain_prefixes.is_empty());
+    assert_eq!(session.received_unicast_v4(), 0);
+    assert!(session.remember_known_path(prefix, 0));
+    assert_eq!(session.received_unicast_v4(), 1);
+    assert!(session.max_prefix_violation(true).is_none());
+}
+
+/// Mutant: routing loop rejections around `remember_rejected_path` lets a
+/// peer announce any number of looped prefixes under a received bound.
+#[tokio::test]
+async fn received_limit_counts_loop_rejected_announcements() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    while rib_rx.try_recv().is_ok() {}
+    session.config.max_prefixes_received_ipv4 = Some(1);
+    install_dual_stack_session(&mut session, false);
+    let looped = |prefix: Ipv4Prefix| {
+        UpdateMessage::build(
+            &[Ipv4NlriEntry { path_id: 0, prefix }],
+            &[],
+            &[
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::AsPath(AsPath {
+                    segments: vec![AsPathSegment::AsSequence(vec![65002, 65001])],
+                }),
+                PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+            ],
+            true,
+            false,
+            Ipv4UnicastMode::Body,
+        )
+    };
+    session.process_update(looped(v4_prefix(1))).await;
+    assert_eq!(
+        session.known_unicast_v4, 0,
+        "loop detection rejects the route"
+    );
+    assert_eq!(session.received_unicast_v4(), 1);
+    assert!(session.read_half.is_some());
+    session.process_update(looped(v4_prefix(1))).await;
+    assert_eq!(session.received_unicast_v4(), 1);
+    assert!(session.read_half.is_some());
+    while rib_rx.try_recv().is_ok() {}
+    session.process_update(looped(v4_prefix(2))).await;
+    assert!(session.read_half.is_none());
+    let notif = read_until_notification(&mut server).await;
+    assert_eq!(notif.subcode, cease_subcode::MAX_PREFIXES);
+    assert_eq!(
+        notif.data.as_ref(),
+        max_prefix_cease_data(Afi::Ipv4, Safi::Unicast, 1).as_slice()
+    );
+}
+
+/// Mutant: snapshotting only accepted identities at `BoRR` leaves the omitted
+/// rejected prefix counted after `EoRR`; not marking a replayed rejection
+/// sweeps it and under-counts the peer.
+#[tokio::test]
+async fn eorr_sweeps_rejected_identities_the_peer_did_not_replay() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    install_enhanced_refresh_session(&mut session, vec![(Afi::Ipv4, Safi::Unicast)], false);
+    session.config.max_prefixes_received_ipv4 = Some(3);
+    install_deny_all_import_policy(&mut session);
+    let family = (Afi::Ipv4, Safi::Unicast);
+    let accepted_stale = v4_prefix(1);
+    let replayed = v4_prefix(2);
+    let omitted = v4_prefix(3);
+    session.remember_known_path(Prefix::V4(accepted_stale), 0);
+    session
+        .process_update(ipv4_announce(replayed, 0, false))
+        .await;
+    session
+        .process_update(ipv4_announce(omitted, 0, false))
+        .await;
+    while rib_rx.try_recv().is_ok() {}
+    assert_eq!(session.known_unicast_v4, 1);
+    assert_eq!(session.received_unicast_v4(), 3);
+    assert!(session.max_prefix_violation(true).is_none());
+
+    buffer_route_refresh(
+        &mut session,
+        Afi::Ipv4,
+        Safi::Unicast,
+        RouteRefreshSubtype::BoRR,
+    );
+    session.process_read_buffer().await;
+    assert!(matches!(
+        rib_rx.try_recv(),
+        Ok(RibUpdate::BeginRouteRefresh { .. })
+    ));
+    assert_eq!(session.refresh_accounting_stale_count(family), Some(1));
+    assert_eq!(
+        session.refresh_accounting_stale_rejected_count(family),
+        Some(2)
+    );
+    session
+        .process_update(ipv4_announce(replayed, 0, false))
+        .await;
+    assert_eq!(
+        session.refresh_accounting_stale_rejected_count(family),
+        Some(1),
+        "a replayed rejection leaves the stale set immediately"
+    );
+    assert_eq!(
+        session.received_unicast_v4(),
+        3,
+        "stale identities stay counted until the boundary"
+    );
+    buffer_route_refresh(
+        &mut session,
+        Afi::Ipv4,
+        Safi::Unicast,
+        RouteRefreshSubtype::EoRR,
+    );
+    session.process_read_buffer().await;
+    while rib_rx.try_recv().is_ok() {}
+    assert_eq!(
+        session.known_unicast_v4, 0,
+        "the omitted accepted prefix is swept"
+    );
+    assert_eq!(
+        session.received_unicast_v4(),
+        1,
+        "only the replayed rejection survives the sweep"
+    );
+    assert_eq!(session.rejected_plain_prefixes.len(), 1);
+
+    // The reconciled budget is real: two more rejections fit exactly.
+    session
+        .process_update(ipv4_announce(v4_prefix(4), 0, false))
+        .await;
+    session
+        .process_update(ipv4_announce(v4_prefix(5), 0, false))
+        .await;
+    assert_eq!(session.received_unicast_v4(), 3);
+    assert!(session.max_prefix_violation(true).is_none());
+}
+
+/// Mutant: skipping the route-refresh request on enable leaves the peer's
+/// existing rejections uncounted forever; skipping `drop_received_tracking`
+/// on disable leaves rejected identities and their metric series behind.
+#[tokio::test]
+async fn runtime_received_bound_enable_requests_refresh_and_disable_drops_tracking() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    while rib_rx.try_recv().is_ok() {}
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.peer_route_refresh = true;
+    install_test_negotiated_session(&mut session, negotiated);
+    install_deny_all_import_policy(&mut session);
+    session
+        .process_update(ipv4_announce(v4_prefix(1), 0, false))
+        .await;
+    assert_eq!(
+        session.received_unicast_v4(),
+        0,
+        "rejections before any bound exists are not tracked"
+    );
+    assert_max_prefix_gauge(
+        &session,
+        "bgp_max_prefix_usage",
+        "ipv4_unicast_received",
+        None,
+    );
+
+    let (reply, done) = oneshot::channel();
+    assert_eq!(
+        session
+            .handle_command(PeerCommand::UpdateRuntimeConfig {
+                config: Box::new(received_runtime_update(&session, Some(5))),
+                reply,
+            })
+            .await,
+        ControlFlow::Continue(())
+    );
+    done.await.unwrap().unwrap();
+    let refresh = loop {
+        if let Message::RouteRefresh(rr) = read_single_bgp_message(&mut server).await {
+            break rr;
+        }
+    };
+    assert_eq!(
+        refresh.subtype_raw, 0,
+        "recount uses a plain RFC 2918 request"
+    );
+    assert_eq!(
+        (refresh.afi_raw, refresh.safi_raw),
+        (Afi::Ipv4 as u16, Safi::Unicast as u8)
+    );
+    assert_max_prefix_gauge(
+        &session,
+        "bgp_max_prefix_limit",
+        "ipv4_unicast_received",
+        Some(5.0),
+    );
+    // The peer replays its table; the rejection is now counted.
+    session
+        .process_update(ipv4_announce(v4_prefix(1), 0, false))
+        .await;
+    assert_eq!(session.received_unicast_v4(), 1);
+    assert_max_prefix_gauge(
+        &session,
+        "bgp_max_prefix_headroom",
+        "ipv4_unicast_received",
+        Some(4.0),
+    );
+
+    let (reply, done) = oneshot::channel();
+    assert_eq!(
+        session
+            .handle_command(PeerCommand::UpdateRuntimeConfig {
+                config: Box::new(received_runtime_update(&session, None)),
+                reply,
+            })
+            .await,
+        ControlFlow::Continue(())
+    );
+    done.await.unwrap().unwrap();
+    assert!(session.rejected_plain_prefixes.is_empty());
+    assert_eq!(session.received_unicast_v4(), 0);
+    for name in [
+        "bgp_max_prefix_usage",
+        "bgp_max_prefix_limit",
+        "bgp_max_prefix_headroom",
+    ] {
+        assert_max_prefix_gauge(&session, name, "ipv4_unicast_received", None);
+    }
+    assert!(
+        session.read_half.is_some(),
+        "toggling the bound never resets the session"
+    );
+}
+
+/// Mutant: dropping the immediate evaluation on `UpdateRuntimeConfig` leaves a
+/// quiet peer announcing more prefixes than the operator's new received bound.
+#[tokio::test]
+async fn runtime_lowering_received_limit_enforces_immediately() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    while rib_rx.try_recv().is_ok() {}
+    session.config.max_prefixes_received_ipv4 = Some(10);
+    install_dual_stack_session(&mut session, false);
+    install_deny_all_import_policy(&mut session);
+    for index in 1..=3 {
+        session
+            .process_update(ipv4_announce(v4_prefix(index), 0, false))
+            .await;
+    }
+    assert_eq!(session.received_unicast_v4(), 3);
+    assert!(session.read_half.is_some());
+
+    let (reply, done) = oneshot::channel();
+    assert_eq!(
+        session
+            .handle_command(PeerCommand::UpdateRuntimeConfig {
+                config: Box::new(received_runtime_update(&session, Some(2))),
+                reply,
+            })
+            .await,
+        ControlFlow::Continue(())
+    );
+    done.await.unwrap().unwrap();
+    assert!(
+        session.read_half.is_none(),
+        "lowering the received bound below the announced count must tear down immediately"
+    );
+    let notif = read_until_notification(&mut server).await;
+    assert_eq!(notif.code, NotificationCode::Cease);
+    assert_eq!(notif.subcode, cease_subcode::MAX_PREFIXES);
+    assert_eq!(
+        notif.data.as_ref(),
+        max_prefix_cease_data(Afi::Ipv4, Safi::Unicast, 2).as_slice()
+    );
+}
+
+/// Mutant: reporting the received violation as `received: false` makes the
+/// manager's latch reason describe an accepted count the peer never reached.
+#[tokio::test]
+async fn received_limit_notification_marks_the_received_bound() {
+    let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.connect_retry_secs = 1;
+    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    let mut config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    config.max_prefixes_received_ipv4 = Some(1);
+    let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let (notify_tx, mut notify_rx) = crate::session_notification_channel(metrics.clone());
+    let mut session = PeerSession::new_with_identity_and_lifecycle(
+        config,
+        metrics,
+        cmd_rx,
+        rib_tx,
+        None,
+        None,
+        Some(notify_tx),
+        None,
+        None,
+        None,
+        None,
+        false,
+        SessionIdentity::primary(78),
+    );
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    while rib_rx.try_recv().is_ok() {}
+    while notify_rx.try_recv().is_ok() {}
+    install_test_negotiated_session(&mut session, negotiated_session(65002, false));
+    install_deny_all_import_policy(&mut session);
+
+    session
+        .process_update(ipv4_announce(v4_prefix(1), 0, false))
+        .await;
+    session
+        .process_update(ipv4_announce(v4_prefix(2), 0, false))
+        .await;
+    assert!(
+        session.stop_requested,
+        "the received bound latches like the others"
+    );
+    assert!(matches!(
+        notify_rx.try_recv(),
+        Ok(SessionNotification::MaxPrefixExceeded {
+            session_id: 78,
+            count: 2,
+            bound: 1,
+            family: Some((Afi::Ipv4, Safi::Unicast)),
+            received: true,
+            ..
+        })
+    ));
+    let notification = read_until_notification(&mut server).await;
+    assert_eq!(notification.subcode, cease_subcode::MAX_PREFIXES);
 }

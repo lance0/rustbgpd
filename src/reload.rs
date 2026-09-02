@@ -218,6 +218,8 @@ pub(crate) fn build_peer_mgr_config(
         max_prefixes: tc.max_prefixes,
         max_prefixes_ipv4: tc.max_prefixes_ipv4,
         max_prefixes_ipv6: tc.max_prefixes_ipv6,
+        max_prefixes_received_ipv4: tc.max_prefixes_received_ipv4,
+        max_prefixes_received_ipv6: tc.max_prefixes_received_ipv6,
         max_prefix_restart_seconds,
         md5_password: tc.md5_password.clone(),
         tcp_ao: tc.tcp_ao.clone(),
@@ -9417,6 +9419,10 @@ remote_asn = 65002
             .unwrap();
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the bridge fixture spells out one complete resolved neighbor literal inline"
+    )]
     #[tokio::test]
     async fn config_bridge_acks_static_neighbor_event_after_persister_ack() {
         use rustbgpd_api::peer_types::{ConfigEvent, PeerManagerNeighborConfig};
@@ -9447,6 +9453,8 @@ remote_asn = 65002
                     max_prefixes: None,
                     max_prefixes_ipv4: None,
                     max_prefixes_ipv6: None,
+                    max_prefixes_received_ipv4: None,
+                    max_prefixes_received_ipv6: None,
                     max_prefix_restart_seconds: None,
                     md5_password: None,
                     tcp_ao: None,
@@ -9561,6 +9569,8 @@ remote_asn = 65002
                     max_prefixes: None,
                     max_prefixes_ipv4: None,
                     max_prefixes_ipv6: None,
+                    max_prefixes_received_ipv4: None,
+                    max_prefixes_received_ipv6: None,
                     max_prefix_restart_seconds: None,
                     md5_password: None,
                     tcp_ao: None,

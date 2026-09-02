@@ -982,12 +982,29 @@ struct ResolvedClient<'a> {
     allow_longer_prefixes: bool,
     limit_ipv4: Option<u32>,
     limit_ipv6: Option<u32>,
+    /// Effective `max_prefix.count_rejected_routes`: `true` emits the
+    /// pre-policy `max_prefixes_received_*` bounds, `false` the accepted-route
+    /// `max_prefixes_*` bounds.
+    count_rejected_routes: bool,
     max_prefix_restart_seconds: Option<u32>,
     blackhole: Option<ResolvedBlackhole>,
     pref_len: Option<(u8, u8)>,
     reject_rpki_invalid: bool,
     tag_and_reject: bool,
 }
+impl ResolvedClient<'_> {
+    /// TOML keys carrying this client's family limits: ARouteServer's
+    /// `count_rejected_routes: true` (its default) is the daemon's pre-policy
+    /// received bound, `false` its accepted-route bound.
+    fn max_prefix_limit_keys(&self) -> (&'static str, &'static str) {
+        if self.count_rejected_routes {
+            ("max_prefixes_received_ipv4", "max_prefixes_received_ipv6")
+        } else {
+            ("max_prefixes_ipv4", "max_prefixes_ipv6")
+        }
+    }
+}
+
 #[derive(Clone)]
 struct ResolvedBlackhole {
     ipv6: bool,
@@ -1625,7 +1642,6 @@ fn check_refusals(ctx: &Context, opts: &Options) -> Result<(), RenderError> {
             &scope,
             &mut refusals,
         );
-        check_max_prefix_counting(effective_max_prefix, &scope, &mut refusals);
         // Per-client black/white lists are not rendered; dropping a
         // black list would fail open, dropping a white list would
         // reject routes the site intends to accept.
@@ -1970,23 +1986,6 @@ fn check_max_prefix_action(
     }
 }
 
-fn check_max_prefix_counting(
-    max_prefix: EffectiveMaxPrefix<'_>,
-    scope: &str,
-    refusals: &mut Vec<String>,
-) {
-    if matches!(max_prefix.action, Some("shutdown" | "restart"))
-        && (max_prefix.limit_ipv4.is_some() || max_prefix.limit_ipv6.is_some())
-        && max_prefix.count_rejected_routes
-    {
-        refusals.push(format!(
-            "{scope}: effective max_prefix.count_rejected_routes=true is not supported; \
-             ARouteServer defaults this option to true, while rustbgpd max-prefix ceilings \
-             count accepted routes only, so set it to false"
-        ));
-    }
-}
-
 fn resolve_clients<'a>(
     ctx: &'a Context,
     opts: &Options,
@@ -2125,6 +2124,7 @@ fn resolve_clients<'a>(
             allow_longer_prefixes: ctx.cfg.filtering.irrdb.allow_longer_prefixes,
             limit_ipv4,
             limit_ipv6,
+            count_rejected_routes: max_prefix.count_rejected_routes,
             max_prefix_restart_seconds,
             blackhole,
             pref_len: if ipv6 {
@@ -2354,11 +2354,12 @@ fn render_toml(
         if rc.per_client_best {
             out.push_str("per_client_best = true\n");
         }
+        let (limit_key_ipv4, limit_key_ipv6) = rc.max_prefix_limit_keys();
         if let Some(limit) = rc.limit_ipv4 {
-            let _ = writeln!(out, "max_prefixes_ipv4 = {limit}");
+            let _ = writeln!(out, "{limit_key_ipv4} = {limit}");
         }
         if let Some(limit) = rc.limit_ipv6 {
-            let _ = writeln!(out, "max_prefixes_ipv6 = {limit}");
+            let _ = writeln!(out, "{limit_key_ipv6} = {limit}");
         }
         if let Some(seconds) = rc.max_prefix_restart_seconds {
             let _ = writeln!(out, "max_prefix_restart_seconds = {seconds}");
@@ -3055,8 +3056,10 @@ fn build_receipt(
             "ip": rc.client.ip,
             "prefix_set_size": rc.prefixes.len(),
             "origin_set_size": rc.origins.len(),
-            "max_prefixes_ipv4": rc.limit_ipv4,
-            "max_prefixes_ipv6": rc.limit_ipv6,
+            "max_prefixes_ipv4": rc.limit_ipv4.filter(|_| !rc.count_rejected_routes),
+            "max_prefixes_ipv6": rc.limit_ipv6.filter(|_| !rc.count_rejected_routes),
+            "max_prefixes_received_ipv4": rc.limit_ipv4.filter(|_| rc.count_rejected_routes),
+            "max_prefixes_received_ipv6": rc.limit_ipv6.filter(|_| rc.count_rejected_routes),
             "max_prefix_restart_seconds": rc.max_prefix_restart_seconds,
         })).collect::<Vec<_>>(),
         "warnings": warnings,
