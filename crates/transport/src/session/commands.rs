@@ -1198,7 +1198,12 @@ impl PeerSession {
                 // ordinary reconnect timer on the Idle transition because
                 // `stop_requested` is deliberately left alone.
                 if self.fsm.state() == SessionState::Idle {
-                    debug!(peer = %self.peer_label, "administrative reset requested while idle");
+                    info!(peer = %self.peer_label, "administrative reset requested while idle");
+                    self.notification_idle_failures = 0;
+                    if !self.stop_requested {
+                        self.reconnect_timer = None;
+                        self.drive_fsm(Event::ManualStart).await;
+                    }
                 } else {
                     info!(peer = %self.peer_label, "administrative reset requested");
                     self.drive_fsm(Event::AdministrativeReset { reason }).await;
