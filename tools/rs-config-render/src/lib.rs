@@ -1527,6 +1527,18 @@ fn check_refusals(ctx: &Context, opts: &Options) -> Result<(), RenderError> {
             "communities.{RPKI_NOT_PERFORMED} is configured; unsupported tagging/scrubbing cannot be rendered"
         ));
     }
+    for name in [
+        "origin_present_in_as_set",
+        "origin_not_present_in_as_set",
+        "prefix_present_in_as_set",
+        "prefix_not_present_in_as_set",
+    ] {
+        if cfg.communities.get(name).is_some_and(community_configured) {
+            refusals.push(format!(
+                "communities.{name} is configured; unsupported IRR result tagging cannot be rendered"
+            ));
+        }
+    }
     check_control_communities(cfg, &mut refusals);
     if let Some(tag) = cfg.communities.get(WHITE_LIST_TAG) {
         if tag.ext.is_some() {
@@ -1684,7 +1696,6 @@ fn check_refusals(ctx: &Context, opts: &Options) -> Result<(), RenderError> {
             &scope,
             &mut refusals,
         );
-        check_max_prefix_counting(effective_max_prefix, &scope, &mut refusals);
         // A per-client black list is not rendered; dropping it would fail
         // open. IRR white lists render as extra dataset members and ordered
         // accept terms (see resolve_clients / render_client_rpol).

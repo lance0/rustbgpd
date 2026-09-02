@@ -543,6 +543,10 @@ path checks. When the site configures `route_validated_via_white_list`
 (standard and/or large forms) and `irrdb.tag_as_set` is on, the accept
 term adds the tag and the hygiene policy scrubs it on entry so members
 cannot pre-tag their own routes.
+The renderer refuses configured `origin_present_in_as_set`,
+`origin_not_present_in_as_set`, `prefix_present_in_as_set`, and
+`prefix_not_present_in_as_set` result communities even when `tag_as_set` is
+off because the daemon cannot preserve those result tags.
 [`tests/interop/m106-rs-white-list-control-differential/`](../../tests/interop/m106-rs-white-list-control-differential/README.md)
 proves both surfaces against arouteserver-rendered BIRD.
 

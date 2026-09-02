@@ -1259,6 +1259,33 @@ fn white_listed_value() -> serde_yaml::Value {
 }
 
 #[test]
+fn irr_result_communities_are_refused_even_when_as_set_tagging_is_disabled() {
+    for name in [
+        "origin_present_in_as_set",
+        "origin_not_present_in_as_set",
+        "prefix_present_in_as_set",
+        "prefix_not_present_in_as_set",
+    ] {
+        let mut value = healthy_value();
+        set_path(
+            &mut value,
+            &["cfg", "filtering", "irrdb", "tag_as_set"],
+            false.into(),
+        );
+        set_general_community(
+            &mut value,
+            name,
+            serde_yaml::from_str("{std: '65000:1', lrg: null, ext: null}").unwrap(),
+        );
+        let items = refusals(render(&to_yaml(&value), &rtr_options()));
+        assert!(
+            items.iter().any(|item| item.contains(name)),
+            "{name}: {items:?}"
+        );
+    }
+}
+
+#[test]
 /// Load-bearing: white lists render as extra IRR members plus ordered accept
 /// terms ahead of the fail-closed tail, tagged only when the site tags and
 /// scrubbed in shared hygiene; removing any half breaks an exact assertion.

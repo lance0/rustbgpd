@@ -22,11 +22,22 @@ const FIXED_CONFIG_RECEIPTS: &[(&str, &str)] = &[
         "configs/rustbgpd-m102-rs.toml",
     ),
 ];
-const GENERATED_CONFIG_RECEIPTS: &[&str] = &[
-    "test-m90-differential.sh",
-    "test-m104-arouteserver-current-rs-differential.sh",
+/// Scripts that render their daemon config at run time and append the
+/// named explain fragment before validating and installing it.
+const GENERATED_CONFIG_RECEIPTS: &[(&str, &str)] = &[
+    (
+        "test-m90-differential.sh",
+        "m90-differential/policy-explain.toml",
+    ),
+    (
+        "test-m104-arouteserver-current-rs-differential.sh",
+        "m90-differential/policy-explain.toml",
+    ),
+    (
+        "test-m106-rs-white-list-control-differential.sh",
+        "m106-rs-white-list-control-differential/policy-explain.toml",
+    ),
 ];
-const GENERATED_CONFIG_FRAGMENT: &str = "m90-differential/policy-explain.toml";
 const GENERATED_CONFIG_APPEND: &str =
     "cat \"$POLICY_EXPLAIN_FRAGMENT\" >>\"$RENDER_DIR/config.toml\"";
 const GENERATED_CONFIG_COPY: &str =
@@ -78,7 +89,7 @@ fn interop_policy_explain_receipts_explicitly_opt_in() {
         .chain(
             GENERATED_CONFIG_RECEIPTS
                 .iter()
-                .map(|script| (*script).to_owned()),
+                .map(|(script, _)| (*script).to_owned()),
         )
         .collect();
     assert_eq!(
@@ -96,13 +107,13 @@ fn interop_policy_explain_receipts_explicitly_opt_in() {
         );
     }
 
-    let fragment = fs::read_to_string(interop.join(GENERATED_CONFIG_FRAGMENT))
-        .expect("M90 explain fragment is readable");
-    assert!(
-        explain_enabled(&fragment),
-        "{GENERATED_CONFIG_FRAGMENT} must explicitly enable policy explain"
-    );
-    for script in GENERATED_CONFIG_RECEIPTS {
+    for (script, fragment_path) in GENERATED_CONFIG_RECEIPTS {
+        let fragment = fs::read_to_string(interop.join(fragment_path))
+            .unwrap_or_else(|error| panic!("{fragment_path} is unreadable: {error}"));
+        assert!(
+            explain_enabled(&fragment),
+            "{fragment_path} must explicitly enable policy explain"
+        );
         let generated_script = fs::read_to_string(scripts.join(script))
             .unwrap_or_else(|error| panic!("{script} is unreadable: {error}"));
         let append_pos = generated_script

@@ -474,6 +474,7 @@ assert_path_matches() {
         ok "$member holds $prefix from $rs with the expected communities/path ($path)"
     else
         fail "$member holds $prefix from $rs but not as expected: got $path, want $expectation"
+        return 1
     fi
 }
 
