@@ -115,11 +115,9 @@ fn run_pager(
         Err(error) => return Err(CliError::Io(error)),
     };
 
-    let write_result = child
-        .stdin
-        .as_mut()
-        .expect("piped pager stdin")
-        .write_all(payload.as_bytes());
+    let mut stdin = child.stdin.take().expect("piped pager stdin");
+    let write_result = stdin.write_all(payload.as_bytes());
+    drop(stdin);
     let status = child.wait()?;
     classify_pager_result(write_result, status)
 }
@@ -191,6 +189,67 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.to_string(), "pager exited with status 1");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cat_pager_receives_eof_and_does_not_hang() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (tx, rx) = mpsc::channel();
+        let payload = "payload line 1\npayload line 2\n".to_string();
+        std::thread::spawn(move || {
+            let result = run_pager(
+                &["cat".into()],
+                &payload,
+                PagerMode::Always,
+                &mut Vec::new(),
+            );
+            let _ = tx.send(result);
+        });
+
+        let result = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("cat did not receive EOF within 5s - stdin pipe was not closed before wait");
+        assert!(result.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn early_exiting_pager_proves_pipe_closed_on_small_input() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (tx, rx) = mpsc::channel();
+        let payload = "x".to_string();
+        std::thread::spawn(move || {
+            let result = run_pager(
+                &["head".into(), "-c".into(), "1".into()],
+                &payload,
+                PagerMode::Always,
+                &mut Vec::new(),
+            );
+            let _ = tx.send(result);
+        });
+
+        let result = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("head -c 1 did not exit within 5s - stdin pipe was not closed before wait");
+        assert!(result.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn brokenpipe_on_success_is_ignored() {
+        let status = Command::new("/bin/true").status().unwrap();
+        assert!(
+            classify_pager_result(
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed")),
+                status,
+            )
+            .is_ok()
+        );
     }
 
     #[test]
