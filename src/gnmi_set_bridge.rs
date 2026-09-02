@@ -440,6 +440,7 @@ fn empty_dynamic_neighbor(prefix: &str) -> DynamicNeighborConfig {
 
 fn empty_neighbor(address: IpAddr) -> Neighbor {
     Neighbor {
+        tcp_mss: None,
         address: address.to_string(),
         interface: None,
         remote_asn: 0,

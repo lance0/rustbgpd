@@ -1634,7 +1634,7 @@ fn config_field_impact(field: &str) -> Option<(ConfigFieldImpact, &'static str)>
             ConfigFieldImpact::SessionReset,
             "session reset: session re-establish",
         ),
-        "tcp_ao" | "bfd" => (ConfigFieldImpact::RestartRequired, "restart required"),
+        "tcp_ao" | "bfd" | "tcp_mss" => (ConfigFieldImpact::RestartRequired, "restart required"),
         _ => return None,
     })
 }
@@ -1771,6 +1771,7 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<FieldCha
     cmp_field!(max_prefix_restart_seconds);
     cmp_field!(ttl_security);
     cmp_field!(ttl_security_hops);
+    cmp_field!(tcp_mss);
     cmp_field!(families);
     cmp_field!(required_families);
     cmp_field!(graceful_restart);
@@ -1906,6 +1907,7 @@ fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
         && old.max_prefixes_out_ipv6 == new.max_prefixes_out_ipv6
         && old.max_prefix_restart_seconds == new.max_prefix_restart_seconds
         && old.md5_password == new.md5_password
+        && old.tcp_mss == new.tcp_mss
         && old.ttl_security == new.ttl_security
         && old.ttl_security_hops == new.ttl_security_hops
         && old.families == new.families
@@ -2145,6 +2147,11 @@ pub struct ConfigDiff {
     /// edits require a daemon restart until runtime listener key
     /// rotation exists.
     pub neighbor_tcp_ao_changed: bool,
+    /// Effective static-neighbor or peer-group `tcp_mss` changed. Active-open
+    /// sockets and every passive listener socket install the clamp only when
+    /// they are created, so edits remain pinned to the startup snapshot until
+    /// the daemon restarts.
+    pub tcp_mss_changed: bool,
     /// Effective BFD session set changed — `[[bfd_profiles]]` referenced by a
     /// live session, or a neighbor/peer-group `bfd` block. The ADR-0067 BFD
     /// actor resolves its session set once at startup, so edits are
@@ -2385,6 +2392,7 @@ impl ConfigDiff {
             || self.blackhole_fib_discard_changed
             || self.neighbor_tcp_ao_changed
             || self.dynamic_neighbor_tcp_ao_changed
+            || self.tcp_mss_changed
             || self.bfd_changed
             || self.policy_explain_changed
             || self.policy_reject_retention_changed
@@ -2813,6 +2821,9 @@ impl Config {
             neighbor.max_prefix_restart_seconds = neighbor
                 .max_prefix_restart_seconds
                 .or_else(|| group.and_then(|g| g.max_prefix_restart_seconds));
+            neighbor.tcp_mss = neighbor
+                .tcp_mss
+                .or_else(|| group.and_then(|group| group.tcp_mss));
             neighbor.route_reflector_client = Some(
                 neighbor
                     .route_reflector_client
@@ -3189,6 +3200,11 @@ pub fn classify_config_transaction_v1(diff: &ConfigDiff) -> ConfigTransactionSec
             .restart_required_sections
             .push("[[dynamic_neighbors]].tcp_ao".to_string());
     }
+    if diff.tcp_mss_changed {
+        class
+            .restart_required_sections
+            .push("[[neighbors]] / [peer_groups.*].tcp_mss".to_string());
+    }
     if diff.bfd_changed {
         class
             .restart_required_sections
@@ -3420,6 +3436,7 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "blackhole_fib_discard_changed": diff.blackhole_fib_discard_changed,
             "neighbor_tcp_ao_changed": diff.neighbor_tcp_ao_changed,
             "dynamic_neighbor_tcp_ao_changed": diff.dynamic_neighbor_tcp_ao_changed,
+            "tcp_mss_changed": diff.tcp_mss_changed,
             "bfd_changed": diff.bfd_changed,
             "policy_explain_changed": diff.policy_explain_changed,
             "policy_reject_retention_changed": diff.policy_reject_retention_changed,
@@ -3701,6 +3718,9 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
     if diff.dynamic_neighbor_tcp_ao_changed {
         restart_sections.push("[[dynamic_neighbors]].tcp_ao");
     }
+    if diff.tcp_mss_changed {
+        restart_sections.push("[[neighbors]] / [peer_groups.*].tcp_mss");
+    }
     if diff.bfd_changed {
         restart_sections.push("[[bfd_profiles]] / [neighbors.bfd] / [peer_groups.*.bfd]");
     }
@@ -3854,9 +3874,11 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
     pin_dynamic_tcp_ao_startup_only(&mut dynamic_reload_new, old);
     let dynamic_neighbors_reload_applied_changed =
         old.dynamic_neighbors != dynamic_reload_new.dynamic_neighbors;
+    let tcp_mss_changed = tcp_mss_restart_required_changed(old, new);
     let bfd_changed = bfd_restart_required_changed(old, new);
     let mut reload_new = new.clone();
     pin_tcp_ao_startup_only_runtime(&mut reload_new, old);
+    pin_tcp_mss_startup_only_runtime(&mut reload_new, old);
     // Pin BFD too so the hot-reload neighbor/peer-group diff does not report
     // startup-only BFD edits as if they apply live; the restart-required
     // surface is carried by `bfd_changed` above.
@@ -3961,6 +3983,7 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         apply_bum_enforcement_changed: old.apply_bum_enforcement != new.apply_bum_enforcement,
         blackhole_fib_discard_changed,
         neighbor_tcp_ao_changed,
+        tcp_mss_changed,
         bfd_changed,
         policy_explain_changed: old.policy.explain != new.policy.explain,
         policy_reject_retention_changed: old.policy.reject_retention != new.policy.reject_retention,
@@ -4068,6 +4091,119 @@ fn effective_bfd_sessions(config: &Config) -> Vec<(String, u32, u32, u32, bool)>
 /// ADR-0067 actor resolves its sessions once at startup.
 fn bfd_restart_required_changed(old: &Config, new: &Config) -> bool {
     effective_bfd_sessions(old) != effective_bfd_sessions(new)
+}
+
+type StaticNeighborKey = (String, Option<String>);
+
+fn effective_static_neighbor_tcp_mss(config: &Config) -> BTreeMap<StaticNeighborKey, u16> {
+    config
+        .neighbors
+        .iter()
+        .filter_map(|neighbor| {
+            let tcp_mss = neighbor.tcp_mss.or_else(|| {
+                neighbor
+                    .peer_group
+                    .as_ref()
+                    .and_then(|name| config.peer_groups.get(name))
+                    .and_then(|group| group.tcp_mss)
+            })?;
+            Some((
+                (neighbor.address.clone(), neighbor.interface.clone()),
+                tcp_mss,
+            ))
+        })
+        .collect()
+}
+
+fn configured_peer_group_tcp_mss(config: &Config) -> BTreeMap<String, u16> {
+    config
+        .peer_groups
+        .iter()
+        .filter_map(|(name, group)| group.tcp_mss.map(|tcp_mss| (name.clone(), tcp_mss)))
+        .collect()
+}
+
+fn tcp_mss_restart_required_changed(old: &Config, new: &Config) -> bool {
+    effective_static_neighbor_tcp_mss(old) != effective_static_neighbor_tcp_mss(new)
+        || configured_peer_group_tcp_mss(old) != configured_peer_group_tcp_mss(new)
+}
+
+/// Pin startup-only TCP MSS state to the live snapshot while preserving
+/// unrelated neighbor and peer-group edits. Existing static neighbors keep
+/// their effective clamp and peer-group source, new clamped neighbors are held
+/// back, and removed clamped neighbors remain until restart. Peer-group clamp
+/// additions, changes, and removals are pinned independently, including groups
+/// that currently have no static members.
+pub(crate) fn pin_tcp_mss_startup_only_runtime(new_config: &mut Config, current: &Config) -> bool {
+    if !tcp_mss_restart_required_changed(current, new_config) {
+        return false;
+    }
+
+    let live_effective = effective_static_neighbor_tcp_mss(current);
+    let candidate_effective = effective_static_neighbor_tcp_mss(new_config);
+
+    for (name, group) in &mut new_config.peer_groups {
+        group.tcp_mss = current
+            .peer_groups
+            .get(name)
+            .and_then(|group| group.tcp_mss);
+    }
+    for (name, group) in &current.peer_groups {
+        if group.tcp_mss.is_some() && !new_config.peer_groups.contains_key(name) {
+            new_config.peer_groups.insert(name.clone(), group.clone());
+        }
+    }
+
+    let current_by_key: BTreeMap<StaticNeighborKey, &Neighbor> = current
+        .neighbors
+        .iter()
+        .map(|neighbor| {
+            (
+                (neighbor.address.clone(), neighbor.interface.clone()),
+                neighbor,
+            )
+        })
+        .collect();
+    let mut pinned_peer_groups = BTreeSet::new();
+    new_config.neighbors.retain_mut(|neighbor| {
+        let key = (neighbor.address.clone(), neighbor.interface.clone());
+        if live_effective.get(&key) == candidate_effective.get(&key) {
+            return true;
+        }
+        if let Some(live) = current_by_key.get(&key) {
+            neighbor.tcp_mss = live.tcp_mss;
+            neighbor.peer_group.clone_from(&live.peer_group);
+            pinned_peer_groups.extend(live.peer_group.iter().cloned());
+            true
+        } else {
+            false
+        }
+    });
+
+    let mut new_keys: HashSet<StaticNeighborKey> = new_config
+        .neighbors
+        .iter()
+        .map(|neighbor| (neighbor.address.clone(), neighbor.interface.clone()))
+        .collect();
+    for (startup_index, neighbor) in current.neighbors.iter().enumerate() {
+        let key = (neighbor.address.clone(), neighbor.interface.clone());
+        if live_effective.contains_key(&key) && new_keys.insert(key) {
+            pinned_peer_groups.extend(neighbor.peer_group.iter().cloned());
+            new_config.neighbors.insert(
+                startup_index.min(new_config.neighbors.len()),
+                neighbor.clone(),
+            );
+        }
+    }
+    for name in pinned_peer_groups {
+        if let Some(group) = current.peer_groups.get(&name) {
+            new_config
+                .peer_groups
+                .entry(name)
+                .or_insert_with(|| group.clone());
+        }
+    }
+    true
 }
 
 /// Resolved (effective) BFD per neighbor address — its own `bfd`, else its
@@ -5013,6 +5149,7 @@ pub fn describe_peer_group_changes(
     cmp_field!(max_prefix_restart_seconds);
     cmp_field!(ttl_security);
     cmp_field!(ttl_security_hops);
+    cmp_field!(tcp_mss);
     cmp_field!(families);
     cmp_field!(required_families);
     cmp_field!(graceful_restart);

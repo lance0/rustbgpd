@@ -179,6 +179,7 @@ fn config_neighbor_set_to_api(definition: &NeighborSetConfig) -> NeighborSetDefi
 
 pub(crate) fn api_peer_group_to_config(definition: PeerGroupDefinition) -> PeerGroupConfig {
     PeerGroupConfig {
+        tcp_mss: None,
         hold_time: definition.hold_time,
         min_hold_time: definition.min_hold_time,
         send_hold_time: definition.send_hold_time,
@@ -478,6 +479,7 @@ fn configured_family_labels(
 
 fn raw_neighbor(raw: &PresenceAwareNeighborCreate) -> Result<Neighbor, ConfigError> {
     Ok(Neighbor {
+        tcp_mss: None,
         address: raw.address.to_string(),
         interface: raw.interface.clone(),
         remote_asn: raw.remote_asn,
@@ -573,6 +575,7 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                     &cfg.required_families,
                 )?;
                 config.neighbors.push(Neighbor {
+                    tcp_mss: cfg.tcp_mss,
                     address: cfg.address.to_string(),
                     interface: cfg.interface.clone(),
                     remote_asn: cfg.remote_asn,
@@ -793,9 +796,9 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
         ConfigEvent::SetPeerGroup {
             name, definition, ..
         } => {
-            config
-                .peer_groups
-                .insert(name.clone(), api_peer_group_to_config(definition.clone()));
+            let mut group = api_peer_group_to_config(definition.clone());
+            group.tcp_mss = config.peer_groups.get(name).and_then(|group| group.tcp_mss);
+            config.peer_groups.insert(name.clone(), group);
         }
         ConfigEvent::DeletePeerGroup { name, .. } => {
             config.peer_groups.remove(name);
@@ -1171,6 +1174,7 @@ peer_group = "fabric"
                 }
                 .into(),
             ),
+            tcp_mss: None,
             ttl_security_hops: None,
             families: vec![(rustbgpd_wire::Afi::Ipv4, rustbgpd_wire::Safi::Unicast)],
             required_families: Vec::new(),
@@ -1283,6 +1287,7 @@ peer_group = "fabric"
         let mut config = minimal_config();
         let mut neighbor_config = test_neighbor_config("10.0.0.3".parse().unwrap());
         neighbor_config.send_non_transitive_extended_communities = true;
+        neighbor_config.tcp_mss = Some(1234);
 
         apply_config_event(
             &mut config,
@@ -1300,6 +1305,7 @@ peer_group = "fabric"
             .unwrap();
         let tcp_ao = neighbor.tcp_ao.as_ref().expect("tcp_ao preserved");
         assert_eq!(neighbor.min_hold_time, Some(30));
+        assert_eq!(neighbor.tcp_mss, Some(1234));
         assert_eq!(
             neighbor.send_non_transitive_extended_communities,
             Some(true)
@@ -1311,5 +1317,34 @@ peer_group = "fabric"
         assert_eq!(tcp_ao.algorithm, "hmac(sha256)");
         assert!(tcp_ao.preferred);
         assert!(!tcp_ao.deprecated);
+    }
+
+    #[test]
+    fn peer_group_event_preserves_file_only_tcp_mss() {
+        let mut config = minimal_config();
+        config.peer_groups.insert(
+            "tunnel".to_string(),
+            PeerGroupConfig {
+                hold_time: Some(90),
+                tcp_mss: Some(1360),
+                ..Default::default()
+            },
+        );
+        let mut definition = config_peer_group_to_api(&config.peer_groups["tunnel"]);
+        definition.hold_time = Some(45);
+
+        apply_config_event(
+            &mut config,
+            &ConfigEvent::SetPeerGroup {
+                name: "tunnel".to_string(),
+                definition,
+                ack: None,
+            },
+        )
+        .unwrap();
+
+        let group = &config.peer_groups["tunnel"];
+        assert_eq!(group.hold_time, Some(45));
+        assert_eq!(group.tcp_mss, Some(1360));
     }
 }

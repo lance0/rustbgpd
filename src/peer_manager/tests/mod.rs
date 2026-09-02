@@ -76,6 +76,7 @@ fn make_config(addr: IpAddr, asn: u32) -> PeerManagerNeighborConfig {
         max_prefix_restart_seconds: None,
         md5_password: None,
         tcp_ao: None,
+        tcp_mss: None,
         ttl_security_hops: None,
         families: vec![(Afi::Ipv4, Safi::Unicast)],
         required_families: Vec::new(),
@@ -1139,6 +1140,7 @@ async fn wait_counter(counter: &AtomicU32, expected: u32) {
 
 fn config_neighbor(addr: IpAddr, remote_asn: u32) -> crate::config::Neighbor {
     crate::config::Neighbor {
+        tcp_mss: None,
         min_hold_time: None,
         address: addr.to_string(),
         interface: None,

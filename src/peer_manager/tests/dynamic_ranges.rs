@@ -115,6 +115,13 @@ fn add_dynamic_range_rejects_listener_enforced_group_auth() {
                 ..Default::default()
             },
         ),
+        (
+            "mss-members",
+            crate::config::PeerGroupConfig {
+                tcp_mss: Some(1360),
+                ..Default::default()
+            },
+        ),
     ] {
         mgr.current_config
             .peer_groups
@@ -127,6 +134,7 @@ fn add_dynamic_range_rejects_listener_enforced_group_auth() {
                 &err,
                 rustbgpd_api::peer_types::DynamicRangeError::Invalid(reason)
                     if reason.contains("startup-pinned BGP listener")
+                        || reason.contains("static neighbors only")
             ),
             "{err}"
         );
@@ -135,55 +143,68 @@ fn add_dynamic_range_rejects_listener_enforced_group_auth() {
 
 #[tokio::test]
 async fn runtime_create_peer_rejects_listener_enforced_group_auth() {
-    let mut mgr = dynamic_test_manager();
-    mgr.current_config.peer_groups.insert(
-        "gtsm-members".to_string(),
-        crate::config::PeerGroupConfig {
-            ttl_security: Some(true),
-            ..Default::default()
-        },
-    );
-    let err = mgr
-        .runtime_create_peer(Box::new(
-            rustbgpd_api::peer_types::PresenceAwareNeighborCreate {
-                address: "10.0.0.9".parse().unwrap(),
-                interface: None,
-                remote_asn: 65009,
-                description: None,
-                peer_group: Some("gtsm-members".to_string()),
-                hold_time: None,
-                min_hold_time: None,
-                send_hold_time: None,
-                max_prefixes: None,
-                max_prefix_restart_seconds: None,
-                remove_private_as: None,
-                discard_path_attributes: None,
-                local_role: None,
-                families: None,
-                required_families: None,
-                route_server_client: None,
-                per_client_best: None,
-                strict_role: None,
-                add_path: None,
+    for (name, group) in [
+        (
+            "gtsm-members",
+            crate::config::PeerGroupConfig {
+                ttl_security: Some(true),
+                ..Default::default()
             },
-        ))
-        .await
-        .expect_err("runtime create resolving listener-enforced auth must be rejected");
-    assert!(
-        matches!(
-            &err,
-            rustbgpd_api::peer_types::PeerLifecycleError::RestartRequired(reason)
-                if reason.contains("startup or SIGHUP reload")
         ),
-        "{err}"
-    );
-    assert!(
-        !mgr.current_config
-            .neighbors
-            .iter()
-            .any(|neighbor| neighbor.address == "10.0.0.9"),
-        "rejected create must not advance the config snapshot"
-    );
+        (
+            "mss-members",
+            crate::config::PeerGroupConfig {
+                tcp_mss: Some(1360),
+                ..Default::default()
+            },
+        ),
+    ] {
+        let mut mgr = dynamic_test_manager();
+        mgr.current_config
+            .peer_groups
+            .insert(name.to_string(), group);
+        let err = mgr
+            .runtime_create_peer(Box::new(
+                rustbgpd_api::peer_types::PresenceAwareNeighborCreate {
+                    address: "10.0.0.9".parse().unwrap(),
+                    interface: None,
+                    remote_asn: 65009,
+                    description: None,
+                    peer_group: Some(name.to_string()),
+                    hold_time: None,
+                    min_hold_time: None,
+                    send_hold_time: None,
+                    max_prefixes: None,
+                    max_prefix_restart_seconds: None,
+                    remove_private_as: None,
+                    discard_path_attributes: None,
+                    local_role: None,
+                    families: None,
+                    required_families: None,
+                    route_server_client: None,
+                    per_client_best: None,
+                    strict_role: None,
+                    add_path: None,
+                },
+            ))
+            .await
+            .expect_err("runtime create resolving listener-enforced state must be rejected");
+        assert!(
+            matches!(
+                &err,
+                rustbgpd_api::peer_types::PeerLifecycleError::RestartRequired(reason)
+                    if reason.contains("runtime peer CRUD")
+            ),
+            "{err}"
+        );
+        assert!(
+            !mgr.current_config
+                .neighbors
+                .iter()
+                .any(|neighbor| neighbor.address == "10.0.0.9"),
+            "rejected create must not advance the config snapshot"
+        );
+    }
 }
 
 #[test]
@@ -243,8 +264,10 @@ async fn delete_peer_rejects_listener_enforced_auth() {
     md5_config.md5_password = Some("secret".to_string().into());
     let mut gtsm_config = make_config(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)), 65003);
     gtsm_config.ttl_security_hops = Some(std::num::NonZeroU8::MIN);
+    let mut mss_config = make_config(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4)), 65004);
+    mss_config.tcp_mss = Some(1360);
 
-    for config in [md5_config, gtsm_config] {
+    for config in [md5_config, gtsm_config, mss_config] {
         let addr = config.address;
         let (reply_tx, reply_rx) = oneshot::channel();
         tx.send(PeerManagerCommand::AddPeer {
@@ -270,7 +293,7 @@ async fn delete_peer_rejects_listener_enforced_auth() {
                 matches!(
                     &err,
                     rustbgpd_api::peer_types::PeerLifecycleError::RestartRequired(reason)
-                        if reason.contains("startup or SIGHUP reload")
+                        if reason.contains("runtime peer CRUD")
                 ),
                 "{err}"
             ),
@@ -283,7 +306,7 @@ async fn delete_peer_rejects_listener_enforced_auth() {
         .unwrap();
     assert_eq!(
         list_rx.await.unwrap().len(),
-        2,
+        3,
         "refused deletes must leave the peers configured"
     );
 
@@ -315,6 +338,14 @@ fn delete_dynamic_range_rejects_listener_enforced_group_auth() {
             },
             "10.10.0.0/24",
         ),
+        (
+            "mss-members",
+            crate::config::PeerGroupConfig {
+                tcp_mss: Some(1360),
+                ..Default::default()
+            },
+            "10.11.0.0/24",
+        ),
     ] {
         mgr.current_config
             .peer_groups
@@ -336,7 +367,7 @@ fn delete_dynamic_range_rejects_listener_enforced_group_auth() {
             matches!(
                 &err,
                 rustbgpd_api::peer_types::DynamicRangeError::Invalid(reason)
-                    if reason.contains("startup or SIGHUP reload")
+                    if reason.contains("runtime range CRUD")
             ),
             "{err}"
         );
@@ -394,6 +425,34 @@ async fn delete_peer_group_referenced_by_md5_dynamic_range_is_refused() {
         mgr.current_config.peer_groups.contains_key("md5-members"),
         "refused delete must keep the group"
     );
+}
+
+#[tokio::test]
+async fn delete_unreferenced_tcp_mss_peer_group_requires_restart() {
+    let mut mgr = dynamic_test_manager();
+    mgr.current_config.peer_groups.insert(
+        "mss-members".to_string(),
+        crate::config::PeerGroupConfig {
+            tcp_mss: Some(1360),
+            ..Default::default()
+        },
+    );
+
+    let error = mgr
+        .apply_peer_group_change(
+            rustbgpd_api::peer_types::ConfigEvent::DeletePeerGroup {
+                name: "mss-members".to_string(),
+                ack: None,
+            },
+            Vec::new(),
+        )
+        .await
+        .expect_err("peer-group tcp_mss removal must be restart-required");
+    assert!(
+        matches!(error, CatalogMutationError::RestartRequired(_)),
+        "{error}"
+    );
+    assert!(mgr.current_config.peer_groups.contains_key("mss-members"));
 }
 
 #[test]

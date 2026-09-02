@@ -3831,6 +3831,12 @@ async fn run<T>(
                     ttl_security_listener_policy_for_dynamic_range(range, &config.peer_groups)
                 }))
                 .collect(),
+            // Every bound listener socket carries the same clamp: the smallest
+            // effective value across resolved static neighbors.
+            tcp_mss: peer_configs
+                .iter()
+                .filter_map(|neighbor| neighbor.transport_config.tcp_mss)
+                .min(),
         };
     let (accept_tx, mut accept_rx) = mpsc::channel::<rustbgpd_transport::AcceptedConnection>(64);
     let explicit_endpoints = config.explicit_listen_endpoints();
@@ -5472,6 +5478,7 @@ async fn run<T>(
             max_prefix_restart_seconds: neighbor.max_prefix_restart_seconds,
             md5_password: transport_config.md5_password.clone(),
             tcp_ao: transport_config.tcp_ao.clone(),
+            tcp_mss: transport_config.tcp_mss,
             ttl_security_hops: transport_config.ttl_security_hops,
             families: transport_config.peer.families.clone(),
             required_families: transport_config.peer.required_families.clone(),
@@ -8578,6 +8585,7 @@ peer_group = "plain"
             security: crate::config::SecurityConfig::default(),
             neighbors: vec![
                 crate::config::Neighbor {
+                    tcp_mss: None,
                     min_hold_time: None,
                     address: "10.0.0.2".to_string(),
                     interface: None,
@@ -8634,6 +8642,7 @@ peer_group = "plain"
                     log_level: None,
                 },
                 crate::config::Neighbor {
+                    tcp_mss: None,
                     min_hold_time: None,
                     address: "10.0.0.3".to_string(),
                     interface: None,
@@ -8690,6 +8699,7 @@ peer_group = "plain"
                     log_level: None,
                 },
                 crate::config::Neighbor {
+                    tcp_mss: None,
                     min_hold_time: None,
                     address: "10.0.0.4".to_string(),
                     interface: None,

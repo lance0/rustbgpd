@@ -44,6 +44,18 @@ pub(super) struct InstalledPolicyRoutesReachability {
     scopes: BTreeMap<(String, String), InstalledPolicyRoutesScope>,
 }
 
+fn reject_peer_group_tcp_mss_change(
+    current: &crate::config::Config,
+    next: &crate::config::Config,
+) -> Result<(), CatalogMutationError> {
+    if crate::config::diff_config(current, next).tcp_mss_changed {
+        return Err(CatalogMutationError::RestartRequired(
+            "peer-group tcp_mss changes require a daemon restart".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct InstalledPolicyRoutesScope {
     reachable: BTreeSet<(String, String)>,
@@ -3597,6 +3609,7 @@ impl PeerManager {
             })
             .cloned()
             .unwrap_or_else(|| crate::config::Neighbor {
+                tcp_mss: None,
                 min_hold_time: None,
                 address: address.to_string(),
                 interface: managed.transport_config.peer_interface.clone(),
@@ -3872,6 +3885,7 @@ impl PeerManager {
             max_prefix_restart_seconds: resolved.max_prefix_restart_seconds,
             md5_password: tc.md5_password.clone(),
             tcp_ao: tc.tcp_ao.clone(),
+            tcp_mss: tc.tcp_mss,
             ttl_security_hops: tc.ttl_security_hops,
             families: tc.peer.families.clone(),
             required_families: tc.peer.required_families.clone(),
@@ -3939,6 +3953,7 @@ impl PeerManager {
         if next_config == self.current_config {
             return Ok(());
         }
+        reject_peer_group_tcp_mss_change(&self.current_config, &next_config)?;
         let purge_dynamic_group = match &event {
             ConfigEvent::SetPeerGroup { name, .. } => {
                 let old = self.current_config.peer_groups.get(name).and_then(|group| {
@@ -4098,6 +4113,9 @@ impl PeerManager {
         }
         if next_config == self.current_config {
             return OwnedCatalogMutationOutcome::Success;
+        }
+        if let Err(error) = reject_peer_group_tcp_mss_change(&self.current_config, &next_config) {
+            return OwnedCatalogMutationOutcome::RejectedNoEffect(error);
         }
         let purge_dynamic_group = match &event {
             ConfigEvent::SetPeerGroup { name, .. } => {

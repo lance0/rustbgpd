@@ -378,6 +378,125 @@ fn diff_config_no_policy_explain_change_is_clean() {
 }
 
 #[test]
+fn tcp_mss_add_change_remove_and_inheritance_are_restart_pinned() {
+    let base = parse(valid_toml()).unwrap();
+
+    let mut neighbor_added = base.clone();
+    let mut added = test_neighbor("10.0.0.3", 65003);
+    added.tcp_mss = Some(1200);
+    neighbor_added.neighbors.push(added);
+
+    let mut neighbor_changed = base.clone();
+    neighbor_changed.neighbors[0].tcp_mss = Some(1200);
+
+    let mut neighbor_present = base.clone();
+    neighbor_present.neighbors[0].tcp_mss = Some(1200);
+    let mut neighbor_removed = neighbor_present.clone();
+    neighbor_removed.neighbors.clear();
+
+    let mut group_added = base.clone();
+    group_added.peer_groups.insert(
+        "tunnel".to_string(),
+        PeerGroupConfig {
+            tcp_mss: Some(1360),
+            ..Default::default()
+        },
+    );
+
+    let mut group_present = base.clone();
+    group_present.peer_groups.insert(
+        "tunnel".to_string(),
+        PeerGroupConfig {
+            tcp_mss: Some(1360),
+            ..Default::default()
+        },
+    );
+    let mut group_changed = group_present.clone();
+    group_changed.peer_groups.get_mut("tunnel").unwrap().tcp_mss = Some(1200);
+    let mut group_removed = group_present.clone();
+    group_removed.peer_groups.remove("tunnel");
+
+    let mut inherited_before = base.clone();
+    inherited_before.neighbors[0].peer_group = Some("tunnel".to_string());
+    inherited_before
+        .peer_groups
+        .insert("tunnel".to_string(), PeerGroupConfig::default());
+    let mut inherited_after = inherited_before.clone();
+    inherited_after
+        .peer_groups
+        .get_mut("tunnel")
+        .unwrap()
+        .tcp_mss = Some(1360);
+
+    for (label, old, new) in [
+        ("neighbor add", &base, &neighbor_added),
+        ("neighbor change", &base, &neighbor_changed),
+        ("neighbor remove", &neighbor_present, &neighbor_removed),
+        ("group add", &base, &group_added),
+        ("group change", &group_present, &group_changed),
+        ("group remove", &group_present, &group_removed),
+        ("inherited change", &inherited_before, &inherited_after),
+    ] {
+        let diff = super::diff_config(old, new);
+        assert!(diff.tcp_mss_changed, "{label}");
+        assert!(diff.has_restart_required_changes(), "{label}");
+        assert_eq!(
+            super::config_diff_json_value(&diff)["restart_required"]["tcp_mss_changed"],
+            true,
+            "{label}"
+        );
+        assert!(
+            super::format_config_diff_with_style(&diff, &super::ConfigDiffTextStyle::default())
+                .contains("[[neighbors]] / [peer_groups.*].tcp_mss"),
+            "{label}"
+        );
+        assert_eq!(
+            super::classify_config_transaction_v1(&diff).restart_required_sections,
+            vec!["[[neighbors]] / [peer_groups.*].tcp_mss"],
+            "{label}"
+        );
+
+        let mut pinned = new.clone();
+        assert!(
+            super::pin_tcp_mss_startup_only_runtime(&mut pinned, old),
+            "{label}"
+        );
+        assert_eq!(
+            super::effective_static_neighbor_tcp_mss(old),
+            super::effective_static_neighbor_tcp_mss(&pinned),
+            "{label}"
+        );
+        assert_eq!(
+            super::configured_peer_group_tcp_mss(old),
+            super::configured_peer_group_tcp_mss(&pinned),
+            "{label}"
+        );
+        assert!(!super::diff_config(old, &pinned).tcp_mss_changed, "{label}");
+    }
+}
+
+#[test]
+fn tcp_mss_pin_restores_a_removed_neighbors_ordinary_peer_group() {
+    let mut current = parse(valid_toml()).unwrap();
+    current
+        .peer_groups
+        .insert("ordinary".to_string(), PeerGroupConfig::default());
+    current.neighbors[0].peer_group = Some("ordinary".to_string());
+    current.neighbors[0].tcp_mss = Some(1360);
+    let mut candidate = current.clone();
+    candidate.neighbors.clear();
+    candidate.peer_groups.remove("ordinary");
+
+    assert!(super::pin_tcp_mss_startup_only_runtime(
+        &mut candidate,
+        &current
+    ));
+    candidate
+        .validate()
+        .expect("pinning a removed MSS neighbor must restore its ordinary peer group");
+}
+
+#[test]
 fn diff_config_flags_security_grpc_as_restart_required() {
     // LAN-286: `[security.grpc]` is resolved once at startup when the
     // gRPC listeners are built — an edit must classify as
@@ -849,6 +968,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
     new.peer_groups.insert(
         "new-group".to_string(),
         PeerGroupConfig {
+            tcp_mss: None,
             min_hold_time: None,
             hold_time: Some(60),
             send_hold_time: None,
@@ -900,6 +1020,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         },
     );
     new.neighbors.push(Neighbor {
+        tcp_mss: None,
         min_hold_time: None,
         address: "10.0.0.3".into(),
         interface: None,
@@ -966,6 +1087,7 @@ fn tcp_ao_pinning_keeps_new_unprotected_neighbor_peer_group_valid() {
         log_level: None,
     });
     new.neighbors.push(Neighbor {
+        tcp_mss: None,
         min_hold_time: None,
         address: "10.0.0.4".into(),
         interface: None,
@@ -1041,6 +1163,7 @@ fn diff_config_does_not_mark_tcp_ao_neighbor_add_as_reload_applied() {
     let old = parse(valid_toml()).unwrap();
     let mut new = old.clone();
     new.neighbors.push(Neighbor {
+        tcp_mss: None,
         min_hold_time: None,
         address: "10.0.0.3".into(),
         interface: None,

@@ -168,6 +168,9 @@ pub struct ListenerSocketOptions {
     pub md5_keys: Vec<Md5ListenerKey>,
     /// GTSM selectors applied to accepted children.
     pub ttl_security: Vec<TtlSecurityListenerPolicy>,
+    /// TCP maximum segment size clamp (`TCP_MAXSEG`) installed before
+    /// listen; the kernel applies it to every accepted child.
+    pub tcp_mss: Option<u16>,
 }
 
 /// One bound listening socket of a single address family. The listener
@@ -2544,6 +2547,7 @@ fn log_bound_family(
             .iter()
             .filter(|policy| policy.hops.is_some() && policy.peer.is_ipv4() == is_v4)
             .count(),
+        tcp_mss = options.tcp_mss,
         "BGP listener bound"
     );
 }
@@ -2622,6 +2626,11 @@ where
         debug!(peer = %key.peer, prefix_len = key.prefix_len, "TCP MD5 listener key configured");
     }
     enable_listener_gtsm_outbound(&socket, addr.is_ipv4(), &options.ttl_security)?;
+    // Listener-wide by construction: the clamp is negotiated in the SYN-ACK,
+    // so it must precede listen() and cannot be scoped per accepted peer.
+    if let Some(mss) = options.tcp_mss {
+        socket.set_tcp_mss(u32::from(mss))?;
+    }
     socket.listen(DEFAULT_LISTEN_BACKLOG)?;
     socket.set_nonblocking(true)?;
 
@@ -4253,6 +4262,42 @@ mod tests {
         assert!(listener.local_addr().unwrap().port() > 0);
         assert_eq!(installed.into_inner(), vec![1, 2]);
         tokio::task::yield_now().await;
+    }
+
+    /// The clamp is negotiated in the SYN-ACK, so it must be on the listening
+    /// socket before `listen()`; the accepted child and the peer's send MSS
+    /// both land on it.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn bind_socket2_listener_installs_tcp_mss_before_listen_and_children_inherit_it() {
+        let options = ListenerSocketOptions {
+            tcp_mss: Some(1000),
+            ..ListenerSocketOptions::default()
+        };
+        let listener = bind_socket2_listener("127.0.0.1:0".parse().unwrap(), &options).unwrap();
+        assert_eq!(socket2::SockRef::from(&listener).tcp_mss().unwrap(), 1000);
+
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (accepted, _) = listener.accept().await.unwrap();
+        // An established socket reports its effective payload MSS: the
+        // negotiated 1000 minus TCP option bytes (12 with timestamps), far
+        // below the ~65k a clampless loopback session negotiates.
+        for (label, mss) in [
+            (
+                "accepted child",
+                socket2::SockRef::from(&accepted).tcp_mss().unwrap(),
+            ),
+            (
+                "peer send MSS",
+                socket2::SockRef::from(&client).tcp_mss().unwrap(),
+            ),
+        ] {
+            assert!(
+                (960..=1000).contains(&mss),
+                "{label} must negotiate at most the clamp: {mss}"
+            );
+        }
     }
 
     /// Restart-under-traffic: the daemon is the active closer at shutdown,

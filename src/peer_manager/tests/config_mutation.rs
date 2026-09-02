@@ -928,6 +928,41 @@ async fn apply_peer_reshape_snapshot_rejects_tcp_ao_delta_without_mutation() {
 }
 
 #[tokio::test]
+async fn reconfigure_and_reshape_reject_tcp_mss_delta_without_mutation() {
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+    let mut mgr = test_peer_manager();
+    mgr.add_peer(make_config(addr, 65002), false).await.unwrap();
+    let mut replacement = make_config(addr, 65002);
+    replacement.hold_time = Some(45);
+    replacement.tcp_mss = Some(1360);
+    let Err(error) = mgr.reconfigure_peer_runtime(replacement).await else {
+        panic!("tcp_mss reconfigure must be restart-required");
+    };
+    assert!(matches!(
+        error,
+        rustbgpd_api::peer_types::PeerLifecycleError::RestartRequired(_)
+    ));
+    let managed = mgr.peers.get(&key(addr)).expect("unchanged peer");
+    assert_eq!(managed.hold_time, Some(90));
+    assert_eq!(managed.transport_config.tcp_mss, None);
+
+    let mut replacement = make_config(addr, 65002);
+    replacement.hold_time = Some(45);
+    replacement.tcp_mss = Some(1360);
+    let Err(error) = mgr.apply_peer_reshape_snapshot(vec![replacement]).await else {
+        panic!("tcp_mss reshape must be restart-required");
+    };
+    assert!(matches!(
+        error,
+        rustbgpd_api::peer_types::PeerLifecycleError::RestartRequired(_)
+    ));
+    let managed = mgr.peers.get(&key(addr)).expect("unchanged peer");
+    assert_eq!(managed.hold_time, Some(90));
+    assert_eq!(managed.transport_config.tcp_mss, None);
+}
+
+#[tokio::test]
 async fn apply_peer_reshape_snapshot_rolls_back_prior_peers_on_later_failure() {
     let mut mgr = test_peer_manager();
     let addr1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));

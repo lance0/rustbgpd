@@ -894,6 +894,7 @@ impl PeerManager {
         transport.peer_group.clone_from(&config.peer_group);
         transport.md5_password.clone_from(&config.md5_password);
         transport.tcp_ao.clone_from(&config.tcp_ao);
+        transport.tcp_mss = config.tcp_mss;
         transport.ttl_security_hops = config.ttl_security_hops;
         transport.local_ipv6_nexthop = config.local_ipv6_nexthop;
         transport.gr_stale_routes_time = config.gr_stale_routes_time;

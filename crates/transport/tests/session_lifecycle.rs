@@ -92,6 +92,7 @@ fn transport_config(addr: SocketAddr) -> TransportConfig {
         max_prefix_action: MaxPrefixAction::Shutdown,
         max_prefix_warning_percent: None,
         md5_password: None,
+        tcp_mss: None,
         tcp_ao: None,
         ttl_security_hops: None,
         local_ipv6_nexthop: None,

@@ -836,3 +836,100 @@ fn max_prefix_mode_edits_are_hot_applicable() {
             .all(|change| change.impact == Some(super::ConfigFieldImpact::HotApplied))
     );
 }
+
+#[test]
+fn tcp_mss_inherits_from_group_allows_neighbor_override_and_is_restart_required() {
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.tunnel]
+tcp_mss = 1360
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "tunnel"
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+peer_group = "tunnel"
+tcp_mss = 1200
+
+[[neighbors]]
+address = "10.0.0.4"
+remote_asn = 65004
+"#;
+    let config = parse(toml_str).unwrap();
+    let resolved = config.resolved_neighbors().unwrap();
+    let mss: Vec<Option<u16>> = resolved
+        .iter()
+        .map(|neighbor| neighbor.transport_config.tcp_mss)
+        .collect();
+    assert_eq!(mss, vec![Some(1360), Some(1200), None]);
+    assert_eq!(
+        config_field_impact("tcp_mss").map(|(impact, _)| impact),
+        Some(ConfigFieldImpact::RestartRequired)
+    );
+    let effective = config.effective_redacted();
+    assert_eq!(effective.neighbors[0].tcp_mss, Some(1360));
+    assert_eq!(effective.neighbors[1].tcp_mss, Some(1200));
+    assert_eq!(effective.neighbors[2].tcp_mss, None);
+}
+
+#[test]
+fn dynamic_range_rejects_peer_group_tcp_mss() {
+    let err = parse(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.dynamic]
+tcp_mss = 1360
+
+[[dynamic_neighbors]]
+prefix = "192.0.2.0/24"
+peer_group = "dynamic"
+"#,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("tcp_mss"), "{err}");
+    assert!(err.contains("static neighbors only"), "{err}");
+}
+
+#[test]
+fn tcp_mss_rejects_values_outside_the_kernel_range() {
+    let base = "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\n[global.telemetry]\nprometheus_addr = \"0.0.0.0:9179\"\nlog_format = \"json\"\n\n";
+    for (snippet, expected) in [
+        (
+            "[[neighbors]]\naddress = \"10.0.0.2\"\nremote_asn = 65002\ntcp_mss = 87\n",
+            "10.0.0.2: tcp_mss: 87",
+        ),
+        (
+            "[[neighbors]]\naddress = \"10.0.0.2\"\nremote_asn = 65002\ntcp_mss = 32768\n",
+            "10.0.0.2: tcp_mss: 32768",
+        ),
+        ("[peer_groups.g]\ntcp_mss = 0\n", "peer_group.g: tcp_mss: 0"),
+    ] {
+        let err = parse(&format!("{base}{snippet}")).unwrap_err().to_string();
+        assert!(err.contains(expected), "{err}");
+        assert!(err.contains("88..=32767"), "{err}");
+    }
+    let ok =
+        format!("{base}[[neighbors]]\naddress = \"10.0.0.2\"\nremote_asn = 65002\ntcp_mss = 88\n");
+    assert!(parse(&ok).is_ok());
+}
