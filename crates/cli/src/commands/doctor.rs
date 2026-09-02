@@ -4450,6 +4450,7 @@ paths = ["x"]
             diagnostic: "none".to_string(),
             strict: true,
             remote_administrative_down: Some(true),
+            multihop: false,
         }];
         let connection = connect(&server.addr, None).await;
         let dir = tempfile::tempdir().unwrap();

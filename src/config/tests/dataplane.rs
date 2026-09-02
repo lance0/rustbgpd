@@ -534,6 +534,119 @@ peer_group = "rrc"
 }
 
 #[test]
+fn bfd_multihop_parses_and_defaults_single_hop() {
+    let toml = format!(
+        r#"
+{}
+
+[[bfd_profiles]]
+name = "fast"
+
+[[neighbors]]
+address = "10.0.2.2"
+remote_asn = 65003
+bfd = {{ profile = "fast", multihop = true }}
+
+[[neighbors]]
+address = "2001:db8::2"
+remote_asn = 65003
+bfd = {{ profile = "fast", multihop = true }}
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+bfd = {{ profile = "fast" }}
+"#,
+        valid_toml()
+    );
+    let config = parse(&toml).expect("multihop BFD on global peers is valid");
+    let bfd_of = |addr: &str| {
+        config
+            .neighbors
+            .iter()
+            .find(|n| n.address == addr)
+            .and_then(|n| n.bfd.as_ref())
+            .expect("bfd block")
+    };
+    assert!(bfd_of("10.0.2.2").multihop);
+    assert!(bfd_of("2001:db8::2").multihop);
+    assert!(!bfd_of("10.0.0.3").multihop, "multihop defaults to false");
+}
+
+#[test]
+fn bfd_multihop_rejects_link_local_neighbor_own_and_inherited() {
+    for (label, extra) in [
+        (
+            "own",
+            r#"
+[[neighbors]]
+address = "fe80::1"
+interface = "lo"
+remote_asn = 65003
+bfd = { profile = "fast", multihop = true }
+"#,
+        ),
+        (
+            "inherited",
+            r#"
+[peer_groups.rrc]
+bfd = { profile = "fast", multihop = true }
+
+[[neighbors]]
+address = "fe80::2"
+interface = "lo"
+remote_asn = 65003
+peer_group = "rrc"
+"#,
+        ),
+    ] {
+        let toml = format!(
+            r#"
+{}
+
+[[bfd_profiles]]
+name = "fast"
+{extra}
+"#,
+            valid_toml()
+        );
+        let err = parse(&toml).unwrap_err();
+        let ConfigError::InvalidBfd { reason } = err else {
+            panic!("{label}: expected InvalidBfd, got {err}");
+        };
+        assert!(
+            reason.contains("multihop") && reason.contains("link-local"),
+            "{label}: unexpected: {reason}"
+        );
+    }
+}
+
+#[test]
+fn bfd_multihop_edits_are_restart_required() {
+    let base = |bfd: &str| {
+        parse(&format!(
+            r#"
+{}
+
+[[bfd_profiles]]
+name = "fast"
+
+[[neighbors]]
+address = "10.0.2.2"
+remote_asn = 65003
+bfd = {bfd}
+"#,
+            valid_toml()
+        ))
+        .unwrap()
+    };
+    let single_hop = base(r#"{ profile = "fast" }"#);
+    let multihop = base(r#"{ profile = "fast", multihop = true }"#);
+    assert!(diff_config(&single_hop, &multihop).bfd_changed);
+    assert!(!diff_config(&multihop, &multihop.clone()).bfd_changed);
+}
+
+#[test]
 fn bfd_diff_marks_restart_required_and_pins() {
     let old = parse(valid_toml()).unwrap();
     let toml = format!(

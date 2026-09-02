@@ -1,4 +1,5 @@
-//! Single-hop asynchronous BFD actor (ADR-0067).
+//! Asynchronous BFD actor (ADR-0067): single-hop (RFC 5881) and multihop
+//! (RFC 5883) sessions.
 //!
 //! Owns the UDP sockets, the real per-session timers, and transmit jitter, and
 //! drives the pure [`rustbgpd_bfd::Session`] state machine. It is a **pure
@@ -8,17 +9,20 @@
 //! lossy [`BfdRuntimeEvent`] broadcast for the operator event stream, and a
 //! per-peer coalescing [`BfdStateChange`] channel (bounded by the session
 //! count; latest state wins, a real transition is never masked by an ack) that
-//! `PeerManager` consumes for RFC 5882 BGP coupling (non-strict teardown
-//! shipped; strict withholding lands next).
+//! `PeerManager` consumes for RFC 5882 BGP coupling.
 //!
 //! Design: a single actor task `select!`s over the shared per-AF receive
-//! sockets and a min-deadline timer heap covering every session's transmit and
-//! detection timers. The receive path validates the RFC 5881 TTL/Hop-Limit-255
-//! requirement via `recvmsg` ancillary data and the §4 source-port range
-//! (49152..=65535), decodes, demultiplexes to the
-//! session by Your Discriminator (RFC 5880 §6.8.6; source address only for the
-//! zero-discriminator bootstrap), and executes the resulting
-//! [`rustbgpd_bfd::Action`]s.
+//! sockets (UDP/3784 single-hop, UDP/4784 multihop — each opened only when a
+//! session of that mode and family exists) and a min-deadline timer heap
+//! covering every session's transmit and detection timers. The receive path
+//! validates the RFC 5881 TTL/Hop-Limit-255 requirement via `recvmsg`
+//! ancillary data (single-hop only — RFC 5883 packets have transited routers)
+//! and the source-port range (49152..=65535, RFC 5881 §4 / RFC 5883 §5),
+//! decodes, demultiplexes to the session by Your Discriminator (RFC 5880
+//! §6.8.6; source address only for the zero-discriminator bootstrap), refuses a
+//! packet whose encapsulation mode differs from the session's, and executes
+//! the resulting [`rustbgpd_bfd::Action`]s. Both modes transmit with TTL /
+//! Hop Limit 255; multihop can bind the configured per-family active source.
 
 use std::net::{IpAddr, SocketAddr, SocketAddrV6};
 
@@ -55,6 +59,10 @@ pub struct BfdSessionParams {
     /// neighbor) is reconciled the same as an absent entry — the actor drains
     /// the session to `AdminDown` and drops it.
     pub enabled: bool,
+    /// RFC 5883 multihop encapsulation (UDP/4784, no receive TTL check).
+    pub multihop: bool,
+    /// Configured per-family active-open source for multihop transmit.
+    pub source: Option<IpAddr>,
 }
 
 /// The desired BFD session set the actor reconciles toward. Owned and published
@@ -208,24 +216,51 @@ impl BfdRuntimeConfig {
         !self.sessions.is_empty()
     }
 
-    /// Whether any configured session targets an IPv4 peer. Sockets are opened
-    /// only for families with at least one session, so a family that is absent
-    /// on the host (e.g. `ipv6.disable=1`) cannot fail startup unless a
-    /// session actually needs it.
+    /// Whether any configured single-hop session targets an IPv4 peer.
+    /// Sockets are opened only for (mode, family) pairs with at least one
+    /// session, so a family that is absent on the host (e.g.
+    /// `ipv6.disable=1`) cannot fail startup unless a session actually needs
+    /// it, and a multihop-only daemon never binds the single-hop port.
     #[must_use]
     pub fn needs_ipv4(&self) -> bool {
-        self.sessions.iter().any(|s| s.peer.is_ipv4())
+        self.sessions
+            .iter()
+            .any(|s| s.peer.is_ipv4() && !s.multihop)
     }
 
-    /// Whether any configured session targets an IPv6 peer. See [`Self::needs_ipv4`].
+    /// Whether any configured single-hop session targets an IPv6 peer. See
+    /// [`Self::needs_ipv4`].
     #[must_use]
     pub fn needs_ipv6(&self) -> bool {
-        self.sessions.iter().any(|s| s.peer.is_ipv6())
+        self.sessions
+            .iter()
+            .any(|s| s.peer.is_ipv6() && !s.multihop)
+    }
+
+    /// Whether any configured multihop (RFC 5883) session targets an IPv4
+    /// peer. See [`Self::needs_ipv4`].
+    #[must_use]
+    pub fn needs_multihop_ipv4(&self) -> bool {
+        self.sessions.iter().any(|s| s.peer.is_ipv4() && s.multihop)
+    }
+
+    /// Whether any configured multihop (RFC 5883) session targets an IPv6
+    /// peer. See [`Self::needs_ipv4`].
+    #[must_use]
+    pub fn needs_multihop_ipv6(&self) -> bool {
+        self.sessions.iter().any(|s| s.peer.is_ipv6() && s.multihop)
+    }
+
+    fn multihop_source(&self, v6: bool) -> Option<IpAddr> {
+        self.sessions
+            .iter()
+            .find(|session| session.multihop && session.peer.is_ipv6() == v6)
+            .and_then(|session| session.source)
     }
 
     fn validate_destinations(&self) -> Result<(), BfdRuntimeConfigError> {
         for session in &self.sessions {
-            let expected = bfd_destination(session.peer, session.scope_id)?;
+            let expected = bfd_destination(session.peer, session.scope_id, session.multihop)?;
             if session.destination != expected {
                 return Err(BfdRuntimeConfigError(format!(
                     "BFD peer {} has inconsistent runtime destination {} (expected {expected})",
@@ -286,7 +321,7 @@ impl BfdRuntimeConfig {
             } else {
                 None
             };
-            let destination = bfd_destination(peer, scope_id)?;
+            let destination = bfd_destination(peer, scope_id, bfd.multihop)?;
             sessions.push(BfdSessionParams {
                 peer,
                 scope_id,
@@ -298,6 +333,11 @@ impl BfdRuntimeConfig {
                 detect_mult: u8::try_from(profile.multiplier).unwrap_or(u8::MAX),
                 strict: bfd.strict,
                 enabled: true,
+                multihop: bfd.multihop,
+                source: bfd
+                    .multihop
+                    .then(|| config.active_source_for(peer))
+                    .flatten(),
             });
         }
         Ok(BfdRuntimeConfig { sessions })
@@ -311,13 +351,26 @@ fn is_ipv6_link_local(peer: IpAddr) -> bool {
     })
 }
 
+/// UDP destination port: 3784 single-hop (RFC 5881 §4), 4784 multihop (RFC
+/// 5883 §5).
+fn bfd_control_port(multihop: bool) -> u16 {
+    if multihop { 4784 } else { 3784 }
+}
+
 pub(crate) fn bfd_destination(
     peer: IpAddr,
     scope_id: Option<u32>,
+    multihop: bool,
 ) -> Result<SocketAddr, BfdRuntimeConfigError> {
+    if multihop && is_ipv6_link_local(peer) {
+        return Err(BfdRuntimeConfigError(format!(
+            "BFD peer {peer} is IPv6 link-local; multihop BFD (RFC 5883) needs a global peer address"
+        )));
+    }
+    let port = bfd_control_port(multihop);
     match (peer, scope_id) {
         (IpAddr::V6(v6), Some(scope_id)) if is_ipv6_link_local(peer) && scope_id != 0 => {
-            Ok(SocketAddr::V6(SocketAddrV6::new(v6, 3784, 0, scope_id)))
+            Ok(SocketAddr::V6(SocketAddrV6::new(v6, port, 0, scope_id)))
         }
         (IpAddr::V6(_), None) if is_ipv6_link_local(peer) => Err(BfdRuntimeConfigError(format!(
             "BFD peer {peer} is IPv6 link-local but has no interface scope"
@@ -328,7 +381,7 @@ pub(crate) fn bfd_destination(
         (_, Some(scope_id)) => Err(BfdRuntimeConfigError(format!(
             "global BFD peer {peer} unexpectedly carries interface scope {scope_id}"
         ))),
-        (_, None) => Ok(SocketAddr::new(peer, 3784)),
+        (_, None) => Ok(SocketAddr::new(peer, port)),
     }
 }
 
@@ -360,6 +413,8 @@ pub struct BfdStatus {
     /// in that case, so this cause bit is required to explain why RFC 5882
     /// permits BGP while BFD is locally Down.
     pub remote_admin_down: bool,
+    /// Whether the session uses RFC 5883 multihop encapsulation.
+    pub multihop: bool,
 }
 
 /// A BFD session state transition, broadcast for the operator event stream
@@ -454,6 +509,8 @@ mod linux {
 
     /// BFD single-hop control port (RFC 5881 §4).
     const BFD_CONTROL_PORT: u16 = 3784;
+    /// BFD multihop control port (RFC 5883 §5).
+    const BFD_MULTIHOP_CONTROL_PORT: u16 = 4784;
     const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
     /// Max datagrams pulled off one receive socket per actor turn. Bounds the
     /// work a packet flood can pin the actor to before the `select!` loop gets
@@ -479,19 +536,31 @@ mod linux {
         }
     }
 
-    /// The receive + transmit socket pair for one address family. Opening them
-    /// before spawning the task makes socket acquisition part of daemon
-    /// startup instead of an eventually logged background failure.
+    /// The receive + transmit socket pair for one address family and one
+    /// encapsulation mode. Opening them before spawning the task makes socket
+    /// acquisition part of daemon startup instead of an eventually logged
+    /// background failure.
     struct FamilySockets {
         rx: AsyncFd<std::net::UdpSocket>,
         tx: UdpSocket,
     }
 
     impl FamilySockets {
+        /// Single-hop pair: receive on UDP/3784 (RFC 5881 §4).
         fn open(v6: bool) -> std::io::Result<Self> {
+            Self::open_on(v6, BFD_CONTROL_PORT, None)
+        }
+
+        /// Multihop pair: receive on UDP/4784 (RFC 5883 §5). The transmit
+        /// socket transmits at TTL 255 like the single-hop one.
+        fn open_multihop(v6: bool, source: Option<IpAddr>) -> std::io::Result<Self> {
+            Self::open_on(v6, BFD_MULTIHOP_CONTROL_PORT, source)
+        }
+
+        fn open_on(v6: bool, port: u16, source: Option<IpAddr>) -> std::io::Result<Self> {
             Ok(Self {
-                rx: AsyncFd::new(rx_socket(v6)?)?,
-                tx: UdpSocket::from_std(tx_socket(v6)?)?,
+                rx: AsyncFd::new(rx_socket(v6, port)?)?,
+                tx: UdpSocket::from_std(tx_socket(v6, source)?)?,
             })
         }
     }
@@ -506,9 +575,12 @@ mod linux {
     }
 
     /// BFD sockets acquired during fail-fast startup and retained, inactive,
-    /// until the daemon reaches the existing BFD activation point.
+    /// until the daemon reaches the existing BFD activation point. Each
+    /// encapsulation mode has its own per-family set; a mode with no
+    /// configured session opens nothing.
     pub struct PreparedRuntime {
-        sockets: RuntimeSockets,
+        single_hop: Option<RuntimeSockets>,
+        multihop: Option<RuntimeSockets>,
     }
 
     /// Open sockets for exactly the families that have configured sessions.
@@ -545,12 +617,24 @@ mod linux {
                 format!("invalid BFD runtime configuration: {error}"),
             )
         })?;
-        let sockets = prepare_runtime_sockets(
+        let single_hop = prepare_runtime_sockets(
             config.needs_ipv4(),
             config.needs_ipv6(),
             FamilySockets::open,
         )?;
-        Ok(sockets.map(|sockets| PreparedRuntime { sockets }))
+        let multihop = prepare_runtime_sockets(
+            config.needs_multihop_ipv4(),
+            config.needs_multihop_ipv6(),
+            |v6| FamilySockets::open_multihop(v6, config.multihop_source(v6)),
+        )
+        .map_err(|error| std::io::Error::new(error.kind(), format!("multihop {error}")))?;
+        if single_hop.is_none() && multihop.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(PreparedRuntime {
+            single_hop,
+            multihop,
+        }))
     }
 
     /// Activate an already prepared BFD runtime. Socket acquisition cannot
@@ -564,11 +648,11 @@ mod linux {
         state_change_tx: BfdStateChangeSender,
         shutdown: CancellationToken,
     ) -> Option<BfdRuntimeHandle> {
-        let PreparedRuntime { sockets } = prepared?;
+        let prepared = prepared?;
         let task_shutdown = shutdown.clone();
         let task = tokio::spawn(async move {
             run(
-                sockets,
+                prepared,
                 desired_rx,
                 &metrics,
                 &status_tx,
@@ -592,6 +676,9 @@ mod linux {
         /// required interface scope.
         destination: SocketAddr,
         strict: bool,
+        /// RFC 5883 multihop encapsulation: selects the UDP/4784 socket pair
+        /// and rejects packets that arrive through the other mode's socket.
+        multihop: bool,
         /// Our local discriminator for this session (RFC 5880 §6.8.1) — held so
         /// it can be released back to the allocator and removed from the
         /// `by_discriminator` demux index when the session is torn down.
@@ -656,6 +743,9 @@ mod linux {
         /// so a session can never appear in an unopened family).
         tx_v4: Option<UdpSocket>,
         tx_v6: Option<UdpSocket>,
+        /// Multihop transmit socket per family, same opening rule.
+        multihop_tx_v4: Option<UdpSocket>,
+        multihop_tx_v6: Option<UdpSocket>,
         /// Broadcast sink for session state transitions (ADR-0067 step 3b) —
         /// lossy, feeds the operator event stream.
         event_tx: broadcast::Sender<BfdRuntimeEvent>,
@@ -666,8 +756,48 @@ mod linux {
         jitter_state: u64,
     }
 
+    /// The receive and transmit halves of one family's socket pair (`None`
+    /// for an unopened family).
+    type FamilyHalves = (Option<AsyncFd<std::net::UdpSocket>>, Option<UdpSocket>);
+
+    /// Split one mode's per-family socket pairs into `(IPv4, IPv6)` halves.
+    fn split_sockets(sockets: Option<RuntimeSockets>) -> (FamilyHalves, FamilyHalves) {
+        let split = |family: Option<FamilySockets>| match family {
+            Some(f) => (Some(f.rx), Some(f.tx)),
+            None => (None, None),
+        };
+        match sockets {
+            Some(RuntimeSockets { v4, v6 }) => (split(v4), split(v6)),
+            None => ((None, None), (None, None)),
+        }
+    }
+
+    /// Service one readable receive socket: read up to `RECV_BUDGET`
+    /// datagrams, clear readiness only when the socket is fully drained, and
+    /// feed each packet to the actor. `multihop` selects the RFC 5883
+    /// receive rules (no TTL-255 requirement) and tags the packets so demux
+    /// can refuse a session reached through the other mode's socket.
+    async fn service_rx(
+        actor: &mut Actor,
+        guard: std::io::Result<tokio::io::unix::AsyncFdReadyGuard<'_, std::net::UdpSocket>>,
+        multihop: bool,
+        metrics: &BgpMetrics,
+        status_tx: &watch::Sender<Vec<BfdStatus>>,
+    ) {
+        let Ok(mut g) = guard else {
+            return;
+        };
+        let (pkts, drained) = drain_socket(g.get_inner().as_raw_fd(), RECV_BUDGET, multihop);
+        if drained {
+            g.clear_ready();
+        }
+        for packet in pkts {
+            actor.on_packet(packet, metrics, status_tx).await;
+        }
+    }
+
     async fn run(
-        sockets: RuntimeSockets,
+        prepared: PreparedRuntime,
         mut desired_rx: watch::Receiver<BfdRuntimeConfig>,
         metrics: &BgpMetrics,
         status_tx: &watch::Sender<Vec<BfdStatus>>,
@@ -675,15 +805,12 @@ mod linux {
         state_change_tx: &BfdStateChangeSender,
         shutdown: &CancellationToken,
     ) {
-        let RuntimeSockets { v4, v6 } = sockets;
-        let (rx_v4, tx_v4) = match v4 {
-            Some(f) => (Some(f.rx), Some(f.tx)),
-            None => (None, None),
-        };
-        let (rx_v6, tx_v6) = match v6 {
-            Some(f) => (Some(f.rx), Some(f.tx)),
-            None => (None, None),
-        };
+        let PreparedRuntime {
+            single_hop,
+            multihop,
+        } = prepared;
+        let ((rx_v4, tx_v4), (rx_v6, tx_v6)) = split_sockets(single_hop);
+        let ((rx_mh_v4, tx_mh_v4), (rx_mh_v6, tx_mh_v6)) = split_sockets(multihop);
         let mut actor = Actor {
             sessions: BTreeMap::new(),
             discriminators: DiscriminatorAllocator::new(),
@@ -691,6 +818,8 @@ mod linux {
             timers: BinaryHeap::new(),
             tx_v4,
             tx_v6,
+            multihop_tx_v4: tx_mh_v4,
+            multihop_tx_v6: tx_mh_v6,
             event_tx: event_tx.clone(),
             state_change_tx: state_change_tx.clone(),
             jitter_state: 0x9E37_79B9_7F4A_7C15,
@@ -709,8 +838,9 @@ mod linux {
         // arm reads at most `RECV_BUDGET` datagrams before the loop re-selects
         // (`clear_ready` is skipped when the budget ran out, so a still-loaded
         // socket is picked up again on the very next turn).
-        // ponytail: a sustained v4 flood can delay v6 reads (biased arm order);
-        // alternate the two rx arms per turn if that ever matters.
+        // ponytail: a sustained flood on an earlier rx arm can delay the later
+        // ones (biased arm order: single-hop v4, v6, then multihop v4, v6);
+        // rotate the rx arms per turn if that ever matters.
         loop {
             let sleep = next_timer_sleep(&actor.timers);
             tokio::select! {
@@ -732,26 +862,16 @@ mod linux {
                     actor.fire_due_timers(metrics, status_tx).await;
                 }
                 guard = readable_or_pending(rx_v4.as_ref()) => {
-                    if let Ok(mut g) = guard {
-                        let (pkts, drained) = drain_socket(g.get_inner().as_raw_fd(), RECV_BUDGET);
-                        if drained {
-                            g.clear_ready();
-                        }
-                        for packet in pkts {
-                            actor.on_packet(packet, metrics, status_tx).await;
-                        }
-                    }
+                    service_rx(&mut actor, guard, false, metrics, status_tx).await;
                 }
                 guard = readable_or_pending(rx_v6.as_ref()) => {
-                    if let Ok(mut g) = guard {
-                        let (pkts, drained) = drain_socket(g.get_inner().as_raw_fd(), RECV_BUDGET);
-                        if drained {
-                            g.clear_ready();
-                        }
-                        for packet in pkts {
-                            actor.on_packet(packet, metrics, status_tx).await;
-                        }
-                    }
+                    service_rx(&mut actor, guard, false, metrics, status_tx).await;
+                }
+                guard = readable_or_pending(rx_mh_v4.as_ref()) => {
+                    service_rx(&mut actor, guard, true, metrics, status_tx).await;
+                }
+                guard = readable_or_pending(rx_mh_v6.as_ref()) => {
+                    service_rx(&mut actor, guard, true, metrics, status_tx).await;
                 }
             }
         }
@@ -804,6 +924,7 @@ mod linux {
                 scope_id: params.scope_id,
                 destination: params.destination,
                 strict: params.strict,
+                multihop: params.multihop,
                 local_discriminator: discr,
                 last_diagnostic: Diagnostic::None,
                 epochs: HashMap::new(),
@@ -906,7 +1027,9 @@ mod linux {
             let ReceivedPacket {
                 src,
                 ifindex,
+                multihop,
                 packet: pkt,
+                ..
             } = packet;
             let Some(peer) = scoped_demux_target(
                 &self.by_discriminator,
@@ -926,6 +1049,18 @@ mod linux {
             let Some(entry) = self.sessions.get_mut(&peer) else {
                 return;
             };
+            // A session is single-hop or multihop, never both: a packet that
+            // reached it through the other mode's socket (and therefore the
+            // other mode's receive rules) is not this session's traffic.
+            if entry.multihop != multihop {
+                debug!(
+                    %peer,
+                    session_multihop = entry.multihop,
+                    packet_multihop = multihop,
+                    "BFD packet arrived through the other encapsulation mode's socket; ignoring"
+                );
+                return;
+            }
             let before_state = entry.session.state();
             let before_remote_admin_down = entry.session.remote_admin_down();
             let actions = entry.session.handle(Event::PacketReceived(pkt));
@@ -1086,24 +1221,43 @@ mod linux {
             Duration::from_micros(micros.max(1))
         }
 
-        async fn send(&self, peer: IpAddr, pkt: &ControlPacket) {
+        async fn send(&mut self, peer: IpAddr, pkt: &ControlPacket) {
             let bytes = pkt.encode();
-            let Some(dst) = self.sessions.get(&peer).map(|entry| entry.destination) else {
+            let Some((dst, multihop)) = self
+                .sessions
+                .get(&peer)
+                .map(|entry| (entry.destination, entry.multihop))
+            else {
                 return;
             };
-            let sock = if peer.is_ipv4() {
-                self.tx_v4.as_ref()
+            let sent = if multihop {
+                let sock = if peer.is_ipv4() {
+                    self.multihop_tx_v4.as_mut()
+                } else {
+                    self.multihop_tx_v6.as_mut()
+                };
+                let Some(sock) = sock else {
+                    // Unreachable while the restart-required session set holds
+                    // (a session's mode and family always had their sockets
+                    // opened at startup); degrade to a logged non-send rather
+                    // than a panic.
+                    warn!(peer = %peer, "BFD transmit skipped: no multihop socket for the peer's address family");
+                    return;
+                };
+                sock.send_to(&bytes, dst).await.map(|_| ())
             } else {
-                self.tx_v6.as_ref()
+                let sock = if peer.is_ipv4() {
+                    self.tx_v4.as_ref()
+                } else {
+                    self.tx_v6.as_ref()
+                };
+                let Some(sock) = sock else {
+                    warn!(peer = %peer, "BFD transmit skipped: no socket for the peer's address family");
+                    return;
+                };
+                sock.send_to(&bytes, dst).await.map(|_| ())
             };
-            let Some(sock) = sock else {
-                // Unreachable while the restart-required session set holds (a
-                // session's family always had its sockets opened at startup);
-                // degrade to a logged non-send rather than a panic.
-                warn!(peer = %peer, "BFD transmit skipped: no socket for the peer's address family");
-                return;
-            };
-            if let Err(e) = sock.send_to(&bytes, dst).await {
+            if let Err(e) = sent {
                 debug!(peer = %peer, error = %e, "BFD transmit failed");
             }
         }
@@ -1133,6 +1287,7 @@ mod linux {
                     diagnostic: e.last_diagnostic,
                     strict: e.strict,
                     remote_admin_down: e.session.remote_admin_down(),
+                    multihop: e.multihop,
                 })
                 .collect();
             let _ = status_tx.send(statuses);
@@ -1191,21 +1346,28 @@ mod linux {
     pub(super) struct ReceivedPacket {
         pub(super) src: IpAddr,
         pub(super) ifindex: Option<u32>,
+        /// Which socket (mode) delivered the datagram.
+        pub(super) multihop: bool,
+        /// Received TTL / Hop Limit from ancillary data, when reported. The
+        /// actor only gates on it (above); the netns tests read it to prove
+        /// multihop transmit TTL 255 reaches the wire.
+        #[cfg(test)]
+        pub(super) ttl: Option<i32>,
         pub(super) packet: ControlPacket,
     }
 
     /// Read up to `budget` datagrams from a non-blocking RX socket, validating
-    /// the TTL/Hop-Limit-255 requirement (RFC 5881) via ancillary data and
-    /// decoding each into a `(source IP, ControlPacket)`. Every `recvmsg`
-    /// (including discarded datagrams) counts against the budget, so a garbage
-    /// flood is bounded exactly like a valid one. Returns the packets and
-    /// whether the socket was fully drained (`false` = budget exhausted with
-    /// data possibly still queued — the caller must keep the socket marked
-    /// ready and come back).
-    fn drain_socket(fd: i32, budget: usize) -> (Vec<ReceivedPacket>, bool) {
+    /// the TTL/Hop-Limit-255 requirement (RFC 5881; skipped for a `multihop`
+    /// socket per RFC 5883) via ancillary data and decoding each into a
+    /// `(source IP, ControlPacket)`. Every `recvmsg` (including discarded
+    /// datagrams) counts against the budget, so a garbage flood is bounded
+    /// exactly like a valid one. Returns the packets and whether the socket
+    /// was fully drained (`false` = budget exhausted with data possibly still
+    /// queued — the caller must keep the socket marked ready and come back).
+    fn drain_socket(fd: i32, budget: usize, multihop: bool) -> (Vec<ReceivedPacket>, bool) {
         let mut out = Vec::new();
         for _ in 0..budget {
-            match recv_one(fd) {
+            match recv_one(fd, multihop) {
                 Recv::Packet(packet) => out.push(packet),
                 Recv::Discard => {}
                 Recv::Done => return (out, true),
@@ -1214,7 +1376,7 @@ mod linux {
         (out, false)
     }
 
-    pub(super) fn recv_one(fd: i32) -> Recv {
+    pub(super) fn recv_one(fd: i32, multihop: bool) -> Recv {
         let mut buf = [0u8; 256];
         let mut iov = [IoSliceMut::new(&mut buf)];
         let mut cmsg = nix::cmsg_space!([u8; 256]);
@@ -1243,16 +1405,18 @@ mod linux {
             }
         }
         // RFC 5881 §5: single-hop control packets must arrive with TTL/Hop
-        // Limit 255, else be discarded.
-        if ttl != Some(255) {
+        // Limit 255, else be discarded. RFC 5883 packets have crossed routers,
+        // so the multihop socket applies no TTL requirement (§5 leaves any
+        // GTSM-style bound to the operator; none is configured here).
+        if !multihop && ttl != Some(255) {
             return Recv::Discard;
         }
         let Some((src, src_port)) = msg.address.and_then(socket_ip_port) else {
             return Recv::Discard;
         };
-        // RFC 5881 §4: the source port MUST be in 49152..=65535. The
-        // range's upper bound is the u16 ceiling, so only the lower
-        // bound needs checking. Defense-in-depth alongside the
+        // RFC 5881 §4 / RFC 5883 §5: the source port MUST be in
+        // 49152..=65535. The range's upper bound is the u16 ceiling, so only
+        // the lower bound needs checking. Defense-in-depth alongside the
         // exact-TTL check and discriminator demux.
         if src_port < BFD_SRC_PORT_MIN {
             tracing::debug!(
@@ -1267,6 +1431,9 @@ mod linux {
             Ok(packet) => Recv::Packet(ReceivedPacket {
                 src,
                 ifindex,
+                multihop,
+                #[cfg(test)]
+                ttl,
                 packet,
             }),
             Err(_) => Recv::Discard,
@@ -1283,8 +1450,8 @@ mod linux {
         None
     }
 
-    fn rx_socket(v6: bool) -> std::io::Result<std::net::UdpSocket> {
-        rx_socket_with(v6, BFD_CONTROL_PORT, enable_recv_ttl)
+    fn rx_socket(v6: bool, port: u16) -> std::io::Result<std::net::UdpSocket> {
+        rx_socket_with(v6, port, enable_recv_ttl)
     }
 
     fn rx_socket_with(
@@ -1344,7 +1511,10 @@ mod linux {
     const BFD_SRC_PORT_MIN: u16 = 49152;
     const BFD_SRC_PORT_MAX: u16 = 65535;
 
-    pub(super) fn tx_socket(v6: bool) -> std::io::Result<std::net::UdpSocket> {
+    pub(super) fn tx_socket(
+        v6: bool,
+        source: Option<IpAddr>,
+    ) -> std::io::Result<std::net::UdpSocket> {
         let domain = if v6 { Domain::IPV6 } else { Domain::IPV4 };
         let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
         if v6 {
@@ -1353,7 +1523,7 @@ mod linux {
         } else {
             socket.set_ttl_v4(255)?;
         }
-        bind_source_port(&socket, v6)?;
+        bind_source_port(&socket, v6, source)?;
         socket.set_nonblocking(true)?;
         Ok(socket.into())
     }
@@ -1363,20 +1533,34 @@ mod linux {
     /// (Linux: ≥ 32768), which can fall below 49152 and break strict interop;
     /// scan the range from a per-process pseudo-random offset and bind the
     /// first free port instead.
-    fn bind_source_port(socket: &Socket, v6: bool) -> std::io::Result<()> {
+    fn bind_source_port(socket: &Socket, v6: bool, source: Option<IpAddr>) -> std::io::Result<()> {
         let span = BFD_SRC_PORT_MAX - BFD_SRC_PORT_MIN; // 16383
         // Pseudo-random start within the range, derived from the PID.
         let start = u16::try_from(std::process::id() % u32::from(span + 1)).unwrap_or(0);
-        let unspec: IpAddr = if v6 {
-            IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
-        } else {
-            IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
-        };
+        let bind_address = source.unwrap_or({
+            if v6 {
+                IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
+            } else {
+                IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+            }
+        });
+        let mut first_error = None;
         for i in 0..=span {
             let port = BFD_SRC_PORT_MIN + (start + i) % (span + 1);
-            if socket.bind(&SocketAddr::new(unspec, port).into()).is_ok() {
-                return Ok(());
+            match socket.bind(&SocketAddr::new(bind_address, port).into()) {
+                Ok(()) => return Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                    break;
+                }
             }
+        }
+        if let Some(error) = first_error {
+            return Err(std::io::Error::new(
+                error.kind(),
+                format!("failed to bind BFD transmit source {bind_address}: {error}"),
+            ));
         }
         Err(std::io::Error::new(
             std::io::ErrorKind::AddrInUse,
@@ -1419,7 +1603,7 @@ mod linux {
     mod unit {
         use super::{
             BFD_SRC_PORT_MIN, Deadline, FamilySockets, enable_recv_ttl, kind_key,
-            prepare_runtime_sockets, rx_socket_with, scoped_demux_target,
+            prepare_runtime_sockets, rx_socket_with, scoped_demux_target, tx_socket,
         };
         use rustbgpd_bfd::{ControlPacket, Diagnostic, SessionState, TimerKind};
         use std::collections::HashMap;
@@ -1490,7 +1674,7 @@ mod linux {
 
             let link_local: IpAddr = "fe80::2".parse().unwrap();
             assert_eq!(
-                bfd_destination(link_local, Some(17)),
+                bfd_destination(link_local, Some(17), false),
                 Ok(SocketAddr::V6(SocketAddrV6::new(
                     "fe80::2".parse().unwrap(),
                     3784,
@@ -1499,14 +1683,14 @@ mod linux {
                 )))
             );
             assert_eq!(
-                bfd_destination(link_local, None),
+                bfd_destination(link_local, None, false),
                 Err(BfdRuntimeConfigError(
                     "BFD peer fe80::2 is IPv6 link-local but has no interface scope".to_string()
                 )),
                 "link-local transmit must fail closed without a scope"
             );
             assert_eq!(
-                bfd_destination(link_local, Some(0)),
+                bfd_destination(link_local, Some(0), false),
                 Err(BfdRuntimeConfigError(
                     "BFD peer fe80::2 has invalid zero interface scope".to_string()
                 )),
@@ -1515,14 +1699,80 @@ mod linux {
 
             let global_v6: IpAddr = "2001:db8::2".parse().unwrap();
             assert_eq!(
-                bfd_destination(global_v6, None),
+                bfd_destination(global_v6, None, false),
                 Ok("[2001:db8::2]:3784".parse().unwrap())
             );
             let global_v4: IpAddr = "192.0.2.2".parse().unwrap();
             assert_eq!(
-                bfd_destination(global_v4, None),
+                bfd_destination(global_v4, None, false),
                 Ok("192.0.2.2:3784".parse().unwrap())
             );
+        }
+
+        #[test]
+        fn transmit_destination_uses_multihop_port_and_rejects_link_local() {
+            use super::super::bfd_destination;
+
+            // RFC 5883 §5: multihop control packets go to UDP/4784.
+            assert_eq!(
+                bfd_destination("192.0.2.2".parse().unwrap(), None, true),
+                Ok("192.0.2.2:4784".parse().unwrap())
+            );
+            assert_eq!(
+                bfd_destination("2001:db8::2".parse().unwrap(), None, true),
+                Ok("[2001:db8::2]:4784".parse().unwrap())
+            );
+            // Single-hop stays on 3784 — the port is the only difference.
+            assert_eq!(
+                bfd_destination("192.0.2.2".parse().unwrap(), None, false),
+                Ok("192.0.2.2:3784".parse().unwrap())
+            );
+            // A link-local peer is adjacent by definition: fail closed even
+            // when a scope is supplied.
+            let link_local: IpAddr = "fe80::2".parse().unwrap();
+            for scope in [None, Some(17)] {
+                let error = bfd_destination(link_local, scope, true)
+                    .expect_err("link-local multihop must fail closed");
+                assert!(
+                    error.to_string().contains("multihop") && error.to_string().contains("fe80::2"),
+                    "actionable error: {error}"
+                );
+            }
+        }
+
+        #[test]
+        fn multihop_receive_admits_transit_ttl_while_single_hop_requires_255() {
+            // One real RX socket with IP_RECVTTL; the same TTL-7 datagram is
+            // read once under each mode's rules. Load-bearing proof: dropping
+            // the `!multihop` guard makes the single-hop assertion red, and
+            // re-adding an unconditional TTL check makes the multihop one red.
+            let rx = rx_socket_with(false, 0, enable_recv_ttl).expect("rx socket");
+            let dst = ("127.0.0.1", rx.local_addr().expect("addr").port());
+            let sender = sender_in(BFD_SRC_PORT_MIN..=BFD_SRC_PORT_MIN + 200);
+            sender.set_ttl(7).expect("ttl");
+
+            sender
+                .send_to(&control_packet(0x5111).encode(), dst)
+                .expect("send");
+            let (pkts, drained) = super::drain_socket(rx.as_raw_fd(), 8, false);
+            assert!(drained);
+            assert!(
+                pkts.is_empty(),
+                "RFC 5881 §5: a single-hop socket discards TTL≠255"
+            );
+
+            sender
+                .send_to(&control_packet(0x5883).encode(), dst)
+                .expect("send");
+            let (pkts, drained) = super::drain_socket(rx.as_raw_fd(), 8, true);
+            assert!(drained);
+            assert_eq!(pkts.len(), 1, "RFC 5883 packets have transited routers");
+            assert_eq!(pkts[0].packet.my_discriminator, 0x5883);
+            assert!(
+                pkts[0].multihop,
+                "packets are tagged with the receiving mode"
+            );
+            assert_eq!(pkts[0].ttl, Some(7), "the received TTL is still reported");
         }
 
         #[test]
@@ -1589,6 +1839,20 @@ mod linux {
         }
 
         #[test]
+        fn transmit_socket_binds_configured_source_and_preserves_bind_error() {
+            let socket = tx_socket(false, Some("127.0.0.1".parse().unwrap()))
+                .expect("bind configured loopback source");
+            let local = socket.local_addr().expect("local address");
+            assert_eq!(local.ip(), "127.0.0.1".parse::<IpAddr>().unwrap());
+            assert!((BFD_SRC_PORT_MIN..=u16::MAX).contains(&local.port()));
+
+            let error = tx_socket(false, Some("192.0.2.1".parse().unwrap()))
+                .expect_err("unavailable source must fail");
+            assert_eq!(error.kind(), std::io::ErrorKind::AddrNotAvailable);
+            assert!(error.to_string().contains("192.0.2.1"));
+        }
+
+        #[test]
         fn configured_startup_propagates_socket_open_failure() {
             // Load-bearing proof: changing `prepare_runtime_sockets` back to
             // the old log-and-continue behavior (`Err(_) => Ok(None)`) makes
@@ -1623,6 +1887,8 @@ mod linux {
                     detect_mult: 3,
                     strict: false,
                     enabled: true,
+                    multihop: false,
+                    source: None,
                 }],
             };
             let Err(error) = super::prepare_runtime(&config) else {
@@ -1749,10 +2015,10 @@ mod linux {
             for _ in 0..10 {
                 tx.send_to(&[0u8; 24], dst).expect("send");
             }
-            let (pkts, drained) = super::drain_socket(rx.as_raw_fd(), 4);
+            let (pkts, drained) = super::drain_socket(rx.as_raw_fd(), 4, false);
             assert!(pkts.is_empty(), "garbage never decodes into packets");
             assert!(!drained, "budget exhausted with datagrams still queued");
-            let (pkts, drained) = super::drain_socket(rx.as_raw_fd(), 64);
+            let (pkts, drained) = super::drain_socket(rx.as_raw_fd(), 64, false);
             assert!(pkts.is_empty());
             assert!(drained, "second turn drains the remainder");
         }
@@ -1807,7 +2073,7 @@ mod linux {
             good.send_to(&control_packet(0x600D).encode(), dst)
                 .expect("send");
 
-            let (pkts, drained) = super::drain_socket(rx.as_raw_fd(), 8);
+            let (pkts, drained) = super::drain_socket(rx.as_raw_fd(), 8, false);
             assert!(drained, "both datagrams fit the budget");
             let discs: Vec<u32> = pkts
                 .iter()
@@ -1868,6 +2134,8 @@ mod linux {
                     detect_mult: 3,
                     strict: false,
                     enabled: true,
+                    multihop: false,
+                    source: None,
                 }],
             };
             let prepared = prepare_runtime(&config).expect("actor sockets open");
@@ -1978,6 +2246,138 @@ bfd = { profile = "fast", strict = true }
         assert_eq!(s.required_min_rx_us, 200_000);
         assert_eq!(s.detect_mult, 4);
         assert!(s.strict);
+    }
+
+    #[test]
+    fn from_config_collects_multihop_mode() {
+        let config = config_with(
+            r#"
+[[bfd_profiles]]
+name = "fast"
+
+[[neighbors]]
+address = "10.0.2.2"
+remote_asn = 65002
+bfd = { profile = "fast", multihop = true }
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+bfd = { profile = "fast" }
+"#,
+        );
+        let rc = BfdRuntimeConfig::from_config(&config).expect("derive BFD runtime");
+        let multihop = rc
+            .sessions
+            .iter()
+            .find(|s| s.peer == ip("10.0.2.2"))
+            .expect("multihop session");
+        assert!(multihop.multihop);
+        assert_eq!(multihop.source, None);
+        assert_eq!(multihop.destination, "10.0.2.2:4784".parse().unwrap());
+        let single_hop = rc
+            .sessions
+            .iter()
+            .find(|s| s.peer == ip("10.0.0.2"))
+            .expect("single-hop session");
+        assert!(!single_hop.multihop);
+        assert_eq!(single_hop.source, None);
+        assert_eq!(single_hop.destination, "10.0.0.2:3784".parse().unwrap());
+        // Sockets open per (mode, family): a mixed config needs both IPv4
+        // sets and neither IPv6 set.
+        assert!(rc.needs_ipv4() && rc.needs_multihop_ipv4());
+        assert!(!rc.needs_ipv6() && !rc.needs_multihop_ipv6());
+    }
+
+    #[test]
+    fn from_config_carries_active_source_only_for_multihop() {
+        let mut config = config_with(
+            r#"
+[[bfd_profiles]]
+name = "fast"
+
+[[neighbors]]
+address = "127.0.0.2"
+remote_asn = 65001
+bfd = { profile = "fast", multihop = true }
+
+[[neighbors]]
+address = "127.0.0.3"
+remote_asn = 65001
+bfd = { profile = "fast" }
+"#,
+        );
+        config.global.listen_addresses = Some(vec![ip("127.0.0.1")]);
+        let runtime = BfdRuntimeConfig::from_config(&config).expect("derive runtime");
+        assert_eq!(runtime.sessions[0].source, Some(ip("127.0.0.1")));
+        assert_eq!(runtime.sessions[1].source, None);
+    }
+
+    #[test]
+    fn multihop_only_config_never_needs_the_single_hop_sockets() {
+        let config = config_with(
+            r#"
+[[bfd_profiles]]
+name = "fast"
+
+[[neighbors]]
+address = "2001:db8::2"
+remote_asn = 65002
+bfd = { profile = "fast", multihop = true }
+"#,
+        );
+        let rc = BfdRuntimeConfig::from_config(&config).expect("derive BFD runtime");
+        assert!(rc.needs_multihop_ipv6());
+        assert!(
+            !rc.needs_ipv4() && !rc.needs_ipv6() && !rc.needs_multihop_ipv4(),
+            "a multihop-only daemon must not bind UDP/3784"
+        );
+    }
+
+    #[test]
+    fn from_config_inherits_multihop_from_peer_group() {
+        let config = config_with(
+            r#"
+[[bfd_profiles]]
+name = "fast"
+
+[peer_groups.rr-clients]
+bfd = { profile = "fast", multihop = true }
+
+[[neighbors]]
+address = "10.0.2.2"
+remote_asn = 65001
+peer_group = "rr-clients"
+"#,
+        );
+        let rc = BfdRuntimeConfig::from_config(&config).expect("derive BFD runtime");
+        assert_eq!(rc.sessions.len(), 1);
+        assert!(rc.sessions[0].multihop);
+        assert_eq!(rc.sessions[0].destination, "10.0.2.2:4784".parse().unwrap());
+    }
+
+    #[test]
+    fn from_config_rejects_multihop_on_link_local_neighbor() {
+        // Config validation refuses this earlier; the runtime derivation must
+        // fail closed on its own too (it is what the actor trusts).
+        let config = config_with(
+            r#"
+[[bfd_profiles]]
+name = "fast"
+
+[[neighbors]]
+address = "fe80::2"
+interface = "lo"
+remote_asn = 65002
+bfd = { profile = "fast", multihop = true }
+"#,
+        );
+        let error = BfdRuntimeConfig::from_config(&config)
+            .expect_err("link-local multihop must not derive a session");
+        assert!(
+            error.to_string().contains("fe80::2") && error.to_string().contains("multihop"),
+            "actionable error: {error}"
+        );
     }
 
     #[test]
@@ -2366,7 +2766,7 @@ bfd = {{ profile = "p" }}
         use std::os::fd::AsRawFd;
         use std::process::Command;
         use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU16, Ordering};
         use std::time::Duration;
         use tokio::sync::{broadcast, watch};
         use tokio_util::sync::CancellationToken;
@@ -2382,6 +2782,16 @@ bfd = {{ profile = "p" }}
         const LL_WRONG_ACTOR_IF: &str = "bfdwa";
         const LL_WRONG_PEER_IF: &str = "bfdwp";
         const PORT: u16 = 3784;
+        const MULTIHOP_PORT: u16 = 4784;
+        /// A never-answered single-hop peer that keeps the UDP/3784 sockets
+        /// open beside the multihop ones, so the mode-isolation phase has a
+        /// single-hop socket to misdeliver through.
+        const SINGLE_HOP_BYSTANDER_ADDR: &str = "127.0.0.3";
+
+        // Multihop responder mode, shared via a watch channel.
+        const MH_MODE_TRANSIT: u8 = 0; // reply on 4784 with TTL=1 (transited; must be accepted)
+        const MH_MODE_WRONG_SOCKET: u8 = 1; // reply on 3784 with TTL=255 (must be ignored)
+        const MH_MODE_SILENT: u8 = 2; // stop replying
 
         // Peer responder mode, shared via a watch channel.
         const MODE_TTL_BAD: u8 = 0; // reply with TTL=1 (must be discarded)
@@ -2519,6 +2929,60 @@ bfd = {{ profile = "p" }}
             tokio::net::UdpSocket::from_std(s.into()).unwrap()
         }
 
+        /// Multihop peer receive socket on UDP/4784 with `IP_RECVTTL`, so the
+        /// responder can read the actor's transmit TTL through `recv_one`.
+        fn multihop_peer_rx() -> std::net::UdpSocket {
+            let s = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
+            s.set_reuse_address(true).unwrap();
+            let addr: SocketAddr = format!("{PEER_ADDR}:{MULTIHOP_PORT}").parse().unwrap();
+            s.bind(&addr.into()).unwrap();
+            enable_recv_ttl(s.as_raw_fd(), false).unwrap();
+            s.set_nonblocking(true).unwrap();
+            s.into()
+        }
+
+        /// Hand-rolled multihop peer: answers the actor's UDP/4784 packets
+        /// with a transited-looking TTL, or misdelivers the same reply through
+        /// the single-hop port, or stays silent.
+        async fn multihop_peer_responder(
+            rx: std::net::UdpSocket,
+            tx_sock: tokio::net::UdpSocket,
+            mode_rx: watch::Receiver<u8>,
+            observed_ttl: Arc<AtomicI32>,
+            stop: CancellationToken,
+        ) {
+            let multihop_actor: SocketAddr =
+                format!("{ACTOR_ADDR}:{MULTIHOP_PORT}").parse().unwrap();
+            let single_hop_actor: SocketAddr = format!("{ACTOR_ADDR}:{PORT}").parse().unwrap();
+            let mut cur_ttl = 0u32;
+            loop {
+                tokio::select! {
+                    biased;
+                    () = stop.cancelled() => return,
+                    () = tokio::time::sleep(Duration::from_millis(10)) => {
+                        let Recv::Packet(received) = recv_one(rx.as_raw_fd(), true) else {
+                            continue;
+                        };
+                        observed_ttl.store(received.ttl.unwrap_or(-1), Ordering::Relaxed);
+                        let actor_disc = received.packet.my_discriminator;
+                        if actor_disc == 0 {
+                            continue;
+                        }
+                        let (ttl, dst) = match *mode_rx.borrow() {
+                            MH_MODE_TRANSIT => (1, multihop_actor),
+                            MH_MODE_WRONG_SOCKET => (255, single_hop_actor),
+                            _ => continue,
+                        };
+                        if ttl != cur_ttl {
+                            tx_sock.set_ttl(ttl).unwrap();
+                            cur_ttl = ttl;
+                        }
+                        let _ = tx_sock.send_to(&peer_init(actor_disc), dst).await;
+                    }
+                }
+            }
+        }
+
         fn link_local_peer_rx(scope_id: u32) -> std::net::UdpSocket {
             let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP)).unwrap();
             socket.set_reuse_address(true).unwrap();
@@ -2650,7 +3114,7 @@ bfd = {{ profile = "p" }}
                     biased;
                     () = stop.cancelled() => return Ok(()),
                     () = tokio::time::sleep(Duration::from_millis(10)) => {
-                        let Recv::Packet(received) = recv_one(rx.as_raw_fd()) else {
+                        let Recv::Packet(received) = recv_one(rx.as_raw_fd(), false) else {
                             continue;
                         };
                         // `recv_one` admits only Hop-Limit 255 and an RFC 5881
@@ -2771,6 +3235,8 @@ bfd = {{ profile = "p" }}
                     detect_mult: 3,
                     strict: false,
                     enabled: true,
+                    multihop: false,
+                    source: None,
                 }],
             };
             let prepared = prepare_runtime(&config).expect("actor sockets open");
@@ -2899,6 +3365,171 @@ bfd = {{ profile = "p" }}
             handle.shutdown().await;
         }
 
+        /// RFC 5883 multihop session end to end: UDP/4784 both ways, the
+        /// transmit TTL 255 on the wire, transited (TTL≠255) replies
+        /// accepted, encapsulation-mode isolation, and detection of loss.
+        #[tokio::test]
+        #[expect(clippy::too_many_lines, reason = "end-to-end netns scenario")]
+        async fn multihop_session_accepts_transit_ttl_on_udp_4784_and_detects_down() {
+            if !netns_gate() {
+                eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run the privileged BFD netns test");
+                return;
+            }
+            if !is_inner() {
+                let ns = Netns::create("mh");
+                reexec_inner(
+                    &ns,
+                    "bfd_runtime::tests::netns::multihop_session_accepts_transit_ttl_on_udp_4784_and_detects_down",
+                );
+                return;
+            }
+
+            let peer_ip: IpAddr = PEER_ADDR.parse().unwrap();
+            let bystander_ip: IpAddr = SINGLE_HOP_BYSTANDER_ADDR.parse().unwrap();
+            let config = BfdRuntimeConfig {
+                sessions: vec![
+                    BfdSessionParams {
+                        peer: peer_ip,
+                        scope_id: None,
+                        destination: format!("{PEER_ADDR}:{MULTIHOP_PORT}").parse().unwrap(),
+                        desired_min_tx_us: 100_000,
+                        required_min_rx_us: 100_000,
+                        detect_mult: 3,
+                        strict: false,
+                        enabled: true,
+                        multihop: true,
+                        source: Some(ACTOR_ADDR.parse().unwrap()),
+                    },
+                    BfdSessionParams {
+                        peer: bystander_ip,
+                        scope_id: None,
+                        destination: format!("{SINGLE_HOP_BYSTANDER_ADDR}:{PORT}")
+                            .parse()
+                            .unwrap(),
+                        desired_min_tx_us: 100_000,
+                        required_min_rx_us: 100_000,
+                        detect_mult: 3,
+                        strict: false,
+                        enabled: true,
+                        multihop: false,
+                        source: None,
+                    },
+                ],
+            };
+            let prepared = prepare_runtime(&config).expect("actor sockets open");
+            let registry = Registry::new();
+            let metrics = BgpMetrics::with_registry(registry.clone());
+            let (status_tx, status_rx) = watch::channel(Vec::new());
+            let (event_tx, _event_rx) = broadcast::channel(64);
+            let (_desired_tx, desired_rx) = watch::channel(config);
+            let (state_change_tx, _state_change_rx) = super::super::state_change_channel();
+            let shutdown = CancellationToken::new();
+            let handle = spawn_prepared(
+                prepared,
+                desired_rx,
+                metrics,
+                status_tx,
+                event_tx,
+                state_change_tx,
+                shutdown.clone(),
+            )
+            .expect("actor should start with two sessions");
+
+            let (mode_tx, mode_rx) = watch::channel(MH_MODE_TRANSIT);
+            let peer_stop = CancellationToken::new();
+            let observed_ttl = Arc::new(AtomicI32::new(0));
+            let peer_task = tokio::spawn(multihop_peer_responder(
+                multihop_peer_rx(),
+                peer_tx_socket(),
+                mode_rx,
+                Arc::clone(&observed_ttl),
+                peer_stop.clone(),
+            ));
+
+            // Phase A — transited replies (TTL=1) on UDP/4784 bring the
+            // session Up: no TTL-255 requirement on the multihop socket.
+            assert!(
+                wait_for(
+                    &status_rx,
+                    peer_ip,
+                    SessionState::Up,
+                    Duration::from_secs(5)
+                )
+                .await,
+                "multihop session did not reach Up on TTL=1 replies over UDP/4784"
+            );
+            assert!(
+                wait_for_gauge(&registry, PEER_ADDR, 1, Duration::from_secs(2)).await,
+                "bfd_session_up should be 1 once the multihop session is Up"
+            );
+            assert_eq!(
+                observed_ttl.load(Ordering::Relaxed),
+                255,
+                "multihop transmit TTL must be 255"
+            );
+            {
+                let statuses = status_rx.borrow();
+                let multihop = statuses.iter().find(|s| s.peer == peer_ip).expect("status");
+                assert!(multihop.multihop, "operator snapshot reports the mode");
+                let bystander = statuses
+                    .iter()
+                    .find(|s| s.peer == bystander_ip)
+                    .expect("bystander status");
+                assert!(!bystander.multihop);
+                assert_eq!(
+                    bystander.state,
+                    SessionState::Down,
+                    "the never-answered single-hop session stays Down"
+                );
+            }
+
+            // Phase B — peer goes silent: detection drives Down.
+            mode_tx.send(MH_MODE_SILENT).unwrap();
+            assert!(
+                wait_for(
+                    &status_rx,
+                    peer_ip,
+                    SessionState::Down,
+                    Duration::from_secs(5)
+                )
+                .await,
+                "multihop session did not detect Down after the peer went silent"
+            );
+
+            // Phase C — the same valid reply (TTL=255, our discriminator)
+            // delivered through the single-hop socket must not revive a
+            // multihop session: encapsulation modes never cross.
+            mode_tx.send(MH_MODE_WRONG_SOCKET).unwrap();
+            let revived = wait_for(
+                &status_rx,
+                peer_ip,
+                SessionState::Up,
+                Duration::from_millis(1500),
+            )
+            .await;
+            assert!(
+                !revived,
+                "multihop session came Up from packets on the single-hop socket"
+            );
+
+            // Phase D — back on UDP/4784 the session recovers.
+            mode_tx.send(MH_MODE_TRANSIT).unwrap();
+            assert!(
+                wait_for(
+                    &status_rx,
+                    peer_ip,
+                    SessionState::Up,
+                    Duration::from_secs(5)
+                )
+                .await,
+                "multihop session did not recover on UDP/4784"
+            );
+
+            peer_stop.cancel();
+            let _ = peer_task.await;
+            handle.shutdown().await;
+        }
+
         #[tokio::test]
         #[expect(clippy::too_many_lines, reason = "scoped IPv6 netns scenario")]
         async fn link_local_session_enforces_interface_scope_and_detects_down() {
@@ -2940,6 +3571,8 @@ bfd = {{ profile = "p" }}
                     detect_mult: 3,
                     strict: false,
                     enabled: true,
+                    multihop: false,
+                    source: None,
                 }],
             };
             let prepared = prepare_runtime(&config).expect("scoped actor sockets open");

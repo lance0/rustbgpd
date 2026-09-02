@@ -344,15 +344,19 @@ memory-safe-language row refers to.
     in-process, no-GC actor runs sessions over UDP/3784 (TTL/Hop-Limit 255,
     discard-on-receive if ≠ 255), config via `[[bfd_profiles]]` +
     `[neighbors.bfd]`, observable through `GetBfdSessions` / `rbgp bfd` /
-    events + Prometheus. RFC 5882 BGP coupling ships in both **strict** (withhold
+    events + Prometheus. Multihop **asynchronous** BFD (RFC 5883) ships on the
+    same actor: `bfd.multihop = true` moves the session to UDP/4784 with a
+    fixed transmit TTL 255 and no receive minimum-TTL knob,
+    cross-checked against FRR `bfdd` across a two-hop path by interop test
+    M108. RFC 5882 BGP coupling ships in both **strict** (withhold
     BGP until BFD Up) and **non-strict** (tear BGP down on BFD-down before the
-    hold timer) modes; the non-strict path is cross-checked against FRR `bfdd` by
-    interop test M51, and strict mode is covered by unit tests. IPv4, IPv6
+    hold timer) modes; M51 cross-checks both single-hop coupling modes against
+    FRR `bfdd`, while M108 covers multihop non-strict coupling. IPv4, IPv6
     global, and interface-scoped IPv6 link-local static neighbors are
     supported; link-local RX is pinned to the configured interface through
-    `IPV6_PKTINFO`, and M51 exercises it against FRR. Deferred: multihop (RFC 5883),
-    echo / demand mode, authentication, C-bit / GR-aware nuance, static-route
-    BFD tracking, dynamic-neighbor BFD, and hardware / offload.
+    `IPV6_PKTINFO`, and M51 exercises it against FRR. Deferred: echo / demand
+    mode, authentication, C-bit / GR-aware nuance, static-route BFD tracking,
+    dynamic-neighbor BFD, and hardware / offload.
 
 [^fuzz]: Every entry in this row means in-tree fuzz targets; the scope
     differs. rustbgpd carries libFuzzer targets in

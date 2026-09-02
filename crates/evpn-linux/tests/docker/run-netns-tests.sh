@@ -12,7 +12,7 @@
 #     (`src/fib_runtime.rs`) — proves configured non-reserved
 #     Linux tables receive and drain daemon-owned routes, including
 #     ADR-0066 unicast multipath/ECMP install + failover.
-#   - ADR-0067 single-hop BFD actor validation (`src/bfd_runtime.rs`)
+#   - ADR-0067 BFD actor validation (`src/bfd_runtime.rs`)
 #     — proves the real UDP socket path: TTL/Hop-Limit-255 discard
 #     (RFC 5881), decode/demux, the session reaching Up, and
 #     detection-timer expiry when the peer goes silent.
@@ -42,7 +42,7 @@
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh fib_runtime
 #       (ADR-0061 Slice 4 general unicast FIB runtime validation)
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh bfd_runtime
-#       (ADR-0067 single-hop BFD actor netns validation)
+#       (ADR-0067 BFD actor netns validation)
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh bfd_runtime_ipv4
 #       (ADR-0067 IPv4-only BFD actor netns validation)
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh bgp_unnumbered

@@ -1,4 +1,4 @@
-//! gRPC BFD service — single-hop BFD session inspection (ADR-0067).
+//! gRPC BFD service — single-hop and multihop BFD session inspection (ADR-0067).
 //!
 //! Read-only operator surface over the BFD actor's published session status.
 //! The actor owns the sessions; this service just snapshots their state.
@@ -69,6 +69,7 @@ mod tests {
             diagnostic: "none".to_string(),
             strict: false,
             remote_administrative_down: None,
+            multihop: false,
         }
     }
 

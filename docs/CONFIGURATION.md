@@ -907,7 +907,7 @@ complete atomic block. There is no probe or automatic legacy fallback.
 | `max_prefix_restart_seconds` | non-zero u32 | no | unset | Opt in to one timed restart attempt after max-prefix teardown. Omit to retain the indefinite fail-closed latch until explicit enable; failure to deliver the timed session `Start` command consumes the attempt and stays latched off |
 | `md5_password`         | string   | no       | --      | TCP MD5 authentication password (RFC 2385, Linux only) |
 | `tcp_ao`               | table or array | no | -- | Ordered TCP-AO keyring for static neighbors (RFC 5925; Linux; append a non-preferred successor, then select it in a later observation-gated SIGHUP generation) |
-| `bfd`                  | table    | no       | --      | Single-hop BFD attachment referencing a `[[bfd_profiles]]` entry (RFC 5880/5881/5882; static neighbors only, including interface-scoped IPv6 link-local peers; restart-required edits) |
+| `bfd`                  | table    | no       | --      | BFD attachment referencing a `[[bfd_profiles]]` entry (RFC 5880/5881/5882; `multihop = true` selects RFC 5883; static neighbors only; restart-required edits) |
 | `tcp_mss`              | u16      | no       | --      | TCP maximum segment size clamp in bytes (`TCP_MAXSEG`, 88..=32767; Linux). Set on the active-open socket before connect; every bound passive listener socket takes the smallest effective value across resolved static neighbors before listen. Dynamic-range peer groups cannot set it. Restart-required |
 | `ttl_security`         | bool     | no       | false   | Enable GTSM / TTL security (RFC 5082, Linux only). Outbound packets use TTL/Hop-Limit 255. Without `ttl_security_hops`, inbound packets must arrive with exactly 255, preserving the historical one-hop policy |
 | `ttl_security_hops`    | non-zero u8 | no    | 1 when GTSM is enabled | Maximum expected peer distance for GTSM (1--255). Requires effective `ttl_security = true`; inbound packets below `256 - ttl_security_hops` are dropped by `IP_MINTTL` / `IPV6_MINHOPCOUNT`. Inherits from peer groups and may be overridden per neighbor |
@@ -1249,9 +1249,9 @@ only when no listener family remains usable, or when strict explicit endpoint
 binding requires the failed socket. The per-implementation comparison and its
 sourcing live in [COMPARISON.md](COMPARISON.md).
 
-### BFD (RFC 5880 / 5881 / 5882)
+### BFD (RFC 5880 / 5881 / 5882 / 5883)
 
-Single-hop asynchronous BFD (ADR-0067) gives sub-second peer-failure detection
+Asynchronous BFD (ADR-0067) gives sub-second peer-failure detection
 and, via RFC 5882, tears the BGP session down on a BFD-down event before the
 hold timer expires. Timers live in named profiles; neighbors (or peer groups)
 attach to a profile.
@@ -1269,6 +1269,13 @@ address = "10.0.0.2"
 remote_asn = 65002
 # Attach BFD. `strict` is optional (default false).
 bfd = { profile = "fast" }
+
+# A routed-loopback peer uses RFC 5883 over UDP/4784. When configured, the
+# family's `[global].listen_addresses` entry is also the transmit source.
+[[neighbors]]
+address = "192.0.2.9"
+remote_asn = 65002
+bfd = { profile = "fast", multihop = true }
 
 # Peer groups can carry a default; a neighbor can override it off:
 [peer_groups.edge]
@@ -1296,6 +1303,7 @@ bfd = { profile = "fast" }
 | `profile` | string | --      | Name of a `[[bfd_profiles]]` entry (must exist)                   |
 | `enabled` | bool   | true    | Set `false` to disable BFD (e.g. override an inherited group block) |
 | `strict`  | bool   | false   | RFC 5882 strict mode: withhold BGP establishment until BFD is Up   |
+| `multihop` | bool  | false   | RFC 5883 over UDP/4784; requires a global peer address             |
 
 In **non-strict** mode (default) BGP establishes normally and a later BFD-down
 tears it down faster than the hold timer; recovery re-establishes. In **strict**
@@ -1315,9 +1323,16 @@ BGP.) Genuine failures — a detection timeout or a remote-signaled
 operator disable/delete of the neighbor stops BGP through the normal lifecycle,
 not this path.
 
+Single-hop sessions use UDP/3784 and require received TTL/Hop-Limit 255.
+Multihop sessions use UDP/4784 and do not enforce a receive minimum TTL. Both
+modes transmit with TTL/Hop-Limit 255; there is no BFD receive minimum-TTL
+knob. Set `[global].listen_addresses` when a multihop session must originate
+from a routed loopback. BFD authentication is not supported.
+
 BFD is **static-neighbors only** — a `[[dynamic_neighbors]]` range whose peer
 group enables BFD is rejected at config time. IPv4, IPv6 global, and IPv6
-link-local neighbors are supported. A link-local neighbor already requires a
+link-local neighbors are supported for single-hop; multihop requires a global
+peer address. A link-local neighbor already requires a
 unique bare address plus `interface`; startup resolves that interface to the
 BFD transmit scope and rejects an unresolvable name before preparing sockets.
 Receive-side `IPV6_PKTINFO` must report the same interface for every link-local

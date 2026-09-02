@@ -124,6 +124,7 @@ proved with kernel evidence (routes, FDB rows, nexthop groups, netdev state).
 | M69 | RFC 9785 Highest-Preference DF election, cross-vendor | FRR 10.3.1 |
 | M50 / M52 | ADR-0066 unicast multipath ECMP FIB install + multipath-relax | FRR 10.3.1 ×2 |
 | M51 | ADR-0067 single-hop BFD + RFC 5882 BGP coupling | FRR 10.3.1 |
+| M108 | RFC 5883 multihop BFD + RFC 5882 BGP coupling over routed loopbacks | FRR 10.3.1 |
 | M53 | ADR-0069 BGP unnumbered / IPv6 link-local peering + scoped FIB | FRR 10.3.1 ×2 |
 | M58 | ADR-0061 runtime `[[fib_tables]]` CRUD over gRPC/CLI | FRR 10.3.1 |
 | M60 / M61 / M62 | Kill-and-restart reaping/re-adoption for FDB and EVPN L3 marker sweeps; M62 additionally pins exact durable BLACKHOLE receipt authority and preservation of an unreceipted marker row | FRR 10.3.1 |

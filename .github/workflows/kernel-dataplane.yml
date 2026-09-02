@@ -428,6 +428,22 @@ jobs:
           topology: tests/interop/m51-bfd-frr.clab.yml
           script: tests/interop/scripts/test-m51-bfd-frr.sh
 
+  m108:
+    needs: [grpcurl_archive, prime_dev_image]
+    name: M108 — RFC 5883 multihop BFD + RFC 5882 coupling across two hops (FRR 10.3.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-dataplane-host
+        id: dataplane
+      - name: Run M108 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M108
+          topology: tests/interop/m108-bfd-multihop-frr.clab.yml
+          script: tests/interop/scripts/test-m108-bfd-multihop-frr.sh
+
   m43:
     needs: [grpcurl_archive, bird3_archive, prime_dev_image]
     # No archive means no BIRD 3.3.2 image, so nothing here can run. Skipping
@@ -935,14 +951,14 @@ jobs:
     if: ${{ always() }}
     needs: [classify_changes, grpcurl_archive, gobgp_archive, bird3_archive, prime_dev_image, m36,
       m37, m37-ip, m38, m39, m39b, m48, m60, m61, m62, m40, m42, m50, m52,
-      m58, m53, m51, m43, m47, m69, m70, m65, m71, m72, m66,
+      m58, m53, m51, m108, m43, m47, m69, m70, m65, m71, m72, m66,
       m67, m68, netns]
     env:
       NEEDS_CONTEXT: ${{ toJSON(needs) }}
       EXPECTED_JOBS: >-
         classify_changes grpcurl_archive gobgp_archive bird3_archive prime_dev_image
         m36 m37 m37-ip m38 m39
-        m39b m48 m60 m61 m62 m40 m42 m50 m52 m58 m53 m51 m43 m47
+        m39b m48 m60 m61 m62 m40 m42 m50 m52 m58 m53 m51 m108 m43 m47
         m69 m70 m65 m71 m72 m66 m67 m68 netns
     steps:
       - name: Aggregate required Kernel Dataplane result

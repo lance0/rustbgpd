@@ -30,7 +30,7 @@ operator-facing index that answers "what has actually been proved?"
 | BIRD / GoBGP / StayRTR diversity | Mixed CI/manual | BIRD TCP-AO and GoBGP coverage are documented. The RTR-dependent RPKI/ASPA cases are hosted in `interop.yml`: M84 multi-cache RTR/ASPA epoch conformance against Routinator and StayRTR, M27/M59 ASPA against the RTR v2 mock, and M83's route-server StayRTR fixture. The earlier M21 origin-validation lab and broader platform-diversity runs remain local/manual where extra fixtures are required. |
 | Long-wall-clock gates | Manual/local | M11's broader GR sweep and M33 scale churn remain outside PR CI because they consume substantial wall-clock; the bounded M16 dual-stack LLGR lifecycle is hosted. |
 
-Compact M36-M102 index (details and assertions stay in
+Compact M36-M108 index (details and assertions stay in
 [`INTEROP.md`](INTEROP.md#ci-coverage)):
 
 | Receipts | Coverage |
@@ -38,7 +38,7 @@ Compact M36-M102 index (details and assertions stay in
 | M36, M37, M37+IP | EVPN L2 VTEP FDB programming plus local Type 2 / Type 3 / MAC+IP origination. |
 | M38, M40, M65, M66, M67, M69 | EVPN multi-homing: DF election, aliasing/FDB-NHG, single-active backup swap, runtime drain, link drain, and FRR preference-DF interop. |
 | M39, M39b, M47, M48, M60, M61, M68, M70, M71, M72 | EVPN L3VNI / Type 5 / runtime convergence / adoption / VLAN-aware / overlay-index dataplane receipts. |
-| M42, M50, M51, M52, M53, M58, M62 | Non-EVPN kernel dataplane receipts in the same hosted span: FIB runtime/CRUD, BFD, BGP unnumbered, and BLACKHOLE adoption. |
+| M42, M50, M51, M52, M53, M58, M62, M108 | Non-EVPN kernel dataplane receipts in the same hosted span: FIB runtime/CRUD, single-hop and multihop BFD, BGP unnumbered, and BLACKHOLE adoption. |
 | M43 | Conditional TCP-AO queued-child receipt, uninterrupted no-flap add/select/deprecate/delete against BIRD with a 100 ms route-continuity oracle, and a separate three-phase SIGKILL/restart recovery gate requiring exact fresh-start inventory/auth/session state; probed and skipped only when the selected runner kernel lacks support. |
 | M96 | [IXP Manager local activation](INTEROP.md#ixp-manager-v74-manual-configuration-oracle) (local): the pinned v7.4 Foil capture through the real renderer/strict checker, then atomic initial, no-op, hot-reload, and pre-effect spawn-failure restoration against MD5-authenticated FRR with exact prior bytes, unchanged daemon PID, and route/session continuity. |
 | M97 | [IXP Manager authenticated lifecycle](INTEROP.md#ixp-manager-v74-manual-configuration-oracle) (local): pinned v7.4 API lock/fetch/callback state for two same-host IPv4/IPv6 handles with distinct PIDs, state/UDS endpoints, and TCP/179 listeners, plus a shared durable host fence, paired competing-423 behavior, sequential callbacks, and cross-handle failure containment. |

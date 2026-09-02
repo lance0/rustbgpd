@@ -1,7 +1,7 @@
 # rustbgpd-bfd
 
 RFC 5880 BFD (Bidirectional Forwarding Detection) control-packet codec and a
-single-hop **asynchronous** session state machine — pure and sans-IO, in the
+**asynchronous** session state machine — pure and sans-IO, in the
 same spirit as `rustbgpd-fsm`: the state machine consumes packet/timer **events**
 and produces packet/timer/state-change **actions**. It never reads a clock, opens
 a socket, or spawns a task; the daemon actor owns the real I/O, timers, and
@@ -11,11 +11,13 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 
 ## Scope
 
-- **Single-hop asynchronous mode** (RFC 5880 + RFC 5881).
-- **Out of scope:** multihop (RFC 5883), echo mode, demand mode, and
-  authentication. The Multipoint (`M`) bit is rejected at decode; packets with
-  the Authentication (`A`) bit are decoded structurally and discarded by the
-  session (no auth is ever negotiated).
+- **Asynchronous mode** (RFC 5880). Encapsulation is not this crate's
+  concern: the daemon actor runs the same state machine for single-hop
+  (RFC 5881, UDP/3784) and multihop (RFC 5883, UDP/4784) sessions.
+- **Out of scope:** echo mode, demand mode, and authentication. The Multipoint
+  (`M`) bit is rejected at decode; packets with the Authentication (`A`) bit
+  are decoded structurally and discarded by the session (no auth is ever
+  negotiated).
 
 ## Key types
 
@@ -34,7 +36,7 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 | RFC | Coverage |
 |-----|----------|
 | RFC 5880 | Control-packet format (§4.1) and the async session state machine (§6.8), including the slow-while-not-Up transmit floor (§6.8.3), detection time (§6.8.4), reception/FSM (§6.8.6), and AdminDown teardown (§6.8.16). |
-| RFC 5881 | Single-hop encapsulation context (UDP/3784, TTL/Hop-Limit 255). The TTL check and the sockets themselves live in the daemon actor, not this crate. |
+| RFC 5881 / RFC 5883 | Single-hop (UDP/3784) and multihop (UDP/4784) encapsulation context. Both transmit with TTL/Hop-Limit 255; multihop has no receive minimum-TTL knob. The sockets and TTL rules live in the daemon actor. |
 | RFC 5882 | BFD-client/BGP coupling (§3.2, §4.1/§4.2): `Session::remote_admin_down()` distinguishes a peer's administrative disable from a genuine liveness failure. Cause-only flips emit `Action::StateChanged` even when the local state remains `Down`, so callers can permit BGP during remote `AdminDown` without hiding a later remote `Down` or detection timeout. |
 
 ## Design

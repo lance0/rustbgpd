@@ -18,7 +18,7 @@ INTEROP = (
 ).split()
 KERNEL = (
     "m36 m37 m37-ip m38 m39 m39b m48 m60 m61 m62 m40 m42 m50 m52 "
-    "m58 m53 m51 m43 m47 m69 m70 m65 m71 m72 m66 m67 m68"
+    "m58 m53 m51 m108 m43 m47 m69 m70 m65 m71 m72 m66 m67 m68"
 ).split()
 NETNS_MAPPINGS = {
     "dataplane_remote_mac": (
@@ -151,11 +151,11 @@ PERMISSION_HASHES = {
 }
 CALL_HASHES = {
     "interop.yml": "4f21857a91c96ea0b6743dbfcb709a26ffdcbb071357c0e7e489fd8a0174916c",
-    "kernel-dataplane.yml": "310ed2344bd6ff3f766580f704cc77fec4be0a2103a943e2ad837f497af346c3",
+    "kernel-dataplane.yml": "ffe292e5ed004a8c1ca0f271ddd934311e2a0dc0b3401f95ec9bd7ac4c3a675b",
 }
 PINS = collections.Counter(
     {
-        "actions/checkout@v7": 96,
+        "actions/checkout@v7": 97,
         "dtolnay/rust-toolchain@v1 # stable": 3,
         "Swatinem/rust-cache@v2": 5,
         "dtolnay/rust-toolchain@v1 # 1.95": 2,

@@ -1,4 +1,4 @@
-//! Single-hop asynchronous BFD session state machine (RFC 5880 §6.8), pure and
+//! Asynchronous BFD session state machine (RFC 5880 §6.8), pure and
 //! sans-IO. It consumes [`Event`]s and produces [`Action`]s; the actor owns the
 //! sockets, the real clock, and transmit jitter. Demand mode, echo, and
 //! authentication are out of scope for this implementation.

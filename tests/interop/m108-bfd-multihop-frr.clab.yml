@@ -1,0 +1,75 @@
+# Containerlab topology: rustbgpd ↔ mid ↔ FRR (M108 — RFC 5883 multihop BFD)
+#
+# Validates RFC 5880/5883/5882 multihop BFD coupling against a real FRR peer
+# running bfdd across a two-hop path:
+#
+#   * rustbgpd and FRR peer iBGP between routed loopbacks 10.255.0.1/32 and
+#     10.255.0.2/32 through `mid`. rustbgpd is the route reflector and FRR its
+#     client. Both BFD endpoints use UDP/4784.
+#   * BGP reaches Established AND BFD reaches Up, reported as multihop from
+#     both sides (rustbgpd GetBfdSessions `multihop`, FRR `show bfd peers`).
+#   * Failover: cutting the middle hop (`mid` stops forwarding) makes BFD
+#     detect the loss within the lab's bound; rustbgpd tears the BGP
+#     session down through the RFC 5882 coupling with a Cease / BFD Down
+#     NOTIFICATION (RFC 9384) — far faster than the 90 s hold timer.
+#   * Recovery: forwarding is restored; BFD and BGP re-establish.
+#
+# Usage:
+#   docker build --target dev -t rustbgpd:dev .
+#   containerlab deploy -t tests/interop/m108-bfd-multihop-frr.clab.yml
+#   bash tests/interop/scripts/test-m108-bfd-multihop-frr.sh
+#   containerlab destroy -t tests/interop/m108-bfd-multihop-frr.clab.yml --cleanup
+
+name: m108-bfd-multihop-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m108-bfd-multihop.toml:/etc/rustbgpd/config.toml:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.1.1/24 dev eth1
+        - ip addr add 10.255.0.1/32 dev lo
+        - ip link set eth1 up
+        - ip route add 10.255.0.2/32 via 10.0.1.2
+      env:
+        RUST_LOG: info
+
+    # The middle hop: a plain forwarding node with no BGP or BFD of its own.
+    # The failover phase turns its forwarding off and back on.
+    mid:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      exec:
+        - ip addr add 10.0.1.2/24 dev eth1
+        - ip addr add 10.0.2.1/24 dev eth2
+        - ip link set eth1 up
+        - ip link set eth2 up
+        - ip route add 10.255.0.1/32 via 10.0.1.1
+        - ip route add 10.255.0.2/32 via 10.0.2.2
+        - sh -c "echo 1 > /proc/sys/net/ipv4/ip_forward"
+
+    frr1:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons-bfd:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m108-bfd-multihop.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.2.2/24 dev eth1
+        - ip addr add 10.255.0.2/32 dev lo
+        - ip link set eth1 up
+        - ip route add 10.255.0.1/32 via 10.0.2.1
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "mid:eth1"]
+    - endpoints: ["mid:eth2", "frr1:eth1"]
+
+# Network: routed loopbacks 10.255.0.1/32 and 10.255.0.2/32 over two transit
+# subnets. Both BGP speakers use AS 65001; the BGP hold timer is 90 seconds.

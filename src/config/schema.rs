@@ -158,7 +158,7 @@ pub struct Config {
     /// VRF, and L3VXLAN create/adopt/reap.
     #[serde(default)]
     pub managed_netdevs: ManagedNetdevsConfig,
-    /// Named BFD timing profiles (RFC 5880/5881, ADR-0067) referenced by
+    /// Named BFD timing profiles (RFC 5880/5881/5883, ADR-0067) referenced by
     /// `[neighbors.bfd]` / `[peer_groups.<name>.bfd]`.
     #[serde(default)]
     pub bfd_profiles: Vec<BfdProfileConfig>,
@@ -1445,11 +1445,11 @@ define_neighbor_and_peer_group_configs! {
     }
     bfd: Option<BfdConfig> {
         neighbor {
-            /// Single-hop BFD (RFC 5880/5881) attachment, referencing a
+            /// BFD (RFC 5880/5881/5883) attachment, referencing a
             /// `[[bfd_profiles]]` entry. Presence enables BFD for this neighbor.
         }
         peer_group {
-            /// Single-hop BFD attachment inherited by neighbors in this group (unless
+            /// BFD attachment inherited by neighbors in this group (unless
             /// the neighbor sets its own `bfd`). References a `[[bfd_profiles]]` entry.
         }
     }
@@ -2192,11 +2192,12 @@ pub struct AddPathConfig {
     pub receive_max: Option<u16>,
 }
 
-/// Per-neighbor / per-peer-group BFD attachment (RFC 5880/5881, ADR-0067).
+/// Per-neighbor / per-peer-group BFD attachment (RFC 5880/5881/5883, ADR-0067).
 ///
-/// The presence of this block enables single-hop asynchronous BFD for the
-/// neighbor; it references a `[[bfd_profiles]]` entry for the timers. Static
-/// neighbors only — dynamic-neighbor BFD is deferred (see ADR-0067).
+/// The presence of this block enables asynchronous BFD for the neighbor —
+/// single-hop (RFC 5881) by default, multihop (RFC 5883) with `multihop = true`;
+/// it references a `[[bfd_profiles]]` entry for the timers. Static neighbors
+/// only — dynamic-neighbor BFD is deferred (see ADR-0067).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BfdConfig {
@@ -2215,6 +2216,13 @@ pub struct BfdConfig {
     /// timer.
     #[serde(default)]
     pub strict: bool,
+    /// RFC 5883 multihop mode. The session runs over UDP/4784 instead of
+    /// UDP/3784 and received control packets are not required to carry
+    /// TTL / Hop Limit 255 (the peer is not adjacent). Requires a global peer
+    /// address: an IPv6 link-local neighbor is rejected at config time.
+    /// Default false (single-hop).
+    #[serde(default)]
+    pub multihop: bool,
 }
 
 fn default_bfd_enabled() -> bool {
