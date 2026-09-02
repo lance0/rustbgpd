@@ -704,3 +704,115 @@ remote_asn = 65001
         );
     }
 }
+
+/// Proves that when `SessionNotification::OpenReceived` is processed on the lossless
+/// coordination channel, `PeerManager` updates `managed.remote_asn`, `transport_config`,
+/// and `bgp_peer_info` with the learned remote ASN, even if the lossy `StateChanged`
+/// lifecycle notification was dropped due to channel overflow during a connection storm.
+#[tokio::test]
+async fn dynamic_peer_open_received_updates_remote_asn_and_metric_without_state_changed() {
+    let mut mgr = test_peer_manager();
+    let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer = key(addr);
+
+    let counters = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer_with_asn(
+        &mut mgr,
+        addr,
+        0,
+        fake_peer_handle(addr, SessionState::OpenSent, None, counters),
+        false,
+    );
+    mgr.peers.get_mut(&peer).unwrap().is_dynamic = true;
+
+    // Simulate dynamic peer admission publishing the initial remote_asn="0" identity row.
+    mgr.publish_peer_info_metric(&peer);
+
+    let peer_info_remote_asn = |mgr: &PeerManager| -> Option<String> {
+        mgr.metrics
+            .registry()
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == "bgp_peer_info")
+            .and_then(|family| {
+                family.get_metric().iter().find_map(|metric| {
+                    let has_peer = metric
+                        .get_label()
+                        .iter()
+                        .any(|l| l.name() == "peer" && l.value() == "10.0.0.2");
+                    if has_peer {
+                        metric
+                            .get_label()
+                            .iter()
+                            .find(|l| l.name() == "remote_asn")
+                            .map(|l| l.value().to_string())
+                    } else {
+                        None
+                    }
+                })
+            })
+    };
+
+    assert_eq!(peer_info_remote_asn(&mgr).as_deref(), Some("0"));
+
+    let session_id = mgr.peers[&peer].session_id;
+
+    // Session transitions to OpenConfirm, triggering OpenReceived on the lossless notify_tx.
+    // Notice we deliberately DO NOT invoke handle_session_lifecycle_notification with
+    // StateChanged, modeling a dropped StateChanged event on the bounded lossy channel.
+    mgr.handle_session_notification(SessionNotification::OpenReceived {
+        session_id,
+        role: rustbgpd_transport::SessionRole::Primary,
+        peer_addr: addr,
+        remote_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        peer_asn: 65099,
+    })
+    .await;
+
+    // Peer state must reflect learned ASN immediately.
+    let managed = mgr.peers.get(&peer).unwrap();
+    assert_eq!(managed.remote_asn, 65099);
+    assert_eq!(managed.transport_config.peer.remote_asn, 65099);
+
+    // bgp_peer_info metric must report the learned ASN instead of 0.
+    assert_eq!(peer_info_remote_asn(&mgr).as_deref(), Some("65099"));
+
+    // Verify there are no duplicate bgp_peer_info rows for this peer.
+    let peer_info_asns: Vec<String> = mgr
+        .metrics
+        .registry()
+        .gather()
+        .into_iter()
+        .find(|family| family.name() == "bgp_peer_info")
+        .map(|family| {
+            family
+                .get_metric()
+                .iter()
+                .filter(|m| {
+                    m.get_label()
+                        .iter()
+                        .any(|l| l.name() == "peer" && l.value() == "10.0.0.2")
+                })
+                .filter_map(|m| {
+                    m.get_label()
+                        .iter()
+                        .find(|l| l.name() == "remote_asn")
+                        .map(|l| l.value().to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(peer_info_asns, vec!["65099".to_string()]);
+
+    // If StateChanged arrives subsequently, it behaves idempotently.
+    mgr.handle_session_lifecycle_notification(&SessionLifecycleNotification::StateChanged {
+        session_id,
+        role: rustbgpd_transport::SessionRole::Primary,
+        peer_addr: addr,
+        peer_asn: Some(65099),
+        old: SessionState::OpenConfirm,
+        new: SessionState::Established,
+    });
+    assert_eq!(mgr.peers[&peer].remote_asn, 65099);
+    assert_eq!(peer_info_remote_asn(&mgr).as_deref(), Some("65099"));
+}
