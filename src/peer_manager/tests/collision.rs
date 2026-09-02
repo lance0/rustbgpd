@@ -1140,6 +1140,48 @@ async fn stale_collision_notifications_do_not_mutate_current_peer() {
 }
 
 #[tokio::test]
+async fn stale_max_prefix_warnings_are_not_published() {
+    let mut mgr = test_peer_manager();
+    let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let counters = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer(
+        &mut mgr,
+        peer_addr,
+        fake_peer_handle(peer_addr, SessionState::Established, None, counters),
+        false,
+    );
+    let mut live_events = mgr.session_events_tx.subscribe();
+    mgr.register_session(99, &key(peer_addr));
+
+    for session_id in [99, 100] {
+        mgr.handle_session_notification(SessionNotification::MaxPrefixWarning {
+            session_id,
+            role: rustbgpd_transport::SessionRole::Primary,
+            peer_addr,
+            scope: "ipv4_unicast",
+            usage: 80,
+            bound: 100,
+            percent: 80,
+        })
+        .await;
+    }
+
+    assert!(live_events.try_recv().is_err());
+    assert!(
+        query_session_event_history(
+            &mgr,
+            Some(peer_addr),
+            [SessionLifecycleEventType::MaxPrefixWarning]
+                .into_iter()
+                .collect(),
+            0,
+        )
+        .await
+        .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn disable_peer_drains_pending_inbound_candidate() {
     let (_cmd_tx, cmd_rx) = mpsc::channel(16);
     let (rib_tx, _rib_rx) = mpsc::channel(64);

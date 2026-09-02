@@ -117,7 +117,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `inbound_prefix_limits[]` row with reason `inbound_prefix_limit_reached` in
   `rbgp neighbor <addr>`, counts every withheld prefix in
   `bgp_max_prefix_blocked_total{peer,scope}`, and requests one route refresh
-  when usage falls back under the bound. `warning`, or a
+  when usage falls back under the bound or blocking is disabled. Peers without
+  route-refresh support require reannouncement or a session reset to recover
+  withheld routes. Admission reserves net-new prefixes across a whole UPDATE,
+  so one batch cannot overshoot either bound. `warning`, or a
   `max_prefix_warning_percent` threshold under any action, emits one warn log
   line, one `max_prefix_warning` session event, and one
   `bgp_max_prefix_warning_total{peer,scope}` increment per crossing. Neither

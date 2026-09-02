@@ -1376,10 +1376,12 @@ define_neighbor_and_peer_group_configs! {
                 /// re-armed when usage falls back under; never a teardown.
                 /// Unset warns only at the bound under `max_prefix_action =
                 /// "warning"`.
+                #[schemars(range(min = 1, max = 100))]
             }
             peer_group {
                 /// Warning threshold inherited by neighbors in this group. See
                 /// the neighbor-level `max_prefix_warning_percent`.
+                #[schemars(range(min = 1, max = 100))]
             }
         }
         max_prefixes_out_ipv4: Option<NonZeroU32> {

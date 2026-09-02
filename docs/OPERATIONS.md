@@ -876,8 +876,11 @@ already accepted still pass. The first withheld prefix opens a blocking episode
 `inbound_prefix_limits[]` row in `rbgp neighbor <addr>` reports
 `blocking=inbound_prefix_limit_reached`) and every withheld prefix increments
 `bgp_max_prefix_blocked_total`. When usage falls back under the bound (a
-withdrawal, an enhanced-refresh sweep, or a raised limit) the episode ends and
-the daemon sends one plain ROUTE-REFRESH so the peer replays what was withheld;
+withdrawal, an enhanced-refresh sweep, or a raised limit), the bound is
+removed, or the action leaves `block`, the episode ends and the daemon sends
+one plain ROUTE-REFRESH per affected family so the peer replays what was
+withheld. Without negotiated route refresh, peer reannouncement or a session
+reset is required;
 a replay that overflows again opens a new episode, so a peer churning at its
 bound can trigger repeated full replays — `block` is a containment mode, not a
 steady-state one. Under `"warning"` the daemon only reports and keeps

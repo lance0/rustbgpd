@@ -4181,8 +4181,8 @@ impl BgpMetrics {
     ///
     /// `scope` is deliberately bounded to the aggregate and the two unicast
     /// families whose independent limits are enforced by the session actor.
-    /// An unlimited scope keeps its usage series but removes limit and
-    /// headroom instead of manufacturing a misleading zero.
+    /// An unlimited scope keeps its usage series but removes limit, headroom,
+    /// and blocking instead of manufacturing a misleading zero.
     pub fn set_max_prefix_capacity(
         &self,
         peer: &str,
@@ -4218,6 +4218,7 @@ impl BgpMetrics {
         } else {
             let _ = self.0.max_prefix_limit.remove_label_values(&labels);
             let _ = self.0.max_prefix_headroom.remove_label_values(&labels);
+            let _ = self.0.max_prefix_blocking.remove_label_values(&labels);
         }
     }
 
@@ -8451,6 +8452,7 @@ mod tests {
         let peer = "10.0.0.1";
 
         m.set_max_prefix_capacity(peer, "aggregate", 80, Some(100));
+        m.set_max_prefix_blocking(peer, "aggregate", true);
         m.set_max_prefix_capacity(peer, "ipv4_unicast", 12, None);
 
         let text = gather_text(&m);
@@ -8466,6 +8468,7 @@ mod tests {
         assert!(text.contains(r#"bgp_max_prefix_usage{peer="10.0.0.1",scope="aggregate"} 101"#));
         assert!(!text.contains(r#"bgp_max_prefix_limit{peer="10.0.0.1",scope="aggregate"}"#));
         assert!(!text.contains(r#"bgp_max_prefix_headroom{peer="10.0.0.1",scope="aggregate"}"#));
+        assert!(!text.contains(r#"bgp_max_prefix_blocking{peer="10.0.0.1",scope="aggregate"}"#));
     }
 
     /// Load-bearing session-reap proof: replacing the narrow reap with a zero

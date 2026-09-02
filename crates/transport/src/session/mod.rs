@@ -920,20 +920,43 @@ impl PeerSession {
 
     /// Evaluate the non-teardown max-prefix modes against current accounting:
     /// warning-threshold crossings (latched once per crossing per scope) and
-    /// block-episode recovery (usage fell back under the bound). Runs at every
+    /// block-episode recovery (usage fell back under the bound or blocking was
+    /// disabled). Runs at every
     /// accounting boundary before the capacity gauges are published.
     fn reconcile_max_prefix_modes(&mut self) {
         let percent = self.max_prefix_warning_percent();
         let mut recovered_families: Vec<Afi> = Vec::new();
         for scope in MaxPrefixScope::ALL {
-            let (usage, Some(bound)) = self.max_prefix_scope_usage(scope) else {
+            let index = scope.index();
+            let (usage, bound) = self.max_prefix_scope_usage(scope);
+            if percent.is_none() {
+                self.max_prefix_warned[index] = false;
+            }
+            if self.max_prefix_blocking[index]
+                && (self.config.max_prefix_action != MaxPrefixAction::Block
+                    || bound.is_none_or(|bound| usage < bound as usize))
+            {
+                self.max_prefix_blocking[index] = false;
+                info!(
+                    peer = %self.peer_label,
+                    scope = scope.as_str(),
+                    usage,
+                    bound,
+                    "max prefix blocking ended; requesting route replay"
+                );
+                if let Some(afi) = scope.family()
+                    && !recovered_families.contains(&afi)
+                {
+                    recovered_families.push(afi);
+                }
+            }
+            let Some(bound) = bound else {
                 self.max_prefix_warned[scope.index()] = false;
-                self.max_prefix_blocking[scope.index()] = false;
                 continue;
             };
             if let Some(percent) = percent {
                 let crossed = (usage as u64) * 100 >= u64::from(bound) * u64::from(percent);
-                let warned = &mut self.max_prefix_warned[scope.index()];
+                let warned = &mut self.max_prefix_warned[index];
                 if crossed && !*warned {
                     *warned = true;
                     warn!(
@@ -974,24 +997,9 @@ impl PeerSession {
                     );
                 }
             }
-            if self.max_prefix_blocking[scope.index()] && usage < bound as usize {
-                self.max_prefix_blocking[scope.index()] = false;
-                info!(
-                    peer = %self.peer_label,
-                    scope = scope.as_str(),
-                    usage,
-                    bound,
-                    "max prefix blocking ended; requesting route refresh"
-                );
-                if let Some(afi) = scope.family()
-                    && !recovered_families.contains(&afi)
-                {
-                    recovered_families.push(afi);
-                }
-            }
         }
         for afi in recovered_families {
-            self.request_received_recount(afi);
+            self.request_unicast_reannouncement(afi, "max-prefix blocking ended");
         }
     }
 
@@ -1019,13 +1027,13 @@ impl PeerSession {
 
     /// Under `Block`, whether a prefix with no accepted or rejected identity
     /// may take a pre-policy received slot in its family.
-    fn received_slot_available(&self, prefix: Prefix) -> bool {
+    fn received_slot_available(&self, prefix: Prefix, reserved: usize) -> bool {
         let scope = match prefix {
             Prefix::V4(_) => MaxPrefixScope::Ipv4Received,
             Prefix::V6(_) => MaxPrefixScope::Ipv6Received,
         };
         let (usage, bound) = self.max_prefix_scope_usage(scope);
-        bound.is_none_or(|bound| usage < bound as usize)
+        bound.is_none_or(|bound| usage.saturating_add(reserved) < bound as usize)
     }
 
     /// Under `Block`, drop every announced unicast route whose prefix would
@@ -1037,25 +1045,38 @@ impl PeerSession {
             return;
         }
         let mut kept = Vec::with_capacity(announced.len());
+        let mut reserved = HashSet::new();
+        let mut reserved_accepted = [0_usize; 2];
+        let mut reserved_received = [0_usize; 2];
         for route in announced.drain(..) {
             let prefix = route.prefix;
-            if self.has_accepted_identity(prefix) {
+            if self.has_accepted_identity(prefix) || reserved.contains(&prefix) {
                 kept.push(route);
                 continue;
             }
-            let (accepted_scope, received_scope) = match prefix {
-                Prefix::V4(_) => (MaxPrefixScope::Ipv4, MaxPrefixScope::Ipv4Received),
-                Prefix::V6(_) => (MaxPrefixScope::Ipv6, MaxPrefixScope::Ipv6Received),
+            let (family_index, accepted_scope, received_scope) = match prefix {
+                Prefix::V4(_) => (0, MaxPrefixScope::Ipv4, MaxPrefixScope::Ipv4Received),
+                Prefix::V6(_) => (1, MaxPrefixScope::Ipv6, MaxPrefixScope::Ipv6Received),
             };
-            if !self.has_rejected_identity(prefix) && !self.received_slot_available(prefix) {
+            let has_rejected = self.has_rejected_identity(prefix);
+            if !has_rejected
+                && !self.received_slot_available(prefix, reserved_received[family_index])
+            {
                 self.note_max_prefix_block(received_scope);
                 continue;
             }
             let (usage, bound) = self.max_prefix_scope_usage(accepted_scope);
-            if bound.is_some_and(|bound| usage >= bound as usize) {
+            if bound.is_some_and(|bound| {
+                usage.saturating_add(reserved_accepted[family_index]) >= bound as usize
+            }) {
                 self.note_max_prefix_block(accepted_scope);
                 self.remember_rejected_path(prefix, route.path_id);
                 continue;
+            }
+            reserved.insert(prefix);
+            reserved_accepted[family_index] += 1;
+            if !has_rejected {
+                reserved_received[family_index] += 1;
             }
             kept.push(route);
         }
@@ -1354,7 +1375,7 @@ impl PeerSession {
         if self.blocks_over_limit()
             && !self.has_accepted_identity(prefix)
             && !self.has_rejected_identity(prefix)
-            && !self.received_slot_available(prefix)
+            && !self.received_slot_available(prefix, 0)
         {
             self.note_max_prefix_block(match prefix {
                 Prefix::V4(_) => MaxPrefixScope::Ipv4Received,

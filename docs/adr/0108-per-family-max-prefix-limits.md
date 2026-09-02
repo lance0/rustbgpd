@@ -142,10 +142,12 @@ prefix blocked by its accepted bound is still a received rejection so the
 pre-policy count stays exact; a prefix blocked by the received bound is not
 recorded at all. The first drop opens a per-scope episode (one warn line,
 `bgp_max_prefix_blocking` = 1, `inbound_prefix_limits[]` row with the stable
-`inbound_prefix_limit_reached` reason); usage falling back under the bound ends
-it and requests one plain route refresh so the peer replays what was withheld,
-the inbound analogue of ADR-0113's coalesced resync. Lowering a bound under
-`block` never prunes: the family withholds until usage falls back under.
+`inbound_prefix_limit_reached` reason); usage falling back under the bound,
+removing the bound, or leaving `block` ends it and requests one plain route
+refresh per affected family so the peer replays what was withheld. Without
+negotiated route refresh, peer reannouncement or a session reset is required.
+This is the inbound analogue of ADR-0113's coalesced resync. Lowering a bound
+under `block` never prunes: the family withholds until usage falls back under.
 `block` and `warning` never send `MaxPrefixExceeded`, so the manager latch and
 timed restart stay untouched; `block` applies to the per-family unicast bounds
 and rejects a configured aggregate `max_prefixes`, whose non-unicast families

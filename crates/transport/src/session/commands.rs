@@ -189,13 +189,10 @@ impl PeerSession {
         Ok(())
     }
 
-    /// A `max_prefixes_received_*` bound enabled on an Established session
-    /// starts with no rejected identities, so ask the peer to re-announce
-    /// its table: every replayed rejection is then counted, and an
-    /// enhanced-refresh window reconciles the accepted side at `EoRR`.
-    /// Without route-refresh support the count stays exact only for
-    /// announcements from now on, which the operator is told.
-    pub(super) fn request_received_recount(&mut self, afi: Afi) {
+    /// Ask an Established peer to replay one unicast family after enabling a
+    /// received-prefix bound or ending a Block episode. Without route-refresh
+    /// support, tell the operator that reannouncement or reset is required.
+    pub(super) fn request_unicast_reannouncement(&mut self, afi: Afi, reason: &'static str) {
         if self.fsm.state() != SessionState::Established {
             return;
         }
@@ -215,9 +212,9 @@ impl PeerSession {
                 peer = %self.peer_label,
                 ?afi,
                 %error,
-                "received-prefix bound enabled on a live session without a route refresh; \
-                 rejected announcements are counted from now on and a session reset makes \
-                 the count exact"
+                reason,
+                "route refresh unavailable after max-prefix state change; peer \
+                 reannouncement or session reset is required"
             );
         }
     }
@@ -1577,7 +1574,7 @@ impl PeerSession {
                     if was_tracked && !tracked {
                         self.drop_received_tracking(afi);
                     } else if !was_tracked && tracked {
-                        self.request_received_recount(afi);
+                        self.request_unicast_reannouncement(afi, "received-prefix bound enabled");
                     }
                 }
                 self.config.gr_stale_routes_time = gr_stale_routes_time;

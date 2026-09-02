@@ -2035,8 +2035,8 @@
             "null"
           ],
           "format": "uint8",
-          "maximum": 255,
-          "minimum": 0
+          "maximum": 100,
+          "minimum": 1
         },
         "max_prefixes": {
           "description": "Maximum prefixes accepted from this peer before the session is\ntorn down. Unset = unlimited.",
@@ -2542,8 +2542,8 @@
             "null"
           ],
           "format": "uint8",
-          "maximum": 255,
-          "minimum": 0
+          "maximum": 100,
+          "minimum": 1
         },
         "max_prefixes": {
           "description": "Prefix limit inherited by neighbors in this group. See the\nneighbor-level `max_prefixes`.",

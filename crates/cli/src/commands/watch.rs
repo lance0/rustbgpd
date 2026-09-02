@@ -147,7 +147,7 @@ fn parse_bgp_event_type(s: &str) -> Result<i32, CliError> {
         "otc_route_blocked" => Ok(BgpEventType::OtcRouteBlocked as i32),
         "stream_lagged" | "lagged" => Ok(BgpEventType::StreamLagged as i32),
         other => Err(CliError::Argument(format!(
-            "unsupported event type {other:?}; expected added, withdrawn, best_changed, policy_filtered, state_changed, established, lost, peer_added, peer_removed, peer_enabled, peer_disabled, notification_sent, notification_received, policy_changed, otc_route_blocked, dataplane_status_changed, dataplane_route_installed, dataplane_route_withdrawn, dataplane_route_failed, evpn_added, evpn_withdrawn, evpn_best_changed, bfd_up, bfd_down, bfd_state_changed, or stream_lagged"
+            "unsupported event type {other:?}; expected added, withdrawn, best_changed, policy_filtered, state_changed, established, lost, peer_added, peer_removed, peer_enabled, peer_disabled, max_prefix_warning, notification_sent, notification_received, policy_changed, otc_route_blocked, dataplane_status_changed, dataplane_route_installed, dataplane_route_withdrawn, dataplane_route_failed, evpn_added, evpn_withdrawn, evpn_best_changed, bfd_up, bfd_down, bfd_state_changed, or stream_lagged"
         ))),
     }
 }
@@ -164,7 +164,7 @@ fn parse_session_bgp_event_type(s: &str) -> Result<i32, CliError> {
         | Ok(BgpEventType::PeerRemoved)
         | Ok(BgpEventType::MaxPrefixWarning) => Ok(event_type),
         _ => Err(CliError::Argument(format!(
-            "unsupported session event type {s:?}; expected state_changed, established, lost, peer_added, peer_removed, peer_enabled, or peer_disabled"
+            "unsupported session event type {s:?}; expected state_changed, established, lost, peer_added, peer_removed, peer_enabled, peer_disabled, or max_prefix_warning"
         ))),
     }
 }
@@ -3498,6 +3498,10 @@ mod tests {
         assert_eq!(
             parse_session_bgp_event_type("peer_removed").unwrap(),
             BgpEventType::PeerRemoved as i32
+        );
+        assert_eq!(
+            parse_session_bgp_event_type("max_prefix_warning").unwrap(),
+            BgpEventType::MaxPrefixWarning as i32
         );
         assert!(parse_session_bgp_event_type("added").is_err());
     }
