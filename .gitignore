@@ -57,3 +57,7 @@ tests/interop/configs/m54-certs/
 .last_review_sha
 .lycheecache
 bench/scale/matrix/artifacts-*/
+
+# Local contributor-tool guidance (kept on disk, not tracked)
+/AGENTS.md
+/CLAUDE.md
