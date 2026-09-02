@@ -168,9 +168,22 @@ pub struct ListenerSocketOptions {
     pub md5_keys: Vec<Md5ListenerKey>,
     /// GTSM selectors applied to accepted children.
     pub ttl_security: Vec<TtlSecurityListenerPolicy>,
-    /// TCP maximum segment size clamp (`TCP_MAXSEG`) installed before
-    /// listen; the kernel applies it to every accepted child.
-    pub tcp_mss: Option<u16>,
+    /// TCP maximum segment size clamp (`TCP_MAXSEG`) applied to IPv4
+    /// listener sockets before listen; accepted IPv4 children inherit it.
+    pub tcp_mss_v4: Option<u16>,
+    /// TCP maximum segment size clamp (`TCP_MAXSEG`) applied to IPv6
+    /// listener sockets before listen; accepted IPv6 children inherit it.
+    pub tcp_mss_v6: Option<u16>,
+}
+
+impl ListenerSocketOptions {
+    const fn tcp_mss_for(&self, is_v4: bool) -> Option<u16> {
+        if is_v4 {
+            self.tcp_mss_v4
+        } else {
+            self.tcp_mss_v6
+        }
+    }
 }
 
 /// One bound listening socket of a single address family. The listener
@@ -2547,7 +2560,7 @@ fn log_bound_family(
             .iter()
             .filter(|policy| policy.hops.is_some() && policy.peer.is_ipv4() == is_v4)
             .count(),
-        tcp_mss = options.tcp_mss,
+        tcp_mss = options.tcp_mss_for(is_v4),
         "BGP listener bound"
     );
 }
@@ -2628,7 +2641,9 @@ where
     enable_listener_gtsm_outbound(&socket, addr.is_ipv4(), &options.ttl_security)?;
     // Listener-wide by construction: the clamp is negotiated in the SYN-ACK,
     // so it must precede listen() and cannot be scoped per accepted peer.
-    if let Some(mss) = options.tcp_mss {
+    // Partitioned by address family so IPv4 tunnel constraints do not
+    // down-clamp IPv6 listeners.
+    if let Some(mss) = options.tcp_mss_for(addr.is_ipv4()) {
         socket.set_tcp_mss(u32::from(mss))?;
     }
     socket.listen(DEFAULT_LISTEN_BACKLOG)?;
@@ -4271,7 +4286,7 @@ mod tests {
     #[tokio::test]
     async fn bind_socket2_listener_installs_tcp_mss_before_listen_and_children_inherit_it() {
         let options = ListenerSocketOptions {
-            tcp_mss: Some(1000),
+            tcp_mss_v4: Some(1000),
             ..ListenerSocketOptions::default()
         };
         let listener = bind_socket2_listener("127.0.0.1:0".parse().unwrap(), &options).unwrap();
@@ -4298,6 +4313,69 @@ mod tests {
                 "{label} must negotiate at most the clamp: {mss}"
             );
         }
+    }
+
+    /// TCP MSS clamps are partitioned by address family so an IPv4 neighbor
+    /// with a reduced tunnel MTU does not down-clamp IPv6 listeners.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn bind_socket2_listener_partitions_tcp_mss_by_address_family() {
+        let options = ListenerSocketOptions {
+            tcp_mss_v4: Some(1000),
+            tcp_mss_v6: Some(1220),
+            ..ListenerSocketOptions::default()
+        };
+        let v4_listener = bind_socket2_listener("127.0.0.1:0".parse().unwrap(), &options).unwrap();
+        let v6_listener = bind_socket2_listener("[::1]:0".parse().unwrap(), &options).unwrap();
+        assert_eq!(
+            socket2::SockRef::from(&v4_listener).tcp_mss().unwrap(),
+            1000
+        );
+        assert_eq!(
+            socket2::SockRef::from(&v6_listener).tcp_mss().unwrap(),
+            1220
+        );
+
+        // Setting only IPv4 clamp must leave IPv6 listener unclamped (not polluted with 1000).
+        let v4_only_options = ListenerSocketOptions {
+            tcp_mss_v4: Some(1000),
+            tcp_mss_v6: None,
+            ..ListenerSocketOptions::default()
+        };
+        let v4_only =
+            bind_socket2_listener("127.0.0.1:0".parse().unwrap(), &v4_only_options).unwrap();
+        let v6_unclamped =
+            bind_socket2_listener("[::1]:0".parse().unwrap(), &v4_only_options).unwrap();
+        let v6_baseline = bind_socket2_listener(
+            "[::1]:0".parse().unwrap(),
+            &ListenerSocketOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(socket2::SockRef::from(&v4_only).tcp_mss().unwrap(), 1000);
+        assert_eq!(
+            socket2::SockRef::from(&v6_unclamped).tcp_mss().unwrap(),
+            socket2::SockRef::from(&v6_baseline).tcp_mss().unwrap(),
+            "IPv6 listener must retain its unclamped baseline"
+        );
+    }
+
+    /// Each address family resolves its own listener clamp.
+    #[test]
+    fn listener_socket_options_resolve_tcp_mss_by_family() {
+        let options = ListenerSocketOptions {
+            tcp_mss_v4: Some(1000),
+            tcp_mss_v6: Some(1220),
+            ..ListenerSocketOptions::default()
+        };
+        assert_eq!(options.tcp_mss_for(true), Some(1000));
+        assert_eq!(options.tcp_mss_for(false), Some(1220));
+
+        let v4_only = ListenerSocketOptions {
+            tcp_mss_v4: Some(1000),
+            ..ListenerSocketOptions::default()
+        };
+        assert_eq!(v4_only.tcp_mss_for(true), Some(1000));
+        assert_eq!(v4_only.tcp_mss_for(false), None);
     }
 
     /// Restart-under-traffic: the daemon is the active closer at shutdown,

@@ -23,11 +23,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `tcp_mss` on `[[neighbors]]` and `[peer_groups.<name>]` clamps the TCP
   maximum segment size (`TCP_MAXSEG`, 88..=32767 bytes) for sessions behind
   tunnels or reduced-MTU paths. **Operator-visible:** the clamp is installed
-  on the active-open socket before connect. Every bound passive listener socket
-  takes the smallest effective value across resolved static neighbors before
-  listen, and every accepted child inherits it. Dynamic-range peer groups
-  cannot set `tcp_mss`. Omitting the field leaves it unset; values outside the
-  kernel range are rejected at load. The field is restart-required.
+  on the active-open socket before connect. Each bound passive listener socket
+  takes the smallest effective value across resolved static neighbors of the
+  same address family before listen, so an IPv4 tunnel constraint does not
+  down-clamp IPv6 sessions. Every accepted child inherits its family's clamp.
+  Dynamic-range peer groups cannot set `tcp_mss`. Omitting the field leaves it
+  unset; values outside the kernel range are rejected at load. The field is
+  restart-required.
 
 - **Operator-visible:** `rs-config-render` now renders arouteserver IRR white
   lists instead of refusing them: `white_list_pref` and `white_list_asn` join
