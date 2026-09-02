@@ -37,8 +37,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `route_validated_via_white_list` community (standard and large forms; the
   hygiene policy scrubs the tag on entry). The render receipt counts each
   client's white-listed routes. A configured `ext` form or a malformed tag
-  value is still refused, as are arouteserver's four IRR result communities,
-  which the daemon cannot preserve.
+  value is now refused, as are arouteserver's four IRR result communities,
+  which the daemon cannot preserve; all five were previously ignored.
 
 - **Operator-visible:** `rs-config-render` now renders an effective
   `rfc8950: true` IPv6 session for a uniform IPv6 fleet: the session carries
@@ -312,6 +312,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   pre-admission attempts and actor-received work while remaining the sole
   queue-depth source across shutdown and manager restarts.
 
+- Coordinated shutdown now bounds the gRPC listener drain and removes the
+  bound gRPC Unix socket on every exit path. An active streaming RPC no
+  longer holds a listener open indefinitely: the listeners share a
+  one-second grace deadline, after which the remaining tasks are aborted and
+  the count is logged. A guard unlinks the socket path on the cancelled path
+  as well as the completing one, and retains the path when it is no longer a
+  socket or when its device and inode no longer match the socket the daemon
+  bound, so a replacement is never removed. The daemon joins the gRPC task
+  before closing the durable event outbox, so active streams cannot outlive
+  their dependencies, and a panic in that task during shutdown is reported
+  as a component failure and exits 1.
+
 ### Documentation
 
 - Publish a descriptive raw bridge event-skew receipt across six pinned Jammy
@@ -347,6 +359,96 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   NLRI are now treated as withdraw by default; without reachable NLRI, the
   session resets. Deployments that must relay arbitrarily long paths set
   `[global] max_as_path_length = 0` to keep the previous behavior.
+- **Shipped systemd units are `Type=notify`:** `rustbgpd.service` and
+  `rustbgpd@.service` now declare `Type=notify`, `NotifyAccess=main`,
+  `WatchdogSec=5min`, and `TimeoutStartSec=10min`. A `.deb` or `.rpm`
+  upgrade replaces both units under `/lib/systemd/system`, discarding local
+  edits to those files, so keep customizations in an
+  `/etc/systemd/system/rustbgpd.service.d/` drop-in. Deploy the unit and the
+  binary together: a new binary under an old `Type=simple` unit behaves
+  exactly as before, because systemd sets no `NOTIFY_SOCKET` and every
+  notification is a no-op, but an old binary under the new unit never sends
+  `READY=1`, so `systemctl start` blocks until `TimeoutStartSec` and the
+  service is then killed and retried on a ten-minute loop. Opting out on a
+  native unit requires all three of `Type=simple`, `NotifyAccess=none`, and
+  `WatchdogSec=0`; the container unit already stays `Type=simple`.
+- **Reconnect wait escalates after repeated NOTIFICATION teardowns:** a
+  session that keeps falling to Idle because of a NOTIFICATION — sent,
+  received, or an OPEN exchange that ends in one — now doubles its reconnect
+  wait per consecutive failure instead of retrying at a fixed interval. At
+  the `connect_retry_secs` default of 5 s the wait runs 5, 10, 20, 40, 80,
+  160, and then 300 s, which is the cap. Monitoring and automation that
+  assumed a worst case near `connect_retry_secs` must widen that
+  expectation. The curve has no configuration knob:
+  `rbgp neighbor <addr> enable` or an administrative reset clears the streak
+  and retries immediately, and five minutes Established clears it on its
+  own. TCP connection failures, the max-prefix latch, disable, and graceful
+  shutdown keep their existing timing.
+- **Config transactions accept unchanged external policy inputs:** a
+  full-snapshot candidate that declares `[policy] rpol_files` or
+  `[policy.datasets]` is no longer rejected on declaration alone. The
+  planner records each declared external file's byte identity and admits the
+  transaction when it matches the accepted snapshot, so plan, apply,
+  commit-confirm, and rollback work again for `.rpol` and dataset
+  deployments whose sources are unchanged on disk. Automation that treated
+  the blanket rejection as the expected outcome now sees these transactions
+  commit. Nothing that previously succeeded now fails: drift in a declared
+  file, including a comment-only rewrite, a missing or unreadable file, and
+  a rollback across an external content change all still reject without
+  mutation, and gNMI Set full-snapshot candidates remain rejected whenever
+  external inputs are present.
+- **`rbgp neighbor` reports inbound prefix limits for existing bounds:** any
+  peer already configured with `max_prefixes`, `max_prefixes_ipv4`, or
+  `max_prefixes_ipv6` now carries an `inbound_prefix_limits[]` row per
+  finite bound in the neighbor API, the `rbgp neighbor <addr>` detail
+  output, and its JSON, and publishes `bgp_max_prefix_blocking{peer,scope}`
+  at 0 for each of those bounds. No configuration change is required to see
+  either. Consumers that parse the detail output or pin its JSON keys should
+  accept the new section; the `block` and `warning` modes themselves stay
+  off until `max_prefix_action` is set.
+- **Shipped alert rules join peer identity:** the packaged
+  `BgpSessionNotEstablished` rule now joins `bgp_peer_info`, so an alert for
+  a peer that has an identity row carries `remote_asn`, `description`, and
+  `peer_group` labels. Alertmanager matchers and silences keyed on the
+  previous labels still match, but an explicit `group_by` list, grouping and
+  deduplication behavior, or a notification template built on the old label
+  set should be reviewed before adopting the refreshed rules. Keeping the
+  previous rules changes nothing, and the rule's fallback arm still fires
+  for peers without an identity row, including against an older daemon.
+- **Route-server renders state `rs_control_communities`:**
+  `rs-config-render` now writes `rs_control_communities` on every rendered
+  member session. A site that configures none of the nine arouteserver
+  control-community keys renders `false`, where the previously omitted key
+  left the daemon default in force, so re-rendering an otherwise unchanged
+  site turns off RFC 7947 section 2.3.2 and RFC 8195 control-community
+  interpretation and scrubbing on those sessions. Re-render and diff before
+  activating, then either accept the transparent behavior or declare the
+  full nine-key matrix exactly as the daemon expands it. A partial or
+  differing matrix, and any `add_noexport_to_*` or `add_noadvertise_to_*`
+  community, now exit 2 naming the key; both rendered before. The IXP
+  Manager render path is unchanged.
+- **Route-server renders refuse more IRR community inputs:**
+  `rs-config-render` now exits 2 on an `ext` form or a malformed value under
+  `communities.route_validated_via_white_list`, and on any of arouteserver's
+  four IRR result communities `origin_present_in_as_set`,
+  `origin_not_present_in_as_set`, `prefix_present_in_as_set`, and
+  `prefix_not_present_in_as_set`. All five were previously ignored and the
+  site rendered. A site that declares the white-list tag community also
+  gains a hygiene term scrubbing that tag on entry, whether or not it
+  configures any white-list entry. Re-render before activating and remove
+  the refused keys.
+- **Route-server renders accept arouteserver max-prefix inputs:**
+  `rs-config-render` previously exited 2 on arouteserver's default
+  `max_prefix.count_rejected_routes: true` and on
+  `max_prefix.action: block` or `warning`; those sites now render. The
+  emitted bound is not equivalent: an effective `true` renders the
+  pre-policy `max_prefixes_received_ipv4`/`_ipv6`, which count accepted and
+  rejected prefixes before import policy, while `false` keeps the
+  accepted-route `max_prefixes_ipv4`/`_ipv6`. Confirm the intended bound
+  before activating. Every render receipt also gains the
+  `max_prefixes_received_ipv4`, `max_prefixes_received_ipv6`,
+  `max_prefix_action`, and `white_list_routes` client keys, so receipt diffs
+  and schema consumers see new fields on unchanged sites.
 
 ## [0.68.0] — 2026-08-30
 
