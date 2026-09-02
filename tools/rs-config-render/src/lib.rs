@@ -484,6 +484,8 @@ struct Irrdb {
     enforce_prefix_in_as_set: bool,
     #[serde(default)]
     allow_longer_prefixes: bool,
+    #[serde(default = "default_true")]
+    tag_as_set: bool,
 }
 
 impl Default for Irrdb {
@@ -492,6 +494,7 @@ impl Default for Irrdb {
             enforce_origin_in_as_set: true,
             enforce_prefix_in_as_set: true,
             allow_longer_prefixes: false,
+            tag_as_set: true,
         }
     }
 }
@@ -574,12 +577,16 @@ struct ClientFiltering {
 struct ClientIrrdb {
     #[serde(default)]
     as_set_bundle_ids: Vec<String>,
+    /// Extra authorized origin ASNs, folded into the origin dataset.
     #[serde(default)]
-    white_list_asn: Option<serde_yaml::Value>,
+    white_list_asn: Option<Vec<AsnLit>>,
+    /// Extra authorized prefixes, folded into the prefix dataset.
     #[serde(default)]
-    white_list_pref: Option<serde_yaml::Value>,
+    white_list_pref: Option<Vec<PrefixEntry>>,
+    /// Routes accepted ahead of IRR enforcement, optionally bound to an
+    /// origin ASN (`asn`).
     #[serde(default)]
-    white_list_route: Option<serde_yaml::Value>,
+    white_list_route: Option<Vec<PrefixEntry>>,
 }
 
 #[derive(Deserialize)]
@@ -641,6 +648,9 @@ struct PrefixEntry {
     le: Option<u8>,
     #[serde(default)]
     max_length: Option<u8>,
+    /// Origin binding; only `white_list_route` entries carry one.
+    #[serde(default)]
+    asn: Option<u32>,
 }
 
 impl PrefixEntry {
@@ -991,6 +1001,10 @@ struct ResolvedClient<'a> {
     pref_len: Option<(u8, u8)>,
     reject_rpki_invalid: bool,
     tag_and_reject: bool,
+    /// IPv4 unicast rides this IPv6 session with an IPv6 next hop.
+    rfc8950: bool,
+    /// Session-family `white_list_route` entries, in emission order.
+    white_list_routes: Vec<&'a PrefixEntry>,
 }
 impl ResolvedClient<'_> {
     /// TOML keys carrying this client's family limits: ARouteServer's
@@ -1073,15 +1087,16 @@ fn render_inner(
     let site = site
         .map(|input| validate_site_local(&ctx, &resolved, input))
         .transpose()?;
+    let white_list_tag = white_list_tag(&ctx);
     let mut files = BTreeMap::new();
     files.insert(
         "policy/rs-hygiene.rpol".to_owned(),
-        render_hygiene(&ctx, &found_fingerprint),
+        render_hygiene(&ctx, &white_list_tag, &found_fingerprint),
     );
     for rc in &resolved {
         files.insert(
             format!("policy/client-{}.rpol", rc.slug),
-            render_client_rpol(rc, &found_fingerprint),
+            render_client_rpol(rc, &white_list_tag, &found_fingerprint),
         );
         if rc.enforce_origin {
             files.insert(
@@ -1512,6 +1527,32 @@ fn check_refusals(ctx: &Context, opts: &Options) -> Result<(), RenderError> {
             "communities.{RPKI_NOT_PERFORMED} is configured; unsupported tagging/scrubbing cannot be rendered"
         ));
     }
+    for name in [
+        "origin_present_in_as_set",
+        "origin_not_present_in_as_set",
+        "prefix_present_in_as_set",
+        "prefix_not_present_in_as_set",
+    ] {
+        if cfg.communities.get(name).is_some_and(community_configured) {
+            refusals.push(format!(
+                "communities.{name} is configured; unsupported IRR result tagging cannot be rendered"
+            ));
+        }
+    }
+    check_control_communities(cfg, &mut refusals);
+    if let Some(tag) = cfg.communities.get(WHITE_LIST_TAG) {
+        if tag.ext.is_some() {
+            refusals.push(format!("communities.{WHITE_LIST_TAG}.ext is unsupported"));
+        }
+        for (value, parts, max) in [
+            (tag.std.as_deref(), 2, u16::MAX as u64),
+            (tag.lrg.as_deref(), 3, u32::MAX as u64),
+        ] {
+            if value.is_some_and(|value| !valid_reject_community(value, parts, max, false)) {
+                refusals.push(format!("communities.{WHITE_LIST_TAG} is malformed"));
+            }
+        }
+    }
     if cfg.prepend_rs_as {
         refusals.push(
             "prepend_rs_as: the rendered sessions are transparent route-server-client \
@@ -1594,11 +1635,24 @@ fn check_refusals(ctx: &Context, opts: &Options) -> Result<(), RenderError> {
                 "{scope}: effective multihop={multihop} is not rendered; set this client to 0 or disable general multihop"
             ));
         }
-        let rfc8950 = client.cfg.rfc8950.unwrap_or(cfg.rfc8950);
-        if ipv6 && rfc8950 {
-            refusals.push(format!(
-                "{scope}: effective rfc8950=true is not rendered on IPv6 sessions"
-            ));
+        if ipv6 && client.cfg.rfc8950.unwrap_or(cfg.rfc8950) {
+            // Transparent export hands the IPv6 next hop of an IPv4 route to
+            // every member verbatim; an IPv4-session member cannot consume it
+            // and the SLAT translation of ADR-0128 is not implemented.
+            if let Some(legacy) = ctx.clients.iter().find(|c| !c.ip.contains(':')) {
+                refusals.push(format!(
+                    "{scope}: effective rfc8950=true needs next-hop translation toward \
+                     IPv4-session client {} (ADR-0128, not implemented); only a uniform \
+                     IPv6 fleet is rendered",
+                    legacy.id
+                ));
+            }
+            if blackhole.policy_ipv4.is_some() {
+                refusals.push(format!(
+                    "{scope}: effective rfc8950=true with blackhole_filtering.policy_ipv4 \
+                     is not rendered; IPv4 blackhole terms are bound to IPv4 sessions"
+                ));
+            }
         }
         if client.cfg.blackhole_filtering.policy_ipv4.is_some()
             || client.cfg.blackhole_filtering.policy_ipv6.is_some()
@@ -1642,29 +1696,15 @@ fn check_refusals(ctx: &Context, opts: &Options) -> Result<(), RenderError> {
             &scope,
             &mut refusals,
         );
-        // Per-client black/white lists are not rendered; dropping a
-        // black list would fail open, dropping a white list would
-        // reject routes the site intends to accept.
+        // A per-client black list is not rendered; dropping it would fail
+        // open. IRR white lists render as extra dataset members and ordered
+        // accept terms (see resolve_clients / render_client_rpol).
         if value_present(client.cfg.filtering.black_list_pref.as_ref()) {
             refusals.push(format!(
                 "client {}: black_list_pref is not rendered; silently dropping it would \
                  fail open",
                 client.id
             ));
-        }
-        let irrdb = &client.cfg.filtering.irrdb;
-        for (name, value) in [
-            ("white_list_asn", &irrdb.white_list_asn),
-            ("white_list_pref", &irrdb.white_list_pref),
-            ("white_list_route", &irrdb.white_list_route),
-        ] {
-            if value_present(value.as_ref()) {
-                refusals.push(format!(
-                    "client {}: irrdb.{name} is not rendered; silently dropping it would \
-                     reject routes the site intends to accept",
-                    client.id
-                ));
-            }
         }
     }
 
@@ -1688,6 +1728,116 @@ fn value_present(value: Option<&serde_yaml::Value>) -> bool {
 
 fn community_configured(value: &CommunityValues) -> bool {
     value.std.is_some() || value.lrg.is_some() || value.ext.is_some()
+}
+
+const WHITE_LIST_TAG: &str = "route_validated_via_white_list";
+
+/// The daemon's fixed RFC 7947 §2.3.2 / RFC 8195 control matrix
+/// (`rs_control` in the RIB crate), as arouteserver spells it after
+/// expanding `rs_as`: `(key, std, lrg)`. Standard forms that embed the
+/// route-server ASN exist only when it fits 16 bits.
+fn control_matrix(rs_as: u32) -> [(&'static str, Option<String>, String); 9] {
+    let std16 = |value: String| (rs_as <= u32::from(u16::MAX)).then_some(value);
+    [
+        (
+            "do_not_announce_to_peer",
+            Some("0:peer_as".to_owned()),
+            format!("{rs_as}:0:peer_as"),
+        ),
+        (
+            "announce_to_peer",
+            std16(format!("{rs_as}:peer_as")),
+            format!("{rs_as}:1:peer_as"),
+        ),
+        (
+            "do_not_announce_to_any",
+            std16(format!("0:{rs_as}")),
+            format!("{rs_as}:0:0"),
+        ),
+        ("prepend_once_to_peer", None, format!("{rs_as}:101:peer_as")),
+        (
+            "prepend_twice_to_peer",
+            None,
+            format!("{rs_as}:102:peer_as"),
+        ),
+        (
+            "prepend_thrice_to_peer",
+            None,
+            format!("{rs_as}:103:peer_as"),
+        ),
+        ("prepend_once_to_any", None, format!("{rs_as}:101:0")),
+        ("prepend_twice_to_any", None, format!("{rs_as}:102:0")),
+        ("prepend_thrice_to_any", None, format!("{rs_as}:103:0")),
+    ]
+}
+
+/// Control communities the daemon has no action for; configuring one
+/// would silently drop member intent.
+const UNSUPPORTED_CONTROL_COMMUNITIES: [&str; 4] = [
+    "add_noadvertise_to_any",
+    "add_noadvertise_to_peer",
+    "add_noexport_to_any",
+    "add_noexport_to_peer",
+];
+
+/// True when the site configures any control community the daemon
+/// enforces — the rendered sessions then keep `rs_control_communities` on.
+fn control_communities_enabled(cfg: &Cfg) -> bool {
+    control_matrix(cfg.rs_as)
+        .iter()
+        .any(|(name, _, _)| cfg.communities.get(*name).is_some_and(community_configured))
+}
+
+/// The daemon's matrix is fixed, so an enabled site must configure exactly
+/// it: every key present with the daemon's forms and nothing else. A site
+/// with no control communities renders the knob off instead.
+fn check_control_communities(cfg: &Cfg, refusals: &mut Vec<String>) {
+    for name in UNSUPPORTED_CONTROL_COMMUNITIES {
+        if cfg.communities.get(name).is_some_and(community_configured) {
+            refusals.push(format!(
+                "communities.{name} is configured; the daemon has no equivalent action"
+            ));
+        }
+    }
+    if !control_communities_enabled(cfg) {
+        return;
+    }
+    for (name, std, lrg) in control_matrix(cfg.rs_as) {
+        let values = cfg.communities.get(name);
+        let got_std = values.and_then(|v| v.std.as_deref());
+        let got_lrg = values.and_then(|v| v.lrg.as_deref());
+        let got_ext = values.and_then(|v| v.ext.as_deref());
+        if got_std != std.as_deref() || got_lrg != Some(lrg.as_str()) || got_ext.is_some() {
+            fn show(value: Option<&str>) -> &str {
+                value.unwrap_or("null")
+            }
+            refusals.push(format!(
+                "communities.{name}: the daemon enforces a fixed control matrix; expected \
+                 std={} lrg={lrg} ext=null, got std={} lrg={} ext={}",
+                show(std.as_deref()),
+                show(got_std),
+                show(got_lrg),
+                show(got_ext)
+            ));
+        }
+    }
+}
+
+/// The configured white-list tag, empty unless `irrdb.tag_as_set` is on.
+fn white_list_tag(ctx: &Context) -> Vec<(CommunityKind, String)> {
+    if !ctx.cfg.filtering.irrdb.tag_as_set {
+        return Vec::new();
+    }
+    let Some(values) = ctx.cfg.communities.get(WHITE_LIST_TAG) else {
+        return Vec::new();
+    };
+    [
+        (CommunityKind::Standard, &values.std),
+        (CommunityKind::Large, &values.lrg),
+    ]
+    .into_iter()
+    .filter_map(|(kind, value)| value.clone().map(|value| (kind, value)))
+    .collect()
 }
 
 fn check_blackhole_rewrite(blackhole: &BlackholeFiltering, ipv6: bool, refusals: &mut Vec<String>) {
@@ -2027,6 +2177,19 @@ fn resolve_clients<'a>(
         // AS-SET and the bare origin-ASN object); the union dedupes.
         let mut seen_prefixes = BTreeSet::new();
         let mut origins = BTreeSet::new();
+        let mut push_prefix = |prefix: &'a PrefixEntry| {
+            let key = (
+                prefix.prefix.clone(),
+                prefix.length,
+                prefix.exact,
+                prefix.ge,
+                prefix.le,
+                prefix.max_length,
+            );
+            if seen_prefixes.insert(key) {
+                prefixes.push(prefix);
+            }
+        };
         for bundle_id in &filtering.irrdb.as_set_bundle_ids {
             let bundle = ctx.irrdb_info.get(bundle_id).ok_or_else(|| {
                 RenderError::Parse(format!(
@@ -2035,21 +2198,21 @@ fn resolve_clients<'a>(
                 ))
             })?;
             for prefix in &bundle.prefixes {
-                let key = (
-                    prefix.prefix.clone(),
-                    prefix.length,
-                    prefix.exact,
-                    prefix.ge,
-                    prefix.le,
-                    prefix.max_length,
-                );
-                if seen_prefixes.insert(key) {
-                    prefixes.push(prefix);
-                }
+                push_prefix(prefix);
             }
             for asn in &bundle.asns {
                 origins.insert(asn.value().map_err(RenderError::Parse)?);
             }
+        }
+        // IRR white lists are extra members of the same sets. arouteserver
+        // also folds them into a synthetic bundle the loop above ingested;
+        // reading the raw keys keeps a hand-authored context honest and the
+        // dedupe absorbs the overlap.
+        for prefix in filtering.irrdb.white_list_pref.iter().flatten() {
+            push_prefix(prefix);
+        }
+        for asn in filtering.irrdb.white_list_asn.iter().flatten() {
+            origins.insert(asn.value().map_err(RenderError::Parse)?);
         }
 
         if enforce_prefix && (prefixes.len() as u64) < u64::from(opts.min_prefixes) {
@@ -2108,6 +2271,17 @@ fn resolve_clients<'a>(
 
         let ipv6 = client.ip.contains(':');
         let blackhole = resolve_blackhole(ctx, client, ipv6);
+        let rfc8950 = ipv6 && client.cfg.rfc8950.unwrap_or(ctx.cfg.rfc8950);
+        // Like arouteserver, only entries of a family the session carries
+        // are emitted; the others can never arrive on it.
+        let mut white_list_routes: Vec<&PrefixEntry> = filtering
+            .irrdb
+            .white_list_route
+            .iter()
+            .flatten()
+            .filter(|entry| rfc8950 || entry.is_ipv6() == ipv6)
+            .collect();
+        white_list_routes.sort_by(|a, b| (&a.prefix, a.length).cmp(&(&b.prefix, b.length)));
 
         resolved.push(ResolvedClient {
             client,
@@ -2143,6 +2317,8 @@ fn resolve_clients<'a>(
             reject_rpki_invalid: ctx.cfg.filtering.rpki_bgp_origin_validation.enabled
                 && ctx.cfg.filtering.rpki_bgp_origin_validation.reject_invalid,
             tag_and_reject,
+            rfc8950,
+            white_list_routes,
         });
     }
 
@@ -2331,20 +2507,38 @@ fn render_toml(
         }
     }
 
+    let rs_control = control_communities_enabled(cfg);
+    out.push_str(if rs_control {
+        "\n# RFC 7947 §2.3.2 control communities: the site configures exactly the\n\
+         # daemon's fixed matrix, so every member session interprets and scrubs them.\n"
+    } else {
+        "\n# The site configures no control communities: member sessions stay fully\n\
+         # transparent and interpret nothing (the daemon's own default would be on).\n"
+    });
+
     for rc in clients {
-        let family = if rc.client.ip.contains(':') {
-            "ipv6_unicast"
+        let families = if rc.rfc8950 {
+            "\"ipv4_unicast\", \"ipv6_unicast\""
+        } else if rc.client.ip.contains(':') {
+            "\"ipv6_unicast\""
         } else {
-            "ipv4_unicast"
+            "\"ipv4_unicast\""
         };
         let _ = write!(
             out,
             "\n[[neighbors]]\naddress = \"{}\"\nremote_asn = {}\ndescription = \"{}\"\n\
-             families = [\"{family}\"]\nroute_server_client = true\nrole = \"route_server\"\n",
+             families = [{families}]\nroute_server_client = true\nrole = \"route_server\"\n",
             toml_escape(&rc.client.ip),
             rc.client.asn,
             toml_escape(&rc.description),
         );
+        if rc.rfc8950 {
+            out.push_str(
+                "# RFC 8950: IPv4 unicast rides this IPv6 session. The dual-family session\n\
+                 # negotiates the extended next hop, and strict_peer accepts an IPv4 route\n\
+                 # only with this session's own IPv6 address as its next hop.\n",
+            );
+        }
         if rc.strict_next_hop {
             out.push_str("next_hop_ownership = \"strict_peer\"\n");
         }
@@ -2355,6 +2549,7 @@ fn render_toml(
             out.push_str("per_client_best = true\n");
         }
         let (limit_key_ipv4, limit_key_ipv6) = rc.max_prefix_limit_keys();
+        let _ = writeln!(out, "rs_control_communities = {rs_control}");
         if let Some(limit) = rc.limit_ipv4 {
             let _ = writeln!(out, "{limit_key_ipv4} = {limit}");
         }
@@ -2554,7 +2749,11 @@ fn render_prefix_set(
     out.push_str("}\n");
 }
 
-fn render_hygiene(ctx: &Context, fingerprint: &str) -> String {
+fn render_hygiene(
+    ctx: &Context,
+    white_list_tag: &[(CommunityKind, String)],
+    fingerprint: &str,
+) -> String {
     let filtering = &ctx.cfg.filtering;
     let mut out = generated_header("Shared import hygiene", fingerprint);
     out.push_str(
@@ -2577,6 +2776,15 @@ fn render_hygiene(ctx: &Context, fingerprint: &str) -> String {
     tests.push_str(
         "test as-set-path-is-rejected {\n    route { prefix 203.0.113.0/24; as-path \"3333 {65010 65011}\" }\n    expect rs-hygiene == reject\n}\n",
     );
+
+    if !white_list_tag.is_empty() {
+        let _ = writeln!(
+            terms,
+            "    # The white-list tag is set by the route server only; members cannot pre-tag.\n\
+             \x20   term scrub-white-list-tag {{ {} }}",
+            community_actions("remove", white_list_tag)
+        );
+    }
 
     if filtering.reject_invalid_as_in_as_path {
         let _ = write!(
@@ -2805,7 +3013,11 @@ fn inactive_family_guard(ctx: &Context) -> String {
     }
 }
 
-fn render_client_rpol(rc: &ResolvedClient<'_>, fingerprint: &str) -> String {
+fn render_client_rpol(
+    rc: &ResolvedClient<'_>,
+    white_list_tag: &[(CommunityKind, String)],
+    fingerprint: &str,
+) -> String {
     let slug = &rc.slug;
     let mut out = generated_header(
         &format!(
@@ -2877,8 +3089,41 @@ fn render_client_rpol(rc: &ResolvedClient<'_>, fingerprint: &str) -> String {
         }
     }
 
+    // White-listed routes are accepted ahead of IRR enforcement; shared
+    // hygiene has already run, so nothing else is bypassed.
+    let mut white_list_terms = String::new();
+    for (index, entry) in rc.white_list_routes.iter().enumerate() {
+        let n = index + 1;
+        let _ = writeln!(
+            out,
+            "prefix-set client-{slug}-white-list-route-{n} {{ {} }}",
+            entry.render_member(true, false)
+        );
+        let origin = entry
+            .asn
+            .map(|asn| format!(" && route.origin-as == {asn}"))
+            .unwrap_or_default();
+        let mut actions = community_actions("add", white_list_tag);
+        if !actions.is_empty() {
+            actions.push_str("; ");
+        }
+        let _ = writeln!(
+            white_list_terms,
+            "    term accept-white-list-route-{n} {{ if route.prefix in client-{slug}-white-list-route-{n}{origin} {{ {actions}accept }} }}"
+        );
+    }
+    if !white_list_terms.is_empty() {
+        white_list_terms.insert_str(
+            0,
+            "    # IRR white list: accepted before origin/prefix enforcement.\n",
+        );
+    }
+
     if rc.tag_and_reject {
-        let _ = write!(out, "\npolicy client-{slug} {{\n{blackhole_terms}");
+        let _ = write!(
+            out,
+            "\npolicy client-{slug} {{\n{blackhole_terms}{white_list_terms}"
+        );
         if rc.enforce_origin {
             let _ = writeln!(
                 out,
@@ -2897,6 +3142,7 @@ fn render_client_rpol(rc: &ResolvedClient<'_>, fingerprint: &str) -> String {
             out,
             "\npolicy client-{slug} {{\n\
              {blackhole_terms}\
+             {white_list_terms}\
              \x20   term accept-authorized {{\n\
              \x20       if {} {{ accept }}\n\
              \x20   }}\n\
@@ -2927,7 +3173,36 @@ fn render_client_rpol(rc: &ResolvedClient<'_>, fingerprint: &str) -> String {
              }}\n"
         );
     }
+    // The IRR overrides above authorize nothing here, so only the white-list
+    // term can accept this route.
+    if let Some(entry) = rc.white_list_routes.first() {
+        let overrides = render_test_dataset_overrides(rc, false);
+        let _ = write!(
+            out,
+            "\ntest client-{slug}-white-listed-route-is-accepted {{\n{overrides}\
+             \x20   route {{ prefix {}; as-path \"{}\" }}\n\
+             \x20   expect client-{slug} == accept\n\
+             }}\n",
+            representative_prefix(entry),
+            entry.asn.unwrap_or(64497)
+        );
+    }
     out
+}
+
+/// `add`/`remove` actions for a tag's configured forms, `; `-joined.
+fn community_actions(verb: &str, tag: &[(CommunityKind, String)]) -> String {
+    tag.iter()
+        .map(|(kind, value)| {
+            let keyword = match kind {
+                CommunityKind::Standard => "community",
+                CommunityKind::Large => "large-community",
+                CommunityKind::Extended => "ext-community",
+            };
+            format!("{verb} {keyword} {value}")
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 fn render_test_dataset_overrides(rc: &ResolvedClient<'_>, authorized_origin: bool) -> String {
@@ -3000,7 +3275,7 @@ fn render_blackhole_cover_dataset(rc: &ResolvedClient<'_>, ipv6: bool) -> String
     members.join("\n") + "\n"
 }
 
-#[cfg(test)]
+/// One address inside the entry's window, for generated in-language tests.
 fn representative_prefix(entry: &PrefixEntry) -> String {
     let length = entry
         .ge
@@ -3056,6 +3331,7 @@ fn build_receipt(
             "ip": rc.client.ip,
             "prefix_set_size": rc.prefixes.len(),
             "origin_set_size": rc.origins.len(),
+            "white_list_routes": rc.white_list_routes.len(),
             "max_prefixes_ipv4": rc.limit_ipv4.filter(|_| !rc.count_rejected_routes),
             "max_prefixes_ipv6": rc.limit_ipv6.filter(|_| !rc.count_rejected_routes),
             "max_prefixes_received_ipv4": rc.limit_ipv4.filter(|_| rc.count_rejected_routes),
@@ -3134,6 +3410,7 @@ mod tests {
             ge: None,
             le: None,
             max_length: None,
+            asn: None,
         };
         assert_eq!(entry.render_member(true, false), "10.0.0.0/8 le 32");
         assert_eq!(entry.render_member(false, false), "10.0.0.0/8");
@@ -3146,6 +3423,7 @@ mod tests {
             ge: Some(40),
             le: Some(48),
             max_length: None,
+            asn: None,
         };
         assert_eq!(
             bounded.render_member(false, false),

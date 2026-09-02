@@ -16,6 +16,13 @@ const SECTIONED: &str =
     include_str!("../../../tests/interop/m90-differential/context-sectioned.yml");
 /// The hand-authored single-document context for the same site.
 const M90_HAND: &str = include_str!("../../../tests/interop/m90-differential/context.yml");
+/// The M106 sibling site (IRR white lists plus the daemon's control
+/// matrix), dumped by the same pinned image, and its hand-authored twin.
+const M106_SECTIONED: &str = include_str!(
+    "../../../tests/interop/m106-rs-white-list-control-differential/context-sectioned.yml"
+);
+const M106_HAND: &str =
+    include_str!("../../../tests/interop/m106-rs-white-list-control-differential/context.yml");
 
 fn fixture_value() -> serde_yaml::Value {
     serde_yaml::from_str(FIXTURE).expect("fixture parses")
@@ -614,10 +621,26 @@ fn effective_nonzero_multihop_is_refused() {
     }
 }
 
+/// The healthy fixture without its IPv4 member: an IPv6-only fleet.
+fn ipv6_only_value() -> serde_yaml::Value {
+    let mut value = healthy_value();
+    let clients = value["clients"].as_sequence_mut().expect("clients list");
+    clients.retain(|c| c["id"].as_str() != Some("AS4242_1"));
+    value["irrdb_info"]
+        .as_mapping_mut()
+        .expect("irrdb_info mapping")
+        .remove(serde_yaml::Value::String("AS4242_bundle".to_owned()));
+    value
+}
+
+const MIXED_FLEET_REFUSAL: &str = "client AS197000_1: effective rfc8950=true needs next-hop \
+translation toward IPv4-session client AS4242_1 (ADR-0128, not implemented); only a uniform \
+IPv6 fleet is rendered";
+
 #[test]
-/// Load-bearing: dropping parsing, fallback, IPv6 applicability, or explicit
-/// false precedence breaks one of these exact refusal/success verdicts.
-fn effective_rfc8950_is_refused_only_for_ipv6_sessions() {
+/// Load-bearing: an RFC 8950 session renders only inside a uniform IPv6
+/// fleet; a mixed fleet would need the ADR-0128 translation and is refused.
+fn rfc8950_renders_uniform_ipv6_fleets_and_refuses_mixed_ones() {
     use serde_yaml::Value;
     let mut inherited = healthy_value();
     set_path(&mut inherited, &["cfg", "rfc8950"], Value::Bool(true));
@@ -627,14 +650,14 @@ fn effective_rfc8950_is_refused_only_for_ipv6_sessions() {
         .remove(Value::String("rfc8950".into()));
     assert_eq!(
         refusals(render(&to_yaml(&inherited), &rtr_options())),
-        ["client AS197000_1: effective rfc8950=true is not rendered on IPv6 sessions"]
+        [MIXED_FLEET_REFUSAL]
     );
 
     let mut client = healthy_value();
     set_client(&mut client, 1, &["cfg", "rfc8950"], Value::Bool(true));
     assert_eq!(
         refusals(render(&to_yaml(&client), &rtr_options())),
-        ["client AS197000_1: effective rfc8950=true is not rendered on IPv6 sessions"]
+        [MIXED_FLEET_REFUSAL]
     );
 
     let mut inert = healthy_value();
@@ -642,6 +665,43 @@ fn effective_rfc8950_is_refused_only_for_ipv6_sessions() {
     render(&to_yaml(&inert), &rtr_options()).expect("client false overrides general true");
     set_client(&mut inert, 0, &["cfg", "rfc8950"], Value::Bool(true));
     render(&to_yaml(&inert), &rtr_options()).expect("RFC8950 is inert on an IPv4 session");
+
+    let mut uniform = ipv6_only_value();
+    set_client(&mut uniform, 0, &["cfg", "rfc8950"], Value::Bool(true));
+    set_client(
+        &mut uniform,
+        0,
+        &["cfg", "filtering", "irrdb", "white_list_route"],
+        serde_yaml::from_str("[{prefix: 198.51.100.0, length: 24}]").unwrap(),
+    );
+    let rendered = render(&to_yaml(&uniform), &rtr_options()).expect("uniform IPv6 fleet");
+    let expected = "\n[[neighbors]]\naddress = \"2001:db8:0:1::22\"\nremote_asn = 197000\n\
+description = \"member-two-v6\"\nfamilies = [\"ipv4_unicast\", \"ipv6_unicast\"]\n\
+route_server_client = true\nrole = \"route_server\"\n\
+# RFC 8950: IPv4 unicast rides this IPv6 session. The dual-family session\n\
+# negotiates the extended next hop, and strict_peer accepts an IPv4 route\n\
+# only with this session's own IPv6 address as its next hop.\n\
+next_hop_ownership = \"strict_peer\"\nttl_security = true\nper_client_best = true\n\
+rs_control_communities = false\nmax_prefixes_ipv6 = 1000\n\
+import_policy_chain = [\"rs-hygiene\", \"client-as197000-1\"]\n";
+    let config = &rendered.files["config.toml"];
+    assert!(config.contains(expected), "{config}");
+    // The session carries both families, so an IPv4 white-list route is kept.
+    assert!(
+        rendered.files["policy/client-as197000-1.rpol"]
+            .contains("prefix-set client-as197000-1-white-list-route-1 { 198.51.100.0/24 le 32 }")
+    );
+
+    let mut blackhole = ipv6_only_value();
+    set_client(&mut blackhole, 0, &["cfg", "rfc8950"], Value::Bool(true));
+    set_blackhole_policy(&mut blackhole, "policy_ipv4", Some("propagate-unchanged"));
+    assert_eq!(
+        refusals(render(&to_yaml(&blackhole), &rtr_options())),
+        [
+            "client AS197000_1: effective rfc8950=true with blackhole_filtering.policy_ipv4 \
+          is not rendered; IPv4 blackhole terms are bound to IPv4 sessions"
+        ]
+    );
 }
 
 #[test]
@@ -1045,6 +1105,51 @@ fn sectioned_dump_renders_identically_to_the_hand_authored_context() {
 }
 
 #[test]
+/// The real dump of the M106 site carries the white lists both raw and as a
+/// synthetic bundle, plus the expanded control matrix; both forms render the
+/// same tagged accept term, datasets, scrub, and explicit knob.
+fn m106_sectioned_dump_renders_identically_and_exercises_both_surfaces() {
+    let real = render(M106_SECTIONED, &Options::default()).expect("real M106 dump renders");
+    let hand = render(M106_HAND, &Options::default()).expect("hand-authored M106 context renders");
+    assert_eq!(real.files.len(), hand.files.len());
+    for (path, content) in &real.files {
+        assert_eq!(
+            strip_fingerprint(content),
+            strip_fingerprint(&hand.files[path]),
+            "render divergence in {path}"
+        );
+    }
+    let config = &real.files["config.toml"];
+    assert_eq!(config.matches("rs_control_communities = true\n").count(), 3);
+    assert!(
+        real.files["datasets/client-as64500-1-prefixes.list"].contains("198.51.100.128/25 le 32\n")
+    );
+    assert_eq!(
+        real.files["datasets/client-as64500-1-origins.list"],
+        "64500\n64510\n"
+    );
+    assert!(real.files["policy/client-as64501-1.rpol"].contains(
+        "term accept-white-list-route-1 { if route.prefix in client-as64501-1-white-list-route-1 && route.origin-as == 64501 { add community 65530:2; add large-community 64496:65530:2; accept } }"
+    ));
+    assert!(real.files["policy/rs-hygiene.rpol"].contains(
+        "term scrub-white-list-tag { remove community 65530:2; remove large-community 64496:65530:2 }"
+    ));
+    for rpol in ["policy/rs-hygiene.rpol", "policy/client-as64501-1.rpol"] {
+        let report = run_rpol_tests(&real.files[rpol]).unwrap();
+        assert!(report.all_passed(), "{rpol}: {:?}", report.failures);
+    }
+    assert_eq!(
+        real.receipt["clients"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["white_list_routes"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        [0, 1, 0]
+    );
+}
+
+#[test]
 fn sectioned_unknown_section_is_refused_and_overridable() {
     let doctored = format!("{SECTIONED}\n\nshiny_new_knob\n--------------\ntrue\n");
     match render(&doctored, &Options::default()) {
@@ -1102,37 +1207,374 @@ fn sectioned_malformed_section_body_is_a_parse_error() {
 }
 
 #[test]
-fn client_black_and_white_lists_are_refused() {
-    use serde_yaml::Value;
-    let entry: Value = serde_yaml::from_str("[{prefix: 203.0.113.0, length: 24}]").unwrap();
-    let cases: &[(&[&str], &str)] = &[
-        (&["cfg", "filtering", "black_list_pref"], "black_list_pref"),
-        (
-            &["cfg", "filtering", "irrdb", "white_list_pref"],
-            "white_list_pref",
-        ),
-        (
-            &["cfg", "filtering", "irrdb", "white_list_asn"],
-            "white_list_asn",
-        ),
-        (
-            &["cfg", "filtering", "irrdb", "white_list_route"],
-            "white_list_route",
-        ),
-    ];
-    for (path, marker) in cases {
+fn client_black_list_is_refused() {
+    let entry: serde_yaml::Value =
+        serde_yaml::from_str("[{prefix: 203.0.113.0, length: 24}]").unwrap();
+    let mut value = healthy_value();
+    set_client(
+        &mut value,
+        0,
+        &["cfg", "filtering", "black_list_pref"],
+        entry,
+    );
+    let items = refusals(render(&to_yaml(&value), &rtr_options()));
+    assert!(
+        items
+            .iter()
+            .any(|i| i.contains("black_list_pref") && i.contains("client AS4242_1")),
+        "{items:?}"
+    );
+}
+
+fn white_listed_value() -> serde_yaml::Value {
+    let mut value = healthy_value();
+    set_client(
+        &mut value,
+        0,
+        &["cfg", "filtering", "irrdb", "white_list_pref"],
+        serde_yaml::from_str("[{prefix: 192.0.2.0, length: 24, max_length: 32}]").unwrap(),
+    );
+    set_client(
+        &mut value,
+        0,
+        &["cfg", "filtering", "irrdb", "white_list_asn"],
+        serde_yaml::from_str("[64500, AS64501]").unwrap(),
+    );
+    set_client(
+        &mut value,
+        0,
+        &["cfg", "filtering", "irrdb", "white_list_route"],
+        serde_yaml::from_str(
+            "[{prefix: 198.51.100.0, length: 25, le: 26, asn: 64502}, \
+             {prefix: 10.0.0.0, length: 8}, {prefix: '2001:db8::', length: 32}]",
+        )
+        .unwrap(),
+    );
+    set_general_community(
+        &mut value,
+        "route_validated_via_white_list",
+        serde_yaml::from_str("{std: '65530:2', lrg: '65500:65530:2', ext: null}").unwrap(),
+    );
+    value
+}
+
+#[test]
+fn irr_result_communities_are_refused_even_when_as_set_tagging_is_disabled() {
+    for name in [
+        "origin_present_in_as_set",
+        "origin_not_present_in_as_set",
+        "prefix_present_in_as_set",
+        "prefix_not_present_in_as_set",
+    ] {
         let mut value = healthy_value();
-        let mut clients = value["clients"].clone();
-        set_path(&mut clients[0], path, entry.clone());
-        set_path(&mut value, &["clients"], clients);
+        set_path(
+            &mut value,
+            &["cfg", "filtering", "irrdb", "tag_as_set"],
+            false.into(),
+        );
+        set_general_community(
+            &mut value,
+            name,
+            serde_yaml::from_str("{std: '65000:1', lrg: null, ext: null}").unwrap(),
+        );
         let items = refusals(render(&to_yaml(&value), &rtr_options()));
         assert!(
-            items
-                .iter()
-                .any(|i| i.contains(marker) && i.contains("client AS4242_1")),
-            "no refusal containing {marker:?}: {items:?}"
+            items.iter().any(|item| item.contains(name)),
+            "{name}: {items:?}"
         );
     }
+}
+
+#[test]
+/// Load-bearing: white lists render as extra IRR members plus ordered accept
+/// terms ahead of the fail-closed tail, tagged only when the site tags and
+/// scrubbed in shared hygiene; removing any half breaks an exact assertion.
+fn white_lists_render_as_irr_members_and_ordered_accept_terms() {
+    use serde_yaml::Value;
+    let rendered = render(&to_yaml(&white_listed_value()), &rtr_options()).expect("render");
+    let prefixes = &rendered.files["datasets/client-as4242-1-prefixes.list"];
+    assert!(prefixes.contains("192.0.2.0/24 le 32\n"), "{prefixes}");
+    let origins = &rendered.files["datasets/client-as4242-1-origins.list"];
+    assert_eq!(origins, "4242\n4243\n64500\n64501\n");
+    let client = &rendered.files["policy/client-as4242-1.rpol"];
+    let expected = "dataset asn-set client-as4242-1-origins\n\
+dataset prefix-set client-as4242-1-prefixes\n\
+prefix-set client-as4242-1-white-list-route-1 { 10.0.0.0/8 le 32 }\n\
+prefix-set client-as4242-1-white-list-route-2 { 198.51.100.0/25 le 26 }\n\
+\npolicy client-as4242-1 {\n\
+\x20   # IRR white list: accepted before origin/prefix enforcement.\n\
+\x20   term accept-white-list-route-1 { if route.prefix in client-as4242-1-white-list-route-1 { add community 65530:2; add large-community 65500:65530:2; accept } }\n\
+\x20   term accept-white-list-route-2 { if route.prefix in client-as4242-1-white-list-route-2 && route.origin-as == 64502 { add community 65530:2; add large-community 65500:65530:2; accept } }\n\
+\x20   term accept-authorized {\n";
+    assert!(client.contains(expected), "{client}");
+    assert!(
+        !client.contains("2001:db8::"),
+        "IPv6 entry skipped on an IPv4 session"
+    );
+    assert!(client.contains(
+        "test client-as4242-1-white-listed-route-is-accepted {\n    dataset client-as4242-1-origins { 64498 }\n    dataset client-as4242-1-prefixes { 192.0.2.0/24 }\n    route { prefix 10.0.0.0/8; as-path \"64497\" }\n    expect client-as4242-1 == accept\n}\n"
+    ), "{client}");
+    let cases = r#"
+test wrong-origin-is-not-white-listed {
+    dataset client-as4242-1-origins { 64498 }
+    dataset client-as4242-1-prefixes { 192.0.2.0/24 }
+    route { prefix 198.51.100.0/26; as-path "64503" }
+    expect client-as4242-1 == reject
+}
+test bound-origin-is-white-listed {
+    dataset client-as4242-1-origins { 64498 }
+    dataset client-as4242-1-prefixes { 192.0.2.0/24 }
+    route { prefix 198.51.100.0/26; as-path "64502" }
+    expect client-as4242-1 == accept
+}
+test outside-window-is-not-white-listed {
+    dataset client-as4242-1-origins { 64498 }
+    dataset client-as4242-1-prefixes { 192.0.2.0/24 }
+    route { prefix 198.51.100.0/27; as-path "64502" }
+    expect client-as4242-1 == reject
+}
+"#;
+    let report = run_rpol_tests(&format!("{client}\n{cases}")).unwrap();
+    assert!(report.all_passed(), "{:?}", report.failures);
+    let hygiene = &rendered.files["policy/rs-hygiene.rpol"];
+    assert!(
+        hygiene.contains(
+            "    term reject-as-set { if route.as-path matches \"\\\\{\" { reject } }\n\
+             \x20   # The white-list tag is set by the route server only; members cannot pre-tag.\n\
+             \x20   term scrub-white-list-tag { remove community 65530:2; remove large-community 65500:65530:2 }\n"
+        ),
+        "{hygiene}"
+    );
+    assert!(run_rpol_tests(hygiene).unwrap().all_passed());
+    assert_eq!(rendered.receipt["clients"][0]["white_list_routes"], 2);
+
+    // tag_and_reject keeps the white-list terms ahead of the IRR reject terms.
+    let mut tagged = white_listed_value();
+    set_path(
+        &mut tagged,
+        &["cfg", "filtering", "reject_policy", "policy"],
+        Value::String("tag_and_reject".into()),
+    );
+    set_general_community(
+        &mut tagged,
+        "reject_cause",
+        serde_yaml::from_str("{std: '65520:dyn_val', lrg: null, ext: null}").unwrap(),
+    );
+    let client = render(&to_yaml(&tagged), &rtr_options())
+        .expect("render")
+        .files["policy/client-as4242-1.rpol"]
+        .clone();
+    let white = client.find("term accept-white-list-route-1").unwrap();
+    let origin = client.find("term reject-irrdb-origin-as-filtered").unwrap();
+    assert!(white < origin, "{client}");
+
+    // Without tag_as_set nothing is tagged and nothing needs scrubbing.
+    let mut untagged = white_listed_value();
+    set_path(
+        &mut untagged,
+        &["cfg", "filtering", "irrdb", "tag_as_set"],
+        Value::Bool(false),
+    );
+    let rendered = render(&to_yaml(&untagged), &rtr_options()).expect("render");
+    assert!(rendered.files["policy/client-as4242-1.rpol"].contains(
+        "term accept-white-list-route-1 { if route.prefix in client-as4242-1-white-list-route-1 { accept } }"
+    ));
+    assert!(!rendered.files["policy/rs-hygiene.rpol"].contains("scrub-white-list-tag"));
+
+    for (tag, marker) in [
+        (
+            "{std: '65530:2', lrg: null, ext: 'rt:65530:2'}",
+            "communities.route_validated_via_white_list.ext is unsupported",
+        ),
+        (
+            "{std: 'rs_as:2', lrg: null, ext: null}",
+            "communities.route_validated_via_white_list is malformed",
+        ),
+    ] {
+        let mut value = white_listed_value();
+        set_general_community(
+            &mut value,
+            "route_validated_via_white_list",
+            serde_yaml::from_str(tag).unwrap(),
+        );
+        let items = refusals(render(&to_yaml(&value), &rtr_options()));
+        assert!(items.iter().any(|i| i == marker), "{items:?}");
+    }
+}
+
+/// The daemon's control matrix as arouteserver spells it for `rs_as`.
+fn set_control_matrix(root: &mut serde_yaml::Value, rs_as: u64) {
+    let std16 = rs_as <= u64::from(u16::MAX);
+    let entries: [(&str, Option<String>, String); 9] = [
+        (
+            "do_not_announce_to_peer",
+            Some("0:peer_as".into()),
+            format!("{rs_as}:0:peer_as"),
+        ),
+        (
+            "announce_to_peer",
+            std16.then(|| format!("{rs_as}:peer_as")),
+            format!("{rs_as}:1:peer_as"),
+        ),
+        (
+            "do_not_announce_to_any",
+            std16.then(|| format!("0:{rs_as}")),
+            format!("{rs_as}:0:0"),
+        ),
+        ("prepend_once_to_peer", None, format!("{rs_as}:101:peer_as")),
+        (
+            "prepend_twice_to_peer",
+            None,
+            format!("{rs_as}:102:peer_as"),
+        ),
+        (
+            "prepend_thrice_to_peer",
+            None,
+            format!("{rs_as}:103:peer_as"),
+        ),
+        ("prepend_once_to_any", None, format!("{rs_as}:101:0")),
+        ("prepend_twice_to_any", None, format!("{rs_as}:102:0")),
+        ("prepend_thrice_to_any", None, format!("{rs_as}:103:0")),
+    ];
+    for (name, std, lrg) in entries {
+        let mut map = serde_yaml::Mapping::new();
+        map.insert(
+            "std".into(),
+            std.map_or(serde_yaml::Value::Null, Into::into),
+        );
+        map.insert("lrg".into(), lrg.into());
+        map.insert("ext".into(), serde_yaml::Value::Null);
+        set_general_community(root, name, serde_yaml::Value::Mapping(map));
+    }
+}
+
+#[test]
+/// Load-bearing: the daemon's control matrix is fixed, so the knob renders
+/// off for a site without control communities and on only when the site
+/// configures exactly that matrix; any other value or an unsupported action
+/// refuses with the offending key.
+fn control_communities_follow_the_daemon_matrix() {
+    use serde_yaml::Value;
+    let off = render(&to_yaml(&healthy_value()), &rtr_options()).expect("render");
+    let config = &off.files["config.toml"];
+    assert_eq!(
+        config.matches("rs_control_communities = false\n").count(),
+        2
+    );
+    assert!(config.contains("# The site configures no control communities"));
+
+    let mut on = healthy_value();
+    set_control_matrix(&mut on, 65500);
+    let config =
+        render(&to_yaml(&on), &rtr_options()).expect("render").files["config.toml"].clone();
+    assert_eq!(config.matches("rs_control_communities = true\n").count(), 2);
+    assert!(!config.contains("rs_control_communities = false"));
+    assert!(
+        config.contains("# RFC 7947 §2.3.2 control communities: the site configures exactly the")
+    );
+
+    let mut missing = on.clone();
+    set_general_community(
+        &mut missing,
+        "prepend_thrice_to_any",
+        serde_yaml::from_str("{std: null, lrg: null, ext: null}").unwrap(),
+    );
+    assert_eq!(
+        refusals(render(&to_yaml(&missing), &rtr_options())),
+        [
+            "communities.prepend_thrice_to_any: the daemon enforces a fixed control matrix; \
+          expected std=null lrg=65500:103:0 ext=null, got std=null lrg=null ext=null"
+        ]
+    );
+
+    let mut differs = on.clone();
+    set_general_community(
+        &mut differs,
+        "prepend_once_to_peer",
+        serde_yaml::from_str("{std: null, lrg: '65500:65504:peer_as', ext: null}").unwrap(),
+    );
+    assert_eq!(
+        refusals(render(&to_yaml(&differs), &rtr_options())),
+        [
+            "communities.prepend_once_to_peer: the daemon enforces a fixed control matrix; \
+          expected std=null lrg=65500:101:peer_as ext=null, got std=null \
+          lrg=65500:65504:peer_as ext=null"
+        ]
+    );
+
+    let mut extended = on.clone();
+    set_general_community(
+        &mut extended,
+        "do_not_announce_to_peer",
+        serde_yaml::from_str("{std: '0:peer_as', lrg: '65500:0:peer_as', ext: 'rt:0:peer_as'}")
+            .unwrap(),
+    );
+    let items = refusals(render(&to_yaml(&extended), &rtr_options()));
+    assert!(
+        items
+            .iter()
+            .any(|i| i.starts_with("communities.do_not_announce_to_peer:")
+                && i.ends_with("ext=rt:0:peer_as")),
+        "{items:?}"
+    );
+
+    // A lone subset is still a mismatch: the daemon would act on the rest.
+    let mut subset = healthy_value();
+    set_general_community(
+        &mut subset,
+        "do_not_announce_to_peer",
+        serde_yaml::from_str("{std: '0:peer_as', lrg: '65500:0:peer_as', ext: null}").unwrap(),
+    );
+    let items = refusals(render(&to_yaml(&subset), &rtr_options()));
+    assert_eq!(items.len(), 8, "{items:?}");
+    assert!(items.iter().all(|i| i.contains("fixed control matrix")));
+
+    for name in [
+        "add_noexport_to_any",
+        "add_noadvertise_to_any",
+        "add_noexport_to_peer",
+        "add_noadvertise_to_peer",
+    ] {
+        let mut value = healthy_value();
+        set_general_community(
+            &mut value,
+            name,
+            serde_yaml::from_str("{std: '65281:peer_as', lrg: null, ext: null}").unwrap(),
+        );
+        assert_eq!(
+            refusals(render(&to_yaml(&value), &rtr_options())),
+            [format!(
+                "communities.{name} is configured; the daemon has no equivalent action"
+            )]
+        );
+    }
+
+    // A 32-bit route-server ASN has no standard form embedding it.
+    let mut wide = healthy_value();
+    set_path(
+        &mut wide,
+        &["cfg", "rs_as"],
+        Value::Number(4_200_000_000u64.into()),
+    );
+    set_control_matrix(&mut wide, 4_200_000_000);
+    let config = render(&to_yaml(&wide), &rtr_options())
+        .expect("render")
+        .files["config.toml"]
+        .clone();
+    assert!(config.contains("rs_control_communities = true\n"));
+    set_general_community(
+        &mut wide,
+        "do_not_announce_to_any",
+        serde_yaml::from_str("{std: '0:65500', lrg: '4200000000:0:0', ext: null}").unwrap(),
+    );
+    assert_eq!(
+        refusals(render(&to_yaml(&wide), &rtr_options())),
+        [
+            "communities.do_not_announce_to_any: the daemon enforces a fixed control matrix; \
+          expected std=null lrg=4200000000:0:0 ext=null, got std=0:65500 \
+          lrg=4200000000:0:0 ext=null"
+        ]
+    );
 }
 
 #[test]

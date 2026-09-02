@@ -1,0 +1,155 @@
+# M106 differential lab — hand-authored `arouteserver template-context`
+# fixture for the site described by general.yml + clients.yml, in the
+# renderer's single-document form: the M90 site plus the daemon's control
+# matrix, the white-list tag, and the members' IRR white lists.
+#
+# The REAL dump of the same site is checked in verbatim next to this
+# file as context-sectioned.yml (captured from the pinned
+# pierky/arouteserver image via
+#     arouteserver template-context --cfg arouteserver.yml --output ...
+# with the lab's bogons.yml and bgpq4 stub in place); rs-config-render
+# ingests both forms and must render them identically — the renderer's
+# test suite and prove-context-ingestion.sh assert exactly that, so
+# the two fixtures cannot drift apart silently. The M106 driver ALWAYS
+# runs arouteserver proper for the BIRD side, so drift between either
+# fixture and the site files shows up as a verdict mismatch.
+#
+# Shape: top-level keys pinned by rs-config-render's
+# EXPECTED_TOP_LEVEL_KEYS fingerprint (copied from the renderer's
+# golden fixture, tools/rs-config-render/tests/fixtures/context-small.yml).
+ip_ver: null
+list_ip_vers: [4, 6]
+live_tests: false
+rtt_based_functions_are_used: false
+perform_graceful_shutdown: false
+any_reject_cause_map_community_set: true
+asn3216_map: {}
+arin_whois_records: {}
+registrobr_whois_records: {}
+rpki_roas: {}
+reject_reasons:
+  "1": "Invalid AS_PATH length"
+  "2": "Prefix is bogon"
+never_via_route_servers_asns: [65551]
+bogons:
+  # Must match the lab's bogons.yml (NOT arouteserver's default list,
+  # which rightly treats the RFC 5737 documentation prefixes as
+  # bogons — this lab announces from exactly that space).
+  - {prefix: "10.0.0.0", length: 8, comment: "RFC 1918"}
+  - {prefix: "192.168.0.0", length: 16, comment: "RFC 1918"}
+  - {prefix: "fc00::", length: 7, comment: "unique local"}
+cfg:
+  rs_as: 64496
+  router_id: "192.0.2.10"
+  prepend_rs_as: false
+  path_hiding: true
+  passive: true
+  gtsm: false
+  multihop: null
+  add_path: false
+  rfc8950: false
+  graceful_shutdown:
+    enabled: false
+  blackhole_filtering:
+    policy_ipv4: null
+    policy_ipv6: null
+  rtt_thresholds: null
+  communities:
+    # The daemon's fixed control matrix; arouteserver expands rs_as and
+    # keeps peer_as literal in its dump.
+    do_not_announce_to_peer: {std: "0:peer_as", lrg: "64496:0:peer_as", ext: null}
+    announce_to_peer: {std: "64496:peer_as", lrg: "64496:1:peer_as", ext: null}
+    do_not_announce_to_any: {std: "0:64496", lrg: "64496:0:0", ext: null}
+    prepend_once_to_peer: {std: null, lrg: "64496:101:peer_as", ext: null}
+    prepend_twice_to_peer: {std: null, lrg: "64496:102:peer_as", ext: null}
+    prepend_thrice_to_peer: {std: null, lrg: "64496:103:peer_as", ext: null}
+    prepend_once_to_any: {std: null, lrg: "64496:101:0", ext: null}
+    prepend_twice_to_any: {std: null, lrg: "64496:102:0", ext: null}
+    prepend_thrice_to_any: {std: null, lrg: "64496:103:0", ext: null}
+    route_validated_via_white_list: {std: "65530:2", lrg: "64496:65530:2", ext: null}
+    reject_cause: {std: "65520:dyn_val", lrg: "64496:65520:dyn_val", ext: null}
+    reject_cause_map_3: {std: "64512:3", lrg: "64496:65521:3", ext: null}
+    rejected_route_announced_by: {std: null, lrg: null, ext: null}
+  filtering:
+    next_hop:
+      policy: strict
+    ipv4_pref_len: {min: 8, max: 28}
+    ipv6_pref_len: {min: 12, max: 48}
+    global_black_list_pref:
+      - {prefix: "192.0.2.0", length: 24, comment: "IXP peering LAN"}
+    max_as_path_len: 32
+    reject_invalid_as_in_as_path: false
+    transit_free:
+      action: null
+      asns: null
+    irrdb:
+      enforce_origin_in_as_set: true
+      enforce_prefix_in_as_set: true
+      allow_longer_prefixes: false
+      tag_as_set: true
+    rpki_bgp_origin_validation:
+      enabled: false
+      reject_invalid: true
+    max_prefix:
+      action: shutdown
+      count_rejected_routes: false
+      peering_db: {enabled: false}
+    reject_policy:
+      policy: tag_and_reject
+asns:
+  AS64500: {as_sets: ["AS-M90-ONE"]}
+  AS64501: {as_sets: ["AS-M90-TWO"]}
+  AS64502: {as_sets: ["AS-M90-THREE"]}
+clients:
+  - id: AS64500_1
+    asn: 64500
+    ip: "192.0.2.11"
+    description: "member1 - IRR-clean member"
+    cfg:
+      filtering:
+        irrdb:
+          # arouteserver folds the white lists into a synthetic bundle
+          # (AS64500_white_list below) and keeps the raw keys too.
+          as_set_bundle_ids: ["AS64500_bundle", "AS64500_white_list"]
+          white_list_asn: [64510]
+          white_list_pref:
+            - {prefix: "198.51.100.128", length: 25, le: 32, comment: "white-listed prefix outside the exact route object"}
+        max_prefix: {limit_ipv4: 100, limit_ipv6: 12000, action: shutdown, count_rejected_routes: false}
+  - id: AS64501_1
+    asn: 64501
+    ip: "192.0.2.12"
+    description: "member2 - announces outside its IRR set"
+    cfg:
+      filtering:
+        irrdb:
+          as_set_bundle_ids: ["AS64501_bundle"]
+          white_list_route:
+            - {prefix: "198.51.100.0", length: 25, le: 26, asn: 64501, comment: "white-listed route bound to origin 64501"}
+        max_prefix: {limit_ipv4: 100, limit_ipv6: 12000, action: shutdown, count_rejected_routes: false}
+  - id: AS64502_1
+    asn: 64502
+    ip: "192.0.2.13"
+    description: "member3 - hygiene violator"
+    cfg:
+      filtering:
+        irrdb:
+          as_set_bundle_ids: ["AS64502_bundle"]
+        max_prefix: {limit_ipv4: 100, limit_ipv6: 12000, action: shutdown, count_rejected_routes: false}
+irrdb_info:
+  AS64500_bundle:
+    asns: [64500]
+    prefixes:
+      - {prefix: "198.51.100.0", length: 24, exact: true}
+      - {prefix: "203.0.113.0", length: 26, le: 28}
+  AS64500_white_list:
+    asns: [64510]
+    prefixes:
+      - {prefix: "198.51.100.128", length: 25, le: 32}
+  AS64501_bundle:
+    asns: [64501]
+    prefixes:
+      - {prefix: "203.0.113.128", length: 25, exact: true}
+  AS64502_bundle:
+    asns: [64502]
+    prefixes:
+      - {prefix: "203.0.113.64", length: 26, exact: true}

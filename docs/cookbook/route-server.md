@@ -301,6 +301,25 @@ end-to-end walkthrough — including the Alice-LG looking glass — is
 policy:
 [ADR-0110](../adr/0110-irr-peeringdb-filtering-pipeline.md).
 
+The renderer states `rs_control_communities` on every member session: off
+when the arouteserver site configures no control community, on only when
+it configures exactly the matrix above (the daemon's matrix is fixed; any
+other value is refused). IRR white lists render as extra dataset members
+and ordered accept terms, tagged with the site's
+`route_validated_via_white_list` community.
+
+An IPv6-only fleet can carry IPv4 unicast over its IPv6 sessions (RFC 8950):
+set arouteserver's `rfc8950` and the renderer emits
+`families = ["ipv4_unicast", "ipv6_unicast"]` on each IPv6 session — the
+daemon negotiates the extended next hop — with `strict_peer` accepting an
+IPv4 route only when its IPv6 next hop is that session's own address.
+Transparent export hands that IPv6 next hop on verbatim, so the shape holds
+only while every member is an RFC 8950 IPv6 session; the renderer refuses it
+as soon as an IPv4-session member exists, because that member would need
+the next-hop translation
+[ADR-0128](../adr/0128-route-server-next-hop-translation.md) keeps
+demand-gated.
+
 ## Watch
 
 Prometheus (`prometheus_addr`, `/metrics`; dashboards in

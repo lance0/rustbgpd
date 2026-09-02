@@ -388,11 +388,10 @@ def context_doc(
             "rtt_thresholds": None,
             "communities": {
                 "blackholing": {"std": None, "lrg": None, "ext": None},
-                "do_not_announce_to_any": {
-                    "std": f"0:{RS_ASN}",
-                    "lrg": None,
-                    "ext": None,
-                },
+                # No control communities: the harness never tags one, and the
+                # renderer refuses a partial control matrix (it renders the
+                # daemon's rs_control_communities knob off for this site).
+                "do_not_announce_to_any": {"std": None, "lrg": None, "ext": None},
                 "do_not_announce_to_peers_with_rtt_lower_than": {
                     "std": None,
                     "lrg": None,

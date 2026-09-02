@@ -44,7 +44,7 @@ cfg:
   rtt_thresholds: null
   communities:
     blackholing: {std: null, lrg: null, ext: null}
-    do_not_announce_to_any: {std: "0:65500", lrg: null, ext: null}
+    do_not_announce_to_any: {std: null, lrg: null, ext: null}
     do_not_announce_to_peers_with_rtt_lower_than: {std: null, lrg: null, ext: null}
   filtering:
     next_hop:

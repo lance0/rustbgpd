@@ -11,6 +11,25 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Operator-visible:** `rs-config-render` now renders arouteserver IRR white
+  lists instead of refusing them: `white_list_pref` and `white_list_asn` join
+  the client's prefix and origin datasets, and each `white_list_route` entry
+  becomes an ordered accept term ahead of IRR enforcement, bound to the
+  entry's origin ASN when given and tagged with the site's
+  `route_validated_via_white_list` community (standard and large forms; the
+  hygiene policy scrubs the tag on entry). The render receipt counts each
+  client's white-listed routes. A configured `ext` form or a malformed tag
+  value is still refused, as are arouteserver's four IRR result communities,
+  which the daemon cannot preserve.
+
+- **Operator-visible:** `rs-config-render` now renders an effective
+  `rfc8950: true` IPv6 session for a uniform IPv6 fleet: the session carries
+  both unicast families, so the daemon negotiates the RFC 8950 extended next
+  hop, and `next_hop_ownership = "strict_peer"` binds IPv4 routes to that
+  session's IPv6 address. A fleet that also has IPv4-session members, or an
+  active `blackhole_filtering.policy_ipv4`, is still refused (ADR-0128 keeps
+  next-hop translation demand-gated).
+
 - `rs-config-render --help` now lists its rendering, activation, status,
   pruning, recovery, and IXP Manager lifecycle command paths.
 
@@ -115,6 +134,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and `null` under the other.
 
 ### Fixed
+
+- **Operator-visible:** `rs-config-render` now states `rs_control_communities`
+  on every rendered member session instead of inheriting the daemon default:
+  off when the site configures no control community, on only when the site
+  configures exactly the daemon's fixed RFC 7947 §2.3.2 / RFC 8195 matrix.
+  Any differing value, a matrix key left unset while another is configured,
+  or a configured `add_noexport_to_*` / `add_noadvertise_to_*` community is
+  refused (exit 2) naming the key. Previously every rendered session
+  interpreted and scrubbed the daemon's matrix regardless of what the site
+  had declared to arouteserver.
 
 - Policy and peer-group mutations now report unavailable when configuration
   persistence admission is closed or temporarily full.

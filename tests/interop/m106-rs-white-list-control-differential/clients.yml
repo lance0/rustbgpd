@@ -1,0 +1,52 @@
+# M106 differential lab — arouteserver member roster (clients.yml).
+#
+# The M90 roster (same ASNs, addresses, AS-SETs and limits) plus the IRR
+# white lists under test:
+#   - AS64500 member1: white_list_pref (a /25 outside its exact /24 route
+#     object) and white_list_asn (origin 64510, not in AS-M90-ONE);
+#   - AS64501 member2: white_list_route bound to origin 64501 for
+#     198.51.100.0/25 le 26 — member1's space, absent from AS-M90-TWO.
+#   - AS64502 member3: unchanged hygiene violator.
+clients:
+  - asn: 64500
+    ip: "192.0.2.11"
+    description: "member1 - IRR-clean member"
+    cfg:
+      filtering:
+        irrdb:
+          as_sets:
+            - "AS-M90-ONE"
+          white_list_pref:
+            - prefix: "198.51.100.128"
+              length: 25
+              comment: "white-listed prefix outside the exact route object"
+          white_list_asn:
+            - 64510
+        max_prefix:
+          limit_ipv4: 100
+  - asn: 64501
+    ip: "192.0.2.12"
+    description: "member2 - announces outside its IRR set"
+    cfg:
+      filtering:
+        irrdb:
+          as_sets:
+            - "AS-M90-TWO"
+          white_list_route:
+            - prefix: "198.51.100.0"
+              length: 25
+              le: 26
+              asn: 64501
+              comment: "white-listed route bound to origin 64501"
+        max_prefix:
+          limit_ipv4: 100
+  - asn: 64502
+    ip: "192.0.2.13"
+    description: "member3 - hygiene violator"
+    cfg:
+      filtering:
+        irrdb:
+          as_sets:
+            - "AS-M90-THREE"
+        max_prefix:
+          limit_ipv4: 100
