@@ -3634,8 +3634,13 @@ impl BgpMetrics {
 
     /// Materialize the exact six-row active-primary FSM state vector.
     ///
-    /// Calling this for every transition keeps the vector one-hot; calling it
-    /// before `Start` makes a never-established peer visible as `idle=1`.
+    /// Reset non-current states to 0, then set `current` to 1. This call
+    /// never writes a second `1` before clearing the others. Overlapping
+    /// callers of the same labels can still interleave, so a scrape may
+    /// observe sum > 1. Clearing a previously different current state can
+    /// leave a brief all-zero window; republishing the same current state
+    /// does not.
+    /// Calling this before `Start` makes a never-established peer visible as `idle=1`.
     ///
     /// An unknown state is rejected without changing the last valid vector;
     /// accepting it would publish an invalid all-zero vector.
@@ -3654,11 +3659,17 @@ impl BgpMetrics {
             return;
         }
         for state in SESSION_STATES {
-            self.0
-                .peer_session_state
-                .with_label_values(&[peer, interface, state])
-                .set(i64::from(state == current));
+            if state != current {
+                self.0
+                    .peer_session_state
+                    .with_label_values(&[peer, interface, state])
+                    .set(0);
+            }
         }
+        self.0
+            .peer_session_state
+            .with_label_values(&[peer, interface, current])
+            .set(1);
         for reason in crate::reason_labels::SessionDownReason::ALL {
             let _counter =
                 self.0
