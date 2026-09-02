@@ -447,6 +447,12 @@ pub use linux::{BfdRuntimeHandle, PreparedRuntime, prepare_runtime, spawn_prepar
 /// 5881 §5 warns against identifying an established single-hop session by source
 /// address). Returns the peer key, or `None` if no session matches.
 ///
+/// Note: Once a candidate session is selected by discriminator, RFC 5883 §5
+/// mandates verifying that the packet's source IP matches the session's peer
+/// for multihop sessions. Single-hop (RFC 5881 §5) deliberately does NOT
+/// verify source IP — it relies on GTSM (TTL=255) instead. The source IP
+/// check is enforced on packet reception in `on_packet`, gated on multihop.
+///
 /// Gated to Linux (where the actor runs) plus test builds.
 #[cfg(any(test, target_os = "linux"))]
 fn demux_target(
@@ -1058,6 +1064,20 @@ mod linux {
                     session_multihop = entry.multihop,
                     packet_multihop = multihop,
                     "BFD packet arrived through the other encapsulation mode's socket; ignoring"
+                );
+                return;
+            }
+            // RFC 5883 §5: for multihop sessions, if the source address does
+            // not match the session's peer, the packet MUST be discarded.
+            // Single-hop (RFC 5881 §5) deliberately does NOT verify source IP;
+            // it relies on GTSM (TTL=255) for spoofing protection instead.
+            if entry.multihop && src != peer {
+                debug!(
+                    %peer,
+                    packet_src = %src,
+                    your_discriminator = pkt.your_discriminator,
+                    multihop,
+                    "BFD packet source address does not match multihop session peer; ignoring"
                 );
                 return;
             }
@@ -2083,6 +2103,252 @@ mod linux {
                 discs,
                 vec![0x600D],
                 "RFC 5881 §4: only the in-range source port passes"
+            );
+        }
+
+        fn test_actor() -> (
+            super::Actor,
+            rustbgpd_telemetry::BgpMetrics,
+            tokio::sync::watch::Sender<Vec<super::super::BfdStatus>>,
+        ) {
+            use super::super::state_change_channel;
+            use super::{Actor, DiscriminatorAllocator};
+            use prometheus::Registry;
+            use rustbgpd_telemetry::BgpMetrics;
+            use std::collections::{BTreeMap, BinaryHeap, HashMap};
+            use tokio::sync::{broadcast, watch};
+
+            let (event_tx, _event_rx) = broadcast::channel(64);
+            let (state_change_tx, _state_change_rx) = state_change_channel();
+            let (status_tx, _status_rx) = watch::channel(Vec::new());
+            let metrics = BgpMetrics::with_registry(Registry::new());
+
+            let actor = Actor {
+                sessions: BTreeMap::new(),
+                discriminators: DiscriminatorAllocator::new(),
+                by_discriminator: HashMap::new(),
+                timers: BinaryHeap::new(),
+                tx_v4: None,
+                tx_v6: None,
+                multihop_tx_v4: None,
+                multihop_tx_v6: None,
+                event_tx,
+                state_change_tx,
+                jitter_state: 0x9E37_79B9_7F4A_7C15,
+            };
+            (actor, metrics, status_tx)
+        }
+
+        fn init_packet(my_discriminator: u32, your_discriminator: u32) -> ControlPacket {
+            ControlPacket {
+                diagnostic: Diagnostic::None,
+                state: SessionState::Init,
+                poll: false,
+                final_bit: false,
+                control_plane_independent: false,
+                auth_present: false,
+                demand: false,
+                multipoint: false,
+                detect_mult: 3,
+                my_discriminator,
+                your_discriminator,
+                desired_min_tx_interval: 1_000_000,
+                required_min_rx_interval: 1_000_000,
+                required_min_echo_rx_interval: 0,
+            }
+        }
+
+        #[tokio::test]
+        async fn multihop_packet_with_mismatched_source_ip_is_discarded() {
+            use super::super::BfdSessionParams;
+            use super::ReceivedPacket;
+
+            let (mut actor, metrics, status_tx) = test_actor();
+            let peer: IpAddr = "192.0.2.1".parse().unwrap();
+            let params = BfdSessionParams {
+                peer,
+                scope_id: None,
+                destination: SocketAddr::new(peer, 4784),
+                desired_min_tx_us: 1_000_000,
+                required_min_rx_us: 1_000_000,
+                detect_mult: 3,
+                strict: false,
+                enabled: true,
+                multihop: true,
+                source: None,
+            };
+            actor.start_session(&params, &metrics).await;
+
+            let local_discr = actor
+                .sessions
+                .get(&peer)
+                .expect("session exists")
+                .local_discriminator;
+            assert_eq!(
+                actor.sessions.get(&peer).unwrap().session.state(),
+                SessionState::Down
+            );
+
+            // RFC 5883 §5: packet with valid your_discriminator but mismatched source IP
+            // MUST be discarded and MUST NOT affect session state.
+            let mismatched_src: IpAddr = "198.51.100.99".parse().unwrap();
+            let bad_packet = ReceivedPacket {
+                src: mismatched_src,
+                ifindex: None,
+                multihop: true,
+                #[cfg(test)]
+                ttl: Some(254),
+                packet: init_packet(9001, local_discr),
+            };
+            actor.on_packet(bad_packet, &metrics, &status_tx).await;
+            assert_eq!(
+                actor.sessions.get(&peer).unwrap().session.state(),
+                SessionState::Down,
+                "mismatched multihop source IP must be discarded and session must remain Down"
+            );
+
+            // A packet from the matching peer IP with state=Init transitions session to Up.
+            let good_packet = ReceivedPacket {
+                src: peer,
+                ifindex: None,
+                multihop: true,
+                #[cfg(test)]
+                ttl: Some(254),
+                packet: init_packet(9001, local_discr),
+            };
+            actor.on_packet(good_packet, &metrics, &status_tx).await;
+            assert_eq!(
+                actor.sessions.get(&peer).unwrap().session.state(),
+                SessionState::Up,
+                "packet from matching multihop source IP transitions session to Up"
+            );
+        }
+
+        #[tokio::test]
+        async fn link_local_single_hop_source_ip_not_verified_but_scope_is() {
+            use super::super::BfdSessionParams;
+            use super::ReceivedPacket;
+
+            let (mut actor, metrics, status_tx) = test_actor();
+            let peer: IpAddr = "fe80::1".parse().unwrap();
+            let scope_id = 10;
+            let params = BfdSessionParams {
+                peer,
+                scope_id: Some(scope_id),
+                destination: SocketAddr::V6(SocketAddrV6::new(
+                    "fe80::1".parse().unwrap(),
+                    3784,
+                    0,
+                    scope_id,
+                )),
+                desired_min_tx_us: 1_000_000,
+                required_min_rx_us: 1_000_000,
+                detect_mult: 3,
+                strict: false,
+                enabled: true,
+                multihop: false,
+                source: None,
+            };
+            actor.start_session(&params, &metrics).await;
+
+            let local_discr = actor
+                .sessions
+                .get(&peer)
+                .expect("session exists")
+                .local_discriminator;
+            assert_eq!(
+                actor.sessions.get(&peer).unwrap().session.state(),
+                SessionState::Down
+            );
+
+            // Correct source IP on wrong interface -> discarded by
+            // scoped_demux_target's receive_scope_matches; session stays Down.
+            let wrong_scope_packet = ReceivedPacket {
+                src: peer,
+                ifindex: Some(20),
+                multihop: false,
+                #[cfg(test)]
+                ttl: Some(255),
+                packet: init_packet(9002, local_discr),
+            };
+            actor
+                .on_packet(wrong_scope_packet, &metrics, &status_tx)
+                .await;
+            assert_eq!(
+                actor.sessions.get(&peer).unwrap().session.state(),
+                SessionState::Down,
+                "link-local packet on wrong interface must be discarded"
+            );
+
+            // Single-hop link-local does NOT verify source IP (RFC 5881 §5
+            // relies on GTSM, not source matching). Mismatched source IP on
+            // the correct interface is accepted and transitions to Up.
+            let mismatched_src_packet = ReceivedPacket {
+                src: "fe80::2".parse().unwrap(),
+                ifindex: Some(scope_id),
+                multihop: false,
+                #[cfg(test)]
+                ttl: Some(255),
+                packet: init_packet(9002, local_discr),
+            };
+            actor
+                .on_packet(mismatched_src_packet, &metrics, &status_tx)
+                .await;
+            assert_eq!(
+                actor.sessions.get(&peer).unwrap().session.state(),
+                SessionState::Up,
+                "mismatched link-local source IP is accepted by GTSM (TTL=255), not discarded"
+            );
+        }
+
+        #[tokio::test]
+        async fn single_hop_packet_with_mismatched_source_ip_is_accepted_by_gtsm() {
+            use super::super::BfdSessionParams;
+            use super::ReceivedPacket;
+
+            let (mut actor, metrics, status_tx) = test_actor();
+            let peer: IpAddr = "10.0.0.1".parse().unwrap();
+            let params = BfdSessionParams {
+                peer,
+                scope_id: None,
+                destination: SocketAddr::new(peer, 3784),
+                desired_min_tx_us: 1_000_000,
+                required_min_rx_us: 1_000_000,
+                detect_mult: 3,
+                strict: false,
+                enabled: true,
+                multihop: false,
+                source: None,
+            };
+            actor.start_session(&params, &metrics).await;
+
+            let local_discr = actor
+                .sessions
+                .get(&peer)
+                .expect("session exists")
+                .local_discriminator;
+            assert_eq!(
+                actor.sessions.get(&peer).unwrap().session.state(),
+                SessionState::Down
+            );
+
+            // Single-hop (RFC 5881 §5) does NOT verify source IP — it relies
+            // on GTSM (TTL=255) for spoofing protection. A packet with a
+            // mismatched source IP but valid your_discriminator and correct
+            // TTL=255 is accepted and transitions the session to Up.
+            let packet = ReceivedPacket {
+                src: "10.0.0.2".parse().unwrap(),
+                ifindex: None,
+                multihop: false,
+                #[cfg(test)]
+                ttl: Some(255),
+                packet: init_packet(9003, local_discr),
+            };
+            actor.on_packet(packet, &metrics, &status_tx).await;
+            assert_eq!(
+                actor.sessions.get(&peer).unwrap().session.state(),
+                SessionState::Up,
+                "single-hop with mismatched source IP is accepted by GTSM (TTL=255), not discarded"
             );
         }
     }
