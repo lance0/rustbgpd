@@ -30,7 +30,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-fail() { echo "FAIL: $*" >&2; echo "--- daemon log"; cat "$WORK/daemon.log"; exit 1; }
+fail() { echo "FAIL: $*" >&2; echo "--- daemon log"; cat "$WORK/daemon.log" 2>/dev/null || true; exit 1; }
 
 start_server() { # $1 = listener MD5 key ("" = plain TCP)
     RTR_LISTEN_PORT="$RTR_PORT" RTR_TCP_MD5_KEY="$1" \
