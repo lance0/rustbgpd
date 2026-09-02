@@ -605,6 +605,13 @@ impl Config {
                 &self.peer_groups,
                 self.global.asn,
             )?;
+            validate_max_prefix_modes(
+                &format!("peer_group.{name}"),
+                group.max_prefix_action.as_deref(),
+                group.max_prefix_restart_seconds.is_some(),
+                group.max_prefixes.is_some(),
+                group.max_prefix_warning_percent,
+            )?;
         }
 
         // Validate named policy definitions
@@ -727,6 +734,25 @@ impl Config {
                     reason: "requires effective ttl_security = true".to_string(),
                 });
             }
+
+            validate_max_prefix_modes(
+                &neighbor.address,
+                neighbor
+                    .max_prefix_action
+                    .as_deref()
+                    .or_else(|| group.and_then(|group| group.max_prefix_action.as_deref())),
+                neighbor
+                    .max_prefix_restart_seconds
+                    .or_else(|| group.and_then(|group| group.max_prefix_restart_seconds))
+                    .is_some(),
+                neighbor
+                    .max_prefixes
+                    .or_else(|| group.and_then(|group| group.max_prefixes))
+                    .is_some(),
+                neighbor
+                    .max_prefix_warning_percent
+                    .or_else(|| group.and_then(|group| group.max_prefix_warning_percent)),
+            )?;
 
             if let Some(tcp_ao) = &neighbor.tcp_ao {
                 if neighbor.md5_password.is_some() {
@@ -2713,6 +2739,59 @@ fn validate_tcp_ao_key(address: &str, tcp_ao: &TcpAoConfig) -> Result<(), Config
         });
     }
 
+    Ok(())
+}
+
+/// ADR-0108 amendment: max-prefix mode cross-field rules, evaluated on
+/// effective values for a neighbor and on its own values for a peer group.
+fn validate_max_prefix_modes(
+    subject: &str,
+    action: Option<&str>,
+    restart_configured: bool,
+    aggregate_configured: bool,
+    warning_percent: Option<u8>,
+) -> Result<(), ConfigError> {
+    use rustbgpd_transport::MaxPrefixAction;
+    let action = match action {
+        None => MaxPrefixAction::Shutdown,
+        Some(value) => {
+            MaxPrefixAction::parse(value).ok_or_else(|| ConfigError::InvalidNeighborConfig {
+                address: subject.to_string(),
+                field: "max_prefix_action".to_string(),
+                reason: format!(
+                    "unknown value {value:?}; expected \"shutdown\", \"block\", or \"warning\""
+                ),
+            })?
+        }
+    };
+    if action != MaxPrefixAction::Shutdown && restart_configured {
+        return Err(ConfigError::InvalidNeighborConfig {
+            address: subject.to_string(),
+            field: "max_prefix_action".to_string(),
+            reason: format!(
+                "\"{}\" excludes max_prefix_restart_seconds; the timed restart only follows a shutdown",
+                action.as_str()
+            ),
+        });
+    }
+    if action == MaxPrefixAction::Block && aggregate_configured {
+        return Err(ConfigError::InvalidNeighborConfig {
+            address: subject.to_string(),
+            field: "max_prefix_action".to_string(),
+            reason: "\"block\" applies to the per-family unicast bounds only; unset the aggregate \
+                     max_prefixes"
+                .to_string(),
+        });
+    }
+    if let Some(percent) = warning_percent
+        && !(1..=100).contains(&percent)
+    {
+        return Err(ConfigError::InvalidNeighborConfig {
+            address: subject.to_string(),
+            field: "max_prefix_warning_percent".to_string(),
+            reason: format!("{percent} is outside 1..=100"),
+        });
+    }
     Ok(())
 }
 

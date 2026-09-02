@@ -1083,6 +1083,20 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         max_prefix_headroom: info.max_prefix_headroom,
         max_prefix_headroom_ipv4: info.max_prefix_headroom_ipv4,
         max_prefix_headroom_ipv6: info.max_prefix_headroom_ipv6,
+        inbound_prefix_limits: info
+            .inbound_prefix_limits
+            .iter()
+            .map(|row| proto::InboundPrefixLimitState {
+                scope: row.scope.clone(),
+                usage: row.usage,
+                limit: row.limit,
+                headroom: row.headroom,
+                blocking: row.blocking,
+                reason: row
+                    .blocking
+                    .then(|| crate::peer_types::INBOUND_PREFIX_LIMIT_REACHED.to_string()),
+            })
+            .collect(),
         negotiation_available: Some(negotiated_session.is_some()),
         negotiated_session,
         rfc8212_import_policy: rfc8212_status_to_proto(info.rfc8212_import_policy).into(),

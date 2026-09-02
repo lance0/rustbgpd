@@ -30,6 +30,7 @@ pub fn route_event_to_bgp_event(event: rustbgpd_rib::RouteEvent) -> proto::BgpEv
             | proto::BgpEventType::PeerDisabled
             | proto::BgpEventType::PeerAdded
             | proto::BgpEventType::PeerRemoved
+            | proto::BgpEventType::MaxPrefixWarning
             | proto::BgpEventType::NotificationSent
             | proto::BgpEventType::NotificationReceived
             | proto::BgpEventType::PolicyChanged
@@ -202,7 +203,9 @@ fn session_lifecycle_event_to_bgp_event(event: SessionLifecycleEvent) -> proto::
     };
 
     let severity = match event.event_type {
-        SessionLifecycleEventType::Lost => proto::EventSeverity::Warning,
+        SessionLifecycleEventType::Lost | SessionLifecycleEventType::MaxPrefixWarning => {
+            proto::EventSeverity::Warning
+        }
         SessionLifecycleEventType::StateChanged
         | SessionLifecycleEventType::Established
         | SessionLifecycleEventType::PeerAdded

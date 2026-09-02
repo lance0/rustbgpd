@@ -270,7 +270,8 @@ impl PeerManager {
             SessionLifecycleEventType::PeerAdded
             | SessionLifecycleEventType::PeerRemoved
             | SessionLifecycleEventType::PeerEnabled
-            | SessionLifecycleEventType::PeerDisabled => {
+            | SessionLifecycleEventType::PeerDisabled
+            | SessionLifecycleEventType::MaxPrefixWarning => {
                 unreachable!("non-state lifecycle events use dedicated publishers")
             }
         };

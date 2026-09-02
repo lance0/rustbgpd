@@ -108,6 +108,27 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   configured. Enabling the bound on an Established session requests a route
   refresh so existing rejections are recounted (ADR-0108 amendment).
 
+- **Operator-visible:** `max_prefix_action = "block" | "warning"` and
+  `max_prefix_warning_percent` (neighbor and peer-group, hot-applied) add the
+  non-teardown max-prefix modes. `block` withholds net-new prefixes beyond a
+  full per-family bound while the session stays Established (already accepted
+  prefixes keep taking attribute changes and Add-Path identities), opens a
+  blocking episode visible as `bgp_max_prefix_blocking{peer,scope}` and an
+  `inbound_prefix_limits[]` row with reason `inbound_prefix_limit_reached` in
+  `rbgp neighbor <addr>`, counts every withheld prefix in
+  `bgp_max_prefix_blocked_total{peer,scope}`, and requests one route refresh
+  when usage falls back under the bound or blocking is disabled. Peers without
+  route-refresh support require reannouncement or a session reset to recover
+  withheld routes. Admission reserves net-new prefixes across a whole UPDATE,
+  so one batch cannot overshoot either bound. `warning`, or a
+  `max_prefix_warning_percent` threshold under any action, emits one warn log
+  line, one `max_prefix_warning` session event, and one
+  `bgp_max_prefix_warning_total{peer,scope}` increment per crossing. Neither
+  mode latches the peer; `block` requires the aggregate `max_prefixes` to be
+  unset and both exclude `max_prefix_restart_seconds`. The neighbor API and
+  CLI gain `inbound_prefix_limits[]` (one row per finite bound) and report
+  `max_prefix_action` as `block`/`warning` when configured.
+
 - **Operator-visible:** export one
   `bgp_peer_info{peer,interface,remote_asn,description,peer_group}` identity
   gauge per configured and dynamic peer so dashboards and alerts can name a
@@ -193,7 +214,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an effective `true` renders the pre-policy `max_prefixes_received_ipv4`/`_ipv6`
   bounds and `false` renders the accepted-route `max_prefixes_ipv4`/`_ipv6`
   bounds. The render receipt reports each client's limits under the emitted key
-  and `null` under the other.
+  and `null` under the other. `max_prefix.action: block` and `warning` are
+  accepted as well and render `max_prefix_action = "block"` / `"warning"`
+  (reported in the receipt as `max_prefix_action`); `restart_after` is ignored
+  for them, as ARouteServer does.
 - **Operator-visible:** a session that keeps falling to Idle because of a
   NOTIFICATION (sent or received, including an OPEN exchange that ends in
   one) now doubles its reconnect wait per consecutive failure, from

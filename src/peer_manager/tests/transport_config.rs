@@ -259,6 +259,8 @@ fn build_transport_config_reflects_every_transport_field() {
         max_prefixes_ipv6: None,
         max_prefixes_received_ipv4: None,
         max_prefixes_received_ipv6: None,
+        max_prefix_action: rustbgpd_transport::MaxPrefixAction::Shutdown,
+        max_prefix_warning_percent: None,
         max_prefix_restart_seconds: Some(30),
         md5_password: Some("hunter2".into()),
         tcp_ao: Some(
@@ -319,6 +321,8 @@ fn build_transport_config_reflects_every_transport_field() {
         max_prefixes_ipv6,
         max_prefixes_received_ipv4,
         max_prefixes_received_ipv6,
+        max_prefix_action,
+        max_prefix_warning_percent,
         max_prefix_restart_seconds: _max_prefix_restart_seconds,
         md5_password,
         tcp_ao,
@@ -376,6 +380,11 @@ fn build_transport_config_reflects_every_transport_field() {
     assert_eq!(
         t.max_prefixes_received_ipv6, *max_prefixes_received_ipv6,
         "max_prefixes_received_ipv6"
+    );
+    assert_eq!(t.max_prefix_action, *max_prefix_action, "max_prefix_action");
+    assert_eq!(
+        t.max_prefix_warning_percent, *max_prefix_warning_percent,
+        "max_prefix_warning_percent"
     );
     assert_eq!(
         t.peer.send_hold_time,

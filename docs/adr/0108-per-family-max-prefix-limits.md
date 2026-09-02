@@ -121,5 +121,36 @@ bound drops the rejected identities and the metric scope.
 `bgp_max_prefix_headroom` gain the `ipv4_unicast_received` and
 `ipv6_unicast_received` scopes, present only while the bound is configured.
 
-**Still deferred.** Warning thresholds and block modes, outbound limits beyond
-ADR-0113, and non-unicast families.
+**Warning thresholds and block mode.** `max_prefix_action` (`shutdown`,
+`block`, `warning`; neighbor and peer-group inheritable, hot-applied) and
+`max_prefix_warning_percent` (1..=100) complete the deferred non-teardown
+modes. A warning is evaluated per scope at every accounting boundary: usage at
+or above the percentage of the bound (the bound itself under `warning`)
+latches the scope, emitting exactly one warn log line, one
+`bgp_max_prefix_warning_total` increment, and one `max_prefix_warning` session
+event through the lossless coordination lane; the latch re-arms when usage
+falls back under, so every crossing reports once and nothing is torn down.
+
+`block` reuses ADR-0113's withhold shape on the inbound side. Withdrawals in an
+UPDATE free slots first; then each announced route whose prefix has no accepted
+identity is admitted only while its family's bound (and, if the prefix has no
+rejected identity either, the received bound) has room, else it is dropped
+before accounting and delivery — never installed, never in Adj-RIB-In, and not
+remembered, exactly as ADR-0113 refuses a blocked-prefix inventory. A prefix
+already accepted always passes (attribute changes, new Add-Path identities). A
+prefix blocked by its accepted bound is still a received rejection so the
+pre-policy count stays exact; a prefix blocked by the received bound is not
+recorded at all. The first drop opens a per-scope episode (one warn line,
+`bgp_max_prefix_blocking` = 1, `inbound_prefix_limits[]` row with the stable
+`inbound_prefix_limit_reached` reason); usage falling back under the bound,
+removing the bound, or leaving `block` ends it and requests one plain route
+refresh per affected family so the peer replays what was withheld. Without
+negotiated route refresh, peer reannouncement or a session reset is required.
+This is the inbound analogue of ADR-0113's coalesced resync. Lowering a bound
+under `block` never prunes: the family withholds until usage falls back under.
+`block` and `warning` never send `MaxPrefixExceeded`, so the manager latch and
+timed restart stay untouched; `block` applies to the per-family unicast bounds
+and rejects a configured aggregate `max_prefixes`, whose non-unicast families
+have no admission seam; both exclude `max_prefix_restart_seconds`.
+
+**Still deferred.** Outbound limits beyond ADR-0113 and non-unicast families.

@@ -996,6 +996,10 @@ struct ResolvedClient<'a> {
     /// pre-policy `max_prefixes_received_*` bounds, `false` the accepted-route
     /// `max_prefixes_*` bounds.
     count_rejected_routes: bool,
+    /// `block` or `warning` when that ARouteServer action is active with a
+    /// positive family limit; `None` keeps the daemon's default shutdown
+    /// (with `max_prefix_restart_seconds` for `restart`).
+    max_prefix_action: Option<&'static str>,
     max_prefix_restart_seconds: Option<u32>,
     blackhole: Option<ResolvedBlackhole>,
     pref_len: Option<(u8, u8)>,
@@ -2125,13 +2129,10 @@ fn check_max_prefix_action(
             )),
             Some(_) => {}
         },
-        Some(other @ ("block" | "warning")) => refusals.push(format!(
-            "{scope}: max_prefix.action `{other}` is not supported; rustbgpd only \
-             implements `shutdown` and timed `restart`"
-        )),
+        Some("block" | "warning") => {}
         Some(other) => refusals.push(format!(
-            "{scope}: unknown max_prefix.action `{other}` (only `shutdown` and timed \
-             `restart` are supported)"
+            "{scope}: unknown max_prefix.action `{other}` (only `shutdown`, timed \
+             `restart`, `block`, and `warning` are supported)"
         )),
     }
 }
@@ -2248,11 +2249,18 @@ fn resolve_clients<'a>(
             ctx.cfg.filtering.max_prefix.as_ref(),
             filtering.max_prefix.as_ref(),
         );
-        let (limit_ipv4, limit_ipv6) = if matches!(max_prefix.action, Some("shutdown" | "restart"))
-        {
+        let (limit_ipv4, limit_ipv6) = if matches!(
+            max_prefix.action,
+            Some("shutdown" | "restart" | "block" | "warning")
+        ) {
             (max_prefix.limit_ipv4, max_prefix.limit_ipv6)
         } else {
             (None, None)
+        };
+        let max_prefix_action = match max_prefix.action {
+            Some("block") if limit_ipv4.is_some() || limit_ipv6.is_some() => Some("block"),
+            Some("warning") if limit_ipv4.is_some() || limit_ipv6.is_some() => Some("warning"),
+            _ => None,
         };
         let max_prefix_restart_seconds = (max_prefix.action == Some("restart")
             && (limit_ipv4.is_some() || limit_ipv6.is_some()))
@@ -2299,6 +2307,7 @@ fn resolve_clients<'a>(
             limit_ipv4,
             limit_ipv6,
             count_rejected_routes: max_prefix.count_rejected_routes,
+            max_prefix_action,
             max_prefix_restart_seconds,
             blackhole,
             pref_len: if ipv6 {
@@ -2558,6 +2567,9 @@ fn render_toml(
         }
         if let Some(seconds) = rc.max_prefix_restart_seconds {
             let _ = writeln!(out, "max_prefix_restart_seconds = {seconds}");
+        }
+        if let Some(action) = rc.max_prefix_action {
+            let _ = writeln!(out, "max_prefix_action = \"{action}\"");
         }
         if let Some(site) = site {
             let base = client_exports
@@ -3337,6 +3349,7 @@ fn build_receipt(
             "max_prefixes_received_ipv4": rc.limit_ipv4.filter(|_| rc.count_rejected_routes),
             "max_prefixes_received_ipv6": rc.limit_ipv6.filter(|_| rc.count_rejected_routes),
             "max_prefix_restart_seconds": rc.max_prefix_restart_seconds,
+            "max_prefix_action": rc.max_prefix_action,
         })).collect::<Vec<_>>(),
         "warnings": warnings,
     })

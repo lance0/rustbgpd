@@ -45,7 +45,8 @@ fields "session reset".
 Static-neighbor edits whose **every** changed field is hot-applied
 (`description`, `max_prefixes`, `max_prefixes_ipv4`,
 `max_prefixes_ipv6`, `max_prefixes_received_ipv4`,
-`max_prefixes_received_ipv6`, `max_prefixes_out_ipv4`,
+`max_prefixes_received_ipv6`, `max_prefix_action`,
+`max_prefix_warning_percent`, `max_prefixes_out_ipv4`,
 `max_prefixes_out_ipv6`, `max_prefix_restart_seconds`,
 `gr_peer_restart_time_max`, `gr_stale_routes_time`,
 `local_ipv6_nexthop`, `remove_private_as`, `log_level`, and the
@@ -120,6 +121,8 @@ reload).
 | `max_prefixes_ipv6` | live | IPv6-unicast sibling of `max_prefixes_ipv4` (ADR-0108). |
 | `max_prefixes_received_ipv4` | live | Pre-policy IPv4-unicast received-prefix cap (ADR-0108 amendment), enforced independently of the accepted-route caps. Lowering below the announced count enforces immediately. Adding the cap to an Established session starts tracking rejected identities and requests a plain route refresh for the family so already-rejected announcements are recounted; without negotiated route refresh the count is exact only for announcements after the change (logged). Removing the cap drops the tracked rejected identities and the `*_received` metric scope. |
 | `max_prefixes_received_ipv6` | live | IPv6-unicast sibling of `max_prefixes_received_ipv4`. |
+| `max_prefix_action` | live | Hot-applied; the new action governs the next evaluation. Leaving `block` clears its episodes and requests one route refresh per affected family; without that capability, peer reannouncement or reset is required. Switching to `shutdown` re-evaluates every per-family bound immediately (an over-limit family tears down at once). Switching to `block` never prunes: a family already above its bound simply withholds net-new prefixes until usage falls back under. |
+| `max_prefix_warning_percent` | live | Hot-applied; the threshold is re-evaluated immediately and each scope's once-per-crossing latch re-arms from the new value. |
 | `max_prefixes_out_ipv4` | live | RIB-owned outbound capacity (ADR-0113). Applies without touching the session. Adding or lowering is accepted only when the peer currently advertises at or below the candidate: an over-limit family rejects the whole edit (SIGHUP abandons the reload; a config transaction fails its precondition) and leaves the running maxima, admission state, Adj-RIB-Out, and wire state untouched — lowering is not an implicit pruning policy. A valid raise or removal schedules one coalesced, family-scoped resync. Commit-confirmed transactions may only tighten, because their automatic undo only loosens. |
 | `max_prefixes_out_ipv6` | live | IPv6-unicast sibling of `max_prefixes_out_ipv4`. |
 | `max_prefix_restart_seconds` | live | Manager-owned hold-down policy. A successful value change hot-applies without touching the session and reschedules any armed countdown to now + the new duration (the superseded deadline never fires); removing the value cancels the countdown; a rejected change preserves it untouched. The field does not retroactively arm an indefinitely latched peer. |
@@ -178,6 +181,8 @@ configure their keyring directly.
 | `max_prefixes_ipv6` | live | Same as neighbor. |
 | `max_prefixes_received_ipv4` | live | Same as neighbor; pre-policy received cap inherited by group members. |
 | `max_prefixes_received_ipv6` | live | Same as neighbor. |
+| `max_prefix_action` | live | Same as neighbor; inherited by group members. |
+| `max_prefix_warning_percent` | live | Same as neighbor; inherited by group members. |
 | `max_prefixes_out_ipv4` | live | Same maxima semantics as neighbor, evaluated by effective value: one over-limit member — static or accepted dynamic — rejects a group-wide lowering before any sibling changes. An all-`live` group edit swaps the maximum in place on every inheriting member, static and dynamic, without touching a session; a change set that also moves a session-reset field reshapes static members as before. Down children inherit the committed value when they reconnect. |
 | `max_prefixes_out_ipv6` | live | IPv6-unicast sibling of `max_prefixes_out_ipv4`. |
 | `max_prefix_restart_seconds` | live | Inherited by group members. An all-`live` group edit applies in place to static and dynamic members without bouncing them; a mixed change set reshapes static members and manager-syncs dynamic ones. Committed config transactions also bounce enabled dynamic sessions; disabled dynamic peers retain admin state and adopt the new duration. An armed countdown reschedules to now + the new duration; removing the duration cancels it. |

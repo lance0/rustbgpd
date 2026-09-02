@@ -47,6 +47,7 @@ pub(crate) fn peer_info(address: IpAddr) -> PeerInfo {
         max_prefix_headroom: None,
         max_prefix_headroom_ipv4: None,
         max_prefix_headroom_ipv6: None,
+        inbound_prefix_limits: Vec::new(),
         hold_time: None,
         min_hold_time: None,
         send_hold_time: 0,

@@ -259,7 +259,8 @@ async fn simultaneous_active_open_runs_inbound_candidate_before_primary_idle() {
             assert_eq!(*peer_asn, 65002);
         }
         other @ (SessionNotification::BackToIdle { .. }
-        | SessionNotification::MaxPrefixExceeded { .. }) => {
+        | SessionNotification::MaxPrefixExceeded { .. }
+        | SessionNotification::MaxPrefixWarning { .. }) => {
             panic!("expected OpenReceived from candidate, got {other:?}");
         }
     }
@@ -1135,6 +1136,48 @@ async fn stale_collision_notifications_do_not_mutate_current_peer() {
             .get(&key(peer_addr))
             .is_some_and(|m| m.pending_inbound.is_some() && m.session_id == 1),
         "stale notifications must not drop or promote live sessions"
+    );
+}
+
+#[tokio::test]
+async fn stale_max_prefix_warnings_are_not_published() {
+    let mut mgr = test_peer_manager();
+    let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let counters = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer(
+        &mut mgr,
+        peer_addr,
+        fake_peer_handle(peer_addr, SessionState::Established, None, counters),
+        false,
+    );
+    let mut live_events = mgr.session_events_tx.subscribe();
+    mgr.register_session(99, &key(peer_addr));
+
+    for session_id in [99, 100] {
+        mgr.handle_session_notification(SessionNotification::MaxPrefixWarning {
+            session_id,
+            role: rustbgpd_transport::SessionRole::Primary,
+            peer_addr,
+            scope: "ipv4_unicast",
+            usage: 80,
+            bound: 100,
+            percent: 80,
+        })
+        .await;
+    }
+
+    assert!(live_events.try_recv().is_err());
+    assert!(
+        query_session_event_history(
+            &mgr,
+            Some(peer_addr),
+            [SessionLifecycleEventType::MaxPrefixWarning]
+                .into_iter()
+                .collect(),
+            0,
+        )
+        .await
+        .is_empty()
     );
 }
 

@@ -150,6 +150,7 @@ impl PeerSession {
         for (prefix, path_id) in window.stale_rejected {
             self.forget_rejected_path(prefix, path_id);
         }
+        self.reconcile_max_prefix_modes();
         self.sync_max_prefix_capacity_metrics();
     }
 

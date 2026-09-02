@@ -430,11 +430,6 @@ fn refusal_matrix() {
             "perform_graceful_shutdown",
         ),
         (
-            &["cfg", "filtering", "max_prefix", "action"],
-            Value::String("block".into()),
-            "max_prefix.action `block`",
-        ),
-        (
             &[
                 "cfg",
                 "communities",
@@ -1737,22 +1732,21 @@ fn client_shutdown_overrides_unsupported_general_max_prefix_action() {
 /// required/nonzero/checked restart timer validation breaks a refusal; changing
 /// the largest representable minute conversion breaks the boundary assertion.
 fn restart_action_validates_timer_and_unsupported_actions_are_refused() {
-    for action in ["block", "warning", "mystery"] {
-        let mut value = healthy_value();
-        let mut clients = value["clients"].clone();
-        set_path(
-            &mut clients[0],
-            &["cfg", "filtering", "max_prefix", "action"],
-            serde_yaml::Value::String(action.into()),
-        );
-        set_path(&mut value, &["clients"], clients);
-        let items = refusals(render(&to_yaml(&value), &rtr_options()));
-        assert!(
-            items.iter().any(|item| item.contains("client AS4242_1")
-                && item.contains(&format!("action `{action}`"))),
-            "{action}: {items:?}"
-        );
-    }
+    let mut unknown = healthy_value();
+    let mut clients = unknown["clients"].clone();
+    set_path(
+        &mut clients[0],
+        &["cfg", "filtering", "max_prefix", "action"],
+        serde_yaml::Value::String("mystery".into()),
+    );
+    set_path(&mut unknown, &["clients"], clients);
+    let items = refusals(render(&to_yaml(&unknown), &rtr_options()));
+    assert!(
+        items
+            .iter()
+            .any(|item| item.contains("client AS4242_1") && item.contains("action `mystery`")),
+        "{items:?}"
+    );
 
     for (restart_after, marker) in [
         (None, "requires restart_after > 0"),
@@ -2000,4 +1994,115 @@ fn m90_member_with_rejected_route_counting_renders_received_limits() {
         .expect("untouched member in receipt");
     assert_eq!(untouched["max_prefixes_ipv4"], 100);
     assert!(untouched["max_prefixes_received_ipv4"].is_null());
+}
+
+#[test]
+/// Load-bearing proof: refusing `block`/`warning` again, emitting the action
+/// without a positive family limit, emitting it for `shutdown`/`restart`, or
+/// dropping it from the receipt breaks an assertion below.
+fn block_and_warning_actions_render_the_daemon_action_key() {
+    for action in ["block", "warning"] {
+        let mut value = healthy_value();
+        let mut clients = value["clients"].clone();
+        set_path(
+            &mut clients[0],
+            &["cfg", "filtering", "max_prefix", "action"],
+            serde_yaml::Value::String(action.into()),
+        );
+        set_path(&mut value, &["clients"], clients);
+        let rendered = render(&to_yaml(&value), &rtr_options())
+            .unwrap_or_else(|error| panic!("{action} must render: {error}"));
+        let config = &rendered.files["config.toml"];
+        let start = config
+            .find("address = \"192.0.2.11\"")
+            .expect("client block");
+        let block = &config[start..];
+        let block = block.find("\n[[").map_or(block, |end| &block[..end]);
+        assert!(
+            block.contains(&format!("max_prefix_action = \"{action}\"")),
+            "{action}: {block}"
+        );
+        assert!(block.contains("max_prefixes_ipv4 = "), "{action}: {block}");
+        assert!(
+            !block.contains("max_prefix_restart_seconds"),
+            "{action} never emits a restart timer: {block}"
+        );
+        let receipt = rendered.receipt["clients"].as_array().expect("clients");
+        let flipped = receipt
+            .iter()
+            .find(|client| client["id"] == "AS4242_1")
+            .expect("flipped client");
+        assert_eq!(flipped["max_prefix_action"], action);
+        let sibling = receipt
+            .iter()
+            .find(|client| client["id"] == "AS197000_1")
+            .expect("sibling");
+        assert!(sibling["max_prefix_action"].is_null(), "{sibling}");
+        assert!(
+            !config.matches("max_prefix_action").count().eq(&0),
+            "{config}"
+        );
+    }
+
+    // Without a positive family limit the action is inert, like the timer.
+    let mut zero_limits = healthy_value();
+    let mut clients = zero_limits["clients"].clone();
+    set_path(
+        &mut clients[0],
+        &["cfg", "filtering", "max_prefix", "action"],
+        serde_yaml::Value::String("block".into()),
+    );
+    set_path(
+        &mut clients[0],
+        &["cfg", "filtering", "max_prefix", "limit_ipv4"],
+        serde_yaml::Value::Number(0.into()),
+    );
+    set_path(
+        &mut clients[0],
+        &["cfg", "filtering", "max_prefix", "limit_ipv6"],
+        serde_yaml::Value::Number(0.into()),
+    );
+    set_path(&mut zero_limits, &["clients"], clients);
+    let rendered = render(&to_yaml(&zero_limits), &rtr_options()).expect("zero limits render");
+    assert!(!rendered.files["config.toml"].contains("max_prefix_action"));
+}
+
+#[test]
+/// M90 fixture proof: flipping one member of the checked-in differential
+/// context to `action: block` emits `max_prefix_action = "block"` for exactly
+/// that member alongside its unchanged limits; the others stay on shutdown.
+fn m90_member_with_block_action_renders_the_action_key() {
+    let mut value: serde_yaml::Value = serde_yaml::from_str(M90_HAND).expect("M90 context parses");
+    let mut clients = value["clients"].clone();
+    set_path(
+        &mut clients[1],
+        &["cfg", "filtering", "max_prefix", "action"],
+        serde_yaml::Value::String("block".into()),
+    );
+    set_path(&mut value, &["clients"], clients);
+    let rendered = render(&to_yaml(&value), &Options::default()).expect("M90 variant renders");
+    let config = &rendered.files["config.toml"];
+    assert_eq!(
+        config.matches("\nmax_prefix_action = \"block\"\n").count(),
+        1,
+        "{config}"
+    );
+    assert_eq!(
+        config.matches("\nmax_prefixes_ipv4 = 100\n").count(),
+        3,
+        "{config}"
+    );
+    let receipt = rendered.receipt["clients"].as_array().expect("clients");
+    let flipped = receipt
+        .iter()
+        .find(|client| client["id"] == "AS64501_1")
+        .expect("flipped member");
+    assert_eq!(flipped["max_prefix_action"], "block");
+    assert_eq!(flipped["max_prefixes_ipv4"], 100);
+    assert!(
+        receipt
+            .iter()
+            .filter(|client| client["id"] != "AS64501_1")
+            .all(|client| client["max_prefix_action"].is_null())
+    );
 }

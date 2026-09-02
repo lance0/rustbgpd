@@ -384,6 +384,23 @@ pub struct JsonNeighborDetail {
     /// ADR-0113 outbound unicast capacity, one row per limited family.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub outbound_prefix_limits: Vec<JsonOutboundPrefixLimit>,
+    /// Inbound max-prefix capacity, one row per finite bound (ADR-0108
+    /// amendment).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub inbound_prefix_limits: Vec<JsonInboundPrefixLimit>,
+}
+
+/// One finite inbound max-prefix bound. `reason` carries the stable
+/// `inbound_prefix_limit_reached` only while the scope is blocking.
+#[derive(Serialize)]
+pub struct JsonInboundPrefixLimit {
+    pub scope: String,
+    pub usage: u64,
+    pub limit: u32,
+    pub headroom: u32,
+    pub blocking: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1302,6 +1319,11 @@ mod tests {
                         assert_json_shape(row, nested, contract_id);
                     }
                 }
+                "inbound_prefix_limits[]" => {
+                    for row in value["inbound_prefix_limits"].as_array().unwrap() {
+                        assert_json_shape(row, nested, contract_id);
+                    }
+                }
                 "tcp_ao" => assert_json_shape(&value["tcp_ao"], nested, contract_id),
                 "tcp_ao.keys[]" => {
                     for key in value["tcp_ao"]["keys"].as_array().unwrap() {
@@ -1748,6 +1770,14 @@ mod tests {
                     reason: None,
                 },
             ],
+            inbound_prefix_limits: vec![JsonInboundPrefixLimit {
+                scope: "ipv4_unicast".to_string(),
+                usage: 4,
+                limit: 4,
+                headroom: 0,
+                blocking: true,
+                reason: Some("inbound_prefix_limit_reached".to_string()),
+            }],
         };
 
         let value: Value =

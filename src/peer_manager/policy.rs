@@ -3613,6 +3613,8 @@ impl PeerManager {
                 max_prefixes_ipv6: None,
                 max_prefixes_received_ipv4: None,
                 max_prefixes_received_ipv6: None,
+                max_prefix_action: None,
+                max_prefix_warning_percent: None,
                 max_prefixes_out_ipv4: None,
                 max_prefixes_out_ipv6: None,
                 max_prefix_restart_seconds: None,
@@ -3865,6 +3867,8 @@ impl PeerManager {
             max_prefixes_ipv6: tc.max_prefixes_ipv6,
             max_prefixes_received_ipv4: tc.max_prefixes_received_ipv4,
             max_prefixes_received_ipv6: tc.max_prefixes_received_ipv6,
+            max_prefix_action: tc.max_prefix_action,
+            max_prefix_warning_percent: tc.max_prefix_warning_percent,
             max_prefix_restart_seconds: resolved.max_prefix_restart_seconds,
             md5_password: tc.md5_password.clone(),
             tcp_ao: tc.tcp_ao.clone(),
@@ -3905,6 +3909,16 @@ impl PeerManager {
     }
 
     pub(super) async fn apply_peer_group_change(
+        &mut self,
+        event: ConfigEvent,
+        affected_peers: Vec<IpAddr>,
+    ) -> Result<(), CatalogMutationError> {
+        // The body clones the running configuration onto its own stack frame;
+        // boxing it keeps every caller's future under clippy's size ceiling.
+        Box::pin(self.apply_peer_group_change_inner(event, affected_peers)).await
+    }
+
+    async fn apply_peer_group_change_inner(
         &mut self,
         event: ConfigEvent,
         affected_peers: Vec<IpAddr>,
@@ -4047,11 +4061,20 @@ impl PeerManager {
     /// It preserves the legacy behavior while carrying explicit proof of
     /// whether an error preceded all effects, was completely restored, or
     /// left runtime state uncertain.
+    pub(super) async fn apply_peer_group_change_owned(
+        &mut self,
+        event: ConfigEvent,
+        affected_peers: Vec<IpAddr>,
+    ) -> OwnedCatalogMutationOutcome {
+        // See `apply_peer_group_change`: boxed for the same stack-size reason.
+        Box::pin(self.apply_peer_group_change_owned_inner(event, affected_peers)).await
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "the typed peer-group path keeps validation, apply, and settlement classification in one auditable flow"
     )]
-    pub(super) async fn apply_peer_group_change_owned(
+    async fn apply_peer_group_change_owned_inner(
         &mut self,
         event: ConfigEvent,
         affected_peers: Vec<IpAddr>,

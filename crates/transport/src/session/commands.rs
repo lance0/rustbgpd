@@ -1,7 +1,7 @@
 use super::{
-    Afi, ControlFlow, Event, Message, NotificationCode, PeerCommand, PeerSession, PeerSessionState,
-    RibUpdate, RouteRefreshMessage, Safi, SessionNotificationDirection, SessionState,
-    cease_subcode, debug, info, warn,
+    Afi, ControlFlow, Event, MaxPrefixScope, Message, NotificationCode, PeerCommand, PeerSession,
+    PeerSessionState, RibUpdate, RouteRefreshMessage, Safi, SessionNotificationDirection,
+    SessionState, cease_subcode, debug, info, warn,
 };
 use crate::handle::{MaxPrefixState, PeerCommandError, WarmCheckpointSessionState};
 
@@ -180,7 +180,7 @@ fn remaining_prefix_headroom(limit: Option<u32>, count: usize) -> Option<u32> {
 
 impl PeerSession {
     /// Enqueue one plain ROUTE-REFRESH for a negotiated family.
-    fn send_route_refresh(&mut self, afi: Afi, safi: Safi) -> Result<(), String> {
+    pub(super) fn send_route_refresh(&mut self, afi: Afi, safi: Safi) -> Result<(), String> {
         let msg = Message::RouteRefresh(RouteRefreshMessage::new(afi, safi));
         self.enqueue_priority(&msg).map_err(|e| e.to_string())?;
         info!(peer = %self.peer_label, ?afi, ?safi, "sent ROUTE-REFRESH");
@@ -189,13 +189,10 @@ impl PeerSession {
         Ok(())
     }
 
-    /// A `max_prefixes_received_*` bound enabled on an Established session
-    /// starts with no rejected identities, so ask the peer to re-announce
-    /// its table: every replayed rejection is then counted, and an
-    /// enhanced-refresh window reconciles the accepted side at `EoRR`.
-    /// Without route-refresh support the count stays exact only for
-    /// announcements from now on, which the operator is told.
-    fn request_received_recount(&mut self, afi: Afi) {
+    /// Ask an Established peer to replay one unicast family after enabling a
+    /// received-prefix bound or ending a Block episode. Without route-refresh
+    /// support, tell the operator that reannouncement or reset is required.
+    pub(super) fn request_unicast_reannouncement(&mut self, afi: Afi, reason: &'static str) {
         if self.fsm.state() != SessionState::Established {
             return;
         }
@@ -215,9 +212,9 @@ impl PeerSession {
                 peer = %self.peer_label,
                 ?afi,
                 %error,
-                "received-prefix bound enabled on a live session without a route refresh; \
-                 rejected announcements are counted from now on and a session reset makes \
-                 the count exact"
+                reason,
+                "route refresh unavailable after max-prefix state change; peer \
+                 reannouncement or session reset is required"
             );
         }
     }
@@ -1285,6 +1282,22 @@ impl PeerSession {
                             }
                         }),
                     max_prefix: MaxPrefixState {
+                        scopes: MaxPrefixScope::ALL
+                            .into_iter()
+                            .filter_map(|scope| {
+                                let (usage, limit) = self.max_prefix_scope_usage(scope);
+                                let limit = limit?;
+                                Some(crate::handle::MaxPrefixScopeState {
+                                    scope: scope.as_str(),
+                                    usage,
+                                    limit,
+                                    headroom: limit
+                                        .saturating_sub(u32::try_from(usage).unwrap_or(u32::MAX)),
+                                    blocking: self.max_prefix_scope_blocking(scope),
+                                })
+                            })
+                            .collect(),
+                        action: self.config.max_prefix_action,
                         prefix_count_ipv4,
                         prefix_count_ipv6,
                         max_prefixes: self.config.max_prefixes,
@@ -1524,6 +1537,8 @@ impl PeerSession {
                     max_prefixes_ipv6,
                     max_prefixes_received_ipv4,
                     max_prefixes_received_ipv6,
+                    max_prefix_action,
+                    max_prefix_warning_percent,
                     gr_stale_routes_time,
                     gr_peer_restart_time_max,
                     local_ipv6_nexthop,
@@ -1549,6 +1564,8 @@ impl PeerSession {
                 self.config.max_prefixes_ipv6 = max_prefixes_ipv6;
                 self.config.max_prefixes_received_ipv4 = max_prefixes_received_ipv4;
                 self.config.max_prefixes_received_ipv6 = max_prefixes_received_ipv6;
+                self.config.max_prefix_action = max_prefix_action;
+                self.config.max_prefix_warning_percent = max_prefix_warning_percent;
                 for (afi, was_tracked) in received_was_tracked {
                     let tracked = match afi {
                         Afi::Ipv4 => max_prefixes_received_ipv4.is_some(),
@@ -1557,7 +1574,7 @@ impl PeerSession {
                     if was_tracked && !tracked {
                         self.drop_received_tracking(afi);
                     } else if !was_tracked && tracked {
-                        self.request_received_recount(afi);
+                        self.request_unicast_reannouncement(afi, "received-prefix bound enabled");
                     }
                 }
                 self.config.gr_stale_routes_time = gr_stale_routes_time;

@@ -1575,6 +1575,8 @@ fn config_field_impact(field: &str) -> Option<(ConfigFieldImpact, &'static str)>
         | "max_prefixes_ipv6"
         | "max_prefixes_received_ipv4"
         | "max_prefixes_received_ipv6"
+        | "max_prefix_action"
+        | "max_prefix_warning_percent"
         | "max_prefixes_out_ipv4"
         | "max_prefixes_out_ipv6"
         | "max_prefix_restart_seconds"
@@ -1762,6 +1764,8 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<FieldCha
     cmp_field!(max_prefixes_ipv6);
     cmp_field!(max_prefixes_received_ipv4);
     cmp_field!(max_prefixes_received_ipv6);
+    cmp_field!(max_prefix_action);
+    cmp_field!(max_prefix_warning_percent);
     cmp_field!(max_prefixes_out_ipv4);
     cmp_field!(max_prefixes_out_ipv6);
     cmp_field!(max_prefix_restart_seconds);
@@ -1896,6 +1900,8 @@ fn neighbor_runtime_equal(old: &Neighbor, new: &Neighbor) -> bool {
         && old.max_prefixes_ipv6 == new.max_prefixes_ipv6
         && old.max_prefixes_received_ipv4 == new.max_prefixes_received_ipv4
         && old.max_prefixes_received_ipv6 == new.max_prefixes_received_ipv6
+        && old.max_prefix_action == new.max_prefix_action
+        && old.max_prefix_warning_percent == new.max_prefix_warning_percent
         && old.max_prefixes_out_ipv4 == new.max_prefixes_out_ipv4
         && old.max_prefixes_out_ipv6 == new.max_prefixes_out_ipv6
         && old.max_prefix_restart_seconds == new.max_prefix_restart_seconds
@@ -2791,6 +2797,13 @@ impl Config {
             neighbor.max_prefixes_received_ipv6 = neighbor
                 .max_prefixes_received_ipv6
                 .or_else(|| group.and_then(|g| g.max_prefixes_received_ipv6));
+            neighbor.max_prefix_action = neighbor
+                .max_prefix_action
+                .clone()
+                .or_else(|| group.and_then(|g| g.max_prefix_action.clone()));
+            neighbor.max_prefix_warning_percent = neighbor
+                .max_prefix_warning_percent
+                .or_else(|| group.and_then(|g| g.max_prefix_warning_percent));
             neighbor.max_prefixes_out_ipv4 = neighbor
                 .max_prefixes_out_ipv4
                 .or_else(|| group.and_then(|g| g.max_prefixes_out_ipv4));
@@ -4993,6 +5006,8 @@ pub fn describe_peer_group_changes(
     cmp_field!(max_prefixes_ipv6);
     cmp_field!(max_prefixes_received_ipv4);
     cmp_field!(max_prefixes_received_ipv6);
+    cmp_field!(max_prefix_action);
+    cmp_field!(max_prefix_warning_percent);
     cmp_field!(max_prefixes_out_ipv4);
     cmp_field!(max_prefixes_out_ipv6);
     cmp_field!(max_prefix_restart_seconds);

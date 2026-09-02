@@ -280,6 +280,46 @@ impl PeerManager {
                     }
                 }
             }
+            SessionNotification::MaxPrefixWarning {
+                session_id,
+                role,
+                peer_addr,
+                scope,
+                usage,
+                bound,
+                percent,
+            } => {
+                // Informational: nothing is latched. One durable session event
+                // per crossing so operators can alert on it without a log tail.
+                let Some(peer_key) = self.peer_key_for_session(session_id) else {
+                    debug!(%peer_addr, session_id, ?role, "ignoring max-prefix warning from unknown session");
+                    return;
+                };
+                let currently_owned = self.peers.get(&peer_key).is_some_and(|managed| {
+                    managed.session_id == session_id
+                        || managed
+                            .pending_inbound
+                            .as_ref()
+                            .is_some_and(|pending| pending.session_id == session_id)
+                });
+                if !currently_owned {
+                    debug!(%peer_addr, session_id, ?role, "ignoring stale max-prefix warning notification");
+                    return;
+                }
+                let rendered_peer = peer_key.label();
+                self.publish_lifecycle_event(rustbgpd_api::peer_types::SessionLifecycleEvent {
+                    event_type: rustbgpd_api::peer_types::SessionLifecycleEventType::MaxPrefixWarning,
+                    peer: peer_addr,
+                    peer_label: Some(rendered_peer.clone()),
+                    timestamp: Self::session_event_timestamp(),
+                    old_state: None,
+                    new_state: None,
+                    session_role: Some(Self::session_role_label(role).to_string()),
+                    reason: format!(
+                        "max-prefix warning for peer {rendered_peer}: {scope} usage {usage} of bound {bound} (threshold {percent}%)"
+                    ),
+                });
+            }
             SessionNotification::MaxPrefixExceeded {
                 session_id,
                 role,

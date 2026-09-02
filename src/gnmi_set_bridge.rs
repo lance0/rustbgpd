@@ -456,6 +456,8 @@ fn empty_neighbor(address: IpAddr) -> Neighbor {
         max_prefixes_ipv6: None,
         max_prefixes_received_ipv4: None,
         max_prefixes_received_ipv6: None,
+        max_prefix_action: None,
+        max_prefix_warning_percent: None,
         max_prefixes_out_ipv4: None,
         max_prefixes_out_ipv6: None,
         max_prefix_restart_seconds: None,

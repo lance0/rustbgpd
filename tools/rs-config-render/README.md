@@ -492,13 +492,17 @@ cannot reproduce its tagging and inbound anti-spoof scrubbing), `next_hop.policy
 than `strict`
 (`same-as` needs the deferred fleet-inventory mode), `reject_policy`
 `tag` (it accepts invalid routes into the master table), `prepend_rs_as`,
-`perform_graceful_shutdown`, `max_prefix.action` `block`/`warning`,
+`perform_graceful_shutdown`,
  per-client `black_list_pref` (dropping a black list would fail open),
  a configured `route_validated_via_white_list.ext` or malformed tag value,
  and disabling both IRR enforcement knobs. `shutdown` emits the positive family ceilings;
 `restart` additionally requires a positive `restart_after` in minutes, checked
-while converting to `u32` seconds. An absent action or zero family limits emit
-neither ceilings nor a restart timer. The effective
+while converting to `u32` seconds. `block` and `warning` emit the ceilings plus
+`max_prefix_action = "block"` (net-new prefixes beyond the bound are withheld
+while the session stays Established) or `"warning"` (one warning per crossing,
+nothing torn down); `restart_after` is ignored for them, as ARouteServer does.
+An absent action or zero family limits emit neither ceilings, a restart timer,
+nor an action. The effective
 `max_prefix.count_rejected_routes` selects the counting model: `true`
 (ARouteServer 1.23.2's default) emits the pre-policy
 `max_prefixes_received_ipv4`/`_ipv6` bounds, which count every unicast prefix
