@@ -23,6 +23,12 @@ const M106_SECTIONED: &str = include_str!(
 );
 const M106_HAND: &str =
     include_str!("../../../tests/interop/m106-rs-white-list-control-differential/context.yml");
+/// The M107 RFC 8950 uniform-fleet site (IPv6-only members, `rfc8950`
+/// on), dumped by the same pinned image, and its hand-authored twin.
+const M107_SECTIONED: &str =
+    include_str!("../../../tests/interop/m107-rs-rfc8950-uniform-fleet/context-sectioned.yml");
+const M107_HAND: &str =
+    include_str!("../../../tests/interop/m107-rs-rfc8950-uniform-fleet/context.yml");
 
 fn fixture_value() -> serde_yaml::Value {
     serde_yaml::from_str(FIXTURE).expect("fixture parses")
@@ -1147,6 +1153,48 @@ fn m106_sectioned_dump_renders_identically_and_exercises_both_surfaces() {
             .collect::<Vec<_>>(),
         [0, 1, 0]
     );
+}
+
+#[test]
+/// The real dump of the M107 site carries `rfc8950: true` on both IPv6
+/// clients; both forms render the uniform-fleet shape identically.
+fn m107_sectioned_dump_renders_the_uniform_fleet_shape() {
+    let real = render(M107_SECTIONED, &Options::default()).expect("real M107 dump renders");
+    let hand = render(M107_HAND, &Options::default()).expect("hand-authored M107 context renders");
+    assert_eq!(real.files.len(), hand.files.len());
+    for (path, content) in &real.files {
+        assert_eq!(
+            strip_fingerprint(content),
+            strip_fingerprint(&hand.files[path]),
+            "render divergence in {path}"
+        );
+    }
+    let config = &real.files["config.toml"];
+    assert_eq!(
+        config
+            .matches("families = [\"ipv4_unicast\", \"ipv6_unicast\"]\n")
+            .count(),
+        2
+    );
+    assert_eq!(
+        config
+            .matches("next_hop_ownership = \"strict_peer\"\n")
+            .count(),
+        2
+    );
+    assert_eq!(
+        config.matches("rs_control_communities = false\n").count(),
+        2
+    );
+    assert!(!config.contains("families = [\"ipv6_unicast\"]"));
+    assert_eq!(
+        real.files["datasets/client-as64500-1-prefixes.list"],
+        "198.51.100.0/24 le 25\n2001:db8:1::/48\n"
+    );
+    for rpol in ["policy/rs-hygiene.rpol", "policy/client-as64500-1.rpol"] {
+        let report = run_rpol_tests(&real.files[rpol]).unwrap();
+        assert!(report.all_passed(), "{rpol}: {:?}", report.failures);
+    }
 }
 
 #[test]

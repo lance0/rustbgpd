@@ -2497,6 +2497,49 @@ jobs:
           script: tests/interop/scripts/test-m104-arouteserver-current-rs-differential.sh
           max_attempts: "1"
 
+  m107:
+    needs: [prime_dev_image]
+    name: M107 — RFC 8950 uniform-fleet route server
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/install-protobuf
+
+      - name: Install containerlab
+        uses: ./.github/actions/install-containerlab
+
+      - name: Ensure jq
+        run: |
+          command -v jq >/dev/null || { sudo apt-get update -y && sudo apt-get install -y jq; }
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build rustbgpd:dev
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: rustbgpd:dev
+          target: dev
+          cache-from: type=gha,scope=rustbgpd-dev
+
+      - name: Build gobgp:v4.8.0-m107
+        run: >-
+          docker build --build-arg TARGETARCH=amd64
+          --build-arg GOBGP_VERSION=4.8.0
+          --build-arg GOBGP_SHA256=43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03
+          -t gobgp:v4.8.0-m107 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
+
+      - name: Run M107 (RFC 8950 uniform fleet, strict_peer, transparent export)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M107
+          topology: tests/interop/m107-rs-rfc8950-uniform-fleet.clab.yml
+          script: tests/interop/scripts/test-m107-rs-rfc8950-uniform-fleet.sh
+
   check:
     name: check
     runs-on: ubuntu-latest
@@ -2507,7 +2550,7 @@ jobs:
       m13, m80, m15, m10, m14, m17, m73, m74, m75, m76, m77, m78, m79, m22, m24,
       m81, m82, m83, m85, m94, m86, m25, m29, m30, m34, m35, m35b, m35c,
       m41, m44, m54, m55, m56, m45, m57, m63, m64,
-      m26_m27_m28_m59_m91, m92, m84, m99, m100, m101, m102, m103, m104]
+      m26_m27_m28_m59_m91, m92, m84, m99, m100, m101, m102, m103, m104, m107]
     env:
       NEEDS_CONTEXT: ${{ toJSON(needs) }}
       EXPECTED_JOBS: >-

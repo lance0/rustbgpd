@@ -1,0 +1,25 @@
+# M107 member1 (AS64500, 2001:db8:107::11) — an RFC 8950 member: IPv4 and
+# IPv6 unicast over one IPv6-only session with the rustbgpd route server
+# (2001:db8:107::9). The pinned local address is the next hop the member
+# announces for its own routes, and the only next hop strict_peer accepts
+# from this session.
+[global.config]
+as = 64500
+router-id = "192.0.2.11"
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "2001:db8:107::9"
+peer-as = 64496
+description = "rustbgpd-rs"
+
+[neighbors.transport.config]
+local-address = "2001:db8:107::11"
+
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "ipv4-unicast"
+
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "ipv6-unicast"
