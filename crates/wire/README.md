@@ -474,10 +474,11 @@ family enums — remain exhaustively matchable on purpose.
 
 ## Fuzz tested
 
-Twelve fuzz targets exercise the codec continuously in CI:
+Fuzz targets exercise the codec in the nightly CI fuzz campaign:
 
 - `decode_message` — full BGP message framing
 - `decode_update` — UPDATE parsing with Add-Path and MP-BGP variants
+- `encode_update` — canonical IPv4 UPDATE encode round-trip
 - `decode_open` — OPEN + capability decode
 - `decode_route_refresh` — ROUTE-REFRESH / ORF decode
 - `decode_flowspec` — FlowSpec NLRI component decoding

@@ -130,7 +130,7 @@ see the full ~16,000-ASN path.
 ### Fuzzing
 
 Six fuzz crates (`crates/wire`, `crates/policy`, `crates/mrt`,
-`crates/evpn`, `crates/bfd`, `crates/rpki`) carry 21 fuzz targets covering
+`crates/evpn`, `crates/bfd`, `crates/rpki`) carry fuzz targets covering
 the message decoders, the policy frontend, structure-aware policy-chain
 compilation and explain-walk agreement, MRT snapshot and warm-bundle
 readers, EVPN parsing, the BFD control-packet decoder, and the RTR PDU
@@ -146,10 +146,11 @@ inventory is fail-closed: `scripts/check_fuzz_target_inventory.py` runs
 in CI and fails when the inventory drifts from the reviewed list.
 Every wire target has a tracked seed. The nightly workflow may reuse a bounded
 `main`-lineage corpus, but it restores into runner-temporary staging and
-validates the exact 12-directory layout, regular-file shape, per-target length
-bounds, SHA-256 manifest, 20,000-file ceiling, and 16 MiB ceiling before copying
-anything into the live corpus. Cache misses and cache-service outages use only
-the tracked seeds; matched content that fails validation stops the campaign.
+validates the exact reviewed target-directory set, regular-file shape,
+per-target length bounds, SHA-256 manifest, 20,000-file ceiling, and 16 MiB
+ceiling before copying anything into the live corpus. Cache misses and
+cache-service outages use only the tracked seeds; matched content that fails
+validation stops the campaign.
 The cache contains public test inputs only and is not a place for credentials
 or other private data.
 

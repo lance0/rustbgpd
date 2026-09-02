@@ -348,8 +348,8 @@ specific method if the model warrants it.
 
 ## Code matrix
 
-`crates/api/src/authz.rs` contains the same 107-method classification
-as a static Rust table. `docs/grpc-method-inventory.json` is the
+`crates/api/src/authz.rs` contains the same method classification as a
+static Rust table. `docs/grpc-method-inventory.json` is the
 machine-readable export for auditors, tooling, and generated clients. The
 `authz` tests parse `proto/rustbgpd.proto` and fail if a new RPC is added
 without a tier assignment; they also parse the JSON export and fail if it drifts
