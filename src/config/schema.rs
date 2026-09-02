@@ -1284,6 +1284,34 @@ define_neighbor_and_peer_group_configs! {
                 /// See the neighbor-level `max_prefixes_ipv6`.
             }
         }
+        max_prefixes_received_ipv4: Option<u32> {
+            neighbor {
+                /// Maximum unique IPv4-unicast prefixes this peer may announce,
+                /// counted before import policy (accepted and rejected alike),
+                /// before the session is torn down with Cease/1. Enforced
+                /// independently of `max_prefixes_ipv4` (ADR-0108 amendment).
+                /// Unset = unlimited.
+            }
+            peer_group {
+                /// Pre-policy IPv4-unicast received-prefix limit inherited by
+                /// neighbors in this group. See the neighbor-level
+                /// `max_prefixes_received_ipv4`.
+            }
+        }
+        max_prefixes_received_ipv6: Option<u32> {
+            neighbor {
+                /// Maximum unique IPv6-unicast prefixes this peer may announce,
+                /// counted before import policy (accepted and rejected alike),
+                /// before the session is torn down with Cease/1. Enforced
+                /// independently of `max_prefixes_ipv6` (ADR-0108 amendment).
+                /// Unset = unlimited.
+            }
+            peer_group {
+                /// Pre-policy IPv6-unicast received-prefix limit inherited by
+                /// neighbors in this group. See the neighbor-level
+                /// `max_prefixes_received_ipv6`.
+            }
+        }
         max_prefixes_out_ipv4: Option<NonZeroU32> {
             neighbor {
                 /// Maximum distinct IPv4-unicast prefixes advertised TO this peer
@@ -1704,6 +1732,14 @@ impl fmt::Debug for Neighbor {
             .field("max_prefixes", &self.max_prefixes)
             .field("max_prefixes_ipv4", &self.max_prefixes_ipv4)
             .field("max_prefixes_ipv6", &self.max_prefixes_ipv6)
+            .field(
+                "max_prefixes_received_ipv4",
+                &self.max_prefixes_received_ipv4,
+            )
+            .field(
+                "max_prefixes_received_ipv6",
+                &self.max_prefixes_received_ipv6,
+            )
             .field("max_prefixes_out_ipv4", &self.max_prefixes_out_ipv4)
             .field("max_prefixes_out_ipv6", &self.max_prefixes_out_ipv6)
             .field(
@@ -1887,6 +1923,14 @@ impl fmt::Debug for PeerGroupConfig {
             .field("max_prefixes", &self.max_prefixes)
             .field("max_prefixes_ipv4", &self.max_prefixes_ipv4)
             .field("max_prefixes_ipv6", &self.max_prefixes_ipv6)
+            .field(
+                "max_prefixes_received_ipv4",
+                &self.max_prefixes_received_ipv4,
+            )
+            .field(
+                "max_prefixes_received_ipv6",
+                &self.max_prefixes_received_ipv6,
+            )
             .field("max_prefixes_out_ipv4", &self.max_prefixes_out_ipv4)
             .field("max_prefixes_out_ipv6", &self.max_prefixes_out_ipv6)
             .field(

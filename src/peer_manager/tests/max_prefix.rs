@@ -465,6 +465,10 @@ async fn readiness_straddle_cannot_accept_a_late_max_prefix_start() {
 /// - consulting only the session's stale `last_error` hides the manager-owned
 ///   max-prefix cause; and
 /// - failing to clear on explicit enable leaves the peer permanently latched.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one ordered promotion, latch, idle, and explicit-enable sequence against a single manager"
+)]
 #[tokio::test]
 async fn promoted_dynamic_max_prefix_latch_survives_idle_until_explicit_enable() {
     let mut mgr = test_peer_manager();
@@ -538,6 +542,7 @@ async fn promoted_dynamic_max_prefix_latch_survives_idle_until_explicit_enable()
         count: 501,
         bound: 500,
         family: Some((Afi::Ipv4, Safi::Unicast)),
+        received: false,
     })
     .await;
     assert!(!mgr.peers.get(&key(addr)).unwrap().enabled);
@@ -599,6 +604,7 @@ async fn stale_max_prefix_generation_cannot_latch_replacement() {
         count: 501,
         bound: 500,
         family: None,
+        received: false,
     })
     .await;
 
@@ -633,6 +639,7 @@ async fn primary_max_prefix_breach_drains_pending_collision_candidate() {
         count: 501,
         bound: 500,
         family: None,
+        received: false,
     })
     .await;
 
@@ -679,6 +686,7 @@ async fn peer_presence_retained_max_prefix_emits_no_removed() {
             count: 501,
             bound: 500,
             family: None,
+            received: false,
         })
         .unwrap();
     mgr.session_notify_tx
@@ -740,6 +748,7 @@ async fn pending_candidate_max_prefix_breach_stops_primary_and_drains_candidate(
         count: 501,
         bound: 500,
         family: Some((Afi::Ipv4, Safi::Unicast)),
+        received: false,
     })
     .await;
 
@@ -1148,6 +1157,7 @@ async fn pending_breach_rebuilds_unstoppable_primary_for_explicit_recovery() {
             count: 501,
             bound: 500,
             family: None,
+            received: false,
         }),
     )
     .await

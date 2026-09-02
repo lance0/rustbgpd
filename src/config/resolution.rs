@@ -758,6 +758,12 @@ impl Config {
         transport.max_prefixes_ipv6 = neighbor
             .max_prefixes_ipv6
             .or_else(|| group.and_then(|g| g.max_prefixes_ipv6));
+        transport.max_prefixes_received_ipv4 = neighbor
+            .max_prefixes_received_ipv4
+            .or_else(|| group.and_then(|g| g.max_prefixes_received_ipv4));
+        transport.max_prefixes_received_ipv6 = neighbor
+            .max_prefixes_received_ipv6
+            .or_else(|| group.and_then(|g| g.max_prefixes_received_ipv6));
         transport.peer_group.clone_from(&neighbor.peer_group);
         transport.md5_password = neighbor
             .md5_password
@@ -965,6 +971,8 @@ impl Config {
             max_prefixes: None,
             max_prefixes_ipv4: None,
             max_prefixes_ipv6: None,
+            max_prefixes_received_ipv4: None,
+            max_prefixes_received_ipv6: None,
             max_prefixes_out_ipv4: None,
             max_prefixes_out_ipv6: None,
             max_prefix_restart_seconds: None,

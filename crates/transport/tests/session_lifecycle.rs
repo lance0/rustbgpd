@@ -86,6 +86,8 @@ fn transport_config(addr: SocketAddr) -> TransportConfig {
         max_prefixes: None,
         max_prefixes_ipv4: None,
         max_prefixes_ipv6: None,
+        max_prefixes_received_ipv4: None,
+        max_prefixes_received_ipv6: None,
         md5_password: None,
         tcp_ao: None,
         ttl_security_hops: None,

@@ -440,6 +440,25 @@ pub(crate) struct PeerSession {
     known_unicast_v4: usize,
     /// IPv6-unicast sibling of `known_unicast_v4` for `max_prefixes_ipv6`.
     known_unicast_v6: usize,
+    /// Rejected plain (non-Add-Path receive) unicast prefixes the peer still
+    /// announces. Populated only while a `max_prefixes_received_*` bound is
+    /// configured for the prefix's family; disjoint from
+    /// `known_plain_prefixes` by construction (an accept retires the
+    /// rejected identity and a reject retires the accepted one).
+    rejected_plain_prefixes: HashSet<Prefix>,
+    /// Rejected Add-Path receive unicast identities `(prefix, path_id)`,
+    /// the rejected sibling of `known_paths`.
+    rejected_paths: HashSet<(Prefix, u32)>,
+    /// Rejected Add-Path identities per prefix, the sibling of
+    /// `known_prefix_refcounts`.
+    rejected_prefix_refcounts: HashMap<Prefix, usize>,
+    /// Unique IPv4-unicast prefixes with a rejected identity and no accepted
+    /// one. `known_unicast_v4 + rejected_only_v4` is the pre-policy received
+    /// count enforced by `max_prefixes_received_ipv4`; the split keeps both
+    /// counters O(1) at every accept/reject/withdraw transition.
+    rejected_only_v4: usize,
+    /// IPv6-unicast sibling of `rejected_only_v4`.
+    rejected_only_v6: usize,
     /// Accepted `FlowSpec` rules from this peer. Counted toward
     /// max-prefix enforcement so a peer can't bypass the cap by
     /// flooding `FlowSpec` rules.
@@ -562,6 +581,9 @@ struct MaxPrefixViolation {
     count: usize,
     bound: u32,
     family: Option<(Afi, Safi)>,
+    /// The pre-policy received bound (`max_prefixes_received_*`) rather than
+    /// an accepted-route bound.
+    received: bool,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -777,6 +799,29 @@ impl PeerSession {
             self.known_unicast_v6,
             self.config.max_prefixes_ipv6,
         );
+        // The received scopes exist only while their bound is configured:
+        // without one, rejected identities are not tracked and the usage
+        // would silently equal the accepted count.
+        for (scope, usage, limit) in [
+            (
+                "ipv4_unicast_received",
+                self.received_unicast_v4(),
+                self.config.max_prefixes_received_ipv4,
+            ),
+            (
+                "ipv6_unicast_received",
+                self.received_unicast_v6(),
+                self.config.max_prefixes_received_ipv6,
+            ),
+        ] {
+            if limit.is_some() {
+                self.metrics
+                    .set_max_prefix_capacity(&self.peer_label, scope, usage, limit);
+            } else {
+                self.metrics
+                    .remove_max_prefix_capacity(&self.peer_label, scope);
+            }
+        }
     }
 
     fn reap_max_prefix_capacity_metrics(&self) {
@@ -797,6 +842,7 @@ impl PeerSession {
                 count: self.known_prefix_count(),
                 bound: max,
                 family: None,
+                received: false,
             });
         }
         if let Some(max) = self.config.max_prefixes_ipv4
@@ -806,6 +852,7 @@ impl PeerSession {
                 count: self.known_unicast_v4,
                 bound: max,
                 family: Some((Afi::Ipv4, Safi::Unicast)),
+                received: false,
             });
         }
         if let Some(max) = self.config.max_prefixes_ipv6
@@ -815,6 +862,27 @@ impl PeerSession {
                 count: self.known_unicast_v6,
                 bound: max,
                 family: Some((Afi::Ipv6, Safi::Unicast)),
+                received: false,
+            });
+        }
+        if let Some(max) = self.config.max_prefixes_received_ipv4
+            && self.received_unicast_v4() > max as usize
+        {
+            return Some(MaxPrefixViolation {
+                count: self.received_unicast_v4(),
+                bound: max,
+                family: Some((Afi::Ipv4, Safi::Unicast)),
+                received: true,
+            });
+        }
+        if let Some(max) = self.config.max_prefixes_received_ipv6
+            && self.received_unicast_v6() > max as usize
+        {
+            return Some(MaxPrefixViolation {
+                count: self.received_unicast_v6(),
+                bound: max,
+                family: Some((Afi::Ipv6, Safi::Unicast)),
+                received: true,
             });
         }
         None
@@ -840,6 +908,21 @@ impl PeerSession {
                     "max prefix exceeded"
                 );
                 Bytes::new()
+            }
+            Some((afi, safi)) if violation.received => {
+                warn!(
+                    peer = %self.peer_label,
+                    count = violation.count,
+                    max = violation.bound,
+                    afi = afi as u16,
+                    safi = safi as u8,
+                    "pre-policy received max prefix exceeded"
+                );
+                let mut data = Vec::with_capacity(7);
+                data.extend_from_slice(&(afi as u16).to_be_bytes());
+                data.push(safi as u8);
+                data.extend_from_slice(&violation.bound.to_be_bytes());
+                Bytes::from(data)
             }
             Some((afi, safi)) => {
                 warn!(
@@ -872,6 +955,7 @@ impl PeerSession {
                 count: violation.count,
                 bound: violation.bound,
                 family: violation.family,
+                received: violation.received,
             })
         {
             warn!(
@@ -935,16 +1019,158 @@ impl PeerSession {
 
     /// Bump the per-family unique-prefix counter when a unique unicast
     /// prefix appears (plain insert, or Add-Path refcount 0 → 1).
+    ///
+    /// A prefix that still carries a rejected identity moves between the
+    /// accepted count and `rejected_only_*` instead of changing the
+    /// pre-policy received count.
     fn count_unique_unicast(&mut self, prefix: Prefix, delta_positive: bool) {
+        let has_rejected = self.has_rejected_identity(prefix);
+        let (counter, rejected_only) = match prefix {
+            Prefix::V4(_) => (&mut self.known_unicast_v4, &mut self.rejected_only_v4),
+            Prefix::V6(_) => (&mut self.known_unicast_v6, &mut self.rejected_only_v6),
+        };
+        if delta_positive {
+            *counter += 1;
+            if has_rejected {
+                debug_assert!(*rejected_only > 0, "rejected-only counter underflow");
+                *rejected_only = rejected_only.saturating_sub(1);
+            }
+        } else {
+            debug_assert!(*counter > 0, "per-family unicast counter underflow");
+            *counter = counter.saturating_sub(1);
+            if has_rejected {
+                *rejected_only += 1;
+            }
+        }
+    }
+
+    /// Unique IPv4-unicast prefixes the peer currently announces, accepted or
+    /// rejected — the count bounded by `max_prefixes_received_ipv4`. Exact
+    /// only while that bound is configured (rejected identities are not
+    /// tracked otherwise, so the count then equals the accepted one).
+    pub(super) fn received_unicast_v4(&self) -> usize {
+        self.known_unicast_v4 + self.rejected_only_v4
+    }
+
+    /// IPv6-unicast sibling of [`Self::received_unicast_v4`].
+    pub(super) fn received_unicast_v6(&self) -> usize {
+        self.known_unicast_v6 + self.rejected_only_v6
+    }
+
+    fn tracks_received(&self, prefix: Prefix) -> bool {
+        match prefix {
+            Prefix::V4(_) => self.config.max_prefixes_received_ipv4.is_some(),
+            Prefix::V6(_) => self.config.max_prefixes_received_ipv6.is_some(),
+        }
+    }
+
+    fn has_accepted_identity(&self, prefix: Prefix) -> bool {
+        if self.receives_add_path_for_prefix(prefix) {
+            self.known_prefix_refcounts.contains_key(&prefix)
+        } else {
+            self.known_plain_prefixes.contains(&prefix)
+        }
+    }
+
+    fn has_rejected_identity(&self, prefix: Prefix) -> bool {
+        if self.receives_add_path_for_prefix(prefix) {
+            self.rejected_prefix_refcounts.contains_key(&prefix)
+        } else {
+            self.rejected_plain_prefixes.contains(&prefix)
+        }
+    }
+
+    /// Rejected sibling of [`Self::count_unique_unicast`]: a prefix whose
+    /// first rejected identity appears (or last one leaves) changes the
+    /// received count only while it has no accepted identity.
+    fn count_rejected_only(&mut self, prefix: Prefix, delta_positive: bool) {
+        if self.has_accepted_identity(prefix) {
+            return;
+        }
         let counter = match prefix {
-            Prefix::V4(_) => &mut self.known_unicast_v4,
-            Prefix::V6(_) => &mut self.known_unicast_v6,
+            Prefix::V4(_) => &mut self.rejected_only_v4,
+            Prefix::V6(_) => &mut self.rejected_only_v6,
         };
         if delta_positive {
             *counter += 1;
         } else {
-            debug_assert!(*counter > 0, "per-family unicast counter underflow");
+            debug_assert!(*counter > 0, "rejected-only counter underflow");
             *counter = counter.saturating_sub(1);
+        }
+    }
+
+    /// Record one unicast announcement this session rejected before or in
+    /// import policy. Mirrors [`Self::remember_known_path`]; a no-op unless
+    /// the family's `max_prefixes_received_*` bound is configured. Returns
+    /// `true` when the identity was new.
+    fn remember_rejected_path(&mut self, prefix: Prefix, path_id: u32) -> bool {
+        if !self.tracks_received(prefix) {
+            return false;
+        }
+        self.refresh_accounting_replay_rejected(prefix, path_id);
+        if !self.receives_add_path_for_prefix(prefix) {
+            let inserted = self.rejected_plain_prefixes.insert(prefix);
+            if inserted {
+                self.count_rejected_only(prefix, true);
+            }
+            return inserted;
+        }
+        if !self.rejected_paths.insert((prefix, path_id)) {
+            return false;
+        }
+        let refcount = self.rejected_prefix_refcounts.entry(prefix).or_insert(0);
+        *refcount += 1;
+        if *refcount == 1 {
+            self.count_rejected_only(prefix, true);
+        }
+        true
+    }
+
+    /// Retire one rejected unicast identity: the peer withdrew it, this
+    /// session now accepts it, or an ERR sweep found it stale. Mirrors
+    /// [`Self::forget_known_path`].
+    fn forget_rejected_path(&mut self, prefix: Prefix, path_id: u32) -> bool {
+        if !self.receives_add_path_for_prefix(prefix) {
+            let removed = self.rejected_plain_prefixes.remove(&prefix);
+            if removed {
+                self.count_rejected_only(prefix, false);
+            }
+            return removed;
+        }
+        if !self.rejected_paths.remove(&(prefix, path_id)) {
+            return false;
+        }
+        if let Some(count) = self.rejected_prefix_refcounts.get_mut(&prefix) {
+            if *count > 1 {
+                *count -= 1;
+            } else {
+                self.rejected_prefix_refcounts.remove(&prefix);
+                self.count_rejected_only(prefix, false);
+            }
+        } else {
+            debug_assert!(
+                false,
+                "rejected_prefix_refcounts missing an entry for a prefix still in rejected_paths"
+            );
+        }
+        true
+    }
+
+    /// Stop tracking one family's rejected identities after its
+    /// `max_prefixes_received_*` bound was removed at runtime.
+    fn drop_received_tracking(&mut self, afi: Afi) {
+        let in_family = |prefix: &Prefix| match prefix {
+            Prefix::V4(_) => afi == Afi::Ipv4,
+            Prefix::V6(_) => afi == Afi::Ipv6,
+        };
+        self.rejected_plain_prefixes
+            .retain(|prefix| !in_family(prefix));
+        self.rejected_paths.retain(|(prefix, _)| !in_family(prefix));
+        self.rejected_prefix_refcounts
+            .retain(|prefix, _| !in_family(prefix));
+        match afi {
+            Afi::Ipv4 => self.rejected_only_v4 = 0,
+            _ => self.rejected_only_v6 = 0,
         }
     }
 
@@ -1028,6 +1254,11 @@ impl PeerSession {
         self.known_prefix_refcounts.clear();
         self.known_unicast_v4 = 0;
         self.known_unicast_v6 = 0;
+        self.rejected_plain_prefixes.clear();
+        self.rejected_paths.clear();
+        self.rejected_prefix_refcounts.clear();
+        self.rejected_only_v4 = 0;
+        self.rejected_only_v6 = 0;
         self.known_flowspec.clear();
         self.known_evpn.clear();
         self.known_bgpls.clear();
@@ -1221,6 +1452,11 @@ impl PeerSession {
             known_prefix_refcounts: HashMap::new(),
             known_unicast_v4: 0,
             known_unicast_v6: 0,
+            rejected_plain_prefixes: HashSet::new(),
+            rejected_paths: HashSet::new(),
+            rejected_prefix_refcounts: HashMap::new(),
+            rejected_only_v4: 0,
+            rejected_only_v6: 0,
             known_flowspec: HashSet::new(),
             known_evpn: HashSet::new(),
             known_bgpls: HashSet::new(),
@@ -1390,6 +1626,11 @@ impl PeerSession {
             known_prefix_refcounts: HashMap::new(),
             known_unicast_v4: 0,
             known_unicast_v6: 0,
+            rejected_plain_prefixes: HashSet::new(),
+            rejected_paths: HashSet::new(),
+            rejected_prefix_refcounts: HashMap::new(),
+            rejected_only_v4: 0,
+            rejected_only_v6: 0,
             known_flowspec: HashSet::new(),
             known_evpn: HashSet::new(),
             known_bgpls: HashSet::new(),

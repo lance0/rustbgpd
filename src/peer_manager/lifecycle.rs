@@ -456,6 +456,8 @@ impl PeerManager {
             max_prefixes: managed.max_prefixes,
             max_prefixes_ipv4: tc.max_prefixes_ipv4,
             max_prefixes_ipv6: tc.max_prefixes_ipv6,
+            max_prefixes_received_ipv4: tc.max_prefixes_received_ipv4,
+            max_prefixes_received_ipv6: tc.max_prefixes_received_ipv6,
             max_prefix_restart_seconds: managed.max_prefix_restart_seconds,
             md5_password: tc.md5_password.clone(),
             tcp_ao: tc.tcp_ao.clone(),
@@ -1070,6 +1072,8 @@ impl PeerManager {
                 tc.max_prefixes != config.max_prefixes
                     || tc.max_prefixes_ipv4 != config.max_prefixes_ipv4
                     || tc.max_prefixes_ipv6 != config.max_prefixes_ipv6
+                    || tc.max_prefixes_received_ipv4 != config.max_prefixes_received_ipv4
+                    || tc.max_prefixes_received_ipv6 != config.max_prefixes_received_ipv6
                     || tc.gr_stale_routes_time != config.gr_stale_routes_time
                     || tc.gr_peer_restart_time_max != config.gr_peer_restart_time_max
                     || export_knobs_changed,
@@ -1106,6 +1110,8 @@ impl PeerManager {
                     config.max_prefixes,
                     config.max_prefixes_ipv4,
                     config.max_prefixes_ipv6,
+                    config.max_prefixes_received_ipv4,
+                    config.max_prefixes_received_ipv6,
                     config.gr_stale_routes_time,
                     config.gr_peer_restart_time_max,
                     config.local_ipv6_nexthop,
@@ -1192,6 +1198,8 @@ impl PeerManager {
         managed.transport_config.max_prefixes = config.max_prefixes;
         managed.transport_config.max_prefixes_ipv4 = config.max_prefixes_ipv4;
         managed.transport_config.max_prefixes_ipv6 = config.max_prefixes_ipv6;
+        managed.transport_config.max_prefixes_received_ipv4 = config.max_prefixes_received_ipv4;
+        managed.transport_config.max_prefixes_received_ipv6 = config.max_prefixes_received_ipv6;
         managed.transport_config.gr_stale_routes_time = config.gr_stale_routes_time;
         managed.transport_config.gr_peer_restart_time_max = config.gr_peer_restart_time_max;
         managed.transport_config.local_ipv6_nexthop = config.local_ipv6_nexthop;

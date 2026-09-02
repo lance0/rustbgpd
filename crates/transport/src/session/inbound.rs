@@ -1009,11 +1009,13 @@ impl PeerSession {
         }
         for &(prefix, path_id) in &loop_withdrawn {
             self.forget_known_path(prefix, path_id);
+            self.forget_rejected_path(prefix, path_id);
         }
         for &(prefix, path_id) in &rejected_unicast {
             if self.forget_known_path(prefix, path_id) {
                 loop_withdrawn.push((prefix, path_id));
             }
+            self.remember_rejected_path(prefix, path_id);
         }
         if self.import_explain_enabled {
             for &(prefix, path_id) in &loop_withdrawn {
@@ -1107,12 +1109,15 @@ impl PeerSession {
                 loop_rtc_withdrawn.push(key);
             }
         }
-        // This RFC 7606/loop-rejection path only removes accepted routes and
-        // therefore does not call max-prefix enforcement. Publish after its
-        // complete accounting transaction and before the first awaited RIB
-        // delivery so actor state and gauges cannot diverge on backpressure or
-        // channel failure.
-        self.sync_max_prefix_capacity_metrics();
+        // This RFC 7606/loop-rejection path only removes accepted routes, but
+        // every rejected announcement still counts toward a configured
+        // pre-policy received bound, so enforce (which also publishes the
+        // gauges) after the complete accounting transaction and before the
+        // first awaited RIB delivery so actor state and gauges cannot diverge
+        // on backpressure or channel failure.
+        if self.enforce_max_prefix_limits(true).await {
+            return;
+        }
         if !loop_withdrawn.is_empty()
             || !loop_fs_withdrawn.is_empty()
             || !loop_evpn_withdrawn.is_empty()
@@ -2711,6 +2716,7 @@ impl PeerSession {
         //    cap by flooding a non-unicast family.
         for &(prefix, path_id) in &withdrawn {
             self.forget_known_path(prefix, path_id);
+            self.forget_rejected_path(prefix, path_id);
         }
         // LAN-472: an explicit withdrawal clears any retained reject for
         // the identity — the peer no longer announces it, so "why isn't
@@ -2768,6 +2774,7 @@ impl PeerSession {
         // under the same wire identity. Explicit withdrawals above win on
         // overlap; first-seen rejected announcements remain silent.
         for (prefix, path_id) in otc_rejected_unicast {
+            self.remember_rejected_path(prefix, path_id);
             if self.forget_known_path(prefix, path_id) {
                 withdrawn.push((prefix, path_id));
                 if explain_enabled {
@@ -2791,6 +2798,7 @@ impl PeerSession {
         // from the OTC set by construction (the ownership check is
         // skipped when OTC already dropped this UPDATE).
         for (prefix, path_id) in ownership_rejected_unicast {
+            self.remember_rejected_path(prefix, path_id);
             if self.forget_known_path(prefix, path_id) {
                 withdrawn.push((prefix, path_id));
                 if explain_enabled {
@@ -2811,11 +2819,15 @@ impl PeerSession {
         // `forget_known_path` gates first-seen denies and also deduplicates an
         // explicit withdrawal for the same identity in this UPDATE.
         for (prefix, path_id) in denied_unicast {
+            self.remember_rejected_path(prefix, path_id);
             if self.forget_known_path(prefix, path_id) {
                 withdrawn.push((prefix, path_id));
             }
         }
+        // An accepted identity retires its rejected sibling so the
+        // pre-policy received count stays one slot per prefix.
         for route in &announced {
+            self.forget_rejected_path(route.prefix, route.path_id);
             self.remember_known_path(route.prefix, route.path_id);
         }
         // LAN-472: retain the policy denies (body + MP unicast), clear

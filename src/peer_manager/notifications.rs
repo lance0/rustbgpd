@@ -286,6 +286,7 @@ impl PeerManager {
                 count,
                 bound,
                 family,
+                received,
             } => {
                 let Some(peer_key) = self.peer_key_for_session(session_id) else {
                     debug!(%peer_addr, session_id, ?role, "ignoring max-prefix latch from unknown session");
@@ -310,11 +311,12 @@ impl PeerManager {
                     return;
                 }
 
+                let counted = if received { "received" } else { "accepted" };
                 let error = family.map_or_else(
                     || format!("max-prefix limit exceeded: {count} accepted, bound {bound}"),
                     |(afi, safi)| {
                         format!(
-                            "max-prefix limit exceeded for {afi:?}/{safi:?}: {count} accepted, bound {bound}"
+                            "max-prefix limit exceeded for {afi:?}/{safi:?}: {count} {counted}, bound {bound}"
                         )
                     },
                 );

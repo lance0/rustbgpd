@@ -491,16 +491,19 @@ than `strict`
 (`same-as` needs the deferred fleet-inventory mode), `reject_policy`
 `tag` (it accepts invalid routes into the master table), `prepend_rs_as`,
 `perform_graceful_shutdown`, `max_prefix.action` `block`/`warning`,
-and an effective `max_prefix.count_rejected_routes: true` while a positive
-shutdown or restart limit is active (ARouteServer 1.23.2 defaults this option to true,
-while rustbgpd counts accepted routes only),
 per-client `black_list_pref` and IRR `white_list_*` entries (dropping
 a black list would fail open; dropping a white list would reject
 routes the site intends to accept), and disabling both IRR
 enforcement knobs. `shutdown` emits the positive family ceilings;
 `restart` additionally requires a positive `restart_after` in minutes, checked
 while converting to `u32` seconds. An absent action or zero family limits emit
-neither ceilings nor a restart timer.
+neither ceilings nor a restart timer. The effective
+`max_prefix.count_rejected_routes` selects the counting model: `true`
+(ARouteServer 1.23.2's default) emits the pre-policy
+`max_prefixes_received_ipv4`/`_ipv6` bounds, which count every unicast prefix
+the member announces whether or not import policy accepts it; `false` emits
+the accepted-route `max_prefixes_ipv4`/`_ipv6` bounds. The render receipt
+carries the limit under the emitted key and `null` under the other.
 
 An effective `reject_policy: tag_and_reject` instead emits ordered origin- and
 prefix-reject terms plus `birdwatcher-reject-communities.json`. The startup

@@ -192,6 +192,8 @@ pub(crate) fn api_peer_group_to_config(definition: PeerGroupDefinition) -> PeerG
         // peer-group surface does not carry them.
         max_prefixes_ipv4: None,
         max_prefixes_ipv6: None,
+        max_prefixes_received_ipv4: None,
+        max_prefixes_received_ipv6: None,
         max_prefixes_out_ipv4: None,
         max_prefixes_out_ipv6: None,
         max_prefix_restart_seconds: definition
@@ -488,6 +490,8 @@ fn raw_neighbor(raw: &PresenceAwareNeighborCreate) -> Result<Neighbor, ConfigErr
         max_prefixes: raw.max_prefixes,
         max_prefixes_ipv4: None,
         max_prefixes_ipv6: None,
+        max_prefixes_received_ipv4: None,
+        max_prefixes_received_ipv6: None,
         max_prefixes_out_ipv4: None,
         max_prefixes_out_ipv6: None,
         max_prefix_restart_seconds: raw
@@ -582,6 +586,10 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                     max_prefixes: cfg.max_prefixes,
                     max_prefixes_ipv4: cfg.max_prefixes_ipv4,
                     max_prefixes_ipv6: cfg.max_prefixes_ipv6,
+                    // Pre-policy received bounds are config-file knobs like
+                    // the per-family accepted bounds above.
+                    max_prefixes_received_ipv4: None,
+                    max_prefixes_received_ipv6: None,
                     // Also absent from the runtime neighbor-add surface:
                     // outbound maxima are edited through the config
                     // transaction / SIGHUP path (ADR-0113).
@@ -1140,6 +1148,8 @@ peer_group = "fabric"
             max_prefixes: None,
             max_prefixes_ipv4: None,
             max_prefixes_ipv6: None,
+            max_prefixes_received_ipv4: None,
+            max_prefixes_received_ipv6: None,
             max_prefix_restart_seconds: None,
             md5_password: None,
             tcp_ao: Some(

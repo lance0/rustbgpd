@@ -148,6 +148,8 @@ fn transport_config(remote: SocketAddr) -> TransportConfig {
         max_prefixes: None,
         max_prefixes_ipv4: None,
         max_prefixes_ipv6: None,
+        max_prefixes_received_ipv4: None,
+        max_prefixes_received_ipv6: None,
         peer_group: None,
         md5_password: None,
         tcp_ao: None,

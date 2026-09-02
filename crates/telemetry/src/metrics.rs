@@ -4071,7 +4071,11 @@ impl BgpMetrics {
     ) {
         debug_assert!(matches!(
             scope,
-            "aggregate" | "ipv4_unicast" | "ipv6_unicast"
+            "aggregate"
+                | "ipv4_unicast"
+                | "ipv6_unicast"
+                | "ipv4_unicast_received"
+                | "ipv6_unicast_received"
         ));
         let labels = [peer, scope];
         let usage = i64::try_from(usage).unwrap_or(i64::MAX);
@@ -4094,6 +4098,16 @@ impl BgpMetrics {
             let _ = self.0.max_prefix_limit.remove_label_values(&labels);
             let _ = self.0.max_prefix_headroom.remove_label_values(&labels);
         }
+    }
+
+    /// Remove one scope's usage, limit, and headroom series for a peer. The
+    /// received scopes use this while their bound is unset: without one the
+    /// session does not track rejected identities, so no usage is published.
+    pub fn remove_max_prefix_capacity(&self, peer: &str, scope: &str) {
+        let labels = [peer, scope];
+        let _ = self.0.max_prefix_usage.remove_label_values(&labels);
+        let _ = self.0.max_prefix_limit.remove_label_values(&labels);
+        let _ = self.0.max_prefix_headroom.remove_label_values(&labels);
     }
 
     /// Remove every max-prefix capacity series owned by one live session.

@@ -1295,13 +1295,27 @@ fn restart_action_validates_timer_and_unsupported_actions_are_refused() {
 }
 
 #[test]
-/// Load-bearing proof: defaulting an omitted value to false, checking the
-/// value without an active shutdown/restart positive limit, deleting the
-/// true-value refusal, or reversing client-over-general precedence breaks an
-/// asserted success or refusal below.
-fn rejected_route_counting_is_checked_only_for_an_active_limit() {
-    // ARouteServer 1.23.2 defaults an omitted value to true. Silently treating
-    // this context as accepted-only would change when shutdown happens.
+/// Load-bearing proof: defaulting an omitted value to false, reversing
+/// client-over-general precedence, emitting the accepted-route keys for a
+/// true value, or emitting any limit key without an active shutdown/restart
+/// positive limit breaks an asserted key below.
+fn rejected_route_counting_selects_the_received_prefix_keys() {
+    fn client_keys(rendered: &rs_config_render::Rendered, ip: &str) -> Vec<String> {
+        let config = &rendered.files["config.toml"];
+        let start = config
+            .find(&format!("address = \"{ip}\""))
+            .unwrap_or_else(|| panic!("client {ip} missing from {config}"));
+        let block = &config[start..];
+        let block = block.find("\n[[").map_or(block, |end| &block[..end]);
+        block
+            .lines()
+            .filter(|line| line.starts_with("max_prefixes_"))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    // ARouteServer 1.23.2 defaults an omitted value to true: the pre-policy
+    // received bounds are the faithful translation, not accepted-only ones.
     let mut omitted = healthy_value();
     omitted["cfg"]["filtering"]["max_prefix"]
         .as_mapping_mut()
@@ -1309,72 +1323,66 @@ fn rejected_route_counting_is_checked_only_for_an_active_limit() {
         .remove(serde_yaml::Value::String(
             "count_rejected_routes".to_owned(),
         ));
-    let items = refusals(render(&to_yaml(&omitted), &rtr_options()));
+    let rendered = render(&to_yaml(&omitted), &rtr_options()).expect("omitted value renders");
+    let keys = client_keys(&rendered, "192.0.2.11");
     assert!(
-        items.iter().any(|item| item.contains("client AS4242_1")
-            && item.contains("defaults this option to true")),
-        "{items:?}"
+        keys.iter()
+            .any(|key| key.starts_with("max_prefixes_received_ipv4 = ")),
+        "{keys:?}"
+    );
+    assert!(
+        !keys
+            .iter()
+            .any(|key| key.starts_with("max_prefixes_ipv4 = ")),
+        "{keys:?}"
     );
 
+    // A general true value is inherited by every client and lands in the
+    // receipt under the received key only.
     let mut inherited = healthy_value();
-    inherited["cfg"]["filtering"]["max_prefix"]["action"] = "restart".into();
     set_path(
         &mut inherited,
         &["cfg", "filtering", "max_prefix", "count_rejected_routes"],
         serde_yaml::Value::Bool(true),
     );
-    let items = refusals(render(&to_yaml(&inherited), &rtr_options()));
+    let rendered = render(&to_yaml(&inherited), &rtr_options()).expect("inherited true renders");
+    for client in rendered.receipt["clients"].as_array().expect("clients") {
+        if client["max_prefixes_received_ipv4"].is_null()
+            && client["max_prefixes_received_ipv6"].is_null()
+        {
+            continue;
+        }
+        assert!(client["max_prefixes_ipv4"].is_null(), "{client}");
+        assert!(client["max_prefixes_ipv6"].is_null(), "{client}");
+    }
     assert!(
-        items
-            .iter()
-            .any(|item| item.contains("client AS197000_1") && item.contains("=true")),
-        "{items:?}"
+        rendered.files["config.toml"].contains("max_prefixes_received_ipv6 = "),
+        "{}",
+        rendered.files["config.toml"]
     );
+    assert!(!rendered.files["config.toml"].contains("\nmax_prefixes_ipv"));
 
-    let mut overridden = healthy_value();
+    // A client can select the accepted-route model over an inherited true.
+    let mut overridden = inherited.clone();
     let mut clients = overridden["clients"].clone();
     set_path(
         &mut clients[0],
         &["cfg", "filtering", "max_prefix", "count_rejected_routes"],
-        serde_yaml::Value::Bool(true),
+        serde_yaml::Value::Bool(false),
     );
     set_path(&mut overridden, &["clients"], clients);
-    let items = refusals(render(&to_yaml(&overridden), &rtr_options()));
+    let rendered = render(&to_yaml(&overridden), &rtr_options()).expect("override renders");
+    let keys = client_keys(&rendered, "192.0.2.11");
     assert!(
-        items
-            .iter()
-            .any(|item| item.contains("client AS4242_1") && item.contains("=true")),
-        "{items:?}"
+        keys.iter().any(|key| key.starts_with("max_prefixes_ipv")),
+        "{keys:?}"
     );
-
-    // A client can explicitly select rustbgpd's accepted-route model over an
-    // inherited general true value.
-    let mut allowed_override = healthy_value();
-    set_path(
-        &mut allowed_override,
-        &["cfg", "filtering", "max_prefix", "action"],
-        serde_yaml::Value::String("restart".into()),
+    assert!(!keys.iter().any(|key| key.contains("received")), "{keys:?}");
+    assert!(
+        rendered.files["config.toml"].contains("max_prefixes_received_ipv"),
+        "sibling keeps the inherited received model: {}",
+        rendered.files["config.toml"]
     );
-    set_path(
-        &mut allowed_override,
-        &["cfg", "filtering", "max_prefix", "restart_after"],
-        serde_yaml::Value::Number(1.into()),
-    );
-    set_path(
-        &mut allowed_override,
-        &["cfg", "filtering", "max_prefix", "count_rejected_routes"],
-        serde_yaml::Value::Bool(true),
-    );
-    let mut clients = allowed_override["clients"].clone();
-    for client in clients.as_sequence_mut().expect("clients list") {
-        set_path(
-            client,
-            &["cfg", "filtering", "max_prefix", "count_rejected_routes"],
-            serde_yaml::Value::Bool(false),
-        );
-    }
-    set_path(&mut allowed_override, &["clients"], clients);
-    render(&to_yaml(&allowed_override), &rtr_options()).expect("explicit false override");
 
     // Counting semantics are irrelevant when no shutdown action is active,
     // even if ARouteServer leaves resolved positive limits in the context.
@@ -1396,7 +1404,8 @@ fn rejected_route_counting_is_checked_only_for_an_active_limit() {
         serde_yaml::Value::Null,
     );
     set_path(&mut disabled, &["clients"], clients);
-    render(&to_yaml(&disabled), &rtr_options()).expect("disabled max-prefix counting");
+    let rendered = render(&to_yaml(&disabled), &rtr_options()).expect("disabled max-prefix");
+    assert!(client_keys(&rendered, "192.0.2.11").is_empty());
 
     // A timed restart with only zero/unset family limits is also inactive.
     let mut zero_limits = healthy_value();
@@ -1438,6 +1447,64 @@ fn rejected_route_counting_is_checked_only_for_an_active_limit() {
             .as_array()
             .unwrap()
             .iter()
-            .all(|client| client["max_prefix_restart_seconds"].is_null())
+            .all(|client| client["max_prefix_restart_seconds"].is_null()
+                && client["max_prefixes_received_ipv4"].is_null())
     );
+}
+
+#[test]
+/// M90 fixture proof: the checked-in differential context keeps every member
+/// on the accepted-route model; flipping one member to ARouteServer's default
+/// moves exactly that member's limits to the received keys with the same
+/// values, and the receipt reports them under the emitted key only.
+fn m90_member_with_rejected_route_counting_renders_received_limits() {
+    let mut value: serde_yaml::Value = serde_yaml::from_str(M90_HAND).expect("M90 context parses");
+    let mut clients = value["clients"].clone();
+    set_path(
+        &mut clients[2],
+        &["cfg", "filtering", "max_prefix", "count_rejected_routes"],
+        serde_yaml::Value::Bool(true),
+    );
+    set_path(&mut value, &["clients"], clients);
+    let rendered = render(&to_yaml(&value), &Options::default()).expect("M90 variant renders");
+    let config = &rendered.files["config.toml"];
+    assert_eq!(
+        config.matches("\nmax_prefixes_ipv4 = 100\n").count(),
+        2,
+        "{config}"
+    );
+    assert_eq!(
+        config.matches("\nmax_prefixes_ipv6 = 12000\n").count(),
+        2,
+        "{config}"
+    );
+    assert_eq!(
+        config
+            .matches("\nmax_prefixes_received_ipv4 = 100\n")
+            .count(),
+        1,
+        "{config}"
+    );
+    assert_eq!(
+        config
+            .matches("\nmax_prefixes_received_ipv6 = 12000\n")
+            .count(),
+        1,
+        "{config}"
+    );
+    let receipt = rendered.receipt["clients"].as_array().expect("clients");
+    let flipped = receipt
+        .iter()
+        .find(|client| client["id"] == "AS64502_1")
+        .expect("flipped member in receipt");
+    assert_eq!(flipped["max_prefixes_received_ipv4"], 100);
+    assert_eq!(flipped["max_prefixes_received_ipv6"], 12000);
+    assert!(flipped["max_prefixes_ipv4"].is_null());
+    assert!(flipped["max_prefixes_ipv6"].is_null());
+    let untouched = receipt
+        .iter()
+        .find(|client| client["id"] == "AS64500_1")
+        .expect("untouched member in receipt");
+    assert_eq!(untouched["max_prefixes_ipv4"], 100);
+    assert!(untouched["max_prefixes_received_ipv4"].is_null());
 }

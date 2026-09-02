@@ -179,6 +179,49 @@ fn remaining_prefix_headroom(limit: Option<u32>, count: usize) -> Option<u32> {
 }
 
 impl PeerSession {
+    /// Enqueue one plain ROUTE-REFRESH for a negotiated family.
+    fn send_route_refresh(&mut self, afi: Afi, safi: Safi) -> Result<(), String> {
+        let msg = Message::RouteRefresh(RouteRefreshMessage::new(afi, safi));
+        self.enqueue_priority(&msg).map_err(|e| e.to_string())?;
+        info!(peer = %self.peer_label, ?afi, ?safi, "sent ROUTE-REFRESH");
+        self.metrics
+            .record_message_sent(&self.peer_label, "route_refresh");
+        Ok(())
+    }
+
+    /// A `max_prefixes_received_*` bound enabled on an Established session
+    /// starts with no rejected identities, so ask the peer to re-announce
+    /// its table: every replayed rejection is then counted, and an
+    /// enhanced-refresh window reconciles the accepted side at `EoRR`.
+    /// Without route-refresh support the count stays exact only for
+    /// announcements from now on, which the operator is told.
+    fn request_received_recount(&mut self, afi: Afi) {
+        if self.fsm.state() != SessionState::Established {
+            return;
+        }
+        let family = (afi, Safi::Unicast);
+        let refresh_capable = self
+            .negotiated
+            .as_ref()
+            .is_some_and(|n| n.peer_route_refresh)
+            && self.negotiated_families().contains(&family);
+        let outcome = if refresh_capable {
+            self.send_route_refresh(afi, Safi::Unicast)
+        } else {
+            Err("peer did not negotiate route refresh for the family".to_owned())
+        };
+        if let Err(error) = outcome {
+            warn!(
+                peer = %self.peer_label,
+                ?afi,
+                %error,
+                "received-prefix bound enabled on a live session without a route refresh; \
+                 rejected announcements are counted from now on and a session reset makes \
+                 the count exact"
+            );
+        }
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "selection validation keeps exact owner, inventory, and staged-metadata checks together"
@@ -1350,13 +1393,9 @@ impl PeerSession {
                     let _ = reply.send(Err(PeerCommandError::FamilyNotNegotiated { afi, safi }));
                     return ControlFlow::Continue(());
                 }
-                let msg = Message::RouteRefresh(RouteRefreshMessage::new(afi, safi));
-                if let Err(e) = self.enqueue_priority(&msg) {
-                    let _ = reply.send(Err(PeerCommandError::SendFailed(e.to_string())));
+                if let Err(e) = self.send_route_refresh(afi, safi) {
+                    let _ = reply.send(Err(PeerCommandError::SendFailed(e)));
                 } else {
-                    info!(peer = %self.peer_label, ?afi, ?safi, "sent ROUTE-REFRESH");
-                    self.metrics
-                        .record_message_sent(&self.peer_label, "route_refresh");
                     let _ = reply.send(Ok(()));
                 }
                 ControlFlow::Continue(())
@@ -1461,6 +1500,8 @@ impl PeerSession {
                     max_prefixes,
                     max_prefixes_ipv4,
                     max_prefixes_ipv6,
+                    max_prefixes_received_ipv4,
+                    max_prefixes_received_ipv6,
                     gr_stale_routes_time,
                     gr_peer_restart_time_max,
                     local_ipv6_nexthop,
@@ -1477,9 +1518,26 @@ impl PeerSession {
                 // `RibUpdate::RefreshPeerOutbound` so preflight-suppressed
                 // routes are re-probed and advertised AS_PATHs re-encoded
                 // under the new values.
+                let received_was_tracked = [
+                    (Afi::Ipv4, self.config.max_prefixes_received_ipv4.is_some()),
+                    (Afi::Ipv6, self.config.max_prefixes_received_ipv6.is_some()),
+                ];
                 self.config.max_prefixes = max_prefixes;
                 self.config.max_prefixes_ipv4 = max_prefixes_ipv4;
                 self.config.max_prefixes_ipv6 = max_prefixes_ipv6;
+                self.config.max_prefixes_received_ipv4 = max_prefixes_received_ipv4;
+                self.config.max_prefixes_received_ipv6 = max_prefixes_received_ipv6;
+                for (afi, was_tracked) in received_was_tracked {
+                    let tracked = match afi {
+                        Afi::Ipv4 => max_prefixes_received_ipv4.is_some(),
+                        _ => max_prefixes_received_ipv6.is_some(),
+                    };
+                    if was_tracked && !tracked {
+                        self.drop_received_tracking(afi);
+                    } else if !was_tracked && tracked {
+                        self.request_received_recount(afi);
+                    }
+                }
                 self.config.gr_stale_routes_time = gr_stale_routes_time;
                 self.config.gr_peer_restart_time_max = gr_peer_restart_time_max;
                 self.config.local_ipv6_nexthop = local_ipv6_nexthop;

@@ -324,6 +324,7 @@ async fn queued_max_prefix_latch_fences_inbound_before_collision_handling() {
             count: 501,
             bound: 500,
             family: None,
+            received: false,
         })
         .unwrap();
 
@@ -378,6 +379,7 @@ async fn max_prefix_latch_arriving_during_idle_query_blocks_inbound_replace() {
                             count: 501,
                             bound: 500,
                             family: Some((Afi::Ipv4, Safi::Unicast)),
+                            received: false,
                         })
                         .unwrap();
                     let _ = reply.send(PeerSessionState {

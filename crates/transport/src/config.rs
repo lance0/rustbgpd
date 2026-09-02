@@ -418,6 +418,13 @@ pub struct TransportConfig {
     /// Maximum unique IPv6-unicast prefixes accepted before Cease/1.
     /// Enforced independently of `max_prefixes` (ADR-0108).
     pub max_prefixes_ipv6: Option<u32>,
+    /// Maximum unique IPv4-unicast prefixes the peer may announce, counted
+    /// before import policy (accepted and rejected alike), before Cease/1.
+    /// Enforced independently of the accepted-route bounds (ADR-0108
+    /// amendment). Rejected identities are tracked only while this is set.
+    pub max_prefixes_received_ipv4: Option<u32>,
+    /// IPv6-unicast sibling of `max_prefixes_received_ipv4`.
+    pub max_prefixes_received_ipv6: Option<u32>,
     /// Optional peer-group name used for policy matching and operator visibility.
     pub peer_group: Option<String>,
     /// TCP MD5 authentication password (RFC 2385).
@@ -562,6 +569,8 @@ impl TransportConfig {
             max_prefixes: None,
             max_prefixes_ipv4: None,
             max_prefixes_ipv6: None,
+            max_prefixes_received_ipv4: None,
+            max_prefixes_received_ipv6: None,
             peer_group: None,
             md5_password: None,
             tcp_ao: None,

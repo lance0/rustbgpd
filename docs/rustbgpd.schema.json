@@ -2040,6 +2040,24 @@
           "format": "uint32",
           "minimum": 1
         },
+        "max_prefixes_received_ipv4": {
+          "description": "Maximum unique IPv4-unicast prefixes this peer may announce,\ncounted before import policy (accepted and rejected alike),\nbefore the session is torn down with Cease/1. Enforced\nindependently of `max_prefixes_ipv4` (ADR-0108 amendment).\nUnset = unlimited.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_received_ipv6": {
+          "description": "Maximum unique IPv6-unicast prefixes this peer may announce,\ncounted before import policy (accepted and rejected alike),\nbefore the session is torn down with Cease/1. Enforced\nindependently of `max_prefixes_ipv6` (ADR-0108 amendment).\nUnset = unlimited.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
         "md5_password": {
           "description": "TCP MD5 signature password (RFC 2385).",
           "type": [
@@ -2511,6 +2529,24 @@
           ],
           "format": "uint32",
           "minimum": 1
+        },
+        "max_prefixes_received_ipv4": {
+          "description": "Pre-policy IPv4-unicast received-prefix limit inherited by\nneighbors in this group. See the neighbor-level\n`max_prefixes_received_ipv4`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "max_prefixes_received_ipv6": {
+          "description": "Pre-policy IPv6-unicast received-prefix limit inherited by\nneighbors in this group. See the neighbor-level\n`max_prefixes_received_ipv6`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
         },
         "md5_password": {
           "description": "TCP MD5 signature password (RFC 2385) inherited by neighbors in\nthis group.",
