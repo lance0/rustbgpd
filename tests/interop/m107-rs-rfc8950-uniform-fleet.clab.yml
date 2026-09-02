@@ -1,0 +1,89 @@
+# Containerlab topology: RFC 8950 uniform-fleet route server (M107)
+#
+# One IPv6-only IXP peering LAN (2001:db8:107::/64) bridged through a
+# dedicated switch node, carrying:
+#   - rustbgpd route server  2001:db8:107::9  (config rendered by
+#     tools/rs-config-render from the site under
+#     m107-rs-rfc8950-uniform-fleet/: both unicast families on each IPv6
+#     session, strict_peer next-hop ownership)
+#   - two GoBGP members       2001:db8:107::11-12 (AS64500-AS64501), each
+#     announcing IPv4 and IPv6 unicast with its own IPv6 address as the
+#     next hop (RFC 8950 for the IPv4 routes)
+#
+# No peering or access interface carries IPv4: the lab proves IPv4 reachability
+# information crossing an IPv6-only fabric through a transparent route server
+# that keeps the originating member's IPv6 next hop. Containerlab may assign
+# out-of-band IPv4 addresses on its separate management network.
+#
+# The route-server config is rendered and copied in by the driver
+# script AFTER deploy (docker cp), because the render is part of the
+# test — nothing is bind-mounted into the route-server node.
+#
+# Usage:
+#   docker build --target dev -t rustbgpd:dev .
+#   docker build --build-arg TARGETARCH=amd64 --build-arg GOBGP_VERSION=4.8.0 \
+#     --build-arg GOBGP_SHA256=43b570ae5cc1afab7aebdd9d8f4536e27656465848270c8a6f5fda1ffe093a03 \
+#     -t gobgp:v4.8.0-m107 -f tests/interop/Dockerfile.gobgp-v47 tests/interop
+#   containerlab deploy -t tests/interop/m107-rs-rfc8950-uniform-fleet.clab.yml
+#   bash tests/interop/scripts/test-m107-rs-rfc8950-uniform-fleet.sh
+#   containerlab destroy -t tests/interop/m107-rs-rfc8950-uniform-fleet.clab.yml
+
+name: m107-rs-rfc8950-uniform-fleet
+
+topology:
+  nodes:
+    # Plain bridge over the three access ports: a multipoint peering LAN
+    # out of containerlab's p2p links.
+    switch:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      exec:
+        - ip link add br0 type bridge mcast_snooping 0
+        - ip link set eth1 master br0
+        - ip link set eth2 master br0
+        - ip link set eth3 master br0
+        - ip link set eth1 up
+        - ip link set eth2 up
+        - ip link set eth3 up
+        - ip link set br0 up
+
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      exec:
+        - ip -6 addr add 2001:db8:107::9/64 dev eth1
+        - ip link set eth1 up
+        - mkdir -p /etc/rustbgpd /var/lib/rustbgpd
+      env:
+        RUST_LOG: info
+
+    member1:
+      kind: linux
+      image: gobgp:v4.8.0-m107
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m107-member1.toml:/config/gobgp.toml:ro
+      exec:
+        - ip -6 addr add 2001:db8:107::11/64 dev eth1
+        - ip link set eth1 up
+
+    member2:
+      kind: linux
+      image: gobgp:v4.8.0-m107
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m107-member2.toml:/config/gobgp.toml:ro
+      exec:
+        - ip -6 addr add 2001:db8:107::12/64 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["switch:eth1", "rustbgpd:eth1"]
+    - endpoints: ["switch:eth2", "member1:eth1"]
+    - endpoints: ["switch:eth3", "member2:eth1"]
+
+# rustbgpd RS: AS 64496, 2001:db8:107::9 (BGP identifier 192.0.2.10)
+# member1: AS64500, 2001:db8:107::11
+# member2: AS64501, 2001:db8:107::12

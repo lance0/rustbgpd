@@ -559,7 +559,11 @@ session's own IPv6 address as its next hop. It is refused when any
 IPv4-session client exists in the same context — a mixed fleet needs the
 next-hop translation [ADR-0128](../../docs/adr/0128-route-server-next-hop-translation.md)
 keeps demand-gated — or when `blackhole_filtering.policy_ipv4` is active,
-because the IPv4 blackhole terms are bound to IPv4 sessions. Blackhole
+because the IPv4 blackhole terms are bound to IPv4 sessions.
+[`tests/interop/m107-rs-rfc8950-uniform-fleet/`](../../tests/interop/m107-rs-rfc8950-uniform-fleet/README.md)
+proves the rendered shape on an IPv6-only peering LAN: strict_peer accepts the
+RFC 8950 next hop, rejects a foreign one, and transparent export keeps the
+originator's IPv6 next hop. Blackhole
 policies support `propagate-unchanged` and
 `rewrite-next-hop`. Active-family marked routes must have an IRR-authorized
 origin and fall under a separately widened IRR covering set; this bypasses

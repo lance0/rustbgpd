@@ -1,0 +1,29 @@
+# M107 RFC 8950 uniform-fleet lab — arouteserver member roster (clients.yml).
+#
+# Two members on the IPv6-only peering LAN 2001:db8:107::/64, each with
+# one IPv4 and one IPv6 route object (answered by bgpq4-stub.sh):
+#   - AS64500 member1 (2001:db8:107::11): 198.51.100.0/24 le 25, 2001:db8:1::/48
+#   - AS64501 member2 (2001:db8:107::12): 203.0.113.0/24, 2001:db8:2::/48
+clients:
+  - asn: 64500
+    ip: "2001:db8:107::11"
+    description: "member1 - RFC 8950 member"
+    cfg:
+      filtering:
+        irrdb:
+          as_sets:
+            - "AS-M107-ONE"
+        max_prefix:
+          limit_ipv4: 100
+          limit_ipv6: 100
+  - asn: 64501
+    ip: "2001:db8:107::12"
+    description: "member2 - RFC 8950 member"
+    cfg:
+      filtering:
+        irrdb:
+          as_sets:
+            - "AS-M107-TWO"
+        max_prefix:
+          limit_ipv4: 100
+          limit_ipv6: 100

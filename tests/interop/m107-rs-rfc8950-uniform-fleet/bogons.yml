@@ -1,0 +1,16 @@
+# M107 RFC 8950 uniform-fleet lab — arouteserver bogons override.
+#
+# arouteserver's DEFAULT bogons list correctly includes the RFC 3849 and
+# RFC 5737 documentation prefixes — exactly the space this lab announces
+# from. This override keeps only entries that are NOT lab actor space and
+# must stay in lockstep with the `bogons:` key of context.yml.
+bogons:
+  - prefix: "10.0.0.0"
+    length: 8
+    comment: "RFC 1918"
+  - prefix: "192.168.0.0"
+    length: 16
+    comment: "RFC 1918"
+  - prefix: "fc00::"
+    length: 7
+    comment: "unique local"
