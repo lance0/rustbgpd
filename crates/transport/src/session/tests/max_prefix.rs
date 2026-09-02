@@ -294,6 +294,8 @@ async fn collision_candidate_cannot_overwrite_or_reap_primary_capacity_metrics()
         make_test_session_with_metrics_and_identity(metrics.clone(), SessionIdentity::primary(1));
     let (mut candidate, mut candidate_rib_rx) =
         make_test_session_with_metrics_and_identity(metrics, SessionIdentity::inbound_candidate(2));
+    primary.config.max_prefixes_received_ipv4 = Some(10);
+    candidate.config.max_prefixes_received_ipv4 = Some(10);
     let (primary_client, _primary_server) = connected_stream_pair().await;
     primary.test_install_stream(primary_client);
     establish_test_session(&mut primary, 65002).await;
@@ -322,6 +324,12 @@ async fn collision_candidate_cannot_overwrite_or_reap_primary_capacity_metrics()
         .process_update(ipv4_announce(v4_prefix(3), 0, false))
         .await;
     assert_max_prefix_gauge(&primary, "bgp_max_prefix_usage", "aggregate", Some(2.0));
+    assert_max_prefix_gauge(
+        &primary,
+        "bgp_max_prefix_usage",
+        "ipv4_unicast_received",
+        Some(2.0),
+    );
     assert_eq!(
         peer_truth_gauge(
             &primary.metrics,
@@ -331,6 +339,15 @@ async fn collision_candidate_cannot_overwrite_or_reap_primary_capacity_metrics()
         ),
         Some(1.0),
         "inactive candidate must not overwrite active-primary truth"
+    );
+
+    candidate.config.max_prefixes_received_ipv4 = None;
+    candidate.drop_received_tracking(Afi::Ipv4);
+    assert_max_prefix_gauge(
+        &primary,
+        "bgp_max_prefix_usage",
+        "ipv4_unicast_received",
+        Some(2.0),
     );
 
     drop(candidate);

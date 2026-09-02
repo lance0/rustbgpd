@@ -1160,8 +1160,10 @@ impl PeerSession {
             Afi::Ipv4 => "ipv4_unicast_received",
             _ => "ipv6_unicast_received",
         };
-        self.metrics
-            .remove_max_prefix_capacity(&self.peer_label, scope);
+        if self.max_prefix_metric_lease.active {
+            self.metrics
+                .remove_max_prefix_capacity(&self.peer_label, scope);
+        }
         let in_family = |prefix: &Prefix| match prefix {
             Prefix::V4(_) => afi == Afi::Ipv4,
             Prefix::V6(_) => afi == Afi::Ipv6,

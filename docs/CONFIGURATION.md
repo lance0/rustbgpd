@@ -1435,6 +1435,7 @@ hold_time = 45  # neighbor override beats peer-group default
 
 Peer-group fields mirror inheritable neighbor settings: timers, families,
 prefix limits (`max_prefixes`, `max_prefixes_ipv4`, `max_prefixes_ipv6`,
+`max_prefixes_received_ipv4`, `max_prefixes_received_ipv6`,
 `max_prefixes_out_ipv4`, `max_prefixes_out_ipv6`) and
 `max_prefix_restart_seconds`,
 GR/LLGR, Add-Path, route-server / RR flags, BGP Role / strict-role defaults,
