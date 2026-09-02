@@ -987,6 +987,13 @@ impl Config {
                         reason: format!("cache_servers[{i}]: expire_interval must be > 0"),
                     });
                 }
+                if let Some(password) = &server.md5_password
+                    && (password.is_empty() || password.len() > 80)
+                {
+                    return Err(ConfigError::InvalidRpkiConfig {
+                        reason: format!("cache_servers[{i}]: md5_password must be 1..=80 bytes"),
+                    });
+                }
                 if let Some(tcp_ao) = &server.tcp_ao {
                     if server.md5_password.is_some() {
                         return Err(ConfigError::InvalidRpkiConfig {

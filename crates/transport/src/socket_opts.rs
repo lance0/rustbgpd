@@ -26,6 +26,16 @@ use zeroize::{Zeroize, Zeroizing};
 #[cfg(target_os = "linux")]
 const TCP_MD5SIG_MAXKEYLEN: usize = 80;
 
+fn validate_tcp_md5sig_key(password: &str) -> io::Result<()> {
+    if password.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "MD5 password must not be empty",
+        ));
+    }
+    Ok(())
+}
+
 /// Linux `tcp_md5sig`. The key buffer is populated only for the duration of
 /// one `setsockopt` call and is scrubbed, together with its length, on drop.
 #[cfg(target_os = "linux")]
@@ -147,9 +157,10 @@ fn tcp_md5sig_setsockopt(
 /// # Errors
 ///
 /// Returns the kernel `setsockopt` error, or `InvalidInput` when the
-/// password exceeds the 80-byte kernel key limit.
+/// password is empty or exceeds the 80-byte kernel key limit.
 #[cfg(target_os = "linux")]
 pub fn set_tcp_md5sig(socket: &Socket, peer: SocketAddr, password: &str) -> io::Result<()> {
+    validate_tcp_md5sig_key(password)?;
     tcp_md5sig_setsockopt(socket, peer, None, password.as_bytes())
 }
 
@@ -162,7 +173,7 @@ pub fn set_tcp_md5sig(socket: &Socket, peer: SocketAddr, password: &str) -> io::
 /// # Errors
 ///
 /// Returns the kernel `setsockopt` error (`ENOPROTOOPT` on kernels without
-/// `TCP_MD5SIG_EXT`), or `InvalidInput` for an oversized password.
+/// `TCP_MD5SIG_EXT`), or `InvalidInput` for an empty or oversized password.
 #[cfg(target_os = "linux")]
 pub fn set_tcp_md5sig_prefix(
     socket: &Socket,
@@ -170,6 +181,7 @@ pub fn set_tcp_md5sig_prefix(
     prefix_len: u8,
     password: &str,
 ) -> io::Result<()> {
+    validate_tcp_md5sig_key(password)?;
     tcp_md5sig_setsockopt(
         socket,
         SocketAddr::new(peer, 0),
@@ -199,6 +211,7 @@ pub fn remove_tcp_md5sig(socket: &Socket, peer: IpAddr, prefix_len: u8) -> io::R
 /// Stub for non-Linux platforms.
 #[cfg(not(target_os = "linux"))]
 pub fn set_tcp_md5sig(_socket: &Socket, _peer: SocketAddr, _password: &str) -> io::Result<()> {
+    validate_tcp_md5sig_key(_password)?;
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "TCP MD5 authentication is only supported on Linux",
@@ -213,6 +226,7 @@ pub fn set_tcp_md5sig_prefix(
     _prefix_len: u8,
     _password: &str,
 ) -> io::Result<()> {
+    validate_tcp_md5sig_key(_password)?;
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "TCP MD5 authentication is only supported on Linux",
@@ -3314,6 +3328,7 @@ pub fn set_gtsm(_socket: &Socket, _remote: SocketAddr, _hops: NonZeroU8) -> io::
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+    use socket2::{Domain, Protocol, Type};
     use std::mem;
 
     // Stable, dependency-free negative trait assertion. If `$ty` implements
@@ -3385,6 +3400,19 @@ mod tests {
         assert_eq!(sig.tcpm_keylen, 0);
         assert!(sig.tcpm_key.iter().all(|byte| *byte == 0));
         assert!(mem::needs_drop::<TcpMd5Sig>());
+    }
+
+    #[test]
+    fn public_tcp_md5_setters_reject_empty_keys() {
+        let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
+        let peer: SocketAddr = "127.0.0.1:179".parse().unwrap();
+
+        for result in [
+            set_tcp_md5sig(&socket, peer, ""),
+            set_tcp_md5sig_prefix(&socket, peer.ip(), 32, ""),
+        ] {
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        }
     }
 
     #[test]

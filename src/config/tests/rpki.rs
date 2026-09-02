@@ -326,6 +326,19 @@ fn rpki_cache_server_md5_password_parses_and_never_debug_prints() {
 }
 
 #[test]
+fn rpki_cache_server_rejects_empty_and_oversized_md5_passwords() {
+    for password in [String::new(), "k".repeat(81), "é".repeat(41)] {
+        let err = parse(&rpki_toml(&format!("md5_password = {password:?}")))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("cache_servers[0]: md5_password must be 1..=80 bytes"),
+            "{err}"
+        );
+    }
+}
+
+#[test]
 fn rpki_cache_server_tcp_ao_parses_in_neighbor_shape() {
     let config = parse(&rpki_toml(
         "tcp_ao = { key = \"rtr-ao-hunter2\", send_id = 1, recv_id = 2, algorithm = \"hmac(sha256)\" }",
