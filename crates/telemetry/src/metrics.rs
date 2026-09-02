@@ -1202,7 +1202,7 @@ impl BgpMetrics {
         let max_prefix_blocked = IntCounterVec::new(
             Opts::new(
                 "bgp_max_prefix_blocked_total",
-                "Net-new prefixes withheld from a peer's inbound feed by a full max-prefix bound under the block action.",
+                "Inbound max-prefix block episodes opened for this peer and scope, counted once when the first net-new prefix is withheld.",
             ),
             &["peer", "scope"],
         )

@@ -874,8 +874,9 @@ stays Established; attribute changes and new Add-Path identities for prefixes
 already accepted still pass. The first withheld prefix opens a blocking episode
 (one warn log line, `bgp_max_prefix_blocking{peer,scope}` = 1, the
 `inbound_prefix_limits[]` row in `rbgp neighbor <addr>` reports
-`blocking=inbound_prefix_limit_reached`) and every withheld prefix increments
-`bgp_max_prefix_blocked_total`. When usage falls back under the bound (a
+`blocking=inbound_prefix_limit_reached`) and increments
+`bgp_max_prefix_blocked_total` once for that episode; prefixes withheld later in
+the same episode are not counted again. When usage falls back under the bound (a
 withdrawal, an enhanced-refresh sweep, or a raised limit), the bound is
 removed, or the action leaves `block`, the episode ends and the daemon sends
 one plain ROUTE-REFRESH per affected family so the peer replays what was
@@ -1233,7 +1234,7 @@ without a `reason` label encode the mechanism in the metric name.
 | `bgp_update_malformed_total{peer,disposition}` | Malformed UPDATE messages by the RFC 7606 disposition applied: `attribute_discard` (offending attribute dropped, UPDATE proceeds), `treat_as_withdraw` (every route in the UPDATE handled as withdrawn, session stays Established), or `session_reset` (NOTIFICATION + teardown, retained where the NLRI cannot be trusted — including the §5.2 escalation when a treat-as-withdraw-class error arrives with no reachable NLRI). One increment per malformed UPDATE, labeled with the strongest-action disposition that governed it (§3 (h)). Each increment is accompanied by a warn log line per malformed attribute and, at DEBUG, the §6 full-message hex capture |
 | `bgp_exact_export_rejections_total{peer,family,reason}` | Post-policy announcements rejected before Adj-RIB-Out commit because the session's exact one-route encoder could not produce a legal wire message. `family` is a bounded OpenConfig AFI/SAFI label; `reason` is `encoding`, `missing_ipv6_next_hop`, `ipv4_requires_extended_next_hop`, or `message_too_long`. Alert on a sustained increase, then correlate the peer/family with the warning log's bounded route identity and detail. Series are reaped only when the configured peer is deleted. |
 | `bgp_max_prefix_exceeded_total{peer}` | `max_prefixes` ceiling breaches; each increment is followed by max-prefix teardown: bare Cease/1 without Notification GR, or RFC 8538 Hard Reset encapsulating Cease/1 when the N-bit was negotiated (see "Peer max-prefix exceeded" above) |
-| `bgp_max_prefix_blocked_total{peer,scope}` | Net-new prefixes withheld from a peer's inbound feed by a full bound under `max_prefix_action = "block"`. Carries no prefix label: the withheld set is exactly the unbounded quantity the limit exists to contain — the peer's replay after recovery, or `rbgp rib received <addr>`, shows what is installed |
+| `bgp_max_prefix_blocked_total{peer,scope}` | Blocking episodes opened for a scope under `max_prefix_action = "block"`, counted once when the first net-new prefix is withheld by a full bound — not once per withheld prefix. Each increment marks a `bgp_max_prefix_blocking{peer,scope}` transition to 1; the scope must recover to 0 before another withheld prefix increments the counter again. Read it as how often a peer has driven a bound to full, never as how much it sent: a `rate()` over it measures episode frequency, the gauge answers whether prefixes are being withheld right now, and the peer's replay after recovery, or `rbgp rib received <addr>`, shows what is installed. Carries no prefix label: the withheld set is exactly the unbounded quantity the limit exists to contain |
 | `bgp_max_prefix_warning_total{peer,scope}` | `max_prefix_warning_percent` (or the bound itself under `max_prefix_action = "warning"`) crossings, one per crossing per scope; each is paired with one warn log line and one `max_prefix_warning` session event |
 
 The shipped `BgpMaxPrefixNearLimit` example alert warns after a finite scope
