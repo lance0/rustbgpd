@@ -2184,6 +2184,231 @@ async fn block_action_received_bound_drops_rejections_without_recording_them() {
     assert_eq!(session.received_unicast_v4(), 0);
     assert!(!session.max_prefix_scope_blocking(MaxPrefixScope::Ipv4Received));
 }
+#[tokio::test]
+async fn block_action_cross_update_reannounce_deduplicates_blocked_total() {
+    let mut config = mode_config(crate::config::MaxPrefixAction::Block);
+    config.max_prefixes_ipv4 = Some(1);
+    let (mut session, mut rib_rx, _notify_rx, _server) = notifying_session(config).await;
+    install_dual_stack_session(&mut session, true);
+
+    let blocked_total = |s: &PeerSession| {
+        counter_value(
+            &s.metrics,
+            "bgp_max_prefix_blocked_total",
+            &s.peer_label,
+            "ipv4_unicast",
+        )
+    };
+
+    session
+        .process_update(ipv4_announce(v4_prefix(1), 1, true))
+        .await;
+    assert_eq!(session.known_unicast_v4, 1);
+    assert_eq!(blocked_total(&session), None);
+    while rib_rx.try_recv().is_ok() {}
+
+    let attrs = [
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+    ];
+    let update = UpdateMessage::build(
+        &[
+            Ipv4NlriEntry {
+                path_id: 1,
+                prefix: v4_prefix(2),
+            },
+            Ipv4NlriEntry {
+                path_id: 2,
+                prefix: v4_prefix(2),
+            },
+        ],
+        &[],
+        &attrs,
+        true,
+        true,
+        Ipv4UnicastMode::Body,
+    );
+    session.process_update(update).await;
+    assert_eq!(session.known_unicast_v4, 1);
+    assert!(session.max_prefix_scope_blocking(MaxPrefixScope::Ipv4));
+    assert_eq!(
+        blocked_total(&session),
+        Some(1.0),
+        "multiple Add-Path paths for one blocked prefix increment blocked total once"
+    );
+
+    session
+        .process_update(ipv4_announce(v4_prefix(2), 3, true))
+        .await;
+    assert_eq!(session.known_unicast_v4, 1);
+    assert_eq!(
+        blocked_total(&session),
+        Some(1.0),
+        "subsequent path for already-blocked prefix must not re-increment blocked total"
+    );
+
+    session
+        .process_update(ipv4_announce(v4_prefix(3), 1, true))
+        .await;
+    assert_eq!(session.known_unicast_v4, 1);
+    assert_eq!(
+        blocked_total(&session),
+        Some(1.0),
+        "subsequent withheld prefix within active episode does not re-increment"
+    );
+}
+
+#[tokio::test]
+async fn block_action_add_path_received_limit_deduplicates_blocked_total() {
+    let mut config = mode_config(crate::config::MaxPrefixAction::Block);
+    config.max_prefixes_received_ipv4 = Some(1);
+    let (mut session, mut rib_rx, _notify_rx, _server) = notifying_session(config).await;
+    install_dual_stack_session(&mut session, true);
+    install_deny_all_import_policy(&mut session);
+
+    let blocked_total = |s: &PeerSession| {
+        counter_value(
+            &s.metrics,
+            "bgp_max_prefix_blocked_total",
+            &s.peer_label,
+            "ipv4_unicast_received",
+        )
+    };
+
+    session
+        .process_update(ipv4_announce(v4_prefix(1), 1, true))
+        .await;
+    assert_eq!(session.received_unicast_v4(), 1);
+    assert_eq!(blocked_total(&session), None);
+    while rib_rx.try_recv().is_ok() {}
+
+    let attrs = [
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+    ];
+    let update = UpdateMessage::build(
+        &[
+            Ipv4NlriEntry {
+                path_id: 1,
+                prefix: v4_prefix(2),
+            },
+            Ipv4NlriEntry {
+                path_id: 2,
+                prefix: v4_prefix(2),
+            },
+        ],
+        &[],
+        &attrs,
+        true,
+        true,
+        Ipv4UnicastMode::Body,
+    );
+    session.process_update(update).await;
+    assert_eq!(session.received_unicast_v4(), 1);
+    assert!(session.max_prefix_scope_blocking(MaxPrefixScope::Ipv4Received));
+    assert_eq!(
+        blocked_total(&session),
+        Some(1.0),
+        "multiple Add-Path paths on pre-policy limit hit increment blocked total once"
+    );
+
+    session
+        .process_update(ipv4_announce(v4_prefix(2), 3, true))
+        .await;
+    assert_eq!(session.received_unicast_v4(), 1);
+    assert_eq!(
+        blocked_total(&session),
+        Some(1.0),
+        "subsequent path for already-blocked prefix must not re-increment blocked total"
+    );
+
+    session
+        .process_update(ipv4_announce(v4_prefix(3), 1, true))
+        .await;
+    assert_eq!(session.received_unicast_v4(), 1);
+    assert_eq!(
+        blocked_total(&session),
+        Some(1.0),
+        "subsequent withheld prefix within active episode does not re-increment"
+    );
+}
+
+#[tokio::test]
+async fn block_action_episode_recovery_and_rearm_increments_blocked_total() {
+    let mut config = mode_config(crate::config::MaxPrefixAction::Block);
+    config.max_prefixes_ipv4 = Some(1);
+    let (mut session, mut rib_rx, _notify_rx, _server) = notifying_session(config).await;
+    install_dual_stack_session(&mut session, true);
+
+    let blocked_total = |s: &PeerSession| {
+        counter_value(
+            &s.metrics,
+            "bgp_max_prefix_blocked_total",
+            &s.peer_label,
+            "ipv4_unicast",
+        )
+    };
+
+    // 1. Initial accepted prefix fills capacity to 1/1.
+    session
+        .process_update(ipv4_announce(v4_prefix(1), 1, true))
+        .await;
+    assert_eq!(session.known_unicast_v4, 1);
+    assert_eq!(blocked_total(&session), None);
+    while rib_rx.try_recv().is_ok() {}
+
+    // 2. Over-limit prefix opens episode 1 and increments metric to 1.
+    session
+        .process_update(ipv4_announce(v4_prefix(2), 1, true))
+        .await;
+    assert!(session.max_prefix_scope_blocking(MaxPrefixScope::Ipv4));
+    assert_eq!(blocked_total(&session), Some(1.0));
+
+    // 3. Another over-limit prefix while episode 1 is active: suppressed.
+    session
+        .process_update(ipv4_announce(v4_prefix(3), 1, true))
+        .await;
+    assert_eq!(blocked_total(&session), Some(1.0));
+
+    // 4. Withdraw accepted prefix: usage drops to 0, episode ends.
+    session
+        .process_update(ipv4_withdraw(v4_prefix(1), 1, true))
+        .await;
+    assert_eq!(session.known_unicast_v4, 0);
+    assert!(!session.max_prefix_scope_blocking(MaxPrefixScope::Ipv4));
+    assert_eq!(blocked_total(&session), Some(1.0));
+
+    // 5. Admitting prefix 4 fills capacity back to 1/1.
+    session
+        .process_update(ipv4_announce(v4_prefix(4), 1, true))
+        .await;
+    assert_eq!(session.known_unicast_v4, 1);
+    assert!(!session.max_prefix_scope_blocking(MaxPrefixScope::Ipv4));
+    assert_eq!(blocked_total(&session), Some(1.0));
+
+    // 6. A new flood exceeding the limit opens episode 2 and increments metric to 2.
+    session
+        .process_update(ipv4_announce(v4_prefix(5), 1, true))
+        .await;
+    assert!(session.max_prefix_scope_blocking(MaxPrefixScope::Ipv4));
+    assert_eq!(
+        blocked_total(&session),
+        Some(2.0),
+        "new blocking episode re-armed after recovery increments blocked total again"
+    );
+
+    // 7. Further dropped prefix in episode 2 is suppressed.
+    session
+        .process_update(ipv4_announce(v4_prefix(6), 1, true))
+        .await;
+    assert_eq!(blocked_total(&session), Some(2.0));
+}
 
 /// Mutant: letting `block` fall through to the violation check tears the
 /// session down on a runtime lowering; skipping the re-evaluation when the
