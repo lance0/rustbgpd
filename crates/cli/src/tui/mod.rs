@@ -22,10 +22,17 @@ use theme::Theme;
 
 struct TerminalGuard;
 
+/// Leave the alternate screen and show the cursor. Ratatui hides the cursor
+/// during `draw()`, and `LeaveAlternateScreen` does not restore it.
+fn restore_screen(out: &mut impl io::Write) {
+    let _ = out.execute(LeaveAlternateScreen);
+    let _ = out.execute(crossterm::cursor::Show);
+}
+
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = io::stdout().execute(LeaveAlternateScreen);
+        restore_screen(&mut io::stdout());
     }
 }
 
@@ -113,4 +120,28 @@ pub async fn run(connection: Connection, interval: u64) -> Result<(), CliError> 
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restore_screen_emits_leave_alternate_then_cursor_show() {
+        let mut output = Vec::new();
+        restore_screen(&mut output);
+
+        let leave = output
+            .windows(b"\x1b[?1049l".len())
+            .position(|w| w == b"\x1b[?1049l")
+            .expect("restore_screen must emit LeaveAlternateScreen");
+        let show = output
+            .windows(b"\x1b[?25h".len())
+            .position(|w| w == b"\x1b[?25h")
+            .expect("restore_screen must emit cursor::Show");
+        assert!(
+            leave < show,
+            "LeaveAlternateScreen must precede cursor::Show"
+        );
+    }
 }
