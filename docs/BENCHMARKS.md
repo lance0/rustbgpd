@@ -1070,7 +1070,7 @@ RUSTBGPD_RIB_MEMORY_PROFILE=full \
   --test memory_profile memory_profile_high_n -- --ignored --nocapture
 
 # Explicit size override. Checked *before* RUSTBGPD_RIB_MEMORY_PROFILE and
-# reported as profile "custom". Tiny sizes smoke all four shape rows in
+# reported as profile "custom". Tiny sizes smoke all six shape rows in
 # milliseconds instead of minutes — mechanics only, never comparison evidence.
 RUSTBGPD_RIB_MEMORY_SIZES=1000 \
   cargo test -p rustbgpd-rib --features bench-internals \
@@ -1150,13 +1150,16 @@ These are per-unique-attribute-set costs. With interning, routes sharing the
 same attributes pay only the 128-byte `Route` stack cost plus an 8-byte `Arc`
 pointer.
 
-The `memory_profile` harness emits **four** shape rows per size —
-`adj_rib_in`, `full_rib`, `full_rib_diverse`, and `rr_fanout`. Three are
-tabled below. `full_rib_diverse` is the `full_rib` shape with a distinct
-attribute set per prefix rather than one per peer, so it prices the
-interning claim above by removing the sharing; no published table is carried
-for it here, and a run of `bench/compare-rib-memory.sh` will show that fourth
-row uninterpreted.
+The `memory_profile` harness emits **six** shape rows per size —
+`adj_rib_in`, `full_rib`, `full_rib_diverse`, `full_rib_representative`,
+`rr_fanout`, and `rr_fanout_representative`. Three are tabled below:
+`adj_rib_in`, `full_rib`, and `rr_fanout`. `full_rib_diverse` is the
+`full_rib` shape with a distinct attribute set per prefix rather than one per
+peer, so it prices the interning claim above by removing the sharing. The two
+`_representative` shapes share one attribute set across seven consecutive
+prefixes instead, so they price partial sharing. No published table is carried
+for those three here, and a run of `bench/compare-rib-memory.sh` will show
+those rows uninterpreted.
 
 ### AdjRibIn at Scale (single peer, typical attrs)
 

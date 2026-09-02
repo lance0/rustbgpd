@@ -26,7 +26,7 @@ required if you keep the default UDS:
 runtime_state_dir = "/var/lib/rustbgpd"
 
 [global.telemetry]
-prometheus_addr = "0.0.0.0:9179"
+prometheus_addr = "127.0.0.1:9179"
 log_format = "json"
 ```
 

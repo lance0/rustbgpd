@@ -47,10 +47,11 @@ before forwarding to the RIB — the FSM sees only payloadless events.
   --rejected` (`[policy.reject_retention]`). **On by default:**
   `TransportConfig::reject_retention_enabled` defaults to `true`, unlike the
   opt-in import-explain cache above. The `ListRejectedRoutes` reply reports
-  `enabled`, `capacity`, and `evictions_since_reset`; `enabled = false` makes
-  an empty result a configuration fact, zero evictions proves no retained
-  rejection was displaced by capacity since the session reset, and a nonzero
-  count means the bounded listing may be incomplete. Entries and the eviction
+  `retention_enabled`, `capacity`, and `evictions_since_reset`;
+  `retention_enabled = false` makes an empty result a configuration fact,
+  zero evictions proves no retained rejection was displaced by capacity
+  since the session reset, and a nonzero count means the bounded listing
+  may be incomplete. Entries and the eviction
   count are diagnostic state and reset with the session. The session snapshot
   exposes exact IPv4/IPv6-unicast policy-reject counts for RFC 9972 BMP type 22
   while retention is enabled and no eviction has occurred; otherwise the

@@ -1,6 +1,6 @@
 <?php
 // SPDX-License-Identifier: GPL-2.0-only
-// Copyright (C) 2026 Lance McKee
+// Copyright (C) 2026 Lance Tuller
 // Original rustbgpd integration code. No upstream router template is copied.
 
 use IXP\Models\Aggregators\IrrdbAggregator;
