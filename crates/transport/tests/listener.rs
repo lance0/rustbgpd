@@ -915,8 +915,8 @@ async fn strict_explicit_bind_failure_releases_every_earlier_socket() {
     std::net::TcpListener::bind(first).expect("earlier successful bind must be released");
 }
 
-/// LAN-1471: TCP MSS clamps are partitioned by address family on dual-stack
-/// listeners so that an IPv4 tunnel constraint does not down-clamp IPv6 listeners.
+/// TCP MSS clamps are partitioned by address family on dual-stack listeners so
+/// that an IPv4 tunnel constraint does not down-clamp IPv6 listeners.
 #[tokio::test]
 async fn dual_stack_listener_partitions_tcp_mss_by_address_family() {
     let (accept_tx, mut accept_rx) = mpsc::channel(4);

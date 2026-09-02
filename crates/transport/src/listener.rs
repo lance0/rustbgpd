@@ -174,36 +174,15 @@ pub struct ListenerSocketOptions {
     /// TCP maximum segment size clamp (`TCP_MAXSEG`) applied to IPv6
     /// listener sockets before listen; accepted IPv6 children inherit it.
     pub tcp_mss_v6: Option<u16>,
-    /// Fallback TCP maximum segment size clamp (`TCP_MAXSEG`) installed before
-    /// listen on any listener socket that does not have an address
-    /// family-specific clamp configured (`tcp_mss_v4` or `tcp_mss_v6`).
-    pub tcp_mss: Option<u16>,
 }
 
 impl ListenerSocketOptions {
-    /// Returns the effective TCP MSS clamp for the given address family.
-    ///
-    /// Family-specific clamps (`tcp_mss_v4` for IPv4, `tcp_mss_v6` for IPv6)
-    /// take precedence over the legacy listener-wide fallback clamp `tcp_mss`.
-    #[must_use]
-    pub const fn tcp_mss_for(&self, is_v4: bool) -> Option<u16> {
+    const fn tcp_mss_for(&self, is_v4: bool) -> Option<u16> {
         if is_v4 {
-            match self.tcp_mss_v4 {
-                Some(mss) => Some(mss),
-                None => self.tcp_mss,
-            }
+            self.tcp_mss_v4
         } else {
-            match self.tcp_mss_v6 {
-                Some(mss) => Some(mss),
-                None => self.tcp_mss,
-            }
+            self.tcp_mss_v6
         }
-    }
-
-    /// Returns the effective TCP MSS clamp for the given socket address.
-    #[must_use]
-    pub const fn tcp_mss_for_addr(&self, addr: SocketAddr) -> Option<u16> {
-        self.tcp_mss_for(addr.is_ipv4())
     }
 }
 
@@ -2662,8 +2641,8 @@ where
     enable_listener_gtsm_outbound(&socket, addr.is_ipv4(), &options.ttl_security)?;
     // Listener-wide by construction: the clamp is negotiated in the SYN-ACK,
     // so it must precede listen() and cannot be scoped per accepted peer.
-    // Partitioned by address family (LAN-1471) so IPv4 tunnel constraints do
-    // not down-clamp IPv6 listeners.
+    // Partitioned by address family so IPv4 tunnel constraints do not
+    // down-clamp IPv6 listeners.
     if let Some(mss) = options.tcp_mss_for(addr.is_ipv4()) {
         socket.set_tcp_mss(u32::from(mss))?;
     }
@@ -4307,7 +4286,7 @@ mod tests {
     #[tokio::test]
     async fn bind_socket2_listener_installs_tcp_mss_before_listen_and_children_inherit_it() {
         let options = ListenerSocketOptions {
-            tcp_mss: Some(1000),
+            tcp_mss_v4: Some(1000),
             ..ListenerSocketOptions::default()
         };
         let listener = bind_socket2_listener("127.0.0.1:0".parse().unwrap(), &options).unwrap();
@@ -4336,8 +4315,8 @@ mod tests {
         }
     }
 
-    /// LAN-1471: TCP MSS clamps are partitioned by address family so an IPv4
-    /// neighbor with a reduced tunnel MTU does not down-clamp IPv6 listeners.
+    /// TCP MSS clamps are partitioned by address family so an IPv4 neighbor
+    /// with a reduced tunnel MTU does not down-clamp IPv6 listeners.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn bind_socket2_listener_partitions_tcp_mss_by_address_family() {
@@ -4361,7 +4340,6 @@ mod tests {
         let v4_only_options = ListenerSocketOptions {
             tcp_mss_v4: Some(1000),
             tcp_mss_v6: None,
-            tcp_mss: None,
             ..ListenerSocketOptions::default()
         };
         let v4_only =
@@ -4375,26 +4353,16 @@ mod tests {
         );
     }
 
-    /// Legacy listener-wide `tcp_mss` acts as fallback for both families when
-    /// family-specific options are omitted, while family-specific options
-    /// take precedence when provided.
+    /// Each address family resolves its own listener clamp.
     #[test]
-    fn listener_socket_options_tcp_mss_precedence() {
-        let fallback_only = ListenerSocketOptions {
-            tcp_mss: Some(1100),
-            ..ListenerSocketOptions::default()
-        };
-        assert_eq!(fallback_only.tcp_mss_for(true), Some(1100));
-        assert_eq!(fallback_only.tcp_mss_for(false), Some(1100));
-
-        let family_override = ListenerSocketOptions {
+    fn listener_socket_options_resolve_tcp_mss_by_family() {
+        let options = ListenerSocketOptions {
             tcp_mss_v4: Some(1000),
             tcp_mss_v6: Some(1220),
-            tcp_mss: Some(1100),
             ..ListenerSocketOptions::default()
         };
-        assert_eq!(family_override.tcp_mss_for(true), Some(1000));
-        assert_eq!(family_override.tcp_mss_for(false), Some(1220));
+        assert_eq!(options.tcp_mss_for(true), Some(1000));
+        assert_eq!(options.tcp_mss_for(false), Some(1220));
 
         let v4_only = ListenerSocketOptions {
             tcp_mss_v4: Some(1000),
