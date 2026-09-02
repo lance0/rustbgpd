@@ -145,6 +145,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   bounds and `false` renders the accepted-route `max_prefixes_ipv4`/`_ipv6`
   bounds. The render receipt reports each client's limits under the emitted key
   and `null` under the other.
+- **Operator-visible:** a session that keeps falling to Idle because of a
+  NOTIFICATION (sent or received, including an OPEN exchange that ends in
+  one) now doubles its reconnect wait per consecutive failure, from
+  `connect_retry_secs` up to 300 s, instead of retrying at a fixed
+  interval. The streak clears after five minutes Established, on
+  `rbgp neighbor <addr> enable`, or on an administrative reset; TCP
+  connection failures, the max-prefix latch, disable, and graceful
+  shutdown are unchanged. `NeighborState.reconnect_in_seconds`, the
+  `rbgp neighbor <addr>` detail row `Reconnect In`, and its JSON key
+  `reconnect_in_seconds` report the remaining wait.
 
 ### Fixed
 

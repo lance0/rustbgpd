@@ -102,6 +102,7 @@ async fn export_policy_apply_times_out_when_rib_reply_wedges() {
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
                         slow_peer: false,
+                        reconnect_in_secs: 0,
                     });
                 }
                 _ => {}
@@ -311,6 +312,7 @@ async fn honor_graceful_shutdown_hot_apply_targets_ebgp_only() {
                             tcp_ao_info: None,
                             tcp_ao_protected: false,
                             slow_peer: false,
+                            reconnect_in_secs: 0,
                         });
                     }
                     PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -496,6 +498,7 @@ async fn import_apply_failure_on_established_peer_bails_without_refresh() {
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
                         slow_peer: false,
+                        reconnect_in_secs: 0,
                     });
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -685,6 +688,7 @@ async fn import_apply_failure_on_idle_peer_bails_and_sets_pending_refresh() {
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
                         slow_peer: false,
+                        reconnect_in_secs: 0,
                     });
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -868,6 +872,7 @@ async fn export_apply_failure_bails_without_advancing_bookkeeping() {
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
                         slow_peer: false,
+                        reconnect_in_secs: 0,
                     });
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -1082,6 +1087,7 @@ async fn import_succeeds_export_fails_then_retry_fires_refresh() {
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
                         slow_peer: false,
+                        reconnect_in_secs: 0,
                     });
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -1317,6 +1323,7 @@ async fn rib_failure_preserves_pending_refresh_for_retry() {
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
                         slow_peer: false,
+                        reconnect_in_secs: 0,
                     });
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {

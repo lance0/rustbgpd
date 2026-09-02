@@ -91,6 +91,7 @@ fn established_policy_handle(peer: IpAddr, acks: EstablishedPolicyPeerAcks) -> P
                         import_policy_routes_permitted: 0,
                         import_policy_routes_denied: 0,
                         slow_peer: false,
+                        reconnect_in_secs: 0,
                     });
                 }
                 PeerCommand::UpdateImportPolicy { reply, .. } => {

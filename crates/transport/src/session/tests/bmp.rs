@@ -56,7 +56,7 @@ async fn accept_any_session_established_uses_learned_asn_for_bmp_and_rib() {
 async fn session_down_emits_bmp_peer_down() {
     let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
     session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
-    session.established_at = Some(Instant::now());
+    session.established_at = Some(tokio::time::Instant::now());
     session.last_down_reason = Some(PeerDownReason::RemoteNoNotification);
     session.execute_actions(vec![Action::SessionDown]).await;
     match bmp_rx.recv().await.unwrap() {
@@ -789,7 +789,7 @@ async fn bmp_repair_timer_retries_until_channel_drains() {
 async fn bmp_peer_down_survives_full_channel() {
     let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
     session.negotiated = Some(Arc::new(negotiated_session(65002, false)));
-    session.established_at = Some(Instant::now());
+    session.established_at = Some(tokio::time::Instant::now());
     session.last_down_reason = Some(PeerDownReason::RemoteNoNotification);
     let tx = session.bmp_tx.clone().unwrap();
     for _ in 0..16 {

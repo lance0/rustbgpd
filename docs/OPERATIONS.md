@@ -1866,6 +1866,19 @@ records for a later outage.
    isn't establishing. `OpenSent`/`OpenConfirm` means OPEN exchange is
    failing.
 
+   `Idle` with a `Reconnect In` row in `rbgp neighbor <addr>` means the
+   daemon is waiting out the deferred reconnect that follows an unplanned
+   teardown. Each consecutive NOTIFICATION teardown (sent or received,
+   including an OPEN exchange that ends in one, such as an ASN mismatch or
+   a repeated hold-timer expiry) doubles that wait, starting from
+   `connect_retry_secs` (default 5 s) and capped at 300 s. The wait is also
+   `reconnect_in_seconds` in the JSON output and in `NeighborState`. The
+   streak clears after the session stays Established for five minutes, on
+   `rbgp neighbor <addr> enable`, or on an administrative reset. Plain TCP
+   connection failures keep the fixed interval and the fast first retries,
+   and a max-prefix shutdown stays latched until an explicit enable. There
+   is no configuration knob for the curve.
+
 2. **Check logs for the peer:**
    ```bash
    journalctl -u rustbgpd | grep "10.0.0.2"
@@ -2336,6 +2349,10 @@ answer); both knobs are restart-required per peer.
 rbgp neighbor 10.0.0.2 enable
 rbgp neighbor 10.0.0.2 disable --reason "maintenance"
 ```
+
+`enable` also clears the NOTIFICATION reconnect backoff, so the next
+attempt starts immediately and any later failure streak restarts from
+`connect_retry_secs`.
 
 ### Trigger an MRT dump
 

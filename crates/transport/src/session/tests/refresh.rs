@@ -707,7 +707,7 @@ async fn session_down_clears_all_known_sets() {
         });
     install_test_negotiated_session(&mut session, negotiated);
     session.config.peer.graceful_restart = true;
-    session.established_at = Some(Instant::now());
+    session.established_at = Some(tokio::time::Instant::now());
     let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
     session.remember_known_path(prefix, 0);
     let add_path_prefix = Prefix::V6(Ipv6Prefix::new(Ipv6Addr::LOCALHOST, 128));

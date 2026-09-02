@@ -958,3 +958,269 @@ async fn hard_reset_always_bypasses_gr_even_with_n_bit() {
         _ => panic!("expected PeerDown"),
     }
 }
+
+// ── NOTIFICATION Idle reconnect backoff ──────────────────────────────
+
+/// Seconds until the armed deferred reconnect fires, read under paused time.
+fn pending_reconnect_secs(session: &PeerSession) -> u64 {
+    session
+        .reconnect_timer
+        .as_ref()
+        .expect("fall to Idle must arm the deferred reconnect")
+        .deadline()
+        .saturating_duration_since(tokio::time::Instant::now())
+        .as_secs()
+}
+
+fn peer_cease() -> Event {
+    Event::NotificationReceived(NotificationMessage::new(
+        NotificationCode::Cease,
+        cease_subcode::ADMINISTRATIVE_SHUTDOWN,
+        Bytes::new(),
+    ))
+}
+
+fn peer_open(my_as: u16) -> Event {
+    Event::OpenReceived(rustbgpd_wire::OpenMessage {
+        version: 4,
+        my_as,
+        hold_time: 90,
+        bgp_identifier: Ipv4Addr::new(10, 0, 0, 2),
+        capabilities: vec![
+            Capability::MultiProtocol {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+            },
+            Capability::FourOctetAs {
+                asn: u32::from(my_as),
+            },
+        ],
+    })
+}
+
+/// Let the pending reconnect "fire" the way the run loop does, bring the
+/// session to Established over a fresh loopback stream, then tear it down
+/// with a peer NOTIFICATION. Returns the wait armed for the next reconnect.
+async fn notification_cycle(session: &mut PeerSession) -> u64 {
+    session.reconnect_timer = None;
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(session, 65002).await;
+    session.drive_fsm(peer_cease()).await;
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    pending_reconnect_secs(session)
+}
+
+async fn queried_reconnect_in_secs(session: &mut PeerSession) -> u64 {
+    let (reply, state) = oneshot::channel();
+    assert!(matches!(
+        session
+            .handle_command(PeerCommand::QueryState { reply })
+            .await,
+        ControlFlow::Continue(())
+    ));
+    state.await.unwrap().reconnect_in_secs
+}
+
+#[tokio::test(start_paused = true)]
+async fn notification_idle_reconnect_doubles_per_failure_up_to_cap() {
+    let mut session = make_test_session(65001, 65002);
+    let mut waits = Vec::new();
+    for _ in 0..6 {
+        waits.push(notification_cycle(&mut session).await);
+    }
+    assert_eq!(waits, [30, 60, 120, 240, 300, 300]);
+    assert_eq!(session.notification_idle_failures, 6);
+}
+
+#[tokio::test(start_paused = true)]
+async fn notification_idle_backoff_never_shrinks_a_connect_retry_above_the_cap() {
+    let mut peer_config = PeerConfig::new(65001, 65002, Ipv4Addr::new(10, 0, 0, 1));
+    peer_config.connect_retry_secs = 600;
+    peer_config.families = vec![(Afi::Ipv4, Safi::Unicast)];
+    let mut session = make_test_session_with_peer_config(peer_config);
+    assert_eq!(notification_cycle(&mut session).await, 600);
+    assert_eq!(notification_cycle(&mut session).await, 600);
+}
+
+#[tokio::test(start_paused = true)]
+async fn open_rejected_with_notification_counts_toward_idle_backoff() {
+    let mut session = make_test_session(65001, 65002);
+    for expected in [30, 60, 120] {
+        session.reconnect_timer = None;
+        let (client, _server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        session.drive_fsm(Event::ManualStart).await;
+        assert_eq!(session.fsm.state(), SessionState::OpenSent);
+        let sent_before = session.notifications_sent;
+        session.drive_fsm(peer_open(65003)).await;
+        assert_eq!(session.fsm.state(), SessionState::Idle);
+        assert_eq!(session.notifications_sent, sent_before + 1);
+        assert_eq!(pending_reconnect_secs(&session), expected);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn healthy_established_session_forgets_notification_idle_backoff() {
+    let mut session = make_test_session(65001, 65002);
+    notification_cycle(&mut session).await;
+    assert_eq!(notification_cycle(&mut session).await, 60);
+
+    // One second short of the healthy window keeps the streak.
+    session.reconnect_timer = None;
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    tokio::time::advance(
+        fsm::HEALTHY_ESTABLISHED
+            .checked_sub(Duration::from_secs(1))
+            .unwrap(),
+    )
+    .await;
+    session.drive_fsm(peer_cease()).await;
+    assert_eq!(pending_reconnect_secs(&session), 120);
+
+    // A session that lasts the full window restarts from the base interval.
+    session.reconnect_timer = None;
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    tokio::time::advance(fsm::HEALTHY_ESTABLISHED).await;
+    session.drive_fsm(peer_cease()).await;
+    assert_eq!(pending_reconnect_secs(&session), 30);
+    assert_eq!(session.notification_idle_failures, 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn tcp_failures_keep_fixed_retries_alongside_notification_idle_backoff() {
+    let mut session = make_test_session(65001, 65002);
+    notification_cycle(&mut session).await;
+    assert_eq!(notification_cycle(&mut session).await, 60);
+
+    // Connect-phase TCP misses stay on the FSM's fast retry curve and never
+    // arm the deferred reconnect.
+    session.reconnect_timer = None;
+    session.drive_fsm(Event::ManualStart).await;
+    assert_eq!(session.fsm.state(), SessionState::Connect);
+    for _ in 0..2 {
+        session.drive_fsm(Event::TcpConnectionFails).await;
+        assert_eq!(session.fsm.state(), SessionState::Active);
+        let retry = session
+            .timers
+            .connect_retry
+            .as_ref()
+            .expect("TCP miss restarts the FSM connect-retry timer")
+            .deadline()
+            .saturating_duration_since(tokio::time::Instant::now());
+        assert_eq!(retry, Duration::from_secs(1));
+        assert!(session.reconnect_timer.is_none());
+    }
+    assert_eq!(session.notification_idle_failures, 2);
+
+    // An Established session lost to a TCP failure keeps the configured
+    // Idle wait and neither advances nor forgets the NOTIFICATION streak.
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    session.drive_fsm(Event::TcpConnectionConfirmed).await;
+    session.drive_fsm(peer_open(65002)).await;
+    session.drive_fsm(Event::KeepaliveReceived).await;
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    session.drive_fsm(Event::TcpConnectionFails).await;
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    assert_eq!(pending_reconnect_secs(&session), 30);
+    assert_eq!(session.notification_idle_failures, 2);
+    assert_eq!(notification_cycle(&mut session).await, 120);
+}
+
+#[tokio::test(start_paused = true)]
+async fn max_prefix_latch_ignores_notification_idle_backoff() {
+    let mut session = make_test_session(65001, 65002);
+    session.config.max_prefixes = Some(1);
+    notification_cycle(&mut session).await;
+    assert_eq!(notification_cycle(&mut session).await, 60);
+
+    session.reconnect_timer = None;
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    install_test_negotiated_session(&mut session, negotiated_session(65002, false));
+    session
+        .process_update(ipv4_announce(v4_prefix(1), 0, false))
+        .await;
+    session
+        .process_update(ipv4_announce(v4_prefix(2), 0, false))
+        .await;
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    assert!(session.stop_requested, "max-prefix must stay latched");
+    assert!(
+        session.reconnect_timer.is_none(),
+        "the latch must not arm a deferred reconnect"
+    );
+    assert_eq!(session.notification_idle_failures, 2);
+
+    // Explicit enable recovers the latch and clears the streak together.
+    assert!(matches!(
+        session.handle_command(PeerCommand::Start).await,
+        ControlFlow::Continue(())
+    ));
+    assert!(!session.stop_requested);
+    assert_eq!(session.notification_idle_failures, 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn enable_clears_notification_idle_backoff() {
+    let mut session = make_test_session(65001, 65002);
+    notification_cycle(&mut session).await;
+    assert_eq!(notification_cycle(&mut session).await, 60);
+
+    assert!(matches!(
+        session.handle_command(PeerCommand::Start).await,
+        ControlFlow::Continue(())
+    ));
+    assert_eq!(session.fsm.state(), SessionState::Connect);
+    assert!(session.reconnect_timer.is_none());
+    assert_eq!(session.notification_idle_failures, 0);
+
+    // A manual stop is operator-driven: it neither counts nor escalates.
+    session.drive_fsm(Event::ManualStop { reason: None }).await;
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    assert_eq!(pending_reconnect_secs(&session), 30);
+    assert_eq!(session.notification_idle_failures, 0);
+    assert_eq!(notification_cycle(&mut session).await, 30);
+}
+
+#[tokio::test(start_paused = true)]
+async fn administrative_reset_clears_notification_idle_backoff() {
+    let mut session = make_test_session(65001, 65002);
+    notification_cycle(&mut session).await;
+    assert_eq!(notification_cycle(&mut session).await, 60);
+
+    session.reconnect_timer = None;
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    session
+        .drive_fsm(Event::AdministrativeReset { reason: None })
+        .await;
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    assert_eq!(pending_reconnect_secs(&session), 30);
+    assert_eq!(session.notification_idle_failures, 0);
+    assert_eq!(notification_cycle(&mut session).await, 30);
+}
+
+#[tokio::test(start_paused = true)]
+async fn query_state_reports_pending_reconnect_wait() {
+    let mut session = make_test_session(65001, 65002);
+    assert_eq!(queried_reconnect_in_secs(&mut session).await, 0);
+    notification_cycle(&mut session).await;
+    assert_eq!(notification_cycle(&mut session).await, 60);
+    assert_eq!(queried_reconnect_in_secs(&mut session).await, 60);
+    tokio::time::advance(Duration::from_secs(10)).await;
+    assert_eq!(queried_reconnect_in_secs(&mut session).await, 50);
+
+    session.reconnect_timer = None;
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    assert_eq!(queried_reconnect_in_secs(&mut session).await, 0);
+}

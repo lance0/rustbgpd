@@ -2497,6 +2497,9 @@ pub struct PeerInfo {
     pub flap_count: u64,
     /// Seconds since last Established transition (0 if never).
     pub uptime_secs: u64,
+    /// Seconds until the next automatic reconnect attempt while the session
+    /// waits in Idle after an unplanned teardown (0 when none is pending).
+    pub reconnect_in_secs: u64,
     /// Human-readable last error description.
     pub last_error: String,
     /// Effective transport authentication: plaintext, MD5, or `tcp_ao`.

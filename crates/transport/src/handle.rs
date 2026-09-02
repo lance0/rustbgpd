@@ -804,6 +804,9 @@ pub struct PeerSessionState {
     pub flap_count: u64,
     /// Seconds since last transition to Established (0 if never established).
     pub uptime_secs: u64,
+    /// Seconds until the next automatic reconnect attempt while the session
+    /// waits in Idle after an unplanned teardown (0 when none is pending).
+    pub reconnect_in_secs: u64,
     /// Human-readable description of the last error (empty if none).
     pub last_error: String,
     /// Query-time TCP-AO socket inspection. Refreshed by `QueryState` and

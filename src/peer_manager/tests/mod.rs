@@ -580,6 +580,7 @@ fn established_export_policy_test_session_with_queries(
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
                         slow_peer: false,
+                        reconnect_in_secs: 0,
                     });
                 }
                 PeerCommand::Shutdown => break,
@@ -657,6 +658,7 @@ fn rollback_ordering_policy_session(
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
                         slow_peer: false,
+                        reconnect_in_secs: 0,
                     });
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -740,6 +742,7 @@ fn stalled_export_policy_test_session(
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
                         slow_peer: false,
+                        reconnect_in_secs: 0,
                     });
                 }
                 PeerCommand::Shutdown => break,
@@ -887,6 +890,7 @@ fn max_prefix_on_command_peer_handle(
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
                         slow_peer: false,
+                        reconnect_in_secs: 0,
                     });
                     false
                 }
@@ -1015,6 +1019,7 @@ fn fake_peer_handle_with_route_refresh_reply(
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
                         slow_peer: false,
+                        reconnect_in_secs: 0,
                     });
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -1384,6 +1389,7 @@ fn acking_counted_policy_handle(peer_addr: IpAddr, counters: Arc<FakePeerCounter
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
                         slow_peer: false,
+                        reconnect_in_secs: 0,
                     });
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -1439,6 +1445,7 @@ fn policy_test_peer_state(peer_addr: IpAddr, state: SessionState) -> PeerSession
         tcp_ao_info: None,
         tcp_ao_protected: false,
         slow_peer: false,
+        reconnect_in_secs: 0,
     }
 }
 
@@ -1486,6 +1493,7 @@ fn acking_policy_handle(peer_addr: IpAddr, state: SessionState) -> PeerHandle {
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
                         slow_peer: false,
+                        reconnect_in_secs: 0,
                     });
                 }
                 PeerCommand::UpdateImportPolicy { reply, .. }

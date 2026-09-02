@@ -1153,6 +1153,7 @@ impl PeerSession {
             PeerCommand::Start => {
                 self.stop_requested = false;
                 self.reconnect_timer = None;
+                self.notification_idle_failures = 0;
                 self.drive_fsm(Event::ManualStart).await;
                 ControlFlow::Continue(())
             }
@@ -1326,6 +1327,12 @@ impl PeerSession {
                     tcp_ao_info: self.tcp_ao_info.clone().map(Box::new),
                     tcp_ao_protected: self.tcp_ao_protected,
                     slow_peer: self.slow_peer,
+                    reconnect_in_secs: self.reconnect_timer.as_ref().map_or(0, |timer| {
+                        timer
+                            .deadline()
+                            .saturating_duration_since(tokio::time::Instant::now())
+                            .as_secs()
+                    }),
                 };
                 let _ = reply.send(state);
                 ControlFlow::Continue(())

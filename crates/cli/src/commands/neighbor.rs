@@ -349,6 +349,7 @@ pub async fn show(
             slow_peer: n.slow_peer,
             graceful_shutdown_advertise_intent: n.graceful_shutdown_advertise_intent,
             uptime_seconds: n.uptime_seconds,
+            reconnect_in_seconds: n.reconnect_in_seconds,
             prefixes_received: n.prefixes_received,
             prefixes_received_ipv4: n.prefixes_received_ipv4,
             prefixes_received_ipv6: n.prefixes_received_ipv6,
@@ -630,6 +631,12 @@ pub async fn show(
             "Uptime:                {}",
             output::format_duration(n.uptime_seconds)
         );
+        if n.reconnect_in_seconds > 0 {
+            println!(
+                "Reconnect In:          {}",
+                output::format_duration(n.reconnect_in_seconds)
+            );
+        }
         println!("Prefixes Received:     {}", n.prefixes_received);
         println!("  IPv4 Unicast:        {}", n.prefixes_received_ipv4);
         println!("  IPv6 Unicast:        {}", n.prefixes_received_ipv6);

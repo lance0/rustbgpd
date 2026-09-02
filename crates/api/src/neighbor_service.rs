@@ -991,6 +991,7 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         config: Some(config),
         state: state.into(),
         uptime_seconds: info.uptime_secs,
+        reconnect_in_seconds: info.reconnect_in_secs,
         prefixes_received: info.prefix_count as u64,
         rejected_routes_retained: info.rejected_routes_retained.map(|count| count as u64),
         prefixes_sent: 0,

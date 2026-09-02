@@ -273,6 +273,10 @@ pub struct JsonNeighborDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub graceful_shutdown_advertise_intent: Option<bool>,
     pub uptime_seconds: u64,
+    /// Seconds until the next automatic reconnect attempt. Omitted while no
+    /// deferred reconnect is pending.
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub reconnect_in_seconds: u64,
     pub prefixes_received: u64,
     pub prefixes_received_ipv4: u64,
     pub prefixes_received_ipv6: u64,
@@ -1602,6 +1606,7 @@ mod tests {
             slow_peer: true,
             graceful_shutdown_advertise_intent: Some(true),
             uptime_seconds: 42,
+            reconnect_in_seconds: 0,
             prefixes_received: 11,
             prefixes_received_ipv4: 7,
             prefixes_received_ipv6: 3,
