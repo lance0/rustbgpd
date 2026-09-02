@@ -37,8 +37,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `route_validated_via_white_list` community (standard and large forms; the
   hygiene policy scrubs the tag on entry). The render receipt counts each
   client's white-listed routes. A configured `ext` form or a malformed tag
-  value is still refused, as are arouteserver's four IRR result communities,
-  which the daemon cannot preserve.
+  value is now refused, as are arouteserver's four IRR result communities,
+  which the daemon cannot preserve; all five were previously ignored.
 
 - **Operator-visible:** `rs-config-render` now renders an effective
   `rfc8950: true` IPv6 session for a uniform IPv6 fleet: the session carries
