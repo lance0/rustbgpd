@@ -37,6 +37,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   state. Static active-open peers retry on their normal schedule; an accepted
   dynamic peer is removed when it reaches Idle and must dial in again. Unknown
   peers return `NOT_FOUND`; disabled peers return `FAILED_PRECONDITION`.
+- **Operator-visible:** the daemon now speaks the systemd notify protocol
+  without a new dependency: `READY=1` once every configured gRPC listener is
+  bound, the configured peer roster is installed, and BGP ingress is active;
+  a gRPC bind failure enters the existing shortened startup teardown instead.
+  `STOPPING=1` marks coordinated shutdown, and `WATCHDOG=1` is sent at half
+  `WATCHDOG_USEC` while the PeerManager and RIB actors answer the same bounded
+  core-actor probe `/readyz` uses. PID 1
+  independently applies the five-minute watchdog deadline. The
+  shipped `rustbgpd.service` and `rustbgpd@.service` units switch to
+  `Type=notify`, `NotifyAccess=main`, `WatchdogSec=5min`, and
+  `TimeoutStartSec=10min`;
+  `Restart=on-failure` already covers a watchdog kill. Without `NOTIFY_SOCKET`
+  nothing changes.
 
 - `rs-config-render --help` now lists its rendering, activation, status,
   pruning, recovery, and IXP Manager lifecycle command paths.

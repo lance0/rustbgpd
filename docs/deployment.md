@@ -473,12 +473,43 @@ Notes on the sandbox:
 - `ExecReload=kill -HUP` is the supported reload path. See the
   [reload matrix](reload-matrix.md) for which fields hot-apply vs.
   need a restart.
+- `Type=notify` is load-bearing. The daemon sends `READY=1` only after every
+  configured gRPC listener is bound, the configured peer roster is installed,
+  and BGP ingress is active — the same boundary `/readyz` cannot go green
+  before — so `systemctl start` and units ordered `After=rustbgpd.service`
+  wait for a daemon that can accept sessions, not for a forked process. A gRPC
+  bind failure prevents peer registration, BGP ingress, telemetry, dial-out,
+  and readiness publication before entering shortened coordinated teardown.
+  `STOPPING=1` marks the start of coordinated
+  shutdown. With `WatchdogSec=5min` the daemon sends `WATCHDOG=1` every
+  2.5 minutes while the PeerManager and RIB actors answer the same bounded
+  core-actor probe `/readyz` uses. A missed probe skips the ping and retries
+  every second; PID 1 independently expires the service after five minutes
+  without a ping, and `Restart=on-failure` covers that expiry. The probe's
+  200 ms timeout bounds one liveness sample; it is not a separate service
+  deadline. `TimeoutStartSec=10min` bounds initial roster installation before
+  `READY=1`.
+
+  Without `NOTIFY_SOCKET` — a foreground run or Docker — every notification
+  is a silent no-op. A native unit opting out must disable all inherited notify
+  behavior:
+
+  ```ini
+  [Service]
+  Type=simple
+  NotifyAccess=none
+  WatchdogSec=0
+  ```
+
+  The container unit keeps `Type=simple` because Docker, not the daemon, is
+  its main process.
 - `Restart=on-failure` is load-bearing. The daemon exits `0` only on an
   operator-initiated shutdown (SIGINT/SIGTERM, the `Shutdown` RPC) and
   `1` on a component failure it cannot recover from in place. Startup exits
   immediately if legacy BGP mode binds neither family, explicit
   `listen_addresses` cannot bind every configured endpoint, or a configured
-  `prometheus_addr` health listener cannot bind. An unexpected gRPC server,
+  `prometheus_addr` health listener cannot bind, or any configured gRPC
+  listener cannot bind. An unexpected gRPC server,
   RIB manager, peer manager, RPKI subsystem task, BGP listener task, or inbound
   accept-forwarding task exit instead runs the coordinated peer teardown before
   exit 1. These components are not respawned in place; the supervisor is the

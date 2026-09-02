@@ -1396,7 +1396,11 @@ fn prepare_stream_plan_state(
 /// practice; expressing the failure as a panic rather than a
 /// fallback matches the broader daemon convention for "should
 /// be unreachable" lock acquisitions on startup paths.
-#[expect(clippy::too_many_arguments, reason = "startup wiring for gRPC server")]
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "startup wiring and listener readiness aggregation for gRPC server"
+)]
 pub async fn serve(
     listeners: Vec<ListenerConfig>,
     rib_tx: mpsc::Sender<RibUpdate>,
@@ -1406,9 +1410,11 @@ pub async fn serve(
     shutdown_rx: oneshot::Receiver<()>,
     rpc_shutdown_tx: watch::Sender<bool>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
+    startup_tx: oneshot::Sender<Result<(), String>>,
 ) {
     let (listener_shutdown_tx, listener_shutdown_rx) = watch::channel(false);
     let mut listener_tasks = JoinSet::new();
+    let mut listener_startup = Vec::with_capacity(listeners.len());
     let dataplane_events = dataplane_event_broadcaster();
     let stream_plan =
         prepare_stream_plan_state(config.stream_plan_runtime_state_directory.as_ref());
@@ -1438,6 +1444,8 @@ pub async fn serve(
     }
 
     for listener in listeners {
+        let (listener_startup_tx, listener_startup_rx) = oneshot::channel();
+        listener_startup.push(listener_startup_rx);
         let rib_tx = rib_tx.clone();
         let rib_query_tx = rib_query_tx.clone();
         let peer_mgr_tx = peer_mgr_tx.clone();
@@ -1459,24 +1467,46 @@ pub async fn serve(
                 rpc_shutdown_tx,
                 config_tx,
                 stream_plan,
+                listener_startup_tx,
             ))
             .await
         });
     }
 
-    tokio::select! {
-        () = async {
-            let _ = shutdown_rx.await;
-        } => {
-            let _ = listener_shutdown_tx.send(true);
-        }
-        result = listener_tasks.join_next() => {
-            match result {
-                Some(Ok(Err(err))) => error!(error = %err, "gRPC listener exited unexpectedly"),
-                Some(Err(err)) => error!(error = %err, "gRPC listener task panicked"),
-                Some(Ok(Ok(()))) | None => error!("gRPC listener exited unexpectedly"),
+    let mut startup_result = Ok(());
+    for listener_startup_rx in listener_startup {
+        match listener_startup_rx.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                startup_result = Err(error);
             }
-            let _ = listener_shutdown_tx.send(true);
+            Err(error) => {
+                startup_result = Err(format!(
+                    "gRPC listener exited before reporting startup status: {error}"
+                ));
+            }
+        }
+    }
+    let startup_failed = startup_result.is_err();
+    let _ = startup_tx.send(startup_result);
+
+    if startup_failed {
+        let _ = listener_shutdown_tx.send(true);
+    } else {
+        tokio::select! {
+            () = async {
+                let _ = shutdown_rx.await;
+            } => {
+                let _ = listener_shutdown_tx.send(true);
+            }
+            result = listener_tasks.join_next() => {
+                match result {
+                    Some(Ok(Err(err))) => error!(error = %err, "gRPC listener exited unexpectedly"),
+                    Some(Err(err)) => error!(error = %err, "gRPC listener task panicked"),
+                    Some(Ok(Ok(()))) | None => error!("gRPC listener exited unexpectedly"),
+                }
+                let _ = listener_shutdown_tx.send(true);
+            }
         }
     }
 
@@ -1531,6 +1561,7 @@ async fn run_listener(
     rpc_shutdown_tx: watch::Sender<bool>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
     stream_plan: Option<Arc<crate::config_service::stream::StreamPlanState>>,
+    startup_tx: oneshot::Sender<Result<(), String>>,
 ) -> Result<(), String> {
     let asn = config.asn;
     let router_id = config.router_id;
@@ -1648,6 +1679,7 @@ async fn run_listener(
                 rpc_shutdown_tx,
                 config_tx,
                 stream_plan,
+                startup_tx,
             ))
             .await
         }
@@ -1713,6 +1745,7 @@ async fn run_listener(
                 rpc_shutdown_tx,
                 config_tx,
                 stream_plan,
+                startup_tx,
             ))
             .await
         }
@@ -1784,15 +1817,22 @@ async fn run_tcp_listener(
     rpc_shutdown_tx: watch::Sender<bool>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
     stream_plan: Option<Arc<crate::config_service::stream::StreamPlanState>>,
+    startup_tx: oneshot::Sender<Result<(), String>>,
 ) -> Result<(), String> {
     let initial_generation = credential_store.load();
     let credentials = initial_generation.listener(credential_index);
     let tls_enabled = credentials.tls.is_some();
     let auth_enabled = credentials.bearer.is_some();
     let stream_authenticated_transport = tcp_stream_plan_authenticated(tls_enabled, auth_enabled);
-    let tcp_listener = TcpListener::bind(addr)
-        .await
-        .map_err(|e| format!("failed to bind gRPC TCP listener {addr}: {e}"))?;
+    let tcp_listener = match TcpListener::bind(addr).await {
+        Ok(listener) => listener,
+        Err(error) => {
+            let error = format!("failed to bind gRPC TCP listener {addr}: {error}");
+            let _ = startup_tx.send(Err(error.clone()));
+            return Err(error);
+        }
+    };
+    let _ = startup_tx.send(Ok(()));
     let bound_addr = tcp_listener.local_addr().unwrap_or(addr);
     info!(
         %bound_addr,
@@ -2059,8 +2099,16 @@ async fn run_uds_listener(
     rpc_shutdown_tx: watch::Sender<bool>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
     stream_plan: Option<Arc<crate::config_service::stream::StreamPlanState>>,
+    startup_tx: oneshot::Sender<Result<(), String>>,
 ) -> Result<(), String> {
-    let (uds_listener, _socket_cleanup) = bind_uds_listener(&path, mode)?;
+    let (uds_listener, _socket_cleanup) = match bind_uds_listener(&path, mode) {
+        Ok(listener) => listener,
+        Err(error) => {
+            let _ = startup_tx.send(Err(error.clone()));
+            return Err(error);
+        }
+    };
+    let _ = startup_tx.send(Ok(()));
     let auth_enabled = credential_store
         .load()
         .listener(credential_index)
@@ -2399,6 +2447,45 @@ mod tests {
         drop(cleanup);
 
         assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
+    }
+
+    #[test]
+    fn startup_reports_only_after_every_listener_binds() {
+        let source = include_str!("server.rs");
+        let serve = source.split_once("pub async fn serve(").unwrap().1;
+        let enqueue = serve
+            .find("listener_startup.push(listener_startup_rx)")
+            .unwrap();
+        let aggregate = serve
+            .find("for listener_startup_rx in listener_startup {")
+            .unwrap();
+        let report = serve.find("startup_tx.send(startup_result)").unwrap();
+        assert!(enqueue < aggregate);
+        assert!(aggregate < report);
+
+        let tcp = source
+            .split_once("async fn run_tcp_listener(")
+            .unwrap()
+            .1
+            .split_once("async fn run_uds_listener(")
+            .unwrap()
+            .0;
+        assert!(
+            tcp.find("TcpListener::bind(addr).await").unwrap()
+                < tcp.find("startup_tx.send(Ok(()))").unwrap()
+        );
+
+        let uds = source
+            .split_once("async fn run_uds_listener(")
+            .unwrap()
+            .1
+            .split_once("fn bind_uds_listener(")
+            .unwrap()
+            .0;
+        assert!(
+            uds.find("bind_uds_listener(&path, mode)").unwrap()
+                < uds.find("startup_tx.send(Ok(()))").unwrap()
+        );
     }
 
     #[test]
