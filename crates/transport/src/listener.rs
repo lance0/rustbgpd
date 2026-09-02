@@ -4346,10 +4346,16 @@ mod tests {
             bind_socket2_listener("127.0.0.1:0".parse().unwrap(), &v4_only_options).unwrap();
         let v6_unclamped =
             bind_socket2_listener("[::1]:0".parse().unwrap(), &v4_only_options).unwrap();
+        let v6_baseline = bind_socket2_listener(
+            "[::1]:0".parse().unwrap(),
+            &ListenerSocketOptions::default(),
+        )
+        .unwrap();
         assert_eq!(socket2::SockRef::from(&v4_only).tcp_mss().unwrap(), 1000);
-        assert_ne!(
+        assert_eq!(
             socket2::SockRef::from(&v6_unclamped).tcp_mss().unwrap(),
-            1000
+            socket2::SockRef::from(&v6_baseline).tcp_mss().unwrap(),
+            "IPv6 listener must retain its unclamped baseline"
         );
     }
 
