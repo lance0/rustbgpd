@@ -56,7 +56,7 @@ not by itself make it v1-stable.
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `SetPolicy`, `DeletePolicy`, `ListNeighborSets`, `GetNeighborSet`, `SetNeighborSet`, `DeleteNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain`, `ExplainImportPolicy`, `ListRejectedRoutes`, `TestPolicy`, `GetPolicyStats`, `GetValidationPolicyPosture` | Named policy CRUD, neighbor sets, global/per-neighbor chain attachment, import-policy diagnostics, read-only candidate-policy dry runs, live counters, and bounded invalid-validation disposition posture |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup`, `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` | Peer-group CRUD and neighbor membership assignment |
 | `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainAdvertisedRoute`, `ExplainBestPath`, `LookupBestPath`, `ListFlowSpecRoutes`, `ListEvpnRoutes`, `ListBgpLsRoutes`, `ListTopologyNodes`, `ListTopologyLinks`, `ListOrrStatus`, `ListVpnRoutes`, `ListRtcRoutes`, `ListLabeledRoutes`, `ListBlackholeDiscards`, `ListFibRoutes`, `ListFibTables`, `SetFibTable`, `DeleteFibTable`, `ListRouteEvents` | Query-only RIB route surfaces (incl. EVPN, BGP-LS, VPNv4/v6, RT-Constrain, and labeled-unicast), the RFC 9107 ORR / BGP-LS topology read surface (`ListTopologyNodes` / `ListTopologyLinks` / `ListOrrStatus`), BLACKHOLE discard status, paginated FIB status, runtime FIB-table CRUD, exact explain plus outside-v1 global LPM, and recent route-event history; live route streaming is owned by `EventService.WatchEvents` / `SubscribeFromEvent` |
-| `BfdService` | `GetBfdSessions` | Single-hop BFD session inspection for configured static neighbors |
+| `BfdService` | `GetBfdSessions` | BFD session inspection (single-hop and multihop) for configured static neighbors |
 | `RpkiService` | `ValidateRouteOrigin`, `ListCaches` | Bounded point validation and configured RTR-cache accepted-epoch inventory |
 | `EventService` | `WatchEvents`, `SubscribeFromEvent`, `ListEvpnEvents`, `ListSessionEvents`, `ListPolicyEvents` | Unified live stream for route, session lifecycle, BGP NOTIFICATION metadata, policy mutation, EVPN route events, BFD session events, and FIB / BLACKHOLE dataplane status-row summary events, with `stream_lagged` warnings for bounded-source backpressure; durable cursor replay via `SubscribeFromEvent` when `[event_history].enabled = true`; plus bounded after-the-fact EVPN, session-lifecycle, and policy-mutation history. Per-MAC EVPN dataplane categories remain follow-up work |
 | `InjectionService` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddEvpnRoute`, `DeleteEvpnRoute` | Programmatic route, FlowSpec, and EVPN injection |
@@ -2580,14 +2580,15 @@ fail-stop on a later primitive convergence failure as described above.
 
 ## BfdService
 
-Read-only inspection of single-hop BFD sessions (ADR-0067, RFC 5880/5881).
+Read-only inspection of single-hop and multihop BFD sessions (ADR-0067,
+RFC 5880/5881/5883).
 Sessions themselves are configured via `[[bfd_profiles]]` + `[neighbors.bfd]`
 (see [CONFIGURATION.md](CONFIGURATION.md)) — BFD config is restart-required, so
 there is no mutating RPC here.
 
 | RPC | Description |
 |-----|-------------|
-| `GetBfdSessions` | List BFD sessions (peer address, state, last diagnostic, strict flag, remote-AdminDown cause), optionally filtered to one `peer_address` |
+| `GetBfdSessions` | List BFD sessions (peer address, state, last diagnostic, strict flag, remote-AdminDown cause, `multihop` mode flag), optionally filtered to one `peer_address` |
 
 ```bash
 # All BFD sessions

@@ -194,7 +194,7 @@ shape itself does not raise the tier.
 
 | RPC | Tier | Notes |
 |-----|------|-------|
-| `GetBfdSessions` | `sensitive_read` | ADR-0067 BFD session snapshot — peer addresses, state, diagnostics, and strict flag. |
+| `GetBfdSessions` | `sensitive_read` | ADR-0067 BFD session snapshot — peer addresses, state, diagnostics, strict flag, and multihop mode. |
 
 ### RpkiService (2 RPCs)
 

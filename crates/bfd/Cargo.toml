@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
-description = "RFC 5880 BFD control-packet codec and single-hop session state machine — pure, no I/O, no async runtime"
+description = "RFC 5880 BFD control-packet codec and session state machine — pure, no I/O, no async runtime"
 readme = "README.md"
 
 [dependencies]

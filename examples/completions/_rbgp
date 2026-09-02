@@ -3948,7 +3948,7 @@ _rbgp_commands() {
 'config:Runtime config diagnostics' \
 'neighbor:Manage BGP neighbors' \
 'summary:Manage BGP neighbors' \
-'bfd:Inspect single-hop BFD sessions (ADR-0067)' \
+'bfd:Inspect single-hop and multihop BFD sessions (ADR-0067)' \
 'rpki:Validate a route origin against the current authoritative VRP table' \
 'rib:Query and manage the RIB' \
 'topology:Show the RFC 9107 ORR topology graph derived from BGP-LS' \
@@ -4759,7 +4759,7 @@ _rbgp__subcmd__help_commands() {
 'global:Show daemon global configuration' \
 'config:Runtime config diagnostics' \
 'neighbor:Manage BGP neighbors' \
-'bfd:Inspect single-hop BFD sessions (ADR-0067)' \
+'bfd:Inspect single-hop and multihop BFD sessions (ADR-0067)' \
 'rpki:Validate a route origin against the current authoritative VRP table' \
 'rib:Query and manage the RIB' \
 'topology:Show the RFC 9107 ORR topology graph derived from BGP-LS' \

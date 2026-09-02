@@ -43,13 +43,15 @@ fn bfd_params(peer: IpAddr, strict: bool) -> crate::bfd_runtime::BfdSessionParam
     crate::bfd_runtime::BfdSessionParams {
         peer,
         scope_id: None,
-        destination: crate::bfd_runtime::bfd_destination(peer, None)
+        destination: crate::bfd_runtime::bfd_destination(peer, None, false)
             .expect("global test peer destination"),
         desired_min_tx_us: 300_000,
         required_min_rx_us: 300_000,
         detect_mult: 3,
         strict,
         enabled: true,
+        multihop: false,
+        source: None,
     }
 }
 
@@ -562,13 +564,15 @@ async fn republish_preserves_link_local_scope_across_reconcile() {
     let params = crate::bfd_runtime::BfdSessionParams {
         peer,
         scope_id: Some(71),
-        destination: crate::bfd_runtime::bfd_destination(peer, Some(71))
+        destination: crate::bfd_runtime::bfd_destination(peer, Some(71), false)
             .expect("scoped test peer destination"),
         desired_min_tx_us: 300_000,
         required_min_rx_us: 300_000,
         detect_mult: 3,
         strict: false,
         enabled: true,
+        multihop: false,
+        source: None,
     };
     let configured = std::collections::HashMap::from([(peer, params)]);
     let (desired_tx, desired_rx) = watch::channel(crate::bfd_runtime::BfdRuntimeConfig::default());

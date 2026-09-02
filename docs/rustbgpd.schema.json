@@ -9,7 +9,7 @@
       "default": true
     },
     "bfd_profiles": {
-      "description": "Named BFD timing profiles (RFC 5880/5881, ADR-0067) referenced by\n`[neighbors.bfd]` / `[peer_groups.<name>.bfd]`.",
+      "description": "Named BFD timing profiles (RFC 5880/5881/5883, ADR-0067) referenced by\n`[neighbors.bfd]` / `[peer_groups.<name>.bfd]`.",
       "type": "array",
       "default": [],
       "items": {
@@ -267,13 +267,18 @@
       ]
     },
     "BfdConfig": {
-      "description": "Per-neighbor / per-peer-group BFD attachment (RFC 5880/5881, ADR-0067).\n\nThe presence of this block enables single-hop asynchronous BFD for the\nneighbor; it references a `[[bfd_profiles]]` entry for the timers. Static\nneighbors only — dynamic-neighbor BFD is deferred (see ADR-0067).",
+      "description": "Per-neighbor / per-peer-group BFD attachment (RFC 5880/5881/5883, ADR-0067).\n\nThe presence of this block enables asynchronous BFD for the neighbor —\nsingle-hop (RFC 5881) by default, multihop (RFC 5883) with `multihop = true`;\nit references a `[[bfd_profiles]]` entry for the timers. Static neighbors\nonly — dynamic-neighbor BFD is deferred (see ADR-0067).",
       "type": "object",
       "properties": {
         "enabled": {
           "description": "Whether BFD is enabled. Defaults to `true`; the field exists so a\nneighbor can override an inherited peer-group `bfd` block to *disable*\nBFD (`bfd = { profile = \"...\", enabled = false }`). A disabled block runs\nno session — the actor skips it — so the effective session set is fully\nexpressible inline, which the restart-required reload pin relies on.",
           "type": "boolean",
           "default": true
+        },
+        "multihop": {
+          "description": "RFC 5883 multihop mode. The session runs over UDP/4784 instead of\nUDP/3784 and received control packets are not required to carry\nTTL / Hop Limit 255 (the peer is not adjacent). Requires a global peer\naddress: an IPv6 link-local neighbor is rejected at config time.\nDefault false (single-hop).",
+          "type": "boolean",
+          "default": false
         },
         "profile": {
           "description": "Name of the `[[bfd_profiles]]` entry providing the timers.",
@@ -1851,7 +1856,7 @@
           "type": "string"
         },
         "bfd": {
-          "description": "Single-hop BFD (RFC 5880/5881) attachment, referencing a\n`[[bfd_profiles]]` entry. Presence enables BFD for this neighbor.",
+          "description": "BFD (RFC 5880/5881/5883) attachment, referencing a\n`[[bfd_profiles]]` entry. Presence enables BFD for this neighbor.",
           "anyOf": [
             {
               "$ref": "#/$defs/BfdConfig"
@@ -2382,7 +2387,7 @@
           ]
         },
         "bfd": {
-          "description": "Single-hop BFD attachment inherited by neighbors in this group (unless\nthe neighbor sets its own `bfd`). References a `[[bfd_profiles]]` entry.",
+          "description": "BFD attachment inherited by neighbors in this group (unless\nthe neighbor sets its own `bfd`). References a `[[bfd_profiles]]` entry.",
           "anyOf": [
             {
               "$ref": "#/$defs/BfdConfig"

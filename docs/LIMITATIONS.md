@@ -94,11 +94,13 @@ full gate ladder.
   non-deprecated-key deletion, and protected-owner CRUD require a daemon restart.
 - TCP MD5 and GTSM are supported.
 - BFD supports IPv4, IPv6 global, and interface-scoped IPv6 link-local
-  single-hop asynchronous sessions for static neighbors. Multihop BFD (RFC
-  5883), echo, demand mode, authentication, and dynamic-neighbor BFD remain
-  follow-up work. This deferral is scoped to BFD sessions only. It says
-  nothing about BGP sessions to non-adjacent peers: those require no separate
-  enablement and can be distance-bounded with `ttl_security_hops`.
+  single-hop asynchronous sessions, and IPv4 / IPv6 global multihop (RFC 5883)
+  asynchronous sessions, for static neighbors. Multihop sessions apply no
+  receive TTL bound (RFC 5883 leaves a GTSM-style check optional; none is
+  configurable) and cannot target an IPv6 link-local neighbor. Echo, demand
+  mode, authentication, and dynamic-neighbor BFD remain follow-up work. BGP
+  sessions to non-adjacent peers require no separate enablement and can be
+  distance-bounded with `ttl_security_hops`.
 - BGP unnumbered supports static IPv6 link-local neighbors for IPv4 unicast.
   Interface-neighbor autodiscovery and capability 77 remain follow-up work.
 

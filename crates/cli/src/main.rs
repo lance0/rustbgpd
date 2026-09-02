@@ -196,7 +196,7 @@ enum Command {
         compare: Option<String>,
     },
 
-    /// Inspect single-hop BFD sessions (ADR-0067)
+    /// Inspect single-hop and multihop BFD sessions (ADR-0067)
     Bfd {
         #[command(subcommand)]
         action: Option<BfdAction>,

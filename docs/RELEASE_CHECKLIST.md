@@ -610,7 +610,8 @@ containerlab destroy -t tests/interop/m52-fib-ecmp-relax-frr.clab.yml
 
 If the release touches **ADR-0067 BFD** (`crates/bfd`, `src/bfd_runtime.rs`,
 `[[bfd_profiles]]`, `[neighbors.bfd]`, `BfdService`, `rbgp bfd`, or BFD
-events / coupling), run the hosted `Kernel Dataplane` workflow for M51.
+events / coupling), run the hosted `Kernel Dataplane` workflow for M51 and
+M108.
 Manual reproduction:
 
 ```bash
@@ -619,6 +620,11 @@ docker build --target dev -t rustbgpd:dev .
 containerlab deploy -t tests/interop/m51-bfd-frr.clab.yml
 bash tests/interop/scripts/test-m51-bfd-frr.sh
 containerlab destroy -t tests/interop/m51-bfd-frr.clab.yml
+
+# M108 — multihop BFD over routed loopbacks + RFC 5882 coupling
+containerlab deploy -t tests/interop/m108-bfd-multihop-frr.clab.yml
+bash tests/interop/scripts/test-m108-bfd-multihop-frr.sh
+containerlab destroy -t tests/interop/m108-bfd-multihop-frr.clab.yml --cleanup
 ```
 
 Also smoke the controller-injection path against a live RR (M30

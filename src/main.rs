@@ -2285,6 +2285,7 @@ fn bfd_status_to_proto(status: &bfd_runtime::BfdStatus) -> rustbgpd_api::proto::
         diagnostic: bfd_diagnostic_to_str(status.diagnostic).to_string(),
         strict: status.strict,
         remote_administrative_down: Some(status.remote_admin_down),
+        multihop: status.multihop,
     }
 }
 
@@ -4951,7 +4952,7 @@ async fn run<T>(
         .as_ref()
         .map(fib_runtime::FibRuntimeHandle::command_sender);
 
-    // Spawn the BFD actor (single-hop async, ADR-0067). Runs the sessions in the
+    // Spawn the BFD actor (single-hop and multihop async, ADR-0067). Runs the sessions in the
     // PeerManager-owned desired set, publishes their state, and emits state
     // changes that PeerManager couples to BGP (non-strict RFC 5882 teardown).
     // No-op when no neighbor has BFD configured; the actor owns the Linux sockets.
@@ -7069,14 +7070,21 @@ mod tests {
             diagnostic: rustbgpd_bfd::Diagnostic::None,
             strict: true,
             remote_admin_down: true,
+            multihop: false,
         };
 
         let projected = bfd_status_to_proto(&status);
         assert_eq!(projected.remote_administrative_down, Some(true));
+        assert!(!projected.multihop);
 
         status.remote_admin_down = false;
+        status.multihop = true;
         let projected = bfd_status_to_proto(&status);
         assert_eq!(projected.remote_administrative_down, Some(false));
+        assert!(
+            projected.multihop,
+            "RFC 5883 mode must reach the public snapshot"
+        );
     }
 
     fn unique_temp_path(name: &str) -> PathBuf {

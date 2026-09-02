@@ -1,4 +1,4 @@
-//! rustbgpd-bfd — RFC 5880 BFD control-packet codec + single-hop session FSM
+//! rustbgpd-bfd — RFC 5880 BFD control-packet codec + session FSM
 //!
 //! Pure and sans-IO, mirroring `rustbgpd-fsm`: the [`Session`] state machine
 //! takes packet and timer inputs ([`Event`]) and produces packet, timer, and
@@ -7,10 +7,12 @@
 //!
 //! # Scope
 //!
-//! - **Single-hop asynchronous mode** (RFC 5880 / RFC 5881) only.
-//! - **Out of scope:** multihop (RFC 5883), echo mode, demand mode, and
-//!   authentication. Packets with the `A` (auth) bit are decoded structurally
-//!   and discarded by the session; the `M` (multipoint) bit is rejected at decode.
+//! - **Asynchronous mode** (RFC 5880) only. Encapsulation (single-hop RFC 5881
+//!   or multihop RFC 5883 — ports and TTL rules) belongs to the daemon actor;
+//!   the state machine is the same for both.
+//! - **Out of scope:** echo mode, demand mode, and authentication. Packets with
+//!   the `A` (auth) bit are decoded structurally and discarded by the session;
+//!   the `M` (multipoint) bit is rejected at decode.
 //!
 //! # Entry points
 //!

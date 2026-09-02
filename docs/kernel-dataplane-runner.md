@@ -17,7 +17,7 @@ Azure kernel ships without the `vrf` module — it is supplied on demand by
 `linux-modules-extra-$(uname -r)` (see `setup-dataplane-host` below). Everything
 else the suite needs is present: bridge + VXLAN, FDB nexthop groups
 (`NDA_NH_ID`, kernel ≥ 5.8), real netns route tables, `CONFIG_TCP_AO`, and
-UDP/3784 for BFD.
+UDP/3784 and UDP/4784 for BFD.
 
 > The privileged-in-*container* restriction (the single-CPU "ubuntu-slim" /
 > `container:`-job runners) does **not** apply here: these jobs run their steps
@@ -77,6 +77,8 @@ issue #187) so reviewers can distinguish real stability from flake masking.
 - M53: ADR-0069 BGP unnumbered / IPv6 link-local peering with scoped FIB ECMP
   against two FRR peers over unnumbered links.
 - M51: ADR-0067 single-hop BFD + RFC 5882 coupling against FRR `bfdd`.
+- M108: RFC 5883 multihop BFD + RFC 5882 coupling against FRR `bfdd` over
+  routed /32 loopbacks.
 - M43: TCP-AO dynamic `/24` queued-child reconciliation plus full live
   add/select/deprecate/delete rotation against BIRD 3.3.2 (conditional on the
   runner advertising `CONFIG_TCP_AO=y`). The deletion phase proves the exact

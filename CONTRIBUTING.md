@@ -282,7 +282,7 @@ src/metrics_server.rs    # Prometheus /metrics HTTP endpoint
 crates/
   wire/                  # BGP codec — zero internal deps, independently publishable
   fsm/                   # RFC 4271 state machine — pure, no I/O
-  bfd/                   # RFC 5880/5881 single-hop BFD: control-packet codec + sans-IO session state machine
+  bfd/                   # RFC 5880 BFD: control-packet codec + sans-IO session state machine (single-hop / multihop encapsulation lives in the daemon actor)
   transport/             # Tokio TCP glue — session runtime, BMP event emission
   rib/                   # RIB data structures, best-path selection, route distribution
   policy/                # Match + modify + filter engine: prefix, community, AS_PATH regex, RPKI

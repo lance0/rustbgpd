@@ -4067,8 +4067,8 @@ fn neighbor_effective_bfd<'a>(neighbor: &'a Neighbor, config: &'a Config) -> Opt
 /// `bfd` references a defined profile, resolved to the timers the actor would
 /// run. Sorted so it is order-insensitive. This is exactly the actor's startup
 /// input, so comparing it across configs detects restart-required BFD drift.
-fn effective_bfd_sessions(config: &Config) -> Vec<(String, u32, u32, u32, bool)> {
-    let mut out: Vec<(String, u32, u32, u32, bool)> = config
+fn effective_bfd_sessions(config: &Config) -> Vec<(String, u32, u32, u32, bool, bool)> {
+    let mut out: Vec<(String, u32, u32, u32, bool, bool)> = config
         .neighbors
         .iter()
         .filter_map(|n| {
@@ -4080,6 +4080,7 @@ fn effective_bfd_sessions(config: &Config) -> Vec<(String, u32, u32, u32, bool)>
                 profile.min_rx_interval,
                 profile.multiplier,
                 bfd.strict,
+                bfd.multihop,
             ))
         })
         .collect();
@@ -4280,6 +4281,7 @@ pub(crate) fn pin_bfd_startup_only_runtime(new_config: &mut Config, current: &Co
                         profile: inherited.profile.clone(),
                         enabled: false,
                         strict: inherited.strict,
+                        multihop: inherited.multihop,
                     }),
                     _ => None,
                 }

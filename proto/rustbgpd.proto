@@ -1953,7 +1953,7 @@ service RibService {
 }
 
 // ---------------------------------------------------------------------------
-// BfdService — single-hop BFD session inspection (ADR-0067)
+// BfdService — BFD session inspection (ADR-0067; single-hop and multihop)
 // ---------------------------------------------------------------------------
 
 service BfdService {
@@ -2058,6 +2058,10 @@ message BfdSession {
   // Explicit presence preserves rolling-upgrade truth: absent means the
   // serving daemon predates this cause signal, not `false`.
   optional bool remote_administrative_down = 5;
+  // RFC 5883 multihop encapsulation (UDP/4784, no receive TTL-255
+  // requirement). False for single-hop (RFC 5881); a serving daemon that
+  // predates this field ran single-hop sessions only, so absent is false.
+  bool multihop = 6;
 }
 
 message GetBfdSessionsResponse {

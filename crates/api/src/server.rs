@@ -1115,7 +1115,7 @@ pub struct ServeConfig {
     /// separate from the aggregate dataplane poller so route events
     /// are not delayed by snapshot polling.
     pub dataplane_route_events: Option<tokio::sync::broadcast::Sender<crate::proto::BgpEvent>>,
-    /// Live snapshot reader for ADR-0067 single-hop BFD session state.
+    /// Live snapshot reader for ADR-0067 single-hop and multihop BFD session state.
     /// Returns an empty list when no BFD sessions are configured or off Linux.
     pub bfd_session_snapshot: crate::bfd_service::BfdSessionSnapshotFn,
     /// Live ADR-0067 BFD session-event source (state transitions) for the

@@ -712,6 +712,33 @@ fn m51_interop_config_describes_non_strict_bfd_with_fast_profile() {
 }
 
 #[test]
+fn m108_interop_config_describes_multihop_bfd_with_fast_profile() {
+    // Pin the M108 interop fixture: one iBGP RR client reached through routed
+    // /32 loopbacks with non-strict RFC 5883 BFD and a 90 s hold timer.
+    let config = parse_with_shared_test_grpc_token(include_str!(
+        "../../../tests/interop/configs/rustbgpd-m108-bfd-multihop.toml"
+    ))
+    .unwrap();
+    let profile = &config.bfd_profiles[0];
+    assert_eq!(profile.name, "fast");
+    assert_eq!(profile.min_tx_interval, 300);
+    assert_eq!(profile.min_rx_interval, 300);
+    assert_eq!(profile.multiplier, 3);
+
+    let n = config
+        .neighbors
+        .iter()
+        .find(|n| n.address == "10.255.0.2")
+        .unwrap();
+    assert_eq!(n.hold_time, Some(90));
+    let bfd = n.bfd.as_ref().unwrap();
+    assert_eq!(bfd.profile, "fast");
+    assert!(bfd.enabled);
+    assert!(!bfd.strict);
+    assert!(bfd.multihop);
+}
+
+#[test]
 fn m52_interop_config_enables_multipath_relax_with_mixed_asns() {
     // Pin the M52 interop fixture: multipath_relax on, maximum_paths 2, and two
     // neighbors in *different* ASes (65002 / 65003) — the whole point of the

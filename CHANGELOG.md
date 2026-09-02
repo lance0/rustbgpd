@@ -11,6 +11,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Operator-visible:** RFC 5883 multihop BFD. Setting
+  `bfd = { profile = "...", multihop = true }` on a static global neighbor
+  uses UDP/4784 with the same profiles, inspection, metrics, events, and RFC
+  5882 coupling as single-hop BFD. Both modes transmit with TTL/Hop-Limit 255;
+  multihop has no receive minimum-TTL knob. When configured,
+  `[global].listen_addresses` supplies the per-family multihop transmit source.
+  M108 validates Up, forwarding-loss Down and BGP teardown, and recovery
+  against FRR over routed /32 loopbacks.
+
 - `tcp_mss` on `[[neighbors]]` and `[peer_groups.<name>]` clamps the TCP
   maximum segment size (`TCP_MAXSEG`, 88..=32767 bytes) for sessions behind
   tunnels or reduced-MTU paths. **Operator-visible:** the clamp is installed

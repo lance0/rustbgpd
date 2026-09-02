@@ -1,4 +1,4 @@
-//! `rbgp bfd` — single-hop BFD session inspection (ADR-0067).
+//! `rbgp bfd` — BFD session inspection (ADR-0067; single-hop and multihop).
 
 use crate::connection::Connection;
 use crate::error::CliError;
@@ -14,6 +14,7 @@ struct JsonBfdSession {
     diagnostic: String,
     strict: bool,
     remote_administrative_down: Option<bool>,
+    multihop: bool,
 }
 
 fn state_label(state: i32) -> &'static str {
@@ -33,24 +34,31 @@ fn to_json(session: &BfdSession) -> JsonBfdSession {
         diagnostic: session.diagnostic.clone(),
         strict: session.strict,
         remote_administrative_down: session.remote_administrative_down,
+        multihop: session.multihop,
     }
 }
 
-/// Human diagnostic text. Healthy/current-daemon rows stay byte-for-byte
-/// identical to the pre-field output; only a locally Down session needs the
-/// additional RFC 5882 cause context.
+/// Human diagnostic text. Healthy/current-daemon single-hop rows stay
+/// byte-for-byte identical to the pre-field output; only a locally Down
+/// session needs the additional RFC 5882 cause context, and only a multihop
+/// session carries its encapsulation mode.
 fn human_diagnostic(session: &BfdSession) -> String {
-    if BfdSessionState::try_from(session.state) != Ok(BfdSessionState::Down) {
-        return session.diagnostic.clone();
+    let mut text = if BfdSessionState::try_from(session.state) != Ok(BfdSessionState::Down) {
+        session.diagnostic.clone()
+    } else {
+        match session.remote_administrative_down {
+            Some(true) => format!("{} (remote AdminDown; BGP permitted)", session.diagnostic),
+            Some(false) => session.diagnostic.clone(),
+            None => format!(
+                "{} (remote AdminDown cause unknown; serving daemon predates field 5)",
+                session.diagnostic
+            ),
+        }
+    };
+    if session.multihop {
+        text.push_str(" (multihop)");
     }
-    match session.remote_administrative_down {
-        Some(true) => format!("{} (remote AdminDown; BGP permitted)", session.diagnostic),
-        Some(false) => session.diagnostic.clone(),
-        None => format!(
-            "{} (remote AdminDown cause unknown; serving daemon predates field 5)",
-            session.diagnostic
-        ),
-    }
+    text
 }
 
 async fn fetch(connection: Connection, peer: Option<&str>) -> Result<Vec<BfdSession>, CliError> {
@@ -121,6 +129,7 @@ mod tests {
             diagnostic: diagnostic.to_string(),
             strict,
             remote_administrative_down,
+            multihop: false,
         }
     }
 
@@ -137,6 +146,7 @@ mod tests {
             diagnostic: diagnostic.to_string(),
             strict,
             remote_administrative_down,
+            multihop: false,
         }
     }
 
@@ -159,7 +169,39 @@ mod tests {
                 "diagnostic": "none",
                 "strict": true,
                 "remote_administrative_down": true,
+                "multihop": false,
             })
+        );
+    }
+
+    /// Load-bearing proof: a multihop session is visible in both the JSON
+    /// field and the human diagnostic cell, while single-hop rows above stay
+    /// byte-identical (no unconditional mode text).
+    #[test]
+    fn multihop_mode_is_visible_in_json_and_human_output() {
+        let multihop = BfdSession {
+            multihop: true,
+            ..session("192.0.2.9", BfdSessionState::Up, "none", false, Some(false))
+        };
+        assert_eq!(
+            serde_json::to_value(to_json(&multihop)).unwrap()["multihop"],
+            serde_json::Value::Bool(true),
+        );
+        assert_eq!(human_diagnostic(&multihop), "none (multihop)");
+
+        let multihop_down = BfdSession {
+            multihop: true,
+            ..session(
+                "192.0.2.9",
+                BfdSessionState::Down,
+                "control_detection_time_expired",
+                false,
+                Some(false),
+            )
+        };
+        assert_eq!(
+            human_diagnostic(&multihop_down),
+            "control_detection_time_expired (multihop)"
         );
     }
 

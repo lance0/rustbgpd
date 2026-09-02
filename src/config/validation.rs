@@ -3465,6 +3465,28 @@ fn validate_bfd(config: &Config) -> Result<(), ConfigError> {
             });
         }
     }
+    // RFC 5883 multihop needs a routable peer address: an IPv6 link-local
+    // neighbor is adjacent by definition and its scope cannot be expressed on
+    // the multihop socket. Checked on the *effective* (own or inherited) block
+    // so a peer-group `multihop = true` cannot reach a link-local member.
+    for neighbor in &config.neighbors {
+        let Some(bfd) = super::neighbor_effective_bfd(neighbor, config) else {
+            continue;
+        };
+        if bfd.multihop
+            && neighbor
+                .address
+                .parse::<Ipv6Addr>()
+                .is_ok_and(|addr| is_ipv6_link_local_addr(&addr))
+        {
+            return Err(ConfigError::InvalidBfd {
+                reason: format!(
+                    "neighbor {:?}: bfd.multihop is not supported for an IPv6 link-local neighbor (RFC 5883 needs a global peer address)",
+                    neighbor.address
+                ),
+            });
+        }
+    }
 
     Ok(())
 }

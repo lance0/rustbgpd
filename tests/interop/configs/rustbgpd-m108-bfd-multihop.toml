@@ -1,0 +1,37 @@
+[global]
+asn = 65001
+router_id = "10.255.0.1"
+listen_port = 179
+listen_addresses = ["10.255.0.1"]
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
+
+# RFC 5883 multihop BFD profile used by the M108 forwarding-loss proof.
+[[bfd_profiles]]
+name = "fast"
+min_tx_interval = 300
+min_rx_interval = 300
+multiplier = 3
+
+# One iBGP route-reflector client reached through routed /32 loopbacks. The
+# explicit listen address is also the multihop BFD transmit source.
+[[neighbors]]
+address = "10.255.0.2"
+remote_asn = 65001
+description = "frr1-m108-multihop"
+hold_time = 90
+route_reflector_client = true
+bfd = { profile = "fast", multihop = true }
+
+[security.grpc]
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"

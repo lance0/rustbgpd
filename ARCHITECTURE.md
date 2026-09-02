@@ -35,7 +35,7 @@ unicast Linux FIB, the BFD socket actor, and the EVPN dataplane glue).
 |-------|-------------|
 | `rustbgpd-wire` | BGP message codec. Zero internal deps. Independently published and fuzzed. |
 | `rustbgpd-fsm` | RFC 4271 state machine. Pure -- no tokio, no sockets, no tasks. Independently published for embedders. |
-| `rustbgpd-bfd` | RFC 5880/5881 single-hop BFD: control-packet codec + sans-IO session state machine. Pure -- no tokio, no sockets (ADR-0067). The UDP/timer actor that drives it lives in the daemon binary (`src/bfd_runtime.rs`). |
+| `rustbgpd-bfd` | RFC 5880 BFD control-packet codec + sans-IO session state machine. Pure -- no tokio, no sockets (ADR-0067). The daemon actor supplies RFC 5881/5883 encapsulation. |
 | `rustbgpd-transport` | Tokio TCP glue. Owns BGP peer session I/O and drives the FSM. |
 | `rustbgpd-rib` | Adj-RIB-In, Loc-RIB best-path, Adj-RIB-Out. Single-task ownership, no locks. |
 | `rustbgpd-policy` | Policy engine: prefix/community/AS_PATH matching, route modifications. |
@@ -228,8 +228,8 @@ gRPC request
 | RIB event loop | `crates/rib/src/manager/mod.rs` — `run()` |
 | FIB install candidates (best + ECMP siblings, weights, scoped next-hop dedup) | `crates/rib/src/manager/mod.rs` — `handle_query_fib_install_candidates` |
 | Unicast Linux FIB install (ECMP, weighted multipath, scoped link-local `dev`) | `src/fib.rs` (intent projection, diff, next-hop canonicalize/identity by `(addr, ifindex)`), `src/fib_runtime.rs` (netlink reconcile actor, owned-state persistence) — ADR-0061 / 0066 / 0068 / 0069 |
-| BFD codec + sans-IO session FSM | `crates/bfd/src/` — `packet.rs`, `session.rs` (RFC 5880/5881, ADR-0067) |
-| BFD socket/timer actor + BGP coupling | `src/bfd_runtime.rs` (UDP sockets, per-session timers, discriminator demux), `src/peer_manager/bfd.rs` (RFC 5882 session coupling) |
+| BFD codec + sans-IO session FSM | `crates/bfd/src/` — `packet.rs`, `session.rs` (RFC 5880, ADR-0067) |
+| BFD socket/timer actor + BGP coupling | `src/bfd_runtime.rs` (RFC 5881/5883 UDP encapsulation, per-session timers, discriminator demux), `src/peer_manager/bfd.rs` (RFC 5882 session coupling) |
 | gRPC service handlers | `crates/api/src/` — one file per service |
 | RPKI / RTR | `crates/rpki/src/` |
 | BMP export | `crates/bmp/src/` |

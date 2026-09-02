@@ -165,7 +165,7 @@ releases rather than carried forward from older measurements.
 | TCP MD5 (RFC 2385) | Yes | Yes | |
 | TCP-AO (RFC 5925) | Yes (v4.9.0) | Partial live rotation | GoBGP v4.9.0 adds a TCP-AO keychain configuration API, server-side keychain management, config-file keychains, and HMAC-SHA256 profiles per its release notes (Linux implementation with a non-Linux stub; upstream support, not an interoperability receipt). rustbgpd applies ordered static-neighbor and direct dynamic-prefix TCP-AO keyrings on Linux, appends non-preferred successor MKTs on SIGHUP, can later select an installed successor with cohort-observed deprecation, and can then delete deprecated unselected MKTs; key edits/reordering and protected-owner CRUD remain restart-required |
 | GTSM / TTL Security (RFC 5082) | Yes | Yes | |
-| BFD (RFC 5880/5881/5882) | Yes | Yes | GoBGP now documents native single-hop async BFD for BGP neighbors with config-file and gRPC API support. rustbgpd ships single-hop async BFD with IPv4 + IPv6 global static neighbors, `[[bfd_profiles]]` / `[neighbors.bfd]`, `GetBfdSessions`, `rbgp bfd`, Prometheus/events, and RFC 5882 strict + non-strict BGP coupling. M51 validates non-strict failover/recovery against FRR `bfdd`. Deferred: multihop, echo/demand, auth, dynamic-neighbor BFD, and IPv6 link-local / unnumbered |
+| BFD (RFC 5880/5881/5882/5883) | Yes | Yes | GoBGP documents native single-hop async BFD for BGP neighbors. rustbgpd ships single-hop and multihop async BFD for static neighbors with inspection, metrics/events, and strict + non-strict RFC 5882 coupling. M51 and M108 validate the respective modes against FRR `bfdd`. Deferred: echo/demand, authentication, dynamic-neighbor BFD, and interface-neighbor autodiscovery |
 | RPKI/RTR (RFC 6811/8210) | Yes | Yes | Persistent RTR session with `SerialNotify`, fallback serial polling, and enforced expiry |
 | Private AS removal | Yes | Yes | Three modes: `remove`, `all`, `replace` (ADR-0045) |
 | LLGR_STALE stripping (RFC 9494 §4.6) | N/A | Yes | Strip `LLGR_STALE` from exports to non-LLGR peers |
@@ -281,9 +281,8 @@ target. Remaining gaps are narrower:
 1. **BGP unnumbered autodiscovery** — rustbgpd v1 requires static
    `address` + `interface`; FRR-style `neighbor IFACE interface remote-as
    external` remains deferred.
-2. **IPv6 link-local BFD for unnumbered peers** — follows naturally from the
-   scoped peer identity in ADR-0069, but ADR-0067 intentionally shipped global
-   IPv4 / IPv6 single-hop first.
+2. **BFD for interface-neighbor autodiscovery** — static scoped IPv6 link-local
+   single-hop sessions ship; autodiscovered interface neighbors remain deferred.
 3. ~~**Config transaction / diff UX**~~ — *shipped in v0.35.0 (ADR-0076),
    on the `DiffRuntimeConfig` baseline from v0.22.0.* `ConfigService` plans,
    applies, confirms, and aborts runtime config transactions under the shared
