@@ -630,11 +630,13 @@ fn peer_info_series(metrics: &BgpMetrics, peer: &str) -> Vec<Vec<(String, String
                 })
                 .map(|metric| {
                     assert!((metric.get_gauge().value() - 1.0).abs() < f64::EPSILON);
-                    metric
+                    let mut labels = metric
                         .get_label()
                         .iter()
                         .map(|label| (label.name().to_owned(), label.value().to_owned()))
-                        .collect()
+                        .collect::<Vec<_>>();
+                    labels.sort();
+                    labels
                 })
                 .collect::<Vec<_>>()
         })
@@ -659,7 +661,7 @@ fn peer_info_labels(
 }
 
 #[tokio::test(start_paused = true)]
-async fn peer_info_follows_install_reconfigure_and_delete() {
+async fn peer_info_follows_install_hot_update_and_delete() {
     let (_cmd_tx, cmd_rx) = mpsc::channel(16);
     let (rib_tx, _rib_rx) = mpsc::channel(64);
     let metrics = BgpMetrics::new();
@@ -683,13 +685,14 @@ async fn peer_info_follows_install_reconfigure_and_delete() {
         peer_info_series(&metrics_view, "10.0.0.2"),
         vec![peer_info_labels("65002", "Example Member", "")]
     );
+    let session_id = mgr.peers[&key(peer_addr)].session_id;
 
-    // A description edit routes through reconfigure (delete without reap,
-    // then re-add): the new identity replaces the old row instead of
-    // accumulating beside it.
+    // A hot-applied description edit replaces the old identity row without
+    // rebuilding the session.
     let mut renamed = make_config(peer_addr, 65002);
     renamed.description = "Renamed Member".to_string();
-    mgr.reconfigure_peer(renamed).await.unwrap();
+    mgr.hot_update_peer(renamed).await.unwrap();
+    assert_eq!(mgr.peers[&key(peer_addr)].session_id, session_id);
     assert_eq!(
         peer_info_series(&metrics_view, "10.0.0.2"),
         vec![peer_info_labels("65002", "Renamed Member", "")]

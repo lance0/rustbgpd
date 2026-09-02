@@ -1221,6 +1221,7 @@ impl PeerManager {
         managed.transport_config.gr_peer_restart_time_max = config.gr_peer_restart_time_max;
         managed.transport_config.local_ipv6_nexthop = config.local_ipv6_nexthop;
         managed.transport_config.remove_private_as = config.remove_private_as;
+        self.publish_peer_info_metric(&peer);
         info!(%peer, "hot-applied neighbor config change in place (no session rebuild)");
         Ok(())
     }
