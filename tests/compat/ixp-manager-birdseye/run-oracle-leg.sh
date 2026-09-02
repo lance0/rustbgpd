@@ -271,7 +271,7 @@ alice_ready || exit 1
 # saw the expected accepted and filtered totals.
 alice_store_ready() {
   curl --fail --silent --max-time 2 "$alice_api/status" | python3 -c \
-    'import json,sys; totals=json.load(sys.stdin)["routes"]["total_routes"]; assert totals == {"imported": int(sys.argv[1]), "filtered": int(sys.argv[2])}' \
+    'import json,sys; totals=json.load(sys.stdin)["routes"]["total_routes"]; expected={"imported": int(sys.argv[1]), "filtered": int(sys.argv[2])}; raise SystemExit(totals != expected)' \
     "$1" "$2" >/dev/null 2>&1
 }
 wait_alice_store() {
