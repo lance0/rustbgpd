@@ -1,6 +1,6 @@
 [Unit]
 Description=rustbgpd BGP daemon (%i)
-Documentation=https://github.com/lance0/rustbgpd
+Documentation=man:rustbgpd(8) https://github.com/lance0/rustbgpd
 After=network-online.target
 Wants=network-online.target
 # Bound repeated fail-stop recovery: five starts per ten-minute window.
@@ -8,9 +8,18 @@ StartLimitIntervalSec=10min
 StartLimitBurst=5
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
+TimeoutStartSec=10min
 ExecStart=/usr/local/bin/rustbgpd /var/lib/rustbgpd/%i/activation/current/config.toml
 ExecReload=/bin/kill -HUP $MAINPID
+# READY=1 arrives once the configured peer roster is installed and BGP
+# ingress is active; STOPPING=1 marks the start of coordinated shutdown.
+# WATCHDOG=1 is sent every 2.5 minutes only while the PeerManager and RIB
+# actors answer the same bounded core-actor probe /readyz uses. PID 1
+# independently enforces the five-minute watchdog deadline;
+# Restart=on-failure below covers watchdog expiry.
+WatchdogSec=5min
 
 User=rustbgpd
 Group=rustbgpd

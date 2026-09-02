@@ -43,6 +43,7 @@ const NOT_MIRRORED: &[&str] = &[
     "peer_manager",
     "policy_admin",
     "reload",
+    "sd_notify",
 ];
 
 /// Collect file-backed `mod name;` declarations (any visibility, any cfg

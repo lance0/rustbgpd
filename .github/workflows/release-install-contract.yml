@@ -144,7 +144,7 @@ jobs:
             # config schema evolves; the daemon's own validator does not.
             "$tree/usr/bin/rustbgpd" --check "$tree/etc/rustbgpd/config.toml"
             unit="$tree/lib/systemd/system/rustbgpd.service"
-            for directive in StartLimitIntervalSec=10min StartLimitBurst=5 Restart=on-failure RestartSec=5 TimeoutStopSec=32min; do
+            for directive in Type=notify NotifyAccess=main WatchdogSec=5min TimeoutStartSec=10min StartLimitIntervalSec=10min StartLimitBurst=5 Restart=on-failure RestartSec=5 TimeoutStopSec=32min; do
               grep -qxF "$directive" "$unit"
             done
             template="$tree/lib/systemd/system/rustbgpd@.service"

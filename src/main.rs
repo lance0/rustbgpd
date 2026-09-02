@@ -43,6 +43,7 @@ mod metrics_server;
 mod peer_manager;
 mod policy_admin;
 mod reload;
+mod sd_notify;
 #[cfg(test)]
 mod test_support;
 
@@ -5311,6 +5312,7 @@ async fn run<T>(
         bfd_events: Some(bfd_bgp_event_tx),
         event_history: event_history_handle.clone(),
     };
+    let (grpc_startup_tx, grpc_startup_rx) = oneshot::channel();
     let mut grpc_handle = tokio::spawn(async move {
         rustbgpd_api::server::serve(
             grpc_listeners,
@@ -5321,24 +5323,44 @@ async fn run<T>(
             grpc_shutdown_rx,
             rpc_shutdown_tx,
             config_event_tx,
+            grpc_startup_tx,
         )
         .await;
     });
+
+    let mut component_failed = false;
+    let mut initial_peer_boot_failed = match grpc_startup_rx.await {
+        Ok(Ok(())) => false,
+        Ok(Err(error)) => {
+            error!(error = %error, "failed to bind every configured gRPC listener");
+            component_failed = true;
+            true
+        }
+        Err(error) => {
+            error!(error = %error, "gRPC server exited before reporting listener startup");
+            component_failed = true;
+            true
+        }
+    };
+    let grpc_listener_boot_failed = initial_peer_boot_failed;
 
     // ADR-0113: install the configured outbound prefix maxima before the
     // first session can register, so a limited peer admits its initial feed
     // up to the cap instead of flooding and only then discovering it is over
     // one. No peer is registered yet, so the preflight cannot fail.
-    if let Err(error) = reload::apply_outbound_prefix_limits(&rib_tx, &config).await {
+    if !initial_peer_boot_failed
+        && let Err(error) = reload::apply_outbound_prefix_limits(&rib_tx, &config).await
+    {
         error!(error = %error, "failed to install configured outbound prefix maxima");
     }
 
     // Add initial peers from config via PeerManager
     // Failures after the ownership boundary enter the common bounded teardown.
-    let mut component_failed = false;
-    let mut initial_peer_boot_failed = false;
     let mut peer_ordinal = 0;
     for neighbor in peer_configs {
+        if initial_peer_boot_failed {
+            break;
+        }
         peer_ordinal += 1;
         let transport_config = neighbor.transport_config;
         let label = neighbor.label;
@@ -5442,7 +5464,13 @@ async fn run<T>(
     }
 
     if initial_peer_boot_failed {
-        info!("initiating shortened coordinated shutdown after configured-peer startup failure");
+        if grpc_listener_boot_failed {
+            info!("initiating shortened coordinated shutdown after gRPC listener startup failure");
+        } else {
+            info!(
+                "initiating shortened coordinated shutdown after configured-peer startup failure"
+            );
+        }
     }
 
     // Activate BGP ingress only after the complete configured-peer roster is
@@ -5504,17 +5532,34 @@ async fn run<T>(
     // Prometheus text; `/livez` and `/readyz` provide minimal probe bodies.
     // Spawn after startup wiring and initial peer registration so readiness
     // cannot go green while initialization is still in progress.
+    let core_probe = rustbgpd_api::health_probe::CoreReadinessProbe::new(
+        peer_mgr_tx.clone(),
+        rib_query_tx.clone(),
+    )
+    .with_peer_manager_readiness(peer_mgr_readiness_tx.clone())
+    .with_rib_readiness(rib_readiness_tx.clone());
     if let Some(metrics_listener) = metrics_listener.filter(|_| !initial_peer_boot_failed) {
         let metrics_clone = metrics.clone();
-        let readiness_probe = rustbgpd_api::health_probe::CoreReadinessProbe::new(
-            peer_mgr_tx.clone(),
-            rib_query_tx.clone(),
-        )
-        .with_peer_manager_readiness(peer_mgr_readiness_tx.clone())
-        .with_rib_readiness(rib_readiness_tx.clone())
-        .with_gate(daemon_gate.clone());
+        let readiness_probe = core_probe.clone().with_gate(daemon_gate.clone());
         tokio::spawn(async move {
             metrics_server::serve_metrics(metrics_listener, metrics_clone, readiness_probe).await;
+        });
+    }
+
+    // systemd `READY=1` shares the readiness boundary above: every configured
+    // gRPC listener is bound, the peer roster is installed, and BGP ingress is
+    // active. The watchdog ping reuses the core-actor probe without the
+    // availability gate, so it
+    // reflects PeerManager/RIB responsiveness and keeps running through
+    // coordinated shutdown until the actors themselves go away.
+    let sd_notify = sd_notify::SdNotify::from_env();
+    if !initial_peer_boot_failed {
+        sd_notify.ready();
+        let watchdog_notify = sd_notify.clone();
+        tokio::spawn(async move {
+            watchdog_notify
+                .run_watchdog(|| async { core_probe.check().await.is_ok() })
+                .await;
         });
     }
 
@@ -5835,6 +5880,7 @@ async fn run<T>(
     // Coordinated shutdown closes admission first, then drains both logical
     // watchdog registrations and the acquire-to-registration physical gap.
     daemon_gate.begin_shutdown();
+    sd_notify.stopping();
     runtime_config_lock.close();
     info!("initiating coordinated shutdown");
     if let Some(handle) = rpki_supervisor.take() {
@@ -6261,8 +6307,9 @@ mod tests {
     #[test]
     fn bgp_ingress_activation_follows_complete_initial_peer_registration() {
         // Load-bearing startup-order proof: moving either ingress spawn above
-        // the configured-peer loop makes this test fail. Binding remains
-        // earlier so address reservation and bind errors are still fail-fast.
+        // the configured-peer loop makes this test fail. BGP binding remains
+        // earlier, while every configured gRPC listener must bind before peer
+        // registration or any readiness publication.
         let source = include_str!("main.rs");
         let production = source.split_once("\n#[cfg(test)]\nmod tests").unwrap().0;
         let listener_bind = production
@@ -6271,6 +6318,9 @@ mod tests {
         let peer_registration = production
             .find("for neighbor in peer_configs {")
             .expect("initial configured-peer registration loop must remain explicit");
+        let grpc_startup = production
+            .find("grpc_startup_rx.await")
+            .expect("gRPC listener startup acknowledgement must remain explicit");
         let post_registration_barrier = production
             .find("// Activate BGP ingress only after the complete configured-peer roster is")
             .expect("post-registration BGP ingress barrier must remain explicit");
@@ -6286,6 +6336,7 @@ mod tests {
         let peer_registration_loop = &production[peer_registration..post_registration_barrier];
 
         assert!(listener_bind < peer_registration);
+        assert!(grpc_startup < peer_registration);
         assert!(
             peer_registration_loop.ends_with("\n    }\n\n    "),
             "ingress barrier must follow the rustfmt-indented closing brace of the peer loop"
@@ -6318,6 +6369,15 @@ mod tests {
         assert!(
             production.contains("if initial_peer_boot_failed {\n            break;\n        }")
         );
+        // systemd READY=1 shares the readiness boundary and is sent once;
+        // STOPPING=1 follows the shutdown gate exactly once.
+        assert_eq!(production.matches("sd_notify.ready();").count(), 1);
+        let sd_ready = production.find("sd_notify.ready();").unwrap();
+        assert!(metrics_startup < sd_ready);
+        assert!(grpc_startup < sd_ready);
+        assert!(production.contains("if !initial_peer_boot_failed {\n        sd_notify.ready();"));
+        assert_eq!(production.matches("sd_notify.stopping();").count(), 1);
+        assert!(production.contains("daemon_gate.begin_shutdown();\n    sd_notify.stopping();"));
     }
 
     #[test]
