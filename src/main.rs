@@ -1899,6 +1899,28 @@ fn ttl_security_listener_policy_for_dynamic_range(
     })
 }
 
+/// Compute family-partitioned listener TCP MSS clamps from resolved static
+/// neighbors: the smallest effective `tcp_mss` among IPv4 neighbors becomes the
+/// IPv4 listener clamp, and likewise for IPv6 (LAN-1471). This prevents a
+/// reduced IPv4 tunnel MTU from down-clamping IPv6 sessions below the IPv6
+/// minimum MTU. Returns `(min_v4, min_v6)`, each `None` when no neighbor of
+/// that family sets `tcp_mss`.
+fn family_partitioned_listener_mss(
+    neighbors: &[config::ResolvedNeighbor],
+) -> (Option<u16>, Option<u16>) {
+    let min_v4 = neighbors
+        .iter()
+        .filter(|n| n.transport_config.remote_addr.is_ipv4())
+        .filter_map(|n| n.transport_config.tcp_mss)
+        .min();
+    let min_v6 = neighbors
+        .iter()
+        .filter(|n| n.transport_config.remote_addr.is_ipv6())
+        .filter_map(|n| n.transport_config.tcp_mss)
+        .min();
+    (min_v4, min_v6)
+}
+
 /// Emit every `--check` warning and return the total count.
 ///
 /// The single place the check-time warning set is defined. `--strict` turns
@@ -3794,7 +3816,6 @@ async fn run<T>(
     }
 
     // Acquire every later-activated data-plane listener/socket now. Retaining
-    // these resources reserves the operator's configured addresses, but no
     // BFD actor, BGP accept loop, or metrics HTTP server runs before its
     // existing activation barrier below.
     let bfd_initial = bfd_runtime::BfdRuntimeConfig::from_config(&config).unwrap_or_else(|error| {
@@ -3806,6 +3827,7 @@ async fn run<T>(
             error,
         );
     });
+    let (min_v4_mss, min_v6_mss) = family_partitioned_listener_mss(&peer_configs);
     let listener_options =
         ListenerSocketOptions {
             tcp_ao_keys: peer_configs
@@ -3832,12 +3854,14 @@ async fn run<T>(
                     ttl_security_listener_policy_for_dynamic_range(range, &config.peer_groups)
                 }))
                 .collect(),
-            // Every bound listener socket carries the same clamp: the smallest
-            // effective value across resolved static neighbors.
-            tcp_mss: peer_configs
-                .iter()
-                .filter_map(|neighbor| neighbor.transport_config.tcp_mss)
-                .min(),
+            // Bound listener sockets carry family-partitioned clamps: the smallest
+            // effective value across resolved static IPv4 neighbors is applied to
+            // IPv4 listeners, and likewise for IPv6 (LAN-1471). This prevents a
+            // reduced IPv4 tunnel MTU from down-clamping IPv6 sessions below the
+            // IPv6 minimum MTU.
+            tcp_mss_v4: min_v4_mss,
+            tcp_mss_v6: min_v6_mss,
+            tcp_mss: None,
         };
     let (accept_tx, mut accept_rx) = mpsc::channel::<rustbgpd_transport::AcceptedConnection>(64);
     let explicit_endpoints = config.explicit_listen_endpoints();
@@ -8794,5 +8818,74 @@ peer_group = "plain"
             Some(180),
             "resolution failure must retain the previous raw-config marker fallback"
         );
+    }
+
+    /// Helper: build a `ResolvedNeighbor` with the given remote address and
+    /// `tcp_mss` clamp, all other fields at defaults.
+    fn resolved_neighbor_with_mss(addr: &str, tcp_mss: Option<u16>) -> config::ResolvedNeighbor {
+        let remote_addr: std::net::SocketAddr = addr.parse().unwrap();
+        let mut transport = rustbgpd_transport::TransportConfig::new(
+            rustbgpd_fsm::PeerConfig::default(),
+            remote_addr,
+        );
+        transport.tcp_mss = tcp_mss;
+        config::ResolvedNeighbor {
+            transport_config: transport,
+            max_prefix_restart_seconds: None,
+            label: format!("peer-{addr}"),
+            import_policy: None,
+            export_policy: None,
+            peer_group: None,
+            rfc8212_external: false,
+        }
+    }
+
+    /// LAN-1471: when only an IPv4 neighbor has `tcp_mss = 536`, the IPv4
+    /// listener gets 536 and the IPv6 listener is unclamped.
+    #[test]
+    fn family_partitioned_listener_mss_ipv4_only_clamp() {
+        let neighbors = vec![
+            resolved_neighbor_with_mss("10.0.0.2:179", Some(536)),
+            resolved_neighbor_with_mss("[2001:db8::2]:179", None),
+        ];
+        let (v4, v6) = family_partitioned_listener_mss(&neighbors);
+        assert_eq!(v4, Some(536), "IPv4 listener must get the IPv4 clamp");
+        assert_eq!(v6, None, "IPv6 listener must be unclamped");
+    }
+
+    /// LAN-1471: when both families have neighbors with different `tcp_mss`
+    /// values, each listener gets its own family's minimum — an IPv4 tunnel
+    /// constraint does not down-clamp the IPv6 listener.
+    #[test]
+    fn family_partitioned_listener_mss_both_families_independent() {
+        let neighbors = vec![
+            resolved_neighbor_with_mss("10.0.0.2:179", Some(536)),
+            resolved_neighbor_with_mss("10.0.0.3:179", Some(1300)),
+            resolved_neighbor_with_mss("[2001:db8::2]:179", Some(1220)),
+            resolved_neighbor_with_mss("[2001:db8::3]:179", Some(1400)),
+        ];
+        let (v4, v6) = family_partitioned_listener_mss(&neighbors);
+        assert_eq!(
+            v4,
+            Some(536),
+            "IPv4 listener must get the smallest IPv4 clamp"
+        );
+        assert_eq!(
+            v6,
+            Some(1220),
+            "IPv6 listener must get the smallest IPv6 clamp, not the IPv4 minimum"
+        );
+    }
+
+    /// LAN-1471: when no neighbor sets `tcp_mss`, both listeners are unclamped.
+    #[test]
+    fn family_partitioned_listener_mss_no_clamps() {
+        let neighbors = vec![
+            resolved_neighbor_with_mss("10.0.0.2:179", None),
+            resolved_neighbor_with_mss("[2001:db8::2]:179", None),
+        ];
+        let (v4, v6) = family_partitioned_listener_mss(&neighbors);
+        assert_eq!(v4, None);
+        assert_eq!(v6, None);
     }
 }

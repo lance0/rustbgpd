@@ -914,3 +914,61 @@ async fn strict_explicit_bind_failure_releases_every_earlier_socket() {
     );
     std::net::TcpListener::bind(first).expect("earlier successful bind must be released");
 }
+
+/// LAN-1471: TCP MSS clamps are partitioned by address family on dual-stack
+/// listeners so that an IPv4 tunnel constraint does not down-clamp IPv6 listeners.
+#[tokio::test]
+async fn dual_stack_listener_partitions_tcp_mss_by_address_family() {
+    let (accept_tx, mut accept_rx) = mpsc::channel(4);
+    let options = rustbgpd_transport::ListenerSocketOptions {
+        tcp_mss_v4: Some(1000),
+        tcp_mss_v6: None,
+        ..rustbgpd_transport::ListenerSocketOptions::default()
+    };
+    let listener = BgpListener::bind_dual_with_options(
+        "127.0.0.1:0".parse().unwrap(),
+        "[::1]:0".parse().unwrap(),
+        accept_tx,
+        options,
+    )
+    .await
+    .expect("dual-family listener bind");
+    let addrs = listener.local_addrs();
+    let v6_addr = *addrs.iter().find(|addr| addr.is_ipv6()).unwrap();
+    let v4_addr = *addrs.iter().find(|addr| addr.is_ipv4()).unwrap();
+    let listener_task = tokio::spawn(listener.run());
+
+    let _v4_client = TcpStream::connect(v4_addr)
+        .await
+        .expect("inbound IPv4 BGP connection must establish");
+    let accepted_v4 = tokio::time::timeout(Duration::from_secs(2), accept_rx.recv())
+        .await
+        .expect("listener did not accept the IPv4 connection")
+        .expect("accept channel closed");
+    assert!(accepted_v4.peer_addr.ip().is_ipv4());
+    let v4_mss = socket2::SockRef::from(&accepted_v4.stream)
+        .tcp_mss()
+        .unwrap();
+    assert!(
+        (960..=1000).contains(&v4_mss),
+        "IPv4 accepted child must negotiate clamped MSS: {v4_mss}"
+    );
+
+    let _v6_client = TcpStream::connect(v6_addr)
+        .await
+        .expect("inbound IPv6 BGP connection must establish");
+    let accepted_v6 = tokio::time::timeout(Duration::from_secs(2), accept_rx.recv())
+        .await
+        .expect("listener did not accept the IPv6 connection")
+        .expect("accept channel closed");
+    assert!(accepted_v6.peer_addr.ip().is_ipv6());
+    let v6_mss = socket2::SockRef::from(&accepted_v6.stream)
+        .tcp_mss()
+        .unwrap();
+    assert!(
+        v6_mss > 1000,
+        "IPv6 accepted child must not be down-clamped by IPv4 constraint: {v6_mss}"
+    );
+
+    listener_task.abort();
+}
