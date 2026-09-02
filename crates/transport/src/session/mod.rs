@@ -817,9 +817,6 @@ impl PeerSession {
             if limit.is_some() {
                 self.metrics
                     .set_max_prefix_capacity(&self.peer_label, scope, usage, limit);
-            } else {
-                self.metrics
-                    .remove_max_prefix_capacity(&self.peer_label, scope);
             }
         }
     }
@@ -1159,6 +1156,12 @@ impl PeerSession {
     /// Stop tracking one family's rejected identities after its
     /// `max_prefixes_received_*` bound was removed at runtime.
     fn drop_received_tracking(&mut self, afi: Afi) {
+        let scope = match afi {
+            Afi::Ipv4 => "ipv4_unicast_received",
+            _ => "ipv6_unicast_received",
+        };
+        self.metrics
+            .remove_max_prefix_capacity(&self.peer_label, scope);
         let in_family = |prefix: &Prefix| match prefix {
             Prefix::V4(_) => afi == Afi::Ipv4,
             Prefix::V6(_) => afi == Afi::Ipv6,
