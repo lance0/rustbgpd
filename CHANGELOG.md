@@ -241,9 +241,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   one) now doubles its reconnect wait per consecutive failure, from
   `connect_retry_secs` up to 300 s, instead of retrying at a fixed
   interval. The streak clears after five minutes Established, on
-  `rbgp neighbor <addr> enable`, or on an administrative reset; TCP
-  connection failures, the max-prefix latch, disable, and graceful
-  shutdown are unchanged. `NeighborState.reconnect_in_seconds`, the
+  `rbgp neighbor <addr> enable`, or on an administrative reset. Resetting an
+  enabled static peer that is already Idle also starts its connection
+  immediately. TCP connection failures, the max-prefix latch, disable, and
+  graceful shutdown are unchanged. `NeighborState.reconnect_in_seconds`, the
   `rbgp neighbor <addr>` detail row `Reconnect In`, and its JSON key
   `reconnect_in_seconds` report the remaining wait. Older daemons leave the
   API field absent; JSON omits the value when absent or zero.

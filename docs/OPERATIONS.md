@@ -2406,15 +2406,18 @@ One-shot session bounce (`NeighborService.ResetNeighbor`): sends Cease /
 Administrative Reset with the optional RFC 9003 shutdown communication,
 and closes the TCP connection. Unlike `disable`, the peer stays enabled, so
 there is no `enable` to remember afterwards. A static active-open peer retries
-on its normal schedule. An accepted dynamic peer is removed on Idle and must
-dial in again; its next connection uses the current dynamic-range
-configuration. Unknown peers fail with `NOT_FOUND` and disabled peers with
-`FAILED_PRECONDITION`; an Idle peer is a no-op. Routes are not retained across
-an Established bounce: peers that negotiated RFC 8538 Notification Graceful
-Restart receive a Cease / Hard Reset wrapping the Administrative Reset. The
-sent event therefore reports the on-wire subcode 9 in that case rather than
-the inner Administrative Reset subcode 4. Only an Established active-primary
-teardown increments `bgp_session_down_total{reason="local_notification"}`.
+on its normal schedule. If an enabled static peer is already Idle, reset clears
+any NOTIFICATION backoff and starts the connection immediately; it emits no
+teardown event or session-down sample because no session exists. An accepted
+dynamic peer is removed on Idle and must dial in again; its next connection
+uses the current dynamic-range configuration. Unknown peers fail with
+`NOT_FOUND` and disabled peers with `FAILED_PRECONDITION`. Routes are not
+retained across an Established bounce: peers that negotiated RFC 8538
+Notification Graceful Restart receive a Cease / Hard Reset wrapping the
+Administrative Reset. The sent event therefore reports the on-wire subcode 9
+in that case rather than the inner Administrative Reset subcode 4. Only an
+Established active-primary teardown increments
+`bgp_session_down_total{reason="local_notification"}`.
 
 ### Trigger an MRT dump
 
