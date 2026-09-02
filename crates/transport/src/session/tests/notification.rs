@@ -1174,19 +1174,22 @@ async fn enable_clears_notification_idle_backoff() {
     assert_eq!(notification_cycle(&mut session).await, 60);
 
     assert!(matches!(
+        session
+            .handle_command(PeerCommand::Stop { reason: None })
+            .await,
+        ControlFlow::Continue(())
+    ));
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    assert!(session.reconnect_timer.is_none());
+    assert_eq!(session.notification_idle_failures, 2);
+
+    assert!(matches!(
         session.handle_command(PeerCommand::Start).await,
         ControlFlow::Continue(())
     ));
     assert_eq!(session.fsm.state(), SessionState::Connect);
     assert!(session.reconnect_timer.is_none());
     assert_eq!(session.notification_idle_failures, 0);
-
-    // A manual stop is operator-driven: it neither counts nor escalates.
-    session.drive_fsm(Event::ManualStop { reason: None }).await;
-    assert_eq!(session.fsm.state(), SessionState::Idle);
-    assert_eq!(pending_reconnect_secs(&session), 30);
-    assert_eq!(session.notification_idle_failures, 0);
-    assert_eq!(notification_cycle(&mut session).await, 30);
 }
 
 #[tokio::test(start_paused = true)]
@@ -1217,6 +1220,8 @@ async fn query_state_reports_pending_reconnect_wait() {
     assert_eq!(queried_reconnect_in_secs(&mut session).await, 60);
     tokio::time::advance(Duration::from_secs(10)).await;
     assert_eq!(queried_reconnect_in_secs(&mut session).await, 50);
+    tokio::time::advance(Duration::from_millis(49_500)).await;
+    assert_eq!(queried_reconnect_in_secs(&mut session).await, 1);
 
     session.reconnect_timer = None;
     let (client, _server) = connected_stream_pair().await;

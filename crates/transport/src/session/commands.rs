@@ -1328,10 +1328,12 @@ impl PeerSession {
                     tcp_ao_protected: self.tcp_ao_protected,
                     slow_peer: self.slow_peer,
                     reconnect_in_secs: self.reconnect_timer.as_ref().map_or(0, |timer| {
-                        timer
+                        let remaining = timer
                             .deadline()
-                            .saturating_duration_since(tokio::time::Instant::now())
+                            .saturating_duration_since(tokio::time::Instant::now());
+                        remaining
                             .as_secs()
+                            .saturating_add(u64::from(remaining.subsec_nanos() > 0))
                     }),
                 };
                 let _ = reply.send(state);

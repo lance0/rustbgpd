@@ -273,10 +273,10 @@ pub struct JsonNeighborDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub graceful_shutdown_advertise_intent: Option<bool>,
     pub uptime_seconds: u64,
-    /// Seconds until the next automatic reconnect attempt. Omitted while no
-    /// deferred reconnect is pending.
-    #[serde(skip_serializing_if = "is_zero_u64")]
-    pub reconnect_in_seconds: u64,
+    /// Seconds until the next automatic reconnect attempt. `None` means the
+    /// daemon predates this field or no deferred reconnect is pending.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reconnect_in_seconds: Option<u64>,
     pub prefixes_received: u64,
     pub prefixes_received_ipv4: u64,
     pub prefixes_received_ipv6: u64,
@@ -1606,7 +1606,7 @@ mod tests {
             slow_peer: true,
             graceful_shutdown_advertise_intent: Some(true),
             uptime_seconds: 42,
-            reconnect_in_seconds: 0,
+            reconnect_in_seconds: None,
             prefixes_received: 11,
             prefixes_received_ipv4: 7,
             prefixes_received_ipv6: 3,
@@ -1789,6 +1789,7 @@ mod tests {
         assert_eq!(value["max_prefix_restart_seconds"], 30);
         assert_eq!(value["max_prefix_restart_remaining_millis"], 15_000);
         assert_eq!(value["prefixes_received"], 11);
+        assert!(value.get("reconnect_in_seconds").is_none());
         assert_eq!(value["prefixes_received_ipv4"], 7);
         assert_eq!(value["prefixes_received_ipv6"], 3);
         assert_eq!(value["effective_max_prefixes"], 20);

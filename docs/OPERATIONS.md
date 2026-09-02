@@ -1872,8 +1872,9 @@ records for a later outage.
    including an OPEN exchange that ends in one, such as an ASN mismatch or
    a repeated hold-timer expiry) doubles that wait, starting from
    `connect_retry_secs` (default 5 s) and capped at 300 s. The wait is also
-   `reconnect_in_seconds` in the JSON output and in `NeighborState`. The
-   streak clears after the session stays Established for five minutes, on
+   `reconnect_in_seconds` in the JSON output and in `NeighborState`. The API
+   field is absent on older daemons, while JSON omits it when absent or zero.
+   The streak clears after the session stays Established for five minutes, on
    `rbgp neighbor <addr> enable`, or on an administrative reset. Plain TCP
    connection failures keep the fixed interval and the fast first retries,
    and a max-prefix shutdown stays latched until an explicit enable. There

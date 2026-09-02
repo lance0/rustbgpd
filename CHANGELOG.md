@@ -154,7 +154,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   connection failures, the max-prefix latch, disable, and graceful
   shutdown are unchanged. `NeighborState.reconnect_in_seconds`, the
   `rbgp neighbor <addr>` detail row `Reconnect In`, and its JSON key
-  `reconnect_in_seconds` report the remaining wait.
+  `reconnect_in_seconds` report the remaining wait. Older daemons leave the
+  API field absent; JSON omits the value when absent or zero.
 
 ### Fixed
 
