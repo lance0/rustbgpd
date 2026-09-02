@@ -9,11 +9,16 @@ ASPA PDU type 11 is v2-only.
 """
 
 import json
+import os
 import socket
 import struct
 import time
 
-LISTEN_PORT = 3323
+LISTEN_PORT = int(os.environ.get("RTR_LISTEN_PORT", "3323"))
+# Optional listener-side TCP MD5 (RFC 2385) key, applied to every IPv4 peer
+# via TCP_MD5SIG_EXT with a 0.0.0.0/0 prefix. Used by the RTR transport
+# authentication receipt; unset means plain TCP as before.
+TCP_MD5_KEY = os.environ.get("RTR_TCP_MD5_KEY", "").encode()
 SESSION_ID = 1
 SERIAL = 1
 REFRESH = 30
@@ -200,9 +205,31 @@ def write_status(queries_served):
         json.dump(status, f)
 
 
+def install_tcp_md5(sock, key):
+    """setsockopt(TCP_MD5SIG_EXT) with a prefix-scoped 0.0.0.0/0 key.
+
+    Linux ``struct tcp_md5sig``: sockaddr_storage (128), tcpm_flags (u8),
+    tcpm_prefixlen (u8), tcpm_keylen (u16), tcpm_ifindex (i32), key[80].
+    """
+    tcp_md5sig_ext = 32
+    tcp_md5sig_flag_prefix = 1
+    if not 1 <= len(key) <= 80:
+        raise SystemExit("RTR_TCP_MD5_KEY must be 1..=80 bytes")
+    addr = struct.pack("=HH4s", socket.AF_INET, 0, socket.inet_aton("0.0.0.0"))
+    opt = (
+        addr.ljust(128, b"\0")
+        + struct.pack("=BBHi", tcp_md5sig_flag_prefix, 0, len(key), 0)
+        + key.ljust(80, b"\0")
+    )
+    sock.setsockopt(socket.IPPROTO_TCP, tcp_md5sig_ext, opt)
+
+
 def main():
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if TCP_MD5_KEY:
+        install_tcp_md5(srv, TCP_MD5_KEY)
+        print("RTR: TCP MD5 required from every peer", flush=True)
     srv.bind(("0.0.0.0", LISTEN_PORT))
     srv.listen(2)
     srv.settimeout(300)

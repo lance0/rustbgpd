@@ -5,6 +5,8 @@ Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+- Added `RtrClient::with_dialer` so embedders can supply custom cache connection setup.
+
 ## 0.1.0 - 2026-08-30
 
 - Added an optional cache-inventory attachment with separate enhanced-update

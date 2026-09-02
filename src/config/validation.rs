@@ -987,6 +987,27 @@ impl Config {
                         reason: format!("cache_servers[{i}]: expire_interval must be > 0"),
                     });
                 }
+                if let Some(password) = &server.md5_password
+                    && (password.is_empty() || password.len() > 80)
+                {
+                    return Err(ConfigError::InvalidRpkiConfig {
+                        reason: format!("cache_servers[{i}]: md5_password must be 1..=80 bytes"),
+                    });
+                }
+                if let Some(tcp_ao) = &server.tcp_ao {
+                    if server.md5_password.is_some() {
+                        return Err(ConfigError::InvalidRpkiConfig {
+                            reason: format!(
+                                "cache_servers[{i}]: tcp_ao is mutually exclusive with md5_password"
+                            ),
+                        });
+                    }
+                    validate_tcp_ao_config(&format!("rpki.cache_servers[{i}]"), tcp_ao).map_err(
+                        |e| ConfigError::InvalidRpkiConfig {
+                            reason: format!("cache_servers[{i}]: {e}"),
+                        },
+                    )?;
+                }
                 if server.expire_interval < server.refresh_interval {
                     return Err(ConfigError::InvalidRpkiConfig {
                         reason: format!(
@@ -1660,14 +1681,17 @@ impl Config {
     /// still carries the placeholder must fail loudly at load instead of
     /// silently booting with `<redacted>` as a live credential.
     fn validate_no_redacted_secrets(&self) -> Result<(), ConfigError> {
-        let placeholder_error = |address: &str, field: &str| ConfigError::InvalidNeighborConfig {
-            address: address.to_string(),
-            field: field.to_string(),
-            reason: format!(
+        let placeholder_reason = || {
+            format!(
                 "is the literal {:?} placeholder emitted by `rbgp config effective`; \
                  restore the real secret before loading this config",
                 super::REDACTED_SECRET
-            ),
+            )
+        };
+        let placeholder_error = |address: &str, field: &str| ConfigError::InvalidNeighborConfig {
+            address: address.to_string(),
+            field: field.to_string(),
+            reason: placeholder_reason(),
         };
         for neighbor in &self.neighbors {
             if neighbor.md5_password.as_deref() == Some(super::REDACTED_SECRET) {
@@ -1699,6 +1723,26 @@ impl Config {
                     &format!("peer_groups.{name}"),
                     "md5_password",
                 ));
+            }
+        }
+        for (i, server) in self
+            .rpki
+            .iter()
+            .flat_map(|rpki| rpki.cache_servers.iter().enumerate())
+        {
+            if server.md5_password.as_deref() == Some(super::REDACTED_SECRET) {
+                return Err(ConfigError::InvalidRpkiConfig {
+                    reason: format!("cache_servers[{i}]: md5_password {}", placeholder_reason()),
+                });
+            }
+            if server
+                .tcp_ao
+                .as_ref()
+                .is_some_and(|tcp_ao| tcp_ao.iter().any(|key| key.key == super::REDACTED_SECRET))
+            {
+                return Err(ConfigError::InvalidRpkiConfig {
+                    reason: format!("cache_servers[{i}]: tcp_ao.key {}", placeholder_reason()),
+                });
             }
         }
         Ok(())

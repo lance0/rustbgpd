@@ -3,6 +3,7 @@ pub mod diagnostic;
 mod parse;
 pub mod profiles;
 mod resolution;
+pub(crate) use resolution::transport_tcp_ao_keyring;
 mod schema;
 pub(crate) mod source_provenance;
 pub(crate) use source_provenance::AcceptedConfigSnapshot;
@@ -2885,8 +2886,9 @@ impl Config {
         }
 
         // Redact secret material everywhere it appears in the schema:
-        // neighbor/dynamic-range tcp_ao.key, neighbor md5_password, and
-        // peer-group md5_password.
+        // neighbor/dynamic-range tcp_ao.key, neighbor md5_password,
+        // peer-group md5_password, and RPKI cache-server md5_password /
+        // tcp_ao.key.
         for neighbor in &mut effective.neighbors {
             if neighbor.md5_password.is_some() {
                 neighbor.md5_password = Some(REDACTED_SECRET.to_string());
@@ -2904,6 +2906,20 @@ impl Config {
         }
         for range in &mut effective.dynamic_neighbors {
             if let Some(tcp_ao) = &mut range.tcp_ao {
+                for key in &mut tcp_ao.0 {
+                    key.key = REDACTED_SECRET.to_string();
+                }
+            }
+        }
+        for server in effective
+            .rpki
+            .iter_mut()
+            .flat_map(|rpki| rpki.cache_servers.iter_mut())
+        {
+            if server.md5_password.is_some() {
+                server.md5_password = Some(REDACTED_SECRET.to_string());
+            }
+            if let Some(tcp_ao) = &mut server.tcp_ao {
                 for key in &mut tcp_ao.0 {
                     key.key = REDACTED_SECRET.to_string();
                 }

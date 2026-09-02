@@ -10,6 +10,8 @@ pub mod rejected_routes;
 mod shared_group;
 mod writer;
 
+pub use io::{connect_authenticated, preflight_authenticated_dial};
+
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::ops::ControlFlow;

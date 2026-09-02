@@ -440,6 +440,13 @@
           "format": "uint64",
           "minimum": 0
         },
+        "md5_password": {
+          "description": "TCP MD5 password (RFC 2385) installed on the RTR socket before\nconnect; the cache must hold the same key. Mutually exclusive with\n`tcp_ao`. Restart-required like the rest of `[rpki]`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "refresh_interval": {
           "description": "RTR refresh interval in seconds. Default 3600.",
           "type": "integer",
@@ -453,6 +460,17 @@
           "format": "uint64",
           "default": 600,
           "minimum": 0
+        },
+        "tcp_ao": {
+          "description": "TCP-AO keyring (RFC 5925) installed on the RTR socket before connect,\nin the neighbor `tcp_ao` shape. Mutually exclusive with\n`md5_password`. Restart-required like the rest of `[rpki]`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TcpAoKeyringConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,

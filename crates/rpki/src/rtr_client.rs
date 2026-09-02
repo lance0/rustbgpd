@@ -19,7 +19,9 @@
 //! deadline and record/byte budgets. See the crate-level docs for the
 //! supported RFC 8210 / 8210bis subset.
 
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -227,7 +229,17 @@ pub struct RtrClient {
     /// Told the effective expire interval (seconds) at start and after
     /// every End of Data; see [`Self::with_expire_observer`].
     expire_observer: Option<Box<dyn Fn(u64) + Send + Sync>>,
+    /// Opens every transport connection to the cache; see
+    /// [`Self::with_dialer`]. `None` is a plain `TcpStream::connect`.
+    dialer: Option<RtrDialer>,
 }
+
+/// Boxed connection opener installed by [`RtrClient::with_dialer`].
+type RtrDialer = Box<
+    dyn Fn(SocketAddr) -> Pin<Box<dyn Future<Output = std::io::Result<TcpStream>> + Send>>
+        + Send
+        + Sync,
+>;
 
 impl RtrClient {
     /// Create a new RTR client.
@@ -255,6 +267,7 @@ impl RtrClient {
             max_transaction_records: MAX_TRANSACTION_RECORDS,
             max_transaction_bytes: MAX_TRANSACTION_BYTES,
             expire_observer: None,
+            dialer: None,
         }
     }
 
@@ -284,6 +297,28 @@ impl RtrClient {
     fn observe_expire(&self) {
         if let Some(observer) = &self.expire_observer {
             observer(self.expire_interval.as_secs());
+        }
+    }
+
+    /// Open every transport connection through `dial` instead of a plain
+    /// `TcpStream::connect`. The embedding daemon uses this to install
+    /// socket options such as TCP MD5 or TCP-AO before connect; a dial
+    /// error is a failed connection attempt that is retried after the
+    /// retry interval, never a plaintext fallback.
+    #[must_use]
+    pub fn with_dialer<F, Fut>(mut self, dial: F) -> Self
+    where
+        F: Fn(SocketAddr) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = std::io::Result<TcpStream>> + Send + 'static,
+    {
+        self.dialer = Some(Box::new(move |addr| Box::pin(dial(addr))));
+        self
+    }
+
+    async fn dial(&self) -> std::io::Result<TcpStream> {
+        match &self.dialer {
+            Some(dial) => dial(self.config.server_addr).await,
+            None => TcpStream::connect(self.config.server_addr).await,
         }
     }
 
@@ -327,7 +362,7 @@ impl RtrClient {
     }
 
     async fn connect_and_run(&mut self) -> Result<(), std::io::Error> {
-        let mut stream = TcpStream::connect(self.config.server_addr).await?;
+        let mut stream = self.dial().await?;
         let mut disconnect_sent = false;
         self.send_enhanced(EnhancedVrpUpdate::Connected {
             server: self.config.server_addr,
@@ -430,7 +465,7 @@ impl RtrClient {
         // the v1 full table replaces them or the expire interval passes.
         self.epoch = None;
 
-        match TcpStream::connect(self.config.server_addr).await {
+        match self.dial().await {
             Ok(mut stream) => {
                 let mut disconnect_sent = false;
                 self.send_enhanced(EnhancedVrpUpdate::Connected {
@@ -1590,6 +1625,38 @@ mod tests {
             pdu.encode_with_version(&mut buf, version).unwrap();
         }
         stream.write_all(&buf).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn with_dialer_opens_every_connection_through_the_dialer() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // The configured address is deliberately not the listener: only the
+        // dialer knows where the cache is, so an accepted connection proves
+        // the client never fell back to a plain connect.
+        let configured: SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let dials = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&dials);
+        let (vrp_tx, _vrp_rx) = mpsc::channel(8);
+        let client = RtrClient::new(test_config(configured, 60, 5, 120), vrp_tx).with_dialer(
+            move |requested| {
+                assert_eq!(requested, configured);
+                counter.fetch_add(1, Ordering::SeqCst);
+                TcpStream::connect(addr)
+            },
+        );
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
+        assert_eq!(dials.load(Ordering::SeqCst), 1);
+        client_handle.abort();
     }
 
     #[tokio::test]

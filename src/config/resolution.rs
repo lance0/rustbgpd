@@ -770,22 +770,7 @@ impl Config {
             .clone()
             .or_else(|| group.and_then(|g| g.md5_password.clone()))
             .map(Into::into);
-        transport.tcp_ao = neighbor.tcp_ao.as_ref().map(|tcp_ao| {
-            TcpAoKeyring(
-                tcp_ao
-                    .iter()
-                    .map(|key| TransportTcpAoConfig {
-                        key: key.key.clone().into(),
-                        send_id: key.send_id,
-                        recv_id: key.recv_id,
-                        algorithm: TcpAoAlgorithm::from_linux_name(&key.algorithm)
-                            .expect("validated in Config::load"),
-                        preferred: key.preferred,
-                        deprecated: key.deprecated,
-                    })
-                    .collect(),
-            )
-        });
+        transport.tcp_ao = neighbor.tcp_ao.as_ref().map(transport_tcp_ao_keyring);
         let ttl_security = neighbor
             .ttl_security
             .or_else(|| group.and_then(|g| g.ttl_security))
@@ -1374,4 +1359,23 @@ pub struct EffectivePolicyChains {
     pub export_explicit: bool,
     /// RFC 8212 external (eBGP) classification for this resolution.
     pub external: bool,
+}
+
+/// Convert a validated schema keyring into the transport keyring installed
+/// on sockets, preserving declaration order and metadata.
+pub(crate) fn transport_tcp_ao_keyring(tcp_ao: &super::TcpAoKeyringConfig) -> TcpAoKeyring {
+    TcpAoKeyring(
+        tcp_ao
+            .iter()
+            .map(|key| TransportTcpAoConfig {
+                key: key.key.clone().into(),
+                send_id: key.send_id,
+                recv_id: key.recv_id,
+                algorithm: TcpAoAlgorithm::from_linux_name(&key.algorithm)
+                    .expect("validated in Config::load"),
+                preferred: key.preferred,
+                deprecated: key.deprecated,
+            })
+            .collect(),
+    )
 }

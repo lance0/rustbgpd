@@ -3007,6 +3007,10 @@ const TEST_RPKI_TASK_EXIT_ENV: &str = "RUSTBGPD_TEST_RPKI_TASK_EXIT";
 /// first unexpected exit. This is observability work before the ordinary
 /// fail-stop teardown, not a grace period for live tasks.
 const RPKI_FAILURE_RESOLUTION_DEADLINE: Duration = Duration::from_secs(1);
+/// Bound on an authenticated RTR TCP handshake. A cache holding a different
+/// TCP MD5 / TCP-AO key drops the signed SYN, so the mismatch surfaces as a
+/// logged connection failure instead of a kernel-length SYN retry.
+const RTR_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn resolve_test_peer_manager_panic() -> bool {
     match std::env::var(TEST_PEER_MANAGER_PANIC_ENV) {
@@ -3751,6 +3755,43 @@ async fn run<T>(
         );
     });
 
+    // Prove the kernel accepts every RPKI cache server's TCP MD5 / TCP-AO
+    // material before any teardown-owned actor starts. The RTR clients
+    // spawned later dial with the same options and never fall back to
+    // plaintext, so a refused key is a startup error rather than an endless
+    // reconnect loop.
+    for server in config
+        .rpki
+        .iter()
+        .flat_map(|rpki| rpki.cache_servers.iter())
+        .filter(|server| server.md5_password.is_some() || server.tcp_ao.is_some())
+    {
+        // Validation already requires a numeric endpoint; the spawn site
+        // reports anything that still fails to parse.
+        let Ok(addr) = server.address.parse::<std::net::SocketAddr>() else {
+            continue;
+        };
+        let md5_password = server
+            .md5_password
+            .clone()
+            .map(rustbgpd_transport::TransportAuthSecret::from);
+        let tcp_ao = server
+            .tcp_ao
+            .as_ref()
+            .map(crate::config::transport_tcp_ao_keyring);
+        if let Err(error) = rustbgpd_transport::preflight_authenticated_dial(
+            addr,
+            md5_password.as_ref(),
+            tcp_ao.as_ref(),
+            &addr.to_string(),
+        ) {
+            fatal_startup_error(
+                "RPKI cache server transport authentication rejected by the kernel",
+                format!("cache {addr}: {error}"),
+            );
+        }
+    }
+
     // Acquire every later-activated data-plane listener/socket now. Retaining
     // these resources reserves the operator's configured addresses, but no
     // BFD actor, BGP accept loop, or metrics HTTP server runs before its
@@ -4201,6 +4242,43 @@ async fn run<T>(
                 .with_expire_observer(move |secs| {
                     expire_metrics.set_rpki_cache_effective_expire_seconds(&cache_label, secs);
                 });
+            // Authenticated caches dial through the transport crate so TCP MD5
+            // or TCP-AO is installed before the SYN leaves; the material was
+            // preflighted against the kernel before the ownership boundary.
+            let md5_password = server
+                .md5_password
+                .clone()
+                .map(rustbgpd_transport::TransportAuthSecret::from);
+            let tcp_ao = server
+                .tcp_ao
+                .as_ref()
+                .map(crate::config::transport_tcp_ao_keyring);
+            let client = if md5_password.is_some() || tcp_ao.is_some() {
+                let auth_label = addr.to_string();
+                info!(
+                    server = %addr,
+                    md5 = md5_password.is_some(),
+                    tcp_ao = tcp_ao.is_some(),
+                    "RTR transport authentication configured"
+                );
+                client.with_dialer(move |remote| {
+                    let md5_password = md5_password.clone();
+                    let tcp_ao = tcp_ao.clone();
+                    let label = auth_label.clone();
+                    async move {
+                        rustbgpd_transport::connect_authenticated(
+                            remote,
+                            md5_password.as_ref(),
+                            tcp_ao.as_ref(),
+                            &label,
+                            RTR_HANDSHAKE_TIMEOUT,
+                        )
+                        .await
+                    }
+                })
+            } else {
+                client
+            };
             info!(server = %addr, "spawning RTR client for RPKI cache");
             let handle = rpki_tasks.spawn(async move {
                 assert!(

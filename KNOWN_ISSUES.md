@@ -390,13 +390,14 @@ byte counts.
 - **Route Refresh is unconditional.** The ROUTE-REFRESH capability
   (code 2) is always advertised. Inbound route refresh requests check
   peer capability, but there is no config option to disable the feature.
-- **TCP-AO not supported for RTR connections.** RPKI cache (RTR) server
-  connections use plain TCP; TCP-AO (RFC 5925) is not available for the
-  RTR transport. Use network-level access controls or SSH tunnels for RTR
-  transport security. (TCP-AO *is* supported for BGP static-neighbor and
-  dynamic-prefix keys on Linux, including live successor installation,
-  selection, and deprecated-key deletion on SIGHUP — see SECURITY.md and
-  ADR-0062.)
+- **RTR over TLS or SSH is not supported.** RPKI cache (RTR) sessions are
+  authenticated at the TCP layer only: per-cache `md5_password` (RFC 2385)
+  or `tcp_ao` (RFC 5925) installed before connect. TCP-AO on RTR sockets is
+  startup-only — the live successor installation, selection, and
+  deprecated-key deletion that BGP neighbor keyrings get on SIGHUP does not
+  apply; `[rpki]` changes require a restart. Encrypted RTR transports
+  (RFC 8210 §3 TLS/SSH) are not implemented; tunnel the session for
+  confidentiality.
 - **Non-negotiated Add-Path NLRI is not detected.** If a peer violates
   negotiation and sends Add-Path-encoded NLRI for a family where Add-Path
   was not negotiated, the wire format is ambiguous — the 4-byte path ID

@@ -568,11 +568,21 @@ pub struct RpkiConfig {
     pub cache_servers: Vec<CacheServer>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CacheServer {
     /// Numeric RTR cache endpoint as IPv4 `address:port` or bracketed IPv6 `[address]:port`.
     pub address: String,
+    /// TCP MD5 password (RFC 2385) installed on the RTR socket before
+    /// connect; the cache must hold the same key. Mutually exclusive with
+    /// `tcp_ao`. Restart-required like the rest of `[rpki]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub md5_password: Option<String>,
+    /// TCP-AO keyring (RFC 5925) installed on the RTR socket before connect,
+    /// in the neighbor `tcp_ao` shape. Mutually exclusive with
+    /// `md5_password`. Restart-required like the rest of `[rpki]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tcp_ao: Option<TcpAoKeyringConfig>,
     /// RTR refresh interval in seconds. Default 3600.
     #[serde(default = "default_rpki_refresh")]
     pub refresh_interval: u64,
@@ -590,6 +600,25 @@ pub struct CacheServer {
     /// `retry_interval`. Unset: only the two-day maximum applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_expire_interval: Option<u64>,
+}
+
+// Manual Debug: never render `md5_password` (mirrors `NeighborConfig`;
+// `TcpAoConfig` redacts its own key).
+impl fmt::Debug for CacheServer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CacheServer")
+            .field("address", &self.address)
+            .field(
+                "md5_password",
+                &self.md5_password.as_ref().map(|_| "<redacted>"),
+            )
+            .field("tcp_ao", &self.tcp_ao)
+            .field("refresh_interval", &self.refresh_interval)
+            .field("retry_interval", &self.retry_interval)
+            .field("expire_interval", &self.expire_interval)
+            .field("max_expire_interval", &self.max_expire_interval)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
