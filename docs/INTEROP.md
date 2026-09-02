@@ -495,6 +495,30 @@ three-key inventory. Only after BIRD selects the successor may the proof require
 `healthy` Current `3` / RNext `13`. M43 does not claim container- or host-reboot
 persistence.
 
+### RTR transport authentication (local loopback lab)
+
+No public RTR cache (Routinator, StayRTR, rpki-client, FORT) offers a TCP MD5
+or TCP-AO listener, so the daemon-level receipt runs the in-repo RTR v2 server
+with `TCP_MD5SIG` installed on its listener (`RTR_TCP_MD5_KEY`) on loopback —
+no containers, but the kernel enforces the key on both ends exactly as it
+would across a wire:
+
+```sh
+cargo build --bin rustbgpd
+bash tests/interop/scripts/test-rtr-tcp-md5.sh
+```
+
+The driver proves three outcomes for `[[rpki.cache_servers]] md5_password`:
+a matching key syncs (`bgp_rpki_cache_end_of_data_ready` = 1 and
+`bgp_rpki_vrp_count` > 0), a mismatched key never completes the handshake and
+is logged as `RTR connection failed` with the key-mismatch hint, and a keyed
+client against an unsigned cache also stays down — the client never falls
+back to plaintext. TCP-AO on RTR sockets is proven at the socket seam by the
+transport crate's loopback tests
+(`crates/transport/src/session/tests/authenticated_dial.rs`), which install
+the mirrored MKT on a listener and require the same three outcomes; they skip
+on kernels without `CONFIG_TCP_AO`.
+
 ### Network Layouts
 
 ```

@@ -941,7 +941,8 @@ pub(super) async fn poll_connect(
 
 fn install_active_tcp_ao_with<F>(
     socket: &socket2::Socket,
-    config: &TransportConfig,
+    remote_addr: SocketAddr,
+    tcp_ao: Option<&crate::TcpAoKeyring>,
     peer_label: &str,
     mut install_key: F,
 ) -> std::io::Result<Option<crate::socket_opts::TcpAoMktReceipt>>
@@ -954,7 +955,7 @@ where
         crate::socket_opts::TcpAoSocketRole,
     ) -> std::io::Result<()>,
 {
-    let Some(tcp_ao) = config.tcp_ao.as_ref() else {
+    let Some(tcp_ao) = tcp_ao else {
         return Ok(None);
     };
     tcp_ao.selected().ok_or_else(|| {
@@ -963,11 +964,7 @@ where
             "TCP-AO keyring has no selectable non-deprecated key",
         )
     })?;
-    let prefix_len = if config.remote_addr.is_ipv4() {
-        32
-    } else {
-        128
-    };
+    let prefix_len = if remote_addr.is_ipv4() { 32 } else { 128 };
     for (index, key) in tcp_ao.startup_order().into_iter().enumerate() {
         let role = if index == 0 {
             crate::socket_opts::TcpAoSocketRole::ActiveOpen
@@ -976,7 +973,7 @@ where
         };
         install_key(
             socket,
-            config.remote_addr.ip(),
+            remote_addr.ip(),
             prefix_len,
             key,
             role,
@@ -984,7 +981,7 @@ where
         .map_err(|err| {
             warn!(
                 peer = %peer_label,
-                addr = %config.remote_addr,
+                addr = %remote_addr,
                 send_id = key.send_id,
                 recv_id = key.recv_id,
                 algorithm = key.algorithm.linux_name(),
@@ -996,7 +993,7 @@ where
                 format!(
                     "failed to install TCP-AO key for peer {peer_label} at {} \
                      (send_id={}, recv_id={}, algorithm={}): {err}",
-                    config.remote_addr,
+                    remote_addr,
                     key.send_id,
                     key.recv_id,
                     key.algorithm.linux_name()
@@ -1006,7 +1003,7 @@ where
     }
     let receipt = crate::socket_opts::capture_tcp_ao_keyring_receipt(
         socket,
-        config.remote_addr.ip(),
+        remote_addr.ip(),
         prefix_len,
         tcp_ao,
         true,
@@ -1014,7 +1011,7 @@ where
     .map_err(|err| {
         warn!(
             peer = %peer_label,
-            addr = %config.remote_addr,
+            addr = %remote_addr,
             error = %err,
             "failed to capture TCP-AO pre-connect kernel receipt; protected session will retry without unauthenticated fallback"
         );
@@ -1060,7 +1057,13 @@ where
     // key in declaration order before connect. This helper owns the fresh
     // socket, so any partial installation failure closes it before returning
     // and cannot reach the connect operation or fall back to plaintext.
-    let tcp_ao_receipt = install_active_tcp_ao_with(&socket, config, peer_label, install_key)?;
+    let tcp_ao_receipt = install_active_tcp_ao_with(
+        &socket,
+        config.remote_addr,
+        config.tcp_ao.as_ref(),
+        peer_label,
+        install_key,
+    )?;
 
     if let Some(hops) = config.ttl_security_hops {
         crate::socket_opts::set_gtsm(&socket, config.remote_addr, hops)?;
@@ -1092,6 +1095,102 @@ where
     C: FnOnce(&socket2::Socket, &socket2::SockAddr) -> std::io::Result<()>,
 {
     prepare_active_socket_with(socket, config, peer_label, install_key, connect_socket)
+}
+
+/// Build an unconnected socket for `remote` with `md5_password` (RFC 2385)
+/// and/or `tcp_ao` (RFC 5925) installed. Any option the kernel refuses is
+/// returned as the error; the socket never reaches the caller half-armed.
+fn prepare_authenticated_socket(
+    remote: SocketAddr,
+    md5_password: Option<&crate::TransportAuthSecret>,
+    tcp_ao: Option<&crate::TcpAoKeyring>,
+    label: &str,
+) -> std::io::Result<socket2::Socket> {
+    use socket2::{Domain, Protocol, Type};
+
+    let domain = if remote.is_ipv4() {
+        Domain::IPV4
+    } else {
+        Domain::IPV6
+    };
+    let socket = socket2::Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+    if let Some(password) = md5_password {
+        crate::socket_opts::set_tcp_md5sig(&socket, remote, password.as_ref())?;
+        debug!(peer = %label, "TCP MD5 authentication configured");
+    }
+    install_active_tcp_ao_with(
+        &socket,
+        remote,
+        tcp_ao,
+        label,
+        crate::socket_opts::set_tcp_ao_config,
+    )?;
+    Ok(socket)
+}
+
+/// Prove the kernel accepts `md5_password` / `tcp_ao` for `remote` without
+/// connecting: the options are installed on a throwaway socket exactly as
+/// [`connect_authenticated`] would install them. Lets a daemon turn a refused
+/// key into a startup error instead of an endless reconnect loop.
+///
+/// # Errors
+///
+/// Returns the socket creation or `setsockopt` error.
+pub fn preflight_authenticated_dial(
+    remote: SocketAddr,
+    md5_password: Option<&crate::TransportAuthSecret>,
+    tcp_ao: Option<&crate::TcpAoKeyring>,
+    label: &str,
+) -> std::io::Result<()> {
+    prepare_authenticated_socket(remote, md5_password, tcp_ao, label).map(drop)
+}
+
+/// Connect to `remote` with `md5_password` and/or `tcp_ao` installed before
+/// the SYN leaves, for authenticated non-BGP clients such as RTR. A refused
+/// option or a failed handshake is the error; there is no plaintext fallback.
+///
+/// A peer holding a different key drops the signed SYN silently, which is
+/// indistinguishable from a black hole, so the handshake is bounded by
+/// `handshake_timeout` and the timeout error names the key mismatch.
+///
+/// # Errors
+///
+/// Returns the socket option, connect, or handshake error; `TimedOut` when
+/// the handshake does not complete within `handshake_timeout`.
+pub async fn connect_authenticated(
+    remote: SocketAddr,
+    md5_password: Option<&crate::TransportAuthSecret>,
+    tcp_ao: Option<&crate::TcpAoKeyring>,
+    label: &str,
+    handshake_timeout: Duration,
+) -> std::io::Result<TcpStream> {
+    let socket = prepare_authenticated_socket(remote, md5_password, tcp_ao, label)?;
+    socket.set_nonblocking(true)?;
+    match socket.connect(&socket2::SockAddr::from(remote)) {
+        Ok(()) => {}
+        Err(e) if e.raw_os_error() == Some(libc::EINPROGRESS) => {}
+        Err(e) => return Err(e),
+    }
+    let stream = TcpStream::from_std(socket.into())?;
+    let Ok(ready) = tokio::time::timeout(handshake_timeout, stream.writable()).await else {
+        let hint = if md5_password.is_some() || tcp_ao.is_some() {
+            "; the peer is unreachable or does not hold the same TCP MD5 / TCP-AO key"
+        } else {
+            ""
+        };
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!(
+                "TCP handshake with {remote} did not complete within {}s{hint}",
+                handshake_timeout.as_secs_f64()
+            ),
+        ));
+    };
+    ready?;
+    if let Some(err) = stream.take_error()? {
+        return Err(err);
+    }
+    Ok(stream)
 }
 
 async fn create_and_connect(

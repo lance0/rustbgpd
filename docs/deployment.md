@@ -1421,9 +1421,11 @@ short version for first deployment:
   both supported. TCP-AO is preferred and needs mainline Linux 6.7 or newer,
   or a downstream kernel with TCP-AO backported, built with
   `CONFIG_TCP_AO=y`; see ADR-0062.
-- **RPKI cache transport.** RTR (RFC 8210) sessions are plain TCP:
-  unauthenticated and unencrypted. Run caches on loopback or a trusted
-  segment, or tunnel the session (WireGuard, an SSH or stunnel forward).
+- **RPKI cache transport.** RTR (RFC 8210) sessions are TCP with optional
+  per-cache `md5_password` or `tcp_ao` authentication; they are never
+  encrypted. Set a key when the cache supports one; otherwise run caches on
+  loopback or a trusted segment, or tunnel the session (WireGuard, an SSH or
+  stunnel forward).
   A remote cache reached over an untrusted path is a validation-integrity
   problem: anything on the path can rewrite the VRPs the daemon validates
   against.

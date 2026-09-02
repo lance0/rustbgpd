@@ -84,6 +84,7 @@ pub use session::import_decision_cache::{
 // LAN-472: rejected-route retention types crossing into the api +
 // binary layers (PeerManagerCommand reply, PolicyService mapping).
 pub use session::rejected_routes::{RejectedRouteEntry, RejectedRoutesReply};
+pub use session::{connect_authenticated, preflight_authenticated_dial};
 pub use socket_opts::{
     TcpAoInfoSnapshot, TcpAoKeyState, TcpAoSupport, probe_tcp_ao_support, set_gtsm, set_tcp_md5sig,
 };

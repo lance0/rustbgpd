@@ -1211,6 +1211,14 @@ fn redacted_placeholder_fails_validation_loudly() {
             "dynamic tcp_ao key",
             "[peer_groups.g]\nhold_time = 90\n[[dynamic_neighbors]]\nprefix = \"192.0.2.0/24\"\npeer_group = \"g\"\ntcp_ao = { key = \"<redacted>\", send_id = 1, recv_id = 2, algorithm = \"hmac(sha256)\" }\n",
         ),
+        (
+            "rpki cache md5",
+            "[rpki]\n[[rpki.cache_servers]]\naddress = \"127.0.0.1:3323\"\nmd5_password = \"<redacted>\"\n",
+        ),
+        (
+            "rpki cache tcp_ao key",
+            "[rpki]\n[[rpki.cache_servers]]\naddress = \"127.0.0.1:3323\"\ntcp_ao = { key = \"<redacted>\", send_id = 1, recv_id = 2, algorithm = \"hmac(sha256)\" }\n",
+        ),
     ] {
         let toml_str = format!(
             "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n[global.telemetry]\nlog_format = \"json\"\n\n{snippet}"

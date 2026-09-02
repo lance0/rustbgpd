@@ -2322,9 +2322,12 @@ You need a running RPKI validator that speaks RTR:
 | [FORT](https://fortproject.net/) | 8323 | C, lightweight |
 | [OctoRPKI](https://github.com/cloudflare/cfrpki) | 8282 | Go, Cloudflare |
 
-RTR runs over plain TCP with no authentication or encryption. Keep caches on
+RTR runs over TCP. Per cache server, `md5_password` (RFC 2385) or `tcp_ao`
+(RFC 5925) authenticates the session at the TCP layer on Linux; the cache must
+hold the same key. Without either the session is plain TCP: keep such caches on
 loopback or a trusted segment, or tunnel the session; see the
 [security checklist](deployment.md#security-checklist) in the deployment guide.
+RTR over TLS or SSH is not implemented.
 
 ### Basic setup
 
@@ -2358,6 +2361,29 @@ address = "[2001:db8::10]:3323"
 | `retry_interval` | u64 | no | 600 | Seconds before reconnect on failure |
 | `expire_interval` | u64 | no | 7200 | Seconds before discarding stale VRPs, until the cache's End of Data supplies its own expire |
 | `max_expire_interval` | u64 | no | unset | Ceiling on the effective expire, in seconds: the cache-advertised expire (and `expire_interval`) is clamped down to it, so this cache's VRPs are discarded once older than this no matter what the cache advertises. Must be <= 172800 and > both `refresh_interval` and `retry_interval`. Unset: only the two-day maximum applies |
+| `md5_password` | string | no | unset | TCP MD5 key (RFC 2385, 1..=80 bytes) installed on the RTR socket before connect. Mutually exclusive with `tcp_ao` |
+| `tcp_ao` | table or array of tables | no | unset | TCP-AO keyring (RFC 5925) installed on the RTR socket before connect, in the same shape and with the same validation as a neighbor `tcp_ao`. Mutually exclusive with `md5_password` |
+
+### Transport authentication
+
+```toml
+[[rpki.cache_servers]]
+address = "192.0.2.10:3323"
+md5_password = "shared-with-the-cache"
+
+[[rpki.cache_servers]]
+address = "[2001:db8::10]:3323"
+tcp_ao = { key = "shared-with-the-cache", send_id = 1, recv_id = 2, algorithm = "hmac(sha256)" }
+```
+
+The key is installed on the socket before the SYN leaves. Key material the
+kernel refuses (an oversized password, TCP-AO on a kernel without
+`CONFIG_TCP_AO`) is a startup error; a cache that holds a different key never
+completes the TCP handshake, which the client logs as an `RTR connection failed`
+after a 10 s handshake bound and retries after `retry_interval`. There is no
+plaintext fallback. Both fields are redacted by `rbgp config effective` and
+never appear in logs; like the rest of `[rpki]`, changing them requires a
+restart.
 
 ### Validation states
 

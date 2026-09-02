@@ -103,7 +103,9 @@ runs inside the task the application supplies.
 | `draft-ietf-sidrops-8210bis` | Scoped RTR version 2 support for ASPA records, with v1 fallback. Router Key PDUs are not implemented. |
 | `draft-ietf-sidrops-aspa-verification-28` | Role-aware upstream/downstream ASPA path verification for IPv4 and IPv6 unicast. |
 
-RTR cache connections use plain TCP. TLS and SSH transports are not implemented.
+RTR cache connections use plain TCP by default; an embedding daemon can open them
+through its own dialer (`RtrClient::with_dialer`) to install TCP MD5 or TCP-AO
+before connect. TLS and SSH transports are not implemented.
 Transactions are bounded by time, record count, and byte count; validated data
 is retained across reconnects until replacement or expiry.
 

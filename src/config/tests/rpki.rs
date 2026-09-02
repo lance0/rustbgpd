@@ -313,3 +313,75 @@ fn rpki_max_expire_interval_not_above_retry_rejected() {
         "{err}"
     );
 }
+
+#[test]
+fn rpki_cache_server_md5_password_parses_and_never_debug_prints() {
+    let config = parse(&rpki_toml("md5_password = \"rtr-md5-hunter2\"")).unwrap();
+    let server = &config.rpki.as_ref().unwrap().cache_servers[0];
+    assert_eq!(server.md5_password.as_deref(), Some("rtr-md5-hunter2"));
+    assert!(server.tcp_ao.is_none());
+    let debug = format!("{server:?}");
+    assert!(!debug.contains("hunter2"), "{debug}");
+    assert!(debug.contains("<redacted>"), "{debug}");
+}
+
+#[test]
+fn rpki_cache_server_tcp_ao_parses_in_neighbor_shape() {
+    let config = parse(&rpki_toml(
+        "tcp_ao = { key = \"rtr-ao-hunter2\", send_id = 1, recv_id = 2, algorithm = \"hmac(sha256)\" }",
+    ))
+    .unwrap();
+    let server = &config.rpki.as_ref().unwrap().cache_servers[0];
+    let ring = server.tcp_ao.as_ref().unwrap();
+    assert_eq!(ring.len(), 1);
+    assert_eq!((ring.0[0].send_id, ring.0[0].recv_id), (1, 2));
+    let transport = transport_tcp_ao_keyring(ring);
+    assert_eq!(transport.0.len(), 1);
+    assert_eq!(transport.selected().unwrap().send_id, 1);
+    assert!(!format!("{server:?}").contains("hunter2"));
+}
+
+#[test]
+fn rpki_cache_server_rejects_md5_with_tcp_ao_and_invalid_tcp_ao() {
+    let err = parse(&rpki_toml(
+        "md5_password = \"x\"\ntcp_ao = { key = \"k\", send_id = 1, recv_id = 2, algorithm = \"hmac(sha256)\" }",
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("cache_servers[0]"), "{err}");
+    assert!(err.contains("mutually exclusive"), "{err}");
+
+    let err = parse(&rpki_toml(
+        "tcp_ao = { key = \"k\", send_id = 1, recv_id = 2, algorithm = \"md5\" }",
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("cache_servers[0]"), "{err}");
+    assert!(err.contains("tcp_ao.algorithm"), "{err}");
+
+    let err = parse(&rpki_toml(
+        "tcp_ao = { key = \"\", send_id = 1, recv_id = 2, algorithm = \"hmac(sha256)\" }",
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("tcp_ao.key"), "{err}");
+}
+
+#[test]
+fn rpki_cache_server_secrets_are_redacted_in_effective_dump() {
+    for fields in [
+        "md5_password = \"rtr-md5-hunter2\"",
+        "tcp_ao = { key = \"rtr-ao-hunter2\", send_id = 1, recv_id = 2, algorithm = \"hmac(sha256)\" }",
+    ] {
+        let mut config = parse(&rpki_toml(fields)).unwrap();
+        let rendered = config.effective_redacted_toml().unwrap();
+        assert!(!rendered.contains("hunter2"), "{rendered}");
+        assert!(rendered.contains(REDACTED_SECRET), "{rendered}");
+        let err = Config::load_toml_with_diagnostics(&rendered, "effective.toml").unwrap_err();
+        assert!(err.contains("rbgp config effective"), "{err}");
+        assert!(
+            err.contains("invalid RPKI config: cache_servers[0]"),
+            "{err}"
+        );
+    }
+}

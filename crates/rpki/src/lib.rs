@@ -40,9 +40,12 @@
 //! - **Transaction bounds** — each transaction is bounded by a wall-clock
 //!   deadline and record/byte budgets, so a broken or malicious cache
 //!   cannot wedge the client or exhaust memory.
+//! - **Transport** — connections are plain TCP by default. An embedding
+//!   daemon can open them through its own dialer
+//!   ([`RtrClient::with_dialer`]) to install TCP MD5 or TCP-AO before
+//!   connect. RTR over TLS or SSH is not implemented.
 //! - **Not implemented** — Router Key PDUs (`BGPsec`, type 9) are rejected
-//!   as unknown and end the session; transport security (RTR over
-//!   TLS/SSH) — connections are plain TCP.
+//!   as unknown and end the session.
 
 #![deny(unsafe_code)]
 #![deny(clippy::all)]

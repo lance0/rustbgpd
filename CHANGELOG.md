@@ -56,6 +56,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sends KEEPALIVEs on the negotiated timer, and prints each successfully
   parsed UPDATE. Its loopback tests exercise the library-embedding shape in
   `docs/EMBEDDING.md`.
+- `[[rpki.cache_servers]]` accepts `md5_password` (RFC 2385) or a
+  neighbor-shaped `tcp_ao` keyring (RFC 5925); the key is installed on the
+  RTR socket before connect. **Operator-visible:** key material the kernel
+  refuses is a startup error, a cache holding a different key never completes
+  the handshake and is logged as `RTR connection failed` after a 10 s bound,
+  and there is no plaintext fallback. Both fields are redacted by
+  `rbgp config effective`, rejected when the `<redacted>` placeholder is
+  loaded back, and restart-required like the rest of `[rpki]`. RTR over TLS
+  or SSH remains unimplemented. `rustbgpd-rpki` gains
+  `RtrClient::with_dialer` for embedders that open the connection themselves.
 
 - `rs-config-render --help` now lists its rendering, activation, status,
   pruning, recovery, and IXP Manager lifecycle command paths.
