@@ -2457,7 +2457,8 @@ pub struct PeerInfo {
     pub send_hold_time: u32,
     /// Maximum prefix limit (None = unlimited).
     pub max_prefixes: Option<u32>,
-    /// Effective current max-prefix action: `shutdown` or `restart`.
+    /// Effective current max-prefix action: `shutdown`, `restart`, `block`, or
+    /// `warning`.
     pub max_prefix_action: String,
     /// Configured hold-down for the `restart` action.
     pub max_prefix_restart_seconds: Option<u32>,

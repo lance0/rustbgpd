@@ -2093,7 +2093,15 @@ async fn block_action_reserves_batch_slots_per_prefix() {
                 prefix: v4_prefix(2),
             },
             Ipv4NlriEntry {
+                path_id: 2,
+                prefix: v4_prefix(2),
+            },
+            Ipv4NlriEntry {
                 path_id: 1,
+                prefix: v4_prefix(3),
+            },
+            Ipv4NlriEntry {
+                path_id: 2,
                 prefix: v4_prefix(3),
             },
         ],
@@ -2112,8 +2120,25 @@ async fn block_action_reserves_batch_slots_per_prefix() {
     assert_eq!(announced.len(), 2, "both paths share the admitted slot");
     assert_eq!(session.known_unicast_v4, 1);
     assert_eq!(session.received_unicast_v4(), 2);
+    assert_eq!(
+        session.rejected_paths.len(),
+        2,
+        "all paths withheld by the accepted bound stay accounted"
+    );
     assert!(session.max_prefix_scope_blocking(MaxPrefixScope::Ipv4));
     assert!(session.max_prefix_scope_blocking(MaxPrefixScope::Ipv4Received));
+    for scope in ["ipv4_unicast", "ipv4_unicast_received"] {
+        assert_eq!(
+            counter_value(
+                &session.metrics,
+                "bgp_max_prefix_blocked_total",
+                &session.peer_label,
+                scope,
+            ),
+            Some(1.0),
+            "one blocked prefix with two Add-Path identities counts once"
+        );
+    }
 }
 
 /// Mutant: recording a received-bound block as a rejected identity grows the

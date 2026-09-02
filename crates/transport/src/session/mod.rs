@@ -1046,6 +1046,7 @@ impl PeerSession {
         }
         let mut kept = Vec::with_capacity(announced.len());
         let mut reserved = HashSet::new();
+        let mut blocked_prefixes = HashSet::new();
         let mut reserved_accepted = [0_usize; 2];
         let mut reserved_received = [0_usize; 2];
         for route in announced.drain(..) {
@@ -1062,14 +1063,18 @@ impl PeerSession {
             if !has_rejected
                 && !self.received_slot_available(prefix, reserved_received[family_index])
             {
-                self.note_max_prefix_block(received_scope);
+                if blocked_prefixes.insert(prefix) {
+                    self.note_max_prefix_block(received_scope);
+                }
                 continue;
             }
             let (usage, bound) = self.max_prefix_scope_usage(accepted_scope);
             if bound.is_some_and(|bound| {
                 usage.saturating_add(reserved_accepted[family_index]) >= bound as usize
             }) {
-                self.note_max_prefix_block(accepted_scope);
+                if blocked_prefixes.insert(prefix) {
+                    self.note_max_prefix_block(accepted_scope);
+                }
                 self.remember_rejected_path(prefix, route.path_id);
                 continue;
             }
