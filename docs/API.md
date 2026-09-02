@@ -412,6 +412,18 @@ stale peer-session query; clients must not turn absence into zero. Inventory
 consumers can therefore obtain every peer's count in one `ListNeighbors`
 request without scanning routes or issuing `ListRejectedRoutes` per peer.
 
+`NeighborState.reconnect_in_seconds` is the whole-second wait, rounded up,
+until this session's next automatic reconnect attempt while it sits in Idle
+after an unplanned teardown; `0` means no reconnect is pending. Each response
+recomputes it from the live timer, so it is a sample rather than a countdown
+a client can decrement. Consecutive NOTIFICATION-driven returns to Idle
+lengthen the wait from the peer's connect-retry base up to a fixed ceiling,
+so a rising value distinguishes a peer that keeps failing the OPEN exchange
+from one waiting out an ordinary retry. Presence is explicit: a current
+daemon always sends the field, including the zero, so absence means only that
+the daemon predates it and must never be read as "no reconnect pending".
+`rbgp neighbor` omits the field rather than rendering the zero.
+
 `NeighborState.negotiation_available` and `negotiated_session` expose the
 actor-authoritative capability outcome of the current Established session:
 hold time, cached local IP address, negotiated keepalive cadence, remote
@@ -442,6 +454,33 @@ any negotiated family. `NOT_REQUIRED` covers process-wide disabled
 enforcement and iBGP sessions. Clients must render `UNSPECIFIED` (a daemon
 that predates the field) and any unrecognized future value as "unknown",
 never as `NOT_REQUIRED`.
+
+`NeighborState.inbound_prefix_limits` reports ADR-0108 inbound max-prefix
+capacity, one `InboundPrefixLimitState` per finite configured bound in
+enforcement order: the `scope` name (`aggregate`, `ipv4_unicast`,
+`ipv6_unicast`, `ipv4_unicast_received`, or `ipv6_unicast_received`), the
+session actor's `usage` for that scope, the configured `limit`, the
+saturating `headroom`, a `blocking` flag for an open
+`max_prefix_action = "block"` episode, and the stable `reason`
+`inbound_prefix_limit_reached` while blocking. Unlike the outbound sibling,
+a scope with no configured bound has no row at all, so the list is empty for
+a peer with no finite inbound bound — and equally empty from a daemon that
+does not expose the field and from a stale peer-session snapshot. Absence is
+therefore never proof that no bound is configured. Counts come from the
+session actor's O(1) enforcement accounting, never from the RIB, whose rows
+carry different Add-Path and lifecycle semantics.
+
+`NeighborState.max_prefix_action` is the effective current disposition of a
+crossed inbound bound, not a straight echo of the `max_prefix_action`
+configuration key. `block` and `warning` mirror the configured value.
+Configured `shutdown` reports `restart` whenever a timed
+`max_prefix_restart_seconds` is configured, and while a peer latched by a
+max-prefix violation still has a hold-down deadline pending; it reports
+`shutdown` otherwise, including once a latch has become indefinite. The
+companion `max_prefix_restart_remaining_millis` is present only while a
+hold-down is counting down. The field is a plain string: an empty value is a
+daemon that predates it, and clients must render an unrecognized value as
+unknown rather than mapping it back onto a configuration key.
 
 `NeighborState.outbound_prefix_limits` reports ADR-0113 outbound unicast
 capacity, one `OutboundPrefixLimitState` per family: the `family` name
@@ -1830,7 +1869,7 @@ Live `WatchEvents` compatibility:
 | Category | Compatible event types |
 |----------|------------------------|
 | Route | `BGP_EVENT_TYPE_ROUTE_ADDED`, `BGP_EVENT_TYPE_ROUTE_WITHDRAWN`, `BGP_EVENT_TYPE_ROUTE_BEST_CHANGED`, `BGP_EVENT_TYPE_ROUTE_POLICY_FILTERED`, `BGP_EVENT_TYPE_STREAM_LAGGED` |
-| Session | `BGP_EVENT_TYPE_SESSION_STATE_CHANGED`, `BGP_EVENT_TYPE_SESSION_ESTABLISHED`, `BGP_EVENT_TYPE_SESSION_LOST`, `BGP_EVENT_TYPE_PEER_ADDED`, `BGP_EVENT_TYPE_PEER_REMOVED`, `BGP_EVENT_TYPE_PEER_ENABLED`, `BGP_EVENT_TYPE_PEER_DISABLED`, `BGP_EVENT_TYPE_NOTIFICATION_SENT`, `BGP_EVENT_TYPE_NOTIFICATION_RECEIVED`, `BGP_EVENT_TYPE_STREAM_LAGGED` |
+| Session | `BGP_EVENT_TYPE_SESSION_STATE_CHANGED`, `BGP_EVENT_TYPE_SESSION_ESTABLISHED`, `BGP_EVENT_TYPE_SESSION_LOST`, `BGP_EVENT_TYPE_PEER_ADDED`, `BGP_EVENT_TYPE_PEER_REMOVED`, `BGP_EVENT_TYPE_PEER_ENABLED`, `BGP_EVENT_TYPE_PEER_DISABLED`, `BGP_EVENT_TYPE_MAX_PREFIX_WARNING`, `BGP_EVENT_TYPE_NOTIFICATION_SENT`, `BGP_EVENT_TYPE_NOTIFICATION_RECEIVED`, `BGP_EVENT_TYPE_STREAM_LAGGED` |
 | Policy | `BGP_EVENT_TYPE_POLICY_CHANGED` (never `BGP_EVENT_TYPE_STREAM_LAGGED`) |
 | Dataplane | `BGP_EVENT_TYPE_DATAPLANE_STATUS_CHANGED`, `BGP_EVENT_TYPE_DATAPLANE_ROUTE_INSTALLED`, `BGP_EVENT_TYPE_DATAPLANE_ROUTE_WITHDRAWN`, `BGP_EVENT_TYPE_DATAPLANE_ROUTE_FAILED`, plus `BGP_EVENT_TYPE_STREAM_LAGGED` only for the per-route source (not the peerless summary source) |
 | EVPN | `BGP_EVENT_TYPE_EVPN_ROUTE_ADDED`, `BGP_EVENT_TYPE_EVPN_ROUTE_WITHDRAWN`, `BGP_EVENT_TYPE_EVPN_ROUTE_BEST_CHANGED`, `BGP_EVENT_TYPE_STREAM_LAGGED` |
@@ -1847,7 +1886,7 @@ pass-through remains `FAILED_PRECONDITION`; post-admission producer loss retains
 | Category | Compatible event types |
 |----------|------------------------|
 | Route | `BGP_EVENT_TYPE_ROUTE_ADDED`, `BGP_EVENT_TYPE_ROUTE_WITHDRAWN`, `BGP_EVENT_TYPE_ROUTE_BEST_CHANGED`, `BGP_EVENT_TYPE_ROUTE_POLICY_FILTERED`, global `BGP_EVENT_TYPE_STREAM_LAGGED` |
-| Session | `BGP_EVENT_TYPE_SESSION_STATE_CHANGED`, `BGP_EVENT_TYPE_SESSION_ESTABLISHED`, `BGP_EVENT_TYPE_SESSION_LOST`, `BGP_EVENT_TYPE_PEER_ADDED`, `BGP_EVENT_TYPE_PEER_REMOVED`, `BGP_EVENT_TYPE_PEER_ENABLED`, `BGP_EVENT_TYPE_PEER_DISABLED`, `BGP_EVENT_TYPE_NOTIFICATION_SENT`, `BGP_EVENT_TYPE_NOTIFICATION_RECEIVED`, global `BGP_EVENT_TYPE_STREAM_LAGGED` |
+| Session | `BGP_EVENT_TYPE_SESSION_STATE_CHANGED`, `BGP_EVENT_TYPE_SESSION_ESTABLISHED`, `BGP_EVENT_TYPE_SESSION_LOST`, `BGP_EVENT_TYPE_PEER_ADDED`, `BGP_EVENT_TYPE_PEER_REMOVED`, `BGP_EVENT_TYPE_PEER_ENABLED`, `BGP_EVENT_TYPE_PEER_DISABLED`, `BGP_EVENT_TYPE_MAX_PREFIX_WARNING`, `BGP_EVENT_TYPE_NOTIFICATION_SENT`, `BGP_EVENT_TYPE_NOTIFICATION_RECEIVED`, global `BGP_EVENT_TYPE_STREAM_LAGGED` |
 | Policy | `BGP_EVENT_TYPE_POLICY_CHANGED`, `BGP_EVENT_TYPE_OTC_ROUTE_BLOCKED`, global `BGP_EVENT_TYPE_STREAM_LAGGED` |
 | Dataplane | `BGP_EVENT_TYPE_DATAPLANE_STATUS_CHANGED`, `BGP_EVENT_TYPE_DATAPLANE_ROUTE_INSTALLED`, `BGP_EVENT_TYPE_DATAPLANE_ROUTE_WITHDRAWN`, `BGP_EVENT_TYPE_DATAPLANE_ROUTE_FAILED`, global `BGP_EVENT_TYPE_STREAM_LAGGED` |
 | EVPN | `BGP_EVENT_TYPE_EVPN_ROUTE_ADDED`, `BGP_EVENT_TYPE_EVPN_ROUTE_WITHDRAWN`, `BGP_EVENT_TYPE_EVPN_ROUTE_BEST_CHANGED`, global `BGP_EVENT_TYPE_STREAM_LAGGED` |
@@ -1898,12 +1937,19 @@ them so category-agnostic clients can render or filter events without unpacking
 the `oneof`.
 
 `ListSessionEvents` accepts `neighbor_address`, lifecycle-only `event_types`,
-and `limit` filters. Valid `event_types` are the seven session lifecycle types:
+and `limit` filters. Valid `event_types` are the eight session lifecycle types:
 `BGP_EVENT_TYPE_SESSION_STATE_CHANGED`, `BGP_EVENT_TYPE_SESSION_ESTABLISHED`,
 `BGP_EVENT_TYPE_SESSION_LOST`, `BGP_EVENT_TYPE_PEER_ADDED`,
-`BGP_EVENT_TYPE_PEER_REMOVED`, `BGP_EVENT_TYPE_PEER_ENABLED`, and
-`BGP_EVENT_TYPE_PEER_DISABLED`. Empty `event_types` means all seven lifecycle
-types. NOTIFICATION sent/received types are not retained in the history ring
+`BGP_EVENT_TYPE_PEER_REMOVED`, `BGP_EVENT_TYPE_PEER_ENABLED`,
+`BGP_EVENT_TYPE_PEER_DISABLED`, and `BGP_EVENT_TYPE_MAX_PREFIX_WARNING`. Empty
+`event_types` means all eight lifecycle types.
+`BGP_EVENT_TYPE_MAX_PREFIX_WARNING` is one crossing of a configured
+max-prefix warning threshold (`max_prefix_warning_percent`, or the bound
+itself under `max_prefix_action = "warning"`): it carries
+`EVENT_SEVERITY_WARNING`, empty old and new states because nothing
+transitioned, and a reason naming the scope, usage, bound, and threshold
+percentage. It is never a teardown.
+NOTIFICATION sent/received types are not retained in the history ring
 and are rejected here with `INVALID_ARGUMENT`; subscribe to `WatchEvents` with
 `BGP_EVENT_TYPE_NOTIFICATION_SENT` / `BGP_EVENT_TYPE_NOTIFICATION_RECEIVED`
 for live NOTIFICATION metadata. Route event types are likewise rejected; use
