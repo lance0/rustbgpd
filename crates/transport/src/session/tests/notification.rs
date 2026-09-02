@@ -774,7 +774,7 @@ async fn administrative_reset_sends_cease_with_reason_and_arms_reconnect() {
 }
 
 #[tokio::test]
-async fn administrative_reset_in_idle_is_a_no_op() {
+async fn administrative_reset_in_idle_reconnects_without_teardown() {
     let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
     assert_eq!(session.fsm.state(), SessionState::Idle);
 
@@ -789,7 +789,7 @@ async fn administrative_reset_in_idle_is_a_no_op() {
         rib_rx.try_recv().is_err(),
         "an idle session has nothing to tear down"
     );
-    assert_eq!(session.fsm.state(), SessionState::Idle);
+    assert_eq!(session.fsm.state(), SessionState::Connect);
     assert!(session.reconnect_timer.is_none());
 }
 
@@ -1290,6 +1290,69 @@ async fn administrative_reset_clears_notification_idle_backoff() {
     assert_eq!(pending_reconnect_secs(&session), 30);
     assert_eq!(session.notification_idle_failures, 0);
     assert_eq!(notification_cycle(&mut session).await, 30);
+}
+
+#[tokio::test(start_paused = true)]
+async fn administrative_reset_in_idle_clears_notification_backoff_and_reconnects() {
+    let mut session = make_test_session(65001, 65002);
+    notification_cycle(&mut session).await;
+    assert_eq!(notification_cycle(&mut session).await, 60);
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    assert!(session.reconnect_timer.is_some());
+    assert_eq!(session.notification_idle_failures, 2);
+
+    assert!(matches!(
+        session
+            .handle_command(PeerCommand::AdministrativeReset { reason: None })
+            .await,
+        ControlFlow::Continue(())
+    ));
+    assert_eq!(session.fsm.state(), SessionState::Connect);
+    assert!(session.reconnect_timer.is_none());
+    assert_eq!(session.notification_idle_failures, 0);
+
+    // Complete the reconnect handshake and tear it down with a NOTIFICATION.
+    // Backoff restarts from the base 30s instead of continuing from 120s.
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    session.drive_fsm(Event::TcpConnectionConfirmed).await;
+    session.drive_fsm(peer_open(65002)).await;
+    session.drive_fsm(Event::KeepaliveReceived).await;
+    assert_eq!(session.fsm.state(), SessionState::Established);
+
+    session.drive_fsm(peer_cease()).await;
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    assert_eq!(pending_reconnect_secs(&session), 30);
+    assert_eq!(session.notification_idle_failures, 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn administrative_reset_in_idle_when_stopped_clears_backoff_without_reconnecting() {
+    let mut session = make_test_session(65001, 65002);
+    notification_cycle(&mut session).await;
+    assert_eq!(notification_cycle(&mut session).await, 60);
+
+    assert!(matches!(
+        session
+            .handle_command(PeerCommand::Stop { reason: None })
+            .await,
+        ControlFlow::Continue(())
+    ));
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    assert!(session.reconnect_timer.is_none());
+    assert_eq!(session.notification_idle_failures, 2);
+    assert!(session.stop_requested);
+
+    assert!(matches!(
+        session
+            .handle_command(PeerCommand::AdministrativeReset { reason: None })
+            .await,
+        ControlFlow::Continue(())
+    ));
+    assert_eq!(session.fsm.state(), SessionState::Idle);
+    assert!(session.reconnect_timer.is_none());
+    assert_eq!(session.notification_idle_failures, 0);
+    assert!(session.stop_requested);
 }
 
 #[tokio::test(start_paused = true)]

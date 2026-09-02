@@ -1000,16 +1000,19 @@ clear`, `clear bgp <peer>`): the session sends Cease / Administrative Reset
 (truncated to 128 bytes at a UTF-8 boundary, like `DisableNeighbor`) and closes
 the TCP connection. The peer's enable/disable state is untouched, so no
 `EnableNeighbor` follow-up is needed. A static active-open peer reconnects on
-its normal schedule. An accepted dynamic peer follows the normal Idle reap
-path and must dial in again; its next inbound connection is resolved from the
-current dynamic-range configuration. Scoped link-local peers pass `interface`
-as for the sibling RPCs.
+its normal schedule; if it is already Idle, reset clears any NOTIFICATION
+backoff and starts the connection immediately. An accepted dynamic peer follows
+the normal Idle reap path and must dial in again; its next inbound connection
+is resolved from the current dynamic-range configuration. Scoped link-local
+peers pass `interface` as for the sibling RPCs.
 
 - Unknown peers return `NOT_FOUND`; administratively disabled peers return
   `FAILED_PRECONDITION` (enable the peer instead of resetting it).
 - A session that is not `Established` is still accepted: `Connect`/`Active`
   drop back to `Idle` without a NOTIFICATION and follow the static or dynamic
-  lifecycle above; an `Idle` session is a no-op.
+  lifecycle above. For an enabled static peer already in `Idle`, reset clears
+  the NOTIFICATION reconnect backoff and starts a connection immediately; no
+  teardown event or session-down sample is emitted because no session exists.
 - When the peer negotiated RFC 8538 Notification Graceful Restart, the reset
   is sent as Cease / Hard Reset wrapping the Administrative Reset and its
   communication, so neither side retains stale routes across the bounce.
