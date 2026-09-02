@@ -30,6 +30,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   active `blackhole_filtering.policy_ipv4`, is still refused (ADR-0128 keeps
   next-hop translation demand-gated).
 
+- `NeighborService.ResetNeighbor` (outside v1, `mutating` tier) and
+  `rbgp neighbor <addr> reset [--reason <text>]` bounce one enabled session:
+  Cease / Administrative Reset with the optional RFC 9003 shutdown
+  communication and TCP close without changing the peer's enable/disable
+  state. Static active-open peers retry on their normal schedule; an accepted
+  dynamic peer is removed when it reaches Idle and must dial in again. Unknown
+  peers return `NOT_FOUND`; disabled peers return `FAILED_PRECONDITION`.
+
 - `rs-config-render --help` now lists its rendering, activation, status,
   pruning, recovery, and IXP Manager lifecycle command paths.
 

@@ -517,6 +517,12 @@ pub(crate) fn peer_lifecycle_error_status(error: PeerLifecycleError) -> Status {
     }
 }
 
+/// Pre-encode an operator-supplied RFC 9003 shutdown communication; an empty
+/// string means no communication at all.
+fn shutdown_communication(reason: &str) -> Option<bytes::Bytes> {
+    (!reason.is_empty()).then(|| rustbgpd_wire::notification::encode_shutdown_communication(reason))
+}
+
 fn outbound_refresh_error_status(error: OutboundRefreshError) -> Status {
     match error {
         OutboundRefreshError::PeerNotFound(peer) => {
@@ -1412,14 +1418,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         }
         let req = request.into_inner();
         let peer = peer_key(&req.address, &req.interface)?;
-
-        let reason = if req.reason.is_empty() {
-            None
-        } else {
-            Some(rustbgpd_wire::notification::encode_shutdown_communication(
-                &req.reason,
-            ))
-        };
+        let reason = shutdown_communication(&req.reason);
 
         peer_manager_request(&self.peer_mgr_tx, |reply| PeerManagerCommand::DisablePeer {
             peer,
@@ -1430,6 +1429,28 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         .map_err(peer_lifecycle_error_status)?;
 
         Ok(Response::new(proto::DisableNeighborResponse {}))
+    }
+
+    async fn reset_neighbor(
+        &self,
+        request: Request<proto::ResetNeighborRequest>,
+    ) -> Result<Response<proto::ResetNeighborResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
+        let req = request.into_inner();
+        let peer = peer_key(&req.address, &req.interface)?;
+        let reason = shutdown_communication(&req.reason);
+
+        peer_manager_request(&self.peer_mgr_tx, |reply| PeerManagerCommand::ResetPeer {
+            peer,
+            reason,
+            reply,
+        })
+        .await?
+        .map_err(peer_lifecycle_error_status)?;
+
+        Ok(Response::new(proto::ResetNeighborResponse {}))
     }
 
     async fn list_dynamic_neighbors(
@@ -2837,6 +2858,16 @@ mod tests {
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
 
         let err = svc
+            .reset_neighbor(Request::new(proto::ResetNeighborRequest {
+                address: "10.0.0.2".into(),
+                interface: String::new(),
+                reason: "maintenance".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+        let err = svc
             .soft_reset_in(Request::new(proto::SoftResetInRequest {
                 address: "10.0.0.2".into(),
                 interface: String::new(),
@@ -2959,6 +2990,78 @@ mod tests {
         });
         let resp = svc.soft_reset_in(req).await.unwrap();
         let _ = resp.into_inner();
+    }
+
+    /// Load-bearing API seam proof: dropping the interface-aware `PeerKey`,
+    /// the RFC 9003 encoding, the empty-reason elision, or the lifecycle
+    /// error mapping makes this test red.
+    #[tokio::test]
+    async fn reset_neighbor_dispatches_scoped_peer_with_encoded_reason() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+
+        tokio::spawn(async move {
+            let Some(PeerManagerCommand::ResetPeer {
+                peer,
+                reason,
+                reply,
+            }) = peer_rx.recv().await
+            else {
+                panic!("expected ResetPeer");
+            };
+            assert_eq!(peer.address, "fe80::2".parse::<IpAddr>().unwrap());
+            assert_eq!(peer.interface.as_deref(), Some("eth1"));
+            let reason = reason.expect("non-empty reason is encoded");
+            assert_eq!(
+                rustbgpd_wire::notification::decode_shutdown_communication(&reason).unwrap(),
+                "maintenance window"
+            );
+            let _ = reply.send(Ok(()));
+
+            let Some(PeerManagerCommand::ResetPeer { reason, reply, .. }) = peer_rx.recv().await
+            else {
+                panic!("expected second ResetPeer");
+            };
+            assert!(reason.is_none(), "empty reason must send no communication");
+            let _ = reply.send(Err(PeerLifecycleError::RestartRequired(
+                "peer is administratively disabled".into(),
+            )));
+
+            let Some(PeerManagerCommand::ResetPeer { peer, reply, .. }) = peer_rx.recv().await
+            else {
+                panic!("expected third ResetPeer");
+            };
+            let _ = reply.send(Err(PeerLifecycleError::NotFound(peer)));
+        });
+
+        svc.reset_neighbor(Request::new(proto::ResetNeighborRequest {
+            address: "fe80::2".into(),
+            interface: "eth1".into(),
+            reason: "maintenance window".into(),
+        }))
+        .await
+        .unwrap();
+
+        let err = svc
+            .reset_neighbor(Request::new(proto::ResetNeighborRequest {
+                address: "10.0.0.2".into(),
+                interface: String::new(),
+                reason: String::new(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+
+        let err = svc
+            .reset_neighbor(Request::new(proto::ResetNeighborRequest {
+                address: "10.0.0.3".into(),
+                interface: String::new(),
+                reason: String::new(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
     }
 
     /// Load-bearing API seam proof: removing the handler's interface-aware

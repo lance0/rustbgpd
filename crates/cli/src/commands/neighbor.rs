@@ -11,7 +11,8 @@ use crate::proto::neighbor_service_client::NeighborServiceClient;
 use crate::proto::{
     AddNeighborRequest, DeleteNeighborRequest, DisableNeighborRequest, EnableNeighborRequest,
     GetNeighborStateRequest, ListDynamicNeighborsRequest, ListNeighborsRequest, NeighborConfig,
-    NeighborCreateIntent, RefreshOutboundRequest, SetGracefulShutdownRequest, SoftResetInRequest,
+    NeighborCreateIntent, RefreshOutboundRequest, ResetNeighborRequest, SetGracefulShutdownRequest,
+    SoftResetInRequest,
 };
 
 pub(super) fn bare_ip_rpc_address(address: &str) -> &str {
@@ -1244,6 +1245,30 @@ pub async fn disable(
     Ok(())
 }
 
+pub async fn reset(
+    connection: Connection,
+    address: &str,
+    reason: Option<String>,
+    json: bool,
+) -> Result<(), CliError> {
+    let mut client =
+        NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let (address_only, interface) = split_scoped_address(address);
+    client
+        .reset_neighbor(ResetNeighborRequest {
+            address: address_only,
+            reason: reason.unwrap_or_default(),
+            interface,
+        })
+        .await?;
+    output::print_result(
+        json,
+        "reset_neighbor",
+        address,
+        &format!("Neighbor {address} reset"),
+    )
+}
+
 pub async fn softreset(
     connection: Connection,
     address: &str,
@@ -2120,6 +2145,34 @@ mod tests {
         let request = server.state.last_softreset.lock().await.clone().unwrap();
         assert_eq!(request.address, "10.0.0.2");
         assert_eq!(request.families, vec!["ipv6_unicast".to_string()]);
+    }
+
+    /// Load-bearing CLI proof: removing scoped-address splitting or dropping
+    /// the operator's reason from the request makes this test red.
+    #[tokio::test]
+    async fn reset_sends_scoped_peer_and_reason() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        reset(
+            connection,
+            "fe80::2%eth1",
+            Some("maintenance window".to_string()),
+            true,
+        )
+        .await
+        .unwrap();
+
+        let request = server
+            .state
+            .last_reset_neighbor
+            .lock()
+            .await
+            .clone()
+            .unwrap();
+        assert_eq!(request.address, "fe80::2");
+        assert_eq!(request.interface, "eth1");
+        assert_eq!(request.reason, "maintenance window");
     }
 
     /// Load-bearing CLI proof: removing scoped-address splitting, duplicating

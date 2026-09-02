@@ -1882,6 +1882,54 @@ impl PeerManager {
         Ok(())
     }
 
+    /// Operator session reset: Cease/Administrative Reset with the optional
+    /// shutdown communication. A static active-open peer reconnects on its
+    /// normal schedule; an accepted dynamic peer follows the ordinary
+    /// `BackToIdle` removal path and must be re-established by the remote.
+    /// The peer's enable/disable state is untouched, so a disabled peer is
+    /// rejected instead of silently bounced.
+    pub(super) async fn reset_peer(
+        &mut self,
+        peer: PeerKey,
+        reason: Option<bytes::Bytes>,
+    ) -> Result<(), PeerLifecycleError> {
+        let address = peer.address;
+        let pending = {
+            let managed = self
+                .peers
+                .get_mut(&peer)
+                .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?;
+            if !managed.enabled {
+                return Err(PeerLifecycleError::RestartRequired(format!(
+                    "peer {peer} is administratively disabled; enable it before resetting"
+                )));
+            }
+            managed.pending_inbound.take()
+        };
+        if let Some(pending) = pending {
+            let _ = self
+                .quiesce_retiring_session(
+                    &peer,
+                    pending.session_id,
+                    pending.handle,
+                    "administrative reset pending inbound",
+                    false,
+                )
+                .await;
+        }
+        let managed = self
+            .peers
+            .get_mut(&peer)
+            .ok_or_else(|| PeerLifecycleError::NotFound(peer.clone()))?;
+        managed
+            .handle
+            .administrative_reset_timeout(reason, PEER_LIFECYCLE_COMMAND_TIMEOUT)
+            .await
+            .map_err(|e| PeerLifecycleError::Internal(format!("failed to reset peer: {e}")))?;
+        info!(%address, "peer reset");
+        Ok(())
+    }
+
     /// RFC 8326 graceful-shutdown initiator: toggle `GRACEFUL_SHUTDOWN`
     /// community attachment for one peer (`Some(addr)`) or every
     /// currently-managed peer (`None`).

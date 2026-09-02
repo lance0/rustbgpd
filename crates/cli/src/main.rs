@@ -1050,6 +1050,12 @@ enum NeighborAction {
         #[arg(long)]
         reason: Option<String>,
     },
+    /// Reset this neighbor's session (static peers retry; dynamic peers reconnect inbound)
+    Reset {
+        /// Shutdown communication sent with the reset (RFC 9003)
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// Trigger soft reset (inbound)
     Softreset {
         /// Address family to refresh
@@ -2917,6 +2923,9 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             (Some(addr), Some(NeighborAction::Disable { reason })) => {
                 commands::neighbor::disable(connection, &addr, reason, json).await
             }
+            (Some(addr), Some(NeighborAction::Reset { reason })) => {
+                commands::neighbor::reset(connection, &addr, reason, json).await
+            }
             (Some(addr), Some(NeighborAction::Softreset { family })) => {
                 commands::neighbor::softreset(connection, &addr, family, json).await
             }
@@ -4502,6 +4511,39 @@ printf '%s\n' "${COMPREPLY[@]}"
         } else {
             panic!("expected Doctor command");
         }
+    }
+
+    #[test]
+    fn test_parse_neighbor_reset() {
+        let cli = Cli::try_parse_from([
+            "rbgp",
+            "neighbor",
+            "10.0.0.2",
+            "reset",
+            "--reason",
+            "maintenance",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Neighbor {
+                address: Some(address),
+                action: Some(NeighborAction::Reset { reason }),
+                ..
+            } => {
+                assert_eq!(address, "10.0.0.2");
+                assert_eq!(reason.as_deref(), Some("maintenance"));
+            }
+            _ => panic!("expected neighbor reset"),
+        }
+
+        let cli = Cli::try_parse_from(["rbgp", "neighbor", "10.0.0.2", "reset"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Neighbor {
+                action: Some(NeighborAction::Reset { reason: None }),
+                ..
+            }
+        ));
     }
 
     #[test]

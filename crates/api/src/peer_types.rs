@@ -979,6 +979,17 @@ pub enum PeerManagerCommand {
         /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), PeerLifecycleError>>,
     },
+    /// Reset one enabled peer's session without changing its enable/disable
+    /// state. Static active-open sessions retry normally; accepted dynamic
+    /// peers must redial inbound.
+    ResetPeer {
+        /// Peer identity.
+        peer: PeerKey,
+        /// RFC 9003 shutdown communication reason (pre-encoded).
+        reason: Option<Bytes>,
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), PeerLifecycleError>>,
+    },
     /// Trigger a soft inbound reset (route refresh) for the given families.
     SoftResetIn {
         /// Peer identity.

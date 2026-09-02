@@ -682,6 +682,9 @@ _rbgp() {
             rbgp__subcmd__help__subcmd__neighbor,refresh-out)
                 cmd="rbgp__subcmd__help__subcmd__neighbor__subcmd__refresh__subcmd__out"
                 ;;
+            rbgp__subcmd__help__subcmd__neighbor,reset)
+                cmd="rbgp__subcmd__help__subcmd__neighbor__subcmd__reset"
+                ;;
             rbgp__subcmd__help__subcmd__neighbor,softreset)
                 cmd="rbgp__subcmd__help__subcmd__neighbor__subcmd__softreset"
                 ;;
@@ -823,6 +826,9 @@ _rbgp() {
             rbgp__subcmd__neighbor,refresh-out)
                 cmd="rbgp__subcmd__neighbor__subcmd__refresh__subcmd__out"
                 ;;
+            rbgp__subcmd__neighbor,reset)
+                cmd="rbgp__subcmd__neighbor__subcmd__reset"
+                ;;
             rbgp__subcmd__neighbor,softreset)
                 cmd="rbgp__subcmd__neighbor__subcmd__softreset"
                 ;;
@@ -843,6 +849,9 @@ _rbgp() {
                 ;;
             rbgp__subcmd__neighbor__subcmd__help,refresh-out)
                 cmd="rbgp__subcmd__neighbor__subcmd__help__subcmd__refresh__subcmd__out"
+                ;;
+            rbgp__subcmd__neighbor__subcmd__help,reset)
+                cmd="rbgp__subcmd__neighbor__subcmd__help__subcmd__reset"
                 ;;
             rbgp__subcmd__neighbor__subcmd__help,softreset)
                 cmd="rbgp__subcmd__neighbor__subcmd__help__subcmd__softreset"
@@ -5335,7 +5344,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__help__subcmd__neighbor)
-            opts="add delete enable disable softreset refresh-out"
+            opts="add delete enable disable reset softreset refresh-out"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -5475,6 +5484,20 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__help__subcmd__neighbor__subcmd__refresh__subcmd__out)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__help__subcmd__neighbor__subcmd__reset)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -6223,7 +6246,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__neighbor)
-            opts="-s -j -h --wide --compare --addr --token-file --json --no-color --pager --help add delete enable disable softreset refresh-out help"
+            opts="-s -j -h --wide --compare --addr --token-file --json --no-color --pager --help add delete enable disable reset softreset refresh-out help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -6675,7 +6698,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__neighbor__subcmd__help)
-            opts="add delete enable disable softreset refresh-out help"
+            opts="add delete enable disable reset softreset refresh-out help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -6772,6 +6795,20 @@ _rbgp() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        rbgp__subcmd__neighbor__subcmd__help__subcmd__reset)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         rbgp__subcmd__neighbor__subcmd__help__subcmd__softreset)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
@@ -6793,6 +6830,40 @@ _rbgp() {
                 return 0
             fi
             case "${prev}" in
+                --addr)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -s)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --token-file)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --pager)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__neighbor__subcmd__reset)
+            opts="-s -j -h --reason --addr --token-file --json --no-color --pager --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --reason)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 --addr)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0

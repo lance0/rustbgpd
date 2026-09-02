@@ -1195,6 +1195,19 @@ impl PeerSession {
                 self.timers.stop_all();
                 ControlFlow::Break(())
             }
+            PeerCommand::AdministrativeReset { reason } => {
+                // Operator bounce: Cease/Administrative Reset (RFC 4486
+                // subcode 4) through the FSM, which closes TCP and arms the
+                // ordinary reconnect timer on the Idle transition because
+                // `stop_requested` is deliberately left alone.
+                if self.fsm.state() == SessionState::Idle {
+                    debug!(peer = %self.peer_label, "administrative reset requested while idle");
+                } else {
+                    info!(peer = %self.peer_label, "administrative reset requested");
+                    self.drive_fsm(Event::AdministrativeReset { reason }).await;
+                }
+                ControlFlow::Continue(())
+            }
             PeerCommand::QueryState { reply } => {
                 // TCP_AO_INFO is cumulative for this socket. Its in-actor
                 // getsockopt is a bounded, nonblocking kernel-memory read, so

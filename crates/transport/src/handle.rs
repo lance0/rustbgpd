@@ -447,6 +447,14 @@ pub enum PeerCommand {
     /// Tear down the task with an administrative reset that cannot retain
     /// stale routes under Graceful Restart.
     PurgeReset,
+    /// Operator session reset: send Cease/Administrative Reset with the
+    /// optional RFC 9003 shutdown communication and close TCP. The session
+    /// actor returns to its normal reconnect path; its owner decides whether
+    /// to retain it. Administrative state is untouched.
+    AdministrativeReset {
+        /// Shutdown communication reason (pre-encoded), or None.
+        reason: Option<Bytes>,
+    },
     /// Query the current session state.
     QueryState {
         /// Oneshot channel to receive the session state snapshot.
@@ -1435,6 +1443,27 @@ impl PeerHandle {
     ) -> Result<(), PeerCommandError> {
         self.send_simple_command_timeout(PeerCommand::Stop { reason }, "stop", deadline)
             .await
+    }
+
+    /// Request an operator session reset with a bounded command-channel
+    /// deadline. The session sends Cease/Administrative Reset, closes TCP,
+    /// and returns to its normal reconnect path if its owner retains it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session task has exited or the command is not
+    /// accepted before `deadline`.
+    pub async fn administrative_reset_timeout(
+        &self,
+        reason: Option<Bytes>,
+        deadline: Duration,
+    ) -> Result<(), PeerCommandError> {
+        self.send_simple_command_timeout(
+            PeerCommand::AdministrativeReset { reason },
+            "administrative reset",
+            deadline,
+        )
+        .await
     }
 
     /// Send a typed BFD-down command with a bounded deadline.

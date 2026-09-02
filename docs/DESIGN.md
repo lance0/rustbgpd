@@ -95,7 +95,7 @@ and mirrors internal architecture.
 
 ```protobuf
 // Abridged — proto/rustbgpd.proto is authoritative; NeighborService has
-// 12 RPCs and RibService 21, only representative subsets are shown here.
+// 13 RPCs and RibService 21, only representative subsets are shown here.
 
 // Global daemon configuration and identity
 service GlobalService {
@@ -112,6 +112,7 @@ service NeighborService {
   rpc DisableNeighbor(DisableNeighborRequest) returns (DisableNeighborResponse);
   rpc SoftResetIn(SoftResetInRequest)        returns (SoftResetInResponse);
   rpc RefreshOutbound(RefreshOutboundRequest) returns (RefreshOutboundResponse);
+  rpc ResetNeighbor(ResetNeighborRequest)    returns (ResetNeighborResponse);
 }
 
 // Paginated point-in-time RIB queries; EventService owns live route streams

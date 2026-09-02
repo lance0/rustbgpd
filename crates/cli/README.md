@@ -67,6 +67,7 @@ rbgp neighbor <addr> --compare <NEIGHBOR>   # compare live update-group membersh
 rbgp neighbor <addr> add --remote-asn <asn> [--peer-group <name>] [--families <list>] [--route-server-client|--no-route-server-client] [--per-client-best|--no-per-client-best] [--role <role>] [--strict-role|--no-strict-role] [--no-add-path]
 rbgp neighbor <addr> enable
 rbgp neighbor <addr> disable --reason "maintenance"
+rbgp neighbor <addr> reset [--reason "maintenance"]   # Cease/Administrative Reset; static peers retry, dynamic peers reconnect inbound
 rbgp neighbor <addr> softreset
 rbgp neighbor <addr> refresh-out            # re-send this peer's current exportable outbound routes
 rbgp neighbor <addr> delete
@@ -336,6 +337,7 @@ a non-TTY.
 | Explain import policy | `rbgp policy explain --neighbor <peer> --prefix <cidr>` |
 | Policy hit counters | `rbgp policy stats` or `rbgp policy counters` |
 | Route-server clients | `rbgp summary`, then `rbgp neighbor <peer>` for distribution mode |
+| Bounce one session (`clear bgp <peer>`, `bgpctl neighbor <peer> clear`) | `rbgp neighbor <peer> reset [--reason <text>]` |
 | Support bundle + triage checks | `rbgp doctor --output ./support.tar.gz` |
 
 Confirmed config transaction handles must be non-empty, at most 128

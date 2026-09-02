@@ -344,6 +344,81 @@ async fn open_clears_gr_restart_state_after_restart_window_expires() {
     handle.shutdown().await.unwrap().unwrap();
 }
 
+/// An operator reset must reach the peer as Cease/Administrative Reset
+/// carrying the shutdown communication, close the TCP connection, and the
+/// same session actor must reconnect on the ordinary connect-retry schedule.
+#[tokio::test]
+async fn administrative_reset_sends_cease_and_reconnects() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let handle = PeerHandle::spawn(
+        transport_config(addr),
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+    );
+    handle.start().await.unwrap();
+
+    let (mut peer_stream, _) = listener.accept().await.unwrap();
+    let mut buf = BytesMut::with_capacity(4096);
+    let msg = read_bgp_message(&mut peer_stream, &mut buf).await;
+    assert!(matches!(msg, Message::Open(_)));
+    send_bgp_message(&mut peer_stream, &Message::Open(mock_open())).await;
+    send_bgp_message(&mut peer_stream, &Message::Keepalive).await;
+    let msg = read_bgp_message(&mut peer_stream, &mut buf).await;
+    assert!(matches!(msg, Message::Keepalive));
+    wait_for_fsm_state(&handle, SessionState::Established).await;
+
+    let reason = rustbgpd_wire::notification::encode_shutdown_communication("maintenance window");
+    handle
+        .administrative_reset_timeout(Some(reason), Duration::from_secs(1))
+        .await
+        .unwrap();
+
+    let notification = loop {
+        match read_bgp_message(&mut peer_stream, &mut buf).await {
+            Message::Notification(notification) => break notification,
+            Message::Update(_) | Message::Keepalive => {}
+            _ => panic!("unexpected message before the reset NOTIFICATION"),
+        }
+    };
+    assert_eq!(notification.code, NotificationCode::Cease);
+    assert_eq!(
+        notification.subcode,
+        rustbgpd_wire::notification::cease_subcode::ADMINISTRATIVE_RESET
+    );
+    assert_eq!(
+        rustbgpd_wire::notification::decode_shutdown_communication(&notification.data).unwrap(),
+        "maintenance window"
+    );
+    // The TCP connection is closed behind the NOTIFICATION.
+    let mut probe = [0u8; 1];
+    let closed = tokio::time::timeout(Duration::from_secs(5), peer_stream.read(&mut probe))
+        .await
+        .expect("peer socket must close after the reset")
+        .unwrap();
+    assert_eq!(closed, 0, "rustbgpd must close TCP after the NOTIFICATION");
+
+    // The same actor reconnects on the connect-retry schedule (5s here).
+    let (mut peer_stream2, _) = tokio::time::timeout(Duration::from_secs(15), listener.accept())
+        .await
+        .expect("reset session must reconnect")
+        .unwrap();
+    let mut buf2 = BytesMut::with_capacity(4096);
+    let msg = read_bgp_message(&mut peer_stream2, &mut buf2).await;
+    assert!(matches!(msg, Message::Open(_)));
+
+    drop(peer_stream2);
+    handle.shutdown().await.unwrap().unwrap();
+}
+
 #[tokio::test]
 async fn peer_disconnect_triggers_retry() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
