@@ -309,6 +309,15 @@ pub(crate) struct PeerSession {
     /// this timer fires after the connect-retry interval to avoid a hot
     /// reconnect loop (e.g., persistent OPEN validation failures).
     reconnect_timer: Option<Pin<Box<Sleep>>>,
+    /// Consecutive falls to Idle caused by a NOTIFICATION (sent or received,
+    /// including OPEN exchanges that end in one). Each one doubles the
+    /// deferred reconnect wait up to `MAX_NOTIFICATION_IDLE_BACKOFF_SECS`.
+    /// Cleared by an explicit operator start, an administrative reset, or a
+    /// session that stays Established for `HEALTHY_ESTABLISHED`.
+    notification_idle_failures: u32,
+    /// The FSM batch being executed tore the session down with a
+    /// NOTIFICATION. Read when that batch falls to Idle to pick the wait.
+    batch_notification_teardown: bool,
     /// In-flight outbound TCP connect attempt. Polled by the main event loop
     /// so control commands remain responsive during connection establishment.
     connect_task: Option<ConnectTask>,
@@ -493,7 +502,7 @@ pub(crate) struct PeerSession {
     import_policy_routes_permitted: u64,
     import_policy_routes_denied: u64,
     flap_count: u64,
-    established_at: Option<Instant>,
+    established_at: Option<tokio::time::Instant>,
     last_error: String,
     /// Root cause of an in-flight local Cease/8 teardown.
     pending_outbound_teardown_cause: Option<crate::handle::SessionFailureCause>,
@@ -1426,6 +1435,8 @@ impl PeerSession {
             received_eor_families: HashSet::new(),
             stop_requested: false,
             reconnect_timer: None,
+            notification_idle_failures: 0,
+            batch_notification_teardown: false,
             connect_task: None,
             connect_failure_episode: ConnectFailureEpisode::default(),
             outbound_rx,
@@ -1600,6 +1611,8 @@ impl PeerSession {
             received_eor_families: HashSet::new(),
             stop_requested: false,
             reconnect_timer: None,
+            notification_idle_failures: 0,
+            batch_notification_teardown: false,
             connect_task: None,
             connect_failure_episode: ConnectFailureEpisode::default(),
             outbound_rx,

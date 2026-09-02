@@ -89,6 +89,7 @@ pub(crate) fn peer_info(address: IpAddr) -> PeerInfo {
         export_policy_routes_denied: 0,
         flap_count: 0,
         uptime_secs: 0,
+        reconnect_in_secs: 0,
         last_error: String::new(),
         authentication: "plaintext".to_string(),
         tcp_ao_info: None,

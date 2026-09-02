@@ -192,6 +192,7 @@ async fn simultaneous_active_open_runs_inbound_candidate_before_primary_idle() {
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
                         slow_peer: false,
+                        reconnect_in_secs: 0,
                     });
                 }
                 PeerCommand::CollisionDump => {
@@ -414,6 +415,7 @@ async fn max_prefix_latch_arriving_during_idle_query_blocks_inbound_replace() {
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
                         slow_peer: false,
+                        reconnect_in_secs: 0,
                     });
                 }
                 PeerCommand::Shutdown => break,

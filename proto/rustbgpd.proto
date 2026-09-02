@@ -691,6 +691,11 @@ message NeighborState {
   // Absence means an older daemon or a stale peer-session snapshot; clients
   // must not interpret absence as zero.
   optional uint64 rejected_routes_retained = 56;
+  // Seconds until the next automatic reconnect attempt while the session
+  // waits in Idle after an unplanned teardown. Consecutive NOTIFICATION
+  // failures lengthen this wait; 0 when no reconnect is pending. Absence
+  // means the daemon predates this field.
+  optional uint64 reconnect_in_seconds = 57;
 }
 
 message AcceptedDynamicNeighborRange {

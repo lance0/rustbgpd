@@ -52,6 +52,7 @@ fn sequenced_policy_state_handle(
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
                         slow_peer: false,
+                        reconnect_in_secs: 0,
                     });
                 }
                 PeerCommand::UpdateImportPolicy { reply, .. }
@@ -114,6 +115,7 @@ fn export_fails_once_policy_handle(peer_addr: IpAddr, state: SessionState) -> Pe
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
                         slow_peer: false,
+                        reconnect_in_secs: 0,
                     });
                 }
                 PeerCommand::UpdateImportPolicy { reply, .. }
@@ -277,6 +279,7 @@ fn route_refresh_failing_handle(peer_addr: IpAddr, state: SessionState) -> PeerH
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
                         slow_peer: false,
+                        reconnect_in_secs: 0,
                     });
                 }
                 PeerCommand::UpdateImportPolicy { reply, .. }
@@ -344,6 +347,7 @@ fn route_refresh_failing_after_first_handle(peer_addr: IpAddr, state: SessionSta
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
                         slow_peer: false,
+                        reconnect_in_secs: 0,
                     });
                 }
                 PeerCommand::UpdateImportPolicy { reply, .. }
@@ -1368,6 +1372,7 @@ async fn back_to_back_updates_do_not_lose_pending_refresh() {
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
                         slow_peer: false,
+                        reconnect_in_secs: 0,
                     });
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
@@ -1487,6 +1492,7 @@ async fn peer_deletion_after_failed_update_drops_pending_retry_cleanly() {
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
                         slow_peer: false,
+                        reconnect_in_secs: 0,
                     });
                 }
                 PeerCommand::Shutdown => break,

@@ -991,6 +991,7 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         config: Some(config),
         state: state.into(),
         uptime_seconds: info.uptime_secs,
+        reconnect_in_seconds: Some(info.reconnect_in_secs),
         prefixes_received: info.prefix_count as u64,
         rejected_routes_retained: info.rejected_routes_retained.map(|count| count as u64),
         prefixes_sent: 0,
@@ -3830,6 +3831,7 @@ mod tests {
         info.max_prefix_headroom = Some(9);
         info.max_prefix_headroom_ipv4 = Some(3);
         info.max_prefix_headroom_ipv6 = None;
+        info.reconnect_in_secs = 7;
 
         let state = peer_info_to_proto(&info);
         assert_eq!(state.prefixes_received, 11);
@@ -3842,6 +3844,7 @@ mod tests {
         assert_eq!(state.max_prefix_headroom, Some(9));
         assert_eq!(state.max_prefix_headroom_ipv4, Some(3));
         assert_eq!(state.max_prefix_headroom_ipv6, None);
+        assert_eq!(state.reconnect_in_seconds, Some(7));
         info.rejected_routes_retained = None;
         assert_eq!(peer_info_to_proto(&info).rejected_routes_retained, None);
     }

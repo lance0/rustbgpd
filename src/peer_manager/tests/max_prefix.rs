@@ -512,6 +512,7 @@ async fn promoted_dynamic_max_prefix_latch_survives_idle_until_explicit_enable()
                         tcp_ao_info: None,
                         tcp_ao_protected: false,
                         slow_peer: false,
+                        reconnect_in_secs: 0,
                     });
                 }
                 PeerCommand::Stop { .. } => {
@@ -530,8 +531,7 @@ async fn promoted_dynamic_max_prefix_latch_survives_idle_until_explicit_enable()
         PeerHandle::from_parts(session_tx, task),
         false,
     );
-    let managed = mgr.peers.get_mut(&key(addr)).unwrap();
-    managed.is_dynamic = true;
+    mgr.peers.get_mut(&key(addr)).unwrap().is_dynamic = true;
     mgr.dynamic_peer_count = 1;
 
     mgr.handle_session_notification(SessionNotification::MaxPrefixExceeded {

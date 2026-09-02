@@ -1,8 +1,8 @@
 use super::{
-    Action, AddPathMode, Afi, Arc, BmpEvent, Bytes, Duration, Event, Instant, IpAddr, Ipv4Addr,
-    Message, NotificationCode, OUTBOUND_BUFFER, PeerDownReason, PeerSession, RibUpdate, Safi,
-    SessionLifecycleNotification, SessionNotification, SessionNotificationDirection, SessionState,
-    cease_subcode, debug, info, mpsc, warn,
+    Action, AddPathMode, Afi, Arc, BmpEvent, Bytes, Duration, Event, IpAddr, Ipv4Addr, Message,
+    NotificationCode, OUTBOUND_BUFFER, PeerDownReason, PeerSession, RibUpdate, Safi,
+    SessionDownReason, SessionLifecycleNotification, SessionNotification,
+    SessionNotificationDirection, SessionState, cease_subcode, debug, info, mpsc, warn,
 };
 
 pub(super) fn notification_description(
@@ -35,7 +35,38 @@ fn sanitized_notification_reason(reason: &str) -> String {
     sanitized
 }
 
+/// Upper bound for the escalated Idle reconnect wait after consecutive
+/// NOTIFICATION failures. Matches the FSM's Connect/Active retry cap.
+pub(super) const MAX_NOTIFICATION_IDLE_BACKOFF_SECS: u32 = 300;
+
+/// An Established session that lasts this long clears the NOTIFICATION
+/// failure streak. It equals the longest escalated wait, so a peer that stays
+/// up for at least as long as the damping it could earn starts its next
+/// streak from the configured interval, while a peer that flaps inside that
+/// window keeps escalating. It also exceeds the default 90 s hold time, so a
+/// peer that only ever survives until hold-timer expiry still backs off.
+pub(super) const HEALTHY_ESTABLISHED: Duration = Duration::from_secs(300);
+
 impl PeerSession {
+    /// Deferred reconnect wait for the fall to Idle being executed.
+    ///
+    /// A NOTIFICATION teardown doubles `connect_retry_secs` for each
+    /// consecutive NOTIFICATION failure, capped at
+    /// `MAX_NOTIFICATION_IDLE_BACKOFF_SECS` and never below the configured
+    /// interval. Every other fall to Idle keeps the configured interval and
+    /// leaves the streak untouched.
+    fn idle_reconnect_delay_secs(&mut self) -> u32 {
+        let base = self.config.peer.connect_retry_secs;
+        if !self.batch_notification_teardown {
+            return base;
+        }
+        let shift = self.notification_idle_failures.min(31);
+        self.notification_idle_failures = self.notification_idle_failures.saturating_add(1);
+        base.saturating_mul(1u32.checked_shl(shift).unwrap_or(u32::MAX))
+            .min(MAX_NOTIFICATION_IDLE_BACKOFF_SECS)
+            .max(base)
+    }
+
     pub(super) fn log_notification(
         &self,
         direction: SessionNotificationDirection,
@@ -269,10 +300,23 @@ impl PeerSession {
             // Classify before executing the batch: some FSM paths publish
             // SessionDown before their SendNotification action. This observes
             // the batch without changing protocol action order.
-            if let Some(reason) = session_down_reason_for_batch(&event, &actions) {
+            let down_reason = session_down_reason_for_batch(&event, &actions);
+            if let Some(reason) = down_reason {
                 self.session_telemetry_metric_lease
                     .latch_down_reason(reason);
             }
+            // Operator-driven teardowns never count toward the NOTIFICATION
+            // reconnect backoff; an administrative reset also clears it.
+            if matches!(event, Event::AdministrativeReset { .. }) {
+                self.notification_idle_failures = 0;
+            }
+            self.batch_notification_teardown = matches!(
+                down_reason,
+                Some(SessionDownReason::RemoteNotification | SessionDownReason::LocalNotification)
+            ) && !matches!(
+                event,
+                Event::AdministrativeReset { .. } | Event::ManualStop { .. }
+            );
             let follow_up = self.execute_actions(actions).await;
             pending.extend(follow_up);
         }
@@ -480,8 +524,13 @@ impl PeerSession {
                     // a deferred reconnect timer. This avoids a hot loop
                     // when the peer persistently fails (e.g., ASN mismatch).
                     if new == SessionState::Idle && !self.stop_requested {
-                        let delay = self.config.peer.connect_retry_secs;
-                        debug!(peer = %self.peer_label, delay_secs = delay, "scheduling reconnect");
+                        let delay = self.idle_reconnect_delay_secs();
+                        debug!(
+                            peer = %self.peer_label,
+                            delay_secs = delay,
+                            notification_failures = self.notification_idle_failures,
+                            "scheduling reconnect"
+                        );
                         self.reconnect_timer = Some(Box::pin(tokio::time::sleep(
                             Duration::from_secs(u64::from(delay)),
                         )));
@@ -612,7 +661,7 @@ impl PeerSession {
                     let peer_enhanced_refresh = neg.peer_enhanced_route_refresh;
                     self.negotiated = Some(negotiated);
                     self.publish_export_profile();
-                    self.established_at = Some(Instant::now());
+                    self.established_at = Some(tokio::time::Instant::now());
                     // Publish the empty/current capacity snapshot only after
                     // this actor owns a live Established session. Collision
                     // candidates remain suppressed until manager promotion.
@@ -894,8 +943,14 @@ impl PeerSession {
                     // extended messages are per-session, not persistent).
                     self.read_buf
                         .set_max_message_len(rustbgpd_wire::MAX_MESSAGE_LEN);
-                    if self.established_at.take().is_some() {
+                    if let Some(established_at) = self.established_at.take() {
                         self.flap_count += 1;
+                        // A session that held for the longest possible
+                        // escalated wait has proven the peer; start the
+                        // next NOTIFICATION streak from the base interval.
+                        if established_at.elapsed() >= HEALTHY_ESTABLISHED {
+                            self.notification_idle_failures = 0;
+                        }
                     }
 
                     // Recreate outbound channel to discard stale updates
