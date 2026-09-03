@@ -190,7 +190,7 @@ pub(crate) async fn fetch_tui_explain_advertised(
     Ok(response)
 }
 
-/// Which unicast route-listing RPC [`fetch_all_route_pages`] and the TUI
+/// Which unicast route-listing RPC [`fetch_route_listing`] and the TUI
 /// explorer drive.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RouteListRpc {
