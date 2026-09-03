@@ -101,7 +101,13 @@ fn attributes(recipe: &UpdateRecipe) -> Vec<PathAttribute> {
         _ => Origin::Incomplete,
     };
     let asn_count = usize::from(recipe.as_path_len) % (recipe.asns.len() + 1);
-    let asns: Vec<_> = recipe.asns.iter().copied().take(asn_count).collect();
+    let asns: Vec<_> = recipe
+        .asns
+        .iter()
+        .copied()
+        .take(asn_count)
+        .map(|asn| asn.max(1))
+        .collect();
     let as_path = if asns.is_empty() {
         AsPath { segments: vec![] }
     } else {
@@ -176,7 +182,7 @@ fn attributes(recipe: &UpdateRecipe) -> Vec<PathAttribute> {
     }
     if recipe.present & (1 << 8) != 0 {
         attrs.push(PathAttribute::Aggregator(Aggregator {
-            asn: recipe.aggregator_asn,
+            asn: recipe.aggregator_asn.max(1),
             router_id: Ipv4Addr::from(recipe.aggregator_id),
             partial: recipe.partial & (1 << 8) != 0,
         }));
