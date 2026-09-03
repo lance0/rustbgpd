@@ -55,9 +55,11 @@ tests/interop/bird3-archive/*
 tests/interop/configs/m44-certs/
 tests/interop/configs/m54-certs/
 .last_review_sha
+.last_review_hardening_sha
 .lycheecache
 bench/scale/matrix/artifacts-*/
 
 # Local contributor-tool guidance (kept on disk, not tracked)
 /AGENTS.md
 /CLAUDE.md
+/WATCHDOG.yml
