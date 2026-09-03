@@ -1,5 +1,6 @@
 use std::net::IpAddr;
 
+use rustbgpd_api::peer_types::PeerKey;
 use rustbgpd_fsm::SessionState;
 use rustbgpd_transport::{
     PeerHandle, SessionIdentity, SessionLifecycleNotification, SessionNotification,
@@ -117,6 +118,7 @@ impl PeerManager {
                     debug!(%peer_addr, session_id, ?role, "ignoring stale OpenReceived notification");
                     return;
                 }
+                self.learn_dynamic_remote_asn(&peer_key, peer_asn);
                 if self
                     .peers
                     .get(&peer_key)
@@ -479,17 +481,21 @@ impl PeerManager {
             debug!(%peer_addr, session_id, ?role, "ignoring stale StateChanged lifecycle notification");
             return;
         }
-        if let Some(peer_asn) = peer_asn.filter(|asn| *asn != 0)
-            && let Some(managed) = self.peers.get_mut(&peer_key)
+        if let Some(peer_asn) = peer_asn {
+            self.learn_dynamic_remote_asn(&peer_key, peer_asn);
+        }
+        self.publish_state_lifecycle_event(&peer_key, role, old, new);
+    }
+
+    fn learn_dynamic_remote_asn(&mut self, peer_key: &PeerKey, peer_asn: u32) {
+        if peer_asn != 0
+            && let Some(managed) = self.peers.get_mut(peer_key)
             && managed.is_dynamic
             && managed.remote_asn == 0
         {
             managed.remote_asn = peer_asn;
             managed.transport_config.peer.remote_asn = peer_asn;
-            // The learned ASN replaces the accept-any `remote_asn="0"`
-            // identity row.
-            self.publish_peer_info_metric(&peer_key);
+            self.publish_peer_info_metric(peer_key);
         }
-        self.publish_state_lifecycle_event(&peer_key, role, old, new);
     }
 }
