@@ -347,6 +347,136 @@ async fn delete_peer_reaps_metric_series() {
     assert!(matches!(update, RibUpdate::PeerDeleted { peer } if peer == peer_addr));
 }
 
+#[tokio::test]
+async fn reconcile_changed_peer_reaps_metrics_when_replacement_add_fails() {
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let metrics_view = metrics.clone();
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+    );
+    let addr = IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1));
+    let interface = "rustbgpd-test-missing0";
+    let mut original = make_config(addr, 65002);
+    original.interface = Some(interface.to_string());
+    original.scope_id = Some(42);
+    mgr.add_peer(original, false).await.unwrap();
+
+    let peer_label = rustbgpd_telemetry::peer_label(addr);
+    seed_peer_metric_series(&metrics_view, &peer_label);
+    assert!(peer_metric_series_count(&metrics_view, &peer_label) > 0);
+
+    // Reconcile with replacement missing scope_id on nonexistent interface,
+    // so delete_peer_for_reconfigure succeeds, but add_peer_with_admin_state
+    // fails on nix::net::if_::if_nametoindex.
+    let mut replacement = make_config(addr, 65002);
+    replacement.interface = Some(interface.to_string());
+    replacement.scope_id = None;
+    replacement.hold_time = Some(30);
+
+    let result = mgr
+        .reconcile_peers(Vec::new(), Vec::new(), vec![replacement])
+        .await;
+
+    assert_eq!(result.failures.len(), 1);
+    assert_eq!(
+        result.failures[0].kind,
+        rustbgpd_api::peer_types::ReconcileFailureKind::ChangeAdd
+    );
+    assert_eq!(
+        result.effects,
+        vec![
+            rustbgpd_api::peer_types::PeerReconcileEffect::RemovedForFailedReplacement(scoped_key(
+                addr, interface
+            ))
+        ]
+    );
+
+    // Metric series must be reaped on failed replacement
+    assert_eq!(peer_metric_series_count(&metrics_view, &peer_label), 0);
+    // The ordered RIB-side reap marker was queued
+    let update = rib_rx.try_recv().expect("PeerDeleted queued for the RIB");
+    assert!(matches!(update, RibUpdate::PeerDeleted { peer } if peer == addr));
+}
+
+#[tokio::test]
+async fn reconcile_changed_peer_failed_replacement_preserves_scoped_sibling() {
+    let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let metrics_view = metrics.clone();
+    let mut mgr = PeerManager::new(
+        cmd_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        metrics,
+        rib_tx,
+        None,
+    );
+    let addr = IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1));
+    for (interface, scope_id) in [("eth0", 1), ("rustbgpd-test-missing0", 42)] {
+        let mut config = make_config(addr, 65002);
+        config.interface = Some(interface.to_string());
+        config.scope_id = Some(scope_id);
+        mgr.add_peer_with_admin_state(config, false, false)
+            .await
+            .unwrap();
+    }
+
+    let peer_label = rustbgpd_telemetry::peer_label(addr);
+    seed_peer_metric_series(&metrics_view, &peer_label);
+
+    // Replace rustbgpd-test-missing0 with scope_id: None so add fails
+    let mut replacement = make_config(addr, 65002);
+    replacement.interface = Some("rustbgpd-test-missing0".to_string());
+    replacement.scope_id = None;
+
+    let result = mgr
+        .reconcile_peers(Vec::new(), Vec::new(), vec![replacement])
+        .await;
+
+    assert_eq!(result.failures.len(), 1);
+    assert_eq!(
+        result.effects,
+        vec![
+            rustbgpd_api::peer_types::PeerReconcileEffect::RemovedForFailedReplacement(scoped_key(
+                addr,
+                "rustbgpd-test-missing0"
+            ))
+        ]
+    );
+
+    // The failed interface's identity series are reaped
+    assert_eq!(
+        peer_identity_series_count(
+            &metrics_view,
+            "bgp_peer_session_state",
+            &peer_label,
+            "rustbgpd-test-missing0"
+        ),
+        0
+    );
+    // Surviving eth0 sibling still owns bare address series
+    assert_eq!(
+        peer_identity_series_count(&metrics_view, "bgp_peer_session_state", &peer_label, "eth0"),
+        6
+    );
+    assert!(
+        rib_rx.try_recv().is_err(),
+        "surviving sibling owns bare address so RIB delete is not queued"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn peer_presence_rollback_reap_after_shutdown_preserves_scoped_sibling() {
     let mut mgr = dynamic_test_manager();
