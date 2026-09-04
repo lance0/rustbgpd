@@ -331,6 +331,12 @@ jobs:
       - run: cargo doc --locked --workspace --lib --no-deps
         env:
           RUSTDOCFLAGS: "-D warnings"
+      - run: cargo doc --locked -p rustbgpd --bin rustbgpd --no-deps
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+      - run: cargo doc --locked -p rustbgpctl --bin rbgp --no-deps
+        env:
+          RUSTDOCFLAGS: "-D warnings"
       - run: cargo doc --locked -p rustbgpd-wire --lib --no-deps --features tokio-codec
         env:
           RUSTDOCFLAGS: "-D warnings"
