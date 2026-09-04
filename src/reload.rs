@@ -1942,24 +1942,24 @@ pub(crate) async fn reload_config_with_tcp_ao(
     let blackhole_fib_reload_touches_spawn_gate =
         current.global.install_blackhole_discard || new_config.global.install_blackhole_discard;
 
-    // Warn about sections that require restart. The implicit receiver
-    // honor knobs are hot-applied below, so ignore them for this broad
-    // restart warning.
+    // Flag sections that require restart at ERROR, the documented level for
+    // a restart-required edit. The implicit receiver honor knobs are
+    // hot-applied below, so ignore them for this broad restart check.
     let mut restart_new_global = new_config.global.clone();
     let restart_current_global = current.global.clone();
     restart_new_global.honor_graceful_shutdown = restart_current_global.honor_graceful_shutdown;
     restart_new_global.honor_blackhole = restart_current_global.honor_blackhole;
     if restart_new_global != restart_current_global {
-        warn!("[global] changed — requires full restart to take effect");
+        error!("[global] changed — requires full restart to take effect");
     }
     if new_config.rpki != current.rpki {
-        warn!("[rpki] changed — requires full restart to take effect");
+        error!("[rpki] changed — requires full restart to take effect");
     }
     if new_config.bmp != current.bmp {
-        warn!("[bmp] changed — requires full restart to take effect");
+        error!("[bmp] changed — requires full restart to take effect");
     }
     if new_config.mrt != current.mrt {
-        warn!("[mrt] changed — requires full restart to take effect");
+        error!("[mrt] changed — requires full restart to take effect");
     }
 
     // Surface gRPC listener / TLS changes specifically and pin the
@@ -7749,6 +7749,71 @@ hold_time = 90
                     .router_id
                     .parse::<std::net::Ipv4Addr>()
                     .unwrap()
+            );
+        }
+    }
+
+    /// The reload matrix documents a restart-required section as an
+    /// `ERROR`-level log line. Capture the reload's structured log output and
+    /// pin that level for an `[rpki]`-only edit.
+    #[tokio::test]
+    async fn reload_logs_restart_required_section_at_error_level() {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct Sink(Arc<Mutex<Vec<u8>>>);
+        impl Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let sink = Sink(Arc::new(Mutex::new(Vec::new())));
+        let writer_sink = sink.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_writer(move || writer_sink.clone())
+            .finish();
+        // A thread-local default is enough: the reload runs on this thread
+        // under the current-thread test runtime. Sibling tests can reach the
+        // restart-required callsites with no subscriber installed, which
+        // caches `Interest::never()` process-wide, so rebuild the cache
+        // against this subscriber before driving the reload.
+        let _guard = tracing::subscriber::set_default(subscriber);
+        tracing::callsite::rebuild_interest_cache();
+
+        let desired = format!(
+            "{}\n[rpki]\n[[rpki.cache_servers]]\naddress = \"127.0.0.1:3323\"\n",
+            baseline_toml()
+        );
+        let (returned, tags) = drive_reload(baseline_toml(), &desired).await;
+        returned.expect("rpki-only reload must return the pinned runtime config");
+        assert!(
+            tags.is_empty(),
+            "rpki-only edit is restart-required and must not reconcile peers: {tags:?}"
+        );
+
+        let output = String::from_utf8(sink.0.lock().unwrap().clone()).expect("utf8 log output");
+        let line = output
+            .lines()
+            .find(|line| line.contains("[rpki] changed — requires full restart to take effect"))
+            .unwrap_or_else(|| {
+                panic!("reload must emit the rpki restart-required line; captured: {output}")
+            });
+        let json: serde_json::Value = serde_json::from_str(line).expect("structured log line");
+        assert_eq!(
+            json["level"], "ERROR",
+            "restart-required is documented as an ERROR-level line: {line}"
+        );
+        for other in ["[global]", "[bmp]", "[mrt]"] {
+            assert!(
+                !output.contains(&format!("{other} changed")),
+                "rpki-only edit must not flag {other}: {output}"
             );
         }
     }
