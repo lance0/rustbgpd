@@ -309,6 +309,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   SIGINT, or SIGHUP; the signal quits the dashboard the same way Ctrl-C does
   and the process exits with status 0.
 
+- **Operator-visible:** `rustbgpd --diff` now exits 2 when the current
+  config (the second path) cannot be loaded, as documented and as the
+  candidate side already did; it previously exited 1, the code that means
+  the diff carries actionable changes. The diagnostic text is unchanged.
+  Daemon boot and `--check` still exit 1 on a config that cannot be loaded.
 - `birdwatcher-adapter` route views now emit `bgp.ext_communities` (an empty
   array when the route carries none), so Alice-LG shows route targets and
   other extended communities instead of nothing. Each entry is birdwatcher's

@@ -2406,7 +2406,8 @@ The config was rejected, or
 .B \-\-check \-\-strict
 reported at least one warning. For
 .BR \-\-diff ,
-1 means the diff carries actionable changes. A running daemon also exits
+1 means the diff carries actionable changes; a config that cannot be
+loaded exits 2 there. A running daemon also exits
 1 when a component failure ends it (legacy BGP listen mode could bind
 neither family; explicit
 .B listen_addresses
@@ -2420,7 +2421,10 @@ restarts it. An operator\-initiated shutdown exits 0.
 .TP
 .B 2
 Invalid invocation: an unusable flag combination or a missing
-argument.
+argument. For
+.BR \-\-diff ,
+also a candidate or current config that could not be loaded, or a
+diff that could not be serialized.
 .TP
 .B 70
 Internal error.
@@ -2493,12 +2497,14 @@ fn main() -> ExitCode {
                0  Success. For --check: the config is valid; without --strict this\n     \
                   includes a valid config that was warned about\n  \
                1  The config was rejected, or --check --strict found warnings.\n     \
+                  For --diff: the diff carries actionable changes.\n     \
                   A running daemon exits 1 on a component failure that ends it\n     \
                   (legacy BGP mode bound neither family; an explicit listen_addresses\n     \
                   endpoint failed to bind; configured metrics/readiness bind failure;\n     \
                   or unexpected RIB manager, peer manager, RPKI subsystem,\n     \
                   gRPC server, BGP listener task, or BGP accept-forwarding task exit)\n  \
-               2  Invalid invocation (unknown flag combination, missing argument)\n  \
+               2  Invalid invocation (unknown flag combination, missing argument).\n     \
+                  For --diff: also a config that could not be loaded\n  \
                70 Internal error",
                     env!("CARGO_PKG_VERSION"),
                     crate::config::profiles::PROFILE_NAMES.join(", ")
@@ -2726,7 +2732,11 @@ fn main() -> ExitCode {
             Ok(snapshot) => Arc::new(snapshot),
             Err(diagnostic) => {
                 eprintln!("{diagnostic}");
-                process::exit(1);
+                // `--diff` documents 2 for a config that cannot be loaded on
+                // either side, the same code its candidate load uses below;
+                // 1 there means the diff carries actionable changes. Boot and
+                // `--check` keep 1.
+                process::exit(if diff_path.is_some() { 2 } else { 1 });
             }
         }
     };

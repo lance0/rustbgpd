@@ -157,3 +157,41 @@ fn valid_one_shot_interleavings_and_literal_dash_paths_still_work() {
     assert!(output.stdout.starts_with(b"config OK:"), "{output:?}");
     assert!(output.stderr.is_empty(), "{output:?}");
 }
+
+/// `--diff` documents exit 2 for a config that cannot be loaded. The current
+/// config (second path) shares its loader with daemon boot and `--check`,
+/// which exit 1, so the diff mode must map that failure itself.
+#[test]
+fn diff_exits_2_when_the_current_config_cannot_be_loaded() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let candidate = temp.path().join("candidate.toml");
+    std::fs::write(&candidate, starter_config()).expect("write candidate config");
+    let candidate = candidate.to_str().expect("UTF-8 path");
+    let missing = temp.path().join("missing.toml");
+    let missing = missing.to_str().expect("UTF-8 path");
+
+    let output = run(&["--diff", candidate, missing], None);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("error: failed to read") && stderr.contains("missing.toml"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn check_still_exits_1_when_the_config_cannot_be_loaded() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let missing = temp.path().join("missing.toml");
+    let missing = missing.to_str().expect("UTF-8 path");
+
+    let output = run(&["--check", missing], None);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("error: failed to read") && stderr.contains("missing.toml"),
+        "{stderr}"
+    );
+}
