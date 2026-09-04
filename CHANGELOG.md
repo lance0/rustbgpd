@@ -262,6 +262,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - An UPDATE that changes only the link-local companion of an IPv6 next hop
   (RFC 2545 two-address form) is now re-advertised to downstream peers instead
   of being suppressed as an unchanged Adj-RIB-Out entry.
+- `bgp_route_refresh_in_progress` and `bgp_route_refresh_stale_entries` are
+  now reset when a peer session ends while an enhanced route refresh is in
+  progress, including graceful-restart entry and session fail-over.
+  Previously the gauges kept their last values until the peer was removed
+  from configuration.
 
 - **Operator-visible:** `rs-config-render` now states `rs_control_communities`
   on every rendered member session instead of inheriting the daemon default:

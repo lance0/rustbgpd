@@ -1210,3 +1210,69 @@ async fn eorr_preserves_llgr_stale_routes_awaiting_eor() {
     drop(tx);
     handle.await.unwrap();
 }
+
+#[test]
+fn peer_down_mid_refresh_zeroes_refresh_gauges() {
+    // A session that ends while an enhanced route refresh is in progress
+    // must leave `bgp_route_refresh_in_progress` and
+    // `bgp_route_refresh_stale_entries` at zero; nothing else runs for
+    // the peer until it re-establishes.
+    let (_tx, rx) = mpsc::channel(8);
+    let metrics = BgpMetrics::new();
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, metrics.clone());
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let (outbound_tx, _outbound_rx) = mpsc::channel(8);
+    manager.handle_update(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 2,
+        peer,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    });
+
+    manager.handle_update(RibUpdate::RoutesReceived {
+        session_id: 2,
+        peer,
+        announced: vec![
+            make_route(
+                Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24),
+                Ipv4Addr::new(10, 0, 0, 1),
+            ),
+            make_route(
+                Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24),
+                Ipv4Addr::new(10, 0, 0, 1),
+            ),
+        ],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    });
+    drain_route_chunks(&mut manager);
+
+    manager.handle_update(RibUpdate::BeginRouteRefresh {
+        session_id: 2,
+        peer,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    });
+    assert_refresh_metrics(&metrics, "10.0.0.1", "ipv4_unicast", 1.0, 2.0);
+
+    manager.handle_update(RibUpdate::PeerDown {
+        peer,
+        session_id: 2,
+    });
+    assert_refresh_metrics(&metrics, "10.0.0.1", "ipv4_unicast", 0.0, 0.0);
+}
