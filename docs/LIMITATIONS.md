@@ -30,6 +30,15 @@ surfaces; it does not promote the rest of the project out of alpha.
   best-path selection. This is inherent to the RFC 9107 union model — the
   MT/Flex isolation above scopes topology inputs, not speakers.
 - Confederations are not implemented.
+- RFC 5004 (prefer the existing external best path) is not implemented. Path
+  selection is deterministic: below the eBGP-over-iBGP step, ties are broken
+  by the lowest effective BGP Identifier, then the shorter CLUSTER_LIST, then
+  the lowest peer address, so a newly learned external path that ties the
+  current best down to the identifier and carries the lower identifier
+  replaces it. BIRD and OpenBGPD default to the same behavior. If an operator
+  asks, the change would take the shape of an opt-in preference for the
+  existing external path; see the RFC 4271 §9.1.2.2 notes in
+  [`docs/RFC_NOTES.md`](RFC_NOTES.md).
 - Transparent route-server export preserves the accepted route's next hop.
   Operators can opt into fail-closed pre-policy ownership validation with
   `next_hop_ownership = "strict_peer"`, which accepts unicast announcements
