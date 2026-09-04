@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import collections
 import hashlib
 import re
 import stat
@@ -149,25 +148,28 @@ PERMISSION_HASHES = {
     "interop.yml": "6f1d70d72bad231d43c575acef6946580e439c879794ed2ea1f4a40340245172",
     "kernel-dataplane.yml": "6f1d70d72bad231d43c575acef6946580e439c879794ed2ea1f4a40340245172",
 }
-CALL_HASHES = {
-    "interop.yml": "4f21857a91c96ea0b6743dbfcb709a26ffdcbb071357c0e7e489fd8a0174916c",
-    "kernel-dataplane.yml": "ffe292e5ed004a8c1ca0f271ddd934311e2a0dc0b3401f95ec9bd7ac4c3a675b",
-}
-PINS = collections.Counter(
+# External actions are pinned by reviewed version tag: no branch refs and no
+# bare commit SHAs. Adding an action or moving to a new major edits this set.
+PINS = frozenset(
     {
-        "actions/checkout@v7": 97,
-        "dtolnay/rust-toolchain@v1 # stable": 3,
-        "Swatinem/rust-cache@v2": 5,
-        "dtolnay/rust-toolchain@v1 # 1.95": 2,
-        "docker/setup-buildx-action@v4": 51,
-        "docker/build-push-action@v7": 56,
-        "actions/cache@v6": 7,
-        "actions/upload-artifact@v7": 12,
-        "actions/download-artifact@v8": 5,
-        "rustsec/audit-check@v2.0.0": 1,
-        "EmbarkStudios/cargo-deny-action@v2": 1,
+        "actions/cache@v6",
+        "actions/checkout@v7",
+        "actions/download-artifact@v8",
+        "actions/upload-artifact@v7",
+        "docker/build-push-action@v7",
+        "docker/setup-buildx-action@v4",
+        "dtolnay/rust-toolchain@v1",
+        "EmbarkStudios/cargo-deny-action@v2",
+        "rustsec/audit-check@v2.0.0",
+        "Swatinem/rust-cache@v2",
     }
 )
+VERSION_TAG = re.compile(r"@v\d+(?:\.\d+){0,2}$")
+LAB_CALL = re.compile(
+    r"(?ms)^        uses: \./\.github/actions/run-interop-test\n(.*?)(?=^      - |\Z)"
+)
+LAB_CALL_INPUT = re.compile(r"(?m)^          (label|topology|script): (.+)$")
+SETUP_HOST_ACTION = "uses: ./.github/actions/setup-dataplane-host"
 
 GOBGP_PRODUCER_JOB_CONTRACT = (
     "    needs: classify_changes",
@@ -320,6 +322,39 @@ def _list_needs(block: str) -> list[str]:
     if not match:
         return []
     return re.findall(r"(?m)^      - ([\w-]+)$", match.group(1))
+
+
+def _lab_token(label: str) -> str:
+    """Scenario token of a lab label: ``M37+IP`` -> ``m37``, ``M43 crash-restart`` -> ``m43``."""
+    return re.split(r"[ +-]", label, maxsplit=1)[0].lower()
+
+
+def _check_lab_calls(name: str, job_name: str, job: str, errors: list[str]) -> None:
+    """Every lab job drives its own scenarios through complete run-interop-test calls."""
+    prefix = f"{name}:{job_name}"
+    calls = LAB_CALL.findall(job)
+    if not calls:
+        errors.append(f"{prefix}: has no run-interop-test call")
+        return
+    labels: set[str] = set()
+    for call in calls:
+        inputs = dict(LAB_CALL_INPUT.findall(call))
+        missing = [key for key in ("label", "topology", "script") if key not in inputs]
+        if missing:
+            errors.append(f"{prefix}: run-interop-test call missing {', '.join(missing)}")
+            return
+        label = inputs["label"]
+        # A space starts a descriptive suffix (``M43 crash-restart``); ``+`` and ``-``
+        # join scenario variants (``M37+IP`` is the m37-ip job's own identifier).
+        labels.add(label.split(" ", 1)[0].replace("+", "-").upper())
+        token = _lab_token(label)
+        if not inputs["topology"].startswith(f"tests/interop/{token}-"):
+            errors.append(f"{prefix}: {label} topology drifted: {inputs['topology']}")
+        if not inputs["script"].startswith(f"tests/interop/scripts/test-{token}-"):
+            errors.append(f"{prefix}: {label} script drifted: {inputs['script']}")
+    for token in job_name.split("_"):
+        if token.upper() not in labels:
+            errors.append(f"{prefix}: no run-interop-test call labelled {token.upper()}")
 
 
 def _expected_jobs(block: str) -> list[str]:
@@ -995,12 +1030,15 @@ def check(root: Path) -> list[str]:
                         errors.append(f"interop.yml:m85: permits {forbidden}")
             if CHECKOUT not in job:
                 errors.append(f"{name}:{job_name}: pinned checkout drifted")
+            _check_lab_calls(name, job_name, job, errors)
             if setup:
-                if "uses: ./.github/actions/setup-dataplane-host" not in job:
+                if job.count(SETUP_HOST_ACTION) != 1:
                     errors.append(f"{name}:{job_name}: setup call drifted")
                 if GRPCURL_ACTION in job:
                     errors.append(f"{name}:{job_name}: bypasses shared host setup")
             else:
+                if SETUP_HOST_ACTION in job:
+                    errors.append(f"{name}:{job_name}: kernel host setup in interop lab")
                 if job.count(GRPCURL_ACTION) != 1:
                     errors.append(
                         f"{name}:{job_name}: must consume one grpcurl artifact"
@@ -1056,16 +1094,6 @@ def check(root: Path) -> list[str]:
         for forbidden in ("continue-on-error:", "if: success()"):
             if forbidden in aggregate:
                 errors.append(f"{name}:check permits {forbidden}")
-        calls = "\n".join(
-            line.strip()
-            for line in texts[name].splitlines()
-            if re.search(
-                r"(setup-dataplane-host|run-interop-test|label:|topology:|script:)",
-                line,
-            )
-        )
-        if _hash(calls) != CALL_HASHES[name]:
-            errors.append(f"{name}: existing test/setup calls drifted")
     m92 = _jobs(texts["interop.yml"]).get("m92", "")
     required = {
         GRPCURL_ACTION: 1,
@@ -1644,23 +1672,26 @@ def check(root: Path) -> list[str]:
     if "bird.nic.cz" in bird3_surfaces:
         errors.append("bird.nic.cz URL escaped the installer/Dockerfile")
 
-    pins = collections.Counter()
-    for text in [
-        *texts.values(),
-        action,
-        prepare_grpcurl_action,
-        prepare_gobgp_action,
-        prime_dev_image_action,
-        grpcurl_action,
-        gnmic_action,
-        gobgp_action,
-        bird3_action,
-    ]:
+    pin_surfaces = {
+        **{f".github/workflows/{name}": text for name, text in texts.items()},
+        ".github/actions/setup-dataplane-host/action.yml": action,
+        ".github/actions/prepare-grpcurl-artifact/action.yml": prepare_grpcurl_action,
+        ".github/actions/prepare-gobgp-artifact/action.yml": prepare_gobgp_action,
+        ".github/actions/prime-rustbgpd-dev-cache/action.yml": prime_dev_image_action,
+        ".github/actions/install-grpcurl-artifact/action.yml": grpcurl_action,
+        ".github/actions/install-gnmic-artifact/action.yml": gnmic_action,
+        ".github/actions/stage-gobgp-artifact/action.yml": gobgp_action,
+        ".github/actions/stage-bird3-artifact/action.yml": bird3_action,
+    }
+    for source, text in pin_surfaces.items():
         for value in re.findall(r"^\s*(?:- )?uses:\s*(.+)$", text, re.MULTILINE):
-            if not value.strip().startswith("./"):
-                pins[value.strip()] += 1
-    if pins != PINS:
-        errors.append("external action pins/counts drifted")
+            ref = value.split("#", 1)[0].strip()
+            if ref.startswith("./"):
+                continue
+            if not VERSION_TAG.search(ref):
+                errors.append(f"{source}: action ref is not a reviewed version tag: {ref}")
+            elif ref not in PINS:
+                errors.append(f"{source}: action ref is not in the reviewed pin set: {ref}")
 
     dockerfile = (root / "Dockerfile").read_text()
     builder = dockerfile.split("FROM chef AS builder\n", 1)[-1].split("\nFROM ", 1)[0]
