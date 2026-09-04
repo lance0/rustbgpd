@@ -827,7 +827,7 @@ pub(crate) async fn peer_manager_request<R>(
         peer_mgr_tx
             .send(build_command(reply_tx))
             .await
-            .map_err(|_| Status::internal("peer manager unavailable"))?;
+            .map_err(|_| Status::unavailable("peer manager unavailable"))?;
         reply_rx
             .await
             .map_err(|_| Status::internal("peer manager dropped reply"))
@@ -3068,5 +3068,20 @@ mod tests {
         assert_eq!(result.unwrap_err().code(), tonic::Code::DeadlineExceeded);
         // Held so the command is accepted but never answered.
         drop(rx);
+    }
+
+    /// Load-bearing: a closed peer-manager command channel means the
+    /// mutation was never accepted, which the documented status contract
+    /// reports as `UNAVAILABLE`; a reply lost after acceptance stays
+    /// `INTERNAL` because the command may already have been applied.
+    #[tokio::test]
+    async fn closed_peer_manager_request_returns_unavailable() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let error = peer_manager_request(&tx, |reply| PeerManagerCommand::ListPeers { reply })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert_eq!(error.message(), "peer manager unavailable");
     }
 }

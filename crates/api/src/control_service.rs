@@ -170,7 +170,7 @@ impl proto::control_service_server::ControlService for ControlService {
         trigger_tx
             .send(reply_tx)
             .await
-            .map_err(|_| Status::internal("MRT manager unavailable"))?;
+            .map_err(|_| Status::unavailable("MRT manager unavailable"))?;
 
         let result = reply_rx
             .await
@@ -325,6 +325,34 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
+
+    /// Load-bearing: a closed MRT trigger channel means the dump was never
+    /// requested, which the documented status contract reports as
+    /// `UNAVAILABLE`; only a reply lost after acceptance stays `INTERNAL`.
+    #[tokio::test]
+    async fn trigger_mrt_dump_send_failure_is_unavailable() {
+        let (peer_tx, _peer_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let (mrt_tx, mrt_rx) = mpsc::channel(1);
+        drop(mrt_rx);
+        let svc = ControlService::new(
+            AccessMode::ReadWrite,
+            tokio::time::Instant::now(),
+            BgpMetrics::new(),
+            peer_tx,
+            rib_tx,
+            shutdown_tx,
+            Some(mrt_tx),
+        );
+
+        let err = svc
+            .trigger_mrt_dump(Request::new(proto::TriggerMrtDumpRequest {}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unavailable);
+        assert_eq!(err.message(), "MRT manager unavailable");
     }
 
     #[tokio::test]
