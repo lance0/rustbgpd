@@ -182,6 +182,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   bound below the prefix length or above the address-family maximum. TOML
   `[policy.definitions]` statements, `.rpol` prefix sets, `test` dataset
   overrides, and dataset snapshot files share one validator and one wording.
+- `md5_password` on a neighbor or peer group is now validated at load to the
+  kernel `TCP_MD5SIG` key bound, 1..=80 bytes, with the same wording the
+  `[[rpki.cache_servers]]` check already uses.
 
 - Reject AS 0 in received and locally encoded AS paths and aggregators per RFC
   7607. Malformed ordinary paths are treated as withdraw, while affected AS4
@@ -397,6 +400,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   such a line is a startup error at initial load and, on SIGHUP reload, keeps
   the prior generation with the existing refresh-failure WARN and counter.
   Remove or correct the entry; the effective policy does not change.
+- **Neighbor and peer-group `md5_password` length is checked at load:** an
+  empty password or one longer than 80 bytes is now a config error
+  (`md5_password must be 1..=80 bytes`) instead of loading and then failing
+  when the session or listener socket installs the key. Such a value never
+  produced a working session; shorten or remove it.
 - Received `AS_PATH` attributes with more than 750 AS numbers and reachable
   NLRI are now treated as withdraw by default; without reachable NLRI, the
   session resets. Deployments that must relay arbitrarily long paths set
