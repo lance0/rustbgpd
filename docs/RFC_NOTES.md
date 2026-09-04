@@ -1400,19 +1400,19 @@ carries inactive (absent), unlimited (zero), or finite.
   branches emit a proper EVPN withdrawal toward the looping peer
   (rather than silently dropping the route in the Adj-RIB-Out), so a
   client that previously received the route observes a clean retract.
-- **Best-path tie-break:** the EVPN best-path chain runs the full
-  RFC 4456 ordering after the BGP body — stale flag → ORIGIN →
-  shortest CLUSTER_LIST → lowest ORIGINATOR_ID — matching the unicast
-  decision process so a reflector with multiple equal-AS paths
-  converges deterministically. The EVPN identifier step has always
-  fallen back to the advertising peer's BGP Identifier when
-  ORIGINATOR_ID is absent. The unicast, VPN, labeled-unicast, FlowSpec,
-  BGP-LS, and RT-Constrain chains now do the same (see the RFC 4271
-  §9.1.2.2 notes under Milestone 1) but, per RFC 4456 §9, compare the
-  identifier before CLUSTER_LIST length and
-  skip the step for locally originated routes. EVPN keeps its
-  CLUSTER_LIST-first order and applies the identifier step to every
-  route, including locally originated VTEP routes.
+- **Best-path tie-break:** the EVPN best-path chain runs the same
+  ordering as the unicast decision process after the MAC Mobility head —
+  stale flag → LOCAL_PREF → AS_PATH length → ORIGIN → MED → eBGP over
+  iBGP → lowest effective BGP Identifier → shortest CLUSTER_LIST →
+  lowest peer address — so a reflector with multiple equal-AS paths
+  converges deterministically. The identifier step compares
+  ORIGINATOR_ID when present and otherwise the advertising peer's BGP
+  Identifier (RFC 4456 §9), the same substitution the unicast, VPN,
+  labeled-unicast, FlowSpec, BGP-LS, and RT-Constrain chains apply (see
+  the RFC 4271 §9.1.2.2 notes under Milestone 1). Every family uses this
+  order, and every family skips the identifier step for a pair that
+  includes a locally originated route: a locally originated VTEP route
+  carries the `0.0.0.0` injection sentinel, not a BGP Identifier.
 - **Initial dump on session up:** when an iBGP EVPN session reaches
   Established, the existing Adj-RIB-In is replayed to the new peer
   through the same Adj-RIB-Out path that handles steady-state

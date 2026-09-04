@@ -1120,6 +1120,170 @@ async fn inject_evpn_reflects_to_peer() {
     handle.await.unwrap();
 }
 
+fn with_evpn_cluster_list(mut route: EvpnRibRoute, ids: &[Ipv4Addr]) -> EvpnRibRoute {
+    Arc::make_mut(&mut route.attributes).push(PathAttribute::ClusterList(ids.to_vec()));
+    route
+}
+
+async fn evpn_rr_client_up(
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: Ipv4Addr,
+) -> mpsc::Receiver<OutboundRouteUpdate> {
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer: IpAddr::V4(peer),
+        peer_asn: 65000,
+        peer_router_id: peer,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: evpn_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: Vec::new(),
+        negotiated_llgr_families: Vec::new(),
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+    out_rx
+}
+
+async fn evpn_routes_received(tx: &mpsc::Sender<RibUpdate>, peer: Ipv4Addr, route: EvpnRibRoute) {
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V4(peer),
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![route],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+}
+
+async fn next_evpn_announce_next_hop(
+    out_rx: &mut mpsc::Receiver<OutboundRouteUpdate>,
+    what: &str,
+) -> IpAddr {
+    let msg = tokio::time::timeout(Duration::from_secs(2), out_rx.recv())
+        .await
+        .unwrap_or_else(|_| panic!("{what}: expected an EVPN announce within 2s"))
+        .expect("outbound channel open");
+    assert_eq!(
+        msg.evpn_announce.len(),
+        1,
+        "{what}: {:?}",
+        msg.evpn_announce
+    );
+    msg.evpn_announce[0].next_hop
+}
+
+/// A locally injected EVPN route carries the `0.0.0.0` injection sentinel
+/// as `peer_router_id`, so the identifier step is skipped for any pair
+/// that includes it and the pair falls through to `CLUSTER_LIST` length.
+/// A received route for the same key with the shorter list wins and is
+/// what the reflector's other client receives.
+#[tokio::test]
+async fn inject_evpn_local_route_yields_to_shorter_cluster_list() {
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = Ipv4Addr::new(10, 0, 0, 1);
+    let client = Ipv4Addr::new(10, 0, 0, 2);
+    let _source_rx = evpn_rr_client_up(&tx, source).await;
+    let mut client_rx = evpn_rr_client_up(&tx, client).await;
+
+    let mac = [0xAA, 0xBB, 0xCC, 0x00, 0x00, 0x07];
+    let mut local = make_evpn_macip(Ipv4Addr::UNSPECIFIED, mac, None, false);
+    local.origin_type = crate::route::RouteOrigin::Local;
+    let local = with_evpn_cluster_list(local, &[Ipv4Addr::new(10, 0, 0, 200)]);
+    let key = local.key();
+
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::InjectEvpn {
+        route: local,
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    reply_rx
+        .await
+        .expect("inject reply")
+        .expect("inject succeeds");
+    assert_eq!(
+        next_evpn_announce_next_hop(&mut client_rx, "injected route").await,
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+    );
+
+    // Same key from a client, no CLUSTER_LIST: the shorter list wins over
+    // the local route because the identifier step is skipped for the pair.
+    let received = make_evpn_macip(source, mac, None, false);
+    assert_eq!(received.key(), key);
+    evpn_routes_received(&tx, source, received).await;
+    assert_eq!(
+        next_evpn_announce_next_hop(&mut client_rx, "received route replaces local").await,
+        IpAddr::V4(source)
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Between two received EVPN routes for one key, the lower advertising
+/// BGP Identifier decides before `CLUSTER_LIST` length, so the reflector
+/// switches its clients to the route from the lower identifier even
+/// though it carries the longer list.
+#[tokio::test]
+async fn evpn_lower_identifier_reflected_over_shorter_cluster_list() {
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let low_id = Ipv4Addr::new(10, 0, 0, 1);
+    let high_id = Ipv4Addr::new(10, 0, 0, 2);
+    let client = Ipv4Addr::new(10, 0, 0, 3);
+    let _low_rx = evpn_rr_client_up(&tx, low_id).await;
+    let _high_rx = evpn_rr_client_up(&tx, high_id).await;
+    let mut client_rx = evpn_rr_client_up(&tx, client).await;
+
+    let mac = [0xAA, 0xBB, 0xCC, 0x00, 0x00, 0x08];
+    let short_list = with_evpn_cluster_list(
+        make_evpn_macip(high_id, mac, None, false),
+        &[Ipv4Addr::new(10, 0, 0, 200)],
+    );
+    let long_list = with_evpn_cluster_list(
+        make_evpn_macip(low_id, mac, None, false),
+        &[Ipv4Addr::new(10, 0, 0, 200), Ipv4Addr::new(10, 0, 0, 201)],
+    );
+    assert_eq!(short_list.key(), long_list.key());
+
+    evpn_routes_received(&tx, high_id, short_list).await;
+    assert_eq!(
+        next_evpn_announce_next_hop(&mut client_rx, "first route").await,
+        IpAddr::V4(high_id)
+    );
+
+    evpn_routes_received(&tx, low_id, long_list).await;
+    assert_eq!(
+        next_evpn_announce_next_hop(&mut client_rx, "lower identifier becomes best").await,
+        IpAddr::V4(low_id)
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 /// Withdrawing an unknown EVPN key surfaces a user-visible error
 /// (controller got a bad route identifier).
 #[tokio::test]
