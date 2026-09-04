@@ -447,9 +447,9 @@ impl LocRib {
     ///
     /// Tie-break: Type 2 routes first run the MAC Mobility head (sticky
     /// flag + sequence number per RFC 7432 §15.1); all types then fall
-    /// through to the standard BGP chain (`LocalPref` → `AS_PATH` → MED
-    /// → eBGP>iBGP → peer address). DF-election hints for Type 1/4 are
-    /// left to downstream VTEPs; the RR just reflects.
+    /// through to the standard BGP chain (see `evpn_tiebreak_simple`).
+    /// DF-election hints for Type 1/4 are left to downstream VTEPs; the
+    /// RR just reflects.
     ///
     /// Returns `true` if the selection changed.
     pub fn recompute_evpn<'a>(
@@ -794,16 +794,17 @@ fn evpn_stale_rank(route: &EvpnRibRoute) -> u8 {
 /// a higher sequence number. Absence of the MAC Mobility community is
 /// treated as sequence=0, sticky=false per RFC 7432 §7.7.
 ///
-/// All route types then fall through to the standard BGP chain:
+/// All route types then fall through to the same chain as unicast
+/// `best_path_cmp` and the other family chains:
 /// stale → `LocalPref` → `AS_PATH` length → ORIGIN → MED →
-/// eBGP > iBGP → `CLUSTER_LIST` length → `ORIGINATOR_ID` → peer address.
+/// eBGP > iBGP → effective BGP Identifier → `CLUSTER_LIST` length →
+/// peer address.
 ///
-/// The EVPN chain deliberately differs from unicast `best_path_cmp` and
-/// the other family chains in two ways: `CLUSTER_LIST` length is compared
-/// before the identifier, and the identifier step (`ORIGINATOR_ID`, else
-/// the peer's BGP Identifier) runs for every route, including locally
-/// originated VTEP routes whose `peer_router_id` is the `0.0.0.0`
-/// sentinel.
+/// The identifier step compares `ORIGINATOR_ID` when present, else the
+/// advertising peer's BGP Identifier (RFC 4456 §9), and is skipped for
+/// any pair that includes a locally originated VTEP route: its
+/// `peer_router_id` is the `0.0.0.0` injection sentinel, not a BGP
+/// Identifier.
 fn evpn_tiebreak_simple(a: &EvpnRibRoute, b: &EvpnRibRoute) -> Ordering {
     // 0. Three-tier freshness: fresh (0) > GR-stale (1) > LLGR-stale (2)
     //    per RFC 4724 §4.2 / RFC 9494 §4.7. LLGR promotion clears
@@ -865,15 +866,17 @@ fn evpn_tiebreak_simple(a: &EvpnRibRoute, b: &EvpnRibRoute) -> Ordering {
         (false, true) => return Ordering::Greater,
         _ => {}
     }
-    // 6. Shorter CLUSTER_LIST wins (RFC 4456 §9).
-    match a.cluster_list().len().cmp(&b.cluster_list().len()) {
-        Ordering::Equal => {}
-        other => return other,
+    // 6. Lowest effective BGP Identifier (RFC 4271 §9.1.2.2 step (f);
+    //    ORIGINATOR_ID substitutes per RFC 4456 §9). Skipped for a pair
+    //    that includes a locally originated route.
+    if let Some((cmp, _)) = compare_bgp_identifier(
+        (a.origin_type, a.originator_id(), a.peer_router_id),
+        (b.origin_type, b.originator_id(), b.peer_router_id),
+    ) {
+        return cmp;
     }
-    // 7. Lower ORIGINATOR_ID wins (falls back to peer router-id, RFC 4456 §9).
-    let a_oid = a.originator_id().unwrap_or(a.peer_router_id);
-    let b_oid = b.originator_id().unwrap_or(b.peer_router_id);
-    match a_oid.cmp(&b_oid) {
+    // 7. Shorter CLUSTER_LIST wins (RFC 4456 §9).
+    match a.cluster_list().len().cmp(&b.cluster_list().len()) {
         Ordering::Equal => {}
         other => return other,
     }
@@ -3002,19 +3005,108 @@ mod tests {
     #[test]
     fn evpn_shorter_cluster_list_wins() {
         let short = make_evpn_type2(
-            2,
+            3,
             vec![PathAttribute::ClusterList(vec![Ipv4Addr::new(
                 10, 0, 0, 100,
             )])],
         );
-        let long = make_evpn_type2(
-            3,
+        let mut long = make_evpn_type2(
+            2,
             vec![PathAttribute::ClusterList(vec![
                 Ipv4Addr::new(10, 0, 0, 100),
                 Ipv4Addr::new(10, 0, 0, 200),
             ])],
         );
+        // Both routes share one BGP Identifier so the identifier step
+        // cannot decide, and `long` has the lower peer address
+        // (10.0.0.2 < 10.0.0.3) so the final tiebreak would pick it.
+        // CLUSTER_LIST length is therefore genuinely what decides.
+        long.peer_router_id = short.peer_router_id;
         assert_eq!(evpn_tiebreak_simple(&short, &long), Ordering::Less);
+        assert_eq!(evpn_tiebreak_simple(&long, &short), Ordering::Greater);
+    }
+
+    /// The effective BGP Identifier decides before `CLUSTER_LIST` length
+    /// (RFC 4271 §9.1.2.2 step (f), then RFC 4456 §9), matching every
+    /// other family chain: the route from the lower identifier wins even
+    /// with the longer `CLUSTER_LIST`.
+    #[test]
+    fn evpn_lower_bgp_identifier_beats_shorter_cluster_list() {
+        let low_id_long_list = make_evpn_type2(
+            2,
+            vec![PathAttribute::ClusterList(vec![
+                Ipv4Addr::new(10, 0, 0, 100),
+                Ipv4Addr::new(10, 0, 0, 200),
+            ])],
+        );
+        let high_id_short_list = make_evpn_type2(
+            3,
+            vec![PathAttribute::ClusterList(vec![Ipv4Addr::new(
+                10, 0, 0, 100,
+            )])],
+        );
+        assert_eq!(
+            evpn_tiebreak_simple(&low_id_long_list, &high_id_short_list),
+            Ordering::Less
+        );
+        assert_eq!(
+            evpn_tiebreak_simple(&high_id_short_list, &low_id_long_list),
+            Ordering::Greater
+        );
+    }
+
+    /// A route without `ORIGINATOR_ID` is compared by its advertising
+    /// peer's BGP Identifier against the other route's `ORIGINATOR_ID`
+    /// (RFC 4456 §9 substitution on one side only).
+    #[test]
+    fn evpn_originator_id_falls_back_to_peer_identifier_when_one_side_absent() {
+        let with_originator = make_evpn_type2(
+            2,
+            vec![PathAttribute::OriginatorId(Ipv4Addr::new(3, 3, 3, 3))],
+        );
+        let mut without = make_evpn_type2(3, vec![]);
+        without.peer_router_id = Ipv4Addr::new(1, 1, 1, 1);
+        // Peer address alone would pick `with_originator` (10.0.0.2 <
+        // 10.0.0.3); the identifier step must decide for `without`.
+        assert_eq!(
+            evpn_tiebreak_simple(&without, &with_originator),
+            Ordering::Less
+        );
+        assert_eq!(
+            evpn_tiebreak_simple(&with_originator, &without),
+            Ordering::Greater
+        );
+    }
+
+    /// A locally originated route carries the `0.0.0.0` injection sentinel
+    /// as `peer_router_id`, which is not a BGP Identifier. The identifier
+    /// step is skipped for any pair that includes one, so the pair falls
+    /// through to `CLUSTER_LIST` length: the received route with the
+    /// shorter list wins even though `0.0.0.0` would have won a naive
+    /// identifier comparison.
+    #[test]
+    fn evpn_local_route_skips_identifier_step() {
+        let mut local = make_evpn_type2(
+            0,
+            vec![PathAttribute::ClusterList(vec![Ipv4Addr::new(
+                10, 0, 0, 100,
+            )])],
+        );
+        local.origin_type = RouteOrigin::Local;
+        local.peer_router_id = Ipv4Addr::UNSPECIFIED;
+        let received = make_evpn_type2(2, vec![]);
+        assert_eq!(evpn_tiebreak_simple(&received, &local), Ordering::Less);
+        assert_eq!(evpn_tiebreak_simple(&local, &received), Ordering::Greater);
+
+        // With equal CLUSTER_LIST lengths the pair falls through to the
+        // peer-address step, where the sentinel `0.0.0.0` is lowest.
+        let mut local_plain = make_evpn_type2(0, vec![]);
+        local_plain.origin_type = RouteOrigin::Local;
+        local_plain.peer_router_id = Ipv4Addr::UNSPECIFIED;
+        assert_eq!(
+            evpn_tiebreak_simple(&local_plain, &received),
+            Ordering::Less
+        );
     }
 
     /// Regression: lower `ORIGINATOR_ID` breaks ties before peer address.

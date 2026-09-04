@@ -208,11 +208,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lowest effective BGP Identifier, shorter CLUSTER_LIST, lowest peer address.
   Pairs that include a locally originated route skip the identifier step. The
   unicast, VPN, labeled-unicast, FlowSpec, BGP-LS, and RT-Constrain chains all
-  follow this order; the EVPN chain is unchanged. Explain output and BMP path
-  marking report the new `lower_bgp_identifier` reason when at least one side
-  was compared by its peer's identifier and keep `lower_originator_id` when
-  both carried ORIGINATOR_ID; both map to the path-marking "router ID" reason
-  code.
+  follow this order, as does the EVPN chain (next entry). Explain output and
+  BMP path marking report the new `lower_bgp_identifier` reason when at least
+  one side was compared by its peer's identifier and keep `lower_originator_id`
+  when both carried ORIGINATOR_ID; both map to the path-marking "router ID"
+  reason code.
+
+- **Operator-visible:** EVPN best-path selection now runs the same order
+  below eBGP-over-iBGP as every other family: lowest effective BGP Identifier
+  (ORIGINATOR_ID when present, else the advertising peer's BGP Identifier),
+  shorter CLUSTER_LIST, lowest peer address. Previously the EVPN chain
+  compared CLUSTER_LIST length before the identifier, and it compared a
+  locally originated VTEP route by its `0.0.0.0` injection sentinel. A pair
+  that includes a locally originated route now skips the identifier step, as
+  the other chains already do; such a pair is decided by CLUSTER_LIST length,
+  then the peer-address step, which the sentinel still wins, so its outcome is
+  unchanged.
 
 - Reject AS 0 in received and locally encoded AS paths and aggregators per RFC
   7607. Malformed ordinary paths are treated as withdraw, while affected AS4
@@ -505,6 +516,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   address. `rbgp rib --prefix <cidr> --explain` and BMP path marking report
   the new `lower_bgp_identifier` reason; `lower_originator_id` is retained
   for the both-ORIGINATOR_ID case.
+- **EVPN best-path selection can change after upgrade** between
+  otherwise-equal routes for the same EVPN key received from different
+  peers: the lowest effective BGP Identifier (ORIGINATOR_ID, else the
+  advertising peer's BGP Identifier) now decides before CLUSTER_LIST length,
+  and a locally originated VTEP route no longer wins the identifier step by
+  its `0.0.0.0` sentinel. Expect a one-time best-path change, and the
+  corresponding withdraw/announce toward VTEP peers, for keys whose paths
+  tied down to CLUSTER_LIST length across different identifiers. Pairs that
+  include a locally originated route keep their prior outcome.
 - Received `AS_PATH` attributes with more than 750 AS numbers and reachable
   NLRI are now treated as withdraw by default; without reachable NLRI, the
   session resets. Deployments that must relay arbitrarily long paths set

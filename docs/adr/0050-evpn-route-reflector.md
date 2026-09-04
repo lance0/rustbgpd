@@ -126,6 +126,13 @@ Not forked into its own function: keeping a single `evpn_tiebreak_simple`
 with a dispatch head is cheaper to maintain than a per-route-type
 function tree.
 
+> **Superseded ordering, 2026-09-04:** the shared BGP body above predates
+> the RFC 4456 attributes. The chain now runs the same order as unicast —
+> effective BGP Identifier (ORIGINATOR_ID, else the advertising peer's
+> BGP Identifier) before CLUSTER_LIST length, then peer address — and
+> skips the identifier step for a pair that includes a locally originated
+> route. `docs/DESIGN.md` (EVPN best-path) records the current chain.
+
 ### 6 typed extended-community accessors
 
 Added to `ExtendedCommunity`:
