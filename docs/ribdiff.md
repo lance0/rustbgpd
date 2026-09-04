@@ -67,6 +67,22 @@ Live-source limitations (also printed in every report):
   (the proto exposes a flat ASN list); `AS_SET` structure is not compared.
 - **Unknown attributes**: path attributes outside the typed set are not
   visible over gRPC and are not compared.
+- **Encode-time attributes**: the transport finalizes each UPDATE after the
+  advertised view is computed. The eBGP local-ASN prepend and
+  remove-private-as, the eBGP next-hop rewrite to the local address (the
+  default for peers that are not route-server clients, or an export
+  `set next-hop self`), and the `GRACEFUL_SHUTDOWN` community added by
+  `rbgp gshut` are attached on the wire only. A BMP `rib_out_post` capture
+  carries them; the live side does not. An export `set next-hop <ip>` is
+  applied to the stored route and is visible.
+- **Update groups**: a peer sharing an update group has no stored per-peer
+  Adj-RIB-Out. Its live view is synthesized from the group table minus its
+  own-sourced routes, exact-export rejections, and outbound prefix-limit
+  exclusions.
+- **Aggregation**: `AGGREGATOR` and `ATOMIC_AGGREGATE` are exposed over gRPC
+  but `rbgp-ribsnap/1` has no field for them, so the live side drops them.
+  A from-bmp snapshot keeps them in `unknown_attrs`, which diverges unless
+  `--ignore-attribute unknown` is passed.
 - **Generation**: `ListRoutesResponse.page_version` exposes an opaque
   process-local `{epoch, generation}` consistency fence, not a numeric RIB
   snapshot generation. The adapter pins the complete pair across every live
@@ -153,7 +169,10 @@ duplicates; multiplicity is compared):
   byte-exact by the engine — but the live gRPC side cannot see unknown
   attributes, so a snapshot carrying them diverges against a live
   comparison unless `--ignore-attribute unknown` is passed (an explicit
-  operator decision, never a silent drop).
+  operator decision, never a silent drop). `AGGREGATOR` and
+  `ATOMIC_AGGREGATE` land here too: the from-bmp adapter preserves them as
+  wire triples, while the live conversion drops them because the schema
+  has no typed field for them.
 - `path_id`: optional; diagnostics only, never compared.
 
 Unknown fields are rejected (typo protection). All fields except
@@ -210,6 +229,45 @@ Or with `jq`, from a JSON export shaped like
      '{record:"trailer",routes:$n}'
 } > incumbent.ndjson
 ```
+
+### From another rustbgpd
+
+`rbgp --json rib advertised <peer>` (without `--limit`, which nests the
+bounded form under `routes`) prints a JSON array of route objects whose
+field names are close to the snapshot's. The operator supplies `peer` and
+`peer_asn`; `origin` is a string; `med` is already the presence-aware
+value (`null` when the attribute is absent). Two fields must not be passed
+through: `local_pref` is the effective, defaulted value (100 on an eBGP
+export that carries no attribute), and copying it fabricates attribute
+presence — only `local_pref_attr`, present just when the attribute exists,
+may become the snapshot's `local_pref`; `peer_address` is the route's
+source peer, not the member it is advertised to.
+
+```bash
+PEER=192.0.2.1; PEER_ASN=64501
+rbgp --json rib advertised "$PEER" > advertised.json
+{
+  jq -nc '{record:"header",schema:"rbgp-ribsnap/1",source:"rustbgpd-rs1",generation:1}'
+  jq -c --arg peer "$PEER" --argjson peer_asn "$PEER_ASN" '
+    .[] | {record:"route", peer:$peer, peer_asn:$peer_asn,
+           prefix, next_hop, as_path, med, communities, extended_communities,
+           large_communities, path_id,
+           origin: {igp:0, egp:1, incomplete:2}[.origin],
+           local_pref: .local_pref_attr}   # never .local_pref: that is the effective default
+    | with_entries(select(.value != null))' advertised.json
+  jq -nc --argjson n "$(jq length advertised.json)" '{record:"trailer",routes:$n}'
+} > rustbgpd.ndjson
+```
+
+Community strings come out as `ASN:value` or a well-known alias
+(`NO_EXPORT`, `GRACEFUL_SHUTDOWN`, ...), both accepted by the snapshot
+parser; extended communities are the raw integers the schema expects
+(jq 1.7 or later keeps 64-bit values exact). This source has the same
+blind spots as the live side above — no unknown attributes, no
+encode-time attributes, no aggregation attributes — so it is a snapshot of
+what the daemon's RIB would advertise, not of what reached the wire. For a
+wire-true record of a rustbgpd export, capture its own BMP `rib_out_post`
+feed and convert it with `rbgp diff snapshot from-bmp`.
 
 ## Snapshot adapters
 
