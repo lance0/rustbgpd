@@ -797,6 +797,16 @@ fn is_ipv6_link_local(addr: &Ipv6Addr) -> bool {
     (addr.segments()[0] & 0xffc0) == 0xfe80
 }
 
+/// Transport state that exists only for a passively accepted session: the
+/// connected stream plus the TCP-AO identity the listener resolved for it.
+/// An actively dialed session has none of this at construction time and
+/// attaches its stream halves once the connect completes.
+struct AcceptedTransport {
+    stream: TcpStream,
+    tcp_ao_info: Option<crate::TcpAoInfoSnapshot>,
+    tcp_ao_selected_owner: Option<crate::listener::TcpAoSelectedOwner>,
+}
+
 impl PeerSession {
     fn local_gr_restart_active(&mut self) -> bool {
         if let Some(deadline) = self.config.gr_restart_until {
@@ -1637,7 +1647,6 @@ impl PeerSession {
 
     #[expect(
         clippy::too_many_arguments,
-        clippy::too_many_lines,
         reason = "session constructor owns the transport dependency boundary explicitly"
     )]
     pub(crate) fn new_at_tcp_ao_generation(
@@ -1656,148 +1665,27 @@ impl PeerSession {
         session_identity: SessionIdentity,
         tcp_ao_generation: crate::TcpAoRotationGeneration,
     ) -> Self {
-        let peer_ip = config.remote_addr.ip();
-        let peer_label = rustbgpd_telemetry::peer_label(peer_ip);
-        initialize_route_safety_metric_series(&config, &metrics, &peer_label);
-        let link_local_next_hop_scope = Self::link_local_next_hop_scope_from_config(&config);
-        let fsm = Session::new(config.peer.clone());
-        let explain_enabled = config.explain_enabled;
-        let explain_cache_size = config.explain_cache_size;
-        let reject_retention_enabled = config.reject_retention_enabled;
-        let reject_retention_capacity = config.reject_retention_capacity;
-        let tcp_ao_protected = config.tcp_ao.is_some();
-        let tcp_ao_key_metadata = tcp_ao_key_metadata(&config, None, None);
-        let import_needs_as_path_string =
-            Self::import_chain_needs_as_path_string(import_policy.as_ref());
-        let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_BUFFER);
-        let max_prefix_metric_lease = MaxPrefixMetricLease::new(
-            metrics.clone(),
-            peer_label.clone(),
-            session_identity.role == SessionRole::Primary,
-        );
-        let session_telemetry_metric_lease = SessionTelemetryMetricLease::new(
-            metrics.clone(),
-            peer_label.clone(),
-            config.peer_interface.clone().unwrap_or_default(),
-            session_identity.role == SessionRole::Primary,
-        );
-        let export_encoder = Arc::new(SessionExportEncoder::new(SessionExportProfile::initial(
-            &config,
-            None,
-            advertise_graceful_shutdown,
-        )));
-        Self {
+        Self::new_with_transport(
             config,
-            fsm,
-            read_half: None,
-            writer_bulk_tx: None,
-            writer_priority_tx: None,
-            writer_keepalive_tx: None,
-            writer_teardown_tx: None,
-            writer_join: None,
-            read_buf: ReadBuffer::new(),
-            timers: Timers::default(),
             metrics,
             commands,
             rib_tx,
-            peer_label,
-            peer_ip,
-            link_local_next_hop_scope,
-            negotiated: None,
-            add_path_receive_families: Vec::new(),
-            received_eor_families: HashSet::new(),
-            stop_requested: false,
-            reconnect_timer: None,
-            notification_idle_failures: 0,
-            batch_notification_teardown: false,
-            connect_task: None,
-            connect_failure_episode: ConnectFailureEpisode::default(),
-            outbound_rx,
-            outbound_tx,
             import_policy,
-            import_needs_as_path_string,
             export_policy,
-            export_encoder,
-            advertise_graceful_shutdown,
             session_notify_tx,
-            session_lifecycle_tx,
             session_event_tx,
-            session_identity,
-            max_prefix_metric_lease,
-            session_telemetry_metric_lease,
+            session_lifecycle_tx,
             bmp_tx,
-            bmp_stream_diverged: false,
-            bmp_repair_timer: None,
             validation_rx,
-            local_open_pdu: None,
-            remote_open_pdu: None,
-            last_down_reason: None,
-            slow_peer_backlog_since: None,
-            slow_peer: false,
-            slow_peer_isolation_sent: false,
-            slow_peer_timer: None,
-            known_plain_prefixes: HashSet::new(),
-            known_paths: HashSet::new(),
-            known_prefix_refcounts: HashMap::new(),
-            known_unicast_v4: 0,
-            known_unicast_v6: 0,
-            rejected_plain_prefixes: HashSet::new(),
-            rejected_paths: HashSet::new(),
-            rejected_prefix_refcounts: HashMap::new(),
-            rejected_only_v4: 0,
-            rejected_only_v6: 0,
-            max_prefix_warned: [false; MaxPrefixScope::ALL.len()],
-            max_prefix_blocking: [false; MaxPrefixScope::ALL.len()],
-            known_flowspec: HashSet::new(),
-            known_evpn: HashSet::new(),
-            known_bgpls: HashSet::new(),
-            known_vpn: HashSet::new(),
-            known_labeled: HashSet::new(),
-            known_rtc: HashSet::new(),
-            refresh_accounting: refresh_accounting::RefreshMaxPrefixAccounting::default(),
-            refresh_accounting_timer: None,
-            updates_received: 0,
-            updates_sent: 0,
-            notifications_received: 0,
-            notifications_sent: 0,
-            otc_routes_blocked: 0,
-            import_policy_routes_permitted: 0,
-            import_policy_routes_denied: 0,
-            flap_count: 0,
-            established_at: None,
-            last_error: String::new(),
-            pending_outbound_teardown_cause: None,
-            tcp_ao_info: None,
-            tcp_ao_key_metadata,
-            tcp_ao_protected,
+            advertise_graceful_shutdown,
+            session_identity,
             tcp_ao_generation,
-            tcp_ao_stream_was_accepted: false,
-            tcp_ao_accept_only_session: false,
-            tcp_ao_selected_owner: None,
-            tcp_ao_pending_selection: None,
-            tcp_ao_successor_pkt_good_baseline: None,
-            tcp_ao_selection_observed: false,
-            notification_teardown: false,
-            received_hard_reset: false,
-            sent_hard_reset: false,
-            event_sink: Arc::new(NoopTransportEventSink),
-            import_explain_enabled: explain_enabled,
-            import_decision_cache: import_decision_cache::ImportDecisionCache::with_capacity(
-                explain_cache_size,
-            ),
-            reject_retention_enabled,
-            #[cfg(test)]
-            rejected_route_prototype_builds: std::sync::atomic::AtomicUsize::new(0),
-            rejected_routes: rejected_routes::RejectedRouteStore::with_capacity(
-                reject_retention_capacity,
-            ),
-            import_policy_generation: 0,
-        }
+            None,
+        )
     }
 
     #[expect(
         clippy::too_many_arguments,
-        clippy::too_many_lines,
         reason = "inbound constructor carries the same dependency boundary plus accepted stream"
     )]
     pub(crate) fn new_inbound_with_identity_and_lifecycle(
@@ -1819,6 +1707,64 @@ impl PeerSession {
         tcp_ao_selected_owner: Option<crate::listener::TcpAoSelectedOwner>,
         tcp_ao_generation: crate::TcpAoRotationGeneration,
     ) -> Self {
+        Self::new_with_transport(
+            config,
+            metrics,
+            commands,
+            rib_tx,
+            import_policy,
+            export_policy,
+            session_notify_tx,
+            session_event_tx,
+            session_lifecycle_tx,
+            bmp_tx,
+            validation_rx,
+            advertise_graceful_shutdown,
+            session_identity,
+            tcp_ao_generation,
+            Some(AcceptedTransport {
+                stream,
+                tcp_ao_info,
+                tcp_ao_selected_owner,
+            }),
+        )
+    }
+
+    /// The single body behind [`Self::new_at_tcp_ao_generation`] and
+    /// [`Self::new_inbound_with_identity_and_lifecycle`]. Every initial
+    /// field value is produced here; the active and passive adapters differ
+    /// only in whether an [`AcceptedTransport`] is present, so the two
+    /// session shapes cannot drift apart field by field.
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "session constructor owns the transport dependency boundary explicitly"
+    )]
+    fn new_with_transport(
+        config: TransportConfig,
+        metrics: BgpMetrics,
+        commands: mpsc::Receiver<PeerCommand>,
+        rib_tx: mpsc::Sender<RibUpdate>,
+        import_policy: Option<PolicyChain>,
+        export_policy: Option<PolicyChain>,
+        session_notify_tx: Option<SessionNotificationSender>,
+        session_event_tx: Option<mpsc::Sender<SessionNotificationEvent>>,
+        session_lifecycle_tx: Option<mpsc::Sender<SessionLifecycleNotification>>,
+        bmp_tx: Option<mpsc::Sender<BmpEvent>>,
+        validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
+        advertise_graceful_shutdown: bool,
+        session_identity: SessionIdentity,
+        tcp_ao_generation: crate::TcpAoRotationGeneration,
+        accepted: Option<AcceptedTransport>,
+    ) -> Self {
+        let (stream, tcp_ao_info, tcp_ao_selected_owner) = match accepted {
+            Some(accepted) => (
+                Some(accepted.stream),
+                accepted.tcp_ao_info,
+                accepted.tcp_ao_selected_owner,
+            ),
+            None => (None, None, None),
+        };
         let peer_ip = config.remote_addr.ip();
         let peer_label = rustbgpd_telemetry::peer_label(peer_ip);
         initialize_route_safety_metric_series(&config, &metrics, &peer_label);
@@ -1849,30 +1795,54 @@ impl PeerSession {
         );
         let export_encoder = Arc::new(SessionExportEncoder::new(SessionExportProfile::initial(
             &config,
-            stream.local_addr().ok().map(|addr| addr.ip()),
+            stream
+                .as_ref()
+                .and_then(|stream| stream.local_addr().ok())
+                .map(|addr| addr.ip()),
             advertise_graceful_shutdown,
         )));
-        // Split the inbound stream and spawn the writer immediately —
-        // we're in async context here (inside `tokio::spawn` from
+        // Split an accepted stream and spawn its writer immediately: the
+        // passive path is constructed inside `tokio::spawn` (see
         // `PeerHandle::spawn_inbound`), so `tokio::spawn` inside
-        // `writer::spawn` works.
-        let (read_half, write_half) = stream.into_split();
-        let writer_handle = writer::spawn(
-            write_half,
-            OUTBOUND_BUFFER,
-            metrics.clone(),
-            peer_label.clone(),
-            send_hold_duration(&config),
-        );
+        // `writer::spawn` works here. An actively dialed session has no
+        // stream yet and attaches its halves after the connect completes.
+        let (
+            read_half,
+            writer_bulk_tx,
+            writer_priority_tx,
+            writer_keepalive_tx,
+            writer_teardown_tx,
+            writer_join,
+        ) = match stream {
+            Some(stream) => {
+                let (read_half, write_half) = stream.into_split();
+                let writer_handle = writer::spawn(
+                    write_half,
+                    OUTBOUND_BUFFER,
+                    metrics.clone(),
+                    peer_label.clone(),
+                    send_hold_duration(&config),
+                );
+                (
+                    Some(read_half),
+                    Some(writer_handle.bulk_tx),
+                    Some(writer_handle.priority_tx),
+                    Some(writer_handle.keepalive_tx),
+                    Some(writer_handle.teardown_tx),
+                    Some(writer_handle.join),
+                )
+            }
+            None => (None, None, None, None, None, None),
+        };
         Self {
             config,
             fsm,
-            read_half: Some(read_half),
-            writer_bulk_tx: Some(writer_handle.bulk_tx),
-            writer_priority_tx: Some(writer_handle.priority_tx),
-            writer_keepalive_tx: Some(writer_handle.keepalive_tx),
-            writer_teardown_tx: Some(writer_handle.teardown_tx),
-            writer_join: Some(writer_handle.join),
+            read_half,
+            writer_bulk_tx,
+            writer_priority_tx,
+            writer_keepalive_tx,
+            writer_teardown_tx,
+            writer_join,
             read_buf: ReadBuffer::new(),
             timers: Timers::default(),
             metrics,
