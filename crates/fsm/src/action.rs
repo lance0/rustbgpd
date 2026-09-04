@@ -195,3 +195,77 @@ pub enum Action {
         remote_role: Option<BgpRole>,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `Action` variants the daemon's transport executor handles.
+    ///
+    /// `Action` is `#[non_exhaustive]`, so the executor in
+    /// `crates/transport/src/session/fsm.rs` cannot match it exhaustively and
+    /// treats any variant it does not name as a no-op. This match is
+    /// exhaustive because it lives inside the crate: adding a variant fails
+    /// to compile here. Extend this list only together with the change that
+    /// teaches that executor the new variant.
+    fn executor_variant_name(action: &Action) -> &'static str {
+        match action {
+            Action::SendOpen(_) => "SendOpen",
+            Action::SendKeepalive => "SendKeepalive",
+            Action::SendNotification(_) => "SendNotification",
+            Action::StartTimer(..) => "StartTimer",
+            Action::StopTimer(_) => "StopTimer",
+            Action::InitiateTcpConnection => "InitiateTcpConnection",
+            Action::CloseTcpConnection => "CloseTcpConnection",
+            Action::StateChanged { .. } => "StateChanged",
+            Action::SessionEstablished(_) => "SessionEstablished",
+            Action::SessionDown => "SessionDown",
+            Action::StaleTimerIgnored { .. } => "StaleTimerIgnored",
+            Action::RoleMismatchObserved { .. } => "RoleMismatchObserved",
+        }
+    }
+
+    #[test]
+    fn every_action_variant_is_named_for_the_transport_executor() {
+        const EXECUTOR_VARIANTS: [&str; 12] = [
+            "SendOpen",
+            "SendKeepalive",
+            "SendNotification",
+            "StartTimer",
+            "StopTimer",
+            "InitiateTcpConnection",
+            "CloseTcpConnection",
+            "StateChanged",
+            "SessionEstablished",
+            "SessionDown",
+            "StaleTimerIgnored",
+            "RoleMismatchObserved",
+        ];
+        for action in [
+            Action::SendKeepalive,
+            Action::StartTimer(TimerType::Hold, 90),
+            Action::StopTimer(TimerType::ConnectRetry),
+            Action::InitiateTcpConnection,
+            Action::CloseTcpConnection,
+            Action::StateChanged {
+                old: SessionState::Idle,
+                new: SessionState::Connect,
+            },
+            Action::SessionDown,
+            Action::StaleTimerIgnored {
+                state: SessionState::Idle,
+                timer: TimerType::Keepalive,
+            },
+            Action::RoleMismatchObserved {
+                local_role: None,
+                remote_role: None,
+            },
+        ] {
+            let name = executor_variant_name(&action);
+            assert!(
+                EXECUTOR_VARIANTS.contains(&name),
+                "{name} is not in the transport executor's variant list"
+            );
+        }
+    }
+}
