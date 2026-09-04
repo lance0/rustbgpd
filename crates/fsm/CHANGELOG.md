@@ -5,6 +5,14 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+- `validate_open` now limits `NegotiatedSession::add_path_families` and
+  `NegotiatedSession::extended_nexthop_families` to the address families in
+  the negotiated MultiProtocol intersection, matching the existing Graceful
+  Restart and Long-Lived Graceful Restart handling. A peer that advertises
+  Add-Path or Extended Next Hop Encoding for a family it did not advertise
+  MultiProtocol for no longer leaves that family in either map.
+  `negotiate_add_path` and `negotiate_extended_nexthop` are unchanged.
+
 ## 0.6.0 - 2026-08-30
 
 - **Additive FSM API:** Added `Event::AdministrativeReset`, which sends

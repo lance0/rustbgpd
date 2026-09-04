@@ -272,6 +272,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   experimental-use range (type bit `0x80`) are no longer decoded as EVPN,
   opaque encapsulation, default-gateway, route-target, or route-origin
   communities.
+- Add-Path and extended-next-hop negotiation in `rustbgpd-fsm` are now
+  limited to the negotiated address families. A peer advertising Add-Path or
+  Extended Next Hop Encoding for a family outside the MultiProtocol
+  intersection no longer leaves that family in the session's Add-Path or
+  extended-next-hop set; the Add-Path case previously suppressed RFC 9972 BMP
+  Adj-RIB-In counts for sessions that never negotiated the family.
 
 - **Operator-visible:** `rs-config-render` now states `rs_control_communities`
   on every rendered member session instead of inheriting the daemon default:
