@@ -1977,42 +1977,6 @@ fn tcp_ao_secret_eq(lhs: &[u8], rhs: &[u8]) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-#[allow(
-    dead_code,
-    reason = "singleton receipt helper retained for focused ABI tests"
-)]
-fn receipt_from_raw_inventory(
-    keys: &[TcpAoGetSockOpt],
-    peer: IpAddr,
-    prefix_len: u8,
-    config: &TcpAoConfig,
-    exact_inventory: bool,
-) -> io::Result<TcpAoMktReceipt> {
-    let mut matching = Vec::new();
-    for raw in keys {
-        if raw_matches_owner(raw, peer, prefix_len, config)? {
-            matching.push(raw);
-        }
-    }
-    if matching.len() != 1 || (exact_inventory && keys.len() != 1) {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "TCP-AO kernel MKT inventory does not exactly contain the configured owner",
-        ));
-    }
-    Ok(TcpAoMktReceipt {
-        cores: vec![mkt_core(matching[0])?],
-        metadata: vec![TcpAoMktMetadata {
-            owner: crate::listener::TcpAoListenerOwnerKind::Static,
-            peer,
-            prefix_len,
-            preferred: config.preferred,
-            deprecated: config.deprecated,
-        }],
-    })
-}
-
-#[cfg(target_os = "linux")]
 fn keyring_receipt_from_raw_inventory(
     keys: &[TcpAoGetSockOpt],
     peer: IpAddr,
@@ -2105,23 +2069,8 @@ fn owned_receipt_from_raw_inventory(
 }
 
 /// Capture the kernel-normalized cryptographic identity of one configured
-/// owner. The returned secret-bearing receipt must remain short-lived.
-#[cfg(target_os = "linux")]
-#[allow(
-    dead_code,
-    reason = "singleton compatibility seam retained for Phase 1 callers"
-)]
-pub(crate) fn capture_tcp_ao_mkt_receipt(
-    socket: &impl AsRawFd,
-    peer: IpAddr,
-    prefix_len: u8,
-    config: &TcpAoConfig,
-    exact_inventory: bool,
-) -> io::Result<TcpAoMktReceipt> {
-    let keys = get_tcp_ao_keys_with(|entries| query_tcp_ao_keys(socket, entries))?;
-    receipt_from_raw_inventory(&keys, peer, prefix_len, config, exact_inventory)
-}
-
+/// owner's keyring. The returned secret-bearing receipt must remain
+/// short-lived.
 #[cfg(target_os = "linux")]
 pub(crate) fn capture_tcp_ao_keyring_receipt(
     socket: &impl AsRawFd,
@@ -2771,24 +2720,6 @@ fn tcp_ao_rnext_update(recv_id: u8, current: &TcpAoInfoSnapshot) -> TcpAoInfoOpt
 /// Inspect runtime TCP-AO socket state.
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn get_tcp_ao_info<T>(_socket: &T) -> io::Result<TcpAoInfoSnapshot> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "TCP-AO inspection is only supported on Linux",
-    ))
-}
-
-#[cfg(not(target_os = "linux"))]
-#[allow(
-    dead_code,
-    reason = "singleton compatibility seam retained for Phase 1 callers"
-)]
-pub(crate) fn capture_tcp_ao_mkt_receipt<T>(
-    _socket: &T,
-    _peer: std::net::IpAddr,
-    _prefix_len: u8,
-    _config: &crate::config::TcpAoConfig,
-    _exact_inventory: bool,
-) -> io::Result<TcpAoMktReceipt> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "TCP-AO inspection is only supported on Linux",
@@ -3696,8 +3627,14 @@ mod tests {
         listener_raw.prefix = 24;
         listener_raw.flags = 0;
         listener_raw.pkt_good = 0;
-        let receipt =
-            receipt_from_raw_inventory(&[listener_raw], owner, 24, &config, false).unwrap();
+        let receipt = keyring_receipt_from_raw_inventory(
+            &[listener_raw],
+            owner,
+            24,
+            &TcpAoKeyring(vec![config]),
+            false,
+        )
+        .unwrap();
 
         let mut child_raw = raw_dump_key(connected, "hmac(sha256)", b"secret");
         child_raw.pkt_good = 101;
@@ -3768,11 +3705,12 @@ mod tests {
         assert_eq!(config.key.as_ref().len(), 13);
         let normalized = [0xa5; 16];
         let raw = raw_dump_key(peer, "cmac(aes)", &normalized);
-        let receipt = receipt_from_raw_inventory(&[raw], peer, 32, &config, true).unwrap();
+        let ring = TcpAoKeyring(vec![config]);
+        let receipt = keyring_receipt_from_raw_inventory(&[raw], peer, 32, &ring, true).unwrap();
         assert_eq!(receipt.cores[0].key.as_slice(), normalized);
         assert_ne!(
             receipt.cores[0].key.as_slice(),
-            config.key.as_ref().as_bytes()
+            ring.0[0].key.as_ref().as_bytes()
         );
     }
 
