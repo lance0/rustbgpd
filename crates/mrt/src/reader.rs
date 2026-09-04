@@ -6,7 +6,11 @@
 //! entry. Everything the writer emits round-trips; records the reader
 //! does not understand (non-`TABLE_DUMP_V2` MRT types, unknown
 //! `TABLE_DUMP_V2` subtypes, `RIB_GENERIC` with an AFI/SAFI other than
-//! L2VPN/EVPN) are skipped and counted, not treated as errors.
+//! L2VPN/EVPN) are skipped and counted, not treated as errors. A RIB
+//! entry's `MP_REACH_NLRI` is accepted in both the RFC 6396 §4.3.4
+//! reduced form the writer emits and the full RFC 4760 form other
+//! collectors write; see [`decode_table_dump_v2_mp_reach_next_hop`] in
+//! `rustbgpd_wire`.
 //!
 //! Input is treated as hostile — this will read an untrusted file at
 //! daemon boot. Every length field is bounds-checked, malformed input
@@ -27,6 +31,7 @@ use bytes::Bytes;
 use rustbgpd_rib::update::MrtPeerEntry;
 use rustbgpd_wire::constants::{attr_flags, attr_type};
 use rustbgpd_wire::error::DecodeError;
+use rustbgpd_wire::mrt::decode_table_dump_v2_mp_reach_next_hop;
 use rustbgpd_wire::notification::update_subcode;
 use rustbgpd_wire::{Afi, ErrorDisposition, Ipv4Prefix, Ipv6Prefix, PathAttribute, Prefix, Safi};
 use std::borrow::Cow;
@@ -167,15 +172,15 @@ pub struct SnapshotEntry {
     /// This is separate from `path_id`: zero is a valid path identifier and
     /// therefore cannot identify the record subtype by itself.
     pub add_path: bool,
-    /// Decoded path attributes, excluding `MP_REACH_NLRI` — the MRT
-    /// reduced form (RFC 6396 §4.3.4) carries only the next-hop, which
-    /// is surfaced via `next_hop` / `link_local_next_hop` instead.
+    /// Decoded path attributes, excluding `MP_REACH_NLRI` — inside a RIB
+    /// entry it carries only the next hop (RFC 6396 §4.3.4), which is
+    /// surfaced via `next_hop` / `link_local_next_hop` instead.
     pub attributes: Vec<PathAttribute>,
-    /// Next-hop: from the reduced `MP_REACH_NLRI` if present, else
-    /// from a `NEXT_HOP` attribute, else `None`.
+    /// Next-hop: from the `MP_REACH_NLRI` if present, else from a
+    /// `NEXT_HOP` attribute, else `None`.
     pub next_hop: Option<IpAddr>,
-    /// Link-local IPv6 next-hop when the reduced `MP_REACH_NLRI`
-    /// carried the 32-byte global + link-local form.
+    /// Link-local IPv6 next-hop when the `MP_REACH_NLRI` carried the
+    /// 32-byte global + link-local form.
     pub link_local_next_hop: Option<Ipv6Addr>,
 }
 
@@ -262,45 +267,6 @@ fn read_record(data: &[u8], start: usize) -> Result<(u16, u16, &[u8]), ReadError
     Ok((mrt_type, subtype, &data[payload_start..payload_start + len]))
 }
 
-/// Decode the MRT-reduced `MP_REACH_NLRI` value (RFC 6396 §4.3.4):
-/// NH-Len byte followed by 4, 16, or 32 next-hop octets.
-fn parse_reduced_mp_reach(
-    value: &[u8],
-    offset: usize,
-) -> Result<(IpAddr, Option<Ipv6Addr>), ReadError> {
-    let Some((&nh_len, rest)) = value.split_first() else {
-        return Err(malformed(offset, "empty MP_REACH_NLRI value"));
-    };
-    if rest.len() != usize::from(nh_len) {
-        return Err(malformed(
-            offset,
-            format!(
-                "MP_REACH_NLRI NH-Len {nh_len} does not match {} value bytes",
-                rest.len()
-            ),
-        ));
-    }
-    match nh_len {
-        4 => {
-            let o: [u8; 4] = rest.try_into().expect("length checked above");
-            Ok((IpAddr::V4(Ipv4Addr::from(o)), None))
-        }
-        16 => {
-            let o: [u8; 16] = rest.try_into().expect("length checked above");
-            Ok((IpAddr::V6(Ipv6Addr::from(o)), None))
-        }
-        32 => {
-            let g: [u8; 16] = rest[..16].try_into().expect("length checked above");
-            let ll: [u8; 16] = rest[16..].try_into().expect("length checked above");
-            Ok((IpAddr::V6(Ipv6Addr::from(g)), Some(Ipv6Addr::from(ll))))
-        }
-        other => Err(malformed(
-            offset,
-            format!("unsupported MP_REACH_NLRI NH-Len {other}"),
-        )),
-    }
-}
-
 /// Decoded attribute block of one RIB entry.
 struct EntryAttributes {
     attributes: Vec<PathAttribute>,
@@ -311,7 +277,7 @@ struct EntryAttributes {
 }
 
 /// Split a RIB entry's attribute block: walk the TLV framing with
-/// bounds checks, peel off the MRT-reduced `MP_REACH_NLRI`, and decode
+/// bounds checks, peel off the next-hop-only `MP_REACH_NLRI`, and decode
 /// the remaining attributes with the revised wire decoder. Four-octet ASNs
 /// match the writer, while `is_ibgp = true` is the conservative all-lanes
 /// default on incomplete evidence: an MRT peer table does not preserve the
@@ -320,7 +286,7 @@ struct EntryAttributes {
 fn decode_entry_attributes(attrs: &[u8], base: usize) -> Result<EntryAttributes, ReadError> {
     let mut cur = Cur::new(attrs, base);
     let mut other: Vec<u8> = Vec::with_capacity(attrs.len());
-    let mut reduced: Option<(IpAddr, Option<Ipv6Addr>)> = None;
+    let mut mp_next_hop: Option<(IpAddr, Option<Ipv6Addr>)> = None;
     while !cur.is_empty() {
         let span_start = cur.rel_pos();
         let attr_offset = cur.offset();
@@ -331,9 +297,10 @@ fn decode_entry_attributes(attrs: &[u8], base: usize) -> Result<EntryAttributes,
         } else {
             usize::from(cur.u16("extended attribute length")?)
         };
+        let value_offset = cur.offset();
         let value = cur.take(value_len, "attribute value")?;
         if type_code == attr_type::MP_REACH_NLRI {
-            if reduced.is_some() {
+            if mp_next_hop.is_some() {
                 return Err(malformed(attr_offset, "duplicate MP_REACH_NLRI"));
             }
             let flags_mask = attr_flags::OPTIONAL | attr_flags::TRANSITIVE;
@@ -351,7 +318,10 @@ fn decode_entry_attributes(attrs: &[u8], base: usize) -> Result<EntryAttributes,
                     },
                 ));
             }
-            reduced = Some(parse_reduced_mp_reach(value, attr_offset)?);
+            mp_next_hop = Some(
+                decode_table_dump_v2_mp_reach_next_hop(value)
+                    .map_err(|err| malformed(value_offset, err.to_string()))?,
+            );
         } else {
             other.extend_from_slice(&attrs[span_start..cur.rel_pos()]);
         }
@@ -369,7 +339,7 @@ fn decode_entry_attributes(attrs: &[u8], base: usize) -> Result<EntryAttributes,
         .map_err(|_| malformed(base, "discarded path-attribute count exceeds u64"))?;
     let discarded_bgpls_nlris = u64::from(decoded.bgpls_nlri_discarded);
     let attributes = decoded.attributes;
-    let (next_hop, link_local_next_hop) = match reduced {
+    let (next_hop, link_local_next_hop) = match mp_next_hop {
         Some((nh, ll)) => (Some(nh), ll),
         None => (
             attributes.iter().find_map(|a| match a {
@@ -1415,6 +1385,41 @@ mod tests {
         assert_eq!(reader.discarded_bgpls_nlris(), 0);
     }
 
+    /// Collectors that write the full RFC 4760 `MP_REACH_NLRI` (AFI, SAFI,
+    /// NH-Len, next hop, reserved octet) into a RIB entry must read back like
+    /// the RFC 6396 §4.3.4 reduced form.
+    #[test]
+    fn full_form_mp_reach_in_rib_entry_yields_next_hop() {
+        let peer = make_peer(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 65001);
+        let mut data =
+            encode_snapshot(COLLECTOR, std::slice::from_ref(&peer), &[], &[], TS).unwrap();
+        let attr = [
+            attr_flags::OPTIONAL,
+            attr_type::MP_REACH_NLRI,
+            9,
+            0,
+            1, // AFI 1
+            1, // SAFI 1
+            4, // NH-Len
+            192,
+            0,
+            2,
+            1,
+            0, // reserved
+        ];
+        append_v4_rib_with_attributes(&mut data, &attr);
+        let mut reader = SnapshotReader::new(&data).unwrap();
+        let (entries, err) = drain(&mut reader);
+        assert!(err.is_none(), "unexpected error: {err:?}");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].next_hop,
+            Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)))
+        );
+        assert_eq!(entries[0].link_local_next_hop, None);
+        assert!(entries[0].attributes.is_empty());
+    }
+
     #[test]
     fn recovery_counters_exclude_entries_not_yielded_before_record_failure() {
         let peer = make_peer(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 65001);
@@ -1540,21 +1545,42 @@ mod tests {
         );
     }
 
+    /// The entry-level error carries the absolute file offset of the
+    /// attribute value the shared wire decoder rejected.
     #[test]
-    fn reduced_mp_reach_bad_nh_len_is_malformed() {
-        assert!(matches!(
-            parse_reduced_mp_reach(&[5, 1, 2, 3, 4, 5], 0),
-            Err(ReadError::Malformed { .. })
-        ));
-        assert!(matches!(
-            parse_reduced_mp_reach(&[], 0),
-            Err(ReadError::Malformed { .. })
-        ));
-        // NH-Len valid but value short.
-        assert!(matches!(
-            parse_reduced_mp_reach(&[16, 0, 0], 0),
-            Err(ReadError::Malformed { .. })
-        ));
+    fn rib_entry_mp_reach_trailing_octets_fail_the_entry_at_absolute_offset() {
+        let peer = make_peer(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 65001);
+        let mut data =
+            encode_snapshot(COLLECTOR, std::slice::from_ref(&peer), &[], &[], TS).unwrap();
+        let attr = [
+            attr_flags::OPTIONAL,
+            attr_type::MP_REACH_NLRI,
+            6,
+            4,
+            192,
+            0,
+            2,
+            1,
+            0xAB,
+        ];
+        let record_start = data.len();
+        append_v4_rib_with_attributes(&mut data, &attr);
+        // Locate the attribute in the appended record; its value follows the
+        // flags, type, and one-octet length header.
+        let attr_start = record_start
+            + data[record_start..]
+                .windows(attr.len())
+                .position(|window| window == attr)
+                .expect("attribute bytes are in the appended record");
+        let value_offset = attr_start + attr.len() - usize::from(attr[2]);
+        let mut reader = SnapshotReader::new(&data).unwrap();
+        let (entries, err) = drain(&mut reader);
+        assert!(entries.is_empty());
+        let Some(ReadError::Malformed { offset, context }) = err else {
+            panic!("expected Malformed, got {err:?}");
+        };
+        assert!(context.contains("1 trailing octets"), "{context}");
+        assert_eq!(offset, value_offset);
     }
 
     #[test]

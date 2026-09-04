@@ -23,7 +23,15 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 - **TABLE_DUMP_V2 reader** — `SnapshotReader` parses `PEER_INDEX_TABLE` +
   `RIB_IPV4_UNICAST` / `RIB_IPV6_UNICAST` records into
   `SnapshotEntry` / `SnapshotNlri`, with gzip auto-detection
-  (`decompress_if_gzip`). Defensive revised attribute decoding keeps an entry
+  (`decompress_if_gzip`). A RIB entry's `MP_REACH_NLRI` is accepted in both
+  the RFC 6396 section 4.3.4 reduced form (next-hop length, next hop) and the
+  full RFC 4760 form other collectors write (AFI, SAFI, next-hop length, next
+  hop, optional reserved octet), told apart by the leading octet; a next-hop
+  length other than 4, 16, or 32, a truncated next hop, an AFI that disagrees
+  with the next-hop length, or trailing octets is a malformed-record error.
+  The decoder is `rustbgpd-wire`'s `decode_table_dump_v2_mp_reach_next_hop`,
+  which `rbgp diff snapshot from-mrt` also uses, so both read the same bytes
+  the same way. Defensive revised attribute decoding keeps an entry
   only when every recovered issue is attribute-discard, using the conservative
   internal-neighbor classification when the snapshot lacks session evidence.
   Separate path-attribute and BGP-LS NLRI discard counters make that bounded

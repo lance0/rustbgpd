@@ -111,14 +111,23 @@ class EmbeddingVersionContractTests(unittest.TestCase):
                 )
 
     def test_prepared_boundary_is_guarded(self) -> None:
-        """Fails if §7 loses any authoritative prepared-version slot."""
-        for package, version in (("wire", "0.19.0"), ("fsm", "0.6.0"), ("rpki", "0.1.0")):
+        """Fails if §7 loses any authoritative prepared-version slot.
+
+        Wire is staged ahead of the registry, so its prepared slot is the only
+        `rustbgpd-wire 0.19.1` marker; FSM and RPKI share their published
+        version and the prepared slot is the second occurrence.
+        """
+        for package, version, occurrence in (
+            ("wire", "0.19.1", 0),
+            ("fsm", "0.6.0", 1),
+            ("rpki", "0.1.0", 1),
+        ):
             with self.subTest(package=package):
                 self.assert_fails(
                     self.replace_nth(
                         f"`rustbgpd-{package} {version}`",
                         f"rustbgpd-{package} {version}",
-                        1,
+                        occurrence,
                     ),
                     "prepared-boundary-version",
                 )
@@ -138,21 +147,19 @@ class EmbeddingVersionContractTests(unittest.TestCase):
         )
 
     def test_prepared_clause_expresses_a_tree_ahead_of_the_registry(self) -> None:
-        """The published/prepared split survives this release's zero-width gap.
+        """The published/prepared split tracks the manifest as the gap moves.
 
-        Today every manifest version is also on crates.io, so no §4 entry carries
-        a prepared clause. The next version bump reopens the gap; re-adding the
-        clause and moving the §7 prepared paragraph must still validate.
+        Wire `0.19.1` is staged ahead of crates.io today. Moving the §4 clause
+        and the §7 prepared paragraph to the next prepared version must still
+        validate against manifests carrying that version.
         """
         changed = DOCUMENT.replace(
-            "1. **`rustbgpd-wire` (published as `0.19.0`).**",
+            "1. **`rustbgpd-wire` (published as `0.19.0`; `0.19.1` prepared).**",
             "1. **`rustbgpd-wire` (published as `0.19.0`; `0.20.0` prepared).**",
             1,
         )
-        marker = "`rustbgpd-wire 0.19.0`"
-        second = changed.find(marker, changed.find(marker) + 1)
-        self.assertGreaterEqual(second, 0)
-        changed = changed[:second] + "`rustbgpd-wire 0.20.0`" + changed[second + len(marker) :]
+        self.assertNotEqual(changed, DOCUMENT)
+        changed = changed.replace("`rustbgpd-wire 0.19.1`", "`rustbgpd-wire 0.20.0`", 1)
         self.assertEqual(
             check(changed, {"wire": "0.20.0", "fsm": "0.6.0", "rpki": "0.1.0"}),
             [],
@@ -160,6 +167,10 @@ class EmbeddingVersionContractTests(unittest.TestCase):
 
     def test_a_staged_version_cannot_hide_by_omitting_the_prepared_clause(self) -> None:
         """An absent clause claims tree == registry, so a bumped tree is rejected."""
+        changed = DOCUMENT.replace("; `0.19.1` prepared", "", 1)
+        self.assertNotEqual(changed, DOCUMENT)
+        errors = check(changed, {"wire": "0.19.1", "fsm": "0.6.0", "rpki": "0.1.0"})
+        self.assertIn("publish-status-version", errors)
         errors = check(DOCUMENT, {"wire": "0.20.0", "fsm": "0.6.0", "rpki": "0.1.0"})
         self.assertIn("publish-status-version", errors)
         self.assertIn("prepared-boundary-version", errors)

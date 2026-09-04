@@ -16,12 +16,16 @@
 //! ever present on a fully-converted snapshot. Any parse error exits 2
 //! with nothing written to stdout.
 //!
-//! Wire notes (RFC 6396 §4.3.4): AS_PATH is always 4-octet;
-//! `MP_REACH_NLRI` inside RIB entries is abbreviated to next-hop-only,
-//! but some collectors emit the full RFC 4760 form — a leading zero
-//! octet can only be an AFI high byte (next-hop length 0 is invalid),
-//! which disambiguates. RFC 8050 Add-Path subtypes (8/9) carry a path
-//! identifier per entry, emitted as `path_id`.
+//! Wire notes (RFC 6396 §4.3.4): AS_PATH is always 4-octet. The
+//! `MP_REACH_NLRI` inside a RIB entry is decoded by `rustbgpd_wire`'s
+//! [`decode_table_dump_v2_mp_reach_next_hop`], shared with the daemon's
+//! warm-checkpoint reader: both the reduced next-hop-only form and the
+//! full RFC 4760 form some collectors emit are accepted, and malformed
+//! shapes (bad next-hop length, truncation, AFI/length mismatch,
+//! trailing octets) are refused. The link-local half of a 32-octet next
+//! hop is not part of the snapshot format and is dropped. RFC 8050
+//! Add-Path subtypes (8/9) carry a path identifier per entry, emitted as
+//! `path_id`.
 
 use std::fmt::Write as _;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -29,6 +33,7 @@ use std::path::Path;
 
 use crate::output;
 use rustbgpd_wire::constants::{attr_flags, attr_type};
+use rustbgpd_wire::mrt::decode_table_dump_v2_mp_reach_next_hop;
 
 /// Snapshot emitted.
 pub const EXIT_OK: i32 = 0;
@@ -38,7 +43,10 @@ pub const EXIT_REFUSED: i32 = 2;
 /// MRT message type for `TABLE_DUMP_V2` (RFC 6396 §4.3).
 const TABLE_DUMP_V2: u16 = 13;
 /// Subtypes ingested (plus RFC 8050 Add-Path variants). Everything else
-/// — `PEER_INDEX_TABLE`, multicast, `RIB_GENERIC` — is skipped.
+/// — `PEER_INDEX_TABLE`, multicast, `RIB_GENERIC` — is skipped. These are
+/// RFC 6396 / RFC 8050 registry values, duplicated from `rustbgpd-mrt` on
+/// purpose: constants cannot drift, and the CLI must not link the daemon's
+/// MRT manager (which pulls in the RIB).
 const RIB_IPV4_UNICAST: u16 = 2;
 const RIB_IPV6_UNICAST: u16 = 4;
 const RIB_IPV4_UNICAST_ADDPATH: u16 = 8;
@@ -461,7 +469,11 @@ fn parse_attributes(mut buf: &[u8]) -> Result<SnapRoute, String> {
                     })
                     .collect();
             }
-            attr_type::MP_REACH_NLRI => route.next_hop = Some(mp_reach_next_hop(value)?),
+            attr_type::MP_REACH_NLRI => {
+                let (next_hop, _link_local) =
+                    decode_table_dump_v2_mp_reach_next_hop(value).map_err(|err| err.to_string())?;
+                route.next_hop = Some(next_hop);
+            }
             _ => {}
         }
     }
@@ -492,42 +504,6 @@ fn parse_as_path(mut value: &[u8]) -> Result<Vec<u32>, String> {
         value = &value[segment_len..];
     }
     Ok(path)
-}
-
-/// Extract the next hop from a RIB-entry `MP_REACH_NLRI`.
-///
-/// RFC 6396 §4.3.4 form: next-hop length (1 octet) + next hop. Some
-/// collectors emit the full RFC 4760 form instead (AFI + SAFI + length +
-/// next hop + ...); a leading zero octet can only be an AFI high byte
-/// (a next-hop length of 0 is invalid), which disambiguates the two.
-fn mp_reach_next_hop(value: &[u8]) -> Result<IpAddr, String> {
-    let (&first, _) = value
-        .split_first()
-        .ok_or_else(|| "empty MP_REACH_NLRI".to_string())?;
-    let (nh_len, nh_start) = if first == 0 {
-        if value.len() < 4 {
-            return Err("truncated RFC 4760-form MP_REACH_NLRI".to_string());
-        }
-        (value[3] as usize, 4)
-    } else {
-        (first as usize, 1)
-    };
-    if value.len() < nh_start + nh_len {
-        return Err("truncated MP_REACH_NLRI next hop".to_string());
-    }
-    let nh = &value[nh_start..nh_start + nh_len];
-    match nh_len {
-        4 => {
-            let octets: [u8; 4] = nh.try_into().expect("length checked");
-            Ok(IpAddr::V4(Ipv4Addr::from(octets)))
-        }
-        // 32 = global + link-local pair; the global address comes first.
-        16 | 32 => {
-            let octets: [u8; 16] = nh[..16].try_into().expect("length checked");
-            Ok(IpAddr::V6(Ipv6Addr::from(octets)))
-        }
-        n => Err(format!("unsupported MP_REACH_NLRI next hop length {n}")),
-    }
 }
 
 #[cfg(test)]
@@ -771,17 +747,39 @@ mod tests {
         assert!(run(&opts(dump.path(), "adj-rib-out-capture")).is_err());
     }
 
+    /// One `RIB_IPV6_UNICAST` entry whose `MP_REACH_NLRI` value is `value`.
+    fn v6_dump_with_mp_reach(value: &[u8]) -> Vec<u8> {
+        let mut attrs = attr(attr_type::ORIGIN, &[0]);
+        attrs.extend_from_slice(&as_path_attr(&[65001]));
+        attrs.extend_from_slice(&attr(attr_type::MP_REACH_NLRI, value));
+        mrt_record(
+            RIB_IPV6_UNICAST,
+            &rib_payload(32, &[0x20, 0x01, 0x0d, 0xb8], &[(None, attrs)]),
+        )
+    }
+
     #[test]
     fn full_form_mp_reach_next_hop_is_accepted() {
-        // AFI(2)=2, SAFI(1)=1, nh_len(1)=16, nh(16), reserved(1).
+        // AFI(2)=2, SAFI(1)=1, NH-Len(1)=16, next hop(16), reserved(1).
         let mut value = vec![0, 2, 1, 16];
-        let nh: Ipv6Addr = "2001:db8::2".parse().unwrap();
-        value.extend_from_slice(&nh.octets());
+        value.extend_from_slice(&"2001:db8::2".parse::<Ipv6Addr>().unwrap().octets());
         value.push(0);
-        assert_eq!(
-            mp_reach_next_hop(&value).unwrap(),
-            "2001:db8::2".parse::<IpAddr>().unwrap()
-        );
+        let dump = write_dump(&v6_dump_with_mp_reach(&value));
+        let rendered = run(&opts(dump.path(), "adj-rib-out-capture")).unwrap();
+        let route: serde_json::Value =
+            serde_json::from_str(rendered.lines().nth(1).unwrap()).unwrap();
+        assert_eq!(route["next_hop"], "2001:db8::2");
+    }
+
+    #[test]
+    fn mp_reach_trailing_octets_are_refused() {
+        // Reduced form (NH-Len 16 + next hop) followed by two stray octets.
+        let mut value = vec![16];
+        value.extend_from_slice(&"2001:db8::2".parse::<Ipv6Addr>().unwrap().octets());
+        value.extend_from_slice(&[0xAB, 0xCD]);
+        let dump = write_dump(&v6_dump_with_mp_reach(&value));
+        let err = run(&opts(dump.path(), "adj-rib-out-capture")).unwrap_err();
+        assert!(err.contains("trailing"), "unexpected error: {err}");
     }
 
     #[test]

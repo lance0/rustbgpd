@@ -369,7 +369,7 @@ registry dependency (§3.4); its published pairing with wire is recorded in §7.
 current paired boundary, `rpki` on its first release. `rib`, `bmp`, `mrt`, and
 `policy` remain demand-gated.**
 
-1. **`rustbgpd-wire` (published as `0.19.0`).** This is the foundation —
+1. **`rustbgpd-wire` (published as `0.19.0`; `0.19.1` prepared).** This is the foundation —
    dependent crate versions cannot publish before their wire dependency exists
    on crates.io. `0.15.0` brought `Capability::PathsLimit`
    with its `PathsLimitFamily` entry type (experimental capability code 76),
@@ -580,11 +580,11 @@ Registry-visible releases are `rustbgpd-wire 0.19.0`,
 `rustbgpd-fsm 0.6.0`, and `rustbgpd-rpki 0.1.0`. The registry
 dependency examples in §3 name only those published versions.
 
-The prepared package boundary is `rustbgpd-wire 0.19.0`,
+The prepared package boundary is `rustbgpd-wire 0.19.1`,
 `rustbgpd-fsm 0.6.0`, and first-published `rustbgpd-rpki 0.1.0` — the versions
-the working tree carries. All three are now on the registry, so this boundary
-currently coincides with the paragraph above and nothing is staged ahead of
-crates.io; the two diverge again as soon as the tree takes its next version.
+the working tree carries. Wire `0.19.1` is staged ahead of crates.io: an
+additive patch that adds the `mrt` module's `TABLE_DUMP_V2` next-hop decoder.
+The FSM and RPKI boundaries coincide with the paragraph above.
 The wire/FSM pair moved together because the FSM re-exports codec types. RPKI
 also exposes wire types in public method signatures, and it had no frozen
 baseline, so its first `0.1.0` line starts on wire `0.19.0`. That baseline now

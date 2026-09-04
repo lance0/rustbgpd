@@ -81,6 +81,8 @@ pub mod keepalive;
 pub mod labeled;
 /// Top-level BGP message enum and codec dispatch.
 pub mod message;
+/// MRT `TABLE_DUMP_V2` RIB-entry `MP_REACH_NLRI` next-hop decoder (RFC 6396 §4.3.4).
+pub mod mrt;
 /// NLRI prefix types and codec (IPv4, IPv6, Add-Path).
 pub mod nlri;
 /// NOTIFICATION error codes, subcodes, and shutdown communication.
@@ -124,6 +126,7 @@ pub use labeled::{
     encode_labeled_withdraw_nlri, encode_labeled_withdraw_nlri_addpath,
 };
 pub use message::{Message, decode_message, encode_message, encode_message_with_limit};
+pub use mrt::decode_table_dump_v2_mp_reach_next_hop;
 pub use notification::NotificationCode;
 pub use notification_msg::NotificationMessage;
 pub use open::OpenMessage;
