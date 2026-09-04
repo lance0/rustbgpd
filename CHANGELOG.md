@@ -183,6 +183,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   runtime strings (metric help text and `tracing` message literals) in crate
   sources, leaving comments, lint reasons, and test assertions untouched.
 
+- The reload log line for a changed `[global]`, `[rpki]`, `[bmp]`, or `[mrt]`
+  section (`... changed — requires full restart to take effect`) is now
+  emitted at `ERROR`, the level the reload matrix documents for
+  restart-required edits and the level the other restart-required reload
+  sites already use; it was `WARN`. The message text is unchanged, so
+  filters keyed on it still match.
 - Policy prefix entries now reject `ge`/`le` bounds whose derived length range
   can never match: `le` below the prefix length, `ge` above `le`, or either
   bound below the prefix length or above the address-family maximum. TOML
