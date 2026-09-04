@@ -344,6 +344,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Operator-visible:** the daemon's warm-checkpoint reader and `rbgp diff
+  snapshot from-mrt` now share one decoder for the `MP_REACH_NLRI` inside a
+  `TABLE_DUMP_V2` RIB entry. It accepts both the RFC 6396 §4.3.4 reduced form
+  (next-hop length, next hop) and the full RFC 4760 form some collectors
+  write (AFI, SAFI, next-hop length, next hop, optional reserved octet), told
+  apart by the leading octet (a next-hop length is never 0), and rejects a
+  next-hop length other than 4, 16, or 32, a truncated next hop, an AFI that
+  disagrees with the next-hop length, and octets trailing the next hop.
+  Previously the two readers disagreed: warm-checkpoint loading accepted
+  only the reduced form with an exact length match, while `from-mrt` also
+  accepted the full form and ignored trailing octets, so one collector dump
+  converted in one place and was rejected in the other. `rustbgpd-mrt` now
+  exports the decoder (`decode_rib_entry_mp_reach_next_hop`) and its
+  `TABLE_DUMP_V2` subtype constants.
+
 - `rbgp top` now restores the terminal (leaves the alternate screen, shows
   the cursor, disables raw mode) when the process is terminated by SIGTERM,
   SIGINT, or SIGHUP; the signal quits the dashboard the same way Ctrl-C does
@@ -529,6 +544,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   refuses the signed form for MAC and ESI fields, where it previously
   parsed. Clients that send canonical zero-padded MAC and ESI input are
   unaffected.
+- **`TABLE_DUMP_V2` RIB-entry `MP_REACH_NLRI` decoding is shared:**
+  warm-checkpoint loading now reads dumps whose RIB entries carry the full
+  RFC 4760 `MP_REACH_NLRI` form, which it previously rejected as malformed.
+  `rbgp diff snapshot from-mrt` now refuses (exit 2, nothing emitted) a RIB
+  entry with octets trailing the next hop, which it previously ignored; such
+  bytes were never part of a valid entry, so re-export the dump from its
+  collector.
 - **EVPN local port moves now re-advertise MAC+IP routes:** when a MAC that
   is advertised as MAC+IP moves between local bridge ports, peers receive one
   additional Type 2 per IP bound to that MAC, each carrying the incremented

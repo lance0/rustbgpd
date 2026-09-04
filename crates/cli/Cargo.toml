@@ -48,6 +48,9 @@ ratatui = "0.30"
 crossterm = { version = "0.29", features = ["event-stream"] }
 rustbgpd-policy.workspace = true
 rustbgpd-wire.workspace = true
+# `TABLE_DUMP_V2` subtype constants and the RIB-entry `MP_REACH_NLRI` next-hop
+# decoder shared with the daemon's warm-checkpoint reader (`from-mrt`).
+rustbgpd-mrt.workspace = true
 
 [build-dependencies]
 tonic-prost-build.workspace = true

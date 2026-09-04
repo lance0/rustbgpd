@@ -3002,6 +3002,7 @@ dependencies = [
  "rustbgpd-api",
  "rustbgpd-bmp",
  "rustbgpd-evpn",
+ "rustbgpd-mrt",
  "rustbgpd-policy",
  "rustbgpd-wire",
  "serde",

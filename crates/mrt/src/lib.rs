@@ -20,7 +20,9 @@ pub mod warm_bundle;
 pub mod writer;
 
 pub use manager::MrtManager;
-pub use reader::{ReadError, SnapshotEntry, SnapshotNlri, SnapshotReader};
+pub use reader::{
+    ReadError, SnapshotEntry, SnapshotNlri, SnapshotReader, decode_rib_entry_mp_reach_next_hop,
+};
 pub use types::MrtWriterConfig;
 pub use warm_bundle::{
     MAX_WARM_BUNDLE_MANIFEST_BYTES, MAX_WARM_BUNDLE_SNAPSHOT_BYTES, WARM_BUNDLE_FORMAT_VERSION,

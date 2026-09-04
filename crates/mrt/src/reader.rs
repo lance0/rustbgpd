@@ -6,7 +6,10 @@
 //! entry. Everything the writer emits round-trips; records the reader
 //! does not understand (non-`TABLE_DUMP_V2` MRT types, unknown
 //! `TABLE_DUMP_V2` subtypes, `RIB_GENERIC` with an AFI/SAFI other than
-//! L2VPN/EVPN) are skipped and counted, not treated as errors.
+//! L2VPN/EVPN) are skipped and counted, not treated as errors. A RIB
+//! entry's `MP_REACH_NLRI` is accepted in both the RFC 6396 §4.3.4
+//! reduced form the writer emits and the full RFC 4760 form other
+//! collectors write; see [`decode_rib_entry_mp_reach_next_hop`].
 //!
 //! Input is treated as hostile — this will read an untrusted file at
 //! daemon boot. Every length field is bounds-checked, malformed input
@@ -167,15 +170,15 @@ pub struct SnapshotEntry {
     /// This is separate from `path_id`: zero is a valid path identifier and
     /// therefore cannot identify the record subtype by itself.
     pub add_path: bool,
-    /// Decoded path attributes, excluding `MP_REACH_NLRI` — the MRT
-    /// reduced form (RFC 6396 §4.3.4) carries only the next-hop, which
-    /// is surfaced via `next_hop` / `link_local_next_hop` instead.
+    /// Decoded path attributes, excluding `MP_REACH_NLRI` — inside a RIB
+    /// entry it carries only the next hop (RFC 6396 §4.3.4), which is
+    /// surfaced via `next_hop` / `link_local_next_hop` instead.
     pub attributes: Vec<PathAttribute>,
-    /// Next-hop: from the reduced `MP_REACH_NLRI` if present, else
-    /// from a `NEXT_HOP` attribute, else `None`.
+    /// Next-hop: from the `MP_REACH_NLRI` if present, else from a
+    /// `NEXT_HOP` attribute, else `None`.
     pub next_hop: Option<IpAddr>,
-    /// Link-local IPv6 next-hop when the reduced `MP_REACH_NLRI`
-    /// carried the 32-byte global + link-local form.
+    /// Link-local IPv6 next-hop when the `MP_REACH_NLRI` carried the
+    /// 32-byte global + link-local form.
     pub link_local_next_hop: Option<Ipv6Addr>,
 }
 
@@ -262,43 +265,99 @@ fn read_record(data: &[u8], start: usize) -> Result<(u16, u16, &[u8]), ReadError
     Ok((mrt_type, subtype, &data[payload_start..payload_start + len]))
 }
 
-/// Decode the MRT-reduced `MP_REACH_NLRI` value (RFC 6396 §4.3.4):
-/// NH-Len byte followed by 4, 16, or 32 next-hop octets.
-fn parse_reduced_mp_reach(
+/// IANA AFI numbers accepted in a full-form `MP_REACH_NLRI` header.
+const AFI_IPV4: u16 = Afi::Ipv4 as u16;
+const AFI_IPV6: u16 = Afi::Ipv6 as u16;
+
+/// Decode the `MP_REACH_NLRI` value of a `TABLE_DUMP_V2` RIB entry into
+/// its next hop, plus the link-local address when the next hop is the
+/// 32-octet global + link-local pair.
+///
+/// RFC 6396 §4.3.4 reduces the attribute to next-hop length (1 octet) and
+/// next hop, but several collectors write the full RFC 4760 form (AFI,
+/// SAFI, next-hop length, next hop, reserved octet). Both are accepted,
+/// told apart by the first octet: a next-hop length is never 0, so a
+/// leading 0 can only be the high octet of AFI 1 or 2 — the discriminator
+/// bgpdump, bgpkit-parser, and mrtparse also use. Everything else is
+/// rejected: a next-hop length other than 4, 16, or 32; a truncated next
+/// hop; a full-form AFI that disagrees with the next-hop length (AFI 1
+/// requires 4, AFI 2 requires 16 or 32); and any octets past the next hop
+/// beyond the single reserved octet the full form may carry (its value is
+/// ignored, RFC 4760 §3).
+///
+/// Shared by the daemon's warm-checkpoint reader and `rbgp diff snapshot
+/// from-mrt`, so one dump converts and reads back identically.
+///
+/// # Errors
+///
+/// [`ReadError::Malformed`] for every rejected shape; its `offset` is
+/// relative to the start of `value`.
+pub fn decode_rib_entry_mp_reach_next_hop(
     value: &[u8],
-    offset: usize,
 ) -> Result<(IpAddr, Option<Ipv6Addr>), ReadError> {
-    let Some((&nh_len, rest)) = value.split_first() else {
-        return Err(malformed(offset, "empty MP_REACH_NLRI value"));
+    let Some(&first) = value.first() else {
+        return Err(malformed(0, "empty MP_REACH_NLRI value"));
     };
-    if rest.len() != usize::from(nh_len) {
+    let (afi, nh_len_at) = if first == 0 {
+        if value.len() < 4 {
+            return Err(malformed(
+                value.len(),
+                "truncated full-form MP_REACH_NLRI header (AFI, SAFI, NH-Len)",
+            ));
+        }
+        (Some(u16::from_be_bytes([value[0], value[1]])), 3)
+    } else {
+        (None, 0)
+    };
+    let nh_len = usize::from(value[nh_len_at]);
+    let rest = &value[nh_len_at + 1..];
+    let v6 = |o: &[u8; 16]| IpAddr::V6(Ipv6Addr::from(*o));
+    let decoded = match (afi, nh_len) {
+        (None | Some(AFI_IPV4), 4) => rest
+            .split_first_chunk::<4>()
+            .map(|(o, tail)| ((IpAddr::V4(Ipv4Addr::from(*o)), None), tail)),
+        (None | Some(AFI_IPV6), 16) => rest
+            .split_first_chunk::<16>()
+            .map(|(o, tail)| ((v6(o), None), tail)),
+        (None | Some(AFI_IPV6), 32) => rest.split_first_chunk::<16>().and_then(|(g, tail)| {
+            tail.split_first_chunk::<16>()
+                .map(|(ll, tail)| ((v6(g), Some(Ipv6Addr::from(*ll))), tail))
+        }),
+        (None, _) => {
+            return Err(malformed(
+                nh_len_at,
+                format!("MP_REACH_NLRI NH-Len {nh_len} is not 4, 16, or 32"),
+            ));
+        }
+        (Some(afi), _) => {
+            return Err(malformed(
+                nh_len_at,
+                format!("MP_REACH_NLRI AFI {afi} does not carry a {nh_len}-octet next hop"),
+            ));
+        }
+    };
+    let Some((next_hop, tail)) = decoded else {
         return Err(malformed(
-            offset,
+            value.len(),
             format!(
-                "MP_REACH_NLRI NH-Len {nh_len} does not match {} value bytes",
+                "truncated MP_REACH_NLRI next hop: NH-Len {nh_len}, {} octets present",
                 rest.len()
             ),
         ));
+    };
+    // The full form ends with one reserved octet (RFC 4760 §3); nothing
+    // else may follow the next hop in either form.
+    let reserved = usize::from(afi.is_some());
+    if tail.len() > reserved {
+        return Err(malformed(
+            value.len() - tail.len() + reserved,
+            format!(
+                "{} trailing octets after MP_REACH_NLRI next hop",
+                tail.len() - reserved
+            ),
+        ));
     }
-    match nh_len {
-        4 => {
-            let o: [u8; 4] = rest.try_into().expect("length checked above");
-            Ok((IpAddr::V4(Ipv4Addr::from(o)), None))
-        }
-        16 => {
-            let o: [u8; 16] = rest.try_into().expect("length checked above");
-            Ok((IpAddr::V6(Ipv6Addr::from(o)), None))
-        }
-        32 => {
-            let g: [u8; 16] = rest[..16].try_into().expect("length checked above");
-            let ll: [u8; 16] = rest[16..].try_into().expect("length checked above");
-            Ok((IpAddr::V6(Ipv6Addr::from(g)), Some(Ipv6Addr::from(ll))))
-        }
-        other => Err(malformed(
-            offset,
-            format!("unsupported MP_REACH_NLRI NH-Len {other}"),
-        )),
-    }
+    Ok(next_hop)
 }
 
 /// Decoded attribute block of one RIB entry.
@@ -311,7 +370,7 @@ struct EntryAttributes {
 }
 
 /// Split a RIB entry's attribute block: walk the TLV framing with
-/// bounds checks, peel off the MRT-reduced `MP_REACH_NLRI`, and decode
+/// bounds checks, peel off the next-hop-only `MP_REACH_NLRI`, and decode
 /// the remaining attributes with the revised wire decoder. Four-octet ASNs
 /// match the writer, while `is_ibgp = true` is the conservative all-lanes
 /// default on incomplete evidence: an MRT peer table does not preserve the
@@ -320,7 +379,7 @@ struct EntryAttributes {
 fn decode_entry_attributes(attrs: &[u8], base: usize) -> Result<EntryAttributes, ReadError> {
     let mut cur = Cur::new(attrs, base);
     let mut other: Vec<u8> = Vec::with_capacity(attrs.len());
-    let mut reduced: Option<(IpAddr, Option<Ipv6Addr>)> = None;
+    let mut mp_next_hop: Option<(IpAddr, Option<Ipv6Addr>)> = None;
     while !cur.is_empty() {
         let span_start = cur.rel_pos();
         let attr_offset = cur.offset();
@@ -331,9 +390,10 @@ fn decode_entry_attributes(attrs: &[u8], base: usize) -> Result<EntryAttributes,
         } else {
             usize::from(cur.u16("extended attribute length")?)
         };
+        let value_offset = cur.offset();
         let value = cur.take(value_len, "attribute value")?;
         if type_code == attr_type::MP_REACH_NLRI {
-            if reduced.is_some() {
+            if mp_next_hop.is_some() {
                 return Err(malformed(attr_offset, "duplicate MP_REACH_NLRI"));
             }
             let flags_mask = attr_flags::OPTIONAL | attr_flags::TRANSITIVE;
@@ -351,7 +411,14 @@ fn decode_entry_attributes(attrs: &[u8], base: usize) -> Result<EntryAttributes,
                     },
                 ));
             }
-            reduced = Some(parse_reduced_mp_reach(value, attr_offset)?);
+            mp_next_hop = Some(decode_rib_entry_mp_reach_next_hop(value).map_err(
+                |err| match err {
+                    ReadError::Malformed { offset, context } => {
+                        malformed(value_offset + offset, context)
+                    }
+                    other => other,
+                },
+            )?);
         } else {
             other.extend_from_slice(&attrs[span_start..cur.rel_pos()]);
         }
@@ -369,7 +436,7 @@ fn decode_entry_attributes(attrs: &[u8], base: usize) -> Result<EntryAttributes,
         .map_err(|_| malformed(base, "discarded path-attribute count exceeds u64"))?;
     let discarded_bgpls_nlris = u64::from(decoded.bgpls_nlri_discarded);
     let attributes = decoded.attributes;
-    let (next_hop, link_local_next_hop) = match reduced {
+    let (next_hop, link_local_next_hop) = match mp_next_hop {
         Some((nh, ll)) => (Some(nh), ll),
         None => (
             attributes.iter().find_map(|a| match a {
@@ -1415,6 +1482,41 @@ mod tests {
         assert_eq!(reader.discarded_bgpls_nlris(), 0);
     }
 
+    /// Collectors that write the full RFC 4760 `MP_REACH_NLRI` (AFI, SAFI,
+    /// NH-Len, next hop, reserved octet) into a RIB entry must read back like
+    /// the RFC 6396 §4.3.4 reduced form.
+    #[test]
+    fn full_form_mp_reach_in_rib_entry_yields_next_hop() {
+        let peer = make_peer(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 65001);
+        let mut data =
+            encode_snapshot(COLLECTOR, std::slice::from_ref(&peer), &[], &[], TS).unwrap();
+        let attr = [
+            attr_flags::OPTIONAL,
+            attr_type::MP_REACH_NLRI,
+            9,
+            0,
+            1, // AFI 1
+            1, // SAFI 1
+            4, // NH-Len
+            192,
+            0,
+            2,
+            1,
+            0, // reserved
+        ];
+        append_v4_rib_with_attributes(&mut data, &attr);
+        let mut reader = SnapshotReader::new(&data).unwrap();
+        let (entries, err) = drain(&mut reader);
+        assert!(err.is_none(), "unexpected error: {err:?}");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].next_hop,
+            Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)))
+        );
+        assert_eq!(entries[0].link_local_next_hop, None);
+        assert!(entries[0].attributes.is_empty());
+    }
+
     #[test]
     fn recovery_counters_exclude_entries_not_yielded_before_record_failure() {
         let peer = make_peer(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 65001);
@@ -1540,21 +1642,125 @@ mod tests {
         );
     }
 
+    fn cat(parts: &[&[u8]]) -> Vec<u8> {
+        parts.concat()
+    }
+
     #[test]
-    fn reduced_mp_reach_bad_nh_len_is_malformed() {
-        assert!(matches!(
-            parse_reduced_mp_reach(&[5, 1, 2, 3, 4, 5], 0),
-            Err(ReadError::Malformed { .. })
-        ));
-        assert!(matches!(
-            parse_reduced_mp_reach(&[], 0),
-            Err(ReadError::Malformed { .. })
-        ));
-        // NH-Len valid but value short.
-        assert!(matches!(
-            parse_reduced_mp_reach(&[16, 0, 0], 0),
-            Err(ReadError::Malformed { .. })
-        ));
+    fn rib_entry_mp_reach_accepts_reduced_and_full_forms() {
+        let global = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+        let link_local = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
+        let v4 = [192, 0, 2, 1];
+        let v6 = global.octets();
+        let pair = cat(&[&v6, &link_local.octets()]);
+        let cases = [
+            // RFC 6396 §4.3.4 reduced form: NH-Len + next hop.
+            (cat(&[&[4], &v4]), (IpAddr::V4(v4.into()), None)),
+            (cat(&[&[16], &v6]), (IpAddr::V6(global), None)),
+            (cat(&[&[32], &pair]), (IpAddr::V6(global), Some(link_local))),
+            // Full RFC 4760 form: AFI, SAFI, NH-Len, next hop, optional
+            // reserved octet.
+            (
+                cat(&[&[0, 1, 1, 4], &v4, &[0]]),
+                (IpAddr::V4(v4.into()), None),
+            ),
+            (cat(&[&[0, 1, 1, 4], &v4]), (IpAddr::V4(v4.into()), None)),
+            (
+                cat(&[&[0, 2, 1, 16], &v6, &[0]]),
+                (IpAddr::V6(global), None),
+            ),
+            (cat(&[&[0, 2, 1, 16], &v6]), (IpAddr::V6(global), None)),
+            (
+                cat(&[&[0, 2, 1, 32], &pair, &[0]]),
+                (IpAddr::V6(global), Some(link_local)),
+            ),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(
+                decode_rib_entry_mp_reach_next_hop(&value).unwrap(),
+                expected,
+                "value {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rib_entry_mp_reach_rejects_malformed_shapes() {
+        let v4 = [192, 0, 2, 1];
+        let v6 = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1).octets();
+        // (value, expected error text, expected offset within value)
+        let rejected = [
+            (vec![], "empty", 0),
+            // A leading 0 is an AFI high octet, so a lone 0 (or a
+            // reduced-form NH-Len 0) is a truncated full-form header.
+            (vec![0], "truncated full-form", 1),
+            (vec![0, 0, 0, 0], "AFI 0 does not carry a 0-octet", 3),
+            (cat(&[&[5], &[1, 2, 3, 4, 5]]), "NH-Len 5 is not", 0),
+            (vec![16, 0, 0], "truncated MP_REACH_NLRI next hop", 3),
+            (
+                cat(&[&[0, 2, 1, 16], &[0, 0]]),
+                "truncated MP_REACH_NLRI next hop",
+                6,
+            ),
+            // The reduced form has no reserved octet.
+            (cat(&[&[4], &v4, &[0]]), "1 trailing octets", 5),
+            (cat(&[&[0, 1, 1, 4], &v4, &[0, 0]]), "1 trailing octets", 9),
+            (
+                cat(&[&[0, 2, 1, 4], &v4, &[0]]),
+                "AFI 2 does not carry a 4-octet",
+                3,
+            ),
+            (
+                cat(&[&[0, 1, 1, 16], &v6, &[0]]),
+                "AFI 1 does not carry a 16-octet",
+                3,
+            ),
+            (
+                cat(&[&[0, 2, 1, 5], &[1, 2, 3, 4, 5]]),
+                "AFI 2 does not carry a 5-octet",
+                3,
+            ),
+        ];
+        for (value, needle, expected_offset) in rejected {
+            match decode_rib_entry_mp_reach_next_hop(&value) {
+                Err(ReadError::Malformed { offset, context }) => {
+                    assert!(context.contains(needle), "value {value:?}: {context}");
+                    assert_eq!(offset, expected_offset, "value {value:?}: {context}");
+                }
+                other => panic!("value {value:?}: expected Malformed, got {other:?}"),
+            }
+        }
+    }
+
+    /// The entry-level error carries the absolute file offset of the
+    /// offending octet, not one relative to the attribute value.
+    #[test]
+    fn rib_entry_mp_reach_trailing_octets_fail_the_entry_at_absolute_offset() {
+        let peer = make_peer(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 65001);
+        let mut data =
+            encode_snapshot(COLLECTOR, std::slice::from_ref(&peer), &[], &[], TS).unwrap();
+        let attr = [
+            attr_flags::OPTIONAL,
+            attr_type::MP_REACH_NLRI,
+            6,
+            4,
+            192,
+            0,
+            2,
+            1,
+            0xAB,
+        ];
+        // The attribute value starts 3 octets after the attribute header.
+        let value_offset = data.len() + 12 + 4 + 1 + 3 + 2 + 2 + 4 + 2 + 3;
+        append_v4_rib_with_attributes(&mut data, &attr);
+        let mut reader = SnapshotReader::new(&data).unwrap();
+        let (entries, err) = drain(&mut reader);
+        assert!(entries.is_empty());
+        let Some(ReadError::Malformed { offset, context }) = err else {
+            panic!("expected Malformed, got {err:?}");
+        };
+        assert!(context.contains("1 trailing octets"), "{context}");
+        assert_eq!(offset, value_offset + 5);
     }
 
     #[test]

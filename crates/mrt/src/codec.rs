@@ -15,16 +15,20 @@ use std::time::Instant;
 use thiserror::Error;
 const MRT_HEADER_LEN: usize = 12;
 /// MRT message type for `TABLE_DUMP_V2`.
-pub(crate) const TABLE_DUMP_V2: u16 = 13;
-/// `TABLE_DUMP_V2` subtypes.
-pub(crate) const PEER_INDEX_TABLE: u16 = 1;
-pub(crate) const RIB_IPV4_UNICAST: u16 = 2;
-pub(crate) const RIB_IPV6_UNICAST: u16 = 4;
+pub const TABLE_DUMP_V2: u16 = 13;
+/// `TABLE_DUMP_V2` subtype: the leading peer table (RFC 6396 §4.3.1).
+pub const PEER_INDEX_TABLE: u16 = 1;
+/// `TABLE_DUMP_V2` subtype: IPv4 unicast RIB record (RFC 6396 §4.3.2).
+pub const RIB_IPV4_UNICAST: u16 = 2;
+/// `TABLE_DUMP_V2` subtype: IPv6 unicast RIB record (RFC 6396 §4.3.2).
+pub const RIB_IPV6_UNICAST: u16 = 4;
 /// RFC 6396 §4.3.5 — generic RIB record carrying any AFI/SAFI.
 /// Used here for L2VPN/EVPN (AFI 25 / SAFI 70).
-pub(crate) const RIB_GENERIC: u16 = 6;
-pub(crate) const RIB_IPV4_UNICAST_ADDPATH: u16 = 8;
-pub(crate) const RIB_IPV6_UNICAST_ADDPATH: u16 = 9;
+pub const RIB_GENERIC: u16 = 6;
+/// `TABLE_DUMP_V2` subtype: IPv4 unicast with Add-Path (RFC 8050).
+pub const RIB_IPV4_UNICAST_ADDPATH: u16 = 8;
+/// `TABLE_DUMP_V2` subtype: IPv6 unicast with Add-Path (RFC 8050).
+pub const RIB_IPV6_UNICAST_ADDPATH: u16 = 9;
 /// An individual RIB entry within a RIB_* record.
 pub struct RibEntry {
     /// Index into the `PEER_INDEX_TABLE`.

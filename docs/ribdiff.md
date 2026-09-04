@@ -323,12 +323,17 @@ the dump actually is:
   non-comparable instead of pretending.
 
 Wire handling: AS_PATH is decoded as 4-octet (mandatory in
-`TABLE_DUMP_V2`); both the §4.3.4 abbreviated `MP_REACH_NLRI` (next-hop
-only) and the full RFC 4760 form some collectors emit are accepted (a
-leading zero octet can only be an AFI high byte, which disambiguates);
-RFC 8050 Add-Path entries carry their path identifier through as
-`path_id`. Extended and large communities are emitted from the raw
-attribute bytes.
+`TABLE_DUMP_V2`). A RIB entry's `MP_REACH_NLRI` is decoded by the same
+`rustbgpd-mrt` routine the daemon's warm-checkpoint reader uses, so a
+dump that converts here also reads back there: both the §4.3.4 reduced
+form (next-hop length, next hop) and the full RFC 4760 form some
+collectors emit (AFI, SAFI, next-hop length, next hop, optional reserved
+octet) are accepted — a leading zero octet can only be an AFI high byte,
+which disambiguates — while a next-hop length other than 4, 16, or 32, a
+truncated next hop, an AFI that disagrees with the next-hop length, or
+octets trailing the next hop refuse the dump (exit 2). RFC 8050 Add-Path
+entries carry their path identifier through as `path_id`. Extended and
+large communities are emitted from the raw attribute bytes.
 
 <a id="rbgp-diff-snapshot-from-bmp--rfc-8671-post-policy-bmp-captures"></a>
 ### BMP post-policy snapshots
