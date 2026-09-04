@@ -9,8 +9,8 @@
 //! L2VPN/EVPN) are skipped and counted, not treated as errors. A RIB
 //! entry's `MP_REACH_NLRI` is accepted in both the RFC 6396 §4.3.4
 //! reduced form the writer emits and the full RFC 4760 form other
-//! collectors write; see [`decode_table_dump_v2_mp_reach_next_hop`] in
-//! `rustbgpd_wire`.
+//! collectors write; see
+//! [`rustbgpd_wire::mrt::decode_table_dump_v2_mp_reach_next_hop`].
 //!
 //! Input is treated as hostile — this will read an untrusted file at
 //! daemon boot. Every length field is bounds-checked, malformed input
