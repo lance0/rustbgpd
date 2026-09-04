@@ -17,8 +17,8 @@
 //! with nothing written to stdout.
 //!
 //! Wire notes (RFC 6396 §4.3.4): AS_PATH is always 4-octet. The
-//! `MP_REACH_NLRI` inside a RIB entry is decoded by `rustbgpd_wire`'s
-//! [`decode_table_dump_v2_mp_reach_next_hop`], shared with the daemon's
+//! `MP_REACH_NLRI` inside a RIB entry is decoded by
+//! [`rustbgpd_wire::mrt::decode_table_dump_v2_mp_reach_next_hop`], shared with the daemon's
 //! warm-checkpoint reader: both the reduced next-hop-only form and the
 //! full RFC 4760 form some collectors emit are accepted, and malformed
 //! shapes (bad next-hop length, truncation, AFI/length mismatch,
