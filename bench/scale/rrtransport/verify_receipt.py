@@ -200,7 +200,9 @@ def verify(directory, tiny=False):
         fail(f"RSS ceiling exceeded: process_tree_sampler_max_rss_kib={sampler_max} KiB")
     hwms = [observer[name]["direct_pid_vmhwm_kib"] for name in ("established", "staged", "wire")]
     values = [observer[name]["direct_pid_vmrss_kib"] for name in ("established", "staged", "wire")]
-    if any(hwm < value for hwm, value in zip(hwms, values, strict=True)):
+    if len(hwms) != len(values):
+        fail(f"resource checkpoint sample count mismatch: {len(hwms)} VmHWM vs {len(values)} VmRSS")
+    if any(hwm < value for hwm, value in zip(hwms, values)):
         fail("VmHWM is below VmRSS")
     if any(
         current + VMHWM_REGRESSION_TOLERANCE_KIB < previous
