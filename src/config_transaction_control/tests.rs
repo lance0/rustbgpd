@@ -40,6 +40,42 @@ remote_asn = 65002
     ))
 }
 
+/// Body of the function whose signature starts with `signature`, from its
+/// opening brace through the matching closing brace. Braces inside string
+/// literals are not skipped; none of the extracted bodies contain an
+/// unbalanced one.
+fn fn_body<'a>(source: &'a str, signature: &str) -> &'a str {
+    let rest = &source[source.find(signature).expect("function signature present")..];
+    let open = rest.find('{').expect("function has a body");
+    let mut depth = 0usize;
+    for (offset, byte) in rest.bytes().enumerate().skip(open) {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &rest[open..=offset];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unbalanced braces after {signature}");
+}
+
+#[test]
+fn fn_body_ends_at_the_matching_brace_and_excludes_the_next_item() {
+    let first = "fn first() {\n    if a { b(); }\n    first_tail();\n}\n";
+    let second = "fn second() {\n    second_marker();\n}\n";
+    let first_then_second = format!("{first}\n{second}");
+    let second_then_first = format!("{second}\n{first}");
+    let body = fn_body(&first_then_second, "fn first");
+    assert!(body.starts_with('{') && body.ends_with('}'));
+    assert!(body.contains("first_tail();"));
+    assert!(!body.contains("second_marker"));
+    assert_eq!(fn_body(&second_then_first, "fn first"), body);
+}
+
 #[test]
 fn production_snapshot_callers_are_fenced_to_the_accepted_helper() {
     fn count_all(sources: &[&str], needle: &str) -> usize {
@@ -614,13 +650,7 @@ fn runtime_config_coordinator_inventory_is_complete_and_closed() {
         .find("let outcome = body(operation.clone()).await;")
         .unwrap();
     assert!(acquired < registered && registered < body);
-    let owned_body = neighbor
-        .split_once("async fn owned_neighbor_mutation_body")
-        .unwrap()
-        .1
-        .split_once("async fn reserve_config_event_slot")
-        .unwrap()
-        .0;
+    let owned_body = fn_body(neighbor, "async fn owned_neighbor_mutation_body");
     assert!(!owned_body.contains(".code()"));
     assert!(!owned_body.contains(".message()"));
     assert!(!owned_body.contains("to_string().contains"));
@@ -655,13 +685,7 @@ fn runtime_config_coordinator_inventory_is_complete_and_closed() {
             .count(),
         1
     );
-    let owned_peer_group_body = peer_group
-        .split_once("async fn owned_peer_group_mutation_body")
-        .unwrap()
-        .1
-        .split_once("#[tonic::async_trait]")
-        .unwrap()
-        .0;
+    let owned_peer_group_body = fn_body(peer_group, "async fn owned_peer_group_mutation_body");
     assert!(!owned_peer_group_body.contains(".code()"));
     assert!(!owned_peer_group_body.contains(".message()"));
     assert!(!owned_peer_group_body.contains("to_string().contains"));
@@ -697,13 +721,7 @@ fn runtime_config_coordinator_inventory_is_complete_and_closed() {
             .count(),
         1
     );
-    let owned_policy_body = policy
-        .split_once("async fn owned_policy_mutation_body")
-        .unwrap()
-        .1
-        .split_once("async fn require_managed_peer_address")
-        .unwrap()
-        .0;
+    let owned_policy_body = fn_body(policy, "async fn owned_policy_mutation_body");
     assert!(!owned_policy_body.contains(".code()"));
     assert!(!owned_policy_body.contains(".message()"));
     assert!(!owned_policy_body.contains("to_string().contains"));
