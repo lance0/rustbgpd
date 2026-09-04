@@ -2706,7 +2706,7 @@ pub struct EvpnInstanceConfig {
     pub advertise_svi_mac: bool,
     /// MACs to be originated with the RFC 7432 §15.4 sticky bit when
     /// the local kernel learns them. Textual form: `aa:bb:cc:dd:ee:ff`
-    /// (lowercase hex, six octets). Empty by default. See ADR-0056.
+    /// (six two-digit hex octets, either case). Empty by default. See ADR-0056.
     #[serde(default)]
     pub sticky_macs: Vec<String>,
     /// Optional name of an `[[evpn_ip_vrfs]]` entry that binds this

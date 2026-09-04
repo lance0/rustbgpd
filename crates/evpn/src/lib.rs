@@ -75,7 +75,9 @@
 //!   construction (the daemon's `evpn_l3_originator` task drives
 //!   it under `IpVrfStatus::Ready`).
 //!
-//! Other modules: `aliasing` (canonical alias VTEP set per
+//! Other modules: `colon_hex` (the operator text form of MAC and
+//! ESI values, shared by the configuration loader and the gRPC
+//! services), `aliasing` (canonical alias VTEP set per
 //! `RemoteMacEntry`, plus the ADR-0083 single-active eligible-set /
 //! backup-PE derivation), `df_election` (Gate 8 RFC 7432 §8.5),
 //! `label_allocator` (Gate 8b per-ESI EVPN label),
@@ -92,6 +94,7 @@
 #![warn(clippy::pedantic)]
 
 pub mod aliasing;
+pub mod colon_hex;
 pub mod dataplane;
 pub mod df_election;
 pub mod duplicate_mac;
@@ -113,6 +116,7 @@ pub use aliasing::{
     AliasEadPerEvi, AliasIndex, EadPerEsMode, SingleActiveBackupView, SingleActiveEligibleIndex,
     alias_resolved_next_hops, group_members,
 };
+pub use colon_hex::{ColonHexParseError, parse_esi, parse_mac_address};
 pub use dataplane::{
     AcGateEntry, AcGateState, AppliedOp, BumEnforcementEntry, BumEnforcementKey,
     BumEnforcementReadiness, BumEnforcementStatus, BumEnforcementTable, BumForwardingAction,

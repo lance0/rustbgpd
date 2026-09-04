@@ -529,7 +529,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
                 EvpnRouteKey::MacIp {
                     rd,
                     ethernet_tag: EthernetTagId(req.ethernet_tag),
-                    mac: MacAddress(mac),
+                    mac,
                     ip: parse_optional_ip(&req.ip)?,
                 }
             }
@@ -915,23 +915,16 @@ fn parse_rd(s: &str) -> Result<RouteDistinguisher, Status> {
     }
 }
 
-pub(crate) fn parse_mac(s: &str) -> Result<[u8; 6], Status> {
-    let parts: Vec<&str> = s.split(':').collect();
-    if parts.len() != 6 {
-        return Err(Status::invalid_argument(format!(
-            "MAC must be six colon-separated hex octets; got {s:?}"
-        )));
-    }
-    let mut out = [0u8; 6];
-    for (i, p) in parts.iter().enumerate() {
-        out[i] = u8::from_str_radix(p, 16)
-            .map_err(|_| Status::invalid_argument(format!("MAC octet {i} not valid hex: {p:?}")))?;
-    }
-    Ok(out)
+/// Parse a request MAC through the grammar shared with the configuration
+/// loader, reporting a refusal as `INVALID_ARGUMENT` with the offending
+/// input.
+pub(crate) fn parse_mac(s: &str) -> Result<MacAddress, Status> {
+    rustbgpd_evpn::parse_mac_address(s)
+        .map_err(|e| Status::invalid_argument(format!("invalid MAC {s:?}: {e}")))
 }
 
 fn parse_router_mac(s: &str) -> Result<MacAddress, Status> {
-    let mac = MacAddress(parse_mac(s)?);
+    let mac = parse_mac(s)?;
     let octets = mac.octets();
     if octets.iter().all(|&b| b == 0) {
         return Err(Status::invalid_argument(
@@ -1043,7 +1036,7 @@ fn build_type2(
         rd,
         esi: EthernetSegmentIdentifier::ZERO,
         ethernet_tag: EthernetTagId(req.ethernet_tag),
-        mac: MacAddress(mac),
+        mac,
         ip,
         label1: MplsLabel::new(req.label),
         label2,
@@ -1681,14 +1674,20 @@ mod tests {
 
     #[test]
     fn parse_mac_roundtrip() {
-        let bytes = parse_mac("aa:bb:cc:dd:ee:ff").unwrap();
-        assert_eq!(bytes, [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+        let mac = parse_mac("aa:bb:cc:dd:ee:ff").unwrap();
+        assert_eq!(mac.octets(), [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
     }
 
     #[test]
     fn parse_mac_rejects_malformed() {
         assert!(parse_mac("aa:bb:cc").is_err());
         assert!(parse_mac("aa:bb:cc:dd:ee:gg").is_err());
+        // Same grammar as the configuration parser: exactly two hex
+        // digits per octet, so short groups and signed groups (which
+        // `u8::from_str_radix` would otherwise accept) are rejected.
+        assert!(parse_mac("2:0:0:0:0:1").is_err());
+        assert!(parse_mac("+2:+0:+0:+0:+0:+1").is_err());
+        assert!(parse_mac("00f:00:00:00:00:01").is_err());
     }
 
     #[tokio::test]
