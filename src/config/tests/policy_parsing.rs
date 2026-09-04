@@ -303,6 +303,28 @@ ge = 8
 }
 
 #[test]
+fn policy_le_less_than_prefix_len_rejected() {
+    let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[policy.definitions.t]
+[[policy.definitions.t.statements]]
+action = "deny"
+prefix = "10.0.0.0/24"
+le = 16
+"#;
+    let err = parse(toml_str).unwrap_err();
+    assert!(matches!(err, ConfigError::InvalidPolicyEntry { .. }));
+}
+
+#[test]
 fn policy_ge_exceeds_le_rejected() {
     let toml_str = r#"
 [global]

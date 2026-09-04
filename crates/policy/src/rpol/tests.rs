@@ -332,6 +332,43 @@ fn set_membership_lowers_to_indexed_sets() {
 }
 
 #[test]
+fn prefix_set_bounds_that_cannot_match_are_rejected() {
+    // A range whose derived `min..=max` is empty, or whose `ge` sits
+    // below the member length, is a compile error rather than an
+    // entry that silently matches nothing.
+    for (entry, reason) in [
+        (
+            "10.0.0.0/24 ge 28 le 16",
+            "le value 16 is less than prefix length 24",
+        ),
+        ("10.0.0.0/24 ge 28 le 26", "ge value 28 exceeds le value 26"),
+        (
+            "10.0.0.0/24 le 16",
+            "le value 16 is less than prefix length 24",
+        ),
+        (
+            "10.0.0.0/24 ge 16 le 28",
+            "ge value 16 is less than prefix length 24",
+        ),
+    ] {
+        let source = format!(
+            "prefix-set s {{ {entry} }}
+             policy p {{ term t {{ if route.prefix in s {{ accept }} }} }}"
+        );
+        let (_, rendered) = diagnostics_of(&source);
+        assert!(
+            rendered.contains(reason),
+            "{entry} must be rejected, got: {rendered}"
+        );
+    }
+    // Positive control: an ordered range compiles.
+    compile_ok(
+        "prefix-set s { 10.0.0.0/8 ge 16 le 24 }
+         policy p { term t { if route.prefix in s { accept } } }",
+    );
+}
+
+#[test]
 fn u32_equality_lowers_to_ge_and_le() {
     let chain = compile_ok("policy p { term t { if route.med == 50 { reject } } }");
     assert_eq!(
@@ -5563,6 +5600,13 @@ test missing-override-fails {
         // Wrong-kind content fails parse (this is what keeps a
         // mis-pointed path from silently probing garbage).
         assert!(parse_dataset_text("10.0.0.0/8\n", DatasetKind::Asn).is_err());
+        // Same bound rules as source sets: a range that cannot match
+        // is a load error, not a silent no-match.
+        let err = parse_dataset_text("10.0.0.0/24 le 16\n", DatasetKind::Prefix).expect_err("dead");
+        assert!(
+            err.contains("le value 16 is less than prefix length 24"),
+            "{err}"
+        );
     }
 
     /// Explain names the dataset and the pinned generation without

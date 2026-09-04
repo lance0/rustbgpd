@@ -4,6 +4,7 @@ use super::{
     PeerGroupConfig, Policy, PolicyAction, PolicyChain, PolicyStatement, PolicyStatementConfig,
     Prefix, RouteModifications, Safi, parse_community_match,
 };
+use rustbgpd_policy::sets::check_length_bounds;
 use rustbgpd_policy::{
     NeighborSetMatch, RouteExtendedCommunityAdmin, RouteExtendedCommunityKind, RouteType,
     encode_route_extended_community,
@@ -50,32 +51,11 @@ fn parse_prefix_entry(
         });
     };
 
-    if let Some(ge) = ge {
-        if ge > max_len {
-            return Err(ConfigError::InvalidPolicyEntry {
-                reason: format!("ge value {ge} exceeds {max_len} in {prefix_str:?}"),
-            });
+    check_length_bounds(len, max_len, ge, le).map_err(|reason| {
+        ConfigError::InvalidPolicyEntry {
+            reason: format!("{reason} in {prefix_str:?}"),
         }
-        if ge < len {
-            return Err(ConfigError::InvalidPolicyEntry {
-                reason: format!("ge value {ge} is less than prefix length {len} in {prefix_str:?}"),
-            });
-        }
-    }
-    if let Some(le) = le
-        && le > max_len
-    {
-        return Err(ConfigError::InvalidPolicyEntry {
-            reason: format!("le value {le} exceeds {max_len} in {prefix_str:?}"),
-        });
-    }
-    if let (Some(ge), Some(le)) = (ge, le)
-        && ge > le
-    {
-        return Err(ConfigError::InvalidPolicyEntry {
-            reason: format!("ge value {ge} exceeds le value {le} in {prefix_str:?}"),
-        });
-    }
+    })?;
     Ok(prefix)
 }
 
