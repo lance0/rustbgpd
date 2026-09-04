@@ -12,6 +12,17 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 - Add `validate_as_path_ceiling`, an optional bounded ceiling on the number of
   AS numbers in `AS_PATH`, enforced as treat-as-withdraw (subcode 11). `0`
   leaves validation unchanged.
+- `ExtendedCommunity` accessors now match the type byte exactly. The EVPN
+  accessors (`as_mac_mobility`, `as_esi_label`, `as_es_import_rt`,
+  `as_router_mac`, `as_df_election`) require type `0x06`, and the opaque
+  accessors (`as_bgp_encapsulation`, `as_default_gateway`) require type `0x03`.
+  `route_target`, `route_origin`, and `Display` clear only the non-transitive
+  bit (`0x40`, RFC 4360 section 3.1), so types `0x40`-`0x42` still decode with
+  the transitive layouts. Previously the type byte was masked with `0x3F`,
+  which also cleared the IANA experimental-use bit (`0x80`) and let values
+  such as `0x86`, `0xC6`, `0x83`, and `0x80` decode as EVPN, opaque, or
+  two-part communities. Values with `0x80` set now return `None`, `false`,
+  or the hexadecimal fallback.
 
 ## 0.19.0 - 2026-08-30
 
