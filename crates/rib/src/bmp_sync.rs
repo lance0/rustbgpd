@@ -56,10 +56,13 @@ pub fn path_marking_reason_code(reason: BestPathReason) -> Option<u16> {
         BestPathReason::LowerMed => Some(bmp_tlv::REASON_MED),
         BestPathReason::EbgpOverIbgp => Some(bmp_tlv::REASON_PEER_TYPE),
         BestPathReason::OrrInteriorCost => Some(bmp_tlv::REASON_IGP_COST),
-        // RFC 4456 substitutes ORIGINATOR_ID for the BGP identifier on
-        // reflected routes — the same RFC 4271 §9.1.2.2 step the
-        // draft's "router ID" code names.
-        BestPathReason::LowerOriginatorId => Some(bmp_tlv::REASON_ROUTER_ID),
+        // Both reasons are RFC 4271 §9.1.2.2 step (f), the step the
+        // draft's "router ID" code names: RFC 4456 substitutes
+        // ORIGINATOR_ID for the BGP Identifier on reflected routes, and
+        // a route without one is compared by its peer's BGP Identifier.
+        BestPathReason::LowerOriginatorId | BestPathReason::LowerBgpIdentifier => {
+            Some(bmp_tlv::REASON_ROUTER_ID)
+        }
         BestPathReason::LowerPeerAddress => Some(bmp_tlv::REASON_PEER_ADDRESS),
         BestPathReason::StalePreference
         | BestPathReason::RpkiPreference
@@ -811,6 +814,7 @@ mod tests {
             (R::EbgpOverIbgp, Some(tlv::REASON_PEER_TYPE)),
             (R::OrrInteriorCost, Some(tlv::REASON_IGP_COST)),
             (R::LowerOriginatorId, Some(tlv::REASON_ROUTER_ID)),
+            (R::LowerBgpIdentifier, Some(tlv::REASON_ROUTER_ID)),
             (R::LowerPeerAddress, Some(tlv::REASON_PEER_ADDRESS)),
             (R::StalePreference, None),
             (R::RpkiPreference, None),
@@ -829,6 +833,11 @@ mod tests {
         // Numeric pins straight from Table 2 so a constant edit in the
         // bmp crate cannot silently shift the wire values.
         assert_eq!(path_marking_reason_code(R::HigherLocalPref), Some(0x0003));
+        assert_eq!(path_marking_reason_code(R::LowerOriginatorId), Some(0x0009));
+        assert_eq!(
+            path_marking_reason_code(R::LowerBgpIdentifier),
+            Some(0x0009)
+        );
         assert_eq!(path_marking_reason_code(R::LowerPeerAddress), Some(0x000A));
         assert_eq!(path_marking_reason_code(R::LowerPathId), None);
     }

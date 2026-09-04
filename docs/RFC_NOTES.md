@@ -702,6 +702,27 @@ Interpretation decisions:
 - PeerDown clears all routes for that peer.
 - Single `RibManager` tokio task owns all Adj-RIB-In state (ADR-0013).
 
+### §9.1.2.2 — Decision Process tie-breaking
+
+- Step (f), "prefer the route received from the speaker with the lowest
+  BGP Identifier", is implemented for the unicast, VPN, labeled-unicast,
+  FlowSpec, BGP-LS, and RT-Constrain decision chains. The identifier a
+  route is compared by is its ORIGINATOR_ID when present, otherwise the
+  BGP Identifier from the advertising peer's OPEN (RFC 4456 §9). The step
+  runs after eBGP-over-iBGP (and the RFC 9107 ORR interior-cost step when
+  one applies) and before the shorter-CLUSTER_LIST comparison, which in
+  turn precedes step (g), lowest peer address.
+- Locally originated routes have no advertising speaker and skip the
+  step: any pair that includes one falls through to the CLUSTER_LIST and
+  peer-address comparisons unchanged. The daemon's own BGP Identifier is
+  not substituted.
+- Explain output and BMP path marking report the step as
+  `lower_originator_id` when both routes carried ORIGINATOR_ID and as
+  `lower_bgp_identifier` otherwise; both map to the same path-marking
+  "router ID" reason code.
+- RFC 5004 (retain the existing external best path across identifier
+  changes) is not implemented.
+
 ---
 
 ## Interpretation Decisions
@@ -1383,7 +1404,15 @@ carries inactive (absent), unlimited (zero), or finite.
   RFC 4456 ordering after the BGP body — stale flag → ORIGIN →
   shortest CLUSTER_LIST → lowest ORIGINATOR_ID — matching the unicast
   decision process so a reflector with multiple equal-AS paths
-  converges deterministically.
+  converges deterministically. The EVPN identifier step has always
+  fallen back to the advertising peer's BGP Identifier when
+  ORIGINATOR_ID is absent. The unicast, VPN, labeled-unicast, FlowSpec,
+  BGP-LS, and RT-Constrain chains now do the same (see the RFC 4271
+  §9.1.2.2 notes under Milestone 1) but, per RFC 4456 §9, compare the
+  identifier before CLUSTER_LIST length and
+  skip the step for locally originated routes. EVPN keeps its
+  CLUSTER_LIST-first order and applies the identifier step to every
+  route, including locally originated VTEP routes.
 - **Initial dump on session up:** when an iBGP EVPN session reaches
   Established, the existing Adj-RIB-In is replayed to the new peer
   through the same Adj-RIB-Out path that handles steady-state

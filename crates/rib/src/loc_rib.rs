@@ -12,7 +12,7 @@ use rustbgpd_wire::{AsPath, EvpnRouteKey, Origin, PathAttribute, Prefix};
 // Aliased to the std name so the storage types read unchanged.
 use rustc_hash::{FxBuildHasher, FxHashMap as HashMap};
 
-use crate::best_path::best_path_cmp;
+use crate::best_path::{best_path_cmp, compare_bgp_identifier};
 use crate::prefix_map::FamilyPrefixMap;
 use crate::route::{
     BgpLsRibRoute, BgpLsRouteKey, EvpnRibRoute, FlowSpecKey, FlowSpecRoute, LabeledRibRoute, Route,
@@ -794,10 +794,16 @@ fn evpn_stale_rank(route: &EvpnRibRoute) -> u8 {
 /// a higher sequence number. Absence of the MAC Mobility community is
 /// treated as sequence=0, sticky=false per RFC 7432 §7.7.
 ///
-/// All route types then fall through to the standard BGP chain, matching
-/// unicast `best_path_cmp` and `flowspec_tiebreak`:
+/// All route types then fall through to the standard BGP chain:
 /// stale → `LocalPref` → `AS_PATH` length → ORIGIN → MED →
 /// eBGP > iBGP → `CLUSTER_LIST` length → `ORIGINATOR_ID` → peer address.
+///
+/// The EVPN chain deliberately differs from unicast `best_path_cmp` and
+/// the other family chains in two ways: `CLUSTER_LIST` length is compared
+/// before the identifier, and the identifier step (`ORIGINATOR_ID`, else
+/// the peer's BGP Identifier) runs for every route, including locally
+/// originated VTEP routes whose `peer_router_id` is the `0.0.0.0`
+/// sentinel.
 fn evpn_tiebreak_simple(a: &EvpnRibRoute, b: &EvpnRibRoute) -> Ordering {
     // 0. Three-tier freshness: fresh (0) > GR-stale (1) > LLGR-stale (2)
     //    per RFC 4724 §4.2 / RFC 9494 §4.7. LLGR promotion clears
@@ -902,7 +908,7 @@ fn flowspec_stale_rank(route: &FlowSpecRoute) -> u8 {
 ///
 /// Uses the same preference chain as unicast `best_path_cmp`:
 /// stale → `LOCAL_PREF` → `AS_PATH` length → ORIGIN → MED →
-/// eBGP>iBGP → `CLUSTER_LIST` → `ORIGINATOR_ID` → peer address.
+/// eBGP>iBGP → BGP Identifier → `CLUSTER_LIST` → peer address.
 ///
 /// RPKI validation is not applicable to `FlowSpec` routes.
 fn flowspec_tiebreak(a: &FlowSpecRoute, b: &FlowSpecRoute) -> Ordering {
@@ -945,18 +951,19 @@ fn flowspec_tiebreak(a: &FlowSpecRoute, b: &FlowSpecRoute) -> Ordering {
         return cmp;
     }
 
-    // 5.5. Shortest CLUSTER_LIST length (RFC 4456 §9)
-    let cmp = a.cluster_list().len().cmp(&b.cluster_list().len());
-    if cmp != Ordering::Equal {
+    // 5.5. Lowest effective BGP Identifier (RFC 4271 §9.1.2.2 step (f);
+    //      ORIGINATOR_ID substitutes per RFC 4456 §9)
+    if let Some((cmp, _)) = compare_bgp_identifier(
+        (a.origin_type, a.originator_id(), a.peer_router_id),
+        (b.origin_type, b.originator_id(), b.peer_router_id),
+    ) {
         return cmp;
     }
 
-    // 5.6. Lowest ORIGINATOR_ID (RFC 4456 §9) — only when both present
-    if let (Some(a_oid), Some(b_oid)) = (a.originator_id(), b.originator_id()) {
-        let cmp = a_oid.cmp(&b_oid);
-        if cmp != Ordering::Equal {
-            return cmp;
-        }
+    // 5.6. Shortest CLUSTER_LIST length (RFC 4456 §9)
+    let cmp = a.cluster_list().len().cmp(&b.cluster_list().len());
+    if cmp != Ordering::Equal {
+        return cmp;
     }
 
     // 6. Lowest peer address (final tiebreaker)
@@ -996,16 +1003,16 @@ fn bgpls_tiebreak(a: &BgpLsRibRoute, b: &BgpLsRibRoute) -> Ordering {
         return cmp;
     }
 
-    let cmp = bgpls_cluster_list_len(a).cmp(&bgpls_cluster_list_len(b));
-    if cmp != Ordering::Equal {
+    if let Some((cmp, _)) = compare_bgp_identifier(
+        (a.origin_type, bgpls_originator_id(a), a.peer_router_id),
+        (b.origin_type, bgpls_originator_id(b), b.peer_router_id),
+    ) {
         return cmp;
     }
 
-    if let (Some(a_oid), Some(b_oid)) = (bgpls_originator_id(a), bgpls_originator_id(b)) {
-        let cmp = a_oid.cmp(&b_oid);
-        if cmp != Ordering::Equal {
-            return cmp;
-        }
+    let cmp = bgpls_cluster_list_len(a).cmp(&bgpls_cluster_list_len(b));
+    if cmp != Ordering::Equal {
+        return cmp;
     }
 
     cmp_ipaddr(&a.peer, &b.peer)
@@ -1084,7 +1091,7 @@ pub(crate) fn vpn_tiebreak(a: &VpnRibRoute, b: &VpnRibRoute) -> Ordering {
 /// Compare two VPN routes under RFC 9107 Optimal Route Reflection.
 ///
 /// The standard [`vpn_tiebreak`] chain with one extra step between the
-/// eBGP/iBGP step and `CLUSTER_LIST` — the same slot as
+/// eBGP/iBGP step and the BGP Identifier step — the same slot as
 /// [`crate::best_path::best_path_cmp_orr`]: the configured vantage's
 /// interior (SPF) cost to each route's `NEXT_HOP`. Lower cost wins; a
 /// known cost beats an unknown one (RFC 9107 §3.1); equal or
@@ -1154,16 +1161,16 @@ fn vpn_cmp_chain(
         }
     }
 
-    let cmp = vpn_cluster_list_len(a).cmp(&vpn_cluster_list_len(b));
-    if cmp != Ordering::Equal {
+    if let Some((cmp, _)) = compare_bgp_identifier(
+        (a.origin_type, vpn_originator_id(a), a.peer_router_id),
+        (b.origin_type, vpn_originator_id(b), b.peer_router_id),
+    ) {
         return cmp;
     }
 
-    if let (Some(a_oid), Some(b_oid)) = (vpn_originator_id(a), vpn_originator_id(b)) {
-        let cmp = a_oid.cmp(&b_oid);
-        if cmp != Ordering::Equal {
-            return cmp;
-        }
+    let cmp = vpn_cluster_list_len(a).cmp(&vpn_cluster_list_len(b));
+    if cmp != Ordering::Equal {
+        return cmp;
     }
 
     cmp_ipaddr(&a.peer, &b.peer)
@@ -1243,7 +1250,7 @@ pub(crate) fn labeled_tiebreak(a: &LabeledRibRoute, b: &LabeledRibRoute) -> Orde
 /// Reflection.
 ///
 /// The standard [`labeled_tiebreak`] chain with one extra step between the
-/// eBGP/iBGP step and `CLUSTER_LIST` — the same slot as
+/// eBGP/iBGP step and the BGP Identifier step — the same slot as
 /// [`crate::best_path::best_path_cmp_orr`]: the configured vantage's
 /// interior (SPF) cost to each route's `NEXT_HOP`. Lower cost wins; a
 /// known cost beats an unknown one (RFC 9107 §3.1); equal or
@@ -1313,16 +1320,16 @@ fn labeled_cmp_chain(
         }
     }
 
-    let cmp = labeled_cluster_list_len(a).cmp(&labeled_cluster_list_len(b));
-    if cmp != Ordering::Equal {
+    if let Some((cmp, _)) = compare_bgp_identifier(
+        (a.origin_type, labeled_originator_id(a), a.peer_router_id),
+        (b.origin_type, labeled_originator_id(b), b.peer_router_id),
+    ) {
         return cmp;
     }
 
-    if let (Some(a_oid), Some(b_oid)) = (labeled_originator_id(a), labeled_originator_id(b)) {
-        let cmp = a_oid.cmp(&b_oid);
-        if cmp != Ordering::Equal {
-            return cmp;
-        }
+    let cmp = labeled_cluster_list_len(a).cmp(&labeled_cluster_list_len(b));
+    if cmp != Ordering::Equal {
+        return cmp;
     }
 
     cmp_ipaddr(&a.peer, &b.peer)
@@ -1427,16 +1434,16 @@ fn rtc_tiebreak(a: &RtcRibRoute, b: &RtcRibRoute) -> Ordering {
         return cmp;
     }
 
-    let cmp = rtc_cluster_list_len(a).cmp(&rtc_cluster_list_len(b));
-    if cmp != Ordering::Equal {
+    if let Some((cmp, _)) = compare_bgp_identifier(
+        (a.origin_type, rtc_originator_id(a), a.peer_router_id),
+        (b.origin_type, rtc_originator_id(b), b.peer_router_id),
+    ) {
         return cmp;
     }
 
-    if let (Some(a_oid), Some(b_oid)) = (rtc_originator_id(a), rtc_originator_id(b)) {
-        let cmp = a_oid.cmp(&b_oid);
-        if cmp != Ordering::Equal {
-            return cmp;
-        }
+    let cmp = rtc_cluster_list_len(a).cmp(&rtc_cluster_list_len(b));
+    if cmp != Ordering::Equal {
+        return cmp;
     }
 
     cmp_ipaddr(&a.peer, &b.peer)
@@ -2617,6 +2624,63 @@ mod tests {
         let best = loc.get_flowspec(&flowspec_key(&rule)).unwrap();
         // Lowest peer IP wins
         assert_eq!(best.peer, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+    }
+
+    // ---- RFC 4271 §9.1.2.2 step (f) on every non-unicast chain ---------
+    //
+    // Peer 10.0.0.2 advertises with the lower BGP Identifier; peer
+    // 10.0.0.1 has the lower address. The identifier decides first.
+
+    #[test]
+    fn flowspec_lower_bgp_identifier_beats_peer_address() {
+        let r1 = make_flowspec_route(2, 1, vec![PathAttribute::LocalPref(100)], RouteOrigin::Ibgp);
+        let r2 = make_flowspec_route(1, 2, vec![PathAttribute::LocalPref(100)], RouteOrigin::Ibgp);
+        assert_eq!(flowspec_tiebreak(&r1, &r2), Ordering::Less);
+        assert_eq!(flowspec_tiebreak(&r2, &r1), Ordering::Greater);
+    }
+
+    #[test]
+    fn bgpls_lower_bgp_identifier_beats_peer_address() {
+        let nlri = bgpls_nlri(21);
+        let mut r1 = make_bgpls_route(BgpLsFamily::LinkState, nlri.clone(), 2);
+        r1.peer_router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let mut r2 = make_bgpls_route(BgpLsFamily::LinkState, nlri, 1);
+        r2.peer_router_id = Ipv4Addr::new(2, 2, 2, 2);
+        assert_eq!(bgpls_tiebreak(&r1, &r2), Ordering::Less);
+        assert_eq!(bgpls_tiebreak(&r2, &r1), Ordering::Greater);
+    }
+
+    #[test]
+    fn vpn_lower_bgp_identifier_beats_peer_address() {
+        let nlri = vpn_nlri([10, 0, 9, 0], 24, 100);
+        let mut r1 = make_vpn_route(nlri.clone(), 2, 100);
+        r1.peer_router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let mut r2 = make_vpn_route(nlri, 1, 100);
+        r2.peer_router_id = Ipv4Addr::new(2, 2, 2, 2);
+        assert_eq!(vpn_tiebreak(&r1, &r2), Ordering::Less);
+        assert_eq!(vpn_tiebreak(&r2, &r1), Ordering::Greater);
+    }
+
+    #[test]
+    fn labeled_lower_bgp_identifier_beats_peer_address() {
+        let nlri = labeled_nlri([10, 0, 9, 0], 24, 100);
+        let mut r1 = make_labeled_route(nlri.clone(), 2, 100);
+        r1.peer_router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let mut r2 = make_labeled_route(nlri, 1, 100);
+        r2.peer_router_id = Ipv4Addr::new(2, 2, 2, 2);
+        assert_eq!(labeled_tiebreak(&r1, &r2), Ordering::Less);
+        assert_eq!(labeled_tiebreak(&r2, &r1), Ordering::Greater);
+    }
+
+    #[test]
+    fn rtc_lower_bgp_identifier_beats_peer_address() {
+        let nlri = rtc_test_nlri(900);
+        let mut r1 = make_rtc_route(nlri, 2, 100);
+        r1.peer_router_id = Ipv4Addr::new(1, 1, 1, 1);
+        let mut r2 = make_rtc_route(nlri, 1, 100);
+        r2.peer_router_id = Ipv4Addr::new(2, 2, 2, 2);
+        assert_eq!(rtc_tiebreak(&r1, &r2), Ordering::Less);
+        assert_eq!(rtc_tiebreak(&r2, &r1), Ordering::Greater);
     }
 
     // ---- EVPN MAC mobility tie-break tests (RFC 7432 §15.1) ------------

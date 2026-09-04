@@ -431,8 +431,8 @@ Best-path rules (implemented), applied in order:
 3. Lowest ORIGIN (IGP < EGP < INCOMPLETE)
 4. Lowest MED (deterministic — always-compare across all peers, not just same-AS)
 5. eBGP over iBGP (only `RouteOrigin::Ebgp`; Local uses LOCAL_PREF/AS_PATH)
-5.5. Shortest CLUSTER_LIST length (RFC 4456 §9)
-5.6. Lowest ORIGINATOR_ID (RFC 4456 §9) — only when both routes carry the attribute
+5.5. Lowest effective BGP Identifier (RFC 4271 §9.1.2.2 step (f)): ORIGINATOR_ID substitutes for the advertising peer's BGP Identifier when present (RFC 4456 §9); locally originated routes skip this step. Explain reports `lower_originator_id` when both routes carried ORIGINATOR_ID and `lower_bgp_identifier` otherwise
+5.6. Shortest CLUSTER_LIST length (RFC 4456 §9)
 6. Lowest peer address (tiebreaker)
 7. Lowest inbound Add-Path path identifier (same-peer route identity only; reported as `lower_path_id` in explain)
 

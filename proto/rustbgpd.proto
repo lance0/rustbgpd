@@ -2421,9 +2421,10 @@ message ExplainBestPathResponse {
   // eliminated. Same snake_case step vocabulary as vs_best_reason
   // (stale_preference, rpki_preference, aspa_preference,
   // higher_local_pref, shorter_as_path, lower_origin, lower_med,
-  // ebgp_over_ibgp, shorter_cluster_list, lower_originator_id,
-  // lower_peer_address, lower_path_id, plus orr_interior_cost for a
-  // peer-scoped explanation using a resolved RFC 9107 vantage).
+  // ebgp_over_ibgp, lower_originator_id, lower_bgp_identifier,
+  // shorter_cluster_list, lower_peer_address, lower_path_id, plus
+  // orr_interior_cost for a peer-scoped explanation using a resolved
+  // RFC 9107 vantage).
   // "only_path" when the prefix has
   // exactly one path (trivial winner, no competing candidates). A prefix
   // with no paths at all is NOT_FOUND at the RPC layer, so this field is

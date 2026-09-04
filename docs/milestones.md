@@ -187,6 +187,10 @@ Loc-RIB best-path selection per RFC 4271 §9.1.2.
   Simpler, avoids ordering sensitivity, matches GoBGP default.
 - **Peer address tiebreaker** — router-id tiebreak deferred to M3/M4 when
   we have outbound route advertisement and need full BGP decision process.
+  Since implemented: the RFC 4271 §9.1.2.2 step (f) lowest-BGP-Identifier
+  comparison (ORIGINATOR_ID substituting per RFC 4456 §9, locally
+  originated routes excluded) now runs before the CLUSTER_LIST and peer
+  address steps; see DESIGN.md.
 - **eBGP/iBGP step skipped** — deferred until transport distinguishes session
   types and router-id is available for a more complete implementation.
 
