@@ -11,7 +11,14 @@ from unittest import mock
 from pathlib import Path
 
 from scripts import classify_heavy_ci_paths as heavy
-from scripts.check_ci_image_primer_contract import INTEROP, KERNEL, _list_needs, check
+from scripts.check_ci_image_primer_contract import (
+    INTEROP,
+    KERNEL,
+    PINS,
+    VERSION_TAG,
+    _list_needs,
+    check,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -96,7 +103,7 @@ class PrimerContractTests(unittest.TestCase):
         ):
             shutil.copy2(ROOT / "tests" / "interop" / name, interop / name)
 
-    def mutate(self, relative, old, new="", occurrence=0):
+    def mutate(self, relative, old, new="", occurrence=0, expect=None):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             for fixture in (
@@ -141,7 +148,10 @@ class PrimerContractTests(unittest.TestCase):
                 )
                 start = index + len(old)
             path.write_text(text[:index] + new + text[index + len(old) :])
-            self.assertTrue(check(root), f"mutation stayed green: {relative}: {old}")
+            errors = check(root)
+            self.assertTrue(errors, f"mutation stayed green: {relative}: {old}")
+            if expect is not None:
+                self.assertIn(expect, errors)
 
     def stage_indexed_fixture(self, root):
         for fixture in (
@@ -208,6 +218,116 @@ class PrimerContractTests(unittest.TestCase):
 
     def test_live_contract(self):
         self.assertEqual([], check(ROOT))
+
+    def test_external_action_refs_are_reviewed_version_tags(self):
+        for ref in PINS:
+            self.assertRegex(ref, VERSION_TAG)
+        audit = ".github/workflows/audit.yml"
+        ci = ".github/workflows/ci.yml"
+        bird3 = ".github/actions/stage-bird3-artifact/action.yml"
+        sha = "0123456789abcdef0123456789abcdef01234567"
+        cases = (
+            (
+                audit,
+                "actions/checkout@v7",
+                "actions/checkout@main",
+                f"{audit}: action ref is not a reviewed version tag: actions/checkout@main",
+            ),
+            (
+                audit,
+                "actions/checkout@v7",
+                f"actions/checkout@{sha}",
+                f"{audit}: action ref is not a reviewed version tag: actions/checkout@{sha}",
+            ),
+            (
+                audit,
+                "actions/checkout@v7",
+                "actions/checkout@v8",
+                f"{audit}: action ref is not in the reviewed pin set: actions/checkout@v8",
+            ),
+            (
+                audit,
+                "      - uses: actions/checkout@v7\n",
+                "      - uses: actions/checkout@v7\n      - uses: actions/setup-python@v5\n",
+                f"{audit}: action ref is not in the reviewed pin set: actions/setup-python@v5",
+            ),
+            (
+                ci,
+                "dtolnay/rust-toolchain@v1 # stable",
+                "dtolnay/rust-toolchain@master # stable",
+                f"{ci}: action ref is not a reviewed version tag: dtolnay/rust-toolchain@master",
+            ),
+            (
+                bird3,
+                "actions/download-artifact@v8",
+                "actions/download-artifact@main",
+                f"{bird3}: action ref is not a reviewed version tag: "
+                "actions/download-artifact@main",
+            ),
+        )
+        for relative, old, new, expect in cases:
+            with self.subTest(relative=relative, ref=new.strip()):
+                self.mutate(relative, old, new, expect=expect)
+
+    def test_lab_call_structure_is_load_bearing(self):
+        interop = ".github/workflows/interop.yml"
+        kernel = ".github/workflows/kernel-dataplane.yml"
+        m1_call = (
+            "        uses: ./.github/actions/run-interop-test\n"
+            "        with:\n"
+            "          label: M1\n"
+            "          topology: tests/interop/m1-frr.clab.yml\n"
+            "          script: tests/interop/scripts/test-m1-frr.sh\n"
+        )
+        self.assertEqual(1, (ROOT / interop).read_text().count(m1_call))
+        for old, new, expect in (
+            ("          label: M1\n", "", "interop.yml:m1: run-interop-test call missing label"),
+            (
+                "          topology: tests/interop/m1-frr.clab.yml\n",
+                "",
+                "interop.yml:m1: run-interop-test call missing topology",
+            ),
+            (
+                "          script: tests/interop/scripts/test-m1-frr.sh\n",
+                "",
+                "interop.yml:m1: run-interop-test call missing script",
+            ),
+            ("label: M1\n", "label: M2\n", "interop.yml:m1: no run-interop-test call labelled M1"),
+            (
+                "topology: tests/interop/m1-frr.clab.yml",
+                "topology: tests/interop/m13-policy-frr.clab.yml",
+                "interop.yml:m1: M1 topology drifted: tests/interop/m13-policy-frr.clab.yml",
+            ),
+            (
+                "script: tests/interop/scripts/test-m1-frr.sh",
+                "script: tests/interop/scripts/test-m13-policy-frr.sh",
+                "interop.yml:m1: M1 script drifted: tests/interop/scripts/test-m13-policy-frr.sh",
+            ),
+        ):
+            with self.subTest(seam=old.strip()):
+                self.mutate(interop, m1_call, m1_call.replace(old, new), expect=expect)
+        with self.subTest(seam="interop lab gains kernel host setup"):
+            self.mutate(
+                interop,
+                m1_call,
+                m1_call + "      - uses: ./.github/actions/setup-dataplane-host\n",
+                expect="interop.yml:m1: kernel host setup in interop lab",
+            )
+        host_setup = "      - uses: ./.github/actions/setup-dataplane-host\n"
+        with self.subTest(seam="kernel lab duplicates host setup"):
+            self.mutate(
+                kernel,
+                host_setup,
+                host_setup * 2,
+                expect="kernel-dataplane.yml:m36: setup call drifted",
+            )
+        with self.subTest(seam="kernel lab loses its scenario call"):
+            self.mutate(
+                kernel,
+                "        uses: ./.github/actions/run-interop-test\n",
+                "        uses: ./.github/actions/install-containerlab\n",
+                expect="kernel-dataplane.yml:m36: has no run-interop-test call",
+            )
 
     def test_v064_producer_is_load_bearing(self):
         cache_key = (
