@@ -45,7 +45,12 @@ decisive comparison step (`only_path`, `higher_local_pref`,
 `shorter_as_path`, `lower_origin`, `lower_med`, ... down to
 `lower_peer_address` and the same-peer Add-Path identity tie
 `lower_path_id`) and the compared values behind it, plus its
-equal-cost multipath classification:
+equal-cost multipath classification. The RFC 4271 §9.1.2.2 step (f)
+identifier comparison reports as `lower_originator_id` when both routes
+carried ORIGINATOR_ID and as `lower_bgp_identifier` when at least one
+side was compared by its advertising peer's BGP Identifier (RFC 4456 §9
+substitution); it precedes `shorter_cluster_list`, and a pair that
+includes a locally originated route skips it:
 
 ```console
 $ rbgp rib --prefix 203.0.113.0/24 --explain

@@ -186,6 +186,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   kernel `TCP_MD5SIG` key bound, 1..=80 bytes, with the same wording the
   `[[rpki.cache_servers]]` check already uses.
 
+- **Operator-visible:** best-path selection now applies RFC 4271 §9.1.2.2
+  step (f), preferring the route received from the speaker with the lowest
+  BGP Identifier. A route's ORIGINATOR_ID substitutes for the identifier when
+  present (RFC 4456 §9); otherwise the advertising peer's BGP Identifier from
+  its OPEN is used. Previously the step ran only when both routes carried
+  ORIGINATOR_ID, and it ran after the CLUSTER_LIST comparison. The order below
+  eBGP-over-iBGP (and the RFC 9107 ORR interior cost where it applies) is now
+  lowest effective BGP Identifier, shorter CLUSTER_LIST, lowest peer address.
+  Pairs that include a locally originated route skip the identifier step. The
+  unicast, VPN, labeled-unicast, FlowSpec, BGP-LS, and RT-Constrain chains all
+  follow this order; the EVPN chain is unchanged. Explain output and BMP path
+  marking report the new `lower_bgp_identifier` reason when at least one side
+  was compared by its peer's identifier and keep `lower_originator_id` when
+  both carried ORIGINATOR_ID; both map to the path-marking "router ID" reason
+  code.
+
 - Reject AS 0 in received and locally encoded AS paths and aggregators per RFC
   7607. Malformed ordinary paths are treated as withdraw, while affected AS4
   compatibility and aggregator attributes are discarded without entering
@@ -427,6 +443,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`md5_password must be 1..=80 bytes`) instead of loading and then failing
   when the session or listener socket installs the key. Such a value never
   produced a working session; shorten or remove it.
+- **Best-path selection can change after upgrade** between otherwise-equal
+  paths from different peers: the lowest advertising BGP Identifier (or
+  ORIGINATOR_ID) now decides before CLUSTER_LIST length and peer address,
+  where previously peer address decided unless both routes carried
+  ORIGINATOR_ID. Expect a one-time best-path change, and the corresponding
+  withdraw/announce toward peers, for prefixes that tied down to the peer
+  address. `rbgp rib --prefix <cidr> --explain` and BMP path marking report
+  the new `lower_bgp_identifier` reason; `lower_originator_id` is retained
+  for the both-ORIGINATOR_ID case.
 - Received `AS_PATH` attributes with more than 750 AS numbers and reachable
   NLRI are now treated as withdraw by default; without reachable NLRI, the
   session resets. Deployments that must relay arbitrarily long paths set

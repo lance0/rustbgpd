@@ -3,10 +3,11 @@
 //! Uses deterministic MED (always-compare) for simplicity, matching `GoBGP`.
 
 use std::cmp::Ordering;
+use std::net::Ipv4Addr;
 
 use rustbgpd_wire::{AsPath, AspaValidation, RpkiValidation};
 
-use crate::route::Route;
+use crate::route::{Route, RouteOrigin};
 
 /// Numeric preference for RPKI validation state: higher = more preferred.
 fn rpki_preference(v: RpkiValidation) -> u8 {
@@ -39,6 +40,62 @@ fn stale_rank(route: &Route) -> u8 {
     }
 }
 
+/// The identifier a route is compared by at RFC 4271 §9.1.2.2 step (f),
+/// with the RFC 4456 §9 substitution: its `ORIGINATOR_ID` when present,
+/// otherwise the BGP Identifier of the peer that advertised it.
+///
+/// Locally originated routes have no advertising speaker — their
+/// `peer_router_id` is the `0.0.0.0` injection sentinel, not a BGP
+/// Identifier — so they yield `None` and the step is skipped for any
+/// pair that includes one.
+#[must_use]
+pub(crate) fn effective_bgp_identifier(
+    origin_type: RouteOrigin,
+    originator_id: Option<Ipv4Addr>,
+    peer_router_id: Ipv4Addr,
+) -> Option<Ipv4Addr> {
+    match origin_type {
+        RouteOrigin::Local => None,
+        RouteOrigin::Ebgp | RouteOrigin::Ibgp => Some(originator_id.unwrap_or(peer_router_id)),
+    }
+}
+
+/// Decide step (f) for a pair of routes, each given as
+/// `(origin_type, originator_id, peer_router_id)`.
+///
+/// `None` when the step does not decide: equal effective identifiers, or
+/// either route locally originated. The reason is
+/// [`BestPathReason::LowerOriginatorId`] when both routes carried
+/// `ORIGINATOR_ID` and [`BestPathReason::LowerBgpIdentifier`] when at
+/// least one side fell back to its peer's BGP Identifier.
+#[must_use]
+pub(crate) fn compare_bgp_identifier(
+    a: (RouteOrigin, Option<Ipv4Addr>, Ipv4Addr),
+    b: (RouteOrigin, Option<Ipv4Addr>, Ipv4Addr),
+) -> Option<(Ordering, BestPathReason)> {
+    let id_a = effective_bgp_identifier(a.0, a.1, a.2)?;
+    let id_b = effective_bgp_identifier(b.0, b.1, b.2)?;
+    let cmp = id_a.cmp(&id_b);
+    if cmp == Ordering::Equal {
+        return None;
+    }
+    let reason = if a.1.is_some() && b.1.is_some() {
+        BestPathReason::LowerOriginatorId
+    } else {
+        BestPathReason::LowerBgpIdentifier
+    };
+    Some((cmp, reason))
+}
+
+/// The step (f) inputs of a unicast [`Route`].
+fn bgp_identity(route: &Route) -> (RouteOrigin, Option<Ipv4Addr>, Ipv4Addr) {
+    (
+        route.origin_type,
+        route.originator_id(),
+        route.peer_router_id,
+    )
+}
+
 /// The decisive step in a best-path comparison.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BestPathReason {
@@ -63,10 +120,15 @@ pub enum BestPathReason {
     /// by the Loc-RIB ladder (`best_path_cmp_with_reason` carries no
     /// vantage costs) — only [`best_path_cmp_orr_with_reason`] yields it.
     OrrInteriorCost,
-    /// Step 5.5: shorter `CLUSTER_LIST` wins (RFC 4456).
-    ShorterClusterList,
-    /// Step 5.6: lower `ORIGINATOR_ID` wins (RFC 4456).
+    /// Step 5.5: lower `ORIGINATOR_ID` wins when both routes carry the
+    /// attribute (RFC 4456 §9 substitution for the BGP Identifier).
     LowerOriginatorId,
+    /// Step 5.5: lower effective BGP Identifier wins (RFC 4271 §9.1.2.2
+    /// step (f)) when at least one side fell back to the advertising
+    /// peer's BGP Identifier because it carries no `ORIGINATOR_ID`.
+    LowerBgpIdentifier,
+    /// Step 5.6: shorter `CLUSTER_LIST` wins (RFC 4456 §9).
+    ShorterClusterList,
     /// Step 6: lower peer address.
     LowerPeerAddress,
     /// Step 6.1: lower inbound Add-Path identifier as a deterministic
@@ -94,8 +156,9 @@ impl BestPathReason {
             Self::LowerMed => "lower_med",
             Self::EbgpOverIbgp => "ebgp_over_ibgp",
             Self::OrrInteriorCost => "orr_interior_cost",
-            Self::ShorterClusterList => "shorter_cluster_list",
             Self::LowerOriginatorId => "lower_originator_id",
+            Self::LowerBgpIdentifier => "lower_bgp_identifier",
+            Self::ShorterClusterList => "shorter_cluster_list",
             Self::LowerPeerAddress => "lower_peer_address",
             Self::LowerPathId => "lower_path_id",
             Self::EvpnMacMobility => "evpn_mac_mobility",
@@ -156,16 +219,13 @@ pub fn best_path_cmp_with_reason(a: &Route, b: &Route) -> (Ordering, BestPathRea
         return (cmp, BestPathReason::EbgpOverIbgp);
     }
 
+    if let Some(decided) = compare_bgp_identifier(bgp_identity(a), bgp_identity(b)) {
+        return decided;
+    }
+
     let cmp = a.cluster_list().len().cmp(&b.cluster_list().len());
     if cmp != Ordering::Equal {
         return (cmp, BestPathReason::ShorterClusterList);
-    }
-
-    if let (Some(a_oid), Some(b_oid)) = (a.originator_id(), b.originator_id()) {
-        let cmp = a_oid.cmp(&b_oid);
-        if cmp != Ordering::Equal {
-            return (cmp, BestPathReason::LowerOriginatorId);
-        }
     }
 
     let cmp = a.peer.cmp(&b.peer);
@@ -181,7 +241,7 @@ pub fn best_path_cmp_with_reason(a: &Route, b: &Route) -> (Ordering, BestPathRea
 /// Same ordering as [`best_path_cmp_orr`], derived by composition rather
 /// than a third hand-maintained ladder: the plain reason ladder decides
 /// unless its decisive step is one of the tiebreakers *below* the ORR
-/// interior-cost step (`CLUSTER_LIST`, `ORIGINATOR_ID`, peer address,
+/// interior-cost step (BGP Identifier, `CLUSTER_LIST`, peer address,
 /// inbound Add-Path identifier) — in that case the vantage cost gets first
 /// shot and, when decisive, yields [`BestPathReason::OrrInteriorCost`].
 #[must_use]
@@ -194,8 +254,9 @@ pub fn best_path_cmp_orr_with_reason(
     let (ord, reason) = best_path_cmp_with_reason(a, b);
     let below_orr_step = matches!(
         reason,
-        BestPathReason::ShorterClusterList
-            | BestPathReason::LowerOriginatorId
+        BestPathReason::LowerOriginatorId
+            | BestPathReason::LowerBgpIdentifier
+            | BestPathReason::ShorterClusterList
             | BestPathReason::LowerPeerAddress
             | BestPathReason::LowerPathId
     );
@@ -314,6 +375,22 @@ pub fn best_path_reason_detail(reason: BestPathReason, a: &Route, b: &Route) -> 
             // both routes carry ORIGINATOR_ID.
             _ => "originator_id absent".to_string(),
         },
+        BestPathReason::LowerBgpIdentifier => {
+            let (x, y) = (
+                effective_bgp_identifier(a.origin_type, a.originator_id(), a.peer_router_id),
+                effective_bgp_identifier(b.origin_type, b.originator_id(), b.peer_router_id),
+            );
+            // Defensive: `None` (locally originated) never reaches this
+            // reason because the comparator skips the step for that pair.
+            let show =
+                |id: Option<Ipv4Addr>| id.map_or_else(|| "local".to_string(), |id| id.to_string());
+            format!(
+                "bgp_identifier {} {} {}",
+                show(x),
+                cmp_symbol(&x, &y),
+                show(y)
+            )
+        }
         BestPathReason::LowerPeerAddress => {
             format!(
                 "peer {} {} {}",
@@ -395,8 +472,11 @@ pub fn multipath_eligibility(best: &Route, other: &Route) -> MultipathEligibilit
 /// 5. eBGP over iBGP
 ///    5.3. ORR interior cost (RFC 9107) — [`best_path_cmp_orr`] only;
 ///    this comparator never runs it
-///    5.5. Shortest `CLUSTER_LIST` length (RFC 4456 §9)
-///    5.6. Lowest `ORIGINATOR_ID` (RFC 4456 §9) — only when both present
+///    5.5. Lowest effective BGP Identifier (RFC 4271 §9.1.2.2 step (f)):
+///    `ORIGINATOR_ID` when present, else the advertising peer's BGP
+///    Identifier (RFC 4456 §9); skipped for a pair that includes a
+///    locally originated route
+///    5.6. Shortest `CLUSTER_LIST` length (RFC 4456 §9)
 /// 6. Lowest peer address (tiebreaker)
 ///    Final identity tie: lowest inbound Add-Path identifier
 ///    (deterministic same-peer route identity only; RFC 7911 assigns no
@@ -409,7 +489,7 @@ pub fn best_path_cmp(a: &Route, b: &Route) -> Ordering {
 /// Compare two routes under RFC 9107 Optimal Route Reflection.
 ///
 /// The standard [`best_path_cmp`] chain with one extra step between
-/// step 5 (eBGP over iBGP) and step 5.5 (`CLUSTER_LIST`): the
+/// step 5 (eBGP over iBGP) and step 5.5 (BGP Identifier): the
 /// configured vantage's interior (SPF) cost to each route's `NEXT_HOP`.
 /// Lower cost wins; a known cost beats an unknown one (RFC 9107 §3.1:
 /// an unknown metric-to-next-hop MUST be least preferred); equal or
@@ -495,18 +575,17 @@ fn cmp_chain(a: &Route, b: &Route, orr_costs: Option<(Option<u64>, Option<u64>)>
         }
     }
 
-    // 5.5. Shortest CLUSTER_LIST length (RFC 4456 §9)
-    let cmp = a.cluster_list().len().cmp(&b.cluster_list().len());
-    if cmp != Ordering::Equal {
+    // 5.5. Lowest effective BGP Identifier (RFC 4271 §9.1.2.2 step (f)):
+    //      ORIGINATOR_ID substitutes when present (RFC 4456 §9); a pair
+    //      with a locally originated route skips the step.
+    if let Some((cmp, _)) = compare_bgp_identifier(bgp_identity(a), bgp_identity(b)) {
         return cmp;
     }
 
-    // 5.6. Lowest ORIGINATOR_ID (RFC 4456 §9) — only when both present
-    if let (Some(a_oid), Some(b_oid)) = (a.originator_id(), b.originator_id()) {
-        let cmp = a_oid.cmp(&b_oid);
-        if cmp != Ordering::Equal {
-            return cmp;
-        }
+    // 5.6. Shortest CLUSTER_LIST length (RFC 4456 §9)
+    let cmp = a.cluster_list().len().cmp(&b.cluster_list().len());
+    if cmp != Ordering::Equal {
+        return cmp;
     }
 
     // 6. Lowest peer address, then inbound Add-Path identifier. The
@@ -523,7 +602,7 @@ fn cmp_chain(a: &Route, b: &Route, orr_costs: Option<(Option<u64>, Option<u64>)>
 /// `AS_PATH`, `ORIGIN`, `MED` — **and** are the same eBGP/iBGP class (a group is
 /// never mixed; forwarding across an eBGP and an iBGP path at once is not a
 /// thing operators expect). The tiebreakers `best_path_cmp` applies below this
-/// point (`CLUSTER_LIST` length, `ORIGINATOR_ID`, peer address, inbound Add-Path
+/// point (BGP Identifier, `CLUSTER_LIST` length, peer address, inbound Add-Path
 /// identifier) are deliberately *not* compared: those exist precisely to pick
 /// one winner among otherwise co-equal paths, which are exactly the paths we
 /// want to bundle.
@@ -923,9 +1002,15 @@ mod tests {
         assert_eq!(best_path_cmp(&b, &a), Ordering::Greater);
     }
 
+    fn with_router_id(mut r: Route, id: Ipv4Addr) -> Route {
+        r.peer_router_id = id;
+        r
+    }
+
+    /// RFC 4456 §9 orders the identifier comparison before `CLUSTER_LIST`
+    /// length: the lower `ORIGINATOR_ID` wins despite a longer list.
     #[test]
-    fn cluster_list_beats_originator_id() {
-        // Shorter CLUSTER_LIST should win even if ORIGINATOR_ID is higher
+    fn originator_id_beats_shorter_cluster_list() {
         let a = with_originator_id(
             with_cluster_list(
                 base_route(Ipv4Addr::new(1, 0, 0, 1)),
@@ -940,20 +1025,118 @@ mod tests {
             ),
             Ipv4Addr::new(10, 0, 0, 1),
         );
-        assert_eq!(best_path_cmp(&a, &b), Ordering::Less);
+        assert_eq!(
+            best_path_cmp_with_reason(&a, &b),
+            (Ordering::Greater, BestPathReason::LowerOriginatorId)
+        );
+        assert_eq!(best_path_cmp(&b, &a), Ordering::Less);
     }
 
+    /// RFC 4271 §9.1.2.2 step (f): the lower BGP Identifier of the
+    /// advertising peer decides before the peer address does.
     #[test]
-    fn originator_id_only_when_both_present() {
-        // When only one route has ORIGINATOR_ID, it should fall through
-        let a = with_originator_id(
-            base_route(Ipv4Addr::new(1, 0, 0, 2)),
-            Ipv4Addr::new(10, 0, 0, 99),
+    fn lower_bgp_identifier_beats_peer_address() {
+        let a = with_router_id(
+            base_route(Ipv4Addr::new(10, 0, 0, 2)),
+            Ipv4Addr::new(1, 1, 1, 1),
         );
-        let b = base_route(Ipv4Addr::new(1, 0, 0, 1));
-        // ORIGINATOR_ID tiebreaker skipped (b has none), falls to peer address
-        // b has lower peer → b wins
-        assert_eq!(best_path_cmp(&a, &b), Ordering::Greater);
+        let b = with_router_id(
+            base_route(Ipv4Addr::new(10, 0, 0, 1)),
+            Ipv4Addr::new(2, 2, 2, 2),
+        );
+        assert_eq!(
+            best_path_cmp_with_reason(&a, &b),
+            (Ordering::Less, BestPathReason::LowerBgpIdentifier)
+        );
+        assert_eq!(
+            best_path_cmp_with_reason(&b, &a),
+            (Ordering::Greater, BestPathReason::LowerBgpIdentifier)
+        );
+        assert_eq!(best_path_cmp(&a, &b), Ordering::Less);
+        assert_eq!(best_path_cmp(&b, &a), Ordering::Greater);
+    }
+
+    /// RFC 4456 §9: `ORIGINATOR_ID` substitutes for the BGP Identifier on
+    /// the route that carries it; the other side keeps its peer's.
+    #[test]
+    fn originator_id_compares_against_peer_router_id_when_one_side_absent() {
+        let x = with_originator_id(
+            with_router_id(
+                base_route(Ipv4Addr::new(10, 0, 0, 1)),
+                Ipv4Addr::new(5, 5, 5, 5),
+            ),
+            Ipv4Addr::new(3, 3, 3, 3),
+        );
+        let y = with_router_id(
+            base_route(Ipv4Addr::new(10, 0, 0, 2)),
+            Ipv4Addr::new(1, 1, 1, 1),
+        );
+        // y's peer identifier 1.1.1.1 < x's ORIGINATOR_ID 3.3.3.3, despite
+        // x's lower peer address.
+        assert_eq!(
+            best_path_cmp_with_reason(&x, &y),
+            (Ordering::Greater, BestPathReason::LowerBgpIdentifier)
+        );
+        assert_eq!(
+            best_path_cmp_with_reason(&y, &x),
+            (Ordering::Less, BestPathReason::LowerBgpIdentifier)
+        );
+        assert_eq!(best_path_cmp(&x, &y), Ordering::Greater);
+    }
+
+    /// Step (f) precedes `CLUSTER_LIST` length: the lower effective
+    /// identifier wins even with the longer list.
+    #[test]
+    fn lower_bgp_identifier_beats_shorter_cluster_list() {
+        let a = with_cluster_list(
+            with_router_id(
+                base_route(Ipv4Addr::new(10, 0, 0, 2)),
+                Ipv4Addr::new(1, 1, 1, 1),
+            ),
+            vec![Ipv4Addr::new(10, 0, 0, 100), Ipv4Addr::new(10, 0, 0, 200)],
+        );
+        let b = with_cluster_list(
+            with_router_id(
+                base_route(Ipv4Addr::new(10, 0, 0, 1)),
+                Ipv4Addr::new(2, 2, 2, 2),
+            ),
+            vec![Ipv4Addr::new(10, 0, 0, 100)],
+        );
+        assert_eq!(
+            best_path_cmp_with_reason(&a, &b),
+            (Ordering::Less, BestPathReason::LowerBgpIdentifier)
+        );
+        assert_eq!(best_path_cmp(&b, &a), Ordering::Greater);
+    }
+
+    /// Locally originated routes have no advertising speaker: step (f) is
+    /// skipped for the pair and the `0.0.0.0` peer sentinel decides,
+    /// exactly as it did before the identifier step existed.
+    #[test]
+    fn local_route_skips_bgp_identifier_step() {
+        let mut local = base_route(Ipv4Addr::UNSPECIFIED);
+        local.origin_type = RouteOrigin::Local;
+        let mut learned = with_router_id(
+            base_route(Ipv4Addr::new(10, 0, 0, 1)),
+            Ipv4Addr::new(1, 1, 1, 1),
+        );
+        learned.origin_type = RouteOrigin::Ibgp;
+        assert_eq!(
+            effective_bgp_identifier(
+                local.origin_type,
+                local.originator_id(),
+                local.peer_router_id
+            ),
+            None
+        );
+        assert_eq!(
+            best_path_cmp_with_reason(&local, &learned),
+            (Ordering::Less, BestPathReason::LowerPeerAddress)
+        );
+        assert_eq!(
+            best_path_cmp_with_reason(&learned, &local),
+            (Ordering::Greater, BestPathReason::LowerPeerAddress)
+        );
     }
 
     #[test]
@@ -1126,9 +1309,17 @@ mod tests {
                 BestPathReason::LowerOriginatorId,
             ),
             (
+                "bgp_identifier",
+                with_router_id(base_route(p1), Ipv4Addr::new(2, 2, 2, 2)),
+                with_router_id(base_route(p2), Ipv4Addr::new(1, 1, 1, 1)),
+                BestPathReason::LowerBgpIdentifier,
+            ),
+            (
+                // Equal peer BGP Identifiers so step (f) ties and the
+                // peer address is the deciding step.
                 "peer",
-                base_route(p1),
-                base_route(p2),
+                with_router_id(base_route(p1), Ipv4Addr::new(9, 9, 9, 9)),
+                with_router_id(base_route(p2), Ipv4Addr::new(9, 9, 9, 9)),
                 BestPathReason::LowerPeerAddress,
             ),
             (
@@ -1464,6 +1655,30 @@ mod tests {
         assert_eq!(
             best_path_reason_detail(BestPathReason::LowerPathId, &path_9, &path_7),
             "path_id 9 > 7"
+        );
+    }
+
+    /// Step (f) detail renders the effective identifiers: the peer's BGP
+    /// Identifier, or `ORIGINATOR_ID` where RFC 4456 §9 substitutes it.
+    #[test]
+    fn reason_detail_renders_effective_bgp_identifiers() {
+        let p1 = Ipv4Addr::new(1, 0, 0, 1);
+        let p2 = Ipv4Addr::new(1, 0, 0, 2);
+        assert_eq!(
+            best_path_reason_detail(
+                BestPathReason::LowerBgpIdentifier,
+                &with_router_id(base_route(p1), Ipv4Addr::new(2, 2, 2, 2)),
+                &with_router_id(base_route(p2), Ipv4Addr::new(1, 1, 1, 1)),
+            ),
+            "bgp_identifier 2.2.2.2 > 1.1.1.1"
+        );
+        assert_eq!(
+            best_path_reason_detail(
+                BestPathReason::LowerBgpIdentifier,
+                &with_originator_id(base_route(p1), Ipv4Addr::new(3, 3, 3, 3)),
+                &with_router_id(base_route(p2), Ipv4Addr::new(1, 1, 1, 1)),
+            ),
+            "bgp_identifier 3.3.3.3 > 1.1.1.1"
         );
     }
 

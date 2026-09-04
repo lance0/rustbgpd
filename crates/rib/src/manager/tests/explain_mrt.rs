@@ -611,6 +611,12 @@ async fn explain_best_path_attributes_each_loss_and_the_winning_step() {
         .iter()
         .map(|(peer, asns, lp)| make_multipath_route(prefix, *peer, asns.clone(), *lp))
         .collect();
+    // Every candidate carries the same peer BGP Identifier, so RFC 4271
+    // §9.1.2.2 step (f) ties and the peer address separates the twins.
+    assert!(
+        all.iter()
+            .all(|r| r.peer_router_id == all[0].peer_router_id)
+    );
     for route in &all {
         tx.send(RibUpdate::RoutesReceived {
             session_id: 0,
@@ -671,6 +677,64 @@ async fn explain_best_path_attributes_each_loss_and_the_winning_step() {
     assert_eq!(lp.vs_best_reason, BestPathReason::HigherLocalPref);
     assert_eq!(lp.vs_best_detail, "local_pref 100 < 200");
     assert_eq!(lp.multipath, MultipathEligibility::None);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// RFC 4271 §9.1.2.2 step (f) through the manager: between two otherwise
+/// equal paths the lower advertising BGP Identifier wins even though the
+/// other peer has the lower address, and explain attributes the decision
+/// to `lower_bgp_identifier` on both the winner and the loser.
+#[tokio::test]
+async fn explain_best_path_lower_bgp_identifier_beats_peer_address() {
+    use crate::best_path::BestPathReason;
+
+    let (tx, rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let handle = tokio::spawn(RibManager::new(rx, dummy_query_rx(), None, None, metrics).run());
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
+    let low_id_peer = Ipv4Addr::new(1, 0, 0, 2);
+    let low_addr_peer = Ipv4Addr::new(1, 0, 0, 1);
+    let mut low_id = make_multipath_route(prefix, low_id_peer, vec![65001], 200);
+    low_id.peer_router_id = Ipv4Addr::new(1, 1, 1, 1);
+    let mut low_addr = make_multipath_route(prefix, low_addr_peer, vec![65001], 200);
+    low_addr.peer_router_id = Ipv4Addr::new(2, 2, 2, 2);
+    for route in [&low_id, &low_addr] {
+        tx.send(RibUpdate::RoutesReceived {
+            session_id: 0,
+            peer: route.peer,
+            announced: vec![route.clone()],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let explain = query_explain_best_path(&tx, Prefix::V4(prefix)).await;
+    let best = explain.best.as_ref().expect("best route");
+    assert_eq!(best.peer, IpAddr::V4(low_id_peer));
+    assert_eq!(
+        explain.best_reason,
+        Some(BestPathReason::LowerBgpIdentifier)
+    );
+    assert_eq!(
+        explain.best_reason_detail,
+        "bgp_identifier 1.1.1.1 < 2.2.2.2"
+    );
+    let loser = explain
+        .candidates
+        .iter()
+        .find(|c| c.route.peer == IpAddr::V4(low_addr_peer))
+        .expect("losing candidate");
+    assert_eq!(loser.vs_best_reason, BestPathReason::LowerBgpIdentifier);
+    assert_eq!(loser.vs_best_detail, "bgp_identifier 2.2.2.2 > 1.1.1.1");
 
     drop(tx);
     handle.await.unwrap();
