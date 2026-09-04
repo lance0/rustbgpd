@@ -137,7 +137,12 @@ asn-set NAME { ASN, ... }
   TOML frontend (and Cisco/Juniper prefix lists): the candidate is
   masked at the member's length and its length must fall in the
   derived range (`ge` only → `ge..=address_bits`; `le` only →
-  `member_len..=le`; neither → exact length).
+  `member_len..=le`; neither → exact length). Bounds must satisfy
+  `member_len <= ge <= le <= address_bits` (32 for IPv4, 128 for
+  IPv6); a member whose range could never match, such as
+  `10.0.0.0/24 le 16` or `10.0.0.0/24 ge 28 le 26`, is a compile
+  error. Dataset snapshot files use the same grammar and the same
+  rule.
 - Community sets may mix standard, large, and extended members.
   Membership (`in`) matches when **any route community of any kind
   matches any member** — the set is kind-partitioned internally, and

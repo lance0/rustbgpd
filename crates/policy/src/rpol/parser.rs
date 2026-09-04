@@ -15,7 +15,7 @@ use crate::engine::{CommunityMatch, parse_community_match};
 use crate::ir::ArithOp;
 
 use crate::datasets::{DatasetData, DatasetKind, MAX_DATASET_RECORDS};
-use crate::sets::{AsnSet, CommunitySet, PrefixSet, PrefixSetEntry};
+use crate::sets::{AsnSet, CommunitySet, PrefixSet, PrefixSetEntry, check_length_bounds};
 
 use super::ast::{
     ActionStmt, AsnSetDef, CmpOp, CommunityArg, CommunityKind, CommunityLit, CommunitySetDef,
@@ -464,16 +464,24 @@ impl Parser<'_> {
     /// definitions, `test` dataset overrides, and the dataset file
     /// format (LAN-305: one literal grammar everywhere).
     fn prefix_entry(&mut self) -> PResult<PrefixEntryAst> {
-        let (prefix, _) = self.expect_prefix()?;
+        let (prefix, mut span) = self.expect_prefix()?;
         let mut ge = None;
         let mut le = None;
         if self.eat(Tok::GeKw).is_some() {
             let (value, value_span) = self.expect_u32("a prefix length after `ge`")?;
             ge = Some(self.prefix_len_bound(prefix, value, value_span)?);
+            span = span.to(value_span);
         }
         if self.eat(Tok::LeKw).is_some() {
             let (value, value_span) = self.expect_u32("a prefix length after `le`")?;
             le = Some(self.prefix_len_bound(prefix, value, value_span)?);
+            span = span.to(value_span);
+        }
+        if let Err(reason) = check_length_bounds(prefix.prefix_len(), address_bits(prefix), ge, le)
+        {
+            self.diags
+                .push(Diagnostic::new(span, reason, "cannot match"));
+            return Err(Fail);
         }
         Ok(PrefixEntryAst { prefix, ge, le })
     }
@@ -549,10 +557,7 @@ impl Parser<'_> {
     }
 
     fn prefix_len_bound(&mut self, prefix: Prefix, value: u32, span: Span) -> PResult<u8> {
-        let max = match prefix {
-            Prefix::V4(_) => 32u32,
-            Prefix::V6(_) => 128,
-        };
+        let max = u32::from(address_bits(prefix));
         if value > max {
             self.diags.push(Diagnostic::new(
                 span,
@@ -1805,6 +1810,14 @@ impl Parser<'_> {
                 Err(Fail)
             }
         }
+    }
+}
+
+/// Address-family length ceiling for a prefix's `ge`/`le` bounds.
+fn address_bits(prefix: Prefix) -> u8 {
+    match prefix {
+        Prefix::V4(_) => 32,
+        Prefix::V6(_) => 128,
     }
 }
 

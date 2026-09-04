@@ -3000,7 +3000,10 @@ set_community_add = ["65001:100"]
 
 Without `ge`/`le`, only exact prefix-length matches count. With them, a route
 matches if its prefix falls within the given network *and* its mask length is
-within `[ge, le]`.
+within `[ge, le]`. The bounds must satisfy prefix length `<= ge <= le <=`
+address-family maximum (32 for IPv4, 128 for IPv6); an entry whose range could
+never match, such as `prefix = "10.0.0.0/24"` with `le = 16`, is rejected at
+load. `.rpol` prefix sets and dataset snapshot files apply the same rule.
 
 Example -- deny all specifics of 10.0.0.0/8 longer than /24:
 
@@ -4548,7 +4551,7 @@ starting:
 | `local_ipv6_nexthop` must be a valid non-link-local, non-loopback, non-multicast IPv6 address | `invalid local_ipv6_nexthop` |
 | `ttl_security_hops` must be 1--255 and requires effective `ttl_security = true`; a peer-group value requires `ttl_security = true` on that same group | `ttl_security_hops` / `requires ... ttl_security = true` |
 | `ge` must be >= prefix length and <= AFI max (32 for IPv4, 128 for IPv6) | `invalid ge` |
-| `le` must be <= AFI max | `invalid le` |
+| `le` must be >= prefix length and <= AFI max | `invalid le` |
 | `ge` must be <= `le` when both are set | `ge must be <= le` |
 | Config file must be valid TOML | `failed to parse TOML` |
 

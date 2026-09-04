@@ -177,6 +177,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Policy prefix entries now reject `ge`/`le` bounds whose derived length range
+  can never match: `le` below the prefix length, `ge` above `le`, or either
+  bound below the prefix length or above the address-family maximum. TOML
+  `[policy.definitions]` statements, `.rpol` prefix sets, `test` dataset
+  overrides, and dataset snapshot files share one validator and one wording.
+
 - Reject AS 0 in received and locally encoded AS paths and aggregators per RFC
   7607. Malformed ordinary paths are treated as withdraw, while affected AS4
   compatibility and aggregator attributes are discarded without entering
@@ -383,6 +389,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Upgrade notes
 
+- **Dead prefix-length ranges are now load errors:** a TOML policy prefix
+  entry or an `.rpol` prefix-set member whose `le` is below the prefix length
+  (`10.0.0.0/24 le 16`) or whose `ge` exceeds `le` (`10.0.0.0/24 ge 28 le 26`)
+  is rejected at load. Such entries previously loaded and matched nothing.
+  `.rpol` dataset snapshot files use the same grammar, so a snapshot holding
+  such a line is a startup error at initial load and, on SIGHUP reload, keeps
+  the prior generation with the existing refresh-failure WARN and counter.
+  Remove or correct the entry; the effective policy does not change.
 - Received `AS_PATH` attributes with more than 750 AS numbers and reachable
   NLRI are now treated as withdraw by default; without reachable NLRI, the
   session resets. Deployments that must relay arbitrarily long paths set

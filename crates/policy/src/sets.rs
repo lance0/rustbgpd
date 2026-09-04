@@ -63,6 +63,50 @@ fn matches_v6(entry: Ipv6Prefix, ge: Option<u8>, le: Option<u8>, candidate: Ipv6
     candidate.len >= min_len && candidate.len <= max_len
 }
 
+/// Reject a `(prefix_len, ge, le)` triple whose derived range (see
+/// [`prefix_entry_matches`]) can never contain a candidate length:
+/// every present bound must satisfy `prefix_len <= ge <= le <= max_bits`.
+/// Both policy frontends call this at load so a dead entry is a load
+/// error instead of a silent no-match. The `Err` carries the reason
+/// without location; callers add the prefix or source span.
+///
+/// # Errors
+///
+/// Returns the human-readable rule that the bounds violate.
+pub fn check_length_bounds(
+    prefix_len: u8,
+    max_bits: u8,
+    ge: Option<u8>,
+    le: Option<u8>,
+) -> Result<(), String> {
+    if let Some(ge) = ge {
+        if ge > max_bits {
+            return Err(format!("ge value {ge} exceeds {max_bits}"));
+        }
+        if ge < prefix_len {
+            return Err(format!(
+                "ge value {ge} is less than prefix length {prefix_len}"
+            ));
+        }
+    }
+    if let Some(le) = le {
+        if le > max_bits {
+            return Err(format!("le value {le} exceeds {max_bits}"));
+        }
+        if le < prefix_len {
+            return Err(format!(
+                "le value {le} is less than prefix length {prefix_len}"
+            ));
+        }
+    }
+    if let (Some(ge), Some(le)) = (ge, le)
+        && ge > le
+    {
+        return Err(format!("ge value {ge} exceeds le value {le}"));
+    }
+    Ok(())
+}
+
 #[inline]
 fn length_bounds(entry_len: u8, ge: Option<u8>, le: Option<u8>, max_bits: u8) -> (u8, u8) {
     match (ge, le) {
