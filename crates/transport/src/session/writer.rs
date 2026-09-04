@@ -434,7 +434,12 @@ impl WriterTask {
             }
         };
         result.map_err(|e| {
-            warn!(error_kind = ?e.kind(), "writer: write/flush failed");
+            warn!(
+                peer = %peer_label,
+                error = %e,
+                error_kind = ?e.kind(),
+                "writer: write/flush failed"
+            );
             WriterExit::Io(e)
         })
     }

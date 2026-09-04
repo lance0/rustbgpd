@@ -89,7 +89,9 @@ impl tracing::Subscriber for SessionLogCapture {
 }
 
 fn session_log_metadata(metadata: &tracing::Metadata<'_>) -> bool {
-    notification_log_metadata(metadata) || connect_failure_log_metadata(metadata)
+    notification_log_metadata(metadata)
+        || connect_failure_log_metadata(metadata)
+        || writer_failure_log_metadata(metadata)
 }
 
 fn notification_log_metadata(metadata: &tracing::Metadata<'_>) -> bool {
@@ -103,6 +105,10 @@ fn connect_failure_log_metadata(metadata: &tracing::Metadata<'_>) -> bool {
     ["peer", "error", "failure_source", "previously_established"]
         .into_iter()
         .all(|field| metadata.fields().field(field).is_some())
+}
+
+fn writer_failure_log_metadata(metadata: &tracing::Metadata<'_>) -> bool {
+    *metadata.level() == tracing::Level::WARN && metadata.fields().field("error_kind").is_some()
 }
 
 fn capture_session_logs(action: impl FnOnce()) -> Vec<SessionLogFields> {
@@ -1372,4 +1378,59 @@ async fn query_state_reports_pending_reconnect_wait() {
     session.test_install_stream(client);
     establish_test_session(&mut session, 65002).await;
     assert_eq!(queried_reconnect_in_secs(&mut session).await, 0);
+}
+
+/// A TCP write failure is logged with the peer and the OS error, like the
+/// connect-failure and OPEN-send warnings, so the operator can tell which
+/// session failed and why without correlating a bare `error_kind`.
+#[test]
+fn writer_failure_log_names_peer_and_error() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let events = capture_session_logs(|| {
+        runtime.block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let connect =
+                tokio::spawn(async move { tokio::net::TcpStream::connect(addr).await.unwrap() });
+            let (server, _) = listener.accept().await.unwrap();
+            // Close the peer end first: the peer's kernel answers the next
+            // write with a reset, and the write after that fails.
+            drop(connect.await.unwrap());
+            let (_read, write) = server.into_split();
+            let handle = super::writer::spawn(
+                write,
+                8,
+                BgpMetrics::with_registry(prometheus::Registry::new()),
+                "10.0.0.2".to_string(),
+                None,
+            );
+            let exit = tokio::time::timeout(Duration::from_secs(5), async {
+                while handle.priority_tx.send(Bytes::from_static(&[0])).is_ok() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                handle.join.await.unwrap()
+            })
+            .await
+            .expect("writer must exit once the peer resets the connection");
+            assert!(
+                matches!(exit, Err(super::writer::WriterExit::Io(_))),
+                "expected an I/O writer exit, got {exit:?}"
+            );
+        });
+    });
+    let event = events
+        .iter()
+        .find(|event| {
+            event.get("message").map(String::as_str) == Some("writer: write/flush failed")
+        })
+        .expect("writer failure warning was not logged");
+    assert_eq!(event.get("peer").map(String::as_str), Some("10.0.0.2"));
+    assert!(
+        event.get("error").is_some_and(|error| !error.is_empty()),
+        "writer failure warning must carry the OS error: {event:?}"
+    );
+    assert!(event.contains_key("error_kind"), "{event:?}");
 }

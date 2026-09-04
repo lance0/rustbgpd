@@ -417,6 +417,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   before closing the durable event outbox, so active streams cannot outlive
   their dependencies, and a panic in that task during shutdown is reported
   as a component failure and exits 1.
+- The `writer: write/flush failed` warning now carries the `peer` and `error`
+  fields alongside `error_kind`, matching the other session transport
+  warnings; the message text is unchanged.
 
 ### Documentation
 
