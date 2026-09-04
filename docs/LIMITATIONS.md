@@ -86,7 +86,10 @@ Known EVPN gaps:
 - True RFC VLAN-aware bundle VTEP origination and dataplane for non-zero
   Ethernet Tag remains future work; RR receive/reflect is implemented.
 - VXLAN local-bias split-horizon for all-active shared segments remains an
-  ASIC/offload-dependent limitation of the Linux softswitch path.
+  ASIC/offload-dependent limitation of the Linux softswitch path. RFC 9746
+  §2.2 makes local bias the only split-horizon mechanism for VXLAN (the ESI
+  Label Split Horizon Type MUST be 00 for tunnel type 8), so there is no
+  ESI-label alternative to implement for this lane.
 - Route types 6-11, PBB-EVPN, multicast EVPN, MPLS/SRv6 encapsulation,
   VPWS, and E-Tree are demand-shaped rather than part of the current
   VXLAN/Linux lane.

@@ -1596,8 +1596,11 @@ carries inactive (absent), unlimited (zero), or finite.
   `crates/evpn/src/df_election.rs` ships the pure
   `(state, event) → roles` state machine — RFC 7432 §8.5 service
   carving (sort candidates by originator IP ascending; `vni mod n`
-  picks the slot) plus RFC 8584 §3 algorithm negotiation (lowest
-  algorithm-id wins; `DefaultModulo` is the universal floor). New
+  picks the slot) plus RFC 8584 §2.2 algorithm negotiation (a
+  non-default algorithm runs only when every Type 4 route in the
+  segment advertises it; if even a single Type 4 advertisement is
+  received without the locally configured DF Alg, the RFC 7432 default
+  `DefaultModulo` MUST be used — the algorithm id is not a tiebreak). New
   `crates/evpn/src/origination_es.rs` ships three deterministic
   Type 1/4 originators: `LocalEsOriginator` (Type 4 ES),
   `LocalEadPerEsOriginator` (Type 1 EAD-per-ES with MAX_ET
@@ -1667,11 +1670,12 @@ carries inactive (absent), unlimited (zero), or finite.
 ## RFC 9012 / RFC 8365 — BGP Encapsulation Ext Community + VXLAN-EVPN
 
 - The BGP Encapsulation extended community (Type 0x03, Subtype 0x0C)
-  uses the widely-deployed **RFC 5512 layout** (4 bytes reserved +
-  2-byte Tunnel Type). RFC 9012 §4.1 specifies a different layout
-  (1-byte Tunnel Type + 5-byte Flags) but FRR, BIRD, Juniper, and
-  Cisco all emit the RFC 5512 form, so interop compatibility wins.
-- Tunnel Type values: 7 = NVGRE, 8 = VXLAN, 11 = MPLS-over-GRE.
+  carries 4 reserved bytes followed by a 2-byte Tunnel Type. RFC 9012
+  §4.1 (Figure 14) keeps the RFC 5512 layout unchanged — Reserved
+  (2 octets), Reserved (2 octets), Tunnel Type (2 octets) — so the
+  emitted form is the current standard, not a compatibility deviation.
+- Tunnel Type values (IANA BGP Tunnel Encapsulation Attribute Tunnel
+  Types): 8 = VXLAN, 9 = NVGRE, 11 = MPLS in GRE.
   `as_bgp_encapsulation()` returns the u16 tunnel type.
 - rustbgpd does not yet **negotiate** a preferred encap. VXLAN is
   assumed; non-VXLAN values are passed through untouched.
@@ -1718,6 +1722,22 @@ carries inactive (absent), unlimited (zero), or finite.
   tails, Linux softswitch local-bias limits, true shared-VNI / non-zero
   Ethernet Tag service, managed netdev ergonomics, and service-provider
   route families.
+
+---
+
+## Later EVPN standards against the VXLAN/Linux lane
+
+EVPN RFCs published after the lane's base set that bear on the VXLAN/Linux
+VTEP lane. Each row records the implementation status and why the standard
+matters to this lane.
+
+| RFC | Status | Relevance |
+|-----|--------|-----------|
+| RFC 9746 (Mar 2025; updates RFC 7432, RFC 8365) | Not implemented | Split Horizon Type (SHT) bits in the ESI Label extended community. §2.2: an egress NVE MUST NOT use an SHT other than 00 with VXLAN (tunnel type 8), so local bias is the only multi-homing split-horizon mechanism for VXLAN. This is the normative backing for the Linux softswitch local-bias limitation in [docs/LIMITATIONS.md](LIMITATIONS.md); the ESI Label decoder reads only the single-active flag. |
+| RFC 9785 (Jun 2025; updates RFC 8584) | Partial | Highest-/Lowest-Preference DF election is implemented (`df_algorithm`), under the same unanimous-or-default negotiation restated in §4.1. The Don't-Preempt (DP) bit is originated (`df_dont_preempt`) and parsed but is not an election input, so stateful non-revertive election is not implemented. |
+| RFC 9722 (May 2025; updates RFC 8584) | Not implemented | Fast DF recovery: a Service Carving Time extended community on the Type 4 route synchronizes the DF election timer across the segment's PEs so they carve at the same instant. rustbgpd runs each election on its own timer. |
+| RFC 9721 (Apr 2025; extends the RFC 7432 and RFC 9135 IRB procedures) | Not implemented | Extended IRB mobility: MAC/IP routes inherit the MAC route's sequence number, with duplicate detection extended to IP-to-different-MAC moves. rustbgpd keeps the RFC 7432 §15.1 per-route sequence rules, and the MAC-only local-move cascade decision is deferred in `crates/evpn/src/origination_macip.rs`. |
+| RFC 9786 (Jun 2025) | Not implemented | Port-active multi-homing redundancy mode (per-port active/standby). Demand-shaped alongside the other redundancy modes outside all-active and single-active. |
 
 ---
 

@@ -50,7 +50,7 @@ rustbgpd-vs-GoBGP comparison, which records the primary-source verification.
 | VPNv4 (RFC 4364) | Partial[^mpls-rr] | Yes | Yes | Yes | Yes |
 | VPNv6 | Partial[^mpls-rr] | Yes | Yes | Yes | Yes |
 | RT-Constrain (RFC 4684) | Partial[^mpls-rr] | Yes | Yes | Yes | No |
-| L2VPN EVPN (RFC 7432) | Partial[^evpn] | Yes | Yes | Yes | No |
+| L2VPN EVPN (RFC 7432) | Partial[^evpn] | Yes | Partial[^evpn-bird] | Yes | RIB only[^evpn-openbgpd] |
 | L2VPN VPLS | No | No | No | Yes | No |
 | IPv4 FlowSpec (RFC 8955) | Yes | Yes | Yes | Yes | Yes |
 | IPv6 FlowSpec | Yes | Yes | Yes | Yes | Yes |
@@ -94,6 +94,17 @@ IPv4/IPv6 `Prefix` routes.
     encapsulation, and VPWS/E-Tree remain demand-shaped service-provider
     breadth, not part of the current VXLAN/Linux alpha lane. See
     [evpn-enablement.md](evpn-enablement.md) for the full gate ladder.
+[^evpn-bird]: BIRD [3.3.2](https://bird.nic.cz/doc/bird-3.3.2.html) describes
+    its EVPN protocol as "a preliminary release limited to basic handling of
+    MAC and IMET EVPN routes"; the same manual lists EAD and ES routes as
+    "Currently not used by BIRD" and documents no IP Prefix (Type 5) route.
+    This claim is limited to that release.
+[^evpn-openbgpd]: OpenBGPD
+    [8.8](https://marc.info/?l=openbsd-announce&m=173887198302373) announced
+    "Preliminary support for EVPN in the RIB", and the
+    [OpenBSD-current `bgpd.conf(5)`](https://man.openbsd.org/bgpd.conf)
+    documents `announce EVPN [enforce]` per neighbor. The pinned 9.2 release
+    postdates 8.8; the announcement scopes the support to the RIB.
 
 ## Core Protocol
 
