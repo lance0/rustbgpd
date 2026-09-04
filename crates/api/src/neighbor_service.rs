@@ -24,7 +24,7 @@ use crate::runtime_config_settlement::{
 };
 use crate::server::{
     AccessMode, ConfigMutationGateFn, RuntimeConfigCoordinator, check_config_mutation_gate,
-    fully_compensated_status, peer_manager_request, read_only_rejection,
+    fully_compensated_status, peer_manager_request, read_only_rejection, reserve_config_event_slot,
     stage_runtime_config_event_typed,
 };
 use rustbgpd_rib::{
@@ -33,7 +33,6 @@ use rustbgpd_rib::{
     UpdateGroupPeerComparison,
 };
 
-const CONFIG_PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
 const OWNED_NEIGHBOR_ACTOR_TIMEOUT: Duration = Duration::from_mins(10);
 /// Bound both channel admission and the reply from the single-threaded RIB
 /// actor.  This matches the existing internal RIB-query timeout precedent and
@@ -370,23 +369,6 @@ where
             }
         }
     }
-}
-
-async fn reserve_config_event_slot(
-    config_tx: Option<mpsc::Sender<ConfigEvent>>,
-) -> Result<Option<mpsc::OwnedPermit<ConfigEvent>>, Status> {
-    let Some(tx) = config_tx else {
-        return Ok(None);
-    };
-
-    let permit = tokio::time::timeout(CONFIG_PERSIST_RESERVE_TIMEOUT, tx.reserve_owned())
-        .await
-        .map_err(|_| {
-            Status::unavailable("config persistence queue busy — refusing mutation to avoid drift")
-        })?
-        .map_err(|_| Status::unavailable("config persistence unavailable"))?;
-
-    Ok(Some(permit))
 }
 
 async fn query_neighbor_rib_snapshots(
@@ -1671,6 +1653,55 @@ mod tests {
             selection_deferral: Vec::new(),
             outbound_prefix_limits: Vec::new(),
         }
+    }
+
+    fn persisting_service(
+        config_tx: mpsc::Sender<ConfigEvent>,
+    ) -> (NeighborService, mpsc::Receiver<PeerManagerCommand>) {
+        let (peer_tx, peer_rx) = mpsc::channel(1);
+        let (rib_tx, _rib_rx) = mpsc::channel(1);
+        (
+            NeighborService::new(
+                65001,
+                AccessMode::ReadWrite,
+                peer_tx,
+                rib_tx,
+                Some(config_tx),
+            ),
+            peer_rx,
+        )
+    }
+
+    async fn delete_dynamic_neighbor_error(svc: &NeighborService) -> Status {
+        svc.delete_dynamic_neighbor(Request::new(proto::DeleteDynamicNeighborRequest {
+            prefix: "192.0.2.0/24".into(),
+        }))
+        .await
+        .unwrap_err()
+    }
+
+    /// Load-bearing: a closed or back-pressured persistence queue must reject
+    /// the mutation as `UNAVAILABLE` before anything reaches the peer manager.
+    #[tokio::test(start_paused = true)]
+    async fn config_persistence_admission_failures_are_unavailable() {
+        let (config_tx, config_rx) = mpsc::channel(1);
+        drop(config_rx);
+        let (svc, mut peer_rx) = persisting_service(config_tx);
+        let error = delete_dynamic_neighbor_error(&svc).await;
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert_eq!(error.message(), "config persistence unavailable");
+        assert!(matches!(peer_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        let (config_tx, _config_rx) = mpsc::channel(1);
+        let _permit = config_tx.clone().reserve_owned().await.unwrap();
+        let (svc, mut peer_rx) = persisting_service(config_tx);
+        let error = delete_dynamic_neighbor_error(&svc).await;
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert_eq!(
+            error.message(),
+            "config persistence queue busy — refusing mutation to avoid drift"
+        );
+        assert!(matches!(peer_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 
     /// Load-bearing: mapping read-command admission loss to `INTERNAL` makes

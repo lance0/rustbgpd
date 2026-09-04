@@ -1334,6 +1334,25 @@ pub(crate) fn read_only_rejection(access_mode: AccessMode) -> Option<Status> {
     }
 }
 
+pub(crate) const CONFIG_PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
+
+pub(crate) async fn reserve_config_event_slot(
+    config_tx: Option<mpsc::Sender<ConfigEvent>>,
+) -> Result<Option<mpsc::OwnedPermit<ConfigEvent>>, Status> {
+    let Some(tx) = config_tx else {
+        return Ok(None);
+    };
+
+    let permit = tokio::time::timeout(CONFIG_PERSIST_RESERVE_TIMEOUT, tx.reserve_owned())
+        .await
+        .map_err(|_| {
+            Status::unavailable("config persistence queue busy — refusing mutation to avoid drift")
+        })?
+        .map_err(|_| Status::unavailable("config persistence unavailable"))?;
+
+    Ok(Some(permit))
+}
+
 impl Interceptor for AuthInterceptor {
     fn call(&mut self, request: Request<()>) -> Result<Request<()>, Status> {
         if let Some(store) = &self.credential_store {
