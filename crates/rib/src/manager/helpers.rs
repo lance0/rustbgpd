@@ -46,6 +46,9 @@ pub(super) fn gauge_val(n: usize) -> i64 {
 /// Used to avoid re-announcing unchanged routes to multi-path peers.
 pub(super) fn routes_equal(a: &crate::route::Route, b: &crate::route::Route) -> bool {
     a.next_hop == b.next_hop
+        // A change confined to the IPv6 link-local half of the next-hop
+        // (RFC 2545 §3 two-address form) must still re-advertise.
+        && a.link_local_next_hop == b.link_local_next_hop
         && a.peer == b.peer
         && (Arc::ptr_eq(&a.attributes, &b.attributes) || a.attributes == b.attributes)
 }

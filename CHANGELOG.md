@@ -259,6 +259,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- An UPDATE that changes only the link-local companion of an IPv6 next hop
+  (RFC 2545 two-address form) is now re-advertised to downstream peers instead
+  of being suppressed as an unchanged Adj-RIB-Out entry.
+
 - **Operator-visible:** `rs-config-render` now states `rs_control_communities`
   on every rendered member session instead of inheriting the daemon default:
   off when the site configures no control community, on only when the site
