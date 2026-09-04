@@ -1563,9 +1563,16 @@ mod tests {
             1,
             0xAB,
         ];
-        // The attribute value starts 3 octets after the attribute header.
-        let value_offset = data.len() + 12 + 4 + 1 + 3 + 2 + 2 + 4 + 2 + 3;
+        let record_start = data.len();
         append_v4_rib_with_attributes(&mut data, &attr);
+        // Locate the attribute in the appended record; its value follows the
+        // flags, type, and one-octet length header.
+        let attr_start = record_start
+            + data[record_start..]
+                .windows(attr.len())
+                .position(|window| window == attr)
+                .expect("attribute bytes are in the appended record");
+        let value_offset = attr_start + attr.len() - usize::from(attr[2]);
         let mut reader = SnapshotReader::new(&data).unwrap();
         let (entries, err) = drain(&mut reader);
         assert!(entries.is_empty());
