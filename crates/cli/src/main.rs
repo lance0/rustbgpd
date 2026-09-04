@@ -2435,6 +2435,63 @@ fn validate_local_command(command: &Command) -> Result<(), CliError> {
             "set-export requires at least one policy name; use clear-export to drop the chain"
                 .into(),
         )),
+        // Every `--family` the connected handlers resolve through
+        // `parse_family`, in resolution order, so a typo fails before the
+        // transport is dialed. Views that forward the family string to the
+        // daemon (bgpls, vpn, labeled) are deliberately not listed.
+        Command::Watch {
+            family: Some(family),
+            ..
+        }
+        | Command::Events {
+            action: None,
+            family: Some(family),
+            ..
+        }
+        | Command::Events {
+            action:
+                Some(EventsAction::Watch {
+                    family: Some(family),
+                    ..
+                }),
+            ..
+        }
+        | Command::Flowspec {
+            family: Some(family),
+            ..
+        }
+        | Command::Rib {
+            action:
+                None
+                | Some(
+                    RibAction::Received { family: None, .. }
+                    | RibAction::Advertised { family: None, .. },
+                ),
+            family: Some(family),
+            ..
+        }
+        | Command::Rib {
+            action:
+                Some(
+                    RibAction::Received {
+                        family: Some(family),
+                        ..
+                    }
+                    | RibAction::Advertised {
+                        family: Some(family),
+                        ..
+                    },
+                ),
+            ..
+        } if parse_family(family).is_none() => Err(CliError::Argument(format!(
+            "unknown address family: {family}"
+        ))),
+        Command::Flowspec {
+            action: Some(FlowspecAction::Add { family, .. } | FlowspecAction::Delete { family, .. }),
+            ..
+        } if parse_family(family).is_none() => Err(CliError::Argument(format!(
+            "unknown address family: {family}"
+        ))),
         _ => Ok(()),
     }
 }
@@ -6990,6 +7047,16 @@ printf '%s\n' "${COMPREPLY[@]}"
             "rbgp top --interval 60",
             "rbgp policy chain set-import import-policy",
             "rbgp policy chain set-export export-policy fallback-policy",
+            "rbgp watch --family ipv6",
+            "rbgp flowspec --family ipv4_flowspec",
+            "rbgp flowspec add --family ipv6-flowspec",
+            "rbgp rib --family ipv4_unicast",
+            "rbgp rib --family ipv4-unicast advertised 192.0.2.1",
+            "rbgp rib received 192.0.2.1 --family ipv6_unicast",
+            "rbgp rib --family bgpls bgpls",
+            "rbgp rib --family vpnv4 vpn",
+            "rbgp events --family ipv4",
+            "rbgp events watch --family ipv6",
         ] {
             let cli = Cli::try_parse_from(args.split_whitespace()).unwrap();
             validate_local_command(&cli.command)
@@ -7015,6 +7082,28 @@ printf '%s\n' "${COMPREPLY[@]}"
             (
                 "policy chain set-export",
                 "set-export requires at least one policy name; use clear-export to drop the chain",
+            ),
+            ("watch --family bogus", "unknown address family: bogus"),
+            (
+                "flowspec add --family bogus",
+                "unknown address family: bogus",
+            ),
+            (
+                "flowspec --family ipv4_flowspec delete --family bogus",
+                "unknown address family: bogus",
+            ),
+            (
+                "rib --family bogus advertised 192.0.2.1",
+                "unknown address family: bogus",
+            ),
+            (
+                "rib received 192.0.2.1 --family bogus",
+                "unknown address family: bogus",
+            ),
+            ("events --family bogus", "unknown address family: bogus"),
+            (
+                "events watch --family bogus",
+                "unknown address family: bogus",
             ),
         ] {
             let command = format!("rbgp --addr http://127.0.0.1:1 {args}");

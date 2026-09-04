@@ -418,6 +418,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   their dependencies, and a panic in that task during shutdown is reported
   as a component failure and exits 1.
 
+- `rbgp` now rejects an unknown `--family` value before dialing the daemon,
+  so a typo reports `unknown address family: ...` instead of a connection
+  error when the daemon is unreachable. The message and exit code are
+  unchanged.
+
 ### Documentation
 
 - Publish a descriptive raw bridge event-skew receipt across six pinned Jammy
