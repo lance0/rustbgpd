@@ -104,6 +104,13 @@ class PrimerContractTests(unittest.TestCase):
             shutil.copy2(ROOT / "tests" / "interop" / name, interop / name)
 
     def mutate(self, relative, old, new="", occurrence=0, expect=None):
+        errors = self.mutated_errors(relative, old, new, occurrence)
+        self.assertTrue(errors, f"mutation stayed green: {relative}: {old}")
+        if expect is not None:
+            self.assertIn(expect, errors)
+        return errors
+
+    def mutated_errors(self, relative, old, new="", occurrence=0):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             for fixture in (
@@ -148,10 +155,7 @@ class PrimerContractTests(unittest.TestCase):
                 )
                 start = index + len(old)
             path.write_text(text[:index] + new + text[index + len(old) :])
-            errors = check(root)
-            self.assertTrue(errors, f"mutation stayed green: {relative}: {old}")
-            if expect is not None:
-                self.assertIn(expect, errors)
+            return check(root)
 
     def stage_indexed_fixture(self, root):
         for fixture in (
@@ -322,11 +326,40 @@ class PrimerContractTests(unittest.TestCase):
                 expect="kernel-dataplane.yml:m36: setup call drifted",
             )
         with self.subTest(seam="kernel lab loses its scenario call"):
-            self.mutate(
+            errors = self.mutate(
                 kernel,
                 "        uses: ./.github/actions/run-interop-test\n",
                 "        uses: ./.github/actions/install-containerlab\n",
                 expect="kernel-dataplane.yml:m36: has no run-interop-test call",
+            )
+            self.assertEqual(
+                ["kernel-dataplane.yml:m36: has no run-interop-test call"],
+                [error for error in errors if error.startswith("kernel-dataplane.yml:m36:")],
+            )
+        with self.subTest(seam="incomplete call reports one cause"):
+            errors = self.mutate(
+                interop,
+                m1_call,
+                m1_call.replace("          label: M1\n", ""),
+                expect="interop.yml:m1: run-interop-test call missing label",
+            )
+            self.assertEqual(
+                ["interop.yml:m1: run-interop-test call missing label"],
+                [error for error in errors if error.startswith("interop.yml:m1:")],
+            )
+        with self.subTest(seam="descriptive label satisfies the roster"):
+            self.assertEqual(
+                [],
+                self.mutated_errors(
+                    kernel, "          label: M36\n", "          label: M36 crash-restart\n"
+                ),
+            )
+        with self.subTest(seam="variant label is the job identifier"):
+            self.mutate(
+                kernel,
+                "          label: M37+IP\n",
+                "          label: M37\n",
+                expect="kernel-dataplane.yml:m37-ip: no run-interop-test call labelled M37-IP",
             )
 
     def test_v064_producer_is_load_bearing(self):

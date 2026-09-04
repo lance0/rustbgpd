@@ -335,15 +335,18 @@ def _check_lab_calls(name: str, job_name: str, job: str, errors: list[str]) -> N
     calls = LAB_CALL.findall(job)
     if not calls:
         errors.append(f"{prefix}: has no run-interop-test call")
+        return
     labels: set[str] = set()
     for call in calls:
         inputs = dict(LAB_CALL_INPUT.findall(call))
         missing = [key for key in ("label", "topology", "script") if key not in inputs]
         if missing:
             errors.append(f"{prefix}: run-interop-test call missing {', '.join(missing)}")
-            continue
+            return
         label = inputs["label"]
-        labels.add(label.replace("+", "-").upper())
+        # A space starts a descriptive suffix (``M43 crash-restart``); ``+`` and ``-``
+        # join scenario variants (``M37+IP`` is the m37-ip job's own identifier).
+        labels.add(label.split(" ", 1)[0].replace("+", "-").upper())
         token = _lab_token(label)
         if not inputs["topology"].startswith(f"tests/interop/{token}-"):
             errors.append(f"{prefix}: {label} topology drifted: {inputs['topology']}")
