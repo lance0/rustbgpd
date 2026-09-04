@@ -427,7 +427,8 @@ jobs:
             bench/tests/test-rrtransport-receipt.sh \
             bench/tests/test-scale-provenance.sh \
             bench/tests/test-route-server-1000-receipt.sh \
-            bench/tests/test-scale-host-quiet.sh
+            bench/tests/test-scale-host-quiet.sh \
+            bench/scale/compare-rrharness.sh
           shellcheck bench/tests/test-vpn-query-receipt.sh
           shellcheck bench/tests/test-vpn-query-campaign.sh \
             bench/run-vpn-query-campaign.sh
