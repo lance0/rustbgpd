@@ -431,6 +431,47 @@ fn owned_transaction_phase_boundaries_are_closed() {
     );
 }
 
+/// Returns the function introduced by `signature`, from the signature through
+/// the brace that closes its body.
+///
+/// Braces inside string literals are counted too, so the target must keep them
+/// balanced (format placeholders such as `{name}` do).
+fn fn_body<'a>(source: &'a str, signature: &str) -> &'a str {
+    let start = source
+        .find(signature)
+        .unwrap_or_else(|| panic!("missing {signature}"));
+    let rest = &source[start..];
+    let open = rest
+        .find('{')
+        .unwrap_or_else(|| panic!("no body for {signature}"));
+    let mut depth = 0usize;
+    for (offset, ch) in rest[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &rest[..=open + offset];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unterminated body for {signature}")
+}
+
+#[test]
+fn fn_body_stops_at_the_matching_brace() {
+    let source =
+        "fn first() {\n    if a { b() }\n    let _ = \"{x}\";\n}\n\nfn second() {\n    c()\n}\n";
+    let body = fn_body(source, "fn first()");
+    assert!(body.starts_with("fn first() {"));
+    assert!(body.ends_with("let _ = \"{x}\";\n}"));
+    assert!(body.contains("b()"));
+    assert!(!body.contains("fn second"));
+    assert!(!body.contains("c()"));
+}
+
 #[test]
 #[expect(
     clippy::too_many_lines,
@@ -614,13 +655,7 @@ fn runtime_config_coordinator_inventory_is_complete_and_closed() {
         .find("let outcome = body(operation.clone()).await;")
         .unwrap();
     assert!(acquired < registered && registered < body);
-    let owned_body = neighbor
-        .split_once("async fn owned_neighbor_mutation_body")
-        .unwrap()
-        .1
-        .split_once("async fn reserve_config_event_slot")
-        .unwrap()
-        .0;
+    let owned_body = fn_body(neighbor, "async fn owned_neighbor_mutation_body");
     assert!(!owned_body.contains(".code()"));
     assert!(!owned_body.contains(".message()"));
     assert!(!owned_body.contains("to_string().contains"));
