@@ -2499,8 +2499,12 @@ async fn routes_noexport(
     }
 
     // Loc-RIB best — the export candidate set (single-best send mode;
-    // only best routes are export candidates).
-    let mut best: Vec<proto::Route> = Vec::new();
+    // only best routes are export candidates) — diffed page by page so
+    // the request retains only the suppressed candidates (capped at
+    // `max_routes`, like every other route view), never the whole
+    // Loc-RIB with its attribute payloads.
+    let mut excluded = advertised;
+    let mut candidates: Vec<proto::Route> = Vec::new();
     let mut page_token = String::new();
     loop {
         let resp = rib
@@ -2513,7 +2517,12 @@ async fn routes_noexport(
             .await
             .map_err(|e| bad_gateway("ListBestRoutes", &e))?
             .into_inner();
-        best.extend(resp.routes);
+        retain_noexport_page(
+            &mut candidates,
+            &mut excluded,
+            resp.routes,
+            state.max_routes,
+        )?;
         if resp.next_page_token.is_empty() {
             break;
         }
@@ -2525,10 +2534,8 @@ async fn routes_noexport(
     // from the real decision. O(suppressed prefixes) RPCs; pair with
     // Alice-LG's `[noexport] load_on_demand` (its own default) so this
     // is only computed when an operator opens the view.
-    let candidates = noexport_candidates(&best, &advertised);
-    enforce_max(candidates.len() as u64, state.max_routes)?;
     let mut routes: Vec<Value> = Vec::new();
-    for route in candidates {
+    for route in &candidates {
         let explain = match rib
             .explain_advertised_route(proto::ExplainAdvertisedRouteRequest {
                 peer_address: peer_addr.to_string(),
@@ -2565,18 +2572,27 @@ async fn routes_noexport(
     })))
 }
 
-/// Loc-RIB best routes whose prefix is absent from the peer's advertised
-/// set — the not-exported candidates, deduped per prefix (multipath /
-/// Add-Path can put several best paths on one prefix).
-fn noexport_candidates<'a>(
-    best: &'a [proto::Route],
-    advertised: &HashSet<(String, u32)>,
-) -> Vec<&'a proto::Route> {
-    let mut seen: HashSet<(&str, u32)> = HashSet::new();
-    best.iter()
-        .filter(|r| !advertised.contains(&(r.prefix.clone(), r.prefix_length)))
-        .filter(|r| seen.insert((r.prefix.as_str(), r.prefix_length)))
-        .collect()
+/// Retain the not-exported candidates of one Loc-RIB best page: routes
+/// whose prefix is absent from `excluded`, which starts as the peer's
+/// advertised prefix set and grows with every retained prefix so the
+/// candidates stay deduped per prefix (multipath / Add-Path can put
+/// several best paths on one prefix). The generic cap applies to the
+/// retained rows before they are kept, so an oversized view fails on the
+/// page that crosses the cap instead of after the whole Loc-RIB is paged.
+fn retain_noexport_page(
+    candidates: &mut Vec<proto::Route>,
+    excluded: &mut HashSet<(String, u32)>,
+    page: Vec<proto::Route>,
+    max_routes: u64,
+) -> Result<(), HttpError> {
+    let retained = page
+        .into_iter()
+        .filter(|route| excluded.insert((route.prefix.clone(), route.prefix_length)))
+        .collect::<Vec<_>>();
+    let accumulated = (candidates.len() as u64).saturating_add(retained.len() as u64);
+    enforce_max(accumulated, max_routes)?;
+    candidates.extend(retained);
+    Ok(())
 }
 
 /// Synthesized noexport-reason large community, `64496:65521:<gate id>`.
@@ -4027,7 +4043,9 @@ mod tests {
         ];
         let advertised: HashSet<(String, u32)> = [("10.2.0.0".to_string(), 24)].into();
 
-        let candidates = noexport_candidates(&best, &advertised);
+        let mut candidates = Vec::new();
+        let mut excluded = advertised.clone();
+        retain_noexport_page(&mut candidates, &mut excluded, best, u64::MAX).unwrap();
         let networks: Vec<(&str, u32)> = candidates
             .iter()
             .map(|r| (r.prefix.as_str(), r.prefix_length))
@@ -4038,10 +4056,106 @@ mod tests {
             "suppressed once, exported absent"
         );
 
+        let mut candidates = Vec::new();
+        let mut excluded = advertised;
+        retain_noexport_page(&mut candidates, &mut excluded, Vec::new(), u64::MAX).unwrap();
         assert!(
-            noexport_candidates(&[], &advertised).is_empty(),
+            candidates.is_empty(),
             "empty Loc-RIB yields an empty noexport view"
         );
+    }
+
+    /// The whole-Loc-RIB diff the handler used to compute after paging
+    /// everything in: the oracle the page-wise diff must reproduce.
+    fn noexport_candidates_oracle<'a>(
+        best: &'a [proto::Route],
+        advertised: &HashSet<(String, u32)>,
+    ) -> Vec<&'a proto::Route> {
+        let mut seen: HashSet<(&str, u32)> = HashSet::new();
+        best.iter()
+            .filter(|r| !advertised.contains(&(r.prefix.clone(), r.prefix_length)))
+            .filter(|r| seen.insert((r.prefix.as_str(), r.prefix_length)))
+            .collect()
+    }
+
+    /// Paging the Loc-RIB through the per-page diff yields exactly the
+    /// rows the whole-Loc-RIB diff produced, in the same order, across
+    /// page boundaries that split a prefix's Add-Path duplicates and
+    /// interleave exported prefixes.
+    #[test]
+    fn noexport_page_diff_matches_whole_loc_rib_diff() {
+        let mk = |prefix: &str, path_id: u32| proto::Route {
+            prefix: prefix.to_string(),
+            prefix_length: 24,
+            path_id,
+            ..Default::default()
+        };
+        let pages = vec![
+            vec![mk("10.1.0.0", 0), mk("10.2.0.0", 0), mk("10.1.0.0", 1)],
+            vec![mk("10.3.0.0", 0), mk("10.1.0.0", 2), mk("10.2.0.0", 1)],
+            vec![mk("10.4.0.0", 0), mk("10.3.0.0", 1)],
+        ];
+        let advertised: HashSet<(String, u32)> =
+            [("10.2.0.0".to_string(), 24), ("10.4.0.0".to_string(), 24)].into();
+
+        let best = pages.concat();
+        let expected = noexport_candidates_oracle(&best, &advertised)
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let mut candidates = Vec::new();
+        let mut excluded = advertised;
+        for page in pages {
+            retain_noexport_page(&mut candidates, &mut excluded, page, 2).unwrap();
+        }
+        assert_eq!(candidates, expected);
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|r| (r.prefix.as_str(), r.path_id))
+                .collect::<Vec<_>>(),
+            vec![("10.1.0.0", 0), ("10.3.0.0", 0)]
+        );
+    }
+
+    /// The cap trips on the page that crosses it: with `max_routes = 2`,
+    /// two suppressed routes on page one are retained and the third on
+    /// page two is refused with the generic cap error before it is kept,
+    /// so the retained candidates never exceed the cap.
+    #[test]
+    fn noexport_page_diff_enforces_cap_before_retaining_the_page() {
+        let mk = |prefix: &str| proto::Route {
+            prefix: prefix.to_string(),
+            prefix_length: 24,
+            ..Default::default()
+        };
+        let advertised: HashSet<(String, u32)> = [("10.9.0.0".to_string(), 24)].into();
+        let mut candidates = Vec::new();
+        let mut excluded = advertised;
+
+        retain_noexport_page(
+            &mut candidates,
+            &mut excluded,
+            vec![mk("10.1.0.0"), mk("10.9.0.0"), mk("10.2.0.0")],
+            2,
+        )
+        .unwrap();
+        assert_eq!(candidates.len(), 2);
+
+        let error = retain_noexport_page(
+            &mut candidates,
+            &mut excluded,
+            vec![mk("10.9.0.0"), mk("10.3.0.0")],
+            2,
+        )
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            error.1.0["message"],
+            "Number of routes exceeds maximum allowed (3/2)"
+        );
+        assert_eq!(candidates.len(), 2, "the refused page is not retained");
     }
 
     /// Every export-ladder gate maps to its pinned triplet, and an

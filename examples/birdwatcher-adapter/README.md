@@ -430,7 +430,10 @@ the real decision. Precisely what the view contains:
   it never fabricates a "not exported" claim.
 
 **Cost:** each request pages the complete Loc-RIB and peer Adj-RIB-Out, then
-makes one `ExplainAdvertisedRoute` call per suppressed prefix. Each paged
+makes one `ExplainAdvertisedRoute` call per suppressed prefix. Retained memory
+is proportional to the advertised prefix-key set plus at most `--max-routes`
+candidate rows: each Loc-RIB page is diffed as it arrives, only suppressed
+candidates are kept, and the cap is applied per page. Each paged
 snapshot is version-fenced independently: concurrent churn within either walk
 can fail the request rather than mix generations in that snapshot, so clients
 should retry the request when it returns a 502. The two snapshots are not fenced

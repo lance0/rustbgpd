@@ -274,6 +274,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `generic` with the two 32-bit halves in hex for every other type. The
   pinned IXP compatibility live fixture carries the empty array; filtered
   routes are unchanged.
+- `birdwatcher-adapter` `/routes/noexport/{id}` now diffs each Loc-RIB page
+  against the peer's advertised prefix set as it arrives and applies
+  `--max-routes` to the retained candidates per page, so a request retains
+  only the advertised keys plus at most `--max-routes` candidate rows instead
+  of the entire Loc-RIB with its attributes. Rendered output is unchanged; an
+  oversized view fails with the same 403 on the page that crosses the cap.
 
 - An UPDATE that changes only the link-local companion of an IPv6 next hop
   (RFC 2545 two-address form) is now re-advertised to downstream peers instead
