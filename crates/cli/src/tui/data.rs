@@ -465,7 +465,13 @@ pub(super) fn spawn_fetcher(
         // Poll loop
         let mut state = FetcherState::new();
         loop {
-            let snapshot = poll_once(&connection, &mut state).await;
+            // A daemon that accepts the connection but never answers must
+            // surface by the next tick instead of freezing the loop.
+            let snapshot =
+                match tokio::time::timeout(interval, poll_once(&connection, &mut state)).await {
+                    Ok(snapshot) => snapshot,
+                    Err(_) => timed_out_snapshot(&state, interval),
+                };
             if data_tx.send(snapshot).await.is_err() {
                 break;
             }
@@ -473,6 +479,32 @@ pub(super) fn spawn_fetcher(
         }
     });
     FetcherHandle(poller, route_fetcher)
+}
+
+/// The snapshot for a poll that outlived its deadline: cached data is
+/// stale and missing data is unavailable, exactly as an RPC error reports it.
+fn timed_out_snapshot(state: &FetcherState, deadline: Duration) -> DataSnapshot {
+    DataSnapshot {
+        global: state.global.clone(),
+        global_freshness: if state.global.is_some() {
+            Freshness::Fresh
+        } else {
+            Freshness::Unavailable
+        },
+        health: state.health.clone(),
+        health_fresh: false,
+        neighbors: state.neighbors.clone().unwrap_or_default(),
+        neighbors_freshness: if state.neighbors.is_some() {
+            Freshness::Stale
+        } else {
+            Freshness::Unavailable
+        },
+        dynamic_range_count: state.dynamic_range_count,
+        dynamic_ranges_freshness: state.dynamic_ranges_freshness,
+        rpki_vrp_count: state.rpki_vrp_count,
+        metrics_freshness: state.metrics_freshness,
+        error: Some(format!("refresh timed out after {deadline:?}")),
+    }
 }
 
 async fn poll_once(connection: &Connection, state: &mut FetcherState) -> DataSnapshot {
@@ -1471,6 +1503,57 @@ mod tests {
         assert_eq!(second.metrics_freshness, Freshness::Fresh);
         assert!(second.error.is_none());
         assert_eq!(server.state.metrics_calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// A daemon that accepts the connection but never answers must surface
+    /// as unavailable by the refresh deadline instead of freezing the loop.
+    #[tokio::test]
+    async fn unresponsive_daemon_reports_unavailable_by_the_refresh_deadline() {
+        use rustbgpd_api::proto::global_service_server::{GlobalService, GlobalServiceServer};
+
+        struct HangingGlobalService;
+
+        #[tonic::async_trait]
+        impl GlobalService for HangingGlobalService {
+            async fn get_global(
+                &self,
+                _request: tonic::Request<rustbgpd_api::proto::GetGlobalRequest>,
+            ) -> Result<tonic::Response<rustbgpd_api::proto::GlobalState>, tonic::Status>
+            {
+                std::future::pending().await
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(GlobalServiceServer::new(HangingGlobalService))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)),
+        );
+        let connection = connect(&addr, None).await.unwrap();
+        let (_enabled_tx, enabled_rx) = watch::channel(false);
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let (data_tx, mut data_rx) = mpsc::channel(1);
+        let _task = spawn_fetcher(
+            connection,
+            Duration::from_millis(200),
+            data_tx,
+            event_tx,
+            enabled_rx,
+        );
+
+        let snapshot = tokio::time::timeout(Duration::from_secs(2), data_rx.recv())
+            .await
+            .expect("no snapshot arrived within the refresh deadline")
+            .expect("fetcher lane closed");
+        assert_eq!(snapshot.global_freshness, Freshness::Unavailable);
+        assert!(!snapshot.health_fresh);
+        assert_eq!(snapshot.neighbors_freshness, Freshness::Unavailable);
+        assert_eq!(
+            snapshot.error.as_deref(),
+            Some("refresh timed out after 200ms")
+        );
     }
 
     /// Red proof: starting the primary stream while disabled or failing to
