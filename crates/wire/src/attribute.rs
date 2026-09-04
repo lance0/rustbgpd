@@ -392,8 +392,10 @@ impl ExtendedCommunity {
     /// per the widely-deployed RFC 5512 layout: 4-byte reserved + 2-byte
     /// Tunnel Type). Type 0x03, subtype 0x0C.
     ///
-    /// Returns the Tunnel Type code. For VXLAN-EVPN (RFC 8365), the value is
-    /// 8. Other common values: 7 = NVGRE, 11 = MPLS-over-GRE.
+    /// Returns the Tunnel Type code from the IANA "BGP Tunnel Encapsulation
+    /// Attribute Tunnel Types" registry. Registry values include 8 = VXLAN,
+    /// 9 = NVGRE, 10 = MPLS, 11 = MPLS in GRE, 12 = VXLAN GPE, and
+    /// 13 = MPLS in UDP (RFC 7510); RFC 8365 overlays use 8, 9, and 11.
     ///
     /// The reserved bytes are intentionally not validated here: RFC 5512
     /// specifies MUST-zero on send, ignored on receive. FRR, `GoBGP`, Cisco,
