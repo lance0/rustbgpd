@@ -3847,7 +3847,7 @@ async fn stalled_v3_residue_cleanup_releases_terminal_paths_and_is_singleton() {
         .controller
         .v3_residue_cleanup_thread
         .lock()
-        .unwrap()
+        .expect("cleanup thread handle slot must not be poisoned")
         .take()
         .expect("confirm must have spawned the residue cleanup thread");
     harness.ack_task.abort();
@@ -3864,7 +3864,7 @@ async fn stalled_v3_residue_cleanup_releases_terminal_paths_and_is_singleton() {
     )
     .await
     .expect("detached cleanup must finish after release")
-    .unwrap()
+    .expect("the blocking task joining the residue cleanup thread was cancelled or panicked")
     .expect("residue cleanup thread must not panic");
     assert!(!cleanup_active.load(Ordering::Acquire));
 }

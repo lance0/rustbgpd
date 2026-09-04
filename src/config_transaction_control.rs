@@ -1978,7 +1978,10 @@ impl ConfigTransactionController {
             Ok(handle) => {
                 #[cfg(test)]
                 {
-                    *self.v3_residue_cleanup_thread.lock().unwrap() = Some(handle);
+                    *self
+                        .v3_residue_cleanup_thread
+                        .lock()
+                        .expect("cleanup thread handle slot must not be poisoned") = Some(handle);
                 }
                 #[cfg(not(test))]
                 drop(handle);
