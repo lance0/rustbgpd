@@ -85,6 +85,10 @@ pub struct ConfigTransactionController {
     settlement: Option<(RuntimeConfigSettlementWatchdog, DaemonGate)>,
     #[cfg(test)]
     v3_residue_cleanup_spawn_fail: Arc<AtomicBool>,
+    /// The most recently spawned residue cleanup thread, so tests can join it
+    /// instead of polling for the singleton release.
+    #[cfg(test)]
+    v3_residue_cleanup_thread: Arc<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>>,
 }
 
 #[derive(Default)]
@@ -299,6 +303,8 @@ impl ConfigTransactionController {
             v3_residue_cleanup_active: Arc::new(AtomicBool::new(false)),
             settlement: None,
             v3_residue_cleanup_spawn_fail: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            v3_residue_cleanup_thread: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -319,6 +325,8 @@ impl ConfigTransactionController {
             settlement: None,
             #[cfg(test)]
             v3_residue_cleanup_spawn_fail: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            v3_residue_cleanup_thread: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -1959,20 +1967,30 @@ impl ConfigTransactionController {
             warn!(context, "v3 residue cleanup could not start");
             return;
         }
-        if let Err(error) = std::thread::Builder::new()
+        match std::thread::Builder::new()
             .name("rustbgpd-v3-cleanup".to_string())
             .spawn(move || {
                 let _reservation = reservation;
                 if cleanup.cleanup() {
                     warn!(context, "v3 residue cleanup failed");
                 }
-            })
-        {
-            warn!(
+            }) {
+            Ok(handle) => {
+                #[cfg(test)]
+                {
+                    *self
+                        .v3_residue_cleanup_thread
+                        .lock()
+                        .expect("cleanup thread handle slot must not be poisoned") = Some(handle);
+                }
+                #[cfg(not(test))]
+                drop(handle);
+            }
+            Err(error) => warn!(
                 context,
                 error_kind = ?error.kind(),
                 "v3 locator is durably absent, but residue cleanup could not start"
-            );
+            ),
         }
     }
 
