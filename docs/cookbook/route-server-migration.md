@@ -436,6 +436,9 @@ schema rbgp-ribdiff/1; normalization v1; ignored attributes: as_path, next_hop
 live-source notes:
   - as_path: the daemon proto exposes a flattened ASN list, so AS_PATH is compared as a single AS_SEQUENCE on both sides; AS_SET structure is not compared
   - unknown attributes: path attributes outside the typed set (origin, as_path, next_hop, med, local_pref, communities, extended/large communities) are not visible over gRPC and are not compared
+  - encode-time attributes: the transport finalizes each UPDATE after the advertised view is computed — the eBGP local-ASN prepend and remove-private-as, the eBGP next-hop rewrite to the local address (default for peers that are not route-server clients, or `set next-hop self`), and the GRACEFUL_SHUTDOWN community added by `rbgp gshut` — so a BMP rib_out_post capture carries them and the live side does not; a `set next-hop <ip>` is stored and visible
+  - update groups: a peer sharing an update group has no stored per-peer Adj-RIB-Out; its live view is synthesized from the group table minus its own-sourced routes, exact-export rejections, and outbound prefix-limit exclusions
+  - aggregation: AGGREGATOR and ATOMIC_AGGREGATE are exposed over gRPC but rbgp-ribsnap/1 has no field for them, so the live side drops them; a from-bmp snapshot keeps them in unknown_attrs, which diverges unless --ignore-attribute unknown is passed
   - generation: the route-page epoch/generation pair is a process-local consistency fence, compared only across live pages and peers; it is not a RIB snapshot generation and is never compared with the producer-local snapshot header generation
 verdict: in_sync
 per-peer summary:
