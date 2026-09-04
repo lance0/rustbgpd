@@ -1183,6 +1183,11 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
     for route in live["routes"].as_array().unwrap() {
         assert_eq!(route["network"], "10.99.0.0/24", "{live}");
         assert_eq!(route["from_protocol"], "pb_0001_as65020", "{live}");
+        assert_eq!(
+            route["bgp"]["ext_communities"],
+            serde_json::json!([]),
+            "{live}"
+        );
     }
     assert_eq!(
         live["routes"]

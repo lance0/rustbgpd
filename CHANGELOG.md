@@ -265,6 +265,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `birdwatcher-adapter` route views now emit `bgp.ext_communities` (an empty
+  array when the route carries none), so Alice-LG shows route targets and
+  other extended communities instead of nothing. Each entry is birdwatcher's
+  `[kind, key, value]` string triple as parsed from BIRD 2.0.12 text: `rt` /
+  `ro` for the transitive two-octet-AS, IPv4-address, and four-octet-AS
+  families, `unknown 0x<type>` for other subtypes of those families, and
+  `generic` with the two 32-bit halves in hex for every other type. The
+  pinned IXP compatibility live fixture carries the empty array; filtered
+  routes are unchanged.
+
 - An UPDATE that changes only the link-local companion of an IPv6 next hop
   (RFC 2545 two-address form) is now re-advertised to downstream peers instead
   of being suppressed as an unchanged Adj-RIB-Out entry.

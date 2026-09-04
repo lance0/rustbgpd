@@ -491,6 +491,7 @@ load_on_demand = true
 | route `metric` | `0` | Sentinel only; this is not an IGP metric. |
 | filtered route `bgp.origin` | `""` | ORIGIN is not retained for rejected routes. |
 | filtered route `bgp.local_pref`, `bgp.med` | `"100"`, omitted | Not retained for rejected routes: `local_pref` renders the effective default (the same rule the accepted views apply to a route without the attribute) and `med` is omitted. An explicit wire value on the rejected announcement is lost. |
+| route `bgp.ext_communities` | rendered | Accepted, exact, and noexport routes carry every extended community as birdwatcher's `[kind, key, value]` string triple parsed from BIRD 2.0.12 text: `rt` / `ro` for the transitive two-octet-AS, IPv4-address, and four-octet-AS families (key and value split per family), `unknown 0x<type>` for other subtypes of those families, and `generic` with the two 32-bit halves in hex for every other type (opaque, EVPN, RFC 8097 origin validation state). Alice-LG converts the two values with `Atoi`, so an IPv4 key or a hex half reads as `0` there, exactly as behind a real birdwatcher. Filtered routes carry none (rejects retain no extended communities). |
 
 Error behavior differs only on failure: when the daemon is unreachable
 the adapter returns `502 Bad Gateway` (the in-daemon server returned
