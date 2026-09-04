@@ -368,7 +368,7 @@ impl PeerSession {
                     capacity,
                     backlog_for = ?since.elapsed(),
                     "peer flagged slow: session alive but outbound queue \
-                     persistently backlogged (LAN-470)"
+                     persistently backlogged"
                 );
             }
         } else {

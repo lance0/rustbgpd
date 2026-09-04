@@ -19,6 +19,16 @@ checksums; they are frozen captures, not living documentation. The
 exemption is derived from the seal files themselves rather than a hand-kept
 list, so it narrows automatically as receipts age out and cannot be widened
 by editing this guard.
+
+Exported runtime text is the one crate-source surface fenced here. Crate
+sources stay outside the document scan (see the scope note below), but two
+kinds of string literal inside them leave the repository at runtime:
+Prometheus metric help text and `tracing` event messages. An operator
+reading `/metrics` or a log line cannot resolve a tracker ID any more than
+a doc reader can, so those literals are matched by shape — a metric
+`Opts::new`/`IntGauge::new`-style registration or a `warn!`-family macro
+call — while comments, lint `reason` strings, test modules, and test
+directories keep the conventional in-repository cross-reference.
 """
 
 from __future__ import annotations
@@ -62,6 +72,22 @@ SCANNED_FILES = frozenset(
 
 # Binary blobs and compressed captures carry no reviewable prose.
 SKIPPED_SUFFIXES = frozenset({".gz", ".png", ".svg", ".zst", ".bin"})
+
+# Exported runtime text: `.rs` files under the daemon and crate source trees,
+# minus test directories and `tests.rs` modules. Within them only string
+# literals inside these call shapes are exported — metric registrations
+# (`Opts::new("name", "help")`, `IntGauge::new("name", "help")`, custom
+# collector `Desc::new`) and `tracing` event macros.
+RUNTIME_SOURCE = re.compile(r"^(?:src|crates/[^/]+/src)/.*\.rs$")
+RUNTIME_TEXT_HEAD = re.compile(
+    r"(?:\btracing::)?\b(?:error|warn|info|debug|trace)!\s*\("
+    r"|\b(?:Opts|HistogramOpts|Desc|IntCounter|IntGauge|Counter|Gauge|Histogram)"
+    r"::new\s*\("
+)
+STRING_LITERAL = re.compile(r'"(?:[^"\\]|\\[\s\S])*"')
+RAW_STRING_LITERAL = re.compile(r'r(#*)"[\s\S]*?"\1')
+CHAR_LITERAL = re.compile(r"'(?:[^'\\\n]|\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F]+\}|.))'")
+CFG_TEST = re.compile(r"#\[cfg\(test\)\]")
 
 TRACKER_ID = re.compile(r"\bLAN-\d+\b")
 HOME_PATH = re.compile(rb"/(?:home|Users)/(?![<$\{])[^/\s\"'<>]+")
@@ -264,6 +290,129 @@ def audit_document(relative: str, text: str) -> list[str]:
     return failures
 
 
+def _literal_end(code: str, index: int) -> int | None:
+    """Return the end of the string or char literal starting at `index`."""
+    char = code[index]
+    previous = code[index - 1] if index else " "
+    if char == '"':
+        match = STRING_LITERAL.match(code, index)
+    elif char == "'":
+        match = CHAR_LITERAL.match(code, index)
+    elif char == "r" and (previous == "b" or not (previous.isalnum() or previous == "_")):
+        match = RAW_STRING_LITERAL.match(code, index)
+    else:
+        match = None
+    return None if match is None else match.end()
+
+
+def _blank(text: str) -> str:
+    return re.sub(r"[^\n]", " ", text)
+
+
+def _blank_comments(text: str) -> str:
+    """Blank `//`, `///`, and `/* */` comments, keeping newlines and literals."""
+    out: list[str] = []
+    index = 0
+    while index < len(text):
+        end = _literal_end(text, index)
+        if end is not None:
+            out.append(text[index:end])
+            index = end
+        elif text.startswith("//", index):
+            end = text.find("\n", index)
+            end = len(text) if end < 0 else end
+            out.append(_blank(text[index:end]))
+            index = end
+        elif text.startswith("/*", index):
+            end = text.find("*/", index + 2)
+            end = len(text) if end < 0 else end + 2
+            out.append(_blank(text[index:end]))
+            index = end
+        else:
+            out.append(text[index])
+            index += 1
+    return "".join(out)
+
+
+def _balanced_end(code: str, index: int, open_char: str, close_char: str) -> int:
+    """Return the index just past the bracket closing the one at `index`."""
+    depth = 0
+    while index < len(code):
+        end = _literal_end(code, index)
+        if end is not None:
+            index = end
+            continue
+        if code[index] == open_char:
+            depth += 1
+        elif code[index] == close_char:
+            depth -= 1
+            if depth == 0:
+                return index + 1
+        index += 1
+    return len(code)
+
+
+def _blank_test_modules(code: str) -> str:
+    """Blank every `#[cfg(test)]` block item in comment-free code."""
+    while match := CFG_TEST.search(code):
+        index = match.end()
+        while index < len(code) and code[index] not in "{;":
+            index = _literal_end(code, index) or index + 1
+        if index >= len(code) or code[index] == ";":
+            # A `#[cfg(test)] mod tests;` declaration or `use`: the body
+            # lives in a test directory that discovery already skips.
+            code = code[: match.start()] + _blank(match.group(0)) + code[match.end() :]
+            continue
+        end = _balanced_end(code, index, "{", "}")
+        code = code[: match.start()] + _blank(code[match.start() : end]) + code[end:]
+    return code
+
+
+def discover_runtime_sources() -> dict[str, str]:
+    """Map each runtime Rust source file to its text."""
+    sources: dict[str, str] = {}
+    for path in tracked_files():
+        relative = path.relative_to(ROOT).as_posix()
+        if not RUNTIME_SOURCE.match(relative):
+            continue
+        parts = Path(relative).parts
+        if "tests" in parts or path.stem == "tests":
+            continue
+        try:
+            sources[relative] = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+    if not sources:
+        raise TrackerIdGuardError(
+            "no runtime sources were discovered, so the walk is broken: "
+            "the repository ships src/ and crates/*/src/ Rust trees"
+        )
+    return dict(sorted(sources.items()))
+
+
+def audit_runtime_text(relative: str, text: str) -> list[str]:
+    """Report every private tracker ID exported by metric help or log text."""
+    code = _blank_test_modules(_blank_comments(text))
+    failures: list[str] = []
+    seen: set[tuple[int, str]] = set()
+    for head in RUNTIME_TEXT_HEAD.finditer(code):
+        open_paren = head.end() - 1
+        close = _balanced_end(code, open_paren, "(", ")")
+        for literal in STRING_LITERAL.finditer(code, open_paren, close):
+            for match in TRACKER_ID.finditer(literal.group(0)):
+                number = code.count("\n", 0, literal.start() + match.start()) + 1
+                if (number, match.group(0)) in seen:
+                    continue
+                seen.add((number, match.group(0)))
+                failures.append(
+                    f"{relative}:{number} exports the private tracker ID "
+                    f"{match.group(0)!r} in runtime text (metric help or log "
+                    "message), which an operator cannot resolve; keep the "
+                    "explanation and drop the ID"
+                )
+    return failures
+
+
 def audit_artifact_home_paths(
     paths: list[Path] | None = None, root: Path | None = None
 ) -> list[str]:
@@ -313,6 +462,7 @@ def audit_artifact_home_paths(
 def main() -> int:
     try:
         documents = discover_documents()
+        sources = discover_runtime_sources()
     except TrackerIdGuardError as error:
         print(f"public tracker ID check failed: {error}", file=sys.stderr)
         return 1
@@ -322,6 +472,11 @@ def main() -> int:
         for relative, text in documents.items()
         for failure in audit_document(relative, text)
     ]
+    failures.extend(
+        failure
+        for relative, text in sources.items()
+        for failure in audit_runtime_text(relative, text)
+    )
     try:
         failures.extend(audit_artifact_home_paths())
     except TrackerIdGuardError as error:
@@ -334,7 +489,7 @@ def main() -> int:
 
     print(
         f"public tracker ID check passed: {len(documents)} public documents "
-        "cite no private tracker IDs"
+        f"cite no private tracker IDs; {len(sources)} runtime sources export none"
     )
     return 0
 
