@@ -422,6 +422,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   so a typo reports `unknown address family: ...` instead of a connection
   error when the daemon is unreachable. The message and exit code are
   unchanged.
+- `rbgp top` now bounds each refresh by the refresh interval. A daemon that
+  accepts the connection but never answers is reported as unavailable (or
+  stale, for data already on screen) by the next tick instead of freezing
+  the refresh loop.
 
 ### Documentation
 
