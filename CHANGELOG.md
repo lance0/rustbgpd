@@ -177,6 +177,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Prometheus metric help strings and runtime `warn` messages no longer carry
+  internal tracker identifiers; the behavioral explanation is kept and metric
+  names are unchanged. The public-text checker now also covers exported
+  runtime strings (metric help text and `tracing` message literals) in crate
+  sources, leaving comments, lint reasons, and test assertions untouched.
+
 - Policy prefix entries now reject `ge`/`le` bounds whose derived length range
   can never match: `le` below the prefix length, `ge` above `le`, or either
   bound below the prefix length or above the address-family maximum. TOML

@@ -29,6 +29,54 @@ CLEAN_LINES = (
     "Milestone M84 covers multi-cache RTR conformance.",
 )
 
+RUNTIME_POSITIVES = {
+    "metric help": (
+        'let g = IntGauge::new(\n'
+        '    "bgp_example",\n'
+        '    "Example gauge (LAN-336). Refreshed per batch.",\n'
+        ')\n.expect("valid");\n'
+    ),
+    "metric opts help": (
+        'IntCounterVec::new(Opts::new("bgp_example_total", '
+        '"Counted (LAN-283 fail-closed)."), &["peer"])'
+    ),
+    "warn literal": (
+        "warn!(\n"
+        "    peer = %label,\n"
+        '    "peer flagged slow: outbound queue \\\n'
+        '     persistently backlogged (LAN-470)"\n'
+        ");\n"
+    ),
+    "error literal with tracing prefix": (
+        'tracing::error!(?op, "install withheld (LAN-283)");\n'
+    ),
+}
+
+RUNTIME_NEGATIVES = {
+    "comment": '// LAN-283 rule 1 observability\nwarn!("foreign row withheld");\n',
+    "doc comment": "/// LAN-283: keys withheld.\npub foreign: u32,\n",
+    "url in a string is not a comment": (
+        'warn!("see https://example.invalid/x"); // LAN-1 comment\n'
+    ),
+    "lint reason": (
+        '#[allow(dead_code, reason = "LAN-311 wiring lands later")]\nfn f() {}\n'
+    ),
+    "test module assertion": (
+        "#[cfg(test)]\n"
+        "mod tests {\n"
+        "    #[test]\n"
+        "    fn t() {\n"
+        '        assert_eq!(1, 1, "must hold (LAN-311)");\n'
+        '        warn!("even a log in tests (LAN-1)");\n'
+        "    }\n"
+        "}\n"
+    ),
+    "test module declaration does not swallow the file": (
+        "#[cfg(test)]\nmod tests;\n"
+        'let s = "not a metric or log literal (LAN-1)";\n'
+    ),
+}
+
 
 def write_fixture(root: Path, relative: str, contents: str | bytes) -> Path:
     path = root / relative
@@ -68,6 +116,34 @@ class PublicTrackerIdTests(unittest.TestCase):
             with self.subTest(line=line):
                 failures = guard.audit_document("docs/example.md", f"{line}\n")
                 self.assertEqual(failures, [], f"{line!r} must be accepted")
+
+    def test_repository_runtime_sources_are_discovered_and_clean(self) -> None:
+        sources = guard.discover_runtime_sources()
+        self.assertIn("crates/telemetry/src/metrics.rs", sources)
+        self.assertIn("src/main.rs", sources)
+        self.assertFalse(
+            [name for name in sources if "/tests/" in name or name.endswith("/tests.rs")],
+            "test directories and modules must stay out of the runtime scan",
+        )
+        for relative, text in sources.items():
+            with self.subTest(source=relative):
+                self.assertEqual(guard.audit_runtime_text(relative, text), [])
+
+    def test_exported_runtime_text_is_rejected(self) -> None:
+        for label, code in RUNTIME_POSITIVES.items():
+            with self.subTest(label=label):
+                failures = guard.audit_runtime_text("crates/x/src/lib.rs", code)
+                self.assertEqual(len(failures), 1, failures)
+                self.assertIn("crates/x/src/lib.rs:", failures[0])
+        # A continuation line reports the line the ID sits on.
+        failures = guard.audit_runtime_text("src/io.rs", RUNTIME_POSITIVES["warn literal"])
+        self.assertIn("src/io.rs:4 ", failures[0])
+        self.assertIn("'LAN-470'", failures[0])
+
+    def test_conventional_source_cross_references_are_accepted(self) -> None:
+        for label, code in RUNTIME_NEGATIVES.items():
+            with self.subTest(label=label):
+                self.assertEqual(guard.audit_runtime_text("src/lib.rs", code), [])
 
     def test_artifact_home_paths_cover_plain_gzip_and_placeholders(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

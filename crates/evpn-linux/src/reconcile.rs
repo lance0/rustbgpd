@@ -1028,7 +1028,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 vni = ?key.0,
                 mac = %key.1,
                 "foreign kernel FDB row at this (vni, mac); operation withheld until the \
-                 foreign row goes away (LAN-283 fail-closed)"
+                 foreign row goes away (fail-closed)"
             );
         }
         self.state
@@ -1435,7 +1435,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             if l3_guard_failed {
                 tracing::warn!(
                     "L3 ownership guard dump failed; skipping all L3 kernel mutations this \
-                     pass (fail closed, LAN-283)"
+                     pass (fail closed)"
                 );
             }
             if let Some(live) = &l3_live {
@@ -1601,7 +1601,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                                     tracing::warn!(
                                         ?op,
                                         "foreign kernel row at this L3 key; install withheld \
-                                         until the foreign row goes away (LAN-283 fail-closed)"
+                                         until the foreign row goes away (fail-closed)"
                                     );
                                 }
                                 blocked_l3_now.insert(key);
@@ -1626,7 +1626,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                             tracing::warn!(
                                 ?op,
                                 "live row under this L3 key is foreign; delete skipped and \
-                                 ownership relinquished (LAN-283)"
+                                 ownership relinquished"
                             );
                             crate::l3_diff::record_l3_success(
                                 &mut self.state.l3_owned,
@@ -1646,7 +1646,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                             tracing::warn!(
                                 ?op,
                                 "L3VXLAN FDB row under this key is foreign; row delete \
-                                 skipped, group objects GC'd (LAN-283)"
+                                 skipped, group objects GC'd"
                             );
                             spare_foreign_nhg_row = true;
                         }
@@ -3236,7 +3236,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 vrf_id = key.0.as_u32(),
                 prefix = ?key.1,
                 "owned VRF route was replaced by a foreign entry; relinquishing ownership \
-                 (foreign row preserved, LAN-283)"
+                 (foreign row preserved)"
             );
         }
         let taken_neighbors: Vec<(u32, IpAddr)> = self
@@ -3254,7 +3254,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 l3vxlan_ifindex = key.0,
                 next_hop = %key.1,
                 "owned L3 neighbor was replaced by a foreign entry; relinquishing ownership \
-                 (foreign row preserved, LAN-283)"
+                 (foreign row preserved)"
             );
         }
         let taken_fdb: Vec<(u32, MacAddress)> = self
@@ -3272,7 +3272,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 l3vxlan_ifindex = key.0,
                 router_mac = %key.1,
                 "owned L3VXLAN FDB row was replaced by a foreign entry; relinquishing \
-                 ownership (foreign row preserved, LAN-283)"
+                 ownership (foreign row preserved)"
             );
         }
     }
@@ -3323,7 +3323,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 %mac,
                 ?vlan,
                 "owned FDB row was replaced by a foreign entry; relinquishing ownership \
-                 (foreign row preserved, LAN-283)"
+                 (foreign row preserved)"
             );
         }
     }
@@ -4274,7 +4274,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                     tracing::warn!(
                         error = %e,
                         "shutdown snapshot dump failed; skipping owned-FDB drain (fail \
-                         closed, LAN-283) — next startup adopts the marker rows"
+                         closed) — next startup adopts the marker rows"
                     );
                     None
                 }
@@ -4313,8 +4313,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                     tracing::warn!(
                         ?vni,
                         %mac,
-                        "foreign FDB row under owned key at shutdown; drain skips it \
-                         (LAN-283)"
+                        "foreign FDB row under owned key at shutdown; drain skips it"
                     );
                     continue;
                 }
@@ -4370,8 +4369,8 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 !l3_drain_plan.ops.is_empty() && !l3_ip_vrfs.is_empty() && l3_drain_live.is_none();
             if l3_drain_guard_failed {
                 tracing::warn!(
-                    "shutdown L3 ownership dump failed; skipping L3 drain (fail closed, \
-                     LAN-283) — next startup adopts the marker rows"
+                    "shutdown L3 ownership dump failed; skipping L3 drain (fail closed) — \
+                     next startup adopts the marker rows"
                 );
             }
             let l3_drain_ops: &[DataplaneOp] = if l3_drain_guard_failed {
@@ -4388,8 +4387,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                             self.state.foreign_since_report.deletes_skipped += 1;
                             tracing::warn!(
                                 ?op,
-                                "foreign row under owned L3 key at shutdown; drain skips \
-                                 it (LAN-283)"
+                                "foreign row under owned L3 key at shutdown; drain skips it"
                             );
                             crate::l3_diff::record_l3_success(
                                 &mut self.state.l3_owned,
@@ -4408,8 +4406,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                             self.state.foreign_since_report.deletes_skipped += 1;
                             tracing::warn!(
                                 ?op,
-                                "foreign row under owned L3 key at shutdown; drain skips \
-                                 it (LAN-283)"
+                                "foreign row under owned L3 key at shutdown; drain skips it"
                             );
                             continue;
                         }

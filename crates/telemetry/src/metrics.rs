@@ -1007,7 +1007,7 @@ impl BgpMetrics {
             Opts::new(
                 "bgp_rejected_routes_retained",
                 "Rejected inbound routes currently retained for the \
-                 looking-glass filtered-route surface (LAN-472), per peer. \
+                 looking-glass filtered-route surface, per peer. \
                  Bounded by [policy.reject_retention] capacity; refreshed on \
                  every retention mutation and reset on session reset.",
             ),
@@ -1056,7 +1056,7 @@ impl BgpMetrics {
 
         let rib_attr_intern_global_size = IntGauge::new(
             "bgp_rib_attr_intern_global_size",
-            "Unique attribute sets in the daemon-wide cross-peer intern table (LAN-336). Reclaim sweeps drop entries no route references; refreshed at every insert/remove batch seam.",
+            "Unique attribute sets in the daemon-wide cross-peer intern table. Reclaim sweeps drop entries no route references; refreshed at every insert/remove batch seam.",
         )
         .expect("valid metric definition");
 
@@ -1930,7 +1930,7 @@ impl BgpMetrics {
         let policy_dataset_refresh_errors = IntCounterVec::new(
             Opts::new(
                 "bgp_policy_dataset_refresh_errors_total",
-                "Policy dataset (LAN-305) refresh failures by dataset; the prior snapshot keeps serving probes.",
+                "Policy dataset refresh failures by dataset; the prior snapshot keeps serving probes.",
             ),
             &["dataset"],
         )
@@ -2268,25 +2268,25 @@ impl BgpMetrics {
 
         let evpn_foreign_replaces_blocked = IntCounter::new(
             "evpn_foreign_replaces_blocked_total",
-            "EVPN dataplane installs/replaces withheld because an exact-key foreign kernel row exists (LAN-283 fail-closed).",
+            "EVPN dataplane installs/replaces withheld because an exact-key foreign kernel row exists (fail-closed).",
         )
         .expect("valid metric definition");
 
         let evpn_foreign_deletes_skipped = IntCounter::new(
             "evpn_foreign_deletes_skipped_total",
-            "EVPN dataplane deletes skipped during withdrawal/NotReady/shutdown because the live kernel row is no longer rustbgpd's (LAN-283).",
+            "EVPN dataplane deletes skipped during withdrawal/NotReady/shutdown because the live kernel row is no longer rustbgpd's.",
         )
         .expect("valid metric definition");
 
         let evpn_foreign_owned_relinquished = IntCounter::new(
             "evpn_foreign_owned_relinquished_total",
-            "EVPN dataplane owned keys relinquished after a live snapshot showed a foreign writer replaced the row (LAN-283).",
+            "EVPN dataplane owned keys relinquished after a live snapshot showed a foreign writer replaced the row.",
         )
         .expect("valid metric definition");
 
         let evpn_foreign_nhid_range_conflicts = IntCounter::new(
             "evpn_foreign_nhid_range_conflicts_total",
-            "Foreign kernel nexthop objects found inside a rustbgpd-reserved NHID range (shape conflict; LAN-290 fail-closed quarantine). Counted once per conflicting ID.",
+            "Foreign kernel nexthop objects found inside a rustbgpd-reserved NHID range (shape conflict; fail-closed quarantine). Counted once per conflicting ID.",
         )
         .expect("valid metric definition");
 
