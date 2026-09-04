@@ -364,14 +364,8 @@ jobs:
       - name: Check standalone scale harnesses and receipt classifiers
         run: |
           set -euo pipefail
-          cargo fmt --manifest-path bench/scale/rrharness/Cargo.toml -- --check
-          cargo fmt --manifest-path bench/scale/rrtransport/Cargo.toml -- --check
-          cargo fmt --manifest-path bench/scale/reloadstall/Cargo.toml -- --check
-          cargo fmt --manifest-path bench/scale/enhanced-route-refresh/Cargo.toml -- --check
-          cargo test --manifest-path bench/scale/rrharness/Cargo.toml --locked
-          cargo test --manifest-path bench/scale/rrtransport/Cargo.toml --locked
-          cargo test --manifest-path bench/scale/reloadstall/Cargo.toml --locked
-          cargo test --manifest-path bench/scale/enhanced-route-refresh/Cargo.toml --locked
+          cargo fmt --manifest-path bench/scale/Cargo.toml --all -- --check
+          cargo test --manifest-path bench/scale/Cargo.toml --workspace --locked
           cargo clippy --manifest-path bench/scale/rrtransport/Cargo.toml \
             --locked --all-targets -- -D warnings
           cargo run --manifest-path bench/scale/rrtransport/Cargo.toml --locked -- smoke

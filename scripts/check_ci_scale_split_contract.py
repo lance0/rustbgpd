@@ -33,10 +33,7 @@ EXPECTED_ROOT_COMMANDS = {
     WORKFLOWS[5]: Counter(test=3),
 }
 EXPECTED_STANDALONE_COMMANDS = (
-    (WORKFLOWS[0], "cargo test --manifest-path bench/scale/rrharness/Cargo.toml --locked"),
-    (WORKFLOWS[0], "cargo test --manifest-path bench/scale/rrtransport/Cargo.toml --locked"),
-    (WORKFLOWS[0], "cargo test --manifest-path bench/scale/reloadstall/Cargo.toml --locked"),
-    (WORKFLOWS[0], "cargo test --manifest-path bench/scale/enhanced-route-refresh/Cargo.toml --locked"),
+    (WORKFLOWS[0], "cargo test --manifest-path bench/scale/Cargo.toml --workspace --locked"),
     (WORKFLOWS[0],
      "cargo clippy --manifest-path bench/scale/rrtransport/Cargo.toml --locked --all-targets -- -D warnings"),
     (WORKFLOWS[0], "cargo run --manifest-path bench/scale/rrtransport/Cargo.toml --locked -- smoke"),

@@ -62,9 +62,10 @@ The recipes intentionally expose their direct commands:
 - `just gate-rib` compiles the feature-gated RIB, transport, and API benchmark
   surfaces that the default workspace build cannot see, including the root
   FIB projection and both API feature combinations.
-- `just gate-deps` tests the four standalone scale-harness manifests. These
-  manifests share `bench/scale/Cargo.lock`, which is separate from the
-  workspace lockfile, and can add substantial cold-build time.
+- `just gate-deps` tests the standalone scale-harness workspace under
+  `bench/scale` in one invocation. That workspace has its own
+  `bench/scale/Cargo.lock`, separate from the root lockfile, and can add
+  substantial cold-build time.
 - `just gate-contract` executes every Criterion benchmark body once without
   collecting timings, with locked dependency resolution and fail-fast local
   behavior. The harness is Linux/GNU-Bash oriented and requires the same local
