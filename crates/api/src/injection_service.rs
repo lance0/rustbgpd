@@ -294,7 +294,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
                 reply: reply_tx,
             })
             .await
-            .map_err(|_| Status::internal("RIB manager unavailable"))?;
+            .map_err(|_| Status::unavailable("RIB manager unavailable"))?;
 
         reply_rx
             .await
@@ -343,7 +343,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
                 reply: reply_tx,
             })
             .await
-            .map_err(|_| Status::internal("RIB manager unavailable"))?;
+            .map_err(|_| Status::unavailable("RIB manager unavailable"))?;
 
         reply_rx
             .await
@@ -412,7 +412,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
                 reply: reply_tx,
             })
             .await
-            .map_err(|_| Status::internal("RIB manager unavailable"))?;
+            .map_err(|_| Status::unavailable("RIB manager unavailable"))?;
 
         reply_rx
             .await
@@ -445,7 +445,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
                 reply: reply_tx,
             })
             .await
-            .map_err(|_| Status::internal("RIB manager unavailable"))?;
+            .map_err(|_| Status::unavailable("RIB manager unavailable"))?;
 
         reply_rx
             .await
@@ -502,7 +502,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
                 reply: reply_tx,
             })
             .await
-            .map_err(|_| Status::internal("RIB manager unavailable"))?;
+            .map_err(|_| Status::unavailable("RIB manager unavailable"))?;
 
         reply_rx
             .await
@@ -584,7 +584,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
                 reply: reply_tx,
             })
             .await
-            .map_err(|_| Status::internal("RIB manager unavailable"))?;
+            .map_err(|_| Status::unavailable("RIB manager unavailable"))?;
 
         reply_rx
             .await
@@ -1329,6 +1329,22 @@ mod tests {
             err.message(),
             "inject failed: storage not found during lookup"
         );
+    }
+
+    /// Load-bearing: a closed RIB command channel means the mutation was
+    /// never accepted, which the documented status contract reports as
+    /// `UNAVAILABLE`; only a reply lost after acceptance stays `INTERNAL`.
+    #[tokio::test]
+    async fn add_path_send_failure_is_unavailable() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let svc = InjectionService::new(tx, AccessMode::ReadWrite);
+        let err = svc
+            .add_path(add_path_request(0, "192.0.2.1"))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unavailable);
+        assert_eq!(err.message(), "RIB manager unavailable");
     }
 
     #[tokio::test]

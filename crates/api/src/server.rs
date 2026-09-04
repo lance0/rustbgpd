@@ -818,6 +818,12 @@ const PEER_MANAGER_MUTATION_TIMEOUT: Duration = Duration::from_mins(10);
 /// still be applied by the actor afterwards — like any RPC deadline, the
 /// outcome is unknown — but the error propagates out of the shielded body,
 /// so the runtime-config lock guard drops instead of being held forever.
+///
+/// Returns `UNAVAILABLE` when the peer-manager command channel is closed,
+/// so the command was never accepted and nothing was applied.
+///
+/// Returns `INTERNAL` when the peer manager accepted the command but
+/// dropped its reply. The command may already have been applied.
 pub(crate) async fn peer_manager_request<R>(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     build_command: impl FnOnce(oneshot::Sender<R>) -> PeerManagerCommand,
@@ -827,7 +833,7 @@ pub(crate) async fn peer_manager_request<R>(
         peer_mgr_tx
             .send(build_command(reply_tx))
             .await
-            .map_err(|_| Status::internal("peer manager unavailable"))?;
+            .map_err(|_| Status::unavailable("peer manager unavailable"))?;
         reply_rx
             .await
             .map_err(|_| Status::internal("peer manager dropped reply"))
@@ -3068,5 +3074,20 @@ mod tests {
         assert_eq!(result.unwrap_err().code(), tonic::Code::DeadlineExceeded);
         // Held so the command is accepted but never answered.
         drop(rx);
+    }
+
+    /// Load-bearing: a closed peer-manager command channel means the
+    /// mutation was never accepted, which the documented status contract
+    /// reports as `UNAVAILABLE`; a reply lost after acceptance stays
+    /// `INTERNAL` because the command may already have been applied.
+    #[tokio::test]
+    async fn closed_peer_manager_request_returns_unavailable() {
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        let error = peer_manager_request(&tx, |reply| PeerManagerCommand::ListPeers { reply })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        assert_eq!(error.message(), "peer manager unavailable");
     }
 }

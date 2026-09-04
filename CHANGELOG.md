@@ -288,6 +288,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `transit_free.action` is `reject`; a null or absent action with
   `transit_free.asns` populated no longer emits reject terms arouteserver
   would not generate.
+- Mutation RPCs (`AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`,
+  `AddEvpnRoute`, `DeleteEvpnRoute`, `TriggerMrtDump`, and the peer-manager
+  mutations routed through the shared request path) now return `UNAVAILABLE`
+  instead of `INTERNAL` when the actor command channel is closed, matching
+  the documented status-code contract. A reply dropped after the actor
+  accepted the command still returns `INTERNAL`.
 
 - **Operator-visible:** `rs-config-render` now states `rs_control_communities`
   on every rendered member session instead of inheriting the daemon default:
