@@ -24,11 +24,10 @@ use crate::runtime_config_settlement::{
 use crate::server::{
     AccessMode, ConfigMutationGateFn, OwnedCatalogDispatch, RuntimeConfigCoordinator,
     catalog_mutation_error_to_status, check_config_mutation_gate, dispatch_owned_catalog_mutation,
-    fully_compensated_status, peer_manager_request, read_only_rejection,
+    fully_compensated_status, peer_manager_request, read_only_rejection, reserve_config_event_slot,
     stage_runtime_config_event_typed, with_catalog_persist_ack,
 };
 
-const CONFIG_PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
 const OWNED_PEER_GROUP_ACTOR_TIMEOUT: Duration = Duration::from_mins(10);
 
 fn input_statement_to_proto(statement: &PolicyStatementDefinition) -> proto::PolicyStatement {
@@ -289,23 +288,6 @@ fn input_definition_to_proto(definition: &PeerGroupDefinition) -> proto::PeerGro
         import_policy_chain: definition.import_policy_chain.clone(),
         export_policy_chain: definition.export_policy_chain.clone(),
     }
-}
-
-async fn reserve_config_event_slot(
-    config_tx: Option<mpsc::Sender<ConfigEvent>>,
-) -> Result<Option<mpsc::OwnedPermit<ConfigEvent>>, Status> {
-    let Some(tx) = config_tx else {
-        return Ok(None);
-    };
-
-    let permit = tokio::time::timeout(CONFIG_PERSIST_RESERVE_TIMEOUT, tx.reserve_owned())
-        .await
-        .map_err(|_| {
-            Status::unavailable("config persistence queue busy — refusing mutation to avoid drift")
-        })?
-        .map_err(|_| Status::unavailable("config persistence unavailable"))?;
-
-    Ok(Some(permit))
 }
 
 /// gRPC service for peer-group CRUD and neighbor membership assignment.
