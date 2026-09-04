@@ -3366,6 +3366,222 @@ async fn relearn_while_mac_ip_live_does_not_re_emit_mac_only() {
     );
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RibActionWithSeq {
+    Inject(EvpnRouteKey, Option<u32>),
+    Withdraw(EvpnRouteKey),
+}
+
+/// Like [`rib_capture_responder`] but also records the MAC Mobility
+/// sequence each Inject carries on the wire.
+fn rib_capture_responder_with_seq(
+    mut rib_rx: mpsc::Receiver<RibUpdate>,
+) -> (
+    Arc<tokio::sync::Mutex<Vec<RibActionWithSeq>>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let log = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let log_clone = log.clone();
+    let join = tokio::spawn(async move {
+        while let Some(msg) = rib_rx.recv().await {
+            match msg {
+                RibUpdate::InjectEvpn { route, reply } => {
+                    let (_, seq) = extract_mac_mobility_full(&route.attributes);
+                    log_clone
+                        .lock()
+                        .await
+                        .push(RibActionWithSeq::Inject(route.key(), seq));
+                    let _ = reply.send(Ok(()));
+                }
+                RibUpdate::WithdrawEvpn { key, reply } => {
+                    log_clone.lock().await.push(RibActionWithSeq::Withdraw(key));
+                    let _ = reply.send(Ok(()));
+                }
+                RibUpdate::QueryEvpnRoutes { reply, .. } => {
+                    let _ = reply.send(vec![]);
+                }
+                _ => {}
+            }
+        }
+    });
+    (log, join)
+}
+
+fn assert_duplicate_mac_moves(metrics: &BgpMetrics, v: u32, m: u8, value: u32) {
+    let text = gather_metrics_text(metrics);
+    assert!(
+        text.contains(&format!(
+            "evpn_duplicate_mac_moves_total{{mac=\"{}\",vni=\"{v}\"}} {value}\n",
+            mac(m)
+        )) || text.contains(&format!(
+            "evpn_duplicate_mac_moves_total{{vni=\"{v}\",mac=\"{}\"}} {value}\n",
+            mac(m)
+        )),
+        "expected {value} duplicate-MAC moves for vni {v} mac {}: {text}",
+        mac(m)
+    );
+}
+
+/// RFC 9721 §5.1/§6.2: a `Learned` on a *different* bridge port while
+/// MAC+IP is live is a local move. Every (MAC, IP) route re-advertises
+/// at the bumped sequence, no MAC-only Inject appears (replace
+/// invariant), and the duplicate-MAC detector counts one move for the
+/// event rather than one per IP.
+#[tokio::test]
+async fn local_port_move_while_mac_ip_live_cascades_to_every_mac_ip_route() {
+    let instances = instance_table(100);
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let (log, _responder) = rib_capture_responder_with_seq(rib_rx);
+    let metrics = BgpMetrics::new();
+    let counts = OriginatedLocalMacCounts::default();
+    let mut state = originator_state(&instances);
+
+    let learned = |ifindex| LocalMacObservation::Learned {
+        vni: vni(100),
+        mac: mac(0xAA),
+        ifindex,
+    };
+    let ip_added = |ip: &str| LocalMacObservation::IpAdded {
+        vni: vni(100),
+        mac: mac(0xAA),
+        ip: ipa(ip),
+    };
+    observe_test(
+        learned(10),
+        &mut state,
+        &instances,
+        &rib_tx,
+        &metrics,
+        &counts,
+    )
+    .await;
+    observe_test(
+        ip_added("192.0.2.10"),
+        &mut state,
+        &instances,
+        &rib_tx,
+        &metrics,
+        &counts,
+    )
+    .await;
+    observe_test(
+        ip_added("192.0.2.11"),
+        &mut state,
+        &instances,
+        &rib_tx,
+        &metrics,
+        &counts,
+    )
+    .await;
+    // Remote contenders for both IPs appear after the upgrade, so the
+    // move below is the only contended event in the test.
+    for ip in ["192.0.2.10", "192.0.2.11"] {
+        state.remote_mac_ip_view.insert(
+            (vni(100), mac(0xAA), ipa(ip)),
+            remote_mac_ip_view(0xAA, ip, Some(0)),
+        );
+    }
+    log.lock().await.clear();
+
+    observe_test(
+        learned(11),
+        &mut state,
+        &instances,
+        &rib_tx,
+        &metrics,
+        &counts,
+    )
+    .await;
+
+    let actions = log.lock().await.clone();
+    assert_eq!(
+        actions,
+        vec![
+            RibActionWithSeq::Inject(macip_key_with(100, 0xAA, Some("192.0.2.10")), Some(1)),
+            RibActionWithSeq::Inject(macip_key_with(100, 0xAA, Some("192.0.2.11")), Some(1)),
+        ],
+        "port move must re-Inject every MAC+IP route at seq+1 and nothing else"
+    );
+    assert_duplicate_mac_moves(&metrics, 100, 0xAA, 1);
+
+    // Same port again: AF_BRIDGE churn, not a move.
+    observe_test(
+        learned(11),
+        &mut state,
+        &instances,
+        &rib_tx,
+        &metrics,
+        &counts,
+    )
+    .await;
+    assert_eq!(
+        log.lock().await.len(),
+        2,
+        "re-learn on the same port must not re-emit"
+    );
+    assert_duplicate_mac_moves(&metrics, 100, 0xAA, 1);
+}
+
+/// Pending IPs drained by one `Learned` are one MAC event: the
+/// duplicate-MAC detector counts a single move even when several of
+/// those IPs have remote contenders.
+#[tokio::test]
+async fn learned_with_multiple_pending_ips_records_one_duplicate_mac_move() {
+    let instances = instance_table(100);
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let (log, _responder) = rib_capture_responder_with_seq(rib_rx);
+    let metrics = BgpMetrics::new();
+    let counts = OriginatedLocalMacCounts::default();
+    let mut state = originator_state(&instances);
+
+    for ip in ["192.0.2.10", "192.0.2.11"] {
+        state.remote_mac_ip_view.insert(
+            (vni(100), mac(0xAA), ipa(ip)),
+            remote_mac_ip_view(0xAA, ip, Some(0)),
+        );
+        // MAC not local yet: parked in pending_ip_bindings.
+        observe_test(
+            LocalMacObservation::IpAdded {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ip: ipa(ip),
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+    }
+    assert!(log.lock().await.is_empty(), "parked IPs must not originate");
+
+    observe_test(
+        LocalMacObservation::Learned {
+            vni: vni(100),
+            mac: mac(0xAA),
+            ifindex: 10,
+        },
+        &mut state,
+        &instances,
+        &rib_tx,
+        &metrics,
+        &counts,
+    )
+    .await;
+
+    let actions = log.lock().await.clone();
+    assert_eq!(
+        actions,
+        vec![
+            RibActionWithSeq::Inject(macip_key_with(100, 0xAA, Some("192.0.2.10")), Some(1)),
+            RibActionWithSeq::Inject(macip_key_with(100, 0xAA, Some("192.0.2.11")), Some(1)),
+        ],
+        "both pending IPs originate above the remote contender"
+    );
+    assert_duplicate_mac_moves(&metrics, 100, 0xAA, 1);
+}
+
 /// Sticky pass-through to MAC+IP: a MAC listed in
 /// `[[evpn_instances]].sticky_macs` originates the MAC+IP Type 2
 /// with the RFC 7432 §15.4 sticky bit set on its MAC Mobility

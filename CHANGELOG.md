@@ -177,6 +177,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- EVPN: a local bridge-port move of a MAC advertised as MAC+IP now
+  re-advertises every (MAC, IP) Type 2 route for that MAC with the MAC
+  Mobility sequence incremented (RFC 9721 §5.1/§6.2); such moves were
+  previously not signalled. Duplicate-MAC accounting now counts one move per
+  MAC event instead of one per IP.
+
 - Prometheus metric help strings and runtime `warn` messages no longer carry
   internal tracker identifiers; the behavioral explanation is kept and metric
   names are unchanged. The public-text checker now also covers exported
@@ -494,6 +500,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Upgrade notes
 
+- **EVPN local port moves now re-advertise MAC+IP routes:** when a MAC that
+  is advertised as MAC+IP moves between local bridge ports, peers receive one
+  additional Type 2 per IP bound to that MAC, each carrying the incremented
+  MAC Mobility sequence. Because such a move now counts as one duplicate-MAC
+  move (rather than none), a multi-IP MAC that flaps between local ports
+  reaches the `duplicate_mac_detection` threshold where it previously did
+  not; a MAC learned with several pending IPs under remote contention now
+  counts one move where it previously counted one per IP, so that shape trips
+  suppression later than before.
 - **Dead prefix-length ranges are now load errors:** a TOML policy prefix
   entry or an `.rpol` prefix-set member whose `le` is below the prefix length
   (`10.0.0.0/24 le 16`) or whose `ge` exceeds `le` (`10.0.0.0/24 ge 28 le 26`)
