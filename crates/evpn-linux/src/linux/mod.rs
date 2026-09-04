@@ -943,7 +943,7 @@ fn map_nexthop_error(e: nexthop_raw::NexthopError) -> DataplaneError {
 }
 
 /// Classify a positive errno from the nexthop netlink socket. Mirrors
-/// the dispatch in [`crate::linux::fdb::errno_to_dataplane_error`] so
+/// the dispatch in `crate::linux::fdb::errno_to_dataplane_error` so
 /// transient kernel errors (`EBUSY` / `ENOMEM` / etc.) stay
 /// `FailureClass::Transient` instead of getting trapped in the
 /// actor's permanent-failure suppression — a blanket

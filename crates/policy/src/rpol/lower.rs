@@ -1614,7 +1614,7 @@ fn rhs_ident(rhs: &Rhs) -> &str {
     }
 }
 
-/// Language spelling → [`RouteFamily`] (the inverse of
+/// Language spelling → [`crate::engine::RouteFamily`] (the inverse of
 /// `RouteFamily::as_str`; members pinned by `FAMILY_MEMBERS`).
 pub(super) fn family_value(name: &str) -> crate::engine::RouteFamily {
     use crate::engine::RouteFamily;

@@ -24,7 +24,7 @@ gate:
     python3 scripts/check-metric-consumers.py
     cargo clippy --locked --workspace --all-targets -- -D warnings
     cargo test --locked --workspace
-    cargo doc --locked --workspace --lib --no-deps
+    cargo doc --locked --workspace --lib --no-deps --document-private-items
     cargo doc --locked -p rustbgpd --bin rustbgpd --no-deps
     cargo doc --locked -p rustbgpctl --bin rbgp --no-deps
 

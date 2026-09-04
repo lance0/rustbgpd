@@ -139,7 +139,7 @@ impl LocalMacIpOriginationState {
     /// Should the rendered Inject carry a MAC Mobility extcomm? Same
     /// rule as [`crate::origination::LocalMacOriginator`]: emit whenever a remote
     /// contender has been observed, sticky is set, or `our_seq > 0`.
-    /// See [`crate::origination::LocalMacOriginationState::rendered_seq`]
+    /// See `crate::origination::LocalMacOriginationState::rendered_seq`
     /// for the rationale on the `our_seq > 0` case.
     fn rendered_seq(&self) -> Option<u32> {
         if self.last_seen_remote_seq.is_some() || self.sticky || self.our_seq > 0 {

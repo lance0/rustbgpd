@@ -3,7 +3,7 @@
 //! The route-bearing maps used to store ~130-byte route values inline in
 //! hashbrown bucket arrays, paying the table's power-of-two capacity slack
 //! per value (the dominant heap cost in the 2026-07 dhat re-baseline).
-//! [`RouteSlab`] stores the bodies densely in a `Vec` behind `u32` handles,
+//! [`crate::slab::RouteSlab`] stores the bodies densely in a `Vec` behind `u32` handles,
 //! so the maps and prefix-trie indexes only carry 4-byte handles.
 //!
 //! `Option<T>` costs nothing for the stored route types: they all carry a

@@ -54,7 +54,7 @@ pub(crate) struct BridgeLink {
     /// instance, if exactly one exists. `None` indicates either no
     /// VXLAN port or multiple competing ports — `probe` reports the
     /// instance `NotReady` in that case. The presence of multiple
-    /// ports is detected by [`vxlan_attach_count`], not by
+    /// ports is detected by [`Self::vxlan_attach_count`], not by
     /// [`Option<KernelVxlanInfo>`] alone.
     pub vxlan: Option<KernelVxlanInfo>,
     /// Every VXLAN member attached to this bridge. Legacy

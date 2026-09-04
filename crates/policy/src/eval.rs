@@ -134,7 +134,7 @@ pub enum EvalErrorKind {
 
 /// One evaluation error with its blame context (LAN-301): the kind
 /// plus the failing policy/term names, as the live walk resolved them.
-/// Carried on [`PolicyEvaluation`](crate::engine::PolicyEvaluation)
+/// Carried on [`PolicyEvaluation`]
 /// (error path only — the hot path never builds one) and retained per
 /// chain as [`PolicyHitCounters::last_error`] for the stats surface.
 #[derive(Debug, Clone, PartialEq, Eq)]

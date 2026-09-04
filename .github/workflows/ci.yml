@@ -328,7 +328,7 @@ jobs:
         env:
           RUSTBGPD_V064_VALIDATOR: ${{ runner.temp }}/rustbgpd-v064/rustbgpd-v0.64.0
       - run: cargo test --locked -p rustbgpd-wire --features tokio-codec
-      - run: cargo doc --locked --workspace --lib --no-deps
+      - run: cargo doc --locked --workspace --lib --no-deps --document-private-items
         env:
           RUSTDOCFLAGS: "-D warnings"
       - run: cargo doc --locked -p rustbgpd --bin rustbgpd --no-deps

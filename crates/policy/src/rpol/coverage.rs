@@ -4,7 +4,7 @@
 //! Coverage is pure attribution — no new evaluation machinery. Every
 //! `expect` in a `test` block already walks its instantiated policy
 //! through the IR evaluator; the coverage pass re-runs each walk
-//! through [`CompiledChain::evaluate_recording_coverage`] and
+//! through [`crate::ir::CompiledChain::evaluate_recording_coverage`] and
 //! aggregates, per source term, two distinct facts:
 //!
 //! - **evaluated** — the walk reached the term's guard at all. A term

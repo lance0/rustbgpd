@@ -66,7 +66,7 @@ pub(crate) fn write_allocator(conn: &Connection, new_value: u64) -> Result<(), E
 }
 
 /// In-memory allocator handed across calls within a single
-/// [`crate::storage::Store::append_batch_blocking`] transaction.
+/// `crate::storage::append_batch_blocking` transaction.
 ///
 /// Construction reads the persisted value; [`Self::next`] mints the
 /// next `event_id`; [`Self::finalize`] persists the new high-water

@@ -55,7 +55,8 @@ just --list
 The recipes intentionally expose their direct commands:
 
 - `just gate` runs formatting, lightweight repository contracts, strict
-  workspace Clippy, the full workspace tests, and library and binary docs.
+  workspace Clippy, the full workspace tests, and library docs (private items
+  included) and binary docs.
   This is the broad local baseline and can take several minutes on a cold
   target directory.
 - `just gate-rib` compiles the feature-gated RIB, transport, and API benchmark

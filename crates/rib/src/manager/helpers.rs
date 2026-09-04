@@ -299,7 +299,7 @@ pub(super) fn validate_route_rpki(route: &crate::route::Route, table: &VrpTable)
 /// only (distribution and graceful-restart revalidation of unicast
 /// routes), so the §6.2 precondition is satisfied by construction. If
 /// non-unicast routes are ever routed through this helper, callers must
-/// gate via [`ValidationSnapshot::validate_aspa`], which carries the
+/// gate via [`rustbgpd_rpki::ValidationSnapshot::validate_aspa`], which carries the
 /// explicit family check.
 pub(super) fn validate_route_aspa(
     route: &crate::route::Route,
