@@ -447,17 +447,9 @@ pub(crate) fn spawn_store(
 ) -> Result<(StoreHandle, JoinHandle<()>, StorageInit), EventHistoryError> {
     let init = open_with_recovery(&path, synchronous)?;
     let (tx, rx) = mpsc::channel(capacity);
-    let path_clone = path.clone();
-    let boot_id_clone = daemon_boot_id.clone();
     let initial_allocator = init.initial_allocator;
     let join = tokio::task::spawn_blocking(move || {
-        run_storage_thread(
-            path_clone,
-            boot_id_clone,
-            initial_allocator,
-            synchronous,
-            rx,
-        );
+        run_storage_thread(&path, &daemon_boot_id, initial_allocator, synchronous, rx);
     });
     Ok((
         StoreHandle {
@@ -578,28 +570,27 @@ fn recover_after_quarantine(
     let quarantine_anchor = read_quarantine_allocator(stale);
     let sidecar_hint = read_sidecar(sidecar);
 
-    let fresh_anchor = match quarantine_anchor {
-        Some(v) => v,
-        None => {
-            // No authoritative anchor recoverable. If a stale file or
-            // sidecar exists, we KNOW prior IDs may have been issued —
-            // refusing here protects the never-reused promise. Caller
-            // decides what to do (required=true ⇒ fail-start,
-            // required=false ⇒ pass-through with degraded flag — see
-            // EventHistoryManager).
-            if stale.exists() || sidecar.exists() {
-                if let Some(sidecar_value) = sidecar_hint {
-                    warn!(
-                        sidecar_value,
-                        "ignoring sidecar allocator hint because it may lag committed events"
-                    );
-                }
-                return Err(EventHistoryError::PassThrough);
+    let fresh_anchor = if let Some(v) = quarantine_anchor {
+        v
+    } else {
+        // No authoritative anchor recoverable. If a stale file or
+        // sidecar exists, we KNOW prior IDs may have been issued —
+        // refusing here protects the never-reused promise. Caller
+        // decides what to do (required=true ⇒ fail-start,
+        // required=false ⇒ pass-through with degraded flag — see
+        // EventHistoryManager).
+        if stale.exists() || sidecar.exists() {
+            if let Some(sidecar_value) = sidecar_hint {
+                warn!(
+                    sidecar_value,
+                    "ignoring sidecar allocator hint because it may lag committed events"
+                );
             }
-            // Truly fresh install — no stale, no sidecar, no DB.
-            // Allocator starts at 0.
-            0
+            return Err(EventHistoryError::PassThrough);
         }
+        // Truly fresh install — no stale, no sidecar, no DB.
+        // Allocator starts at 0.
+        0
     };
 
     // Open (or create) the primary DB and seed its allocator to the
@@ -635,13 +626,13 @@ fn probe_open(path: &Path, synchronous: SynchronousMode) -> Result<u64, EventHis
 
 /// The dedicated storage thread loop. Runs on a `spawn_blocking` task.
 fn run_storage_thread(
-    path: PathBuf,
-    daemon_boot_id: Arc<str>,
+    path: &Path,
+    daemon_boot_id: &Arc<str>,
     initial_allocator: u64,
     synchronous: SynchronousMode,
     mut rx: mpsc::Receiver<StoreOp>,
 ) {
-    let mut conn = match Connection::open(&path) {
+    let mut conn = match Connection::open(path) {
         Ok(c) => c,
         Err(e) => {
             error!(error = %e, "storage thread failed to open DB; exiting");
@@ -671,12 +662,12 @@ fn run_storage_thread(
         "event history storage thread started"
     );
 
-    let sidecar = sidecar_path(&path);
+    let sidecar = sidecar_path(path);
 
     while let Some(op) = rx.blocking_recv() {
         match op {
             StoreOp::Append { envelopes, reply } => {
-                let outcome = append_batch_blocking(&mut conn, &path, envelopes, &daemon_boot_id);
+                let outcome = append_batch_blocking(&mut conn, path, &envelopes, daemon_boot_id);
                 let _ = reply.send(outcome);
             }
             StoreOp::Query {
@@ -714,7 +705,7 @@ fn run_storage_thread(
                 max_bytes,
                 reply,
             } => {
-                let outcome = retain_blocking(&mut conn, &path, max_events, max_bytes);
+                let outcome = retain_blocking(&mut conn, path, max_events, max_bytes);
                 let _ = reply.send(outcome);
             }
             StoreOp::FlushSidecar { reply } => {
@@ -745,7 +736,7 @@ fn run_storage_thread(
 fn append_batch_blocking(
     conn: &mut Connection,
     db_path: &Path,
-    envelopes: Vec<Arc<EventEnvelope>>,
+    envelopes: &[Arc<EventEnvelope>],
     daemon_boot_id: &Arc<str>,
 ) -> Result<AppendOutcome, EventHistoryError> {
     if envelopes.is_empty() {
@@ -780,7 +771,7 @@ fn append_batch_blocking(
         let mut insert_peer =
             txn.prepare("INSERT INTO event_peers (event_id, role, peer) VALUES (?1, ?2, ?3)")?;
 
-        for env in &envelopes {
+        for env in envelopes {
             let id = allocator.next()?;
             assigned_ids.push(id);
             // SQLite INTEGER is signed 64-bit; bind the event_id as i64 because
@@ -873,12 +864,13 @@ fn query_by_peer(
     }
     if filter.prefix.is_some() {
         let p = if category_str.is_some() { "?5" } else { "?4" };
-        sql.push_str(&format!(" AND e.prefix = {p}"));
+        sql.push_str(" AND e.prefix = ");
+        sql.push_str(p);
     }
     if filter.rd.is_some() {
         let extras = usize::from(category_str.is_some()) + usize::from(filter.prefix.is_some());
-        let p = format!("?{}", 4 + extras);
-        sql.push_str(&format!(" AND e.rd = {p}"));
+        sql.push_str(" AND e.rd = ?");
+        sql.push_str(&(4 + extras).to_string());
     }
     sql.push_str(" ORDER BY e.event_id ASC LIMIT ");
     sql.push_str(&limit.to_string());
@@ -904,7 +896,7 @@ fn query_by_peer(
     if let Some(r) = &filter.rd {
         bind.push(Box::new(r.clone()));
     }
-    let bind_refs: Vec<&dyn rusqlite::ToSql> = bind.iter().map(|b| b.as_ref()).collect();
+    let bind_refs: Vec<&dyn rusqlite::ToSql> = bind.iter().map(AsRef::as_ref).collect();
     let rows = stmt.query_map(rusqlite::params_from_iter(bind_refs), persisted_row_mapper)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
@@ -933,12 +925,13 @@ fn query_no_peer(
         } else {
             "?3"
         };
-        sql.push_str(&format!(" AND prefix = {p}"));
+        sql.push_str(" AND prefix = ");
+        sql.push_str(p);
     }
     if filter.rd.is_some() {
         let extras = usize::from(filter.category.is_some()) + usize::from(filter.prefix.is_some());
-        let p = format!("?{}", 3 + extras);
-        sql.push_str(&format!(" AND rd = {p}"));
+        sql.push_str(" AND rd = ?");
+        sql.push_str(&(3 + extras).to_string());
     }
     sql.push_str(" ORDER BY event_id ASC LIMIT ");
     sql.push_str(&limit.to_string());
@@ -957,21 +950,17 @@ fn query_no_peer(
     if let Some(r) = &filter.rd {
         bind.push(Box::new(r.clone()));
     }
-    let bind_refs: Vec<&dyn rusqlite::ToSql> = bind.iter().map(|b| b.as_ref()).collect();
+    let bind_refs: Vec<&dyn rusqlite::ToSql> = bind.iter().map(AsRef::as_ref).collect();
     let rows = stmt.query_map(rusqlite::params_from_iter(bind_refs), persisted_row_mapper)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
-/// SQLite's INTEGER column is signed 64-bit; we clamp at i64::MAX so
-/// a `u64::MAX` sentinel from query callers (e.g. "from_event_id=0,
-/// to_event_id=u64::MAX" for "all events") doesn't trip a ToSql
+/// SQLite's INTEGER column is signed 64-bit; we clamp at `i64::MAX` so
+/// a `u64::MAX` sentinel from query callers (e.g. `from_event_id=0,
+/// to_event_id=u64::MAX` for "all events") doesn't trip a `ToSql`
 /// conversion failure.
 fn clamp_event_id(value: u64) -> i64 {
-    if value > i64::MAX as u64 {
-        i64::MAX
-    } else {
-        value as i64
-    }
+    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 fn persisted_row_mapper(row: &rusqlite::Row<'_>) -> rusqlite::Result<PersistedEvent> {
@@ -981,8 +970,14 @@ fn persisted_row_mapper(row: &rusqlite::Row<'_>) -> rusqlite::Result<PersistedEv
         .ok_or_else(|| invalid_enum_error(2, "category", &category_raw))?;
     let severity = Severity::parse(&severity_raw)
         .ok_or_else(|| invalid_enum_error(11, "severity", &severity_raw))?;
+    // `event_id` is INTEGER NOT NULL and the allocator only issues positive
+    // ids, so a negative value is corruption; surface it the way rusqlite
+    // reports an out-of-range integral read instead of wrapping.
+    let event_id_raw: i64 = row.get(0)?;
+    let event_id = u64::try_from(event_id_raw)
+        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, event_id_raw))?;
     Ok(PersistedEvent {
-        event_id: row.get::<_, i64>(0)? as u64,
+        event_id,
         timestamp_ns: row.get(1)?,
         category,
         event_type: row.get(3)?,
@@ -1020,11 +1015,8 @@ fn retain_blocking(
     let mut outcome = RetentionOutcome::default();
 
     // 1. Count cap.
-    let total: u64 = conn
-        .query_row("SELECT COUNT(*) FROM events", [], |row| {
-            row.get::<_, i64>(0)
-        })?
-        .max(0) as u64;
+    let total: i64 = conn.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?;
+    let total = u64::try_from(total).unwrap_or(0);
     if total > max_events {
         let to_evict = (total - max_events).min(5000);
         outcome.evicted_count_cap = evict_oldest(conn, to_evict as usize)?;
@@ -1063,6 +1055,9 @@ fn evict_oldest(conn: &mut Connection, limit: usize) -> Result<usize, EventHisto
     if limit == 0 {
         return Ok(0);
     }
+    // Bind LIMIT as SQLite's signed 64-bit integer; callers cap the batch
+    // well below `i64::MAX`, so the fallback is never taken in practice.
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
     let txn = conn.transaction()?;
     // Delete from event_peers first (foreign keys are off; we own the
     // referential integrity).
@@ -1071,14 +1066,14 @@ fn evict_oldest(conn: &mut Connection, limit: usize) -> Result<usize, EventHisto
          WHERE event_id IN (
              SELECT event_id FROM events ORDER BY event_id ASC LIMIT ?1
          )",
-        params![limit as i64],
+        params![limit],
     )?;
     let deleted = txn.execute(
         "DELETE FROM events
          WHERE event_id IN (
              SELECT event_id FROM events ORDER BY event_id ASC LIMIT ?1
          )",
-        params![limit as i64],
+        params![limit],
     )?;
     txn.commit()?;
     Ok(deleted)
@@ -1089,14 +1084,14 @@ fn evict_oldest(conn: &mut Connection, limit: usize) -> Result<usize, EventHisto
 /// `events.db` → `events.db-wal` (not `events.db.db-wal` or
 /// `events.db-wal-wal`) and `events` (no extension) → `events-wal`.
 /// `path.with_extension(...)` REPLACES the extension, which gets it
-/// wrong in the no-extension case. Concatenate to the OsString
+/// wrong in the no-extension case. Concatenate to the `OsString`
 /// directly instead.
 fn file_size(path: &Path) -> u64 {
-    let main = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let main = std::fs::metadata(path).map_or(0, |m| m.len());
     let mut wal_os = path.as_os_str().to_os_string();
     wal_os.push("-wal");
     let wal = std::path::PathBuf::from(wal_os);
-    let wal_size = std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0);
+    let wal_size = std::fs::metadata(&wal).map_or(0, |m| m.len());
     main + wal_size
 }
 
@@ -1119,10 +1114,14 @@ fn oldest_event_id_blocking(conn: &Connection) -> Result<Option<u64>, EventHisto
         .query_row("SELECT MIN(event_id) FROM events", [], |r| r.get(0))
         .map_err(EventHistoryError::Sqlite)?;
     // `event_id` is stored as INTEGER NOT NULL on insert; values must
-    // be positive (the allocator skips 0). Cast through i64 only because
-    // SQLite's INTEGER column type is i64; the runtime invariant gives
-    // us a safe `as u64` cast.
-    Ok(row.map(|v| v as u64))
+    // be positive (the allocator skips 0). Read through i64 only because
+    // SQLite's INTEGER column type is i64; a negative value is corruption
+    // and surfaces as an out-of-range read instead of wrapping.
+    row.map(|v| {
+        u64::try_from(v)
+            .map_err(|_| EventHistoryError::Sqlite(rusqlite::Error::IntegralValueOutOfRange(0, v)))
+    })
+    .transpose()
 }
 
 #[cfg(test)]
