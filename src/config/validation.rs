@@ -757,6 +757,17 @@ impl Config {
                 validate_tcp_mss(&neighbor.address, mss)?;
             }
 
+            if let Some(reason) = neighbor
+                .md5_password
+                .as_deref()
+                .and_then(md5_password_length_error)
+            {
+                return Err(ConfigError::InvalidNeighborConfig {
+                    address: neighbor.address.clone(),
+                    field: "md5_password".to_string(),
+                    reason: reason.to_string(),
+                });
+            }
             if let Some(tcp_ao) = &neighbor.tcp_ao {
                 if neighbor.md5_password.is_some() {
                     return Err(ConfigError::InvalidNeighborConfig {
@@ -1016,11 +1027,13 @@ impl Config {
                         reason: format!("cache_servers[{i}]: expire_interval must be > 0"),
                     });
                 }
-                if let Some(password) = &server.md5_password
-                    && (password.is_empty() || password.len() > 80)
+                if let Some(reason) = server
+                    .md5_password
+                    .as_deref()
+                    .and_then(md5_password_length_error)
                 {
                     return Err(ConfigError::InvalidRpkiConfig {
-                        reason: format!("cache_servers[{i}]: md5_password must be 1..=80 bytes"),
+                        reason: format!("cache_servers[{i}]: {reason}"),
                     });
                 }
                 if let Some(tcp_ao) = &server.tcp_ao {
@@ -2726,6 +2739,18 @@ fn validate_tcp_mss(address: &str, mss: u16) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// Kernel key ceiling (`TCP_MD5SIG_MAXKEYLEN`); TCP-AO keys share the same 80-byte bound here.
+const TCP_KEY_MAX_LEN: usize = 80;
+
+/// The kernel `TCP_MD5SIG` key bound (`TCP_MD5SIG_MAXKEYLEN`): the transport
+/// refuses an empty key and truncates nothing, so an out-of-range password is
+/// a load error rather than a socket-setup failure. Byte length, like the
+/// kernel copy.
+fn md5_password_length_error(password: &str) -> Option<&'static str> {
+    (password.is_empty() || password.len() > TCP_KEY_MAX_LEN)
+        .then_some("md5_password must be 1..=80 bytes")
+}
+
 fn validate_tcp_ao_key(address: &str, tcp_ao: &TcpAoConfig) -> Result<(), ConfigError> {
     let key_len = tcp_ao.key.len();
     if key_len == 0 {
@@ -2735,11 +2760,11 @@ fn validate_tcp_ao_key(address: &str, tcp_ao: &TcpAoConfig) -> Result<(), Config
             reason: "must not be empty".to_string(),
         });
     }
-    if key_len > 80 {
+    if key_len > TCP_KEY_MAX_LEN {
         return Err(ConfigError::InvalidNeighborConfig {
             address: address.to_string(),
             field: "tcp_ao.key".to_string(),
-            reason: "must be 80 bytes or fewer".to_string(),
+            reason: format!("must be {TCP_KEY_MAX_LEN} bytes or fewer"),
         });
     }
 
@@ -2824,6 +2849,10 @@ fn validate_max_prefix_modes(
     clippy::too_many_arguments,
     reason = "mirrors resolve_chain's namespace threading"
 )]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one pass over every inheritable peer-group field keeps the neighbor and group checks side by side"
+)]
 fn validate_peer_group(
     name: &str,
     group: &PeerGroupConfig,
@@ -2845,6 +2874,17 @@ fn validate_peer_group(
     }
     if let Some(mss) = group.tcp_mss {
         validate_tcp_mss(&format!("peer_group.{name}"), mss)?;
+    }
+    if let Some(reason) = group
+        .md5_password
+        .as_deref()
+        .and_then(md5_password_length_error)
+    {
+        return Err(ConfigError::InvalidNeighborConfig {
+            address: format!("peer_group.{name}"),
+            field: "md5_password".to_string(),
+            reason: reason.to_string(),
+        });
     }
 
     let configured_families = (!group.families.is_empty())

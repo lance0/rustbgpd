@@ -179,6 +179,94 @@ ttl_security = true
 }
 
 #[test]
+fn neighbor_md5_password_length_is_bounded() {
+    let config = |password: &str| {
+        format!(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+md5_password = {password:?}
+"#
+        )
+    };
+    for bad in [String::new(), "k".repeat(81)] {
+        let err = parse(&config(&bad)).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                ConfigError::InvalidNeighborConfig { address, field, .. }
+                    if address == "10.0.0.2" && field == "md5_password"
+            ),
+            "{err}"
+        );
+        assert!(
+            err.to_string()
+                .contains("md5_password must be 1..=80 bytes"),
+            "{err}"
+        );
+    }
+    // 80 bytes is the kernel maximum and must still load.
+    let config = parse(&config(&"k".repeat(80))).unwrap();
+    assert_eq!(
+        config.neighbors[0].md5_password.as_deref().map(str::len),
+        Some(80)
+    );
+}
+
+#[test]
+fn peer_group_md5_password_length_is_bounded() {
+    let config = |password: &str| {
+        format!(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.secure]
+md5_password = {password:?}
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "secure"
+"#
+        )
+    };
+    for bad in [String::new(), "k".repeat(81)] {
+        let err = parse(&config(&bad)).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                ConfigError::InvalidNeighborConfig { address, field, .. }
+                    if address == "peer_group.secure" && field == "md5_password"
+            ),
+            "{err}"
+        );
+    }
+    let config = parse(&config(&"k".repeat(80))).unwrap();
+    let peers = config.to_peer_configs().unwrap();
+    assert_eq!(
+        peers[0].0.md5_password.as_ref().map(|s| s.as_ref().len()),
+        Some(80)
+    );
+}
+
+#[test]
 fn ttl_security_hops_inherit_override_and_require_enablement() {
     let inherited = r#"
 [global]
