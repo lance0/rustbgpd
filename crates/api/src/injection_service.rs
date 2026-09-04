@@ -867,9 +867,9 @@ fn flowspec_action_to_ec(
 }
 
 /// Parse an RFC 4364 Route Distinguisher from its display form:
-///   Type 0: "<asn-u16>:<assigned-u32>" — e.g. "65000:100"
-///   Type 1: "<ipv4>:<assigned-u16>"    — e.g. "10.0.0.1:100"
-///   Type 2: "<asn-u32>:<assigned-u16>" — e.g. "4200000000:100"
+///   Type 0: `"<asn-u16>:<assigned-u32>"` — e.g. "65000:100"
+///   Type 1: `"<ipv4>:<assigned-u16>"`    — e.g. "10.0.0.1:100"
+///   Type 2: `"<asn-u32>:<assigned-u16>"` — e.g. "4200000000:100"
 /// Heuristic: IPv4 form has 4 dot-separated octets before the colon;
 /// numeric > 65535 signals type 2; otherwise type 0.
 fn parse_rd(s: &str) -> Result<RouteDistinguisher, Status> {

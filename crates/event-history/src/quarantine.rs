@@ -39,8 +39,8 @@ const STALE_SUFFIX: &str = "stale";
 const SIDECAR_FILENAME: &str = "events.last_id";
 
 /// Return the path the events DB is quarantined to. `events.db` →
-/// `events.db.stale`. Matches [`stale_owned_state_path`] in
-/// `src/fib_runtime.rs`.
+/// `events.db.stale`. Matches `stale_owned_state_path` in the
+/// `rustbgpd` crate's `src/fib_runtime.rs`.
 #[must_use]
 pub(crate) fn stale_path(events_db: &Path) -> PathBuf {
     let mut p = events_db.to_path_buf();

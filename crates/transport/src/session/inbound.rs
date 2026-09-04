@@ -101,7 +101,7 @@ fn vpn_inner_prefix(prefix: &rustbgpd_wire::VpnPrefix) -> Prefix {
     }
 }
 /// Build the `(otc_value, as_path_string)` pair attached to an
-/// [`OtcRouteBlockedEvent`] for the ingress decision sites.
+/// [`crate::event_sink::OtcRouteBlockedEvent`] for the ingress decision sites.
 ///
 /// `otc_value` is `None` on the `malformed_length` path because the
 /// attribute could not be decoded. For both

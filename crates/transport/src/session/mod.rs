@@ -2351,7 +2351,8 @@ impl PeerSession {
     }
 
     /// Install a transport event sink for ADR-0072 structured event
-    /// publishing. Called by [`crate::handle::PeerHandle::spawn_with_event_sink`]
+    /// publishing. Called by
+    /// [`crate::handle::PeerHandle::spawn_with_event_sink_and_identity_and_lifecycle`]
     /// (and its inbound counterpart) before [`Self::run`] starts; the
     /// session task runs single-threaded so this `&mut` cannot race
     /// with publishes. Tests can also call this to install a

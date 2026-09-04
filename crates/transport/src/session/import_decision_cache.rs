@@ -23,7 +23,7 @@
 //!   `match`.
 //!
 //! Bound: per-peer LRU cap configured via `[policy.explain] cache_size`
-//! ([`super::super::DEFAULT_EXPLAIN_CACHE_SIZE`] = 4096). When the cap
+//! ([`DEFAULT_EXPLAIN_CACHE_SIZE`] = 4096). When the cap
 //! is reached, the least-recently-touched entry is pushed out; its key
 //! is recorded in a small lossy recent-eviction ring so a subsequent
 //! lookup returns `Evicted` rather than misleading `NotSeen`. The ring

@@ -278,7 +278,7 @@ struct ActorState {
     /// warns afresh.
     warned_stp_ac_gates: BTreeSet<String>,
     /// Retry schedule for ADR-0059 slice 3b `UpdateFdbNhgMembers`
-    /// ops, keyed by [`AliasGroupKey`]. Group-level ops have no
+    /// ops, keyed by [`crate::group_state::AliasGroupKey`]. Group-level ops have no
     /// natural `(VNI, MAC)` identity, so they need their own key
     /// space — without it, every group update within the same VNI
     /// would collide on a placeholder all-zeros MAC.
@@ -2250,7 +2250,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
     }
 
     /// LAN-290 reserved-NHID-range contract enforcement: if `nh` is a
-    /// [`KernelNexthopKind::ShapeConflict`] (an in-range kernel object
+    /// [`crate::dataplane::KernelNexthopKind::ShapeConflict`] (an in-range kernel object
     /// not shaped like anything rustbgpd writes — i.e. a co-resident
     /// netlink writer violated the single-writer contract on our
     /// documented ranges, see `docs/deployment.md`), fail closed for
@@ -6371,7 +6371,7 @@ fn safe_orphan_vlan_upper_stamp_for_owner(
 
 /// Build the per-IP-VRF status block for a [`DataplaneReport`] (Gate 9).
 ///
-/// Joins the operator-facing handle from the [`IpVrfTable`] with the
+/// Joins the operator-facing handle from the [`rustbgpd_evpn::ip_vrf::IpVrfTable`] with the
 /// live [`IpVrfStatus`] verdict from the reconcile actor's per-pass
 /// `probe_ip_vrfs` call. Empty when no IP-VRFs are configured —
 /// `probe_ip_vrfs` short-circuits without a netlink dump in that case.
@@ -6519,8 +6519,8 @@ fn note_single_active_swap(
 }
 
 /// ADR-0059 slice 3b coordinator: apply an FDB-NHG op by calling
-/// [`NexthopOps`] methods in ADR §5 invariant 1+2 order, updating
-/// the allocator + [`GroupOwnedMap`] state.
+/// [`crate::dataplane::NexthopOps`] methods in ADR §5 invariant 1+2 order, updating
+/// the allocator + [`crate::group_state::GroupOwnedMap`] state.
 ///
 /// Free function (not a method) so it can borrow `dataplane` and
 /// `state` mutably from disjoint fields of the actor.

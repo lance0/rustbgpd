@@ -1,7 +1,7 @@
 //! Family-split prefix map.
 //!
 //! `prefix_trie::PrefixMap` is single-family, while the RIB keys its maps by the
-//! mixed-family [`Prefix`] enum. This wraps one IPv4 and one IPv6 trie behind the
+//! mixed-family [`rustbgpd_wire::Prefix`] enum. This wraps one IPv4 and one IPv6 trie behind the
 //! `HashMap<Prefix, V>` subset the RIB's prefix indexes actually use
 //! (`entry_or_default` / `get` / `get_mut` / `remove` / `clear`).
 //!

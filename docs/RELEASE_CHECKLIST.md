@@ -24,7 +24,7 @@ diff actually ran before tagging.
       upgrade receipt still match their machine sources.
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings`
 - [ ] `cargo test --workspace`
-- [ ] `cargo doc --workspace --lib --no-deps`,
+- [ ] `cargo doc --workspace --lib --no-deps --document-private-items`,
       `cargo doc -p rustbgpd --bin rustbgpd --no-deps`, and
       `cargo doc -p rustbgpctl --bin rbgp --no-deps` (warning denial comes from
       `.cargo/config.toml` `build.rustdocflags` — don't set a different

@@ -8,7 +8,7 @@
 //!
 //! The async side gets a [`StoreHandle`] — a thin wrapper that pushes
 //! ops into the channel and `await`s the reply. The actor loop in
-//! [`crate::lib`] holds the only [`StoreHandle`]; broadcast subscribers
+//! [`crate::run_actor`] holds the only [`StoreHandle`]; broadcast subscribers
 //! never call into storage.
 
 use std::io;

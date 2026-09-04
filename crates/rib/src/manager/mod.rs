@@ -1025,7 +1025,7 @@ pub(in crate::manager) fn policy_transition_slice_end(
 pub(in crate::manager) const POLICY_TRANSITION_MEMBER_SLICE: usize = 8;
 /// Stride of validated members committed between wall-clock checks inside
 /// one commit-kind actor poll (matches `QUERY_BUDGET_PER_CHUNK`). The poll
-/// keeps flushing strides until [`COMMIT_FLUSH_POLL_BUDGET`] elapses, then
+/// keeps flushing strides until [`FLUSH_POLL_BUDGET`] elapses, then
 /// parks so the readiness lane gets its seam.
 pub(in crate::manager) const COMMIT_MEMBERS_PER_POLL: usize = 8;
 /// Wall-clock budget for one paced actor poll — a commit-kind member flush

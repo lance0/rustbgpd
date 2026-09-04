@@ -159,7 +159,7 @@ def check(root: Path) -> list[str]:
     core_tests = jobs.get("core_tests", "")
     for command in (
         "cargo test --locked --workspace",
-        "cargo doc --locked --workspace --lib --no-deps",
+        "cargo doc --locked --workspace --lib --no-deps --document-private-items",
         "cargo doc --locked -p rustbgpd --bin rustbgpd --no-deps",
         "cargo doc --locked -p rustbgpctl --bin rbgp --no-deps",
     ):

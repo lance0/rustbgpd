@@ -287,6 +287,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `--lib`-only run documented an empty stub and cargo skipped every daemon
   module; one intra-doc link that pointed at a test-only item is now plain
   text.
+- The library run of the rustdoc gate now passes `--document-private-items`,
+  so doc comments on private items in the workspace library crates are checked
+  the way the binary runs already checked theirs. Twenty-eight doc comments
+  that the previous run never saw are corrected: twenty-one unresolved
+  intra-doc links (paths re-pointed, one of them at a renamed constant, or
+  plain text where the target is private to another module or lives in another
+  crate), six unclosed HTML tags in the route-distinguisher parser docs, and one
+  redundant explicit link target.
 
 ### Fixed
 
