@@ -3,7 +3,7 @@ use crate::connection::Connection;
 use crate::error::CliError;
 use crate::output::{
     self, JsonExplainAdvertisedRoute, JsonExplainModifications, JsonExplainReason,
-    JsonOrrExplainCandidate, JsonRouteSourceIdentity,
+    JsonOrrExplainCandidate, JsonRouteSourceIdentity, outln,
 };
 use crate::pager;
 use crate::proto::injection_service_client::InjectionServiceClient;
@@ -278,7 +278,7 @@ fn print_route_count(total_count: u64, json: bool) -> Result<(), CliError> {
     if json {
         output::print_json_pretty(&route_count_json(total_count))
     } else {
-        println!("{}", route_count_message(total_count));
+        outln!("{}", route_count_message(total_count))?;
         Ok(())
     }
 }
@@ -464,9 +464,9 @@ fn print_routes(
     if json {
         output::print_json_pretty(&JsonRoutes(routes))?;
     } else if routes.is_empty() {
-        println!("No routes");
+        outln!("No routes")?;
     } else {
-        output::print_route_table(routes, show_age);
+        output::print_route_table(routes, show_age)?;
     }
     Ok(())
 }
@@ -534,20 +534,24 @@ fn print_bgpls_routes(routes: &[BgpLsRouteEntry], json: bool) -> Result<(), CliE
     if json {
         output::print_json_pretty(&JsonBgpLsRoutes(routes))?;
     } else if routes.is_empty() {
-        println!("No BGP-LS routes");
+        outln!("No BGP-LS routes")?;
     } else {
-        println!(
+        outln!(
             "{:<12} {:<18} {:<12} {:<18} {:<18} Payload",
-            "Family", "NLRI Type", "RD", "Next Hop", "Peer"
-        );
-        println!("{}", "-".repeat(104));
+            "Family",
+            "NLRI Type",
+            "RD",
+            "Next Hop",
+            "Peer"
+        )?;
+        outln!("{}", "-".repeat(104))?;
         for route in routes {
             let rd = if route.route_distinguisher.is_empty() {
                 "-".to_string()
             } else {
                 hex_lower(&route.route_distinguisher)
             };
-            println!(
+            outln!(
                 "{:<12} {:<18} {:<12} {:<18} {:<18} {}",
                 bgpls_family_display(route),
                 bgpls_type_display(route),
@@ -555,7 +559,7 @@ fn print_bgpls_routes(routes: &[BgpLsRouteEntry], json: bool) -> Result<(), CliE
                 route.next_hop,
                 route.peer_address,
                 hex_lower(&route.payload)
-            );
+            )?;
         }
     }
     Ok(())
@@ -565,13 +569,17 @@ fn print_vpn_routes(routes: &[VpnRouteEntry], json: bool) -> Result<(), CliError
     if json {
         output::print_json_pretty(&JsonVpnRoutes(routes))?;
     } else if routes.is_empty() {
-        println!("No VPN routes");
+        outln!("No VPN routes")?;
     } else {
-        println!(
+        outln!(
             "{:<16} {:<24} {:<14} {:<18} {:<18} Route Targets",
-            "RD", "Prefix", "Labels", "Next Hop", "Peer"
-        );
-        println!("{}", "-".repeat(110));
+            "RD",
+            "Prefix",
+            "Labels",
+            "Next Hop",
+            "Peer"
+        )?;
+        outln!("{}", "-".repeat(110))?;
         for route in routes {
             let labels = route
                 .labels
@@ -579,7 +587,7 @@ fn print_vpn_routes(routes: &[VpnRouteEntry], json: bool) -> Result<(), CliError
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join(",");
-            println!(
+            outln!(
                 "{:<16} {:<24} {:<14} {:<18} {:<18} {}",
                 route.route_distinguisher_str,
                 route.prefix,
@@ -587,7 +595,7 @@ fn print_vpn_routes(routes: &[VpnRouteEntry], json: bool) -> Result<(), CliError
                 route.next_hop,
                 route.peer_address,
                 vpn_route_targets(route).join(" ")
-            );
+            )?;
         }
     }
     Ok(())
@@ -597,13 +605,16 @@ fn print_labeled_routes(routes: &[LabeledRouteEntry], json: bool) -> Result<(), 
     if json {
         output::print_json_pretty(&JsonLabeledRoutes(routes))?;
     } else if routes.is_empty() {
-        println!("No labeled routes");
+        outln!("No labeled routes")?;
     } else {
-        println!(
+        outln!(
             "{:<24} {:<14} {:<18} {:<18} Path ID",
-            "Prefix", "Labels", "Next Hop", "Peer"
-        );
-        println!("{}", "-".repeat(88));
+            "Prefix",
+            "Labels",
+            "Next Hop",
+            "Peer"
+        )?;
+        outln!("{}", "-".repeat(88))?;
         for route in routes {
             let labels = route
                 .labels
@@ -611,10 +622,14 @@ fn print_labeled_routes(routes: &[LabeledRouteEntry], json: bool) -> Result<(), 
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join(",");
-            println!(
+            outln!(
                 "{:<24} {:<14} {:<18} {:<18} {}",
-                route.prefix, labels, route.next_hop, route.peer_address, route.path_id
-            );
+                route.prefix,
+                labels,
+                route.next_hop,
+                route.peer_address,
+                route.path_id
+            )?;
         }
     }
     Ok(())
@@ -624,27 +639,30 @@ fn print_rtc_routes(routes: &[RtcRouteEntry], json: bool) -> Result<(), CliError
     if json {
         output::print_json_pretty(&JsonRtcRoutes(routes))?;
     } else if routes.is_empty() {
-        println!("No RTC routes");
+        outln!("No RTC routes")?;
     } else {
-        println!(
+        outln!(
             "{:<10} {:<20} {:<5} {:<18} From-Peer",
-            "Origin-AS", "Route-Target", "Len", "Next-Hop"
-        );
-        println!("{}", "-".repeat(76));
+            "Origin-AS",
+            "Route-Target",
+            "Len",
+            "Next-Hop"
+        )?;
+        outln!("{}", "-".repeat(76))?;
         for route in routes {
             let (origin_as, route_target) = if route.is_default {
                 ("-".to_string(), "default".to_string())
             } else {
                 (route.origin_as.to_string(), route.route_target.clone())
             };
-            println!(
+            outln!(
                 "{:<10} {:<20} {:<5} {:<18} {}",
                 origin_as,
                 route_target,
                 route.prefix_len,
                 route.next_hop,
                 rtc_from_peer(route)
-            );
+            )?;
         }
     }
     Ok(())
@@ -1097,18 +1115,18 @@ fn print_blackhole_discards(
             discards.iter().map(blackhole_discard_to_json).collect();
         output::print_json_pretty(&out)?;
     } else if discards.is_empty() {
-        println!("No BLACKHOLE discard routes");
+        outln!("No BLACKHOLE discard routes")?;
     } else {
-        println!("{:<43} {:<18} {:<10} Reason", "Prefix", "Peer", "State");
-        println!("{}", "-".repeat(88));
+        outln!("{:<43} {:<18} {:<10} Reason", "Prefix", "Peer", "State")?;
+        outln!("{}", "-".repeat(88))?;
         for d in discards {
-            println!(
+            outln!(
                 "{:<43} {:<18} {:<10} {}",
                 format!("{}/{}", d.prefix, d.prefix_length),
                 d.peer_address,
                 blackhole_state_label(d.state),
                 d.reason
-            );
+            )?;
         }
     }
     Ok(())
@@ -1134,15 +1152,19 @@ fn print_fib_routes(
             output::print_json_pretty(&routes)?;
         }
     } else if resp.routes.is_empty() {
-        println!("{}", empty_fib_routes_message(resp, include_page_meta));
+        outln!("{}", empty_fib_routes_message(resp, include_page_meta))?;
     } else {
-        println!(
+        outln!(
             "{:<16} {:<10} {:<43} {:<39} {:<10} Reason",
-            "Table", "Metric", "Prefix", "Next hop", "State"
-        );
-        println!("{}", "-".repeat(132));
+            "Table",
+            "Metric",
+            "Prefix",
+            "Next hop",
+            "State"
+        )?;
+        outln!("{}", "-".repeat(132))?;
         for r in &resp.routes {
-            println!(
+            outln!(
                 "{:<16} {:<10} {:<43} {:<39} {:<10} {}",
                 r.table_name,
                 r.metric,
@@ -1150,16 +1172,16 @@ fn print_fib_routes(
                 fib_next_hop_display(r),
                 fib_state_label(r.state),
                 r.reason
-            );
+            )?;
         }
     }
     if include_page_meta && !json {
-        println!("Total matching rows: {}", resp.total_count);
+        outln!("Total matching rows: {}", resp.total_count)?;
         if !resp.next_page_token.is_empty() {
-            println!("Next page token: {}", resp.next_page_token);
+            outln!("Next page token: {}", resp.next_page_token)?;
         }
         for sampling in fib_sampling_metadata(&resp.routes) {
-            println!(
+            outln!(
                 "Sampling: table={} metric={} reason={} sampled={} suppressed={} total={} max_routes={} sample_limit={} complete={}",
                 sampling.table_name,
                 sampling.metric,
@@ -1170,7 +1192,7 @@ fn print_fib_routes(
                 sampling.max_routes,
                 sampling.sample_limit,
                 sampling.complete
-            );
+            )?;
         }
     }
     Ok(())
@@ -1413,41 +1435,44 @@ fn print_explain_advertised(
             ExplainDecision::UnsupportedFamily => "Unsupported Family",
             ExplainDecision::Unspecified => "Unspecified",
         };
-    println!(
+    outln!(
         "{decision}: {}/{} to {}",
-        explain.prefix, explain.prefix_length, explain.peer_address
-    );
+        explain.prefix,
+        explain.prefix_length,
+        explain.peer_address
+    )?;
     if !explain.rd.is_empty() {
-        println!("RD:         {}", explain.rd);
+        outln!("RD:         {}", explain.rd)?;
     }
     if let Some(source) = &explain.source {
-        println!(
+        outln!(
             "Source path: {} inbound path ID {}",
-            source.peer_address, source.path_id
-        );
+            source.peer_address,
+            source.path_id
+        )?;
     }
     if let Some(group_id) = explain.update_group_id {
-        println!("Update group: {group_id} (shared staging; split horizon applied per member)");
+        outln!("Update group: {group_id} (shared staging; split horizon applied per member)")?;
     }
     if !explain.route_peer_address.is_empty() {
-        println!("Route peer: {}", explain.route_peer_address);
+        outln!("Route peer: {}", explain.route_peer_address)?;
     }
     if !explain.route_type.is_empty() {
-        println!("Route type: {}", explain.route_type);
+        outln!("Route type: {}", explain.route_type)?;
     }
     if !explain.next_hop.is_empty() {
-        println!("Next hop:   {}", explain.next_hop);
+        outln!("Next hop:   {}", explain.next_hop)?;
     }
     if let Some(line) = advertised_path_id_line(explain) {
-        println!("{line}");
+        outln!("{line}")?;
     }
     if !explain.orr_vantage.is_empty() {
-        println!("ORR vantage: {}", explain.orr_vantage);
+        outln!("ORR vantage: {}", explain.orr_vantage)?;
     }
     if !explain.orr_candidates.is_empty() {
-        println!("ORR candidates (per-vantage best first):");
+        outln!("ORR candidates (per-vantage best first):")?;
         for candidate in &explain.orr_candidates {
-            println!(
+            outln!(
                 "- {} next-hop {} cost={}{}",
                 candidate.peer_address,
                 candidate.next_hop,
@@ -1457,11 +1482,11 @@ fn print_explain_advertised(
                 } else {
                     ""
                 }
-            );
+            )?;
         }
     }
     if !explain.gates.is_empty() {
-        println!("Gate ladder (live evaluation order):");
+        outln!("Gate ladder (live evaluation order):")?;
         for step in &explain.gates {
             let mark = match ExportGateVerdict::try_from(step.verdict)
                 .unwrap_or(ExportGateVerdict::Unspecified)
@@ -1470,19 +1495,19 @@ fn print_explain_advertised(
                 ExportGateVerdict::Stop => "STOP",
                 ExportGateVerdict::NotApplicable | ExportGateVerdict::Unspecified => "n/a ",
             };
-            println!("  [{mark}] {:<14} {}", step.gate, step.detail);
+            outln!("  [{mark}] {:<14} {}", step.gate, step.detail)?;
         }
     }
     if explain.already_advertised {
-        println!(
+        outln!(
             "Adj-RIB-Out in sync: identical route already advertised - nothing would be \
              re-sent; remote acceptance is not observable"
-        );
+        )?;
     }
     if !explain.reasons.is_empty() {
-        println!("Reasons:");
+        outln!("Reasons:")?;
         for reason in &explain.reasons {
-            println!("- {}: {}", reason.code, reason.message);
+            outln!("- {}: {}", reason.code, reason.message)?;
         }
     }
     if let Some(mods) = explain.modifications.as_ref()
@@ -1498,70 +1523,70 @@ fn print_explain_advertised(
             || mods.as_path_prepend_asn.is_some()
             || mods.as_path_prepend_count.is_some())
     {
-        println!("Modifications:");
+        outln!("Modifications:")?;
         if let Some(value) = mods.set_local_pref {
-            println!("- set_local_pref: {value}");
+            outln!("- set_local_pref: {value}")?;
         }
         if let Some(value) = mods.set_med {
-            println!("- set_med: {value}");
+            outln!("- set_med: {value}")?;
         }
         if !mods.set_next_hop.is_empty() {
-            println!("- set_next_hop: {}", mods.set_next_hop);
+            outln!("- set_next_hop: {}", mods.set_next_hop)?;
         }
         if !mods.communities_add.is_empty() {
-            println!(
+            outln!(
                 "- communities_add: {}",
                 mods.communities_add
                     .iter()
                     .map(|c| output::format_community(*c))
                     .collect::<Vec<_>>()
                     .join(", ")
-            );
+            )?;
         }
         if !mods.communities_remove.is_empty() {
-            println!(
+            outln!(
                 "- communities_remove: {}",
                 mods.communities_remove
                     .iter()
                     .map(|c| output::format_community(*c))
                     .collect::<Vec<_>>()
                     .join(", ")
-            );
+            )?;
         }
         if !mods.extended_communities_add.is_empty() {
-            println!(
+            outln!(
                 "- extended_communities_add: {}",
                 mods.extended_communities_add
                     .iter()
                     .map(|ec| format!("0x{ec:016x}"))
                     .collect::<Vec<_>>()
                     .join(", ")
-            );
+            )?;
         }
         if !mods.extended_communities_remove.is_empty() {
-            println!(
+            outln!(
                 "- extended_communities_remove: {}",
                 mods.extended_communities_remove
                     .iter()
                     .map(|ec| format!("0x{ec:016x}"))
                     .collect::<Vec<_>>()
                     .join(", ")
-            );
+            )?;
         }
         if !mods.large_communities_add.is_empty() {
-            println!(
+            outln!(
                 "- large_communities_add: {}",
                 mods.large_communities_add.join(", ")
-            );
+            )?;
         }
         if !mods.large_communities_remove.is_empty() {
-            println!(
+            outln!(
                 "- large_communities_remove: {}",
                 mods.large_communities_remove.join(", ")
-            );
+            )?;
         }
         if let (Some(asn), Some(count)) = (mods.as_path_prepend_asn, mods.as_path_prepend_count) {
-            println!("- as_path_prepend: {asn} x {count}");
+            outln!("- as_path_prepend: {asn} x {count}")?;
         }
     }
     Ok(())
@@ -1711,54 +1736,64 @@ fn print_explain_best_path(
         return Ok(());
     }
 
-    println!(
+    outln!(
         "Best-path explanation for {}/{}",
-        resp.prefix, resp.prefix_length
-    );
+        resp.prefix,
+        resp.prefix_length
+    )?;
     if !resp.peer_address.is_empty() {
-        println!(
+        outln!(
             "Scope:      peer {} (Add-Path send_max={})",
-            resp.peer_address, resp.add_path_send_max
-        );
+            resp.peer_address,
+            resp.add_path_send_max
+        )?;
     }
     if !resp.orr_vantage.is_empty() {
-        println!("ORR vantage: {}", resp.orr_vantage);
+        outln!("ORR vantage: {}", resp.orr_vantage)?;
     }
 
     if let Some(ref best) = resp.best_route {
-        println!(
+        outln!(
             "Best route: peer={}, next_hop={}, as_path={:?}",
-            best.peer_address, best.next_hop, best.as_path
-        );
+            best.peer_address,
+            best.next_hop,
+            best.as_path
+        )?;
     } else {
-        println!("No best route");
+        outln!("No best route")?;
         return Ok(());
     }
 
     if resp.best_reason == "only_path" {
-        println!("Selected:   only path for this prefix");
+        outln!("Selected:   only path for this prefix")?;
     } else if resp.best_reason_detail.is_empty() {
-        println!("Selected:   {}", resp.best_reason);
+        outln!("Selected:   {}", resp.best_reason)?;
     } else {
-        println!(
+        outln!(
             "Selected:   {} ({}) vs runner-up",
-            resp.best_reason, resp.best_reason_detail
-        );
+            resp.best_reason,
+            resp.best_reason_detail
+        )?;
     }
 
     if resp.candidates.is_empty() {
-        println!("No candidates");
+        outln!("No candidates")?;
         return Ok(());
     }
 
-    println!();
+    outln!()?;
     let peer_scoped = !resp.peer_address.is_empty();
     if peer_scoped {
-        println!(
+        outln!(
             "{:<18} {:<18} {:<22} {:<26} {:<8} {:<10} Adv-PathID",
-            "Peer", "Next Hop", "Reason", "Detail", "Result", "Multipath"
-        );
-        println!("{}", "-".repeat(118));
+            "Peer",
+            "Next Hop",
+            "Reason",
+            "Detail",
+            "Result",
+            "Multipath"
+        )?;
+        outln!("{}", "-".repeat(118))?;
         for c in &resp.candidates {
             if let Some(ref r) = c.route {
                 let advert = if c.advertised_path_id == 0 {
@@ -1766,7 +1801,7 @@ fn print_explain_best_path(
                 } else {
                     c.advertised_path_id.to_string()
                 };
-                println!(
+                outln!(
                     "{:<18} {:<18} {:<22} {:<26} {:<8} {:<10} {}",
                     r.peer_address,
                     r.next_hop,
@@ -1775,18 +1810,22 @@ fn print_explain_best_path(
                     c.vs_best_ordering,
                     c.multipath,
                     advert
-                );
+                )?;
             }
         }
     } else {
-        println!(
+        outln!(
             "{:<18} {:<18} {:<22} {:<26} {:<8} Multipath",
-            "Peer", "Next Hop", "Reason", "Detail", "Result"
-        );
-        println!("{}", "-".repeat(106));
+            "Peer",
+            "Next Hop",
+            "Reason",
+            "Detail",
+            "Result"
+        )?;
+        outln!("{}", "-".repeat(106))?;
         for c in &resp.candidates {
             if let Some(ref r) = c.route {
-                println!(
+                outln!(
                     "{:<18} {:<18} {:<22} {:<26} {:<8} {}",
                     r.peer_address,
                     r.next_hop,
@@ -1794,7 +1833,7 @@ fn print_explain_best_path(
                     c.vs_best_detail,
                     c.vs_best_ordering,
                     c.multipath
-                );
+                )?;
             }
         }
     }
@@ -2150,19 +2189,19 @@ fn print_rejected_routes(resp: &ListRejectedRoutesResponse, json: bool) -> Resul
         });
     }
     if !resp.retention_enabled {
-        println!(
+        outln!(
             "Rejected-route retention is disabled for {} ([policy.reject_retention] enabled = false)",
             resp.peer_address
-        );
+        )?;
         return Ok(());
     }
     if resp.routes.is_empty() {
-        println!("No rejected routes retained for {}", resp.peer_address);
+        outln!("No rejected routes retained for {}", resp.peer_address)?;
     } else {
         write_rejected_routes_table(&mut std::io::stdout().lock(), resp)?;
     }
     if let Some(notice) = rejected_routes_completeness_notice(resp) {
-        println!("{notice}");
+        outln!("{notice}")?;
     }
     Ok(())
 }

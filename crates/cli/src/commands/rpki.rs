@@ -185,7 +185,7 @@ pub async fn validate(
     if json {
         output::print_json_pretty(&to_json(&response))?;
     } else {
-        print!("{}", render_human(&response));
+        output::print_text(&render_human(&response))?;
     }
     Ok(())
 }
@@ -281,7 +281,7 @@ pub async fn caches(connection: Connection, json: bool) -> Result<(), CliError> 
     if json {
         output::print_json_pretty(&caches_json(&response))?;
     } else {
-        print!("{}", render_caches_human(&response));
+        output::print_text(&render_caches_human(&response))?;
     }
     Ok(())
 }

@@ -1,6 +1,6 @@
 use crate::connection::Connection;
 use crate::error::CliError;
-use crate::output::{self, JsonRouteEvent};
+use crate::output::{self, JsonRouteEvent, outln};
 use crate::proto::event_service_client::EventServiceClient;
 use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
@@ -92,7 +92,7 @@ fn print_event(event: &RouteEvent, json: bool) -> Result<(), CliError> {
     } else {
         format!(" reason={}", event.reason)
     };
-    println!(
+    outln!(
         "[{}] {} {} from {}{}{}{}{}{}",
         event.timestamp,
         output::colored_event_type(format_event_type(event.event_type)),
@@ -103,7 +103,7 @@ fn print_event(event: &RouteEvent, json: bool) -> Result<(), CliError> {
         reason,
         path_id_str,
         event_id_str,
-    );
+    )?;
     Ok(())
 }
 
@@ -637,7 +637,7 @@ fn print_bgp_event(event: &BgpEvent, json: bool) -> Result<(), CliError> {
         return Ok(());
     }
 
-    println!("{}", format_bgp_event_line(event));
+    outln!("{}", format_bgp_event_line(event))?;
     Ok(())
 }
 
@@ -1244,7 +1244,7 @@ fn print_empty_history(json: bool, what: &str) -> Result<(), CliError> {
         let stdout = std::io::stdout();
         write_empty_json_history(&mut stdout.lock())?;
     } else {
-        println!("No {what} events recorded");
+        outln!("No {what} events recorded")?;
     }
     Ok(())
 }

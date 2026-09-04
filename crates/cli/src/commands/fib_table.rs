@@ -10,7 +10,7 @@ use serde::Serialize;
 
 use crate::connection::Connection;
 use crate::error::CliError;
-use crate::output;
+use crate::output::{self, outln};
 use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
     DeleteFibTableRequest, FibTableConfig, ListFibTablesRequest, ListFibTablesResponse,
@@ -64,19 +64,22 @@ fn render(resp: &ListFibTablesResponse, json: bool) -> Result<(), CliError> {
         return Ok(());
     }
     if !resp.runtime_available {
-        println!(
+        outln!(
             "FIB reconciler not running (no [[fib_tables]] at startup, or non-Linux / netlink \
              unavailable); a restart is required to start it."
-        );
+        )?;
     }
     if resp.tables.is_empty() {
-        println!("No FIB tables configured");
+        outln!("No FIB tables configured")?;
         return Ok(());
     }
-    println!(
+    outln!(
         "{:<16} {:<9} {:<7} {:<24} MAX_ROUTES",
-        "NAME", "TABLE_ID", "METRIC", "FAMILIES"
-    );
+        "NAME",
+        "TABLE_ID",
+        "METRIC",
+        "FAMILIES"
+    )?;
     for t in &resp.tables {
         let families = if t.families.is_empty() {
             "(default)".to_string()
@@ -86,10 +89,14 @@ fn render(resp: &ListFibTablesResponse, json: bool) -> Result<(), CliError> {
         let max_routes = t
             .max_routes
             .map_or_else(|| "-".to_string(), |m| m.to_string());
-        println!(
+        outln!(
             "{:<16} {:<9} {:<7} {:<24} {}",
-            t.name, t.table_id, t.metric, families, max_routes
-        );
+            t.name,
+            t.table_id,
+            t.metric,
+            families,
+            max_routes
+        )?;
     }
     Ok(())
 }
@@ -144,10 +151,10 @@ pub async fn set(
     if json {
         render(&resp, true)?;
     } else {
-        println!(
+        outln!(
             "FIB table {name} applied ({} table(s) now active)",
             resp.tables.len()
-        );
+        )?;
     }
     Ok(())
 }
@@ -164,10 +171,10 @@ pub async fn delete(connection: Connection, name: &str, json: bool) -> Result<()
     if json {
         render(&resp, true)?;
     } else {
-        println!(
+        outln!(
             "FIB table {name} deleted ({} table(s) now active)",
             resp.tables.len()
-        );
+        )?;
     }
     Ok(())
 }

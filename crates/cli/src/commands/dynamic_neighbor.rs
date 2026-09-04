@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use crate::connection::Connection;
 use crate::error::CliError;
-use crate::output;
+use crate::output::{self, outln};
 use crate::proto::neighbor_service_client::NeighborServiceClient;
 use crate::proto::{
     AddDynamicNeighborRequest, DeleteDynamicNeighborRequest, DynamicNeighborRange,
@@ -45,22 +45,27 @@ pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
             .collect();
         output::print_json_pretty(&out)?;
     } else if resp.ranges.is_empty() {
-        println!("No dynamic neighbor ranges configured");
+        outln!("No dynamic neighbor ranges configured")?;
     } else {
-        println!(
+        outln!(
             "{:<22} {:<24} {:<10} DESCRIPTION",
-            "PREFIX", "PEER_GROUP", "REMOTE_ASN"
-        );
+            "PREFIX",
+            "PEER_GROUP",
+            "REMOTE_ASN"
+        )?;
         for r in &resp.ranges {
             let asn = if r.remote_asn == 0 {
                 "any".to_string()
             } else {
                 r.remote_asn.to_string()
             };
-            println!(
+            outln!(
                 "{:<22} {:<24} {:<10} {}",
-                r.prefix, r.peer_group, asn, r.description
-            );
+                r.prefix,
+                r.peer_group,
+                asn,
+                r.description
+            )?;
         }
     }
     Ok(())

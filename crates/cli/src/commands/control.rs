@@ -1,6 +1,6 @@
 use crate::connection::Connection;
 use crate::error::CliError;
-use crate::output::{self, JsonHealth};
+use crate::output::{self, JsonHealth, outln};
 use crate::proto::control_service_client::ControlServiceClient;
 use crate::proto::{HealthRequest, MetricsRequest, ShutdownRequest, TriggerMrtDumpRequest};
 use std::collections::BTreeMap;
@@ -104,10 +104,10 @@ pub async fn health(connection: Connection, json: bool) -> Result<(), CliError> 
         };
         output::print_json_pretty(&out)?;
     } else {
-        println!("Status:  {}", output::colored_health(resp.healthy));
-        println!("Uptime:  {}", output::format_duration(resp.uptime_seconds));
-        println!("Peers:   {}", resp.active_peers);
-        println!("Routes:  {}", resp.total_routes);
+        outln!("Status:  {}", output::colored_health(resp.healthy))?;
+        outln!("Uptime:  {}", output::format_duration(resp.uptime_seconds))?;
+        outln!("Peers:   {}", resp.active_peers)?;
+        outln!("Routes:  {}", resp.total_routes)?;
     }
     Ok(())
 }
@@ -116,7 +116,7 @@ pub async fn metrics(connection: Connection) -> Result<(), CliError> {
     let mut client =
         ControlServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let resp = client.get_metrics(MetricsRequest {}).await?.into_inner();
-    print!("{}", resp.prometheus_text);
+    output::print_text(&resp.prometheus_text)?;
     Ok(())
 }
 
@@ -146,7 +146,7 @@ pub async fn mrt_dump(connection: Connection, json: bool) -> Result<(), CliError
     if json {
         output::print_json_line(&serde_json::json!({ "file_path": resp.file_path }))?;
     } else {
-        println!("MRT dump written: {}", resp.file_path);
+        outln!("MRT dump written: {}", resp.file_path)?;
     }
     Ok(())
 }

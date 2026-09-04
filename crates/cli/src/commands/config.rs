@@ -1,6 +1,6 @@
 use crate::connection::Connection;
 use crate::error::CliError;
-use crate::output;
+use crate::output::{self, outln};
 use crate::proto::config_service_client::ConfigServiceClient;
 use crate::proto::{
     AbortConfigTransactionRequest, ApplyConfigTransactionRequest, ConfigTransactionApplyResponse,
@@ -71,7 +71,7 @@ pub async fn diff(connection: Connection, from_file: &str, json: bool) -> Result
     if json {
         output::print_serialized_json_line(&resp.diff_json)?;
     } else {
-        print!("{}", resp.human_text);
+        output::print_text(&resp.human_text)?;
     }
     Ok(resp.has_any_changes)
 }
@@ -120,9 +120,9 @@ pub async fn plan(
     if json {
         print_json(plan_to_json(&resp, plan_token.as_deref()))?;
     } else {
-        print_plan_human(&resp);
+        print_plan_human(&resp)?;
         if let Some(line) = plan_token_human_line(plan_token.as_deref()) {
-            println!("{line}");
+            outln!("{line}")?;
         }
     }
     Ok(resp.status != ConfigTransactionPlanStatus::Noop as i32)
@@ -297,7 +297,7 @@ fn print_apply_response(resp: &ConfigTransactionApplyResponse, json: bool) -> Re
     if json {
         print_json(apply_to_json(resp))?;
     } else {
-        print_apply_human(resp);
+        print_apply_human(resp)?;
     }
     if let Some(footer) = confirm_window_footer(resp.confirmation.as_ref()) {
         crate::output::print_next_step(json, &footer);
@@ -524,8 +524,8 @@ pub async fn confirm(connection: Connection, confirm_id: &str, json: bool) -> Re
             "human_text": resp.human_text,
         }))?;
     } else {
-        print!("{}", resp.human_text);
-        print_confirmation(resp.confirmation.as_ref());
+        output::print_text(&resp.human_text)?;
+        print_confirmation(resp.confirmation.as_ref())?;
     }
     crate::output::print_next_step(
         json,
@@ -552,11 +552,11 @@ pub async fn abort(connection: Connection, confirm_id: &str, json: bool) -> Resu
             "human_text": resp.human_text,
         }))?;
     } else {
-        print!("{}", resp.human_text);
+        output::print_text(&resp.human_text)?;
         if !resp.runtime_snapshot_token.is_empty() {
-            println!("runtime_snapshot_token: {}", resp.runtime_snapshot_token);
+            outln!("runtime_snapshot_token: {}", resp.runtime_snapshot_token)?;
         }
-        print_confirmation(resp.confirmation.as_ref());
+        print_confirmation(resp.confirmation.as_ref())?;
     }
     crate::output::print_next_step(
         json,
@@ -576,8 +576,8 @@ pub async fn status(connection: Connection, json: bool) -> Result<(), CliError> 
     if json {
         print_json(status_to_json(&resp))?;
     } else {
-        print!("{}", resp.human_text);
-        print_confirmation(resp.confirmation.as_ref());
+        output::print_text(&resp.human_text)?;
+        print_confirmation(resp.confirmation.as_ref())?;
     }
     Ok(())
 }
@@ -596,7 +596,7 @@ pub async fn history(connection: Connection, json: bool) -> Result<(), CliError>
     if json {
         print_json(history_to_json(&resp))?;
     } else {
-        print_history_human(&resp);
+        print_history_human(&resp)?;
     }
     Ok(())
 }
@@ -651,7 +651,7 @@ pub async fn rollback(
     if json {
         print_json(apply_to_json(&resp))?;
     } else {
-        print_apply_human(&resp);
+        print_apply_human(&resp)?;
     }
     if let Some(footer) = confirm_window_footer(resp.confirmation.as_ref()) {
         crate::output::print_next_step(json, &footer);
@@ -674,11 +674,12 @@ fn history_to_json(resp: &ListConfigHistoryResponse) -> serde_json::Value {
     })
 }
 
-fn print_history_human(resp: &ListConfigHistoryResponse) {
+fn print_history_human(resp: &ListConfigHistoryResponse) -> Result<(), CliError> {
     for entry in &resp.entries {
-        println!("{}", history_human_line(entry));
+        outln!("{}", history_human_line(entry))?;
     }
-    print!("{}", resp.human_text);
+    output::print_text(&resp.human_text)?;
+    Ok(())
 }
 
 fn history_human_line(entry: &crate::proto::ConfigHistoryEntry) -> String {
@@ -753,7 +754,7 @@ pub async fn effective(connection: Connection, json: bool) -> Result<(), CliErro
     if json {
         print_json(effective_to_json(&resp.toml)?)?;
     } else {
-        print!("{}", resp.toml);
+        output::print_text(&resp.toml)?;
     }
     Ok(())
 }
@@ -913,12 +914,12 @@ fn update_group_impact_to_json(plan: Option<&UpdateGroupImpactPlan>) -> serde_js
     })
 }
 
-fn print_update_group_impact(plan: Option<&UpdateGroupImpactPlan>) {
+fn print_update_group_impact(plan: Option<&UpdateGroupImpactPlan>) -> Result<(), CliError> {
     let Some(plan) = plan else {
-        return;
+        return Ok(());
     };
     if let Some(rollup) = &plan.rollup {
-        println!(
+        outln!(
             "update_group_impact_v{}: affected_peers={} affected_families={} shared_groups={} private_views={} capacity={} ({})",
             plan.schema_version,
             rollup.affected_peers,
@@ -927,11 +928,11 @@ fn print_update_group_impact(plan: Option<&UpdateGroupImpactPlan>) {
             rollup.projected_private_views,
             plan.capacity_class,
             plan.capacity_basis
-        );
+        )?;
     }
     for row in &plan.entries {
         if row.transition != "no_op" {
-            println!(
+            outln!(
                 "  {} afi/safi {}/{}: {} -> {} [{}; local_resync={}; route_refresh={}]",
                 row.peer,
                 row.afi,
@@ -941,9 +942,10 @@ fn print_update_group_impact(plan: Option<&UpdateGroupImpactPlan>) {
                 row.transition,
                 row.local_resync,
                 row.remote_route_refresh
-            );
+            )?;
         }
     }
+    Ok(())
 }
 
 fn confirmation_to_json(confirmation: Option<&ConfigTransactionConfirmation>) -> serde_json::Value {
@@ -968,8 +970,8 @@ fn status_to_json(resp: &ConfigTransactionStatusResponse) -> serde_json::Value {
     })
 }
 
-fn print_plan_human(resp: &ConfigTransactionPlanResponse) {
-    print!("{}", resp.human_text);
+fn print_plan_human(resp: &ConfigTransactionPlanResponse) -> Result<(), CliError> {
+    output::print_text(&resp.human_text)?;
     print_transaction_tail(
         resp.status,
         &resp.runtime_snapshot_token,
@@ -978,69 +980,75 @@ fn print_plan_human(resp: &ConfigTransactionPlanResponse) {
             ("unsupported_sections", &resp.unsupported_sections),
             ("restart_required_sections", &resp.restart_required_sections),
         ],
-    );
-    print_update_group_impact(resp.update_group_impact.as_ref());
+    )?;
+    print_update_group_impact(resp.update_group_impact.as_ref())?;
+    Ok(())
 }
 
-fn print_apply_human(resp: &ConfigTransactionApplyResponse) {
-    print!("{}", resp.human_text);
+fn print_apply_human(resp: &ConfigTransactionApplyResponse) -> Result<(), CliError> {
+    output::print_text(&resp.human_text)?;
     print_transaction_tail(
         resp.status,
         &resp.runtime_snapshot_token,
         &[("committed_sections", &resp.committed_sections)],
-    );
-    print_confirmation(resp.confirmation.as_ref());
-    print_update_group_impact(resp.update_group_impact.as_ref());
+    )?;
+    print_confirmation(resp.confirmation.as_ref())?;
+    print_update_group_impact(resp.update_group_impact.as_ref())?;
+    Ok(())
 }
 
-fn print_confirmation(confirmation: Option<&ConfigTransactionConfirmation>) {
+fn print_confirmation(
+    confirmation: Option<&ConfigTransactionConfirmation>,
+) -> Result<(), CliError> {
     let Some(confirmation) = confirmation else {
-        return;
+        return Ok(());
     };
-    println!(
+    outln!(
         "confirmation_status: {}",
         confirmation_status_label(confirmation.status)
-    );
+    )?;
     if !confirmation.confirm_id.is_empty() {
-        println!("confirm_id: {}", confirmation.confirm_id);
+        outln!("confirm_id: {}", confirmation.confirm_id)?;
     }
     if confirmation.timeout_seconds > 0 {
-        println!("confirm_timeout_seconds: {}", confirmation.timeout_seconds);
+        outln!("confirm_timeout_seconds: {}", confirmation.timeout_seconds)?;
     }
     if confirmation.deadline_unix_seconds > 0 {
-        println!(
+        outln!(
             "confirm_deadline_unix_seconds: {}",
             confirmation.deadline_unix_seconds
-        );
+        )?;
     }
     if !confirmation.runtime_snapshot_token.is_empty() {
-        println!(
+        outln!(
             "confirmation_runtime_snapshot_token: {}",
             confirmation.runtime_snapshot_token
-        );
+        )?;
     }
     if !confirmation.committed_sections.is_empty() {
-        println!(
+        outln!(
             "confirmation_committed_sections: {}",
             confirmation.committed_sections.join(", ")
-        );
+        )?;
     }
+    Ok(())
 }
 
 fn print_transaction_tail(
     status: i32,
     runtime_snapshot_token: &str,
     sections: &[(&str, &Vec<String>)],
-) {
-    println!("status: {}", status_label(status));
+) -> Result<(), CliError> {
+    outln!("status: {}", status_label(status))?;
     if !runtime_snapshot_token.is_empty() {
-        println!("runtime_snapshot_token: {runtime_snapshot_token}");
+        outln!("runtime_snapshot_token: {runtime_snapshot_token}")?;
     }
     for (label, values) in sections {
         if !values.is_empty() {
-            println!("{label}: {}", values.join(", "));
+            outln!("{label}: {}", values.join(", "))?;
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]

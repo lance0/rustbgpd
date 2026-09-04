@@ -4,6 +4,51 @@ use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
 
+use rustbgpd_api::proto::global_service_server::{GlobalService, GlobalServiceServer};
+use rustbgpd_api::proto::{GetGlobalRequest, GlobalState};
+use tokio_stream::wrappers::TcpListenerStream;
+use tonic::{Request, Response, Status};
+
+struct MockGlobalService;
+
+#[tonic::async_trait]
+impl GlobalService for MockGlobalService {
+    async fn get_global(
+        &self,
+        _request: Request<GetGlobalRequest>,
+    ) -> Result<Response<GlobalState>, Status> {
+        Ok(Response::new(GlobalState {
+            asn: 65001,
+            router_id: "10.0.0.1".to_string(),
+            listen_port: 179,
+            ..Default::default()
+        }))
+    }
+}
+
+/// Serve `GlobalService` from a background thread for the lifetime of the
+/// test process; returns the address to pass as `--addr`.
+fn spawn_global_service() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async move {
+            listener.set_nonblocking(true).unwrap();
+            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+            tonic::transport::Server::builder()
+                .add_service(GlobalServiceServer::new(MockGlobalService))
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+                .unwrap();
+        });
+    });
+    addr
+}
+
 fn run_with_closed_stdout(args: &[&str]) {
     let (reader, writer) = UnixStream::pair().unwrap();
     drop(reader);
@@ -40,4 +85,10 @@ fn offline_commands_quietly_handle_closed_stdout() {
             "/tests/fixtures/import/frr.conf"
         ),
     ]);
+}
+
+#[test]
+fn connected_human_output_quietly_handles_closed_stdout() {
+    let addr = spawn_global_service();
+    run_with_closed_stdout(&["--addr", &addr, "global"]);
 }

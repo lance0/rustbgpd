@@ -6,7 +6,7 @@ use crate::output::{
     self, JsonEffectiveNeighborPosture, JsonInboundPrefixLimit, JsonNegotiatedGracefulRestart,
     JsonNegotiatedSession, JsonNeighbor, JsonNeighborDetail, JsonOutboundPrefixLimit,
     JsonPathsLimit, JsonSelectionDeferralFamily, JsonTcpAoKeyState, JsonTcpAoState,
-    JsonUpdateGroupComparison,
+    JsonUpdateGroupComparison, outln,
 };
 use crate::proto::neighbor_service_client::NeighborServiceClient;
 use crate::proto::{
@@ -294,8 +294,7 @@ fn emit_effective_posture_human(value: &str) -> Result<(), CliError> {
     }) {
         return Ok(());
     }
-    print!("{value}");
-    Ok(())
+    output::print_text(value)
 }
 
 fn emit_neighbor_source_human(neighbor: &crate::proto::NeighborState) -> Result<(), CliError> {
@@ -314,7 +313,7 @@ fn emit_neighbor_source_human(neighbor: &crate::proto::NeighborState) -> Result<
     }) {
         return Ok(());
     }
-    print!("{value}");
+    output::print_text(&value)?;
     Ok(())
 }
 
@@ -329,7 +328,7 @@ pub async fn show(
             if json {
                 output::print_json_pretty(&comparison)?;
             } else {
-                print!("{}", render_update_group_comparison(&comparison));
+                output::print_text(&render_update_group_comparison(&comparison))?;
             }
             return Ok(());
         }
@@ -486,235 +485,240 @@ pub async fn show(
         };
         emit_neighbor_detail_json(&out, n.negotiated_session.as_ref())?;
     } else {
-        println!(
+        outln!(
             "Neighbor:              {}",
             cfg.map(|c| c.address.as_str()).unwrap_or("")
-        );
+        )?;
         let interface = cfg.map(|c| c.interface.as_str()).unwrap_or("");
         if !interface.is_empty() {
-            println!("Interface:             {interface}");
+            outln!("Interface:             {interface}")?;
         }
-        println!(
+        outln!(
             "Remote ASN:            {}",
             cfg.map(|c| c.remote_asn).unwrap_or(0)
-        );
-        println!(
+        )?;
+        outln!(
             "Description:           {}",
             cfg.map(|c| c.description.as_str()).unwrap_or("")
-        );
+        )?;
         emit_neighbor_source_human(&n)?;
-        println!(
+        outln!(
             "Hold Time:             {}",
             cfg.map(|c| c.hold_time).unwrap_or(0)
-        );
+        )?;
         if let Some(minimum) = cfg.and_then(|c| c.min_hold_time) {
-            println!("Minimum Hold Time:     {minimum}");
+            outln!("Minimum Hold Time:     {minimum}")?;
         }
-        println!(
+        outln!(
             "Send Hold Time:        {}",
             cfg.and_then(|c| c.send_hold_time).unwrap_or(0)
-        );
-        println!("Max-Prefix Action:     {max_prefix_action}");
+        )?;
+        outln!("Max-Prefix Action:     {max_prefix_action}")?;
         if let Some(seconds) = cfg.and_then(|c| c.max_prefix_restart_seconds) {
-            println!("Max-Prefix Restart:    {seconds}s configured");
+            outln!("Max-Prefix Restart:    {seconds}s configured")?;
         }
         if let Some(remaining) = n.max_prefix_restart_remaining_millis {
-            println!("Max-Prefix Hold-Down:  {remaining}ms remaining");
+            outln!("Max-Prefix Hold-Down:  {remaining}ms remaining")?;
         }
-        println!(
+        outln!(
             "Families:              {}",
             cfg.map(|c| c.families.join(", ")).unwrap_or_default()
-        );
+        )?;
         if let Some(required) = cfg
             .map(|c| &c.required_families)
             .filter(|required| !required.is_empty())
         {
-            println!("Required Families:     {}", required.join(", "));
+            outln!("Required Families:     {}", required.join(", "))?;
         }
-        println!("Negotiation:           {}", negotiation_status_label(&n));
+        outln!("Negotiation:           {}", negotiation_status_label(&n))?;
         if let Some(negotiated) = n.negotiated_session.as_ref() {
-            print!("{}", render_negotiated_transport_details(negotiated));
-            println!(
+            output::print_text(&render_negotiated_transport_details(negotiated))?;
+            outln!(
                 "Remote Router ID:     {}",
                 negotiated.remote_router_id.as_deref().unwrap_or("unknown")
-            );
-            println!(
+            )?;
+            outln!(
                 "Four-Octet AS:        {}",
                 optional_bool_label(negotiated.four_octet_as)
-            );
-            print!("{}", render_negotiated_capability_details(negotiated));
-            println!(
+            )?;
+            output::print_text(&render_negotiated_capability_details(negotiated))?;
+            outln!(
                 "Negotiated Families:  {}",
                 negotiated_families_label(&negotiated.families)
-            );
-            println!(
+            )?;
+            outln!(
                 "Graceful Restart:     {}",
                 graceful_restart_status_label(negotiated.graceful_restart.as_ref())
-            );
+            )?;
             if let Some(gr) = negotiated.graceful_restart.as_ref() {
-                println!(
+                outln!(
                     "GR Peer Families:    {}",
                     negotiated_families_label(&gr.peer_families)
-                );
-                println!(
+                )?;
+                outln!(
                     "GR Peer Restart Time: {}",
                     optional_seconds_label(gr.peer_restart_time_seconds)
-                );
-                println!(
+                )?;
+                outln!(
                     "GR Effective Retention: {}",
                     gr.effective_retention_time_seconds.map_or_else(
                         || "disabled locally".to_string(),
                         |seconds| format!("{seconds}s")
                     )
-                );
+                )?;
             }
         }
         let peer_group = cfg.map(|c| c.peer_group.as_str()).unwrap_or("");
         if !peer_group.is_empty() {
-            println!("Peer Group:            {peer_group}");
+            outln!("Peer Group:            {peer_group}")?;
         }
-        println!("RR Client:             {}", n.route_reflector_client);
-        println!(
+        outln!("RR Client:             {}", n.route_reflector_client)?;
+        outln!(
             "Route Server Client:   {}",
             cfg.map(|c| c.route_server_client).unwrap_or(false)
-        );
+        )?;
         if let Some(codes) = cfg
             .map(|config| config.discard_path_attributes.as_slice())
             .filter(|codes| !codes.is_empty())
         {
-            println!("Discard Attributes:    {codes:?}");
+            outln!("Discard Attributes:    {codes:?}")?;
         }
         if cfg.map(|c| c.per_client_best).unwrap_or(false) {
-            println!("Per-Client Best:       true");
+            outln!("Per-Client Best:       true")?;
         }
         emit_effective_posture_human(&render_effective_posture(n.effective_posture.as_ref()))?;
-        println!("Distribution Mode:     {distribution_mode}");
+        outln!("Distribution Mode:     {distribution_mode}")?;
         let role = cfg.map(|c| c.role.as_str()).unwrap_or("");
         if !role.is_empty() {
-            println!("BGP Role:              {role}");
-            println!(
+            outln!("BGP Role:              {role}")?;
+            outln!(
                 "Strict Role:           {}",
                 cfg.map(|c| c.strict_role).unwrap_or(false)
-            );
+            )?;
             let remote_role = n.remote_role.as_str();
-            println!(
+            outln!(
                 "Remote Role:           {}",
                 if remote_role.is_empty() {
                     "not advertised"
                 } else {
                     remote_role
                 }
-            );
-            println!("Role Negotiated:       {}", n.role_negotiated);
+            )?;
+            outln!("Role Negotiated:       {}", n.role_negotiated)?;
         }
-        println!(
+        outln!(
             "Add-Path Receive:      {}",
             cfg.map(|c| c.add_path_receive).unwrap_or(false)
-        );
-        println!(
+        )?;
+        outln!(
             "Add-Path Send:         {}",
             cfg.map(|c| c.add_path_send).unwrap_or(false)
-        );
+        )?;
         let add_path_send_max = cfg.map(|c| c.add_path_send_max).unwrap_or(0);
         if add_path_send_max > 0 {
-            println!("Add-Path Send Max:     {add_path_send_max}");
+            outln!("Add-Path Send Max:     {add_path_send_max}")?;
         }
         for limit in &n.paths_limits {
             let effective_send = paths_limit_effective_send_label(limit.effective_send_limit);
-            println!(
+            outln!(
                 "Paths-Limit {}: configured={} advertised={} received={} effective-send={}",
                 limit.family,
                 limit.configured_receive_max,
                 limit.advertised_receive_max,
                 limit.received_receive_max,
                 effective_send
-            );
+            )?;
         }
-        println!(
+        outln!(
             "State:                 {}",
             output::colored_state_with_stale(n.state, n.stale)
-        );
+        )?;
         if n.slow_peer {
-            println!("Slow Peer:             true (outbound queue persistently backlogged)");
+            outln!("Slow Peer:             true (outbound queue persistently backlogged)")?;
         }
-        println!(
+        outln!(
             "GShut Advertise Intent: {}",
             graceful_shutdown_advertise_intent_label(n.graceful_shutdown_advertise_intent)
-        );
-        println!(
+        )?;
+        outln!(
             "Uptime:                {}",
             output::format_duration(n.uptime_seconds)
-        );
+        )?;
         if let Some(seconds) = n.reconnect_in_seconds.filter(|seconds| *seconds > 0) {
-            println!(
+            outln!(
                 "Reconnect In:          {}",
                 output::format_duration(seconds)
-            );
+            )?;
         }
-        println!("Prefixes Received:     {}", n.prefixes_received);
-        println!("  IPv4 Unicast:        {}", n.prefixes_received_ipv4);
-        println!("  IPv6 Unicast:        {}", n.prefixes_received_ipv6);
-        println!(
+        outln!("Prefixes Received:     {}", n.prefixes_received)?;
+        outln!("  IPv4 Unicast:        {}", n.prefixes_received_ipv4)?;
+        outln!("  IPv6 Unicast:        {}", n.prefixes_received_ipv6)?;
+        outln!(
             "Max Prefixes:          {}",
             max_prefix_capacity_label(effective_max_prefixes, n.max_prefix_headroom, n.stale)
-        );
-        println!(
+        )?;
+        outln!(
             "Max Prefixes IPv4:     {}",
             max_prefix_capacity_label(
                 n.effective_max_prefixes_ipv4,
                 n.max_prefix_headroom_ipv4,
                 n.stale
             )
-        );
-        println!(
+        )?;
+        outln!(
             "Max Prefixes IPv6:     {}",
             max_prefix_capacity_label(
                 n.effective_max_prefixes_ipv6,
                 n.max_prefix_headroom_ipv6,
                 n.stale
             )
-        );
-        println!("Prefixes Sent:         {}", n.prefixes_sent);
-        println!("Updates Received:      {}", n.updates_received);
-        println!("Updates Sent:          {}", n.updates_sent);
-        println!("Notifications Received:{}", n.notifications_received);
-        println!("Notifications Sent:    {}", n.notifications_sent);
-        println!("Messages Received:     {}", n.messages_received);
-        println!("Messages Sent:         {}", n.messages_sent);
-        println!(
+        )?;
+        outln!("Prefixes Sent:         {}", n.prefixes_sent)?;
+        outln!("Updates Received:      {}", n.updates_received)?;
+        outln!("Updates Sent:          {}", n.updates_sent)?;
+        outln!("Notifications Received:{}", n.notifications_received)?;
+        outln!("Notifications Sent:    {}", n.notifications_sent)?;
+        outln!("Messages Received:     {}", n.messages_received)?;
+        outln!("Messages Sent:         {}", n.messages_sent)?;
+        outln!(
             "Authentication:        {}",
             authentication_label(n.authentication)
-        );
+        )?;
         if matches!(
             crate::proto::AuthenticationMode::try_from(n.authentication),
             Ok(crate::proto::AuthenticationMode::TcpAo)
         ) {
-            println!(
+            outln!(
                 "TCP-AO Health:        {}",
                 tcp_ao_health_label(n.tcp_ao_health)
-            );
-            println!(
+            )?;
+            outln!(
                 "TCP-AO Rotation:      desired={} applied={} phase={}",
-                n.tcp_ao_desired_generation, n.tcp_ao_applied_generation, n.tcp_ao_rotation_phase
-            );
+                n.tcp_ao_desired_generation,
+                n.tcp_ao_applied_generation,
+                n.tcp_ao_rotation_phase
+            )?;
             if !n.tcp_ao_rotation_error.is_empty() {
-                println!("TCP-AO Rotation Error: {}", n.tcp_ao_rotation_error);
+                outln!("TCP-AO Rotation Error: {}", n.tcp_ao_rotation_error)?;
             }
         }
         if let Some(ao) = &n.tcp_ao {
-            println!(
+            outln!(
                 "TCP-AO Keys:           current={} rnext={}",
                 ao.current_key_id
                     .map_or_else(|| "none".to_string(), |v| v.to_string()),
                 ao.rnext_key_id
                     .map_or_else(|| "none".to_string(), |v| v.to_string())
-            );
-            println!(
+            )?;
+            outln!(
                 "TCP-AO Packets:        good={} bad={} key-not-found={} unsigned-required={}",
-                ao.packets_good, ao.packets_bad, ao.packets_key_not_found, ao.packets_ao_required
-            );
+                ao.packets_good,
+                ao.packets_bad,
+                ao.packets_key_not_found,
+                ao.packets_ao_required
+            )?;
             for key in &ao.keys {
-                println!(
+                outln!(
                     "  MKT {}/{}: send={} recv={} algorithm={} current={} rnext={} preferred={} deprecated={} vrf-ifindex={} good={} bad={}",
                     key.peer_address,
                     key.prefix_length,
@@ -729,36 +733,38 @@ pub async fn show(
                         .map_or_else(|| "unbound".to_string(), |value| value.to_string()),
                     key.packets_good,
                     key.packets_bad
-                );
+                )?;
             }
         }
-        println!("OTC Routes Blocked:    {}", n.otc_routes_blocked);
+        outln!("OTC Routes Blocked:    {}", n.otc_routes_blocked)?;
         // ADR-0112: two rows, never one. A peer with an import policy and no
         // export policy is a real and common half-configured state, and
         // collapsing it would hide the denied half.
-        println!("RFC 8212 Policy:");
-        println!(
+        outln!("RFC 8212 Policy:")?;
+        outln!(
             "  Import: {}",
             rfc8212_policy_status_label(n.rfc8212_import_policy)
-        );
-        println!(
+        )?;
+        outln!(
             "  Export: {}",
             rfc8212_policy_status_label(n.rfc8212_export_policy)
-        );
-        println!("Policy Stats:");
-        println!(
+        )?;
+        outln!("Policy Stats:")?;
+        outln!(
             "  Import — permitted: {} denied: {}",
-            n.import_policy_routes_permitted, n.import_policy_routes_denied
-        );
-        println!(
+            n.import_policy_routes_permitted,
+            n.import_policy_routes_denied
+        )?;
+        outln!(
             "  Export — permitted: {} denied: {}",
-            n.export_policy_routes_permitted, n.export_policy_routes_denied
-        );
+            n.export_policy_routes_permitted,
+            n.export_policy_routes_denied
+        )?;
         if !n.update_group.is_empty() {
-            println!("Update Group:          {}", n.update_group);
+            outln!("Update Group:          {}", n.update_group)?;
         }
         if !n.selection_deferral.is_empty() {
-            println!("Selection Deferral:");
+            outln!("Selection Deferral:")?;
             for row in &n.selection_deferral {
                 let state = if row.active {
                     format!(
@@ -778,11 +784,11 @@ pub async fn show(
                             .map_or_else(|| "none".to_string(), |id| id.to_string())
                     )
                 };
-                println!("  AFI {}/SAFI {} — {state}", row.afi, row.safi);
+                outln!("  AFI {}/SAFI {} — {state}", row.afi, row.safi)?;
             }
         }
         if !n.outbound_prefix_limits.is_empty() {
-            println!("Outbound Prefix Limits:");
+            outln!("Outbound Prefix Limits:")?;
             for row in &n.outbound_prefix_limits {
                 // Unlimited prints as `unlimited`, never a synthetic 0, and a
                 // blocking family names the stable reason it is withholding.
@@ -796,28 +802,32 @@ pub async fn show(
                     .reason
                     .as_deref()
                     .map_or_else(String::new, |reason| format!("; blocking={reason}"));
-                println!(
+                outln!(
                     "  {:<14} usage={}; {capacity}{blocking}",
-                    row.family, row.usage
-                );
+                    row.family,
+                    row.usage
+                )?;
             }
         }
         if !n.inbound_prefix_limits.is_empty() {
-            println!("Inbound Prefix Limits:");
+            outln!("Inbound Prefix Limits:")?;
             for row in &n.inbound_prefix_limits {
                 let blocking = row
                     .reason
                     .as_deref()
                     .map_or_else(String::new, |reason| format!("; blocking={reason}"));
-                println!(
+                outln!(
                     "  {:<22} usage={}; limit={}; headroom={}{blocking}",
-                    row.scope, row.usage, row.limit, row.headroom
-                );
+                    row.scope,
+                    row.usage,
+                    row.limit,
+                    row.headroom
+                )?;
             }
         }
-        println!("Flap Count:            {}", n.flap_count);
+        outln!("Flap Count:            {}", n.flap_count)?;
         if !n.last_error.is_empty() {
-            println!("Last Error:            {}", n.last_error);
+            outln!("Last Error:            {}", n.last_error)?;
         }
     }
     Ok(())
@@ -1355,7 +1365,7 @@ pub async fn refresh_outbound(
     if json {
         output::print_json_pretty(&refresh_outbound_json(address, response.scheduled))
     } else {
-        println!("{}", refresh_outbound_message(address));
+        outln!("{}", refresh_outbound_message(address))?;
         Ok(())
     }
 }

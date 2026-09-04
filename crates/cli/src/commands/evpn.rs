@@ -1,7 +1,7 @@
 use crate::commands::neighbor::{bare_ip_rpc_address, restore_matching_scoped_address};
 use crate::connection::Connection;
 use crate::error::CliError;
-use crate::output;
+use crate::output::{self, outln};
 use crate::proto::control_service_client::ControlServiceClient;
 use crate::proto::evpn_service_client::EvpnServiceClient;
 use crate::proto::injection_service_client::InjectionServiceClient;
@@ -85,7 +85,7 @@ pub async fn list(
             .collect();
         output::print_json_pretty(&out)?;
     } else if resp.routes.is_empty() {
-        println!("No EVPN routes");
+        outln!("No EVPN routes")?;
     } else {
         // Two distinct concepts both spell "tag" in EVPN-land: the
         // route-type label (RFC 7432 §7) is `mac-ip` / `imet` / etc.,
@@ -128,12 +128,12 @@ pub async fn list(
             } else if r.tunnel_type != 0 {
                 detail.push(format!("encap-type={}", r.tunnel_type));
             }
-            println!(
+            outln!(
                 "[{route_label}] {} via {} from {}",
                 detail.join(" "),
                 r.next_hop,
                 r.peer_address,
-            );
+            )?;
         }
     }
     Ok(())
@@ -396,9 +396,9 @@ pub async fn clear_duplicate_mac(
                 "message": resp.message,
         }))?;
     } else if resp.cleared {
-        println!("EVPN duplicate-MAC quarantine cleared: {mac} on VNI {vni}");
+        outln!("EVPN duplicate-MAC quarantine cleared: {mac} on VNI {vni}")?;
     } else {
-        println!("No active EVPN duplicate-MAC quarantine: {mac} on VNI {vni}");
+        outln!("No active EVPN duplicate-MAC quarantine: {mac} on VNI {vni}")?;
     }
     Ok(())
 }
@@ -424,14 +424,14 @@ pub async fn list_duplicate_mac_quarantines(
             "complete": resp.complete,
         }))?;
     } else if resp.quarantines.is_empty() {
-        println!("No active EVPN duplicate-MAC quarantines");
+        outln!("No active EVPN duplicate-MAC quarantines")?;
     } else {
-        println!("VNI\tMAC");
+        outln!("VNI\tMAC")?;
         for row in resp.quarantines {
-            println!("{}\t{}", row.vni, row.mac);
+            outln!("{}\t{}", row.vni, row.mac)?;
         }
         if !resp.complete {
-            println!("... {} additional quarantines omitted", resp.omitted);
+            outln!("... {} additional quarantines omitted", resp.omitted)?;
         }
     }
     Ok(())
@@ -473,7 +473,7 @@ pub async fn set_es_drain(
                 "message": resp.message,
         }))?;
     } else {
-        println!("{}", resp.message);
+        outln!("{}", resp.message)?;
     }
     Ok(())
 }
@@ -498,13 +498,13 @@ pub async fn list_ethernet_segments(
         output::print_json_pretty(&ethernet_segments_to_json(&resp))?;
     } else if resp.segments.is_empty() {
         if filter.is_empty() {
-            println!("No Ethernet Segments configured");
+            outln!("No Ethernet Segments configured")?;
         } else {
-            println!("No Ethernet Segment matching {filter}");
+            outln!("No Ethernet Segment matching {filter}")?;
         }
     } else {
         for segment in &resp.segments {
-            println!("{}", format_ethernet_segment_human(segment));
+            outln!("{}", format_ethernet_segment_human(segment))?;
         }
     }
     Ok(())
@@ -522,7 +522,7 @@ pub async fn runtime(connection: Connection, json: bool) -> Result<(), CliError>
     if json {
         output::print_json_pretty(&runtime_to_json(&state))?;
     } else {
-        println!(
+        outln!(
             "EVPN runtime generation={} lifecycle={} mutation={} l2-instances={} ip-vrfs={} ethernet-segments={} es-member-vnis={}",
             state.generation,
             runtime_lifecycle_label(state.lifecycle),
@@ -531,9 +531,9 @@ pub async fn runtime(connection: Connection, json: bool) -> Result<(), CliError>
             state.evpn_ip_vrfs_count,
             state.ethernet_segments_count,
             state.ethernet_segment_member_vnis_count,
-        );
+        )?;
         if !state.message.is_empty() {
-            println!("{}", state.message);
+            outln!("{}", state.message)?;
         }
     }
     Ok(())
@@ -558,7 +558,7 @@ pub async fn list_instances(connection: Connection, json: bool) -> Result<(), Cl
             resp.instances.iter().map(evpn_instance_to_json).collect();
         output::print_json_pretty(&out)?;
     } else if resp.instances.is_empty() {
-        println!("No local EVPN instances configured");
+        outln!("No local EVPN instances configured")?;
     } else {
         for inst in &resp.instances {
             let mut detail = vec![
@@ -587,7 +587,7 @@ pub async fn list_instances(connection: Connection, json: bool) -> Result<(), Cl
             if !inst.not_ready_reason.is_empty() {
                 detail.push(format!("reason=[{}]", inst.not_ready_reason));
             }
-            println!("{}", detail.join(" "));
+            outln!("{}", detail.join(" "))?;
         }
     }
     Ok(())
@@ -636,7 +636,7 @@ pub async fn list_managed_netdevs(connection: Connection, json: bool) -> Result<
         let out: Vec<serde_json::Value> = resp.netdevs.iter().map(managed_netdev_to_json).collect();
         output::print_json_pretty(&out)?;
     } else if resp.netdevs.is_empty() {
-        println!("No managed EVPN netdevs configured or observed");
+        outln!("No managed EVPN netdevs configured or observed")?;
     } else {
         for row in &resp.netdevs {
             let mut detail = vec![
@@ -699,7 +699,7 @@ pub async fn list_managed_netdevs(connection: Connection, json: bool) -> Result<
             if !row.reason.is_empty() {
                 detail.push(format!("reason=[{}]", row.reason));
             }
-            println!("{}", detail.join(" "));
+            outln!("{}", detail.join(" "))?;
         }
     }
     Ok(())
@@ -813,15 +813,15 @@ pub async fn list_nexthops(connection: Connection, json: bool) -> Result<(), Cli
         // non-Linux build, pre-first-report) where no drift loop is
         // running at all, so a derived "enabled" label would
         // misrepresent those cases.
-        println!(
+        outln!(
             "FDB nexthop groups: {} orphan-nexthops={} pending-deletes={} drift-recovery-disabled={}",
             resp.groups.len(),
             resp.orphan_nexthops_count,
             resp.pending_delete_count,
             resp.drift_recovery_disabled,
-        );
+        )?;
         if resp.groups.is_empty() {
-            println!("No owned FDB nexthop groups");
+            outln!("No owned FDB nexthop groups")?;
         } else {
             for group in &resp.groups {
                 // Use `nh_id=N via <gw>` per-member so IPv6 gateways
@@ -833,7 +833,7 @@ pub async fn list_nexthops(connection: Connection, json: bool) -> Result<(), Cli
                     .map(|m| format!("nh_id={} via {}", m.nexthop_id, m.gateway))
                     .collect::<Vec<_>>()
                     .join(", ");
-                println!(
+                outln!(
                     "vni={} esi={} tag={} group-id={} members=[{}] mac-refs=[{}]",
                     group.vni,
                     group.esi,
@@ -841,7 +841,7 @@ pub async fn list_nexthops(connection: Connection, json: bool) -> Result<(), Cli
                     group.group_id,
                     members,
                     group.ref_macs.join(","),
-                );
+                )?;
             }
         }
     }
@@ -1018,10 +1018,10 @@ pub async fn list_ip_vrfs(connection: Connection, json: bool) -> Result<(), CliE
         let out: Vec<serde_json::Value> = resp.ip_vrfs.iter().map(ip_vrf_to_json).collect();
         output::print_json_pretty(&out)?;
     } else if resp.ip_vrfs.is_empty() {
-        println!("No IP-VRFs configured");
+        outln!("No IP-VRFs configured")?;
     } else {
         for vrf in &resp.ip_vrfs {
-            println!("{}", format_ip_vrf_human(vrf));
+            outln!("{}", format_ip_vrf_human(vrf))?;
         }
     }
     Ok(())
@@ -1040,13 +1040,13 @@ pub async fn get_ip_vrf(connection: Connection, name: String, json: bool) -> Res
     if json {
         output::print_json_pretty(&ip_vrf_to_json(&vrf))?;
     } else {
-        println!("{}", format_ip_vrf_human(&vrf));
+        outln!("{}", format_ip_vrf_human(&vrf))?;
         // In the detail view we also print each not-ready reason on
         // its own indented line so operators can scan the failures
         // without parsing the parenthesized list.
         if !vrf.not_ready_reasons.is_empty() {
             for reason in &vrf.not_ready_reasons {
-                println!("  - {reason}");
+                outln!("  - {reason}")?;
             }
         }
     }
@@ -1180,10 +1180,10 @@ pub async fn diagnose(connection: Connection, json: bool) -> Result<(), CliError
                 "key_metrics": key_metrics,
         }))?;
     } else {
-        println!("EVPN diagnose");
-        println!("Instances: {}", instances.len());
-        println!("Originated local MACs: {originated_local_macs}");
-        println!(
+        outln!("EVPN diagnose")?;
+        outln!("Instances: {}", instances.len())?;
+        outln!("Originated local MACs: {originated_local_macs}")?;
+        outln!(
             "Type 2 routes: {} ({})",
             type2_routes.len(),
             if type2_routes.is_empty() {
@@ -1191,8 +1191,8 @@ pub async fn diagnose(connection: Connection, json: bool) -> Result<(), CliError
             } else {
                 "present"
             }
-        );
-        println!(
+        )?;
+        outln!(
             "Type 3 IMET routes: {} ({})",
             type3_routes.len(),
             if type3_routes.is_empty() {
@@ -1200,13 +1200,13 @@ pub async fn diagnose(connection: Connection, json: bool) -> Result<(), CliError
             } else {
                 "present"
             }
-        );
-        println!("Key EVPN metrics:");
+        )?;
+        outln!("Key EVPN metrics:")?;
         if key_metrics.is_empty() {
-            println!("  none observed");
+            outln!("  none observed")?;
         } else {
             for line in key_metrics {
-                println!("  {line}");
+                outln!("  {line}")?;
             }
         }
     }

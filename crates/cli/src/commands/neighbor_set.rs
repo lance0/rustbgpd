@@ -9,7 +9,7 @@ use serde::Serialize;
 use crate::commands::policy_input::{JsonNeighborSetDefinition, load_json};
 use crate::connection::Connection;
 use crate::error::CliError;
-use crate::output;
+use crate::output::{self, outln};
 use crate::proto::policy_service_client::PolicyServiceClient;
 use crate::proto::{
     DeleteNeighborSetRequest, GetNeighborSetRequest, ListNeighborSetsRequest, SetNeighborSetRequest,
@@ -55,21 +55,23 @@ pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
             .collect();
         output::print_json_pretty(&out)?;
     } else if resp.neighbor_sets.is_empty() {
-        println!("No neighbor sets configured");
+        outln!("No neighbor sets configured")?;
     } else {
-        println!(
+        outln!(
             "{:<32} {:<10} {:<6} PEER_GROUPS",
-            "NAME", "ADDRESSES", "ASNS"
-        );
+            "NAME",
+            "ADDRESSES",
+            "ASNS"
+        )?;
         for ns in &resp.neighbor_sets {
             let def = ns.definition.as_ref();
-            println!(
+            outln!(
                 "{:<32} {:<10} {:<6} {}",
                 ns.name,
                 def.map(|d| d.addresses.len()).unwrap_or(0),
                 def.map(|d| d.remote_asns.len()).unwrap_or(0),
                 def.map(|d| d.peer_groups.len()).unwrap_or(0),
-            );
+            )?;
         }
     }
     Ok(())
@@ -95,16 +97,16 @@ pub async fn get(connection: Connection, name: &str, json: bool) -> Result<(), C
         };
         output::print_json_pretty(&detail)?;
     } else {
-        println!("Name:        {}", resp.name);
-        println!(
+        outln!("Name:        {}", resp.name)?;
+        outln!(
             "Addresses:   {}",
             if def.addresses.is_empty() {
                 "(none)".to_string()
             } else {
                 def.addresses.join(", ")
             }
-        );
-        println!(
+        )?;
+        outln!(
             "Remote ASNs: {}",
             if def.remote_asns.is_empty() {
                 "(none)".to_string()
@@ -115,15 +117,15 @@ pub async fn get(connection: Connection, name: &str, json: bool) -> Result<(), C
                     .collect::<Vec<_>>()
                     .join(", ")
             }
-        );
-        println!(
+        )?;
+        outln!(
             "Peer Groups: {}",
             if def.peer_groups.is_empty() {
                 "(none)".to_string()
             } else {
                 def.peer_groups.join(", ")
             }
-        );
+        )?;
     }
     Ok(())
 }

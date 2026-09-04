@@ -1,6 +1,6 @@
 use crate::connection::Connection;
 use crate::error::CliError;
-use crate::output::{self, JsonGlobal};
+use crate::output::{self, JsonGlobal, outln};
 use crate::proto::GetGlobalRequest;
 use crate::proto::global_service_client::GlobalServiceClient;
 
@@ -28,10 +28,10 @@ pub async fn run(connection: Connection, json: bool) -> Result<(), CliError> {
         };
         output::print_json_pretty(&out)?;
     } else {
-        println!("ASN:         {}", resp.asn);
-        println!("Router ID:   {}", resp.router_id);
-        println!("Listen Port: {}", resp.listen_port);
-        println!(
+        outln!("ASN:         {}", resp.asn)?;
+        outln!("Router ID:   {}", resp.router_id)?;
+        outln!("Listen Port: {}", resp.listen_port)?;
+        outln!(
             "TCP-AO:      {}{}",
             tcp_ao_support_label(resp.tcp_ao_support),
             if resp.tcp_ao_detail.is_empty() {
@@ -39,7 +39,7 @@ pub async fn run(connection: Connection, json: bool) -> Result<(), CliError> {
             } else {
                 format!(" ({})", resp.tcp_ao_detail)
             }
-        );
+        )?;
     }
     Ok(())
 }

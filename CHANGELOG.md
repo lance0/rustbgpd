@@ -426,6 +426,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   accepts the connection but never answers is reported as unavailable (or
   stale, for data already on screen) by the next tick instead of freezing
   the refresh loop.
+- Human-readable `rbgp` output for connected commands now goes through the
+  same fallible stdout writer as JSON output, so a reader that closes the
+  pipe early (for example `rbgp rib | head -1`) ends the command quietly
+  with exit code 1 instead of a `failed printing to stdout` panic. Output
+  bytes are unchanged.
 
 ### Documentation
 
