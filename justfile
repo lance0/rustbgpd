@@ -25,6 +25,8 @@ gate:
     cargo clippy --locked --workspace --all-targets -- -D warnings
     cargo test --locked --workspace
     cargo doc --locked --workspace --lib --no-deps
+    cargo doc --locked -p rustbgpd --bin rustbgpd --no-deps
+    cargo doc --locked -p rustbgpctl --bin rbgp --no-deps
 
 # Check links between tracked Markdown files without making network requests.
 links:

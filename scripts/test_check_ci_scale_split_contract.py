@@ -145,6 +145,8 @@ class ScaleSplitContractTests(unittest.TestCase):
             ("  evpn_bum_filter_kernel:\n", "  renamed_evpn:\n"),
             ("- run: cargo test --locked --workspace", "- run: true"),
             ("- run: cargo doc --locked --workspace --lib --no-deps", "- run: true"),
+            ("- run: cargo doc --locked -p rustbgpd --bin rustbgpd --no-deps", "- run: true"),
+            ("- run: cargo doc --locked -p rustbgpctl --bin rbgp --no-deps", "- run: true"),
             (
                 "- run: cargo clippy --locked -p rustbgpd-wire --all-targets --features tokio-codec -- -D warnings",
                 "- run: true",

@@ -1054,7 +1054,7 @@ impl PeerManager {
         }
     }
 
-    /// The applier half of [`Self::hot_update_peer`], without the
+    /// The applier half of `Self::hot_update_peer`, without the
     /// static-only guard.
     ///
     /// Everything it touches is per-session runtime state that an accepted

@@ -281,6 +281,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   carrying reachable NLRI is handled as RFC 7606 treat-as-withdraw and counted
   under `bgp_update_malformed_total{disposition="treat_as_withdraw"}`; without
   reachable NLRI, RFC 7606 section 5.2 requires a session reset.
+- The rustdoc gate (`just gate`, the pre-push hook, and CI) now documents the
+  `rustbgpd` and `rbgp` binaries in addition to the workspace libraries. The
+  root lib target shares its name with the daemon binary, so the previous
+  `--lib`-only run documented an empty stub and cargo skipped every daemon
+  module; one intra-doc link that pointed at a test-only item is now plain
+  text.
 
 ### Fixed
 
