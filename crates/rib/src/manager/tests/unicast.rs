@@ -4019,3 +4019,87 @@ async fn rr_local_route_to_all_ibgp() {
 }
 
 // --- RPKI integration tests ---
+
+#[tokio::test]
+async fn link_local_only_next_hop_change_is_re_advertised() {
+    // RFC 2545 §3: an IPv6 next hop can carry a global address plus a
+    // link-local companion. A same-peer re-announce that changes only the
+    // link-local half is a Loc-RIB change and must reach downstream peers.
+    let (tx, rx) = mpsc::channel(32);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let target: IpAddr = "2001:db8::90".parse().unwrap();
+    let source: Ipv6Addr = "2001:db8::1".parse().unwrap();
+    let (out_tx, mut out_rx) = mpsc::channel(16);
+    tx.send(RibUpdate::PeerUp {
+        peer: target,
+        session_id: 0,
+        peer_asn: 65_000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: dual_stack_sendable(),
+        is_ebgp: false,
+        route_reflector_client: false,
+        orr_vantage: None,
+        per_client_best: false,
+        interpret_rfc1997: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    let prefix = Ipv6Prefix::new("2001:db8:100::".parse().unwrap(), 48);
+    let mut route = make_v6_route(prefix, source);
+    route.link_local_next_hop = Some("fe80::1".parse().unwrap());
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V6(source),
+        announced: vec![route.clone()],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_best_routes(&tx).await;
+    let announced = out_rx.try_recv().expect("initial route is announced");
+    assert_eq!(announced.announce.len(), 1);
+    assert_eq!(
+        announced.announce[0].link_local_next_hop,
+        Some("fe80::1".parse().unwrap())
+    );
+
+    route.link_local_next_hop = Some("fe80::2".parse().unwrap());
+    tx.send(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer: IpAddr::V6(source),
+        announced: vec![route],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    let _ = query_best_routes(&tx).await;
+    let re_advertised = out_rx
+        .try_recv()
+        .expect("link-local-only next-hop change is re-advertised");
+    assert_eq!(re_advertised.announce.len(), 1);
+    assert_eq!(re_advertised.announce[0].prefix, Prefix::V6(prefix));
+    assert_eq!(
+        re_advertised.announce[0].link_local_next_hop,
+        Some("fe80::2".parse().unwrap())
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
