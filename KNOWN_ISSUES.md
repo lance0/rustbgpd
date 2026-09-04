@@ -146,30 +146,30 @@ resolved.
   monitoring retains the original wire UPDATE, including the peer-supplied
   attribute.
 
-## Measurement tooling defects
+- **DHAT import-decision owner matching (resolved).** A profiling-instrument
+  defect found during the explain-cache memory campaign
+  (`docs/perf/explain-cache-opt-in-2026-07.md`); it never affected daemon
+  behavior. The classifier now requires an actual `ImportDecisionCache` owner
+  rather than any generic type mentioning its module. The unrelated
+  `RejectedRouteStore` no longer enters the cache bucket, and the
+  disabled-cache capture reports exactly zero there. The explain-cache receipt
+  retains its per-row semantic table because policy-context clones allocated
+  in the inbound path have no cache owner in their allocation stack.
 
-These profiling-instrument defects do not affect daemon behavior. All three
-were found during the explain-cache memory campaign
-(`docs/perf/explain-cache-opt-in-2026-07.md`) and are resolved; the retained
-derivatives were reclassified from unchanged normalized stacks and per-stack
-byte counts.
+- **Current demangled RIB owner matching (resolved).** A second
+  profiling-instrument defect from the same campaign, with no effect on daemon
+  behavior. Owner markers accept the optimized `<Type>::method` spelling
+  emitted by current Rust toolchains, so group, Loc-RIB, Adj-RIB-In,
+  prefix-trie, daemon-core, and per-peer Adj-RIB-Out allocations no longer
+  collapse into `RIB other`.
 
-- **DHAT import-decision owner matching (resolved).** The classifier now
-  requires an actual `ImportDecisionCache` owner rather than any generic type
-  mentioning its module. The unrelated `RejectedRouteStore` no longer enters
-  the cache bucket, and the disabled-cache capture reports exactly zero there.
-  The explain-cache receipt retains its per-row semantic table because
-  policy-context clones allocated in the inbound path have no cache owner in
-  their allocation stack.
-
-- **Current demangled RIB owner matching (resolved).** Owner markers accept the
-  optimized `<Type>::method` spelling emitted by current Rust toolchains, so
-  group, Loc-RIB, Adj-RIB-In, prefix-trie, daemon-core, and per-peer Adj-RIB-Out
-  allocations no longer collapse into `RIB other`.
-
-- **Stripped DHAT capture diagnostic (resolved).** A live allocation with an
-  empty frame stack now fails with an actionable message requiring a symbolized
-  `release-prof` build and explicitly rejecting the stripped release profile.
+- **Stripped DHAT capture diagnostic (resolved).** The third
+  profiling-instrument defect from the same campaign, with no effect on daemon
+  behavior. A live allocation with an empty frame stack now fails with an
+  actionable message requiring a symbolized `release-prof` build and
+  explicitly rejecting the stripped release profile. For all three, the
+  retained derivatives were reclassified from unchanged normalized stacks and
+  per-stack byte counts.
 
 ## Limitations (by design, not bugs)
 
