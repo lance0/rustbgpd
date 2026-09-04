@@ -1126,7 +1126,7 @@ sum by (kind) (rate(bgp_policy_eval_errors_total[5m])) > 0
 
 **Policy filtering visibility — gRPC scalar aggregates.** `NeighborState`
 carries four per-peer running totals to give operators a cheap
-sanity-check on the labelled Prometheus counter:
+sanity-check on the labeled Prometheus counter:
 
 | Field | Direction | Scope |
 |---|---|---|
