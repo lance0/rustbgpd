@@ -111,8 +111,8 @@ class ScaleSplitContractTests(unittest.TestCase):
             ),
             (
                 WORKFLOW,
-                "bench/scale/rrharness/Cargo.toml --locked",
-                "bench/scale/rrharness/Cargo.toml",
+                "bench/scale/Cargo.toml --workspace --locked",
+                "bench/scale/Cargo.toml --workspace",
             ),
             (
                 WORKFLOW,

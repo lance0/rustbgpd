@@ -55,12 +55,9 @@ gate-rib:
     cargo check --locked -p rustbgpd-api --features bench-internals --benches
     cargo check --locked -p rustbgpd-api --features bench-internals,vpn-query-allocation --bench vpn_query_allocation
 
-# Test the four standalone scale-harness manifests used by CI.
+# Test the standalone scale-harness workspace used by CI.
 gate-deps:
-    cargo test --manifest-path bench/scale/rrharness/Cargo.toml --locked
-    cargo test --manifest-path bench/scale/rrtransport/Cargo.toml --locked
-    cargo test --manifest-path bench/scale/reloadstall/Cargo.toml --locked
-    cargo test --manifest-path bench/scale/enhanced-route-refresh/Cargo.toml --locked
+    cargo test --manifest-path bench/scale/Cargo.toml --workspace --locked
 
 # Execute every Criterion benchmark body once without collecting timings.
 gate-contract:
