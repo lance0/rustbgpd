@@ -253,8 +253,13 @@ pub fn validate_open(
         .flatten()
         .copied()
         .collect();
-    let extended_nexthop_families =
-        negotiate_extended_nexthop(&our_extended_nexthop_caps, &peer_extended_nexthop_caps);
+    // RFC 8950 applies per negotiated NLRI AFI/SAFI: keep only families both
+    // sides advertised in MultiProtocol, as the GR and LLGR filters above do.
+    let extended_nexthop_families: HashMap<(Afi, Safi), Afi> =
+        negotiate_extended_nexthop(&our_extended_nexthop_caps, &peer_extended_nexthop_caps)
+            .into_iter()
+            .filter(|(family, _)| negotiated_families.contains(family))
+            .collect();
 
     // Negotiate Add-Path (RFC 7911)
     let our_add_path_caps = config.add_path_capabilities();
@@ -268,7 +273,13 @@ pub fn validate_open(
         .flatten()
         .copied()
         .collect();
-    let add_path_families = negotiate_add_path(&our_add_path_caps, &peer_add_path_caps);
+    // RFC 7911 applies per negotiated AFI/SAFI: keep only families both sides
+    // advertised in MultiProtocol, as the GR and LLGR filters above do.
+    let add_path_families: HashMap<(Afi, Safi), AddPathMode> =
+        negotiate_add_path(&our_add_path_caps, &peer_add_path_caps)
+            .into_iter()
+            .filter(|(family, _)| negotiated_families.contains(family))
+            .collect();
     let peer_paths_limits: HashMap<(Afi, Safi), u16> = open
         .capabilities
         .iter()
@@ -1382,6 +1393,10 @@ mod tests {
         cfg.add_path_send = true;
         cfg.add_path_send_max = 8;
         let mut open = peer_open();
+        open.capabilities.push(Capability::MultiProtocol {
+            afi: Afi::Ipv6,
+            safi: Safi::Unicast,
+        });
         open.capabilities.push(Capability::AddPath(vec![
             AddPathFamily {
                 afi: Afi::Ipv4,
@@ -1669,6 +1684,72 @@ mod tests {
         assert_eq!(
             neg.add_path_families.get(&(Afi::Ipv4, Safi::Unicast)),
             Some(&AddPathMode::Receive)
+        );
+    }
+
+    #[test]
+    fn validate_open_add_path_limited_to_negotiated_families() {
+        let mut cfg = test_config();
+        cfg.families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+        cfg.add_path_receive = true;
+        // Peer advertises MultiProtocol for ipv4/unicast only, but Add-Path
+        // for both ipv4/unicast and ipv6/unicast.
+        let mut open = peer_open();
+        open.capabilities.push(Capability::AddPath(vec![
+            AddPathFamily {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                send_receive: AddPathMode::Send,
+            },
+            AddPathFamily {
+                afi: Afi::Ipv6,
+                safi: Safi::Unicast,
+                send_receive: AddPathMode::Send,
+            },
+        ]));
+
+        let neg = validate_open(&open, &cfg).unwrap();
+        assert!(
+            !neg.negotiated_families
+                .contains(&(Afi::Ipv6, Safi::Unicast))
+        );
+        assert_eq!(
+            neg.add_path_families.get(&(Afi::Ipv4, Safi::Unicast)),
+            Some(&AddPathMode::Receive)
+        );
+        assert!(
+            !neg.add_path_families
+                .contains_key(&(Afi::Ipv6, Safi::Unicast)),
+            "Add-Path must not be negotiated for a family outside the MP intersection"
+        );
+    }
+
+    #[test]
+    fn validate_open_extended_nexthop_limited_to_negotiated_families() {
+        let mut cfg = test_config();
+        cfg.families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+        // Peer advertises MultiProtocol for ipv6/unicast only, but Extended
+        // Next Hop for ipv4/unicast NLRI over an ipv6 next hop.
+        let mut open = peer_open();
+        open.capabilities
+            .retain(|c| !matches!(c, Capability::MultiProtocol { .. }));
+        open.capabilities.push(Capability::MultiProtocol {
+            afi: Afi::Ipv6,
+            safi: Safi::Unicast,
+        });
+        open.capabilities
+            .push(Capability::ExtendedNextHop(vec![ExtendedNextHopFamily {
+                nlri_afi: Afi::Ipv4,
+                nlri_safi: Safi::Unicast,
+                next_hop_afi: Afi::Ipv6,
+            }]));
+
+        let neg = validate_open(&open, &cfg).unwrap();
+        assert_eq!(neg.negotiated_families, vec![(Afi::Ipv6, Safi::Unicast)]);
+        assert!(
+            !neg.extended_nexthop_families
+                .contains_key(&(Afi::Ipv4, Safi::Unicast)),
+            "extended next hop must not be negotiated for a family outside the MP intersection"
         );
     }
 
