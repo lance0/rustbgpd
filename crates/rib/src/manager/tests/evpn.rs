@@ -2630,6 +2630,82 @@ async fn evpn_route_event_best_changed_on_higher_mobility() {
     handle.await.unwrap();
 }
 
+/// A locally originated MAC+IP route re-injected under the same key
+/// with a higher MAC Mobility sequence (the RFC 9721 §5.1/§6.2
+/// local-move cascade) is a best-path change for that key, not a
+/// silent replace: subscribers see `BestChanged` carrying the new
+/// sequence, with the local originator on both sides.
+#[tokio::test]
+async fn evpn_route_event_best_changed_on_local_mac_ip_reinject_with_higher_mobility() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let mac = [0xAA, 0xBB, 0xCC, 0x00, 0x00, 0x09];
+    let local_macip = |seq| {
+        let mut route = make_evpn_macip(Ipv4Addr::UNSPECIFIED, mac, Some(seq), false);
+        route.origin_type = crate::route::RouteOrigin::Local;
+        if let EvpnRoute::MacIp(ref mut macip) = route.route {
+            macip.ip = Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)));
+        }
+        route
+    };
+    let inject = |route: EvpnRibRoute| {
+        let tx = tx.clone();
+        async move {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            tx.send(RibUpdate::InjectEvpn {
+                route,
+                reply: reply_tx,
+            })
+            .await
+            .unwrap();
+            reply_rx
+                .await
+                .expect("inject reply")
+                .expect("inject succeeds");
+        }
+    };
+
+    let first = local_macip(0);
+    let key = first.key();
+    inject(first).await;
+
+    // Subscribe after the initial Added so the next event is the
+    // re-inject.
+    let mut events_rx = subscribe_evpn_events(&tx).await;
+
+    let second = local_macip(1);
+    assert_eq!(second.key(), key, "re-inject must reuse the same key");
+    let expected_attrs = second.attributes.clone();
+    inject(second).await;
+
+    let event = tokio::time::timeout(Duration::from_secs(2), events_rx.recv())
+        .await
+        .expect("EVPN broadcast should deliver event within 2s")
+        .expect("broadcast not closed");
+    assert_eq!(event.event_type, crate::event::RouteEventType::BestChanged);
+    assert_eq!(event.key, key);
+    assert_eq!(event.peer, Some(IpAddr::V4(Ipv4Addr::UNSPECIFIED)));
+    assert_eq!(event.previous_peer, Some(IpAddr::V4(Ipv4Addr::UNSPECIFIED)));
+    let best = event
+        .best
+        .as_ref()
+        .expect("BestChanged must carry a best path");
+    assert_eq!(
+        best.attributes, expected_attrs,
+        "new best must carry the bumped MAC Mobility sequence"
+    );
+    let prior = event
+        .previous_best
+        .as_ref()
+        .expect("BestChanged must carry the prior best path");
+    assert_ne!(prior.attributes, expected_attrs);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 #[tokio::test]
 async fn evpn_route_event_withdrawn_on_last_removed() {
     let (tx, rx) = mpsc::channel(64);

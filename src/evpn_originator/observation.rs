@@ -318,7 +318,7 @@ pub(super) async fn handle_learned(
         debug!(?vni, ?mac, "Learned for unknown VNI — dropping");
         return;
     };
-    state
+    let prior_ifindex = state
         .local_macs
         .entry(vni)
         .or_default()
@@ -342,14 +342,48 @@ pub(super) async fn handle_learned(
         //      re-emit MAC-only via the originator. `on_local_learned`
         //      is idempotent on identity and handles the port-move
         //      ratchet bump if `ifindex` differs from the prior call.
-        //   2. MAC is currently MAC+IP-advertising. The kernel re-emit
-        //      is just AF_BRIDGE FDB churn; emitting a MAC-only Inject would
-        //      re-introduce the route the IpAdded handler explicitly
-        //      withdrew, breaking the replace invariant ("at any time
-        //      at most one of {MAC-only, MAC+IP} is advertising").
-        //      The `local_macs[vni][mac] = ifindex` update above is
-        //      what matters — a future downgrade replays it.
+        //   2. MAC is currently MAC+IP-advertising. A re-emit on the
+        //      same port is just AF_BRIDGE FDB churn; emitting a MAC-only
+        //      Inject would re-introduce the route the IpAdded handler
+        //      explicitly withdrew, breaking the replace invariant ("at
+        //      any time at most one of {MAC-only, MAC+IP} is
+        //      advertising"). The `local_macs[vni][mac] = ifindex`
+        //      update above is what matters — a future downgrade
+        //      replays it. A re-emit on a *different* port is a local
+        //      move: RFC 9721 §5.1/§6.2 make every (MAC, IP) route a
+        //      child of the MAC route, so all of them re-advertise at
+        //      the bumped sequence — still no MAC-only Inject, and one
+        //      duplicate-MAC move for the whole event.
         if state.is_mac_ip_advertising(vni, mac) || state.has_live_mac_ip_bindings(vni, mac) {
+            if prior_ifindex.is_some_and(|prior| prior != ifindex) {
+                let view_present = state
+                    .live_mac_ip
+                    .get(&vni)
+                    .and_then(|per_vni| per_vni.get(&mac))
+                    .is_some_and(|ips| {
+                        ips.iter()
+                            .any(|ip| state.remote_mac_ip_view.contains_key(&(vni, mac, *ip)))
+                    });
+                let preexisting_keys = outstanding_route_keys_for_mac(state, vni, mac);
+                let Some(mac_ip_orig) = state.mac_ip_originators.get_mut(&vni) else {
+                    return;
+                };
+                let actions = mac_ip_orig.on_local_mac_moved(mac);
+                apply_actions_with_duplicate_policy(
+                    actions,
+                    view_present,
+                    preexisting_keys,
+                    vni,
+                    mac,
+                    state,
+                    inst,
+                    rib_tx,
+                    metrics,
+                    originated_local_mac_counts,
+                    vni_to_esi,
+                )
+                .await;
+            }
             return;
         }
         if quarantined {
@@ -430,48 +464,42 @@ pub(super) async fn handle_learned(
         )
         .await;
 
-        for ip in pending_ips {
-            if duplicate_mac_is_quarantined(state, vni, mac) {
-                state
-                    .live_mac_ip
-                    .entry(vni)
-                    .or_default()
-                    .entry(mac)
-                    .or_default()
-                    .insert(ip);
-                continue;
-            }
-            let view_present = state.remote_mac_ip_view.contains_key(&(vni, mac, ip));
-            let preexisting_keys = outstanding_route_keys_for_mac(state, vni, mac);
-            let actions = {
-                let view = state.remote_mac_ip_view.get(&(vni, mac, ip));
-                let Some(mac_ip_orig) = state.mac_ip_originators.get_mut(&vni) else {
-                    return;
-                };
-                mac_ip_orig.on_local_ip_learned(mac, ip, sticky, view)
-            };
-            apply_actions_with_duplicate_policy(
-                actions,
-                view_present,
-                preexisting_keys,
-                vni,
-                mac,
-                state,
-                inst,
-                rib_tx,
-                metrics,
-                originated_local_mac_counts,
-                vni_to_esi,
-            )
-            .await;
-            state
-                .live_mac_ip
-                .entry(vni)
-                .or_default()
-                .entry(mac)
-                .or_default()
-                .insert(ip);
+        // One MAC event, one duplicate-MAC move: batch every pending
+        // IP's Inject through a single policy pass so contention on
+        // several IPs of the same MAC counts once, not once per IP.
+        let view_present = pending_ips
+            .iter()
+            .any(|ip| state.remote_mac_ip_view.contains_key(&(vni, mac, *ip)));
+        let preexisting_keys = outstanding_route_keys_for_mac(state, vni, mac);
+        let Some(mac_ip_orig) = state.mac_ip_originators.get_mut(&vni) else {
+            return;
+        };
+        let mut actions = Vec::with_capacity(pending_ips.len());
+        for ip in &pending_ips {
+            let view = state.remote_mac_ip_view.get(&(vni, mac, *ip));
+            actions.extend(mac_ip_orig.on_local_ip_learned(mac, *ip, sticky, view));
         }
+        apply_actions_with_duplicate_policy(
+            actions,
+            view_present,
+            preexisting_keys,
+            vni,
+            mac,
+            state,
+            inst,
+            rib_tx,
+            metrics,
+            originated_local_mac_counts,
+            vni_to_esi,
+        )
+        .await;
+        state
+            .live_mac_ip
+            .entry(vni)
+            .or_default()
+            .entry(mac)
+            .or_default()
+            .extend(pending_ips);
     }
 }
 

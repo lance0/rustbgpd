@@ -24,30 +24,28 @@
 //!   Bridge-resident IP bindings don't carry a port; an IP migrating
 //!   to a new MAC surfaces as `IpRemoved(old_mac, ip)` followed by
 //!   `IpAdded(new_mac, ip)` — natural withdraw-then-inject without
-//!   the originator special-casing it.
+//!   the originator special-casing it. The kernel's relative ordering
+//!   of those two events is not established; a separate network-
+//!   namespace test is tracked.
 //! - **MAC-aged cascade** — when the kernel ages a MAC, every
 //!   `(MAC, *)` IP route must be withdrawn alongside the MAC-only
 //!   route. [`LocalMacIpOriginator::on_local_mac_aged`] is that hook;
 //!   without it the daemon would have to maintain its own reverse
 //!   `MAC -> Vec<IP>` index and duplicate originator state.
 //!
-//! ## Decision deferred to slice 3 — MAC-only local-move cascade
+//! ## Local-move cascade (RFC 9721 §5.1 and §6.2)
 //!
-//! When a MAC moves locally (a bridge-port change picked up by the
-//! existing [`crate::origination::LocalMacOriginator`] ratchet bump), should the
-//! corresponding `(mac, *)` MAC+IP routes also re-emit at a bumped
-//! sequence?
-//!
-//! - **Argument for**: the host moved locally, and the MAC+IP
-//!   advertisement points at the same host. Peers should learn the
-//!   same fact about both routes.
-//! - **Argument against**: the host's IP didn't change; the move is
-//!   really an L2 fact, and the MAC+IP route is more about ARP/ND
-//!   suppression than about L2 reachability.
-//!
-//! Slice 2 (this module) does **not** decide. The cascade hook lives
-//! at the daemon layer — slice 3 owns the call. Recording the
-//! decision space here so it doesn't get lost.
+//! When the kernel moves a MAC to another local bridge port, the
+//! corresponding `(MAC, *)` MAC+IP routes re-emit at a bumped
+//! sequence. RFC 9721 §5.1 treats every local MAC-IP route as a child
+//! of the local MAC route, §6.2 requires all children to inherit the
+//! recomputed sequence, and §5.2 accepts the cost of re-advertising
+//! every child. [`LocalMacIpOriginator::on_local_mac_moved`] is that
+//! hook: every advertising `(MAC, *)` entry re-emits at
+//! `max(own, last_seen_remote) + 1`. The per-`(MAC, IP)` ratchets stay
+//! independent (there is no shared parent attribute), so the cascade
+//! is a bump-all rather than an inheritance; the daemon owns the
+//! bridge-port comparison and the call.
 //!
 //! ## Sticky bit
 //!
@@ -368,6 +366,36 @@ impl LocalMacIpOriginator {
             if let Some(key) = state.originated_key.take() {
                 out.push(OriginationAction::Withdraw { mac, key });
             }
+        }
+        out
+    }
+
+    /// Cascade hook: the kernel moved the MAC to another local bridge
+    /// port. RFC 9721 §5.1 makes every `(MAC, IP)` route a child of the
+    /// local MAC route and §6.2 requires each child to inherit the
+    /// recomputed sequence, so every advertising `(MAC, *)` entry
+    /// re-emits at `max(own, last_seen_remote) + 1` (saturating at
+    /// `u32::MAX`). Withdrawn entries keep their ratchet untouched; a
+    /// MAC with nothing advertising is a no-op.
+    pub fn on_local_mac_moved(&mut self, mac: MacAddress) -> Vec<OriginationAction> {
+        let mut out = Vec::new();
+        for (k, state) in &mut self.by_key {
+            if k.mac != mac {
+                continue;
+            }
+            let Some(key) = state.originated_key else {
+                continue;
+            };
+            state.our_seq = state
+                .last_seen_remote_seq
+                .map_or(state.our_seq, |remote| remote.max(state.our_seq))
+                .saturating_add(1);
+            out.push(OriginationAction::Inject {
+                mac,
+                mobility_seq: state.rendered_seq(),
+                sticky: state.sticky,
+                key,
+            });
         }
         out
     }
@@ -712,6 +740,95 @@ mod tests {
     fn mac_aged_with_no_entries_is_no_op() {
         let mut o = fresh();
         assert!(o.on_local_mac_aged(mac(0xAA)).is_empty());
+    }
+
+    // --- on_local_mac_moved (RFC 9721 §5.1 / §6.2 cascade) ---
+
+    #[test]
+    fn mac_moved_bumps_every_advertising_ip_of_that_mac() {
+        let mut o = fresh();
+        // Uncontended entry at seq=0 (no extcomm on the wire yet).
+        let _ = o.on_local_ip_learned(mac(0xAA), ipa("192.0.2.10"), false, None);
+        // Contended entry: remote at 5 → we advertise 6.
+        let _ = o.on_local_ip_learned(mac(0xAA), ipa("192.0.2.11"), false, Some(&remote(Some(5))));
+        // Withdrawn entry for the same MAC — must not re-emit.
+        let _ = o.on_local_ip_learned(mac(0xAA), ipa("2001:db8::1"), false, None);
+        let _ = o.on_local_ip_aged(mac(0xAA), ipa("2001:db8::1"));
+        // Different MAC — must not be cascaded.
+        let _ = o.on_local_ip_learned(mac(0xBB), ipa("192.0.2.20"), false, None);
+
+        let actions = o.on_local_mac_moved(mac(0xAA));
+        assert_eq!(
+            actions.len(),
+            2,
+            "one re-Inject per advertising IP: {actions:?}"
+        );
+        // BTreeMap order: 192.0.2.10 then 192.0.2.11.
+        assert_inject(&actions[0], Some(1), false);
+        assert_inject(&actions[1], Some(7), false);
+
+        // The withdrawn (AA, 2001:db8::1) ratchet is untouched: a
+        // re-Learn with no contention history is still seq=0.
+        let relearn = o.on_local_ip_learned(mac(0xAA), ipa("2001:db8::1"), false, None);
+        assert_eq!(relearn.len(), 1);
+        assert_inject(&relearn[0], None, false);
+        // (BB, 192.0.2.20) is still at seq=0: idempotent re-Learn.
+        assert!(
+            o.on_local_ip_learned(mac(0xBB), ipa("192.0.2.20"), false, None)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn mac_moved_with_nothing_advertising_is_no_op() {
+        let mut o = fresh();
+        assert!(o.on_local_mac_moved(mac(0xAA)).is_empty());
+
+        // Tracked but withdrawn: still a no-op, ratchet untouched.
+        let _ = o.on_local_ip_learned(mac(0xAA), ipa("192.0.2.10"), false, None);
+        let _ = o.on_local_mac_aged(mac(0xAA));
+        assert!(o.on_local_mac_moved(mac(0xAA)).is_empty());
+        let relearn = o.on_local_ip_learned(mac(0xAA), ipa("192.0.2.10"), false, None);
+        assert_eq!(relearn.len(), 1);
+        assert_inject(&relearn[0], None, false);
+    }
+
+    #[test]
+    fn mac_moved_then_aged_then_relearn_preserves_ratchet() {
+        // Same preservation rule as the per-IP and MAC-aged paths: the
+        // bumped sequence survives the withdraw, and the re-Learn with
+        // contention history lands at max(remote, prior) + 1.
+        let mut o = fresh();
+        // remote=7 → we advertise 8.
+        let _ = o.on_local_ip_learned(mac(0xAA), ipa("192.0.2.10"), false, Some(&remote(Some(7))));
+        let moved = o.on_local_mac_moved(mac(0xAA));
+        assert_eq!(moved.len(), 1);
+        assert_inject(&moved[0], Some(9), false);
+
+        let _ = o.on_local_mac_aged(mac(0xAA));
+        let actions = o.on_local_ip_learned(mac(0xAA), ipa("192.0.2.10"), false, None);
+        assert_eq!(actions.len(), 1);
+        // max(last_seen=7, prior=9) + 1 = 10.
+        assert_inject(&actions[0], Some(10), false);
+    }
+
+    #[test]
+    fn mac_moved_at_max_saturates_never_wraps_to_zero() {
+        let mut o = fresh();
+        let _ = o.on_local_ip_learned(
+            mac(0xAA),
+            ipa("192.0.2.10"),
+            false,
+            Some(&remote(Some(u32::MAX))),
+        );
+        // Re-emit at the ceiling, never at a wrapped 0. Same policy as
+        // the MAC-only port-move bump.
+        let actions = o.on_local_mac_moved(mac(0xAA));
+        assert_eq!(actions.len(), 1);
+        assert_inject(&actions[0], Some(u32::MAX), false);
+        let actions = o.on_local_mac_moved(mac(0xAA));
+        assert_eq!(actions.len(), 1);
+        assert_inject(&actions[0], Some(u32::MAX), false);
     }
 
     // --- on_remote_ip_changed ---
