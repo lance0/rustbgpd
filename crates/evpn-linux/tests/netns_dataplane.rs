@@ -283,6 +283,28 @@ async fn expect_ip_added(
     }
 }
 
+async fn expect_ip_rebound(
+    rx: &mut tokio::sync::mpsc::Receiver<LocalMacObservation>,
+    want_vni: u32,
+    old_mac: MacAddress,
+    new_mac: MacAddress,
+    want_ip: IpAddr,
+) {
+    let first = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("timed out waiting for IpRemoved of the displaced MAC")
+        .expect("local MAC channel closed");
+    assert!(
+        matches!(
+            first,
+            LocalMacObservation::IpRemoved { vni, mac, ip }
+                if vni.as_u32() == want_vni && mac == old_mac && ip == want_ip
+        ),
+        "expected IpRemoved for the displaced MAC first, got: {first:?}"
+    );
+    expect_ip_added(rx, want_vni, new_mac, want_ip).await;
+}
+
 async fn expect_no_observation(rx: &mut tokio::sync::mpsc::Receiver<LocalMacObservation>) {
     match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
         Err(_) => {}
@@ -826,6 +848,26 @@ async fn linux_dataplane_attributes_vlan_mac_ip_observations_inner() {
         ],
     );
     expect_ip_added(&mut rx, 200, shared_mac, shared_ip).await;
+
+    // Rebind the IP to a new MAC on the VNI 100 upper. The kernel
+    // updates the row in place with one RTM_NEWNEIGH and no delete;
+    // the observation layer must surface the displaced MAC first.
+    let rebound_mac = mac(0x67);
+    run(
+        "ip",
+        &[
+            "neigh",
+            "replace",
+            &shared_ip_str,
+            "lladdr",
+            &mac_str(rebound_mac),
+            "dev",
+            "brvlan.10",
+            "nud",
+            "reachable",
+        ],
+    );
+    expect_ip_rebound(&mut rx, 100, shared_mac, rebound_mac, shared_ip).await;
 
     run(
         "ip",

@@ -24,9 +24,13 @@
 //!   Bridge-resident IP bindings don't carry a port; an IP migrating
 //!   to a new MAC surfaces as `IpRemoved(old_mac, ip)` followed by
 //!   `IpAdded(new_mac, ip)` — natural withdraw-then-inject without
-//!   the originator special-casing it. The kernel's relative ordering
-//!   of those two events is not established; a separate network-
-//!   namespace test is tracked.
+//!   the originator special-casing it. The observation layer
+//!   establishes that ordering: the kernel replaces a neighbour
+//!   row's link-layer address in place with one `RTM_NEWNEIGH` and
+//!   no delete, and the Linux notify loop delivers that as
+//!   `IpRemoved` for the displaced MAC followed by `IpAdded` for the
+//!   new one (asserted by the network-namespace test in
+//!   `rustbgpd-evpn-linux`).
 //! - **MAC-aged cascade** — when the kernel ages a MAC, every
 //!   `(MAC, *)` IP route must be withdrawn alongside the MAC-only
 //!   route. [`LocalMacIpOriginator::on_local_mac_aged`] is that hook;

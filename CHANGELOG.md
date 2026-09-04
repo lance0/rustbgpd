@@ -351,6 +351,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Operator-visible:** an IP that rebinds to a new MAC in the kernel
+  neighbour table now withdraws the old MAC+IP Type 2 route before the new
+  one is advertised. The kernel replaces the neighbour row's link-layer
+  address in place with one `RTM_NEWNEIGH` and sends no delete for the old
+  binding; the Linux observation layer now delivers that change as
+  `IpRemoved` for the displaced MAC followed by `IpAdded` for the new one.
+  Previously the old MAC's cached binding was silently overwritten and its
+  MAC+IP route stayed advertised until that MAC aged out of the bridge FDB.
+
 - **Operator-visible:** the daemon's warm-checkpoint reader and `rbgp diff
   snapshot from-mrt` now share one decoder for the `MP_REACH_NLRI` inside a
   `TABLE_DUMP_V2` RIB entry. It accepts both the RFC 6396 §4.3.4 reduced form

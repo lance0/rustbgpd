@@ -4861,3 +4861,91 @@ async fn pending_ip_bindings_mac_entry_cap_bounds_the_map() {
         "pending-binding MAC entries are capped"
     );
 }
+
+/// An IP rebinding to a new MAC reaches the originator as
+/// `IpRemoved(old_mac, ip)` then `IpAdded(new_mac, ip)` — the Linux
+/// observation layer synthesises the removal because the kernel
+/// replaces the neighbour row in place. The old MAC+IP route is
+/// withdrawn (and that MAC downgraded to MAC-only) before the new
+/// MAC's MAC+IP route replaces its MAC-only route.
+#[tokio::test]
+async fn ip_rebound_to_new_mac_withdraws_old_route_and_injects_new() {
+    let instances = instance_table(100);
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let (log, _responder) = rib_capture_responder(rib_rx);
+    let metrics = BgpMetrics::new();
+    let counts = OriginatedLocalMacCounts::default();
+    let mut state = originator_state(&instances);
+    let ip = ipa("192.0.2.10");
+
+    for (mac_byte, ifindex) in [(0xAA, 10), (0xBB, 11)] {
+        handle_observation(
+            &LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: mac(mac_byte),
+                ifindex,
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+            &std::collections::BTreeMap::new(),
+            &std::collections::BTreeSet::new(),
+        )
+        .await;
+    }
+    handle_observation(
+        &LocalMacObservation::IpAdded {
+            vni: vni(100),
+            mac: mac(0xAA),
+            ip,
+        },
+        &mut state,
+        &instances,
+        &rib_tx,
+        &metrics,
+        &counts,
+        &std::collections::BTreeMap::new(),
+        &std::collections::BTreeSet::new(),
+    )
+    .await;
+    log.lock().await.clear();
+
+    for obs in [
+        LocalMacObservation::IpRemoved {
+            vni: vni(100),
+            mac: mac(0xAA),
+            ip,
+        },
+        LocalMacObservation::IpAdded {
+            vni: vni(100),
+            mac: mac(0xBB),
+            ip,
+        },
+    ] {
+        handle_observation(
+            &obs,
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+            &std::collections::BTreeMap::new(),
+            &std::collections::BTreeSet::new(),
+        )
+        .await;
+    }
+
+    let actions = log.lock().await.clone();
+    assert_eq!(
+        actions,
+        vec![
+            RibAction::Withdraw(macip_key_with(100, 0xAA, Some("192.0.2.10"))),
+            RibAction::Inject(macip_key_with(100, 0xAA, None)),
+            RibAction::Withdraw(macip_key_with(100, 0xBB, None)),
+            RibAction::Inject(macip_key_with(100, 0xBB, Some("192.0.2.10"))),
+        ],
+        "expected old MAC+IP Withdraw, old MAC-only re-Inject, new MAC-only Withdraw, new MAC+IP Inject"
+    );
+}

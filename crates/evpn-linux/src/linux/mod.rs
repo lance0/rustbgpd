@@ -322,16 +322,31 @@ async fn notify_loop(
                 if let Some(obs) =
                     notify::classify_neigh(notify::NeighEventKind::New, &neigh, &cache)
                 {
-                    if let LocalMacObservation::IpAdded { mac, ip, .. } = obs
+                    if let LocalMacObservation::IpAdded { vni, mac, ip } = obs
                         && let Some(key) = notify::ip_neighbour_cache_key(&neigh)
                     {
-                        remember_ip_neighbour_mac(
+                        debug_assert_eq!(key.1, ip);
+                        // An IP rebinding to a new MAC is one RTM_NEWNEIGH
+                        // that replaces the row in place; the kernel sends
+                        // no RTM_DELNEIGH for the old binding. Synthesise it
+                        // so the originator withdraws the old MAC+IP route
+                        // before the new one is injected.
+                        if let Some(displaced) = remember_ip_neighbour_mac(
                             &mut ip_neighbour_macs,
                             &mut ip_neighbour_mac_order,
                             key,
                             mac,
-                        );
-                        debug_assert_eq!(key.1, ip);
+                        ) {
+                            forward_observation_or_record_drop(
+                                &local_mac_tx,
+                                LocalMacObservation::IpRemoved {
+                                    vni,
+                                    mac: displaced,
+                                    ip,
+                                },
+                                &on_observation_drop,
+                            );
+                        }
                     }
                     forward_observation_or_record_drop(&local_mac_tx, obs, &on_observation_drop);
                 }
@@ -426,13 +441,15 @@ fn forward_observation_or_record_drop(
     }
 }
 
+/// Remember `mac` for `key`, returning the previously cached MAC when
+/// `key` was bound to a different one (an in-place rebind).
 fn remember_ip_neighbour_mac(
     cache: &mut HashMap<(u32, IpAddr), MacAddress>,
     order: &mut VecDeque<(u32, IpAddr)>,
     key: (u32, IpAddr),
     mac: MacAddress,
-) {
-    remember_ip_neighbour_mac_with_limit(cache, order, key, mac, IP_NEIGHBOUR_MAC_CACHE_LIMIT);
+) -> Option<MacAddress> {
+    remember_ip_neighbour_mac_with_limit(cache, order, key, mac, IP_NEIGHBOUR_MAC_CACHE_LIMIT)
 }
 
 fn remember_ip_neighbour_mac_with_limit(
@@ -441,7 +458,7 @@ fn remember_ip_neighbour_mac_with_limit(
     key: (u32, IpAddr),
     mac: MacAddress,
     limit: usize,
-) {
+) -> Option<MacAddress> {
     let is_new = !cache.contains_key(&key);
     if is_new && cache.len() >= limit {
         while let Some(old_key) = order.pop_front() {
@@ -457,7 +474,7 @@ fn remember_ip_neighbour_mac_with_limit(
     if is_new {
         order.push_back(key);
     }
-    cache.insert(key, mac);
+    cache.insert(key, mac).filter(|previous| *previous != mac)
 }
 
 fn forget_ip_neighbour_mac(
@@ -1019,6 +1036,31 @@ mod tests {
     }
 
     #[test]
+    fn ip_neighbour_mac_cache_reports_displaced_mac_only_on_rebind() {
+        let mut cache = HashMap::new();
+        let mut order = VecDeque::new();
+        let key = (7, "192.0.2.1".parse::<IpAddr>().unwrap());
+        let old = MacAddress::new([0x02, 0, 0, 0, 0, 1]);
+        let new = MacAddress::new([0x02, 0, 0, 0, 0, 2]);
+
+        assert_eq!(
+            remember_ip_neighbour_mac_with_limit(&mut cache, &mut order, key, old, 4),
+            None
+        );
+        assert_eq!(
+            remember_ip_neighbour_mac_with_limit(&mut cache, &mut order, key, old, 4),
+            None,
+            "same-MAC re-announcement displaces nothing"
+        );
+        assert_eq!(
+            remember_ip_neighbour_mac_with_limit(&mut cache, &mut order, key, new, 4),
+            Some(old)
+        );
+        assert_eq!(cache.get(&key), Some(&new));
+        assert_eq!(order.len(), 1, "a rebind keeps one LRU slot for the key");
+    }
+
+    #[test]
     fn ip_neighbour_mac_cache_is_bounded() {
         let mut cache = HashMap::new();
         let mut order = VecDeque::new();
@@ -1038,6 +1080,65 @@ mod tests {
         forget_ip_neighbour_mac(&mut cache, &mut order, second_key);
         assert!(cache.is_empty());
         assert!(order.is_empty());
+    }
+
+    /// An IP that rebinds to a new MAC arrives as one `RTM_NEWNEIGH`
+    /// replacing the row in place; the kernel sends no `RTM_DELNEIGH`
+    /// for the old binding. The notify loop must deliver the change as
+    /// `IpRemoved` for the displaced MAC before `IpAdded` for the new
+    /// one, and add nothing on a same-MAC re-announcement.
+    #[tokio::test]
+    async fn notify_loop_rebind_emits_ip_removed_before_ip_added() {
+        use netlink_packet_core::{NetlinkHeader, NetlinkMessage};
+        use netlink_packet_route::AddressFamily;
+        use netlink_packet_route::neighbour::{NeighbourFlags, NeighbourState};
+
+        let (msg_tx, msg_rx) = futures::channel::mpsc::unbounded();
+        let (obs_tx, mut obs_rx) = mpsc::channel(16);
+        let (event_tx, _event_rx) = mpsc::channel(16);
+        let link_cache = Arc::new(Mutex::new(notify::tests::cache_for(100, 11, 22)));
+        let hook: ObservationDropHook =
+            Arc::new(|reason: &'static str| panic!("unexpected observation drop: {reason}"));
+
+        let ip: IpAddr = "192.0.2.10".parse().unwrap();
+        let old = [0x02, 0, 0, 0, 0, 0xAA];
+        let new = [0x02, 0, 0, 0, 0, 0xBB];
+        for mac in [old, new, new] {
+            let neigh = notify::tests::ip_neigh_msg(
+                AddressFamily::Inet,
+                99,
+                NeighbourState::Reachable,
+                NeighbourFlags::empty(),
+                Some(mac),
+                Some(ip),
+            );
+            let msg = NetlinkMessage::new(
+                NetlinkHeader::default(),
+                NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewNeighbour(neigh)),
+            );
+            msg_tx
+                .unbounded_send((msg, netlink_sys::SocketAddr::new(0, 0)))
+                .unwrap();
+        }
+        drop(msg_tx);
+        notify_loop(msg_rx, link_cache, obs_tx, event_tx, hook).await;
+
+        let mut got = Vec::new();
+        while let Some(obs) = obs_rx.recv().await {
+            got.push(obs);
+        }
+        let vni = rustbgpd_evpn::EvpnInstanceId::new(100).unwrap();
+        let old = MacAddress::new(old);
+        let new = MacAddress::new(new);
+        assert_eq!(
+            got,
+            vec![
+                LocalMacObservation::IpAdded { vni, mac: old, ip },
+                LocalMacObservation::IpRemoved { vni, mac: old, ip },
+                LocalMacObservation::IpAdded { vni, mac: new, ip },
+                LocalMacObservation::IpAdded { vni, mac: new, ip },
+            ]
+        );
     }
 
     #[test]
