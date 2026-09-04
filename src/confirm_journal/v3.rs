@@ -16,7 +16,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 #[cfg(test)]
-use std::sync::{Condvar, atomic::AtomicBool, atomic::Ordering};
+use std::sync::Condvar;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -628,14 +628,14 @@ impl ClaimedResidue {
 #[cfg(test)]
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ResidueCleanupStall {
-    started: Arc<AtomicBool>,
+    started: Arc<tokio::sync::Notify>,
     release: Arc<(Mutex<bool>, Condvar)>,
 }
 
 #[cfg(test)]
 impl ResidueCleanupStall {
     fn block(&self) {
-        self.started.store(true, Ordering::Release);
+        self.started.notify_one();
         let (lock, ready) = &*self.release;
         let mut released = lock.lock().unwrap();
         while !*released {
@@ -643,8 +643,9 @@ impl ResidueCleanupStall {
         }
     }
 
-    pub(crate) fn started(&self) -> bool {
-        self.started.load(Ordering::Acquire)
+    /// Resolves once the detached cleanup thread has reached the stall.
+    pub(crate) async fn started(&self) {
+        self.started.notified().await;
     }
 
     pub(crate) fn release(&self) {

@@ -3791,13 +3791,11 @@ async fn stalled_v3_residue_cleanup_releases_terminal_paths_and_is_singleton() {
     .await
     .expect("residue cleanup must not delay confirm")
     .unwrap();
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while !stall.started() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("detached residue cleanup must start");
+    // The cleanup runs on a dedicated OS thread; await its own signal rather
+    // than polling, and keep the timeout only as a hang guard.
+    tokio::time::timeout(Duration::from_secs(30), stall.started())
+        .await
+        .expect("detached residue cleanup must start");
     assert!(!harness.locator.exists());
     assert!(!harness.raw.exists() && !harness.metadata.exists());
     assert!(harness.controller.state.lock().await.pending.is_none());
@@ -3845,18 +3843,30 @@ async fn stalled_v3_residue_cleanup_releases_terminal_paths_and_is_singleton() {
     assert!(residue.iter().all(|name| second_state.join(name).exists()));
 
     let cleanup_active = Arc::clone(&harness.controller.v3_residue_cleanup_active);
+    let cleanup_thread = harness
+        .controller
+        .v3_residue_cleanup_thread
+        .lock()
+        .unwrap()
+        .take()
+        .expect("confirm must have spawned the residue cleanup thread");
     harness.ack_task.abort();
     let drop_started = std::time::Instant::now();
     drop(harness.controller);
     assert!(drop_started.elapsed() < Duration::from_secs(1));
     stall.release();
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while cleanup_active.load(Ordering::Acquire) {
-            tokio::task::yield_now().await;
-        }
-    })
+    // Joining the thread is the completion signal: the singleton reservation
+    // is released before the thread exits, so no polling is needed and the
+    // timeout is only a hang guard.
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        tokio::task::spawn_blocking(move || cleanup_thread.join()),
+    )
     .await
-    .expect("detached cleanup must finish after release");
+    .expect("detached cleanup must finish after release")
+    .unwrap()
+    .expect("residue cleanup thread must not panic");
+    assert!(!cleanup_active.load(Ordering::Acquire));
 }
 
 #[tokio::test]
