@@ -818,6 +818,12 @@ const PEER_MANAGER_MUTATION_TIMEOUT: Duration = Duration::from_mins(10);
 /// still be applied by the actor afterwards — like any RPC deadline, the
 /// outcome is unknown — but the error propagates out of the shielded body,
 /// so the runtime-config lock guard drops instead of being held forever.
+///
+/// Returns `UNAVAILABLE` when the peer-manager command channel is closed,
+/// so the command was never accepted and nothing was applied.
+///
+/// Returns `INTERNAL` when the peer manager accepted the command but
+/// dropped its reply. The command may already have been applied.
 pub(crate) async fn peer_manager_request<R>(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     build_command: impl FnOnce(oneshot::Sender<R>) -> PeerManagerCommand,
