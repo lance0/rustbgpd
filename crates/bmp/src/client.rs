@@ -1037,60 +1037,112 @@ mod tests {
         handle.abort();
     }
 
-    /// Production mutations: removing the per-bootstrap check, the final
-    /// pre-completion check, or the post-recv check changes the exact count;
-    /// moving any check after its write violates the source-order assertions.
-    #[test]
-    fn generation_close_checks_guard_every_write_seam() {
-        let source = include_str!("client.rs")
-            .split("#[cfg(test)]\nmod tests")
-            .next()
-            .unwrap();
-        let loop_start = source.find("for message in bootstrap.messages").unwrap();
-        let first_check = source[loop_start..]
-            .find("Self::generation_closed(&rx")
-            .unwrap()
-            + loop_start;
-        let bootstrap_write = source[first_check..]
-            .find("Self::write_all_with_timeout")
-            .unwrap()
-            + first_check;
-        let final_check = source[bootstrap_write..]
-            .find("Self::generation_closed(&rx")
-            .unwrap()
-            + bootstrap_write;
-        let completion = source[final_check..]
-            .find("CollectorBootstrapComplete")
-            .unwrap()
-            + final_check;
-        let receive = source[completion..].find("rx.recv().await").unwrap() + completion;
-        let live_check = source[receive..]
-            .find("Self::generation_closed(&rx")
-            .unwrap()
-            + receive;
-        let live_write = source[live_check..].find("send_live_or_retry").unwrap() + live_check;
-        let retry = source[live_write..]
-            .find("PostConnectWriteOutcome::Retry =>")
-            .unwrap()
-            + live_write;
-        let retry_close = source[retry..].find("close_generation_and_retry").unwrap() + retry;
-        assert!(loop_start < first_check && first_check < bootstrap_write);
-        assert!(bootstrap_write < final_check && final_check < completion);
-        assert!(receive < live_check && live_check < live_write);
-        assert!(live_write < retry && retry < retry_close);
-        let completion_failures = &source[completion..receive];
-        assert_eq!(
-            completion_failures
-                .matches("close_generation_and_retry")
-                .count(),
-            2
+    /// Production mutation: deleting the per-message bootstrap close check
+    /// writes the bootstrap of a generation that closed before its bootstrap
+    /// arrived; the final pre-completion check then still reports the
+    /// disconnect, so the TCP tail is the distinguishing assertion.
+    #[tokio::test]
+    async fn closed_generation_never_writes_bootstrap_messages() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (control_tx, mut control_rx) = mpsc::channel(8);
+        let client = BmpClient::new(
+            BmpClientConfig {
+                collector_id: 7,
+                collector_addr: addr,
+                reconnect_interval: 30,
+                version: BmpVersion::V3,
+            },
+            "rustbgpd".to_string(),
+            "test".to_string(),
+            control_tx,
+            BgpMetrics::new(),
         );
-        assert_eq!(source.matches("Self::generation_closed(&rx").count(), 3);
+        let handle = tokio::spawn(client.run());
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let initiation = codec::encode_initiation("rustbgpd", "test", BmpVersion::V3);
+        let mut observed = vec![0; initiation.len()];
+        stream.read_exact(&mut observed).await.unwrap();
+        let BmpControlEvent::CollectorConnected {
+            sender, bootstrap, ..
+        } = control_rx.recv().await.unwrap()
+        else {
+            panic!("expected connected");
+        };
+        drop(sender);
+        bootstrap
+            .send(crate::types::BmpCollectorBootstrap {
+                generation: 13,
+                messages: vec![Bytes::from_static(&[3, 0, 0, 0, 6, 0])],
+            })
+            .unwrap();
+        assert!(matches!(
+            control_rx.recv().await,
+            Some(BmpControlEvent::CollectorDisconnected { generation: 13, .. })
+        ));
+
+        let mut tail = Vec::new();
+        tokio::time::timeout(Duration::from_millis(500), stream.read_to_end(&mut tail))
+            .await
+            .expect("TCP remained open into one-second retry backoff")
+            .unwrap();
+        assert!(tail.is_empty(), "closed generation bootstrap reached TCP");
+        handle.abort();
     }
 
-    /// Semantic half of the structural bootstrap proof: closing after the
-    /// first direct write makes the same predicate stop before message two.
-    /// Making `generation_closed` ignore `Receiver::is_closed` turns it red.
+    /// Production mutation: deleting the pre-completion close check reports
+    /// `CollectorBootstrapComplete` for a generation that closed before its
+    /// empty bootstrap finished; the empty bootstrap keeps the per-message
+    /// check out of the way.
+    #[tokio::test]
+    async fn closed_generation_never_reports_bootstrap_complete() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (control_tx, mut control_rx) = mpsc::channel(8);
+        let client = BmpClient::new(
+            BmpClientConfig {
+                collector_id: 7,
+                collector_addr: addr,
+                reconnect_interval: 30,
+                version: BmpVersion::V3,
+            },
+            "rustbgpd".to_string(),
+            "test".to_string(),
+            control_tx,
+            BgpMetrics::new(),
+        );
+        let handle = tokio::spawn(client.run());
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let initiation = codec::encode_initiation("rustbgpd", "test", BmpVersion::V3);
+        let mut observed = vec![0; initiation.len()];
+        stream.read_exact(&mut observed).await.unwrap();
+        let BmpControlEvent::CollectorConnected {
+            sender, bootstrap, ..
+        } = control_rx.recv().await.unwrap()
+        else {
+            panic!("expected connected");
+        };
+        drop(sender);
+        bootstrap
+            .send(crate::types::BmpCollectorBootstrap {
+                generation: 14,
+                messages: vec![],
+            })
+            .unwrap();
+        let event = control_rx.recv().await;
+        assert!(
+            matches!(
+                event,
+                Some(BmpControlEvent::CollectorDisconnected { generation: 14, .. })
+            ),
+            "closed generation must disconnect without completing bootstrap, got {event:?}"
+        );
+        handle.abort();
+    }
+
+    /// Closing after the first direct write makes the per-message predicate
+    /// stop before message two. Making `generation_closed` ignore
+    /// `Receiver::is_closed` turns it red.
     #[test]
     fn bootstrap_close_after_message_one_excludes_message_two() {
         let (sender, receiver) = mpsc::channel::<Bytes>(1);
