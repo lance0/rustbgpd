@@ -18,7 +18,7 @@ use rustbgpd_evpn::runtime_plan_shape::validate_supported_plan_shape;
 use rustbgpd_evpn::{
     BridgeVlan, DfAlgorithm, DuplicateMacAction, DuplicateMacConfig, EthernetSegment, EvpnInstance,
     EvpnInstanceId, EvpnInstanceTable, EvpnRuntimeCandidate, EvpnRuntimeModel, IpVrf, IpVrfId,
-    IpVrfTable, OverlayIndexMode, RedundancyMode, RouteTarget,
+    IpVrfTable, OverlayIndexMode, RedundancyMode, RouteTarget, parse_esi, parse_mac_address,
 };
 use rustbgpd_policy::{
     CommunityMatch, NextHopAction, Policy, PolicyAction, PolicyChain, PolicyStatement,
@@ -5429,25 +5429,6 @@ fn parse_duplicate_mac_detection(
     })
 }
 
-/// Parse a `aa:bb:cc:dd:ee:ff` MAC string into a [`MacAddress`]. The
-/// wire crate intentionally does not implement `FromStr` on
-/// `MacAddress` (RFC 7432 NLRI uses raw bytes, not the operator
-/// notation), so the daemon owns this parse.
-fn parse_mac_address(raw: &str) -> Result<MacAddress, &'static str> {
-    let parts: Vec<&str> = raw.split(':').collect();
-    if parts.len() != 6 {
-        return Err("expected 6 colon-separated octets");
-    }
-    let mut bytes = [0u8; 6];
-    for (i, octet) in parts.iter().enumerate() {
-        if octet.len() != 2 {
-            return Err("each octet must be exactly 2 hex digits");
-        }
-        bytes[i] = u8::from_str_radix(octet, 16).map_err(|_| "invalid hex octet")?;
-    }
-    Ok(MacAddress::new(bytes))
-}
-
 /// Default ADR-0085 decision 3 recovery hold-off: how long a bound
 /// ES's link drain is held after carrier returns. Mirrors the RFC
 /// 8584 §3 DF-wait rationale (don't attract traffic before the
@@ -5950,27 +5931,6 @@ fn validate_esi_overlay_index_vrf(
 fn is_unicast_nonzero_mac(mac: MacAddress) -> bool {
     let octets = mac.octets();
     octets != [0; 6] && (octets[0] & 1) == 0
-}
-
-/// Parse a 10-byte ESI from operator text form
-/// (`XX:XX:XX:XX:XX:XX:XX:XX:XX:XX`). Each octet must be exactly
-/// two hex digits. The wire crate intentionally doesn't implement
-/// `FromStr` on `EthernetSegmentIdentifier` (the on-the-wire form
-/// is raw bytes, not the operator notation), so the daemon owns
-/// this parse.
-fn parse_esi(raw: &str) -> Result<EthernetSegmentIdentifier, &'static str> {
-    let parts: Vec<&str> = raw.split(':').collect();
-    if parts.len() != 10 {
-        return Err("expected 10 colon-separated hex octets");
-    }
-    let mut bytes = [0u8; 10];
-    for (i, octet) in parts.iter().enumerate() {
-        if octet.len() != 2 {
-            return Err("each octet must be exactly 2 hex digits");
-        }
-        bytes[i] = u8::from_str_radix(octet, 16).map_err(|_| "invalid hex octet")?;
-    }
-    Ok(EthernetSegmentIdentifier::new(bytes))
 }
 
 /// Resolve the `[gnmi_dialout]` section into runtime dial-out target

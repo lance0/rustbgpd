@@ -803,7 +803,7 @@
           }
         },
         "sticky_macs": {
-          "description": "MACs to be originated with the RFC 7432 §15.4 sticky bit when\nthe local kernel learns them. Textual form: `aa:bb:cc:dd:ee:ff`\n(lowercase hex, six octets). Empty by default. See ADR-0056.",
+          "description": "MACs to be originated with the RFC 7432 §15.4 sticky bit when\nthe local kernel learns them. Textual form: `aa:bb:cc:dd:ee:ff`\n(six two-digit hex octets, either case). Empty by default. See ADR-0056.",
           "type": "array",
           "default": [],
           "items": {

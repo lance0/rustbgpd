@@ -21,7 +21,7 @@ use rustbgpd_evpn::{
     EvpnInstance, EvpnInstanceId, EvpnInstanceTable, EvpnRuntimeLifecycle, EvpnRuntimeModel,
     EvpnRuntimeMutationState, EvpnRuntimePlan, EvpnRuntimeSnapshot, FdbNexthopDataplaneStatus,
     InstanceDataplaneStatus, InstanceState, IpVrfDataplaneStatus, MacAddress, ManagedNetdevStatus,
-    SameEsiBiasTable,
+    SameEsiBiasTable, parse_esi,
 };
 use tonic::{Request, Response, Status};
 
@@ -677,7 +677,7 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
         let req = request.into_inner();
         let vni = EvpnInstanceId::new(req.vni)
             .map_err(|err| Status::invalid_argument(format!("invalid VNI: {err}")))?;
-        let mac = MacAddress::new(crate::injection_service::parse_mac(&req.mac)?);
+        let mac = crate::injection_service::parse_mac(&req.mac)?;
         let clear = self.duplicate_mac_clear.as_ref().ok_or_else(|| {
             Status::unavailable("EVPN duplicate-MAC clear control is unavailable")
         })?;
@@ -772,26 +772,6 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
             .map(Response::new)
             .map_err(EvpnRuntimeApplyError::into_status)
     }
-}
-
-/// Parse a 10-byte ESI from the operator text form used across this
-/// proto (`XX:XX:XX:XX:XX:XX:XX:XX:XX:XX`). Mirrors the daemon config
-/// parser — the wire crate intentionally doesn't implement `FromStr`
-/// for `EthernetSegmentIdentifier` (the on-the-wire form is raw
-/// bytes), so the API layer owns its own parse of the display form.
-fn parse_esi(raw: &str) -> Result<rustbgpd_evpn::EthernetSegmentIdentifier, &'static str> {
-    let parts: Vec<&str> = raw.split(':').collect();
-    if parts.len() != 10 {
-        return Err("expected 10 colon-separated hex octets");
-    }
-    let mut bytes = [0u8; 10];
-    for (i, octet) in parts.iter().enumerate() {
-        if octet.len() != 2 {
-            return Err("each octet must be exactly 2 hex digits");
-        }
-        bytes[i] = u8::from_str_radix(octet, 16).map_err(|_| "invalid hex octet")?;
-    }
-    Ok(rustbgpd_evpn::EthernetSegmentIdentifier::new(bytes))
 }
 
 /// Operator-facing summary for a drain request. `requested` is the
@@ -2166,6 +2146,13 @@ mod tests {
         let esi = super::parse_esi(TEST_ESI).unwrap();
         assert_eq!(esi.to_string(), TEST_ESI);
         assert!(super::parse_esi("not-an-esi").is_err());
+    }
+
+    #[test]
+    fn parse_esi_rejects_signed_group() {
+        // The shared grammar requires two hex digits per octet, so the
+        // leading sign `u8::from_str_radix` would accept is refused.
+        assert!(super::parse_esi("+0:11:22:33:44:55:66:77:88:99").is_err());
     }
 
     #[tokio::test]

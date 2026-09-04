@@ -177,6 +177,23 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Operator-visible:** the EVPN MAC and ESI text forms are parsed by one
+  grammar shared by the configuration loader and the gRPC services: exactly
+  six (MAC) or ten (ESI) colon-separated groups of exactly two hex digits,
+  either case. `AddEvpnRoute`, `DeleteEvpnRoute`, and
+  `ClearDuplicateMacQuarantine` previously accepted one-digit and
+  three-digit MAC groups (`2:0:0:0:0:1`, `00f:00:00:00:00:01`) that
+  configuration load refused, and both entry points accepted a signed
+  two-character group (`+2:+0:+0:+0:+0:+1`). All three forms are now
+  rejected everywhere. gRPC refusals read `invalid MAC "<input>": <reason>`;
+  the configuration reason for a wrong MAC group count now reads
+  `expected 6 colon-separated hex octets`. `ListEthernetSegments` and
+  `SetEthernetSegmentDrain` already parsed `esi` with the configuration
+  grammar but likewise accepted a signed group
+  (`+0:11:22:33:44:55:66:77:88:99`); they now refuse it with
+  `INVALID_ARGUMENT`. Canonical zero-padded MAC and ESI input is
+  unaffected.
+
 - EVPN: a local bridge-port move of a MAC advertised as MAC+IP now
   re-advertises every (MAC, IP) Type 2 route for that MAC with the MAC
   Mobility sequence incremented (RFC 9721 §5.1/§6.2); such moves were
@@ -500,6 +517,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Upgrade notes
 
+- **EVPN RPCs apply the configuration MAC and ESI grammar:** `AddEvpnRoute`,
+  `DeleteEvpnRoute`, and `ClearDuplicateMacQuarantine` now parse `mac` and
+  `router_mac` with the parser the configuration loader uses: exactly six
+  colon-separated groups of exactly two hex digits. Requests carrying a
+  one-digit group (`2:0:0:0:0:1`), a three-digit group
+  (`00f:00:00:00:00:01`), or a signed group (`+2:+0:+0:+0:+0:+1`) are now
+  refused with `INVALID_ARGUMENT`. `ListEthernetSegments` and
+  `SetEthernetSegmentDrain` now refuse a signed ESI group
+  (`+0:11:22:33:44:55:66:77:88:99`) the same way, and configuration load
+  refuses the signed form for MAC and ESI fields, where it previously
+  parsed. Clients that send canonical zero-padded MAC and ESI input are
+  unaffected.
 - **EVPN local port moves now re-advertise MAC+IP routes:** when a MAC that
   is advertised as MAC+IP moves between local bridge ports, peers receive one
   additional Type 2 per IP bound to that MAC, each carrying the incremented
