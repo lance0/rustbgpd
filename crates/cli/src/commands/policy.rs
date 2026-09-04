@@ -17,7 +17,7 @@ use crate::commands::neighbor::bare_ip_rpc_address;
 use crate::commands::policy_input::{JsonPolicyDefinition, load_json};
 use crate::connection::Connection;
 use crate::error::CliError;
-use crate::output;
+use crate::output::{self, outln};
 use crate::proto::policy_service_client::PolicyServiceClient;
 use crate::proto::{
     self, ClearGlobalExportChainRequest, ClearGlobalImportChainRequest,
@@ -648,9 +648,11 @@ pub fn fmt_local(files: &[String], check: bool) -> i32 {
             continue;
         }
         if check {
-            println!("Diff in {file}:");
-            print!("{}", line_diff(&source, &formatted));
             failed = true;
+            let diff = format!("Diff in {file}:\n{}", line_diff(&source, &formatted));
+            if let Err(error) = output::print_text(&diff) {
+                output::report_write_error("policy diff output", &error);
+            }
         } else if let Err(error) = write_atomic(std::path::Path::new(file), &formatted) {
             eprintln!("Error: {error}");
             failed = true;
@@ -848,29 +850,31 @@ pub async fn test(
         eprintln!("{}: compile failed", opts.file);
         std::process::exit(1);
     }
-    println!(
+    outln!(
         "policy {:?} ({}) over {} route{}:",
         opts.policy,
         opts.direction,
         resp.routes_evaluated,
         if resp.routes_evaluated == 1 { "" } else { "s" }
-    );
-    println!(
+    )?;
+    outln!(
         "  accepted {}  rejected {}  modified {}",
-        resp.accepted, resp.rejected, resp.modified
-    );
+        resp.accepted,
+        resp.rejected,
+        resp.modified
+    )?;
     if !resp.term_hits.is_empty() {
-        println!("Term hits:");
+        outln!("Term hits:")?;
         for t in &resp.term_hits {
-            println!("  {:<32} {}", t.term, t.hits);
+            outln!("  {:<32} {}", t.term, t.hits)?;
         }
     }
     if !resp.diffs.is_empty() {
-        println!("Changes (up to {}):", opts.show_changes);
+        outln!("Changes (up to {}):", opts.show_changes)?;
         for d in &resp.diffs {
-            println!("  {}/{} (from {}):", d.prefix, d.prefix_length, d.peer);
+            outln!("  {}/{} (from {}):", d.prefix, d.prefix_length, d.peer)?;
             for change in &d.changes {
-                println!("    {change}");
+                outln!("    {change}")?;
             }
         }
     }
@@ -991,11 +995,11 @@ pub async fn stats(
     }
 
     if resp.chains.is_empty() && resp.datasets.is_empty() {
-        println!("No installed policy chains");
+        outln!("No installed policy chains")?;
         return Ok(());
     }
     if resp.chains.is_empty() {
-        println!("No installed policy chains");
+        outln!("No installed policy chains")?;
     }
     for chain in &resp.chains {
         // Import chains carry an install generation (bumps on every
@@ -1006,16 +1010,16 @@ pub async fn stats(
         } else {
             String::new()
         };
-        println!(
+        outln!(
             "{} {} chain — {} routes evaluated since install{generation}",
             operator_peer_address(peer, &chain.peer_address),
             chain.direction,
             chain.routes_evaluated
-        );
+        )?;
         // LAN-301: evaluation errors are fail-closed denies — surface
         // the count and the most recent blame line when nonzero.
         if chain.eval_errors > 0 {
-            println!(
+            outln!(
                 "  {} route{} denied by evaluation errors (fail closed); last: {}",
                 chain.eval_errors,
                 if chain.eval_errors == 1 { "" } else { "s" },
@@ -1024,9 +1028,9 @@ pub async fn stats(
                 } else {
                     &chain.last_error
                 },
-            );
+            )?;
         }
-        println!("  {:<32} {:<24} HITS", "POLICY", "TERM");
+        outln!("  {:<32} {:<24} HITS", "POLICY", "TERM")?;
         for t in &chain.terms {
             let policy = if t.policy.is_empty() {
                 "inline".to_string()
@@ -1038,27 +1042,34 @@ pub async fn stats(
             } else {
                 t.term.clone()
             };
-            println!("  {policy:<32} {term:<24} {}", t.hits);
+            outln!("  {policy:<32} {term:<24} {}", t.hits)?;
         }
     }
     // LAN-305: external dataset status — generation, size, and the
     // last refresh failure (prior snapshot still serving while set).
     if !resp.datasets.is_empty() {
-        println!("Datasets:");
-        println!(
+        outln!("Datasets:")?;
+        outln!(
             "  {:<24} {:<14} {:>4}  {:>8}  PATH",
-            "NAME", "KIND", "GEN", "RECORDS"
-        );
+            "NAME",
+            "KIND",
+            "GEN",
+            "RECORDS"
+        )?;
         for d in &resp.datasets {
-            println!(
+            outln!(
                 "  {:<24} {:<14} {:>4}  {:>8}  {}",
-                d.name, d.kind, d.generation, d.records, d.path
-            );
+                d.name,
+                d.kind,
+                d.generation,
+                d.records,
+                d.path
+            )?;
             if !d.last_error.is_empty() {
-                println!(
+                outln!(
                     "    last refresh FAILED ({}); prior snapshot still serving",
                     d.last_error
-                );
+                )?;
             }
         }
     }
@@ -1093,14 +1104,14 @@ pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
             .collect();
         output::print_json_pretty(&out)?;
     } else if resp.policies.is_empty() {
-        println!("No policies configured");
+        outln!("No policies configured")?;
     } else {
-        println!("{:<32} {:<10} STATEMENTS", "NAME", "DEFAULT");
+        outln!("{:<32} {:<10} STATEMENTS", "NAME", "DEFAULT")?;
         for p in &resp.policies {
             let def = p.definition.as_ref();
             let default_action = def.map(|d| d.default_action.as_str()).unwrap_or("-");
             let count = def.map(|d| d.statements.len()).unwrap_or(0);
-            println!("{:<32} {:<10} {}", p.name, default_action, count);
+            outln!("{:<32} {:<10} {}", p.name, default_action, count)?;
         }
     }
     Ok(())
@@ -1125,12 +1136,12 @@ pub async fn get(connection: Connection, name: &str, json: bool) -> Result<(), C
         };
         output::print_json_pretty(&detail)?;
     } else {
-        println!("Name:           {}", resp.name);
-        println!("Default Action: {}", def.default_action);
-        println!("Statements:     {}", def.statements.len());
+        outln!("Name:           {}", resp.name)?;
+        outln!("Default Action: {}", def.default_action)?;
+        outln!("Statements:     {}", def.statements.len())?;
         for (i, s) in def.statements.iter().enumerate() {
-            println!("  [{i}] action={}", s.action);
-            print_statement_details(s, "      ");
+            outln!("  [{i}] action={}", s.action)?;
+            print_statement_details(s, "      ")?;
         }
     }
     Ok(())
@@ -1369,15 +1380,15 @@ pub async fn explain_import(
         return Err(err);
     }
 
-    println!(
+    outln!(
         "import policy explain — peer {} prefix {}/{} (policy generation {})",
         operator_peer_address(Some(neighbor), &resp.peer_address),
         resp.prefix,
         resp.prefix_length,
         resp.current_policy_generation
-    );
+    )?;
     if resp.matches.len() > 1 {
-        println!("{} matching paths:", resp.matches.len());
+        outln!("{} matching paths:", resp.matches.len())?;
     }
     for m in &resp.matches {
         let path = if m.path_id == 0 {
@@ -1385,28 +1396,28 @@ pub async fn explain_import(
         } else {
             format!(" path-id {}", m.path_id)
         };
-        println!("  {}{}", outcome_label(m.outcome), path);
+        outln!("  {}{}", outcome_label(m.outcome), path)?;
         if outcome_has_decision(m.outcome) {
-            println!("    {}", decision_attribution_line(m));
-            println!(
+            outln!("    {}", decision_attribution_line(m))?;
+            outln!(
                 "    rpki:    {}    aspa: {}",
                 blank_dash(&m.rpki_validation),
                 blank_dash(&m.aspa_validation)
-            );
-            println!("    eval-ns: {}", m.evaluated_at_unix_ns);
+            )?;
+            outln!("    eval-ns: {}", m.evaluated_at_unix_ns)?;
             if let Some(mods) = &m.modifications {
                 let summary = modifications_summary(mods);
                 if !summary.is_empty() {
-                    println!("    mods:    {summary}");
+                    outln!("    mods:    {summary}")?;
                 }
             }
             for (i, s) in m.statements.iter().enumerate() {
                 if i == 0 {
-                    println!("    statements:");
+                    outln!("    statements:")?;
                 }
-                println!("      {}", statement_line(s));
+                outln!("      {}", statement_line(s))?;
                 for trace in &s.term_traces {
-                    println!("        {trace}");
+                    outln!("        {trace}")?;
                 }
             }
         }
@@ -1620,23 +1631,23 @@ pub async fn chain_show(
         output::print_json_pretty(&out)?;
     } else {
         let scope = neighbor.unwrap_or("global");
-        println!("Scope:        {scope}");
-        println!(
+        outln!("Scope:        {scope}")?;
+        outln!(
             "Import Chain: {}",
             if import.is_empty() {
                 "(none)".to_string()
             } else {
                 import.join(" -> ")
             }
-        );
-        println!(
+        )?;
+        outln!(
             "Export Chain: {}",
             if export.is_empty() {
                 "(none)".to_string()
             } else {
                 export.join(" -> ")
             }
-        );
+        )?;
     }
     Ok(())
 }
@@ -1778,67 +1789,69 @@ pub enum ChainDirection {
     Export,
 }
 
-fn print_statement_details(s: &proto::PolicyStatement, indent: &str) {
+fn print_statement_details(s: &proto::PolicyStatement, indent: &str) -> Result<(), CliError> {
     if let Some(p) = &s.prefix {
-        println!("{indent}prefix={p}");
+        outln!("{indent}prefix={p}")?;
     }
     if let Some(g) = s.ge {
-        println!("{indent}ge={g}");
+        outln!("{indent}ge={g}")?;
     }
     if let Some(l) = s.le {
-        println!("{indent}le={l}");
+        outln!("{indent}le={l}")?;
     }
     if !s.match_community.is_empty() {
-        println!("{indent}match_community={}", s.match_community.join(","));
+        outln!("{indent}match_community={}", s.match_community.join(","))?;
     }
     if let Some(p) = &s.match_as_path {
-        println!("{indent}match_as_path={p}");
+        outln!("{indent}match_as_path={p}")?;
     }
     if let Some(n) = &s.match_neighbor_set {
-        println!("{indent}match_neighbor_set={n}");
+        outln!("{indent}match_neighbor_set={n}")?;
     }
     if let Some(rt) = &s.match_route_type {
-        println!("{indent}match_route_type={rt}");
+        outln!("{indent}match_route_type={rt}")?;
     }
     if let Some(rt) = s.match_evpn_route_type {
-        println!("{indent}match_evpn_route_type={rt}");
+        outln!("{indent}match_evpn_route_type={rt}")?;
     }
     if let Some(v) = &s.match_rpki_validation {
-        println!("{indent}match_rpki_validation={v}");
+        outln!("{indent}match_rpki_validation={v}")?;
     }
     if let Some(v) = &s.match_aspa_validation {
-        println!("{indent}match_aspa_validation={v}");
+        outln!("{indent}match_aspa_validation={v}")?;
     }
     if let Some(n) = &s.match_next_hop {
-        println!("{indent}match_next_hop={n}");
+        outln!("{indent}match_next_hop={n}")?;
     }
     if let Some(lp) = s.set_local_pref {
-        println!("{indent}set_local_pref={lp}");
+        outln!("{indent}set_local_pref={lp}")?;
     }
     if let Some(med) = s.set_med {
-        println!("{indent}set_med={med}");
+        outln!("{indent}set_med={med}")?;
     }
     if let Some(n) = &s.set_next_hop {
-        println!("{indent}set_next_hop={n}");
+        outln!("{indent}set_next_hop={n}")?;
     }
     if !s.set_community_add.is_empty() {
-        println!(
+        outln!(
             "{indent}set_community_add={}",
             s.set_community_add.join(",")
-        );
+        )?;
     }
     if !s.set_community_remove.is_empty() {
-        println!(
+        outln!(
             "{indent}set_community_remove={}",
             s.set_community_remove.join(",")
-        );
+        )?;
     }
     if let Some(p) = &s.set_as_path_prepend {
-        println!(
+        outln!(
             "{indent}set_as_path_prepend=asn={} count={}",
-            p.asn, p.count
-        );
+            p.asn,
+            p.count
+        )?;
     }
+    Ok(())
 }
 
 #[cfg(test)]

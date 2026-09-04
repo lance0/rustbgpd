@@ -1,6 +1,6 @@
 use crate::connection::Connection;
 use crate::error::CliError;
-use crate::output;
+use crate::output::{self, outln};
 use crate::proto::injection_service_client::InjectionServiceClient;
 use crate::proto::{
     AddFlowSpecRequest, DeleteFlowSpecRequest, FlowSpecAction, FlowSpecComponent, FlowSpecRedirect,
@@ -86,18 +86,18 @@ pub async fn list(connection: Connection, family: Option<i32>, json: bool) -> Re
             .collect();
         output::print_json_pretty(&out)?;
     } else if resp.routes.is_empty() {
-        println!("No FlowSpec routes");
+        outln!("No FlowSpec routes")?;
     } else {
         for route in &resp.routes {
             let components: Vec<String> = route.components.iter().map(format_component).collect();
             let actions: Vec<String> = route.actions.iter().map(format_action).collect();
-            println!(
+            outln!(
                 "  match [{}] action [{}] from {} ({})",
                 components.join(", "),
                 actions.join(", "),
                 route.peer_address,
                 output::format_family(route.afi_safi),
-            );
+            )?;
         }
     }
     Ok(())

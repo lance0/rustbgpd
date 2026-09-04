@@ -3,7 +3,7 @@
 
 use crate::connection::Connection;
 use crate::error::CliError;
-use crate::output;
+use crate::output::{self, outln};
 use crate::proto::{
     ListOrrStatusRequest, ListOrrStatusResponse, OrrInputDiagnostics, OrrVantageStatusEntry,
 };
@@ -42,36 +42,40 @@ fn print_orr_status(resp: &ListOrrStatusResponse, json: bool) -> Result<(), CliE
     } else if resp.vantages.is_empty() {
         write_inactive_status(&mut std::io::stdout().lock(), resp)?;
     } else {
-        println!(
+        outln!(
             "{:<40} {:<10} {:<18} {:<8} Peers",
-            "Vantage", "Resolved", "Node", "Reach"
-        );
-        println!("{}", "-".repeat(90));
+            "Vantage",
+            "Resolved",
+            "Node",
+            "Reach"
+        )?;
+        outln!("{}", "-".repeat(90))?;
         for entry in &resp.vantages {
-            println!(
+            outln!(
                 "{:<40} {:<10} {:<18} {:<8} {}",
                 entry.vantage,
                 entry.resolved,
                 node_label(entry),
                 entry.reachable_nodes,
                 entry.peers.join(" ")
-            );
+            )?;
         }
-        println!(
+        outln!(
             "Topology: {} nodes, {} links",
-            resp.topology_nodes, resp.topology_links
-        );
+            resp.topology_nodes,
+            resp.topology_links
+        )?;
     }
     if !json {
         let diagnostics = input_diagnostics(resp);
-        println!(
+        outln!(
             "Topology inputs: included_default={} excluded_nondefault={} malformed_topology={} malformed_attribute_29={} default_with_ignored_flex_algo={}",
             diagnostics.included_default,
             diagnostics.excluded_nondefault,
             diagnostics.malformed_topology,
             diagnostics.malformed_attribute_29,
             diagnostics.default_with_ignored_flex_algo,
-        );
+        )?;
     }
     Ok(())
 }

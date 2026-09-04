@@ -900,8 +900,8 @@ fn format_med(med_attr: Option<u32>) -> String {
 }
 
 /// Print route table with dynamic column widths and colored best marker.
-pub fn print_route_table(routes: &[proto::Route], show_age: bool) {
-    print!("{}", render_route_table_text(routes, show_age));
+pub fn print_route_table(routes: &[proto::Route], show_age: bool) -> Result<(), CliError> {
+    print_text(&render_route_table_text(routes, show_age))
 }
 
 pub(crate) fn render_route_table_text(routes: &[proto::Route], show_age: bool) -> String {
@@ -1088,7 +1088,7 @@ pub fn print_result(json: bool, action: &str, target: &str, message: &str) -> Re
         });
         print_json_pretty(&out)?;
     } else {
-        println!("{message}");
+        print_line(message)?;
     }
     Ok(())
 }
@@ -1175,6 +1175,31 @@ pub(crate) fn write_serialized_json_line<W: Write + ?Sized>(
 ) -> Result<(), CliError> {
     write_line(writer, json.as_bytes())
 }
+
+/// Print one text line through locked stdout. Unlike `println!`, a closed
+/// pipe is reported as an ordinary write error instead of a panic.
+pub fn print_line(text: &str) -> Result<(), CliError> {
+    let stdout = io::stdout();
+    write_text_line(&mut stdout.lock(), text)
+}
+
+/// Print already-rendered text byte-for-byte through locked stdout.
+pub fn print_text(text: &str) -> Result<(), CliError> {
+    let stdout = io::stdout();
+    write_bytes(&mut stdout.lock(), text.as_bytes())
+}
+
+/// `println!` through [`print_line`]: formats the arguments and returns the
+/// write result, which the caller must propagate.
+macro_rules! outln {
+    () => {
+        $crate::output::print_line("")
+    };
+    ($($arg:tt)*) => {
+        $crate::output::print_line(&format!($($arg)*))
+    };
+}
+pub(crate) use outln;
 
 /// Print a pretty JSON value through locked stdout.
 pub fn print_json_pretty<T: Serialize>(value: &T) -> Result<(), CliError> {

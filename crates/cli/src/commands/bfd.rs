@@ -2,7 +2,7 @@
 
 use crate::connection::Connection;
 use crate::error::CliError;
-use crate::output;
+use crate::output::{self, outln};
 use crate::proto::bfd_service_client::BfdServiceClient;
 use crate::proto::{BfdSession, BfdSessionState, GetBfdSessionsRequest};
 use serde::Serialize;
@@ -90,18 +90,18 @@ fn print_sessions(sessions: &[BfdSession], json: bool) -> Result<(), CliError> {
         let out: Vec<JsonBfdSession> = sessions.iter().map(to_json).collect();
         output::print_json_pretty(&out)?;
     } else if sessions.is_empty() {
-        println!("No BFD sessions");
+        outln!("No BFD sessions")?;
     } else {
-        println!("{:<40} {:<11} {:<7} Diagnostic", "Peer", "State", "Strict");
-        println!("{}", "-".repeat(80));
+        outln!("{:<40} {:<11} {:<7} Diagnostic", "Peer", "State", "Strict")?;
+        outln!("{}", "-".repeat(80))?;
         for s in sessions {
-            println!(
+            outln!(
                 "{:<40} {:<11} {:<7} {}",
                 s.peer_address,
                 state_label(s.state),
                 if s.strict { "yes" } else { "no" },
                 human_diagnostic(s)
-            );
+            )?;
         }
     }
     Ok(())

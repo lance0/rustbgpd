@@ -11,7 +11,7 @@ use crate::commands::neighbor::bare_ip_rpc_address;
 use crate::commands::policy_input::{JsonPeerGroupDefinition, load_json};
 use crate::connection::Connection;
 use crate::error::CliError;
-use crate::output;
+use crate::output::{self, outln};
 use crate::proto::peer_group_service_client::PeerGroupServiceClient;
 use crate::proto::{
     ClearNeighborPeerGroupRequest, DeletePeerGroupRequest, GetPeerGroupRequest,
@@ -150,18 +150,21 @@ pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
             .collect();
         output::print_json_pretty(&out)?;
     } else if resp.peer_groups.is_empty() {
-        println!("No peer groups configured");
+        outln!("No peer groups configured")?;
     } else {
-        println!("{:<32} {:<24} IMPORT EXPORT", "NAME", "FAMILIES");
+        outln!("{:<32} {:<24} IMPORT EXPORT", "NAME", "FAMILIES")?;
         for pg in &resp.peer_groups {
             let def = pg.definition.as_ref();
             let families = def.map(|d| d.families.join(",")).unwrap_or_default();
             let import_len = def.map(|d| d.import_policy_chain.len()).unwrap_or(0);
             let export_len = def.map(|d| d.export_policy_chain.len()).unwrap_or(0);
-            println!(
+            outln!(
                 "{:<32} {:<24} {:>6} {:>6}",
-                pg.name, families, import_len, export_len
-            );
+                pg.name,
+                families,
+                import_len,
+                export_len
+            )?;
         }
     }
     Ok(())
@@ -182,111 +185,111 @@ pub async fn get(connection: Connection, name: &str, json: bool) -> Result<(), C
         let detail = json_peer_group_detail(resp.name.clone(), &def);
         output::print_json_pretty(&detail)?;
     } else {
-        println!("Name:                  {}", resp.name);
+        outln!("Name:                  {}", resp.name)?;
         if let Some(h) = def.hold_time {
-            println!("Hold Time:             {h}");
+            outln!("Hold Time:             {h}")?;
         }
         if let Some(h) = def.min_hold_time {
-            println!("Minimum Hold Time:     {h}");
+            outln!("Minimum Hold Time:     {h}")?;
         }
         if let Some(h) = def.send_hold_time {
-            println!("Send Hold Time:        {h}");
+            outln!("Send Hold Time:        {h}")?;
         }
         if let Some(m) = def.max_prefixes {
-            println!("Max Prefixes:          {m}");
+            outln!("Max Prefixes:          {m}")?;
         }
         if let Some(seconds) = def.max_prefix_restart_seconds {
-            println!("Max Prefix Restart:    {seconds}s");
+            outln!("Max Prefix Restart:    {seconds}s")?;
         }
         if def.has_md5_password.unwrap_or(false) {
-            println!("MD5 Password:          (set)");
+            outln!("MD5 Password:          (set)")?;
         }
         if let Some(t) = def.ttl_security {
-            println!("TTL Security:          {t}");
+            outln!("TTL Security:          {t}")?;
         }
         if let Some(hops) = def.ttl_security_hops {
-            println!("TTL Security Hops:     {hops}");
+            outln!("TTL Security Hops:     {hops}")?;
         }
         if !def.families.is_empty() {
-            println!("Families:              {}", def.families.join(", "));
+            outln!("Families:              {}", def.families.join(", "))?;
         }
         if !def.required_families.is_empty() {
-            println!(
+            outln!(
                 "Required Families:     {}",
                 def.required_families.join(", ")
-            );
+            )?;
         }
         if let Some(g) = def.graceful_restart {
-            println!("Graceful Restart:      {g}");
+            outln!("Graceful Restart:      {g}")?;
         }
         if let Some(t) = def.gr_restart_time {
-            println!("GR Restart Time:       {t}");
+            outln!("GR Restart Time:       {t}")?;
         }
         if let Some(t) = def.gr_peer_restart_time_max {
-            println!("GR Peer Restart Max:   {t}");
+            outln!("GR Peer Restart Max:   {t}")?;
         }
         if let Some(t) = def.gr_stale_routes_time {
-            println!("GR Stale Routes Time:  {t}");
+            outln!("GR Stale Routes Time:  {t}")?;
         }
         if let Some(t) = def.llgr_stale_time {
-            println!("LLGR Stale Time:       {t}");
+            outln!("LLGR Stale Time:       {t}")?;
         }
         if let Some(n) = &def.local_ipv6_nexthop {
-            println!("Local IPv6 Nexthop:    {n}");
+            outln!("Local IPv6 Nexthop:    {n}")?;
         }
         if let Some(rr) = def.route_reflector_client {
-            println!("RR Client:             {rr}");
+            outln!("RR Client:             {rr}")?;
         }
         if let Some(vantage) = &def.orr_vantage {
-            println!("ORR Vantage:           {vantage}");
+            outln!("ORR Vantage:           {vantage}")?;
         }
         if let Some(rs) = def.route_server_client {
-            println!("RS Client:             {rs}");
+            outln!("RS Client:             {rs}")?;
         }
         if let Some(pcb) = def.per_client_best {
-            println!("Per-Client Best:       {pcb}");
+            outln!("Per-Client Best:       {pcb}")?;
         }
         if let Some(r) = &def.remove_private_as {
-            println!("Remove Private AS:     {r}");
+            outln!("Remove Private AS:     {r}")?;
         }
         if !def.discard_path_attributes.is_empty() {
-            println!("Discard Attributes:    {:?}", def.discard_path_attributes);
+            outln!("Discard Attributes:    {:?}", def.discard_path_attributes)?;
         }
         if let Some(b) = def.add_path_receive {
-            println!("Add-Path Receive:      {b}");
+            outln!("Add-Path Receive:      {b}")?;
         }
         if let Some(b) = def.add_path_send {
-            println!("Add-Path Send:         {b}");
+            outln!("Add-Path Send:         {b}")?;
         }
         if let Some(m) = def.add_path_send_max
             && m > 0
         {
-            println!("Add-Path Send Max:     {m}");
+            outln!("Add-Path Send Max:     {m}")?;
         }
-        println!(
+        outln!(
             "Inline Import Policy:  {} statements",
             def.import_policy.len()
-        );
-        println!(
+        )?;
+        outln!(
             "Inline Export Policy:  {} statements",
             def.export_policy.len()
-        );
-        println!(
+        )?;
+        outln!(
             "Import Chain:          {}",
             if def.import_policy_chain.is_empty() {
                 "(none)".to_string()
             } else {
                 def.import_policy_chain.join(" -> ")
             }
-        );
-        println!(
+        )?;
+        outln!(
             "Export Chain:          {}",
             if def.export_policy_chain.is_empty() {
                 "(none)".to_string()
             } else {
                 def.export_policy_chain.join(" -> ")
             }
-        );
+        )?;
     }
     Ok(())
 }

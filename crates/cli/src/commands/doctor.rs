@@ -18,7 +18,7 @@ use serde::Serialize;
 use crate::commands::watch::bgp_event_json_value;
 use crate::connection::Connection;
 use crate::error::CliError;
-use crate::output::{self, JsonNeighbor};
+use crate::output::{self, JsonNeighbor, outln};
 use crate::proto::bfd_service_client::BfdServiceClient;
 use crate::proto::control_service_client::ControlServiceClient;
 use crate::proto::event_service_client::EventServiceClient;
@@ -141,7 +141,12 @@ struct Reporter {
 }
 
 impl Reporter {
-    fn record(&mut self, name: impl Into<String>, status: CheckStatus, detail: impl Into<String>) {
+    fn record(
+        &mut self,
+        name: impl Into<String>,
+        status: CheckStatus,
+        detail: impl Into<String>,
+    ) -> Result<(), CliError> {
         let check = Check {
             name: name.into(),
             status,
@@ -156,9 +161,10 @@ impl Reporter {
                 }
                 CheckStatus::Fail => format!("{}", "FAIL".if_supports_color(Stdout, |s| s.red())),
             };
-            println!("{marker}  {}", check.detail);
+            outln!("{marker}  {}", check.detail)?;
         }
         self.checks.push(check);
+        Ok(())
     }
 
     fn any_fail(&self) -> bool {
@@ -1933,7 +1939,7 @@ pub(crate) async fn run(
                 "daemon.reachable",
                 CheckStatus::Ok,
                 format!("daemon reachable at {}", opts.daemon_address),
-            );
+            )?;
             let mut control = ControlServiceClient::with_interceptor(
                 connection.channel(),
                 connection.interceptor(),
@@ -1962,7 +1968,7 @@ pub(crate) async fn run(
                 .await
                 .map(|response| response.into_inner());
             for check in validation_policy_posture_checks(posture) {
-                reporter.record(check.name, check.status, check.detail);
+                reporter.record(check.name, check.status, check.detail)?;
             }
 
             // system/health.json + the healthy check. The same probe outcome
@@ -1970,10 +1976,10 @@ pub(crate) async fn run(
             // authorization finding, not a health one.
             let health_result = control.get_health(HealthRequest {}).await;
             if let Some(check) = authz_reachable_check(health_result.as_ref().err()) {
-                reporter.record(check.name, check.status, check.detail);
+                reporter.record(check.name, check.status, check.detail)?;
             }
             let identity = authz_identity_check(opts.daemon_address, opts.token_file_configured);
-            reporter.record(identity.name, identity.status, identity.detail);
+            reporter.record(identity.name, identity.status, identity.detail)?;
             match health_result {
                 Ok(resp) => {
                     let health = resp.into_inner();
@@ -1998,7 +2004,7 @@ pub(crate) async fn run(
                             health.active_peers,
                             health.total_routes
                         ),
-                    );
+                    )?;
                     bundle.add_json(
                         "system/health.json",
                         &HealthSnapshot {
@@ -2015,7 +2021,7 @@ pub(crate) async fn run(
                         "daemon.healthy",
                         CheckStatus::Fail,
                         format!("health RPC failed: {e}"),
-                    );
+                    )?;
                 }
             }
 
@@ -2063,15 +2069,15 @@ pub(crate) async fn run(
                 Ok(resp) => {
                     let toml_text = resp.into_inner().toml;
                     for check in tcp_ao_capability_checks(&toml_text, tcp_ao_support) {
-                        reporter.record(check.name, check.status, check.detail);
+                        reporter.record(check.name, check.status, check.detail)?;
                     }
                     let rpki_caches = deploy_targets(&toml_text).rpki_caches;
                     if let Some(check) = rpki_vrp_table_check(&rpki_caches, metrics_text.as_deref())
                     {
-                        reporter.record(check.name, check.status, check.detail);
+                        reporter.record(check.name, check.status, check.detail)?;
                     }
                     if let Some(check) = authz_enforcement_check(&toml_text) {
-                        reporter.record(check.name, check.status, check.detail);
+                        reporter.record(check.name, check.status, check.detail)?;
                     }
                     state_dir = parse_state_dir(&toml_text);
                     effective_toml = Some(toml_text);
@@ -2107,7 +2113,7 @@ pub(crate) async fn run(
                         .collect();
                     for snapshot in &snapshots {
                         let check = bfd_check(snapshot);
-                        reporter.record(check.name, check.status, check.detail);
+                        reporter.record(check.name, check.status, check.detail)?;
                     }
                     bundle.add_json("peers/bfd.json", &snapshots)?;
                     true
@@ -2234,11 +2240,11 @@ pub(crate) async fn run(
                             policy_check.name,
                             policy_check.status,
                             policy_check.detail,
-                        );
+                        )?;
                         for check in
                             outbound_prefix_limit_checks(&identity, &n.outbound_prefix_limits)
                         {
-                            reporter.record(check.name, check.status, check.detail);
+                            reporter.record(check.name, check.status, check.detail)?;
                         }
                         records.push(NeighborDoctorRecord {
                             support: JsonNeighbor {
@@ -2277,7 +2283,7 @@ pub(crate) async fn run(
                                 "peers.configured",
                                 CheckStatus::Warn,
                                 "no active neighbor sessions and no dynamic-neighbor ranges configured",
-                            ),
+                            )?,
                             Some(ranges) => reporter.record(
                                 "peers.configured",
                                 CheckStatus::Ok,
@@ -2286,12 +2292,12 @@ pub(crate) async fn run(
                                     ranges.len(),
                                     if ranges.len() == 1 { "" } else { "s" }
                                 ),
-                            ),
+                            )?,
                             None => reporter.record(
                                 "peers.configured",
                                 CheckStatus::Warn,
                                 "no active neighbor sessions; dynamic-neighbor range inventory unavailable",
-                            ),
+                            )?,
                         }
                     }
                     for record in &records {
@@ -2317,7 +2323,7 @@ pub(crate) async fn run(
                             now,
                             &record.support.last_error,
                         ) {
-                            reporter.record(check.name, check.status, check.detail);
+                            reporter.record(check.name, check.status, check.detail)?;
                         }
                         if let Some(check) = gtsm_advisory_check(
                             record,
@@ -2325,7 +2331,7 @@ pub(crate) async fn run(
                             gtsm.as_ref(),
                             admin_enabled.as_ref(),
                         ) {
-                            reporter.record(check.name, check.status, check.detail);
+                            reporter.record(check.name, check.status, check.detail)?;
                         }
                     }
                     bundle.add_json(
@@ -2366,7 +2372,7 @@ pub(crate) async fn run(
                 "daemon.reachable",
                 CheckStatus::Fail,
                 format!("daemon unreachable: {e}"),
-            );
+            )?;
             sections.insert("config", "unavailable: daemon unreachable".to_string());
             sections.insert("peers", "unavailable: daemon unreachable".to_string());
             sections.insert(
@@ -2403,7 +2409,7 @@ pub(crate) async fn run(
         "host.run_context",
         CheckStatus::Ok,
         format!("run context: {run_context}"),
-    );
+    )?;
 
     // ---- daemon rlimits (local processes only) ------------------------
     let daemon_limits = local_daemon_limits();
@@ -2417,13 +2423,13 @@ pub(crate) async fn run(
             match parse_max_open_files(limits) {
                 Some((soft, hard)) => {
                     let check = nofile_check(*pid, soft, hard, run_context);
-                    reporter.record(check.name, check.status, check.detail);
+                    reporter.record(check.name, check.status, check.detail)?;
                 }
                 None => reporter.record(
                     format!("daemon.rlimit.nofile.{pid}"),
                     CheckStatus::Warn,
                     format!("daemon pid {pid}: could not parse Max open files from /proc limits"),
-                ),
+                )?,
             }
             bundle.add(
                 &format!("system/daemon-limits-{pid}.txt"),
@@ -2456,18 +2462,18 @@ pub(crate) async fn run(
             let targets = deploy_targets(toml_text);
             if !daemon_reachable && let Some(port) = targets.listen_port {
                 let check = listener_bind_check(port);
-                reporter.record(check.name, check.status, check.detail);
+                reporter.record(check.name, check.status, check.detail)?;
             }
             for check in reachability_checks(daemon_reachable, opts.daemon_address, &targets).await
             {
-                reporter.record(check.name, check.status, check.detail);
+                reporter.record(check.name, check.status, check.detail)?;
             }
             if state_dir.is_none() {
                 state_dir = parse_state_dir(toml_text);
             }
             let dir = PathBuf::from(state_dir.as_deref().unwrap_or(DEFAULT_STATE_DIR));
             for check in state_dir_checks(&dir) {
-                reporter.record(check.name, check.status, check.detail);
+                reporter.record(check.name, check.status, check.detail)?;
             }
             sections.insert("probes", format!("collected (targets from {source})"));
         }
@@ -2479,7 +2485,7 @@ pub(crate) async fn run(
                     "first-deploy probes skipped: daemon config unavailable and \
                      {DEFAULT_CONFIG_PATH} is not readable"
                 ),
-            );
+            )?;
             sections.insert("probes", "skipped: no config source".to_string());
         }
     }
@@ -2504,7 +2510,7 @@ pub(crate) async fn run(
         };
         let check =
             config_freshness_check(*pid, &config_path.display().to_string(), mtime, reference);
-        reporter.record(check.name, check.status, check.detail);
+        reporter.record(check.name, check.status, check.detail)?;
     }
 
     // ---- crashes/ ------------------------------------------------------
@@ -2515,7 +2521,7 @@ pub(crate) async fn run(
             "crashes.recent",
             CheckStatus::Ok,
             format!("no panic reports in {}", crash_dir.display()),
-        );
+        )?;
         sections.insert(
             "crashes",
             format!("collected (0 reports in {})", crash_dir.display()),
@@ -2529,7 +2535,7 @@ pub(crate) async fn run(
                 crash_reports.len(),
                 crash_dir.display()
             ),
-        );
+        )?;
         sections.insert(
             "crashes",
             format!(
@@ -2626,7 +2632,7 @@ pub(crate) async fn run(
             "sections": serde_json::to_value(&sections_summary)?,
         }))?;
     } else {
-        println!("Support bundle written: {}", bundle_path.display());
+        outln!("Support bundle written: {}", bundle_path.display())?;
     }
     Ok(if failed { 2 } else { 0 })
 }

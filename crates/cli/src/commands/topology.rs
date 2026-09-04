@@ -3,7 +3,7 @@
 
 use crate::connection::Connection;
 use crate::error::CliError;
-use crate::output;
+use crate::output::{self, outln};
 use crate::proto::{
     ListTopologyLinksRequest, ListTopologyNodesRequest, TopologyLinkEntry, TopologyNodeEntry,
 };
@@ -51,10 +51,10 @@ fn print_topology_nodes(nodes: &[TopologyNodeEntry], json: bool) -> Result<(), C
     if json {
         output::print_json_pretty(&JsonTopologyNodes(nodes))?;
     } else if nodes.is_empty() {
-        println!("No topology nodes");
+        outln!("No topology nodes")?;
     } else {
-        println!("{:<18} {:<10} {:<18} Links", "Key", "AS", "Router-ID");
-        println!("{}", "-".repeat(56));
+        outln!("{:<18} {:<10} {:<18} Links", "Key", "AS", "Router-ID")?;
+        outln!("{}", "-".repeat(56))?;
         for node in nodes {
             let asn = if node.asn == 0 {
                 "-".to_string()
@@ -66,13 +66,13 @@ fn print_topology_nodes(nodes: &[TopologyNodeEntry], json: bool) -> Result<(), C
             } else {
                 &node.router_id
             };
-            println!(
+            outln!(
                 "{:<18} {:<10} {:<18} {}",
                 short_key(&node.key),
                 asn,
                 router_id,
                 node.link_count
-            );
+            )?;
         }
     }
     Ok(())
@@ -82,18 +82,18 @@ fn print_topology_links(links: &[TopologyLinkEntry], json: bool) -> Result<(), C
     if json {
         output::print_json_pretty(&JsonTopologyLinks(links))?;
     } else if links.is_empty() {
-        println!("No topology links");
+        outln!("No topology links")?;
     } else {
-        println!("{:<18} {:<18} {:<8} Addresses", "Local", "Remote", "Cost");
-        println!("{}", "-".repeat(76));
+        outln!("{:<18} {:<18} {:<8} Addresses", "Local", "Remote", "Cost")?;
+        outln!("{}", "-".repeat(76))?;
         for link in links {
-            println!(
+            outln!(
                 "{:<18} {:<18} {:<8} {}",
                 endpoint_label(&link.local_router_id, &link.local_key),
                 endpoint_label(&link.remote_router_id, &link.remote_key),
                 link.cost,
                 link.addresses.join(" ")
-            );
+            )?;
         }
     }
     Ok(())
