@@ -2148,6 +2148,13 @@ mod tests {
         assert!(super::parse_esi("not-an-esi").is_err());
     }
 
+    #[test]
+    fn parse_esi_rejects_signed_group() {
+        // The shared grammar requires two hex digits per octet, so the
+        // leading sign `u8::from_str_radix` would accept is refused.
+        assert!(super::parse_esi("+0:11:22:33:44:55:66:77:88:99").is_err());
+    }
+
     #[tokio::test]
     async fn apply_evpn_runtime_rejects_read_only_listener() {
         let apply: EvpnRuntimeApplyFn = Arc::new(|_| {
