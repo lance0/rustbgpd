@@ -57,6 +57,8 @@ protoc-bin-vendored = "3"
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tokio-stream = { workspace = true, features = ["net"] }
+# Raises and delivers real signals in the TUI signal-restore tests.
+nix = { workspace = true, features = ["signal"] }
 rustbgpd-api.workspace = true
 rustbgpd-evpn.workspace = true
 # Fixture builder for the from-bmp adapter tests: captures are framed by

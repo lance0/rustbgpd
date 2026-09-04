@@ -2434,7 +2434,9 @@ rbgp top -i 5     # 5s poll interval
 ```
 
 Shows sessions, prefix counts, message rates, RPKI VRP counts, and
-streaming route events in a terminal UI. The route-event subscription is
+streaming route events in a terminal UI. `q` or Ctrl-C quits; SIGTERM,
+SIGINT, and SIGHUP quit the same way and restore the terminal before the
+process exits with status 0. The route-event subscription is
 opened only while the events panel is visible (`e`).
 The panel uses the lag-aware `WatchEvents` route stream, including exact missed
 counts and policy-filter source/target/reason/Add-Path context. Admission and

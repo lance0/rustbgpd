@@ -290,6 +290,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `rbgp top` now restores the terminal (leaves the alternate screen, shows
+  the cursor, disables raw mode) when the process is terminated by SIGTERM,
+  SIGINT, or SIGHUP; the signal quits the dashboard the same way Ctrl-C does
+  and the process exits with status 0.
+
 - `birdwatcher-adapter` route views now emit `bgp.ext_communities` (an empty
   array when the route carries none), so Alice-LG shows route targets and
   other extended communities instead of nothing. Each entry is birdwatcher's
