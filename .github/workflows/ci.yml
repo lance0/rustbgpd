@@ -124,6 +124,12 @@ jobs:
       - name: Prove kernel-dataplane bird3 outage tolerance
         run: |
           python3 -m unittest -v scripts/test_kernel_dataplane_bird3_tolerance.py
+      # The Kernel Dataplane gate finalizes its netns selector receipt with
+      # this helper; its selector rosters and fail-closed summary have no
+      # other executor, so prove them here.
+      - name: Prove netns selector receipt finalizer
+        run: |
+          python3 -m unittest -v scripts/test_check_netns_selector_receipt.py
       - uses: dtolnay/rust-toolchain@v1 # stable
         with:
           toolchain: stable
@@ -141,6 +147,11 @@ jobs:
         run: |
           python3 -m unittest -v scripts/test_check_fuzz_toolchain_pin.py
           python3 scripts/check_fuzz_toolchain_pin.py
+      # The scheduled fuzz campaign restores and seals its corpus through this
+      # helper; nothing else executes its boundary tests.
+      - name: Prove fuzz corpus cache boundary
+        run: |
+          python3 -m unittest -v scripts/test_fuzz_corpus_cache.py
       - name: Install receipt-tool dependencies
         run: |
           sudo apt-get update
