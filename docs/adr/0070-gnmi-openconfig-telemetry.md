@@ -9,7 +9,7 @@ Cloud and whitebox operators already aggregate device state through
 gNMI / OpenConfig tooling (`gnmic`, `gnmi-gateway`, OpenConfig collectors).
 Before ADR-0070 landed, rustbgpd exposed rich typed gRPC snapshots and event
 streams, but only through its own `rustbgpd.v1` proto — there was no
-OpenConfig-modeled, gNMI-spoken surface, so it could not drop into an existing
+OpenConfig-modelled, gNMI-spoken surface, so it could not drop into an existing
 OpenConfig telemetry pipeline. Closing that gap was the highest-leverage
 remaining adoption item once BGP unnumbered, BFD, and ECMP had shipped.
 
@@ -63,7 +63,7 @@ committed through the existing transaction model.
 
 ### Service surface (v1)
 
-| RPC | v1 behavior |
+| RPC | v1 behaviour |
 |-----|--------------|
 | `Capabilities` | Advertise gNMI version `0.10.0`, the **OpenConfig modules** (name / organization / version, via `ModelData`) backing the supported paths, and encodings `JSON` + `JSON_IETF`. `ModelData` is module-level, not per-path — the path subset is enforced at `Get` / `Subscribe`, not advertised here. |
 | `Get` | OpenConfig BGP operational-state subset (below). |

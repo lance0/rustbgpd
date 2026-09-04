@@ -19,7 +19,7 @@ The controlled result is:
   release C/N/N/C RSS delta is only **−185 KiB (−0.324%)**, below the
   predeclared 0.645% measurement floor, so **no RSS improvement is claimed**.
 
-Every figure below is labeled by measurement surface. Release jemalloc gauges,
+Every figure below is labelled by measurement surface. Release jemalloc gauges,
 DHAT live heap, and Linux process RSS are different quantities and are not
 substituted for one another.
 
@@ -32,7 +32,7 @@ so its computed 1.93 MiB/peer marginal folded route storage into the numerator.
 Two other cells happened to share a 212.0 MiB median despite different shapes,
 but the run-to-run raw container cgroup-usage spread was 24% at one of them.
 That historical bgperf2 surface was neither process-tree RSS nor Docker working
-set; the independent RSS and DHAT measurements below remain labeled as such.
+set; the independent RSS and DHAT measurements below remain labelled as such.
 That evidence identified a memory problem; it did not isolate its dimension.
 
 This campaign uses the real release daemon and real `reloadstall` BGP clients,

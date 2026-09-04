@@ -13,7 +13,7 @@
 > vendor-NOS interop row). Feasibility note from the vendor lab:
 > SR Linux enforces one EVI per mac-vrf, so its bundle mode carries the
 > bundle identity as shared RT + non-zero eth-tag over per-BD RDs — a
-> remote PE modeling one-RD-per-bundle must not assume RD equality
+> remote PE modelling one-RD-per-bundle must not assume RD equality
 > across tags. The RR path needed no code changes (the wire/RIB key
 > already carries the tag); origination, import selection, and
 > dataplane bundle mode remain the unimplemented tranches of this ADR.

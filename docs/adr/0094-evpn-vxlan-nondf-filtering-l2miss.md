@@ -143,7 +143,7 @@ adds the composition checks):
 | (e) | Unknown-unicast from the ES-peer VTEP → **dropped** | the case `enc_src_ip` could not reach; `l2_miss` must |
 | (f) | **Known-unicast** from the ES-peer VTEP to a CE-learned MAC → **still forwards** | the crux ADR-0065 feared; `l2_miss 0` must leave it untouched |
 | (g) | Locally-sourced BUM from the CE (`indev` = CE port) → **still floods** to other local ACs | the filter must not over-drop local traffic |
-| (h) | **Composition — externally-sourced delivery:** non-ES BUM dropped on the non-DF `loc`, but reaches the CE when `loc` is modeled as **DF** (no filter) | proves the DF/non-DF split delivers exactly one copy |
+| (h) | **Composition — externally-sourced delivery:** non-ES BUM dropped on the non-DF `loc`, but reaches the CE when `loc` is modelled as **DF** (no filter) | proves the DF/non-DF split delivers exactly one copy |
 | (i) | **Composition — ES-peer dedup on the DF:** with `loc` as **DF**, determine whether ES-peer-sourced overlay BUM still duplicates to the shared CE (and if so, what residual mechanism closes it) | the load-bearing correctness question |
 
 (a), (e), (f) prove the mechanism; (h), (i) prove the composition. **(i) is the

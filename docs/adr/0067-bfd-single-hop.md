@@ -169,7 +169,7 @@ enabled = true   # default; set false to override an inherited peer-group block
 strict = false
 ```
 
-`Neighbor.bfd` and `PeerGroupConfig.bfd` are `Option<BfdConfig>`, modeled on
+`Neighbor.bfd` and `PeerGroupConfig.bfd` are `Option<BfdConfig>`, modelled on
 `tcp_ao: Option<TcpAoConfig>`; peer-group inheritance uses the existing resolve
 path (a neighbor's own `bfd` wins, else its peer-group's). `BfdConfig.enabled`
 (default `true`) lets a neighbor override an inherited peer-group block to turn
