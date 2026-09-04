@@ -2812,6 +2812,7 @@ fn render_hygiene(
     }
 
     if let Some(tf) = &filtering.transit_free
+        && tf.action.as_deref() == Some("reject")
         && let Some(asns) = tf.asns.as_ref().filter(|a| !a.is_empty())
     {
         let mut sorted = asns.clone();

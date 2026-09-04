@@ -2106,3 +2106,40 @@ fn m90_member_with_block_action_renders_the_action_key() {
             .all(|client| client["max_prefix_action"].is_null())
     );
 }
+
+#[test]
+/// Load-bearing: arouteserver 1.23.2 gates its transit-free block on
+/// `transit_free.action` (`templates/bird/clients.j2`) and `general.yml`
+/// documents the default as none, so a null or absent action with `asns`
+/// populated must render no filter, not reject terms the site never enabled.
+fn transit_free_without_action_renders_no_filter() {
+    let hygiene = &render(&to_yaml(&healthy_value()), &rtr_options())
+        .expect("healthy render")
+        .files["policy/rs-hygiene.rpol"];
+    assert!(hygiene.contains("asn-set rs-transit-free-asns { 174, 3356 }"));
+    assert!(hygiene.contains("term reject-transit-free-in-path"));
+
+    for absent in [false, true] {
+        let mut value = healthy_value();
+        let transit_free = value["cfg"]["filtering"]["transit_free"]
+            .as_mapping_mut()
+            .expect("fixture transit_free is a mapping");
+        if absent {
+            transit_free.remove(serde_yaml::Value::String("action".to_owned()));
+        } else {
+            transit_free.insert("action".into(), serde_yaml::Value::Null);
+        }
+        let hygiene = &render(&to_yaml(&value), &rtr_options())
+            .expect("a disabled transit-free filter is not a refusal")
+            .files["policy/rs-hygiene.rpol"];
+        assert!(
+            !hygiene.contains("rs-transit-free-asns"),
+            "absent={absent}: {hygiene}"
+        );
+        assert!(
+            !hygiene.contains("reject-transit-free-in-path"),
+            "absent={absent}: {hygiene}"
+        );
+        assert!(run_rpol_tests(hygiene).unwrap().all_passed());
+    }
+}

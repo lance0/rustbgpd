@@ -278,6 +278,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   intersection no longer leaves that family in the session's Add-Path or
   extended-next-hop set; the Add-Path case previously suppressed RFC 9972 BMP
   Adj-RIB-In counts for sessions that never negotiated the family.
+- `rs-config-render` renders the transit-free filter only when
+  `transit_free.action` is `reject`; a null or absent action with
+  `transit_free.asns` populated no longer emits reject terms arouteserver
+  would not generate.
 
 - **Operator-visible:** `rs-config-render` now states `rs_control_communities`
   on every rendered member session instead of inheriting the daemon default:
