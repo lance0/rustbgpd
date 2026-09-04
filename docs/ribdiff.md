@@ -324,7 +324,7 @@ the dump actually is:
 
 Wire handling: AS_PATH is decoded as 4-octet (mandatory in
 `TABLE_DUMP_V2`). A RIB entry's `MP_REACH_NLRI` is decoded by the same
-`rustbgpd-mrt` routine the daemon's warm-checkpoint reader uses, so a
+`rustbgpd-wire` decoder the daemon's warm-checkpoint reader uses, so a
 dump that converts here also reads back there: both the §4.3.4 reduced
 form (next-hop length, next hop) and the full RFC 4760 form some
 collectors emit (AFI, SAFI, next-hop length, next hop, optional reserved

@@ -16,6 +16,36 @@ Requires Rust 1.95 or newer.
 
 Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 
+### 0.19.1 compatibility note
+
+`rustbgpd-wire` 0.19.1 is **additive**. No public item is removed and no
+existing signature is changed; code that builds against 0.19.0 builds
+unchanged against 0.19.1. Consumers should account for these additions and
+decode-behavior refinements when upgrading:
+
+- The new `mrt` module adds `decode_table_dump_v2_mp_reach_next_hop`, the
+  next-hop decoder for the `MP_REACH_NLRI` inside an RFC 6396 `TABLE_DUMP_V2`
+  RIB entry. It accepts both the §4.3.4 reduced form (next-hop length, next
+  hop) and the full RFC 4760 form some collectors write (AFI, SAFI, next-hop
+  length, next hop, optional reserved octet), told apart by the leading
+  octet, and rejects a next-hop length other than 4, 16, or 32, a truncated
+  next hop, an AFI that disagrees with the next-hop length, and trailing
+  octets.
+- `validate_as_path_ceiling` adds an optional bounded ceiling on the number
+  of AS numbers in `AS_PATH`, enforced as treat-as-withdraw (subcode 11); `0`
+  leaves validation unchanged.
+- AS 0 is rejected per RFC 7607 in `AS_PATH`, `AS4_PATH`, `AGGREGATOR`, and
+  `AS4_AGGREGATOR`: revised decoding treats an ordinary path containing AS 0
+  as withdraw and discards affected compatibility and aggregator attributes;
+  canonical encoding rejects AS 0 before compatibility sidecars are derived.
+- `ExtendedCommunity` accessors match the type byte exactly: the EVPN
+  accessors require type `0x06`, the opaque accessors type `0x03`, and
+  `route_target`, `route_origin`, and `Display` clear only the
+  non-transitive bit (`0x40`). Values with the IANA experimental-use bit
+  (`0x80`) set now return `None`, `false`, or the hexadecimal fallback where
+  0.19.0 masked that bit away and decoded them as EVPN, opaque, or two-part
+  communities.
+
 ### 0.19.0 compatibility note
 
 `rustbgpd-wire` 0.19.0 is API-additive and moves to the next 0.x
@@ -101,6 +131,7 @@ are `#[non_exhaustive]`; consumers that assert on accepted bytes or exact
 | 5292 | Address-Prefix ORF-Type (64), with the legacy pre-standard type (128) decoded for interoperability |
 | 5492 | BGP capabilities |
 | 5512 | Tunnel Encapsulation extended-community layout (4-byte reserved + 2-byte value) used by the EVPN VXLAN encap sub-type |
+| 6396 §4.3.4 | MRT `TABLE_DUMP_V2` RIB-entry `MP_REACH_NLRI` next-hop decoder (`mrt` module): accepts the reduced next-hop-only form and the full RFC 4760 form collectors also write; rejects malformed next-hop lengths, truncation, AFI/length mismatches, and trailing octets. Codec only — record framing and the peer index table live in the reader |
 | 6514 §5 | PMSI Tunnel attribute (path attribute type 22): base tunnel-type and identifier semantics, with canonical `PmsiTunnel` and received Partial-preserving `PmsiTunnelPartial` variants. The EVPN-VXLAN ingress-replication form encodes the label field as the raw 24-bit VNI per RFC 8365 §5.1.3 |
 | 6793 | 4-octet AS numbers, including canonical type 2/17 and type 7/18 ingress normalization plus capability-specific egress projection |
 | 6811 | RPKI prefix-origin validation state — the `RpkiValidation` routing-domain enum (no extended-community codec) |
@@ -255,7 +286,7 @@ Add the codec and its buffer type as direct dependencies:
 
 ```toml
 [dependencies]
-rustbgpd-wire = "0.19.0"
+rustbgpd-wire = "0.19.1"
 bytes = "1"
 ```
 
@@ -395,6 +426,10 @@ cargo run -p rustbgpd-wire --features tokio-codec --example tokio_codec
 - **`rtc` module** — Route Target Constrain NLRI codec (SAFI 132, RFC 4684):
   `RtcNlri` / `RTC_SAFI` / `RTC_MAX_PREFIX_BITS`, `decode_rtc_nlri` /
   `encode_rtc_nlri` with default-route and prefix-bit bounds
+- **`mrt` module** — `decode_table_dump_v2_mp_reach_next_hop`, the RFC 6396
+  §4.3.4 `TABLE_DUMP_V2` RIB-entry `MP_REACH_NLRI` next-hop decoder (reduced
+  and full RFC 4760 forms; returns the next hop plus the RFC 2545 link-local
+  half of a 32-octet next hop)
 - **`PmsiTunnel`** / **`PmsiTunnelType`** / **`PmsiTunnelIdentifier`** — PMSI Tunnel attribute (RFC 6514 §5) carried by `PathAttribute::PmsiTunnel` or `PmsiTunnelPartial` on EVPN Type 3 IMET routes for ingress-replication BUM. Constructor `PmsiTunnel::for_evpn_ingress_replication(vni, ip)` emits the RFC 8365 §5.1.3 wire shape (raw 24-bit VNI in the label field, originator IP as the tunnel identifier).
 - **`RouteDistinguisher`** — RFC 4364 §4.2 8-byte RD, used by EVPN and
   VPNv4/v6. Implements `Display` + `FromStr` for the structured `asn:val` /

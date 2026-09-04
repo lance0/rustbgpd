@@ -17,8 +17,8 @@
 //! with nothing written to stdout.
 //!
 //! Wire notes (RFC 6396 §4.3.4): AS_PATH is always 4-octet. The
-//! `MP_REACH_NLRI` inside a RIB entry is decoded by
-//! [`decode_rib_entry_mp_reach_next_hop`], shared with the daemon's
+//! `MP_REACH_NLRI` inside a RIB entry is decoded by `rustbgpd_wire`'s
+//! [`decode_table_dump_v2_mp_reach_next_hop`], shared with the daemon's
 //! warm-checkpoint reader: both the reduced next-hop-only form and the
 //! full RFC 4760 form some collectors emit are accepted, and malformed
 //! shapes (bad next-hop length, truncation, AFI/length mismatch,
@@ -32,17 +32,25 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 
 use crate::output;
-use rustbgpd_mrt::codec::{
-    RIB_IPV4_UNICAST, RIB_IPV4_UNICAST_ADDPATH, RIB_IPV6_UNICAST, RIB_IPV6_UNICAST_ADDPATH,
-    TABLE_DUMP_V2,
-};
-use rustbgpd_mrt::{ReadError, decode_rib_entry_mp_reach_next_hop};
 use rustbgpd_wire::constants::{attr_flags, attr_type};
+use rustbgpd_wire::mrt::decode_table_dump_v2_mp_reach_next_hop;
 
 /// Snapshot emitted.
 pub const EXIT_OK: i32 = 0;
 /// Refused (non-comparable view) or malformed/unreadable input.
 pub const EXIT_REFUSED: i32 = 2;
+
+/// MRT message type for `TABLE_DUMP_V2` (RFC 6396 §4.3).
+const TABLE_DUMP_V2: u16 = 13;
+/// Subtypes ingested (plus RFC 8050 Add-Path variants). Everything else
+/// — `PEER_INDEX_TABLE`, multicast, `RIB_GENERIC` — is skipped. These are
+/// RFC 6396 / RFC 8050 registry values, duplicated from `rustbgpd-mrt` on
+/// purpose: constants cannot drift, and the CLI must not link the daemon's
+/// MRT manager (which pulls in the RIB).
+const RIB_IPV4_UNICAST: u16 = 2;
+const RIB_IPV6_UNICAST: u16 = 4;
+const RIB_IPV4_UNICAST_ADDPATH: u16 = 8;
+const RIB_IPV6_UNICAST_ADDPATH: u16 = 9;
 
 /// Options for `rbgp diff snapshot from-mrt`.
 pub struct FromMrtOpts<'a> {
@@ -292,9 +300,6 @@ fn parse_mrt(data: &[u8]) -> Result<Vec<(IpAddr, u8, SnapRoute)>, String> {
         if mrt_type != TABLE_DUMP_V2 {
             continue;
         }
-        // Unicast subtypes plus their RFC 8050 Add-Path variants are
-        // ingested; `PEER_INDEX_TABLE`, multicast, and `RIB_GENERIC` are
-        // skipped.
         let (v6, addpath) = match subtype {
             RIB_IPV4_UNICAST => (false, false),
             RIB_IPV6_UNICAST => (true, false),
@@ -466,10 +471,7 @@ fn parse_attributes(mut buf: &[u8]) -> Result<SnapRoute, String> {
             }
             attr_type::MP_REACH_NLRI => {
                 let (next_hop, _link_local) =
-                    decode_rib_entry_mp_reach_next_hop(value).map_err(|err| match err {
-                        ReadError::Malformed { context, .. } => context,
-                        other => other.to_string(),
-                    })?;
+                    decode_table_dump_v2_mp_reach_next_hop(value).map_err(|err| err.to_string())?;
                 route.next_hop = Some(next_hop);
             }
             _ => {}

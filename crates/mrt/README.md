@@ -29,9 +29,9 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
   hop, optional reserved octet), told apart by the leading octet; a next-hop
   length other than 4, 16, or 32, a truncated next hop, an AFI that disagrees
   with the next-hop length, or trailing octets is a malformed-record error.
-  That decoder, `decode_rib_entry_mp_reach_next_hop`, and the `TABLE_DUMP_V2`
-  subtype constants are public so `rbgp diff snapshot from-mrt` reads the
-  same bytes the same way. Defensive revised attribute decoding keeps an entry
+  The decoder is `rustbgpd-wire`'s `decode_table_dump_v2_mp_reach_next_hop`,
+  which `rbgp diff snapshot from-mrt` also uses, so both read the same bytes
+  the same way. Defensive revised attribute decoding keeps an entry
   only when every recovered issue is attribute-discard, using the conservative
   internal-neighbor classification when the snapshot lacks session evidence.
   Separate path-attribute and BGP-LS NLRI discard counters make that bounded

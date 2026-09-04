@@ -5,6 +5,16 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+## 0.19.1 - Unreleased
+
+- Added the `mrt` module with `decode_table_dump_v2_mp_reach_next_hop`, which
+  decodes the next hop of the `MP_REACH_NLRI` carried inside an RFC 6396
+  `TABLE_DUMP_V2` RIB entry. Both the §4.3.4 reduced form (next-hop length,
+  next hop) and the full RFC 4760 form some collectors write (AFI, SAFI,
+  next-hop length, next hop, optional reserved octet) are accepted, told apart
+  by the leading octet; a next-hop length other than 4, 16, or 32, a truncated
+  next hop, an AFI that disagrees with the next-hop length, and trailing
+  octets are rejected with `DecodeError::MalformedField`.
 - Reject AS 0 per RFC 7607 in `AS_PATH`, `AS4_PATH`, `AGGREGATOR`, and
   `AS4_AGGREGATOR`. Revised decoding treats an ordinary path containing AS 0
   as withdraw and discards affected compatibility and aggregator attributes;

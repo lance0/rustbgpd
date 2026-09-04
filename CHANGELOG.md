@@ -177,6 +177,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `rustbgpd-wire` 0.19.0 → 0.19.1 (additive): a new `mrt` module adds
+  `decode_table_dump_v2_mp_reach_next_hop`, the RFC 6396 §4.3.4 `TABLE_DUMP_V2`
+  RIB-entry `MP_REACH_NLRI` next-hop decoder now shared by the daemon's
+  warm-checkpoint reader and `rbgp diff snapshot from-mrt`. `rustbgpd-fsm`
+  stays at 0.6.0 and `rustbgpd-rpki` at 0.1.0; their wire requirement follows
+  the workspace pin to `^0.19.1`, which the patch satisfies.
+
 - **Operator-visible:** the EVPN MAC and ESI text forms are parsed by one
   grammar shared by the configuration loader and the gRPC services: exactly
   six (MAC) or ten (ESI) colon-separated groups of exactly two hex digits,
@@ -355,9 +362,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Previously the two readers disagreed: warm-checkpoint loading accepted
   only the reduced form with an exact length match, while `from-mrt` also
   accepted the full form and ignored trailing octets, so one collector dump
-  converted in one place and was rejected in the other. `rustbgpd-mrt` now
-  exports the decoder (`decode_rib_entry_mp_reach_next_hop`) and its
-  `TABLE_DUMP_V2` subtype constants.
+  converted in one place and was rejected in the other. The decoder,
+  `decode_table_dump_v2_mp_reach_next_hop`, lives in `rustbgpd-wire`, which
+  both readers already depend on.
 
 - `rbgp top` now restores the terminal (leaves the alternate screen, shows
   the cursor, disables raw mode) when the process is terminated by SIGTERM,

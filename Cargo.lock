@@ -3002,7 +3002,6 @@ dependencies = [
  "rustbgpd-api",
  "rustbgpd-bmp",
  "rustbgpd-evpn",
- "rustbgpd-mrt",
  "rustbgpd-policy",
  "rustbgpd-wire",
  "serde",
@@ -3312,7 +3311,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-wire"
-version = "0.19.0"
+version = "0.19.1"
 dependencies = [
  "bytes",
  "criterion",
