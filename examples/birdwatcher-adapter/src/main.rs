@@ -45,7 +45,7 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{self, Read};
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -2685,7 +2685,7 @@ fn format_connection(state: i32) -> &'static str {
 /// Alice-LG reads: `network`, `gateway`, `from_protocol`, `interface`,
 /// `metric`, `age`, `type`, `primary`, `learnt_from`, and `bgp` sub-object
 /// with `origin`, `as_path`, `next_hop`, `local_pref`, `med`, `communities`,
-/// `large_communities`.
+/// `large_communities`, `ext_communities`.
 ///
 /// `primary` reports what the response itself carries (`Route.best`);
 /// views whose upstream scope never marks best-ness pass an explicit
@@ -2723,6 +2723,13 @@ fn route_to_birdwatcher_with_primary(
         })
         .collect();
 
+    let ext_communities: Vec<Value> = route
+        .extended_communities
+        .iter()
+        .copied()
+        .map(extended_community_to_birdwatcher)
+        .collect();
+
     let from_protocol = route
         .peer_address
         .parse()
@@ -2751,6 +2758,7 @@ fn route_to_birdwatcher_with_primary(
         "local_pref": route.local_pref.to_string(),
         "communities": communities,
         "large_communities": large_communities,
+        "ext_communities": ext_communities,
     });
     // BIRD omits `BGP.med` entirely when the route carries no MED
     // attribute; mirror that presence semantics from the wire-presence
@@ -2781,6 +2789,42 @@ fn route_to_birdwatcher_with_primary(
         "learnt_from": route.peer_address,
         "bgp": bgp
     })
+}
+
+/// Render one extended community as birdwatcher does: three strings,
+/// `[kind, key, value]`, captured from BIRD's `BGP.ext_community` text
+/// (birdwatcher `bird/parser.go` `parseRoutesExtendedCommunities`, which
+/// Alice-LG's `parseExtBgpCommunities` reads back with `strconv.Atoi` on
+/// the two values). The text itself follows BIRD 2.0.12 `ec_format`
+/// (`nest/a-set.c`): the kind is `rt` (subtype 0x02) or `ro` (subtype
+/// 0x03) for transitive two-octet-AS, IPv4-address, and four-octet-AS
+/// communities, any other subtype prints as `unknown 0x<type><subtype>`,
+/// and the key/value split follows the type byte (RFC 4360 §3.1/§3.2,
+/// RFC 5668). Every other type byte, including the non-transitive
+/// opaque family, renders as `generic` with the two 32-bit halves in hex.
+fn extended_community_to_birdwatcher(raw: u64) -> Value {
+    let type_field = (raw >> 48) as u32;
+    let kind = match type_field & 0xf0ff {
+        0x0002 => "rt".to_string(),
+        0x0003 => "ro".to_string(),
+        _ => format!("unknown {type_field:#x}"),
+    };
+    let (key, value) = match raw >> 56 {
+        0x00 | 0x40 => (((raw >> 32) & 0xffff).to_string(), (raw as u32).to_string()),
+        0x01 | 0x41 => (
+            Ipv4Addr::from((raw >> 16) as u32).to_string(),
+            (raw & 0xffff).to_string(),
+        ),
+        0x02 | 0x42 => (((raw >> 16) as u32).to_string(), (raw & 0xffff).to_string()),
+        _ => {
+            return serde_json::json!([
+                "generic",
+                format!("{:#x}", (raw >> 32) as u32),
+                format!("{:#x}", raw as u32),
+            ]);
+        }
+    };
+    serde_json::json!([kind, key, value])
 }
 
 /// Format a "now" timestamp in the layout Alice-LG expects for
@@ -3162,9 +3206,56 @@ mod tests {
             json["bgp"]["large_communities"],
             serde_json::json!([[65001, 1, 2]])
         );
+        // No extended communities on the route: an empty array, like
+        // `communities` (Alice-LG reads the key on every route).
+        assert_eq!(json["bgp"]["ext_communities"], serde_json::json!([]));
         // Bird's Eye shapes from the populated-oracle fixture.
         assert_eq!(json["bgp"]["aggregator"], "203.0.113.1 AS64496");
         assert_eq!(json["bgp"]["atomic_aggr"], "");
+    }
+
+    /// Extended communities render as birdwatcher parses BIRD 2.0.12's
+    /// `BGP.ext_community` text: `[kind, key, value]` as three strings,
+    /// with the key/value split by type byte, `rt`/`ro` kinds for the
+    /// transitive AS/IPv4 families, `unknown 0x<type>` for other
+    /// subtypes of those families, and `generic` hex halves for every
+    /// other type byte (here RFC 8097 origin validation state, 0x43/0x00).
+    #[test]
+    fn route_conversion_renders_extended_communities_as_birdwatcher_triples() {
+        let route = proto::Route {
+            prefix: "10.1.0.0".to_string(),
+            prefix_length: 24,
+            extended_communities: vec![
+                // Two-octet AS route target 65000:100 (RFC 4360 §3.1).
+                0x0002_fde8_0000_0064,
+                // Four-octet AS route target 4200000000:5 (RFC 5668).
+                (0x0202 << 48) | (4_200_000_000u64 << 16) | 5,
+                // IPv4-address route origin 192.0.2.1:200 (RFC 4360 §3.2).
+                (0x0103 << 48) | (0xc000_0201u64 << 16) | 200,
+                // Non-transitive two-octet AS route target: BIRD 2.0.12
+                // names only the transitive rt/ro subtypes.
+                0x4002_fde8_0000_0064,
+                // Two-octet AS, unassigned subtype 0x05.
+                0x0005_fde8_0000_0001,
+                // Non-transitive opaque origin validation state (RFC
+                // 8097) carrying 65000 in the low half: generic form.
+                0x4300_0000_0000_fde8,
+            ],
+            ..Default::default()
+        };
+        let json = route_to_birdwatcher(&route, &IdentityResolver::default());
+
+        assert_eq!(
+            json["bgp"]["ext_communities"],
+            serde_json::json!([
+                ["rt", "65000", "100"],
+                ["rt", "4200000000", "5"],
+                ["ro", "192.0.2.1", "200"],
+                ["unknown 0x4002", "65000", "100"],
+                ["unknown 0x5", "65000", "1"],
+                ["generic", "0x43000000", "0xfde8"],
+            ])
+        );
     }
 
     #[test]
