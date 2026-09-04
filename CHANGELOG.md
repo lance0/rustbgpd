@@ -267,6 +267,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   progress, including graceful-restart entry and session fail-over.
   Previously the gauges kept their last values until the peer was removed
   from configuration.
+- Extended community accessors in `rustbgpd-wire` now match the type byte
+  exactly instead of masking it with `0x3F`, so values in the IANA
+  experimental-use range (type bit `0x80`) are no longer decoded as EVPN,
+  opaque encapsulation, default-gateway, route-target, or route-origin
+  communities.
 
 - **Operator-visible:** `rs-config-render` now states `rs_control_communities`
   on every rendered member session instead of inheriting the daemon default:

@@ -403,7 +403,7 @@ impl ExtendedCommunity {
     /// `tunnel_type` as the semantic signal.
     #[must_use]
     pub fn as_bgp_encapsulation(self) -> Option<u16> {
-        if self.type_byte() & 0x3F != 0x03 || self.subtype() != 0x0C {
+        if self.type_byte() != 0x03 || self.subtype() != 0x0C {
             return None;
         }
         let v = self.value_bytes();
@@ -426,7 +426,7 @@ impl ExtendedCommunity {
     /// a sticky MAC with a higher-sequence non-sticky advertisement.
     #[must_use]
     pub fn as_mac_mobility(self) -> Option<(bool, u32)> {
-        if self.type_byte() & 0x3F != 0x06 || self.subtype() != 0x00 {
+        if self.type_byte() != 0x06 || self.subtype() != 0x00 {
             return None;
         }
         let v = self.value_bytes();
@@ -449,7 +449,7 @@ impl ExtendedCommunity {
     /// the flags byte) signals single-active multi-homing mode.
     #[must_use]
     pub fn as_esi_label(self) -> Option<(bool, u32)> {
-        if self.type_byte() & 0x3F != 0x06 || self.subtype() != 0x01 {
+        if self.type_byte() != 0x06 || self.subtype() != 0x01 {
             return None;
         }
         let v = self.value_bytes();
@@ -487,7 +487,7 @@ impl ExtendedCommunity {
     /// Type 4 ES routes.
     #[must_use]
     pub fn as_es_import_rt(self) -> Option<[u8; 6]> {
-        if self.type_byte() & 0x3F != 0x06 || self.subtype() != 0x02 {
+        if self.type_byte() != 0x06 || self.subtype() != 0x02 {
             return None;
         }
         Some(self.value_bytes())
@@ -502,7 +502,7 @@ impl ExtendedCommunity {
     /// updated by RFC 9785 §3). Type 0x06, subtype 0x06.
     #[must_use]
     pub fn as_df_election(self) -> Option<DfElectionExtendedCommunity> {
-        if self.type_byte() & 0x3F != 0x06 || self.subtype() != 0x06 {
+        if self.type_byte() != 0x06 || self.subtype() != 0x06 {
             return None;
         }
         let v = self.value_bytes();
@@ -562,7 +562,7 @@ impl ExtendedCommunity {
     /// Returns the 6-byte router MAC used for symmetric IRB.
     #[must_use]
     pub fn as_router_mac(self) -> Option<[u8; 6]> {
-        if self.type_byte() & 0x3F != 0x06 || self.subtype() != 0x03 {
+        if self.type_byte() != 0x06 || self.subtype() != 0x03 {
             return None;
         }
         Some(self.value_bytes())
@@ -582,7 +582,7 @@ impl ExtendedCommunity {
     /// validation consumers treat this accessor as semantic truth.
     #[must_use]
     pub fn as_default_gateway(self) -> bool {
-        self.type_byte() & 0x3F == 0x03 && self.subtype() == 0x0D && self.value_bytes() == [0u8; 6]
+        self.type_byte() == 0x03 && self.subtype() == 0x0D && self.value_bytes() == [0u8; 6]
     }
     /// Construct a Default Gateway Extended Community.
     #[must_use]
@@ -597,7 +597,10 @@ impl ExtendedCommunity {
     /// `global_admin` (ASN vs IPv4 address) based on `type_byte()`.
     fn decode_two_part(self) -> Option<(u32, u32)> {
         let v = self.value_bytes();
-        let t = self.type_byte() & 0x3F; // mask off high two bits
+        // Clear only the non-transitive bit (RFC 4360 §3.1): types 0x40-0x42
+        // share the 0x00-0x02 layouts. Bit 0x80 marks the IANA
+        // experimental-use range and must not be masked away.
+        let t = self.type_byte() & !0x40;
         match t {
             // 2-octet AS specific: AS(2) + value(4)
             0x00 => {
@@ -625,7 +628,7 @@ impl fmt::Display for ExtendedCommunity {
             Self::ORIGIN_VALIDATION_INVALID => return write!(f, "OV_INVALID"),
             _ => {}
         }
-        let is_ipv4 = self.type_byte() & 0x3F == 0x01;
+        let is_ipv4 = self.type_byte() & !0x40 == 0x01;
         if let Some((g, l)) = self.route_target() {
             if is_ipv4 {
                 write!(f, "RT:{}:{l}", Ipv4Addr::from(g))
@@ -4390,6 +4393,92 @@ mod tests {
         assert!(!rt.as_default_gateway());
     }
     #[test]
+    /// Load-bearing proof: masking the type byte with `0x3F` clears the
+    /// RFC 4360 §3.1 experimental-use bit (`0x80`), so `0x86`/`0xC6` would
+    /// decode as EVPN (`0x06`) and `0x83`/`0xC3` as transitive opaque (`0x03`).
+    fn ext_comm_evpn_accessors_reject_experimental_type_bytes() {
+        let mac = [0x02, 0, 0, 0, 0, 0x01];
+        for type_byte in [0x86, 0xC6] {
+            let mm =
+                ExtendedCommunity::new(u64::from_be_bytes([type_byte, 0x00, 1, 0, 0, 0, 0, 7]));
+            assert_eq!(mm.as_mac_mobility(), None, "type {type_byte:#04x}");
+            let esi =
+                ExtendedCommunity::new(u64::from_be_bytes([type_byte, 0x01, 1, 0, 0, 0, 0, 5]));
+            assert_eq!(esi.as_esi_label(), None, "type {type_byte:#04x}");
+            let es_import = ExtendedCommunity::new(u64::from_be_bytes([
+                type_byte, 0x02, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+            ]));
+            assert_eq!(es_import.as_es_import_rt(), None, "type {type_byte:#04x}");
+            let rmac = ExtendedCommunity::new(u64::from_be_bytes([
+                type_byte, 0x03, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+            ]));
+            assert_eq!(rmac.as_router_mac(), None, "type {type_byte:#04x}");
+            let df =
+                ExtendedCommunity::new(u64::from_be_bytes([type_byte, 0x06, 2, 0, 0, 0, 0, 9]));
+            assert_eq!(df.as_df_election(), None, "type {type_byte:#04x}");
+        }
+        for type_byte in [0x83, 0xC3] {
+            let encap =
+                ExtendedCommunity::new(u64::from_be_bytes([type_byte, 0x0C, 0, 0, 0, 0, 0, 8]));
+            assert_eq!(encap.as_bgp_encapsulation(), None, "type {type_byte:#04x}");
+            let gw =
+                ExtendedCommunity::new(u64::from_be_bytes([type_byte, 0x0D, 0, 0, 0, 0, 0, 0]));
+            assert!(!gw.as_default_gateway(), "type {type_byte:#04x}");
+        }
+        // Unassigned non-transitive siblings (0x43/0x46) are not admitted either.
+        let nt_encap = ExtendedCommunity::new(u64::from_be_bytes([0x43, 0x0C, 0, 0, 0, 0, 0, 8]));
+        assert_eq!(nt_encap.as_bgp_encapsulation(), None);
+        let nt_mm = ExtendedCommunity::new(u64::from_be_bytes([0x46, 0x00, 0, 0, 0, 0, 0, 7]));
+        assert_eq!(nt_mm.as_mac_mobility(), None);
+        // Positive controls: the exact 0x06 / 0x03 forms still decode.
+        assert_eq!(
+            ExtendedCommunity::mac_mobility(true, 7).as_mac_mobility(),
+            Some((true, 7))
+        );
+        assert_eq!(
+            ExtendedCommunity::esi_label(true, 5).as_esi_label(),
+            Some((true, 5))
+        );
+        assert_eq!(
+            ExtendedCommunity::es_import_rt(mac).as_es_import_rt(),
+            Some(mac)
+        );
+        assert_eq!(
+            ExtendedCommunity::router_mac(mac).as_router_mac(),
+            Some(mac)
+        );
+        assert_eq!(
+            ExtendedCommunity::df_election(2, 0, Some(9))
+                .as_df_election()
+                .map(|d| d.algorithm_id),
+            Some(2)
+        );
+        assert_eq!(
+            ExtendedCommunity::bgp_encapsulation(8).as_bgp_encapsulation(),
+            Some(8)
+        );
+        assert!(ExtendedCommunity::default_gateway().as_default_gateway());
+    }
+    #[test]
+    /// Load-bearing proof: `0x80 | 0x00` is an experimental-range type, not a
+    /// two-octet-AS route target; the non-transitive `0x40` sibling
+    /// (RFC 4360 §3.1) shares the transitive layout and still decodes.
+    fn ext_comm_two_part_rejects_experimental_type_byte() {
+        let experimental_target =
+            ExtendedCommunity::new(u64::from_be_bytes([0x80, 0x02, 0xFD, 0xE8, 0, 0, 0, 100]));
+        assert_eq!(experimental_target.route_target(), None);
+        let experimental_origin =
+            ExtendedCommunity::new(u64::from_be_bytes([0x80, 0x03, 0xFD, 0xE8, 0, 0, 0, 100]));
+        assert_eq!(experimental_origin.route_origin(), None);
+        let non_transitive_rt =
+            ExtendedCommunity::new(u64::from_be_bytes([0x40, 0x02, 0xFD, 0xE8, 0, 0, 0, 100]));
+        assert_eq!(non_transitive_rt.route_target(), Some((65000, 100)));
+        // An experimental type with the IPv4-specific low bits must not render
+        // as an IPv4 route target.
+        let experimental_v4 = ExtendedCommunity::new(0x8102_C000_0201_0064);
+        assert_eq!(experimental_v4.to_string(), "0x8102c00002010064");
+    }
+    #[test]
     fn origin_from_u8_roundtrip() {
         assert_eq!(Origin::from_u8(0), Some(Origin::Igp));
         assert_eq!(Origin::from_u8(1), Some(Origin::Egp));
@@ -4925,7 +5014,7 @@ mod tests {
         assert_eq!(g, 0xC000_0201); // 192.0.2.1 as u32
         assert_eq!(l, 100);
         // Callers distinguish via type_byte()
-        assert_eq!(ec_ipv4.type_byte() & 0x3F, 0x01);
+        assert_eq!(ec_ipv4.type_byte() & !0x40, 0x01);
     }
     #[test]
     fn extended_community_is_transitive() {
