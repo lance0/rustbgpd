@@ -435,7 +435,6 @@ impl RibManager {
         self.peer_bgp_id.remove(&peer);
         self.peer_is_rr_client.remove(&peer);
         self.force_outbound_peers.remove(&peer);
-        self.clear_peer_refresh_metrics(peer);
     }
 
     /// Remove every Adj-RIB-In route learned from `peer` and redistribute
@@ -692,6 +691,9 @@ impl RibManager {
         // The extra-withdraw drop above mutates residue even for a peer
         // whose membership removal doesn't touch a group.
         self.refresh_group_residue_gauge();
+        // Zero the per-family refresh gauges while `refresh_in_progress`
+        // still lists the families; the map-driven clear below drops them.
+        self.clear_peer_refresh_metrics(peer);
         self.clear_peer_refresh_state(peer);
     }
 
