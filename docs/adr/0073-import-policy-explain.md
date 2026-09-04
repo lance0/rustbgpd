@@ -21,7 +21,7 @@ There is no equivalent for **import**. The operator question
   the `evaluate_chain_with_attribution` call sites in
   `crates/transport/src/session/inbound.rs` (for example the IPv4
   unicast body path around line 1855). A denied route drops at that
-  point and never reaches RIB. Existing tests pin this behaviour.
+  point and never reaches RIB. Existing tests pin this behavior.
 - Adj-RIB-In holds only **accepted, post-policy** routes; a
   re-evaluation against it can answer "what would current policy
   do to this prefix" but cannot reconstruct what happened to a
@@ -131,7 +131,7 @@ flag on this one.
   `[policy.explain] cache_size` (nested under the existing
   `[policy]` section per the convention already established by
   `[policy.definitions.filter]`). The bucket reads as *diagnostic
-  retention*, not policy evaluation behaviour — flipping these knobs
+  retention*, not policy evaluation behavior — flipping these knobs
   cannot change which routes get accepted. LRU eviction. A small
   secondary structure — a recent-eviction key set, lossy with
   false-positive-only semantics, capped at `EVICTION_TRACKER_CAPACITY = 512`

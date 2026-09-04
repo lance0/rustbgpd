@@ -65,13 +65,13 @@ phases). Every table below reports the *measured* median, with the per-run
 values printed underneath so a reader can see the spread rather than trust the
 midpoint.
 
-**Units and memory surface:** bgperf2 prints memory labelled "MB" but computes
+**Units and memory surface:** bgperf2 prints memory labeled "MB" but computes
 it 1024-based. Its `max mem (GB)` column times 1024 is the figure this receipt
 calls **MiB**. The source is Docker's raw container cgroup
 `memory_stats.usage` counter, so the tables report its peak over the run. This
 is neither process-tree RSS nor Docker working set; depending on the cgroup it
 may include anonymous memory, file/page-cache memory, kernel memory, and socket
-memory. These pinned historical values are therefore labelled **peak raw
+memory. These pinned historical values are therefore labeled **peak raw
 container cgroup usage** throughout.
 "Convergence" is the harness `elapsed` column: monitor start to all expected
 prefixes received, which therefore includes the wait for the first prefix.

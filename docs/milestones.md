@@ -755,7 +755,7 @@ for the architectural record.
 
 ### Later interop scenarios (M30b onward) and where they run
 
-Scenarios beyond the M29-M33 set above are catalogued below. Most executable
+Scenarios beyond the M29-M33 set above are cataloged below. Most executable
 drivers live in `tests/interop/scripts/`; compatibility-contract oracles such
 as M98 live under `tests/compat/`. The Status column names where each one runs:
 hosted `interop.yml` or `kernel-dataplane.yml` CI, another named hosted lane,

@@ -314,7 +314,7 @@ resolved.
   addition to `[[neighbors]]` deltas. On any step failure, reload
   halts and returns the partial-state snapshot — the daemon's
   in-memory config matches what the peer manager actually applied,
-  rather than the previous behaviour of lying that the prior config
+  rather than the previous behavior of lying that the prior config
   is still in effect. The operator converges by editing the failing
   TOML and reloading again; the next diff runs against the half-
   applied state, so only the remaining steps fire. True rollback

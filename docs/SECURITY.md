@@ -56,7 +56,7 @@ Preferred posture:
   surface.
 - `access_mode` is a listener-level boundary; per-client RBAC is layered on top
   via the ADR-0064 per-method tiers (`read`, `sensitive_read`, `mutating`,
-  `operator_only`) catalogued in `docs/grpc-method-inventory.md` and
+  `operator_only`) cataloged in `docs/grpc-method-inventory.md` and
   `crates/api/src/authz.rs`. The runtime emits `grpc_authz` decision logs and
   `bgp_grpc_authz_decisions_total`; listener `max_tier` caps are enforced, and
   `security.grpc.enforcement = "tier"` (the default since v0.24.0) enforces

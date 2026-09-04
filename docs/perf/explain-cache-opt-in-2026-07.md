@@ -17,7 +17,7 @@ opt-in) and its immediate parent `530badfef268bed9821f5a363a415b77bed6c47f`
 (explain cache on by default). The two are one commit apart, so no other change
 sits inside the comparison.
 
-Every figure is labelled *measured*, *computed*, or *extrapolated* at the point
+Every figure is labeled *measured*, *computed*, or *extrapolated* at the point
 of use. Resident-set figures and DHAT figures are different quantities and are
 never mixed: RSS is what the kernel reports resident for the daemon process
 tree under jemalloc, DHAT bytes are what the program *allocated* in a separate

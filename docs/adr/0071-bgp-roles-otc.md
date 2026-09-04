@@ -32,7 +32,7 @@ MANRS-credibility gap on rustbgpd's roadmap.
 with **NOTIFICATION code 2 (OPEN Message Error), subcode 11 (Role Mismatch)**. A
 **"strict mode"** extends the rejection to "I advertised a Role but the peer
 didn't" — operator opt-in for environments that mandate Roles end-to-end. The
-default behaviour for a missing-on-the-other-side Role is to ignore the absence
+default behavior for a missing-on-the-other-side Role is to ignore the absence
 and proceed: the session establishes and **the §5 OTC procedures still fire**
 driven by the local role (Provider implies the peer is a Customer, RS implies
 RS-Client, Peer implies Peer, and vice versa). The peer's advertised Role is
@@ -232,7 +232,7 @@ Validation:
   - `role_negotiated` (bool — true iff *both* sides advertised compatible
     roles),
   - `otc_routes_blocked` (uint64 — per-peer running total spanning all
-    reason labels; cheap operator sanity-check on top of the labelled
+    reason labels; cheap operator sanity-check on top of the labeled
     Prometheus counter).
 - Prometheus counters:
   - `bgp_otc_routes_blocked_total{peer, reason}` with `reason ∈
@@ -300,7 +300,7 @@ on the `local-role` line. The FRR doc reference is pinned to
 | PR | Scope | Verification |
 |----|-------|--------------|
 | **PR1** | `crates/wire`: Role capability (code 9, 1-byte enum encode/decode) + typed OTC path attribute (type 35, four-byte ASN + Partial) + their public re-exports. Revised decoding records malformed OTC as type-35 RFC 7606 metadata. | `cargo test -p rustbgpd-wire`; tests cover all five role values, `0xC0`/`0xE0`, compact/Extended Length, reserved-bit canonicalization, strict subcode 4/5 errors, and revised treat-as-withdraw. |
-| **PR2** | `crates/fsm` role compatibility + NOTIFICATION 2/11 + strict-mode gating + duplicate-role-cap rejection, and recording the configured local role + advertised peer role on `NegotiatedSession`; `crates/transport` ingress (I1/I2 semantic leak + malformed-OTC-length treat-as-withdraw + I3 set) + egress (E1/E2 unicast only — FlowSpec/EVPN siblings NOT touched) wired through `prepare_outbound_attributes` and the inbound UPDATE path; `src/config` schema + validation for `role` / `strict_role` (mirroring the `remove_private_as` precedent); Prometheus counters with distinct `reason` labels for `ingress_from_customer_rsclient` / `ingress_peer_mismatch` / `malformed_length` / `egress_to_upstream_via_otc`. | `cargo test --workspace`; unit tests cover each ingress/egress rule, the duplicate-cap behaviour, the malformed-length treat-as-withdraw, the preserve-existing-OTC invariant, and the strict / non-strict paths; FSM table covers the compatibility matrix. |
+| **PR2** | `crates/fsm` role compatibility + NOTIFICATION 2/11 + strict-mode gating + duplicate-role-cap rejection, and recording the configured local role + advertised peer role on `NegotiatedSession`; `crates/transport` ingress (I1/I2 semantic leak + malformed-OTC-length treat-as-withdraw + I3 set) + egress (E1/E2 unicast only — FlowSpec/EVPN siblings NOT touched) wired through `prepare_outbound_attributes` and the inbound UPDATE path; `src/config` schema + validation for `role` / `strict_role` (mirroring the `remove_private_as` precedent); Prometheus counters with distinct `reason` labels for `ingress_from_customer_rsclient` / `ingress_peer_mismatch` / `malformed_length` / `egress_to_upstream_via_otc`. | `cargo test --workspace`; unit tests cover each ingress/egress rule, the duplicate-cap behavior, the malformed-length treat-as-withdraw, the preserve-existing-OTC invariant, and the strict / non-strict paths; FSM table covers the compatibility matrix. |
 | **PR3** | `proto/rustbgpd.proto` + `crates/api/src/neighbor_service.rs`: surface `local_role` / `remote_role` / `role_negotiated` on `NeighborState`; `crates/cli` renders them in `rbgp neighbor show`. Additive — no new authz-matrix entries. | `cargo test -p rustbgpd-api`; `rbgp neighbor show` smoke. |
 | **PR4** | FRR interop topology + driver under `tests/interop/`, wired into `interop.yml`. Covers the six interop scenarios above (pair establishment, mismatch, OTC egress set, OTC ingress leak via deliberate injection, strict mode, malformed-length treat-as-withdraw). | M-series CI green against FRR 10.3.1. |
 
@@ -340,7 +340,7 @@ on the `local-role` line. The FRR doc reference is pinned to
   `attr_type::ONLY_TO_CUSTOMER => Some(OPTIONAL | TRANSITIVE)` — this gives
   malformed-flags rejection (subcode 4 `ATTRIBUTE_FLAGS_ERROR`) for free,
   same path the COMMUNITIES family uses. Encode body is one
-  `extend_from_slice(&value.to_be_bytes())`, modelled on `Med`/`LocalPref`
+  `extend_from_slice(&value.to_be_bytes())`, modeled on `Med`/`LocalPref`
   (`attribute.rs:1432-1441`).
 - **`NegotiatedSession`:** `crates/fsm/src/action.rs:26`. The pattern is a
   named scalar field per capability (e.g. `peer_gr_capable: bool` at `:42`,
@@ -458,7 +458,7 @@ on the `local-role` line. The FRR doc reference is pinned to
   Document this in CONFIGURATION.md and the user-facing release notes.
 - Pulls on one small future item: a Route-Refresh-plus-revalidation path so an
   in-place role flip can revalidate ingress without bouncing the session.
-  Deferred; current behaviour is restart-required on role change.
+  Deferred; current behavior is restart-required on role change.
 
 ## Deferred
 
@@ -467,7 +467,7 @@ on the `local-role` line. The FRR doc reference is pinned to
 - **iBGP Roles** (eBGP-only per RFC).
 - **Dynamic role change without session restart** — needs a Route-Refresh +
   revalidation pass; future ADR if demand appears.
-- **Operator override of OTC behaviour** (e.g. forced strip on egress for
+- **Operator override of OTC behavior** (e.g. forced strip on egress for
   asymmetric leak protection) — deliberately not exposed in v1.
 
 ## References

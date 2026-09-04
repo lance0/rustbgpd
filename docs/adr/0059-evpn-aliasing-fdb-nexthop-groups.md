@@ -80,7 +80,7 @@ rejected with `EINVAL`. Empty groups are also rejected.
 
 This mechanism is what FRR (`zebra/zebra_evpn_mh.c::zebra_evpn_nhg_update`,
 `zebra/rt_netlink.c::netlink_fdb_nhg_update`) implements. Matching
-FRR's behaviour means operators get the dataplane they expect.
+FRR's behavior means operators get the dataplane they expect.
 
 ### 2. Rejected alternative: `bridge fdb append ... dst <ip>`
 
@@ -354,7 +354,7 @@ through. Each slice ships independently green.
   (we don't pre-create groups for unobserved aliases).
 - No dataplane change; existing diff/apply ignores the new field.
 - Output: `RemoteMacEntry` is now expressive enough for the
-  dataplane to do its job. No operational behaviour change.
+  dataplane to do its job. No operational behavior change.
 
 #### Slice 2 — raw-netlink `nexthop_raw` module (~day)
 
@@ -520,7 +520,7 @@ through. Each slice ships independently green.
   every MAC behind that ES (memory win). With `false`, each
   MAC gets its own NHG (faster ES-flap failover because there's
   no thundering-herd FDB churn). Soak isolation knob; default
-  matches FRR's behaviour.
+  matches FRR's behavior.
 
 ### 8. Kernel + distro compatibility
 

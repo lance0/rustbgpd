@@ -3376,7 +3376,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `[policy.explain] enabled` defaults to `false`. A daemon whose config
   never named that section stops recording import decisions on upgrade:
   `rbgp policy explain` answers `cache_disabled` and exits nonzero,
-  naming the exact lines to add. **No routing behaviour changes** — the
+  naming the exact lines to add. **No routing behavior changes** — the
   cache is diagnostic retention only, and best-path explain, export
   explain, and the retained rejected-route view are untouched. To keep
   the surface, add `[policy.explain] enabled = true`, reload, and let
@@ -3384,7 +3384,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   before. The reason is that the cache is held **per session**, so its
   cost multiplies by peer count, and 4096 entries cannot promise
   full-table explainability anyway — full price for a partial answer.
-  Sizing guidance, labelled figures, and the conditions that would
+  Sizing guidance, labeled figures, and the conditions that would
   reopen the decision are under *Changed* and in ADR-0073.
 - **`rustbgpd-wire` 0.16.0 changes binary decode acceptance in six places**
   and separately accepts the displayed unknown-type Route Distinguisher
@@ -3592,7 +3592,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and Prometheus exposes `bgp_outbound_prefix_usage`,
   `bgp_outbound_prefix_limit`, `bgp_outbound_prefix_headroom`,
   `bgp_outbound_prefix_blocking`, and `bgp_outbound_prefix_blocked_total`,
-  labelled by peer and family only. An episode logs once when it opens and
+  labeled by peer and family only. An episode logs once when it opens and
   once when recovery proves nothing is still withheld, never per prefix.
   A committed real-session receipt drives four live sessions and reads the
   wire at every phase: 96/96 precommitted checks, caps bound on both the
@@ -3900,7 +3900,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   choice becomes an informed memory-versus-observability trade the
   operator makes.
 
-  **The settled memory receipt, with each figure labelled:**
+  **The settled memory receipt, with each figure labeled:**
 
   | Figure | Kind |
   |---|---|
@@ -3927,7 +3927,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **BREAKING (metrics): the `peer` label is now the bare neighbor address
   on every metric family.** Metric labels are a public API, and this one
   had two incompatible formats — sometimes within a single family.
-  Session-owned series labelled `peer` with the transport endpoint
+  Session-owned series labeled `peer` with the transport endpoint
   (`192.0.2.1:179`, `[2001:db8::1]:179`) while RIB-, policy-, BFD-, and
   BMP-owned series used the bare configured address (`192.0.2.1`,
   `2001:db8::1`). `bgp_policy_routes_total` carried both: its
@@ -3962,7 +3962,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `bgp_hold_timer_rearmed_pending_input_total`,
   `bgp_send_hold_expirations_total`, `bmp_source_drops_total`, and the
   `direction="import"` half of `bgp_policy_routes_total`. Every other
-  `peer`-labelled family already used the bare address and is unchanged.
+  `peer`-labeled family already used the bare address and is unchanged.
 
   **What operator PromQL needs:** drop any port-stripping `label_replace`
   from cross-family joins, and rewrite selectors that pinned an endpoint —
@@ -4241,7 +4241,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Enabled sessions are unaffected: the LRU and the eviction ring still
   come up together at their full configured sizes, before any eviction
   can occur. `[policy.explain] enabled` now defaults to off; an explicit
-  `true` retains the same cache behaviour.
+  `true` retains the same cache behavior.
 
 - **RFC 8654 receive buffers now grow on demand.** Negotiating the 65,535-byte
   inbound limit previously reserved the full difference from 4096 bytes for
@@ -4638,7 +4638,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ARouteServer-generated output, and both now produce exactly one report
   entry at the construct's own line. A `filter`/`function` header that
   arrives through the statement path is also pointed at `.rpol` rather
-  than labelled an unknown structural stanza, and report entries folded
+  than labeled an unknown structural stanza, and report entries folded
   out of a multi-line source no longer carry that source's indentation
   runs. Standalone `include` statements are reported with their source
   lines preserved in every parser context, with explicit flattening
@@ -11087,7 +11087,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ~8 separate scans of the attribute vector, and shares the canonical attribute
   `Arc` across same-UPDATE NLRI when policy makes no modifications
   (`RouteAttrBundle`) instead of deep-cloning per accepted route.
-  Behaviour-identical; cuts per-UPDATE allocation churn and dropped 2p/100k
+  Behavior-identical; cuts per-UPDATE allocation churn and dropped 2p/100k
   peak raw container cgroup usage ~21%. This historical bgperf2 surface is
   Docker `memory_stats.usage`, not process-tree RSS or Docker working set.
 - Inlined the per-peer Adj-RIB-In secondary prefix index
@@ -11095,7 +11095,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   eliminating one heap-allocated `HashSet` per prefix for the common
   no-Add-Path case — ~21–22% lower Adj-RIB-In resident memory at scale
   (−110 MB at 900k prefixes × 2 peers in the `memory_profile` test).
-  Mirrors the existing `AdjRibOut::prefix_path_ids` layout; no behaviour
+  Mirrors the existing `AdjRibOut::prefix_path_ids` layout; no behavior
   change.
 - **MSRV 1.92 → 1.95** for the workspace. Driven by the embedded SQLite
   build: `rusqlite` 0.32 → 0.40 pulls `libsqlite3-sys` 0.38, whose build
@@ -11105,7 +11105,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   images (`Dockerfile` + the EVPN-Linux test image). The event-history
   outbox now binds `event_id` as `i64` (rusqlite 0.40 dropped the `u64`
   `ToSql` impl) via the existing `clamp_event_id` helper; no schema or
-  behaviour change.
+  behavior change.
 
 ## [0.31.0] — 2026-05-28
 
@@ -11150,7 +11150,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the summary table reports across-attempt stddev, min..max, and a
   conservatively propagated last-run 95% CI alongside the mean delta.
   The `Criterion Bench Compare` workflow defaults to `attempts=3`.
-  Single-attempt behaviour is the same simpler table as before.
+  Single-attempt behavior is the same simpler table as before.
 - `bench/compare-criterion.sh` and all five soak entrypoints under
   `tests/soak/` now acquire a shared exclusive `flock` on
   `$HOME/.local/state/rustbgpd-host.lock` before doing real work. A
@@ -12896,7 +12896,7 @@ The wire crate stays at 0.9.0 — no source-level changes under
   sits behind so subsequent ADR-0059 slices can key one FDB
   nexthop group per `(ESI, EthernetTag)` instead of re-deriving
   it at apply time. Empty `alias_vtep_ips` ⇔ `alias_group_key.is_none()`.
-  Pure-logic / portable-intent change; dataplane behaviour
+  Pure-logic / portable-intent change; dataplane behavior
   unchanged.
 - **`aliasing::group_members(entry: &RemoteMacEntry) -> Vec<IpAddr>`**
   helper returning the canonical FDB nexthop group membership for
@@ -14676,7 +14676,7 @@ stable track (Tokio's policy) — gated in PR-CI so it doesn't drift.
   `NEXT_HOP` validation fix above. No public API changes — single
   match-arm guard inside `validate_update_attributes` plus a unit
   test pinning the regression. Downstream consumers picking up
-  0.8.2 fix the session-tear behaviour against any RFC-compliant
+  0.8.2 fix the session-tear behavior against any RFC-compliant
   FlowSpec peer.
 
 ### CI
@@ -14901,7 +14901,7 @@ stable track (Tokio's policy) — gated in PR-CI so it doesn't drift.
 ### CI
 
 - **Interop suite expanded from 3 to 12 parallel jobs.** Every PR
-  now exercises foundation behaviour (M1 basic UPDATE/RIB, M13
+  now exercises foundation behavior (M1 basic UPDATE/RIB, M13
   policy engine, M15 gRPC SoftResetIn), address-family + topology
   shapes (M10 IPv6 dual-stack, M14 Route Reflector, M17 Add-Path),
   operational + security (M22 FlowSpec, M24 BMP, M25 TCP MD5 +

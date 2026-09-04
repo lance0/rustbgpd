@@ -604,7 +604,7 @@ project's own release page and README, and makes no interoperability claim.
 
 **zebra-rs** (AGPL-3.0) describes itself as a BGP, OSPF, and IS-IS
 routing stack with SRv6, SR-MPLS, L3VPN, and EVPN extensions, configured
-through YANG-modelled candidate/running configuration (`zebra-rs/yang/`)
+through YANG-modeled candidate/running configuration (`zebra-rs/yang/`)
 and its own CLI, and shipped as prebuilt Ubuntu `.deb` packages with an
 apt channel. Release
 [v26.8.5](https://github.com/zebra-rs/zebra-rs/releases/tag/v26.8.5)

@@ -873,7 +873,7 @@ Closed arcs and remaining bounds:
 (The hosted `kernel-dataplane` workflow now covers the EVPN dataplane smokes
 M36 / M37 / M37+IP / M38 / M39 / M39b / M40 / M47 / M48 /
 M60 / M61 / M65 / M66 / M67 / M68 / M69 / M70 / M71 / M72 — #130 closed. Non-EVPN kernel
-dataplane, BFD, and TCP-AO coverage is catalogued in `INTEROP.md` and
+dataplane, BFD, and TCP-AO coverage is cataloged in `INTEROP.md` and
 `kernel-dataplane-runner.md`.)
 
 ### Standards-tail map

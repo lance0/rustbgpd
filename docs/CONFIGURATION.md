@@ -988,7 +988,7 @@ Usage is the post-policy, post-OTC, post-exact-export admitted count and
 agrees with `rbgp rib advertised <addr>`. Prometheus exposes the
 same truth as `bgp_outbound_prefix_usage`, `bgp_outbound_prefix_limit`,
 `bgp_outbound_prefix_headroom`, and `bgp_outbound_prefix_blocking`, plus the
-`bgp_outbound_prefix_blocked_total` attempt counter — all labelled by peer and
+`bgp_outbound_prefix_blocked_total` attempt counter — all labeled by peer and
 family only. An episode logs once when it opens and once when a recovery
 resync proves nothing is still withheld, never per prefix.
 
@@ -2790,7 +2790,7 @@ accepted. Scope is IPv4 / IPv6 unicast. The cache resets on peer session
 reset and is **not durable across restart** (for durable history use the
 event-history outbox, ADR-0072). Both fields are **restart-required
 per-peer** on reload — a session already established keeps its current
-behaviour until it re-establishes; see
+behavior until it re-establishes; see
 [`reload-matrix.md`](reload-matrix.md) and the "Explain an import
 decision" runbook in [`OPERATIONS.md`](OPERATIONS.md).
 

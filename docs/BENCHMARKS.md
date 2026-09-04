@@ -1498,7 +1498,7 @@ RAM, Linux 6.17, Docker 27.x. All daemons run in containers on the same host.
 **Methodology:** "Convergence" is the harness `elapsed` column — monitor start
 to all expected prefixes received — so it includes the wait for the first
 prefix as well as the flood. "Total time" additionally includes session
-establishment and harness setup. The harness prints memory labelled "MB" but
+establishment and harness setup. The harness prints memory labeled "MB" but
 computes it 1024-based; the tables below convert it and label the result
 **MiB**. The memory value is the peak of Docker's raw container cgroup
 `memory_stats.usage` counter. It is not process-tree RSS or Docker working set

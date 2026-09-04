@@ -121,7 +121,7 @@ When RFC 8212 enforcement (`[global] ebgp_requires_policy`) is on and this
 eBGP peer has no explicit operator export policy, the ladder stops at
 `export_policy` with the `rfc8212_missing_export_policy` code rather than
 `policy_denied`: the route was not rejected by a policy, there is no policy.
-The import side is labelled the same way — `rbgp policy explain` annotates the
+The import side is labeled the same way — `rbgp policy explain` annotates the
 reserved chain's default-action line. Neither name can belong to an operator
 policy; both are refused at config load. See
 [CONFIGURATION.md](CONFIGURATION.md#ebgp_requires_policy--rfc-8212-explicit-policy-on-ebgp).
