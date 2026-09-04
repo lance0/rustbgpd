@@ -2739,12 +2739,16 @@ fn validate_tcp_mss(address: &str, mss: u16) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// Kernel key ceiling (`TCP_MD5SIG_MAXKEYLEN`); TCP-AO keys share the same 80-byte bound here.
+const TCP_KEY_MAX_LEN: usize = 80;
+
 /// The kernel `TCP_MD5SIG` key bound (`TCP_MD5SIG_MAXKEYLEN`): the transport
 /// refuses an empty key and truncates nothing, so an out-of-range password is
 /// a load error rather than a socket-setup failure. Byte length, like the
 /// kernel copy.
 fn md5_password_length_error(password: &str) -> Option<&'static str> {
-    (password.is_empty() || password.len() > 80).then_some("md5_password must be 1..=80 bytes")
+    (password.is_empty() || password.len() > TCP_KEY_MAX_LEN)
+        .then_some("md5_password must be 1..=80 bytes")
 }
 
 fn validate_tcp_ao_key(address: &str, tcp_ao: &TcpAoConfig) -> Result<(), ConfigError> {
@@ -2756,11 +2760,11 @@ fn validate_tcp_ao_key(address: &str, tcp_ao: &TcpAoConfig) -> Result<(), Config
             reason: "must not be empty".to_string(),
         });
     }
-    if key_len > 80 {
+    if key_len > TCP_KEY_MAX_LEN {
         return Err(ConfigError::InvalidNeighborConfig {
             address: address.to_string(),
             field: "tcp_ao.key".to_string(),
-            reason: "must be 80 bytes or fewer".to_string(),
+            reason: format!("must be {TCP_KEY_MAX_LEN} bytes or fewer"),
         });
     }
 
