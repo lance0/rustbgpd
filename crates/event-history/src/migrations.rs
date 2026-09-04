@@ -25,7 +25,7 @@ pub(crate) const META_SCHEMA_VERSION: &str = "schema_version";
 /// assigned `event_id`). See [`crate::sequence`].
 pub(crate) const META_LAST_EVENT_ID: &str = "last_event_id";
 
-/// Metadata-table key carrying the daemon boot ID (UUIDv4 stamped at
+/// Metadata-table key carrying the daemon boot ID (`UUIDv4` stamped at
 /// startup). Used by clients to detect restarts independently of the
 /// monotonic cursor.
 pub(crate) const META_LAST_BOOT_ID: &str = "last_boot_id";
@@ -118,8 +118,7 @@ fn first_init(conn: &mut Connection) -> Result<(), EventHistoryError> {
             META_CREATED_AT_UNIX,
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs().to_string())
-                .unwrap_or_else(|_| "0".to_string())
+                .map_or_else(|_| "0".to_string(), |d| d.as_secs().to_string())
         ],
     )?;
     txn.commit()?;
@@ -147,7 +146,7 @@ fn read_schema_version(conn: &Connection) -> Result<u32, EventHistoryError> {
 /// (the join-table peer index for "any-role" queries — see ADR-0072
 /// for the rationale). Plus `metadata` (allocator, schema version,
 /// boot id).
-const SCHEMA_V1: &str = r#"
+const SCHEMA_V1: &str = r"
 CREATE TABLE events (
     event_id           INTEGER NOT NULL PRIMARY KEY,
     timestamp_ns       INTEGER NOT NULL,
@@ -186,7 +185,7 @@ CREATE TABLE metadata (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
-"#;
+";
 
 #[cfg(test)]
 mod tests {

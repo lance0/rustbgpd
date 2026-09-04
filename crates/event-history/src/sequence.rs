@@ -77,7 +77,7 @@ pub(crate) fn write_allocator(conn: &Connection, new_value: u64) -> Result<(), E
 /// is never called (which is itself a bug the test suite catches).
 #[derive(Debug)]
 pub(crate) struct Allocator {
-    /// The last-assigned event_id at the time we read the metadata.
+    /// The last-assigned `event_id` at the time we read the metadata.
     /// Increments locally per [`Self::next`]; persisted on
     /// [`Self::finalize`].
     next_to_assign: u64,
@@ -103,7 +103,7 @@ impl Allocator {
 
     /// Returns the next `event_id` and increments the local counter.
     /// `event_id` is a `u64` and we will never wrap in practice (at
-    /// 10k events/s, u64::MAX is ~58 million years away), but check
+    /// 10k events/s, `u64::MAX` is ~58 million years away), but check
     /// defensively.
     pub(crate) fn next(&mut self) -> Result<u64, EventHistoryError> {
         let assigned = self.next_to_assign.checked_add(1).ok_or_else(|| {

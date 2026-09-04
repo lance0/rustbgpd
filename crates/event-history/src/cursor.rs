@@ -34,7 +34,7 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::{debug, warn};
 
-use crate::storage::{QueryFilter, StoreHandle};
+use crate::storage::{PersistedEvent, QueryFilter, StoreHandle};
 use crate::{
     Category, CommittedEvent, EhmState, EventHistoryError, EventHistoryManager, PayloadCodec,
 };
@@ -203,6 +203,11 @@ impl EventHistoryManager {
     /// Returns [`EventHistoryError::PassThrough`] when EHM is in
     /// pass-through mode (no durable backing). Live-only is still
     /// possible by calling [`Self::subscribe`] directly.
+    #[expect(
+        clippy::unused_async,
+        clippy::unused_async_trait_impl,
+        reason = "the handshake runs synchronously by design; the async signature is the public API the daemon awaits"
+    )]
     pub async fn subscribe_from_event(
         &self,
         req: SubscribeRequest,
@@ -243,25 +248,16 @@ pub(crate) fn subscribe_from_event_inner(
 
     let output_capacity = req.output_capacity.max(1);
     let (out_tx, out_rx) = mpsc::channel(output_capacity);
-    let stats = Arc::new(SubscribeStats::default());
+    let subscription_stats = Arc::new(SubscribeStats::default());
 
-    let req_clone = req.clone();
-    let stats_for_task = stats.clone();
+    let task_stats = Arc::clone(&subscription_stats);
     tokio::spawn(async move {
-        run_subscription(
-            req_clone,
-            high_watermark,
-            storage,
-            live_rx,
-            out_tx,
-            stats_for_task,
-        )
-        .await;
+        run_subscription(req, high_watermark, storage, live_rx, out_tx, task_stats).await;
     });
 
     Ok(EventSubscription {
         receiver: out_rx,
-        stats,
+        stats: subscription_stats,
     })
 }
 
@@ -336,32 +332,9 @@ async fn run_subscription(
             if rows.is_empty() {
                 break;
             }
-            let last_id = rows.last().map(|r| r.event_id).unwrap_or(high_watermark);
+            let last_id = rows.last().map_or(high_watermark, |r| r.event_id);
             for row in rows {
-                // Reconstruct a CommittedEvent from PersistedEvent.
-                let envelope = crate::EventEnvelope {
-                    timestamp_ns: row.timestamp_ns,
-                    category: row.category,
-                    event_type: row.event_type,
-                    peers: crate::EnvelopePeers {
-                        peer: row.peer.as_ref().and_then(|s| s.parse().ok()),
-                        previous_peer: row.previous_peer.as_ref().and_then(|s| s.parse().ok()),
-                        target_peer: row.target_peer.as_ref().and_then(|s| s.parse().ok()),
-                    },
-                    afi_safi: row.afi_safi,
-                    prefix: row.prefix,
-                    rd: row.rd,
-                    evpn_route_type: row.evpn_route_type,
-                    severity: row.severity,
-                    payload_codec: PayloadCodec::parse(&row.payload_codec)
-                        .unwrap_or(PayloadCodec::Opaque),
-                    payload: row.payload,
-                };
-                let committed = CommittedEvent {
-                    event_id: row.event_id,
-                    daemon_boot_id: row.daemon_boot_id.into(),
-                    envelope: envelope.into(),
-                };
+                let committed = committed_from_persisted(row);
                 if !req.filter.matches(&committed) {
                     continue;
                 }
@@ -420,6 +393,32 @@ async fn run_subscription(
     );
 }
 
+/// Reconstruct the [`CommittedEvent`] a replayed row was broadcast as.
+fn committed_from_persisted(row: PersistedEvent) -> CommittedEvent {
+    let envelope = crate::EventEnvelope {
+        timestamp_ns: row.timestamp_ns,
+        category: row.category,
+        event_type: row.event_type,
+        peers: crate::EnvelopePeers {
+            peer: row.peer.as_ref().and_then(|s| s.parse().ok()),
+            previous_peer: row.previous_peer.as_ref().and_then(|s| s.parse().ok()),
+            target_peer: row.target_peer.as_ref().and_then(|s| s.parse().ok()),
+        },
+        afi_safi: row.afi_safi,
+        prefix: row.prefix,
+        rd: row.rd,
+        evpn_route_type: row.evpn_route_type,
+        severity: row.severity,
+        payload_codec: PayloadCodec::parse(&row.payload_codec).unwrap_or(PayloadCodec::Opaque),
+        payload: row.payload,
+    };
+    CommittedEvent {
+        event_id: row.event_id,
+        daemon_boot_id: row.daemon_boot_id.into(),
+        envelope: envelope.into(),
+    }
+}
+
 fn retention_gap_missed_count(from_id: u64, floor: Option<u64>) -> Option<u64> {
     let next_id = from_id.saturating_add(1);
     floor.and_then(|floor| (next_id < floor).then(|| floor.saturating_sub(next_id)))
@@ -436,25 +435,28 @@ async fn emit_event(
 }
 
 async fn emit_lag(out_tx: &mpsc::Sender<EventSubscriptionItem>, missed: u64) -> bool {
-    match out_tx.send(EventSubscriptionItem::Lagged(missed)).await {
-        Ok(()) => true,
-        Err(_) => {
-            debug!("subscription output closed");
-            false
-        }
+    if out_tx
+        .send(EventSubscriptionItem::Lagged(missed))
+        .await
+        .is_ok()
+    {
+        true
+    } else {
+        debug!("subscription output closed");
+        false
     }
 }
 
 async fn emit_retention_gap(out_tx: &mpsc::Sender<EventSubscriptionItem>, missed: u64) -> bool {
-    match out_tx
+    if out_tx
         .send(EventSubscriptionItem::RetentionGap(missed))
         .await
+        .is_ok()
     {
-        Ok(()) => true,
-        Err(_) => {
-            debug!("subscription output closed before retention-gap signal");
-            false
-        }
+        true
+    } else {
+        debug!("subscription output closed before retention-gap signal");
+        false
     }
 }
 

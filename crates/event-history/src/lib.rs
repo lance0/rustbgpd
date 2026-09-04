@@ -44,11 +44,8 @@
 //! ```
 
 #![deny(unsafe_code)]
-#![warn(clippy::all)]
-#![allow(
-    clippy::module_name_repetitions,
-    reason = "public cross-crate types keep the event-history domain explicit"
-)]
+#![deny(clippy::all)]
+#![warn(clippy::pedantic)]
 
 mod cursor;
 mod error;
@@ -79,11 +76,11 @@ pub use storage::{PersistedEvent, QueryFilter, RetentionOutcome};
 /// Default capacity for each producer's mpsc channel into EHM.
 pub const DEFAULT_QUEUE_CAPACITY: usize = 4096;
 
-/// Default batch size — the larger of (this, batch_interval) wins per
+/// Default batch size — the larger of (this, `batch_interval`) wins per
 /// commit. See ADR-0072 hot-path section.
 pub const DEFAULT_BATCH_SIZE: usize = 1024;
 
-/// Default batch interval — the larger of (batch_size, this) wins per
+/// Default batch interval — the larger of (`batch_size`, this) wins per
 /// commit.
 pub const DEFAULT_BATCH_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -340,7 +337,7 @@ pub struct EnvelopePeers {
 #[derive(Debug, Clone)]
 pub struct EventEnvelope {
     /// Producer wall-clock at enqueue. Used for causal-ordering signals
-    /// to external consumers; not the cursor (event_id is).
+    /// to external consumers; not the cursor (`event_id` is).
     pub timestamp_ns: i64,
     pub category: Category,
     pub event_type: String,
@@ -384,6 +381,12 @@ impl EventHistorySender {
     /// [`mpsc::error::TrySendError::Full`] — the producer drops the
     /// event, increments its drop counter, and flips the degraded
     /// flag. Never blocks the producer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`mpsc::error::TrySendError::Full`] when the producer queue
+    /// has no free slot and [`mpsc::error::TrySendError::Closed`] once the
+    /// manager has stopped admitting events; both hand the envelope back.
     // mpsc::error::TrySendError carries the envelope on the Full /
     // Closed variants — useful for delivery accounting despite the ~200B Err.
     #[allow(
@@ -423,7 +426,7 @@ impl EventHistorySender {
     }
 
     /// Currently available slots in the underlying mpsc channel. Benchmark
-    /// fences compare this with max_capacity to detect outstanding reservations
+    /// fences compare this with `max_capacity` to detect outstanding reservations
     /// or queued items. The exported queue-depth gauge reads the acceptance
     /// ledger instead.
     #[must_use]
@@ -658,7 +661,7 @@ impl std::fmt::Debug for EventHistoryManager {
             .field("latest_event_id", &self.state.latest_event_id())
             .field("degraded", &self.state.degraded())
             .field("pass_through", &self.state.pass_through())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -693,7 +696,7 @@ impl std::fmt::Debug for EventHistoryHandle {
             .field("latest_event_id", &self.state.latest_event_id())
             .field("degraded", &self.state.degraded())
             .field("pass_through", &self.state.pass_through())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -828,6 +831,17 @@ impl EhmState {
 impl EventHistoryManager {
     /// Start the actor + storage thread. Returns once the storage
     /// thread is initialized (the DB is open + bootstrapped).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EventHistoryError::PassThrough`] when the allocator anchor
+    /// cannot be recovered, and any open, quarantine, or bootstrap error
+    /// the storage thread reports while initializing the database.
+    #[expect(
+        clippy::unused_async,
+        clippy::unused_async_trait_impl,
+        reason = "storage initialization is synchronous; the async signature is the public API the daemon awaits"
+    )]
     pub async fn start(config: EventHistoryConfig) -> Result<Self, EventHistoryError> {
         let daemon_boot_id: Arc<str> = uuid::Uuid::new_v4().to_string().into();
         let state = Arc::new(EhmState::default());
@@ -891,31 +905,20 @@ impl EventHistoryManager {
             metrics.bind_event_outbox_queue_depth_source(queue_depths.clone());
         }
 
-        let actor_state = state.clone();
-        let actor_store = store_handle.clone();
-        let actor_broadcast = broadcast_tx.clone();
-        let actor_boot_id = daemon_boot_id.clone();
-        let actor_config = config.clone();
-        let actor_queue_depths = queue_depths.clone();
         let shutdown_progress = Arc::new(ShutdownProgress::default());
-        let actor_shutdown_progress = Arc::clone(&shutdown_progress);
-
-        let actor = tokio::spawn(async move {
-            run_actor(
-                ActorContext {
-                    config: actor_config,
-                    state: actor_state,
-                    store: actor_store,
-                    broadcast_tx: actor_broadcast,
-                    daemon_boot_id: actor_boot_id,
-                    queue_depths: actor_queue_depths,
-                    shutdown_progress: actor_shutdown_progress,
-                },
-                producer_rx,
-                shutdown_rx,
-            )
-            .await;
-        });
+        let actor = tokio::spawn(run_actor(
+            ActorContext {
+                config: config.clone(),
+                state: state.clone(),
+                store: store_handle.clone(),
+                broadcast_tx: broadcast_tx.clone(),
+                daemon_boot_id: daemon_boot_id.clone(),
+                queue_depths: queue_depths.clone(),
+                shutdown_progress: Arc::clone(&shutdown_progress),
+            },
+            producer_rx,
+            shutdown_rx,
+        ));
 
         info!(
             path = %config.path.display(),
@@ -975,6 +978,11 @@ impl EventHistoryManager {
 
     /// Force a query against the durable store. Tests use this directly;
     /// the daemon wraps it in the `SubscribeFromEvent` cursor RPC.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EventHistoryError::StorageUnavailable`] when the storage
+    /// thread has stopped, or the SQLite error the query raised.
     pub async fn query_persisted(
         &self,
         from_event_id: u64,
@@ -1054,16 +1062,15 @@ impl EventHistoryManager {
         self.sender.queue_depths.close();
         let _ = self.shutdown_tx.send(Some(deadline));
         if let Some(mut actor) = self.actor.take() {
-            let result = match tokio::time::timeout_at(deadline, &mut actor).await {
-                Ok(result) => result,
-                Err(_) => {
-                    #[cfg(test)]
-                    self.shutdown_progress
-                        .deadline_expiries
-                        .fetch_add(1, Ordering::AcqRel);
-                    actor.abort();
-                    actor.await
-                }
+            let result = if let Ok(result) = tokio::time::timeout_at(deadline, &mut actor).await {
+                result
+            } else {
+                #[cfg(test)]
+                self.shutdown_progress
+                    .deadline_expiries
+                    .fetch_add(1, Ordering::AcqRel);
+                actor.abort();
+                actor.await
             };
             if let Err(error) = result {
                 warn!(%error, "event-history actor did not complete cleanly during shutdown");
@@ -1212,6 +1219,10 @@ fn finalize_producer_ledger(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one select loop owns batching, shutdown draining, and retention scheduling; splitting it would scatter the shared deadline state"
+)]
 async fn run_actor(
     ctx: ActorContext,
     mut rx: mpsc::Receiver<EventEnvelope>,
@@ -1257,23 +1268,18 @@ async fn run_actor(
             tokio::pin!(batch_deadline);
             while buffer.len() < config.batch_size {
                 tokio::select! {
-                    maybe = rx.recv() => match maybe {
-                        Some(env) => receive_event(
-                            env,
-                            &mut buffer,
-                            &queue_depths,
-                        ),
-                        None => {
-                            let deadline = tokio::time::Instant::now() + SHUTDOWN_TIMEOUT;
-                            begin_actor_shutdown(
-                                deadline,
-                                &mut shutdown_deadline,
-                                &mut rx,
-                                &mut retention_task,
-                            );
-                            accepted_drained = true;
-                            break;
-                        }
+                    maybe = rx.recv() => if let Some(env) = maybe {
+                        receive_event(env, &mut buffer, &queue_depths);
+                    } else {
+                        let deadline = tokio::time::Instant::now() + SHUTDOWN_TIMEOUT;
+                        begin_actor_shutdown(
+                            deadline,
+                            &mut shutdown_deadline,
+                            &mut rx,
+                            &mut retention_task,
+                        );
+                        accepted_drained = true;
+                        break;
                     },
                     () = &mut batch_deadline => break,
                     changed = shutdown_rx.changed() => {
@@ -1472,6 +1478,11 @@ async fn run_actor(
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::float_cmp,
+        reason = "the metric samples asserted here are integer-valued counters and gauges; exact equality is the assertion"
+    )]
+
     use super::*;
     use storage::TestStoreOp::{Append, Flush, Shutdown};
 
