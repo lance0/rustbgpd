@@ -28,6 +28,8 @@ fn route_server_accepted_absence_requires_successful_snapshot() {
 set -euo pipefail
 eval "rs_accepted_has()$HELPERS"
 peer=192.0.2.1 prefix=203.0.113.0/24
+# Absence matching must not turn a failed external matcher into success.
+grep() { return 127; }
 rs_ctl() {
     [[ "$*" == "rib received $peer" ]] || return 99
     printf '%s' "$reply"

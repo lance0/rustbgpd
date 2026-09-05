@@ -287,7 +287,7 @@ rs_accepted_has() { rs_ctl rib received "${1:?}" | grep -F "${2:?}" >/dev/null; 
 rs_accepted_lacks() {
     local output
     output=$(rs_ctl rib received "${1:?}") || return $?
-    ! grep -qF "${2:?}" <<<"$output"
+    [[ "$output" != *"${2:?}"* ]]
 }
 
 rs_rejected_has() {
