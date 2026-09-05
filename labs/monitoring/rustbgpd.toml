@@ -1,0 +1,43 @@
+# Local BMP learning lab; the collector receives the selected Loc-RIB routes.
+[global]
+asn = 65001
+router_id = "10.96.0.10"
+listen_port = 179
+ebgp_requires_policy = true
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "127.0.0.1:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
+
+[security.grpc]
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"
+
+[policy.definitions.lab-permit]
+default_action = "permit"
+
+[policy]
+import_chain = ["lab-permit"]
+export_chain = ["lab-permit"]
+
+[bmp]
+sys_name = "monitoring-lab"
+
+[[bmp.collectors]]
+address = "10.96.0.30:11019"
+reconnect_interval = 2
+monitor = ["loc_rib"]
+
+[[neighbors]]
+address = "10.96.0.20"
+remote_asn = 65002
+description = "frr-peer"
+hold_time = 90
+families = ["ipv4_unicast"]

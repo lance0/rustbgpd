@@ -1,0 +1,45 @@
+services:
+  rustbgpd:
+    build:
+      context: ../..
+      target: dev
+    volumes:
+      - ./rustbgpd.toml:/etc/rustbgpd/config.toml:ro
+      - ../../tests/fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
+    environment:
+      RUSTBGPD_TOKEN_FILE: /run/rustbgpd/grpc-test-only-operator.token
+      RUST_LOG: info,rustbgpd_bmp=debug
+    networks:
+      monitoring:
+        ipv4_address: 10.96.0.10
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 524288
+
+  frr:
+    image: quay.io/frrouting/frr:10.7.1
+    volumes:
+      - ../../examples/docker-compose/frr-daemons:/etc/frr/daemons:ro
+      - ./frr.conf:/etc/frr/frr.conf:ro
+      - ./vtysh.conf:/etc/frr/vtysh.conf:ro
+    cap_add: [NET_ADMIN, NET_RAW, SYS_ADMIN]
+    networks:
+      monitoring:
+        ipv4_address: 10.96.0.20
+
+  receiver:
+    image: python:3.12-slim
+    # Reuse the raw-byte receiver from the BMP interoperability receipt.
+    command: [python3, /opt/bmp-raw-sink.py]
+    volumes:
+      - ../../tests/interop/scripts/bmp-raw-sink.py:/opt/bmp-raw-sink.py:ro
+    networks:
+      monitoring:
+        ipv4_address: 10.96.0.30
+
+networks:
+  monitoring:
+    ipam:
+      config:
+        - subnet: 10.96.0.0/24

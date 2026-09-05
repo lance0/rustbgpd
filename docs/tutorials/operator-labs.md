@@ -141,6 +141,52 @@ The lab uses the dedicated Compose project `rustbgpd-lab-rr` and subnet
 and avoid overlapping local networks. Repeating `up` restores the intended
 origin; repeating `down` safely removes the lab's containers and network.
 
+## Monitoring: BGP stays up while the collector is down
+
+This lab runs rustbgpd, an FRR 10.7.1 peer, and a small Python BMP receiver.
+The peer announces `198.51.100.0/24`. Explicit Loc-RIB monitoring lets the
+collector receive a snapshot of selected routes when it connects, including
+after an outage. It uses the same host prerequisites as the quickstart.
+
+```bash
+just lab monitoring up
+just lab monitoring verify
+just lab monitoring break
+just lab monitoring explain
+```
+
+`up` preserves existing daemon and peer containers, waits for the session and
+selected route, then creates a fresh receiver. After changing lab source or
+configuration, run `down` before `up` to rebuild the whole topology.
+`verify` checks BGP state and decodes the receiver's captured BMP messages:
+the selected IPv4 prefix must appear before its End-of-RIB marker on the
+newest collector connection. An old capture cannot certify a fresh start.
+
+`break` stops the receiver. A temporary probe-route announcement and
+withdrawal prompt BMP writes, while the example prefix and its BGP session
+remain live. `verify` now fails because the receiver is unavailable.
+`explain` shows the working BGP session and route alongside collector retry
+logs and BMP metrics. Replay attempts count connections, not successful
+delivery; a stopped receiver need not increment the drop counter.
+
+`doctor` reports collector reachability from the CLI's vantage point. It
+does not prove BMP delivery; the decoded snapshot check supplies that proof
+for this exercise.
+
+Restore the receiver and verify that the selected route is replayed:
+
+```bash
+just lab monitoring up
+just lab monitoring verify
+just lab monitoring down
+```
+
+The lab uses the dedicated Compose project `rustbgpd-lab-monitoring` and
+subnet `10.96.0.0/24`, with no published host ports. Run one instance at a
+time and avoid overlapping local networks. `down` removes its containers,
+network, and temporary captures; repeating it is safe. This is a focused
+collector exercise, without a Prometheus or Grafana installation.
+
 For complete deployment scenarios, use the [cookbook](../cookbook/README.md).
 The [interop receipts](../receipts.md) describe the separate protocol validation
 labs and their measured evidence.
