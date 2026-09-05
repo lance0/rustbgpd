@@ -645,6 +645,129 @@ async fn linux_reconcile_actor_installs_and_withdraws_all_active_l3_writer() {
         .expect("actor join");
 }
 
+/// Missing single-path and ECMP routes must release ownership without
+/// retrying, even when an operator removed the kernel row first.
+#[tokio::test]
+async fn linux_reconcile_actor_withdraws_already_absent_l3_routes() {
+    if !netns_gate() {
+        eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged L3 absent-route proof");
+        return;
+    }
+    let local_mac = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0xdd]);
+    let remote_mac = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0xee]);
+    let prefix = "203.0.113.0/24";
+    let foreign_prefix = "198.51.100.0/24";
+    let foreign_gw = "10.0.0.99";
+    if !is_inner() {
+        let ns = NetnsFixture::create("absent-l3");
+        setup_topology(&ns, TABLE_ID, L3VNI, LOCAL_VTEP, local_mac);
+        ns.exec(
+            "ip",
+            &[
+                "route",
+                "add",
+                foreign_prefix,
+                "via",
+                foreign_gw,
+                "dev",
+                "l3vxlan-test",
+                "table",
+                &TABLE_ID.to_string(),
+                "proto",
+                "static",
+                "onlink",
+            ],
+        );
+        run_inner(
+            &ns,
+            "linux_reconcile_actor_withdraws_already_absent_l3_routes",
+        );
+        return;
+    }
+
+    let vrf_id = IpVrfId::new(L3VNI).unwrap();
+    let ip_vrfs = actor_ip_vrfs(local_mac);
+    let (intent_tx, mut reports, shutdown, actor_join) =
+        spawn_reconcile_actor(ReconcileActorConfig::for_tests()).await;
+    for (base, ecmp) in [(1, false), (4, true)] {
+        let mut routes = RemoteIpPrefixTable::new();
+        if ecmp {
+            routes = actor_all_active_prefixes(remote_mac);
+        } else {
+            routes.insert_resolved(
+                vrf_id,
+                RemoteIpPrefixEntry::single(
+                    v4_prefix([203, 0, 113, 0], 24),
+                    "10.0.0.2".parse().unwrap(),
+                    L3VNI,
+                    remote_mac,
+                ),
+            );
+        }
+        intent_tx
+            .send(actor_intent(base, ip_vrfs.clone(), routes))
+            .unwrap();
+        let installed = wait_for_report_generation(&mut reports, base).await;
+        assert!(
+            installed.failed.is_empty(),
+            "install: {:?}",
+            installed.failed
+        );
+        assert_eq!(installed.ip_vrf_installed_routes.get(&vrf_id), Some(&1));
+
+        // No await between the external deletion and the withdrawal intent:
+        // the actor must observe the absent row with withdrawal already pending.
+        run(
+            "ip",
+            &["route", "del", prefix, "table", &TABLE_ID.to_string()],
+        );
+        intent_tx
+            .send(actor_intent(
+                base + 1,
+                ip_vrfs.clone(),
+                RemoteIpPrefixTable::new(),
+            ))
+            .unwrap();
+        let withdrawn = wait_for_report_generation(&mut reports, base + 1).await;
+        assert!(
+            withdrawn.failed.is_empty(),
+            "withdraw: {:?}",
+            withdrawn.failed
+        );
+        assert_eq!(
+            withdrawn
+                .ip_vrf_installed_routes
+                .get(&vrf_id)
+                .copied()
+                .unwrap_or(0),
+            0
+        );
+
+        intent_tx
+            .send(actor_intent(
+                base + 2,
+                ip_vrfs.clone(),
+                RemoteIpPrefixTable::new(),
+            ))
+            .unwrap();
+        let settled = wait_for_report_generation(&mut reports, base + 2).await;
+        assert!(settled.failed.is_empty(), "settled: {:?}", settled.failed);
+        assert!(
+            settled.applied.is_empty(),
+            "withdrawal must not be retried: {:?}",
+            settled.applied
+        );
+        let dump = shell_capture("ip", &["route", "show", "table", &TABLE_ID.to_string()]);
+        assert_route_absent(&dump, prefix);
+        assert_route_present(&dump, foreign_prefix, foreign_gw, "l3vxlan-test");
+    }
+    shutdown.cancel();
+    tokio::time::timeout(std::time::Duration::from_secs(2), actor_join)
+        .await
+        .expect("actor shutdown timeout")
+        .expect("actor join");
+}
+
 /// LAN-77 restart-adoption proof: a fresh actor in the same netns
 /// reclaims the crash-leftover all-active L3 writer state instead of
 /// treating the Router-MAC FDB-NHG row as a scalar FDB entry or

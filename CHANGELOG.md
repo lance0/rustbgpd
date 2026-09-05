@@ -632,6 +632,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   different or zero ESI are contenders as before, and the receive-side
   tiebreak is unchanged.
 
+- EVPN Linux route withdrawal treats an already-absent kernel route as
+  successfully removed, including single-path and ECMP IP-VRF routes. This
+  clears owned state instead of retrying the deletion indefinitely.
+
 ### Documentation
 
 - Publish a descriptive raw bridge event-skew receipt across six pinned Jammy

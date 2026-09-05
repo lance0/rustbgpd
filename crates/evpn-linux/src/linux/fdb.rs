@@ -565,16 +565,17 @@ pub(super) fn is_einval(err: &rtnetlink::Error) -> bool {
 }
 
 /// Variant of [`classify_apply_error`] for **remove** ops:
-/// `ENOENT` is idempotent success.
+/// `ENOENT` and `ESRCH` are idempotent success. Linux route deletion
+/// reports `ESRCH` when the matching route or FIB table is absent.
 ///
 /// Remove ops have a post-condition of "the kernel row is absent
 /// when this returns Ok". If the row was already absent — manual
 /// `ip route del`, prior partial drain, kernel cleanup, foreign
-/// removal — the desired state already holds, so surfacing ENOENT
+/// removal — the desired state already holds, so surfacing either errno
 /// as an error would wedge `L3OwnedState` convergence: the actor
 /// would never call `record_l3_success`, the owned row would stay
 /// indefinitely, and every reconcile pass would re-emit the same
-/// failing remove. Mapping ENOENT to Ok(()) lets owned state
+/// failing remove. Mapping absence to Ok(()) lets owned state
 /// advance and matches the "idempotent delete" semantic operators
 /// expect.
 ///
@@ -590,7 +591,7 @@ pub(super) fn classify_remove_apply_error(err: &rtnetlink::Error) -> Result<(), 
 }
 
 fn errno_to_remove_apply_result(errno: i32, detail: &str) -> Result<(), DataplaneError> {
-    if errno == libc::ENOENT {
+    if errno == libc::ENOENT || errno == libc::ESRCH {
         return Ok(());
     }
     Err(errno_to_dataplane_error(errno, detail))
@@ -1168,6 +1169,23 @@ mod tests {
     #[test]
     fn remove_errno_enoent_is_idempotent_success() {
         assert!(errno_to_remove_apply_result(libc::ENOENT, "No such file or directory").is_ok());
+    }
+
+    #[test]
+    fn remove_errno_esrch_is_idempotent_success() {
+        assert!(errno_to_remove_apply_result(libc::ESRCH, "No such process").is_ok());
+        let add_error = errno_to_dataplane_error(libc::ESRCH, "No such process");
+        assert!(matches!(add_error, DataplaneError::Other(_)));
+        assert_eq!(add_error.class(), FailureClass::Transient);
+    }
+
+    #[test]
+    fn remove_errno_permission_errors_stay_permanent() {
+        for errno in [libc::EPERM, libc::EACCES] {
+            let error = errno_to_remove_apply_result(errno, "Permission denied").unwrap_err();
+            assert!(matches!(error, DataplaneError::PermissionDenied(_)));
+            assert_eq!(error.class(), FailureClass::Permanent);
+        }
     }
 
     #[test]
