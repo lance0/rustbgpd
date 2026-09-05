@@ -1,0 +1,34 @@
+[global]
+asn = 65001
+router_id = "10.97.0.1"
+cluster_id = "10.97.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "127.0.0.1:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
+
+[security.grpc]
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"
+
+[[neighbors]]
+address = "10.97.0.20"
+remote_asn = 65001
+description = "client-a-intended-origin"
+hold_time = 90
+route_reflector_client = true
+
+[[neighbors]]
+address = "10.97.0.30"
+remote_asn = 65001
+description = "client-b"
+hold_time = 90
+route_reflector_client = true

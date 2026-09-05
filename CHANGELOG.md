@@ -232,6 +232,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and a prefix-length rejection, explain the import and export decisions,
   then restore and verify transparent route delivery to the other member.
 
+- `just lab rr up|verify|break|explain|down`: diagnose an unintended
+  duplicate origin, inspect the route reflector's identifier tie-break and
+  split-horizon export decision, and restore the intended source.
+
 ### Changed
 
 - The three example programs (`event-bridge`, `peer-loop`, `birdwatcher-adapter`)
