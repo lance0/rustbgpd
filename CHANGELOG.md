@@ -13,6 +13,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Read-only Model Context Protocol server (`rustbgpd-mcp`) exposing the
+  explain surfaces to an MCP host over stdio: export-gate ladder, import
+  decision, best-path selection, retained rejections, neighbors, and health.
+  It runs on the operator's workstation as a gRPC client, adds no process to
+  the daemon host, and ships in no release artifact — build it with
+  `cargo build -p rustbgpd-mcp`. Read-only rests on two controls: no write
+  tool exists in the binary (fenced by a contract test against the gRPC
+  method inventory) and a listener capped at `max_tier = "sensitive_read"`.
+  Neither is sufficient alone. See the
+  [how-to](docs/how-to/mcp-server.md) and
+  [ADR-0131](docs/adr/0131-read-only-mcp-server.md).
+
 - Per-neighbor EVPN received and advertised route views through additive
   `ListReceivedEvpnRoutes` / `ListAdvertisedEvpnRoutes` RPCs and
   `rbgp evpn received|advertised PEER`. Type/RD filters and bounded pages
