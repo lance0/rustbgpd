@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use crate::commands::neighbor::bare_ip_rpc_address;
 use crate::commands::policy_input::{JsonPeerGroupDefinition, load_json};
-use crate::connection::Connection;
+use crate::connection::{Connection, read_rpc};
 use crate::error::CliError;
 use crate::output::{self, outln};
 use crate::proto::peer_group_service_client::PeerGroupServiceClient;
@@ -126,10 +126,12 @@ fn json_peer_group_detail(
 pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client =
         PeerGroupServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
-        .list_peer_groups(ListPeerGroupsRequest {})
-        .await?
-        .into_inner();
+    let resp = read_rpc(
+        "ListPeerGroups",
+        client.list_peer_groups(ListPeerGroupsRequest {}),
+    )
+    .await?
+    .into_inner();
 
     if json {
         let out: Vec<JsonPeerGroupSummary> = resp
@@ -173,12 +175,14 @@ pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
 pub async fn get(connection: Connection, name: &str, json: bool) -> Result<(), CliError> {
     let mut client =
         PeerGroupServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
-        .get_peer_group(GetPeerGroupRequest {
+    let resp = read_rpc(
+        "GetPeerGroup",
+        client.get_peer_group(GetPeerGroupRequest {
             name: name.to_string(),
-        })
-        .await?
-        .into_inner();
+        }),
+    )
+    .await?
+    .into_inner();
 
     let def = resp.definition.unwrap_or_default();
     if json {

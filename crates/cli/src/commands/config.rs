@@ -1,4 +1,4 @@
-use crate::connection::Connection;
+use crate::connection::{Connection, read_rpc};
 use crate::error::CliError;
 use crate::output::{self, outln};
 use crate::proto::config_service_client::ConfigServiceClient;
@@ -568,10 +568,12 @@ pub async fn abort(connection: Connection, confirm_id: &str, json: bool) -> Resu
 pub async fn status(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client =
         ConfigServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
-        .get_config_transaction_status(GetConfigTransactionStatusRequest {})
-        .await?
-        .into_inner();
+    let resp = read_rpc(
+        "GetConfigTransactionStatus",
+        client.get_config_transaction_status(GetConfigTransactionStatusRequest {}),
+    )
+    .await?
+    .into_inner();
 
     if json {
         print_json(status_to_json(&resp))?;
@@ -588,10 +590,12 @@ pub async fn status(connection: Connection, json: bool) -> Result<(), CliError> 
 pub async fn history(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client =
         ConfigServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
-        .list_config_history(ListConfigHistoryRequest {})
-        .await?
-        .into_inner();
+    let resp = read_rpc(
+        "ListConfigHistory",
+        client.list_config_history(ListConfigHistoryRequest {}),
+    )
+    .await?
+    .into_inner();
 
     if json {
         print_json(history_to_json(&resp))?;

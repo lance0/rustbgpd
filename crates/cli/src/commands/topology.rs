@@ -1,7 +1,7 @@
 //! `rbgp topology nodes|links` — RFC 9107 ORR topology derived from the
 //! BGP-LS Adj-RIB-In union across peers.
 
-use crate::connection::Connection;
+use crate::connection::{Connection, read_rpc};
 use crate::error::CliError;
 use crate::output::{self, outln};
 use crate::proto::{
@@ -12,19 +12,23 @@ use serde::ser::{SerializeMap, SerializeSeq, Serializer};
 
 pub async fn nodes(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client = connection.rib_listing_client();
-    let resp = client
-        .list_topology_nodes(ListTopologyNodesRequest {})
-        .await?
-        .into_inner();
+    let resp = read_rpc(
+        "ListTopologyNodes",
+        client.list_topology_nodes(ListTopologyNodesRequest {}),
+    )
+    .await?
+    .into_inner();
     print_topology_nodes(&resp.nodes, json)
 }
 
 pub async fn links(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client = connection.rib_listing_client();
-    let resp = client
-        .list_topology_links(ListTopologyLinksRequest {})
-        .await?
-        .into_inner();
+    let resp = read_rpc(
+        "ListTopologyLinks",
+        client.list_topology_links(ListTopologyLinksRequest {}),
+    )
+    .await?
+    .into_inner();
     print_topology_links(&resp.links, json)
 }
 

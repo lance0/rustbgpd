@@ -1,7 +1,7 @@
 //! `rbgp orr` — RFC 9107 ORR per-vantage status (resolution, SPF reach,
 //! bound peers) plus topology totals.
 
-use crate::connection::Connection;
+use crate::connection::{Connection, read_rpc};
 use crate::error::CliError;
 use crate::output::{self, outln};
 use crate::proto::{
@@ -15,10 +15,12 @@ const NO_ACTIVE_VANTAGES: &str = "No active ORR vantages (none registered by liv
 
 pub async fn status(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client = connection.rib_listing_client();
-    let resp = client
-        .list_orr_status(ListOrrStatusRequest {})
-        .await?
-        .into_inner();
+    let resp = read_rpc(
+        "ListOrrStatus",
+        client.list_orr_status(ListOrrStatusRequest {}),
+    )
+    .await?
+    .into_inner();
     print_orr_status(&resp, json)
 }
 

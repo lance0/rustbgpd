@@ -1,6 +1,6 @@
 //! `rbgp bfd` — BFD session inspection (ADR-0067; single-hop and multihop).
 
-use crate::connection::Connection;
+use crate::connection::{Connection, read_rpc};
 use crate::error::CliError;
 use crate::output::{self, outln};
 use crate::proto::bfd_service_client::BfdServiceClient;
@@ -64,12 +64,14 @@ fn human_diagnostic(session: &BfdSession) -> String {
 async fn fetch(connection: Connection, peer: Option<&str>) -> Result<Vec<BfdSession>, CliError> {
     let mut client =
         BfdServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
-        .get_bfd_sessions(GetBfdSessionsRequest {
+    let resp = read_rpc(
+        "GetBfdSessions",
+        client.get_bfd_sessions(GetBfdSessionsRequest {
             peer_address: peer.unwrap_or_default().to_string(),
-        })
-        .await?
-        .into_inner();
+        }),
+    )
+    .await?
+    .into_inner();
     Ok(resp.sessions)
 }
 

@@ -1,4 +1,4 @@
-use crate::connection::Connection;
+use crate::connection::{Connection, read_rpc};
 use crate::error::CliError;
 use crate::output::{self, JsonGlobal, outln};
 use crate::proto::GetGlobalRequest;
@@ -16,7 +16,9 @@ fn tcp_ao_support_label(value: i32) -> &'static str {
 pub async fn run(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client =
         GlobalServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client.get_global(GetGlobalRequest {}).await?.into_inner();
+    let resp = read_rpc("GetGlobal", client.get_global(GetGlobalRequest {}))
+        .await?
+        .into_inner();
 
     if json {
         let out = JsonGlobal {

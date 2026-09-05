@@ -7,7 +7,7 @@
 use serde::Serialize;
 
 use crate::commands::policy_input::{JsonNeighborSetDefinition, load_json};
-use crate::connection::Connection;
+use crate::connection::{Connection, read_rpc};
 use crate::error::CliError;
 use crate::output::{self, outln};
 use crate::proto::policy_service_client::PolicyServiceClient;
@@ -34,10 +34,12 @@ struct JsonNeighborSetDetail {
 pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client =
         PolicyServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
-        .list_neighbor_sets(ListNeighborSetsRequest {})
-        .await?
-        .into_inner();
+    let resp = read_rpc(
+        "ListNeighborSets",
+        client.list_neighbor_sets(ListNeighborSetsRequest {}),
+    )
+    .await?
+    .into_inner();
 
     if json {
         let out: Vec<JsonNeighborSetSummary> = resp
@@ -80,12 +82,14 @@ pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
 pub async fn get(connection: Connection, name: &str, json: bool) -> Result<(), CliError> {
     let mut client =
         PolicyServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
-        .get_neighbor_set(GetNeighborSetRequest {
+    let resp = read_rpc(
+        "GetNeighborSet",
+        client.get_neighbor_set(GetNeighborSetRequest {
             name: name.to_string(),
-        })
-        .await?
-        .into_inner();
+        }),
+    )
+    .await?
+    .into_inner();
 
     let def = resp.definition.unwrap_or_default();
     if json {

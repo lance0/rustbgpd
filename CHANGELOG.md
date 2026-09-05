@@ -823,6 +823,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sequence. Re-baseline alerts keyed on that counter for multihomed VNIs;
   single-homed VNIs are unaffected.
 
+- Lightweight native CLI reads now bound the complete RPC response to
+  30 seconds per call or page, so stalled TCP or Unix-socket endpoints
+  cannot hang scripts indefinitely. Doctor preserves successful evidence
+  and marks timed-out sections incomplete, with a separate allowance for
+  large effective-config exports. A failed health collection no longer
+  leaves the system section marked collected.
+
 ## [0.68.0] — 2026-08-30
 
 > **Release framing — broader control surfaces, faster route-server release.**
