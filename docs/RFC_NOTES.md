@@ -1455,7 +1455,7 @@ carries inactive (absent), unlimited (zero), or finite.
   tracks unreplaced EVPN keys in `refresh_stale_evpn` and withdraws
   them on BoRR/EoRR completion.
 - **Type 2 MAC/IP Advertisement interop**: validated end-to-end
-  against FRR 10.3.1 via the M30 containerlab suite
+  against FRR 10.7.1 via the M30 containerlab suite
   (`tests/interop/m30-evpn-type2-frr.clab.yml`). Real kernel VXLAN +
   bridge per VTEP; MAC injection on one VTEP via `bridge fdb add`
   propagates through the rustbgpd RR to the second VTEP and appears
@@ -1660,7 +1660,7 @@ carries inactive (absent), unlimited (zero), or finite.
   `EvpnService.ListIpVrfs` / `EvpnService.GetIpVrf` gRPC
   surfaces let operators read it without scraping logs.
   **M39 hosted kernel-dataplane CI** validates the
-  bidirectional Type 5 path against FRR 10.3.1.
+  bidirectional Type 5 path against FRR 10.7.1.
 - **Shipped since Gate 9:** auto-derived Route Targets (RFC 8365
   §5.1.2.1 for L2VNI / AS:VNI for L3VNI, v0.25.0, M39b cross-vendor
   smoke) and Type 5 gRPC injection (v0.25.0, M45). Hosted
@@ -1721,7 +1721,7 @@ carries inactive (absent), unlimited (zero), or finite.
   ordering, Router MAC conflict detection, sub-second withdraw
   via `RTNLGRP_IPV4_ROUTE` / `RTNLGRP_IPV6_ROUTE` multicast,
   `rbgp evpn vrfs` CLI + `ListIpVrfs`/`GetIpVrf` gRPC,
-  M39 hosted smoke against FRR 10.3.1.
+  M39 hosted smoke against FRR 10.7.1.
 - **Shipped after Gate 9:** receive-side overlay-index recursion,
   auto-derived Route Targets per RFC 8365 §5.1.2.1, native GW-IP +
   ESI overlay-index Type 5 origination (ADR-0087), single-active ESI

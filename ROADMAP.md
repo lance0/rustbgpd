@@ -1510,7 +1510,7 @@ If you need these features, combine rustbgpd with purpose-built tools.
   M0–M9 initial milestones plus the post-v0.1 feature history relocated from
   this roadmap).
 - **[docs/INTEROP.md](docs/INTEROP.md)** — the full M-NN interop test matrix.
-  The automated scripts cover the M-series against FRR 10.3.1, BIRD 2.0.12 /
+  The automated scripts cover the M-series against FRR 10.7.1, BIRD 2.0.12 /
   3.3.1, GoBGP 3.37.0 / 4.6.0 / 4.7.0, and StayRTR; M0 (FRR, BIRD) are manual
   smokes. Privileged kernel-dataplane smokes now run in the hosted
   `kernel-dataplane` workflow for

@@ -692,7 +692,7 @@ reflection through controller injection; see
   L3 FIB programming through the transactional `L3OwnedState` model
   with four-phase apply ordering, sub-second
   `RTNLGRP_IPV4/IPV6_ROUTE` withdraw, `rbgp evpn vrfs` CLI +
-  `ListIpVrfs`/`GetIpVrf` gRPC, M39 hosted smoke against FRR 10.3.1.
+  `ListIpVrfs`/`GetIpVrf` gRPC, M39 hosted smoke against FRR 10.7.1.
   ADR-0059 (v0.19.0) adds receive-path aliasing-ECMP via FDB
   nexthop groups (M40 FRR-validated). Shipped since: receive-side
   RFC 9135 overlay-index Type 5 recursion, native GW-IP + ESI
@@ -867,7 +867,7 @@ Be honest about where rustbgpd isn't the right tool:
   under the FRR-style replace model (requires
   `bridge link set dev vxlan<vni> neigh_suppress on`). M37 and
   M37+IP smokes validate the MAC-only and MAC+IP loops against
-  FRR 10.3.1. Multi-homing **foundation** (observable DF election
+  FRR 10.7.1. Multi-homing **foundation** (observable DF election
   + Type 1/4 origination) shipped with EVPN multi-homing (v0.17.0, ADR-0057),
   validated by M38. **EVPN BUM-flood-suppression alpha enforcement** then landed:
   ESI-aware Type 2 origination, RFC 7432 §14 aliasing receive-side

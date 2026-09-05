@@ -154,7 +154,7 @@ jobs:
 
   m36:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M36 — EVPN VTEP receive FDB programming (FRR 10.3.1)
+    name: M36 — EVPN VTEP receive FDB programming (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -170,7 +170,7 @@ jobs:
 
   m37:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M37 — EVPN local MAC origination (FRR 10.3.1)
+    name: M37 — EVPN local MAC origination (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -186,7 +186,7 @@ jobs:
 
   m37-ip:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M37+IP — EVPN local MAC/IP origination (FRR 10.3.1)
+    name: M37+IP — EVPN local MAC/IP origination (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -218,7 +218,7 @@ jobs:
 
   m39:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M39 — EVPN Type 5 symmetric Interface-less IRB (FRR 10.3.1)
+    name: M39 — EVPN Type 5 symmetric Interface-less IRB (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -235,7 +235,7 @@ jobs:
 
   m39b:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M39b — EVPN auto-derived Route Targets cross-vendor (FRR 10.3.1)
+    name: M39b — EVPN auto-derived Route Targets cross-vendor (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -252,7 +252,7 @@ jobs:
 
   m48:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M48 — EVPN runtime tenant teardown over kernel L3 datapath (FRR 10.3.1)
+    name: M48 — EVPN runtime tenant teardown over kernel L3 datapath (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -269,7 +269,7 @@ jobs:
 
   m60:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M60 — ADR-0079 EVPN adoption sweep kill-and-restart (FRR 10.3.1)
+    name: M60 — ADR-0079 EVPN adoption sweep kill-and-restart (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -285,7 +285,7 @@ jobs:
 
   m61:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M61 — ADR-0079 EVPN L3 adoption sweep kill-and-restart (FRR 10.3.1)
+    name: M61 — ADR-0079 EVPN L3 adoption sweep kill-and-restart (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -302,7 +302,7 @@ jobs:
 
   m62:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M62 — ADR-0079 blackhole adoption sweep kill-and-restart (FRR 10.3.1)
+    name: M62 — ADR-0079 blackhole adoption sweep kill-and-restart (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -318,7 +318,7 @@ jobs:
 
   m40:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M40 — ADR-0059 aliasing dataplane ECMP (FRR EVPN-MH 10.3.1)
+    name: M40 — ADR-0059 aliasing dataplane ECMP (FRR EVPN-MH 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -334,7 +334,7 @@ jobs:
 
   m42:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M42 — ADR-0061 configured-table unicast FIB runtime (FRR 10.3.1)
+    name: M42 — ADR-0061 configured-table unicast FIB runtime (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -350,7 +350,7 @@ jobs:
 
   m50:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M50 — ADR-0066 unicast multipath/ECMP FIB install (FRR 10.3.1)
+    name: M50 — ADR-0066 unicast multipath/ECMP FIB install (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -366,7 +366,7 @@ jobs:
 
   m52:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M52 — ADR-0066 multipath-relax (FRR 10.3.1, mixed ASes)
+    name: M52 — ADR-0066 multipath-relax (FRR 10.7.1, mixed ASes)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -382,7 +382,7 @@ jobs:
 
   m58:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M58 — ADR-0061 FIB-table runtime CRUD (FRR 10.3.1)
+    name: M58 — ADR-0061 FIB-table runtime CRUD (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -398,7 +398,7 @@ jobs:
 
   m53:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M53 — ADR-0069 BGP unnumbered + scoped FIB (FRR 10.3.1)
+    name: M53 — ADR-0069 BGP unnumbered + scoped FIB (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -414,7 +414,7 @@ jobs:
 
   m51:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M51 — ADR-0067 single-hop BFD + RFC 5882 coupling (FRR 10.3.1)
+    name: M51 — ADR-0067 single-hop BFD + RFC 5882 coupling (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -430,7 +430,7 @@ jobs:
 
   m108:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M108 — RFC 5883 multihop BFD + RFC 5882 coupling across two hops (FRR 10.3.1)
+    name: M108 — RFC 5883 multihop BFD + RFC 5882 coupling across two hops (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -593,7 +593,7 @@ jobs:
 
   m47:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M47 — EVPN runtime tenant teardown (FRR 10.3.1)
+    name: M47 — EVPN runtime tenant teardown (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -609,7 +609,7 @@ jobs:
 
   m69:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M69 — EVPN preference-DF election (FRR 10.3.1)
+    name: M69 — EVPN preference-DF election (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -625,7 +625,7 @@ jobs:
 
   m70:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M70 — ADR-0089 VLAN-aware bridge FDB attribution (FRR 10.3.1)
+    name: M70 — ADR-0089 VLAN-aware bridge FDB attribution (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -760,7 +760,7 @@ jobs:
 
   m68:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M68 — ADR-0087 GW-IP overlay-index Type 5 (FRR 10.3.1)
+    name: M68 — ADR-0087 GW-IP overlay-index Type 5 (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

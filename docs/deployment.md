@@ -895,7 +895,7 @@ topology:
       cmd: sleep infinity
     frr:
       kind: linux
-      image: quay.io/frrouting/frr:10.3.1
+      image: quay.io/frrouting/frr:10.7.1
   links:
     - endpoints: ["rustbgpd:eth1", "frr:eth1"]
 ```
