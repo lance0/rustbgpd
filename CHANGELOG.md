@@ -13,6 +13,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Website ingest manifest in `docs/site-manifest.json`, checked in the public
+  docs workflow so moving a consumed page without updating its source mapping
+  fails CI. Site destinations remain independent of repository page paths.
+
 - Read-only Model Context Protocol server (`rustbgpd-mcp`) exposing the
   explain surfaces to an MCP host over stdio: export-gate ladder, import
   decision, best-path selection, retained rejections, neighbors, and health.
