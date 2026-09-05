@@ -675,6 +675,96 @@ fn epoch_from_timestamp(s: &str) -> u64 {
     days * 86_400 + h * 3_600 + mi * 60 + se
 }
 
+fn assert_same_peer_snapshot(
+    inventory: &serde_json::Value,
+    detail: &serde_json::Value,
+    elapsed: Duration,
+) {
+    let mut snapshots = [inventory, detail].map(|value| {
+        value
+            .as_object()
+            .expect("peer snapshot must be an object")
+            .clone()
+    });
+    let timestamps = snapshots.each_mut().map(|snapshot| {
+        let value = snapshot
+            .remove("state_changed")
+            .expect("state_changed field");
+        let timestamp = value.as_str().expect("state_changed must be a string");
+        assert!(
+            timestamp.len() == 25
+                && timestamp
+                    .bytes()
+                    .enumerate()
+                    .all(|(index, byte)| match index {
+                        4 | 7 => byte == b'-',
+                        10 => byte == b'T',
+                        13 | 16 | 22 => byte == b':',
+                        19 => byte == b'+',
+                        _ => byte.is_ascii_digit(),
+                    })
+                && timestamp.ends_with("+00:00"),
+            "state_changed must be an RFC3339 UTC timestamp: {timestamp:?}"
+        );
+        epoch_from_timestamp(timestamp)
+    });
+    assert_eq!(
+        snapshots[0], snapshots[1],
+        "detail must equal inventory row"
+    );
+    // Each response subtracts whole-second uptime from its own wall clock.
+    // Allow the actual read interval plus one second of rounding.
+    assert!(
+        timestamps[0].abs_diff(timestamps[1]) <= elapsed.as_secs() + 1,
+        "state_changed drift exceeds the snapshot interval: {inventory} vs {detail}"
+    );
+}
+
+#[test]
+fn peer_snapshot_comparison_allows_only_timestamp_rounding() {
+    let inventory = serde_json::json!({
+        "protocol": "pb_0001_as65020",
+        "neighbor_as": 65020,
+        "routes": {"imported": 0},
+        "state_changed": "2026-12-31T23:59:59+00:00",
+    });
+    let mut detail = inventory.clone();
+    detail["state_changed"] = "2027-01-01T00:00:00+00:00".into();
+    assert_same_peer_snapshot(&inventory, &detail, Duration::ZERO);
+    let mut later = detail.clone();
+    later["state_changed"] = "2027-01-01T00:00:01+00:00".into();
+    assert_same_peer_snapshot(&inventory, &later, Duration::from_secs(1));
+
+    for (field, value) in [
+        ("protocol", serde_json::json!("another-peer")),
+        ("neighbor_as", serde_json::json!(65021)),
+        ("routes", serde_json::json!({"imported": 1})),
+        (
+            "state_changed",
+            serde_json::json!("2027-01-01T00:00:01+00:00"),
+        ),
+        ("state_changed", serde_json::json!("not a timestamp")),
+        ("state_changed", serde_json::Value::Null),
+    ] {
+        let mut changed = detail.clone();
+        changed[field] = value;
+        assert!(
+            std::panic::catch_unwind(|| {
+                assert_same_peer_snapshot(&inventory, &changed, Duration::ZERO);
+            })
+            .is_err(),
+            "comparison accepted changed {field}: {changed}"
+        );
+    }
+    detail.as_object_mut().unwrap().remove("state_changed");
+    assert!(
+        std::panic::catch_unwind(|| {
+            assert_same_peer_snapshot(&inventory, &detail, Duration::ZERO);
+        })
+        .is_err()
+    );
+}
+
 #[test]
 fn ixp_contract_gate_tracks_adapter_and_live_smoke_changes() {
     let workflow = include_str!("../.github/workflows/ixp-compat.yml");
@@ -1064,6 +1154,7 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
 
     // /protocols/bgp — the configured peer appears under its
     // "bgp_<addr>" protocol id with identity fields.
+    let snapshot_started = Instant::now();
     let protocols = get_json(adapter_port, "/protocols/bgp", "adapter");
     let peer = &protocols["protocols"]["bgp_192.0.2.10"];
     assert!(
@@ -1081,10 +1172,7 @@ fn adapter_serves_birdwatcher_shaped_status_peer_accepted_filtered_and_noexport_
     assert_eq!(alias_peer["protocol"], "pb_0001_as65020", "{protocols}");
     assert_eq!(alias_peer["table"], "master4", "{protocols}");
     let detail = get_json(adapter_port, "/protocol/pb_0001_as65020", "adapter");
-    assert_eq!(
-        detail["protocol"], *alias_peer,
-        "detail must equal inventory row"
-    );
+    assert_same_peer_snapshot(alias_peer, &detail["protocol"], snapshot_started.elapsed());
     let symbols = get_json(adapter_port, "/symbols", "adapter");
     assert_eq!(
         symbols["symbols"]["protocol"],
