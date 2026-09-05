@@ -1,0 +1,35 @@
+[package]
+publish = false
+name = "rustbgpd-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Read-only Model Context Protocol server exposing rustbgpd's gRPC explain surfaces over stdio"
+
+[lib]
+name = "rustbgpd_mcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rustbgpd-mcp"
+path = "src/main.rs"
+
+[dependencies]
+rustbgpd-api.workspace = true
+rmcp.workspace = true
+# Same major as rmcp's own `schemars` requirement, so Cargo unifies both onto
+# one instance and rmcp's `Json<T>` trait bounds are satisfied by types derived
+# here. rmcp also re-exports `rmcp::schemars` for the same reason.
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap = { workspace = true, features = ["derive", "env"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-std"] }
+tonic.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
