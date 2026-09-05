@@ -284,7 +284,11 @@ bird_filtered_has_tags() {
 }
 
 rs_accepted_has() { rs_ctl rib received "${1:?}" | grep -F "${2:?}" >/dev/null; }
-rs_accepted_lacks() { ! rs_accepted_has "$1" "$2"; }
+rs_accepted_lacks() {
+    local output
+    output=$(rs_ctl rib received "${1:?}") || return $?
+    [[ "$output" != *"${2:?}"* ]]
+}
 
 rs_rejected_has() {
     rs_ctl rib received "${1:?}" --rejected -j \
