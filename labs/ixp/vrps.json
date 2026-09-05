@@ -1,0 +1,6 @@
+{
+  "metadata": {"generated": 1710000000, "valid": 1710086400},
+  "roas": [
+    {"asn": "AS65002", "prefix": "198.51.100.0/24", "maxLength": 24, "ta": "lab-only"}
+  ]
+}

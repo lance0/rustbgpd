@@ -221,6 +221,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   AS-path-loop and an import-policy rejection through Alice's filtered view
   and global prefix lookup.
 
+- `just lab ixp up|verify|break|explain|down`: a local route-server exercise
+  with two FRR members and a pinned RPKI cache. Introduce an invalid origin
+  and a prefix-length rejection, explain the import and export decisions,
+  then restore and verify transparent route delivery to the other member.
+
 ### Changed
 
 - The three example programs (`event-bridge`, `peer-loop`, `birdwatcher-adapter`)

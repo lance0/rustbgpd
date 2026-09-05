@@ -1,0 +1,66 @@
+# Reduced IPv4 learning lab, not a production IXP hygiene policy.
+[global]
+asn = 65500
+router_id = "10.98.0.10"
+listen_port = 179
+ebgp_requires_policy = true
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "127.0.0.1:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
+
+[security.grpc]
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"
+
+[[rpki.cache_servers]]
+address = "10.98.0.40:3323"
+refresh_interval = 30
+retry_interval = 5
+expire_interval = 120
+
+[policy.definitions.reject-rpki-invalid]
+[[policy.definitions.reject-rpki-invalid.statements]]
+match_rpki_validation = "invalid"
+action = "deny"
+
+[policy.definitions.reject-long-prefixes]
+default_action = "permit"
+[[policy.definitions.reject-long-prefixes.statements]]
+prefix = "0.0.0.0/0"
+ge = 25
+le = 32
+action = "deny"
+
+[policy.definitions.rs-transparent-export]
+default_action = "permit"
+
+[policy]
+import_chain = ["reject-rpki-invalid", "reject-long-prefixes"]
+export_chain = ["rs-transparent-export"]
+
+[policy.explain]
+enabled = true
+
+[[neighbors]]
+address = "10.98.0.20"
+remote_asn = 65002
+description = "member-a"
+hold_time = 90
+route_server_client = true
+role = "route_server"
+
+[[neighbors]]
+address = "10.98.0.30"
+remote_asn = 65003
+description = "member-b"
+hold_time = 90
+route_server_client = true
+role = "route_server"
