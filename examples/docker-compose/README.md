@@ -5,14 +5,16 @@ bridge network. FRR advertises 4 IPv4 and 3 IPv6 sample prefixes.
 
 ## Start
 
+Run these commands from `examples/docker-compose/`.
+
 ```bash
 docker compose up -d --build
 ```
 
 `--build` asks Compose to build from the current checkout before startup.
 Without it, Compose may reuse an older `docker-compose-rustbgpd` image already
-on the host. Cached layers keep unchanged repeat builds quick. The first build
-takes about 60 seconds; sessions establish within seconds.
+on the host. Build time depends on the machine and available cache; wait for
+the neighbor to reach `Established` before continuing.
 
 The committed bearer token is intentionally public and test-only: it keeps the
 quick-start runnable while demonstrating tier authorization. Replace this
@@ -31,6 +33,55 @@ export RUSTBGPD_TOKEN_FILE="$PWD/../../tests/fixtures/grpc-test-only-operator.to
 cargo run -p rustbgpctl --bin rbgp -- -s http://127.0.0.1:50051 neighbor
 cargo run -p rustbgpctl --bin rbgp -- -s http://127.0.0.1:50051 top
 ```
+
+## Break, explain, restore
+
+Try a missing-policy failure in this local demo. First verify that FRR's
+`192.168.1.0/24` is selected:
+
+```bash
+docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 \
+  rib --prefix 192.168.1.0/24 --explain
+```
+
+Clear the import chain. The demo enables RFC 8212 enforcement, so an eBGP
+session without an explicit import policy rejects incoming routes:
+
+```bash
+docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 \
+  policy chain clear-import
+docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 neighbor
+```
+
+After the update settles, the neighbor remains `Established` with `Rx Pfx`
+zero. Find where the routes went:
+
+```bash
+docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 \
+  rib received 10.99.0.20 --rejected
+docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 \
+  policy explain --neighbor 10.99.0.20 --prefix 192.168.1.0/24
+curl --fail --silent http://127.0.0.1:9179/metrics \
+  | grep '^bgp_rfc8212_missing_import_policy'
+```
+
+The rejected routes show `policy_reject` with detail
+`rfc8212_missing_import_policy`. Import explain names the same policy and its
+`default-action deny`; the metric is `1`. The session is healthy, but its
+routes cannot pass the missing import policy.
+
+Restore the demo's permit policy and verify that the prefix returns:
+
+```bash
+docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 \
+  policy chain set-import lab-permit-all-import
+docker compose exec rustbgpd rbgp -s http://127.0.0.1:50051 \
+  rib --prefix 192.168.1.0/24 --explain
+```
+
+The prefix is selected from `10.99.0.20` again, and the missing-policy metric
+returns to `0`. These chain changes persist, so complete the restore before
+stopping if you want the next start to accept routes.
 
 ## Change it without restarting
 
