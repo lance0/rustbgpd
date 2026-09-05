@@ -67,3 +67,38 @@ gate-contract:
 fix:
     cargo clippy --fix --locked --workspace --all-targets -- -D warnings
     cargo fmt --all
+
+# Compile and run the feature-gated surfaces hosted CI checks beyond the default workspace build.
+test-feature-gated:
+    cargo clippy --locked -p rustbgpd-wire --all-targets --features tokio-codec -- -D warnings
+    just gate-rib
+    just gate-contract
+    cargo test --locked -p rustbgpd-rib --features bench-internals --bench selection_deferral_release -- --self-test
+    cargo test --locked -p rustbgpd-mrt --bench snapshot_allocation -- timing --candidate --smoke
+    cargo test --locked -p rustbgpd-mrt --features snapshot-allocation-diagnostics --bench snapshot_allocation -- diagnostic --candidate --smoke
+    cargo check --locked -p rustbgpd --all-features --lib
+    cargo test --locked -p rustbgpd --no-default-features --features bench-internals --test policy_set_store_allocation shared_set_batch_allocations_do_not_scale_per_peer -- --exact
+    cargo check --locked -p rustbgpd --no-default-features --all-targets
+    cargo test --locked -p rustbgpd-wire --features tokio-codec
+    cargo doc --locked -p rustbgpd-wire --lib --no-deps --features tokio-codec
+
+# Excluded ignored tests: the TCP-AO kernel receipts (transport listener and
+# socket_opts) need CONFIG_TCP_AO and privileges; the four config persistence
+# probes assert a release build; `unicast_prefix_peers_memory` needs its
+# announcer-count environment variable; `policy_set_store_dhat` needs the
+# `dhat-heap` feature and an output-file environment variable;
+# `minimizer_timeout_fixture` is a child-process fixture, not a test.
+
+# Run the ignored receipts that need no privileges, extra environment, or release build (under a minute warm; allocates a few hundred MB).
+test-ignored:
+    cargo test --locked -p rustbgpd-rib --test export_fanout_attr_memo -- --ignored
+    cargo test --locked -p rustbgpd-rib --test route_data_sharing_profile -- --ignored
+    RUSTBGPD_RIB_MEMORY_PROFILE=quick cargo test --locked -p rustbgpd-rib --features bench-internals --test memory_profile memory_profile_high_n -- --ignored
+    cargo test --locked -p rustbgpd-rib --lib manager::tests::update_groups_fault_corpus::deterministic_fault_corpus_extended -- --ignored --exact
+    cargo test --locked -p rustbgpd --no-default-features --features bench-internals --test policy_set_store_allocation -- --ignored
+    cargo test --locked -p rustbgpd --test quickstart_dynamic_neighbor -- --ignored
+    cargo test --locked -p rustbgpctl --lib scale_receipt_1m_routes -- --ignored
+
+# Run the privileged network-namespace tests in Docker; selectors are listed in crates/evpn-linux/tests/docker/run-netns-tests.sh.
+netns selector='all':
+    bash crates/evpn-linux/tests/docker/run-netns-tests.sh {{selector}}

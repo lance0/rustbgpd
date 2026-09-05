@@ -72,6 +72,23 @@ The recipes intentionally expose their direct commands:
   toolchain and system libraries as those benches.
 - `just fix` applies safe Clippy suggestions before formatting. Cargo's normal
   refusal to modify dirty or staged worktrees remains in force.
+- `just test-feature-gated` compiles and runs the feature-gated surfaces that
+  hosted CI exercises beyond the default workspace build: the wire
+  `tokio-codec` adapter, the `bench-internals` bench and receipt targets
+  (through `just gate-rib` and `just gate-contract`), both MRT snapshot
+  allocation modes, and the root crate's `--all-features` and
+  `--no-default-features` builds. The commands match `.github/workflows/ci.yml`.
+- `just test-ignored` runs the `#[ignore]`d receipts that need no privileges,
+  extra environment, or release build: the RIB sizing harnesses, the extended
+  update-group fault corpus, the policy-set allocation receipts, the
+  quickstart shutdown recurrence proof, and the `rbgp` route-diff scale
+  receipt. It finishes in under a minute on a warm target directory, adds
+  minutes of feature-gated builds on a cold one, and allocates a few hundred
+  MB. The `justfile` comment above the recipe names the ignored tests it
+  leaves out and why.
+- `just netns [selector]` runs the privileged network-namespace tests in
+  Docker through `crates/evpn-linux/tests/docker/run-netns-tests.sh`; the
+  selector defaults to `all` and the harness header lists the others.
 
 Hosted checks remain authoritative and cover more than these recipes: the
 declared MSRV, platform and workflow contracts, receipt classifiers, and
@@ -79,8 +96,9 @@ privileged interoperability lanes. In particular, the exact v0.64 migration
 test only runs when `RUSTBGPD_V064_VALIDATOR` points to the verified v0.64
 binary that CI prepares. Privileged network-namespace tests require Linux,
 `EVPN_LINUX_NETNS=1`, and `CAP_NET_ADMIN` plus `CAP_SYS_ADMIN`; use
-`crates/evpn-linux/tests/docker/run-netns-tests.sh` as documented in that
-harness's README. Neither prerequisite is installed or enabled by `just gate`.
+`crates/evpn-linux/tests/docker/run-netns-tests.sh` (or `just netns`) as
+documented in that harness's README. Neither prerequisite is installed or
+enabled by `just gate`.
 
 Treat the `justfile` as a convenient reviewed snapshot, not a single source of
 truth. Check the applicable workflows when changing CI or preparing a merge.
