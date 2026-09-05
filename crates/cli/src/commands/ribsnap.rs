@@ -24,7 +24,7 @@
 //! shapes (bad next-hop length, truncation, AFI/length mismatch,
 //! trailing octets) are refused. The link-local half of a 32-octet next
 //! hop is not part of the snapshot format and is dropped. RFC 8050
-//! Add-Path subtypes (8/9) carry a path identifier per entry, emitted as
+//! Add-Path unicast subtypes (8/10) carry a path identifier per entry, emitted as
 //! `path_id`.
 
 use std::fmt::Write as _;
@@ -45,12 +45,12 @@ const TABLE_DUMP_V2: u16 = 13;
 /// Subtypes ingested (plus RFC 8050 Add-Path variants). Everything else
 /// — `PEER_INDEX_TABLE`, multicast, `RIB_GENERIC` — is skipped. These are
 /// RFC 6396 / RFC 8050 registry values, duplicated from `rustbgpd-mrt` on
-/// purpose: constants cannot drift, and the CLI must not link the daemon's
-/// MRT manager (which pulls in the RIB).
+/// purpose: independent RFC byte vectors pin them, and the CLI must not
+/// link the daemon's MRT manager (which pulls in the RIB).
 const RIB_IPV4_UNICAST: u16 = 2;
 const RIB_IPV6_UNICAST: u16 = 4;
 const RIB_IPV4_UNICAST_ADDPATH: u16 = 8;
-const RIB_IPV6_UNICAST_ADDPATH: u16 = 9;
+const RIB_IPV6_UNICAST_ADDPATH: u16 = 10;
 
 /// Options for `rbgp diff snapshot from-mrt`.
 pub struct FromMrtOpts<'a> {
@@ -344,6 +344,9 @@ fn parse_rib_record(
         let mut route = parse_attributes(attrs)?;
         route.path_id = path_id;
         routes.push((addr, prefix_len, route));
+    }
+    if !cur.is_empty() {
+        return Err("trailing bytes after declared RIB entries".to_string());
     }
     Ok(())
 }
@@ -715,6 +718,92 @@ mod tests {
         }
         let golden = std::fs::read_to_string(golden_path).unwrap();
         assert_eq!(rendered, golden);
+    }
+
+    #[test]
+    fn rfc8050_unicast_vectors_preserve_path_ids_and_refuse_truncation() {
+        for (subtype, prefix_len, prefix_bytes, prefix) in [
+            (8, 24, &[192, 0, 2][..], "192.0.2.0/24"),
+            (10, 32, &[0x20, 1, 0x0d, 0xb8][..], "2001:db8::/32"),
+        ] {
+            for path_id in [0, 0x5566_7788_u32] {
+                // RFC 8050 sections 4.1 and 5.2, without the production
+                // subtype constants or the shared RIB-entry fixture helper.
+                let mut payload = vec![0, 0, 0, 1, prefix_len];
+                payload.extend_from_slice(prefix_bytes);
+                payload.extend_from_slice(&[0, 1]); // entry count
+                let entry_offset = payload.len();
+                payload.extend_from_slice(&[1, 2, 0x11, 0x22, 0x33, 0x44]);
+                payload.extend_from_slice(&path_id.to_be_bytes());
+                payload.extend_from_slice(&[0, 4, 0x40, 1, 1, 0]); // ORIGIN IGP
+                let valid = mrt_record(subtype, &payload);
+                let dump = write_dump(&valid);
+                let rendered = run(&opts(dump.path(), "adj-rib-out-capture")).unwrap();
+                let records: Vec<serde_json::Value> = rendered
+                    .lines()
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect();
+                assert_eq!(records.len(), 3);
+                assert_eq!(
+                    records[1],
+                    serde_json::json!({
+                        "record": "route", "peer": "192.0.2.9", "peer_asn": 64501,
+                        "prefix": prefix, "path_id": path_id, "origin": 0,
+                    })
+                );
+                assert_eq!(
+                    records[2],
+                    serde_json::json!({"record": "trailer", "routes": 1})
+                );
+
+                for length in entry_offset..payload.len() {
+                    // A complete first record must not escape to stdout when
+                    // a later entry is truncated at any field/attribute byte.
+                    let mut bytes = valid.clone();
+                    bytes.extend_from_slice(&mrt_record(subtype, &payload[..length]));
+                    let dump = write_dump(&bytes);
+                    let result = run(&opts(dump.path(), "adj-rib-out-capture"));
+                    assert!(result.as_ref().unwrap_err().contains("truncated"));
+                    let mut output = Vec::new();
+                    assert_eq!(emit_mrt_snapshot(result, &mut output), EXIT_REFUSED);
+                    assert!(output.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rfc8050_ipv4_multicast_is_skipped_not_decoded_as_ipv6() {
+        let multicast = mrt_record(9, &[0xAB; 10]);
+        assert!(matches!(parse_mrt(&multicast), Err(error) if error.contains("no TABLE_DUMP_V2")));
+        let mut mixed = sample_dump();
+        mixed.extend_from_slice(&multicast);
+        let dump = write_dump(&mixed);
+        let baseline = write_dump(&sample_dump());
+        assert_eq!(
+            run(&opts(dump.path(), "adj-rib-out-capture")).unwrap(),
+            run(&opts(baseline.path(), "adj-rib-out-capture")).unwrap()
+        );
+    }
+
+    #[test]
+    fn rib_record_trailing_bytes_refuse_the_entire_snapshot() {
+        for (subtype, path_id) in [(2, None), (4, None), (8, Some(0)), (10, Some(0))] {
+            let entry = (path_id, attr(attr_type::ORIGIN, &[0]));
+            let valid = mrt_record(subtype, &rib_payload(0, &[], std::slice::from_ref(&entry)));
+            for entries in [vec![], vec![entry.clone()]] {
+                let mut payload = rib_payload(0, &[], &entries);
+                payload.push(0xff); // outside the declared zero or one entries
+                let mut bytes = valid.clone();
+                bytes.extend_from_slice(&mrt_record(subtype, &payload));
+                let dump = write_dump(&bytes);
+                let result = run(&opts(dump.path(), "adj-rib-out-capture"));
+                assert!(result.as_ref().unwrap_err().contains("trailing bytes"));
+                let mut output = Vec::new();
+                assert_eq!(emit_mrt_snapshot(result, &mut output), EXIT_REFUSED);
+                assert!(output.is_empty());
+            }
+        }
     }
 
     #[test]
