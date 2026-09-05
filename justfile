@@ -93,12 +93,12 @@ test-feature-gated:
 test-ignored:
     cargo test --locked -p rustbgpd-rib --test export_fanout_attr_memo -- --ignored
     cargo test --locked -p rustbgpd-rib --test route_data_sharing_profile -- --ignored
-    RUSTBGPD_RIB_MEMORY_PROFILE=quick cargo test --locked -p rustbgpd-rib --features bench-internals --test memory_profile memory_profile_high_n -- --ignored
+    RUSTBGPD_RIB_MEMORY_PROFILE=quick cargo test --locked -p rustbgpd-rib --features bench-internals --test memory_profile memory_profile_high_n -- --ignored --exact
     cargo test --locked -p rustbgpd-rib --lib manager::tests::update_groups_fault_corpus::deterministic_fault_corpus_extended -- --ignored --exact
     cargo test --locked -p rustbgpd --no-default-features --features bench-internals --test policy_set_store_allocation -- --ignored
     cargo test --locked -p rustbgpd --test quickstart_dynamic_neighbor -- --ignored
-    cargo test --locked -p rustbgpctl --lib scale_receipt_1m_routes -- --ignored
+    cargo test --locked -p rustbgpctl --lib ribdiff::tests::scale_receipt_1m_routes -- --ignored --exact
 
 # Run the privileged network-namespace tests in Docker; selectors are listed in crates/evpn-linux/tests/docker/run-netns-tests.sh.
 netns selector='all':
-    bash crates/evpn-linux/tests/docker/run-netns-tests.sh {{selector}}
+    bash crates/evpn-linux/tests/docker/run-netns-tests.sh "{{selector}}"
