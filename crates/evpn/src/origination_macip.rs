@@ -69,7 +69,9 @@
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 
-use rustbgpd_wire::{EthernetTagId, EvpnRouteKey, MacAddress, RouteDistinguisher};
+use rustbgpd_wire::{
+    EthernetSegmentIdentifier, EthernetTagId, EvpnRouteKey, MacAddress, RouteDistinguisher,
+};
 
 use crate::EvpnInstanceId;
 use crate::origination::OriginationAction;
@@ -101,7 +103,9 @@ impl MacIpKey {
 /// Mirrors [`crate::origination::RemoteMacView`] one-for-one; the
 /// only structural difference is the additional `ip` field. Daemon
 /// applies the same self-NH filter (drop routes whose next-hop is
-/// our own `local_vtep_ip`) before passing this in.
+/// our own `local_vtep_ip`) and the same same-segment filter
+/// ([`crate::origination::is_same_segment_peer`]) before passing this
+/// in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteMacIpView {
     /// MAC half of the contender route.
@@ -116,6 +120,10 @@ pub struct RemoteMacIpView {
     /// Remote VTEP next-hop. Carried for daemon-side telemetry; the
     /// state machine does not consult it.
     pub next_hop: IpAddr,
+    /// Ethernet Segment Identifier on the remote route
+    /// (`EthernetSegmentIdentifier::ZERO` for a single-homed origin).
+    /// Carried for visibility; the state machine does not consult it.
+    pub esi: EthernetSegmentIdentifier,
 }
 
 /// Per-`(MAC, IP)` state the originator keeps.
@@ -501,6 +509,7 @@ mod tests {
             mobility_sequence: seq,
             sticky: false,
             next_hop: ipa("10.0.0.99"),
+            esi: EthernetSegmentIdentifier::ZERO,
         }
     }
 
@@ -938,6 +947,7 @@ mod tests {
                 mobility_sequence: Some(5),
                 sticky: false,
                 next_hop: ipa("10.0.0.99"),
+                esi: EthernetSegmentIdentifier::ZERO,
             }),
         );
         // First key bumped to seq=6.

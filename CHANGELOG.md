@@ -516,6 +516,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   pipe early (for example `rbgp rib | head -1`) ends the command quietly
   with exit code 1 instead of a `failed printing to stdout` panic. Output
   bytes are unchanged.
+- **Operator-visible:** the EVPN local originators no longer treat a Type 2
+  received from a PE on the same Ethernet Segment as a MAC mobility
+  contender (RFC 7432 §15, RFC 9721 §6.4). The received ESI was discarded
+  when the remote contender views were built, so on an all-active multihomed
+  pair each PE raised its MAC Mobility sequence against the other's
+  advertisement of the same locally learned MAC or MAC/IP and counted the
+  echo toward `evpn_duplicate_mac_moves_total`; enough echoes inside the
+  duplicate-MAC window could quarantine a legitimately multihomed MAC from
+  peer traffic alone. A route whose ESI equals the VNI's own non-zero ESI is
+  now dropped from the contender views alongside self-originated routes, so
+  it neither raises the local sequence nor counts as a move. Routes with a
+  different or zero ESI are contenders as before, and the receive-side
+  tiebreak is unchanged.
 
 ### Documentation
 
@@ -701,6 +714,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `max_prefixes_received_ipv4`, `max_prefixes_received_ipv6`,
   `max_prefix_action`, and `white_list_routes` client keys, so receipt diffs
   and schema consumers see new fields on unchanged sites.
+- **EVPN all-active pairs stop ratcheting each other:** on multihomed
+  deployments `evpn_duplicate_mac_moves_total` and the MAC Mobility
+  sequences advertised for multihomed MACs drop, because a same-segment
+  peer's advertisement no longer counts as a move or raises the local
+  sequence. Re-baseline alerts keyed on that counter for multihomed VNIs;
+  single-homed VNIs are unaffected.
 
 ## [0.68.0] — 2026-08-30
 

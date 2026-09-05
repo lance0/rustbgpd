@@ -223,6 +223,7 @@ fn remote_mac_ip_view(mac_b: u8, ip_str: &str, seq: Option<u32>) -> RemoteMacIpV
         mobility_sequence: seq,
         sticky: false,
         next_hop: ipa("10.0.0.2"),
+        esi: EthernetSegmentIdentifier::ZERO,
     }
 }
 
@@ -259,7 +260,7 @@ fn build_remote_view_drops_self_nh_routes() {
         evpn_macip_route(100, 0xAA, "10.0.0.2", Some(5), false),
         evpn_macip_route(100, 0xAA, "10.0.0.1", Some(10), false), // self-NH
     ];
-    let (view, _) = build_remote_views(&t, &routes);
+    let (view, _) = build_remote_views(&t, &routes, &BTreeMap::new());
     let v = view.get(&(vni(100), mac(0xAA))).expect("view present");
     assert_eq!(v.next_hop, ipa("10.0.0.2"));
     assert_eq!(v.mobility_sequence, Some(5));
@@ -276,7 +277,7 @@ fn build_remote_view_carries_sticky_bit() {
         Some(3),
         /* sticky */ true,
     )];
-    let (view, _) = build_remote_views(&t, &routes);
+    let (view, _) = build_remote_views(&t, &routes, &BTreeMap::new());
     let v = view.get(&(vni(100), mac(0xAA))).expect("view present");
     assert!(v.sticky);
 }
@@ -301,7 +302,7 @@ fn build_remote_view_skips_non_macip_routes() {
         is_stale: false,
         is_llgr_stale: false,
     };
-    let (view, mac_ip_view) = build_remote_views(&t, &[imet]);
+    let (view, mac_ip_view) = build_remote_views(&t, &[imet], &BTreeMap::new());
     assert!(view.is_empty());
     assert!(mac_ip_view.is_empty());
 }
@@ -320,6 +321,7 @@ async fn local_learn_with_remote_contender_records_duplicate_mac_counter() {
             mobility_sequence: Some(3),
             sticky: false,
             next_hop: ipa("10.0.0.2"),
+            esi: EthernetSegmentIdentifier::ZERO,
         },
     );
 
@@ -389,6 +391,7 @@ async fn duplicate_mac_suppress_local_withdraws_without_reinjecting() {
             mobility_sequence: Some(3),
             sticky: false,
             next_hop: ipa("10.0.0.2"),
+            esi: EthernetSegmentIdentifier::ZERO,
         },
     );
     handle_observation(
@@ -451,6 +454,7 @@ async fn duplicate_mac_suppress_local_first_learn_does_not_withdraw_unadvertised
             mobility_sequence: Some(3),
             sticky: false,
             next_hop: ipa("10.0.0.2"),
+            esi: EthernetSegmentIdentifier::ZERO,
         },
     );
 
@@ -509,6 +513,7 @@ async fn duplicate_mac_recovery_replays_local_route_and_resets_metric() {
             mobility_sequence: Some(3),
             sticky: false,
             next_hop: ipa("10.0.0.2"),
+            esi: EthernetSegmentIdentifier::ZERO,
         },
     );
     handle_observation(
@@ -631,6 +636,7 @@ async fn duplicate_mac_manual_clear_replays_local_route_and_resets_metric() {
             mobility_sequence: Some(3),
             sticky: false,
             next_hop: ipa("10.0.0.2"),
+            esi: EthernetSegmentIdentifier::ZERO,
         },
     );
     observe_test(
@@ -1417,6 +1423,7 @@ async fn runtime_model_esi_change_preserves_duplicate_mac_quarantine() {
             mobility_sequence: Some(3),
             sticky: false,
             next_hop: ipa("10.0.0.2"),
+            esi: EthernetSegmentIdentifier::ZERO,
         },
     );
 
@@ -1511,6 +1518,7 @@ async fn runtime_model_redefine_clears_duplicate_mac_quarantine_and_replays() {
             mobility_sequence: Some(3),
             sticky: false,
             next_hop: ipa("10.0.0.2"),
+            esi: EthernetSegmentIdentifier::ZERO,
         },
     );
 
@@ -2481,6 +2489,7 @@ async fn handle_evpn_event_non_winning_withdrawn_keeps_winning_view() {
             mobility_sequence: Some(10),
             sticky: false,
             next_hop: ipa("10.0.0.2"),
+            esi: EthernetSegmentIdentifier::ZERO,
         },
     );
 
@@ -2686,6 +2695,7 @@ async fn handle_evpn_event_withdrawn_clears_remote_view_when_rib_empty() {
             mobility_sequence: Some(7),
             sticky: false,
             next_hop: ipa("10.0.0.2"),
+            esi: EthernetSegmentIdentifier::ZERO,
         },
     );
 
@@ -4303,6 +4313,7 @@ async fn relearn_after_vxlan_port_takeover_bumps_mobility_sequence() {
             mobility_sequence: None,
             sticky: false,
             next_hop: ipa("10.0.0.2"),
+            esi: EthernetSegmentIdentifier::ZERO,
         },
     );
     observe_test(
@@ -4947,5 +4958,419 @@ async fn ip_rebound_to_new_mac_withdraws_old_route_and_injects_new() {
             RibAction::Inject(macip_key_with(100, 0xBB, Some("192.0.2.10"))),
         ],
         "expected old MAC+IP Withdraw, old MAC-only re-Inject, new MAC-only Withdraw, new MAC+IP Inject"
+    );
+}
+
+// --- Same-segment peer-sync: RFC 7432 §15, RFC 9721 §6.4/§6.5 ---
+
+fn segment_esi(seed: u8) -> EthernetSegmentIdentifier {
+    let mut bytes = [0u8; 10];
+    bytes[0] = 0x03;
+    bytes[9] = seed;
+    EthernetSegmentIdentifier::new(bytes)
+}
+
+fn with_esi(mut route: EvpnRibRoute, esi: EthernetSegmentIdentifier) -> EvpnRibRoute {
+    if let EvpnRoute::MacIp(macip) = &mut route.route {
+        macip.esi = esi;
+    }
+    route
+}
+
+fn assert_no_duplicate_mac_moves(metrics: &BgpMetrics, v: u32, m: u8) {
+    let text = gather_metrics_text(metrics);
+    assert!(
+        !text.contains(&format!(
+            "evpn_duplicate_mac_moves_total{{mac=\"{}\",vni=\"{v}\"}}",
+            mac(m)
+        )) && !text.contains(&format!(
+            "evpn_duplicate_mac_moves_total{{vni=\"{v}\",mac=\"{}\"}}",
+            mac(m)
+        )),
+        "expected no duplicate-MAC moves for vni {v} mac {}: {text}",
+        mac(m)
+    );
+}
+
+/// One VNI 100 originator with `segments` as the VNI-to-ESI map and
+/// `routes` as the RIB's answer to every `QueryEvpnRoutes`. The log
+/// records the MAC Mobility sequence of every Inject so a test can pin
+/// "no bump" rather than just "no action".
+struct PeerSyncHarness {
+    instances: Arc<EvpnInstanceTable>,
+    segments: BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
+    rib_tx: mpsc::Sender<RibUpdate>,
+    log: Arc<tokio::sync::Mutex<Vec<RibActionWithSeq>>>,
+    routes_tx: watch::Sender<Vec<EvpnRibRoute>>,
+    metrics: BgpMetrics,
+    counts: OriginatedLocalMacCounts,
+    state: OriginatorState,
+    _responder: tokio::task::JoinHandle<()>,
+}
+
+impl PeerSyncHarness {
+    fn new(
+        segments: BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
+        routes: Vec<EvpnRibRoute>,
+    ) -> Self {
+        let instances = instance_table(100);
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let log = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let log_clone = log.clone();
+        let (routes_tx, routes_rx) = watch::channel(routes);
+        let responder = tokio::spawn(async move {
+            while let Some(msg) = rib_rx.recv().await {
+                match msg {
+                    RibUpdate::QueryEvpnRoutes { reply, .. } => {
+                        let _ = reply.send(routes_rx.borrow().clone());
+                    }
+                    RibUpdate::InjectEvpn { route, reply } => {
+                        let (_, seq) = extract_mac_mobility_full(&route.attributes);
+                        log_clone
+                            .lock()
+                            .await
+                            .push(RibActionWithSeq::Inject(route.key(), seq));
+                        let _ = reply.send(Ok(()));
+                    }
+                    RibUpdate::WithdrawEvpn { key, reply } => {
+                        log_clone.lock().await.push(RibActionWithSeq::Withdraw(key));
+                        let _ = reply.send(Ok(()));
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let state = originator_state(&instances);
+        Self {
+            instances,
+            segments,
+            rib_tx,
+            log,
+            routes_tx,
+            metrics: BgpMetrics::new(),
+            counts: OriginatedLocalMacCounts::default(),
+            state,
+            _responder: responder,
+        }
+    }
+
+    async fn repoll(&mut self) {
+        repoll_rib(
+            &self.instances,
+            &self.rib_tx,
+            &mut self.state,
+            &self.metrics,
+            &self.counts,
+            &self.segments,
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn observe(&mut self, obs: LocalMacObservation) {
+        handle_observation(
+            &obs,
+            &mut self.state,
+            &self.instances,
+            &self.rib_tx,
+            &self.metrics,
+            &self.counts,
+            &self.segments,
+            &BTreeSet::new(),
+        )
+        .await;
+    }
+
+    async fn take_log(&self) -> Vec<RibActionWithSeq> {
+        std::mem::take(&mut *self.log.lock().await)
+    }
+}
+
+fn learned_aa() -> LocalMacObservation {
+    LocalMacObservation::Learned {
+        vni: vni(100),
+        mac: mac(0xAA),
+        ifindex: 10,
+    }
+}
+
+fn ip_added_aa() -> LocalMacObservation {
+    LocalMacObservation::IpAdded {
+        vni: vni(100),
+        mac: mac(0xAA),
+        ip: ipa("192.0.2.10"),
+    }
+}
+
+/// An all-active peer on our own Ethernet Segment advertises the MAC
+/// we learn locally: that is a peer-sync route, not a mobility event.
+/// The first advertisement stays at seq 0, the peer echo is not a
+/// duplicate-MAC move, and the peer raising its sequence afterwards
+/// does not ratchet ours.
+#[tokio::test]
+async fn same_segment_peer_mac_is_not_a_mobility_contender() {
+    let segments = BTreeMap::from([(vni(100), segment_esi(1))]);
+    let peer = |seq| {
+        with_esi(
+            evpn_macip_route(100, 0xAA, "10.0.0.2", Some(seq), false),
+            segment_esi(1),
+        )
+    };
+    let mut h = PeerSyncHarness::new(segments, vec![peer(3)]);
+
+    h.repoll().await;
+    h.observe(learned_aa()).await;
+    assert_eq!(
+        h.take_log().await,
+        vec![RibActionWithSeq::Inject(
+            macip_key_with(100, 0xAA, None),
+            None
+        )],
+        "peer-sync route must not raise the first advertisement above seq 0"
+    );
+    assert_no_duplicate_mac_moves(&h.metrics, 100, 0xAA);
+
+    h.routes_tx.send_replace(vec![peer(9)]);
+    h.repoll().await;
+    assert!(
+        h.take_log().await.is_empty(),
+        "peer-sync re-advertisement must not ratchet the local sequence"
+    );
+    assert_no_duplicate_mac_moves(&h.metrics, 100, 0xAA);
+}
+
+/// Same rule for the MAC+IP originator: the peer's MAC/IP route on our
+/// segment neither bumps the MAC+IP sequence nor counts as a move.
+#[tokio::test]
+async fn same_segment_peer_mac_ip_is_not_a_mobility_contender() {
+    let segments = BTreeMap::from([(vni(100), segment_esi(1))]);
+    let peer = |seq| {
+        with_esi(
+            evpn_macip_route_with_ip(100, 0xAA, Some("192.0.2.10"), "10.0.0.2", Some(seq), false),
+            segment_esi(1),
+        )
+    };
+    let mut h = PeerSyncHarness::new(segments, vec![peer(3)]);
+
+    h.repoll().await;
+    h.observe(learned_aa()).await;
+    h.observe(ip_added_aa()).await;
+    assert_eq!(
+        h.take_log().await,
+        vec![
+            RibActionWithSeq::Inject(macip_key_with(100, 0xAA, None), None),
+            RibActionWithSeq::Withdraw(macip_key_with(100, 0xAA, None)),
+            RibActionWithSeq::Inject(macip_key_with(100, 0xAA, Some("192.0.2.10")), None),
+        ],
+        "peer-sync MAC/IP route must not raise either advertisement above seq 0"
+    );
+    assert_no_duplicate_mac_moves(&h.metrics, 100, 0xAA);
+
+    h.routes_tx.send_replace(vec![peer(9)]);
+    h.repoll().await;
+    assert!(
+        h.take_log().await.is_empty(),
+        "peer-sync MAC/IP re-advertisement must not ratchet the local sequence"
+    );
+    assert_no_duplicate_mac_moves(&h.metrics, 100, 0xAA);
+}
+
+/// Control: a remote on a *different* Ethernet Segment is a genuine
+/// mobility contender and behaves exactly as before — bump on learn,
+/// count the move, bump again when it re-advertises higher.
+#[tokio::test]
+async fn different_segment_remote_mac_still_bumps_and_counts() {
+    let segments = BTreeMap::from([(vni(100), segment_esi(1))]);
+    let other = |seq| {
+        with_esi(
+            evpn_macip_route(100, 0xAA, "10.0.0.2", Some(seq), false),
+            segment_esi(2),
+        )
+    };
+    let mut h = PeerSyncHarness::new(segments, vec![other(3)]);
+
+    h.repoll().await;
+    h.observe(learned_aa()).await;
+    assert_eq!(
+        h.take_log().await,
+        vec![RibActionWithSeq::Inject(
+            macip_key_with(100, 0xAA, None),
+            Some(4)
+        )]
+    );
+    assert_duplicate_mac_moves(&h.metrics, 100, 0xAA, 1);
+
+    h.routes_tx.send_replace(vec![other(9)]);
+    h.repoll().await;
+    assert_eq!(
+        h.take_log().await,
+        vec![RibActionWithSeq::Inject(
+            macip_key_with(100, 0xAA, None),
+            Some(10)
+        )]
+    );
+    assert_duplicate_mac_moves(&h.metrics, 100, 0xAA, 2);
+}
+
+/// Control for the MAC+IP originator on a different segment.
+#[tokio::test]
+async fn different_segment_remote_mac_ip_still_bumps_and_counts() {
+    let segments = BTreeMap::from([(vni(100), segment_esi(1))]);
+    let other = |seq| {
+        with_esi(
+            evpn_macip_route_with_ip(100, 0xAA, Some("192.0.2.10"), "10.0.0.2", Some(seq), false),
+            segment_esi(2),
+        )
+    };
+    let mut h = PeerSyncHarness::new(segments, vec![other(3)]);
+
+    h.repoll().await;
+    h.observe(learned_aa()).await;
+    h.observe(ip_added_aa()).await;
+    assert_eq!(
+        h.take_log().await,
+        vec![
+            RibActionWithSeq::Inject(macip_key_with(100, 0xAA, None), Some(4)),
+            RibActionWithSeq::Withdraw(macip_key_with(100, 0xAA, None)),
+            RibActionWithSeq::Inject(macip_key_with(100, 0xAA, Some("192.0.2.10")), Some(4)),
+        ]
+    );
+    assert_duplicate_mac_moves(&h.metrics, 100, 0xAA, 2);
+
+    h.routes_tx.send_replace(vec![other(9)]);
+    h.repoll().await;
+    assert_eq!(
+        h.take_log().await,
+        vec![RibActionWithSeq::Inject(
+            macip_key_with(100, 0xAA, Some("192.0.2.10")),
+            Some(10)
+        )]
+    );
+    assert_duplicate_mac_moves(&h.metrics, 100, 0xAA, 3);
+}
+
+/// The zero ESI never identifies a shared segment: a single-homed
+/// remote on a multihomed VNI, and any remote on a single-homed VNI,
+/// stay contenders exactly as before.
+#[tokio::test]
+async fn zero_esi_never_makes_a_same_segment_peer() {
+    // Remote is single-homed (ESI zero); our VNI is on a segment.
+    let mut h = PeerSyncHarness::new(
+        BTreeMap::from([(vni(100), segment_esi(1))]),
+        vec![evpn_macip_route(100, 0xAA, "10.0.0.2", Some(3), false)],
+    );
+    h.repoll().await;
+    h.observe(learned_aa()).await;
+    assert_eq!(
+        h.take_log().await,
+        vec![RibActionWithSeq::Inject(
+            macip_key_with(100, 0xAA, None),
+            Some(4)
+        )]
+    );
+    assert_duplicate_mac_moves(&h.metrics, 100, 0xAA, 1);
+
+    // Our VNI is single-homed (no segment); the remote carries an ESI.
+    let mut h = PeerSyncHarness::new(
+        BTreeMap::new(),
+        vec![with_esi(
+            evpn_macip_route(100, 0xAA, "10.0.0.2", Some(3), false),
+            segment_esi(1),
+        )],
+    );
+    h.repoll().await;
+    h.observe(learned_aa()).await;
+    assert_eq!(
+        h.take_log().await,
+        vec![RibActionWithSeq::Inject(
+            macip_key_with(100, 0xAA, None),
+            Some(4)
+        )]
+    );
+    assert_duplicate_mac_moves(&h.metrics, 100, 0xAA, 1);
+}
+
+/// Sticky pin: the originators take the sticky bit from instance
+/// config, never from a remote view, so a sticky peer-sync route on
+/// our segment cannot flip the local advertisement sticky either way.
+#[tokio::test]
+async fn same_segment_peer_sticky_bit_does_not_leak_into_local_advertisement() {
+    let segments = BTreeMap::from([(vni(100), segment_esi(1))]);
+    let sticky_peer = with_esi(
+        evpn_macip_route(100, 0xAA, "10.0.0.2", Some(3), /* sticky */ true),
+        segment_esi(1),
+    );
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let (_log, routes, _responder) = rib_capture_responder_with_routes(rib_rx);
+    let instances = instance_table(100);
+    let metrics = BgpMetrics::new();
+    let counts = OriginatedLocalMacCounts::default();
+    let mut state = originator_state(&instances);
+    let (mac_view, _) = build_remote_views(&instances, &[sticky_peer], &segments);
+    state.remote_mac_view = mac_view;
+
+    handle_observation(
+        &learned_aa(),
+        &mut state,
+        &instances,
+        &rib_tx,
+        &metrics,
+        &counts,
+        &segments,
+        &BTreeSet::new(),
+    )
+    .await;
+
+    let routes = routes.lock().await;
+    assert_eq!(routes.len(), 1);
+    assert_eq!(
+        extract_mac_mobility_full(&routes[0].attributes),
+        (false, None),
+        "local advertisement carries the configured sticky bit (unset) and no sequence"
+    );
+}
+
+/// `build_remote_views` is the only producer of both contender maps:
+/// a route from a PE on the VNI's own segment is dropped before
+/// projection (so a lower-sequence remote elsewhere still surfaces),
+/// and the surviving view carries the contender's ESI and sticky bit.
+#[test]
+fn build_remote_views_drops_same_segment_routes_and_carries_esi() {
+    let mut t = EvpnInstanceTable::new();
+    t.insert(local_instance(100)).unwrap();
+    let routes = vec![
+        with_esi(
+            evpn_macip_route_with_ip(100, 0xAA, Some("192.0.2.10"), "10.0.0.2", Some(10), true),
+            segment_esi(1),
+        ),
+        with_esi(
+            evpn_macip_route_with_ip(100, 0xAA, Some("192.0.2.10"), "10.0.0.3", Some(5), true),
+            segment_esi(2),
+        ),
+    ];
+
+    let segments = BTreeMap::from([(vni(100), segment_esi(1))]);
+    let (mac_view, mac_ip_view) = build_remote_views(&t, &routes, &segments);
+    let v = mac_view
+        .get(&(vni(100), mac(0xAA)))
+        .expect("other-segment contender survives");
+    assert_eq!(
+        (v.next_hop, v.mobility_sequence, v.sticky, v.esi),
+        (ipa("10.0.0.3"), Some(5), true, segment_esi(2))
+    );
+    let v = mac_ip_view
+        .get(&(vni(100), mac(0xAA), ipa("192.0.2.10")))
+        .expect("other-segment MAC/IP contender survives");
+    assert_eq!(
+        (v.next_hop, v.mobility_sequence, v.sticky, v.esi),
+        (ipa("10.0.0.3"), Some(5), true, segment_esi(2))
+    );
+
+    // Single-homed VNI: the segment-1 route is an ordinary contender and wins on sequence.
+    let (mac_view, mac_ip_view) = build_remote_views(&t, &routes, &BTreeMap::new());
+    assert_eq!(mac_view[&(vni(100), mac(0xAA))].esi, segment_esi(1));
+    assert_eq!(
+        mac_ip_view[&(vni(100), mac(0xAA), ipa("192.0.2.10"))].esi,
+        segment_esi(1)
     );
 }
