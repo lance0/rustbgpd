@@ -1,0 +1,55 @@
+services:
+  rustbgpd:
+    build:
+      context: ../..
+      target: dev
+    volumes:
+      - ./rustbgpd.toml:/etc/rustbgpd/config.toml:ro
+      - ../../tests/fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
+    environment:
+      RUSTBGPD_TOKEN_FILE: /run/rustbgpd/grpc-test-only-operator.token
+    networks:
+      ixp:
+        ipv4_address: 10.98.0.10
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 524288
+
+  member-a:
+    image: quay.io/frrouting/frr:10.7.1
+    volumes:
+      - ../../examples/docker-compose/frr-daemons:/etc/frr/daemons:ro
+      - ./member-a.conf:/etc/frr/frr.conf:ro
+      - ./vtysh.conf:/etc/frr/vtysh.conf:ro
+    networks:
+      ixp:
+        ipv4_address: 10.98.0.20
+    cap_add: [NET_ADMIN, NET_RAW, SYS_ADMIN]
+
+  member-b:
+    image: quay.io/frrouting/frr:10.7.1
+    volumes:
+      - ../../examples/docker-compose/frr-daemons:/etc/frr/daemons:ro
+      - ./member-b.conf:/etc/frr/frr.conf:ro
+      - ./vtysh.conf:/etc/frr/vtysh.conf:ro
+    networks:
+      ixp:
+        ipv4_address: 10.98.0.30
+    cap_add: [NET_ADMIN, NET_RAW, SYS_ADMIN]
+
+  stayrtr:
+    # StayRTR 0.6.4, the same immutable image used by the RTR interop labs.
+    image: rpki/stayrtr@sha256:cdb93c0b661d97179a5525e00caf7d9e693a04da3b9002f7e24bebb194d9a77b
+    command: [-cache, /data/vrps.json, -bind, ':3323', -checktime=false, -protocol, '1', -refresh, '30']
+    volumes:
+      - ./vrps.json:/data/vrps.json:ro
+    networks:
+      ixp:
+        ipv4_address: 10.98.0.40
+
+networks:
+  ixp:
+    ipam:
+      config:
+        - subnet: 10.98.0.0/24

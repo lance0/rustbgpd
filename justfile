@@ -4,16 +4,15 @@
 default:
     just --list
 
-# Run the guided local quickstart lab (up, verify, break, explain, down).
+# Run a guided local lab (up, verify, break, explain, down).
 [positional-arguments]
 lab name phase:
     #!/usr/bin/env bash
     set -euo pipefail
-    if [[ "$1" != quickstart ]]; then
-        echo "unknown lab: $1 (available: quickstart)" >&2
-        exit 2
-    fi
-    exec bash labs/quickstart/lab.sh "$2"
+    case "$1" in
+        quickstart|ixp) exec bash "labs/$1/lab.sh" "$2" ;;
+        *) echo "unknown lab: $1 (available: quickstart, ixp)" >&2; exit 2 ;;
+    esac
 
 # Run the broad local correctness baseline in diagnostic order.
 gate:
