@@ -1,4 +1,4 @@
-use crate::connection::Connection;
+use crate::connection::{Connection, read_rpc};
 use crate::error::CliError;
 use crate::output::{self, JsonRouteEvent, outln};
 use crate::proto::event_service_client::EventServiceClient;
@@ -1194,8 +1194,9 @@ pub async fn events_watch(
     if backfill > 0 {
         let mut rib_client =
             RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-        let response = rib_client
-            .list_route_events(ListRouteEventsRequest {
+        let response = read_rpc(
+            "ListRouteEvents",
+            rib_client.list_route_events(ListRouteEventsRequest {
                 neighbor_address: neighbor.unwrap_or_default(),
                 afi_safi: family.unwrap_or(0),
                 // Ask for the full bounded ring only when local type
@@ -1203,9 +1204,10 @@ pub async fn events_watch(
                 limit: route_history_request_limit(backfill, &event_types),
                 prefix,
                 prefix_length,
-            })
-            .await?
-            .into_inner();
+            }),
+        )
+        .await?
+        .into_inner();
         let mut events = response
             .events
             .into_iter()
@@ -1261,16 +1263,18 @@ pub async fn history(
 
     let mut client =
         RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let response = client
-        .list_route_events(ListRouteEventsRequest {
+    let response = read_rpc(
+        "ListRouteEvents",
+        client.list_route_events(ListRouteEventsRequest {
             neighbor_address: neighbor.unwrap_or_default(),
             afi_safi: family.unwrap_or(0),
             limit,
             prefix,
             prefix_length,
-        })
-        .await?
-        .into_inner();
+        }),
+    )
+    .await?
+    .into_inner();
 
     if response.events.is_empty() {
         print_empty_history(json, "route")?;
@@ -1296,14 +1300,16 @@ pub async fn session_history(
         .collect::<Result<Vec<_>, _>>()?;
     let mut client =
         EventServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let response = client
-        .list_session_events(ListSessionEventsRequest {
+    let response = read_rpc(
+        "ListSessionEvents",
+        client.list_session_events(ListSessionEventsRequest {
             neighbor_address: neighbor.unwrap_or_default(),
             event_types,
             limit,
-        })
-        .await?
-        .into_inner();
+        }),
+    )
+    .await?
+    .into_inner();
 
     if response.events.is_empty() {
         print_empty_history(json, "session")?;
@@ -1329,14 +1335,16 @@ pub async fn policy_history(
         .collect::<Result<Vec<_>, _>>()?;
     let mut client =
         EventServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let response = client
-        .list_policy_events(ListPolicyEventsRequest {
+    let response = read_rpc(
+        "ListPolicyEvents",
+        client.list_policy_events(ListPolicyEventsRequest {
             neighbor_address: neighbor.unwrap_or_default(),
             event_types,
             limit,
-        })
-        .await?
-        .into_inner();
+        }),
+    )
+    .await?
+    .into_inner();
 
     if response.events.is_empty() {
         print_empty_history(json, "policy")?;
@@ -1364,16 +1372,18 @@ pub async fn evpn_history(
         .collect::<Result<Vec<_>, _>>()?;
     let mut client =
         EventServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let response = client
-        .list_evpn_events(ListEvpnEventsRequest {
+    let response = read_rpc(
+        "ListEvpnEvents",
+        client.list_evpn_events(ListEvpnEventsRequest {
             neighbor_address: neighbor.unwrap_or_default(),
             event_types,
             limit,
             route_type_filter: route_type.unwrap_or(0),
             rd_filter: rd.unwrap_or_default(),
-        })
-        .await?
-        .into_inner();
+        }),
+    )
+    .await?
+    .into_inner();
 
     if response.events.is_empty() {
         print_empty_history(json, "EVPN")?;

@@ -11,12 +11,14 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
 use crate::commands::watch::bgp_event_json_value;
-use crate::connection::Connection;
+use crate::connection::{
+    Connection, EFFECTIVE_CONFIG_RPC_TIMEOUT, READ_RPC_TIMEOUT, rpc_with_timeout,
+};
 use crate::error::CliError;
 use crate::output::{self, JsonNeighbor, outln};
 use crate::proto::bfd_service_client::BfdServiceClient;
@@ -1918,6 +1920,21 @@ pub(crate) async fn run(
     connection: Result<Connection, CliError>,
     opts: &DoctorOptions<'_>,
 ) -> Result<i32, CliError> {
+    run_with_deadlines(
+        connection,
+        opts,
+        READ_RPC_TIMEOUT,
+        EFFECTIVE_CONFIG_RPC_TIMEOUT,
+    )
+    .await
+}
+
+async fn run_with_deadlines(
+    connection: Result<Connection, CliError>,
+    opts: &DoctorOptions<'_>,
+    read_budget: Duration,
+    effective_config_budget: Duration,
+) -> Result<i32, CliError> {
     let now = now_unix_seconds();
     let mut reporter = Reporter {
         json: opts.json,
@@ -1963,10 +1980,13 @@ pub(crate) async fn run(
                 connection.interceptor(),
             );
 
-            let posture = policy
-                .get_validation_policy_posture(GetValidationPolicyPostureRequest {})
-                .await
-                .map(|response| response.into_inner());
+            let posture = rpc_with_timeout(
+                "GetValidationPolicyPosture",
+                read_budget,
+                policy.get_validation_policy_posture(GetValidationPolicyPostureRequest {}),
+            )
+            .await
+            .map(|response| response.into_inner());
             for check in validation_policy_posture_checks(posture) {
                 reporter.record(check.name, check.status, check.detail)?;
             }
@@ -1974,7 +1994,12 @@ pub(crate) async fn run(
             // system/health.json + the healthy check. The same probe outcome
             // feeds the daemon.authz.* triage: a PERMISSION_DENIED here is an
             // authorization finding, not a health one.
-            let health_result = control.get_health(HealthRequest {}).await;
+            let health_result = rpc_with_timeout(
+                "GetHealth",
+                read_budget,
+                control.get_health(HealthRequest {}),
+            )
+            .await;
             if let Some(check) = authz_reachable_check(health_result.as_ref().err()) {
                 reporter.record(check.name, check.status, check.detail)?;
             }
@@ -2022,11 +2047,18 @@ pub(crate) async fn run(
                         CheckStatus::Fail,
                         format!("health RPC failed: {e}"),
                     )?;
+                    sections.insert("system", format!("partial: health RPC failed: {e}"));
                 }
             }
 
             // system/global.json.
-            match global.get_global(GetGlobalRequest {}).await {
+            match rpc_with_timeout(
+                "GetGlobal",
+                read_budget,
+                global.get_global(GetGlobalRequest {}),
+            )
+            .await
+            {
                 Ok(resp) => {
                     let global_state = resp.into_inner();
                     tcp_ao_support = global_state.tcp_ao_support;
@@ -2048,7 +2080,13 @@ pub(crate) async fn run(
             }
 
             // system/metrics.prom.
-            match control.get_metrics(MetricsRequest {}).await {
+            match rpc_with_timeout(
+                "GetMetrics",
+                read_budget,
+                control.get_metrics(MetricsRequest {}),
+            )
+            .await
+            {
                 Ok(resp) => {
                     let text = resp.into_inner().prometheus_text;
                     bundle.add("system/metrics.prom", redact_text(&text).into_bytes());
@@ -2062,9 +2100,12 @@ pub(crate) async fn run(
             // config/effective.toml: the daemon's own redacted, normalized
             // dump (same RPC as `rbgp config effective`). Never the raw file.
             let mut config_client = connection.effective_config_client();
-            match config_client
-                .get_effective_config(GetEffectiveConfigRequest {})
-                .await
+            match rpc_with_timeout(
+                "GetEffectiveConfig",
+                effective_config_budget,
+                config_client.get_effective_config(GetEffectiveConfigRequest {}),
+            )
+            .await
             {
                 Ok(resp) => {
                     let toml_text = resp.into_inner().toml;
@@ -2098,11 +2139,14 @@ pub(crate) async fn run(
             // red/yellow/green checks. The RPC is bounded by the same tonic
             // request path as the other daemon snapshots; no packet probing is
             // performed by doctor.
-            let bfd_collected = match bfd
-                .get_bfd_sessions(GetBfdSessionsRequest {
+            let bfd_collected = match rpc_with_timeout(
+                "GetBfdSessions",
+                read_budget,
+                bfd.get_bfd_sessions(GetBfdSessionsRequest {
                     peer_address: String::new(),
-                })
-                .await
+                }),
+            )
+            .await
             {
                 Ok(resp) => {
                     let snapshots: Vec<BfdSnapshot> = resp
@@ -2129,10 +2173,18 @@ pub(crate) async fn run(
             // remains harmless; if the snapshot already shows the resulting
             // non-Established state, the later history query includes the
             // disable evidence.
-            let neighbor_snapshot = neighbor.list_neighbors(ListNeighborsRequest {}).await;
-            let dynamic_neighbor_snapshot = match neighbor
-                .list_dynamic_neighbors(ListDynamicNeighborsRequest {})
-                .await
+            let neighbor_snapshot = rpc_with_timeout(
+                "ListNeighbors",
+                read_budget,
+                neighbor.list_neighbors(ListNeighborsRequest {}),
+            )
+            .await;
+            let dynamic_neighbor_snapshot = match rpc_with_timeout(
+                "ListDynamicNeighbors",
+                read_budget,
+                neighbor.list_dynamic_neighbors(ListDynamicNeighborsRequest {}),
+            )
+            .await
             {
                 Ok(resp) => {
                     let snapshots: Vec<DynamicNeighborSnapshot> = resp
@@ -2156,13 +2208,16 @@ pub(crate) async fn run(
                     None
                 }
             };
-            let (session_events, session_history_available) = match events
-                .list_session_events(ListSessionEventsRequest {
+            let (session_events, session_history_available) = match rpc_with_timeout(
+                "ListSessionEvents",
+                read_budget,
+                events.list_session_events(ListSessionEventsRequest {
                     neighbor_address: String::new(),
                     event_types: Vec::new(),
                     limit: EVENT_HISTORY_LIMIT,
-                })
-                .await
+                }),
+            )
+            .await
             {
                 Ok(resp) => (
                     resp.into_inner()
@@ -2186,13 +2241,16 @@ pub(crate) async fn run(
             sections
                 .entry("session_events")
                 .or_insert_with(|| "collected".to_string());
-            let policy_events = match events
-                .list_policy_events(ListPolicyEventsRequest {
+            let policy_events = match rpc_with_timeout(
+                "ListPolicyEvents",
+                read_budget,
+                events.list_policy_events(ListPolicyEventsRequest {
                     neighbor_address: String::new(),
                     event_types: Vec::new(),
                     limit: EVENT_HISTORY_LIMIT,
-                })
-                .await
+                }),
+            )
+            .await
             {
                 Ok(resp) => resp
                     .into_inner()
@@ -2341,13 +2399,6 @@ pub(crate) async fn run(
                             .map(|record| &record.support)
                             .collect::<Vec<_>>(),
                     )?;
-                    bundle.add_json(
-                        "peers/events.json",
-                        &EventsSnapshot {
-                            session: session_events,
-                            policy: policy_events,
-                        },
-                    )?;
                     if bfd_collected {
                         sections.insert("peers", "collected".to_string());
                     }
@@ -2363,6 +2414,15 @@ pub(crate) async fn run(
                     );
                 }
             }
+            // Event history was collected independently of the neighbor snapshot.
+            // Keep it even when that snapshot failed or timed out.
+            bundle.add_json(
+                "peers/events.json",
+                &EventsSnapshot {
+                    session: session_events,
+                    policy: policy_events,
+                },
+            )?;
             sections
                 .entry("system")
                 .or_insert_with(|| "collected".to_string());
@@ -4371,6 +4431,135 @@ paths = ["x"]
             flap_count: flaps,
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn read_deadline_retains_partial_bundle_and_separate_effective_config_budget() {
+        let server = spawn_mock_server(None).await;
+        server.state.health_read_stall.store(true, Ordering::SeqCst);
+        server
+            .state
+            .neighbor_read_stall
+            .store(true, Ordering::SeqCst);
+        server
+            .state
+            .session_events
+            .lock()
+            .await
+            .push(rustbgpd_api::proto::BgpEvent {
+                event_type: rustbgpd_api::proto::BgpEventType::SessionLost as i32,
+                summary: "retained session history".into(),
+                ..Default::default()
+            });
+        server
+            .state
+            .effective_config_delay_ms
+            .store(500, Ordering::SeqCst);
+        let dir = tempfile::tempdir().unwrap();
+        *server.state.config_effective_toml.lock().await = Some(format!(
+            "[global]\nasn = 65000\nruntime_state_dir = \"{}\"\n",
+            dir.path().display()
+        ));
+        let bundle_path = dir.path().join("bundle.tar.gz");
+        let code = run_with_deadlines(
+            connect(&server.addr, None).await,
+            &DoctorOptions {
+                output: Some(&bundle_path),
+                log_file: None,
+                daemon_address: &server.addr,
+                token_file_configured: false,
+                json: true,
+            },
+            Duration::from_millis(250),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 2);
+        let files = extract_bundle(&bundle_path);
+        assert!(!files.iter().any(|(name, _)| name == "system/health.json"));
+        for retained in [
+            "system/global.json",
+            "system/metrics.prom",
+            "config/effective.toml",
+            "peers/events.json",
+        ] {
+            find(&files, retained);
+        }
+        let manifest: serde_json::Value =
+            serde_json::from_str(find(&files, "manifest.json")).unwrap();
+        assert!(
+            manifest["sections"]["system"]
+                .as_str()
+                .unwrap()
+                .contains("partial: health RPC failed")
+        );
+        assert!(
+            manifest_check(&manifest, "daemon.healthy")["detail"]
+                .as_str()
+                .unwrap()
+                .contains("GetHealth response timed out after 0.25s")
+        );
+        assert_eq!(
+            manifest["sections"]["config"],
+            "collected (daemon-redacted effective config)"
+        );
+        assert!(
+            manifest["sections"]["peers"]
+                .as_str()
+                .unwrap()
+                .contains("partial: BFD collected")
+        );
+        assert_eq!(manifest["sections"]["session_events"], "collected");
+        assert!(
+            manifest["sections"]["peers"]
+                .as_str()
+                .unwrap()
+                .contains("ListNeighbors response timed out after 0.25s")
+        );
+        assert!(find(&files, "peers/events.json").contains("retained session history"));
+    }
+
+    #[tokio::test]
+    async fn effective_config_deadline_keeps_successful_lightweight_evidence() {
+        let server = spawn_mock_server(None).await;
+        server
+            .state
+            .effective_config_delay_ms
+            .store(500, Ordering::SeqCst);
+        let dir = tempfile::tempdir().unwrap();
+        let bundle_path = dir.path().join("bundle.tar.gz");
+        run_with_deadlines(
+            connect(&server.addr, None).await,
+            &DoctorOptions {
+                output: Some(&bundle_path),
+                log_file: None,
+                daemon_address: &server.addr,
+                token_file_configured: false,
+                json: true,
+            },
+            Duration::from_secs(1),
+            Duration::from_millis(20),
+        )
+        .await
+        .unwrap();
+        let files = extract_bundle(&bundle_path);
+        find(&files, "system/health.json");
+        find(&files, "peers/neighbors.json");
+        assert!(
+            !files
+                .iter()
+                .any(|(name, _)| name == "config/effective.toml")
+        );
+        let manifest: serde_json::Value =
+            serde_json::from_str(find(&files, "manifest.json")).unwrap();
+        assert_eq!(manifest["sections"]["system"], "collected");
+        assert!(
+            manifest["sections"]["config"]
+                .as_str()
+                .unwrap()
+                .contains("GetEffectiveConfig response timed out after 0.02s")
+        );
     }
 
     #[tokio::test]

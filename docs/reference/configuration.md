@@ -1677,10 +1677,11 @@ Operational note:
 Graceful Restart is enabled by default. rustbgpd implements:
 
 - **Helper mode (receiving speaker):** when a peer with GR capability
-  restarts, its routes are preserved as stale during the restart window
-  instead of being immediately withdrawn. End-of-RIB markers from the peer
-  clear stale flags per address family; if the timer expires before all
-  End-of-RIB markers arrive, remaining stale routes are swept.
+  restarts, routes for families listed in its GR capability are preserved as
+  stale during the restart window. Routes for omitted families, including
+  IPv4/IPv6 FlowSpec, are immediately withdrawn. Re-advertisements replace
+  stale routes; each End-of-RIB marker removes the remaining stale routes
+  for that family. If the timer expires first, remaining stale routes are swept.
 - **Minimal restarting-speaker mode:** after a coordinated daemon restart,
   rustbgpd can temporarily advertise `restart_state = true` to static peers
   restored from config, using a marker file under `runtime_state_dir`.
@@ -3417,7 +3418,7 @@ Each dump contains a complete `TABLE_DUMP_V2` snapshot:
 | `RIB_IPV6_UNICAST` (subtype 4) | IPv6 routes from Adj-RIB-In per peer |
 | `RIB_GENERIC` (subtype 6) | L2VPN/EVPN routes (AFI 25 / SAFI 70) per RFC 6396 section 4.3.5 |
 | `RIB_IPV4_UNICAST_ADDPATH` (subtype 8) | IPv4 routes with path IDs (RFC 8050) |
-| `RIB_IPV6_UNICAST_ADDPATH` (subtype 9) | IPv6 routes with path IDs (RFC 8050) |
+| `RIB_IPV6_UNICAST_ADDPATH` (subtype 10) | IPv6 routes with path IDs (RFC 8050) |
 
 Routes are sourced from Adj-RIB-In (not Loc-RIB) to avoid duplicate entries
 for the best-path winner. Next-hop attributes are synthesized per the MP-BGP

@@ -1,4 +1,4 @@
-use crate::connection::Connection;
+use crate::connection::{Connection, read_rpc};
 use crate::error::CliError;
 use crate::output::{self, JsonHealth, outln};
 use crate::proto::control_service_client::ControlServiceClient;
@@ -93,7 +93,9 @@ pub(crate) fn rpki_cache_end_of_data_readiness(
 pub async fn health(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client =
         ControlServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client.get_health(HealthRequest {}).await?.into_inner();
+    let resp = read_rpc("GetHealth", client.get_health(HealthRequest {}))
+        .await?
+        .into_inner();
 
     if json {
         let out = JsonHealth {
@@ -115,7 +117,9 @@ pub async fn health(connection: Connection, json: bool) -> Result<(), CliError> 
 pub async fn metrics(connection: Connection) -> Result<(), CliError> {
     let mut client =
         ControlServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client.get_metrics(MetricsRequest {}).await?.into_inner();
+    let resp = read_rpc("GetMetrics", client.get_metrics(MetricsRequest {}))
+        .await?
+        .into_inner();
     output::print_text(&resp.prometheus_text)?;
     Ok(())
 }

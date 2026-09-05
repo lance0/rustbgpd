@@ -457,6 +457,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Withdraw every IPv4/IPv6 FlowSpec path immediately when a restarting
+  peer's Graceful Restart capability omits that family. Recompute the best
+  rule and downstream advertisements, selecting an alternate source when
+  available, while keeping GR-covered families stale. Keep the FlowSpec
+  Adj-RIB-In gauge current through GR/LLGR expiry, End-of-RIB cleanup, and
+  peer teardown.
+
 - **Operator-visible:** an IPv6 FlowSpec rule whose destination component
   carries a non-zero offset no longer presents the unshifted address as its
   destination prefix. RFC 8956 §3.1 matches the address shifted right by the
@@ -644,6 +651,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it neither raises the local sequence nor counts as a move. Routes with a
   different or zero ESI are contenders as before, and the receive-side
   tiebreak is unchanged.
+
+- Correct MRT Add-Path entry ordering to Peer Index, Originated Time, then
+  Path Identifier, and use subtype 10 for IPv6 unicast. Snapshot encoders,
+  the reader, and the CLI MRT adapter now follow RFC 8050; subtype 9 is
+  treated as unsupported IPv4 multicast. The CLI adapter also rejects
+  trailing bytes after a RIB record's declared entries without emitting
+  a partial snapshot. Legacy non-Add-Path encoding is unchanged.
+
+- EVPN Linux route withdrawal treats an already-absent kernel route as
+  successfully removed, including single-path and ECMP IP-VRF routes. This
+  clears owned state instead of retrying the deletion indefinitely.
 
 ### Documentation
 
@@ -835,6 +853,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   peer's advertisement no longer counts as a move or raises the local
   sequence. Re-baseline alerts keyed on that counter for multihomed VNIs;
   single-homed VNIs are unaffected.
+
+- **MRT Add-Path snapshots and warm checkpoints:** regenerate historical
+  Add-Path dumps, whose peer, time, and path-ID fields could be misread by
+  external tools. Warm manifests now use format version 2 and reject all
+  version-1 bundles before decoding, without automatic conversion. The next
+  coordinated shutdown can replace an old checkpoint; the daemon still does
+  not restore routes from these artifacts at boot.
+
+- Lightweight native CLI reads now bound the complete RPC response to
+  30 seconds per call or page, so stalled TCP or Unix-socket endpoints
+  cannot hang scripts indefinitely. Doctor preserves successful evidence
+  and marks timed-out sections incomplete, with a separate allowance for
+  large effective-config exports. A failed health collection no longer
+  leaves the system section marked collected.
 
 ## [0.68.0] — 2026-08-30
 

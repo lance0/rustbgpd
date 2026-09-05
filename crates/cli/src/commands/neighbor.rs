@@ -1,6 +1,6 @@
 use std::io::Write;
 
-use crate::connection::Connection;
+use crate::connection::{Connection, read_rpc};
 use crate::error::CliError;
 use crate::output::{
     self, JsonEffectiveNeighborPosture, JsonInboundPrefixLimit, JsonNegotiatedGracefulRestart,
@@ -92,21 +92,25 @@ async fn neighbor_list_view(
 ) -> Result<NeighborListView, CliError> {
     let mut client =
         NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
-        .list_neighbors(ListNeighborsRequest {})
-        .await?
-        .into_inner();
+    let resp = read_rpc(
+        "ListNeighbors",
+        client.list_neighbors(ListNeighborsRequest {}),
+    )
+    .await?
+    .into_inner();
 
     if json {
         let out: Vec<JsonNeighbor> = resp.neighbors.iter().map(json_neighbor).collect();
         Ok(NeighborListView::Json(out))
     } else if resp.neighbors.is_empty() {
-        let dynamic_range_count = client
-            .list_dynamic_neighbors(ListDynamicNeighborsRequest {})
-            .await?
-            .into_inner()
-            .ranges
-            .len();
+        let dynamic_range_count = read_rpc(
+            "ListDynamicNeighbors",
+            client.list_dynamic_neighbors(ListDynamicNeighborsRequest {}),
+        )
+        .await?
+        .into_inner()
+        .ranges
+        .len();
         Ok(NeighborListView::Empty(empty_neighbor_list_message(
             dynamic_range_count,
         )))
@@ -197,15 +201,17 @@ async fn query_neighbor(
     let (address_only, interface) = split_scoped_address(address);
     let (compare_address, compare_interface) =
         compare.map(split_scoped_address).unwrap_or_default();
-    let state = client
-        .get_neighbor_state(GetNeighborStateRequest {
+    let state = read_rpc(
+        "GetNeighborState",
+        client.get_neighbor_state(GetNeighborStateRequest {
             address: address_only,
             interface,
             compare_address,
             compare_interface,
-        })
-        .await?
-        .into_inner();
+        }),
+    )
+    .await?
+    .into_inner();
     match compare {
         Some(comparison) => json_update_group_comparison(
             address,

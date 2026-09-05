@@ -14,7 +14,7 @@ use rustbgpd_mrt::warm_bundle::{
 
 const SHA256: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const CREATED_AT_UTC_SECONDS: i64 = 1_800_000_000;
-const CANONICAL_MANIFEST: &[u8] = include_bytes!("../seeds/warm_bundle_manifest/canonical-v1.json");
+const CANONICAL_MANIFEST: &[u8] = include_bytes!("../seeds/warm_bundle_manifest/canonical-v2.json");
 
 fn expected() -> WarmBundleExpectedV1 {
     WarmBundleExpectedV1 {

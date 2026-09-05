@@ -223,6 +223,11 @@ impl RibManager {
                 rib.sweep_stale_flowspec_family((afi, safi));
                 rib.sweep_llgr_stale_flowspec_family((afi, safi));
                 rib.clear_stale_flowspec((afi, safi));
+                self.metrics.set_rib_prefixes(
+                    &peer.to_string(),
+                    "flowspec",
+                    gauge_val(rib.flowspec_len()),
+                );
                 rib.sweep_stale_family_evpn((afi, safi));
                 rib.sweep_llgr_stale_family_evpn((afi, safi));
                 rib.clear_stale_evpn((afi, safi));
@@ -403,6 +408,11 @@ impl RibManager {
                 rib.clear_llgr_stale((afi, safi));
                 rib.sweep_llgr_stale_flowspec_family((afi, safi));
                 rib.clear_llgr_stale_flowspec((afi, safi));
+                self.metrics.set_rib_prefixes(
+                    &peer.to_string(),
+                    "flowspec",
+                    gauge_val(rib.flowspec_len()),
+                );
                 rib.sweep_llgr_stale_family_evpn((afi, safi));
                 rib.clear_llgr_stale_evpn((afi, safi));
                 rib.sweep_llgr_stale_family_vpn((afi, safi));

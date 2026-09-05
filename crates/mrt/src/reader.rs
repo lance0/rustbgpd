@@ -136,7 +136,7 @@ fn malformed(offset: usize, context: impl Into<String>) -> ReadError {
 /// NLRI of a decoded RIB entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SnapshotNlri {
-    /// IPv4/IPv6 unicast prefix (subtypes 2, 4, 8, 9).
+    /// IPv4/IPv6 unicast prefix (subtypes 2, 4, 8, 10).
     Unicast(Prefix),
     /// `RIB_GENERIC` NLRI, kept as raw bytes. The writer only emits
     /// L2VPN/EVPN here; the bytes are the canonical EVPN route TLV
@@ -606,11 +606,6 @@ impl<'a> SnapshotReader<'a> {
         add_path: bool,
         nlri: &SnapshotNlri,
     ) -> Result<(), ReadError> {
-        let path_id = if add_path {
-            cur.u32("path identifier")?
-        } else {
-            0
-        };
         let peer_index = cur.u16("peer index")?;
         let Some(peer) = self.peers.get(usize::from(peer_index)) else {
             return Err(ReadError::BadPeerIndex {
@@ -619,6 +614,11 @@ impl<'a> SnapshotReader<'a> {
             });
         };
         let originated_time = cur.u32("originated time")?;
+        let path_id = if add_path {
+            cur.u32("path identifier")?
+        } else {
+            0
+        };
         let attr_len = cur.u16("attribute length")?;
         let attr_base = cur.offset();
         let attrs = cur.take(usize::from(attr_len), "attribute bytes")?;
@@ -1054,6 +1054,69 @@ mod tests {
     }
 
     #[test]
+    fn rfc8050_independent_entries_and_truncated_boundaries() {
+        let peers = [
+            make_peer("192.0.2.1".parse().unwrap(), 65001),
+            make_peer("192.0.2.2".parse().unwrap(), 65002),
+        ];
+        let pit = encode_snapshot(COLLECTOR, &peers, &[], &[], TS).unwrap();
+        // Entry bytes are authored directly from RFC 8050 section 4.1,
+        // independent of both production entry encoders.
+        for subtype in [8, 10] {
+            for path_id in [0, 0x5566_7788_u32] {
+                let mut entry = vec![0, 1, 0x11, 0x22, 0x33, 0x44];
+                entry.extend_from_slice(&path_id.to_be_bytes());
+                entry.extend_from_slice(&[0, 4, 0x40, 1, 1, 0]);
+                for length in 0..=entry.len() {
+                    // Sequence=0, default prefix, one entry.
+                    let mut payload = vec![0, 0, 0, 0, 0, 0, 1];
+                    payload.extend_from_slice(&entry[..length]);
+                    let mut data = pit.clone();
+                    data.extend_from_slice(&raw_record(13, subtype, &payload));
+                    let mut reader = SnapshotReader::new(&data).unwrap();
+                    let row = reader.next().unwrap();
+                    if length < entry.len() {
+                        assert!(
+                            matches!(row, Err(ReadError::Truncated { .. })),
+                            "length={length}: {row:?}"
+                        );
+                    } else {
+                        let row = row.unwrap();
+                        assert_eq!(row.peer_index, 1);
+                        assert_eq!(row.peer.peer_addr, peers[1].peer_addr);
+                        assert_eq!(row.peer.peer_bgp_id, peers[1].peer_bgp_id);
+                        assert_eq!(row.peer.peer_asn, peers[1].peer_asn);
+                        assert_eq!(row.originated_time, 0x1122_3344);
+                        assert_eq!(row.path_id, path_id);
+                        assert!(row.add_path);
+                        let prefix = if subtype == 8 {
+                            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0))
+                        } else {
+                            Prefix::V6(Ipv6Prefix::new(Ipv6Addr::UNSPECIFIED, 0))
+                        };
+                        assert_eq!(row.nlri, SnapshotNlri::Unicast(prefix));
+                        assert_eq!(row.attributes, vec![PathAttribute::Origin(Origin::Igp)]);
+                    }
+                    assert!(reader.next().is_none());
+                }
+                // Invalid peer index must be read from the first two bytes.
+                entry[..2].copy_from_slice(&2_u16.to_be_bytes());
+                let mut payload = vec![0, 0, 0, 0, 0, 0, 1];
+                payload.extend_from_slice(&entry);
+                let mut data = pit.clone();
+                data.extend_from_slice(&raw_record(13, subtype, &payload));
+                assert!(matches!(
+                    SnapshotReader::new(&data).unwrap().next(),
+                    Some(Err(ReadError::BadPeerIndex {
+                        index: 2,
+                        peer_count: 2
+                    }))
+                ));
+            }
+        }
+    }
+
+    #[test]
     fn roundtrip_addpath_v4_and_v6() {
         let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         let nh = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9));
@@ -1272,6 +1335,8 @@ mod tests {
         .unwrap();
         // Unknown TABLE_DUMP_V2 subtype (3 = RIB_IPV4_MULTICAST).
         data.extend_from_slice(&raw_record(13, 3, &[0xAB; 10]));
+        // RFC 8050 subtype 9 is IPv4 multicast Add-Path, never IPv6 unicast.
+        data.extend_from_slice(&raw_record(13, 9, &[0xAB; 10]));
         // Foreign MRT type (16 = BGP4MP).
         data.extend_from_slice(&raw_record(16, 4, &[0xCD; 10]));
         // RIB_GENERIC with a non-EVPN AFI/SAFI (IPv4 FlowSpec).
@@ -1285,7 +1350,7 @@ mod tests {
         let (entries, err) = drain(&mut reader);
         assert!(err.is_none(), "skips must not error: {err:?}");
         assert_eq!(entries.len(), 1);
-        assert_eq!(reader.skipped_records(), 3);
+        assert_eq!(reader.skipped_records(), 4);
     }
 
     #[test]

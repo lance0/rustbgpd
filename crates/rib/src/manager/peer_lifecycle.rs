@@ -472,6 +472,8 @@ impl RibManager {
         debug!(%peer, cleared = count, "peer adj-rib-in cleared");
         self.metrics.set_rib_prefixes(&peer.to_string(), "all", 0);
         self.metrics.set_rib_prefixes(&peer.to_string(), "evpn", 0);
+        self.metrics
+            .set_rib_prefixes(&peer.to_string(), "flowspec", 0);
         let changed = self.recompute_best(&affected);
         self.distribute_changes(&changed, &affected);
         if !fs_affected.is_empty() {
