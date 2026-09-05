@@ -485,7 +485,14 @@ tunnel enums, `BgpRole`, and `AspaValidation` are `#[non_exhaustive]`.
 The five public error enums are also non-exhaustive: `DecodeError`,
 `EncodeError`, `RouteDistinguisherParseError`,
 `ShutdownCommunicationError`, and `BgpCodecError` (available with the
-`tokio-codec` feature). Downstream matches on any of these enums must include
+`tokio-codec` feature).
+
+All implement `Display` and `std::error::Error` for
+use with standard error propagation. `ShutdownCommunicationError` displays
+bounded descriptions without malformed input bytes; `category()` retains
+its stable machine-readable labels.
+
+Downstream matches on any of these enums must include
 a wildcard arm:
 
 ```rust
