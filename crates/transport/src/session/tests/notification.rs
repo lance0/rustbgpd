@@ -92,6 +92,10 @@ fn session_log_metadata(metadata: &tracing::Metadata<'_>) -> bool {
     notification_log_metadata(metadata)
         || connect_failure_log_metadata(metadata)
         || writer_failure_log_metadata(metadata)
+        || (*metadata.level() == tracing::Level::WARN
+            && ["peer", "family", "route_type", "discarded"]
+                .into_iter()
+                .all(|field| metadata.fields().field(field).is_some()))
 }
 
 fn notification_log_metadata(metadata: &tracing::Metadata<'_>) -> bool {
@@ -1433,4 +1437,50 @@ fn writer_failure_log_names_peer_and_error() {
         "writer failure warning must carry the OS error: {event:?}"
     );
     assert!(event.contains_key("error_kind"), "{event:?}");
+}
+
+#[test]
+fn evpn_discard_warnings_are_bounded_per_type_and_connection() {
+    let mut session = make_test_session(65001, 65002);
+    let events = capture_session_logs(|| {
+        for route_type in [0, 6, 255] {
+            session.record_evpn_discard(route_type, 2);
+            session.record_evpn_discard(route_type, 3);
+        }
+    });
+    assert_eq!(events.len(), 3);
+    for (event, route_type) in events.iter().zip(["0", "6", "255"]) {
+        assert_eq!(event["level"], "WARN");
+        assert_eq!(event["peer"], session.peer_label);
+        assert_eq!(event["family"], "evpn");
+        assert_eq!(event["route_type"], route_type);
+        assert_eq!(event["discarded"], "2");
+    }
+    let samples = counter_samples(&session.metrics, "bgp_evpn_nlri_discarded_by_type_total");
+    assert_eq!(samples.len(), 3);
+    assert!(
+        samples
+            .iter()
+            .all(|(_, count)| (*count - 5.0).abs() < f64::EPSILON)
+    );
+    assert!(
+        (counter_samples(&session.metrics, "bgp_evpn_nlri_discarded_total")[0].1 - 15.0).abs()
+            < f64::EPSILON
+    );
+
+    session.close_tcp();
+    assert_eq!(
+        capture_session_logs(|| session.record_evpn_discard(6, 1)).len(),
+        1
+    );
+    assert!(capture_session_logs(|| session.record_evpn_discard(6, 1)).is_empty());
+    session.handle_tcp_disconnect();
+    assert_eq!(
+        capture_session_logs(|| session.record_evpn_discard(6, 1)).len(),
+        1
+    );
+    assert!(
+        (counter_samples(&session.metrics, "bgp_evpn_nlri_discarded_total")[0].1 - 18.0).abs()
+            < f64::EPSILON
+    );
 }

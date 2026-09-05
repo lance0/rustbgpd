@@ -498,6 +498,33 @@ pub fn materialize_attrs(
     }
 }
 impl PeerSession {
+    /// Keep every discard observable without warning on every UPDATE.
+    pub(super) fn record_evpn_discard(&mut self, route_type: u8, discarded: u32) {
+        self.metrics.record_evpn_nlri_discarded_by_type(
+            &self.peer_label,
+            route_type,
+            u64::from(discarded),
+        );
+        let warned = &mut self.evpn_discard_warned[usize::from(route_type)];
+        if !*warned {
+            *warned = true;
+            warn!(
+                peer = %self.peer_label,
+                family = "evpn",
+                route_type,
+                discarded,
+                "discarded unrecognized or unsupported EVPN NLRIs; further discards counted in bgp_evpn_nlri_discarded_by_type_total"
+            );
+        }
+        debug!(
+            peer = %self.peer_label,
+            family = "evpn",
+            route_type,
+            discarded,
+            "discarded unrecognized or unsupported EVPN NLRIs"
+        );
+    }
+
     /// Preserve the established OTC ingress diagnostic surfaces for a
     /// decision that rejects one or more unicast announcements.
     fn observe_otc_ingress_block(&mut self, parsed: &ParsedUpdate, reason: OtcBlockReason) {
@@ -1289,20 +1316,8 @@ impl PeerSession {
         };
         let malformed = revised.malformed;
         let parsed = revised.update;
-        let mut evpn_discarded_total = 0_u64;
         for (route_type, discarded) in evpn_discarded {
-            debug!(
-                peer = %self.peer_label,
-                family = "evpn",
-                route_type,
-                discarded,
-                "discarded unrecognized or unsupported EVPN NLRIs"
-            );
-            evpn_discarded_total = evpn_discarded_total.saturating_add(u64::from(discarded));
-        }
-        if evpn_discarded_total > 0 {
-            self.metrics
-                .record_evpn_nlri_discarded(&self.peer_label, evpn_discarded_total);
+            self.record_evpn_discard(route_type, discarded);
         }
         for m in &malformed {
             warn!(

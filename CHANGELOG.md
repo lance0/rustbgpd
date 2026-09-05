@@ -13,6 +13,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- EVPN discard visibility by wire route type through the additive
+  `bgp_evpn_nlri_discarded_by_type_total{peer,route_type}` counter and one
+  warning per type per TCP connection. The existing peer aggregate counter
+  and RFC 7606 discard behavior are unchanged; repeated discards continue
+  counting without repeated warnings.
+
 - `just lab quickstart up|verify|break|explain|down`: a guided local BGP
   exercise using the Docker Compose demo. Verify a route, remove its import
   policy, explain the RFC 8212 rejection, and restore the policy.

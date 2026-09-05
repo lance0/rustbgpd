@@ -566,6 +566,7 @@ impl PeerSession {
         self.tcp_ao_selection_observed = false;
         self.clear_bmp_stream_repair();
         self.reset_slow_peer_state();
+        self.evpn_discard_warned.fill(false);
     }
 
     /// Clear TCP state after disconnect or error. Same writer-channel
@@ -588,6 +589,7 @@ impl PeerSession {
         self.tcp_ao_selection_observed = false;
         self.clear_bmp_stream_repair();
         self.reset_slow_peer_state();
+        self.evpn_discard_warned.fill(false);
     }
 
     /// Abandon any pending BMP divergence repair (LAN-200). Once the TCP
