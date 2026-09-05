@@ -639,6 +639,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   trailing bytes after a RIB record's declared entries without emitting
   a partial snapshot. Legacy non-Add-Path encoding is unchanged.
 
+- EVPN Linux route withdrawal treats an already-absent kernel route as
+  successfully removed, including single-path and ECMP IP-VRF routes. This
+  clears owned state instead of retrying the deletion indefinitely.
+
 ### Documentation
 
 - Publish a descriptive raw bridge event-skew receipt across six pinned Jammy
