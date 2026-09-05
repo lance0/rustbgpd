@@ -50,7 +50,11 @@
 //! routes whose next-hop matches the local instance's `local_vtep_ip`
 //! — otherwise the originator would see its own re-Inject as a
 //! contender and bump indefinitely. The polling code drops self-NH
-//! routes before the projection.
+//! routes before the projection. Routes advertised by a PE on the
+//! VNI's own Ethernet Segment are dropped at the same point: they are
+//! peer-sync routes (RFC 7432 §15, RFC 9721 §6.4), and treating them
+//! as contenders would make an all-active pair ratchet each other's
+//! sequence and count the echo as duplicate-MAC moves.
 //!
 //! ## Reference
 //!

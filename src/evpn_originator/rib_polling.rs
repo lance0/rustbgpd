@@ -9,8 +9,9 @@ use crate::evpn_originator::duplicate_mac::{
     apply_actions_with_duplicate_policy, outstanding_route_keys_for_mac,
     remote_route_processing_suppressed, suppress_local_originations_for_mac,
 };
+use rustbgpd_evpn::is_same_segment_peer;
 
-type StickyMacWinnerKey = (EvpnInstanceId, MacAddress, IpAddr, Option<u32>);
+type MacWinnerKey = (EvpnInstanceId, MacAddress, IpAddr, Option<u32>);
 
 /// Subscribe to the RIB's EVPN route-event broadcast. Returns `None`
 /// if the RIB channel is full / closed or if the reply was dropped —
@@ -92,7 +93,7 @@ pub(super) async fn repoll_rib(
     vni_to_esi: &std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
 ) -> Result<(), RibQueryError> {
     let routes = query_evpn_routes(rib_tx).await?;
-    let (new_mac_view, new_mac_ip_view) = build_remote_views(instances, &routes);
+    let (new_mac_view, new_mac_ip_view) = build_remote_views(instances, &routes, vni_to_esi);
     let mut suppressed_remote_diffs: BTreeSet<(EvpnInstanceId, MacAddress)> = BTreeSet::new();
 
     // --- MAC-only contender diff ---
@@ -323,10 +324,13 @@ pub(super) async fn handle_evpn_event_coalesced(
     }
 }
 
-fn sticky_by_mac_winner(
+/// `(sticky, esi)` of each projected route keyed by the fields
+/// `project_evpn_routes` keeps on its winner, so the MAC-only view can
+/// recover the attributes the collapsed `RemoteMacEntry` drops.
+fn sticky_and_esi_by_mac_winner(
     projected: &[(ProjectedEvpnRoute, bool)],
-) -> BTreeMap<StickyMacWinnerKey, bool> {
-    let mut sticky_by_winner = BTreeMap::new();
+) -> BTreeMap<MacWinnerKey, (bool, EthernetSegmentIdentifier)> {
+    let mut by_winner = BTreeMap::new();
     for (route, sticky) in projected {
         let raw_vni = route.label1.as_vni();
         if raw_vni == 0 {
@@ -335,16 +339,21 @@ fn sticky_by_mac_winner(
         let Ok(vni) = rustbgpd_evpn::EvpnInstanceId::new(raw_vni) else {
             continue;
         };
-        sticky_by_winner
+        by_winner
             .entry((vni, route.mac, route.next_hop, route.mobility_sequence))
-            .or_insert(*sticky);
+            .or_insert((*sticky, route.esi));
     }
-    sticky_by_winner
+    by_winner
 }
 
 /// Build both contender maps from a flat set of best-path
 /// `EvpnRibRoute`s. Drops self-NH routes per the module-level
-/// "self-origination filter" rule.
+/// "self-origination filter" rule, and drops routes advertised by a PE
+/// on the VNI's own Ethernet Segment (`vni_to_esi`, RFC 9721 §6.4):
+/// those are peer-sync routes, not mobility contenders, so they must
+/// never reach an originator or count as a duplicate-MAC move. This is
+/// the only producer of both maps, so filtering here covers every
+/// learn, remote-change, replay, and `view_present` path at once.
 ///
 /// MAC-only and MAC+IP are independent advertisements per RFC 9135
 /// §7.2.3, so the two maps are constructed independently:
@@ -358,6 +367,7 @@ fn sticky_by_mac_winner(
 pub(super) fn build_remote_views(
     instances: &EvpnInstanceTable,
     routes: &[EvpnRibRoute],
+    vni_to_esi: &BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
 ) -> (RemoteMacViewMap, RemoteMacIpViewMap) {
     let projected: Vec<(ProjectedEvpnRoute, bool)> = routes
         .iter()
@@ -365,6 +375,12 @@ pub(super) fn build_remote_views(
             let EvpnRoute::MacIp(macip) = &r.route else {
                 return None;
             };
+            let local_esi = rustbgpd_evpn::EvpnInstanceId::new(macip.label1.as_vni())
+                .ok()
+                .and_then(|vni| vni_to_esi.get(&vni).copied());
+            if local_esi.is_some_and(|local| is_same_segment_peer(macip.esi, local)) {
+                return None;
+            }
             let (sticky, seq) = extract_mac_mobility_full(&r.attributes);
             Some((
                 ProjectedEvpnRoute {
@@ -381,16 +397,16 @@ pub(super) fn build_remote_views(
             ))
         })
         .collect();
-    let sticky_by_winner = sticky_by_mac_winner(&projected);
+    let attrs_by_winner = sticky_and_esi_by_mac_winner(&projected);
 
     // --- MAC-only map (collapses to per-(VNI, MAC) winner) ---
     let table = project_evpn_routes(instances, projected.iter().map(|(p, _)| p.clone()));
     let mut mac_view: RemoteMacViewMap = BTreeMap::new();
     for ((vni, mac), entry) in table.iter() {
-        let sticky = sticky_by_winner
+        let (sticky, esi) = attrs_by_winner
             .get(&(*vni, *mac, entry.remote_vtep_ip, entry.mobility_sequence))
             .copied()
-            .unwrap_or(false);
+            .unwrap_or((false, EthernetSegmentIdentifier::ZERO));
         mac_view.insert(
             (*vni, *mac),
             RemoteMacView {
@@ -398,6 +414,7 @@ pub(super) fn build_remote_views(
                 mobility_sequence: entry.mobility_sequence,
                 sticky,
                 next_hop: entry.remote_vtep_ip,
+                esi,
             },
         );
     }
@@ -452,6 +469,7 @@ pub(super) fn build_remote_views(
                 mobility_sequence: p.mobility_sequence,
                 sticky,
                 next_hop: p.next_hop,
+                esi: p.esi,
             },
         );
     }
@@ -556,8 +574,9 @@ mod partial_extended_community_tests {
             ))
             .unwrap();
 
-        let canonical_views = build_remote_views(&instances, &[canonical]);
-        let partial_views = build_remote_views(&instances, &[partial]);
+        let no_segments = BTreeMap::new();
+        let canonical_views = build_remote_views(&instances, &[canonical], &no_segments);
+        let partial_views = build_remote_views(&instances, &[partial], &no_segments);
         assert_eq!(partial_views, canonical_views);
 
         let mac_view = partial_views

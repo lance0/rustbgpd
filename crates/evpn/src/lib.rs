@@ -154,7 +154,7 @@ pub use managed_netdev::{
     parse_ownership_stamp, svd_vxlan_ownership_stamp, vlan_upper_ownership_stamp,
     vrf_ownership_stamp, vxlan_ownership_stamp,
 };
-pub use origination::{LocalMacOriginator, OriginationAction, RemoteMacView};
+pub use origination::{LocalMacOriginator, OriginationAction, RemoteMacView, is_same_segment_peer};
 pub use origination_es::{LocalEadPerEsOriginator, LocalEadPerEviOriginator, LocalEsOriginator};
 pub use origination_macip::{LocalMacIpOriginator, MacIpKey, RemoteMacIpView};
 pub use projection::{

@@ -91,7 +91,9 @@
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 
-use rustbgpd_wire::{EthernetTagId, EvpnRouteKey, MacAddress, RouteDistinguisher};
+use rustbgpd_wire::{
+    EthernetSegmentIdentifier, EthernetTagId, EvpnRouteKey, MacAddress, RouteDistinguisher,
+};
 
 use crate::EvpnInstanceId;
 
@@ -99,8 +101,10 @@ use crate::EvpnInstanceId;
 /// best-path *non-self* remote Type 2 for some `(VNI, MAC)`.
 ///
 /// The daemon must filter out self-originated routes (next-hop ==
-/// `instance.local_vtep_ip`) before passing this in, so the state
-/// machine never sees its own re-Inject as a contender.
+/// `instance.local_vtep_ip`) and same-segment peer routes
+/// ([`is_same_segment_peer`]) before passing this in, so the state
+/// machine never sees its own re-Inject or an Ethernet Segment peer's
+/// peer-sync advertisement as a contender.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteMacView {
     /// MAC the remote view is for.
@@ -113,6 +117,27 @@ pub struct RemoteMacView {
     /// Remote VTEP next-hop. Carried for daemon-side telemetry; the
     /// state machine does not consult it.
     pub next_hop: IpAddr,
+    /// Ethernet Segment Identifier on the remote route
+    /// (`EthernetSegmentIdentifier::ZERO` for a single-homed origin).
+    /// Carried so the segment the contender sits on is visible; the
+    /// state machine does not consult it.
+    pub esi: EthernetSegmentIdentifier,
+}
+
+/// Whether a Type 2 route carrying `remote_esi` was advertised by a PE
+/// attached to the local Ethernet Segment `local_esi`.
+///
+/// RFC 7432 §15 and RFC 9721 §6.4/§6.5: a MAC or MAC/IP advertised by
+/// another PE on the same Ethernet Segment is a peer-sync route, not a
+/// mobility event, so it must neither raise the local MAC Mobility
+/// sequence nor count as a duplicate-MAC move. The zero ESI means
+/// single-homed on either side and never identifies a shared segment.
+#[must_use]
+pub fn is_same_segment_peer(
+    remote_esi: EthernetSegmentIdentifier,
+    local_esi: EthernetSegmentIdentifier,
+) -> bool {
+    remote_esi == local_esi && !remote_esi.is_zero()
 }
 
 /// Action the daemon-side adapter must execute against the RIB.
@@ -480,7 +505,33 @@ mod tests {
             mobility_sequence: seq,
             sticky: false,
             next_hop: "10.0.0.99".parse().unwrap(),
+            esi: EthernetSegmentIdentifier::ZERO,
         }
+    }
+
+    fn esi(seed: u8) -> EthernetSegmentIdentifier {
+        let mut bytes = [0u8; 10];
+        bytes[0] = 0x03;
+        bytes[9] = seed;
+        EthernetSegmentIdentifier::new(bytes)
+    }
+
+    #[test]
+    fn same_segment_peer_requires_equal_non_zero_esi() {
+        assert!(is_same_segment_peer(esi(1), esi(1)));
+        assert!(!is_same_segment_peer(esi(1), esi(2)));
+        assert!(!is_same_segment_peer(
+            EthernetSegmentIdentifier::ZERO,
+            EthernetSegmentIdentifier::ZERO
+        ));
+        assert!(!is_same_segment_peer(
+            EthernetSegmentIdentifier::ZERO,
+            esi(1)
+        ));
+        assert!(!is_same_segment_peer(
+            esi(1),
+            EthernetSegmentIdentifier::ZERO
+        ));
     }
 
     fn assert_inject(action: &OriginationAction, expected_seq: Option<u32>, expected_sticky: bool) {
@@ -856,6 +907,7 @@ mod tests {
                         mobility_sequence: Some(s),
                         sticky: false,
                         next_hop: "10.0.0.99".parse().unwrap(),
+                        esi: EthernetSegmentIdentifier::ZERO,
                     });
                     o.on_local_learned(*mac, *ifindex, *sticky, v.as_ref());
                 }
@@ -868,6 +920,7 @@ mod tests {
                         mobility_sequence: Some(s),
                         sticky: false,
                         next_hop: "10.0.0.99".parse().unwrap(),
+                        esi: EthernetSegmentIdentifier::ZERO,
                     });
                     o.on_remote_changed(*mac, v.as_ref());
                 }
