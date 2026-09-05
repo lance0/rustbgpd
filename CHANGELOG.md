@@ -465,6 +465,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   while a re-established peer's initial outbound registration is deferred.
   Stale routes still expire, and the pending registration completes normally.
 
+- `rbgp rib` best-path and advertised explanations reject conflicting or
+  unsupported `--family` selectors before connecting, instead of silently
+  returning an explanation for the prefix's family. Matching IPv4/IPv6 aliases
+  and omitted-family inference remain supported.
+
 - `rustbgpd-wire` shutdown communication errors now implement `Display` and
   `std::error::Error` for downstream error propagation, with bounded static
   descriptions. Decoding and structured log categories are unchanged.
