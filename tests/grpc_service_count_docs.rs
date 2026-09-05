@@ -173,6 +173,6 @@ fn documented_grpc_service_counts_match_proto_inventory() {
         "stale gRPC service count claims:\n{}",
         mismatches.join("\n")
     );
-    assert_eq!(total_claims, 5, "expected five total-service claims");
-    assert_eq!(native_claims, 8, "expected eight native-service claims");
+    assert_eq!(total_claims, 4, "expected four total-service claims");
+    assert_eq!(native_claims, 6, "expected six native-service claims");
 }

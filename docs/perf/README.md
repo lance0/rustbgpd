@@ -1,8 +1,92 @@
 # Performance evidence index
 
-> **Document class: CURRENT.** This maintained index describes the current
-> evidence inventory; linked receipts remain historical and bounded to their
-> stated date and shape.
+> **Document class: CURRENT.** This maintained index summarizes dated measurements within their published scope.
+
+Find the measured route-server, route-reflector, and route-import results and their source receipts.
+
+Each receipt records its workload, versions, measurement dates, limitations,
+and artifacts. These results describe those workloads, not a performance
+guarantee for another deployment. The [complete receipts index](../RECEIPTS.md)
+also covers interop and archived soaks.
+
+## Route-server and route-reflector results
+
+Each result below links to its published, reproducible receipt:
+
+- **Policy reload at IXP scale** (700 route-server clients × 400,400 routes,
+  live churn, same harness / same host — the policy-file reload, not the IRR
+  filter refresh below): new policy fully delivered to every member in
+  **1.21–1.35 s p50** for rustbgpd v0.68.0 source-equivalent runs. The dated
+  matrix retains BIRD and OpenBGPD context separately (historical matrix
+  measured 2026-08-08; current rustbgpd rows measured 2026-08-30),
+  [IXP receipt matrix](ixp-matrix-2026-07.md)
+- **IRR-scale filter reload** (320 route-server members × 183,040 generated
+  prefixes, same harness / same host): v0.68.0 source-equivalent completion p50
+  **0.85–1.09 s** across 0%, 10%, and 50% received-view overlap, with 320/320
+  sessions, zero parse errors, and the exact expected received-view delta in
+  all twelve roots. BIRD completed in 11.86–15.21 s and OpenBGPD in
+  42.94–61.96 s at this fixed shape — [current receipt](irr-reload-v0680-2026-08.md),
+  measured 2026-08-30
+- **Member-flap propagation** (50 members flap, 650 observers): re-announce
+  p50 **0.36–0.39 s** in the current v0.68.0 source-equivalent rows. The
+  dated matrix retains BIRD and OpenBGPD comparison rows separately — current
+  rustbgpd measured 2026-08-30,
+  [same matrix](ixp-matrix-2026-07.md#s3--flapstorm-member-down--member-up-propagation)
+- **Cold start**: full 400,400-route table delivered to all 700 members in
+  **3.4 s** in the current v0.68.0 source-equivalent rows. The dated matrix
+  retains BIRD and OpenBGPD comparison rows — current rustbgpd measured
+  2026-08-30,
+  [same matrix](ixp-matrix-2026-07.md#s1--cold-convergence)
+- **Route-reflector scale**: 1,000 RR clients × 100k routes converge on the
+  wire in **0.32–0.34 s** at **383,176–404,892 KiB** direct-process RSS in
+  three current source-equivalent v0.68.0 runs — historical receipt measured 2026-07-03;
+  current rows measured 2026-08-30,
+  [1000-peer scale receipt](scale-receipt-2026-07.md)
+- **The losses, stated plainly**: OpenBGPD 9.2 holds a smaller reload stall
+  (p50 0.213–0.238 s vs current rustbgpd's 0.384–0.529 s), and BIRD keeps the
+  settled-RSS win under flap churn (337/328 MiB vs current rustbgpd's 440/449
+  MiB at S3). Current rustbgpd withdraw p50 is 0.30–0.43 s. At S2, current
+  rustbgpd settles at 373/372 MiB versus BIRD's dated 422/412 MiB — published in the
+  [same receipt](ixp-matrix-2026-07.md#memory), methodology and
+  fairness protocol included. Cross-daemon memory is not ranked in the current
+  IRR receipt because daemon and container defaults differ.
+
+The rustbgpd figures above are current v0.68.0 source-equivalent rows measured
+2026-08-30. BIRD remains the v0.64.0 same-host refresh measured 2026-08-08;
+OpenBGPD 9.2 is a supplemental comparator amendment measured 2026-08-30.
+The mixed-date boundary and earlier bands are preserved in the receipt.
+
+## Earlier route-reflector measurements
+
+**Update-group fanout** — peers with provably identical staged output share
+one staging pass: ~27x faster 100k-route convergence at 256 uniform RR
+clients (15.1 s to 0.56 s), measured 2026-07-03; v2 extends sharing to
+VPNv4/v6 with per-member RT filtering at emit
+([receipt](scale-receipt-2026-07.md)).
+
+At route-reflector shapes, the
+[1000-peer scale receipt](scale-receipt-2026-07.md), measured 2026-07-03,
+records 1,000 uniform RR clients × 100k routes converging on the
+wire in 1.82 s at 419 MiB
+whole-process RSS, and 1,000 clients × 100k VPNv4 in 12.60 s / 625 MiB uniform
+and 3.92 s / 636 MiB with heterogeneous ~10% RT memberships (vs ~73 s / ~31 GiB
+and ~12.5 s / ~5.7 GiB extrapolated per-peer), with a one-RT membership flip
+delivering its 1600-route delta in ~15 ms with zero policy evaluations.
+
+## Route import comparisons
+
+The freshest published [v0.68.0 cross-stack bgperf2
+receipt](competitive-bgperf2-v0680-2026-08.md), measured 2026-08-30,
+is the headline same-host IPv4 import/convergence comparison. All 80 cells
+reached the exact expected route count across five fixed shapes; the largest is
+two peers × 100,000 prefixes, not a full-table cell. Microbenchmarks and memory
+scaling are in [Benchmarks](../BENCHMARKS.md). That page also retains
+the corrected July campaign as explicitly historical evidence; it supports no
+cross-daemon ranking. Every receipt is indexed in
+[the receipts index](../RECEIPTS.md); GoBGP-specific parity is in
+[the GoBGP parity reference](../gobgp-parity.md).
+
+## Reading the archive
 
 This directory is a historical evidence archive. Each row reports only the
 workload and metadata stated by its linked file; it is not a claim about every

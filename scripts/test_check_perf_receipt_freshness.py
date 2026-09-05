@@ -149,7 +149,7 @@ class TemporaryReceiptRepository:
 
     def write_contract_files(self) -> None:
         claims = (
-            ("README.md", "Fixture README claim"),
+            ("docs/perf/README.md", "Fixture performance claim"),
             ("docs/BENCHMARKS.md", "Fixture benchmark claim"),
             ("docs/COMPARISON.md", "Fixture comparison claim"),
             ("docs/ixp-evaluation.md", "Fixture evaluation claim"),
@@ -168,7 +168,7 @@ class TemporaryReceiptRepository:
             ],
             "claims": [
                 {"source": source, "anchor": anchor, "receipt": self.receipt}
-                for source, anchor in claims
+                for source, anchor in sorted(claims)
             ],
         }
         self.write(
@@ -182,8 +182,8 @@ class TemporaryReceiptRepository:
             f"Release commit: `{self.release_commit}`\n",
         )
         self.write(
-            "README.md",
-            f"- **Fixture README claim** [receipt]({self.receipt})\n",
+            "docs/perf/README.md",
+            "- **Fixture performance claim** [receipt](fixture-receipt.md)\n",
         )
         self.write(
             "docs/BENCHMARKS.md",
@@ -226,7 +226,7 @@ class TemporaryReceiptRepository:
 
     def add_measured_date_to_claims(self) -> None:
         for relative, anchor in (
-            ("README.md", "Fixture README claim"),
+            ("docs/perf/README.md", "Fixture performance claim"),
             ("docs/BENCHMARKS.md", "Fixture benchmark claim"),
             ("docs/COMPARISON.md", "Fixture comparison claim"),
             ("docs/ixp-evaluation.md", "Fixture evaluation claim"),
@@ -315,16 +315,18 @@ class PerfReceiptFreshnessTests(unittest.TestCase):
             checker.parse_manifest(json.dumps(document))
 
     def test_missing_or_duplicate_claim_anchor_is_red(self) -> None:
-        readme = text("README.md")
+        summary = text("docs/perf/README.md")
         self.assert_red(
             "occurs 0 times",
             overrides={
-                "README.md": readme.replace("- **IRR-scale filter reload**", "- **IRR reload**", 1)
+                "docs/perf/README.md": summary.replace(
+                    "- **IRR-scale filter reload**", "- **IRR reload**", 1
+                )
             },
         )
         self.assert_red(
             "occurs 2 times",
-            overrides={"README.md": readme + "\n- **IRR-scale filter reload** duplicate\n"},
+            overrides={"docs/perf/README.md": summary + "\n- **IRR-scale filter reload** duplicate\n"},
         )
 
     def test_claim_must_link_the_manifested_receipt(self) -> None:
@@ -341,14 +343,17 @@ class PerfReceiptFreshnessTests(unittest.TestCase):
         )
 
     def test_unmanifested_receipt_link_in_an_enforced_block_is_red(self) -> None:
-        readme = text("README.md")
-        mutated = readme.replace(
-            "[1000-peer scale receipt](docs/perf/scale-receipt-2026-07.md)",
-            "[1000-peer scale receipt](docs/perf/scale-receipt-2026-07.md) and "
-            "[another receipt](docs/perf/route-server-1000-2026-07.md)",
+        summary = text("docs/perf/README.md")
+        mutated = summary.replace(
+            "[1000-peer scale receipt](scale-receipt-2026-07.md)",
+            "[1000-peer scale receipt](scale-receipt-2026-07.md) and "
+            "[another receipt](route-server-1000-2026-07.md)",
             1,
         )
-        self.assert_red("receipt links differ from its manifest", overrides={"README.md": mutated})
+        self.assert_red(
+            "receipt links differ from its manifest",
+            overrides={"docs/perf/README.md": mutated},
+        )
 
     def test_each_stale_claim_requires_its_exact_date(self) -> None:
         comparison = text("docs/COMPARISON.md")
@@ -367,8 +372,10 @@ class PerfReceiptFreshnessTests(unittest.TestCase):
         self.assert_red("has no manifested measured_on date", manifest)
 
     def test_fresh_claim_does_not_require_a_date(self) -> None:
-        readme = text("README.md").replace("  measured 2026-08-08,\n", "", 1)
-        self.assertEqual(self.errors(overrides={"README.md": readme}), [])
+        original = text("docs/perf/README.md")
+        summary = original.replace("  measured 2026-08-30\n", "", 1)
+        self.assertNotEqual(original, summary)
+        self.assertEqual(self.errors(overrides={"docs/perf/README.md": summary}), [])
 
     def test_receipt_must_record_manifested_provenance(self) -> None:
         path = "docs/perf/ixp-matrix-2026-07.md"
