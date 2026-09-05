@@ -51,9 +51,9 @@ run arguments alongside any published results.
 
 The two originators use distinct IPv4-based RDs and deterministic MAC-only
 Type 2 keys, Ethernet Tag 0, label 100, and AS 65000. Every peer is an iBGP RR
-client. Initial injection is unpaced, in batches of 40 routes. Each source
-then waits the configured delay and optionally churns at 1,000 route events
-per second: a withdrawal and reannouncement each consume one event. The
+client. Initial injection is unpaced, in batches of 40 routes. When churn is
+enabled, each source then waits the configured delay and churns at 1,000 route
+events per second: a withdrawal and reannouncement each consume one event. The
 reflector has eight Tokio workers; each synthetic peer has one.
 
 The runner deliberately accepts only this workload shape:

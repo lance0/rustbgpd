@@ -171,7 +171,9 @@ try:
     while any(p.poll() is None for p in monitors):
         if daemon.poll() is not None:
             raise RuntimeError("reflector exited; inspect daemon logs")
-        if time.monotonic() - started >= 190 + args.churn_delay_seconds + args.churn_seconds:
+        # Allow the monitor's convergence, stability and observation windows,
+        # plus headroom for session setup and process shutdown.
+        if time.monotonic() - started >= 210 + args.churn_delay_seconds + args.churn_seconds:
             raise RuntimeError("overall deadline exceeded")
         stat = Path(f"/proc/{daemon.pid}/stat").read_text().split()
         samples.append(
@@ -252,6 +254,8 @@ try:
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     with opener.open("http://127.77.255.254:9179/metrics", timeout=10) as response:
         (root / "metrics.txt").write_bytes(response.read())
+    if not samples:
+        raise RuntimeError("no reflector resource samples collected; inspect peer logs")
     summary = {
         "receivers": args.receivers,
         "originators": 2,
