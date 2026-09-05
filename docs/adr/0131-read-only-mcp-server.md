@@ -136,10 +136,10 @@ reduced to `stopped_at_gate` by the code path the unicast tool uses.
 Three fields on this surface are read wrongly by default, and the responses say
 so in words rather than leaving the inference to a model:
 
-- **`retention_note`** on `rbgp_list_rejected`. An empty list with retention
-  disabled means something completely different from an empty list with
-  retention on, and the tool must never report "no rejected routes" for the
-  first case.
+- **`retention_note`** on `rbgp_list_rejected`. The note identifies whether
+  retention is enabled and reports known capacity evictions separately from
+  occupancy. Acceptance or withdrawal can remove retained entries, so even an
+  enabled, empty store does not prove that nothing was rejected.
 - **`received_note`** on `rbgp_explain_evpn_route`. The proto is explicit that
   absence of retained accepted state is neither an import-rejection explanation
   nor proof the peer never sent the key — EVPN import rejection history is not
@@ -213,6 +213,15 @@ connects to a capped remote listener like any other API client. Colocating it
 on the daemon host is documented as the sharp edge, with the `local-operator`
 tier consequence spelled out.
 
+Remote HTTPS connections use mutual TLS with an explicit server CA and client
+certificate/key. The daemon maps the verified certificate principal to the
+observer role; the MCP client verifies the server identity. Incomplete TLS
+options and TLS options on plaintext or Unix endpoints are rejected.
+
+Every tool bounds the complete unary gRPC response at 30 seconds, including
+connection readiness and body decoding. A stalled response fails the tool
+call without an automatic retry.
+
 ### Packaging: source only, opt-in build, shipped nowhere
 
 The binary is deliberately absent from every release artifact. It is not in
@@ -221,11 +230,11 @@ the release tarball's copy list, not in the deb or rpm payload
 copies binaries by name, so nothing picks it up implicitly — verified against
 the release workflow, the packaging manifest, and the Dockerfile.
 
-The workspace gains a `default-members` list containing every member except
-`tools/mcp`, so a plain `cargo build` does not pay the MCP SDK compile cost.
-CI and the local gates pass `--workspace` or an explicit `-p` everywhere it
-matters, so the crate stays fully built, linted, and tested; the exclusion
-changes only the implicit default set.
+The existing root-package default stays unchanged: a plain `cargo build`
+selects `rustbgpd`, while `cargo build -p rustbgpd-mcp` opts into the MCP
+binary and its SDK dependencies. No `default-members` override is needed.
+CI and the local gates use `--workspace` or an explicit `-p`, so the MCP
+crate is still built, linted, and tested.
 
 The crate stays **in this repository**. Splitting it out would turn the
 inventory contract test into a cross-repo synchronization problem: it reads

@@ -22,33 +22,6 @@ members = [
     "tools/rs-config-render",
     "tools/mcp",
 ]
-# `tools/mcp` is deliberately outside the default set: a plain `cargo build`
-# must not pay the MCP SDK compile cost, and the binary is shipped in no
-# release artifact. CI and the local gates pass `--workspace` or an explicit
-# `-p`, so it stays fully built, linted, and tested.
-default-members = [
-    ".",
-    "crates/wire",
-    "crates/bfd",
-    "crates/fsm",
-    "crates/transport",
-    "crates/rib",
-    "crates/policy",
-    "crates/api",
-    "crates/telemetry",
-    "crates/rpki",
-    "crates/cli",
-    "crates/bmp",
-    "crates/mrt",
-    "crates/evpn",
-    "crates/evpn-linux",
-    "crates/event-history",
-    "bench/evpn-load",
-    "examples/event-bridge",
-    "examples/birdwatcher-adapter",
-    "examples/peer-loop",
-    "tools/rs-config-render",
-]
 resolver = "2"
 
 [workspace.package]

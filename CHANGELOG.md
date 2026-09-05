@@ -21,7 +21,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `cargo build -p rustbgpd-mcp`. Read-only rests on two controls: no write
   tool exists in the binary (fenced by a contract test against the gRPC
   method inventory) and a listener capped at `max_tier = "sensitive_read"`.
-  Neither is sufficient alone. See the
+  Remote HTTPS connections verify the server and present a client certificate;
+  every tool bounds the complete gRPC response at 30 seconds. See the
   [how-to](docs/how-to/mcp-server.md) and
   [ADR-0131](docs/adr/0131-read-only-mcp-server.md).
 

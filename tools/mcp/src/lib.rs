@@ -30,7 +30,9 @@
 #![warn(clippy::pedantic)]
 
 use std::fmt::Write as _;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
@@ -42,7 +44,7 @@ use serde::{Deserialize, Serialize};
 use tonic::metadata::AsciiMetadataValue;
 use tonic::service::Interceptor;
 use tonic::service::interceptor::InterceptedService;
-use tonic::transport::{Channel, Endpoint};
+use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 use tonic::{Request, Status};
 
 /// Every tool this server registers, paired with the gRPC method it calls.
@@ -153,6 +155,88 @@ pub fn parse_daemon_endpoint(addr: &str) -> Result<DaemonEndpoint, std::io::Erro
         )
     })?;
     Ok(DaemonEndpoint::Tcp(addr.to_string()))
+}
+
+/// Client-side TLS credentials for the daemon's mutual-TLS listener.
+#[derive(clap::Args, Debug, Default)]
+pub struct TlsOptions {
+    /// PEM CA certificate used to verify the daemon.
+    #[arg(long = "grpc-tls-ca-file", env = "RUSTBGPD_GRPC_TLS_CA_FILE")]
+    pub ca_file: Option<PathBuf>,
+    /// PEM client certificate presented to the daemon.
+    #[arg(long = "grpc-tls-cert-file", env = "RUSTBGPD_GRPC_TLS_CERT_FILE")]
+    pub cert_file: Option<PathBuf>,
+    /// PEM private key for the client certificate.
+    #[arg(long = "grpc-tls-key-file", env = "RUSTBGPD_GRPC_TLS_KEY_FILE")]
+    pub key_file: Option<PathBuf>,
+    /// TLS verification name and SNI; defaults to the HTTPS URI host.
+    #[arg(long = "grpc-tls-server-name", env = "RUSTBGPD_GRPC_TLS_SERVER_NAME")]
+    pub server_name: Option<String>,
+}
+
+impl TlsOptions {
+    /// Validate TLS options without reading credential files.
+    ///
+    /// # Errors
+    /// Returns invalid input for incomplete HTTPS credentials or TLS options
+    /// on a plaintext TCP or Unix endpoint.
+    pub fn validate(&self, endpoint: &DaemonEndpoint) -> Result<(), std::io::Error> {
+        let https = matches!(endpoint, DaemonEndpoint::Tcp(uri) if uri.starts_with("https://"));
+        let any = self.ca_file.is_some()
+            || self.cert_file.is_some()
+            || self.key_file.is_some()
+            || self.server_name.is_some();
+        let message = if https
+            && (self.ca_file.is_none() || self.cert_file.is_none() || self.key_file.is_none())
+        {
+            Some(
+                "https:// requires --grpc-tls-ca-file, --grpc-tls-cert-file and --grpc-tls-key-file for mutual TLS",
+            )
+        } else if !https && any {
+            Some("gRPC TLS options require an https:// endpoint")
+        } else if self
+            .server_name
+            .as_ref()
+            .is_some_and(|name| name.trim().is_empty())
+        {
+            Some("--grpc-tls-server-name must not be empty")
+        } else {
+            None
+        };
+        message.map_or(Ok(()), |message| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                message,
+            ))
+        })
+    }
+
+    /// Build a lazy channel, verifying the server and presenting the client identity.
+    ///
+    /// # Errors
+    /// Returns invalid options, unreadable credentials, or invalid TLS configuration.
+    pub fn channel(
+        &self,
+        endpoint: &DaemonEndpoint,
+    ) -> Result<Channel, Box<dyn std::error::Error>> {
+        self.validate(endpoint)?;
+        let mut builder =
+            Endpoint::from_shared(endpoint.channel_uri())?.connect_timeout(Duration::from_secs(5));
+        if let (Some(ca), Some(cert), Some(key)) = (&self.ca_file, &self.cert_file, &self.key_file)
+        {
+            let mut tls = ClientTlsConfig::new()
+                .ca_certificate(Certificate::from_pem(std::fs::read(ca)?))
+                .identity(Identity::from_pem(
+                    std::fs::read(cert)?,
+                    std::fs::read(key)?,
+                ));
+            if let Some(name) = &self.server_name {
+                tls = tls.domain_name(name);
+            }
+            builder = builder.tls_config(tls)?;
+        }
+        Ok(builder.connect_lazy())
+    }
 }
 
 /// Attaches a bearer token to every outbound request when one is configured.
@@ -514,12 +598,11 @@ pub struct ListRejectedResult {
     /// an empty `routes` list is a configuration fact and says nothing about
     /// whether routes were rejected.
     pub retention_enabled: bool,
-    /// The session's retention cap. When the daemon returned exactly this many
-    /// rejections, older ones were displaced.
+    /// The session's retention cap; occupancy alone does not establish eviction.
     pub capacity: u32,
     /// Human-readable statement of what an empty or full listing means here.
     pub retention_note: String,
-    /// The rejections, oldest ordering as the daemon returned them.
+    /// Currently retained rejections, in the order the daemon returned them.
     pub routes: Vec<RejectedRouteLine>,
     /// Rejections the daemon returned that `limit` cut from `routes`. `0` means
     /// the list is complete with respect to what the daemon retained.
@@ -782,6 +865,7 @@ pub struct HealthResult {
 pub struct RustbgpdMcp {
     upstream: Upstream,
     tool_router: ToolRouter<Self>,
+    read_timeout: Duration,
 }
 
 #[tool_router(router = tool_router)]
@@ -792,7 +876,21 @@ impl RustbgpdMcp {
         Self {
             upstream,
             tool_router: Self::tool_router(),
+            read_timeout: Duration::from_secs(30),
         }
+    }
+
+    // Wrap the generated unary future itself: readiness, response headers,
+    // body and protobuf decoding all complete inside this deadline.
+    async fn read<T>(
+        &self,
+        response: impl Future<Output = Result<tonic::Response<T>, Status>>,
+    ) -> Result<T, ErrorData> {
+        tokio::time::timeout(self.read_timeout, response)
+            .await
+            .map_err(|_| map_status(&Status::deadline_exceeded("daemon read response timed out")))?
+            .map(tonic::Response::into_inner)
+            .map_err(|status| map_status(&status))
     }
 
     /// Explain the export decision for one prefix toward one peer, as the full
@@ -809,16 +907,16 @@ impl RustbgpdMcp {
         Parameters(params): Parameters<ExplainExportParams>,
     ) -> Result<Json<ExplainExportResult>, ErrorData> {
         let mut client = proto::rib_service_client::RibServiceClient::new(self.upstream.clone());
-        let response = client
-            .explain_advertised_route(proto::ExplainAdvertisedRouteRequest {
-                peer_address: params.peer_address.clone(),
-                prefix: params.prefix.clone(),
-                prefix_length: params.prefix_length,
-                ..Default::default()
-            })
-            .await
-            .map_err(|status| map_status(&status))?
-            .into_inner();
+        let response = self
+            .read(
+                client.explain_advertised_route(proto::ExplainAdvertisedRouteRequest {
+                    peer_address: params.peer_address.clone(),
+                    prefix: params.prefix.clone(),
+                    prefix_length: params.prefix_length,
+                    ..Default::default()
+                }),
+            )
+            .await?;
 
         let gates = gate_ladder(&response.gates);
 
@@ -858,17 +956,17 @@ impl RustbgpdMcp {
     ) -> Result<Json<ExplainImportResult>, ErrorData> {
         let mut client =
             proto::policy_service_client::PolicyServiceClient::new(self.upstream.clone());
-        let response = client
-            .explain_import_policy(proto::ExplainImportPolicyRequest {
-                peer_address: params.peer_address,
-                afi_safi: params.family.as_proto(),
-                prefix: params.prefix,
-                prefix_length: params.prefix_length,
-                path_id: params.path_id,
-            })
-            .await
-            .map_err(|status| map_status(&status))?
-            .into_inner();
+        let response = self
+            .read(
+                client.explain_import_policy(proto::ExplainImportPolicyRequest {
+                    peer_address: params.peer_address,
+                    afi_safi: params.family.as_proto(),
+                    prefix: params.prefix,
+                    prefix_length: params.prefix_length,
+                    path_id: params.path_id,
+                }),
+            )
+            .await?;
 
         Ok(Json(ExplainImportResult {
             peer_address: response.peer_address,
@@ -904,15 +1002,13 @@ impl RustbgpdMcp {
         Parameters(params): Parameters<ExplainBestPathParams>,
     ) -> Result<Json<ExplainBestPathResult>, ErrorData> {
         let mut client = proto::rib_service_client::RibServiceClient::new(self.upstream.clone());
-        let response = client
-            .explain_best_path(proto::ExplainBestPathRequest {
+        let response = self
+            .read(client.explain_best_path(proto::ExplainBestPathRequest {
                 prefix: params.prefix,
                 prefix_length: params.prefix_length,
                 peer_address: params.peer_address,
-            })
-            .await
-            .map_err(|status| map_status(&status))?
-            .into_inner();
+            }))
+            .await?;
 
         let best = response.best_route.unwrap_or_default();
         Ok(Json(ExplainBestPathResult {
@@ -955,13 +1051,13 @@ impl RustbgpdMcp {
     ) -> Result<Json<ListRejectedResult>, ErrorData> {
         let mut client =
             proto::policy_service_client::PolicyServiceClient::new(self.upstream.clone());
-        let response = client
-            .list_rejected_routes(proto::ListRejectedRoutesRequest {
-                peer_address: params.peer_address,
-            })
-            .await
-            .map_err(|status| map_status(&status))?
-            .into_inner();
+        let response = self
+            .read(
+                client.list_rejected_routes(proto::ListRejectedRoutesRequest {
+                    peer_address: params.peer_address,
+                }),
+            )
+            .await?;
 
         let retained = response.routes.len();
         let limit = params
@@ -972,7 +1068,13 @@ impl RustbgpdMcp {
         let at_capacity = response.capacity > 0 && retained >= response.capacity as usize;
 
         Ok(Json(ListRejectedResult {
-            retention_note: retention_note(response.retention_enabled, at_capacity, retained),
+            retention_note: retention_note(
+                response.retention_enabled,
+                at_capacity,
+                retained,
+                response.evictions_since_reset,
+                truncated_by_limit,
+            ),
             peer_address: response.peer_address,
             retention_enabled: response.retention_enabled,
             capacity: response.capacity,
@@ -1009,11 +1111,9 @@ impl RustbgpdMcp {
     ) -> Result<Json<ListPeersResult>, ErrorData> {
         let mut client =
             proto::neighbor_service_client::NeighborServiceClient::new(self.upstream.clone());
-        let response = client
-            .list_neighbors(proto::ListNeighborsRequest {})
-            .await
-            .map_err(|status| map_status(&status))?
-            .into_inner();
+        let response = self
+            .read(client.list_neighbors(proto::ListNeighborsRequest {}))
+            .await?;
 
         Ok(Json(ListPeersResult {
             peers: response
@@ -1046,11 +1146,9 @@ impl RustbgpdMcp {
     ) -> Result<Json<HealthResult>, ErrorData> {
         let mut client =
             proto::control_service_client::ControlServiceClient::new(self.upstream.clone());
-        let response = client
-            .get_health(proto::HealthRequest {})
-            .await
-            .map_err(|status| map_status(&status))?
-            .into_inner();
+        let response = self
+            .read(client.get_health(proto::HealthRequest {}))
+            .await?;
 
         Ok(Json(HealthResult {
             healthy: response.healthy,
@@ -1082,15 +1180,13 @@ impl RustbgpdMcp {
     ) -> Result<Json<ExplainEvpnRouteResult>, ErrorData> {
         let mut client = proto::rib_service_client::RibServiceClient::new(self.upstream.clone());
         let received_from = params.received_from.unwrap_or_default();
-        let response = client
-            .explain_evpn_route(proto::ExplainEvpnRouteRequest {
+        let response = self
+            .read(client.explain_evpn_route(proto::ExplainEvpnRouteRequest {
                 key: Some(params.key.into_selector(params.rd)),
                 received_from: received_from.clone(),
                 advertised_to: params.advertised_to.unwrap_or_default(),
-            })
-            .await
-            .map_err(|status| map_status(&status))?
-            .into_inner();
+            }))
+            .await?;
 
         let received = response.received.as_ref().map(evpn_route_line);
         Ok(Json(ExplainEvpnRouteResult {
@@ -1170,7 +1266,7 @@ impl ServerHandler for RustbgpdMcp {
 /// The token argument is never echoed: the rendered config names a placeholder
 /// path so a real token value cannot leak into a pasted snippet.
 #[must_use]
-pub fn print_config(command: &str, grpc_addr: &str, uses_token: bool) -> String {
+pub fn print_config(command: &str, grpc_addr: &str, uses_token: bool, tls: &TlsOptions) -> String {
     let mut args = vec![
         serde_json::Value::from("--grpc-addr"),
         serde_json::Value::from(grpc_addr),
@@ -1178,6 +1274,36 @@ pub fn print_config(command: &str, grpc_addr: &str, uses_token: bool) -> String 
     if uses_token {
         args.push(serde_json::Value::from("--grpc-token-file"));
         args.push(serde_json::Value::from("/path/to/rustbgpd-observer.token"));
+    }
+    for (configured, flag, placeholder) in [
+        (
+            tls.ca_file.is_some(),
+            "--grpc-tls-ca-file",
+            "/path/to/ca.pem",
+        ),
+        (
+            tls.cert_file.is_some(),
+            "--grpc-tls-cert-file",
+            "/path/to/client.crt",
+        ),
+        (
+            tls.key_file.is_some(),
+            "--grpc-tls-key-file",
+            "/path/to/client.key",
+        ),
+    ] {
+        if configured {
+            args.extend([
+                serde_json::Value::from(flag),
+                serde_json::Value::from(placeholder),
+            ]);
+        }
+    }
+    if let Some(name) = &tls.server_name {
+        args.extend([
+            serde_json::Value::from("--grpc-tls-server-name"),
+            serde_json::Value::from(name.as_str()),
+        ]);
     }
     let config = serde_json::json!({
         "mcpServers": {
@@ -1238,25 +1364,43 @@ fn session_state_label(value: i32) -> String {
     )
 }
 
-fn retention_note(enabled: bool, at_capacity: bool, retained: usize) -> String {
-    if !enabled {
-        return "reject retention is disabled on this session ([policy.reject_retention]); an \
-                empty list is a configuration fact and does not mean nothing was rejected"
-            .into();
+fn retention_note(
+    enabled: bool,
+    at_capacity: bool,
+    retained: usize,
+    evictions: Option<u64>,
+    truncated: usize,
+) -> String {
+    let mut note = if enabled {
+        format!(
+            "reject retention is enabled; {retained} entries are currently retained. {} ",
+            if at_capacity {
+                "The store is at capacity."
+            } else {
+                "The store is below capacity."
+            }
+        )
+    } else {
+        "reject retention is disabled on this session ([policy.reject_retention]). ".into()
+    };
+    match evictions {
+        Some(0) => note.push_str("No capacity eviction has occurred since the session reset. "),
+        Some(count) => {
+            let _ = write!(
+                note,
+                "{count} capacity evictions have occurred since the session reset. "
+            );
+        }
+        None => note.push_str("Capacity eviction history is unavailable. "),
     }
-    if at_capacity {
-        return "the retention store is at capacity, so this listing shows the most recent \
-                rejections and older ones were displaced"
-            .into();
+    if truncated > 0 {
+        let _ = write!(
+            note,
+            "The output limit omits {truncated} currently retained entries. "
+        );
     }
-    if retained == 0 {
-        return "reject retention is enabled and the store is empty: this session has rejected \
-                nothing since its last reset"
-            .into();
-    }
-    "reject retention is enabled and the store is below capacity, so this listing is complete for \
-     this session"
-        .into()
+    note.push_str("This is current retained state, not a rejection history: acceptance or withdrawal can remove entries. An empty list does not mean nothing was rejected.");
+    note
 }
 
 fn render_modifications(modifications: Option<&proto::ExplainModifications>) -> Vec<String> {
@@ -1496,19 +1640,35 @@ mod tests {
     }
 
     #[test]
-    fn disabled_retention_never_reads_as_nothing_rejected() {
-        let note = retention_note(false, false, 0);
-        assert!(note.contains("disabled"), "{note}");
-        assert!(
-            note.contains("does not mean nothing was rejected"),
-            "{note}"
-        );
-
-        let empty = retention_note(true, false, 0);
-        assert!(empty.contains("rejected nothing"), "{empty}");
-
-        let full = retention_note(true, true, 32);
-        assert!(full.contains("displaced"), "{full}");
+    fn retention_notes_do_not_infer_history_from_occupancy() {
+        for (enabled, full, retained) in [
+            (false, false, 0),
+            (true, false, 0),
+            (true, false, 3),
+            (true, true, 32),
+        ] {
+            for evictions in [None, Some(0), Some(7)] {
+                for truncated in [0, 2] {
+                    let note = retention_note(enabled, full, retained, evictions, truncated);
+                    assert!(
+                        note.contains("An empty list does not mean nothing was rejected"),
+                        "{note}"
+                    );
+                    assert!(
+                        note.contains("acceptance or withdrawal can remove entries"),
+                        "{note}"
+                    );
+                    assert_eq!(note.contains("output limit omits"), truncated > 0, "{note}");
+                    let expected = match evictions {
+                        None => "history is unavailable",
+                        Some(0) => "No capacity eviction has occurred",
+                        Some(_) => "7 capacity evictions have occurred",
+                    };
+                    assert!(note.contains(expected), "{note}");
+                    assert!(!note.contains("listing is complete"), "{note}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -1577,6 +1737,7 @@ mod tests {
             "/usr/local/bin/rustbgpd-mcp",
             "http://rr1.example.net:50051",
             true,
+            &TlsOptions::default(),
         );
         let parsed: serde_json::Value = serde_json::from_str(&rendered).expect("valid JSON");
         assert_eq!(
@@ -1597,6 +1758,7 @@ mod tests {
             "/usr/local/bin/rustbgpd-mcp",
             "http://127.0.0.1:50051",
             false,
+            &TlsOptions::default(),
         );
         assert!(!without.contains("token"), "{without}");
     }
@@ -1721,3 +1883,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod backend_tests;

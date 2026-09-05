@@ -13,10 +13,10 @@ use std::path::PathBuf;
 use clap::Parser;
 use rmcp::ServiceExt;
 use rustbgpd_mcp::{
-    BearerInterceptor, RustbgpdMcp, load_bearer_authorization, parse_daemon_endpoint, print_config,
+    BearerInterceptor, RustbgpdMcp, TlsOptions, load_bearer_authorization, parse_daemon_endpoint,
+    print_config,
 };
 use tonic::service::interceptor::InterceptedService;
-use tonic::transport::Endpoint;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -40,6 +40,9 @@ struct Args {
     #[arg(long, env = "RUSTBGPD_GRPC_TOKEN_FILE")]
     grpc_token_file: Option<PathBuf>,
 
+    #[command(flatten)]
+    tls: TlsOptions,
+
     /// Print paste-ready `mcpServers` JSON for an MCP host and exit. The token
     /// path is rendered as a placeholder; no token value is ever echoed.
     #[arg(long)]
@@ -49,6 +52,8 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
+    let endpoint = parse_daemon_endpoint(&args.grpc_addr)?;
+    args.tls.validate(&endpoint)?;
 
     if args.print_config {
         let command = std::env::current_exe().map_or_else(
@@ -57,7 +62,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         println!(
             "{}",
-            print_config(&command, &args.grpc_addr, args.grpc_token_file.is_some())
+            print_config(
+                &command,
+                &args.grpc_addr,
+                args.grpc_token_file.is_some(),
+                &args.tls
+            )
         );
         return Ok(());
     }
@@ -71,12 +81,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_writer(std::io::stderr)
         .init();
 
-    let endpoint = parse_daemon_endpoint(&args.grpc_addr)?;
     tracing::info!(grpc_addr = %args.grpc_addr, "connecting to rustbgpd");
     // Lazy so the server can start before the daemon is reachable; the MCP
     // host spawns it at its own convenience and tool calls report the
     // connection failure when it matters.
-    let channel = Endpoint::from_shared(endpoint.channel_uri())?.connect_lazy();
+    let channel = args.tls.channel(&endpoint)?;
     let authorization = load_bearer_authorization(args.grpc_token_file.as_deref())?;
     let upstream = InterceptedService::new(channel, BearerInterceptor::new(authorization));
 

@@ -20,8 +20,8 @@ other API client.
 That is the honest answer to "do I want an AI-facing process in my production
 environment" — in the recommended deployment, you are not putting one there.
 
-The binary is shipped in no release artifact and is excluded from the default
-workspace build. Build it explicitly when you want it:
+The binary is shipped in no release artifact. Plain `cargo build` keeps its
+existing root-package default; build the MCP server explicitly when needed:
 
 ```sh
 cargo build --release -p rustbgpd-mcp
@@ -29,18 +29,21 @@ cargo build --release -p rustbgpd-mcp
 
 ## Configure a read-only listener on the daemon
 
-Every tool this server exposes calls a `sensitive_read` gRPC method. Cap the
-listener there and map its principal to the `observer` role:
+Every tool calls a `sensitive_read` gRPC method. For remote access, configure
+mutual TLS, cap the listener there, and map the client certificate's principal
+to the `observer` role. This example uses a client certificate with URI SAN
+`rustbgpd://observer/mcp`:
 
 ```toml
 [global.telemetry.grpc_tcp]
 address = "10.0.0.1:50051"
 max_tier = "sensitive_read"
-token_file = "/etc/rustbgpd/mcp-observer.token"
-principal = "mcp.observer"
+tls_cert_file = "/etc/rustbgpd/pki/server.crt"
+tls_key_file = "/etc/rustbgpd/pki/server.key"
+tls_client_ca_file = "/etc/rustbgpd/pki/client-ca.pem"
 
 [security.grpc.roles]
-"mcp.observer" = "observer"
+"rustbgpd://observer/mcp" = "observer"
 ```
 
 `max_tier` is a hard per-listener ceiling and `observer` is the lowest role
@@ -55,19 +58,27 @@ operator_only RPC /rustbgpd.v1.InjectionService/AddPath
 gRPC authorization is startup configuration. Changing it needs a daemon
 restart, not a reload.
 
-For a TLS deployment, give the listener the `tls_cert_file` / `tls_key_file` /
-`tls_client_ca_file` trio instead of a bearer token and point `--grpc-addr` at
-`https://`. See [configuration](../reference/configuration.md) for the full
-listener contract.
+The MCP client needs the server's CA and its own client certificate/key.
+`https://` requires all three `--grpc-tls-*-file` options below. The endpoint's
+host must match the server certificate; `--grpc-tls-server-name` can select a
+different verification name. TLS options are rejected with `http://` and
+`unix://` endpoints. Do not set `grpc_tcp.principal` on a mutual-TLS listener:
+the daemon derives it from the verified client certificate.
+
+For an existing bearer-token listener, use `--grpc-token-file` with the
+appropriate endpoint. See [configuration](../reference/configuration.md) for
+the listener's token, principal, and role settings.
 
 ## Register the server with an MCP host
 
-`--print-config` emits paste-ready `mcpServers` JSON. It renders a placeholder
-for the token path and never echoes a token value:
+`--print-config` emits `mcpServers` JSON with placeholders for credential-file
+paths. It never echoes token values or certificate/key contents:
 
 ```sh
 rustbgpd-mcp --grpc-addr https://10.0.0.1:50051 \
-  --grpc-token-file /etc/rustbgpd/mcp-observer.token --print-config
+  --grpc-tls-ca-file /etc/rustbgpd/pki/server-ca.pem \
+  --grpc-tls-cert-file /etc/rustbgpd/pki/mcp-client.crt \
+  --grpc-tls-key-file /etc/rustbgpd/pki/mcp-client.key --print-config
 ```
 
 ```json
@@ -77,8 +88,12 @@ rustbgpd-mcp --grpc-addr https://10.0.0.1:50051 \
       "args": [
         "--grpc-addr",
         "https://10.0.0.1:50051",
-        "--grpc-token-file",
-        "/path/to/rustbgpd-observer.token"
+        "--grpc-tls-ca-file",
+        "/path/to/ca.pem",
+        "--grpc-tls-cert-file",
+        "/path/to/client.crt",
+        "--grpc-tls-key-file",
+        "/path/to/client.key"
       ],
       "command": "/usr/local/bin/rustbgpd-mcp"
     }
@@ -86,21 +101,27 @@ rustbgpd-mcp --grpc-addr https://10.0.0.1:50051 \
 }
 ```
 
-Note the token path: the real `--grpc-token-file` value is replaced with a
-placeholder, so a pasted snippet never carries a token. `command` is the
-running binary's own path.
+`command` is the running binary's own path. Replace the credential-file
+placeholders with paths readable by the MCP host before using the snippet.
 
-Replace the placeholder path with the real token file before pasting. For
-Claude Code:
+For Claude Code:
 
 ```sh
 claude mcp add rustbgpd -- /usr/local/bin/rustbgpd-mcp \
   --grpc-addr https://10.0.0.1:50051 \
-  --grpc-token-file /etc/rustbgpd/mcp-observer.token
+  --grpc-tls-ca-file /etc/rustbgpd/pki/server-ca.pem \
+  --grpc-tls-cert-file /etc/rustbgpd/pki/mcp-client.crt \
+  --grpc-tls-key-file /etc/rustbgpd/pki/mcp-client.key
 ```
 
 `--grpc-addr` and `--grpc-token-file` also read `RUSTBGPD_GRPC_ADDR` and
-`RUSTBGPD_GRPC_TOKEN_FILE`.
+`RUSTBGPD_GRPC_TOKEN_FILE`. The TLS options read `RUSTBGPD_GRPC_TLS_CA_FILE`,
+`RUSTBGPD_GRPC_TLS_CERT_FILE`, `RUSTBGPD_GRPC_TLS_KEY_FILE`, and
+`RUSTBGPD_GRPC_TLS_SERVER_NAME`.
+
+Each tool call has a 30-second backend response deadline, including connection
+readiness and the complete decoded response body. A stalled daemon or response
+path returns an error; the MCP server does not retry the call automatically.
 
 ## What the agent can ask
 
@@ -165,7 +186,11 @@ model inferring it:
 
 - `rbgp_list_rejected` returns `retention_enabled` and a `retention_note`. When
   retention is off, an empty list is a configuration fact, not "nothing was
-  rejected". When the store is at `capacity`, older rejections were displaced.
+  rejected". An enabled store describes currently retained entries: subsequent
+  acceptance or withdrawal removes entries, so an empty store does not prove
+  there were no earlier rejections. `evictions_since_reset` reports known
+  displacement; occupancy alone cannot establish whether eviction occurred.
+  `truncated_by_limit` reports entries omitted from this response by `limit`.
 - `rbgp_explain_import` outcomes `cache_disabled`, `no_session`, and `evicted`
   mean the question could not be answered. They are not rejections.
 - `rbgp_explain_evpn_route` returns a `received_note`. EVPN import rejection

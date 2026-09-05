@@ -3283,12 +3283,15 @@ name = "rustbgpd-mcp"
 version = "0.68.0"
 dependencies = [
  "clap",
+ "rcgen",
  "rmcp",
  "rustbgpd-api",
  "schemars",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tracing",
  "tracing-subscriber",
