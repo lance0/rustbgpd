@@ -6,7 +6,7 @@
 //! one per advertised peer, dominate). This harness sized the win against a
 //! `>=25%`-of-RR-heap gate; the realistic design clears only 5–13%, so the
 //! refactor was **not shipped**. Kept as the reproducible evidence behind that
-//! call — see `docs/BENCHMARKS.md` and the sprint plan's gate-decision entry.
+//! call — see `docs/benchmarks.md` and the sprint plan's gate-decision entry.
 //!
 //! Run: `cargo test -p rustbgpd-rib --test route_data_sharing_profile -- --ignored --nocapture`
 //! `#[ignore]`d — a sizing harness, not a regression test: it allocates a few

@@ -62,7 +62,7 @@ log_format = "json"
 # filesystem permissions authenticate access and the socket owner is
 # authorized as the implicit "local-operator" principal at operator tier —
 # no [security.grpc] block needed for local operation. To add remote or
-# named access (more principals, TCP, mTLS), see docs/CONFIGURATION.md
+# named access (more principals, TCP, mTLS), see docs/reference/configuration.md
 # under [security.grpc].
 [global.telemetry.grpc_uds]
 enabled = true
@@ -140,7 +140,7 @@ log_format = "json"
 # filesystem permissions authenticate access and the socket owner is
 # authorized as the implicit "local-operator" principal at operator tier —
 # no [security.grpc] block needed for local operation. To add remote or
-# named access (more principals, TCP, mTLS), see docs/CONFIGURATION.md
+# named access (more principals, TCP, mTLS), see docs/reference/configuration.md
 # under [security.grpc].
 [global.telemetry.grpc_uds]
 enabled = true

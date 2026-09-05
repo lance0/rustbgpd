@@ -3,6 +3,7 @@ use std::process::Command;
 
 fn excluded(path: &str) -> bool {
     path == "CHANGELOG.md"
+        || path.starts_with("docs/project/changelog/")
         || path.starts_with("docs/adr/")
         || path.starts_with("docs/soaks/")
         || path.starts_with("docs/perf/")

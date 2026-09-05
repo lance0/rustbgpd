@@ -398,7 +398,7 @@ impl fmt::Display for MissingDatasets {
 /// machinery; it runs on the config-apply/SIGHUP path, never during
 /// evaluation.
 ///
-/// File format (documented in `docs/rpol-language.md`): one entry per
+/// File format (documented in `docs/reference/rpol-language.md`): one entry per
 /// line, `#` starts a comment, blank lines and surrounding whitespace
 /// are ignored. Entries parse with the same literal parsers `.rpol`
 /// set definitions use — a prefix entry with optional `ge`/`le`, a

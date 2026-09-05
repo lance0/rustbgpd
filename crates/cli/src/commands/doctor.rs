@@ -1899,7 +1899,7 @@ fn authz_enforcement_check(effective_toml: &str) -> Option<Check> {
             CheckStatus::Warn,
             "enforcement = \"legacy\": principal roles are audit-only and the listener \
              max_tier authorizes calls; migrate to enforcement = \"tier\" \
-             (see docs/CONFIGURATION.md)"
+             (see docs/reference/configuration.md)"
                 .to_string(),
         ),
         other => (
@@ -3029,7 +3029,7 @@ ttl_security_hops = 3
     fn assert_inventory_json_contract(value: &serde_json::Value, contract_id: &str) {
         let inventory_path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../docs/v1-stable-surface.json"
+            "/../../docs/reference/v1-stable-surface.json"
         );
         let inventory: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(inventory_path).unwrap()).unwrap();

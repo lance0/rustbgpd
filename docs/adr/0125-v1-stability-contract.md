@@ -229,8 +229,8 @@ The actionable backlog seed: criterion → current state → what closes it.
 
 ## References
 
-- [`docs/v1-stable-contract.md`](../v1-stable-contract.md) and
-  [`docs/v1-stable-surface.json`](../v1-stable-surface.json), the pinned
+- [`docs/v1-stable-contract.md`](../reference/v1-stable-contract.md) and
+  [`docs/v1-stable-surface.json`](../reference/v1-stable-surface.json), the pinned
   inventory and compatibility rules
 - [ADR-0122](0122-compatibility-debt-inventory.md), debt inventory, lifetime
   policies, and the recorded D2/L1 outcomes
@@ -238,7 +238,7 @@ The actionable backlog seed: criterion → current state → what closes it.
   [ADR-0119](0119-rfc-8212-secure-default-config-epoch.md), RFC 8212 posture
 - [ADR-0124](0124-bounded-config-history-retention.md), config-history
   formats
-- [`docs/RECEIPTS.md`](../RECEIPTS.md) and
+- [`docs/RECEIPTS.md`](../receipts.md) and
   [`docs/soaks/soak-acceptance-gates.md`](../soaks/soak-acceptance-gates.md),
   the evidence culture this bar is drawn from
 - `SECURITY.md`, supported versions and reporting posture

@@ -1245,7 +1245,7 @@ mod tests {
     //! `tests/evpn_instances_binary.rs`: it boots the real daemon binary
     //! and drives `rbgp evpn instances` as a subprocess before
     //! kernel reconciliation grows the internals (see
-    //! `docs/evpn-enablement.md` Gate 7b).
+    //! `docs/project/evpn-enablement.md` Gate 7b).
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration;

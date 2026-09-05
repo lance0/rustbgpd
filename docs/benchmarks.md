@@ -1,0 +1,1902 @@
+# Benchmarks
+
+> **Document class: CURRENT.** This maintained page reflects the project as it is now; dated sections remain bounded to their stated scope.
+
+Micro-benchmarks using [Criterion](https://github.com/bheisler/criterion.rs) 0.8,
+compiled with `--release` (LTO, codegen-units=1). Numbers below are meant
+for relative comparison and regression tracking, not absolute guarantees.
+For the consolidated operator-facing proof index that rolls benchmark, memory,
+interop, dataplane, and soak receipts together, see
+[`OPERATIONAL_PROOF.md`](operational-proof.md).
+
+## Current evaluator evidence
+
+Start here for the most decision-relevant whole-daemon measurements, with dates
+and version boundaries explicit. The detailed microbenchmark record and
+superseded campaigns remain below with their original provenance.
+
+| Evaluation question | Current evidence | Boundary |
+|---|---|---|
+| How did the measured releases compare for route import and convergence? | [v0.68.0 cross-stack receipt](perf/competitive-bgperf2-v0680-2026-08.md) and [80 raw rows](perf/artifacts/competitive-bgperf2-v0680-2026-08/results.csv) | Counterbalanced same-host campaign measured 2026-08-30: exact rustbgpd v0.68.0, BIRD 2.19.2, FRR 10.7.0, and GoBGP 4.8.0. All 80 cells reached the exact expected route count across the fixed 10×1k, 2×10k, 2×100k, 30×1k, and 100×1k shapes. IPv4 import/convergence only — not a full-table, policy, reload, churn, restart, IPv6, or OpenBGPD claim. |
+| What is the current IRR reload result? | [v0.68.0 IRR reload receipt](perf/irr-reload-v0680-2026-08.md), with 96 verifier-approved rows | Source-equivalent v0.68.0 campaign at 320 members × 183,040 generated IPv4 prefixes, two repeats, four reloads, and 0%/10%/50% received-view overlap. All sessions remained up with zero parse errors. One fixed shape on one host. |
+| What current high-N shapes have run? | [v0.68.0 high-N receipt](perf/high-n-route-server-v0680-2026-08.md) | Exact-source one-run observations at 2,500 and 5,000 route-server peers. No interpolation or larger-fleet extrapolation. |
+| What happens at IXP route-server scale under reload and member churn? | [IXP route-server matrix](perf/ixp-matrix-2026-07.md) | 700 clients × 400,400 IPv4 routes. Current rustbgpd source-equivalent v0.68.0 rows were measured 2026-08-30; BIRD remains the v0.64.0 refresh measured 2026-08-08, and OpenBGPD 9.2 is a supplemental comparator amendment measured 2026-08-30. |
+| Can an IRR-scale candidate use the transactional apply path? | [IRR transactional-apply receipt](perf/irr-transactional-apply-2026-08.md) and [compact evidence](perf/artifacts/irr-transactional-apply-2026-08/README.md) | Two independent single-host runs measured 2026-08-04 at clean, then-current `origin/main` commit `02c752408b2336061da050d3396c3f7a538d3389`. Each completed 4/4 streamed Plan → token-bound Apply → commit-confirm cycles for a ~295.6 MB candidate at 320 members × 183,040 routes and 3,218,965 IRR filter entries, with 320/320 sessions and zero parse errors. Explicit abort and 10 s timeout auto-revert restored disk and runtime byte-exactly; rollback completed 69.5 s / 69.0 s after the deadline under a 600 s ceiling. One fleet shape, two fixed-order repeats; not a cross-daemon comparison. |
+| Which adoption capabilities have direct proof? | [IXP evaluation matrix](explanation/ixp-evaluation.md) | Receipt or config per row, including the explicit gap for dual-stack performance evidence. |
+
+The three commonly cited 1,000-peer memory values are not a release trend:
+
+- [419 MiB](perf/scale-receipt-2026-07.md) is whole-process RSS for an
+  in-process iBGP RR plus 1,000 client stubs at 100,000 routes.
+- [1,057.2 MiB](perf/route-server-1000-2026-07.md) is maximum process-tree RSS
+  for a real eBGP route server at 400,000 unique routes, with the now-opt-in
+  import-decision explain cache enabled and four policy reloads.
+- [441.1–441.8 MiB](perf/v0.61.0-final-performance-2026-07.md) is steady
+  process-tree RSS for the v0.61.0 candidate at the same 400,000-route eBGP
+  fleet shape, with import-decision explain disabled and no reloads.
+
+Use each receipt's fleet, sampling point, and process boundary; do not compare
+the three values as if only the rustbgpd version changed.
+
+jemalloc is the default allocator feature, so a plain
+`cargo build --release` produces the same allocator configuration as the
+published artifacts — the GHCR runtime image and the release tarballs
+(which have built with jemalloc since v0.50.0+; earlier releases shipped
+a CI-profile, glibc-malloc build). This matters for memory numbers: an
+8-cycle policy-reload probe at 200 peers × 115k prefixes showed
+stock-glibc RSS climbing 301→555 MiB and 295→639 MiB across two runs
+without returning memory (live bytes flat — allocator arena retention of
+reload transients), while the identical workload under jemalloc
+oscillated at 270–330 MiB and returned memory via background decay.
+Daemon RSS figures measured on glibc builds before 2026-07-17 overstate
+steady-state RSS relative to the shipped binary. A stock-glibc build
+remains available via `--no-default-features`.
+
+**Last measured:** RIB Operations pinned A/B: 2026-05-29; same-host
+current-main reconfirmation and memory attribution correction: 2026-06-02;
+structured high-N RIB memory profile: 2026-06-08; authoritative exact-export
+distribution fanout A/B, update-group recovery, and grouped exact-precommit
+fast path: 2026-07-13; revision-pinned production-exact manager CPU and
+full-daemon DHAT rebaseline: 2026-07-13; structured high-N RIB memory
+profile refresh (RouteSlab + attribute interning correction): 2026-07-17;
+production UPDATE parser and IPv6 MP-BGP Add-Path coverage: 2026-07-26;
+v0.61.0 release-tip real-daemon and single-revision absolute baseline:
+2026-07-26; RIB-ops prefix-fixture audit bounding the above-65,536 rows:
+2026-08; v0.64.0 release-tag bgperf2 spot-check (rustbgpd only, same host):
+2026-08-08; v0.66.0 release-tag bgperf2 spot-check (rustbgpd only, same
+host): 2026-08-23; EVPN dataplane generation-query controlled A/B: 2026-08-24;
+MP_REACH borrowed-attribute exact-export controlled A/B: 2026-08-25; current
+v0.68.0 cross-stack bgperf2 campaign: 2026-08-30.
+
+| Field | Value |
+|-------|-------|
+| Hardware | AMD Ryzen Threadripper 7970X (32 cores / 64 threads) |
+| Kernel | Linux 6.17.0-20-generic |
+| rustc | 1.95.0 (2026-04-14) |
+| Criterion | 0.8 |
+| Measurement state | **RIB Operations** re-measured pinned (`performance` governor, `taskset -c 8`, 4 alternating A/B attempts) comparing the `v0.31.0` tag to current `main`; absolute numbers below are the `main` medians |
+
+The RIB Operations numbers below are the current-`main` medians from a pinned
+`v0.31.0 → main` comparison run (the cumulative effect of the scale/memory
+sprint: the `SmallVec` prefix index, `FxHash` route maps, and multi-chunk
+distribution coalescing). Each row's per-benchmark delta versus `v0.31.0` is
+noted inline. The v0.32.0 inbound-UPDATE changes (single-pass attribute
+extraction + attribute-`Arc` sharing) are transport-crate only, so the RIB
+criterion and allocator-tracked `memory_profile` numbers are **unchanged**
+(re-confirmed on current `main`) and stand as-is. The **end-to-end bgperf2
+cross-stack comparison was fully re-run on current `main`** for v0.32.0 — all
+three daemons (rustbgpd, BIRD, GoBGP) on the same host — replacing the prior
+v0.4.2 snapshot. See *End-to-End System Benchmarks* below.
+
+## Secondary measurement environment — self-hosted VPS bench runner
+
+> **Retired 2026-08-21.** This runner was deregistered and the host
+> reclaimed. Benchmarking now runs on the primary host described above,
+> which is an upgrade for measurement: bare metal instead of a
+> virtualized guest, and directly comparable to the published receipts
+> rather than needing its own baseline. The `bench-nightly.yml` and
+> `bench.yml` workflows that drove this runner were removed on
+> 2026-08-22; the A/B method they wrapped lives on as
+> `bench/compare-criterion.sh` (see [`bench/README.md`](../bench/README.md)).
+>
+> This section stays because the numbers below and elsewhere in this
+> document were measured here, and a published figure keeps the
+> environment that produced it. Everything in it describes the retired
+> host, in the past tense of fact: the ~11% noise floor is a property of
+> that VPS and must not be assumed for any replacement.
+
+The removed `Criterion Bench Compare` workflow ran on a dedicated VPS
+registered as a `[self-hosted, rustbgpd-bench]` runner. Numbers from CI
+dispatches were produced in this environment, not the primary host
+described above.
+
+| Field | Value |
+|-------|-------|
+| Hardware | Virtualized x86_64 guest on bare-metal Intel host (4 vCPU, ~3.8 GiB RAM, 2 GiB swap, 30 GB disk) |
+| Kernel | Linux 6.8.0-117-generic |
+| OS | Ubuntu 24.04.4 LTS |
+| rustc | 1.95.0 (matches the primary host) |
+| Criterion | 0.8 |
+| Pinning | `taskset -c <core>` (set by the workflow input; default core 0) |
+| cpufreq governor | **Not available** — virtualized CPU does not expose `cpufreq` sysfs, so `--require-performance` is set to `false` for runs on this host |
+
+**Empirical noise floor: ~11% spread on this host, at this one shape.**
+Five sequential pinned runs at the same `main` SHA (2026-05-28
+calibration on `adj_rib_in_insert/10000`) produced medians of 8.232 ms,
+8.446 ms, 8.693 ms, 8.979 ms, and 9.212 ms — a max-minus-min spread of
+11.2% of the mean.
+
+**Do not carry that 11.2% to other hosts or other shapes.** The floor is
+a property of a (host, benchmark, size) triple, not a global constant.
+Same-SHA controls on the primary host (2026-07-25, six alternating
+attempts, `performance` governor, `taskset -c 8`) measured
+`adj_rib_in_insert/10000` at 1.44% — roughly eight times tighter than
+this runner's figure for the identical shape — while
+`adj_rib_in_insert/100000` on that same host measured 16.76%, and
+`rib_pipeline/1000` measured 0.55%. Applied as one number, an 11.2%
+floor hides real regressions at the tight shapes and manufactures
+phantom ones at the noisy shapes. Read the floor from a same-SHA control
+on the host doing the measuring, at the shape being measured; the
+per-shape figures and the method are in
+[`perf/rib-criterion-noise-floor-2026-07.md`](perf/rib-criterion-noise-floor-2026-07.md).
+
+**Hardware speed ratio: ~2.2× slower than the primary host.** Wire
+`validate_update` measures 323 ns here vs 133 ns on the primary host;
+`adj_rib_in_insert/10000` median is ~8.7 ms vs ~4.0 ms. The ratio is
+consistent across crates, so the **scaling shape is preserved** — what
+matters for regression tracking — even though absolute numbers differ.
+
+**Advisory regression bands** (not enforced in code; applied by the
+reviewer reading the workflow summary). The 11% same-SHA noise floor is
+the lower bound; inter-SHA comparisons add base/head cache-warming bias
+on top, so single-dispatch results are wider than the floor suggests.
+Empirical reverify against the PR #295 +12% regression (2026-05-28,
+two single-dispatch comparisons) **could not surface the signal** —
+deltas swung between −2.7% and +2.0% on the 10k case across two runs.
+
+For **single-dispatch** (`attempts=1`) comparisons:
+
+| Delta | Interpretation |
+|-------|----------------|
+| < ~20% | Inside single-dispatch noise + bias band. Do not act on it without re-dispatching with more attempts. |
+| ≥ 20% | Advisory regression. Investigate before merge. |
+
+For **multi-attempt** (`attempts ≥ 3`, the workflow default) comparisons,
+the table also reports across-attempt stddev and min..max. Sub-15%
+signal is gradable once stddev is in single digits and min..max brackets
+the mean cleanly. A formal post-attempts threshold is deferred until
+empirical data accumulates from real PR dispatches.
+
+A pass/fail gate is deferred until a host with full `cpufreq` governor
+control is available (the virtualized CPU here does not expose
+`performance` mode). Until then, the workflow output is reviewer input,
+not a merge gate.
+
+### Host coexistence: bench vs. soak
+
+Criterion comparisons, the rrtransport production receipt, and soak workloads
+share the primary host. That coexistence is now the normal case rather than a
+plan: the 24h flagship soak receipts record the primary host, and benchmarking
+moved there when the VPS was retired. All three acquire an exclusive `flock` on
+`${RUSTBGPD_HOST_LOCK:-$HOME/.local/state/rustbgpd-host.lock}` before doing
+real work — `bench/compare-criterion.sh` directly, and the rrtransport receipt
+runner and soak runners via the shared `tests/soak/host-lock.sh` helper. A bench
+dispatch refuses to start while a soak is active and a soak refuses to
+start while a bench is mid-attempt; either workload fails fast with a
+clear error rather than producing useless numbers next to a busy host.
+The scripts always take the lock, creating the state directory if
+needed — an uncontended `flock` is free on a laptop / dev box, and an
+earlier skip-when-absent escape hatch silently disabled the mutex on
+the shared runner. The sudo / `$HOME` trap (running soak as
+root moves the lock to `/root/...` and bypasses the guard) is covered
+in `tests/soak/README.md` under "Host mutex"; exporting
+`RUSTBGPD_HOST_LOCK` explicitly is the fix, and every call site honors it.
+
+## Running
+
+**Do not run a bare `cargo bench`.** The workspace root is a non-virtual
+workspace (`[package] rustbgpd` alongside `[workspace]`) with no
+`default-members`, so Cargo selects only the root package. Its sole
+`[[bench]]` target, `fib_projection`, is `bench-internals`-gated, which
+leaves the auto-discovered `src/lib.rs` libtest harness as the one thing that
+runs — and it declares no benchmarks. `cargo bench` at the root therefore
+measures nothing. `cargo bench --workspace` is not a substitute either: six
+targets are standalone CLIs rather than criterion harnesses and reject
+criterion's flags.
+
+Run each target explicitly with `-p <crate> --bench <name>`. Sixteen exist.
+Five build with default features (wire/`codec`, rib/`rib_ops`,
+policy/`policy_eval`, rpki/`validate`, mrt/`snapshot_allocation`); eleven are
+`bench-internals`-gated (transport/`fanout`, transport/`inbound_attrs`,
+transport/`explain_snapshot`, rustbgpd/`fib_projection`,
+rib/`route_paging`, rib/`evpn_dataplane_query`,
+rib/`dataplane_prefix_paging`, rib/`selection_deferral_release`,
+api/`event_history_producer`,
+api/`vpn_query_timing`, api/`vpn_query_allocation` — the last also requires
+the api crate's `vpn-query-allocation` feature). Six of the sixteen —
+`snapshot_allocation`, `route_paging`, `dataplane_prefix_paging`,
+`selection_deferral_release`, `vpn_query_timing`, and `vpn_query_allocation` —
+are standalone measurement CLIs with their own argument contracts
+(`snapshot_allocation` hard-errors without a `timing|diagnostic` mode), not
+criterion harnesses.
+
+`bench/smoke-benches.sh` enumerates the target list from `cargo metadata`,
+runs every criterion target once through `cargo test --bench`, and exercises
+`route_paging` and `dataplane_prefix_paging` with bounded multi-page native CLI
+fixtures. The four other custom harnesses retain dedicated CI smoke invocations.
+
+```bash
+# Wire codec only
+cargo bench -p rustbgpd-wire --bench codec
+
+# RIB only
+cargo bench -p rustbgpd-rib --bench rib_ops
+
+# EVPN dataplane generation query (requires bench-internals)
+cargo bench -p rustbgpd-rib --features bench-internals --bench evpn_dataplane_query
+
+# Root-daemon FIB projection internals (requires bench-internals)
+cargo bench --features bench-internals --bench fib_projection
+
+# Inbound UPDATE attribute-clone churn (requires bench-internals)
+cargo bench -p rustbgpd-transport --features bench-internals --bench inbound_attrs
+
+# Manager fanout with the authoritative exact export probe
+cargo bench -p rustbgpd-transport --features bench-internals --bench fanout
+
+# RPKI origin-validation microbench (RFC 6811)
+cargo bench -p rustbgpd-rpki --bench validate
+
+# Policy chain evaluation
+cargo bench -p rustbgpd-policy --bench policy_eval
+
+# Real import-explain context clones and bounded-cache writes (requires bench-internals)
+cargo bench -p rustbgpd-transport --features bench-internals --bench explain_snapshot
+
+# Standalone dataplane-prefix paging comparison (requires bench-internals).
+# Run both arms explicitly; there is no retained raw comparator.
+cargo bench -p rustbgpd-rib --features bench-internals \
+  --bench dataplane_prefix_paging -- --prefixes 100000 --announcers 1 \
+  --max-paths 1 --repetition 1 --mode eager
+cargo bench -p rustbgpd-rib --features bench-internals \
+  --bench dataplane_prefix_paging -- --prefixes 100000 --announcers 1 \
+  --max-paths 1 --repetition 1 --mode lazy-baseline
+
+# Specific group
+cargo bench -p rustbgpd-rib --bench rib_ops -- "adj_rib_in_insert"
+```
+
+HTML reports are generated to `target/criterion/`.
+
+### EVPN dataplane generation query
+
+The `evpn_dataplane_query` target isolates the internal query/materialization
+seam. Its legacy path is the exact pre-change whole-EVPN-table clone; the new
+changed path clones only Type 1/2/5 rows. The downstream intent projection is
+outside both timings, which conservatively omits the new path's smaller mixed
+input. Both sides receive the same input cardinality; mixed output cardinality
+differs because filtering in the actor is the shipped optimization. When every
+row is relevant, the actor's exact relevant-row cardinality preserves the
+prior bulk-clone path. The unchanged path compares the caller's token before
+constructing the iterator.
+
+The fixture covers 0, 1,000, and 50,000 rows in two distributions:
+`all-relevant` cycles Types 1/2/5, while `mixed-types-1-through-5` cycles all
+five route types (60% relevant). Before timed iterations, the target asserts
+the changed receipt visited every input row and returned the exact relevant
+cardinality; the unchanged receipt must be `routes=None` with zero row visits.
+Those are control-flow/materialization receipts, not allocator measurements;
+no allocation-count or byte claim is made here.
+
+Measured 2026-08-24 from the PR #1988 candidate based on
+`5871d4c2fb5583fe1dd1b24c28849f624fa68043`, with rustc 1.98.0, Linux
+6.17.0-35-generic, AMD Ryzen Threadripper 7970X, CPU 8 pinned under the
+`performance` governor, and the shared host lock held:
+
+```bash
+flock -n "$HOME/.local/state/rustbgpd-host.lock" \
+  taskset -c 8 cargo bench -p rustbgpd-rib --features bench-internals \
+  --bench evpn_dataplane_query -- --noplot
+```
+
+Criterion configuration was 1 s warm-up, 3 s measurement, 10 samples. Values
+are point estimates from the same controlled run; delta compares changed with
+legacy at the same input cardinality.
+
+| Distribution | Rows | Legacy clone | Generation changed | Changed delta | Generation unchanged |
+|---|---:|---:|---:|---:|---:|
+| all relevant | 0 | 7.1053 ns | 7.4148 ns | +4.36% | 1.1730 ns |
+| all relevant | 1,000 | 7.0841 us | 7.0540 us | -0.42% | 1.1728 ns |
+| all relevant | 50,000 | 367.27 us | 368.45 us | **+0.32%** | 1.1780 ns |
+| mixed Types 1-5 | 0 | 7.1043 ns | 7.4035 ns | +4.21% | 1.1742 ns |
+| mixed Types 1-5 | 1,000 | 7.1338 us | 5.7271 us | -19.72% | 1.1758 ns |
+| mixed Types 1-5 | 50,000 | 382.54 us | 293.94 us | -23.16% | 1.1746 ns |
+
+The preregistered production switch condition was that the changed 50,000-row
+all-relevant path be no more than 2% slower than legacy. The measured +0.32%
+passes. The 0-row percentage is nanosecond-scale fixed dispatch overhead, not
+a scale result.
+
+### Linux FIB kernel-dump scaling
+
+`bench/run-fib-kernel-dump.py` is the privileged raw-rtnetlink harness for
+global versus strict table-filtered `RTM_GETROUTE` scaling. Its August 2026
+receipt covers 64 managed tables, 0 to 20,000 unrelated IPv4 rows, and 25
+timed passes at each K=1..64 table shape, with exact response-cardinality and
+`NLM_F_DUMP_FILTERED` fences. See the
+[`Linux FIB kernel-dump receipt`](perf/fib-kernel-dump-2026-08.md) and its
+machine-readable [`results.json`](perf/artifacts/fib-kernel-dump-2026-08/results.json).
+The fixture is raw IPv4 blackhole `/32` traffic, not whole-daemon latency.
+
+### MP_REACH borrowed-attribute exact-export probes
+
+The production IPv6 MP_REACH exact-export path now appends its locally built
+MP_REACH attribute to prepared attributes through the wire crate's borrowed
+attribute iterator. A fixed-harness, six-attempt controlled A/B measured all
+four production exact-probe shapes faster: `same_shape/1` by 21.17%,
+`same_shape/64` by 7.35%, `distinct_shape/64` by 27.45%, and
+`rich_scalar/50` by 22.52%. The same-production harness control bounds the
+host/shape noise separately.
+
+The deterministic rich-MP allocation diagnostic measured 50 builds. The
+iterator path made 750 allocation requests for 149,250 requested bytes versus
+1,200 requests for 524,050 bytes through the legacy temporary-vector path,
+saving 9 requests and 7,496 requested bytes per build for that fixture. These
+are `System` allocator request counters around the exact build window, not RSS,
+retained-heap, or a zero-allocation claim.
+
+See the
+[`MP_REACH borrowed-attribute receipt`](perf/probe-mp-reach-borrowed-attrs-2026-08.md),
+machine-readable [`timing rows`](perf/artifacts/probe-mp-reach-borrowed-attrs-2026-08/results.csv),
+and [`allocation row`](perf/artifacts/probe-mp-reach-borrowed-attrs-2026-08/allocation.json).
+The receipt deliberately keeps the direct MP proof separate from the broad
+IPv4-body non-regression sweep. The sealed six-cell sweep passed
+after rejudge: the candidate's combined re-announcement p50 mean was 0.446157 s
+versus 0.454703 s on current base, with exact delivery, 700/700 sessions, and
+zero decode errors in every round. Exact-tag controls reproduced below the
+historical lower bound, so the receipt treats that band as stale calibration
+rather than a current-host acceptance floor; S3 does not prove the MP speedup.
+
+## Comparing Two Refs
+
+Use `bench/compare-criterion.sh` when judging a performance PR locally. It
+creates detached worktrees for the baseline and head refs, runs both with a
+separate Cargo target directory per side and a shared Criterion results tree,
+and writes a Markdown summary plus raw Criterion artifacts under
+`target/bench-compare/`.
+
+It requires `bash`, `git`, `cargo`, `python3`, `flock` (the host mutex is
+taken unconditionally), and `taskset` from util-linux.
+Fixed-harness mode also requires GNU `sha256sum` from coreutils and is supported
+on Linux only; it does not promise macOS portability.
+
+```bash
+bench/compare-criterion.sh \
+  --base origin/main \
+  --head HEAD \
+  --core 8 \
+  --package rustbgpd-rib \
+  --bench rib_ops \
+  --filter adj_rib_in_insert
+```
+
+When source revisions contain different benchmark fixtures, select one exact
+harness blob for both sides. The driver records each side's original blob and
+SHA-256 separately from the selected and installed provenance, then rejects
+any overlay that changes an unrelated path:
+
+```bash
+bench/compare-criterion.sh \
+  --base v0.62.0 \
+  --head v0.63.0 \
+  --package rustbgpd-rib \
+  --bench rib_ops \
+  --filter '^adj_rib_in_insert/500000$' \
+  --harness-ref 13d542c3 \
+  --harness-path crates/rib/benches/rib_ops.rs
+```
+
+The historical v0.62-to-v0.63 `adj_rib_in_insert/500000` comparison did not
+hold this fixture constant: v0.62 repeated 65,536 prefix keys while v0.63 used
+500,000 unique keys. Its roughly 50% delta is fixture-confounded and is not
+evidence of a shipped-code regression. Re-measure it with a fixed harness and
+a fresh same-SHA control before attributing a source regression or bisecting.
+
+For pinned runs, put the selected CPU into the `performance` governor first
+where the host allows it:
+
+```bash
+sudo cpupower frequency-set -g performance
+```
+
+The script records the observed governor, CPU model, kernel, rustc version,
+commit SHAs, logs, and raw Criterion artifact path. Treat unpinned runs as
+directional only.
+
+When a pull request claims a durable performance gain, check in a receipt under
+`docs/perf/` with the exact refs, environment, command, sampling parameters,
+confidence bounds, and correctness fence. Also check in a compact
+machine-readable CSV or JSON summary and index the receipt from
+[`RECEIPTS.md`](receipts.md). A PR description or raw files left only under
+`target/criterion/` are useful review evidence, but they are not a durable
+project receipt.
+
+The revised UPDATE duplicate-table receipt is a worked example of why a
+same-revision control must be read before the target mean: the target's six
+attempts are separated from the control band, but the control has a systematic
+head-side bias large enough that the raw target percentage is not published as
+a causal speedup. See
+[`perf/revised-update-duplicate-table-2026-07.md`](perf/revised-update-duplicate-table-2026-07.md).
+
+## v0.61.0 candidate absolute baseline
+
+The v0.61.0 release-candidate revision `99ee74ba` (measured pre-tag; the
+final v0.61.0 tag landed 87 commits later at `c7066575`) has a compact
+absolute baseline at
+[`perf/v0.61.0-final-performance-2026-07.md`](perf/v0.61.0-final-performance-2026-07.md).
+Three real release-daemon runs at 1,000 eBGP peers × 400 BASE routes measured
+steady process-tree RSS medians of 441.760, 441.215, and 441.131 MiB, with
+1,000/1,000 sessions, one 1,000-member update group, zero fallback/residue,
+1,000 registered outbound peers, zero retained rejected routes, and zero
+settled writer backlog. jemalloc allocated/active/resident/mapped gauges are
+reported separately from RSS.
+
+The same receipt retains 71 median point estimates and confidence intervals
+from the maintained RIB, codec, and policy Criterion suites under the literal
+baseline `v0.61.0-final-99ee74ba`. It is a single-revision regression anchor:
+it makes no CPU delta claim and does not rewrite the historical `515659b1`
+cross-stack comparison below or the explain-cache comparison
+([perf/explain-cache-opt-in-2026-07.md](perf/explain-cache-opt-in-2026-07.md)).
+
+## Manual CI Workflow
+
+There is no CI benchmark workflow. The manual `Criterion Bench Compare`
+dispatch and the `Criterion Bench Nightly` tripwire targeted the
+`[self-hosted, rustbgpd-bench]` runner retired on 2026-08-21 and were removed
+on 2026-08-22. Both were thin wrappers around `bench/compare-criterion.sh`,
+which is the supported entrypoint: run it locally, pinned to one core, with
+`--attempts` ≥ 3 so the summary's `stddev` and `min..max` columns carry a
+signal (`bench/README.md`, "Criterion compare").
+
+Stand up CI benchmarking again only after a replacement runner exists **and
+its own run-to-run noise floor has been measured** — the ~11% figure in this
+document belongs to the retired VPS and does not transfer.
+
+## Reading the comparison output (for PR review)
+
+With `--attempts ≥ 2` the summary table has one row per benchmark with
+these columns:
+
+| Column | What it is | How to read it |
+|---|---|---|
+| `attempts` | `n/N` — successful attempts over requested | `n < N` means some attempts failed to produce a baseline; treat the row as low-confidence. |
+| `base median (mean)` / `head median (mean)` | per-ref median, averaged across attempts | The absolute numbers; useful for sanity (right order of magnitude?) more than for the verdict. |
+| `mean delta` | head-vs-base, averaged across attempts (**+ = head slower = regression**) | The headline. Sign convention is fixed regardless of which ref ran first. |
+| `stddev` | spread of the per-attempt deltas | **The confidence signal.** Single-digit-% stddev → the mean delta is trustworthy. Large stddev → the host was noisy; the mean is soft. |
+| `min..max` | range of per-attempt deltas | If this brackets `0` (e.g. `-3%..+4%`), the sign of the mean delta is not reliable — it's inside the noise. |
+| `last-run 95% CI` | conservatively propagated from the last attempt's saved median CIs | Wider than Criterion's own change CI by construction; a sanity bound, not the primary signal. |
+| `verdict` | optional script classifier for CI tripwires | `regression` only when enough attempts completed, `min..max` is entirely positive, stddev is below the configured ceiling, mean delta crosses the configured threshold, and the last run's propagated 95% CI is entirely above zero. Other informational labels are `ci-straddles-zero` (all-positive deltas above threshold but the last-run CI straddles zero — advisory, does not fail the gate), `noise`, `improvement`, `positive-under-threshold`, `inconclusive-noisy`, `insufficient-attempts`, and `missing`. |
+
+### The grading rule (reviewer guidance, not a CI gate)
+
+This is **reviewer guidance, applied per benchmark row — not CI
+policy**; nothing auto-fails. It is deliberately a *rule* rather than a
+flat percentage: the VPS runner's same-SHA noise floor is ~11% and
+small benchmarks carry several points of spread depending on shape, so
+a magnitude-only threshold would both miss real small regressions and
+cry wolf on noisy ones. Read `stddev` and `min..max` **before** the
+mean delta.
+
+```
+ONE benchmark row (attempts = N, N ≥ 3 recommended)
+│
+│ attempts n/N with n < N ? ───────────► LOW CONFIDENCE: re-dispatch (don't grade)
+│ no
+│ min..max straddles 0 ? ──────────────► NOISE: not actionable (sign unreliable)
+│ no  (entirely one side of 0)
+│ stddev ≥ ~10% (script default; see below) ? ─► INCONCLUSIVE: re-dispatch, more attempts
+│ no  (single-digit stddev)
+▼ CONFIRMED SIGNAL
+│
+├─ mean delta < 0 (faster) ────────────► IMPROVEMENT: note it, no gate
+│
+└─ mean delta > 0 (slower) → CONFIRMED REGRESSION
+       ├─ < ~3%, explained by the PR ──► ACCEPTABLE: mention the tradeoff, proceed
+       ├─ < ~3%, unexplained, hot path ─► INVESTIGATE anyway
+       └─ ≥ ~3%, or unexplained ────────► BLOCK + investigate before merge
+```
+
+| Result | Action |
+|---|---|
+| `min..max` straddles 0 | noise — not actionable |
+| `stddev` ≥ ~10% (`--regression-max-stddev-pct` default) | inconclusive — rerun with more attempts |
+| confirmed improvement | note it, no gate |
+| confirmed regression < ~3% | acceptable if explained by the PR; mention the tradeoff |
+| confirmed regression < ~3% but unexplained in a hot path | investigate anyway |
+| confirmed regression ≥ ~3% | block + investigate before merge |
+
+**The 10% cut is `bench/compare-criterion.sh`'s default, not a noise floor.**
+Per the calibration above, the same-SHA floor is a property of a (host,
+benchmark, size) triple — 0.55%, 1.44%, and 16.76% on the primary host for
+three different shapes. Where a same-SHA control on the measuring host at the
+measured shape gives a tighter or wider figure, pass
+`--regression-max-stddev-pct` rather than trusting 10.
+
+> **Confirmed regression** means `min..max` is entirely above zero and
+> `stddev` is below the configured stddev ceiling. Regressions under ~3% may
+> be accepted when the PR explains the tradeoff; regressions at or above
+> ~3%, or unexplained regressions in a hot path, should block pending
+> investigation.
+
+`bench/compare-criterion.sh --fail-on-regression` codifies the confident
+regression branch for unattended use. It exits non-zero only for a confirmed
+row: at least `--verdict-min-attempts` (default 3) completed attempts,
+`min..max` entirely above zero, `stddev` below `--regression-max-stddev-pct`
+(default 10), a mean delta at or above `--regression-threshold-pct`
+(default 3), and a last-run 95% CI entirely above zero. Rows whose `min..max`
+straddles zero stay advisory/noise, high-stddev rows stay inconclusive, and
+all-positive rows that clear the delta but whose last-run 95% CI straddles
+zero stay advisory (`ci-straddles-zero`).
+
+Nothing runs those flags on a schedule any more. The removed nightly
+release-baseline workflow layered one further filter on top of the per-row
+bar: a confident row failed the run only when the same row was also confident
+on the previous night. That filter was load-bearing — at ~53 rows per run a
+single all-positive row cleared the per-row bar by chance roughly nightly and
+was contradicted the next night, while real regressions repeated identically;
+first-night rows were surfaced as advisory in the run summary instead of
+failing the run. Until a replacement runner exists, accumulated regressions
+are caught only when someone runs `bench/compare-criterion.sh` by hand, and
+any replacement should re-add an equivalent repeat-confirmation filter before
+it is trusted unattended.
+
+**Worked example** — the first multi-attempt comparison on the VPS
+runner (`rib_ops`, `v0.30.0` → `main`, 3 attempts; the span includes
+the `shrink route clone payload` change):
+
+- `route_churn/10k+1k`: `-7.31%`, stddev 1.5%, `-8.9%..-5.9%` → a
+  **confirmed improvement** (one side of 0, tight) — the methodology
+  surfacing the real win.
+- `adj_rib_in_insert/100000`: `+2.84%`, stddev 5.0%, `-1.4%..+8.4%` →
+  **noise** (straddles 0), not actionable despite the positive mean.
+
+That run is why this is a rule and not a number: the same comparison
+held a real −7% signal and a +2.8% non-signal side by side. The
+guidance is reviewer input, not a merge gate (see the
+[secondary measurement environment](#secondary-measurement-environment--self-hosted-vps-bench-runner)
+for the noise-floor rationale).
+
+## Wire Codec
+
+The wire codec (`rustbgpd-wire`) is the hot path for every inbound and outbound
+UPDATE. Outbound sessions use structured UPDATE build/encode. Live inbound
+sessions first decode message framing, then call `parse_revised()` for the
+O(n) structural decode and RFC 7606 disposition pass. The older `parse()` path
+remains benchmarked as a historical IPv4-body baseline, but it does not
+describe daemon ingress.
+
+### NLRI Encode / Decode
+
+| Prefixes | Decode | Encode | Per-prefix decode |
+|----------|--------|--------|-------------------|
+| 1 | 21 ns | 12 ns | 21 ns |
+| 10 | 94 ns | 30 ns | 9.4 ns |
+| 100 | 620 ns | 237 ns | 6.2 ns |
+| 500 | 2.77 µs | 1.06 µs | 5.5 ns |
+
+NLRI encoding is a tight `memcpy` loop. Decoding adds masking and validation.
+At 500 prefixes, decode throughput is ~180M prefixes/sec.
+
+### UPDATE Build / Legacy Parse
+
+Historical full UPDATE construction and IPv4-body `parse()` measurements,
+including path attributes and NLRI. These figures predate the production-path
+coverage below and must not be used as daemon-ingress numbers.
+
+| Prefixes | Build | Legacy `parse()` | Per-prefix legacy parse |
+|----------|-------|------------------|-------------------------|
+| 1 | 154 ns | 147 ns | 147 ns |
+| 10 | 206 ns | 205 ns | 20 ns |
+| 100 | 487 ns | 798 ns | 8.0 ns |
+| 500 | 1.50 µs | 3.11 µs | 6.2 ns |
+
+The former 161M-prefix/s and ~6 ns marginal-cost interpretation applied only
+to this compact legacy fixture.
+
+### Production UPDATE Parse
+
+Pinned current measurements for the live revised parser use a syntactically
+clean IPv4-body UPDATE with the typical six attributes, parsed through the eBGP
+disposition branch. The special MP-BGP row has one IPv6 announcement, one IPv6
+withdrawal, distinct nonzero Add-Path IDs, and four attributes (`ORIGIN`,
+`AS_PATH`, `MP_REACH_NLRI`, and
+`MP_UNREACH_NLRI`). It is intentionally a branch-coverage shape, not a
+full-table extrapolation.
+
+| Shape | Operation | Criterion estimate |
+|-------|-----------|--------------------|
+| 1 IPv4 prefix | revised parse | 304.20 ns [303.26, 305.24] |
+| 10 IPv4 prefixes | revised parse | 369.06 ns [368.43, 369.87] |
+| 100 IPv4 prefixes | revised parse | 955.76 ns [952.18, 960.05] |
+| 500 IPv4 prefixes | revised parse | 3.3358 µs [3.3228, 3.3496] |
+| IPv6 MP-BGP Add-Path | revised parse | 222.27 ns [221.79, 222.83] |
+| IPv6 MP-BGP Add-Path | structured build + MP encode | 148.96 ns [148.67, 149.23] |
+
+Measurement contract: benchmark code commit `ab518890`; AMD Ryzen Threadripper
+7970X; Linux 6.17.0-35-generic; rustc 1.97.0; Criterion 0.8.2; CPU 8 pinned with
+the `performance` governor; no other rustbgpd build, benchmark, or harness
+process active. Commands:
+
+```console
+taskset -c 8 cargo bench -p rustbgpd-wire --bench codec -- \
+  'update_parse_revised'
+taskset -c 8 cargo bench -p rustbgpd-wire --bench codec -- \
+  '^update_build/ipv6_mp_add_path$'
+taskset -c 8 cargo bench -p rustbgpd-wire --bench codec -- \
+  'attr_(decode|encode)'
+```
+
+Each timed fixture is parsed once first. The assertions require a clean
+disposition, exact attributes and body NLRI, zero discarded BGP-LS NLRI, both
+MP attributes, the negotiated IPv6/unicast family, the expected next hop, and
+the exact nonzero Add-Path IDs.
+
+The sensitivity proof deliberately added a nominal 25 µs delay at the
+`parse_revised()` entry: all five revised rows moved to 76.9–80.2 µs while the
+legacy-parser control measured 249 ns and did not inherit that cost (it did
+show 11.6% same-code run-to-run drift). Separate nominal 25 µs delays in the
+IPv6 Add-Path `MP_REACH_NLRI` and `MP_UNREACH_NLRI` decoder arms moved only
+the MP row to 153.93 µs; the IPv4 revised control measured 271 ns. Matching
+delays in the two MP encoder functions moved the MP build row from 148.96 ns
+to 153.98 µs; the IPv4 build control measured 163 ns. The scheduler overshoots
+such short sleeps, so the proof is path sensitivity, not delay calibration.
+All proof-only product mutations were removed.
+
+The normalized measurements, sensitivity receipt, exact proof commands, and
+checksums are retained under
+[`docs/perf/artifacts/wire-codec-production-parser-2026-07/`](perf/artifacts/wire-codec-production-parser-2026-07).
+
+### Path Attributes
+
+| Set | Decoder | Decode estimate | Encode estimate |
+|-----|---------|-----------------|-----------------|
+| Typical (6 attrs) | legacy | 253.53 ns [247.00, 260.61] | 109.20 ns [108.17, 110.14] |
+| Rich (11 attrs, extended-length communities) | legacy | 536.71 ns [523.75, 550.79] | 515.13 ns [514.02, 516.54] |
+| AS_SET (1 received attribute) | revised | 129.49 ns [129.27, 129.77] | N/A — prohibited to originate |
+
+"Typical" = Origin, AS_PATH (3 ASNs), NextHop, LocalPref, MED, Communities (2).
+The rich fixture includes 128 standard communities, forcing the
+extended-length attribute header. The dedicated `as_set_revised` row exercises
+the RFC 7606 revised decoder. The legacy `attr_decode/rich/11` row remains a
+control, while `attr_decode_revised/typical/6` and
+`attr_decode_revised/rich/11` directly cover the live revised attribute
+decoder with the same encoded typical and rich fixtures.
+
+Before Criterion times either revised row, a preflight requires the exact
+fixture count and ordered decoded attributes, no malformed-attribute recovery,
+and zero discarded BGP-LS NLRI. The timed closure contains only
+`decode_path_attributes_revised(...).unwrap()`. Run just these structural
+coverage rows with:
+
+```console
+cargo bench -p rustbgpd-wire --bench codec -- \
+  '^attr_decode_revised/(typical/6|rich/11)$'
+```
+
+No timing or performance conclusion is implied by adding these rows. The
+existing measured rows used the pinned contract and benchmark-code commit
+stated above.
+
+### Validation
+
+| Benchmark | Time |
+|-----------|------|
+| `validate_update` (typical attrs) | 133 ns |
+
+## RIB Operations
+
+The RIB data structures (`rustbgpd-rib`) are pure synchronous structs with no
+async or locking overhead. `RibManager` owns them in a single tokio task.
+Both `AdjRibIn` and `AdjRibOut` use trie-backed secondary prefix indexes
+(`prefix_trie::PrefixMap`) for fast per-prefix lookup, avoiding the O(N)
+full-scans that dominated earlier versions.
+
+### Best-Path Comparison
+
+1000 pairwise `best_path_cmp()` calls per iteration. The 11-step tiebreak
+(stale, RPKI, ASPA, LOCAL_PREF, AS_PATH len, ORIGIN, MED, eBGP pref,
+CLUSTER_LIST, ORIGINATOR_ID, peer addr) is the inner loop of best-path
+selection.
+
+| Scenario | Time (1000 calls) | Per-call | vs v0.31.0 |
+|----------|-------------------|----------|------------|
+| Equal routes (full tiebreak) | 19.8 µs | 19.8 ns | +6.1% |
+| LOCAL_PREF differs (early exit) | 5.22 µs | 5.22 ns | +0.6% (noise) |
+| Different peers (full tiebreak) | 19.7 µs | 19.7 ns | +5.8% |
+
+Early exit at LOCAL_PREF is ~3.8× faster than a full tiebreak. In typical eBGP
+deployments most comparisons resolve at LOCAL_PREF or AS_PATH length, so the
+common path (`local_pref_diff`) is unaffected. The full-ladder paths regressed
+~6% from `v0.31.0` — small in absolute terms (~1 ns/comparison) and dwarfed by
+the −40–62% insert/pipeline wins below. It is consistent across two hosts (the
+self-hosted VPS A/B measured +1.4% / +2.3% ± noise), so it is real but minor;
+flagged for follow-up.
+
+### Adj-RIB-In Insert
+
+Bulk insert into a fresh `AdjRibIn` (HashMap keyed by `(Prefix, path_id)` plus a
+trie-backed secondary prefix index).
+
+| Routes | Time | Throughput | vs v0.31.0 |
+|--------|------|------------|------------|
+| 10,000 | 2.36 ms | 4.2M routes/sec | −34.2% |
+| 100,000 iterations / 65,536 unique keys | 31.6 ms | duplicate-shaped | −39.8% |
+| 500,000 iterations / 65,536 unique keys | 89.5 ms | duplicate-shaped | −49.3% |
+
+The historical A/B roughly halved time for these exact shapes. Rows above
+65,536 used a repeating fixture and are not unique-table throughput evidence;
+see the [prefix-fixture audit](perf/rib-ops-prefix-fixture-audit-2026-08.md).
+The biggest
+contributors are the inlined `SmallVec<[u32; 1]>` Adj-RIB-In prefix index
+(no per-prefix `HashSet` allocation in the common no-Add-Path case) and the
+`FxHash` route maps (a faster non-cryptographic hasher for the internal,
+`max_prefixes`-bounded keys). The secondary prefix index keeps `iter_prefix()` at bounded depth, so
+the full pipeline below stays linear at scale. The prefix index has since moved
+from `HashMap` to a trie (`prefix_trie::PrefixMap`) — this trims RIB index memory
+(see *Memory Footprint*) and improved insert a further ~8% in a quick A/B; the
+table above is the pre-trie pinned baseline, with a pinned re-measure of the trie
+delta deferred to the next quiet-runner bench pass.
+
+### Loc-RIB Recompute
+
+Best-path selection for a single prefix with N candidate routes.
+
+| Candidates | Time | vs v0.31.0 |
+|------------|------|------------|
+| 1 | 38 ns | −37.1% |
+| 2 | 50 ns | −30.9% |
+| 4 | 88 ns | −19.5% |
+| 8 | 167 ns | −9.5% |
+
+Linear in candidate count, as expected. With Add-Path or multiple peers
+advertising the same prefix, each additional candidate adds ~18 ns
+(one `best_path_cmp` call). The single-candidate case (the common one) is
+fastest now that the map lookup uses `FxHash`; the delta shrinks as candidate
+count grows and `best_path_cmp` (slightly slower — see above) dominates.
+
+### Full Pipeline
+
+End-to-end: insert routes from 2 peers into Adj-RIB-In, recompute best path
+for every prefix, install into Adj-RIB-Out. This exercises the real hot path
+without async/channel overhead.
+
+| Prefixes (×2 peers) | Time | Per-prefix | vs v0.31.0 |
+|----------------------|------|------------|------------|
+| 1,000 | 306 µs | 306 ns | −61.9% |
+| 10,000 | 3.37 ms | 0.34 µs | −61.5% |
+| 50,000 | 39.0 ms | 0.78 µs | −49.2% |
+
+Scaling is roughly linear (O(N)) thanks to the secondary prefix index. The
+scale/memory sprint roughly halved the end-to-end pipeline on top of that
+(`SmallVec` index + `FxHash` + coalesced multi-chunk distribution). Versus the
+ancient pre-index O(N²) era the 50 k pipeline took 7.1 s; it is 39 ms now.
+
+Extrapolating linearly, a full Internet table (900 k prefixes × 2 peers) would
+complete the pipeline in ~0.7 s.
+
+### Distribution Fanout (route-reflector / route-server scale)
+
+The stage *after* the pipeline: when best paths change, the `RibManager` must
+re-advertise them to every peer. Unlike the bench above (bare structs), the
+`fanout` bench drives the real manager `distribute_changes` hot path — per-peer
+export-policy evaluation + Adj-RIB-Out staging + bounded-channel send — fanning a
+batch of **64 changed best paths** out to N peers. It is gated behind the
+`bench-internals` feature (a synthetic peer-registration + Loc-RIB-seed driver,
+not reachable in a normal build). Each current `distribute_fanout` and
+`ixp_exact_export_fanout` pass first advertises and drains a MED-50 inventory,
+prepares a MED-51 best-path replacement outside accumulated time, then times
+exactly one production distribution pass. Post-timing receipts require one
+clean update group, the exact grouped/private inventory, real nonzero
+exact-encoder results with compatible reuse, and one commit, enqueue, and gauge
+write per peer. Receiver inspection proves the exact MED-51 inventory and no
+second envelope, so equality suppression cannot silently turn the row into a
+no-op. This is a replacement-distribution microbenchmark, not an initial-table
+or end-to-end convergence measurement.
+
+The benchmark now belongs to the transport crate so it can install a distinct
+authoritative `SessionExportEncoder` for every synthetic peer without creating
+a RIB-to-transport dependency cycle. Run it with:
+
+```bash
+cargo bench -p rustbgpd-transport --features bench-internals --bench fanout
+```
+
+The `private_single_best_fanout` group is the private (per-peer
+Adj-RIB-Out) sibling of the replacement-distribution pair above: a
+peer-context export chain forces every peer onto private export state,
+and the same advertise/drain/replace discipline times one production
+distribution pass whose receipt requires the exact private single-best
+inventory per peer. It instruments the clean single-best path that
+skips per-peer affected-prefix scans unless resolved ORR,
+per-client-best, or Add-Path send behavior requires them.
+
+The `per_client_best_full_resync` group instruments the ADR-0126 shared-group
+per-client-best full-table resync at 8- and 64-member fleets over a fixed
+4,096-route Loc-RIB — the shape where a shared update group must fall back to
+per-client best selection.
+
+Three further groups cover replacement-adjacent shapes.
+`initial_table_peer_join` times one initial-table join of a
+route-reflector client — the full inventory advertisement plus exactly
+one End-of-RIB envelope — at fixed route counts.
+`policy_regroup_resync` times an export-policy replacement across a
+peer cohort in both its `shared_plan` (one shared regroup plan) and
+`forced_per_peer` arms across route/peer grids, and
+`ixp_policy_regroup_resync` is its IXP-shaped sibling
+(homogeneous-remote-ASN vs distinct-remote-ASN route-server cohorts at
+4,096 routes; a 700-peer receipt is gated behind
+`RUSTBGPD_IXP_LARGE_RECEIPT`).
+
+The `add_path_export_staging` group is a 12-row instrument for IPv4-unicast
+Add-Path top-N export staging through the production `RibManager` path. It
+crosses `permit_all` and `deny_best` policy with 8, 64, and 256 candidates at
+negotiated `send_max` values 1 and 4. Each measured pass alternates a
+wire-visible MED across the complete candidate set while fixed, distinct
+LOCAL_PREF values preserve ordering; candidate replacement and Loc-RIB
+recompute remain outside accumulated time.
+
+Retained assertions require the exact Add-Path negotiation on the concrete
+transport snapshot, private (not grouped) Adj-RIB-Out inventory, exactly
+`send_max` announcements, compact path IDs `1..=send_max`, and policy-before-cap
+behavior: `deny_best` must skip the highest-LOCAL_PREF candidate and fill the
+ceiling with the next eligible paths. Production receipts additionally require
+one real exact-probe batch with nonzero encoded lengths, one successful commit
+and enqueue, and no dirty-peer or queued residue after draining. This benchmark
+is introduced without an instrument on its parent SHA, so it publishes the
+instrument only and makes no speedup or regression claim. Any future
+performance claim requires a same-SHA control before comparison. Each row has
+one target peer; because negotiated Add-Path uses private per-peer export
+state, this selection/staging work repeats for every Add-Path target in a
+production fleet.
+
+The `grouped_policy_denial_fanout` group exercises the complementary
+export-policy deny arm at 8, 64, and 256 homogeneous route-server members. Each
+iteration first advertises and drains an exact 64-route MED-50 inventory,
+prepares a wire-visible MED-51 replacement outside accumulated time, then times
+one production grouped distribution pass. A shared export policy denies the
+replacement, so retained receipts require the prior group-owned Adj-RIB-Out to
+be empty, no private or dirty fallback, one successful commit and enqueue per
+member, and no announcement probe for the withdrawal-only result. Receiver
+inspection requires one exact withdrawal-only envelope per member, backed by a
+real transport-session snapshot, with no queued residue. This commit introduces
+the instrument only: it publishes no performance result, and a future claim
+requires a same-SHA control.
+
+The `grouped_withdrawal_fanout` group measures the common homogeneous
+route-server withdrawal shape that first-advertise and replacement targets do
+not cover. It pre-advertises a fixed inventory of 64 IPv4-unicast routes to one
+real update group, drains setup output, then times one production
+`RibUpdate::RoutesReceived` withdrawal at 8, 64, 256, and 1,000 members. The
+timed interval covers manager dispatch, bounded route-chunk processing,
+Loc-RIB recompute, grouped distribution, authoritative commit, and
+bounded-channel enqueue. It does not include manager-channel dequeue or Tokio
+actor scheduling, fixture construction, setup advertisement, receiver
+inspection, the session writer, socket, or network I/O. The synthetic
+eBGP-origin source is intentionally unregistered and therefore uses the
+production legacy-producer `session_id = 0` compatibility branch.
+
+Before resetting counters or starting each timer, an accepted iteration proves
+the setup pass populated 64 group-owned routes and the first member's
+IPv4-unicast gauge, used one clean group with no private/dirty fallback,
+traversed one real exact-probe batch with compatible reuse for the remaining
+members, and committed/enqueued once per member. It then proves the timed update
+crossed the production dispatcher with all 64 withdrawals, every member
+received exactly one envelope containing the exact inventory, and the final
+group-owned and private unicast Adj-RIB-Out tables are empty. The measurement
+baseline at 64 routes records medians of 61.914497 µs, 169.058598 µs,
+558.397745 µs, and 2.194817 ms for 8, 64, 256, and 1,000 grouped members.
+It is an absolute measurement only, with no optimization, control, delta, or
+end-to-end network claim. Exact confidence intervals, samples, environment,
+preflight, and claim boundaries are retained in
+[`docs/perf/grouped-withdrawal-fanout-2026-07.md`](perf/grouped-withdrawal-fanout-2026-07.md).
+The immediate follow-up removed one empty exact-export batch per member from
+withdrawal-only envelopes while retaining the concrete transport snapshot and
+all commit/enqueue fences. In an A/B/B/A campaign with the same harness, the
+two-attempt mean improved by 6.80%, 8.41%, and 9.33% at 64, 256, and 1,000
+members; the 8-member result remains unclaimed. See
+[`docs/perf/grouped-withdrawal-probe-skip-2026-07.md`](perf/grouped-withdrawal-probe-skip-2026-07.md).
+
+The `adj_rib_out_family_gauge` group is the allocation-sensitive steady-state
+control. It keeps persistent homogeneous route-server fleets at 1, 8, 64, 256,
+and 1,000 peers, drains the prewarm advertisement, and alternates a wire-visible
+MED across all 64 routes before each measured pass. Route mutation, Loc-RIB
+recompute, receipt assertions, and receiver draining stay outside accumulated
+time. The measured interval covers manager distribution, the real exact-export
+probe and compatible grouped reuse, authoritative Adj-RIB-Out commit, metric
+refresh, and bounded-channel enqueue; it does not include session-writer or
+network I/O. In-code receipts require one update group, one full real probe per
+changed route, compatible reuse for every remaining member, one successful
+route-bearing commit and enqueue per peer, no dirty or ungrouped fallback, and
+exact family-gauge values. The immediately preceding harness commit is the
+unchanged-behavior control (seven family refreshes per peer); the optimized
+target refreshes only the touched family while retaining all seven eager-zero
+series from PeerUp onward.
+
+The pinned July 2026 control/target receipt is retained in
+[`docs/perf/adj-rib-out-family-gauge-2026-07.md`](perf/adj-rib-out-family-gauge-2026-07.md).
+At 256 and 1,000 peers it improves the measured actor/probe/commit/enqueue
+interval by 11.69% and 14.98%, respectively; both mean-change 95% confidence
+intervals exclude zero.
+
+The pinned July 2026 receipt below predates `0eef03f6`, when the benchmark seed
+populated the Loc-RIB without distributing it. Those rows therefore remain
+truthful first-advertise measurements and optimization evidence, but are not
+directly comparable to the current replacement-distribution instrument.
+That receipt compares the first real-probe baseline against ordered batch
+probing with the live prepared-attribute memo key:
+
+| Peers | No policy baseline → memo | Change | Policy baseline → memo | Change |
+|-------|---------------------------|--------|------------------------|--------|
+| 1 | 45.970 → 35.488 µs | -22.3% | 49.477 → 39.558 µs | -20.3% |
+| 8 | 252.770 → 173.382 µs | -31.7% | 256.996 → 181.819 µs | -29.3% |
+| 64 | 1.920 → 1.328 ms | -30.5% | 1.919 → 1.326 ms | -30.9% |
+| 256 | 7.795 → 5.283 ms | -31.3% | 7.778 → 6.407 ms | -18.3% |
+
+All Criterion mean-change 95% confidence intervals are entirely below zero.
+
+That memo still left the exact probe scaling per peer. A second pinned campaign
+compares current `main`'s permissive benchmark, the pre-cache real-probe head,
+and successful-length reuse across provably wire-equivalent members of the one
+update group exercised by this benchmark:
+
+| Peers | No policy: `main` / pre-cache / optimized | Optimized vs pre-cache | Policy: `main` / pre-cache / optimized | Optimized vs pre-cache |
+|-------|--------------------------------------------|------------------------|-----------------------------------------|------------------------|
+| 1 | 21.148 / 36.395 / 35.908 µs | -1.84% | 24.494 / 40.012 / 39.993 µs | -0.98% |
+| 8 | 56.415 / 180.416 / 94.704 µs | -47.33% | 62.745 / 183.181 / 102.689 µs | -43.99% |
+| 64 | 318.064 µs / 1.382 ms / 543.301 µs | -60.98% | 356.086 µs / 1.369 ms / 584.361 µs | -57.50% |
+| 256 | 1.251 / 5.886 / 2.068 ms | -64.28% | 1.372 / 5.341 / 2.234 ms | -58.31% |
+
+At 256 peers this reduces the overhead relative to the permissive control from
+4.706x to 1.653x without policy (82.37% of the excess recovered), and from
+3.893x to 1.629x with policy (78.28% recovered). This is one update group's
+64-route IPv4 first-advertise burst, not a resync or full-table measurement.
+
+The reuse cache lives for one distribution pass, requires the same group and
+pointer-identical shared unicast payload slices, and retains at most eight
+wire-equivalence cohorts per group. Transport proves equivalence by full
+normalized session-profile equality excluding only owner, generation, and the
+message ceiling; the target re-applies its own ceiling and generation. Only
+cardinality-correct all-success batches are retained. Default-refusing
+snapshots, non-shared/resync/exception payloads, and mixed-family envelopes
+remain on the ordinary exact-probe path.
+
+A third pinned campaign removes the remaining eager per-member bookkeeping on
+the common clean grouped path. Candidate keys and the group's prior advertised
+set are now materialized only when a failed probe or existing rejection
+overlay needs reconciliation:
+
+| Peers | No policy baseline → optimized | Change | Policy baseline → optimized | Change |
+|-------|--------------------------------|--------|-----------------------------|--------|
+| 1 | 42.11 → 38.84 µs | -7.76% | 46.48 → 42.83 µs | -7.85% |
+| 8 | 103.96 → 79.11 µs | -23.90% | 111.87 → 86.48 µs | -22.69% |
+| 64 | 573.75 → 377.92 µs | -34.13% | 615.84 → 416.22 µs | -32.41% |
+| 256 | 2.19 → 1.39 ms | -36.27% | 2.33 → 1.55 ms | -33.46% |
+
+The complementary manager-level rrharness reproduced the scaling result in
+both counterbalanced repetitions: +197%..+200% for 256-peer flood,
++280%..+282% for 1,000-peer flood, +480%..+491% for 256×256 churn, and
++639%..+649% for 1,000×1,000 churn. All 16 cells passed the load/governor/no-
+competitor preflight. The strict Criterion receipt has 16 rows and 32 exact
+input hashes; every required 64/256-peer conservative 95% CI stayed below zero,
+and both one-peer shapes improved rather than consuming the 5% regression
+allowance.
+
+This fast path does not skip per-target ceiling/generation checks. It is used
+only when every probe succeeds for a clean grouped member with no rejection
+overlay. Failures, overlays, resync/regroup, VPN or mixed-family envelopes, and
+non-shared payloads retain the ordinary exact reconciliation path.
+
+The full environments, commands, commit IDs, confidence intervals, correctness
+fences, and checked-in artifacts for all three campaigns are in the
+[`exact-export fanout receipt`](perf/exact-export-fanout-2026-07.md).
+
+The previous 2026-06 numbers used a permissive benchmark stub and did not time
+the exact export probe; they are superseded rather than a valid A/B baseline.
+The first optimization still built one exact `UpdateMessage` per candidate and
+only shared prepared attributes. The cohort optimization builds one exact
+message per shared route and compatible cohort, then rechecks the encoded
+length against each target's ceiling. It preserves the exact correctness gate,
+but must not be described as performing a full exact encode per peer.
+
+### Bulk Initial Load
+
+Cold single-peer table load into pre-sized Adj-RIB-In / Loc-RIB /
+Adj-RIB-Out. This is the benchmark shape to use when judging full-table
+convergence changes; it intentionally separates initial table load from the
+two-peer `rib_pipeline` micro-benchmark above.
+
+Run it with:
+
+```bash
+cargo bench -p rustbgpd-rib --bench rib_ops -- "bulk_initial_load"
+```
+
+| Routes | Time | vs v0.31.0 |
+|--------|------|------------|
+| 10,000 | 1.54 ms | −57.3% |
+| 100,000 iterations / 65,536 unique prefixes | 39.2 ms | −50.5% |
+
+The 100k row is an exact duplicate-shaped regression anchor, not unique-100k
+cold-load evidence. The `SmallVec` prefix
+index removes a per-prefix `HashSet` allocation on every insert, and the
+coalesced distribution flushes one outbound batch instead of one per chunk.
+
+### Route Churn
+
+10,000 base routes from peer 1, then 1,000 route announcements from peer 2
+followed by 1,000 withdrawals, with best-path recomputation at each step.
+
+| Benchmark | Time | vs v0.31.0 |
+|-----------|------|------------|
+| 10k base + 1k announce/withdraw cycle | 254 µs | −59.4% |
+
+A 1 k-prefix churn event reconverges in ~0.25 ms, including both the announce
+and withdraw phases — −59% from `v0.31.0` (the sprint's index + hasher wins on
+the lookup-heavy churn path).
+
+## Memory Footprint
+
+> **Run provenance (2026-07-17).** Clean build (`cargo clean` first) at HEAD
+> `96c1d6e9`, `RUSTBGPD_RIB_MEMORY_PROFILE=full cargo test -p rustbgpd-rib
+> --features bench-internals --test memory_profile memory_profile_high_n --
+> --ignored --nocapture`, on the pinned bench host. These figures replace an
+> older set that predated the RouteSlab migration and the
+> `PathAttribute` enum growth to 208 bytes — see the correction note under the
+> at-scale tables below.
+
+Measured using a tracking global allocator that counts every `alloc` and
+`dealloc`. The normal test compiles and schema-checks the harness; the ignored
+high-N profile emits JSONL rows for the comparison script.
+
+```bash
+# Compile/schema guard
+cargo test -p rustbgpd-rib --features bench-internals --test memory_profile
+
+# Manual full profile (100k / 500k / 900k) — also the default when neither
+# RUSTBGPD_RIB_MEMORY_SIZES nor RUSTBGPD_RIB_MEMORY_PROFILE is set.
+# RUSTBGPD_RIB_MEMORY_PROFILE=quick is 10k / 100k.
+RUSTBGPD_RIB_MEMORY_PROFILE=full \
+  cargo test -p rustbgpd-rib --features bench-internals \
+  --test memory_profile memory_profile_high_n -- --ignored --nocapture
+
+# Explicit size override. Checked *before* RUSTBGPD_RIB_MEMORY_PROFILE and
+# reported as profile "custom". Tiny sizes smoke all six shape rows in
+# milliseconds instead of minutes — mechanics only, never comparison evidence.
+RUSTBGPD_RIB_MEMORY_SIZES=1000 \
+  cargo test -p rustbgpd-rib --features bench-internals \
+  --test memory_profile memory_profile_high_n -- --ignored --nocapture
+
+# A/B summary against another ref
+bench/compare-rib-memory.sh --base origin/main --head HEAD --profile quick
+
+# Enforce the fixed +5% OR +32 MiB review threshold. A `review` or `missing-row`
+# classification exits 1 only after all three artifacts are finalized.
+bench/compare-rib-memory.sh --base origin/main --head HEAD --profile quick \
+  --fail-on-regression
+```
+
+Without `--fail-on-regression`, the comparison remains advisory. Both modes
+classify the same rows as `ok`, `review`, or `missing-row`; metadata records
+the fixed percentage-or-absolute rule, selected mode, gate result, and row
+counts. The summary repeats the mode and result beside the row table.
+
+### Type Sizes (stack)
+
+| Type | Size |
+|------|------|
+| `Route` | 128 bytes |
+| `Prefix` | 18 bytes |
+| `PathAttribute` | 208 bytes |
+| `AsPath` | 24 bytes |
+| `AsPathSegment` | 32 bytes |
+| `AdjRibIn` | 1384 bytes |
+| `LocRib` | 1040 bytes |
+
+`PathAttribute` grew from 112 to 208 bytes since the last figures in this
+doc: new attribute variants (RFC 6514 `PmsiTunnel`, RFC 9234
+`OnlyToCustomer`) plus larger payloads on the existing variants that now
+carry the newer RIB families (VPN, labeled-unicast, RT-Constrain, EVPN,
+BGP-LS). It is interned globally, across all peers, so the
+per-route impact is amortized to near zero (see below), but it does raise
+the per-unique-attribute-set heap cost.
+
+`AdjRibIn` (1032 → 1384 bytes) and `LocRib` (96 → 1040 bytes) grew the same
+way — each struct picked up a route map and/or secondary index per added RIB
+family (VPN, labeled-unicast, RT-Constrain, EVPN, BGP-LS, FlowSpec; see
+`crates/rib/src/adj_rib_in.rs` and `crates/rib/src/loc_rib.rs`). Confirmed
+via `std::mem::size_of` against the current struct definitions; these two
+rows aren't in the allocator-tracked harness JSON.
+
+The final 48 bytes of `AdjRibIn` are two inline, allocation-free
+`RpkiValidationCounts` values, one for each unicast family. They keep the
+exact RPKI post-policy BMP counters on the route mutation path instead of
+requiring a periodic route-table scan.
+
+`Route.attributes` is `Arc<Vec<PathAttribute>>` — cloning a route between
+Adj-RIB-In, Loc-RIB, and Adj-RIB-Out shares the attribute allocation via
+reference counting. Mutation uses `Arc::make_mut()` (copy-on-write).
+
+Path attribute interning deduplicates identical attribute sets across routes
+from ALL peers: a single RIB-manager-owned `AttrInternTable` (the
+analog of BIRD's `rta` cache) maps each unique attribute set to a shared
+`Arc`. Routes with identical attributes — bulk advertisements from one peer,
+or the same route re-advertised by multiple RR clients — share one heap
+allocation instead of one copy per route or per peer.
+
+### Per-Route Heap Allocation
+
+> **Not re-measured this pass.** `PathAttribute` grew 112 → 208 bytes
+> (confirmed above), which changes the per-attribute-set heap totals below,
+> but the nested-allocation breakdown (the `AsPath` segment `Vec`, the
+> `Communities` `Vec<u32>`, etc.) needs a fresh dhat pass to attribute
+> correctly. Treat the two rows below as stale pending that re-measure.
+
+| Attribute set | Heap | Stack | Total |
+|---------------|------|-------|-------|
+| Typical (6 attrs, 3-ASN path, 2 communities) | 764 B | 128 B | 892 B |
+| Rich (8 attrs, 5-ASN+SET path, 5 communities, ORIGINATOR_ID, CLUSTER_LIST) | 1056 B | 128 B | 1184 B |
+
+These are per-unique-attribute-set costs. With interning, routes sharing the
+same attributes pay only the 128-byte `Route` stack cost plus an 8-byte `Arc`
+pointer.
+
+The `memory_profile` harness emits **six** shape rows per size —
+`adj_rib_in`, `full_rib`, `full_rib_diverse`, `full_rib_representative`,
+`rr_fanout`, and `rr_fanout_representative`. Three are tabled below:
+`adj_rib_in`, `full_rib`, and `rr_fanout`. `full_rib_diverse` is the
+`full_rib` shape with a distinct attribute set per prefix rather than one per
+peer, so it prices the interning claim above by removing the sharing. The two
+`_representative` shapes share one attribute set across seven consecutive
+prefixes instead, so they price partial sharing. No published table is carried
+for those three here, and a run of `bench/compare-rib-memory.sh` will show
+those rows uninterpreted.
+
+### AdjRibIn at Scale (single peer, typical attrs)
+
+| Routes | Live heap | Per-route | Route-map capacity |
+|--------|----------:|----------:|--------------------:|
+| 100,000 | 15.3 MiB | 160 B | 100,000 |
+| 500,000 | 73.5 MiB | 154 B | 500,000 |
+| 900,000 | 134.9 MiB | 157 B | 900,000 |
+
+`AdjRibIn` route storage is now a dense `RouteSlab`
+(`crates/rib/src/slab.rs`), not a power-of-2-rounded `HashMap` — capacity now
+equals the exact route count, and the old rounded-plateau curve no longer
+applies. Per-route cost includes the slab, the trie-backed prefix index, and
+the intern table; this pass doesn't break out a separate prefix-index byte
+count (see the run-provenance note above the Type Sizes table).
+
+### Full RIB: 2 Peers + LocRib (typical attrs)
+
+| Prefixes | Live heap | Per-prefix | Route copies | Route-map capacity |
+|----------|----------:|-----------:|-------------:|--------------------:|
+| 100,000 | 51.9 MiB | 544 B | 300,000 | 314,688 |
+| 500,000 | 316.6 MiB | 663 B | 1,500,000 | 1,917,504 |
+| 900,000 | 439.7 MiB | 512 B | 2,700,000 | 2,717,504 |
+
+Route-map capacity is now a composite: two dense (`RouteSlab`, exact)
+Adj-RIB-In capacities plus one rounded (`HashMap`) Loc-RIB capacity — the
+slab conversion covered only the per-peer Adj-RIB tables; Loc-RIB is
+deliberately kept `HashMap`-backed (its lookup-hot best-path recompute
+regressed on both compact-storage candidates tried — see
+`crates/rib/src/loc_rib.rs`). This is the **RIB-only, allocator-tracked**
+structural memory (2× Adj-RIB-In +
+Loc-RIB); each prefix stores Route instances with `Arc` sharing of attributes
+across copies, and global attribute interning shares one allocation across
+routes with identical attributes, whichever peers they came from. It is
+**distinct from the peak raw container cgroup usage** below — it excludes the
+daemon's operational surfaces
+(event-history, gRPC, telemetry, BFD, the tokio runtime, allocator arenas).
+
+### RR / Route-Server Fanout Shape: 2 In + LocRib + 2 Out
+
+| Prefixes | Live heap | Per-prefix | Route copies | Route-map capacity |
+|----------|----------:|-----------:|-------------:|--------------------:|
+| 100,000 | 82.6 MiB | 865 B | 500,000 | 514,688 |
+| 500,000 | 463.7 MiB | 972 B | 2,500,000 | 2,917,504 |
+| 900,000 | 709.5 MiB | 826 B | 4,500,000 | 4,517,504 |
+
+Route-map capacity here is a composite of four dense (`RouteSlab`, exact)
+Adj-RIB-In/Adj-RIB-Out capacities plus one rounded (`HashMap`) Loc-RIB
+capacity, for the same reason as the Full RIB table above. This is the
+structural memory shape closest to the dhat finding below: received
+routes, best paths, and advertised-route maps are all present. It still excludes
+full-daemon surfaces and container cgroup-usage behavior, so bgperf2 remains
+the operator-facing container-memory surface. The A/B review rule for this
+harness is
+deliberately coarse: flag a row for review only when head grows by at least
+**+5% or +32 MiB** for the same shape/size; smaller movement is recorded but
+treated as allocator/map-capacity noise unless the PR is memory-targeted.
+
+> **Correction — RouteSlab + attribute interning (2026-07-17).** The
+> three tables above replace an older, larger set of numbers this doc carried
+> for several releases; those older numbers overstated real memory use. For
+> example, at 500k: Full RIB was previously reported as 484.0 MiB (now 316.6
+> MiB, real) and RR/Fanout was previously reported as 815.0 MiB (now 463.7
+> MiB, real). The drop is the dense `RouteSlab` storage replacing
+> per-route `HashMap` buckets in `AdjRibIn`/`AdjRibOut`, plus the existing
+> benefit from global attribute interning — not a regression in
+> either direction; actual daemon memory footprint is better than this doc
+> previously claimed.
+
+> **Correction (whole-daemon dhat profile, 2026-06-02).** A full-daemon dhat
+> heap profile at 2 peers × 100k (`profile='dhat'` bgperf2 build, SIGTERM at the
+> flood peak) shows the live-at-peak heap (~308 MB tracked, dhat build) is
+> **~76% RIB map/index bucket storage**, broken down by allocation site as:
+> Adj-RIB-Out route map **~86 MB** + its prefix index ~29 MB, Loc-RIB best-path
+> map ~57 MB, Adj-RIB-In route map ~48 MB + its prefix index ~16 MB. API / event
+> / metrics operational surfaces were **negligible (<1 MB)**. **This corrects the
+> framing below:** the `memory_profile` micro-bench above (60.6 MB) is
+> **Adj-RIB-In + Loc-RIB only, on synthetic routes — it excludes Adj-RIB-Out**,
+> which the profile shows is the *single largest* component. The independent
+> profile therefore shows that the full-daemon heap contains **more RIB
+> storage** (the advertised-route maps plus real per-route data) than the 60.6
+> MB micro-bench; it does not decompose bgperf2's raw cgroup counter. The
+> durable memory cost is the three-layer route-storage model (Adj-RIB-In +
+> Loc-RIB + Adj-RIB-Out) and its prefix-keyed `hashbrown` bucket arrays — the
+> target for any future memory work, not the runtime or operational surfaces.
+>
+> **Superseded (2026-07):** this profile predates the update-groups arc. The
+> revision-pinned rebaseline in
+> [`docs/perf/rib-rebaseline-2026-07-13.md`](perf/rib-rebaseline-2026-07-13.md)
+> shows per-peer Adj-RIB-Out is now 0.05% (grouped peers share one group
+> table). At the 210,338,877-byte live-heap peak, the group table is 22.06%,
+> Loc-RIB 21.06%, Adj-RIB-In route storage 15.95%, the two prefix tries 16.37%,
+> and the announcing-peers index 7.10%. The retained derivative, exact image
+> identity, same-process bgperf row, and checksums make those the authoritative
+> attribution values.
+
+> **Prefix-index migration (trie-backed indexes).** The first measured fix
+> targeting the bucket-array overhead above: the two prefix-keyed *indexes* —
+> `AdjRibIn::prefix_index` and `AdjRibOut::prefix_path_ids` (each `Prefix →
+> SmallVec<[path_id]>`) — moved from `hashbrown::HashMap` to a family-split
+> `prefix_trie::PrefixMap`. In the dhat breakdown above these are the ~16 MB
+> Adj-RIB-In + ~29 MB Adj-RIB-Out index components (that profile predates the
+> change). Measured impact (`memory_profile`, allocator-tracked): Full-RIB
+> 100k **66.6 → 60.6 MB (−9%)**, 500k **−14%**; Adj-RIB-In alone **−12% / −19%**
+> at 100k / 500k; and `adj_rib_in_insert` got **~8% faster** (compact trie nodes
+> vs hash buckets, no rehash) with best-path comparison unchanged — a clean win,
+> no read-path regression. The **Loc-RIB best-path map** (~57 MB above) was also
+> prototyped on the trie and gave a larger memory win, but it **regressed the
+> lookup-hot `loc_rib_recompute` ~2.6× (36 → 95 ns)** — Loc-RIB lookups dominate
+> best-path recompute, so that swap was **deferred**. Loc-RIB-specific compaction
+> that avoids the per-lookup trie-descent tax is tracked as follow-up.
+
+### Optimization History
+
+| Version | Full RIB (900k x 2 peers) | Per-prefix | vs GoBGP |
+|---------|--------------------------|------------|----------|
+| Pre-Arc (`Vec<PathAttribute>`) | 1.80 GB | 2.1 KB | 4-9x less |
+| Arc sharing (v0.4.2) | 1.41 GB | 1.6 KB | 6-11x less |
+| Arc + interning | 547 MB | 637 B | 15-29x less |
+
+The 900k×2 figures are the historical allocator-tracked journey; the 547 MB row
+is the last from the pre-RouteSlab harness. The structured
+`memory_profile_high_n` harness (2026-07-17 provenance note above) now measures
+100k/500k/900k directly and is the RIB-structure regression-tracking surface;
+peak raw container cgroup usage at scale uses bgperf2.
+
+### Optimization History (end-to-end, bgperf2 2p/100k)
+
+| Change | Memory | Convergence |
+|--------|--------|-------------|
+| Pre-AdjRibOut index | 168 MB | 71s |
+| + AdjRibOut secondary prefix index | 415 MB | 12s |
+| + Skip unnecessary Arc deep clones (v0.4.x-era) | 257 MB | 11s |
+| + AdjRibOut capacity hints (v0.30-era) | ~260 MB | 11s |
+| v0.31.0-era — event-history **on** (daemon default then) | ~439 MB | ~11s |
+| v0.31.0-era — event-history off | ~344 MB | ~11s |
+| **v0.32.0 — event-history off (daemon default now)** | **~284 MB** | ~11s |
+| **v0.32.0 — event-history on (opt-in)** | **~346 MB** | ~11s |
+
+**v0.32.0 cut 2p/100k peak raw container cgroup usage ~21%** (event-history on:
+~439 → ~346 MB, median of 337 / 346 / 369; off: ~344 → ~284 MB, of 280 / 289).
+The only code
+delta versus the v0.31.0-era rows is the inbound-UPDATE attribute-`Arc` sharing
+(PR #326): eliminating the per-NLRI attribute-vector deep-clones during the
+route flood lowers the (jemalloc) allocator high-water mark, and since jemalloc
+retains freed arenas the lower peak shows up in the raw container cgroup counter.
+Clean before/after on the same harness and host.
+
+**The bgperf2 rows are not apples-to-apples with the v0.4.x/v0.30-era rows
+above** — they are peak raw container cgroup usage, not process RSS or the
+RIB-only figure, and are
+**not a RIB memory regression** (RIB-only structural memory at 100k actually
+improved ~9% — see above). Since the ~257–260 MB era the daemon gained
+substantial always-available operational surfaces (BFD, gNMI, ASPA, BGP
+roles/OTC, plus the explain cache — opt-in, default off since v0.61.0) and
+`PathAttribute` grew 72→112 B over that era (it is 208 B on HEAD — see the
+Type Sizes table above). The single
+biggest contributor is the durable **event-history outbox** (ADR-0072), which
+persists every route event to SQLite: enabling it
+(`[event_history].enabled = true`) adds **~62 MB** raw cgroup usage (~284 →
+~346 MB) **and roughly doubles peak CPU** (~115% → ~239%). Convergence is unchanged at ~11s
+(≈2s route-flood; the outbox is not on the convergence-critical path). Criterion
+and the RIB-only `memory_profile` above remain the regression-tracking surfaces
+for RIB data-structure changes.
+
+> **Operator note — the event-history outbox is opt-in as of v0.32.0.** That
+> always-on cost (~62 MB raw cgroup usage + roughly double the peak CPU at 2p/100k) is
+> exactly why: the outbox now defaults to `[event_history].enabled = false`, so
+> the lean numbers above are the default. Deployments that want restart-safe
+> event replay set `enabled = true` and accept the cost. See ADR-0072 and the
+> two deployment profiles in `docs/reference/operations.md`.
+
+The Arc deep-clone fix (`RouteModifications::is_empty()` guard) was the biggest
+memory win: `Arc::make_mut()` was called unconditionally on every route in
+`distribute_single_best_prefix()`, forcing deep clone of `Vec<PathAttribute>`
+even when no export policy modifications were configured. With the guard, ~85%
+of routes share the same `Arc` across LocRib and AdjRibOut — no deep copy.
+
+Capacity hints (pre-sizing AdjRibOut/LocRib HashMaps) were tested and shown to
+be neutral on the bgperf2 raw cgroup-usage surface, confirming the remaining
+HashMap overhead is structural (power-of-2 rounding), not rehash churn.
+
+Remaining memory is HashMap bucket arrays (~78%) and actual Route data (~19%).
+No obvious accidental overhead remains.
+
+### Where the July 2026 memory step went — single-commit attribution
+
+The history table above stops at v0.32.0. The step it does not show is the one
+the July 2026 performance batch introduced at route-server scale, and that
+bill is not spread across the batch: a single-commit attribution campaign at
+100 peers × 1,000 routes traced the whole settled-memory step to **one change
+— #1189, `perf(api): coalesce neighbor RIB snapshots`** (merged
+2026-07-27T01:53Z, ~14 h before the v0.61.0 tagged commit and shipped in
+it). Measured as a single-commit step against its immediate parent, it is
+**+106.6 MiB cgroup `memory.peak` and +101.1 MiB settled anonymous RSS, for
+−1.02 s of convergence**. It was taken deliberately as a memory-for-speed
+trade, and the campaign confirms it behaved exactly as designed: it is the
+single place where both the memory and the convergence moved.
+
+The rest of that batch's convergence gain cost nothing. The 22 commits ending
+at #1183 (`perf: grow extended-message receive buffers on demand`), which also
+carry #1176 (`perf(rib): remove peer-multiplied fanout bookkeeping`) and #1177
+(`perf(wire): eliminate temporary codec allocation churn`) — all merged
+2026-07-26 UTC, all in v0.61.0 — moved convergence down **−1.03 s with
+memory going down alongside it** (−7.4 MiB peak, −23.7 MiB settled anon).
+That half is resolved to the interval, not to individual PRs. #1188
+(`perf(policy): share attribution labels through group staging`) reduced
+memory on its own, by **−21.4 MiB peak / −23.8 MiB settled anon**, and the
+two steps reconcile exactly: −21.4 + 106.6 = +85.2 MiB, the measured
+endpoint delta across them.
+Roughly half the batch's speed-up was free; only #1189 was paid for.
+
+The later arcs the campaign covered measured flat or negative at this shape —
+#1184 alone (−9.5 MiB), the authz arc (−15.5 MiB across its 54-commit
+interval), the 48-commit interval carrying ADR-0126's grouped per-client-best
+(−18.0 MiB), and v0.64.0 (+4.5 MiB across 11 commits). One residual sits above
+the flat band and is published without an owner: **+24.4 MiB** across the 34
+commits from the authz cut to the v0.63.0 tag, below the campaign's +25 MiB
+ownership threshold.
+
+The #1678–#1689 hardening tranche is a separate case worth stating plainly.
+Its structural reclaims (private unicast storage released after regrouping,
+unused group route-slab tails trimmed, read-buffer storage released on
+disconnect, rejected-route retention grown incrementally) are
+**lifecycle-conditional**. They pay back on
+isolate/rejoin, oversized messages, and flood-then-adopt — not on a daemon
+sitting at steady state, which is why a settled-memory number does not move
+when they land.
+
+**Method, and how to read those magnitudes.** The campaign ran interleaved
+round-robin A/B arms with medians over five runs per arm, reproducible builds
+byte-identical across campaigns, cgroup `memory.peak` as the primary surface
+(not process-tree RSS, and not the raw container `memory_stats.usage` counter
+the bgperf2 rows above report), and bands preregistered before the runs.
+Settled memory at 100 peers × 1,000 routes carries a **±30–50 MiB
+anonymous-residency variance band** — the same figure the soak gates are
+calibrated against, see
+[`soaks/soak-acceptance-gates.md`](soaks/soak-acceptance-gates.md) — so every
+figure above is a band, never a point, and the ownership threshold was set at
++25 MiB on a five-run median precisely so a verdict has to clear that floor.
+All measured phase images used jemalloc; the earlier glibc
+allocator-internal attribution was incorrect and is retracted in the
+[campaign erratum](perf/memory-attribution-2026-08.md).
+Absolute levels do not travel between campaigns: re-running byte-identical
+binaries produced level offsets of +8 to +27 MiB, so only within-campaign
+steps are comparable. The convergence figures are same-shape observations at
+this one workload, not a general speed claim, and no control daemon ran, so
+none of it licenses a comparison. Full per-arm tables, the preregistered
+manifests, the sum checks and the limits are in the receipt:
+[`perf/memory-attribution-2026-08.md`](perf/memory-attribution-2026-08.md).
+
+**Open follow-up: thin the #1189 trade.** ADR-0126's shared-group machinery
+did not exist when #1189 landed — it can hold coalesced snapshot state once
+per update group instead of once per neighbor, which is the shape of the
+retention #1189 introduced. Reworking it that way is planned, and hard-gated:
+no more than a 2% convergence regression at the shape #1189 bought its
+speed-up at. The trade is only worth undoing if the speed survives.
+
+### Steady-state memory at flagship scale — 24 h soak observations
+
+The two archived v1-gating flagship soaks are the current published
+steady-state observations at 1,000 sessions. They are **stability evidence,
+not comparisons**: no control daemon ran alongside either run, so neither
+licenses a performance claim, and their surface is daemon process-tree RSS —
+a third surface again, distinct from both cgroup `memory.peak` and the raw
+container counter used by bgperf2.
+
+| Shape | Steady band | Peak | Late-window slope |
+|---|---|---|---|
+| Route server — 1000 eBGP RS-client sessions × 400 routes (400,000), 24 h under churn with 48 SIGHUP reloads and 6 max-prefix trip/restart cycles | **432–449 MB** between injections | 581.7 MB (reload re-advertisement and trip re-announce bursts, settling back into the band each time) | 0.0724 MB/h |
+| Route reflector — 1000 iBGP RR-client sessions × 100 routes (100,000), 24 h under 5,486,092 churn cycles | **~220–235 MB** for the whole hold | 342.5 MB, in the terminal 1,000-way full-table refresh | 0.2958 MB/h |
+
+Receipts, gates, and artifacts:
+[`soaks/soak-rs-flagship-24h.md`](soaks/soak-rs-flagship-24h.md) and
+[`soaks/soak-rr-flagship-24h.md`](soaks/soak-rr-flagship-24h.md); both are
+indexed with the rest of the operational evidence in
+[`OPERATIONAL_PROOF.md`](operational-proof.md) and
+[`RECEIPTS.md`](receipts.md). The intern gauge
+(`bgp_rib_attr_intern_global_size`) was pinned across both runs, and the RR
+run closed on an exact terminal reflected-delivery receipt — 99,900 non-self
+prefixes to every observer, zero parse errors, zero session flaps — so those
+flat bands were held while the daemon was demonstrably still doing the work.
+
+### Shared `RouteData` — measured and rejected
+
+Splitting `Route` into a shared immutable `RouteData` (referenced from each RIB)
+plus a thin per-RIB wrapper was evaluated against a `>=25%`-of-RR-heap gate and
+**rejected**. In the route-reflector fanout shape the realistic, policy-robust
+split (identity fields shared; attributes + next-hop kept per-copy so per-client
+export policy still shares the identity) recovers only **11–13% of RIB heap
+under transparent policy and ~5% under per-client rewrite** — well below the
+gate, for the largest `&Route`-consumer blast radius in the codebase. A naive
+`Arc<Route>` whole-shell share would reach ~31–37%, but that is unachievable:
+`is_stale` / `is_llgr_stale` and `validation_state` / `aspa_state` mutate per
+RIB, so the full shell can never be shared. Reproducible harness:
+`cargo test -p rustbgpd-rib --test route_data_sharing_profile -- --ignored --nocapture`.
+
+## Interpretation
+
+**Wire codec** — The live revised parser now has direct coverage for compact
+IPv4-body UPDATEs plus an IPv6 MP-BGP Add-Path branch fixture. A 500-prefix
+IPv4-body UPDATE with typical attributes measured 3.34 µs on the pinned host.
+That establishes a regression baseline for those shapes; it does not by itself
+prove that the codec is never a bottleneck for large MP-BGP, VPN, EVPN, or
+malformed-recovery workloads. Framing-only messages still avoid UPDATE
+attribute parsing.
+
+**RIB insert** — The pinned 10k row measures 4.2M unique routes/sec. Historical
+100k and 500k rows repeated after 65,536 keys, so they remain exact-shape
+regression anchors but do not support unique full-table throughput or a 900k
+insert extrapolation.
+
+**Best-path selection** — Full-ladder comparisons are ~19.8ns each. Even an
+8-candidate Add-Path selection completes in ~167ns per prefix, and the common
+early-exit path is much cheaper. Best-path is not a bottleneck.
+
+**Pipeline scaling** — With the secondary prefix index, the pipeline scales
+linearly. 50k prefixes x 2 peers completes in 39ms. Extrapolated full-table
+(900k) would take ~0.7s for a complete 2-peer recomputation — well within
+operational requirements.
+
+**Route churn** — A 1k-prefix announce/withdraw cycle completes in ~254us.
+Real-world churn involves far fewer prefixes per UPDATE (typically 1-50), so
+per-event reconvergence is effectively instant.
+
+## End-to-End System Benchmarks
+
+Measured using [bgperf2](https://github.com/netenglabs/bgperf2), a Docker-based
+BGP benchmarking harness. Each test runs a target daemon, N BIRD tester peers
+(each advertising P prefixes), and a GoBGP monitor peer that observes convergence.
+The monitor's accepted route count is the ground truth for completion.
+
+**Environment:** AMD Ryzen Threadripper 7970X (32 cores / 64 threads), 125 GB
+RAM, Linux 6.17, Docker 27.x. All daemons run in containers on the same host.
+
+**Methodology:** "Convergence" is the harness `elapsed` column — monitor start
+to all expected prefixes received — so it includes the wait for the first
+prefix as well as the flood. "Total time" additionally includes session
+establishment and harness setup. The harness prints memory labeled "MB" but
+computes it 1024-based; the tables below convert it and label the result
+**MiB**. The memory value is the peak of Docker's raw container cgroup
+`memory_stats.usage` counter. It is not process-tree RSS or Docker working set
+and may include anonymous, file/cache, kernel, and socket memory.
+
+### Results
+
+**Freshest published cross-stack receipt: v0.68.0, measured 2026-08-30.** A
+counterbalanced 80-cell campaign rebuilt and pinned exact rustbgpd v0.68.0, BIRD
+2.19.2, FRR 10.7.0, and GoBGP 4.8.0, stopped each cell's samplers before
+starting the next cell, and
+retained all raw rows in the [same cross-stack bgperf2
+receipt](perf/competitive-bgperf2-v0680-2026-08.md). All 80 cells reached the
+exact expected route count across five fixed shapes. The largest is two peers ×
+100,000 prefixes; this is not a full-table campaign.
+
+Values are **convergence seconds / total seconds**. Each median has four
+successful repetitions.
+
+| Shape | rustbgpd v0.68.0 | BIRD 2.19.2 | FRR 10.7.0 | GoBGP 4.8.0 |
+|---|---:|---:|---:|---:|
+| 10p × 1k | 2 / 8.25 | 2 / 9.21 | 3 / 10.30 | 4 / 11.36 |
+| 2p × 10k | 2 / 8.24 | 2.5 / 9.81 | 3 / 9.33 | 3 / 10.39 |
+| 2p × 100k | 3 / 12.45 | 3 / 13.47 | 4 / 13.56 | 4 / 14.59 |
+| 30p × 1k | 2.5 / 9.31 | 3 / 9.75 | 4 / 10.91 | 4 / 10.93 |
+| 100p × 1k | 3 / 11.95 | 5 / 14.02 | 7 / 16.55 | 16 / 24.78 |
+
+Rustbgpd had the lowest median total time in all five shapes and tied or had
+the lowest median convergence time. No CPU or memory ranking is claimed. These
+same-host IPv4 import results
+do not cover policy, reload, churn, restart, or absolute behavior on another
+machine.
+
+### Historical July results
+
+> **Integrity correction (2026-08-28): Historical July harness output only; no current cross-daemon ranking is supported.** The target order was fixed
+> as rustbgpd → BIRD → GoBGP → FRR, and one-second sampler threads from earlier
+> cells continued polling during later cells. Only rustbgpd has a retained
+> fresh no-cache image-build receipt; competitor provenance is incomplete, and
+> FRR was gcov-instrumented. The raw rows remain historical observations. No
+> ranking, margin, ratio, or sampler-derived memory correction is supported.
+
+**Re-measured 2026-07-26** (UTC; the harness records the host's local date as
+2026-07-25) at commit `515659b1`. This is a pinned historical candidate, not
+current `main`: routing and memory code has moved since it was measured. The
+run widened the field from three daemons to **four** and added the two
+route-server shapes, which had never been published. The full write-up, with
+per-run values behind every median, the per-second establishment progressions,
+the disclosed harness defects, and the retained artifacts, is the [cross-stack
+bgperf2 receipt](perf/competitive-bgperf2-2026-07.md). A later controlled
+peer/route matrix corrects the sizing interpretation without rewriting these
+historical rows; see
+[`per-peer-rss-attribution-2026-07.md`](perf/per-peer-rss-attribution-2026-07.md).
+
+**The target reports `rustbgpd 0.60.0` in the raw rows because the v0.61.0
+version bump had not happened when the campaign ran.** The binary is the
+v0.61.0 candidate; only the version string is behind.
+
+Medians of 3 runs per cell, 6 for 10p × 1k. Versions: **rustbgpd** at
+`515659b1`, **BIRD 2.18** (`branch.master.0ee9f93bd076`), **GoBGP 4.3.0**,
+**FRR 10.7.0-dev** (an unpinned, gcov-instrumented development build — every
+cell reported a distinct build identifier). **Same-host caveat:** all four
+daemons, the BIRD tester fleet, and the GoBGP monitor ran in containers on the
+one host described above. The fixed order and accumulating sampler work mean
+the targets did not receive equivalent host conditions.
+
+| Shape | rustbgpd | BIRD 2.18 | GoBGP 4.3.0 | FRR 10.7.0-dev |
+|---|---|---|---|---|
+| 10p × 1k | conv 2 s · total 8.23 s · 7% · 37.9 MiB | conv 2 s · total 9.20 s · 2% · 8.2 MiB | conv 3 s · total 10.32 s · 126% · 38.9 MiB | conv 3 s · total 10.27 s · 4% · 27.6 MiB |
+| 2p × 10k | conv 2 s · total 8.26 s · 7% · 48.1 MiB | conv 2 s · total 9.24 s · 1% · 9.2 MiB | conv 3 s · total 10.34 s · 88% · 44.0 MiB | conv 3 s · total 9.31 s · 5% · 36.9 MiB |
+| 2p × 100k | conv 3 s · total 12.32 s · 41% · 212.0 MiB | conv 3 s · total 13.22 s · 6% · 27.6 MiB | conv 6 s · total 16.49 s · 565% · 202.8 MiB | conv 4 s · total 13.39 s · 94% · 228.4 MiB |
+| 30p × 1k *(new)* | conv 3 s · total 9.83 s · 22% · 108.5 MiB | conv 3 s · total 10.87 s · 14% · 11.3 MiB | conv 4 s · total 11.84 s · 897% · 68.6 MiB | conv 4 s · total 10.85 s · 11% · 51.2 MiB |
+| 100p × 1k *(new)* | conv 3 s · total 11.79 s · 122% · 212.0 MiB | conv 5 s · total 15.22 s · 101% · 32.8 MiB | conv 20 s · total 28.50 s · 1281% · 193.5 MiB | conv 7 s · total 16.01 s · 68% · 134.1 MiB |
+
+*v0.64.0 spot-check (2026-08-08, same host): a single run of the three
+original shapes against the release tag (image built from the public
+`v0.64.0` tag) reproduced the rustbgpd column within its bands — totals
+8.17 / 8.24 / 12.03 s and peak raw cgroup usage 37.7 / 46.7 / 203.1 MiB for
+10p × 1k / 2p × 10k / 2p × 100k. Single run, rustbgpd only; the
+four-daemon rows above remain preserved historical output.*
+
+*v0.66.0 spot-check (2026-08-23, same host): a single run of the three
+original shapes against the release tag (image built from the public
+`v0.66.0` tag, commit `5873768d`) again reproduced the rustbgpd column
+within its bands — totals 8.29 / 8.31 / 12.40 s and peak container memory
+29.6 / 38.2 / 207.1 MB for 10p × 1k / 2p × 10k / 2p × 100k. Rebuilt
+support images (BIRD tester `2.19.0+branch.master`, GoBGP monitor per the
+raw rows) differ from the pinned campaign's testers, so only the rustbgpd
+totals are compared. Single run, rustbgpd only; the four-daemon medians
+above remain preserved historical output.*
+
+Rustbgpd's own raw-cgroup runs span 86.0 / 108.5 / 131.1 MiB at 30p × 1k
+(42% of the median) and 180.2 / 212.0 / 230.4 MiB at 100p × 1k (24%). Quote
+those rustbgpd observations as ranges. The campaign does not isolate peer
+cost: peer and route counts change together. A later counterbalanced
+rustbgpd-only matrix holds BASE routes and peers independently and measures
+118.200/142.844 KiB per peer at fixed 10k/100k BASE routes and
+825.515/850.751 B per BASE route at fixed 10/100 peers. See the [controlled
+attribution receipt](perf/per-peer-rss-attribution-2026-07.md). The 1,000-peer receipts
+([`perf/scale-receipt-2026-07.md`](perf/scale-receipt-2026-07.md),
+[`perf/route-server-1000-2026-07.md`](perf/route-server-1000-2026-07.md)) are
+the evidence at that scale.
+
+**OpenBGPD could not be collected — a bgperf2 harness defect, not a daemon
+result.** The harness launches `/usr/local/sbin/bgpd` while the image ships
+binaries at `/usr/sbin/`, so the harness config never loads and the image's own
+entrypoint runs with zero neighbors; `monitor.py wait_established()` is an
+unbounded loop and hung about 11 minutes before the attempt was killed. The
+comparison is therefore four-way. Root cause and retained evidence are in the
+[receipt](perf/competitive-bgperf2-2026-07.md#openbgpd-could-not-be-collected--harness-defect-not-a-daemon-result).
+The [IXP receipt matrix](perf/ixp-matrix-2026-07.md) carries a head-to-head
+OpenBGPD 9.2 comparison through a different harness (700 clients × 400,400
+routes, policy reload; measured 2026-08-30), and the IRR-scale reload receipts
+retain their separate current OpenBGPD 9.2 comparison:
+
+| IRR-scale filter reload (320 members × 183,040 generated prefixes, 0%/10%/50% received-view overlap) | rustbgpd | BIRD 3.3.2 | OpenBGPD 9.2 |
+|---|---|---|---|
+| Reload completion p50 | **0.852–1.085 s** | 11.861–15.211 s | 42.939–61.959 s |
+
+Source: the [current v0.68.0 IRR reload
+receipt](perf/irr-reload-v0680-2026-08.md). All 96 rows retain 320/320 sessions,
+zero parse errors, and verifier-approved received-view deltas. Cross-daemon
+memory rankings are omitted because daemon and container defaults differ.
+
+One BIRD cell needed a third run: 100p × 1k total measured 24.51 s, then
+15.17 s, then 15.22 s, and the published median is 15.22 s. The outlier is a
+harness startup artifact — the monitor-wait column read 9 s in that run against
+0 s in the other two, and the difference is 9.34 s — not a BIRD result; BIRD's
+convergence column read 5 s in all three runs.
+
+**Deltas against the 2026-07-09 v0.50.0 three-way run** (same host and harness,
+event-history off in both): the three shared shapes are flat to slightly better
+on time (10p × 1k total 8.3 → 8.23 s, 2p × 10k 8.3 → 8.26 s, 2p × 100k
+12.1 → 12.32 s) and 2p/100k raw cgroup usage moved 246 → 212.0 MiB. The earlier
+run's memory figures were reported in 1000-based MB against this run's MiB, so small
+differences there are partly unit conversion; the shape of the result is
+unchanged. BIRD and GoBGP versions are identical across the two runs.
+
+**Re-measured 2026-07-27 at the v0.61.0 tag** (commit `d1877d4b`,
+code-identical to `v0.61.0`; the target reports `rustbgpd 0.61.0`): the three
+non-route-server shapes were rerun on the same host through the same harness,
+3 runs per cell, image rebuilt `nocache`, event-history **on** (the harness
+default, explicitly recorded). Medians: rustbgpd total 8.28 s at 10p × 1k
+(BIRD 9.23, GoBGP 10.29, FRR 10.32), **8.21 s** at 2p × 10k (BIRD 9.22, FRR
+9.28, GoBGP 10.35), **12.33 s** at 2p × 100k (BIRD 13.20, FRR 13.26, GoBGP
+16.45). Every rustbgpd median is within 0.05 s of its earlier rustbgpd value;
+that same-daemon repeatability is the supported conclusion. The competitor
+rows retain the campaign's fixed-order, sampler-lifetime, provenance, and FRR
+instrumentation limitations and do not support rankings. The 30p × 1k and
+100p × 1k rows above were not rerun and stand at `515659b1`. Full tables, raw
+CSVs, transcripts, and checksums: [the receipt's refresh
+section](perf/competitive-bgperf2-2026-07.md#v0610-exact-tag-refresh-2026-07-27).
+
+### Understanding the Numbers
+
+**Session establishment.** rustbgpd dials the passive BIRD testers, which bind
+their listeners ~1-2s after rustbgpd starts, so the first outbound TCP dial is
+refused. Before the fast-retry change, that first refusal armed a ~10s backoff
+timer (`connect_retry_secs` base × exponential), so rustbgpd sat idle until the
+timer fired even though the testers were ready within ~2s — establishment took
+~10s. `main` now retries the first two refused dials at a 1s floor before
+resuming the exponential curve, catching the testers almost immediately;
+unreachable peers that wait for the TCP connect timeout, and OPEN-validation /
+NOTIFICATION failures, still use the slower guards so misconfigured peers do not
+hot-loop. A controlled same-host before/after at 10 peers × 1,000 prefixes
+measured total time **16.7s → 8.3s** (establishment ~10s → ~2s).
+
+**Establishment versus flood at 100 peers.** The raw progression logs show
+rustbgpd at first-prefix/full-table 1 s/2 s, BIRD at 1 s/4 s, GoBGP at
+1 s/18 s, and FRR at 5–6 s/6 s. These are preserved historical observations,
+not a ranking, because each target ran at a different point in the fixed-order
+campaign with cumulative sampler work.
+
+**Rustbgpd implementation context.** The measured rustbgpd build included a
+secondary `AdjRibOut` prefix index and avoided unnecessary `Arc::make_mut()`
+deep clones when no export-policy modifications were configured. Its RIB is a
+single Tokio task without internal locks. The historical rows record 41% CPU
+at 2p × 100k and 122% at 100p × 1k; competitor CPU rows are not used for a
+comparative conclusion.
+
+**Memory.** The historical campaign records rustbgpd peak raw container cgroup
+usage of 212.0 MiB at both 2p × 100k and 100p × 1k. It does not support a
+cross-daemon memory ranking. An independent whole-daemon dhat heap profile
+(2026-06-02; see the *Memory Footprint* correction) attributes **~76% of its
+live-at-peak heap** to **RIB route-storage map/index bucket arrays** across the
+three-layer Adj-RIB-In + Loc-RIB + Adj-RIB-Out model, with Adj-RIB-Out the
+single largest piece. API / event / metrics operational surfaces were
+**negligible (<1 MB)**. The opt-in event-history outbox adds raw cgroup usage
+when enabled, but that two-peer route-heavy profile does not price a 100-peer
+session fleet.
+A controlled 10/100-peer × 10k/100k-route follow-up measures both dimensions
+and attributes 6,150,300 control bytes at 100 ordinary-message peers to eager
+RFC 8654 receive-buffer reservation. The lazy-buffer candidate removes that
+exact DHAT owner; its −0.324% release RSS result is below the 0.645% floor and
+carries no RSS claim. Continuous churn leaves different final route totals, so
+allocator-total and aggregate DHAT deltas are also descriptive only. The
+earlier 60.6 MB "RIB-only is lean" figure is a synthetic Adj-RIB-In + Loc-RIB
+micro-bench that excludes Adj-RIB-Out and so undercounts full-daemon route
+storage. At full-table scale (900k prefixes, RIB-only micro-bench), rustbgpd's
+Adj-RIB-In + Loc-RIB is ~440 MiB; that separate result is not a whole-daemon
+cross-stack comparison.
+
+**gRPC under load.** A priority query channel separates read-only gRPC queries
+from the route-processing pipeline, ensuring management API requests are
+serviced between route batches even during bulk loading. At 100k+ scale, the
+API remains responsive rather than blocking behind thousands of queued route
+updates.
+
+The comparison-summary ranking is removed. The historical raw rows remain in
+the table above; current comparative claims require a counterbalanced rerun
+with cell-scoped samplers and equivalent reproducibly pinned builds.
+
+Historical progression of these figures across releases is in [Optimization
+History (end-to-end, bgperf2 2p/100k)](#optimization-history-end-to-end-bgperf2-2p100k)
+above.
+
+## EVPN RR Scale (M33)
+
+> **Scope note:** the M33 numbers in this section are
+> **RR-only** — empty `[[evpn_instances]]`, no kernel-side dataplane
+> reconciler, no local-MAC originator, no notify_loop draining
+> RTNLGRP_NEIGH. v0.14.0 (Gate 7b) added the FDB programmer and
+> v0.15.0 (Gate 7b+1) added the originator + IMET emitter +
+> `RTNLGRP_NEIGH` subscriber. VTEP-mode scale numbers (originator
+> emitting Type 2 from kernel learns, reconciler programming
+> remote MACs into the bridge FDB, all with mobility churn) are
+> tracked as alpha-soak follow-up — see
+> [`docs/how-to/evpn-alpha-soak.md`](how-to/evpn-alpha-soak.md). Don't read M33
+> numbers as a VTEP-mode baseline.
+
+Measured with the in-tree `bench/evpn-load` generator: two synthetic
+iBGP testers advertise Type 2 MAC/IP routes into a rustbgpd Route
+Reflector, which reflects them to a third peer (the monitor). Tester
+and monitor both listen on port 179 and let the rustbgpd RR dial in
+(rustbgpd's neighbor model always actively dials configured peers, so
+listen-and-accept avoids a TCP collision deadlock). The monitor runs
+the same wire codec as the daemon, tracks live EVPN Type 2 keys in a
+`HashSet<EvpnRouteKey>`, and reports both `initial_convergence_sec`
+(first time the live set reaches the expected count) and
+`stable_convergence_sec` (first time the live set stays at the
+expected count for `stable_sec` continuous seconds — later than
+initial when churn is running, since each withdraw+re-advertise resets
+the stable window). Since the testers and monitor are built directly
+on `rustbgpd-wire`, no third-party daemon is in the measurement path
+— rustbgpd's RR scale is what gets exercised.
+
+**Harness:** `tests/interop/m33-evpn-scale.clab.yml`
+
+**Shape:**
+
+- 2 testers × 25,000 Type 2 routes = 50,000 reflected total
+- Bulk rate: 5,000 routes/sec per tester
+- Churn phase: 60 seconds of 1,000 rps withdraw + re-advertise
+  (sliding window over each tester's MAC space)
+
+**Assertions:**
+
+| Assertion | Target | Observed |
+|-----------|--------|----------|
+| Initial convergence to 50k reflected routes | < 60 s | **5.1 s** |
+| Stable convergence (count steady ≥ 5 s after churn ends) | logged | **~70 s** |
+| Post-churn count (distinct keys) | within ±tester batch (40) of 50,000 | **50,000 — exactly on this run** |
+| Withdrawal events observed during churn | ≥ ½·`CHURN_RATE`·`CHURN_DURATION` (≥ 30,000) | **57,120** |
+| `ListEvpnRoutes` matches observer's view | ≥ 50,000 Type 2 | **50,000** |
+| Tester peers stay Established, zero flaps | both up | **both up, 0 flaps** |
+| RR process stays healthy | yes | **yes — `GetHealth` passes post-run** |
+| Peak RR memory (soft ceiling 2 GB) | < 2 GB | **79 MB** |
+
+Observed wire-level traffic (bulk + churn phases combined):
+
+| Counter | Observed |
+|---------|----------|
+| Total announce events (incl. churn re-advertises) | ~107,000 |
+| Total withdraw events (incl. churn) | ~57,000 |
+| UPDATE messages received by monitor | ~4,100 |
+
+Note: the announce/withdraw counters include idempotent re-advertises
+during churn, so they are larger than the steady-state route count.
+`final_count` (50,000) is the distinct-key cardinality.
+
+Measurement environment: AMD Ryzen Threadripper 7970X (32 cores /
+64 threads), 125 GB RAM, Linux 6.17, Docker 27.x, containerlab. Single
+`rustbgpd:dev` container per node, all four nodes on the same host.
+
+**Notes on methodology:**
+
+- All routes share one RD (`65000:1`), ethernet-tag `0`, VNI `100`.
+  MACs are deterministic (`02:00:00:XX:YY:ZZ` with 24 bits = route
+  index), so runs are exactly repeatable.
+- ESI is zero — Gate 4 / M32 already validated the multi-homing
+  attribute pipeline; Gate 5 / M33 isolates scale of the reflection
+  hot path.
+- The IETF draft [Benchmarking Methodology for EVPN][evpn-bmwg]
+  proposes much larger targets (32k EVIs, 2M MACs, 24 h soak).
+  M33 is scoped to the production-ready-at-fabric-scale claim
+  (10k+ MACs); larger-scale harness work is future roadmap.
+
+[evpn-bmwg]: https://datatracker.ietf.org/doc/html/draft-kishjac-bmwg-evpntest-00
+
+## Running End-to-End Benchmarks
+
+End-to-end system benchmarks use [bgperf2](https://github.com/netenglabs/bgperf2),
+a Docker-based BGP benchmarking harness. bgperf2 lives outside the rustbgpd repo.
+The current v0.68.0 campaign pinned
+[bgperf2 `d0449574`](https://github.com/lance0/bgperf2/commit/d0449574c10966218377ad4ca30da5fc3d783d5c),
+the target images and source revisions in its
+[receipt](perf/competitive-bgperf2-v0680-2026-08.md), and four balanced target
+orders. The commands below reproduce individual cells after those pins are
+matched; they are not the unpublished 80-cell batch orchestration and must not
+be presented as a reproduction of its medians or ordering controls.
+
+### Prerequisites
+
+- Docker running
+- bgperf2 checked out (e.g. `~/projects/bgperf2`)
+- Python virtualenv with bgperf2 dependencies
+
+### Build the Docker image
+
+```bash
+cd /path/to/bgperf2
+source .venv/bin/activate
+python -c "
+from rustbgpd import RustBGPd
+RustBGPd.build_image(force=True, nocache=True)
+"
+```
+
+**Critical:** Always use `nocache=True` when rebuilding. Without it, Docker
+caches the builder stage and reuses stale binaries. This has caused phantom
+benchmark results in the past.
+
+### Run a benchmark
+
+```bash
+# Clean up any leftover containers
+docker rm -f $(docker ps -aq --filter "name=bgperf") 2>/dev/null
+docker network rm bgperf-net bgperf2-br 2>/dev/null
+
+# Run: 2 peers, 100k prefixes each (200k total)
+python bgperf2.py bench -t rustbgpd -n 2 -p 100000
+
+# Other scenarios
+python bgperf2.py bench -t rustbgpd -n 10 -p 1000    # 10 peers, 1k each
+python bgperf2.py bench -t rustbgpd -n 2 -p 10000     # 2 peers, 10k each
+
+# Compare against other daemons
+python bgperf2.py bench -t bird -n 2 -p 100000
+python bgperf2.py bench -t gobgp -n 2 -p 100000
+```
+
+Output is a CSV line with convergence time, max CPU, max memory, etc.
+
+### Heap profiling with dhat
+
+rustbgpd has a feature-gated dhat heap profiler. To capture a heap profile:
+
+```bash
+# Build with dhat profiling (slower, ~2x overhead)
+python -c "
+from rustbgpd import RustBGPd
+RustBGPd.build_image(force=True, nocache=True, profile='dhat')
+"
+
+# Run the benchmark in the background
+python bgperf2.py bench -t rustbgpd -n 2 -p 100000 &
+
+# Wait for convergence (~40s with dhat overhead)
+sleep 50
+
+# Send SIGTERM to rustbgpd to trigger profile dump
+# Note: pgrep/kill may not exist in the container; use /proc scanning
+docker exec bgperf_rustbgpd_target bash -c '
+for p in /proc/[0-9]*/cmdline; do
+  if grep -ql rustbgpd "$p" 2>/dev/null; then
+    pid=$(echo "$p" | cut -d/ -f3)
+    kill -TERM "$pid"
+  fi
+done'
+
+# Wait for profile write, then extract
+sleep 8
+docker cp bgperf_rustbgpd_target:/root/config/dhat-heap.json ./dhat-heap.json
+```
+
+View the profile at https://nnethercote.github.io/dh_view/dh_view.html
+
+### Gotchas
+
+- **Docker image caching.** Always `nocache=True`. Stale binaries produce
+  misleading results.
+- **Container cleanup.** bgperf2 sometimes leaves containers running after the
+  benchmark script exits. Clean up with `docker rm -f $(docker ps -aq --filter "name=bgperf")`.
+- **PID 1 in Docker.** The `exec` in the startup script doesn't always replace
+  bash as PID 1. rustbgpd may be a child process (e.g. PID 7). Use `/proc`
+  scanning to find the right PID for SIGTERM.
+- **Variance.** Raw container cgroup-usage measurements vary ~10-15% between
+  runs due to allocator behavior and timing. Run 2-3 times and take the median.
+- **dhat overhead.** dhat wraps every allocation, adding ~2x CPU overhead and
+  ~40% memory overhead. The tracked heap numbers are accurate but RSS will be
+  higher than production builds.

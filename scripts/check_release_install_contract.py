@@ -458,7 +458,7 @@ def check(root: Path) -> list[str]:
         check_systemd_template(errors, read(SYSTEMD_TEMPLATE))
         check_systemd_container(errors, read(SYSTEMD_CONTAINER_UNIT))
         check_container_deployment_docs(
-            errors, read("docs/deployment.md"), read("Dockerfile")
+            errors, read("docs/how-to/deployment.md"), read("Dockerfile")
         )
         check_compose(errors, read(COMPOSE_FILE))
         license_map = read(LICENSE_MAP)

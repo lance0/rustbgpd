@@ -1,7 +1,7 @@
 # M110 — FRR 10.7.1 Type 5 next-hop startup race on an IPv6 underlay
 
 Raw capture behind the peer-side caveat recorded on the M110 row in
-[`docs/INTEROP.md`](../../../INTEROP.md).
+[`docs/INTEROP.md`](../../../interop.md).
 
 On an IPv6-only VXLAN underlay, FRR 10.7.1's per-VRF `advertise ipv6 unicast`
 Type 5 origination can latch the BGP instance's IPv4 `bgp router-id` into the

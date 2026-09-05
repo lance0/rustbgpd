@@ -800,7 +800,7 @@ fn ixp_contract_gate_tracks_adapter_and_live_smoke_changes() {
         "adapter route inventory drifted"
     );
 
-    let security = include_str!("../docs/SECURITY.md");
+    let security = include_str!("../docs/reference/security.md");
     assert_eq!(security.matches("## Looking glass adapter\n").count(), 1);
     let disclosure = security
         .split_once("## Looking glass adapter\n")

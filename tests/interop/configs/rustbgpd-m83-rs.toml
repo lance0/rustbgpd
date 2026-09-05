@@ -141,7 +141,7 @@ send_max = 8
 # FRR: single-best member with a member-scoped export view. The
 # driver flips per_client_best to true mid-test (sed + SIGHUP +
 # session bounce — the knob is live-effective-next-session, see
-# docs/reload-matrix.md) to pin the ADR-0101 path-hiding contrast.
+# docs/reference/reload-matrix.md) to pin the ADR-0101 path-hiding contrast.
 [[neighbors]]
 address = "10.83.3.2"
 remote_asn = 65003

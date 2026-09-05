@@ -9,7 +9,7 @@
 #     image publishes (.github/workflows/container.yml builds the
 #     default target). Built with the full `release` profile (fat-LTO,
 #     codegen-units=1) and `--features jemalloc` — the exact build
-#     every number in docs/BENCHMARKS.md is measured on.
+#     every number in docs/benchmarks.md is measured on.
 #   dev — interop / CI / lab image: adds the EVPN load-gen helpers
 #     (evpn-tester / evpn-monitor), the interop start script, and
 #     iproute2/ping for containerlab topologies. Built with the fast
@@ -131,7 +131,7 @@ CMD ["rustbgpd", "/etc/rustbgpd/config.toml"]
 # bind port 179 (grant CAP_NET_BIND_SERVICE explicitly on runtimes
 # that don't, e.g. some Kubernetes setups). Kernel-dataplane features
 # (Linux FIB / EVPN VTEP) additionally need CAP_NET_ADMIN — see
-# docs/deployment.md.
+# docs/how-to/deployment.md.
 FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \

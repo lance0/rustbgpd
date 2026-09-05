@@ -1,0 +1,433 @@
+# Architecture
+
+> **Document class: CURRENT.**
+
+Understand the workspace crates, runtime ownership, and cross-crate contracts.
+
+> Update this file when crate boundaries, runtime ownership, or cross-crate
+> contracts change. Do not put milestone or status content here.
+
+---
+
+## Crate Dependency Graph
+
+```
+wire           (no internal deps)
+bfd            (no internal deps)
+fsm            ──► wire
+policy         ──► wire
+rpki           ──► wire
+bmp            ──► telemetry, wire
+mrt            ──► wire, rib, telemetry
+telemetry      (no internal deps)
+event-history  ──► telemetry
+evpn           ──► wire
+evpn-linux     ──► evpn
+rib            ──► wire, policy, telemetry, rpki, bmp
+transport      ──► wire, fsm, rib, policy, rpki, telemetry, bmp
+api            ──► wire, fsm, rib, policy, transport, telemetry, evpn, event-history, rpki
+cli            ──► wire, policy    (dev tests also use api, evpn, bmp)
+```
+
+The daemon binary (`src/`) depends on every crate above; it wires them
+together and owns the runtime actors that are not themselves crates (the
+unicast Linux FIB, the BFD socket actor, and the EVPN dataplane glue).
+
+### Crate summary
+
+| Crate | Description |
+|-------|-------------|
+| `rustbgpd-wire` | BGP message codec. Zero internal deps. Independently published and fuzzed. |
+| `rustbgpd-fsm` | RFC 4271 state machine. Pure -- no tokio, no sockets, no tasks. Independently published for embedders. |
+| `rustbgpd-bfd` | RFC 5880 BFD control-packet codec + sans-IO session state machine. Pure -- no tokio, no sockets (ADR-0067). The daemon actor supplies RFC 5881/5883 encapsulation. |
+| `rustbgpd-transport` | Tokio TCP glue. Owns BGP peer session I/O and drives the FSM. |
+| `rustbgpd-rib` | Adj-RIB-In, Loc-RIB best-path, Adj-RIB-Out. Single-task ownership, no locks. |
+| `rustbgpd-policy` | Policy engine: prefix/community/AS_PATH matching, route modifications. |
+| `rustbgpd-rpki` | RPKI origin validation: RTR client, VRP table, multi-cache aggregation. |
+| `rustbgpd-bmp` | BMP exporter: RFC 7854 codec, collector clients, manager fan-out. |
+| `rustbgpd-mrt` | MRT dump: RFC 6396 TABLE_DUMP_V2 codec, atomic writer, periodic manager. Depends on `telemetry` to export the dump-health gauges and counters (`mrt_dump_*`); see the crate README for the metric list. |
+| `rustbgpd-event-history` | Durable local event outbox (ADR-0072): SQLite WAL store with monotonic `event_id`, `EventHistoryManager` actor + storage thread, in-process `subscribe_live()` broadcast, retention by count + bytes, payload-opaque (producer-encoded bytes are persisted and broadcast byte-identically). Producers (RIB, EVPN, PeerManager session lifecycle, policy, BFD bridge, dataplane FIB / blackhole) enqueue prost-encoded `BgpEvent` envelopes; the gRPC `SubscribeFromEvent` cursor in `api` does the replay → live handoff. |
+| `rustbgpd-evpn` | EVPN local VTEP domain model: `EvpnInstance` / `EvpnInstanceTable` / `RouteTarget` / `IpVrf` / `IpVrfTable` (RFC 7432 / RFC 8365 / RFC 9136). Includes the `LocalMacOriginator` / `LocalMacIpOriginator` / `LocalEsOriginator` / `LocalEadPerEs*` state machines (RFC 7432 §15.1 mobility + §8 multi-homing), the `DataplaneIntent` / `RemoteMacTable` snapshot types with `RemoteMacEntry::alias_group_key` for ADR-0059 aliasing-ECMP wire intent, the IP-VRF readiness probe (Gate 9), and the pure-logic Type 5 origination + projection helpers (RFC 9136 §4.4.2 Interface-less IRB). Aliasing module (`aliasing::group_members`) produces the canonical alias VTEP set for a multi-homed Type 2. Domain-only, kernel-free. See ADR-0052, ADR-0054, ADR-0055, ADR-0057, ADR-0058, ADR-0059. |
+| `rustbgpd-evpn-linux` | Linux kernel dataplane for EVPN VTEP mode (`cfg(target_os = "linux")`). Reconciles remote-MAC FDB programming via rtnetlink, surfaces local-MAC observations from `RTNLGRP_NEIGH` upward (plus `RTNLGRP_IPV4_ROUTE` / `RTNLGRP_IPV6_ROUTE` for slice 6a sub-second IP-VRF route observation), supplies Linux rtnetlink dumps for VRF / L3VXLAN inventory (Gate 9), implements the `Dataplane::probe_ip_vrfs` IRB readiness call, and programs FDB nexthop groups via `NDA_NH_ID` / `NHA_FDB` for aliasing-ECMP receive paths (ADR-0059). `linux::nexthop_raw` is the raw-netlink primitive (rtnetlink 0.23 still exposes no nexthop API); `linux::fdb_nhg` is the apply primitive with the CVE-2025-39851 guard; `group_state` + `nh_id_alloc` carry the refcount + NHID-tagging state the reconcile coordinator uses. Consumes domain types from `rustbgpd-evpn`; never imports `rib` or `transport`. See ADR-0054, ADR-0055, ADR-0058, ADR-0059. |
+| `rustbgpd-api` | gRPC server (tonic). Thirteen services (twelve native, plus the vendored OpenConfig `gnmi.gNMI` service — Capabilities/Get/Set/Subscribe), proto codegen at build time. |
+| `rustbgpd-telemetry` | Prometheus metrics + structured tracing. |
+| `rustbgpctl` | CLI Cargo package/library; ships the `rbgp` binary. Client-only generated gRPC stubs; depends on `wire` for shared route/address-family parsing and formatting and on `policy` for policy tooling. Dev tests use `api`, `evpn`, and `bmp` mock surfaces. |
+
+### Hard rules
+
+- `wire` depends on nothing internal. It is a pure codec library, independently publishable.
+- `fsm` depends on `wire` types (message enums, capability structs) and nothing else. It never imports tokio, never touches a socket, never spawns a task.
+- `bfd` is a pure sans-IO crate with zero internal deps: RFC 5880 control-packet codec plus the session state machine. Like `fsm`, it never imports tokio or touches a socket — the daemon binary's `src/bfd_runtime.rs` owns the UDP sockets, per-session timers, and discriminator demux (ADR-0067).
+- `transport` is the only crate that owns BGP peer TCP session I/O and drives the FSM. Other crates (`api`, `bmp`, `rpki`, `mrt`) run their own async tasks for gRPC serving, collector connections, RTR sessions, and dump I/O respectively.
+- `rib` and `policy` are independent of transport and fsm — they consume route update events.
+- `evpn` is the local-VTEP domain crate (ADR-0052, ADR-0055, ADR-0058). It depends only on `wire`. It does **not** depend on `rib` or `transport`, and it never programs the kernel — kernel reconciliation lives in `crates/evpn-linux` (ADR-0054, shipped Gate 7b/7b+1; Gate 9 IP-VRF readiness probe + Linux netlink dumps + `probe_ip_vrfs` trait surface). The crate also owns the pure supported-plan-shape classifier used by both the daemon converger and plan decomposer; actor execution remains in the binary. This boundary removes the old `bench-internals` library-target mirror of ten EVPN actor modules without changing the default daemon build. The bidirectional VTEP loop is wired in the daemon binary by `src/evpn_dataplane.rs` (downward: RIB best-path → kernel FDB; also publishes the `IpVrfTable` through `DataplaneIntent` so the reconciler can probe IRB readiness every pass), `src/evpn_originator/` (upward: kernel local-MAC / MAC+IP observations → BGP Type 2 originations), and `src/evpn_imet.rs` (Type 3 IMET originations). RR-only deployments (empty `[[evpn_instances]]` and empty `[[evpn_ip_vrfs]]`) spawn no background tasks for either direction.
+- `api` provides the gRPC server; the binary crate (`src/main.rs`) wires everything together.
+
+---
+
+## Runtime Model
+
+One tokio task per peer session, one RibManager task, one PeerManager task. No shared mutable routing state. State-owning task boundaries primarily use bounded `tokio::mpsc`, with `oneshot` for request/reply, `broadcast` for route event streaming, and a small, documented set of intentional unbounded channels where a bounded send would deadlock the owning task (enumerated in Design Invariant #3).
+
+The daemon binary owns the runtime-config coordinator that serializes SIGHUP,
+runtime CRUD, and config transactions. `PlanConfigTransaction` is a
+PeerManager-backed validate-only path that reads the live runtime config
+snapshot and returns an optimistic snapshot token. `ApplyConfigTransaction` and
+the confirmed-commit controls run under the same coordinator lock used by
+SIGHUP and runtime CRUD, so mutation paths share one ordering point before they
+stage the runtime snapshot, apply live effects, wait for persistence
+acknowledgement, and release the lock. The API crate exposes the gRPC surface;
+the binary owns the actual executors because rollback needs binary-only
+channels to the PeerManager, FIB reconciler, and config persistence bridge.
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│ PeerSession │     │ PeerSession │     │ PeerSession │
+│  (per peer) │     │  (per peer) │     │  (per peer) │
+└──────┬──────┘     └──────┬──────┘     └──────┬──────┘
+       │                   │                   │
+       │    RibUpdate      │    RibUpdate      │
+       ▼                   ▼                   ▼
+   ┌──────────────────────────────────────────────┐
+   │              RibManager task                 │
+   │  Adj-RIB-In · Loc-RIB · Adj-RIB-Out         │
+   │  best-path · export policy · distribution    │
+   └──────────────────┬───────────────────────────┘
+                      │ OutboundRouteUpdate
+       ┌──────────────┼──────────────┐
+       ▼              ▼              ▼
+   PeerSession    PeerSession    PeerSession
+
+   ┌──────────────────────────────────────────────┐
+   │           PeerManager task                   │
+   │  neighbor lifecycle · config intent          │
+   └──────────────────────────────────────────────┘
+       ▲
+       │ PeerManagerCommand
+   ┌───┴──────────────────────────────────────────┐
+   │              gRPC API server                 │
+   └──────────────────────────────────────────────┘
+```
+
+Each peer session runs a `tokio::select!` loop over TCP socket I/O, protocol timers (hold, keepalive, connect-retry), and inbound commands. The RIB task processes updates sequentially — no locks, no contention. IPv4 and IPv6 routes coexist in the same `HashMap<Prefix, Route>`. The sharding seam is at the channel boundary: if scale demands it, split to one RIB task per AFI/SAFI without changing session code.
+
+---
+
+## Ownership Model
+
+Each component is the single source of truth for its domain. No overlapping authority.
+
+| Component | Owns | Authoritative for |
+|-----------|------|-------------------|
+| **PeerManager** | Neighbor lifecycle, config intent (`src/peer_manager`) | Which peers should exist and their parameters |
+| **FSM** | Protocol state transitions (`crates/fsm`) | What state each peer session is actually in |
+| **RibManager** | Routing state (`crates/rib`) | What routes exist, which is best, what to advertise |
+| **Transport** | Socket I/O, wire framing (`crates/transport`) | TCP connections, message encode/decode, session runtime |
+| **FIB runtime** | Kernel forwarding state (`src/fib_runtime.rs`) | Which unicast routes are installed into the configured `[[fib_tables]]` and their owned-state across restart. Owns netlink route programming for that table set only — the BLACKHOLE reconciler and the EVPN Linux dataplane own their own, disjoint kernel domains |
+| **BLACKHOLE reconciler** | RFC 7999 kernel discard routes (`src/blackhole.rs`) | Which main-table `RTN_BLACKHOLE` rows are owned, requiring exact-prefix receipt authority plus the kernel marker across restart. Kernel success precedes ownership add; durable ownership release precedes delete. Deliberately separate from the `[[fib_tables]]` projection |
+| **BFD actor** | BFD session liveness (`src/bfd_runtime.rs`) | Whether each BFD-tracked peer's forwarding path is up; the sole owner of BFD sockets, timers, and discriminators (drives RFC 5882 coupling) |
+| **EVPN runtime converger** | Live EVPN runtime model (`src/evpn_runtime_converger.rs`) | Which validated candidate EVPN runtime mutations converge, in what order, and how far the rollback ladder unwinds a failed apply (ADR-0063) |
+| **EVPN dataplane supervisor** | EVPN kernel intent (`src/evpn_dataplane.rs` → `crates/evpn-linux`) | The `DataplaneIntent` projected from EVPN best paths, and the FDB / neighbor / nexthop-group / IP-VRF state the reconcile actor owns in the kernel. The supervisor is daemon-owned glue precisely because ADR-0054 forbids `evpn-linux` from depending on `rib` or `transport` |
+| **Config transaction controller** | Transaction execution, confirmed-commit state, rollback orchestration (`src/config_transaction_control.rs`, `src/confirm_journal.rs`) | Which candidate TOML changes can commit atomically and when runtime config mutations are fenced |
+| **BMP manager** | Collector connections and monitoring feed (`crates/bmp`) | What each collector has been told: per-peer up/down, pre- and post-policy PDUs, and Loc-RIB instance state (RFC 7854 / 8671 / 9069). Unidirectional — never a routing input |
+| **Event history manager** | Durable event outbox (`crates/event-history`) | `event_id` assignment and cursor durability; producer payload bytes pass through unchanged (ADR-0072) |
+| **API** | Request/response adaptation (`crates/api`) | Nothing — it translates gRPC into commands and queries |
+| **EVPN originator** | MAC / IP-VRF route generation counters (`src/evpn_originator`, `src/evpn_l3_originator.rs`) | EVPN origination generation/sequence numbers; uses `Arc<RwLock>` by design — lower-frequency kernel-observation glue, outside the RIB hot-path "no shared mutable routing state / no locks" invariant |
+
+The API layer is explicitly *not* a source of truth. It is an adapter between gRPC callers and the authoritative components.
+
+---
+
+## Design Invariants
+
+These are not negotiable. Every contributor and every PR is measured against them.
+
+1. **The FSM is pure.** It takes message and timer inputs, produces message and state outputs. No tokio, no sockets, no file descriptors.
+
+2. **The wire crate is independently usable.** Zero internal dependencies. `cargo add rustbgpd-wire` works without the daemon.
+
+3. **No accidental unbounded channels.** Channels are bounded by default. The peer-manager private command lane and config-bridge replacement lane are lossless capacity-one channels. A small, documented set of intentional unbounded channels remains where a bounded `send().await` would deadlock the owning session/state task — collision-resolution notifications (`peer_manager`, `transport`), the transport writer's priority channel, and BFD state-change fan-out. Each is justified in an inline comment at its construction.
+
+4. **No silent attribute drops.** Every ignored, filtered, or rejected attribute emits a structured event. Operators can explain every routing decision from logs alone.
+
+5. **No panics on malformed input.** Network input is untrusted. The wire decoder returns `Result` for all paths. A panic on malformed BGP data is a DoS vulnerability.
+
+6. **All protocol violations produce structured events.** Every NOTIFICATION sent/received, every malformed message, every RFC violation — machine-parseable log entries with peer address, error classification, and context.
+
+7. **Resource limits are enforced, not advisory.** Max prefixes, max message size, max channel depth produce defined behavior (NOTIFICATION, backpressure, rejection) when exceeded.
+
+8. **Interop is tested, not assumed.** No feature is complete until validated against FRR and BIRD in a containerlab topology.
+
+---
+
+## Cross-Crate Seam Types
+
+These types define the contracts between crates. They are the key interfaces to understand when working across boundaries.
+
+| Type | Defined in | Contract between |
+|------|-----------|-----------------|
+| `Prefix` | `wire::nlri` | Everything. AFI-agnostic route identity (`V4`/`V6` enum). `Copy`. |
+| `Route` | `rib::route` | Transport → RIB → distribution. Carries prefix, next-hop (`IpAddr`), attributes, origin, validation state, staleness. |
+| `RibUpdate` | `rib::update` | Transport → RIB. Enum: `RoutesReceived`, `PeerUp`, `PeerDown`, `PeerGracefulRestart`, `InjectRoute`, `QueryRoutesPage`, `RpkiCacheUpdate`, FlowSpec variants, etc. |
+| `OutboundRouteUpdate` | `rib::update` | RIB → Transport. Announces + withdrawals + FlowSpec changes for a single peer, after export policy. |
+| `PeerKey` | `api::peer_types` | API ↔ PeerManager. Stable peer identity: `address` plus an optional `interface` for scoped IPv6 link-local peers (RFC 4007 — a `fe80::/10` address is not globally unique). Numbered peers carry `interface: None`; renders as `fe80::x%ifname` (ADR-0069). |
+| `PeerManagerCommand` | `api::peer_types` | API → PeerManager. Enum: `AddPeer`, `DeletePeer`, `EnablePeer`, `DisablePeer`, `QueryState`, `ReconcilePeers`, etc. |
+| `NegotiatedSession` | `fsm::action` | FSM → Transport. Capabilities, peer ASN/ID, negotiated families, GR state, Add-Path modes. Produced on `Established`. |
+| `PathAttribute` | `wire::attribute` | Wire → everything. Typed + raw hybrid enum. Known attrs decoded to Rust types; unknown optional-transitive preserved as `RawAttribute` for byte-exact re-emission. |
+| `PolicyChain` | `policy::engine` | Config → Transport/RIB. Wraps `Vec<Policy>` with chain evaluation semantics (permit=continue, deny=stop). |
+
+---
+
+## Data Flow
+
+### Inbound (receiving routes)
+
+```
+TCP bytes
+  → wire::decode (framing, message parse)
+  → transport validation (attribute checks per RFC 4271)
+  → import policy (match + modify + filter)
+  → RibUpdate::RoutesReceived sent to RIB task
+  → RIB: insert Adj-RIB-In, recompute best-path, update Loc-RIB
+  → RIB: for each peer, apply export policy → Adj-RIB-Out
+  → OutboundRouteUpdate sent to each peer's TX channel
+```
+
+### Outbound (advertising routes)
+
+```
+OutboundRouteUpdate received by PeerSession
+  → transport: build UPDATE message (AS_PATH prepend, NEXT_HOP rewrite, private AS removal)
+  → wire::encode (serialize to bytes)
+  → TCP write
+```
+
+### API queries
+
+```
+gRPC request
+  → API service handler
+  → PeerManagerCommand or RibUpdate (query variant) via channel
+  → oneshot reply with result
+  → API serializes to protobuf response
+```
+
+---
+
+## Where to Change X
+
+| Task | Start here |
+|------|-----------|
+| Wire codec (message parse/encode) | `crates/wire/src/` — `message.rs`, `attribute.rs`, `nlri.rs` |
+| Path attribute decode/encode | `crates/wire/src/attribute.rs` |
+| FlowSpec NLRI | `crates/wire/src/flowspec.rs` |
+| FSM state transitions | `crates/fsm/src/lib.rs` |
+| Capability negotiation | `crates/fsm/src/negotiation.rs` |
+| Peer session runtime | `crates/transport/src/session/` (split into `mod.rs`, `fsm.rs`, `inbound.rs`, `outbound.rs`, `io.rs`, `commands.rs`, `writer.rs`, `import_decision_cache.rs`, `rejected_routes.rs`, `export.rs`, `refresh_accounting.rs`, `shared_group.rs`, `tests/`) |
+| Outbound UPDATE construction | `crates/transport/src/session/outbound.rs` — `prepare_outbound_attributes()` |
+| Policy evaluation | `crates/policy/src/engine.rs` |
+| Best-path selection | `crates/rib/src/best_path.rs` — `best_path_cmp` / `best_path_cmp_with_reason` |
+| Route distribution | `crates/rib/src/manager/distribution/` |
+| Peer lifecycle (GR, LLGR, ERR) | `crates/rib/src/manager/graceful_restart.rs`, `route_refresh.rs` |
+| RIB event loop | `crates/rib/src/manager/mod.rs` — `run()` |
+| FIB install candidates (best + ECMP siblings, weights, scoped next-hop dedup) | `crates/rib/src/manager/mod.rs` — `handle_query_fib_install_candidates` |
+| Unicast Linux FIB install (ECMP, weighted multipath, scoped link-local `dev`) | `src/fib.rs` (intent projection, diff, next-hop canonicalize/identity by `(addr, ifindex)`), `src/fib_runtime.rs` (netlink reconcile actor, owned-state persistence) — ADR-0061 / 0066 / 0068 / 0069 |
+| BFD codec + sans-IO session FSM | `crates/bfd/src/` — `packet.rs`, `session.rs` (RFC 5880, ADR-0067) |
+| BFD socket/timer actor + BGP coupling | `src/bfd_runtime.rs` (RFC 5881/5883 UDP encapsulation, per-session timers, discriminator demux), `src/peer_manager/bfd.rs` (RFC 5882 session coupling) |
+| gRPC service handlers | `crates/api/src/` — one file per service |
+| RPKI / RTR | `crates/rpki/src/` |
+| BMP export | `crates/bmp/src/` |
+| MRT dump | `crates/mrt/src/` |
+| Local EVPN/VTEP domain | `crates/evpn/src/` — `instance.rs`, `route_target.rs`, `mac.rs` (LocalMacObservation, RemoteMacTable), `dataplane.rs` (DataplaneIntent / DataplaneReport), `origination.rs` / `origination_macip.rs` / `origination_es.rs` (per-route-type state machines), `projection.rs` (RIB → RemoteMacTable), `segment.rs` / `df_election.rs` / `aliasing.rs` / `label_allocator.rs` (Gate 8/8b multi-homing), `ip_vrf/` (IpVrf / IpVrfTable, readiness probe, Type 5 origination + projection helpers — Gate 9); daemon-owned receive-side projection and its route-event/periodic reconcile triggers live in `src/evpn_dataplane.rs` |
+| EVPN Linux kernel dataplane | `crates/evpn-linux/src/` — reconcile actor, in-memory fake, `linux/fdb.rs` (program/withdraw), `linux/links.rs` (bridge + VXLAN inventory), `linux/notify.rs` (RTNLGRP_NEIGH classifier + RTNLGRP_IPV4_ROUTE / RTNLGRP_IPV6_ROUTE route observer), `linux/probe.rs`, `linux/bum_filter.rs` (Gate 8b split-horizon), `linux/ip_vrf.rs` (Gate 9 VRF / L3VXLAN dumps + `probe_ip_vrfs`), `l3_diff.rs` + `linux/l3.rs` + `linux/routes.rs` (Gate 9 slice 6 import-side L3 FIB programming), `linux/nexthop_raw/` + `linux/fdb_nhg.rs` + `group_state.rs` + `nh_id_alloc.rs` + `diff.rs` Pass 1b (ADR-0059 FDB nexthop group aliasing-ECMP) |
+| EVPN wire codec extras | `crates/wire/src/pmsi.rs` — RFC 6514 §5 PMSI Tunnel attribute (path attr type 22), used on Type 3 IMET routes |
+| EVPN daemon glue | `src/evpn_dataplane.rs` (RIB → reconciler supervisor), `src/evpn_originator/` (kernel local-MAC / MAC+IP observations → Type 2 actors, RIB polling/write, duplicate-MAC coordination), `src/evpn_imet.rs` (Type 3 IMET startup-inject + shutdown-withdraw) |
+| CLI tool | `crates/cli/src/` |
+| Config loading + validation | `src/config/` |
+| Scoped link-local / unnumbered neighbor identity | `src/config/validation.rs` + `src/config/mod.rs` (`interface` / `scope_id` parse + resolve), `crates/api/src/peer_types.rs` (`PeerKey`), `crates/transport/src/config.rs` (`peer_interface` / `peer_scope_id`), `crates/transport/src/socket_opts.rs` (scoped connect, AF-aware GTSM), `src/peer_manager/inbound.rs` (passive scope match) — ADR-0069 |
+| Startup wiring | `src/main.rs` |
+| Prometheus metrics | `crates/telemetry/src/lib.rs` |
+
+---
+
+## Lifecycle Flows
+
+### Startup
+
+Every Unix signal handler (SIGINT, SIGTERM, SIGHUP) is registered before any
+step below binds or spawns an externally reachable service — the gRPC server,
+the BGP listener, the metrics/readiness listener, or gNMI dial-out. A signal
+delivered during startup stays pending until the select loop begins, so a
+SIGTERM in that window is retained and honored as a graceful shutdown instead
+of taking its default process action. The ordering is a contract, asserted by
+`signal_handlers_are_registered_before_external_reachability`.
+
+1. `main.rs` loads and validates the TOML config, initializes logging and
+   metrics, and checks the GR restart marker
+   (`runtime_state_dir/gr-restart.toml`). If the marker is present and not
+   expired, static peers advertise `R=1` in OPEN.
+2. It resolves the complete static-peer and policy/EVPN startup state, then
+   binds the BGP listener socket(s) and optional metrics/readiness socket. This
+   reserves every configured address and fails fast, but neither accept loop is
+   running yet.
+3. It starts EventHistoryManager before any event producer, when durable event
+   history is enabled.
+4. It wires and starts the optional BMP manager and collector clients, then
+   RibManager, the optional RPKI VRP/ASPA manager and RTR clients, the optional
+   MRT manager, and PeerManager.
+5. It starts the remaining pre-gRPC optional runtime actors, including BFD
+   from its already prepared sockets, and then starts the gRPC API server.
+6. For each configured neighbor, it sends `AddPeer` to PeerManager and waits
+   for the result, so the complete configured-peer roster is installed before
+   inbound BGP can be admitted.
+7. It activates BGP ingress by starting the accept loop and its PeerManager
+   forwarder, then starts the optional metrics/readiness server. A configured-
+   peer failure suppresses both activations and enters coordinated teardown.
+8. It constructs the gNMI dial-out manager and applies the configured targets
+   after metrics/readiness activation. An initial configured-peer failure also
+   suppresses this dial-out activation.
+
+### Peer Establishment
+
+1. PeerSession opens TCP (outbound) or accepts TCP (inbound via listener).
+2. FSM drives OPEN exchange. Transport encodes/decodes, feeds FSM events.
+3. On `Established`, FSM produces `NegotiatedSession` with capabilities.
+4. Transport sends `RibUpdate::PeerUp` to RIB with negotiated families and outbound channel.
+5. RIB registers the peer, dumps existing Loc-RIB routes to the peer's Adj-RIB-Out, sends End-of-RIB.
+6. Inbound UPDATEs flow through the normal data path.
+
+### Config Reload (SIGHUP)
+
+1. Signal handler sets a reload flag in the main `select!` loop.
+2. `reload_config()` re-reads the TOML and diffs the new config against
+   the current snapshot bucket-by-bucket: neighbor sets, named policies,
+   peer groups, global import / export chains, and `[[neighbors]]` deltas.
+3. For each bucket (in dependency order — definitions first, then
+   `[[neighbors]]` reconcile, then deletes in reverse-dependency order
+   so transient `still referenced` rejections don't fire), the binary
+   sends a single-shot command to the peer manager that goes through
+   `apply_policy_change` / `apply_peer_group_change`. Runtime effect
+   matches the existing gRPC API path: hot-applied policy chains, peer
+   re-add for changed peer-group memberships.
+4. Reload halts at the first step failure and returns a partial-state
+   snapshot via `halt_partial`, so the daemon's in-memory config tracks
+   what the peer manager actually applied (operator fixes the failing
+   TOML and reloads again to converge against the half-applied state).
+   Exception: the neighbor-reconcile step returns `None` on partial
+   failure because live state is genuinely ambiguous after a
+   delete-then-readd partial; earlier reload steps still land at the
+   manager and remain in effect.
+5. When an effective import policy changes via SIGHUP (or any gRPC
+   `SetPolicy` / `SetPeerGroup` / chain mutation),
+   `PeerManager::update_runtime_policies` automatically issues a Route
+   Refresh (RFC 2918) to the affected Established peers so routes
+   already in `AdjRibIn` get re-evaluated against the new policy.
+   `pending_refresh` / `pending_export_apply` flags on `ManagedPeer`
+   carry unfired retry intent across calls (e.g. peer mid-reconnect at
+   refresh time, transient mpsc backpressure).
+6. Global config changes that are not hot-reloadable
+   (`[global]` ASN/router-id/families, `[rpki]`, `[bmp]`, `[mrt]`,
+   `[global.telemetry.grpc_*]` listener config)
+   are surfaced under "Restart-required" in `rustbgpd --diff` and logged
+   at reload time. The runtime listener config for `grpc_tcp` / `grpc_uds`
+   is pinned back to the live values so subsequent diffs keep flagging
+   the drift until an actual restart happens.
+
+### Config Transactions
+
+1. `PlanConfigTransaction` sends the full candidate TOML and expected runtime
+   snapshot token to the PeerManager. The PeerManager parses and validates the
+   candidate, compares it with its live runtime snapshot, and classifies each
+   changed section as supported, unsupported, or restart-required for the v1
+   transaction model.
+2. `ApplyConfigTransaction` is handled in the daemon binary. It takes the
+   runtime-config coordinator lock shared with SIGHUP and runtime CRUD,
+   validates the optimistic snapshot token, stages the candidate snapshot in the
+   PeerManager, applies the one supported runtime family, waits for the config
+   persistence acknowledgement, and only then releases the lock.
+3. Rollback is executor-specific and LIFO. FIB-table, dynamic-neighbor,
+   static-neighbor, catalog-only, and live-policy-impact transactions restore
+   their prior runtime state and previous PeerManager config snapshot on
+   apply/persist failure. Rollback failures are surfaced to the caller and
+   logged as `error!`; silent partial rollback is not an acceptable outcome.
+4. Commit-confirmed mode stores a singleton pending transaction with the
+   captured pre-commit snapshot. `ConfirmConfigTransaction` makes it permanent;
+   `AbortConfigTransaction` or timer expiry re-applies the captured snapshot
+   through the same transaction executor. While a transaction is applying or
+   pending confirmation, other persisted runtime config mutators return
+   `FAILED_PRECONDITION`.
+5. Commit-confirm survives a restart durably (ADR-0076 Decision 6 amendment).
+   Before the candidate commits, the v3 authority is published in durability
+   order: the normalized pre-commit snapshot to
+   `<runtime_state_dir>/commit-confirm-v3-prior.toml`, then provenance and
+   file-identity digests to `<runtime_state_dir>/commit-confirm-v3-metadata.json`,
+   then the config-adjacent `<config>.commit-confirm-locator.json`. The locator
+   is the sole boot authority — its absence carries no pending state, so a
+   restart that finds no locator boots the candidate normally. A daemon restart
+   inside the confirm window triggers a boot-time revert
+   (`boot_revert_check()`, per RFC 6241 §8.4): the pre-transaction config is
+   restored and the unconfirmed candidate is saved aside as
+   `<config>.unconfirmed`. Torn or unusable v3 state refuses boot rather than
+   guessing, and so does a retired locator-free
+   `<runtime_state_dir>/commit-confirm-journal.json` or retired v2 locator —
+   both are left untouched for recovery with rustbgpd v0.64.0. Never create
+   either retired artifact by hand; their presence alone blocks startup. See
+   `tests/commit_confirm_binary.rs`.
+
+### Graceful Shutdown
+
+1. SIGTERM or `Shutdown` gRPC RPC triggers shutdown.
+2. Writes GR restart marker file (if any peer has GR enabled) with expiry.
+3. Sends NOTIFICATION/Cease (Administrative Shutdown) to all established peers.
+4. Signals BMP manager to send Termination messages to collectors (bounded
+   ~2s for the BMP send-and-drain step).
+5. Drains all peer sessions through the peer manager.
+6. Flushes final telemetry.
+
+### Graceful Restart (receiving)
+
+1. Peer goes down. If peer had GR capability + restart state, transport sends `PeerGracefulRestart` (not `PeerDown`) to RIB.
+2. RIB marks the peer's routes as GR-stale. Starts `gr_restart_time` timer.
+3. Peer re-establishes. RIB moves families to "awaiting EoR" state.
+4. As new UPDATEs arrive, they replace stale routes.
+5. End-of-RIB received → RIB sweeps remaining stale routes for that family.
+6. If GR timer expires before EoR → if LLGR negotiated, promote to LLGR-stale (add `LLGR_STALE` community, start `llgr_stale_time` timer); otherwise purge stale routes.
+
+### Enhanced Route Refresh
+
+1. `SoftResetIn` gRPC call → transport sends ROUTE-REFRESH to peer.
+2. If peer supports Enhanced Route Refresh: send BoRR → peer re-advertises → send EoRR.
+3. On BoRR received: RIB marks peer's routes as refresh-stale.
+4. Replacement UPDATEs clear the refresh-stale flag.
+5. On EoRR received (or 5-minute timeout): RIB sweeps unreplaced refresh-stale routes.
+
+---
+
+## Failure and Backpressure Model
+
+### Channel boundaries
+
+All inter-task communication uses bounded `tokio::mpsc` channels (capacity 4096 by default). This provides natural backpressure without locks.
+
+| Channel | Producer | Consumer | On full |
+|---------|----------|----------|---------|
+| RIB inbound | PeerSession, API | RibManager | Producer's `send().await` blocks. Session stalls but does not lose data. |
+| Adj-RIB-Out | RibManager | PeerSession | `try_send()` — update dropped, peer marked dirty for resync. |
+| PeerManager commands | API | PeerManager | `send().await` blocks. gRPC call waits. |
+| BMP events | Transport | BmpManager | `try_send()` — event dropped, warning logged. |
+
+The small set of intentional unbounded channels is enumerated in Design Invariant #3 above; the `session_notify` channel used for TCP collision detection remains intentionally unbounded because a bounded send would deadlock with synchronous `QueryState` peer-state queries during collision resolution. Its domain wrapper accounts from sender entry through successful PeerManager dequeue, including synchronous in-flight reservations and queued notifications; the exported high-water mark is monotonic for the daemon lifetime and is not a per-flap or per-round peak.
+
+### Dirty-peer resync
+
+When an Adj-RIB-Out channel is full, the update is dropped and the peer is marked "dirty." On the next successful send, RibManager schedules a full table resync for that peer. This ensures eventual consistency without blocking the RIB task.
+
+### Prefix limits
+
+Per-neighbor `max_prefixes` (aggregate) and the independent per-family `max_prefixes_ipv4` / `max_prefixes_ipv6` caps (ADR-0108) are enforced at Adj-RIB-In insertion; the pre-policy `max_prefixes_received_ipv4` / `max_prefixes_received_ipv6` caps count every unicast prefix the peer announces, accepted or rejected, from the same session-owned accounting. `max_prefix_action` selects what a crossed cap does, per neighbor or peer group and hot-applied on reload. The default `shutdown` produces NOTIFICATION (Cease, Maximum Number of Prefixes Reached) and session teardown. `block` withholds net-new prefixes beyond a full bound while the session stays Established, and requests one route refresh per affected family when usage falls back under. `warning` warns once per crossing and tears nothing down. `max_prefix_warning_percent` adds a sub-bound warning threshold (1..=100 percent of every finite bound) under any action, re-armed when usage falls back under it. `block` applies to the per-family accepted and pre-policy bounds and requires the aggregate `max_prefixes` to be unset; `block` and `warning` exclude `max_prefix_restart_seconds`. There is no global/aggregate route limit across neighbors.
+
+ADR-0113 (released in v0.61.0) adds the outbound contract: distinct `max_prefixes_out_ipv4` and `max_prefixes_out_ipv6` limits count post-export-gate IPv4- and IPv6-unicast prefixes per peer. At a limit, excess net-new prefixes are withheld; existing advertisements remain, and updates to admitted prefixes and withdrawals continue. The session stays Established and no NOTIFICATION is sent. A neighbor value overrides its peer group, an absent neighbor value inherits, and there is no aggregate outbound cap. Live limit edits use one all-peer transactional preflight and activation; an invalid add or lower candidate is rejected before any affected peer's limit changes.
+
+### Why no locks
+
+The RIB is the hottest data structure. Wrapping it in `Arc<RwLock>` would create contention under UPDATE storms and make reasoning about ordering difficult. Instead, the RIB runs as a single task with exclusive ownership. All access is serialized through the channel. This trades parallelism for simplicity and determinism — the right tradeoff at current scale. The sharding seam (channel boundary) is ready if scale demands splitting.

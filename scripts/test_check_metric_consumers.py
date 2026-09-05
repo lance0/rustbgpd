@@ -90,7 +90,7 @@ class MetricConsumerContractTests(unittest.TestCase):
         registered = {name for name in self.inventory if name.startswith(prefix)}
         self.assertEqual(registered, expected)
 
-        operations = (CHECK.ROOT / "docs/OPERATIONS.md").read_text(encoding="utf-8")
+        operations = (CHECK.ROOT / "docs/reference/operations.md").read_text(encoding="utf-8")
         start = "### RFC 7999 BLACKHOLE discards"
         end = "### General Unicast FIB"
         self.assertEqual(operations.count(start), 1)
@@ -523,16 +523,18 @@ groups:
 
     def test_document_evidence_classification_is_pinned(self):
         self.assertNotIn("CHANGELOG.md", self.documents)
-        self.assertNotIn("ROADMAP.md", self.documents)
+        self.assertNotIn("docs/project/roadmap.md", self.documents)
+        self.assertNotIn("docs/project/roadmap-history.md", self.documents)
+        self.assertNotIn("docs/project/changelog/older-releases.md", self.documents)
         self.assertEqual(
             CHECK.HISTORICAL_DOCUMENTS,
             frozenset(
                 {
-                    "docs/OPERATIONAL_PROOF.md",
-                    "docs/RECEIPTS.md",
-                    "docs/evpn-alpha-soak.md",
-                    "docs/milestones.md",
-                    "docs/upstream-findings.md",
+                    "docs/operational-proof.md",
+                    "docs/receipts.md",
+                    "docs/how-to/evpn-alpha-soak.md",
+                    "docs/project/milestones.md",
+                    "docs/project/upstream-findings.md",
                 }
             ),
         )
@@ -541,9 +543,9 @@ groups:
             ("docs/adr/", "docs/artifacts/", "docs/perf/", "docs/soaks/"),
         )
         cases = {
-            "docs/OPERATIONS.md": "normative",
-            "docs/CONFIGURATION.md": "normative",
-            "docs/milestones.md": "historical",
+            "docs/reference/operations.md": "normative",
+            "docs/reference/configuration.md": "normative",
+            "docs/project/milestones.md": "historical",
             "docs/adr/9999-example.md": "historical",
             "docs/artifacts/soak/receipt.md": "historical",
             "docs/perf/artifacts/receipt.md": "historical",
@@ -560,8 +562,8 @@ groups:
         }
         references = CHECK.public_document_references(
             {
-                "docs/OPERATIONS.md": "Watch `bgp_runbook_metric`.",
-                "docs/milestones.md": "Shipped `bgp_historical_metric`.",
+                "docs/reference/operations.md": "Watch `bgp_runbook_metric`.",
+                "docs/project/milestones.md": "Shipped `bgp_historical_metric`.",
                 "docs/adr/9999-example.md": "Chose `bgp_historical_metric`.",
                 "docs/soaks/example.md": "Observed `bgp_historical_metric`.",
             },

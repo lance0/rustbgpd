@@ -411,14 +411,14 @@ and Interop runs also completed successfully.
   a severe control-plane ambiguity. Supervision and graceful-restart behavior
   mitigate but do not erase that operational cost. *Amendment (2026-08-14):*
   the GR mitigation is exactly as strong as the negotiated per-peer capability
-  shape, and the M85 receipt ([docs/INTEROP.md](../INTEROP.md)) measured both
+  shape, and the M85 receipt ([docs/INTEROP.md](../interop.md)) measured both
   shapes against BIRD 2: a peer with a real two-sided GR capability
   (`graceful restart on`, address families listed in the capability) has its
   routes held stale-preserved through a restart — zero withdraws toward
   survivors until re-establish plus the EoR sweep — while BIRD's default
   `graceful restart aware` still sends the GR capability but with restart
   time 0 and no address families, producing immediate withdraws with nothing
-  preserved. Independently, the [ROADMAP](../../ROADMAP.md) GR row records
+  preserved. Independently, the [ROADMAP](../project/roadmap.md) GR row records
   that optional bounded shutdown checkpoint publication shipped "without boot
   restore/adoption": the restarted daemon reconverges its full RIB from peers
   rather than restoring a checkpoint, so even a fully mitigated fail-stop

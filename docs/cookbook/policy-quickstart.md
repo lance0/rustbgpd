@@ -1,5 +1,7 @@
 # Policy quickstart (`.rpol`)
 
+> **Document class: CURRENT.**
+
 Build and validate your first rustbgpd routing policy.
 
 **When this is you:** You're about to write your first real rustbgpd
@@ -8,10 +10,10 @@ compiled policy file with its unit tests *in the file*, checked before
 it ever touches the daemon, dry-run against the live RIB before it's
 attached, hot-swapped under traffic with SIGHUP, and explainable per
 term afterwards. Full language reference:
-[`rpol-language.md`](../rpol-language.md)
+[`rpol-language.md`](../reference/rpol-language.md)
 ([ADR-0096](../adr/0096-policy-language.md)).
 
-**Proven by:** [M80](../RECEIPTS.md#interop-labs--pr-gated-interopyml)
+**Proven by:** [M80](../receipts.md#interop-labs--pr-gated-interopyml)
 (route-for-route parity against FRR route-maps, `rbgp policy check`
 gating, and a SIGHUP hot-apply under traffic that refreshes only the
 peers whose chains changed) and M34 (SIGHUP policy soft-reset
@@ -122,7 +124,7 @@ Keep the file in the canonical style with `rbgp policy fmt edge.rpol`
 (one style, no options; comments and semicolons survive), and add
 `rbgp policy fmt --check edge.rpol` beside `policy check` in CI —
 exit 1 with a diff when a file drifts. See "Formatting" in
-[the language reference](../rpol-language.md).
+[the language reference](../reference/rpol-language.md).
 
 ## 3. Wire it into the config
 
@@ -223,7 +225,7 @@ $ rbgp policy stats --neighbor 192.0.2.20
 `peer.group` / `peer.address` / `peer.asn` matches make a policy's
 verdict peer-dependent, so any peer whose **export** chain uses them
 drops to the per-peer staging path (`policy_peer_context` in
-`rbgp neighbor <address>`, [reason table](../CONFIGURATION.md#update-groups-automatic)).
+`rbgp neighbor <address>`, [reason table](../reference/configuration.md#update-groups-automatic)).
 Identical semantics, less sharing. Import chains don't affect
 grouping, and parameterized instantiations like `customer-in(150)` vs
 `customer-in(200)` on the *import* side are free. Keep peer-context

@@ -31,7 +31,7 @@ BARE = re.compile(rf"(?<![\w/`.-])({ROOTS}/[\w./-]*[\w/])")
 IS_PATH = re.compile(rf"^{ROOTS}/")
 REPOSITORY_PATH = re.compile(rf"^{ROOTS}/[\w./-]*[\w/]$")
 
-DOCUMENT = Path("docs") / "RELEASE_CHECKLIST.md"
+DOCUMENT = Path("docs/project/release-checklist.md")
 OWNER_PROOF_HEADER = "| Source owner | Required release proofs |"
 PROOF_SOURCE_HEADER = "| Release proof | Topology | Assertion script |"
 

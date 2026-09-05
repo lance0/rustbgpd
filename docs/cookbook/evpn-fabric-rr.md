@@ -1,5 +1,7 @@
 # EVPN fabric route reflector (control-plane only)
 
+> **Document class: CURRENT.**
+
 This recipe builds a control-plane-only VXLAN-EVPN fabric route reflector.
 
 **When this is you:** You operate a VXLAN-EVPN leaf/spine fabric. Its
@@ -10,10 +12,10 @@ RR holds no EVI state, learns no MACs, and forwards no packets — it
 reflects all five EVPN route types verbatim between clients. rustbgpd
 also has a bidirectional VTEP mode (alpha, Linux/VXLAN-only, with IRB
 and multi-homing — see
-[`evpn-enablement.md`](../evpn-enablement.md)); that is a different
+[`evpn-enablement.md`](../project/evpn-enablement.md)); that is a different
 deployment and not this document.
 
-**Proven by:** [M29](../RECEIPTS.md#interop-labs--pr-gated-interopyml)
+**Proven by:** [M29](../receipts.md#interop-labs--pr-gated-interopyml)
 (EVPN RR capability + `ListEvpnRoutes` vs FRR), M30 (Type 2 MAC
 reflection end-to-end between kernel VXLAN VTEPs), M31 (MAC mobility +
 sticky preservation), M32 (multi-homing Type 1 EAD / Type 4 ES
@@ -107,7 +109,7 @@ Two things that look odd but are correct:
 
 ## Watch
 
-The [Grafana overview](../GRAFANA.md) session and RIB-scale rows apply
+The [Grafana overview](../how-to/grafana.md) session and RIB-scale rows apply
 as-is (`bgp_session_state_transitions_total`,
 `bgp_rib_outbound_registered_peers`, update-group gauges). Per-VNI
 EVPN metric families (`evpn_*`) are VTEP-mode surface and stay empty
@@ -138,7 +140,7 @@ one EVI per mac-vrf (bundle identity = shared RT + Ethernet Tag,
 per-BD RDs) and needs an explicit `transport local-address` on the BGP
 group, or it sources the session from its system0 address and the RR's
 neighbor stanza never matches. Recorded in
-[`upstream-findings.md`](../upstream-findings.md) and the M82 lab
+[`upstream-findings.md`](../project/upstream-findings.md) and the M82 lab
 fixtures.
 
 **Reflected state survives leaf restarts?** Add GR to the neighbor

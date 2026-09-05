@@ -28,7 +28,7 @@
 //! ## LAN-290: reserved-range single-writer contract
 //!
 //! The four tag ranges above are an **exclusive deployment contract**
-//! (documented for operators in `docs/deployment.md`): no co-resident
+//! (documented for operators in `docs/how-to/deployment.md`): no co-resident
 //! netlink writer may create nexthop objects whose ID carries one of
 //! rustbgpd's high-nibble tags. The kernel does not enforce this, so
 //! the adoption/drift dump parse validates the *shape* of every

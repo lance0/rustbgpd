@@ -2,120 +2,133 @@
 
 > **Document class: CURRENT.** This maintained page reflects the project as it is now; dated sections remain bounded to their stated scope.
 
-The docs are organized by what you are trying to do
-([Diátaxis](https://diataxis.fr/)): **tutorials** to learn, **how-to
-guides** to get a task done, **reference** to look something up, and
-**explanation** to understand why. Every other Markdown page directly in
-`docs/` is indexed below under its primary bucket.
+Find the guide, reference, or evidence for the task at hand.
 
-## Start with your task
+## Contents
 
-| I want to… | Read this first |
-|------------|-----------------|
-| Run rustbgpd for the first time | [Quickstart](QUICKSTART.md) |
-| Choose and deploy a complete topology | [Scenario cookbook](cookbook/README.md) |
-| Operate, reload, upgrade, or debug a daemon | [Operations](OPERATIONS.md) |
-| Explain why a route was selected, rejected, or advertised | [Route explainability](explain.md) |
-| Automate rustbgpd through gRPC | [API reference](API.md) |
-| Evaluate support boundaries and non-goals | [Limitations](LIMITATIONS.md) |
-| Audit the evidence behind a claim | [Receipts index](RECEIPTS.md) |
+[Tutorials](#tutorials) · [How-to](#how-to) · [Reference](#reference) · [Explanation](#explanation) · [Evidence](#evidence) · [Project](#project)
+
+## Tutorials
+
+Learn by running a small example.
+
+| Page | Scope |
+|------|-------|
+| [Quickstart](tutorials/quickstart.md) | Start a daemon, establish a session, and use the CLI. |
+| [Docker Compose demo](../examples/docker-compose/README.md) | Run rustbgpd and an FRR peer together. |
+| [EVPN leaf example](../examples/evpn-vtep-leaf/README.md) | Follow a leaf-mode configuration walkthrough. |
+
+## How-to
+
+Follow a procedure for a specific task.
+
+| Page | Scope |
+|------|-------|
+| [Deployment](how-to/deployment.md) | Install, validate, reload, and upgrade a daemon. |
+| [Explain route decisions](how-to/explain.md) | Find why a route was selected, rejected, or advertised. |
+| [Compare advertised routes](how-to/ribdiff.md) | Compare a shadow route server with the incumbent. |
+| [Settlement watchdog](how-to/settlement-watchdog.md) | Recover when configuration settlement cannot be proved. |
+| [EVPN VTEP setup](how-to/evpn-vtep-setup.md) | Prepare bridge, VXLAN, and VRF interfaces. |
+| [EVPN VTEP troubleshooting](how-to/evpn-vtep-troubleshooting.md) | Diagnose the bidirectional VTEP dataplane. |
+| [EVPN alpha-soak checklist](how-to/evpn-alpha-soak.md) | Run the VTEP confidence checks. |
+| [Grafana and alerting](how-to/grafana.md) | Import dashboards and load Prometheus alert rules. |
+| [Kernel dataplane runner](how-to/kernel-dataplane-runner.md) | Run the privileged Linux dataplane checks. |
+| [Fuzzing](how-to/fuzzing.md) | Build and run the parser fuzz targets. |
+| [Add a configuration field](how-to/config-knob-contributor-guide.md) | Cover validation, reload, persistence, and documentation. |
+| [Scenario cookbook](cookbook/README.md) | Choose a complete deployment recipe. |
+| [iBGP route reflector](cookbook/route-reflector.md) | Deploy a route reflector for an iBGP client fleet. |
+| [L3VPN route reflector](cookbook/l3vpn-route-reflector.md) | Reflect VPN routes with RT-Constrain filtering. |
+| [IXP route server](cookbook/route-server.md) | Configure members and policy by hand. |
+| [IXP filter pipeline](cookbook/ixp-filter-pipeline.md) | Keep an ARouteServer configuration workflow. |
+| [IXP Manager route server](cookbook/ixp-manager-route-server.md) | Provision from IXP Manager and manage activation. |
+| [Route-server shadow pilot](cookbook/route-server-shadow-pilot.md) | Evaluate beside an incumbent without taking authority. |
+| [Route-server migration](cookbook/route-server-migration.md) | Plan a shadow trial, cutover, and rollback. |
+| [MANRS IXP Action 1](cookbook/manrs-ixp-action1.md) | Map the requirements to configuration and verification. |
+| [Controller and monitoring feed](cookbook/monitoring-feed.md) | Export BMP, durable events, and MRT. |
+| [EVPN fabric route reflector](cookbook/evpn-fabric-rr.md) | Reflect EVPN routes in a leaf/spine fabric. |
+| [Policy quickstart](cookbook/policy-quickstart.md) | Test and activate a typed routing policy. |
+| [Peer-flap triage](cookbook/peer-flap-triage.md) | Find and contain a recurring session failure. |
+| [Route-reflector pair operations](cookbook/rr-pair-day2.md) | Maintain a redundant pair through routine changes. |
+| [Paired route servers](cookbook/paired-route-servers.md) | Stage updates, compare output, and drain for maintenance. |
+| [Activation manual recovery](cookbook/activation-manual-recovery.md) | Resolve an interrupted activation or lifecycle operation. |
+
+## Reference
+
+Look up commands, configuration, and compatibility boundaries.
+
+| Page | Scope |
+|------|-------|
+| [Configuration](reference/configuration.md) | TOML fields and examples. |
+| [Configuration schema](reference/rustbgpd.schema.json) | Machine-readable schema for editor integration. |
+| [Reload matrix](reference/reload-matrix.md) | When each configuration change takes effect. |
+| [Operations](reference/operations.md) | Reload semantics, metrics, failure modes, and audit events. |
+| [gRPC API](reference/api.md) | Services, RPCs, and request examples. |
+| [gRPC authorization inventory](reference/grpc-method-inventory.md) | Method tiers and their authorization classification. |
+| [gRPC inventory JSON](reference/grpc-method-inventory.json) | Machine-readable authorization inventory. |
+| [gNMI and OpenConfig](reference/gnmi.md) | Supported telemetry paths and operations. |
+| [Policy language](reference/rpol-language.md) | The typed routing-policy language and its tools. |
+| [Rust libraries](reference/embedding.md) | Workspace crates and their embedding boundaries. |
+| [Security posture](reference/security.md) | Management API protection and deployment tiers. |
+| [Limitations](reference/limitations.md) | Current product boundaries and unsupported behavior. |
+| [Known issues](reference/known-issues.md) | Known defects, workarounds, and operational caveats. |
+| [Stability and compatibility](reference/stability.md) | Daemon, library, adapter, and authorization contracts. |
+| [Narrow v1 contract](reference/v1-stable-contract.md) | The route-server and route-reflector compatibility promise. |
+| [Stable surface inventory](reference/v1-stable-surface.json) | Machine-readable inventory of the narrow v1 contract. |
+| [Format and version namespaces](reference/format-version-namespaces.md) | Independent versions for stored and exchanged formats. |
+| [RFC implementation notes](reference/rfc-notes.md) | Protocol interpretations and deviations. |
+| [ASPA conformance](reference/aspa-conformance.md) | Verification procedures and route-server scope. |
+| [Path-attribute registry](reference/path-attribute-registry.md) | Implementation, propagation, and evidence by attribute. |
+| [Familiar command map](../crates/cli/README.md#familiar-command-map) | Translate FRR and BIRD commands to the CLI. |
+
+## Explanation
+
+Understand the design and choose a deployment role.
+
+| Page | Scope |
+|------|-------|
+| [Feature tour](explanation/feature-tour.md) | Capabilities behind the repository overview. |
+| [Use cases](explanation/use-cases.md) | Deployment roles and their architecture. |
+| [Architecture](explanation/architecture.md) | Workspace structure and subsystem boundaries. |
+| [Design](explanation/design.md) | Constraints, tradeoffs, and protocol scope. |
+| [Implementation comparison](explanation/comparison.md) | Capability and scope comparisons with other BGP daemons. |
+| [GoBGP parity](explanation/gobgp-parity.md) | Detailed capability comparison against the pinned release. |
+| [IXP evaluation](explanation/ixp-evaluation.md) | Assess route-server fit using configuration and evidence. |
+
+## Evidence
+
+Inspect the receipts behind protocol, performance, and operational claims.
+
+| Page | Scope |
+|------|-------|
+| [Receipts index](receipts.md) | Find the lab or measurement behind a claim. |
+| [Operational proof](operational-proof.md) | Review the operational evidence across subsystems. |
+| [Interoperability](interop.md) | Validation against real BGP peers and network operating systems. |
+| [Benchmarks](benchmarks.md) | Microbenchmarks and their measured scope. |
+| [Performance archive](perf/README.md) | Dated performance receipts and their supporting artifacts. |
+| [Soak archive](soaks/README.md) | Long-running test reports, acceptance gates, and receipt templates. |
+| [Raw artifacts](artifacts/) | Preserved data supporting published findings. |
+
+## Project
+
+Follow development plans, contribution guidance, and release history.
+
+| Page | Scope |
+|------|-------|
+| [Roadmap](project/roadmap.md) | Current development direction and remaining work. |
+| [EVPN enablement](project/evpn-enablement.md) | The staged EVPN plan and its completion evidence. |
+| [Release checklist](project/release-checklist.md) | Required checks for publishing a release. |
+| [Contributing](../CONTRIBUTING.md) | Build, test, and submit a change. |
+| [Support](../SUPPORT.md) | Get help and check platform support. |
+| [Report a vulnerability](../SECURITY.md) | Report a security issue privately. |
+| [Changelog](../CHANGELOG.md) | Unreleased changes and the current release. |
+| [Older releases](project/changelog/older-releases.md) | Archived release notes. |
+| [Roadmap history](project/roadmap-history.md) | Completed development phases. |
+| [Milestone history](project/milestones.md) | Archived build orders and exit criteria. |
+| [Upstream findings](project/upstream-findings.md) | Dated observations from interoperability testing. |
+| [Architecture decisions](adr/README.md) | Recorded decisions and their original context. |
 
 ## Document classes
 
-The label immediately below a page title distinguishes maintained guidance
-from dated evidence:
+**CURRENT** pages describe the maintained system; **REFERENCE** pages define a contract, specification, or reusable procedure; **HISTORICAL** pages preserve a dated decision or observation.
 
-| Class | Meaning |
-|-------|---------|
-| **CURRENT** | Maintained guidance that reflects the system as it is now |
-| **REFERENCE** | A maintained contract, specification, or reusable procedure |
-| **HISTORICAL** | A dated decision or observation whose original scope is part of the evidence |
-
-Immutable record directories use the same classes by convention so their
-evidence does not need to be rewritten. ADR bodies and performance receipts
-are **HISTORICAL**; their maintained indexes are **CURRENT**. Under
-[`soaks/`](soaks/README.md), completed receipts are **HISTORICAL**, while the
-acceptance gates and receipt template are **REFERENCE**.
-
-<!-- Structure note: these four buckets are the intended top-level
-     navigation for the future docs site (PR #704) — keep them in
-     sync when adding a page. -->
-
-## Tutorials — learning by doing
-
-Start here if you have never run the daemon.
-
-| Doc | What it teaches |
-|-----|-----------------|
-| [QUICKSTART.md](QUICKSTART.md) | Single daemon on a host: starter config, gRPC socket, health probes, and the `rbgp` CLI |
-| [../examples/docker-compose/](../examples/docker-compose/README.md) | Two-node lab: rustbgpd peered with FRR over Docker Compose, no host setup |
-| [../examples/evpn-vtep-leaf/](../examples/evpn-vtep-leaf/README.md) | Leaf-mode EVPN VTEP config walkthrough (iBGP to spine RRs, kernel dataplane) |
-
-## How-to guides — task-oriented recipes and runbooks
-
-| Doc | What it gets done |
-|-----|-------------------|
-| [cookbook/](cookbook/README.md) | Scenario recipes with receipt-proven configs: RR at scale, L3VPN RR, IXP route server, monitoring feed, EVPN fabric RR, policy quickstart, migration, and the operator runbooks below |
-| [cookbook/peer-flap-triage.md](cookbook/peer-flap-triage.md) | Runbook: a peer is flapping — what to look at, in order |
-| [cookbook/rr-pair-day2.md](cookbook/rr-pair-day2.md) | Runbook: day-2 operations on a redundant RR pair — GR sanity, adding clients, safe config edits |
-| [cookbook/route-server-migration.md](cookbook/route-server-migration.md) | Shadow cutover runbook: map FRR/BIRD/ARouteServer concepts, run the shadow trial, gate cutover on `rbgp diff advertised` |
-| [cookbook/ixp-filter-pipeline.md](cookbook/ixp-filter-pipeline.md) | End-to-end IXP toolchain: arouteserver → `rs-config-render` → validated reload → Alice-LG looking glass |
-| [cookbook/manrs-ixp-action1.md](cookbook/manrs-ixp-action1.md) | MANRS IXP Programme Action 1, mapped requirement-by-requirement to validated config and member-verifiable surfaces |
-| [cookbook/paired-route-servers.md](cookbook/paired-route-servers.md) | Runbook: two independent route servers — staggered updates, inter-RS consistency diff, maintenance-window drain |
-| [explain.md](explain.md) | Answer "why is this route (not) here?": the catalog of every explain surface, with the support-ticket workflow |
-| [deployment.md](deployment.md) | End-to-end install + lifecycle: systemd, Docker, containerlab, validate, reload, upgrade |
-| [settlement-watchdog.md](settlement-watchdog.md) | The runtime-config settlement watchdog: what a fail-stop (exit 70) means, the recovery runbook, and the supervisor contract |
-| [ribdiff.md](ribdiff.md) | Drive `rbgp diff advertised` for the shadow trial (also the `rbgp-ribsnap/1` snapshot-format reference) |
-| [evpn-vtep-setup.md](evpn-vtep-setup.md) | Prepare kernel netdev topology (bridge/VXLAN/VRF) for the EVPN VTEP dataplane |
-| [evpn-vtep-troubleshooting.md](evpn-vtep-troubleshooting.md) | Runbook: debugging the bidirectional EVPN VTEP path, symptom by symptom |
-| [evpn-alpha-soak.md](evpn-alpha-soak.md) | Checklist for running EVPN VTEP alpha confidence soaks |
-| [GRAFANA.md](GRAFANA.md) | Import the overview dashboard and load the Prometheus alert-rule pack |
-| [FUZZING.md](FUZZING.md) | Build and run the cargo-fuzz targets over every peer-fed decode surface |
-| [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md) | Contributor: pre-publish smoke matrix for a tagged release |
-| [config-knob-contributor-guide.md](config-knob-contributor-guide.md) | Contributor: everything a new config knob must ship with (reload class, persistence, docs, tests) |
-
-## Reference — look something up
-
-| Doc | What it describes |
-|-----|-------------------|
-| [CONFIGURATION.md](CONFIGURATION.md) | Every TOML config key, with examples |
-| [rustbgpd.schema.json](rustbgpd.schema.json) | JSON Schema for the TOML config (editor integration; regenerated via `--dump-config-schema`) |
-| [reload-matrix.md](reload-matrix.md) | Per-field reload classification: live, reload-applied, restart-required, rejected |
-| [stability.md](stability.md) | Authoritative navigation for the narrow daemon contract, crate SemVer, authorization tiers, and adapter compatibility |
-| [v1-stable-contract.md](v1-stable-contract.md) | Narrow machine-pinned v1 compatibility contract for proven route-server and route-reflector roles |
-| [API.md](API.md) | gRPC API reference with examples for every RPC |
-| [grpc-method-inventory.md](grpc-method-inventory.md) | Authorization tier of every gRPC method (machine-readable twin: [grpc-method-inventory.json](grpc-method-inventory.json)) |
-| [rpol-language.md](rpol-language.md) | The `.rpol` typed policy language, ADR-0096 |
-| [format-version-namespaces.md](format-version-namespaces.md) | Map of the independent format/version namespaces (commit-confirm journal, config history, snapshot tokens, stream frames, support bundle, FIB owned state, GR marker) |
-| [OPERATIONS.md](OPERATIONS.md) | Production reference: reload semantics, metrics catalog, failure modes, authorization audit (contains runbook-style debugging sections) |
-| [GNMI.md](GNMI.md) | The supported gNMI / OpenConfig operational-state subset |
-| [EMBEDDING.md](EMBEDDING.md) | The crate map for using rustbgpd's layers as Rust libraries |
-| [SECURITY.md](SECURITY.md) | Security posture, deployment tiers, firewall guidance |
-| [LIMITATIONS.md](LIMITATIONS.md) | Current product boundaries and known non-goals |
-| [gobgp-parity.md](gobgp-parity.md) | Feature-by-feature parity table against GoBGP |
-| [../crates/cli/README.md#familiar-command-map](../crates/cli/README.md#familiar-command-map) | Familiar command map: the FRR/BIRD show-command mental model translated to `rbgp` |
-| [COMPARISON.md](COMPARISON.md) | Feature comparison across open-source BGP daemons |
-| [path-attribute-registry.md](path-attribute-registry.md) | Path-attribute implementation, advertisement, preservation, and evidence registry |
-| [ixp-evaluation.md](ixp-evaluation.md) | One-page IXP route-server evaluation matrix: capability status with the receipt or config behind each row |
-| [kernel-dataplane-runner.md](kernel-dataplane-runner.md) | How the privileged Linux dataplane CI workflow runs |
-| [grafana/](grafana/) | The importable Grafana dashboard JSON |
-
-## Explanation — design, evidence, and history
-
-| Doc | What it explains |
-|-----|------------------|
-| [feature-tour.md](feature-tour.md) | Full-depth tour of the capabilities summarized in the root README |
-| [DESIGN.md](DESIGN.md) | Architecture, tradeoffs, protocol scope, rationale |
-| [adr/](adr/README.md) | Architecture Decision Records for every significant protocol and design choice |
-| [USE_CASES.md](USE_CASES.md) | Deployment scenarios and their architecture (for step-by-step configs, see the cookbook) |
-| [RFC_NOTES.md](RFC_NOTES.md) | Per-RFC conformance notes: interpretations, deviations, supported standards at a glance |
-| [aspa-conformance.md](aspa-conformance.md) | Per-procedure ASPA conformance against the verification draft, the §5.6 mitigation boundary, and route-server rollout positioning |
-| [OPERATIONAL_PROOF.md](OPERATIONAL_PROOF.md) | Roll-up of operational evidence: interop, dataplane, scale, memory, soaks |
-| [RECEIPTS.md](RECEIPTS.md) | Index of labs and measurements backing every wire-behavior and performance claim |
-| [BENCHMARKS.md](BENCHMARKS.md) | Criterion micro-benchmarks and cross-stack perf snapshots |
-| [INTEROP.md](INTEROP.md) | Interop validation results against FRR, GoBGP, BIRD, and vendor NOSes |
-| [soaks/](soaks/README.md) | Archived long-run soak postmortems and the maintained procedures that govern them (raw artifacts under [artifacts/](artifacts/)) |
-| [Performance evidence](perf/README.md) | Dated route-server, route-reflector, and route-import measurements with links to source receipts |
-| [evpn-enablement.md](evpn-enablement.md) | Gate-by-gate EVPN roadmap and its history |
-| [milestones.md](milestones.md) | Archived build orders and exit criteria from initial development |
-| [upstream-findings.md](upstream-findings.md) | Bugs and quirks found in peer software during interop development |
+Historical records retain their original scope. Archive indexes guide readers to individual receipts, decisions, and supporting artifacts.

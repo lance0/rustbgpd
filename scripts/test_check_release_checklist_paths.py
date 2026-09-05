@@ -73,8 +73,8 @@ class ReleaseChecklistPathTests(unittest.TestCase):
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "docs").mkdir()
-            (root / "docs" / "RELEASE_CHECKLIST.md").write_text(
+            (root / "docs" / "project").mkdir(parents=True)
+            (root / "docs" / "project" / "release-checklist.md").write_text(
                 checklist, encoding="utf-8"
             )
             for relative in paths:

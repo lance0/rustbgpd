@@ -546,7 +546,7 @@ fn operations_key_log_table_covers_supervised_failures() {
         .split_once("\n#[cfg(test)]\nmod tests")
         .unwrap()
         .0;
-    let key_log_table = include_str!("../docs/OPERATIONS.md")
+    let key_log_table = include_str!("../docs/reference/operations.md")
         .split_once("## Key log messages")
         .expect("operations guide must retain the Key log messages section")
         .1

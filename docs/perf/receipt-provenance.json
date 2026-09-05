@@ -3,9 +3,9 @@
   "release_window": 3,
   "front_doors": [
     "docs/perf/README.md",
-    "docs/BENCHMARKS.md",
-    "docs/COMPARISON.md",
-    "docs/ixp-evaluation.md"
+    "docs/benchmarks.md",
+    "docs/explanation/comparison.md",
+    "docs/explanation/ixp-evaluation.md"
   ],
   "receipts": [
     {
@@ -56,52 +56,52 @@
   ],
   "claims": [
     {
-      "source": "docs/BENCHMARKS.md",
+      "source": "docs/benchmarks.md",
       "anchor": "`bench/run-fib-kernel-dump.py` is the privileged",
       "receipt": "docs/perf/fib-kernel-dump-2026-08.md"
     },
     {
-      "source": "docs/BENCHMARKS.md",
+      "source": "docs/benchmarks.md",
       "anchor": "| How did the measured releases compare for route import and convergence? | [v0.68.0 cross-stack receipt]",
       "receipt": "docs/perf/competitive-bgperf2-v0680-2026-08.md"
     },
     {
-      "source": "docs/BENCHMARKS.md",
+      "source": "docs/benchmarks.md",
       "anchor": "| What current high-N shapes have run? |",
       "receipt": "docs/perf/high-n-route-server-v0680-2026-08.md"
     },
     {
-      "source": "docs/BENCHMARKS.md",
+      "source": "docs/benchmarks.md",
       "anchor": "| What is the current IRR reload result? |",
       "receipt": "docs/perf/irr-reload-v0680-2026-08.md"
     },
     {
-      "source": "docs/COMPARISON.md",
+      "source": "docs/explanation/comparison.md",
       "anchor": "A separate [1,000-peer retained receipt]",
       "receipt": "docs/perf/route-server-1000-2026-07.md"
     },
     {
-      "source": "docs/COMPARISON.md",
+      "source": "docs/explanation/comparison.md",
       "anchor": "At IRR scale, the [current v0.68.0 receipt]",
       "receipt": "docs/perf/irr-reload-v0680-2026-08.md"
     },
     {
-      "source": "docs/COMPARISON.md",
+      "source": "docs/explanation/comparison.md",
       "anchor": "At route-server scale, the [IXP receipt",
       "receipt": "docs/perf/ixp-matrix-2026-07.md"
     },
     {
-      "source": "docs/COMPARISON.md",
+      "source": "docs/explanation/comparison.md",
       "anchor": "The exact v0.61.0 release tip also has an",
       "receipt": "docs/perf/v0.61.0-final-performance-2026-07.md"
     },
     {
-      "source": "docs/COMPARISON.md",
+      "source": "docs/explanation/comparison.md",
       "anchor": "The freshest published [v0.68.0 cross-stack",
       "receipt": "docs/perf/competitive-bgperf2-v0680-2026-08.md"
     },
     {
-      "source": "docs/ixp-evaluation.md",
+      "source": "docs/explanation/ixp-evaluation.md",
       "anchor": "| 7 | Reload at IRR scale |",
       "receipt": "docs/perf/irr-reload-v0680-2026-08.md"
     },

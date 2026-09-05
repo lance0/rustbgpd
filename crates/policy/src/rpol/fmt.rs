@@ -11,7 +11,7 @@
 //! comparing the full interleaved token-and-comment sequence before
 //! returning ([`format_rpol`] fails closed on any mismatch).
 //!
-//! The canonical style (derived from `docs/rpol-language.md` and the
+//! The canonical style (derived from `docs/reference/rpol-language.md` and the
 //! repo's `.rpol` receipts — documented in the "Formatting" section
 //! of the language reference):
 //!

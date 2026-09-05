@@ -28,8 +28,8 @@ PR_FILES = {
         ".github/workflows/release-install-contract.yml",
         ".github/workflows/release.yml",
         "CHANGELOG.md",
-        "docs/QUICKSTART.md",
-        "docs/deployment.md",
+        "docs/tutorials/quickstart.md",
+        "docs/how-to/deployment.md",
         "packaging/nfpm.yaml",
         "scripts/check_release_install_contract.py",
         "scripts/test_check_release_install_contract.py",
@@ -37,7 +37,7 @@ PR_FILES = {
     1524: (
         ".github/workflows/clusterfuzzlite.yml",
         ".github/workflows/fuzz.yml",
-        "ROADMAP.md",
+        "docs/project/roadmap.md",
         "crates/bfd/fuzz/.gitignore",
         "crates/bfd/fuzz/Cargo.toml",
         "crates/bfd/fuzz/decode_bfd_control.options",
@@ -49,8 +49,8 @@ PR_FILES = {
         "crates/rpki/fuzz/fuzz_targets/decode_rtr_pdu.rs",
         "crates/rpki/fuzz/seeds/decode_rtr_pdu/reset_query_v1",
         "crates/wire/fuzz/seeds/decode_update/malformed_next_hop_length",
-        "docs/FUZZING.md",
-        "docs/RECEIPTS.md",
+        "docs/how-to/fuzzing.md",
+        "docs/receipts.md",
         "docs/adr/0125-v1-stability-contract.md",
         "fuzz/build-fuzzers.sh",
         "scripts/check_fuzz_target_inventory.py",
@@ -65,8 +65,8 @@ PR_FILES = {
     ),
     1527: (
         ".github/workflows/interop.yml",
-        "docs/INTEROP.md",
-        "docs/RECEIPTS.md",
+        "docs/interop.md",
+        "docs/receipts.md",
         "tests/interop/configs/frr-bgpd-m25-ipv6-auth.conf",
         "tests/interop/configs/rustbgpd-m25-md5-gtsm.toml",
         "tests/interop/m25-md5-gtsm-frr.clab.yml",
@@ -77,10 +77,10 @@ PR_FILES = {
         "CHANGELOG.md",
         "Dockerfile",
         "README.md",
-        "docs/QUICKSTART.md",
+        "docs/tutorials/quickstart.md",
         "docs/cookbook/ixp-filter-pipeline.md",
         "docs/cookbook/monitoring-feed.md",
-        "docs/deployment.md",
+        "docs/how-to/deployment.md",
         "examples/birdwatcher-adapter/README.md",
         "examples/birdwatcher-adapter/src/main.rs",
         "packaging/nfpm.yaml",
@@ -2378,7 +2378,7 @@ class HeavyLabPathClassifierTests(unittest.TestCase):
             "fuzz/future-file",
         ):
             with self.subTest(path=path):
-                self.assertTrue(heavy.classify_paths(("docs/RECEIPTS.md", path))[0])
+                self.assertTrue(heavy.classify_paths(("docs/receipts.md", path))[0])
         self.assertTrue(
             heavy.classify_paths(
                 ("fuzz/build-fuzzers.sh", "scripts/build-packages.sh")

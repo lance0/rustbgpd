@@ -1,5 +1,7 @@
 # Route-server shadow pilot — a standing non-authoritative deployment
 
+> **Document class: CURRENT.**
+
 The [migration cookbook](route-server-migration.md)'s shadow trial is a
 step on the way to a cutover. This runbook is its standing big sibling:
 rustbgpd runs for weeks or months beside a production BIRD or OpenBGPD
@@ -31,7 +33,7 @@ express it at all. Decide this first:
 | IXP Manager v7.4 | **Not from the IXP Manager path.** `rs-config-render --input-format ixp-manager-v2` refuses the site-local overlays, the Foil export has no receive-only knob, and the activation helper publishes only unmodified receipted candidates — so a candidate rendered from IXP Manager is always a production-posture, transparent route server. The pilot itself is the hand-written shadow (or the arouteserver overlay, if the site also runs arouteserver). What the IXP Manager path contributes to a pilot is a standing **render-and-check dry run** of your real member export ([below](#ixp-manager-sites-the-dry-run-that-is-also-evidence)) | The hand-written deny-all chain; the IXP Manager candidate is rendered, checked, and kept — never activated — during the pilot |
 
 Whichever mode, the shadow runs on its own host with the daemon shipped in
-the release tarball or package ([`deployment.md`](../deployment.md)), and
+the release tarball or package ([`deployment.md`](../how-to/deployment.md)), and
 the operations below — topologies, verification, the comparison loop,
 monitoring, teardown, data return — are identical.
 
@@ -360,7 +362,7 @@ anywhere else, or selects a different best path than the incumbent
 shows for the same prefix, is a finding.
 
 **The full advertised-view diff.** `rbgp diff advertised`
-([`docs/ribdiff.md`](../ribdiff.md)) compares the shadow's live
+([`docs/how-to/ribdiff.md`](../how-to/ribdiff.md)) compares the shadow's live
 Adj-RIB-Out against a snapshot of the incumbent's — fail-closed,
 exit-code gateable. A receive-only shadow has an empty Adj-RIB-Out, so
 this needs one deliberate exception: an **observer session** the
@@ -442,7 +444,7 @@ member count.
 
 The [route-server cookbook's watch table](route-server.md#watch)
 applies unchanged; the Grafana overview dashboard and alert rules are
-in [`GRAFANA.md`](../GRAFANA.md). Pilot-specific notes:
+in [`GRAFANA.md`](../how-to/grafana.md). Pilot-specific notes:
 
 - `bgp_session_state_transitions_total` flat outside member churn is
   the primary health signal — a shadow that flaps its taps is
@@ -456,7 +458,7 @@ in [`GRAFANA.md`](../GRAFANA.md). Pilot-specific notes:
 - Route pilot alerts to whoever runs the pilot, not the production
   on-call — nothing here can page-worthily affect members.
 - Bracket the pilot with support bundles: `rbgp doctor --output ...`
-  ([OPERATIONS.md](../OPERATIONS.md#support-bundles-and-triage-checks-rbgp-doctor))
+  ([OPERATIONS.md](../reference/operations.md#support-bundles-and-triage-checks-rbgp-doctor))
   at start, on a weekly cadence, and at every incident. The bundle is
   redacted at collection (no raw config file, no secrets; metrics,
   events, and descriptions scrubbed client-side) — review it anyway
@@ -538,12 +540,12 @@ What stands behind this pilot today:
   arouteserver/BIRD and `rs-config-render`/rustbgpd, **11/11**
   accept/reject verdicts and explain terms agree, with a rust-only policy
   mutation proving the differential can go red
-  ([`INTEROP.md`](../INTEROP.md)). This is the receipt behind "render
+  ([`INTEROP.md`](../interop.md)). This is the receipt behind "render
   the shadow's filters from your `clients.yml`".
 - **M96 / M97** — the IXP Manager render → atomic activation → lifecycle
   stack, against real pinned v7.4 and MD5-authenticated FRR, including
   pre-effect restoration and two handles on one host
-  ([`INTEROP.md`](../INTEROP.md#ixp-manager-v74-manual-configuration-oracle)).
+  ([`INTEROP.md`](../interop.md#ixp-manager-v74-manual-configuration-oracle)).
   Local gates, not hosted CI.
 - **The IXP receipt matrix** and the **24 h route-server flagship soak**
   — the shapes and numbers in the resource envelope above, wins and
@@ -605,7 +607,7 @@ around this pilot, consistent with [`SUPPORT.md`](../../SUPPORT.md)):
 
 - rustbgpd is public alpha. The only narrow compatibility promise is
   the machine-inventoried
-  [v1 route-server/route-reflector contract](../v1-stable-contract.md);
+  [v1 route-server/route-reflector contract](../reference/v1-stable-contract.md);
   everything else may change between minor releases.
 - No SLA: no promised response time, resolution time, maintenance
   window, or release cadence. "Direct support during the pilot" means

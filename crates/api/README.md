@@ -27,7 +27,7 @@ The crate also provides the device-initiated
 to external collectors and reports per-target connection state through
 `gnmi_dialout_connected{target}`.
 
-See [docs/API.md](../../docs/API.md) for the full RPC reference and examples.
+See [docs/reference/api.md](../../docs/reference/api.md) for the full RPC reference and examples.
 
 ## Proto
 

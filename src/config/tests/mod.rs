@@ -2130,7 +2130,7 @@ fn persisted_config_phase_attribution_release_probe() {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// docs/reload-matrix.md structural test
+// docs/reference/reload-matrix.md structural test
 //
 // Catches the "added a Neighbor / PeerGroupConfig field but forgot to
 // document its reload class" drift. The list is intentionally
@@ -2233,7 +2233,7 @@ fn load_reload_matrix() -> String {
     // CARGO_MANIFEST_DIR is the daemon crate root (`/home/.../rustbgpd`),
     // so the matrix lives next to the docs/ tree two levels up from this
     // test module.
-    let matrix_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/reload-matrix.md");
+    let matrix_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/reference/reload-matrix.md");
     fs::read_to_string(&matrix_path).unwrap_or_else(|err| {
         panic!(
             "could not read {} for reload-matrix structural test: {err}",

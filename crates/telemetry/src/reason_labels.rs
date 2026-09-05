@@ -97,7 +97,7 @@ impl std::fmt::Display for SessionDownReason {
 ///   structured payload (and through it the gRPC
 ///   `OTC_ROUTE_BLOCKED` event surface);
 /// - the `reason` token on the transport warn/debug log lines;
-/// - the documented values in `docs/OPERATIONS.md` and ADR-0071.
+/// - the documented values in `docs/reference/operations.md` and ADR-0071.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum OtcBlockReason {
     /// Ingress: a route carrying OTC arrived while we act as
@@ -244,7 +244,7 @@ impl std::fmt::Display for RrLoopReason {
 /// - `bgp_inbound_connections_dropped_total{reason}` label values
 ///   ([`crate::BgpMetrics::record_inbound_connection_drop`]);
 /// - the `reason` token on the peer-manager accept-path log lines;
-/// - the documented values in `docs/OPERATIONS.md` and ADR-0120.
+/// - the documented values in `docs/reference/operations.md` and ADR-0120.
 ///
 /// The vocabulary is closed and label-free beyond `reason` — never a
 /// source address, which is unbounded exactly under the flood these
@@ -368,7 +368,7 @@ impl std::fmt::Display for ImportRejectReason {
 ///
 /// - `bgp_update_malformed_total{peer, disposition}` label values
 ///   ([`crate::BgpMetrics::record_update_malformed`]);
-/// - the documented values in `docs/OPERATIONS.md`.
+/// - the documented values in `docs/reference/operations.md`.
 ///
 /// The transport warn/debug log lines render the wire crate's
 /// hyphenated `ErrorDisposition::as_str` tokens; the metric label is

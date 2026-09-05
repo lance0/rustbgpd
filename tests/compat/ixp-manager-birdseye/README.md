@@ -470,9 +470,9 @@ predicted eight more that the diff did not show, listed after the table.
     unchanged — evidence: `cargo test --workspace` green.
 18. Done. The flip itself: `runtime_compatibility: true`;
     `verify_capture.py` now requires an explicit boolean and keeps the
-    `must_match` refusal as the permanent gate; this README, `docs/INTEROP.md`,
-    `docs/USE_CASES.md`, `docs/ixp-evaluation.md`, both cookbook recipes, the
-    adapter README, `ROADMAP.md`, and `CHANGELOG.md` carry the flipped claim
+    `must_match` refusal as the permanent gate; this README, `docs/interop.md`,
+    `docs/explanation/use-cases.md`, `docs/explanation/ixp-evaluation.md`, both cookbook recipes, the
+    adapter README, `docs/project/roadmap.md`, and `CHANGELOG.md` carry the flipped claim
     language. Landed after 1–17 with zero `must_match` entries open; the gate
     re-blocks the flag if one re-opens.
 

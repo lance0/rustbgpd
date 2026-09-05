@@ -26,7 +26,7 @@
 # `RTA_VIA`, so the prefix family must match the VTEP / next-hop
 # family: an IPv4 tenant prefix under an IPv6 VTEP is refused at
 # origination and dropped at import. That boundary is recorded in
-# `docs/LIMITATIONS.md`; this topology exercises the supported
+# `docs/reference/limitations.md`; this topology exercises the supported
 # same-family combination.
 #
 # Split from M109 rather than folded into it: the L2 leg needs a bridge

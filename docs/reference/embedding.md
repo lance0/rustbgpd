@@ -1,0 +1,714 @@
+# Embedding rustbgpd — the Rust BGP library map
+
+> **Document class: REFERENCE.** This maintained page defines a contract, specification, or reusable procedure; follow any stated version scope.
+
+rustbgpd is not one crate; it is a layered workspace. The bottom layers are
+packaged as daemon-independent crates: a pure BGP message codec
+(`rustbgpd-wire`), a pure RFC 4271 state machine (`rustbgpd-fsm`), and RPKI/RTR
+validation components (`rustbgpd-rpki`). They are consumable by Rust projects —
+monitors, analyzers, test harnesses, MRT readers, RPKI validators, k8s sidecars,
+and SDN controllers — without linking the daemon.
+
+This document is the contract for embedders: which crate to depend on, what the
+`pub use` boundary is, and what a minimal consumer looks like.
+
+---
+
+## 1. Crate map and publish status
+
+<!-- BEGIN EMBEDDING CRATE MAP -->
+| Package | Cargo publish | Internal normal/build path dependencies | Role |
+|---------|---------------|-----------------------------------------|------|
+| `birdwatcher-adapter` | Disabled | `rustbgpd-api` | Birdwatcher-compatible REST adapter backed by the daemon gRPC API. |
+| `event-bridge` | Disabled | `rustbgpd-api` | Reference durable-event collector bridge. |
+| `peer-loop` | Disabled | `rustbgpd-fsm`, `rustbgpd-wire` | Minimal BGP speaker embedding the published codec and FSM crates. |
+| `rs-config-render` | Disabled | `rustbgpd-policy` | Route-server configuration rendering tool. |
+| `rustbgpctl` | Disabled | `rustbgpd-policy`, `rustbgpd-wire` | Thin gRPC management CLI and support library. |
+| `rustbgpd` | Disabled | `rustbgpd-api`, `rustbgpd-bfd`, `rustbgpd-bmp`, `rustbgpd-event-history`, `rustbgpd-evpn`, `rustbgpd-evpn-linux`, `rustbgpd-fsm`, `rustbgpd-mrt`, `rustbgpd-policy`, `rustbgpd-rib`, `rustbgpd-rpki`, `rustbgpd-telemetry`, `rustbgpd-transport`, `rustbgpd-wire` | Daemon binary and internal assembly library. |
+| `rustbgpd-api` | Disabled | `rustbgpd-event-history`, `rustbgpd-evpn`, `rustbgpd-fsm`, `rustbgpd-policy`, `rustbgpd-rib`, `rustbgpd-rpki`, `rustbgpd-telemetry`, `rustbgpd-transport`, `rustbgpd-wire` | gRPC server, generated bindings, and service types. |
+| `rustbgpd-bfd` | Disabled | None | Pure BFD packet codec and session state machine. |
+| `rustbgpd-bmp` | Disabled | `rustbgpd-telemetry`, `rustbgpd-wire` | RFC 7854 BMP export. |
+| `rustbgpd-event-history` | Disabled | `rustbgpd-telemetry` | Durable local event outbox. |
+| `rustbgpd-evpn` | Disabled | `rustbgpd-wire` | EVPN VTEP domain model. |
+| `rustbgpd-evpn-linux` | Disabled | `rustbgpd-evpn` | Linux netlink EVPN dataplane reconciler. |
+| `rustbgpd-evpn-load` | Disabled | `rustbgpd-wire` | EVPN route-reflector benchmark load generator. |
+| `rustbgpd-fsm` | Enabled | `rustbgpd-wire` | Pure RFC 4271 FSM; no I/O. |
+| `rustbgpd-mrt` | Disabled | `rustbgpd-rib`, `rustbgpd-telemetry`, `rustbgpd-wire` | RFC 6396 MRT dump export. |
+| `rustbgpd-policy` | Disabled | `rustbgpd-wire` | Import/export policy engine. |
+| `rustbgpd-rib` | Disabled | `rustbgpd-bmp`, `rustbgpd-policy`, `rustbgpd-rpki`, `rustbgpd-telemetry`, `rustbgpd-wire` | Adj-RIB and Loc-RIB best-path data structures. |
+| `rustbgpd-rpki` | Enabled | `rustbgpd-wire` | VRP/ASPA tables, RTR client, and validation. |
+| `rustbgpd-telemetry` | Disabled | None | Prometheus metrics and structured tracing. |
+| `rustbgpd-transport` | Disabled | `rustbgpd-bmp`, `rustbgpd-fsm`, `rustbgpd-policy`, `rustbgpd-rib`, `rustbgpd-rpki`, `rustbgpd-telemetry`, `rustbgpd-wire` | Async TCP session runtime. |
+| `rustbgpd-wire` | Enabled | None | Pure BGP message encode/decode. |
+<!-- END EMBEDDING CRATE MAP -->
+
+All Cargo workspace packages are listed. Internal dependencies include normal and build dependencies, including target-specific dependencies; dev dependencies are excluded.
+
+`rustbgpd-wire`, `rustbgpd-fsm`, and `rustbgpd-rpki` all have
+registry-published releases; `rustbgpd-rpki` is on the registry from its first
+release, `0.1.0`. `Disabled` means this repository's package manifest
+sets `publish = false`; it makes no claim about unrelated registry packages
+with a similar name. These workspace packages can still be consumed through
+git or path dependencies, including from outside this repository. A consumer
+that needs the daemon's gRPC surface can instead generate a client from the
+proto (§3.5).
+
+This map records the current workspace topology, not a publication sequence.
+Notably, `rustbgpd-rib` depends on `rustbgpd-bmp`; §4 discusses future
+publication candidates and the gates that would apply.
+
+---
+
+## 2. `rustbgpd-wire` — the codec layer
+
+### 2.1 What you get
+
+The wire crate is a pure codec: encode/decode of BGP messages to/from `bytes`
+buffers. No `unsafe`, no panics on malformed input (all paths return `Result`),
+no async runtime, no sockets. Its default build has two external dependencies:
+`bytes` and `thiserror`. The optional `tokio-codec` feature adds Tokio-util's
+framing traits and support dependencies, but does not enable Tokio runtime,
+network, or I/O-util features; the embedder still owns the socket and runtime.
+
+Public surface (re-exported at crate root — `crates/wire/src/lib.rs`):
+
+- **Entry points:** `decode_message(&mut Bytes, max_message_len: u16) -> Result<Message, DecodeError>`,
+  `encode_message(&Message) -> Result<BytesMut, EncodeError>`,
+  `peek_message_length(&[u8], max_message_len: u16) -> Result<Option<u16>, DecodeError>`
+  (transport framing: `Ok(None)` means "header not yet buffered").
+- **Optional Tokio framing:** the default-off `tokio-codec` feature exports
+  `BgpCodec` and `BgpCodecError`, with independent inbound/outbound ceilings
+  for directional Extended Message negotiation.
+- **`Message`** enum: `Open`, `Update`, `Keepalive`, `Notification`, `RouteRefresh`.
+- **`OpenMessage`** — capabilities negotiation; `Capability` enum (MP-BGP,
+  4-octet AS, Add-Path, experimental Paths-Limit via `PathsLimitFamily`,
+  GR/LLGR, ORF, BGP Roles, Extended Messages, ...).
+- **`UpdateMessage`** — raw wire framing + `parse()` → `ParsedUpdate`
+  (decoded NLRI + `Vec<PathAttribute>`).
+- **`PathAttribute`** — typed variants + `Unknown` pass-through (`AsPath`,
+  `Aggregator`, `AtomicAggregate`, `NextHop`, `Communities`, `MpReachNlri`, `LargeCommunities`,
+  `PmsiTunnel`, `OnlyToCustomer`, ...).
+- **`Prefix`** (`V4(Ipv4Prefix)` / `V6(Ipv6Prefix)`), `NlriEntry`, Add-Path IDs.
+- **`Afi` / `Safi`** — IANA address-family identifiers. The
+  `CONFIGURED_FAMILIES`, `parse_family`, and `family_label` helpers expose the
+  canonical configuration/control-plane labels for the supported pairs;
+  BGP-LS is `linkstate` / `linkstate_vpn` on that surface.
+- **EVPN** (`EvpnRoute`/`EvpnRouteKey`, Types 1–5; route keys implement `Ord`),
+  **FlowSpec** (`FlowSpecRule`),
+  **VPNv4/v6** (`vpn` module), **BGP-LS** (`bgpls` module), **ORF** (`orf` module),
+  **PMSI Tunnel**, **Route Distinguisher** (`Display`/`FromStr` for the three
+  structured RFC 4364 forms and the exact `0x<16-hex-digits>` display fallback
+  for unknown RD types).
+- **Well-known community constants** (`COMMUNITY_NO_EXPORT`, `COMMUNITY_BLACKHOLE`,
+  `COMMUNITY_GRACEFUL_SHUTDOWN`, `COMMUNITY_LLGR_STALE`, ...).
+- **`DecodeError` / `EncodeError`** via `thiserror`.
+- **`UpdateMessage::build` / `try_build`** — construct a wire UPDATE from typed
+  components; `try_build` is the fallible counterpart (returns `EncodeError`).
+
+### 2.2 `pub use` boundary
+
+The crate root re-exports the primary types. Modules (`attribute`, `evpn`,
+`bgpls`, `vpn`, `orf`, `flowspec`, `capability`, ...) are also `pub mod`, so
+embedders can reach internal helpers, but the canonical import path is the crate
+root:
+
+```rust
+use rustbgpd_wire::{
+    Afi, Capability, DecodeError, EncodeError, Message, OpenMessage,
+    Safi, decode_message, encode_message,
+};
+```
+
+The README (`crates/wire/README.md`) is the rendered crate documentation and is
+the source of the supported-RFC table.
+
+### 2.3 Semver policy
+
+The wire crate follows the Cargo/semver convention with a documented wire-specific
+policy (`docs/project/release-checklist.md` §"Wire crate semver"):
+
+- **Patch**: bug fixes, stricter validation, docs/test improvements.
+- **Minor**: new message types, attributes, helper methods, additive API changes.
+- **Major**: breaking API changes, changed method signatures, enum shape changes.
+
+**Registry growth is no longer breaking.** As of the published `0.15.0`, every
+enum that tracks an IANA/RFC registry — `Capability`, `PathAttribute`,
+`Afi`/`Safi`, `Message`/`MessageType`, `NotificationCode`, and the EVPN,
+FlowSpec, ORF, PMSI, and error enums — is `#[non_exhaustive]`. Match them with
+a wildcard arm and a new capability code, path attribute, or AFI/SAFI arrives
+in a minor release without a semver-major break. Closed-by-construction sets
+(`Origin`, `AsPathSegment`, `Prefix`, `AddPathMode`, `ErrorDisposition`,
+`RpkiValidation`) stay exhaustively matchable on purpose. `crates/wire/README.md`
+carries the full split under "Enum exhaustiveness".
+
+**The 0.16.0 release** is additive at the API level, but **decode
+acceptance or type classification changed in six places** — bytes that decoded
+under 0.15.0 may now be rejected or typed differently. `crates/wire/README.md`
+carries the itemized list under "0.16.0 compatibility note"; diff exactly that
+list before you upgrade a consumer that asserts on acceptance or typed
+variants. Consumers comparing decoded values must also account for RFC 8092
+Large Community duplicate normalization, which keeps the first occurrence.
+Separately, `RouteDistinguisher::from_str` now accepts the displayed
+`0x<16-hex-digits>` fallback for unknown RD types and the non-exhaustive
+`RouteDistinguisherParseError` gains `InvalidHexFallback(String)`. That is an
+additive text-parser acceptance and API change, not a seventh binary
+wire-decode change.
+
+---
+
+## 3. Minimal examples
+
+### 3.1 Decode an UPDATE (codec-only — the canonical embedder)
+
+This is the "MRT reader / monitor / analyzer" consumer. Links only
+`rustbgpd-wire`.
+
+```toml
+# Cargo.toml
+[dependencies]
+rustbgpd-wire = "0.19.0"
+bytes = "1"
+```
+
+```rust
+use bytes::Bytes;
+use rustbgpd_wire::{decode_message, MAX_MESSAGE_LEN, Message};
+
+/// Decode one BGP message from a raw byte stream (e.g. from a TCP socket or
+/// an MRT record body) and print the IPv4 NLRI it carries.
+fn handle(raw: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut buf = Bytes::from(raw);
+    let msg = decode_message(&mut buf, MAX_MESSAGE_LEN)?;
+    if let Message::Update(update) = msg {
+        let parsed = update.parse(
+            true,  // 4-octet AS negotiated
+            false, // Add-Path not negotiated for body NLRI
+            &[],   // Add-Path families for MP NLRI (empty = none)
+        )?;
+        for entry in &parsed.announced {
+            println!("announced: {}", entry.prefix);
+        }
+        for attr in &parsed.attributes {
+            println!("attribute: {attr:?}");
+        }
+    }
+    Ok(())
+}
+```
+
+### 3.2 Build and encode an OPEN
+
+```rust
+use std::net::Ipv4Addr;
+use rustbgpd_wire::{encode_message, Afi, Capability, Message, OpenMessage, Safi};
+
+let open = OpenMessage {
+    version: 4,
+    my_as: 65000,
+    hold_time: 90,
+    bgp_identifier: Ipv4Addr::new(10, 0, 0, 1),
+    capabilities: vec![
+        Capability::FourOctetAs { asn: 65000 },
+        Capability::MultiProtocol { afi: Afi::Ipv4, safi: Safi::Unicast },
+        Capability::RouteRefresh,
+    ],
+};
+let bytes = encode_message(&Message::Open(open)).expect("encode OPEN");
+```
+
+### 3.3 Build a session (codec + FSM — the "minimal speaker" consumer)
+
+This is the "k8s sidecar / SDN controller / test harness" consumer. Links
+`rustbgpd-wire` + `rustbgpd-fsm`. The FSM is pure: it produces `Action`s from
+`Event`s; the *embedder* owns the TCP socket and the timers. This is the
+intentional split (ADR-0002: inherent methods, no I/O in the FSM).
+
+```toml
+# Cargo.toml
+[dependencies]
+rustbgpd-wire = "0.19.0"
+rustbgpd-fsm = "0.6.0"
+bytes = "1"
+tokio = { version = "1", features = ["net", "io-util", "time", "rt"] }
+```
+
+```rust
+use std::net::Ipv4Addr;
+
+use rustbgpd_fsm::{Action, Event, PeerConfig, Session, SessionState};
+use rustbgpd_wire::{Afi, Message, Safi, encode_message};
+
+fn start_session() -> Result<Session, Box<dyn std::error::Error>> {
+    // 1. Configure the peer. `PeerConfig` is `#[non_exhaustive]`, so build it
+    //    with the constructor and set optional fields in place.
+    let mut cfg = PeerConfig::new(65000, 65001, Ipv4Addr::new(10, 0, 0, 1));
+    cfg.families = vec![(Afi::Ipv4, Safi::Unicast)];
+
+    // 2. Create the FSM. Starts in Idle.
+    let mut sm = Session::new(cfg);
+
+    // 3. Drive it: operator starts the session -> FSM says "connect + start timers".
+    for action in sm.handle_event(Event::ManualStart) {
+        match action {
+            Action::InitiateTcpConnection => { /* embedder opens a TCP socket */ }
+            Action::StartTimer(_timer, _secs) => { /* embedder arms a tokio timer */ }
+            Action::SendOpen(open) => {
+                let _bytes = encode_message(&Message::Open(open))?;
+                // embedder writes the bytes to the TCP stream
+            }
+            // `Action` is `#[non_exhaustive]`: ignore what you do not drive.
+            _ => {}
+        }
+    }
+
+    // 4. On peer OPEN received: feed Event::BgpOpen -> the FSM validates and
+    //    emits SendKeepalive. On KEEPALIVE in OpenConfirm: -> Established.
+    //    The embedder maps Action::SendKeepalive to Message::Keepalive.
+    assert_eq!(sm.state(), SessionState::Connect); // until TCP confirms
+    Ok(sm)
+}
+```
+
+The FSM does not touch the network. It is `(State, Event) -> (State, Vec<Action>)`.
+This makes it trivially testable and lets a sidecar plug in any transport
+(TCP, TLS, a Unix socket for tests, a virtual link in a simulator).
+
+The in-tree [`examples/peer-loop`](../../examples/peer-loop/README.md) binary is
+this consumer end to end: its rustbgpd dependencies are `rustbgpd-wire` and
+`rustbgpd-fsm`. It dials one peer, drives the FSM to Established, handles the
+required socket, timer, and session actions, and prints successfully parsed
+UPDATEs. Its loopback tests assert Established, one UPDATE round-trip, and the
+NOTIFICATION and hold-expiry exits.
+
+### 3.4 Validate an origin (RPKI table — the synchronous consumer)
+
+An analyzer or policy controller that already has validated ROA payloads can
+construct an immutable table and classify a route without starting Tokio or an
+RTR session. The prefix and validation-state types are part of the published
+wire boundary. The RPKI crate's first registry release, `0.1.0`, is now
+available, so this example resolves entirely from crates.io.
+
+```toml
+# Cargo.toml
+[dependencies]
+rustbgpd-rpki = "0.1.0"
+rustbgpd-wire = "0.19.0"
+```
+
+```rust
+use std::net::{IpAddr, Ipv4Addr};
+
+use rustbgpd_rpki::{VrpEntry, VrpTable};
+use rustbgpd_wire::{Ipv4Prefix, Prefix, RpkiValidation};
+
+let table = VrpTable::new(vec![VrpEntry {
+    prefix: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 0)),
+    prefix_len: 24,
+    max_len: 24,
+    origin_asn: 64_496,
+}]);
+let route = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24));
+assert_eq!(table.validate(&route, 64_496), RpkiValidation::Valid);
+```
+
+`RtrClient` and `VrpManager` are the asynchronous layer. They require a Tokio
+runtime and channels supplied by the application; RTR transport is plain TCP,
+not TLS or SSH. The crate README carries the complete runtime, protocol, and
+public-module boundary.
+
+### 3.5 What a "prefixd-class" consumer links
+
+A route-injection controller (the rustbgpd beachhead — an automation controller
+that originates and withdraws prefixes) has two viable shapes:
+
+**Shape A — drive the daemon over gRPC (no codec).** The controller is a
+separate process that talks to `rustbgpd` over gRPC. This is the *recommended*
+shape for production: the daemon owns the sessions and the RIB; the controller
+owns the intent. No codec, no FSM.
+
+External consumers do **not** link `rustbgpd-api`. That crate is `publish =
+false` — it is the daemon's own generated server types and is not resolvable
+from outside this repository. The supported path is to generate a client from
+[`proto/rustbgpd.proto`](../../proto/rustbgpd.proto), which is self-contained: it
+declares package `rustbgpd.v1` and imports nothing, so no well-known-type
+include path is required.
+
+- **Rust** — `tonic-prost-build` in a `build.rs` (`compile_protos`), the same
+  codegen the daemon itself uses; `tonic` + `tokio` at runtime.
+- **Go** — `protoc-gen-go` + `protoc-gen-go-grpc`.
+- **Python** — `grpcio-tools` (`python -m grpc_tools.protoc`).
+
+The three services that matter for a route-injection controller:
+
+| Service | Methods you will actually call |
+|---------|-------------------------------|
+| `InjectionService` | `AddPath` / `DeletePath` (unicast prefixes), `AddFlowSpec` / `DeleteFlowSpec`, `AddEvpnRoute` / `DeleteEvpnRoute` |
+| `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainBestPath`, `ExplainAdvertisedRoute`, `ListRouteEvents` |
+| `EventService` | `WatchEvents` (live stream), `SubscribeFromEvent` (durable cursor replay, §8) |
+
+Route origination is `InjectionService`, not `RibService` — `RibService` is the
+read and explain surface. [`docs/reference/grpc-method-inventory.md`](grpc-method-inventory.md)
+lists every method with its authorization tier, and its machine-readable twin
+[`grpc-method-inventory.json`](grpc-method-inventory.json) is checked in CI
+against the Rust source-of-truth table, so it is the authority on which methods
+exist. The proto itself remains the definitive schema.
+
+**Shape B — link the codec + FSM and speak BGP directly.** A sidecar that does
+not want a full daemon in the loop (e.g. a minimal speaker in a constrained
+k8s pod) links `rustbgpd-wire` + `rustbgpd-fsm` and owns one or a few sessions.
+It does *not* get a RIB or best-path — it is a speaker, not a router. This is
+the gap Cilium fills by embedding GoBGP today. Links: `rustbgpd-wire` +
+`rustbgpd-fsm` + `tokio`. If it needs origin validation, add the RPKI crate as a
+registry dependency (§3.4); its published pairing with wire is recorded in §7.
+
+---
+
+## 4. Which crate to publish next, and why
+
+**Status: `wire`, `fsm`, and `rpki` are published — the wire/FSM pair on its
+current paired boundary, `rpki` on its first release. `rib`, `bmp`, `mrt`, and
+`policy` remain demand-gated.**
+
+1. **`rustbgpd-wire` (published as `0.19.0`; `0.19.1` prepared).** This is the foundation —
+   dependent crate versions cannot publish before their wire dependency exists
+   on crates.io. `0.15.0` brought `Capability::PathsLimit`
+   with its `PathsLimitFamily` entry type (experimental capability code 76),
+   the `Ord` implementation on `EvpnRouteKey`, and `#[non_exhaustive]` across
+   the registry-tracking enums. The `0.16.0` release is additive at the API
+   level with six binary decode-acceptance changes plus the separate additive
+   Route Distinguisher text-parser change described in §2.3. `0.17.0` is a
+   **breaking release**: `encode_evpn_nlri` now returns
+   `Result<(), EncodeError>` instead of `()`. Direct callers must handle or
+   propagate the result, and on `Err` the output buffer may hold a partial
+   encoding and must be discarded. Three EVPN wire invariants that release
+   builds previously papered over (encoding substitute bytes) now refuse to
+   encode with `EncodeError::ValueOutOfRange`: a Type 5 gateway whose address
+   family differs from its prefix, an EAD-per-ES route whose ethernet tag is
+   not `MAX_ET`, and an EAD-per-EVI route whose ethernet tag is `MAX_ET`.
+   Indirect encode paths (`MP_REACH_NLRI`/`MP_UNREACH_NLRI` via
+   `UpdateMessage::try_build` / `encode_message`) surface the same routes as
+   errors where they previously emitted silently altered wire bytes.
+   `crates/wire/README.md` carries the itemized note under "0.17.0
+   compatibility note". `0.17.1` is a **documentation-only patch**: every
+   change in it corrects an RFC section reference in a doc comment or a test
+   assertion message (RFC 5291 ORF sections, the Default Gateway community's
+   RFC 7432 §7.8 citation, and the FlowSpec next-hop citation to RFC 8955 §4).
+   There is no public API, wire-format, or decoder/encoder behavior change,
+   and therefore nothing to migrate — code that builds against `0.17.0`
+   builds and behaves identically against `0.17.1`. `0.17.2` is
+   **additive**: `PathAttribute` (a `#[non_exhaustive]` enum) gains the
+   `AtomicAggregate` variant, and a zero-length `ATOMIC_AGGREGATE` (type 6)
+   now decodes to it instead of `PathAttribute::Unknown`. Under `0.17.1` that
+   `Unknown` value tripped the unrecognized-well-known-attribute validation,
+   so the UPDATE was treat-as-withdrawn with subcode 2; under `0.17.2` the
+   route validates and the encoder re-emits the attribute. A non-zero length
+   stays an attribute-length error — attribute-discard on the revised decode
+   path per RFC 7606 §7.6. Code matching `PathAttribute::Unknown` for type
+   code 6 no longer sees it; no signature changed and nothing was removed, so
+   `cargo semver-checks` reports no required bump and consumers compiled
+   against `0.17.1` build unchanged. The same release replaces the
+   `unreachable!` arms on the attribute decode path with the typed
+   `DecodeError` the surrounding validation already produces; acceptance is
+   unchanged for every input those guards already rejected. `0.18.0` removes
+   no public item but **takes the next 0.x compatibility line**, because
+   decode acceptance and RFC 7606 classification change in several places.
+   Assigned path attributes now decode under their registered
+   Optional/Transitive propagation classes, with bounded structural framing
+   checks and typed strict-mode flag errors: Traffic Engineering (24) stays
+   payload-opaque and is ignored as optional non-transitive; the IPv6 Address
+   Specific Extended Community (25) stays opaque and propagates with Partial,
+   but its payload must now be a nonempty multiple of 20 octets; a
+   zero-length BIER attribute is discarded per RFC 7606; and the temporary
+   Community Container (34) gains bounded container, Type 1 subtype, atom,
+   and prefix framing while valid values stay opaque and propagate with
+   Partial. Attributes 36-41 stay opaque under the same treatment, and class
+   conflicts on Tunnel Encapsulation, AIGP, PE Distinguisher Labels,
+   BGPsec_Path, Prefix-SID, and ATTR_SET now produce their registered RFC
+   7606 outcomes instead of being silently ignored. Truncated
+   `MP_REACH_NLRI` / `MP_UNREACH_NLRI` attributes return Optional Attribute
+   Error carrying the exact received bytes, Partial is rejected on both, and
+   complete undersized values return Attribute Length Error. Received
+   Partial-bearing Communities, Extended Communities, PMSI Tunnel, Large
+   Communities, and OTC values now stay typed through propagation via new
+   `PathAttribute` variants; locally built canonical variants are unchanged.
+   The additive API surface is
+   `UpdateMessage::try_build_from_attribute_iter` (a single-pass builder over
+   borrowed attributes that delegates to the same transactional encoder),
+   `cease_subcode::BFD_DOWN`, the assigned path-attribute registry constants,
+   and the default-off `tokio-codec` feature (`BgpCodec` / `BgpCodecError`,
+   with independent inbound and outbound RFC 8654 ceilings). A consumer that
+   asserts on accepted bytes or on exact `PathAttribute` variants must diff
+   the itemized list in `crates/wire/README.md` under "0.18.0 compatibility
+   note" before upgrading. `0.19.0` is the registry release consumers resolve
+   today. It remains API-additive but intentionally advances the 0.x boundary
+   for new observation/framing APIs and decode-behavior refinements. Its
+   compatibility note includes the exact role-sensitive disposition for
+   Partial-bearing MED, ORIGINATOR_ID, and CLUSTER_LIST, while MP_REACH_NLRI
+   and MP_UNREACH_NLRI retain session reset. Moving off `0.18.0` means moving
+   `rustbgpd-fsm` to `0.6.0` in the same step.
+
+2. **`rustbgpd-fsm` (published as `0.6.0`).** The `0.4.0` release makes no
+   FSM API changes of its own — it exists because the FSM's public surface
+   re-exports `rustbgpd-wire` types (`Action` carries wire messages), so the
+   wire `0.16.2 → 0.17.0` breaking transition changes the identity of those
+   types. `0.4.0` re-pins `rustbgpd-wire ^0.17.0`; upgrade both crates
+   together, or the re-exported types stop unifying across the two wire
+   versions in one dependency tree. `0.4.1` is **additive**: it adds
+   `Session::negotiated_shared() -> Option<Arc<NegotiatedSession>>` for
+   embedders that need to hold the negotiated parameters across a subsystem
+   boundary while the session is live. `Session::negotiated()` keeps its
+   `Option<&NegotiatedSession>` signature, nothing was removed or changed,
+   and `0.4.1` re-pins `rustbgpd-wire ^0.17.1` — a patch-level wire move with
+   no API change, so there is nothing to migrate. That requirement admits wire
+   `0.17.2` without another FSM release. `0.5.0` is the **paired breaking
+   bump** for wire `0.18.0`: the FSM's public surface re-exports wire types
+   (`Event` carries `OpenMessage` and `NotificationMessage`, `Action` carries
+   wire messages), so the wire `0.17.2 → 0.18.0` compatibility-line move
+   changes the identity of those types even though the FSM removed nothing.
+   Upgrade both crates together, or the re-exported types stop unifying
+   across the two wire versions in one dependency tree. The FSM's own change
+   is additive: `Event::BfdDown` joins the `#[non_exhaustive]` `Event` enum,
+   and a BFD-triggered teardown in `OpenSent`, `OpenConfirm`, or
+   `Established` emits the typed Cease notification and the authoritative
+   session-down cleanup, while earlier connection states return to `Idle`
+   without a notification. Because the FSM surfaces wire decode results to
+   its callers, diff the wire `0.18.0` acceptance changes above before
+   upgrading. (History:
+   `0.3.1` added
+   `min_hold_time` and `required_families` to the `#[non_exhaustive]`
+   `PeerConfig`, made the last duplicate Graceful Restart capability win, and
+   rejected invalid OPEN identities.) Why the FSM was the second published crate:
+   - It depends *only* on `rustbgpd-wire` + `thiserror` + `bytes`. Zero
+     daemon-tier coupling.
+   - It is the smallest, purest building block a second consumer needs. A test
+     harness, a fuzzer, a minimal speaker, and an SDN controller all want "the
+     RFC 4271 state machine" without a RIB.
+   - API stability required: `Session`, `Event`, `Action`, `SessionState`,
+     `NegotiatedSession`, `PeerConfig` must be stable. `PeerConfig` is a public
+     struct with public fields — adding a field is a breaking change unless it
+     is `#[non_exhaustive]` or gets a constructor/default path. The published
+     crate already has the forward-compat boundary: `PeerConfig`,
+     `NegotiatedSession`, `Event`, and `Action` are `#[non_exhaustive]`.
+   The `0.6.0` line pairs with wire `0.19.0`, which changes the identity of
+   wire types exposed through the FSM, so an embedder still on `0.5.0` moves
+   both crates in one step. It also adds `Event::AdministrativeReset` to the
+   non-exhaustive event enum.
+
+3. **`rustbgpd-rpki` (published as `0.1.0`).** This is the crate's first
+   registry release. Why it is independent:
+   - Its direct dependencies are `rustbgpd-wire`, `tokio`, `tracing`,
+     `smallvec`, `thiserror`, and `rustc-hash`; it has no `rib`/`policy` edge.
+   - Synchronous `VrpTable` / `AspaTable` validation can be embedded without a
+     runtime. `RtrClient` and `VrpManager` are the explicitly Tokio-coupled
+     acquisition layer.
+   - The `0.1.x` compatibility boundary covers the crate-root facade and every
+     public module path, including the raw RTR PDU codec. That first publish
+     froze those paths: breaking Rust API or an incompatible public wire-type
+     move now requires `0.2.0`. There was no earlier public RPKI line to bump
+     away from, so the first `0.1.0` release starts directly on wire `0.19.0`.
+
+4. **Later: `rib`, `bmp`, `mrt`, `policy`.** These pull in heavier deps
+   (`prefix-trie`, `ipnet`, `flate2`, `chrono`) and have more churn. Publish
+   only when there is a concrete external consumer asking for them. The `rib`
+   in particular exposes best-path selection, which is a large, still-evolving
+   surface — it is not ready to be a stable external API in alpha.
+
+5. **Never publish as a library: `transport`, `api`, `evpn`, `evpn-linux`,
+   the daemon binary.** `transport` is the daemon's async session runtime and
+   is tightly coupled to the full stack. `api` is generated gRPC types.
+   `evpn-linux` is Linux-kernel-specific. The daemon is a binary.
+
+---
+
+## 5. Target consumers beyond prefixd
+
+| # | Consumer | What it does today | What it links from rustbgpd | API surface it needs | Honest read |
+|---|----------|-------------------|-----------------------------|----------------------|--------------|
+| 1 | **BGP test harness / fuzzer** (à la GoBGP's `internal/testing`, or a Rust peer for FRR interop CI) | Replays PCAPs/MRT, speaks BGP to a device under test, asserts on received UPDATEs | `rustbgpd-wire` (decode/encode), `rustbgpd-fsm` (drive a peer) | `decode_message`, `encode_message`, `Message`/`ParsedUpdate`, `Session::handle_event` | **Highest-leverage, lowest-friction.** Pure codec + pure FSM. No network state, no RIB. The checked-in `examples/peer-loop/` proves this embedding boundary. |
+| 2 | **MRT route collector / analyzer** (à la BGPKIT-parser use case, but with *encode* too) | Reads RFC 6396 dumps, decodes UPDATEs, builds reports; some also synthesize test traffic | `rustbgpd-wire` for decode; optionally `rustbgpd-mrt` later for the dump container | `decode_message`, `ParsedUpdate`, `PathAttribute`, `Prefix`, EVPN/FlowSpec/BGP-LS NLRI types | **Strong fit.** The wire crate already decodes everything BGPKIT-parser parses *plus* BGP-LS, ORF, PMSI, OTC. The gap is the MRT container — `rustbgpd-mrt` closes it but is not yet published. |
+| 3 | **k8s BGP sidecar / minimal speaker** (the Cilium-embeds-GoBGP niche, in Rust) | Advertises pod/service CIDRs to a top-of-rack router; needs a *speaker*, not a router | `rustbgpd-wire` + `rustbgpd-fsm` (+ `rustbgpd-rpki` for origin validation) | `Session`, `PeerConfig`, `Action`, `encode_message`, `VrpTable` | **Real but hard.** This is GoBGP's library-reach moat: Cilium embeds the full GoBGP library (not just the codec) to get a session runtime + RIB + policy. rustbgpd offers only codec+FSM as a library today; the sidecar would have to own the RIB-less "speaker" path itself. Honest: we are not displacing Cilium's GoBGP embedding in 2026; we are the option for a *Rust-native* sidecar that wants no CGo and a smaller blast radius. |
+| 4 | **RPKI validator / RTR cache client** (à la Routinator consumer, or a VRP-driven policy gate) | Maintains a VRP table from one or more RTR caches; validates origins | `rustbgpd-rpki` (`VrpTable`, `RtrClient`, `VrpManager`), `rustbgpd-wire` (`RpkiValidation`) | `VrpTable::validate`, `RtrClient` async session, `VrpManager` merge | **Strong fit, resolvable from crates.io today.** Table validation is synchronous; cache acquisition and merging are Tokio-coupled. The validation-state type lives in the compatible wire line. |
+| 5 | **BMP monitor / telemetry sink** (à la OpenBMP, or a Rust BMP collector) | Receives RFC 7854 BMP messages, decodes per-peer UPDATEs, exports metrics | `rustbgpd-wire` (decode embedded UPDATEs), `rustbgpd-bmp` later | `decode_message`, `PathAttribute`, `MpReachNlri` | **Medium.** BMP message framing is small; the value is the embedded UPDATE decode, which `wire` already does. `rustbgpd-bmp` is the container/framing; publish it once a collector asks. |
+
+---
+
+## 6. Becoming the de facto Rust BGP codec — what's missing vs GoBGP's library reach
+
+GoBGP's library moat is not its codec; it is that the *whole daemon* is a Go
+library (`github.com/osrg/gobgp`), so Cilium imports the package and gets a
+session runtime + RIB + policy + gRPC server in-process. rustbgpd's
+complementary moat is the opposite and narrower: a *pure, memory-safe,
+runtime-free codec with no internal-crate dependencies* that any Rust project
+can link without dragging in the daemon stack.
+
+To be the de facto Rust BGP codec, the concrete gaps:
+
+1. **Ship an in-tree embedder as proof.** Done: `examples/peer-loop/` uses
+   `wire + fsm` as its rustbgpd dependencies, opens one TCP session to a
+   configured peer, drives the FSM to Established, handles the required socket,
+   timer, and session actions, and prints successfully parsed UPDATEs; its
+   loopback tests assert Established, one UPDATE round-trip, and the
+   NOTIFICATION and hold-expiry exits. This is the "it works" receipt for
+   consumers #1 and #3. The `event-bridge` example proves the gRPC-client shape;
+   this proves the library-embedding shape.
+2. **Add a `tokio_util::codec::Decoder/Encoder` impl.** Done: the default-off
+   `tokio-codec` feature exports typed
+   `BgpCodec` / `BgpCodecError` framing with independent inbound and outbound
+   ceilings. It adds Tokio-util's codec support graph without enabling Tokio's
+   runtime, network, or I/O-util features; socket/runtime ownership remains
+   with the embedder.
+3. **Run `cargo-semver-checks` in CI** against the published crates so
+   accidental breaking changes are caught before publish. Done: the
+   `semver-checks` workflow checks every publishable workspace crate against
+   its latest crates.io release on pull requests that touch it.
+4. **docs.rs is the storefront.** Ensure `cargo doc` is warning-clean (already
+   a release gate) and that the README's supported-RFC table stays the landing
+   page. Add per-type examples in doc-comments for `decode_message`,
+   `encode_message`, `UpdateMessage::parse`, `UpdateMessage::try_build`.
+5. **Be honest about what the codec is *not*.** It is not a session runtime,
+   not a RIB, not a router. The embedder that needs a full in-process router
+   (Cilium) cannot get it from rustbgpd as a library today. The embedder that
+   needs a *codec* or a *pure FSM* — monitors, analyzers, test harnesses,
+   minimal speakers, RPKI validators — can, and in Rust, with memory safety and
+   no CGo. That is the wedge.
+
+---
+
+## 7. Published-crate release boundary
+
+Registry-visible releases are `rustbgpd-wire 0.19.0`,
+`rustbgpd-fsm 0.6.0`, and `rustbgpd-rpki 0.1.0`. The registry
+dependency examples in §3 name only those published versions.
+
+The prepared package boundary is `rustbgpd-wire 0.19.1`,
+`rustbgpd-fsm 0.6.0`, and first-published `rustbgpd-rpki 0.1.0` — the versions
+the working tree carries. Wire `0.19.1` is staged ahead of crates.io: an
+additive patch that adds the `mrt` module's `TABLE_DUMP_V2` next-hop decoder.
+The FSM and RPKI boundaries coincide with the paragraph above.
+The wire/FSM pair moved together because the FSM re-exports codec types. RPKI
+also exposes wire types in public method signatures, and it had no frozen
+baseline, so its first `0.1.0` line starts on wire `0.19.0`. That baseline now
+exists: a further incompatible wire move requires the corresponding RPKI
+compatibility-line bump. The ordering rules that govern these publishes are:
+
+- Publish `rustbgpd-wire` first, then verify it is registry-visible. Only then
+  run the fully verified package/dry-run gates for `rustbgpd-fsm` and
+  `rustbgpd-rpki`. Cargo normalizes their path dependencies to a caret
+  requirement on the wire version, so either full package verify may fail to
+  resolve before that wire release is present in the registry.
+- Keep the dependency examples in §3 pinned to the versions actually available
+  from crates.io — never to a version not yet published.
+- Publish a changed wire compatibility line before packaging either FSM or RPKI
+  against it. FSM and RPKI do not depend on each other.
+- All three crates keep their package metadata and README; the README is the
+  rendered crates.io landing page and carries the compatibility boundary.
+- Treat any additional crate publish as separate, demand-gated work.
+
+`docs/project/release-checklist.md` holds the executable form of this, including the
+per-crate semver bump rules.
+
+---
+
+## 8. The Shape-A (gRPC) embedder surface — recent additions
+
+Shape A (§3.5) — a separate process driving the daemon over gRPC — is
+the recommended production embedding, and its surface grew. What a
+gRPC consumer gains from the recent proto additions
+(`proto/rustbgpd.proto`; all additive):
+
+- **`Route.received_at_epoch_seconds`** — every `Route` served by
+  `ListReceivedRoutes` / `ListBestRoutes` / `ListAdvertisedRoutes`
+  (and the explain RPCs that embed `Route`) now carries its receive
+  time, recovered from the monotonic RIB receive instant. Consumers
+  no longer need to track route age themselves by diffing streams.
+  Approximation: the recovery reads the wall clock and the monotonic
+  elapsed separately, so a wall-clock step between the two reads skews
+  the reported epoch by that step. It is a display timestamp, not a
+  precise event ordering key — use the monotonic `event_id` for that.
+- **`RibService.ExplainAdvertisedRoute`** — the export decision as
+  data: the full gate ladder (`split_horizon`, `rr_reflection`,
+  `family`, `llgr`, `orf`, `rt_membership`, `export_policy`,
+  `adj_rib_out`) with per-gate verdict + detail, produced by a dry
+  run of the same staging body live distribution executes. A
+  controller can answer "why isn't prefix X on peer Y" without
+  screen-scraping. The response's `update_group_id` and
+  `NeighborState.update_group` expose ADR-0098 group membership for
+  fleet-level diagnostics.
+- **Live update-group comparison** — set
+  `GetNeighborStateRequest.compare_address` (plus the matching
+  `compare_interface` identity field when present) to compare two configured
+  peers.
+  The response's optional `NeighborState.update_group_comparison` carries an
+  ID-free `shared`, `separate`, `private`, or `unknown` verdict, each side's
+  membership (`grouped`, `unknown`, or a private-path reason), and the stable
+  semantic differences between two separate groups: export policy, session
+  kind, RR-client role, local BGP role, RFC 1997 mode, negotiated families, and
+  LLGR families. `private` means at least one side uses a per-peer fallback;
+  inspect the two membership fields for the reason. `unknown` means at least
+  one configured peer has no live outbound registration or its group metadata
+  is unavailable. Process-local values such as `NeighborState.update_group =
+  "group:N"` remain diagnostic only and must not be persisted as identifiers.
+
+  The primary peer still uses `GetNeighborStateRequest.address` plus
+  `interface`. Both peers must exist. IPv6 global addresses are supported, but
+  the daemon currently rejects a comparison involving an IPv6 link-local peer,
+  even when the usual `fe80::1` + `interface = "eth0"` scoped form is supplied.
+  The compare request/response fields were added to the existing proto, so an
+  older daemon ignores the unknown request fields and returns no
+  `update_group_comparison`; treat absence after a compare request as "feature
+  unsupported", not as `shared` and not as permission to compare `group:N`
+  strings. The in-tree `rbgp` client reports this case as
+  `update-group comparison is not supported by this daemon`.
+- **RFC 8212 directional policy status (ADR-0112)** —
+  `NeighborState.rfc8212_import_policy` and `.rfc8212_export_policy` carry
+  `Rfc8212PolicyStatus` per direction: `NOT_REQUIRED` (enforcement off, or
+  iBGP), `PRESENT`, or `MISSING` (the reserved internal deny is installed and
+  no route crosses that direction). A daemon that predates the fields leaves
+  them at `UNSPECIFIED = 0`; treat that and any unrecognized future value as
+  "unknown", never as `NOT_REQUIRED`, or a rolling upgrade will report a peer
+  as unconstrained while its deny is live. Do not collapse the two into one
+  boolean — a peer with an import policy and no export policy is a real state.
+- **`send_hold_time` (RFC 9687)** — settable in `AddNeighbor`'s
+  `NeighborConfig` and in `PeerGroupDefinition`, with the same
+  validation as the config path; `ListNeighbors` reports the
+  effective value. Automation that provisions peers can now manage
+  the wedged-peer teardown timer instead of inheriting the default.
+- **`max_prefix_restart_seconds`** — settable in `AddNeighbor`'s
+  `NeighborConfig` and in `PeerGroupDefinition`; zero is rejected on both
+  surfaces. Omit it to retain the fail-closed max-prefix shutdown until an
+  explicit enable.
+
+**The event-replay contract** (`EventService.SubscribeFromEvent`,
+ADR-0072) is the durable half of the event surface and the one an
+integration should build on: events carry a monotonic `event_id`;
+the consumer persists the last id it processed and resumes with
+`from_event_id` after either side restarts. It requires
+`[event_history].enabled = true` on the daemon and returns
+`FAILED_PRECONDITION` otherwise — treat that as "replay not
+provisioned", not an error to retry. The live `WatchEvents` stream
+emits `stream_lagged` warnings when a bounded source dropped events;
+that is the signal to fall back to the durable cursor.
+
+**Reference consumers in-tree:** `examples/event-bridge/` (gRPC →
+JSON-lines event bridge, the minimal Shape-A skeleton) and
+`examples/birdwatcher-adapter/` (a Birdwatcher-shaped status, peer,
+accepted-route, filtered-route, and noexport REST subset sourced entirely
+from the public gRPC API, including per-route `age` from
+`received_at_epoch_seconds`, `GET /routes/filtered/{id}` served from
+`PolicyService.ListRejectedRoutes` with structured reject reasons, and
+`GET /routes/noexport/{id}` served from the `ListBestRoutes` −
+`ListAdvertisedRoutes` diff with each suppression explained by
+`RibService.ExplainAdvertisedRoute`). Both live in this workspace, so they take
+`rustbgpd-api` as a path dependency; read them for the call shapes and the RPC
+sequencing, but generate your own client from the proto (§3.5) rather than
+copying that dependency line. The adapter is the honest template: if the public
+API is missing a field an external tool needs, the fix is an additive proto
+field, not a daemon-internal shortcut — that is how `received_at_epoch_seconds`
+landed.
+
+**Stability posture:** the daemon is alpha and the proto is versioned
+by convention, not frozen — but the working convention is additive
+evolution (new fields and RPCs; `optional` scalars for new knobs),
+with any breaking change called out in `CHANGELOG.md`. Generated
+client code should tolerate unknown fields (protobuf's default) and
+gate features on field presence, not daemon version.

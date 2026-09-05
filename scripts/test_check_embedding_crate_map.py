@@ -9,7 +9,7 @@ from scripts import check_embedding_crate_map as checker
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DOCUMENT = (ROOT / "docs" / "EMBEDDING.md").read_text(encoding="utf-8")
+DOCUMENT = (ROOT / "docs" / "reference" / "embedding.md").read_text(encoding="utf-8")
 
 
 class EmbeddingCrateMapTests(unittest.TestCase):

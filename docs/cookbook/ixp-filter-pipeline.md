@@ -1,5 +1,7 @@
 # IXP filter pipeline: arouteserver → rs-config-render → rustbgpd → Alice-LG
 
+> **Document class: CURRENT.**
+
 Build an IXP filter pipeline around rustbgpd.
 
 The toolchain an IXP already runs — [arouteserver] for
@@ -109,7 +111,7 @@ blackhole-cover dataset when configured), and `render-receipt.json`
 warnings). `--rtr-cache` is required whenever the context enables
 RPKI origin validation — the context carries no cache address. The
 renderer ships in the release tarball alongside `rustbgpd` and `rbgp`
-([install](../deployment.md#install)); from a checkout, build it with
+([install](../how-to/deployment.md#install)); from a checkout, build it with
 `cargo build --release -p rs-config-render`.
 
 The renderer is deliberately fail-stale, never fail-open: a refused
@@ -205,7 +207,7 @@ emitted and the daemon keeps serving the last good generation.
 Alert on the age of `render-receipt.json` — a pipeline stuck for more
 than a couple of refresh intervals should page. The matching
 daemon-side signal is `bgp_policy_generation_loaded_timestamp_seconds`
-("Policy artifact freshness" in [OPERATIONS.md](../OPERATIONS.md)),
+("Policy artifact freshness" in [OPERATIONS.md](../reference/operations.md)),
 which deliberately stays frozen when a reload is rejected — file
 mtimes can lie about what the daemon actually accepted.
 
@@ -236,7 +238,7 @@ rbgp rib received 198.51.100.2 --rejected
 The [route-server cookbook](route-server.md#member-support-the-filtered-route-view)
 covers this view, its retention knobs, and the follow-up explain
 workflow; the full explain surface catalog is in
-[explain.md](../explain.md).
+[explain.md](../how-to/explain.md).
 
 <a id="6-looking-glass-alice-lg-via-the-birdwatcher-adapter"></a>
 ## 6. Alice-LG via the birdwatcher adapter

@@ -1,6 +1,6 @@
 //! `rbgp diff snapshot from-mrt` — convert an RFC 6396 `TABLE_DUMP_V2`
 //! MRT dump into an `rbgp-ribsnap/1` NDJSON snapshot for `rbgp diff
-//! advertised` (adapter contract `from-mrt/1`, see docs/ribdiff.md).
+//! advertised` (adapter contract `from-mrt/1`, see docs/how-to/ribdiff.md).
 //!
 //! Honesty contract: `TABLE_DUMP_V2` is, by default, a *collector RIB
 //! view* — not a per-client post-policy Adj-RIB-Out. The required
@@ -84,7 +84,7 @@ pub(crate) struct SnapRoute {
     pub(crate) extended_communities: Vec<u64>,
     pub(crate) large_communities: Vec<[u32; 3]>,
     /// Untyped attributes preserved byte-exact (see `unknown_attrs` in
-    /// docs/ribdiff.md). The MRT adapter leaves this empty (documented
+    /// docs/how-to/ribdiff.md). The MRT adapter leaves this empty (documented
     /// limitation); the BMP adapter fills it.
     pub(crate) unknown_attrs: Vec<UnknownWireAttr>,
 }
@@ -141,7 +141,7 @@ fn run(opts: &FromMrtOpts<'_>) -> Result<String, String> {
 /// Render the full NDJSON snapshot (header, routes, counted trailer).
 fn render(opts: &FromMrtOpts<'_>, peer: IpAddr, routes: &[(IpAddr, u8, SnapRoute)]) -> String {
     let mut out = String::new();
-    // Adapter contract `from-mrt/1` (see docs/ribdiff.md): adapter id +
+    // Adapter contract `from-mrt/1` (see docs/how-to/ribdiff.md): adapter id +
     // attested view + optional free-form label.
     let mut source = "from-mrt/1 view=adj-rib-out-capture".to_string();
     if let Some(label) = opts.source {

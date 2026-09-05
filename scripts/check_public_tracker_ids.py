@@ -45,29 +45,28 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 # Anything under `docs/`, plus the top-level files a first-time reader lands
-# on. CHANGELOG.md, ROADMAP.md, and ROADMAP_HISTORY.md are deliberately out of
-# scope: released and completed sections are historical records that must not
-# be rewritten, while current roadmap work may have only a tracker item as its
-# public name.
+# on. The changelog, roadmap, and roadmap history remain out of scope after
+# moving their historical records under docs/project/: released and completed
+# sections are historical records that must not be rewritten. Current roadmap
+# work may have only a tracker item as its public name.
 #
 # The rest of the tree — `bench/`, `examples/`, `scripts/`, crate sources —
-# is deliberately out of scope too (settled with LAN-957, the same
-# narrow-the-rule-to-what-matters call as the host-path-identifier
-# decision): those files are read by people working inside the repository,
-# where a tracker ID is the conventional cross-reference, and a stale one
-# in a harness README costs that reader very little. Known mentions outside
-# the fence (e.g. bench/scale/rrharness/README.md) are accepted, not
-# missed. Do not widen the scan without a new recorded decision.
+# is deliberately out of scope too: those files are read by people working
+# inside the repository, where a tracker ID is the conventional cross-reference.
+# A stale one in a harness README costs that reader very little. Known mentions
+# outside the fence (e.g. bench/scale/rrharness/README.md) are accepted, not missed. Do not widen the scan without a new recorded decision.
 SCANNED_PREFIXES = ("docs/",)
 SCANNED_FILES = frozenset(
     {
         "README.md",
-        "ARCHITECTURE.md",
         "CONTRIBUTING.md",
-        "KNOWN_ISSUES.md",
         "SECURITY.md",
         "SUPPORT.md",
     }
+)
+
+HISTORICAL_FILES = frozenset(
+    {"docs/project/roadmap.md", "docs/project/roadmap-history.md"}
 )
 
 # Binary blobs and compressed captures carry no reviewable prose.
@@ -262,6 +261,10 @@ def discover_documents() -> dict[str, str]:
     for path in paths:
         relative = path.relative_to(ROOT).as_posix()
         if relative not in SCANNED_FILES and not relative.startswith(SCANNED_PREFIXES):
+            continue
+        if relative in HISTORICAL_FILES or (
+            path.parent == ROOT / "docs/project/changelog" and path.suffix == ".md"
+        ):
             continue
         if relative in sealed or path.suffix in SKIPPED_SUFFIXES:
             continue

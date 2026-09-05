@@ -274,5 +274,5 @@ This decision does not add:
 - [RFC 8669 — Segment Routing Prefix Segment Identifier Extensions for BGP](https://www.rfc-editor.org/rfc/rfc8669.html)
 - [RFC 8402 — Segment Routing Architecture](https://www.rfc-editor.org/rfc/rfc8402.html)
 - [RFC 7606 — Revised Error Handling for BGP UPDATE Messages](https://www.rfc-editor.org/rfc/rfc7606.html)
-- [Path-attribute registry contract](../path-attribute-registry.md)
-- [RFC implementation notes](../RFC_NOTES.md)
+- [Path-attribute registry contract](../reference/path-attribute-registry.md)
+- [RFC implementation notes](../reference/rfc-notes.md)

@@ -30,7 +30,7 @@
 # Tenant prefixes are IPv6 because the Interface-less IRB install path
 # does not implement `RTA_VIA`: the prefix family must match the
 # VTEP / next-hop family. A cross-family pair is refused at origination
-# and dropped at import — see `docs/LIMITATIONS.md`. This leg exercises
+# and dropped at import — see `docs/reference/limitations.md`. This leg exercises
 # the supported same-family combination.
 #
 # Manual leg. FRR 10.7.1 has a startup race in its per-VRF

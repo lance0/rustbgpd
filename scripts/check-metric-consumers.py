@@ -24,15 +24,15 @@ CARGO_LOCK = ROOT / "Cargo.lock"
 # Decision records, evidence receipts, and point-in-time status documents remain
 # part of the public-document spelling check, but they are historical evidence:
 # a metric mention there must not keep an otherwise unused family certified.
-# CHANGELOG.md and ROADMAP.md are already outside the shared public-document
+# CHANGELOG.md and docs/project/roadmap.md are already outside the shared public-document
 # discovery surface, so they cannot certify a metric and do not belong here.
 HISTORICAL_DOCUMENTS = frozenset(
     {
-        "docs/OPERATIONAL_PROOF.md",
-        "docs/RECEIPTS.md",
-        "docs/evpn-alpha-soak.md",
-        "docs/milestones.md",
-        "docs/upstream-findings.md",
+        "docs/operational-proof.md",
+        "docs/receipts.md",
+        "docs/how-to/evpn-alpha-soak.md",
+        "docs/project/milestones.md",
+        "docs/project/upstream-findings.md",
     }
 )
 HISTORICAL_DOCUMENT_PREFIXES = (

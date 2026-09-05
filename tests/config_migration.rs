@@ -372,7 +372,7 @@ enforcement = \"tier\"\n\
 \n\
 [security.grpc.roles]\n\
 \"<your-principal>\" = \"operator\"\n\
-(migration: docs/CONFIGURATION.md [security.grpc]; removal decision: docs/adr/0064-grpc-authorization.md)\n"
+(migration: docs/reference/configuration.md [security.grpc]; removal decision: docs/adr/0064-grpc-authorization.md)\n"
     );
     assert_eq!(fs::read(&path).unwrap(), before);
     assert_eq!(fs::metadata(&path).unwrap().ino(), inode);

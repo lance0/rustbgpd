@@ -478,7 +478,7 @@ Documented asymmetries (the honesty notes for the eventual receipt):
   each path's documented reload operation — not the same amount of work.
 - **The two rustbgpd cells use different policy engines.** The
   transaction seam rejects out-of-band `.rpol` content changes by design
-  (`docs/reload-matrix.md`), so the txn cell carries the dataset as inline
+  (`docs/reference/reload-matrix.md`), so the txn cell carries the dataset as inline
   chain-engine definitions while the SIGHUP cell uses the production
   `.rpol` route-server representation. Cross-daemon comparisons should use
   the SIGHUP cell; the txn cell answers "what does the transactional seam

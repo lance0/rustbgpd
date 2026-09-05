@@ -401,7 +401,7 @@ pub struct EventHistoryConfig {
     /// live broadcasts remain available without persistence, and
     /// `SubscribeFromEvent` returns `FAILED_PRECONDITION`. Set `true`
     /// for restart-safe event replay — it costs memory / CPU / disk
-    /// (see `docs/BENCHMARKS.md`).
+    /// (see `docs/benchmarks.md`).
     #[serde(default = "default_event_history_enabled")]
     pub enabled: bool,
     /// Fail to start if the events DB cannot be opened or recovered.
@@ -522,7 +522,7 @@ pub enum GrpcEnforcementConfig {
     /// `max_tier` caps. **Default since v0.24.0** and the only mode
     /// since v0.63.0. Deployments whose listeners have no role
     /// identity fail validation at startup with a message pointing
-    /// at the migration checklist in `docs/CONFIGURATION.md`.
+    /// at the migration checklist in `docs/reference/configuration.md`.
     #[default]
     Tier,
 }
@@ -3179,7 +3179,7 @@ fn default_redundancy_mode() -> String {
 
 /// JSON Schema for the TOML config file, pretty-printed with a trailing
 /// newline. Emitted by `rustbgpd --dump-config-schema` and committed at
-/// `docs/rustbgpd.schema.json` (freshness-checked in `config::tests`).
+/// `docs/reference/rustbgpd.schema.json` (freshness-checked in `config::tests`).
 pub fn config_json_schema() -> String {
     let schema = schemars::schema_for!(Config);
     let mut json = serde_json::to_string_pretty(&schema)

@@ -1083,7 +1083,7 @@ enum DiffAction {
     ///
     /// The snapshot format (`rbgp-ribsnap/1`) is one JSON object per line:
     /// a header record, route records, and a counted completion trailer
-    /// (see docs/ribdiff.md). Comparison is semantic (multiset of paths
+    /// (see docs/how-to/ribdiff.md). Comparison is semantic (multiset of paths
     /// per peer/family/NLRI; RFC 7911 path IDs are never compared) and
     /// fail-closed: equality is never asserted from incomplete, truncated,
     /// over-limit, or drifting input.
@@ -1158,7 +1158,7 @@ enum SnapshotAction {
     /// RFC 8050 Add-Path subtypes are supported (path identifiers are
     /// emitted as `path_id`); AS_PATH is decoded as 4-octet per RFC 6396
     /// §4.3.4, and both the abbreviated and full RFC 4760 MP_REACH_NLRI
-    /// forms are accepted. See docs/ribdiff.md for the adapter contract.
+    /// forms are accepted. See docs/how-to/ribdiff.md for the adapter contract.
     #[command(after_help = "Exit codes:\n  \
         0  snapshot emitted on stdout\n  \
         2  refused (non-comparable view) or malformed/unreadable input \
@@ -1204,7 +1204,7 @@ enum SnapshotAction {
     /// with the initial dump supersede dump entries; a reconnect or
     /// Peer Down invalidates the affected state. Every emitted
     /// peer/family must have reached End-of-RIB — an incomplete dump is
-    /// refused, never emitted. See docs/ribdiff.md.
+    /// refused, never emitted. See docs/how-to/ribdiff.md.
     #[command(after_help = "Exit codes:\n  \
         0  snapshot emitted on stdout\n  \
         2  refused: pre-policy view, incomplete (missing End-of-RIB), \
@@ -4045,10 +4045,10 @@ mod tests {
         const MARKER: &str = "<!-- rbgp-cli-conformance -->";
         const DOCUMENTS: &[(&str, usize)] = &[
             ("README.md", 4),
-            ("docs/QUICKSTART.md", 5),
+            ("docs/tutorials/quickstart.md", 5),
             ("docs/cookbook/route-server.md", 3),
-            ("docs/explain.md", 7),
-            ("docs/OPERATIONS.md", 2),
+            ("docs/how-to/explain.md", 7),
+            ("docs/reference/operations.md", 2),
         ];
 
         let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -4145,7 +4145,7 @@ mod tests {
     fn v1_stable_cli_command_inventory_matches_clap_tree() {
         let inventory_path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../docs/v1-stable-surface.json"
+            "/../../docs/reference/v1-stable-surface.json"
         );
         let inventory: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(inventory_path).unwrap()).unwrap();
@@ -5117,7 +5117,7 @@ printf '%s\n' "${COMPREPLY[@]}"
 
     #[test]
     fn test_parse_use_cases_route_server_documented_neighbor_add() {
-        let use_cases = include_str!("../../../docs/USE_CASES.md");
+        let use_cases = include_str!("../../../docs/explanation/use-cases.md");
         let documented = documented_continued_command(
             use_cases,
             "rbgp neighbor 198.51.100.10 add --remote-asn 64510",
@@ -7379,8 +7379,8 @@ printf '%s\n' "${COMPREPLY[@]}"
     #[test]
     fn tracked_add_neighbor_payload_sources_are_intent_only() {
         const SOURCES: [(&str, &str); 4] = [
-            ("docs/API.md", r#"-d '{"intent"#),
-            ("docs/INTEROP.md", r#"-d '{"intent"#),
+            ("docs/reference/api.md", r#"-d '{"intent"#),
+            ("docs/interop.md", r#"-d '{"intent"#),
             ("tests/interop/scripts/test-m4-frr.sh", r#"-d "{\"intent\""#),
             (
                 "tests/interop/scripts/test-m44-grpc-tier-authz.sh",
@@ -7405,11 +7405,11 @@ printf '%s\n' "${COMPREPLY[@]}"
         for (rel, intent) in SOURCES {
             let source = std::fs::read_to_string(root.join(rel)).unwrap();
             let mask = match rel {
-                "docs/API.md" | "docs/INTEROP.md" => r#""paths": []"#,
+                "docs/reference/api.md" | "docs/interop.md" => r#""paths": []"#,
                 "tests/interop/scripts/test-m4-frr.sh" => r#"\"paths\": []"#,
                 _ => r#""paths":[]"#,
             };
-            let expected_masks = if rel == "docs/API.md" { 2 } else { 1 };
+            let expected_masks = if rel == "docs/reference/api.md" { 2 } else { 1 };
             assert_eq!(source.matches(mask).count(), expected_masks, "{rel}");
             assert!(
                 source.contains("NeighborService/AddNeighbor") && source.contains(intent),

@@ -858,7 +858,7 @@ mod tests {
     fn assert_ribdiff_inventory_contract(value: &serde_json::Value) {
         let inventory_path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../docs/v1-stable-surface.json"
+            "/../../docs/reference/v1-stable-surface.json"
         );
         let inventory: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(inventory_path).unwrap()).unwrap();

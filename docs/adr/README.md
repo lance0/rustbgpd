@@ -15,7 +15,7 @@ Measured implementation evidence is indexed separately in the
 `Lifecycle` is a navigation aid, not a replacement for the decision's source
 status. Accepted and Current records are Active; rejected records are Rejected.
 A Proposed record is Unstated unless its own text says it is Parked. The
-current proposed records do not, and [ROADMAP's deferred follow-ups](../../ROADMAP.md#deferred-with-rationale)
+current proposed records do not, and [ROADMAP's deferred follow-ups](../project/roadmap.md#deferred-with-rationale)
 do not establish the lifecycle of their associated ADRs. No record currently
 states that the whole decision is Superseded.
 

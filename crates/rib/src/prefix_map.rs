@@ -11,7 +11,7 @@
 //! large prefix sets. Backs `AdjRibIn::prefix_index` and
 //! `AdjRibOut::prefix_path_ids`; the Loc-RIB best-path map deliberately stays on
 //! `HashMap` because the trie regressed its lookup-hot recompute (see
-//! `docs/BENCHMARKS.md`).
+//! `docs/benchmarks.md`).
 
 use ipnet::{Ipv4Net, Ipv6Net};
 use prefix_trie::PrefixMap;

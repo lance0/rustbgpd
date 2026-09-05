@@ -8,7 +8,7 @@ declare production readiness.
 ## Compatibility boundary
 
 The only narrow compatibility promise is the machine-inventoried
-[route-server / route-reflector v1 contract](docs/v1-stable-contract.md).
+[route-server / route-reflector v1 contract](docs/reference/v1-stable-contract.md).
 That promise applies only to the roles and surfaces listed by its inventory.
 The rest of the project remains alpha and may change between minor releases.
 
@@ -16,7 +16,7 @@ The rest of the project remains alpha and may change between minor releases.
 
 The distributed and supported `rustbgpd` daemon targets are Linux x86_64 and
 Linux aarch64. Published binaries use a glibc 2.31 baseline; see the
-[deployment guide](docs/deployment.md#pre-built-binary-tarball). macOS, BSD,
+[deployment guide](docs/how-to/deployment.md#pre-built-binary-tarball). macOS, BSD,
 and Windows daemon builds are unsupported: they may not compile or run, and
 there is no degraded daemon mode for those systems.
 
@@ -50,7 +50,7 @@ Open an issue with the
 - relevant redacted logs or configuration snippets.
 
 When possible, attach the redacted support bundle produced by `rbgp doctor`;
-the [operations guide](docs/OPERATIONS.md#support-bundles-and-triage-checks-rbgp-doctor)
+the [operations guide](docs/reference/operations.md#support-bundles-and-triage-checks-rbgp-doctor)
 describes its contents and collection options. Review attachments for
 environment-specific sensitive information before publishing them.
 
@@ -67,12 +67,12 @@ it is not an ordinary-support commitment.
 ## Releases and proof
 
 The [changelog](CHANGELOG.md) records release history and notable changes. The
-[release checklist](docs/RELEASE_CHECKLIST.md) defines gates that must pass
+[release checklist](docs/project/release-checklist.md) defines gates that must pass
 before a tag; neither document is a release schedule.
 
 Proof receipts establish only the named fixtures, software versions,
 environments, and assertions recorded in each receipt. They do not establish
 general production support. Start with the
-[operational proof index](docs/OPERATIONAL_PROOF.md) and inspect the linked
-[receipt catalog](docs/RECEIPTS.md), [interoperability matrix](docs/INTEROP.md),
+[operational proof index](docs/operational-proof.md) and inspect the linked
+[receipt catalog](docs/receipts.md), [interoperability matrix](docs/interop.md),
 and methodology before applying a result to a different environment.

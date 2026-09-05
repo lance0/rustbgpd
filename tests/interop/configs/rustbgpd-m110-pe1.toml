@@ -14,7 +14,7 @@
 #   - The tenant prefix must be IPv6 to match. The Interface-less IRB
 #     install path does not implement `RTA_VIA`, so a cross-family
 #     prefix/next-hop pair is refused at origination and dropped at
-#     import. See `docs/LIMITATIONS.md`.
+#     import. See `docs/reference/limitations.md`.
 #   - `router_mac` is operator-supplied (ADR-0058 §4); the startup
 #     script writes it onto the L3VXLAN device so the readiness probe
 #     sees a matching kernel-side link-layer address.

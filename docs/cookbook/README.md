@@ -1,5 +1,7 @@
 # Cookbook — scenario-driven deployment recipes
 
+> **Document class: CURRENT.**
+
 Choose a complete rustbgpd deployment recipe.
 
 Each recipe here is a complete deployment shape: a working config, the
@@ -8,13 +10,13 @@ watch, and the failure modes with the explain commands that debug them.
 The configs are derived from the interop fixtures under
 [`tests/interop/configs/`](../../tests/interop/configs/) that the
 M-series receipts run against real peer stacks — every recipe cites the
-receipts that prove its scenario ([`RECEIPTS.md`](../RECEIPTS.md)).
+receipts that prove its scenario ([`RECEIPTS.md`](../receipts.md)).
 
 ## Find the route-server path
 
 | I want to… | Read this |
 |------------|-----------|
-| Decide whether rustbgpd fits an IXP route-server deployment | [IXP evaluation](../ixp-evaluation.md) |
+| Decide whether rustbgpd fits an IXP route-server deployment | [IXP evaluation](../explanation/ixp-evaluation.md) |
 | Build a route server from hand-maintained member and policy configuration | [IXP route server](route-server.md) |
 | Keep an existing ARouteServer `general.yml` / `clients.yml` workflow | [IXP filter pipeline](ixp-filter-pipeline.md) |
 | Provision from an IXP Manager v7.4 database | [IXP Manager route server](ixp-manager-route-server.md) |
@@ -26,7 +28,7 @@ receipts that prove its scenario ([`RECEIPTS.md`](../RECEIPTS.md)).
 
 | Document | Scope it owns | Scope it does not own |
 |----------|---------------|-----------------------|
-| [IXP evaluation](../ixp-evaluation.md) | Fit assessment: capability, evidence, and product-boundary checks before choosing a deployment | Configuration generation, a running pilot, or cutover procedure |
+| [IXP evaluation](../explanation/ixp-evaluation.md) | Fit assessment: capability, evidence, and product-boundary checks before choosing a deployment | Configuration generation, a running pilot, or cutover procedure |
 | [IXP route server](route-server.md) | Hand-maintained member and policy configuration, validation, startup, and day-2 verification | ARouteServer or IXP Manager generation, standing incumbent comparison, or migration planning |
 | [IXP filter pipeline](ixp-filter-pipeline.md) | ARouteServer input, generated datasets and configuration, validated activation, and Alice-LG integration | Hand-maintained inventories, IXP Manager lifecycle, or incumbent cutover |
 | [IXP Manager route server](ixp-manager-route-server.md) | IXP Manager export, render, receipt, activation, rollback, lock, fetch, and callback lifecycle | ARouteServer inputs or a generic incumbent-replacement plan |
@@ -80,7 +82,7 @@ Operator runbooks — short, ordered checklists for a live daemon:
 | [RR pair day-2](rr-pair-day2.md) | Routine changes on a redundant RR pair: GR sanity, adding clients, hot vs session-reset edits, commit-confirm |
 | [Paired route servers](paired-route-servers.md) | Two independent RS instances: staggered config rollout, inter-RS consistency via `rbgp diff advertised`, RFC 8326 maintenance drain |
 | [Activation manual recovery](activation-manual-recovery.md) | The activation or lifecycle helper returned exit 5 (`ManualRecovery`): confirm candidate health, keep or roll back, release the lifecycle lock, handle the receipt, resume automation |
-| Shadow cutover | The step-by-step shadow trial lives in [route-server-migration.md](route-server-migration.md); the comparison tool it gates on is [`rbgp diff advertised`](../ribdiff.md) |
+| Shadow cutover | The step-by-step shadow trial lives in [route-server-migration.md](route-server-migration.md); the comparison tool it gates on is [`rbgp diff advertised`](../how-to/ribdiff.md) |
 
 Conventions:
 
@@ -91,9 +93,9 @@ Conventions:
   startup on the same commit that shipped them.
 - gRPC in the recipes stays on the default local Unix socket with tier
   authorization ([ADR-0064](../adr/0064-grpc-authorization.md)). For
-  remote access, see the mTLS guidance in [`SECURITY.md`](../SECURITY.md).
+  remote access, see the mTLS guidance in [`SECURITY.md`](../reference/security.md).
 - Start here if you haven't run the daemon at all yet:
-  [`docs/QUICKSTART.md`](../QUICKSTART.md), then come
+  [`docs/tutorials/quickstart.md`](../tutorials/quickstart.md), then come
   back for your scenario.
 - Debugging why a route was (not) selected, advertised, or imported?
-  The explain-surface catalog is [`docs/explain.md`](../explain.md).
+  The explain-surface catalog is [`docs/how-to/explain.md`](../how-to/explain.md).

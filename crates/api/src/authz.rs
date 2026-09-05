@@ -798,8 +798,8 @@ mod tests {
     const RUSTBGPD_PROTO: &str = include_str!("../../../proto/rustbgpd.proto");
     const GNMI_PROTO: &str =
         include_str!("../../../proto/github.com/openconfig/gnmi/proto/gnmi/gnmi.proto");
-    const INVENTORY_JSON: &str = include_str!("../../../docs/grpc-method-inventory.json");
-    const INVENTORY_MD: &str = include_str!("../../../docs/grpc-method-inventory.md");
+    const INVENTORY_JSON: &str = include_str!("../../../docs/reference/grpc-method-inventory.json");
+    const INVENTORY_MD: &str = include_str!("../../../docs/reference/grpc-method-inventory.md");
     const READ_TOTAL: &str = "| `read` | 0 | 0.0% |";
     const SENSITIVE_TOTAL: &str = "| `sensitive_read` | 63 | 58.3% |";
     const AUTHZ_SOURCE_PATH: &str = "crates/api/src/authz.rs";
@@ -897,7 +897,7 @@ mod tests {
     /// One `### Service (N RPCs)` heading: `(service, claimed, listed)`.
     type ServiceHeading = (String, usize, usize);
 
-    /// Per-service table rows of `docs/grpc-method-inventory.md`, plus the
+    /// Per-service table rows of `docs/reference/grpc-method-inventory.md`, plus the
     /// claimed and listed RPC count of every per-service heading.
     fn markdown_inventory() -> (BTreeSet<InventoryRow>, Vec<ServiceHeading>) {
         let mut rows = BTreeSet::new();
@@ -946,7 +946,7 @@ mod tests {
         (rows, headings)
     }
 
-    /// The `## Totals` table of `docs/grpc-method-inventory.md`, keyed by tier
+    /// The `## Totals` table of `docs/reference/grpc-method-inventory.md`, keyed by tier
     /// label plus the `Total` row.
     fn markdown_totals(markdown: &str) -> Result<BTreeMap<String, (usize, f64)>, &'static str> {
         let mut totals = BTreeMap::new();
@@ -1125,11 +1125,11 @@ mod tests {
     #[test]
     fn machine_readable_inventory_matches_method_matrix() {
         let actual = serde_json::from_str::<serde_json::Value>(INVENTORY_JSON)
-            .expect("docs/grpc-method-inventory.json must be valid JSON");
+            .expect("docs/reference/grpc-method-inventory.json must be valid JSON");
         assert_eq!(actual, expected_inventory_json());
     }
 
-    /// `docs/grpc-method-inventory.md` is external-review evidence, so it is
+    /// `docs/reference/grpc-method-inventory.md` is external-review evidence, so it is
     /// fenced to the generated export by set equality in both directions: an
     /// RPC missing from the prose and a stale row surviving in it both fail
     /// here, as does a per-service heading or totals count that stops matching
@@ -1144,7 +1144,7 @@ mod tests {
         );
 
         let export = serde_json::from_str::<serde_json::Value>(INVENTORY_JSON)
-            .expect("docs/grpc-method-inventory.json must be valid JSON");
+            .expect("docs/reference/grpc-method-inventory.json must be valid JSON");
         let exported = export["methods"]
             .as_array()
             .expect("export lists methods")
@@ -1378,7 +1378,7 @@ mod tests {
         // credentials. Do not flip this to "fix" it; if its scope widens past
         // ADR-0063's bounded shape set (issue #268), change the tier via a
         // deliberate ADR update — not by editing this assertion. See the
-        // dataplane-programming RPC guardrail in docs/RELEASE_CHECKLIST.md.
+        // dataplane-programming RPC guardrail in docs/project/release-checklist.md.
         assert_eq!(
             method_authz("/rustbgpd.v1.EvpnService/ApplyEvpnRuntime").map(|m| m.tier),
             Some(AuthTier::Mutating)
@@ -1396,7 +1396,7 @@ mod tests {
         // back-filling learned routes, change the tier via an ADR-0074 update
         // — not by editing these assertions. See the dataplane-programming
         // guardrail in
-        // docs/RELEASE_CHECKLIST.md.
+        // docs/project/release-checklist.md.
         assert_eq!(
             method_authz("/rustbgpd.v1.RibService/SetFibTable").map(|m| m.tier),
             Some(AuthTier::Mutating)

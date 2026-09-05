@@ -11,7 +11,7 @@ daemon's metrics HTTP endpoint, with gauges and counters covering peer
 state, RIB sizes, UPDATE processing, policy, graceful restart, RPKI,
 FlowSpec, BFD, BMP, EVPN, update-group, dynamic-neighbor admission,
 and outbound-prefix-limit state — see
-[docs/OPERATIONS.md](../../docs/OPERATIONS.md) for the operator-facing
+[docs/reference/operations.md](../../docs/reference/operations.md) for the operator-facing
 metrics coverage.
 
 ## Logging

@@ -18,7 +18,7 @@
 ignore = [
     # `paste` unmaintained (informational). The sole remaining chain is
     # tikv-jemalloc-ctl → paste; this is a build-time proc-macro surface.
-    # Tracked in ROADMAP.md.
+    # Tracked in docs/project/roadmap.md.
     "RUSTSEC-2024-0436",
 ]
 

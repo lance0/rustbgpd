@@ -13,7 +13,7 @@ post-export view (not retained sent-state): normal eBGP prepends and
 route-server transparency are already reflected, so no AS_PATH or next-hop
 ignore is needed. Extended communities still require the documented ignore.
 
-Honesty notes (see docs/ribdiff.md for the adapter matrix):
+Honesty notes (see docs/how-to/ribdiff.md for the adapter matrix):
   - Add-Path: when Add-Path send is negotiated, adj-out -j emits one
     entry per path but exposes NO path identifier (verified on 3.37.0);
     duplicates are emitted as repeated route records (the snapshot

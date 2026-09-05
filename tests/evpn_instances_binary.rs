@@ -213,7 +213,7 @@ fn removed_adoption_accept_legacy_env_hard_errors_at_boot() {
         for needle in [
             "RUSTBGPD_EVPN_ADOPTION_ACCEPT_LEGACY",
             "v0.38.0",
-            "docs/evpn-vtep-troubleshooting.md",
+            "docs/how-to/evpn-vtep-troubleshooting.md",
         ] {
             assert!(
                 stderr.contains(needle),

@@ -95,6 +95,6 @@ changes.
 
 ## References
 
-- [SECURITY.md](../SECURITY.md) — deployment tiers and firewall guidance
-- [CONFIGURATION.md](../CONFIGURATION.md) — `grpc_tcp`/`grpc_uds` reference
+- [SECURITY.md](../reference/security.md) — deployment tiers and firewall guidance
+- [CONFIGURATION.md](../reference/configuration.md) — `grpc_tcp`/`grpc_uds` reference
 - [`examples/envoy-mtls/`](../../examples/envoy-mtls/) — mTLS sidecar example

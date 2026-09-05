@@ -12,7 +12,7 @@ from scripts.check_embedding_versions import check, manifest_versions
 
 ROOT = Path(__file__).resolve().parents[1]
 CHECKER = ROOT / "scripts" / "check_embedding_versions.py"
-DOCUMENT = (ROOT / "docs" / "EMBEDDING.md").read_text(encoding="utf-8")
+DOCUMENT = (ROOT / "docs" / "reference" / "embedding.md").read_text(encoding="utf-8")
 
 
 class EmbeddingVersionContractTests(unittest.TestCase):

@@ -83,7 +83,7 @@ contents:
 
   # Licenses, config JSON Schema, and the opt-in kernel-dataplane
   # capability drop-in (an example to copy into
-  # /etc/systemd/system/rustbgpd.service.d/ — see docs/deployment.md).
+  # /etc/systemd/system/rustbgpd.service.d/ — see docs/how-to/deployment.md).
   - src: LICENSE-MIT
     dst: /usr/share/doc/rustbgpd/LICENSE-MIT
     file_info:
@@ -96,7 +96,7 @@ contents:
     dst: /usr/share/doc/rustbgpd/LICENSES.md
     file_info:
       mode: 0644
-  - src: docs/rustbgpd.schema.json
+  - src: docs/reference/rustbgpd.schema.json
     dst: /usr/share/doc/rustbgpd/rustbgpd.schema.json
     file_info:
       mode: 0644

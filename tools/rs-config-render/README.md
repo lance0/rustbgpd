@@ -427,7 +427,7 @@ Term ordering is a contract: the hygiene policy leads every client's
 import chain and its first term rejects AS_SET segments, so per-client
 origin enforcement is never evaluated on a path that still carries an
 AS_SET (`route.origin-as` resolves AS_SET-terminated aggregates
-leniently; the ordering makes that moot — see `docs/rpol-language.md`).
+leniently; the ordering makes that moot — see `docs/reference/rpol-language.md`).
 
 ## The refresh loop
 
@@ -459,7 +459,7 @@ One table for every subcommand (`render`, `--input-format ixp-manager-*`,
 meaning, so a cron or systemd wrapper can branch on the code alone without
 knowing which subcommand ran. The mapping is asserted by
 `tests/exit_codes.rs` against this table and its mirror in
-`docs/deployment.md`.
+`docs/how-to/deployment.md`.
 
 | Exit | Meaning |
 |---|---|

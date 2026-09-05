@@ -17,7 +17,7 @@
 //!
 //! The pipeline is `lex (logos) → recursive-descent parse → typecheck
 //! → lower to IR`, with multi-error recovery and ariadne-rendered
-//! diagnostics throughout. See `docs/rpol-language.md` for the
+//! diagnostics throughout. See `docs/reference/rpol-language.md` for the
 //! language reference and the lowering/semantics decisions.
 
 mod ast;

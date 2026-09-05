@@ -17,7 +17,7 @@ Also verified against BIRD 3.3.1. Prefer its retained Adj-RIB-Out:
 
     birdc show route export table <channel> all
 
-Honesty notes (see docs/ribdiff.md for the adapter matrix):
+Honesty notes (see docs/how-to/ribdiff.md for the adapter matrix):
   - The export view is PRE-ENCODING: BGP.as_path / BGP.next_hop show the
     table values after the export filter, not the wire encoding. A
     transparent route server neither prepends nor rewrites next hop

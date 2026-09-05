@@ -3237,7 +3237,7 @@ fn validate_grpc_tier_enforcement(config: &Config) -> Result<(), ConfigError> {
             reason.push('\n');
         }
     }
-    reason.push_str("(migration checklist: docs/CONFIGURATION.md, [security.grpc])");
+    reason.push_str("(migration checklist: docs/reference/configuration.md, [security.grpc])");
     Err(ConfigError::InvalidGrpcConfig { reason })
 }
 

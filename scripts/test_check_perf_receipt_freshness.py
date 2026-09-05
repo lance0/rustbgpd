@@ -150,9 +150,9 @@ class TemporaryReceiptRepository:
     def write_contract_files(self) -> None:
         claims = (
             ("docs/perf/README.md", "Fixture performance claim"),
-            ("docs/BENCHMARKS.md", "Fixture benchmark claim"),
-            ("docs/COMPARISON.md", "Fixture comparison claim"),
-            ("docs/ixp-evaluation.md", "Fixture evaluation claim"),
+            ("docs/benchmarks.md", "Fixture benchmark claim"),
+            ("docs/explanation/comparison.md", "Fixture comparison claim"),
+            ("docs/explanation/ixp-evaluation.md", "Fixture evaluation claim"),
         )
         manifest = {
             "schema": 1,
@@ -186,18 +186,18 @@ class TemporaryReceiptRepository:
             "- **Fixture performance claim** [receipt](fixture-receipt.md)\n",
         )
         self.write(
-            "docs/BENCHMARKS.md",
+            "docs/benchmarks.md",
             "Fixture benchmark claim uses the [receipt](perf/fixture-receipt.md).\n",
         )
         self.write(
-            "docs/COMPARISON.md",
-            "Fixture comparison claim uses the [receipt](perf/fixture-receipt.md).\n",
+            "docs/explanation/comparison.md",
+            "Fixture comparison claim uses the [receipt](../perf/fixture-receipt.md).\n",
         )
         self.write(
-            "docs/ixp-evaluation.md",
+            "docs/explanation/ixp-evaluation.md",
             "| Claim | Evidence |\n"
             "| --- | --- |\n"
-            "| Fixture evaluation claim | [receipt](perf/fixture-receipt.md) |\n",
+            "| Fixture evaluation claim | [receipt](../perf/fixture-receipt.md) |\n",
         )
         self.write(
             ".github/workflows/public-docs-contract.yml",
@@ -210,12 +210,12 @@ class TemporaryReceiptRepository:
             "      python3 scripts/check_perf_receipt_freshness.py\n",
         )
         self.write(
-            "docs/RELEASE_CHECKLIST.md",
+            "docs/project/release-checklist.md",
             "Validate docs/perf/receipt-provenance.json against:\n"
             + "".join(f"- {source}\n" for source in checker.FRONT_DOORS),
         )
         self.write(
-            "docs/RECEIPTS.md",
+            "docs/receipts.md",
             "See [the manifest](perf/receipt-provenance.json) and "
             "[checker](../scripts/check_perf_receipt_freshness.py).\n",
         )
@@ -227,9 +227,9 @@ class TemporaryReceiptRepository:
     def add_measured_date_to_claims(self) -> None:
         for relative, anchor in (
             ("docs/perf/README.md", "Fixture performance claim"),
-            ("docs/BENCHMARKS.md", "Fixture benchmark claim"),
-            ("docs/COMPARISON.md", "Fixture comparison claim"),
-            ("docs/ixp-evaluation.md", "Fixture evaluation claim"),
+            ("docs/benchmarks.md", "Fixture benchmark claim"),
+            ("docs/explanation/comparison.md", "Fixture comparison claim"),
+            ("docs/explanation/ixp-evaluation.md", "Fixture evaluation claim"),
         ):
             path = self.root / relative
             contents = path.read_text(encoding="utf-8")
@@ -287,7 +287,7 @@ class PerfReceiptFreshnessTests(unittest.TestCase):
 
         document = json.loads(MANIFEST_TEXT)
         document["claims"] = [
-            claim for claim in document["claims"] if claim["source"] != "docs/ixp-evaluation.md"
+            claim for claim in document["claims"] if claim["source"] != "docs/explanation/ixp-evaluation.md"
         ]
         with self.assertRaisesRegex(checker.ContractError, "exercise every front door"):
             checker.parse_manifest(json.dumps(document))
@@ -330,11 +330,11 @@ class PerfReceiptFreshnessTests(unittest.TestCase):
         )
 
     def test_claim_must_link_the_manifested_receipt(self) -> None:
-        comparison = text("docs/COMPARISON.md")
+        comparison = text("docs/explanation/comparison.md")
         self.assert_red(
             "receipt links differ from its manifest",
             overrides={
-                "docs/COMPARISON.md": comparison.replace(
+                "docs/explanation/comparison.md": comparison.replace(
                     "perf/route-server-1000-2026-07.md",
                     "perf/not-the-receipt.md",
                     1,
@@ -356,12 +356,12 @@ class PerfReceiptFreshnessTests(unittest.TestCase):
         )
 
     def test_each_stale_claim_requires_its_exact_date(self) -> None:
-        comparison = text("docs/COMPARISON.md")
+        comparison = text("docs/explanation/comparison.md")
         for old, expected in (("measured 2026-07-26", "measured 2026-07-26"),):
             with self.subTest(old=old):
                 self.assert_red(
                     f"must carry exact phrase '{expected}'",
-                    overrides={"docs/COMPARISON.md": comparison.replace(old, "measured later", 1)},
+                    overrides={"docs/explanation/comparison.md": comparison.replace(old, "measured later", 1)},
                 )
 
     def test_stale_claim_cannot_hide_behind_a_manifest_exception(self) -> None:
@@ -515,12 +515,12 @@ class PerfReceiptFreshnessTests(unittest.TestCase):
                 "must contain 'python3 scripts/check_perf_receipt_freshness.py' exactly once",
             ),
             (
-                "docs/RELEASE_CHECKLIST.md",
+                "docs/project/release-checklist.md",
                 "docs/perf/receipt-provenance.json",
                 "must contain required fragment 'docs/perf/receipt-provenance.json'",
             ),
             (
-                "docs/RECEIPTS.md",
+                "docs/receipts.md",
                 "../scripts/check_perf_receipt_freshness.py",
                 "must contain required fragment '../scripts/check_perf_receipt_freshness.py'",
             ),

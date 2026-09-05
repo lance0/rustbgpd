@@ -237,7 +237,7 @@ monitor container — an ingest-convergence shape with a single
 downstream client. It cannot express a 1-ingress → 1000-client RR
 fanout, so no comparable cross-daemon configuration exists in that
 harness. The existing bgperf2 ingest comparisons (rustbgpd / BIRD /
-GoBGP, same host) remain in [`BENCHMARKS.md`](../BENCHMARKS.md).
+GoBGP, same host) remain in [`BENCHMARKS.md`](../benchmarks.md).
 
 ## Caveats
 

@@ -16,7 +16,7 @@ attributes), but only the DETAIL form carries communities — the summary
 form is refused so a communities difference can never be silently
 invisible.
 
-Honesty notes (see docs/ribdiff.md for the adapter matrix):
+Honesty notes (see docs/how-to/ribdiff.md for the adapter matrix):
   - The detail form lists EVERY RIB path for each advertised prefix,
     including paths that are not advertised to this neighbor (e.g. the
     path learned from the neighbor itself). Only the bestpath

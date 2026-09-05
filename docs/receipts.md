@@ -1,0 +1,277 @@
+# Receipts Index
+
+> **Document class: CURRENT.** This maintained page reflects the project as it is now; dated sections remain bounded to their stated scope.
+
+rustbgpd's development rule is simple: **every wire-behavior claim has a lab
+that proves it, and every performance claim has a measured receipt.** A
+feature is not "done" when the code merges — it is done when a containerlab
+topology against a real peer implementation (FRR, BIRD, GoBGP, ExaBGP), a real
+kernel dataplane, or a documented same-host measurement demonstrates the claimed
+behavior, and that evidence is checked in. This page is the single index of
+those receipts: the M-series interop labs, the performance and scale
+measurements, the archived long-running soaks, and the CI schedules that keep
+re-proving all of it. The operator-facing roll-up (what has been proved, in
+prose) is [`OPERATIONAL_PROOF.md`](operational-proof.md); detailed procedures
+and per-test assertions live in [`INTEROP.md`](interop.md). Receipts must
+satisfy the [M-series proof quality
+contract](interop.md#m-series-proof-quality-contract): target-scoped
+assertions, kernel evidence for kernel claims, rerunnable cleanup-safe
+drivers, and a non-vacuity sentinel.
+
+Front-door performance citations and their measured/release revisions are
+declared in the structured
+[`perf/receipt-provenance.json`](perf/receipt-provenance.json) manifest. The
+public-docs [`receipt integrity checker`](../scripts/check_perf_receipt_freshness.py)
+requires every receipt link in those curated headline blocks to match the
+manifest, resolves its provenance against Git tags, and enforces dates on stale
+claims. The manifest is not a whole-corpus catalog: the checker separately
+reports top-level receipts with no inbound Markdown link as a sorted advisory.
+
+Numbering note: M0–M4 and M10 onward are interop labs. M5–M9 were
+development-phase build milestones (wire/RIB/API hardening) and are documented
+in [`milestones.md`](project/milestones.md), not here.
+
+## Receipts → deployment recipes
+
+Several receipt clusters back a copy-paste deployment recipe in
+[`cookbook/`](cookbook/README.md) — the receipt proves the behavior,
+the recipe is the config + runbook it enables:
+
+| Receipts | Recipe |
+|----------|--------|
+| M14, M76, M77, 1000-peer scale receipt | [iBGP route reflector at scale](cookbook/route-reflector.md) |
+| M74, M75, M77, VPN scale receipt | [L3VPN route reflector](cookbook/l3vpn-route-reflector.md) |
+| M24, M81 | [Controller / monitoring feed](cookbook/monitoring-feed.md) |
+| M29, M30, M31, M32, M33, M82 | [EVPN fabric route reflector](cookbook/evpn-fabric-rr.md) |
+| M34, M80 | [Policy quickstart (`.rpol`)](cookbook/policy-quickstart.md) |
+
+## Interop labs — PR-gated (`interop.yml`)
+
+These run on every pull request via
+[`.github/workflows/interop.yml`](../.github/workflows/interop.yml); the job
+id matches the milestone. Full procedures: [`INTEROP.md`](interop.md).
+
+| Receipt | Proves | Peer stack |
+|---------|--------|------------|
+| M1 | Basic session + UPDATE receive into the RIB | FRR 10.7.1 |
+| M10 | IPv6 dual-stack MP-BGP (MP_REACH_NLRI) | FRR 10.7.1 |
+| M13 | Policy engine: import chains, export deny/MED/prepend (3-node) | FRR 10.7.1 |
+| M14 | Route reflector (RFC 4456): ORIGINATOR_ID, CLUSTER_LIST, reflection | FRR 10.7.1 |
+| M15 | Route Refresh (RFC 2918) via gRPC SoftResetIn | FRR 10.7.1 |
+| M16 | Dual-stack LLGR (RFC 9494): exact IPv4/IPv6 fresh → GR-stale → LLGR-stale → fresh lifecycle, both-family capability/timer/EoR proof, one restart and exact counters | FRR 10.7.1 |
+| M17 | Add-Path (RFC 7911) multi-path send with distinct path ids | FRR 10.7.1 |
+| M22 | FlowSpec inject + distribute + withdraw | FRR 10.7.1 |
+| M24 | BMP Initiation, PeerUp, RouteMonitoring ordering | FRR + BMP receiver |
+| M25 | TCP MD5 + GTSM/TTL security, including IPv6 dynamic accepted sockets | FRR 10.7.1 ×3 |
+| M26 | Max-prefix teardown latch + explicit recovery (Cease/1 without Notification GR) | FRR 10.7.1 |
+| M27 / M59 | ASPA via RTR v2: validation states, best-path preference, role-aware downstream verification | FRR + RTR v2 mock |
+| M28 | Dynamic prefix-based neighbors: auto-accept, auto-remove | FRR 10.7.1 |
+| M29 | EVPN RR capability sanity (RFC 7432) + `ListEvpnRoutes` | FRR 10.7.1 |
+| M30 | EVPN Type 2 MAC reflection end-to-end with kernel VXLAN VTEPs | FRR 10.7.1 ×2 |
+| M34 | SIGHUP policy soft-reset auto-fire | FRR 10.7.1 |
+| M35 / M35b / M35c | RFC 8326 Graceful Shutdown: receiver + initiator legs across unicast, FlowSpec, and EVPN | FRR 10.7.1 |
+| M41 | RFC 7999 BLACKHOLE receiver scoping + opt-in kernel FIB discard | FRR 10.7.1 |
+| M44 | ADR-0064 gRPC tier authorization over native mTLS | grpcurl |
+| M45 | EVPN Type 5 control-plane injection via gRPC (RFC 9136) | FRR 10.7.1 |
+| M54 | ADR-0070 gNMI / OpenConfig telemetry + Set over mTLS | gnmic 0.46.0 |
+| M55 | BGP Roles + Only-to-Customer leak prevention (RFC 9234) | FRR 10.7.1 ×5 |
+| M56 | gNMI `Subscribe ON_CHANGE` session-state stream | gnmic + FRR |
+| M57 | Receive-side Address-Prefix ORF (RFC 5291/5292) | FRR 10.7.1 |
+| M63 | ADR-0078 inbound backpressure: hold-timer survival under a stalled RIB | FRR 10.7.1 |
+| M64 | IPv6-only peering (`disable_ipv4_unicast`) | FRR 10.7.1 |
+| M73 | BGP-LS route reflection: source → RR → sink, attributes verbatim | GoBGP 4.6.0 ×2 |
+| M74 | VPNv4/VPNv6 reflection: shared-RD identity, scoped API/sink views, same-path RFC 4456 attributes, ordered withdrawals, zero dataplane | GoBGP 3.37.0 ×2 |
+| M75 | RT-Constrain (RFC 4684) VPNv4 reflection filtering, widen/narrow without reset | GoBGP 3.37.0 ×3 |
+| M76 | RFC 9107 Optimal Route Reflection: divergent per-vantage best paths, topology-driven flip; exact 35/0 current-daemon refresh | Checksum-built GoBGP 4.8.0 ×5 |
+| M77 | GR/LLGR stale preservation for the RR families (RFC 4724 + RFC 9494); exact 83/0 current-daemon refresh | Checksum-built GoBGP 4.8.0 ×3 |
+| M78 | Multi-cluster ORR + inter-RR Add-Path | GoBGP 4.6.0 ×5 + rustbgpd ×2 |
+| M79 | RFC 8277 labeled-unicast (SAFI 4) reflection + GR | GoBGP 4.6.0 ×2 |
+| M80 | ADR-0096 `.rpol` policy parity vs FRR route-maps (dual-family, asn-set origin-AS + `route.family` predicates), hot-apply under traffic | FRR 10.7.1 ×3 |
+| M81 | BMP trio (rib-in, rib-out, loc-rib) + RFC 9972 policy-rejection and RPKI validation-state stats + BMPv4 against three independent decoders | GoBGP ×2 + StayRTR + pmacct + gobmp + tshark |
+| M82 | ADR-0092 EVPN VLAN-Aware Bundle (non-zero Ethernet Tag) reflection: tag as route identity, same MAC under two tags uncollapsed, tag-verbatim NLRIs, tag-scoped withdraw — synthetic leg in CI plus the **first vendor-NOS receipt** (local lab) | GoBGP 3.37.0 ×2 (CI) + Nokia SR Linux 25.10.1 (local) |
+| M83 | RFC 7947 route-server profile, multi-stack: byte-level transparency, a BIRD-only inbound MED-discard boundary with raw-wire/RIB/downstream/metric proof, OTC, per-member views, ROV explain, and the §2.3 path-hiding contrast (single-best / per-client-best / Add-Path, ADR-0101) | BIRD 2.19.2 + GoBGP 4.8.0 + digest-pinned FRR 10.7.0 + StayRTR |
+| M84 | Multi-cache RTR/ASPA epoch conformance: per-cache load at validated EoD, v2→v1 fallback, restart retention + session rotation, ASPA replace / empty-provider withdrawal, serial-regression resync | FRR + Routinator 0.15.2 + StayRTR + RTR v2 mock |
+| M92 | Dual-stack route-server differential: exact inventories, wire EoR completeness, and baseline/mutant/restore semantic diff | GoBGP 4.7.0 ×3 + BIRD 2.0.12 |
+| M93 | Exact required-family OPEN 2/7 rejection, dual-stack recovery, and empty-requirement partial-negotiation compatibility | Checksum-built BIRD 2.19.2 |
+| M94 | RFC 6793 legacy ingress reconstruction, semantic loop rejection, exact type 2/17 + type 7/18 egress, withdrawal, and session continuity | ExaBGP 5.0.9 source + independent Python OLD-speaker sink |
+| M95 | ADR-0112 live RFC 8212 policy-presence transitions: Route Refresh qualification, whole-edit rejection with nothing mutated, real refresh convergence in both directions, and GR-stale deferral | FRR 10.7.1 + checksum-built BIRD 2.19.2 (Route Refresh disabled) |
+| M98 | [IXP Manager Nagios monitoring](interop.md#ixp-manager-v74-manual-configuration-oracle): the pinned v7.4 `birdseye-daemons` and `birdseye-bgp-sessions` generators include the rustbgpd route server (host, service, hostgroup, both client session services with rendered alias names), and the pinned Bird's Eye daemon plugin reports `OK` with `Last Reconfigure` against the live adapter; gated by `ixp-compat.yml` | IXP Manager v7.4.0 + Bird's Eye v2.1.0 plugin + live `birdwatcher-adapter` |
+| M99 | RFC 9072 forced-small extended OPEN plus classic control: host-tshark raw TCP payload, independent retransmission-aware stream reassembly, exact 342-byte/307-capability-octet and 49-byte rustbgpd OPENs, exact type-2 parameter consumption, non-empty common capability inventories, and no NOTIFICATION | Digest-pinned FRR 10.3.1 |
+| M100 | Exact five-attribute by four-receiver Partial-flag matrix: frozen `0xa0` bytes, candidate/survivor snapshots, independent observer reconstruction, accepted MED 100, non-forwarded ORIGINATOR_ID/CLUSTER_LIST, and ordered exact UPDATE `3/4` notification/close/reconnect evidence for every reset | rustbgpd 0.67.0 + BIRD 2.19.2 + OpenBGPD 9.2 + FRR 10.3.1 |
+| M101 | Real-speaker IPv4-unicast attribute-discard at a route server: checksum-built BIRD emits exact type-40 tuple `e0 28 01 00`; post-policy Adj-RIB-In and digest-pinned FRR preserve the route, transparent AS_PATH/NEXT_HOP, and unrelated communities; only `attribute_discard` advances. Import/member-export denies, positive controls, explain/advertised views, withdrawal, and no-flap session survival complete an exact 27/0 receipt | BIRD 3.3.2 + digest-pinned FRR 10.3.1 |
+| M102 | Dual-stack route-server member proof: enforced role/AS4/families, bidirectional AS_PATH and community transparency, independently reassembled AS_TRANS/capability-65 and exact decoded IPv4 UPDATE fields (AS_PATH, NEXT_HOP, standard and Large Communities, and NLRI), explicit import/export policy, four directional-family withdrawals, and no-flap continuity complete exact 32/0; malformed Partial and AS_SET behavior are out of scope | Digest-pinned OpenBGPD 9.2 + FRR 10.3.1 |
+| M103 | GoBGP 4.7 → 4.8 route-server differential revalidation: immutable M92 evidence; exact 56/0 normal and 17/0 missing-EoR refusal; raw equality after deleting only recursive `age`; separately versioned M103 golden with byte-identical route/trailer records | Checksum-built GoBGP 4.8.0 ×3 + BIRD 2.0.12 |
+| M104 | Current-daemon ARouteServer filtering differential: immutable M90 inputs; exact 23/23 context-ingestion plus 74/0 live verdict, term/cause, and session-survival gates | ARouteServer 1.23.2 + checksum-built BIRD 2.19.2 + checksum-built GoBGP 4.8.0 ×3 |
+
+## Interop labs — kernel dataplane, PR + push + manual (`kernel-dataplane.yml`)
+
+Privileged containerlab/netns receipts on hosted runners via
+[`.github/workflows/kernel-dataplane.yml`](../.github/workflows/kernel-dataplane.yml)
+(lab-relevant PRs, non-documentation pushes to `main`, manual dispatch). Kernel claims are
+proved with kernel evidence (routes, FDB rows, nexthop groups, netdev state).
+
+| Receipt | Proves | Peer stack |
+|---------|--------|------------|
+| M36 | EVPN VTEP receive-side Linux FDB programming | FRR 10.7.1 |
+| M37 / M37+IP | EVPN local MAC (+MAC/IP) Type 2/Type 3 origination from kernel observation | FRR 10.7.1 |
+| M38 | EVPN multi-homing DF election + Type 1/4 origination | rustbgpd ×2 |
+| M39 | EVPN symmetric Interface-less IRB (Type 5 / L3VNI) bidirectional | FRR 10.7.1 |
+| M39b | Auto-derived Route Targets cross-vendor (RFC 8365 `AS:VNI`) | FRR 10.7.1 |
+| M40 | ADR-0059 EVPN aliasing dataplane ECMP via FDB nexthop groups | FRR EVPN-MH |
+| M42 | ADR-0061 opt-in general unicast Linux FIB runtime | FRR 10.7.1 |
+| M43 | TCP-AO dynamic `/24` queued-child deletion-foundation receipt plus two BIRD modes: uninterrupted SIGHUP add/select/deprecate/delete with a 100 ms route-continuity oracle, and SIGKILL/restart recovery after add-only, selection/deprecation `awaiting_peer`, and delete. Every restart requires BIRD disconnect, a new daemon PID, fresh `1/1` / `idle`, exact MKT inventory, mandatory TCP-AO, route/session recovery, and phase-correct Current/RNext; selection explicitly proves authenticated `degraded` `2/13` before the peer moves, then `healthy` `3/13` (probed; skips only if the runner kernel lacks TCP-AO) | BIRD 3.3.2 |
+| M47 / M48 | ADR-0063 runtime EVPN tenant teardown (control plane / kernel L3 datapath) | FRR 10.7.1 |
+| M69 | RFC 9785 Highest-Preference DF election, cross-vendor | FRR 10.7.1 |
+| M50 / M52 | ADR-0066 unicast multipath ECMP FIB install + multipath-relax | FRR 10.7.1 ×2 |
+| M51 | ADR-0067 single-hop BFD + RFC 5882 BGP coupling | FRR 10.7.1 |
+| M108 | RFC 5883 multihop BFD + RFC 5882 BGP coupling over routed loopbacks | FRR 10.7.1 |
+| M53 | ADR-0069 BGP unnumbered / IPv6 link-local peering + scoped FIB | FRR 10.7.1 ×2 |
+| M58 | ADR-0061 runtime `[[fib_tables]]` CRUD over gRPC/CLI | FRR 10.7.1 |
+| M60 / M61 / M62 | Kill-and-restart reaping/re-adoption for FDB and EVPN L3 marker sweeps; M62 additionally pins exact durable BLACKHOLE receipt authority and preservation of an unreceipted marker row | FRR 10.7.1 |
+| M65 | ADR-0083 single-active failover blackout measurement | GoBGP 3.x ×2 |
+| M66 / M67 | ADR-0084/0085 Ethernet Segment drain: operator handover and link-driven failover | rustbgpd ×3 |
+| M68 | ADR-0087 native GW-IP overlay-index Type 5, FRR consume-side recursion | FRR 10.7.1 |
+| M70 | ADR-0089 VLAN-aware bridge FDB attribution | FRR 10.7.1 |
+| M71 / M72 | RFC 9136 §4.3 ESI overlay-index Type 5 receive: single-active and all-active recursion | GoBGP 3.x |
+| netns selectors | Docker-harness privileged selectors (`fdb_nhg`, `fib_runtime`, `bfd_runtime`, `svd_fdb_vni`, managed-netdev lifecycle, L3 multipath/writer, …) | Linux kernel |
+
+## Interop labs — manual / local gates
+
+Documented drivers that stay off PR CI (long wall clock, extra fixtures, or
+covered by later CI receipts). Procedures and results:
+[`INTEROP.md`](interop.md).
+
+| Receipt | Proves | Peer stack |
+|---------|--------|------------|
+| M0 | Session establishment, restart/reset recovery, 30-min soak | FRR 10.7.1 and BIRD 2.0.12 |
+| M2 | Best-path selection + `ListBestRoutes` pagination | FRR 10.7.1 |
+| M3 | Redistribution, split horizon, injection, withdrawal propagation | FRR 10.7.1 ×2 |
+| M4 | Route-server mode: 10-peer static + dynamic neighbor management | FRR 10.7.1 |
+| M11 | Graceful Restart (RFC 4724): stale marking, EoR, timer sweep | FRR 10.7.1 |
+| M12 | Extended Communities (RFC 4360) receive + inject | FRR 10.7.1 |
+| M18 | Extended Next-Hop (RFC 8950): IPv6 next hop for IPv4 NLRI | FRR 10.7.1 |
+| M20 | Private AS removal (remove/all/replace) | FRR 10.7.1 |
+| M21 | RPKI origin validation via RTR | FRR + StayRTR |
+| M23 | Bidirectional route exchange with GoBGP | GoBGP 4.3.0 |
+| M30b | EVPN Type 5 IP-prefix origination (RFC 9136) with kernel VRF/L3VNI | FRR 10.7.1 |
+| M31 | EVPN MAC mobility + sticky preservation (RFC 7432 §15.1/§7.7) | FRR 10.7.1 ×3 |
+| M32 / M32b | EVPN multi-homing Type 1 EAD + Type 4 ES reflection (kernel bond / synthetic ESI) | FRR 10.7.1 ×3 |
+| M33 | EVPN RR scale: 50k Type 2 routes + 60 s of 1000/s churn | in-tree `bench/evpn-load` |
+| M90 | ADR-0110 filtering differential: one arouteserver site produces BIRD and rustbgpd policy, with exact verdict/explain parity over 11 announcements and a red-producing policy mutation | BIRD 2.0.12 + GoBGP 3.37.0 ×3 + arouteserver 1.23.2 |
+| M96 | [IXP Manager local activation](interop.md#ixp-manager-v74-manual-configuration-oracle): the pinned v7.4 Foil capture through the real renderer/strict checker, then atomic initial, no-op, hot-reload, and pre-effect spawn-failure restoration with exact prior bytes, unchanged daemon PID, and session continuity | FRR 10.7.1 (TCP MD5) + pinned IXP Manager v7.4.0 capture |
+| M97 | [IXP Manager authenticated lifecycle](interop.md#ixp-manager-v74-manual-configuration-oracle): pinned v7.4 API lock/fetch/callback state for two same-host IPv4/IPv6 handles with distinct PIDs, state/UDS endpoints, and TCP/179 listeners, plus a shared durable host fence, paired competing-423 behavior, sequential callbacks, and cross-handle failure containment | FRR 10.7.1 (TCP MD5) + IXP Manager v7.4.0 + MySQL 8.4 |
+| [M105](../tests/interop/m105-live-as-set/README.md) | Local IPv4 receiver observation repeated on 2026-08-29 from one raw route-server client with every AS_SET policy default unchanged: the ordinary AS_SEQUENCE control reached all five receivers; rustbgpd, BIRD, and OpenBGPD did not install the two-member AS_SET route; GoBGP installed it in accepted Adj-RIB-In and FRR installed it. Every session and process survived, and withdrawal cleared both routes. Absence is not classified as policy rejection versus treat-as-withdraw, and the matrix is not a conformance ranking | rustbgpd 0.67.0 + BIRD 3.3.2 + OpenBGPD 9.2 + GoBGP 4.8.0 + FRR 10.3.1 |
+
+## Performance and scale receipts
+
+| Receipt | What it measures | Source |
+|---------|------------------|--------|
+| Selection-deferral release fanout | Two retained five-repetition campaigns at 700 homogeneous route-server peers and 400,400 routes. The fully reusable IPv4 timer-release median is 53.613 s before shared fanout and 0.811 s on the v0.68.0 candidate, about 66.1x; dual- and seven-gate medians, controls, overflow behavior, normalized rows, and exact provenance remain published. Mixed wire capabilities and other ineligible source, lane, withdrawal, export, and prefix-limit cases retain the per-member fallback | [`artifacts`](perf/artifacts/selection-deferral-release-v0680-2026-08/README.md) |
+| Raw bridge event-skew | One descriptive 4,000-pair observation for each serial-1, burst-8, and burst-32 profile on pinned Jammy Linux 5.15 and Noble Linux 6.8 guests. All 24,000 pairs completed FDB-first with zero missing, duplicate, wrong-tenant, ambiguous, or late-FDB events; post-freeze late-neighbor/delete diagnostics remain separate from the measured denominator. One run per tuple provides no variance, bound, kernel regression, or production-behavior claim | [`artifacts`](perf/artifacts/raw-bridge-event-skew-2026-08/README.md) |
+| v0.68.0 IRR reload refresh | Twelve source-equivalent roots at 320 members × 183,040 generated IPv4 prefixes, two repeats, four reloads, and 0%/10%/50% received-view overlap. All 96 verifier-approved rows retain 320/320 sessions and zero parse errors; rustbgpd completion p50 is 0.852–1.085 s, BIRD 11.861–15.211 s, and OpenBGPD 42.939–61.959 s. One fixed shape on one host; grouped control is diagnostic | [`perf/irr-reload-v0680-2026-08.md`](perf/irr-reload-v0680-2026-08.md), [`artifacts`](perf/artifacts/irr-reload-v0680-2026-08/README.md) |
+| Cross-stack bgperf2 v0.68.0 refresh | Exact-release, counterbalanced 80-cell same-host campaign against rustbgpd v0.68.0, BIRD 2.19.2, FRR 10.7.0, and GoBGP 4.8.0. All cells reached the exact expected route count across five fixed shapes from 10×1k through 2×100k and 100×1k. This is IPv4 import/convergence evidence, not a full-table, CPU, or memory ranking | [`perf/competitive-bgperf2-v0680-2026-08.md`](perf/competitive-bgperf2-v0680-2026-08.md), [`80 rows`](perf/artifacts/competitive-bgperf2-v0680-2026-08/results.csv) |
+| High-N route-server v0.68.0 | Exact-source one-run observations at 2,500 and 5,000 peers, including session establishment, convergence, settled daemon RSS, and combined daemon/harness RSS. No interpolation or larger-fleet extrapolation | [`perf/high-n-route-server-v0680-2026-08.md`](perf/high-n-route-server-v0680-2026-08.md), [`artifacts`](perf/artifacts/high-n-route-server-v0680-2026-08/README.md) |
+| RIB memory v0.68.0 | Exact v0.67.0/v0.68.0 allocator comparison: twelve shared shape/size rows are byte-identical; six representative-distribution rows exist only at v0.68.0 and remain absolute `missing-row` observations | [`perf/rib-memory-v0680-2026-08.md`](perf/rib-memory-v0680-2026-08.md), [`artifacts`](perf/artifacts/rib-memory-v0680-2026-08/README.md) |
+| 1000-peer RR scale receipt | Real `RibManager` + 1000 real transport sessions over loopback: 100k-route cold convergence, policy-on, mixed-fleet, and churn, with the profile-to-fix storyline behind the ADR-0098 update-groups arc | [`perf/scale-receipt-2026-07.md`](perf/scale-receipt-2026-07.md) |
+| 1000-peer route-server retained receipt | Real daemon plus 1000 uniform eBGP route-server clients and 400k routes: exact cold convergence, four generation-complete export reloads, continuous readiness/RSS, update-group and export-explain gates; one-host acceptance evidence, not a competitor or optimization claim | [`perf/route-server-1000-2026-07.md`](perf/route-server-1000-2026-07.md) |
+| 1000-peer VPN scale receipt (update-groups v2) | 100k VPNv4 to 1000 RR clients, uniform and heterogeneous ~10% RT-membership shapes, plus the one-RT membership-flip wire latency (~15 ms at 100k staged, zero policy evals) — the ADR-0099 receipt | [`perf/scale-receipt-2026-07.md`](perf/scale-receipt-2026-07.md) (Scenario E) |
+| Reload UPDATE-stall receipt | Accepted 700-client × 400,400-route run: the corrected gate verifies every expected unique prefix at the requested policy generation for all 700 clients; median stall p50 is 0.76 s and the worst observer is 0.82 s | [`perf/reload-stall-2026-07.md`](perf/reload-stall-2026-07.md) |
+| IXP route-server receipt matrix | Same-host 700-client × 400,400-route policy reload, flapstorm, convergence, and process-tree RSS comparison. Current rustbgpd source-equivalent v0.68.0 rows were measured 2026-08-30; BIRD 3.3.1 remains the v0.64.0 refresh, and OpenBGPD 9.2 is a separate 2026-08-30 comparator amendment. Current rustbgpd reload-stall p50 is 0.384–0.529 s, withdraw p50 is 0.30–0.43 s, and S2/S3 settled RSS is 373/372 and 440/449 MiB. Every accepted row has 700 sessions and zero parse errors; compact machine rows and exact image/harness identities are retained | [`perf/ixp-matrix-2026-07.md`](perf/ixp-matrix-2026-07.md), [`current rustbgpd artifacts`](perf/artifacts/current-scale-v0680-2026-08/README.md), [`OpenBGPD rows`](perf/artifacts/ixp-matrix-2026-07/openbgpd92-v0670-summary.csv) |
+| Mixed policy-reload cohort campaign | 700 sessions and 400,400 routes with 600 changed / 100 stable peers: completion p50 / maximum improve 116.185x / 149.261x, while full-fleet delivery-gap p50 / maximum regress 2.070x / 2.899x; every row retains 700/700 sessions, 100/100 fresh stable markers, and zero parse errors | [`perf/artifacts/policy-reload-cohort-partition-2026-07/README.md`](perf/artifacts/policy-reload-cohort-partition-2026-07/README.md), [`REPRODUCE.md`](perf/artifacts/policy-reload-cohort-partition-2026-07/REPRODUCE.md) |
+| IRR-scale streamed transactional apply | Two fresh sealed roots at 320 members × 183,040 routes with a ~295.6 MB streamed candidate (3,218,965 IRR filter entries): 4/4 confirmed streamed Plan→token-bound Apply→commit-confirm cycles per root at 320/320 sessions and zero parse errors, completion medians 142.6 s / 137.8 s, explicit abort and 10 s-timeout auto-revert both restoring disk and runtime byte-exactly (rollback 69.5 s / 69.0 s against the 600 s ceiling), per-generation persistence hashes identical across roots, VmHWM 36.5 / 36.7 GiB, independent four-way verifier pass — with the campaign's one production defect (deadline minted before a slow apply) and one harness false-red published in the receipt | [`perf/irr-transactional-apply-2026-08.md`](perf/irr-transactional-apply-2026-08.md), [`artifacts`](perf/artifacts/irr-transactional-apply-2026-08/README.md) |
+| IRR-scale reload comparison | Four fresh sealed roots in counterbalanced A/B/B/A order at 320 members × 183,040 routes (3,218,965 IRR filter entries, 4 reloads/cell, all sessions up, zero parse errors, independent verifier pass): rustbgpd SIGHUP vs BIRD 3.3.1 vs OpenBGPD 9.1, each at its documented reload mechanism — BIRD leads completion (~11–12 s; rustbgpd per-client p95 ~9–10× BIRD, fan-out bound), OpenBGPD and per-client rustbgpd share the ~51–70 s class, rustbgpd RSS ~10.5 GiB vs ~1.1–1.4 GiB; the standalone grouped-export control lands below BIRD's completion class (~4.4 s vs ~68 s per-client, ~15×) at ~5× lower RSS (~2.0 GiB); the reproducible first-reload-cheap pattern is published as an open item | [`perf/irr-reload-comparison-2026-08.md`](perf/irr-reload-comparison-2026-08.md), [`artifacts`](perf/artifacts/irr-reload-comparison-2026-08/README.md) |
+| Authoritative reload-batch discriminator | Two fresh 320-member × 183,040-route roots reproduce later-reload growth at 271.88% / 283.02% and localize 101.53% / 99.40% of the delta to registration/membership, but stable 320-peer work counts leave the mechanism unresolved; the retained pair JSON and phase CSV mechanically preserve this checked negative result, not an optimization claim | [`perf/reload-authoritative-batch-discriminator-2026-08.md`](perf/reload-authoritative-batch-discriminator-2026-08.md), [`retained adjudicator`](perf/artifacts/reload-authoritative-batch-discriminator-2026-08/authoritative-pair.json), [`phase rows`](perf/artifacts/reload-authoritative-batch-discriminator-2026-08/authoritative-batch-phases.csv) |
+| Realistic-mix IRR reload (announcement overlap) | Eight fresh sealed roots (four per overlap point, A/B/B/A) at the same 320 × 183,040 shape with a seeded announcement-overlap dimension at F = 0.1 / 0.5 bracketing the published route-server path-diversity evidence: per-client best-path delivers exactly the 18,304 / 91,520 runner-up (member, prefix) pairs the overlap allocates (pointwise-subset verified observer-side, identical A/B repeats), at a steady-state completion cost that scales with overlap (p50 ~87 s at F = 0.1, ~135–143 s at F = 0.5) while BIRD (~12–13 s), OpenBGPD (~58–65 s), and the grouped control (~4.5 s) hold flat across F; instrumented reload phases are flat and the F-scaling per-client-best pre-fan-out span is published as under investigation; one environmental red root (host default-route flap invalidating OpenBGPD nexthops) preserved and disclosed | [`perf/irr-reload-realistic-mix-2026-08.md`](perf/irr-reload-realistic-mix-2026-08.md), [`artifacts`](perf/artifacts/irr-reload-realistic-mix-2026-08/README.md) |
+| Grouped per-client-best IRR reload (ADR-0126 acceptance) | Eight fresh sealed roots at one clean commit (four per overlap point, A/B/B/A) rerun the realistic-mix per-client-best cells with the fleet grouped after the ADR-0126 classifier flip: every comparison root's received view is byte-identical to the sealed ungrouped baseline's capture (received-view-delta exact at 18,304 / 91,520 pairs, both repeats, both overlap points) while steady-state reload completion p50 drops from ~87–143 s to 3.25–3.77 s and sampler RSS peak from 10,534–11,315 MiB to 1,972–2,098 MiB (5.28–5.50×) — passing both acceptance-gate prongs and closing the baseline's under-investigation F-scaling span (SIGHUP-to-snapshot now 1.38–1.54 s, flat); the campaign's four halted roots and superseded green roots (three real daemon defects, fixed in-window) are preserved and disclosed | [`perf/irr-reload-grouped-per-client-best-2026-08.md`](perf/irr-reload-grouped-per-client-best-2026-08.md), [`artifacts`](perf/artifacts/irr-reload-grouped-per-client-best-2026-08/README.md) |
+| RIB operations (Criterion) | Ingest, best-path, distribution microbenchmarks with pinned A/B compare methodology | [`BENCHMARKS.md`](benchmarks.md#rib-operations) |
+| Unicast prefix announcer index | Exact allocator-byte comparison at 100k prefixes plus three admitted, counterbalanced throughput campaigns (six pairs per rung); independently verified no-regression gate | [`perf/unicast-prefix-announcer-index-2026-08.md`](perf/unicast-prefix-announcer-index-2026-08.md), [`artifacts`](perf/artifacts/unicast-prefix-announcer-index-2026-08/README.md) |
+| RIB operations prefix-fixture audit | Bounded audit of the pre-#1374 repeating prefix fixture: exactly three archived rows are duplicate-shaped; their July evidence is non-confident or absolute-only, while independent route-paging and high-N memory generators remain valid | [`perf/rib-ops-prefix-fixture-audit-2026-08.md`](perf/rib-ops-prefix-fixture-audit-2026-08.md) |
+| Attribute-intern hashing noise-floor recheck | Same-source A/B/B/A rerun of all 35 retained Criterion rows with a pinned core and frequency trace: the rich/shared decision rows are stable, but six other controls exceed the unchanged range/CV gates, so attribution remains not evaluated and no fingerprint prototype is authorized | [`perf/attr-intern-hashing-recheck-2026-08.md`](perf/attr-intern-hashing-recheck-2026-08.md), [`raw rows`](perf/artifacts/attr-intern-hashing-recheck-2026-08.csv) |
+| v0.61.0 release-tip absolute baseline | Three accepted real release-daemon runs at 1,000 eBGP peers × 400 BASE routes: steady process-tree RSS medians 441.760/441.215/441.131 MiB, exact positive jemalloc gauges reported separately, 1,000/1,000 sessions, one 1,000-member update group, and zero fallback/residue/rejections/writer backlog. Also retains 71 accepted single-revision RIB/codec/policy Criterion median point estimates and CIs under the literal release-tip baseline; no CPU delta or cross-receipt causal memory claim | [`perf/v0.61.0-final-performance-2026-07.md`](perf/v0.61.0-final-performance-2026-07.md), [`artifacts`](perf/artifacts/v0.61.0-final-performance-2026-07/README.md) |
+| Import-decision explain cache opt-in | Fifteen accepted same-host runs across two commits and three fleet shapes (eleven resident-memory runs plus a DHAT pair): making the per-session explain cache opt-in returns 373.5 MiB of steady RSS (−42.9%) at 1,000 sessions × 400 routes with the configuration omitted, and 374.7 MiB same-binary config-only. Two cross-checks isolate the flip — explicit `true` at the new commit reproduces the old default to 1.3 MiB, explicit `false` reproduces omitted — against a 0.38% control spread. A saturating 100 × 5,000 shape prices the 4,096-entry ceiling at 2.44 MiB per session, and DHAT shows the cache allocating exactly zero bytes when disabled. The 2.4 GiB figure for 1,000 saturated sessions is extrapolated, never measured | [`perf/explain-cache-opt-in-2026-07.md`](perf/explain-cache-opt-in-2026-07.md), [`artifacts`](perf/artifacts/explain-cache-opt-in-2026-07/README.md) |
+| Bounded compiled policy-set sharing (historical) | Superseded 32-neighbor-chunk System-allocation and DHAT receipt, preserved without rewriting its measured rows. Current loading interns sets once for the whole compiled unit, so this is historical evidence rather than the current sharing contract. No daemon RSS or convergence claim | [`artifacts`](perf/artifacts/policy-set-store-2026-07/README.md) |
+| Controlled peer/route RSS attribution + lazy RFC 8654 receive buffer | Two counterbalanced repeats of a real release daemon at 10/100 peers × 10k/100k BASE routes isolate 118.200/142.844 KiB per peer and 825.515/850.751 B per BASE route under continuous churn, superseding the cross-stack campaign's confounded mixed-shape slope. An immediate-parent C/N/N/C at 100 peers × 100 BASE routes removes the exact 6,150,300-byte eager receive-buffer owner. RSS is below the 0.645% floor, while different final route totals confound the allocator-total and DHAT-component deltas, so the optimization claims only that exact owner removal. Complete final metrics, RSS streams, allocator gauges, lossless DHAT derivatives, red proof, and checksums are retained | [`perf/per-peer-rss-attribution-2026-07.md`](perf/per-peer-rss-attribution-2026-07.md), [`artifacts`](perf/artifacts/per-peer-rss-attribution-2026-07/README.md) |
+| Single-commit memory attribution (July 2026 step) | Seven preregistered sealed A/B campaigns chained coarse to single commit — 25 measured arms, 134 runs at 100 peers × 1,000 routes, interleaved round-robin, five-run medians on cgroup `memory.peak` with settled anonymous RSS secondary, bands and ownership thresholds frozen before every build, boundary arms rebuilt byte-identically between phases. A 509-commit window narrows to one merge: #1189 `perf(api): coalesce neighbor RIB snapshots` owns **+106.6 MiB peak / +101.1 MiB settled anon for −1.02 s convergence** in a single-commit step, while #1188 *reduced* memory by 21.4 MiB (sum check exact: −21.4 + 106.6 = +85.2). #1184, the authz arc, ADR-0126's grouped per-client-best and v0.64.0 measure flat or negative; the tip structural-reclaim tranche is recorded INCONCLUSIVE rather than renegotiating an unreachable band. One shape, no control daemon, medians not distributions | [`perf/memory-attribution-2026-08.md`](perf/memory-attribution-2026-08.md), [`artifacts`](perf/artifacts/memory-attribution-2026-08/README.md) |
+| Grouped private Adj-RIB-Out late join | Pinned real-manager A/B/B/A after one million routes converge: removing the unused private unicast reservation saves exactly 125,004 KiB of `VmSize` per freshly joined grouped peer (122.07 MiB including allocator mapping overhead), scaling to 1,000,032 KiB across eight measured peers. The unused capacity was not resident, so the receipt explicitly makes no RSS or latency claim | [`perf/grouped-private-adj-rib-out-late-join-2026-07.md`](perf/grouped-private-adj-rib-out-late-join-2026-07.md), [`artifacts`](perf/artifacts/grouped-private-adj-rib-out-late-join-2026-07/README.md) |
+| RIB criterion noise floor | Same-SHA controls on the primary host prove the noise floor is per-shape and per-host, not one global percentage: 1.44% at `adj_rib_in_insert/10000` against 16.76% at `/100000` and 0.55% at `rib_pipeline/1000`, versus the single ~11.2% figure calibrated on the secondary bench runner at the first of those shapes. The one CPU claim it licenses is isolated to a single commit — `AdjRibIn::insert` 2.35% faster at 10,000 routes, six negative attempts against a 1.44% floor. A `/500000` result and an unattributed release-to-head `rib_pipeline` improvement are published as observations, not claims | [`perf/rib-criterion-noise-floor-2026-07.md`](perf/rib-criterion-noise-floor-2026-07.md), [`artifacts`](perf/artifacts/rib-criterion-noise-floor-2026-07/README.md) |
+| Policy-attribution Criterion control | Six-attempt same-SHA and isolated `Arc<str>` attribution measurements grade all four exact rows inconclusive: 0 supported, 4 inconclusive. This controlled negative evidence makes no CPU or end-to-end claim | [`perf/policy-attribution-criterion-2026-07.md`](perf/policy-attribution-criterion-2026-07.md), [`artifacts`](perf/artifacts/policy-attribution-criterion-2026-07/README.md) |
+| Wire-codec allocation control | Six alternating Criterion pairs plus exact-repeat `System`-wrapped `GlobalAlloc` diagnostics on the rich 11-attribute encoder and typical 6-attribute validator fixtures: 28.34% and 90.57% faster, with requests reduced from 21 to 8 and 2 to 0 per call respectively. Same-SHA timing envelopes, negative allocation controls, five source red proofs, the 9,999-operation harness mutation, and the full sanitized evidence archive are retained; no daemon CPU, convergence, RSS, or universal allocation-free claim | [`perf/wire-codec-allocation-2026-07.md`](perf/wire-codec-allocation-2026-07.md), [`artifacts`](perf/artifacts/wire-codec-allocation-2026-07/README.md) |
+| Revised UPDATE duplicate table | Six alternating same-revision and immediate-baseline/candidate Criterion pairs on one syntactically clean six-attribute UPDATE parsed through the eBGP disposition branch, plus six exact-repeat allocation diagnostics on its attribute section: exactly one allocation request and 48 requested bytes removed per public revised attribute-decoder call. The target timing band clears the biased same-revision band by at least 8.11 percentage points, establishing a fixture-scoped speedup without a bias-corrected percentage. Full-octet unknown-type, RFC 7606, RFC 9774-ordering, negative-control, destructive allocation, and artifact-integrity gates are retained; no daemon, fleet, convergence, RSS, or full-table claim | [`perf/revised-update-duplicate-table-2026-07.md`](perf/revised-update-duplicate-table-2026-07.md), [`artifacts`](perf/artifacts/revised-update-duplicate-table-2026-07/README.md) |
+| Enhanced Route Refresh inventory | One real ERR-capable TCP session with 100,000 IPv4 routes: both clean BoRR boundaries retain about 5.6 MB of live jemalloc allocations, duplicate BoRR replaces rather than doubles the inventory, EoRR/timeout complete in 135.978/141.278 ms of actor work, and reset kernel RSS HWM rises 36,440/36,280 KiB while exact route, max-prefix, stale, API, and session-continuity gates remain green. This is observed 100k evidence; no 1M result or optimization claim | [`perf/enhanced-route-refresh-2026-07.md`](perf/enhanced-route-refresh-2026-07.md), [`artifacts`](perf/artifacts/enhanced-route-refresh-2026-07/README.md) |
+| MRT snapshot allocation control | Pinned two-shape production-encoder control: population timing CV 0.359%/0.367%, 6.81M/10.41M output-growth misses, 12.82M/22.42M allocator calls, exact semantic/allocator/privacy gates, and checksummed rows plus preflight/mutation receipt. The control authorizes a separately measured bounded-growth candidate, not a speedup claim; any candidate must rerun immediate-parent control in the predeclared four-block ABBA protocol | [`perf/mrt-snapshot-allocation-2026-07.md`](perf/mrt-snapshot-allocation-2026-07.md), [`artifacts`](perf/artifacts/mrt-snapshot-allocation-2026-07/README.md) |
+| Exact-export fanout optimization (Criterion + rrharness) | Three pinned campaigns: ordered prepared-attribute memo (18%..32% faster), bounded wire-equivalent update-group probe reuse (58%..64% faster at 256 peers vs pre-cache), then lazy grouped exact-precommit bookkeeping (32%..36% faster at 64/256 peers and +197%..+649% across the manager flood/churn matrix), with fail-closed sealed artifacts, confidence gates, and correctness fences | [`perf/exact-export-fanout-2026-07.md`](perf/exact-export-fanout-2026-07.md) |
+| Adj-RIB-Out family-gauge fanout | Pinned real-encoder A/B over one homogeneous route-server update group with 64 changed routes: touched-family refresh improves the measured actor/probe/commit/enqueue interval by 11.69% at 256 peers and 14.98% at 1,000 peers; the receipt discloses the all-family worst case and untimed `PeerUp` cardinality cost | [`perf/adj-rib-out-family-gauge-2026-07.md`](perf/adj-rib-out-family-gauge-2026-07.md) |
+| Fanout metrics-handle lifetime | Six-pair pinned real-encoder A/B over one homogeneous route-server update group with 64 changed routes: cloning the immutable metrics handle once per pass instead of once per peer improves the measured actor/probe/commit/enqueue interval by 8.16% at 8 peers and 14.10%..15.04% at 64..1,000 peers; the one-peer negative control is noise and carries no claim | [`perf/fanout-metrics-handle-2026-07.md`](perf/fanout-metrics-handle-2026-07.md) |
+| Pristine OTC reconciliation | Six-pair pinned real-encoder A/B over the same fleet: bypassing the empty-state RFC 9234 reconciliation scan improves the measured interval by 7.17% at one peer, 25.88% at 8 peers, and 42.09%..44.61% at 64..1,000 peers; the receipt excludes peers with active OTC diagnostic state | [`perf/otc-pristine-reconcile-2026-07.md`](perf/otc-pristine-reconcile-2026-07.md) |
+| Per-peer policy-fallback handoff | 65,536-route fallback decision plus one authoritative apply: 104.25 ms mean and 110.011 ms largest retained per-iteration sample; a structural 64-peer RIB-loop reference demonstrates why returning to the actor loop between applies protects availability. No total-work gain is claimed | [`perf/policy-fallback-per-peer-handoff-2026-07.md`](perf/policy-fallback-per-peer-handoff-2026-07.md) |
+| Grouped RIB route paging | Pinned four-repetition traversal matrix: 400k grouped listings improve 9.342x at page 100 and 8.086x at page 1,000 after removing per-page full-view clones; exact raw rows, preflights, sources, and checksums are retained | [`perf/rib-route-paging-2026-07.md`](perf/rib-route-paging-2026-07.md) |
+| Lean daemon build flavors | Pinned three-round full-daemon comparison of the shipped artifact against no-history and control-plane-only prototypes: neither candidate clears the predeclared build or compressed-payload value gate, so rustbgpd retains one daemon artifact | [`perf/lean-daemon-build-flavors-2026-07.md`](perf/lean-daemon-build-flavors-2026-07.md) |
+| Outbound prefix-limit real-session receipt (ADR-0113) | Four real BGP sessions against a real daemon over the real encoder: 12 IPv4 + 6 IPv6 unicast prefixes under 8 / 4 maxima, with a peer-group-inheriting member on the shared update-group fanout and an RFC 7947 per-client-best peer on the private path. Enforcement, the grouped/private split, recovery after a raise on both the inherited peer-group path and the private path, agreement between the wire and every operator surface, atomic rejection of a lowering below usage, and the bounded log episodes all hold on the wire. Green at its measured commit, 96 of 96 checks, with zero sessions reset by either limit edit | [`perf/outbound-prefix-limits-2026-07.md`](perf/outbound-prefix-limits-2026-07.md) |
+| Grouped outbound prefix-limit scale | One private source and 400,000 IPv4 routes feeding 1, 10, and 100 homogeneous members in exactly one update group, paired against adjacent unlimited same-SHA controls. At 100 members the candidate adds 996,385,552 paired live jemalloc allocated bytes and 965,292 KiB paired point RSS, spends 2.050 s installing the exact per-member sets, and spends 27.854 s recovering the full table after limit removal. Every candidate withholds exactly 64 routes per member and recovers all 400,064 without a session or group change. This is one fixed campaign with no object-level retained-heap attribution, run-to-run variance estimate, or larger-fleet extrapolation | [`perf/outbound-prefix-limit-scale-2026-07.md`](perf/outbound-prefix-limit-scale-2026-07.md), [`artifacts`](perf/artifacts/outbound-prefix-limit-scale-2026-07/README.md) |
+| Outbound prefix-limit recovery slicing | One source and 400,000 IPv4 routes feeding 1, 10, and 100 homogeneous members in one update group, with same-SHA unlimited configuration controls. At 100 members recovery emits 100 bounded actor turns, totaling 27.064279369 s of actor work across 29.283564918 s wall time; the slowest observed slice is in the `(0.2, 0.5]` s bucket. This isolates actor occupancy rather than reducing total replay work; it is one fixed campaign, not a code A/B, variance estimate, or larger-fleet extrapolation | [`perf/outbound-prefix-limit-recovery-slicing-2026-07.md`](perf/outbound-prefix-limit-recovery-slicing-2026-07.md), [`artifacts`](perf/artifacts/outbound-prefix-limit-recovery-slicing-2026-07/README.md) |
+| Grouped outbound admission compaction | Literal-parent real-daemon A/B over one source, 400,000 IPv4 routes, a 64-route withheld tail, and 1/10/100 limited members in one update group. The candidate's apply-phase live jemalloc allocated deltas are 3,161,832 / 31,500,344 / 315,423,808 bytes, or 31.43% / 31.51% / 31.64% of the parent's. All 9,042 production-path behavior checks pass, including exact group membership, every-member admission/block/recovery state, bounded recovery samples, zero session flaps and decode errors, and all 400,064 routes recovered. Active/resident pages and RSS remain report-only; this is one IPv4-only campaign, not object-level retained-heap attribution, a timing claim, variance evidence, or a larger-fleet extrapolation | [`perf/outbound-prefix-limit-admission-compaction-2026-07.md`](perf/outbound-prefix-limit-admission-compaction-2026-07.md), [`artifacts`](perf/artifacts/outbound-prefix-limit-admission-compaction-2026-07/README.md) |
+| Config persistence real-session receipt | Three real BGP sessions against a real daemon deployed the way the quick-start now ships (config template copied into a writable state volume): a persisted mutation reaching disk, runtime, and history and surviving a restart; `config rollback` restoring a prior generation without resetting a session; commit-confirm confirmed, timed out, and SIGKILLed inside the confirmation window (journal consumed, candidate saved aside, disk and runtime reverted, recovered file revalidates, sessions back in 0.051 s); an injected persistence rejection leaving runtime config, session identity, flap state, cumulative counters, metric series, and wire state unchanged rather than restored; and byte-level file-to-history plus semantic file-to-runtime agreement at seven boundaries. Green at its measured commit, 109 of 109 checks. An earlier run of the same harness was published red at 105 of 109, and those four failures were the one defect it exposed — the BGP listener bound without `SO_REUSEADDR`, so a restart under `TIME_WAIT` came back unable to accept any inbound session while its management plane looked healthy | [`perf/config-persistence-2026-07.md`](perf/config-persistence-2026-07.md) |
+| Cross-stack bgperf2 v0.67.0 refresh | Counterbalanced 80-cell same-host campaign against fresh pinned rustbgpd v0.67.0, BIRD 2.19.2, FRR 10.7.0, and GoBGP 4.8.0 builds. Seventy-nine cells reached the full table; the one rustbgpd 100-peer failure is disclosed beside three later balanced passes and one fresh-bridge pass. Successful-run medians cover five shapes; raw rows and exact image/source provenance are retained without making a CPU claim | [`perf/competitive-bgperf2-v0670-2026-08.md`](perf/competitive-bgperf2-v0670-2026-08.md), [`raw rows`](perf/artifacts/competitive-bgperf2-v0670-2026-08/results.csv) |
+| Cross-stack bgperf2 historical output | **Historical July harness output only; no current cross-daemon ranking is supported.** The five-shape four-daemon raw rows remain archived, but targets ran in fixed rustbgpd → BIRD → GoBGP → FRR order while earlier one-second samplers remained active. Only rustbgpd has a retained fresh no-cache build receipt; competitor provenance is incomplete, and FRR was gcov-instrumented. No ranking, ratio, slope, or sampler-derived memory correction is supported. Rustbgpd's 30p × 1k raw-cgroup observations remain the measured 86.0 / 108.5 / 131.1 MiB range. OpenBGPD is an uncollected harness-defect cell, not a daemon result | [`perf/competitive-bgperf2-2026-07.md`](perf/competitive-bgperf2-2026-07.md), [`artifacts`](perf/artifacts/competitive-bgperf2-2026-07/README.md) |
+| Session-notification flapstorm depth | One host and one 700-session, 400,400-prefix run across three 50-session flap rounds. Ten phase checkpoints drain the notification accounting population to zero with zero parse/send/correctness errors; daemon-lifetime high-water rises from 8 to 30. This proves dequeue accounting only, not a per-round peak, capacity, latency, memory, bound, or optimization | [`artifacts`](perf/artifacts/session-notification-flapstorm-2026-08/README.md) |
+| End-to-end bgperf2 | Same-host historical convergence/CPU/peak raw cgroup-usage rows for rustbgpd, BIRD, GoBGP, and FRR; no current ranking | [`BENCHMARKS.md`](benchmarks.md#end-to-end-system-benchmarks) |
+| High-N RIB memory | Structural memory at 100k/500k/900k prefixes; A/B via `bench/compare-rib-memory.sh` under the shared host lock | [`BENCHMARKS.md`](benchmarks.md#memory-footprint), [`../bench/README.md`](../bench/README.md) |
+| Interned attribute-container layout | Pinned negative structural + DHAT receipt: at one unique set per seven prefixes, a slice Arc would add 17.7 MiB at 900k full RIB and 31.4 MiB at RR fanout, so the production migration is rejected | [`perf/attribute-layout-2026-08.md`](perf/attribute-layout-2026-08.md) |
+| EVPN M33 load gate | 50k reflected Type 2 routes + 60 s of 1k-rps churn | [`BENCHMARKS.md`](benchmarks.md#evpn-rr-scale-m33) |
+
+## Soak receipts
+
+Archived long-running runs with pass/fail gates, RSS slopes, and git-tracked
+artifacts under [`artifacts/soak/`](artifacts/soak). Harnesses live in
+[`../tests/soak/`](../tests/soak/README.md).
+
+| Receipt | Duration | What it proves |
+|---------|----------|----------------|
+| [Route-server flagship](soaks/soak-rs-flagship-24h.md) | 24 h | 1000 eBGP RS clients × 400 routes under churn; 48/48 barrier-verified SIGHUP reloads and 6/6 max-prefix trip/timed-restart chains with exact flap/breach accounting; peak RSS 581.7 MB, late slope 0.07 MB/h |
+| [Route-reflector flagship](soaks/soak-rr-flagship-24h.md) | 24 h | 1000 iBGP RR clients × 100 routes; 5,486,092 churn cycles closed by an exact terminal reflected-delivery receipt (99,900 non-self prefixes per observer, 0 parse errors); zero flaps; peak RSS 342.5 MB |
+| [Gate 8b BUM-state](soaks/soak-gate8b-24h-bum-state.md) | 24 h | BUM-port flag triplet survives 71 DF-flip cycles; flat RSS |
+| [Gate 8b MAC-churn dry run](soaks/soak-gate8b-mac-churn-1h.md) | 1 h | Dry run gating the 24 h MAC-churn soak |
+| [Gate 8b MAC-churn](soaks/soak-gate8b-mac-churn-24h.md) | 24 h | 69 post-flip reconverges under MAC churn; zero WARN/FATAL; ~0.08 MB/h envelope |
+| [Gate 8b MAC-churn leak A/B](soaks/soak-gate8b-mac-churn-10h-leak.md) | ~10 h | EVPN attribute-intern table bounded under churn across DF flips (MAC-mobility leak fix, churn axis) |
+| [Gate 9 symmetric IRB](soaks/soak-gate9-slice6-24h-symmetric-irb.md) | 24 h | 703 Type 5 churn cycles; zero session or installed-route violations |
+| [M33 EVPN scale leak A/B](soaks/soak-m33-evpn-scale-10h-leak.md) | ~10 h | Attribute-intern table bounded at 50k Type 2 routes + churn (leak fix, scale axis) |
+| [M37 local-origination churn](soaks/soak-m37-local-origination-churn-24h.md) | 24 h | 430,400 injects balanced by 430,400 withdraws; zero flaps |
+| [M67 link-drain MAC-mobility](soaks/soak-m67-link-drain-24h-evpn-leak.md) | 24 h | 960 link-drain failover cycles with live MAC-mobility churn; all six RSS gates flat; blackout ≤ 300 ms |
+
+## Continuous verification — CI schedules
+
+| Workflow | Trigger | What it re-proves |
+|----------|---------|-------------------|
+| [`ci.yml`](../.github/workflows/ci.yml) | every PR / push | fmt, clippy (warnings denied), workspace tests, rustdoc, kernel-primitive gate, the exact fail-closed 22-target fuzz inventory, and bounded timing/diagnostic MRT snapshot-allocation bench smokes |
+| [`interop.yml`](../.github/workflows/interop.yml) | lab-relevant PR / non-documentation push | The PR-gated M-series table above, one containerlab job per milestone |
+| [`kernel-dataplane.yml`](../.github/workflows/kernel-dataplane.yml) | lab-relevant PR / non-documentation push / manual dispatch | Privileged EVPN/FIB/BFD/TCP-AO dataplane receipts + netns selectors |
+| [`fuzz.yml`](../.github/workflows/fuzz.yml) | nightly 04:00 UTC + manual dispatch | The sole scheduled 22-target campaign: all 13 wire targets have tracked seeds; `main` runs restore only a staged, manifest-validated corpus within 20,000 files / 16 MiB, fall back explicitly to tracked seeds on miss or service outage, and seal a fresh bounded bundle after success |
+| [`clusterfuzzlite.yml`](../.github/workflows/clusterfuzzlite.yml) | manual dispatch | On-demand official ClusterFuzzLite address-sanitized code-change fuzzing for the exact 22-target inventory; not a PR or scheduled gate |
+| [`audit.yml`](../.github/workflows/audit.yml) | daily 06:00 UTC | `cargo audit` / dependency advisories |
+
+ClusterFuzzLite's PR commissioning run
+[`29855791034`](https://github.com/lance0/rustbgpd/actions/runs/29855791034)
+is retained as a rejection receipt for PR gating. The single job was
+intentionally cancelled after 40m42s: inventory passed in about 2s, the
+address-sanitized build passed in 14m14s, and `run_fuzzers` listed all 17
+targets but completed only three before spending the cancellation point in the
+fourth target's corpus download. Each completed target waited about 6m42s for
+its absent corpus artifact before roughly 18s of fuzzing. The 300-second budget
+covers engine time, not those sequential artifact waits. A cold extrapolation
+is about 134 minutes, so the manual-only workflow uses a conservative
+180-minute bound. This proves the hosted wall-clock cost is unsuitable for
+rustbgpd's PR critical path; it is not a crash-injection receipt, and no
+injected PR crash is required for that scheduling conclusion.
+
+## Adding a receipt
+
+Write the detailed source document first (interop procedure in
+[`INTEROP.md`](interop.md), soak postmortem as `docs/soaks/soak-*.md` with artifacts
+under `docs/artifacts/soak/<run-id>/`, perf receipt under `docs/perf/`), then
+add the row here and in [`OPERATIONAL_PROOF.md`](operational-proof.md).
+
+Keep the evidence proportional to the claim: retain the raw CSV or log, exact
+source commit, workload and environment, and an explicit sentence bounding
+what the result proves. Runtime acceptance checks should validate the measured
+behavior directly; binary copies, source snapshots, checksum rosters, and
+self-referential verification files are not part of the receipt convention.

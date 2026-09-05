@@ -172,7 +172,7 @@ def check(document: str, prepared_versions: dict[str, str] | None = None) -> lis
 def main() -> int:
     if len(sys.argv) > 2:
         raise SystemExit(f"usage: {Path(sys.argv[0]).name} [EMBEDDING.md]")
-    default = ROOT / "docs" / "EMBEDDING.md"
+    default = ROOT / "docs" / "reference" / "embedding.md"
     path = Path(sys.argv[1]) if len(sys.argv) == 2 else default
     errors = check(path.read_text(encoding="utf-8"))
     if errors:

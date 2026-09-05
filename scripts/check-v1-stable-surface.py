@@ -25,9 +25,9 @@ import tomllib
 
 
 ROOT = Path(__file__).resolve().parents[1]
-INVENTORY_PATH = ROOT / "docs/v1-stable-surface.json"
-SCHEMA_PATH = ROOT / "docs/rustbgpd.schema.json"
-GRPC_INVENTORY_PATH = ROOT / "docs/grpc-method-inventory.json"
+INVENTORY_PATH = ROOT / "docs/reference/v1-stable-surface.json"
+SCHEMA_PATH = ROOT / "docs/reference/rustbgpd.schema.json"
+GRPC_INVENTORY_PATH = ROOT / "docs/reference/grpc-method-inventory.json"
 WORKSPACE_MANIFEST_PATH = ROOT / "Cargo.toml"
 JSON_TYPES = {"array", "boolean", "null", "number", "object", "string"}
 V1_UPGRADE_HISTORY_ORIGIN = (0, 50, 0)
@@ -1354,7 +1354,7 @@ def check_policy(inventory: dict) -> None:
     required = {"stable", "scoped_rr_only", "alpha", "experimental"}
     if not required <= classifications:
         fail(f"role matrix must include classifications: {sorted(required)}")
-    public_contract_path = ROOT / "docs/v1-stable-contract.md"
+    public_contract_path = ROOT / "docs/reference/v1-stable-contract.md"
     try:
         public_contract = public_contract_path.read_text()
     except OSError as error:
