@@ -194,6 +194,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The three example programs (`event-bridge`, `peer-loop`, `birdwatcher-adapter`)
+  now build under the same lint policy as the workspace crates
+  (`deny(unsafe_code)`, `deny(clippy::all)`, `warn(clippy::pedantic)`).
+
 - `rustbgpd-wire` 0.19.0 → 0.19.1 (additive): a new `mrt` module adds
   `decode_table_dump_v2_mp_reach_next_hop`, the RFC 6396 §4.3.4 `TABLE_DUMP_V2`
   RIB-entry `MP_REACH_NLRI` next-hop decoder now shared by the daemon's

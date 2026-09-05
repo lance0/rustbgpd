@@ -8,6 +8,10 @@
 //! non-zero when the session ends: NOTIFICATION, hold-timer expiry, or a closed
 //! connection.
 
+#![deny(unsafe_code)]
+#![deny(clippy::all)]
+#![warn(clippy::pedantic)]
+
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
@@ -153,7 +157,7 @@ impl Speaker {
                     }
                 }
                 Action::StartTimer(TimerType::Hold, secs) => {
-                    self.hold_deadline = Some(deadline(secs))
+                    self.hold_deadline = Some(deadline(secs));
                 }
                 Action::StartTimer(TimerType::Keepalive, secs) => {
                     self.keepalive_deadline = Some(deadline(secs));
