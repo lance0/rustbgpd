@@ -116,7 +116,7 @@ pub(crate) async fn apply_add_ip_route(
 ///
 /// Returns [`DataplaneError::InvalidArgument`] on family mismatch.
 /// Other failures classify per [`classify_remove_apply_error`],
-/// which treats `ENOENT` as idempotent success — if the kernel
+/// which treats `ENOENT` and `ESRCH` as idempotent success — if the kernel
 /// row is already absent the post-condition holds and the actor
 /// should advance `L3OwnedState` rather than retry forever.
 pub(crate) async fn apply_remove_ip_route(
@@ -164,7 +164,7 @@ pub(crate) async fn apply_add_ip_route_ecmp(
 ///
 /// Returns [`DataplaneError::InvalidArgument`] on invalid target set
 /// shape. Other failures classify per [`classify_remove_apply_error`],
-/// which treats `ENOENT` as idempotent success.
+/// which treats `ENOENT` and `ESRCH` as idempotent success.
 pub(crate) async fn apply_remove_ip_route_ecmp(
     handle: &Handle,
     prefix: EvpnIpPrefixValue,
