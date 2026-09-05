@@ -712,6 +712,11 @@ impl RibManager {
                     bgpls_affected.extend(rib.sweep_stale_family_bgpls(family));
                     rtc_affected.extend(rib.sweep_stale_family_rtc(family));
                 }
+                self.metrics.set_rib_prefixes(
+                    &peer_label,
+                    "flowspec",
+                    gauge_val(rib.flowspec_len()),
+                );
                 rib_len = rib.len();
                 evpn_len = rib.evpn_len();
                 // First GC catches interned sets made unreachable by direct
@@ -839,6 +844,8 @@ impl RibManager {
             self.attr_intern.gc();
             self.metrics
                 .set_rib_attr_intern_global_size(gauge_val(self.attr_intern.len()));
+            self.metrics
+                .set_rib_prefixes(&peer_label, "flowspec", gauge_val(rib.flowspec_len()));
             rib_len = rib.len();
             evpn_len = rib.evpn_len();
         }
@@ -979,6 +986,8 @@ impl RibManager {
             self.attr_intern.gc();
             self.metrics
                 .set_rib_attr_intern_global_size(gauge_val(self.attr_intern.len()));
+            self.metrics
+                .set_rib_prefixes(&peer_label, "flowspec", gauge_val(rib.flowspec_len()));
             rib_len = rib.len();
             evpn_len = rib.evpn_len();
             llgr_stale_remaining = rib.iter().filter(|r| r.is_llgr_stale).count()

@@ -199,14 +199,144 @@ async fn dirty_resync_retries_flowspec_updates() {
 
 // --- Graceful Restart tests ---
 
+#[expect(
+    clippy::float_cmp,
+    reason = "the exported gauge contains exact integer route counts"
+)]
+fn assert_flowspec_gauge(manager: &RibManager, peer: IpAddr, expected: u32) {
+    let metrics = manager.metrics.registry().gather();
+    let gauge = metrics
+        .iter()
+        .find(|metric| metric.name() == "bgp_rib_prefixes")
+        .unwrap();
+    let sample = gauge
+        .metric
+        .iter()
+        .find(|metric| {
+            metric
+                .label
+                .iter()
+                .any(|label| label.name() == "peer" && label.value() == peer.to_string())
+                && metric
+                    .label
+                    .iter()
+                    .any(|label| label.name() == "afi_safi" && label.value() == "flowspec")
+        })
+        .unwrap();
+    assert_eq!(sample.gauge.value(), f64::from(expected));
+}
+
+#[tokio::test]
+async fn flowspec_gauge_tracks_gr_llgr_expiry_and_end_of_rib() {
+    for llgr in [false, true] {
+        for end_of_rib in [false, true] {
+            let source = Ipv4Addr::new(10, 0, 0, 1);
+            let peer = IpAddr::V4(source);
+            let (_tx, rx) = mpsc::channel(64);
+            let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+            let mut routes = Vec::new();
+            for afi in [Afi::Ipv4, Afi::Ipv6] {
+                for path_id in [0, 7] {
+                    let mut route = make_destless_flowspec_route(afi, source, 6);
+                    route.path_id = path_id;
+                    routes.push(route);
+                }
+            }
+            let mut refreshed = routes[1].clone();
+            let mut no_llgr = make_destless_flowspec_route(Afi::Ipv4, source, 17);
+            no_llgr.attributes.push(PathAttribute::Communities(vec![
+                rustbgpd_wire::COMMUNITY_NO_LLGR,
+            ]));
+            routes.push(no_llgr);
+            manager.handle_update(RibUpdate::RoutesReceived {
+                session_id: 0,
+                peer,
+                announced: vec![],
+                withdrawn: vec![],
+                flowspec_announced: routes,
+                flowspec_withdrawn: vec![],
+                evpn_announced: vec![],
+                evpn_withdrawn: vec![],
+            });
+            drain_route_chunks(&mut manager);
+            assert_flowspec_gauge(&manager, peer, 5);
+            assert!(manager.handle_peer_graceful_restart(
+                peer,
+                0,
+                120,
+                360,
+                vec![(Afi::Ipv4, Safi::FlowSpec), (Afi::Ipv6, Safi::FlowSpec)],
+                llgr,
+                vec![rustbgpd_wire::LlgrFamily {
+                    afi: Afi::Ipv4,
+                    safi: Safi::FlowSpec,
+                    forwarding_preserved: true,
+                    stale_time: 300
+                }],
+                if llgr { 300 } else { 0 },
+            ));
+            assert_flowspec_gauge(&manager, peer, 5);
+            if llgr {
+                manager.sweep_gr_stale(peer);
+                // IPv6 is outside LLGR; the IPv4 NO_LLGR rule is also purged.
+                assert_eq!(manager.ribs[&peer].flowspec_len(), 2);
+                assert!(
+                    manager.ribs[&peer]
+                        .iter_flowspec()
+                        .all(|route| route.is_llgr_stale)
+                );
+                assert_flowspec_gauge(&manager, peer, 2);
+            }
+            // Keep an active outbound registration so timer cleanup retains the
+            // re-advertised path instead of tearing down a departed peer.
+            let (out_tx, _out_rx) = mpsc::channel(64);
+            manager.outbound_peers.insert(peer, out_tx);
+            // One re-advertised path survives either EOR or timer cleanup.
+            refreshed.is_stale = false;
+            manager.handle_update(RibUpdate::RoutesReceived {
+                session_id: 0,
+                peer,
+                announced: vec![],
+                withdrawn: vec![],
+                flowspec_announced: vec![refreshed],
+                flowspec_withdrawn: vec![],
+                evpn_announced: vec![],
+                evpn_withdrawn: vec![],
+            });
+            drain_route_chunks(&mut manager);
+            assert_flowspec_gauge(&manager, peer, if llgr { 2 } else { 5 });
+            if end_of_rib {
+                manager.handle_end_of_rib(peer, Afi::Ipv4, Safi::FlowSpec);
+                assert_flowspec_gauge(&manager, peer, if llgr { 1 } else { 3 });
+                if !llgr {
+                    assert!(
+                        manager.ribs[&peer]
+                            .iter_flowspec()
+                            .filter(|route| route.afi == Afi::Ipv6)
+                            .all(|route| route.is_stale)
+                    );
+                    manager.handle_end_of_rib(peer, Afi::Ipv6, Safi::FlowSpec);
+                }
+            } else if llgr {
+                manager.sweep_llgr_stale(peer, &[(Afi::Ipv4, Safi::FlowSpec)]);
+            } else {
+                manager.sweep_gr_stale(peer);
+            }
+            assert_eq!(manager.ribs[&peer].flowspec_len(), 1);
+            assert_flowspec_gauge(&manager, peer, 1);
+            manager.peer_down_teardown(peer);
+            assert!(!manager.ribs.contains_key(&peer));
+            assert_flowspec_gauge(&manager, peer, 0);
+            manager.peer_down_teardown(peer);
+            assert_flowspec_gauge(&manager, peer, 0);
+        }
+    }
+}
+
 #[tokio::test]
 #[expect(
     clippy::too_many_lines,
     reason = "one GR-entry matrix checks exact path removal, retained families, fallback, and committed downstream state"
-)]
-#[expect(
-    clippy::float_cmp,
-    reason = "the exported integer gauge must contain exactly zero or three routes"
 )]
 async fn flowspec_gr_omitted_families_withdraw_all_paths_and_redistribute() {
     for omitted_afi in [Afi::Ipv4, Afi::Ipv6] {
@@ -377,26 +507,10 @@ async fn flowspec_gr_omitted_families_withdraw_all_paths_and_redistribute() {
                     assert_eq!(withdrawn, vec![key.clone()]);
                     assert!(announced.iter().all(|route| route.selection_key() != key));
                 }
-                let metrics = manager.metrics.registry().gather();
-                let gauge = metrics
-                    .iter()
-                    .find(|metric| metric.name() == "bgp_rib_prefixes")
-                    .unwrap();
-                let sample = gauge
-                    .metric
-                    .iter()
-                    .find(|metric| {
-                        metric.label.iter().any(|label| {
-                            label.name() == "peer" && label.value() == source.to_string()
-                        }) && metric
-                            .label
-                            .iter()
-                            .any(|label| label.name() == "afi_safi" && label.value() == "flowspec")
-                    })
-                    .unwrap();
-                assert_eq!(
-                    sample.gauge.value(),
-                    if preserve_other_flowspec { 3.0 } else { 0.0 }
+                assert_flowspec_gauge(
+                    &manager,
+                    source,
+                    if preserve_other_flowspec { 3 } else { 0 },
                 );
             }
         }
