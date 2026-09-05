@@ -220,6 +220,18 @@ impl RibManager {
             // advertised GR capability are retained. A negotiated typed
             // family whose tuple is absent from `gr_families` is withdrawn
             // outright — mirroring the EVPN not-in-gr arm below.
+            let keys: Vec<_> = rib
+                .iter_flowspec()
+                .filter(|route| !gr_families.contains(&(route.afi, Safi::FlowSpec)))
+                .map(crate::route::FlowSpecRoute::key)
+                .collect();
+            for key in keys {
+                rib.withdraw_flowspec(&key);
+                fs_affected.insert(crate::route::FlowSpecKey {
+                    afi: key.afi,
+                    rule: key.rule,
+                });
+            }
             for &family in &[(Afi::Ipv4, Safi::MplsVpn), (Afi::Ipv6, Safi::MplsVpn)] {
                 if !gr_families.contains(&family) {
                     let keys: Vec<crate::route::VpnRibRouteKey> = rib
@@ -338,6 +350,11 @@ impl RibManager {
             }
             self.metrics
                 .set_rib_prefixes(&peer.to_string(), "all", gauge_val(rib.len()));
+            self.metrics.set_rib_prefixes(
+                &peer.to_string(),
+                "flowspec",
+                gauge_val(rib.flowspec_len()),
+            );
             self.metrics
                 .set_rib_prefixes(&peer.to_string(), "evpn", gauge_val(rib.evpn_len()));
         }

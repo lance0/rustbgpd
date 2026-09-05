@@ -202,6 +202,210 @@ async fn dirty_resync_retries_flowspec_updates() {
 #[tokio::test]
 #[expect(
     clippy::too_many_lines,
+    reason = "one GR-entry matrix checks exact path removal, retained families, fallback, and committed downstream state"
+)]
+#[expect(
+    clippy::float_cmp,
+    reason = "the exported integer gauge must contain exactly zero or three routes"
+)]
+async fn flowspec_gr_omitted_families_withdraw_all_paths_and_redistribute() {
+    for omitted_afi in [Afi::Ipv4, Afi::Ipv6] {
+        for preserve_other_flowspec in [false, true] {
+            for fallback in [false, true] {
+                let other_afi = if omitted_afi == Afi::Ipv4 {
+                    Afi::Ipv6
+                } else {
+                    Afi::Ipv4
+                };
+                let source_v4 = Ipv4Addr::new(10, 0, 0, 1);
+                let source = IpAddr::V4(source_v4);
+                let alternate_v4 = Ipv4Addr::new(10, 0, 0, 2);
+                let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 100));
+                let (_tx, rx) = mpsc::channel(64);
+                let mut manager =
+                    RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+                // The same destination-less rule is legal in both AFIs. Remove every
+                // Add-Path identity of the omitted family without touching the other.
+                let omitted = make_destless_flowspec_route(omitted_afi, source_v4, 6);
+                let retained = make_destless_flowspec_route(other_afi, source_v4, 6);
+                let mut routes = Vec::new();
+                for route in [&omitted, &retained] {
+                    if route.afi == other_afi && !preserve_other_flowspec {
+                        continue;
+                    }
+                    for path_id in [0, 7, 19] {
+                        let mut route = route.clone();
+                        route.path_id = path_id;
+                        route.attributes.push(PathAttribute::LocalPref(200));
+                        routes.push(route);
+                    }
+                }
+                let unicast =
+                    make_route(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24), source_v4);
+                let prefix = unicast.prefix;
+                manager.handle_update(RibUpdate::RoutesReceived {
+                    session_id: 0,
+                    peer: source,
+                    announced: vec![unicast],
+                    withdrawn: vec![],
+                    flowspec_announced: routes,
+                    flowspec_withdrawn: vec![],
+                    evpn_announced: vec![],
+                    evpn_withdrawn: vec![],
+                });
+                drain_route_chunks(&mut manager);
+                if fallback {
+                    let mut route = make_destless_flowspec_route(omitted_afi, alternate_v4, 6);
+                    route.path_id = 31;
+                    route.attributes.push(PathAttribute::LocalPref(100));
+                    let alternate = IpAddr::V4(alternate_v4);
+                    manager.handle_update(RibUpdate::RoutesReceived {
+                        session_id: 0,
+                        peer: alternate,
+                        announced: vec![],
+                        withdrawn: vec![],
+                        flowspec_announced: vec![route],
+                        flowspec_withdrawn: vec![],
+                        evpn_announced: vec![],
+                        evpn_withdrawn: vec![],
+                    });
+                    drain_route_chunks(&mut manager);
+                }
+                let key = omitted.selection_key();
+                assert_eq!(manager.loc_rib.get_flowspec(&key).unwrap().peer, source);
+                let (out_tx, mut out_rx) = mpsc::channel(64);
+                manager.handle_update(RibUpdate::PeerUp {
+                    per_client_best: false,
+                    interpret_rfc1997: true,
+                    session_id: 0,
+                    peer: target,
+                    peer_asn: 65000,
+                    peer_router_id: Ipv4Addr::UNSPECIFIED,
+                    outbound_tx: out_tx,
+                    export_policy: None,
+                    sendable_families: vec![
+                        (Afi::Ipv4, Safi::Unicast),
+                        (Afi::Ipv4, Safi::FlowSpec),
+                        (Afi::Ipv6, Safi::FlowSpec),
+                    ],
+                    is_ebgp: true,
+                    route_reflector_client: false,
+                    orr_vantage: None,
+                    add_path_send_families: vec![],
+                    add_path_send_max: 0,
+                    negotiated_orf_recv: vec![],
+                    negotiated_llgr_families: vec![],
+                });
+                assert_eq!(
+                    manager.adj_ribs_out[&target]
+                        .get_flowspec(&key)
+                        .unwrap()
+                        .peer,
+                    source
+                );
+                while out_rx.try_recv().is_ok() {}
+                let mut gr_families = vec![(Afi::Ipv4, Safi::Unicast)];
+                if preserve_other_flowspec {
+                    gr_families.push((other_afi, Safi::FlowSpec));
+                }
+                assert!(manager.handle_peer_graceful_restart(
+                    source,
+                    0,
+                    120,
+                    360,
+                    gr_families,
+                    false,
+                    vec![],
+                    0,
+                ));
+                let rib = &manager.ribs[&source];
+                assert!(
+                    rib.iter_flowspec().all(|route| route.afi != omitted_afi),
+                    "all paths must be removed for {omitted_afi:?}"
+                );
+                assert_eq!(
+                    rib.flowspec_len(),
+                    if preserve_other_flowspec { 3 } else { 0 }
+                );
+                assert!(rib.iter_flowspec().all(|route| route.is_stale));
+                assert!(rib.iter().all(|route| route.is_stale));
+                assert!(manager.loc_rib.get(&prefix).unwrap().is_stale);
+                if preserve_other_flowspec {
+                    assert!(
+                        manager
+                            .loc_rib
+                            .get_flowspec(&retained.selection_key())
+                            .unwrap()
+                            .is_stale
+                    );
+                    assert!(
+                        manager.adj_ribs_out[&target]
+                            .get_flowspec(&retained.selection_key())
+                            .is_some()
+                    );
+                }
+                let mut withdrawn = Vec::new();
+                let mut announced = Vec::new();
+                while let Ok(update) = out_rx.try_recv() {
+                    assert!(
+                        update.withdraw.is_empty(),
+                        "preserved unicast must not be withdrawn"
+                    );
+                    withdrawn.extend(update.flowspec_withdraw);
+                    announced.extend(update.flowspec_announce);
+                }
+                if fallback {
+                    let best = manager.loc_rib.get_flowspec(&key).unwrap();
+                    assert_eq!(best.peer, IpAddr::V4(alternate_v4));
+                    assert!(!best.is_stale);
+                    assert_eq!(
+                        manager.adj_ribs_out[&target]
+                            .get_flowspec(&key)
+                            .unwrap()
+                            .peer,
+                        best.peer
+                    );
+                    assert!(withdrawn.is_empty());
+                    assert!(
+                        announced
+                            .iter()
+                            .any(|route| route.selection_key() == key && route.peer == best.peer)
+                    );
+                } else {
+                    assert!(manager.loc_rib.get_flowspec(&key).is_none());
+                    assert!(manager.adj_ribs_out[&target].get_flowspec(&key).is_none());
+                    assert_eq!(withdrawn, vec![key.clone()]);
+                    assert!(announced.iter().all(|route| route.selection_key() != key));
+                }
+                let metrics = manager.metrics.registry().gather();
+                let gauge = metrics
+                    .iter()
+                    .find(|metric| metric.name() == "bgp_rib_prefixes")
+                    .unwrap();
+                let sample = gauge
+                    .metric
+                    .iter()
+                    .find(|metric| {
+                        metric.label.iter().any(|label| {
+                            label.name() == "peer" && label.value() == source.to_string()
+                        }) && metric
+                            .label
+                            .iter()
+                            .any(|label| label.name() == "afi_safi" && label.value() == "flowspec")
+                    })
+                    .unwrap();
+                assert_eq!(
+                    sample.gauge.value(),
+                    if preserve_other_flowspec { 3.0 } else { 0.0 }
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
     reason = "covers the stale demotion, RFC 4724 §4.1 re-advertise-before-EoR, and best-path flip-back in one scenario"
 )]
 async fn gr_flowspec_eor_recomputes_and_redistributes() {
