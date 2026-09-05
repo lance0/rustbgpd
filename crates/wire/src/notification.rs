@@ -176,14 +176,17 @@ pub fn encode_shutdown_communication(reason: &str) -> bytes::Bytes {
 ///
 /// The variants intentionally classify malformed input without retaining or
 /// formatting attacker-controlled bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum ShutdownCommunicationError {
     /// The length octet is absent or does not consume the complete data field.
+    #[error("invalid shutdown communication length")]
     InvalidLength,
     /// The declared communication is not valid UTF-8.
+    #[error("shutdown communication is not valid UTF-8")]
     InvalidUtf8,
     /// An RFC 8538 Hard Reset does not contain its inner code and subcode.
+    #[error("malformed Hard Reset notification envelope")]
     MalformedHardResetEnvelope,
 }
 

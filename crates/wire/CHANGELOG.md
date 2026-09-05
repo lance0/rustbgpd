@@ -7,6 +7,10 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## 0.19.1 - Unreleased
 
+- `ShutdownCommunicationError` now implements `Display` and
+  `std::error::Error`, allowing `extract_shutdown_communication` failures to
+  propagate into standard error containers. Descriptions are bounded static
+  text; variants, category labels, and decoding behavior are unchanged.
 - `FlowSpecRule::destination_prefix` returns `None` for an IPv6 destination
   component with a non-zero offset. RFC 8956 §3.1 matches the address
   shifted right by `offset` bits, so the component names no routable prefix,
