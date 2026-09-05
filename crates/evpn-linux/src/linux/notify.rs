@@ -65,7 +65,11 @@
 //!    apply.
 //! 4. Extract MAC (`NDA_LLADDR`) and IP (`NDA_DST`).
 //! 5. Emit `IpAdded { vni, mac, ip }` (or `IpRemoved` on
-//!    `RTM_DELNEIGH`).
+//!    `RTM_DELNEIGH`). The notify loop remembers the MAC per
+//!    `(ifindex, ip)`; when an `RTM_NEWNEIGH` replaces that MAC in
+//!    place (an IP rebinding to a new MAC — the kernel sends no
+//!    `RTM_DELNEIGH` for the old binding), it emits `IpRemoved` for
+//!    the displaced MAC before the new `IpAdded`.
 //!
 //! # Why classification is a pure function
 //!
@@ -684,7 +688,7 @@ fn extract_ip(msg: &NeighbourMessage) -> Option<IpAddr> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::collections::{HashMap, HashSet};
 
     use netlink_packet_route::{
@@ -698,7 +702,7 @@ mod tests {
     use super::*;
     use crate::snapshot::KernelVxlanInfo;
 
-    fn cache_for(vni: u32, vxlan_ifindex: u32, port_ifindex: u32) -> LinkCache {
+    pub(crate) fn cache_for(vni: u32, vxlan_ifindex: u32, port_ifindex: u32) -> LinkCache {
         let mut bridges = HashMap::new();
         bridges.insert(
             "br100".to_string(),
@@ -1076,7 +1080,7 @@ mod tests {
     /// ARP/ND snooping tests. `bridge_ifindex` must match the bridge
     /// stored in the cache (not a bridge port — `AF_INET` /
     /// `AF_INET6` neighbours sit on the bridge itself).
-    fn ip_neigh_msg(
+    pub(crate) fn ip_neigh_msg(
         family: AddressFamily,
         bridge_ifindex: u32,
         state: NeighbourState,
