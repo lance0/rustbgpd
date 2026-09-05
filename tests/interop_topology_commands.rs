@@ -13,6 +13,55 @@ fn repo_path(relative: &str) -> PathBuf {
 }
 
 #[test]
+fn route_server_accepted_absence_requires_successful_snapshot() {
+    for script in [
+        "scripts/test-m104-arouteserver-current-rs-differential.sh",
+        "scripts/test-m106-rs-white-list-control-differential.sh",
+    ] {
+        let source = fs::read_to_string(interop_path(script)).unwrap();
+        let (_, helpers) = source.split_once("rs_accepted_has()").unwrap();
+        let (helpers, _) = helpers.split_once("\n\n").unwrap();
+        let output = Command::new("bash")
+            .args([
+                "-c",
+                r#"
+set -euo pipefail
+eval "rs_accepted_has()$HELPERS"
+peer=192.0.2.1 prefix=203.0.113.0/24
+rs_ctl() {
+    [[ "$*" == "rib received $peer" ]] || return 99
+    printf '%s' "$reply"
+    return "$producer_exit"
+}
+for producer_exit in 0 42; do
+    for reply in '' '192.0.2.0/24' '203.0.113.' "$prefix"; do
+        expected=$producer_exit
+        if [ "$producer_exit" -eq 0 ] && [ "$reply" = "$prefix" ]; then
+            expected=1
+        fi
+        status=0
+        rs_accepted_lacks "$peer" "$prefix" || status=$?
+        if [ "$status" -ne "$expected" ]; then
+            printf 'producer=%s reply=%q: expected status %s, got %s\n' \
+                "$producer_exit" "$reply" "$expected" "$status" >&2
+            exit 1
+        fi
+    done
+done
+"#,
+            ])
+            .env("HELPERS", helpers)
+            .output()
+            .expect("run offline accepted-route absence regression");
+        assert!(
+            output.status.success(),
+            "{script}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
 fn route_server_cli_predicates_drain_output_and_preserve_errors() {
     for script in [
         "scripts/test-m102-routeserver-openbgpd92.sh",

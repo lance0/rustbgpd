@@ -105,7 +105,11 @@ bird_filtered_has_tags() {
 }
 
 rs_accepted_has()   { rs_ctl rib received "${1:?}" | grep -F "${2:?}" >/dev/null; }
-rs_accepted_lacks() { ! rs_accepted_has "$1" "$2"; }
+rs_accepted_lacks() {
+    local output
+    output=$(rs_ctl rib received "${1:?}") || return $?
+    ! grep -qF "${2:?}" <<<"$output"
+}
 
 # True if the member's rejected-route store retains the prefix with the
 # canonical policy_reject reason token.
