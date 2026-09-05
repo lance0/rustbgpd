@@ -1104,15 +1104,17 @@ impl RibManager {
     /// already removed the GR/LLGR maps (its abort arms no-op), the ribs
     /// entry holds only swept-empty state, and the outbound state was
     /// cleared at GR entry (`clear_outbound_peer_state` no-ops). If the
-    /// peer DID re-establish (`outbound_peers` is re-inserted by
-    /// `handle_peer_up`) and only its End-of-RIB is late, identity and RIB
-    /// state must survive the sweep — hence the guard. Retention expiry is
-    /// a timer decision, not a session event, so it calls the
-    /// unconditional teardown rather than the session-identity-gated
-    /// `handle_peer_down` (there is no registered session to match here
-    /// anyway — the guard just established that).
+    /// peer DID re-establish and only its End-of-RIB is late, identity and
+    /// fresh RIB state must survive the sweep. A busy actor may defer its
+    /// outbound registration, so a nonempty live-session record also proves
+    /// the peer is present before that registration completes. Retention
+    /// expiry is a timer decision without a session identity; once departure
+    /// is established it can use unconditional teardown rather than the
+    /// session-identity-gated `handle_peer_down`.
     fn release_peer_state_if_departed(&mut self, peer: IpAddr) {
-        if !self.outbound_peers.contains_key(&peer) {
+        if !self.outbound_peers.contains_key(&peer)
+            && self.live_sessions.get(&peer).is_none_or(Vec::is_empty)
+        {
             info!(%peer, "GR retention expired without re-establishment — releasing per-peer state");
             self.peer_down_teardown(peer);
         }
