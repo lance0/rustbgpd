@@ -1170,6 +1170,11 @@ carries inactive (absent), unlimited (zero), or finite.
 - Actions via extended communities: traffic-rate, traffic-action,
   traffic-marking, redirect.
 - NH length = 0 in MP_REACH_NLRI for FlowSpec.
+- An IPv6 destination component with a non-zero offset (RFC 8956 §3.1)
+  carries no destination prefix for policy, RPKI, or validation purposes:
+  the pattern is the address shifted right by the offset, so it names no
+  routable prefix, and RFC 8956 §5 counts only an offset-0 destination
+  toward validation item (a). The rule is still decoded and installed.
 - See ADR-0035.
 
 ---

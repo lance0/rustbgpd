@@ -368,6 +368,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Operator-visible:** an IPv6 FlowSpec rule whose destination component
+  carries a non-zero offset no longer presents the unshifted address as its
+  destination prefix. RFC 8956 §3.1 matches the address shifted right by the
+  offset, so the rule names no routable prefix: import and export policy
+  prefix terms no longer match it, and RPKI origin validation of the
+  destination no longer runs against a prefix the rule does not name, the
+  same treatment as a rule with no destination component. The wire form is
+  still accepted unchanged.
+
 - **Operator-visible:** an IP that rebinds to a new MAC in the kernel
   neighbour table now withdraws the old MAC+IP Type 2 route before the new
   one is advertised. The kernel replaces the neighbour row's link-layer
