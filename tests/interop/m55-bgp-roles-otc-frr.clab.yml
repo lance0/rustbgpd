@@ -48,7 +48,7 @@ topology:
 
     frr-customer:
       kind: linux
-      image: quay.io/frrouting/frr:10.3.1
+      image: quay.io/frrouting/frr:10.7.1
       binds:
         - ./configs/frr-daemons:/etc/frr/daemons:ro
         - ./configs/frr-bgpd-m55-customer.conf:/etc/frr/frr.conf:ro
@@ -58,7 +58,7 @@ topology:
 
     frr-rsclient:
       kind: linux
-      image: quay.io/frrouting/frr:10.3.1
+      image: quay.io/frrouting/frr:10.7.1
       binds:
         - ./configs/frr-daemons:/etc/frr/daemons:ro
         - ./configs/frr-bgpd-m55-rsclient.conf:/etc/frr/frr.conf:ro
@@ -68,7 +68,7 @@ topology:
 
     frr-peer:
       kind: linux
-      image: quay.io/frrouting/frr:10.3.1
+      image: quay.io/frrouting/frr:10.7.1
       binds:
         - ./configs/frr-daemons:/etc/frr/daemons:ro
         - ./configs/frr-bgpd-m55-peer.conf:/etc/frr/frr.conf:ro
@@ -78,7 +78,7 @@ topology:
 
     frr-mismatch:
       kind: linux
-      image: quay.io/frrouting/frr:10.3.1
+      image: quay.io/frrouting/frr:10.7.1
       binds:
         - ./configs/frr-daemons:/etc/frr/daemons:ro
         - ./configs/frr-bgpd-m55-mismatch.conf:/etc/frr/frr.conf:ro
@@ -88,7 +88,7 @@ topology:
 
     frr-norole:
       kind: linux
-      image: quay.io/frrouting/frr:10.3.1
+      image: quay.io/frrouting/frr:10.7.1
       binds:
         - ./configs/frr-daemons:/etc/frr/daemons:ro
         - ./configs/frr-bgpd-m55-norole.conf:/etc/frr/frr.conf:ro
@@ -98,7 +98,7 @@ topology:
 
     raw-customer:
       kind: linux
-      image: quay.io/frrouting/frr:10.3.1
+      image: quay.io/frrouting/frr:10.7.1
       cmd: sleep infinity
       binds:
         - ./scripts/m55_raw_bgp.py:/usr/local/bin/m55_raw_bgp.py:ro

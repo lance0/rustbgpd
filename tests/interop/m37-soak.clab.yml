@@ -38,7 +38,7 @@ topology:
 
     consumer:
       kind: linux
-      image: quay.io/frrouting/frr:10.3.1
+      image: quay.io/frrouting/frr:10.7.1
       binds:
         - ./configs/frr-daemons:/etc/frr/daemons:ro
         - ./configs/frr-bgpd-m37-consumer.conf:/etc/frr/frr.conf:ro

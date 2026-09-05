@@ -33,7 +33,7 @@ topology:
 
     frr-a:
       kind: linux
-      image: quay.io/frrouting/frr:10.3.1
+      image: quay.io/frrouting/frr:10.7.1
       binds:
         - ./configs/frr-daemons:/etc/frr/daemons:ro
         - ./configs/frr-bgpd-m13-policy-a.conf:/etc/frr/frr.conf:ro
@@ -43,7 +43,7 @@ topology:
 
     frr-b:
       kind: linux
-      image: quay.io/frrouting/frr:10.3.1
+      image: quay.io/frrouting/frr:10.7.1
       binds:
         - ./configs/frr-daemons:/etc/frr/daemons:ro
         - ./configs/frr-bgpd-m13-policy-b.conf:/etc/frr/frr.conf:ro

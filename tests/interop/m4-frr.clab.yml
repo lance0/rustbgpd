@@ -58,7 +58,7 @@ topology:
 
     frr-01:
       kind: linux
-      image: quay.io/frrouting/frr:10.3.1
+      image: quay.io/frrouting/frr:10.7.1
       binds:
         - ./configs/frr-daemons:/etc/frr/daemons:ro
         - ./configs/frr-bgpd-m4-01.conf:/etc/frr/frr.conf:ro
@@ -68,7 +68,7 @@ topology:
 
     frr-02:
       kind: linux
-      image: quay.io/frrouting/frr:10.3.1
+      image: quay.io/frrouting/frr:10.7.1
       binds:
         - ./configs/frr-daemons:/etc/frr/daemons:ro
         - ./configs/frr-bgpd-m4-02.conf:/etc/frr/frr.conf:ro
@@ -78,7 +78,7 @@ topology:
 
     frr-03:
       kind: linux
-      image: quay.io/frrouting/frr:10.3.1
+      image: quay.io/frrouting/frr:10.7.1
       binds:
         - ./configs/frr-daemons:/etc/frr/daemons:ro
         - ./configs/frr-bgpd-m4-03.conf:/etc/frr/frr.conf:ro
@@ -88,7 +88,7 @@ topology:
 
     frr-04:
       kind: linux
-      image: quay.io/frrouting/frr:10.3.1
+      image: quay.io/frrouting/frr:10.7.1
       binds:
         - ./configs/frr-daemons:/etc/frr/daemons:ro
         - ./configs/frr-bgpd-m4-04.conf:/etc/frr/frr.conf:ro
@@ -98,7 +98,7 @@ topology:
 
     frr-05:
       kind: linux
-      image: quay.io/frrouting/frr:10.3.1
+      image: quay.io/frrouting/frr:10.7.1
       binds:
         - ./configs/frr-daemons:/etc/frr/daemons:ro
         - ./configs/frr-bgpd-m4-05.conf:/etc/frr/frr.conf:ro
@@ -108,7 +108,7 @@ topology:
 
     frr-06:
       kind: linux
-      image: quay.io/frrouting/frr:10.3.1
+      image: quay.io/frrouting/frr:10.7.1
       binds:
         - ./configs/frr-daemons:/etc/frr/daemons:ro
         - ./configs/frr-bgpd-m4-06.conf:/etc/frr/frr.conf:ro
@@ -118,7 +118,7 @@ topology:
 
     frr-07:
       kind: linux
-      image: quay.io/frrouting/frr:10.3.1
+      image: quay.io/frrouting/frr:10.7.1
       binds:
         - ./configs/frr-daemons:/etc/frr/daemons:ro
         - ./configs/frr-bgpd-m4-07.conf:/etc/frr/frr.conf:ro
@@ -128,7 +128,7 @@ topology:
 
     frr-08:
       kind: linux
-      image: quay.io/frrouting/frr:10.3.1
+      image: quay.io/frrouting/frr:10.7.1
       binds:
         - ./configs/frr-daemons:/etc/frr/daemons:ro
         - ./configs/frr-bgpd-m4-08.conf:/etc/frr/frr.conf:ro
@@ -138,7 +138,7 @@ topology:
 
     frr-09:
       kind: linux
-      image: quay.io/frrouting/frr:10.3.1
+      image: quay.io/frrouting/frr:10.7.1
       binds:
         - ./configs/frr-daemons:/etc/frr/daemons:ro
         - ./configs/frr-bgpd-m4-09.conf:/etc/frr/frr.conf:ro
@@ -148,7 +148,7 @@ topology:
 
     frr-10:
       kind: linux
-      image: quay.io/frrouting/frr:10.3.1
+      image: quay.io/frrouting/frr:10.7.1
       binds:
         - ./configs/frr-daemons:/etc/frr/daemons:ro
         - ./configs/frr-bgpd-m4-10.conf:/etc/frr/frr.conf:ro
