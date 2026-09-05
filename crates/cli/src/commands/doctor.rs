@@ -4498,7 +4498,7 @@ paths = ["x"]
             manifest_check(&manifest, "daemon.healthy")["detail"]
                 .as_str()
                 .unwrap()
-                .contains("GetHealth response timed out after 250ms")
+                .contains("GetHealth response timed out after 0.25s")
         );
         assert_eq!(
             manifest["sections"]["config"],
@@ -4515,7 +4515,7 @@ paths = ["x"]
             manifest["sections"]["peers"]
                 .as_str()
                 .unwrap()
-                .contains("ListNeighbors response timed out after 250ms")
+                .contains("ListNeighbors response timed out after 0.25s")
         );
         assert!(find(&files, "peers/events.json").contains("retained session history"));
     }
@@ -4558,7 +4558,7 @@ paths = ["x"]
             manifest["sections"]["config"]
                 .as_str()
                 .unwrap()
-                .contains("GetEffectiveConfig response timed out after 20ms")
+                .contains("GetEffectiveConfig response timed out after 0.02s")
         );
     }
 

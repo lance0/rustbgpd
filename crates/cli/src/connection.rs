@@ -46,7 +46,10 @@ pub(crate) async fn rpc_with_timeout<T>(
     future: impl Future<Output = Result<T, Status>>,
 ) -> Result<T, Status> {
     tokio::time::timeout(budget, future).await.map_err(|_| {
-        Status::deadline_exceeded(format!("{name} response timed out after {budget:?}"))
+        Status::deadline_exceeded(format!(
+            "{name} response timed out after {}s",
+            budget.as_secs_f64()
+        ))
     })?
 }
 
@@ -310,7 +313,7 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(error.code(), tonic::Code::DeadlineExceeded);
-        assert_eq!(error.message(), "GetGlobal response timed out after 20ms");
+        assert_eq!(error.message(), "GetGlobal response timed out after 0.02s");
         assert!(cancelled.load(std::sync::atomic::Ordering::SeqCst));
     }
 
