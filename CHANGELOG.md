@@ -461,6 +461,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Preserve fresh routes and live peer state when GR or LLGR retention expires
+  while a re-established peer's initial outbound registration is deferred.
+  Stale routes still expire, and the pending registration completes normally.
+
 - `rustbgpd-wire` shutdown communication errors now implement `Display` and
   `std::error::Error` for downstream error propagation, with bounded static
   descriptions. Decoding and structured log categories are unchanged.

@@ -1204,6 +1204,8 @@ async fn gr_expiry_without_reestablish_releases_peer_state() {
         peer_llgr_families: vec![],
         llgr_stale_time: 0,
     });
+    // An empty session-list entry must not keep a departed peer alive.
+    manager.live_sessions.insert(peer, Vec::new());
     manager.sweep_gr_stale(peer);
 
     assert!(
@@ -2135,5 +2137,142 @@ mod deadline_map {
         assert_eq!(map.min(), Some(at(7)));
         map.retain(|_| false);
         assert_eq!(map.min(), None);
+    }
+}
+
+// Build the same busy-actor deferral window as the lifecycle tests, with
+// retained FlowSpec and fresh input from the re-established session.
+fn deferred_retention_peer(
+    llgr: bool,
+) -> (
+    mpsc::Sender<RibUpdate>,
+    RibManager,
+    mpsc::Receiver<OutboundRouteUpdate>,
+) {
+    let (tx, mut manager) = direct_manager(None);
+    let source = Ipv4Addr::new(10, 0, 0, 1);
+    let peer = IpAddr::V4(source);
+    let _old_rx = establish_peer(&mut manager, peer);
+    let mut old_route = make_flowspec_route(source);
+    old_route.rule.components = vec![rustbgpd_wire::FlowSpecComponent::DestinationPrefix(
+        rustbgpd_wire::FlowSpecPrefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)),
+    )];
+    manager.handle_update(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![old_route],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    });
+    drain_route_chunks(&mut manager);
+    manager.handle_update(RibUpdate::PeerGracefulRestart {
+        session_id: 0,
+        peer,
+        restart_time: 2,
+        stale_routes_time: 5,
+        gr_families: vec![(Afi::Ipv4, Safi::FlowSpec)],
+        peer_llgr_capable: llgr,
+        peer_llgr_families: if llgr {
+            vec![rustbgpd_wire::LlgrFamily {
+                afi: Afi::Ipv4,
+                safi: Safi::FlowSpec,
+                forwarding_preserved: false,
+                stale_time: 10,
+            }]
+        } else {
+            vec![]
+        },
+        llgr_stale_time: if llgr { 10 } else { 0 },
+    });
+    manager.initial_dump_defer_min_routes = 0;
+    tx.try_send(RibUpdate::SetPeerPolicyContext {
+        peer,
+        session_id: 0,
+        peer_group: Some("edge".to_string()),
+    })
+    .unwrap();
+    let new_rx = establish_peer(&mut manager, peer);
+    // Consume the queued context while leaving the initial registration pending.
+    manager.drain_ready_updates();
+    if llgr {
+        // The GR timer can expire before the deferred dump. Promotion is
+        // nonterminal; the original LLGR timer then owns terminal cleanup.
+        manager.sweep_gr_stale(peer);
+        assert!(!manager.gr_peers.contains_key(&peer));
+        assert!(manager.llgr_peers.contains_key(&peer));
+    }
+    manager.handle_update(RibUpdate::RoutesReceived {
+        session_id: 0,
+        peer,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![make_flowspec_route(source)],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    });
+    drain_route_chunks(&mut manager);
+    assert_eq!(manager.loc_rib.flowspec_len(), 2);
+    assert!(manager.pending_initial_registrations.contains(&peer));
+    assert!(!manager.outbound_peers.contains_key(&peer));
+    assert!(manager.live_sessions.contains_key(&peer));
+    (tx, manager, new_rx)
+}
+
+#[tokio::test]
+async fn retention_expiry_spares_deferred_reestablished_peer() {
+    for llgr in [false, true] {
+        let (_tx, mut manager, _new_rx) = deferred_retention_peer(llgr);
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        if llgr {
+            manager.sweep_llgr_stale(peer, &[(Afi::Ipv4, Safi::FlowSpec)]);
+        } else {
+            manager.sweep_gr_stale(peer);
+        }
+        let fresh_key = make_flowspec_route(Ipv4Addr::new(10, 0, 0, 1)).selection_key();
+        assert!(
+            manager.loc_rib.get_flowspec(&fresh_key).is_some(),
+            "retention expiry must preserve fresh FlowSpec from the live deferred session (LLGR={llgr})"
+        );
+        assert_eq!(manager.loc_rib.flowspec_len(), 1, "stale route must expire");
+        assert_eq!(manager.ribs[&peer].flowspec_len(), 1);
+        assert!(manager.live_sessions.contains_key(&peer));
+        assert!(manager.peer_asn.contains_key(&peer));
+        assert!(manager.peer_bgp_id.contains_key(&peer));
+        assert_eq!(
+            manager.peer_group.get(&peer).map(String::as_str),
+            Some("edge")
+        );
+        assert!(manager.pending_initial_registrations.contains(&peer));
+        assert!(!manager.gr_peers.contains_key(&peer));
+        assert!(!manager.llgr_peers.contains_key(&peer));
+        manager.advance_pending_initial_registration();
+        assert!(manager.outbound_peers.contains_key(&peer));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn run_loop_retention_expiry_precedes_deferred_registration() {
+    for llgr in [false, true] {
+        let (tx, manager, mut new_rx) = deferred_retention_peer(llgr);
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        // Start the actual actor with a due timer and a pending registration.
+        // Virtual time makes the ordering deterministic without a bulk table.
+        tokio::time::advance(std::time::Duration::from_secs(10)).await;
+        let handle = tokio::spawn(manager.run());
+        let dump = tokio::time::timeout(std::time::Duration::from_secs(1), new_rx.recv()).await;
+        let best = query_flowspec_routes(&tx).await;
+        drop(tx);
+        handle.await.unwrap();
+        assert_eq!(best.len(), 1, "only the fresh route survives (LLGR={llgr})");
+        assert!(!best[0].is_stale && !best[0].is_llgr_stale);
+        assert_eq!(best[0].peer, peer);
+        let dump = dump
+            .expect("deferred registration must complete")
+            .expect("the live session's sender must survive expiry");
+        assert!(!dump.end_of_rib.is_empty());
     }
 }
