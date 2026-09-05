@@ -14,12 +14,12 @@ use crate::actor_read::rib_manager_read;
 use crate::proto;
 use rustbgpd_rib::update::ordered_route_query_filter;
 use rustbgpd_rib::{
-    BgpLsFamily, BgpLsRibRoute, EvpnRibRoute, ExplainAdvertisedRoute, ExplainAdvertisedRouteError,
-    ExplainBestPath, ExplainDecision, ExportGateVerdict, FlowSpecRoute, LabeledRibRoute,
-    OrrLinkSnapshot, OrrNodeSnapshot, OrrStatusSnapshot, OrrTopologySnapshot, OrrVantageStatus,
-    RibRowFilter, RibUpdate, Route, RouteEventType, RoutePage, RoutePageError, RoutePageVersion,
-    RouteQueryFilter, RouteQueryKey, RouteQueryScope, RouteSourceIdentity, RtcRibRoute,
-    VpnRibRoute, route_query_key,
+    BgpLsFamily, BgpLsRibRoute, EvpnRibRoute, EvpnRouteQueryKey, ExplainAdvertisedRoute,
+    ExplainAdvertisedRouteError, ExplainBestPath, ExplainDecision, ExportGateVerdict,
+    FlowSpecRoute, LabeledRibRoute, OrrLinkSnapshot, OrrNodeSnapshot, OrrStatusSnapshot,
+    OrrTopologySnapshot, OrrVantageStatus, RibRowFilter, RibUpdate, Route, RouteEventType,
+    RoutePage, RoutePageError, RoutePageVersion, RouteQueryFilter, RouteQueryKey, RouteQueryScope,
+    RouteSourceIdentity, RtcRibRoute, VpnRibRoute, route_query_key,
 };
 use rustbgpd_wire::{
     Afi, AsPath, AsPathSegment, AspaValidation, EvpnRoute, LargeCommunity, PathAttribute, Prefix,
@@ -254,6 +254,76 @@ impl RibService {
                 "route pagination unavailable because its process-local generation is exhausted",
             ),
         })
+    }
+
+    async fn list_peer_evpn_routes(
+        &self,
+        req: proto::ListPeerEvpnRoutesRequest,
+        advertised: bool,
+    ) -> Result<Response<proto::ListPeerEvpnRoutesResponse>, Status> {
+        let peer = req.neighbor_address.parse::<IpAddr>().map_err(|error| {
+            Status::invalid_argument(format!("invalid neighbor_address: {error}"))
+        })?;
+        if req.page_size > 1000 {
+            return Err(Status::invalid_argument("page_size must be at most 1000"));
+        }
+        let scope = if advertised {
+            RouteQueryScope::Advertised { peer }
+        } else {
+            RouteQueryScope::Received { peer: Some(peer) }
+        };
+        let (filter, identity) = peer_evpn_filter(req.route_type_filter, &req.rd_filter)?;
+        let (after, expected_version) = if req.page_token.is_empty() {
+            (None, None)
+        } else {
+            let cursor = decode_evpn_page_token(&req.page_token)?;
+            if cursor.scope != scope || cursor.query_identity != identity {
+                return Err(Status::invalid_argument(
+                    "page_token belongs to a different EVPN scope or filters",
+                ));
+            }
+            (Some(cursor.after), Some(cursor.version))
+        };
+        let page_size = if req.page_size == 0 {
+            DEFAULT_ROUTE_PAGE_SIZE
+        } else {
+            req.page_size as usize
+        };
+        let page = rib_manager_read(&self.rib_tx, |reply| RibUpdate::QueryEvpnRoutesPage {
+            scope,
+            filter,
+            after,
+            expected_version,
+            page_size,
+            reply,
+        })
+        .await?
+        .map_err(|error| match error {
+            RoutePageError::Invalidated => Status::aborted(
+                "EVPN route table changed during pagination; restart with an empty page_token",
+            ),
+            RoutePageError::GenerationExhausted => Status::unavailable(
+                "EVPN pagination unavailable because its process-local generation is exhausted",
+            ),
+        })?;
+        let next_page_token = if page.has_more {
+            page.routes
+                .last()
+                .map(|route| encode_evpn_page_token(scope, &identity, route, page.version))
+                .transpose()?
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        Ok(Response::new(proto::ListPeerEvpnRoutesResponse {
+            routes: page.routes.iter().map(evpn_route_to_proto).collect(),
+            next_page_token,
+            total_count: page.total,
+            page_version: Some(proto::RoutePageVersion {
+                epoch: page.version.epoch,
+                generation: page.version.generation,
+            }),
+        }))
     }
 
     async fn query_explain_advertised_route(
@@ -965,6 +1035,130 @@ fn route_page_query_identity(afi_safi: i32, filters: &RouteFilters) -> String {
         encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
     encoded
+}
+
+fn peer_evpn_filter(
+    route_type: u32,
+    rd: &str,
+) -> Result<(Option<RibRowFilter<EvpnRibRoute>>, String), Status> {
+    if route_type > 5 {
+        return Err(Status::invalid_argument(
+            "route_type_filter must be 0 or 1..=5",
+        ));
+    }
+    let rd = if rd.is_empty() {
+        None
+    } else {
+        Some(
+            rd.parse::<rustbgpd_wire::RouteDistinguisher>()
+                .map_err(|error| Status::invalid_argument(format!("invalid rd_filter: {error}")))?,
+        )
+    };
+    let identity = format!(
+        "{route_type}:{}",
+        rd.map(|rd| rd.to_string()).unwrap_or_default()
+    );
+    Ok((
+        row_filter(
+            route_type != 0 || rd.is_some(),
+            move |route: &EvpnRibRoute| {
+                if route_type != 0 && u32::from(route.route_type()) != route_type {
+                    return false;
+                }
+                rd.is_none_or(|rd| match &route.route {
+                    EvpnRoute::EadPerEs(route) => route.rd == rd,
+                    EvpnRoute::EadPerEvi(route) => route.rd == rd,
+                    EvpnRoute::MacIp(route) => route.rd == rd,
+                    EvpnRoute::Imet(route) => route.rd == rd,
+                    EvpnRoute::Es(route) => route.rd == rd,
+                    EvpnRoute::IpPrefix(route) => route.rd == rd,
+                    _ => false,
+                })
+            },
+        ),
+        identity,
+    ))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct EvpnPageCursor {
+    scope: RouteQueryScope,
+    query_identity: String,
+    after: EvpnRouteQueryKey,
+    version: RoutePageVersion,
+}
+
+fn encode_evpn_page_token(
+    scope: RouteQueryScope,
+    identity: &str,
+    route: &EvpnRibRoute,
+    version: RoutePageVersion,
+) -> Result<String, Status> {
+    use std::fmt::Write as _;
+    // Existing wire codecs preserve all typed key fields; labels and other
+    // non-key payload are ignored after decoding the continuation identity.
+    let mut nlri = Vec::new();
+    rustbgpd_wire::encode_evpn_nlri(std::slice::from_ref(&route.route), &mut nlri)
+        .map_err(|error| Status::internal(format!("cannot encode EVPN page cursor: {error}")))?;
+    let mut hex = String::with_capacity(nlri.len() * 2);
+    for byte in nlri {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    let payload = format!(
+        "ep1|{:016x}|{:016x}|{}|{identity}|{hex}|{}",
+        version.epoch,
+        version.generation,
+        route_page_scope_token(scope),
+        route.peer
+    );
+    Ok(format!(
+        "{payload}|{}",
+        route_page_token_signature(&payload)
+    ))
+}
+
+fn decode_evpn_page_token(token: &str) -> Result<EvpnPageCursor, Status> {
+    let invalid = || Status::invalid_argument("invalid EVPN page_token");
+    // Every supported NLRI is smaller than 256 octets; reject oversized input
+    // before hashing, allocating, or invoking the wire decoder.
+    if token.len() > 1024 {
+        return Err(invalid());
+    }
+    let (payload, signature) = token.rsplit_once('|').ok_or_else(invalid)?;
+    let expected = route_page_token_signature(payload);
+    if signature.len() != expected.len()
+        || signature
+            .bytes()
+            .zip(expected.bytes())
+            .fold(0u8, |diff, (a, b)| diff | (a ^ b))
+            != 0
+    {
+        return Err(invalid());
+    }
+    let parts: Vec<_> = payload.split('|').collect();
+    let ["ep1", epoch, generation, scope, identity, hex, peer] = parts.as_slice() else {
+        return Err(invalid());
+    };
+    if hex.len() % 2 != 0 || !hex.is_ascii() {
+        return Err(invalid());
+    }
+    let nlri = (0..hex.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).map_err(|_| invalid()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let routes = rustbgpd_wire::decode_evpn_nlri(&nlri).map_err(|_| invalid())?;
+    let [route] = routes.as_slice() else {
+        return Err(invalid());
+    };
+    Ok(EvpnPageCursor {
+        scope: parse_route_page_scope_token(scope).ok_or_else(invalid)?,
+        query_identity: (*identity).to_string(),
+        after: (route.key(), peer.parse().map_err(|_| invalid())?),
+        version: RoutePageVersion {
+            epoch: u64::from_str_radix(epoch, 16).map_err(|_| invalid())?,
+            generation: u64::from_str_radix(generation, 16).map_err(|_| invalid())?,
+        },
+    })
 }
 
 static ROUTE_PAGE_TOKEN_SECRET: OnceLock<[u8; 16]> = OnceLock::new();
@@ -1860,6 +2054,21 @@ impl proto::rib_service_server::RibService for RibService {
         let routes: Vec<proto::EvpnRouteEntry> = matched.iter().map(evpn_route_to_proto).collect();
 
         Ok(Response::new(proto::ListEvpnResponse { routes }))
+    }
+
+    async fn list_received_evpn_routes(
+        &self,
+        request: Request<proto::ListPeerEvpnRoutesRequest>,
+    ) -> Result<Response<proto::ListPeerEvpnRoutesResponse>, Status> {
+        self.list_peer_evpn_routes(request.into_inner(), false)
+            .await
+    }
+
+    async fn list_advertised_evpn_routes(
+        &self,
+        request: Request<proto::ListPeerEvpnRoutesRequest>,
+    ) -> Result<Response<proto::ListPeerEvpnRoutesResponse>, Status> {
+        self.list_peer_evpn_routes(request.into_inner(), true).await
     }
 
     async fn list_bgp_ls_routes(
@@ -2816,6 +3025,8 @@ mod tests {
         ListRouteEvents,
         ListFlowSpecRoutes,
         ListEvpnRoutes,
+        ListReceivedEvpnRoutes,
+        ListAdvertisedEvpnRoutes,
         ListBgpLsRoutes,
         ListVpnRoutes,
         ListLabeledRoutes,
@@ -2825,7 +3036,7 @@ mod tests {
         ListOrrStatus,
     }
 
-    const UNARY_RIB_READS: [UnaryRibRead; 16] = [
+    const UNARY_RIB_READS: [UnaryRibRead; 18] = [
         UnaryRibRead::ListReceivedRoutes,
         UnaryRibRead::ListBestRoutes,
         UnaryRibRead::ListAdvertisedRoutes,
@@ -2835,6 +3046,8 @@ mod tests {
         UnaryRibRead::ListRouteEvents,
         UnaryRibRead::ListFlowSpecRoutes,
         UnaryRibRead::ListEvpnRoutes,
+        UnaryRibRead::ListReceivedEvpnRoutes,
+        UnaryRibRead::ListAdvertisedEvpnRoutes,
         UnaryRibRead::ListBgpLsRoutes,
         UnaryRibRead::ListVpnRoutes,
         UnaryRibRead::ListLabeledRoutes,
@@ -2888,6 +3101,20 @@ mod tests {
                 .map(|_| ()),
             UnaryRibRead::ListEvpnRoutes => svc
                 .list_evpn_routes(Request::new(proto::ListEvpnRequest::default()))
+                .await
+                .map(|_| ()),
+            UnaryRibRead::ListReceivedEvpnRoutes => svc
+                .list_received_evpn_routes(Request::new(proto::ListPeerEvpnRoutesRequest {
+                    neighbor_address: "192.0.2.1".into(),
+                    ..Default::default()
+                }))
+                .await
+                .map(|_| ()),
+            UnaryRibRead::ListAdvertisedEvpnRoutes => svc
+                .list_advertised_evpn_routes(Request::new(proto::ListPeerEvpnRoutesRequest {
+                    neighbor_address: "192.0.2.1".into(),
+                    ..Default::default()
+                }))
                 .await
                 .map(|_| ()),
             UnaryRibRead::ListBgpLsRoutes => svc
@@ -3073,6 +3300,255 @@ mod tests {
     }
 
     /// The RIB actor's copy rule, for the non-unicast listing fakes.
+    #[test]
+    fn evpn_page_tokens_roundtrip_typed_keys_and_reject_tampering() {
+        use rustbgpd_wire::{
+            EthernetSegmentIdentifier, EthernetTagId, EvpnEs, EvpnMacIp, MacAddress, MplsLabel,
+        };
+        let peer = "192.0.2.1".parse().unwrap();
+        let scope = RouteQueryScope::Advertised { peer };
+        let version = RoutePageVersion {
+            epoch: 5,
+            generation: 17,
+        };
+        let (mut route, ..) = non_unicast_routes(peer);
+        let rd = "65000:100".parse().unwrap();
+        let mut variants = vec![route.route.clone()];
+        variants.push(EvpnRoute::Es(EvpnEs {
+            rd,
+            esi: EthernetSegmentIdentifier([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]),
+            originator_ip: "2001:db8::2".parse().unwrap(),
+        }));
+        variants.push(EvpnRoute::MacIp(EvpnMacIp {
+            rd,
+            esi: EthernetSegmentIdentifier([0; 10]),
+            ethernet_tag: EthernetTagId(3),
+            mac: MacAddress([2, 0, 0, 0, 0, 1]),
+            ip: Some("2001:db8::3".parse().unwrap()),
+            label1: MplsLabel::new(100),
+            label2: Some(MplsLabel::new(200)),
+        }));
+        variants.push(EvpnRoute::EadPerEs(rustbgpd_wire::EvpnEadPerEs {
+            rd,
+            esi: EthernetSegmentIdentifier([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]),
+            ethernet_tag: EthernetTagId(u32::MAX),
+            label: MplsLabel::new(123),
+        }));
+        variants.push(EvpnRoute::EadPerEvi(rustbgpd_wire::EvpnEadPerEvi {
+            rd,
+            esi: EthernetSegmentIdentifier([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]),
+            ethernet_tag: EthernetTagId(17),
+            label: MplsLabel::new(123),
+        }));
+        variants.push(EvpnRoute::IpPrefix(rustbgpd_wire::EvpnIpPrefixRoute {
+            rd,
+            esi: EthernetSegmentIdentifier([0; 10]),
+            ethernet_tag: EthernetTagId(0),
+            prefix: rustbgpd_wire::EvpnIpPrefixValue::V6(rustbgpd_wire::Ipv6Prefix::new(
+                "2001:db8:1::".parse().unwrap(),
+                64,
+            )),
+            gateway: "2001:db8::1".parse().unwrap(),
+            label: MplsLabel::new(456),
+        }));
+        for variant in variants {
+            route.route = variant;
+            let token = encode_evpn_page_token(scope, "0:", &route, version).unwrap();
+            let cursor = decode_evpn_page_token(&token).unwrap();
+            assert_eq!(cursor.after, (route.key(), peer));
+            assert_eq!(cursor.scope, scope);
+            assert_eq!(cursor.version, version);
+            assert!(token.len() < 1024);
+            for index in [0, token.find("0000000000000011").unwrap(), token.len() - 1] {
+                let mut tampered = token.as_bytes().to_vec();
+                tampered[index] = if tampered[index] == b'0' { b'1' } else { b'0' };
+                assert_eq!(
+                    decode_evpn_page_token(std::str::from_utf8(&tampered).unwrap())
+                        .unwrap_err()
+                        .code(),
+                    tonic::Code::InvalidArgument
+                );
+            }
+        }
+        assert!(decode_evpn_page_token(&"x".repeat(1025)).is_err());
+        assert!(decode_evpn_page_token("not a token").is_err());
+    }
+
+    #[test]
+    fn evpn_peer_filters_match_typed_rd_and_route_type() {
+        let (mut route, ..) = non_unicast_routes("192.0.2.1".parse().unwrap());
+        let (filter, identity) = peer_evpn_filter(3, "065000:0100").unwrap();
+        assert_eq!(identity, "3:65000:100");
+        let filter = filter.unwrap();
+        assert!(filter(&route));
+        assert!(!peer_evpn_filter(2, "").unwrap().0.unwrap()(&route));
+        let EvpnRoute::Imet(imet) = &mut route.route else {
+            panic!("IMET fixture");
+        };
+        imet.rd = "65000:101".parse().unwrap();
+        assert!(!filter(&route));
+        assert!(peer_evpn_filter(0, "").unwrap().0.is_none());
+    }
+
+    #[tokio::test]
+    async fn evpn_peer_pages_validate_scope_filters_and_map_stale_tokens() {
+        let (tx, mut rx) = mpsc::channel(8);
+        let svc = RibService::new(tx);
+        let peer = "192.0.2.1".parse().unwrap();
+        let (route, ..) = non_unicast_routes(peer);
+        let version = RoutePageVersion {
+            epoch: 2,
+            generation: 3,
+        };
+        let token = encode_evpn_page_token(
+            RouteQueryScope::Received { peer: Some(peer) },
+            "3:65000:100",
+            &route,
+            version,
+        )
+        .unwrap();
+        let request = proto::ListPeerEvpnRoutesRequest {
+            neighbor_address: peer.to_string(),
+            route_type_filter: 3,
+            rd_filter: "65000:100".into(),
+            page_size: 1,
+            page_token: token.clone(),
+        };
+        let task = tokio::spawn(async move {
+            let Some(RibUpdate::QueryEvpnRoutesPage {
+                scope,
+                filter,
+                after,
+                expected_version,
+                page_size,
+                reply,
+            }) = rx.recv().await
+            else {
+                panic!("expected EVPN page");
+            };
+            assert_eq!(scope, RouteQueryScope::Received { peer: Some(peer) });
+            assert_eq!(after, Some((route.key(), peer)));
+            assert_eq!(expected_version, Some(version));
+            assert_eq!(page_size, 1);
+            assert!(filter.as_ref().unwrap()(&route));
+            let (other, ..) = non_unicast_routes("192.0.2.2".parse().unwrap());
+            assert!(
+                filter.as_ref().unwrap()(&other),
+                "source filtering belongs to scope, not predicate"
+            );
+            reply.send(Err(RoutePageError::Invalidated)).unwrap();
+        });
+        assert_eq!(
+            svc.list_received_evpn_routes(Request::new(request.clone()))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::Aborted
+        );
+        task.await.unwrap();
+        assert_eq!(
+            svc.list_advertised_evpn_routes(Request::new(request.clone()))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+        for invalid in [
+            proto::ListPeerEvpnRoutesRequest {
+                neighbor_address: String::new(),
+                ..request.clone()
+            },
+            proto::ListPeerEvpnRoutesRequest {
+                neighbor_address: "192.0.2.2".into(),
+                ..request.clone()
+            },
+            proto::ListPeerEvpnRoutesRequest {
+                route_type_filter: 2,
+                ..request.clone()
+            },
+            proto::ListPeerEvpnRoutesRequest {
+                route_type_filter: 6,
+                ..request.clone()
+            },
+            proto::ListPeerEvpnRoutesRequest {
+                rd_filter: "65000:101".into(),
+                ..request.clone()
+            },
+            proto::ListPeerEvpnRoutesRequest {
+                rd_filter: "bad".into(),
+                ..request.clone()
+            },
+            proto::ListPeerEvpnRoutesRequest {
+                page_size: 1001,
+                ..request.clone()
+            },
+        ] {
+            assert_eq!(
+                svc.list_received_evpn_routes(Request::new(invalid))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::InvalidArgument
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn evpn_peer_page_response_preserves_source_and_bounded_metadata() {
+        let source = "192.0.2.1".parse().unwrap();
+        let destination = "192.0.2.2".parse().unwrap();
+        let (route, ..) = non_unicast_routes(source);
+        let expected_key = route.key();
+        let (tx, mut rx) = mpsc::channel(8);
+        let svc = RibService::new(tx);
+        let task = tokio::spawn(async move {
+            let Some(RibUpdate::QueryEvpnRoutesPage {
+                scope,
+                after,
+                expected_version,
+                page_size,
+                reply,
+                ..
+            }) = rx.recv().await
+            else {
+                panic!("expected EVPN page");
+            };
+            assert_eq!(scope, RouteQueryScope::Advertised { peer: destination });
+            assert_eq!(after, None);
+            assert_eq!(expected_version, None);
+            assert_eq!(page_size, 100);
+            reply
+                .send(Ok(rustbgpd_rib::EvpnRoutePage {
+                    routes: vec![route],
+                    total: 2,
+                    has_more: true,
+                    version: RoutePageVersion {
+                        epoch: 7,
+                        generation: 8,
+                    },
+                }))
+                .unwrap();
+        });
+        let response = svc
+            .list_advertised_evpn_routes(Request::new(proto::ListPeerEvpnRoutesRequest {
+                neighbor_address: destination.to_string(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(response.routes[0].peer_address, source.to_string());
+        assert_eq!(response.total_count, 2);
+        assert_eq!(response.page_version.unwrap().generation, 8);
+        let cursor = decode_evpn_page_token(&response.next_page_token).unwrap();
+        assert_eq!(cursor.after, (expected_key, source));
+        assert_eq!(
+            cursor.scope,
+            RouteQueryScope::Advertised { peer: destination }
+        );
+        task.await.unwrap();
+    }
+
     fn matching<T: Clone>(rows: &[T], filter: Option<&RibRowFilter<T>>) -> Vec<T> {
         rows.iter()
             .filter(|row| filter.is_none_or(|matches| matches(row)))

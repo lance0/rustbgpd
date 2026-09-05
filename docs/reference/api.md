@@ -57,7 +57,7 @@ not by itself make it v1-stable.
 | `NeighborService` | `AddNeighbor`, `DeleteNeighbor`, `ListNeighbors`, `GetNeighborState`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `RefreshOutbound`, `ResetNeighbor`, `SetGracefulShutdown`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `ListDynamicNeighbors` | Peer lifecycle, inbound soft reset, single-peer outbound re-advertisement, outside-v1 administrative session reset, RFC 8326 graceful-shutdown toggle, and dynamic-neighbor CRUD — `AddDynamicNeighbor` / `DeleteDynamicNeighbor` add and remove `[[dynamic_neighbors]]` prefix ranges at runtime (queued to the config file), `ListDynamicNeighbors` for visibility |
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `SetPolicy`, `DeletePolicy`, `ListNeighborSets`, `GetNeighborSet`, `SetNeighborSet`, `DeleteNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain`, `ExplainImportPolicy`, `ListRejectedRoutes`, `TestPolicy`, `GetPolicyStats`, `GetValidationPolicyPosture` | Named policy CRUD, neighbor sets, global/per-neighbor chain attachment, import-policy diagnostics, read-only candidate-policy dry runs, live counters, and bounded invalid-validation disposition posture |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup`, `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` | Peer-group CRUD and neighbor membership assignment |
-| `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainAdvertisedRoute`, `ExplainBestPath`, `LookupBestPath`, `ListFlowSpecRoutes`, `ListEvpnRoutes`, `ListBgpLsRoutes`, `ListTopologyNodes`, `ListTopologyLinks`, `ListOrrStatus`, `ListVpnRoutes`, `ListRtcRoutes`, `ListLabeledRoutes`, `ListBlackholeDiscards`, `ListFibRoutes`, `ListFibTables`, `SetFibTable`, `DeleteFibTable`, `ListRouteEvents` | Query-only RIB route surfaces (incl. EVPN, BGP-LS, VPNv4/v6, RT-Constrain, and labeled-unicast), the RFC 9107 ORR / BGP-LS topology read surface (`ListTopologyNodes` / `ListTopologyLinks` / `ListOrrStatus`), BLACKHOLE discard status, paginated FIB status, runtime FIB-table CRUD, exact explain plus outside-v1 global LPM, and recent route-event history; live route streaming is owned by `EventService.WatchEvents` / `SubscribeFromEvent` |
+| `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainAdvertisedRoute`, `ExplainBestPath`, `LookupBestPath`, `ListFlowSpecRoutes`, `ListEvpnRoutes`, `ListReceivedEvpnRoutes`, `ListAdvertisedEvpnRoutes`, `ListBgpLsRoutes`, `ListTopologyNodes`, `ListTopologyLinks`, `ListOrrStatus`, `ListVpnRoutes`, `ListRtcRoutes`, `ListLabeledRoutes`, `ListBlackholeDiscards`, `ListFibRoutes`, `ListFibTables`, `SetFibTable`, `DeleteFibTable`, `ListRouteEvents` | Query-only RIB route surfaces (incl. EVPN, BGP-LS, VPNv4/v6, RT-Constrain, and labeled-unicast), the RFC 9107 ORR / BGP-LS topology read surface (`ListTopologyNodes` / `ListTopologyLinks` / `ListOrrStatus`), BLACKHOLE discard status, paginated FIB status, runtime FIB-table CRUD, exact explain plus outside-v1 global LPM, and recent route-event history; live route streaming is owned by `EventService.WatchEvents` / `SubscribeFromEvent` |
 | `BfdService` | `GetBfdSessions` | BFD session inspection (single-hop and multihop) for configured static neighbors |
 | `RpkiService` | `ValidateRouteOrigin`, `ListCaches` | Bounded point validation and configured RTR-cache accepted-epoch inventory |
 | `EventService` | `WatchEvents`, `SubscribeFromEvent`, `ListEvpnEvents`, `ListSessionEvents`, `ListPolicyEvents` | Unified live stream for route, session lifecycle, BGP NOTIFICATION metadata, policy mutation, EVPN route events, BFD session events, and FIB / BLACKHOLE dataplane status-row summary events, with `stream_lagged` warnings for bounded-source backpressure; durable cursor replay via `SubscribeFromEvent` when `[event_history].enabled = true`; plus bounded after-the-fact EVPN, session-lifecycle, and policy-mutation history. Per-MAC EVPN dataplane categories remain follow-up work |
@@ -1288,7 +1288,9 @@ route changes through `EventService.WatchEvents` or `EventService.SubscribeFromE
 | `ExplainBestPath` | Show all candidates for a prefix with decisive comparison reasons; optional `peer_address` field scopes to that peer's Add-Path send view |
 | `LookupBestPath` | Outside-v1 global-only LPM: bounded ancestor probes return the closest installed Loc-RIB winner plus every alternative for that one matched prefix from one actor turn; old daemons fail with `UNIMPLEMENTED` |
 | `ListFlowSpecRoutes` | FlowSpec routes in Adj-RIB-In / Loc-RIB view |
-| `ListEvpnRoutes` | EVPN routes (RFC 7432) in Loc-RIB view, filterable by route type / peer / RD |
+| `ListEvpnRoutes` | EVPN routes (RFC 7432 / RFC 9136) in Loc-RIB view, filterable by route type / source peer / RD |
+| `ListReceivedEvpnRoutes` | Bounded accepted post-policy EVPN Adj-RIB-In for one source neighbor, filterable by type / RD |
+| `ListAdvertisedEvpnRoutes` | Bounded committed EVPN Adj-RIB-Out for one destination neighbor, filterable by type / RD |
 | `ListBgpLsRoutes` | BGP-LS / BGP-LS VPN routes (RFC 9552) in Loc-RIB view, exposed as opaque NLRI/TLV bytes and filterable by family, peer, and NLRI type |
 | `ListVpnRoutes` | RFC 4364/4659 VPNv4/VPNv6 routes — RD-scoped customer prefixes, Route Targets, and MPLS labels |
 | `ListLabeledRoutes` | RFC 8277 labeled-unicast (SAFI 4) routes in Loc-RIB view — MPLS label stack plus prefix reachability |
@@ -1618,6 +1620,48 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 ```
 
 ### List EVPN routes
+
+`ListEvpnRoutes` retains its existing unpaginated best-route view. The additive
+`ListReceivedEvpnRoutes` and `ListAdvertisedEvpnRoutes` methods require
+`neighbor_address` and accept `route_type_filter` (0 or 1–5), `rd_filter`,
+`page_size`, and `page_token`. They are outside the narrow v1 contract; older
+servers return `UNIMPLEMENTED` without falling back to a unicast table.
+
+Received means **accepted post-policy Adj-RIB-In**, including candidates that
+are not best. An absent route does not prove the neighbor never sent it;
+historical EVPN import rejection details are not retained. Advertised means
+**committed Adj-RIB-Out** for the requested destination, after export gates and
+successful outbound enqueue. It does not confirm remote receipt or installation.
+Each row's `peer_address` remains its original source peer, which may differ
+from the requested destination. Neither view provides EVPN explain yet.
+
+These peer methods return one page with `routes`, `total_count`,
+`next_page_token`, and `page_version`. The default page size is 100; the maximum
+is 1000, and larger requests return `INVALID_ARGUMENT`. Rows are ordered by typed
+EVPN route identity and source peer. Use the returned token with the same
+neighbor, direction, and filters to continue. Changed scope or filters, malformed
+or modified tokens return `INVALID_ARGUMENT`; table mutations return `ABORTED`,
+requiring a restart from an empty token. Tokens expire on daemon restart.
+Version counters are conservative across peers and families in the same table
+class, so an unrelated mutation can also invalidate a walk. Types 3/4, attribute
+changes, retained-route lifecycle changes, and peer teardown participate.
+
+Each page scans the selected table: O(table size × log page size) work and
+O(page size) retained route references/copies. Pagination bounds response memory;
+it does not provide an index or a snapshot retained across mutations.
+
+```bash
+rbgp evpn received 192.0.2.1 --route-type 2 --rd 65000:100 --page-size 100
+rbgp evpn advertised 192.0.2.2 --rd 65000:100 --page-size 100
+
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"neighbor_address":"192.0.2.2","route_type_filter":2,"rd_filter":"65000:100","page_size":100}' \
+  localhost:50051 rustbgpd.v1.RibService/ListAdvertisedEvpnRoutes
+```
+
+The CLI prints one page and its continuation metadata; pass `--page-token '<token>'`
+to resume, quoting the opaque token for the shell. `--json` returns a page object for these new views. The existing commands
+below retain their best-route output and syntax.
 
 ```bash
 # All EVPN routes in Loc-RIB

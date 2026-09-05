@@ -270,6 +270,8 @@ the flag and always includes the raw `received_at_epoch_seconds` field.
 
 ```bash
 rbgp evpn
+rbgp evpn received <addr> --route-type 2 --rd 65000:100
+rbgp evpn advertised <addr> --page-size 100 --page-token '<token>'
 rbgp evpn runtime
 rbgp evpn instances
 rbgp evpn nexthops
@@ -287,6 +289,18 @@ rbgp evpn delete-mac-ip ...
 rbgp evpn delete-imet ...
 rbgp evpn delete-ip-prefix ...
 ```
+
+The peer `received` and `advertised` views return one page (100 rows by default,
+maximum 1000) with a total and an opaque continuation token. Pass that token
+with the same peer and filters for the next page; restart without it after a
+table change aborts the query. JSON returns `view`, `neighbor`, `routes`,
+`total_count`, `next_page_token`, and `page_version`.
+
+Received rows are accepted post-policy Adj-RIB-In; absence does not prove the
+peer never sent a route. Advertised rows are committed Adj-RIB-Out for the
+destination neighbor; each row's `peer` remains its source. Older daemons
+report that the new views are unsupported. Plain `rbgp evpn` retains its
+existing best-route listing.
 
 ### Events and Control
 

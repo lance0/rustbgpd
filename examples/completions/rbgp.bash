@@ -286,6 +286,9 @@ _rbgp() {
             rbgp__subcmd__evpn,add-mac-ip)
                 cmd="rbgp__subcmd__evpn__subcmd__add__subcmd__mac__subcmd__ip"
                 ;;
+            rbgp__subcmd__evpn,advertised)
+                cmd="rbgp__subcmd__evpn__subcmd__advertised"
+                ;;
             rbgp__subcmd__evpn,clear-duplicate-mac)
                 cmd="rbgp__subcmd__evpn__subcmd__clear__subcmd__duplicate__subcmd__mac"
                 ;;
@@ -318,6 +321,9 @@ _rbgp() {
                 ;;
             rbgp__subcmd__evpn,nexthops)
                 cmd="rbgp__subcmd__evpn__subcmd__nexthops"
+                ;;
+            rbgp__subcmd__evpn,received)
+                cmd="rbgp__subcmd__evpn__subcmd__received"
                 ;;
             rbgp__subcmd__evpn,runtime)
                 cmd="rbgp__subcmd__evpn__subcmd__runtime"
@@ -358,6 +364,9 @@ _rbgp() {
             rbgp__subcmd__evpn__subcmd__help,add-mac-ip)
                 cmd="rbgp__subcmd__evpn__subcmd__help__subcmd__add__subcmd__mac__subcmd__ip"
                 ;;
+            rbgp__subcmd__evpn__subcmd__help,advertised)
+                cmd="rbgp__subcmd__evpn__subcmd__help__subcmd__advertised"
+                ;;
             rbgp__subcmd__evpn__subcmd__help,clear-duplicate-mac)
                 cmd="rbgp__subcmd__evpn__subcmd__help__subcmd__clear__subcmd__duplicate__subcmd__mac"
                 ;;
@@ -390,6 +399,9 @@ _rbgp() {
                 ;;
             rbgp__subcmd__evpn__subcmd__help,nexthops)
                 cmd="rbgp__subcmd__evpn__subcmd__help__subcmd__nexthops"
+                ;;
+            rbgp__subcmd__evpn__subcmd__help,received)
+                cmd="rbgp__subcmd__evpn__subcmd__help__subcmd__received"
                 ;;
             rbgp__subcmd__evpn__subcmd__help,runtime)
                 cmd="rbgp__subcmd__evpn__subcmd__help__subcmd__runtime"
@@ -607,6 +619,9 @@ _rbgp() {
             rbgp__subcmd__help__subcmd__evpn,add-mac-ip)
                 cmd="rbgp__subcmd__help__subcmd__evpn__subcmd__add__subcmd__mac__subcmd__ip"
                 ;;
+            rbgp__subcmd__help__subcmd__evpn,advertised)
+                cmd="rbgp__subcmd__help__subcmd__evpn__subcmd__advertised"
+                ;;
             rbgp__subcmd__help__subcmd__evpn,clear-duplicate-mac)
                 cmd="rbgp__subcmd__help__subcmd__evpn__subcmd__clear__subcmd__duplicate__subcmd__mac"
                 ;;
@@ -636,6 +651,9 @@ _rbgp() {
                 ;;
             rbgp__subcmd__help__subcmd__evpn,nexthops)
                 cmd="rbgp__subcmd__help__subcmd__evpn__subcmd__nexthops"
+                ;;
+            rbgp__subcmd__help__subcmd__evpn,received)
+                cmd="rbgp__subcmd__help__subcmd__evpn__subcmd__received"
                 ;;
             rbgp__subcmd__help__subcmd__evpn,runtime)
                 cmd="rbgp__subcmd__help__subcmd__evpn__subcmd__runtime"
@@ -2888,7 +2906,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__evpn)
-            opts="-s -j -h --route-type --peer --neighbor --rd --addr --token-file --json --no-color --pager --help add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help"
+            opts="-s -j -h --route-type --peer --neighbor --rd --addr --token-file --json --no-color --pager --help received advertised add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3081,6 +3099,52 @@ _rbgp() {
                     return 0
                     ;;
                 --rt)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --addr)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -s)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --token-file)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --pager)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__evpn__subcmd__advertised)
+            opts="-s -j -h --route-type --rd --page-size --page-token --addr --token-file --json --no-color --pager --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --route-type)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --rd)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --page-size)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --page-token)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -3526,7 +3590,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__evpn__subcmd__help)
-            opts="add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help"
+            opts="received advertised add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3568,6 +3632,20 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__evpn__subcmd__help__subcmd__add__subcmd__mac__subcmd__ip)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__evpn__subcmd__help__subcmd__advertised)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -3777,6 +3855,20 @@ _rbgp() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        rbgp__subcmd__evpn__subcmd__help__subcmd__received)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         rbgp__subcmd__evpn__subcmd__help__subcmd__runtime)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
@@ -3872,6 +3964,52 @@ _rbgp() {
                 return 0
             fi
             case "${prev}" in
+                --addr)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                -s)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --token-file)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --pager)
+                    COMPREPLY=($(compgen -W "auto always never" -- "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__evpn__subcmd__received)
+            opts="-s -j -h --route-type --rd --page-size --page-token --addr --token-file --json --no-color --pager --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --route-type)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --rd)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --page-size)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --page-token)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 --addr)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
@@ -4882,7 +5020,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__help__subcmd__evpn)
-            opts="add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose"
+            opts="received advertised add-mac-ip add-imet add-ip-prefix delete-mac-ip delete-imet delete-ip-prefix clear-duplicate-mac duplicate-mac-quarantines es runtime instances nexthops managed-netdevs vrfs diagnose"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -4924,6 +5062,20 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__help__subcmd__evpn__subcmd__add__subcmd__mac__subcmd__ip)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__help__subcmd__evpn__subcmd__advertised)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -5106,6 +5258,20 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__help__subcmd__evpn__subcmd__nexthops)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        rbgp__subcmd__help__subcmd__evpn__subcmd__received)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )

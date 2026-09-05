@@ -691,6 +691,8 @@ mod tests {
     fn listing_surface_inventory_uses_bounded_client() {
         const LISTING_RPCS: &[&str] = &[
             ".list_evpn_routes(",
+            ".list_received_evpn_routes(",
+            ".list_advertised_evpn_routes(",
             ".list_bgp_ls_routes(",
             ".list_vpn_routes(",
             ".list_labeled_routes(",
@@ -705,7 +707,7 @@ mod tests {
         // (file, source, bounded constructor sites, listing RPC invocations)
         let surfaces = [
             ("commands/rib.rs", include_str!("commands/rib.rs"), 6, 6),
-            ("commands/evpn.rs", include_str!("commands/evpn.rs"), 2, 3),
+            ("commands/evpn.rs", include_str!("commands/evpn.rs"), 3, 5),
             (
                 "commands/flowspec.rs",
                 include_str!("commands/flowspec.rs"),
@@ -743,8 +745,8 @@ mod tests {
             total_ctors += ctors;
             total_rpcs += rpcs;
         }
-        assert_eq!(total_ctors, 12, "inventoried constructor sites");
-        assert_eq!(total_rpcs, 13, "inventoried listing RPC invocations");
+        assert_eq!(total_ctors, 13, "inventoried constructor sites");
+        assert_eq!(total_rpcs, 15, "inventoried listing RPC invocations");
     }
 
     // Budget rationale for the 64 MiB ceiling: it must hold at least

@@ -1615,7 +1615,43 @@ _arguments "${_arguments_options[@]}" : \
         (( CURRENT += 1 ))
         curcontext="${curcontext%:*:*}:rbgp-evpn-command-$line[1]:"
         case $line[1] in
-            (add-mac-ip)
+            (received)
+_arguments "${_arguments_options[@]}" : \
+'--route-type=[Only this route type (1..=5)]:ROUTE_TYPE:_default' \
+'--rd=[Route Distinguisher, e.g. "65000\:100"]:RD:_default' \
+'--page-size=[Maximum rows in this page (1..=1000)]:PAGE_SIZE:_default' \
+'--page-token=[Opaque continuation token from the preceding page; restart after a table change]:PAGE_TOKEN:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':peer -- Source neighbor (received) or destination neighbor (advertised):_default' \
+&& ret=0
+;;
+(advertised)
+_arguments "${_arguments_options[@]}" : \
+'--route-type=[Only this route type (1..=5)]:ROUTE_TYPE:_default' \
+'--rd=[Route Distinguisher, e.g. "65000\:100"]:RD:_default' \
+'--page-size=[Maximum rows in this page (1..=1000)]:PAGE_SIZE:_default' \
+'--page-token=[Opaque continuation token from the preceding page; restart after a table change]:PAGE_TOKEN:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':peer -- Source neighbor (received) or destination neighbor (advertised):_default' \
+&& ret=0
+;;
+(add-mac-ip)
 _arguments "${_arguments_options[@]}" : \
 '--rd=[Route Distinguisher, "asn\:value" / "ip\:value"]:RD:_default' \
 '--ethernet-tag=[Ethernet-tag identifying the EVI (default 0)]:ETHERNET_TAG:_default' \
@@ -1945,7 +1981,15 @@ _arguments "${_arguments_options[@]}" : \
         (( CURRENT += 1 ))
         curcontext="${curcontext%:*:*}:rbgp-evpn-help-command-$line[1]:"
         case $line[1] in
-            (add-mac-ip)
+            (received)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(advertised)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(add-mac-ip)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -3553,7 +3597,15 @@ _arguments "${_arguments_options[@]}" : \
         (( CURRENT += 1 ))
         curcontext="${curcontext%:*:*}:rbgp-help-evpn-command-$line[1]:"
         case $line[1] in
-            (add-mac-ip)
+            (received)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(advertised)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(add-mac-ip)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -4376,6 +4428,8 @@ _rbgp__subcmd__events__subcmd__watch_commands() {
 (( $+functions[_rbgp__subcmd__evpn_commands] )) ||
 _rbgp__subcmd__evpn_commands() {
     local commands; commands=(
+'received:Accepted post-policy EVPN routes from a peer; absence does not prove it sent none' \
+'advertised:Committed EVPN routes advertised to a peer (rows retain their source peer)' \
 'add-mac-ip:Inject a Type 2 MAC/IP route' \
 'add-imet:Inject a Type 3 IMET route' \
 'add-ip-prefix:Inject a Type 5 IP Prefix route' \
@@ -4409,6 +4463,11 @@ _rbgp__subcmd__evpn__subcmd__add-ip-prefix_commands() {
 _rbgp__subcmd__evpn__subcmd__add-mac-ip_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp evpn add-mac-ip commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__evpn__subcmd__advertised_commands] )) ||
+_rbgp__subcmd__evpn__subcmd__advertised_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp evpn advertised commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__evpn__subcmd__clear-duplicate-mac_commands] )) ||
 _rbgp__subcmd__evpn__subcmd__clear-duplicate-mac_commands() {
@@ -4498,6 +4557,8 @@ _rbgp__subcmd__evpn__subcmd__es__subcmd__undrain_commands() {
 (( $+functions[_rbgp__subcmd__evpn__subcmd__help_commands] )) ||
 _rbgp__subcmd__evpn__subcmd__help_commands() {
     local commands; commands=(
+'received:Accepted post-policy EVPN routes from a peer; absence does not prove it sent none' \
+'advertised:Committed EVPN routes advertised to a peer (rows retain their source peer)' \
 'add-mac-ip:Inject a Type 2 MAC/IP route' \
 'add-imet:Inject a Type 3 IMET route' \
 'add-ip-prefix:Inject a Type 5 IP Prefix route' \
@@ -4531,6 +4592,11 @@ _rbgp__subcmd__evpn__subcmd__help__subcmd__add-ip-prefix_commands() {
 _rbgp__subcmd__evpn__subcmd__help__subcmd__add-mac-ip_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp evpn help add-mac-ip commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__evpn__subcmd__help__subcmd__advertised_commands] )) ||
+_rbgp__subcmd__evpn__subcmd__help__subcmd__advertised_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp evpn help advertised commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__evpn__subcmd__help__subcmd__clear-duplicate-mac_commands] )) ||
 _rbgp__subcmd__evpn__subcmd__help__subcmd__clear-duplicate-mac_commands() {
@@ -4606,6 +4672,11 @@ _rbgp__subcmd__evpn__subcmd__help__subcmd__nexthops_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp evpn help nexthops commands' commands "$@"
 }
+(( $+functions[_rbgp__subcmd__evpn__subcmd__help__subcmd__received_commands] )) ||
+_rbgp__subcmd__evpn__subcmd__help__subcmd__received_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp evpn help received commands' commands "$@"
+}
 (( $+functions[_rbgp__subcmd__evpn__subcmd__help__subcmd__runtime_commands] )) ||
 _rbgp__subcmd__evpn__subcmd__help__subcmd__runtime_commands() {
     local commands; commands=()
@@ -4630,6 +4701,11 @@ _rbgp__subcmd__evpn__subcmd__managed-netdevs_commands() {
 _rbgp__subcmd__evpn__subcmd__nexthops_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp evpn nexthops commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__evpn__subcmd__received_commands] )) ||
+_rbgp__subcmd__evpn__subcmd__received_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp evpn received commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__evpn__subcmd__runtime_commands] )) ||
 _rbgp__subcmd__evpn__subcmd__runtime_commands() {
@@ -4964,6 +5040,8 @@ _rbgp__subcmd__help__subcmd__events__subcmd__watch_commands() {
 (( $+functions[_rbgp__subcmd__help__subcmd__evpn_commands] )) ||
 _rbgp__subcmd__help__subcmd__evpn_commands() {
     local commands; commands=(
+'received:Accepted post-policy EVPN routes from a peer; absence does not prove it sent none' \
+'advertised:Committed EVPN routes advertised to a peer (rows retain their source peer)' \
 'add-mac-ip:Inject a Type 2 MAC/IP route' \
 'add-imet:Inject a Type 3 IMET route' \
 'add-ip-prefix:Inject a Type 5 IP Prefix route' \
@@ -4996,6 +5074,11 @@ _rbgp__subcmd__help__subcmd__evpn__subcmd__add-ip-prefix_commands() {
 _rbgp__subcmd__help__subcmd__evpn__subcmd__add-mac-ip_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp help evpn add-mac-ip commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__evpn__subcmd__advertised_commands] )) ||
+_rbgp__subcmd__help__subcmd__evpn__subcmd__advertised_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help evpn advertised commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__help__subcmd__evpn__subcmd__clear-duplicate-mac_commands] )) ||
 _rbgp__subcmd__help__subcmd__evpn__subcmd__clear-duplicate-mac_commands() {
@@ -5065,6 +5148,11 @@ _rbgp__subcmd__help__subcmd__evpn__subcmd__managed-netdevs_commands() {
 _rbgp__subcmd__help__subcmd__evpn__subcmd__nexthops_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp help evpn nexthops commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__evpn__subcmd__received_commands] )) ||
+_rbgp__subcmd__help__subcmd__evpn__subcmd__received_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help evpn received commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__help__subcmd__evpn__subcmd__runtime_commands] )) ||
 _rbgp__subcmd__help__subcmd__evpn__subcmd__runtime_commands() {

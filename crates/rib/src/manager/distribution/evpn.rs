@@ -407,6 +407,11 @@ impl RibManager {
     ) {
         use crate::route::EvpnRibRoute;
 
+        // Every accepted EVPN mutation, including non-best attributes and
+        // Types 3/4, invalidates received pages even while selection is deferred.
+        if !affected.is_empty() {
+            self.advance_table_pages();
+        }
         self.record_deferred_evpn(affected);
         if self.selection_deferred((Afi::L2Vpn, Safi::Evpn)) {
             return;

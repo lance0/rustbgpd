@@ -170,6 +170,10 @@ pub(crate) struct MockState {
     pub(crate) last_list_labeled: Mutex<Option<server_proto::ListLabeledRoutesRequest>>,
     pub(crate) last_list_rtc: Mutex<Option<server_proto::ListRtcRoutesRequest>>,
     pub(crate) last_list_evpn: Mutex<Option<server_proto::ListEvpnRequest>>,
+    pub(crate) last_list_received_evpn: Mutex<Option<server_proto::ListPeerEvpnRoutesRequest>>,
+    pub(crate) last_list_advertised_evpn: Mutex<Option<server_proto::ListPeerEvpnRoutesRequest>>,
+    pub(crate) list_peer_evpn_response: Mutex<server_proto::ListPeerEvpnRoutesResponse>,
+    pub(crate) list_peer_evpn_error: Mutex<Option<(Code, String)>>,
     pub(crate) last_list_rejected: Mutex<Option<server_proto::ListRejectedRoutesRequest>>,
     pub(crate) last_list_topology_nodes: Mutex<Option<server_proto::ListTopologyNodesRequest>>,
     pub(crate) last_list_topology_links: Mutex<Option<server_proto::ListTopologyLinksRequest>>,
@@ -2214,6 +2218,32 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         Ok(Response::new(server_proto::ListFlowSpecResponse {
             routes: vec![],
         }))
+    }
+
+    async fn list_received_evpn_routes(
+        &self,
+        request: Request<server_proto::ListPeerEvpnRoutesRequest>,
+    ) -> Result<Response<server_proto::ListPeerEvpnRoutesResponse>, Status> {
+        *self.state.last_list_received_evpn.lock().await = Some(request.into_inner());
+        if let Some((code, message)) = self.state.list_peer_evpn_error.lock().await.clone() {
+            return Err(Status::new(code, message));
+        }
+        Ok(Response::new(
+            self.state.list_peer_evpn_response.lock().await.clone(),
+        ))
+    }
+
+    async fn list_advertised_evpn_routes(
+        &self,
+        request: Request<server_proto::ListPeerEvpnRoutesRequest>,
+    ) -> Result<Response<server_proto::ListPeerEvpnRoutesResponse>, Status> {
+        *self.state.last_list_advertised_evpn.lock().await = Some(request.into_inner());
+        if let Some((code, message)) = self.state.list_peer_evpn_error.lock().await.clone() {
+            return Err(Status::new(code, message));
+        }
+        Ok(Response::new(
+            self.state.list_peer_evpn_response.lock().await.clone(),
+        ))
     }
 
     async fn list_evpn_routes(
