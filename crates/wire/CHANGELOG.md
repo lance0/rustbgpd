@@ -7,6 +7,12 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## 0.19.1 - Unreleased
 
+- `FlowSpecRule::destination_prefix` returns `None` for an IPv6 destination
+  component with a non-zero offset. RFC 8956 §3.1 matches the address
+  shifted right by `offset` bits, so the component names no routable prefix,
+  and RFC 8956 §5 counts only an offset-0 destination toward validation
+  item (a). Previously the offset was dropped and the unshifted prefix was
+  returned. Encoding and decoding of such rules are unchanged.
 - Added the `mrt` module with `decode_table_dump_v2_mp_reach_next_hop`, which
   decodes the next hop of the `MP_REACH_NLRI` carried inside an RFC 6396
   `TABLE_DUMP_V2` RIB entry. Both the §4.3.4 reduced form (next-hop length,

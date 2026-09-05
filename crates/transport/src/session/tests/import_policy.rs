@@ -122,7 +122,8 @@ async fn import_policy_denied_routes_do_not_reach_rib() {
 /// `prefix = None` in the import policy context — prefix-based deny terms
 /// (including exact-default ones) must not match it, while a rule with a
 /// real destination prefix still evaluates that prefix. Covers IPv4 and
-/// IPv6 `FlowSpec`.
+/// IPv6 `FlowSpec`, and an IPv6 destination whose non-zero offset means it
+/// names no prefix either.
 #[tokio::test]
 #[expect(
     clippy::too_many_lines,
@@ -172,6 +173,10 @@ async fn import_policy_prefix_term_does_not_match_destination_less_flowspec() {
                 Ipv4Addr::new(198, 51, 100, 0),
                 24,
             ))),
+            deny(Prefix::V6(Ipv6Prefix::new(
+                Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0),
+                32,
+            ))),
         ],
         default_action: PolicyAction::Permit,
     }])));
@@ -181,6 +186,17 @@ async fn import_policy_prefix_term_does_not_match_destination_less_flowspec() {
 
     let destless_v4 = destless_rule(6);
     let destless_v6 = destless_rule(17);
+    // RFC 8956 §3.1: a non-zero offset shifts the pattern, so this rule
+    // names no destination prefix and the exact 2001:db8::/32 deny above
+    // must not match it.
+    let offset_v6 = FlowSpecRule {
+        components: vec![FlowSpecComponent::DestinationPrefix(FlowSpecPrefix::V6(
+            Ipv6PrefixOffset {
+                prefix: Ipv6Prefix::new(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0), 32),
+                offset: 16,
+            },
+        ))],
+    };
     let with_denied_prefix = FlowSpecRule {
         components: vec![FlowSpecComponent::DestinationPrefix(FlowSpecPrefix::V4(
             Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24),
@@ -226,7 +242,7 @@ async fn import_policy_prefix_term_does_not_match_destination_less_flowspec() {
             next_hop: "2001:db8::2".parse().unwrap(),
             link_local_next_hop: None,
             announced: vec![],
-            flowspec_announced: vec![destless_v6.clone()],
+            flowspec_announced: vec![destless_v6.clone(), offset_v6.clone()],
             evpn_announced: vec![],
             bgpls_announced: vec![],
             labeled_announced: vec![],
@@ -240,8 +256,8 @@ async fn import_policy_prefix_term_does_not_match_destination_less_flowspec() {
     session.process_update(v6_update).await;
 
     assert_eq!(
-        session.import_policy_routes_permitted, 2,
-        "both destination-less rules must pass through to the default Permit"
+        session.import_policy_routes_permitted, 3,
+        "destination-less and offset-shifted rules must pass through to the default Permit"
     );
     assert_eq!(
         session.import_policy_routes_denied, 1,
@@ -258,10 +274,10 @@ async fn import_policy_prefix_term_does_not_match_destination_less_flowspec() {
         }
     }
     let rules: Vec<_> = announced.iter().map(|r| r.rule.clone()).collect();
-    assert_eq!(rules, vec![destless_v4, destless_v6]);
+    assert_eq!(rules, vec![destless_v4, destless_v6, offset_v6]);
     assert_eq!(
         announced.iter().map(|r| r.afi).collect::<Vec<_>>(),
-        vec![Afi::Ipv4, Afi::Ipv6]
+        vec![Afi::Ipv4, Afi::Ipv6, Afi::Ipv6]
     );
 }
 

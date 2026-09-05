@@ -251,13 +251,18 @@ impl FlowSpecRule {
     }
 
     /// Extract the destination prefix from the rule, if present.
+    ///
+    /// An IPv6 destination with a non-zero offset yields `None`: RFC 8956
+    /// §3.1 matches the address shifted right by `offset` bits, so the
+    /// component names no routable prefix, and RFC 8956 §5 counts only an
+    /// offset-0 destination prefix toward validation item (a).
     #[must_use]
     pub fn destination_prefix(&self) -> Option<crate::nlri::Prefix> {
         self.components.iter().find_map(|c| match c {
             FlowSpecComponent::DestinationPrefix(FlowSpecPrefix::V4(p)) => {
                 Some(crate::nlri::Prefix::V4(*p))
             }
-            FlowSpecComponent::DestinationPrefix(FlowSpecPrefix::V6(p)) => {
+            FlowSpecComponent::DestinationPrefix(FlowSpecPrefix::V6(p)) if p.offset == 0 => {
                 Some(crate::nlri::Prefix::V6(p.prefix))
             }
             _ => None,
@@ -1778,6 +1783,49 @@ mod tests {
             }])],
         };
         assert!(rule.destination_prefix().is_none());
+    }
+
+    fn ipv6_destination_rule(offset: u8) -> FlowSpecRule {
+        FlowSpecRule {
+            components: vec![FlowSpecComponent::DestinationPrefix(FlowSpecPrefix::V6(
+                Ipv6PrefixOffset {
+                    prefix: Ipv6Prefix::new(
+                        std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0),
+                        32,
+                    ),
+                    offset,
+                },
+            ))],
+        }
+    }
+
+    #[test]
+    fn ipv6_destination_prefix_offset_zero_extracts() {
+        let prefix = ipv6_destination_rule(0).destination_prefix().unwrap();
+        let crate::nlri::Prefix::V6(p) = prefix else {
+            panic!("expected V6 prefix");
+        };
+        assert_eq!(
+            p.addr,
+            std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0)
+        );
+        assert_eq!(p.len, 32);
+    }
+
+    /// RFC 8956 §3.1: with a non-zero offset the pattern is the address
+    /// shifted right by `offset` bits, so the component names no routable
+    /// prefix. The wire form is still valid and round-trips unchanged; only
+    /// the extracted destination prefix is absent.
+    #[test]
+    fn ipv6_destination_prefix_with_offset_is_no_destination_prefix() {
+        let rule = ipv6_destination_rule(16);
+        assert_eq!(rule.destination_prefix(), None);
+
+        let mut buf = Vec::new();
+        try_encode_flowspec_nlri(std::slice::from_ref(&rule), &mut buf, Afi::Ipv6).unwrap();
+        let decoded = decode_flowspec_nlri(&buf, Afi::Ipv6).unwrap();
+        assert_eq!(decoded, vec![rule]);
+        assert_eq!(decoded[0].destination_prefix(), None);
     }
 
     #[test]
