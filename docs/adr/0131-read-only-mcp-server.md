@@ -159,9 +159,6 @@ cannot be confused with the ordinary one.
 
 Two tools from the original scope cannot be built and are not faked:
 
-These are unchanged by the EVPN addition — `ExplainEvpnRoute` is an existing
-`sensitive_read` RPC, so the seventh tool needed no new daemon surface.
-
 - **No BMP RPC exists.** BMP is outbound-only export to configured collectors
   (`crates/bmp`); the proto has no BMP service. A BMP tool would require a new
   read RPC first.
@@ -169,6 +166,10 @@ These are unchanged by the EVPN addition — `ExplainEvpnRoute` is an existing
   client-side from several RPCs plus local file and network probes. Reproducing
   it in an MCP server means reproducing those local probes, which is a separate
   decision — a support bundle is a redaction contract, not a query.
+
+Both stand unchanged after the EVPN addition. `ExplainEvpnRoute` was already a
+`sensitive_read` RPC, so the seventh tool needed no new daemon surface — which
+is exactly why it could be added and the two above still cannot.
 
 ### Read-only by two independent controls
 
@@ -250,6 +251,16 @@ policy named in the rung's detail. The same query before the policy change
 returned `"advertise"` with a nine-rung all-pass ladder ending at
 `adj_rib_out`. That is the product claim, demonstrated rather than asserted.
 
+`rbgp_explain_evpn_route` was exercised against an injected Type 2 route on the
+same lab: the selection story came back with `candidate_count: 1` and installed
+best agreeing with fresh selection, and the export half returned a real
+one-rung ladder stopping at the `family` gate (`family_not_sendable`,
+`"decision": "unsupported_family"`) because the lab peer negotiated IPv4
+unicast only. Both `received_note` branches were exercised, including the one
+that matters: an Established peer that had never sent the key produced the full
+disclaimer rather than an empty field an agent could read as "the peer never
+advertised it".
+
 The read-only property is mechanical. "A write RPC cannot leak into the tool
 surface" is a failing test, not a promise in a README, and it is checked
 against the same table the daemon authorizes from.
@@ -286,9 +297,11 @@ remaining explain surfaces (`rbgp policy stats`, `rbgp doctor`, RPKI validation)
 are unaddressed, and whether they belong in an MCP tool list at all is a
 question this ADR does not answer.
 
-`rbgp_explain_evpn_route` is the only tool without live evidence. Its unit
-coverage (selector mapping including the MAC-only and MAX_ET forms, both note
-functions, the shared gate-ladder numbering) and the inventory contract hold,
-but no captured transcript exercises it against a running daemon: reaching a
-real EVPN route means an established EVPN session with a carried route, which
-is a lab this slice deliberately does not build.
+Two branches of the EVPN tool have unit coverage but no live capture, and both
+are conditions a two-node lab does not produce on demand. `selection_deferred =
+true` needs a real deferral, so the `selection_note` hazard text has never been
+emitted by a running daemon. And no EVPN route was ever *received* from a peer
+in the lab — `examples/peer-loop` negotiates IPv4 unicast only — so `received`
+was null in every capture and the populated-source branch is untested against
+live data. The absent-source branch, which is the one that misleads, was
+exercised live.

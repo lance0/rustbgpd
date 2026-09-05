@@ -156,8 +156,8 @@ MAC:
 ### Results an agent must not over-read
 
 Empty is not the same as absent, and absent is not the same as denied. Four
-fields carry an explicit note so the distinction does not depend on a model
-inferring it:
+results say which case they are in, so the distinction does not depend on a
+model inferring it:
 
 - `rbgp_list_rejected` returns `retention_enabled` and a `retention_note`. When
   retention is off, an empty list is a configuration fact, not "nothing was
