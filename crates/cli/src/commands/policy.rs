@@ -1345,8 +1345,9 @@ pub const EXPLAIN_EXPORT_PATH_ID_ERROR: &str = "--path-id applies to --direction
 /// ([`explain_import`]); `export` is the read-only export dry run
 /// behind `rib --prefix <cidr> advertised <peer> --explain`
 /// ([`super::rib::explain_advertised`]) for the unicast, unlabeled,
-/// best-source case. The CLI rejects `--path-id` with `export` before
-/// dialing the daemon; the check here keeps this entry point honest for
+/// best-source case. The CLI's `value_parser` and `validate_local_command`
+/// refuse an unknown direction and `--path-id` with `export` before
+/// dialing the daemon; the checks here keep this entry point honest for
 /// any other caller.
 pub async fn explain(
     connection: Connection,
@@ -1356,14 +1357,21 @@ pub async fn explain(
     direction: &str,
     json: bool,
 ) -> Result<(), CliError> {
-    if direction != "export" {
-        return explain_import(connection, neighbor, prefix, path_id, json).await;
+    match direction {
+        "import" => explain_import(connection, neighbor, prefix, path_id, json).await,
+        "export" if path_id.is_some() => {
+            Err(CliError::Argument(EXPLAIN_EXPORT_PATH_ID_ERROR.into()))
+        }
+        "export" => {
+            super::rib::explain_advertised(
+                connection, neighbor, prefix, None, false, None, None, json,
+            )
+            .await
+        }
+        other => Err(CliError::Argument(format!(
+            "unknown explain direction {other:?}; expected import or export"
+        ))),
     }
-    if path_id.is_some() {
-        return Err(CliError::Argument(EXPLAIN_EXPORT_PATH_ID_ERROR.into()));
-    }
-    super::rib::explain_advertised(connection, neighbor, prefix, None, false, None, None, json)
-        .await
 }
 
 pub async fn explain_import(
@@ -2491,6 +2499,22 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, CliError::Argument(_)), "{err}");
         assert_eq!(err.to_string(), EXPLAIN_EXPORT_PATH_ID_ERROR);
+        assert!(server.state.last_explain_advertised.lock().await.is_none());
+        assert!(server.state.last_explain_import.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn explain_rejects_unknown_direction_before_any_rpc() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+        let err = explain(connection, "192.0.2.1", "192.0.2.0/24", None, "both", false)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CliError::Argument(_)), "{err}");
+        assert_eq!(
+            err.to_string(),
+            "unknown explain direction \"both\"; expected import or export"
+        );
         assert!(server.state.last_explain_advertised.lock().await.is_none());
         assert!(server.state.last_explain_import.lock().await.is_none());
     }
