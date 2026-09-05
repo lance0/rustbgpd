@@ -2917,8 +2917,8 @@ mod tests {
     use clap::CommandFactory;
 
     /// `asn:value` as the RFC 1997 32-bit community.
-    fn community(asn: u32, value: u32) -> u32 {
-        (asn << 16) | value
+    fn community(asn: u16, value: u16) -> u32 {
+        (u32::from(asn) << 16) | u32::from(value)
     }
 
     fn token_file(name: &str, contents: &str) -> PathBuf {
