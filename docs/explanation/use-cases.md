@@ -602,7 +602,9 @@ reflector that distributes EVPN routes (MAC advertisements, multicast
 memberships, IP prefixes) between VTEPs. The VTEPs themselves (SONiC or
 FRR leaves) handle local MAC learning, DF election, and VXLAN encap. You
 want a control plane with an API and structured observability. Published
-EVPN scale evidence is the three-peer M33 workload; it does not establish
+EVPN scale evidence includes the three-peer M33 workload and a
+[synthetic fanout baseline](../perf/evpn-fanout-2026-09-05.md) with hundreds of
+receivers; it does not establish
 capacity for thousands of VTEPs. See the
 [EVPN benchmark receipt](../benchmarks.md#evpn-rr-scale-m33).
 

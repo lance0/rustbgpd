@@ -1715,6 +1715,14 @@ Historical progression of these figures across releases is in [Optimization
 History (end-to-end, bgperf2 2p/100k)](#optimization-history-end-to-end-bgperf2-2p100k)
 above.
 
+## EVPN receiver fanout
+
+The [September 2026 fanout baseline](perf/evpn-fanout-2026-09-05.md) measures
+8–480 receiving peers with 10,000 Type 2 routes and a separate churn phase.
+It reports repeated convergence, daemon CPU, and RSS measurements with raw
+receiver evidence. This is a synthetic reflector workload; it does not
+establish thousands of VTEPs or kernel dataplane scale.
+
 ## EVPN RR Scale (M33)
 
 > **Scope note:** the M33 numbers in this section are

@@ -95,6 +95,11 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     churn_duration_sec: u64,
 
+    /// Wait after initial injection before starting churn. Allows receivers
+    /// to finish their initial table before a separately measured churn phase.
+    #[arg(long, default_value_t = 0)]
+    churn_delay_sec: u64,
+
     /// Churn rate in routes/sec.
     #[arg(long, default_value_t = 1000)]
     churn_rate: u32,
@@ -202,6 +207,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     if args.churn_duration_sec > 0 {
+        tokio::time::sleep(Duration::from_secs(args.churn_delay_sec)).await;
         tracing::info!(
             duration_sec = args.churn_duration_sec,
             rate = args.churn_rate,
@@ -537,6 +543,7 @@ mod tests {
             vni: 100,
             ethernet_tag: 0,
             churn_duration_sec: 0,
+            churn_delay_sec: 0,
             churn_rate: 1_000,
             linger_sec: 30,
             hold_time: 180,
