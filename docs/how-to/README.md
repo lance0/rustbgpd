@@ -17,5 +17,6 @@ Follow a procedure for a specific task.
 - [Kernel dataplane runner](kernel-dataplane-runner.md) — Run the privileged Linux dataplane checks.
 - [Fuzzing](fuzzing.md) — Build and run the parser fuzz targets.
 - [Add a configuration field](config-knob-contributor-guide.md) — Cover validation, reload, persistence, and documentation.
+- [Answer route questions from an AI agent](mcp-server.md) — Expose the explain surfaces to an MCP host, read-only.
 
 For complete deployment recipes, browse the [scenario cookbook](../cookbook/README.md).
