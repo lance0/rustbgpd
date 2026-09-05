@@ -579,9 +579,13 @@ controller-driven injection for Type 2 / Type 3. What remains:
   overlay-index testing, is exposed in the injection RPCs. Type 1 / Type 4
   multi-homing route injection is not exposed; native daemon Type 1/4
   origination exists via `[[ethernet_segments]]`.
-- **RFC 9251 Route Types 6-8** (IGMP multicast), **RFC 9572 Route Types
-  9-11** (BUM segmentation), **RFC 7623 PBB-EVPN**, **MPLS encap**,
-  **BGP Add-Path (RFC 7911) for L2VPN EVPN** (Phase 5).
+- **RFC 9251 Route Types 6-8** (IGMP/MLD proxy) and **RFC 9572 Route
+  Types 9-11** (BUM segmentation) are not decoded or reflected: unknown
+  typed NLRIs are discarded per RFC 7606 §5.4. **RFC 7623 PBB-EVPN**,
+  **MPLS encap**, and **BGP Add-Path (RFC 7911) for L2VPN EVPN** remain
+  outside the implemented service boundary. See the
+  [adjacent standards matrix](../reference/rfc-notes.md#later-evpn-standards-against-the-vxlanlinux-lane)
+  for DCI and SRv6 attribute-preservation scope.
 
 ---
 

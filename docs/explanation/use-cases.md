@@ -601,18 +601,19 @@ cluster, multi-tenant DC, container overlay — and you need an iBGP route
 reflector that distributes EVPN routes (MAC advertisements, multicast
 memberships, IP prefixes) between VTEPs. The VTEPs themselves (SONiC or
 FRR leaves) handle local MAC learning, DF election, and VXLAN encap. You
-want a control plane that's API-first (no vtysh scraping), scales to
-thousands of VTEPs, and gives you structured observability.
+want a control plane with an API and structured observability. Published
+EVPN scale evidence is the three-peer M33 workload; it does not establish
+capacity for thousands of VTEPs. See the
+[EVPN benchmark receipt](../benchmarks.md#evpn-rr-scale-m33).
 
-**What rustbgpd does for you (Phase 1 RR bundle — full RFC 7432 Type 1-5
-reflection through controller injection; see
-[docs/project/evpn-enablement.md](../project/evpn-enablement.md), ADR-0050):**
+**EVPN route-reflector behavior** (see the
+[EVPN enablement plan](../project/evpn-enablement.md) and ADR-0050):
 
-- **RFC 7432 route reflection for all 5 route types** — EAD per-ES,
+- **EVPN Type 1–5 route reflection (RFC 7432 and RFC 9136)** — EAD per-ES,
   EAD per-EVI, MAC/IP, IMET, Ethernet Segment, IP Prefix (RFC 9136) —
-  reflected between VTEPs per RFC 4456 with full tie-break ordering
-  (stale → ORIGIN → CLUSTER_LIST length → ORIGINATOR_ID) and
-  source-peer split horizon.
+  reflected between VTEPs per RFC 4456 with the
+  [EVPN best-path ordering](../reference/rfc-notes.md)
+  and source-peer split horizon.
 - **MAC Mobility handling** — Type 2 best-path honors the MAC Mobility
   sequence number and the sticky flag per RFC 7432 §15.1, so a MAC
   move converges deterministically and sticky MACs aren't displaced.
@@ -644,13 +645,21 @@ reflection through controller injection; see
   delete-mac-ip / delete-imet / delete-ip-prefix`.
 - **gRPC observability** — `ListEvpnRoutes(route_type, peer, rd)` for
   filtered EVPN RIB queries; Prometheus metrics per peer include
-  `adj_rib_out_prefixes{family="evpn"}`. Max-prefix accounting counts
+  `bgp_rib_adj_out_prefixes{afi_safi="evpn"}`. Max-prefix accounting counts
   EVPN keys alongside unicast prefixes.
 - **RT-based policy** — existing `match_community` against Route Target
   extended communities filters EVPN routes the same way unicast RT
   matching works elsewhere. Type 5 IP-Prefix routes surface their
   prefix in the policy `RouteContext` so prefix-based clauses work
   on Type 5 too.
+
+The reflector retains eligible routes even when their RTs match no local
+VNI or VRF, and preserves the VTEP next hop on iBGP and eBGP export unless
+export policy names a replacement address. These defaults need no retention
+or next-hop-unchanged knobs. Policy and normal route selection still apply.
+Unsupported typed NLRIs, including RFC 9251 Types 6–8, are discarded rather
+than reflected; see the
+[adjacent standards matrix](../reference/rfc-notes.md#later-evpn-standards-against-the-vxlanlinux-lane).
 
 **What rustbgpd does for VTEP-mode operators:**
 
@@ -668,7 +677,7 @@ reflection through controller injection; see
   downgrades back). SDN controllers can still inject MAC-with-IP
   routes directly via `InjectionService::AddEvpnRoute` (controller injection).
 
-**What rustbgpd doesn't do yet (and which VTEPs handle for you):**
+**VTEP responsibilities and support boundaries:**
 
 - **EVPN multi-homing enforcement** — EVPN multi-homing (ESI, Type-1/Type-4)
   (v0.17.0, ADR-0057) shipped the observation half: Type 4 ES + Type 1 EAD-per-ES +
@@ -709,8 +718,9 @@ reflection through controller injection; see
   tool via `WatchEvents` / `SubscribeFromEvent` (typed `EvpnRouteEvent`
   payloads). BMP route monitoring and MRT `RIB_GENERIC` dumps carry EVPN
   routes as well.
-- Validate policy changes with `rbgp rib --prefix <PREFIX> --explain` before
-  pushing — routable-surface diffs, not CLI scraping.
+- Inspect EVPN routes with `rbgp evpn --route-type 2 --rd 65000:100`.
+  EVPN has no import/export or best-path explain entry point;
+  `rbgp rib --prefix <PREFIX> --explain` applies to unicast routes.
 
 **Example config:** `examples/rr-evpn-fabric/config.toml` — three VTEP
 peers in AS 65000 with `families = ["l2vpn_evpn"]` and

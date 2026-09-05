@@ -806,3 +806,100 @@ fn ebgp_remove_private_as_all_prepends_after_removal() {
         vec![AsPathSegment::AsSequence(vec![100, 65535])]
     );
 }
+
+/// RFC 9252 service TLVs remain opaque on supported EVPN routes. Pin value
+/// preservation through the receive path and normal iBGP/eBGP export.
+#[tokio::test]
+async fn evpn_srv6_prefix_sid_value_survives_receive_and_export() {
+    use rustbgpd_wire::{
+        EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, EvpnRoute, MacAddress, MplsLabel,
+        RouteDistinguisher,
+    };
+    let (mut receiver, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::L2Vpn, Safi::Evpn)];
+    receiver.negotiated = Some(Arc::new(negotiated));
+
+    // RFC 9252 sections 3/3.1: L2 Service TLV (6), reserved byte, SID
+    // Information sub-TLV (1), End.DX2 SID, no optional sub-sub-TLVs.
+    let mut service = vec![6, 0, 25, 0, 1, 0, 21, 0];
+    service.extend("2001:db8:100::1".parse::<Ipv6Addr>().unwrap().octets());
+    service.extend([0, 0, 0x15, 0]);
+    let prefix_sid = PathAttribute::Unknown(RawAttribute {
+        flags: 0xe0,
+        type_code: rustbgpd_wire::constants::attr_type::PREFIX_SID,
+        data: Bytes::from(service),
+    });
+    let route = EvpnRoute::MacIp(EvpnMacIp {
+        rd: RouteDistinguisher([0, 0, 0xfd, 0xe8, 0, 0, 0, 100]),
+        esi: EthernetSegmentIdentifier::ZERO,
+        ethernet_tag: EthernetTagId(0),
+        mac: MacAddress([0x02, 0, 0, 0, 0, 1]),
+        ip: None,
+        label1: MplsLabel::new(0x30), // Implicit NULL without SID transposition.
+        label2: None,
+    });
+    let next_hop: IpAddr = "2001:db8::2".parse().unwrap();
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        prefix_sid.clone(),
+        PathAttribute::MpReachNlri(MpReachNlri {
+            afi: Afi::L2Vpn,
+            safi: Safi::Evpn,
+            next_hop,
+            link_local_next_hop: None,
+            announced: vec![],
+            flowspec_announced: vec![],
+            evpn_announced: vec![route.clone()],
+            bgpls_announced: vec![],
+            labeled_announced: vec![],
+            vpn_announced: vec![],
+            rtc_announced: vec![],
+        }),
+    ];
+    receiver
+        .process_update(UpdateMessage::build(
+            &[],
+            &[],
+            &attrs,
+            true,
+            false,
+            Ipv4UnicastMode::MpReach,
+        ))
+        .await;
+    let RibUpdate::RoutesReceived { evpn_announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected the EVPN announcement to be accepted");
+    };
+    assert_eq!(evpn_announced.len(), 1);
+    assert!(evpn_announced[0].attributes.contains(&prefix_sid));
+
+    for remote_asn in [65001, 65003] {
+        let mut exporter = make_test_session(65001, remote_asn);
+        exporter.negotiated = Some(Arc::new(negotiated_session(remote_asn, false)));
+        let profile = exporter.publish_export_profile();
+        let candidate = profile.prepare_evpn_candidate(&evpn_announced[0]);
+        let update = profile
+            .build_mp_reach(
+                candidate.afi,
+                candidate.safi,
+                candidate.next_hop,
+                None,
+                &candidate.attrs,
+                export::ReachNlri::Evpn(&[candidate.nlri]),
+                Ipv4UnicastMode::MpReach,
+            )
+            .unwrap();
+        let parsed = update.parse(true, false, &[]).unwrap();
+        assert!(
+            parsed.attributes.contains(&prefix_sid),
+            "peer ASN {remote_asn}"
+        );
+        assert!(parsed.attributes.iter().any(|attr| matches!(
+            attr, PathAttribute::MpReachNlri(mp)
+                if mp.evpn_announced == [route.clone()] && mp.next_hop == next_hop
+        )));
+    }
+}
