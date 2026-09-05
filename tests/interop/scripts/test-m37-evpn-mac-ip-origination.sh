@@ -61,12 +61,18 @@ frr_vtysh_strict() {
 # `[2]:[EthTag]:[MAClen]:[MAC]:[IPlen]:[IP]` for MAC+IP. Older
 # diagnostic comments in this tree used an extra field before
 # `[48]`; keep one optional field in the matcher so this smoke is
-# tolerant of both renderings while still requiring the MAC-only
-# line to end at the MAC.
+# tolerant of both renderings.
+#
+# The MAC-only match ends on an optional trailing token rather than an
+# end-of-line anchor: FRR 10.7.1 appends ` RD <rd>` after a MAC-only
+# prefix, so anchoring to end of line stops matching on that release.
+# Do not simplify this to a bare `$` or drop the trailing group — the
+# boundary is what keeps a MAC+IP line (`...[48]:[MAC]:[32]:[IP]`) from
+# satisfying the MAC-only check, which the withdrawal assertions rely on.
 frr_has_mac_only() {
     local mac=${1:?}
     frr_vtysh "show bgp l2vpn evpn route type macip" \
-        | grep -qiE "\[2\]:\[[^]]*\]:(\[[^]]*\]:)?\[48\]:\[$mac\][[:space:]]*$"
+        | grep -qiE "\[2\]:\[[^]]*\]:(\[[^]]*\]:)?\[48\]:\[$mac\]([[:space:]]|$)"
 }
 
 # Returns 0 if FRR sees a MAC+IP Type 2 for `$mac` carrying `$ip`.
@@ -85,7 +91,7 @@ frr_mac_only_absent() {
     local out
     out=$(frr_vtysh_strict "show bgp l2vpn evpn route type macip") || return 1
     ! echo "$out" \
-        | grep -qiE "\[2\]:\[[^]]*\]:(\[[^]]*\]:)?\[48\]:\[$mac\][[:space:]]*$"
+        | grep -qiE "\[2\]:\[[^]]*\]:(\[[^]]*\]:)?\[48\]:\[$mac\]([[:space:]]|$)"
 }
 
 frr_mac_ip_absent() {

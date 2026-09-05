@@ -204,7 +204,7 @@ assert_frr_negotiation_and_eor() {
         and ($n.neighborCapabilities.multiprotocolExtensions.ipv4Unicast.advertisedAndReceived == true)
         and ($n.neighborCapabilities.multiprotocolExtensions.ipv6Unicast.advertisedAndReceived == true)
         and ($n.neighborCapabilities.gracefulRestart == "advertisedAndReceived")
-        and ($n.neighborCapabilities.gracefulRestartRemoteTimerMsecs == 15000)
+        and ($n.neighborCapabilities.gracefulRestartRemoteTimerSec == 15)
         and ($n.neighborCapabilities.longLivedGracefulRestart == "advertisedAndReceived")
         and (($n.neighborCapabilities.addressFamiliesByPeer | keys | sort)
              == (["ipv4Unicast", "ipv6Unicast"] | sort))
@@ -219,6 +219,11 @@ assert_frr_negotiation_and_eor() {
     ' <<<"$neighbor" >/dev/null; then
         ok "FRR proves IPv4/IPv6 MP, GR, LLGR timers, exact 2/1 export, and both-family EoR"
     else
+        # One boolean carries every conjunct above, so a failure on its own says
+        # nothing about which one broke. Emit the neighbor JSON so the next FRR
+        # bump can be diagnosed from this log without re-running the lab.
+        log "FRR neighbor JSON at the failed negotiation and EoR check:"
+        echo "$neighbor"
         fail "FRR dual-stack MP/GR/LLGR timer or EoR contract does not match"
         return 1
     fi

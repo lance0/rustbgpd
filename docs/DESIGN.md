@@ -552,7 +552,7 @@ controller-driven injection for Type 2 / Type 3. What remains:
   Non-DF BUM suppression, ESI-aware Type 2 origination, aliasing
   projection, and receive-side EAD-per-ES mass-withdraw filtering.
   ADR-0059 closes the aliasing-ECMP receive-path data path via
-  FDB nexthop groups (shipped on `main`, M40 hosted smoke validated against FRR EVPN-MH 10.3.1); aliasing-ECMP
+  FDB nexthop groups (shipped on `main`, M40 hosted smoke validated against FRR EVPN-MH 10.7.1); aliasing-ECMP
   hardening (PRs #91 / #92 / #93) followed up with the
   `apply_aliasing_ecmp` per-instance off-switch, periodic
   `RTM_GETNEXTHOP` drift recovery, and homogeneous IPv6 alias

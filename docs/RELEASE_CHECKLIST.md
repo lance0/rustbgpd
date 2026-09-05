@@ -42,7 +42,7 @@ diff actually ran before tagging.
       --security-opt apparmor=unconfined` against `ubuntu-latest`'s
       6.x kernel
 - [ ] **Interop tier** — the PR-gated foundation interop jobs in
-      `.github/workflows/interop.yml` (against FRR 10.3.1 via
+      `.github/workflows/interop.yml` (against FRR 10.7.1 via
       containerlab) are green; that workflow is the authoritative job
       set, so check it rather than re-listing M-numbers here.
 - [ ] **Public docs contract** — `.github/workflows/public-docs-contract.yml`

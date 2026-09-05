@@ -316,7 +316,7 @@ jobs:
 
   m1:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M1 — basic session + UPDATE (FRR 10.3.1)
+    name: M1 — basic session + UPDATE (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -349,7 +349,7 @@ jobs:
 
   m13:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M13 — Policy Engine (FRR 10.3.1, 3-node)
+    name: M13 — Policy Engine (FRR 10.7.1, 3-node)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -382,7 +382,7 @@ jobs:
 
   m80:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M80 — rpol policy parity (ADR-0096, FRR 10.3.1, 4-node)
+    name: M80 — rpol policy parity (ADR-0096, FRR 10.7.1, 4-node)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -421,7 +421,7 @@ jobs:
 
   m15:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M15 — Route Refresh via gRPC SoftResetIn (FRR 10.3.1)
+    name: M15 — Route Refresh via gRPC SoftResetIn (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -454,7 +454,7 @@ jobs:
 
   m10:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M10/M16 — IPv6 MP-BGP + dual-stack LLGR (FRR 10.3.1)
+    name: M10/M16 — IPv6 MP-BGP + dual-stack LLGR (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -494,7 +494,7 @@ jobs:
 
   m14:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M14 — Route Reflector (FRR 10.3.1, 3-node iBGP)
+    name: M14 — Route Reflector (FRR 10.7.1, 3-node iBGP)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -527,7 +527,7 @@ jobs:
 
   m17:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M17/M89 — Add-Path + experimental Paths-Limit (FRR 10.3.1)
+    name: M17/M89 — Add-Path + experimental Paths-Limit (FRR 10.7.1, M89 on 10.3.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -875,7 +875,7 @@ jobs:
 
   m22:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M22 — FlowSpec (FRR 10.3.1)
+    name: M22 — FlowSpec (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -915,7 +915,7 @@ jobs:
 
   m24:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M24 — BMP (FRR 10.3.1, Python receiver)
+    name: M24 — BMP (FRR 10.7.1, Python receiver)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -1305,7 +1305,7 @@ jobs:
 
   m25:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M25 — TCP MD5 + GTSM (FRR 10.3.1)
+    name: M25 — TCP MD5 + GTSM (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -1338,7 +1338,7 @@ jobs:
 
   m29:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M29 — EVPN cap negotiation (FRR 10.3.1)
+    name: M29 — EVPN cap negotiation (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -1382,7 +1382,7 @@ jobs:
 
   m30:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M30 — EVPN Type 2 reflection (FRR 10.3.1, kernel VXLAN)
+    name: M30 — EVPN Type 2 reflection (FRR 10.7.1, kernel VXLAN)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -1422,7 +1422,7 @@ jobs:
 
   m34:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M34 — SIGHUP policy soft-reset (FRR 10.3.1)
+    name: M34 — SIGHUP policy soft-reset (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -1461,7 +1461,7 @@ jobs:
 
   m35:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M35 — RFC 8326 Graceful Shutdown (FRR 10.3.1)
+    name: M35 — RFC 8326 Graceful Shutdown (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -1500,7 +1500,7 @@ jobs:
 
   m35b:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M35b — RFC 8326 GShut FlowSpec (FRR 10.3.1)
+    name: M35b — RFC 8326 GShut FlowSpec (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -1539,7 +1539,7 @@ jobs:
 
   m35c:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M35c — RFC 8326 GShut EVPN (FRR 10.3.1)
+    name: M35c — RFC 8326 GShut EVPN (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -1577,7 +1577,7 @@ jobs:
 
   m41:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M41 — RFC 7999 BLACKHOLE (FRR 10.3.1)
+    name: M41 — RFC 7999 BLACKHOLE (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -1702,7 +1702,7 @@ jobs:
 
   m55:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M55 — ADR-0071 BGP Roles + OTC (FRR 10.3.1)
+    name: M55 — ADR-0071 BGP Roles + OTC (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -1816,7 +1816,7 @@ jobs:
 
   m57:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M57 — Outbound Route Filtering (RFC 5291/5292, FRR 10.3.1)
+    name: M57 — Outbound Route Filtering (RFC 5291/5292, FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -1855,7 +1855,7 @@ jobs:
 
   m63:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M63 — ADR-0078 stalled-RIB hold-timer survival (FRR 10.3.1)
+    name: M63 — ADR-0078 stalled-RIB hold-timer survival (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -1895,7 +1895,7 @@ jobs:
 
   m64:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M64 — IPv6-only peering via disable_ipv4_unicast (FRR 10.3.1)
+    name: M64 — IPv6-only peering via disable_ipv4_unicast (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -1935,7 +1935,7 @@ jobs:
 
   m26_m27_m28_m59_m91:
     needs: [grpcurl_archive, prime_dev_image]
-    name: M26/M27/M28/M59/M91 — cheap protocol interop (FRR 10.3.1)
+    name: M26/M27/M28/M59/M91 — cheap protocol interop (FRR 10.7.1)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

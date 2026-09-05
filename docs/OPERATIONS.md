@@ -3093,7 +3093,7 @@ vtysh -c 'show ip bgp <prefix> json' \
 ```
 
 Interop is validated in M35 (`tests/interop/m35-graceful-shutdown-frr.clab.yml`)
-against FRR 10.3.1 — both legs (FRR → rustbgpd inbound honor +
+against FRR 10.7.1 — both legs (FRR → rustbgpd inbound honor +
 rustbgpd → FRR outbound advertise + clear) end-to-end.
 
 ### Explain best-path selection

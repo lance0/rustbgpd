@@ -684,7 +684,7 @@ Shipped pieces:
    `NHA_FDB`, with members keyed by per-VTEP IP and the group
    keyed by `(VNI, ESI, EthernetTag)`. Receive-path ECMP fans out
    across every observed alias VTEP. M40 hosted smoke
-   validates the end-to-end path against FRR EVPN-MH 10.3.1.
+   validates the end-to-end path against FRR EVPN-MH 10.7.1.
 7. **Mass-withdraw receive-side filter** — every supervisor pass
    snapshots EAD-per-ES routes and drops non-zero-ESI Type 2 routes
    whose `(origin VTEP next-hop, ESI)` is not active. This gives

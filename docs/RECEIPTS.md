@@ -53,32 +53,32 @@ id matches the milestone. Full procedures: [`INTEROP.md`](INTEROP.md).
 
 | Receipt | Proves | Peer stack |
 |---------|--------|------------|
-| M1 | Basic session + UPDATE receive into the RIB | FRR 10.3.1 |
-| M10 | IPv6 dual-stack MP-BGP (MP_REACH_NLRI) | FRR 10.3.1 |
-| M13 | Policy engine: import chains, export deny/MED/prepend (3-node) | FRR 10.3.1 |
-| M14 | Route reflector (RFC 4456): ORIGINATOR_ID, CLUSTER_LIST, reflection | FRR 10.3.1 |
-| M15 | Route Refresh (RFC 2918) via gRPC SoftResetIn | FRR 10.3.1 |
-| M16 | Dual-stack LLGR (RFC 9494): exact IPv4/IPv6 fresh → GR-stale → LLGR-stale → fresh lifecycle, both-family capability/timer/EoR proof, one restart and exact counters | FRR 10.3.1 |
-| M17 | Add-Path (RFC 7911) multi-path send with distinct path ids | FRR 10.3.1 |
-| M22 | FlowSpec inject + distribute + withdraw | FRR 10.3.1 |
+| M1 | Basic session + UPDATE receive into the RIB | FRR 10.7.1 |
+| M10 | IPv6 dual-stack MP-BGP (MP_REACH_NLRI) | FRR 10.7.1 |
+| M13 | Policy engine: import chains, export deny/MED/prepend (3-node) | FRR 10.7.1 |
+| M14 | Route reflector (RFC 4456): ORIGINATOR_ID, CLUSTER_LIST, reflection | FRR 10.7.1 |
+| M15 | Route Refresh (RFC 2918) via gRPC SoftResetIn | FRR 10.7.1 |
+| M16 | Dual-stack LLGR (RFC 9494): exact IPv4/IPv6 fresh → GR-stale → LLGR-stale → fresh lifecycle, both-family capability/timer/EoR proof, one restart and exact counters | FRR 10.7.1 |
+| M17 | Add-Path (RFC 7911) multi-path send with distinct path ids | FRR 10.7.1 |
+| M22 | FlowSpec inject + distribute + withdraw | FRR 10.7.1 |
 | M24 | BMP Initiation, PeerUp, RouteMonitoring ordering | FRR + BMP receiver |
-| M25 | TCP MD5 + GTSM/TTL security, including IPv6 dynamic accepted sockets | FRR 10.3.1 ×3 |
-| M26 | Max-prefix teardown latch + explicit recovery (Cease/1 without Notification GR) | FRR 10.3.1 |
+| M25 | TCP MD5 + GTSM/TTL security, including IPv6 dynamic accepted sockets | FRR 10.7.1 ×3 |
+| M26 | Max-prefix teardown latch + explicit recovery (Cease/1 without Notification GR) | FRR 10.7.1 |
 | M27 / M59 | ASPA via RTR v2: validation states, best-path preference, role-aware downstream verification | FRR + RTR v2 mock |
-| M28 | Dynamic prefix-based neighbors: auto-accept, auto-remove | FRR 10.3.1 |
-| M29 | EVPN RR capability sanity (RFC 7432) + `ListEvpnRoutes` | FRR 10.3.1 |
-| M30 | EVPN Type 2 MAC reflection end-to-end with kernel VXLAN VTEPs | FRR 10.3.1 ×2 |
-| M34 | SIGHUP policy soft-reset auto-fire | FRR 10.3.1 |
-| M35 / M35b / M35c | RFC 8326 Graceful Shutdown: receiver + initiator legs across unicast, FlowSpec, and EVPN | FRR 10.3.1 |
-| M41 | RFC 7999 BLACKHOLE receiver scoping + opt-in kernel FIB discard | FRR 10.3.1 |
+| M28 | Dynamic prefix-based neighbors: auto-accept, auto-remove | FRR 10.7.1 |
+| M29 | EVPN RR capability sanity (RFC 7432) + `ListEvpnRoutes` | FRR 10.7.1 |
+| M30 | EVPN Type 2 MAC reflection end-to-end with kernel VXLAN VTEPs | FRR 10.7.1 ×2 |
+| M34 | SIGHUP policy soft-reset auto-fire | FRR 10.7.1 |
+| M35 / M35b / M35c | RFC 8326 Graceful Shutdown: receiver + initiator legs across unicast, FlowSpec, and EVPN | FRR 10.7.1 |
+| M41 | RFC 7999 BLACKHOLE receiver scoping + opt-in kernel FIB discard | FRR 10.7.1 |
 | M44 | ADR-0064 gRPC tier authorization over native mTLS | grpcurl |
-| M45 | EVPN Type 5 control-plane injection via gRPC (RFC 9136) | FRR 10.3.1 |
+| M45 | EVPN Type 5 control-plane injection via gRPC (RFC 9136) | FRR 10.7.1 |
 | M54 | ADR-0070 gNMI / OpenConfig telemetry + Set over mTLS | gnmic 0.46.0 |
-| M55 | BGP Roles + Only-to-Customer leak prevention (RFC 9234) | FRR 10.3.1 ×5 |
+| M55 | BGP Roles + Only-to-Customer leak prevention (RFC 9234) | FRR 10.7.1 ×5 |
 | M56 | gNMI `Subscribe ON_CHANGE` session-state stream | gnmic + FRR |
-| M57 | Receive-side Address-Prefix ORF (RFC 5291/5292) | FRR 10.3.1 |
-| M63 | ADR-0078 inbound backpressure: hold-timer survival under a stalled RIB | FRR 10.3.1 |
-| M64 | IPv6-only peering (`disable_ipv4_unicast`) | FRR 10.3.1 |
+| M57 | Receive-side Address-Prefix ORF (RFC 5291/5292) | FRR 10.7.1 |
+| M63 | ADR-0078 inbound backpressure: hold-timer survival under a stalled RIB | FRR 10.7.1 |
+| M64 | IPv6-only peering (`disable_ipv4_unicast`) | FRR 10.7.1 |
 | M73 | BGP-LS route reflection: source → RR → sink, attributes verbatim | GoBGP 4.6.0 ×2 |
 | M74 | VPNv4/VPNv6 reflection: shared-RD identity, scoped API/sink views, same-path RFC 4456 attributes, ordered withdrawals, zero dataplane | GoBGP 3.37.0 ×2 |
 | M75 | RT-Constrain (RFC 4684) VPNv4 reflection filtering, widen/narrow without reset | GoBGP 3.37.0 ×3 |
@@ -86,7 +86,7 @@ id matches the milestone. Full procedures: [`INTEROP.md`](INTEROP.md).
 | M77 | GR/LLGR stale preservation for the RR families (RFC 4724 + RFC 9494); exact 83/0 current-daemon refresh | Checksum-built GoBGP 4.8.0 ×3 |
 | M78 | Multi-cluster ORR + inter-RR Add-Path | GoBGP 4.6.0 ×5 + rustbgpd ×2 |
 | M79 | RFC 8277 labeled-unicast (SAFI 4) reflection + GR | GoBGP 4.6.0 ×2 |
-| M80 | ADR-0096 `.rpol` policy parity vs FRR route-maps (dual-family, asn-set origin-AS + `route.family` predicates), hot-apply under traffic | FRR 10.3.1 ×3 |
+| M80 | ADR-0096 `.rpol` policy parity vs FRR route-maps (dual-family, asn-set origin-AS + `route.family` predicates), hot-apply under traffic | FRR 10.7.1 ×3 |
 | M81 | BMP trio (rib-in, rib-out, loc-rib) + RFC 9972 policy-rejection and RPKI validation-state stats + BMPv4 against three independent decoders | GoBGP ×2 + StayRTR + pmacct + gobmp + tshark |
 | M82 | ADR-0092 EVPN VLAN-Aware Bundle (non-zero Ethernet Tag) reflection: tag as route identity, same MAC under two tags uncollapsed, tag-verbatim NLRIs, tag-scoped withdraw — synthetic leg in CI plus the **first vendor-NOS receipt** (local lab) | GoBGP 3.37.0 ×2 (CI) + Nokia SR Linux 25.10.1 (local) |
 | M83 | RFC 7947 route-server profile, multi-stack: byte-level transparency, a BIRD-only inbound MED-discard boundary with raw-wire/RIB/downstream/metric proof, OTC, per-member views, ROV explain, and the §2.3 path-hiding contrast (single-best / per-client-best / Add-Path, ADR-0101) | BIRD 2.19.2 + GoBGP 4.8.0 + digest-pinned FRR 10.7.0 + StayRTR |
@@ -94,7 +94,7 @@ id matches the milestone. Full procedures: [`INTEROP.md`](INTEROP.md).
 | M92 | Dual-stack route-server differential: exact inventories, wire EoR completeness, and baseline/mutant/restore semantic diff | GoBGP 4.7.0 ×3 + BIRD 2.0.12 |
 | M93 | Exact required-family OPEN 2/7 rejection, dual-stack recovery, and empty-requirement partial-negotiation compatibility | Checksum-built BIRD 2.19.2 |
 | M94 | RFC 6793 legacy ingress reconstruction, semantic loop rejection, exact type 2/17 + type 7/18 egress, withdrawal, and session continuity | ExaBGP 5.0.9 source + independent Python OLD-speaker sink |
-| M95 | ADR-0112 live RFC 8212 policy-presence transitions: Route Refresh qualification, whole-edit rejection with nothing mutated, real refresh convergence in both directions, and GR-stale deferral | FRR 10.3.1 + checksum-built BIRD 2.19.2 (Route Refresh disabled) |
+| M95 | ADR-0112 live RFC 8212 policy-presence transitions: Route Refresh qualification, whole-edit rejection with nothing mutated, real refresh convergence in both directions, and GR-stale deferral | FRR 10.7.1 + checksum-built BIRD 2.19.2 (Route Refresh disabled) |
 | M98 | [IXP Manager Nagios monitoring](INTEROP.md#ixp-manager-v74-manual-configuration-oracle): the pinned v7.4 `birdseye-daemons` and `birdseye-bgp-sessions` generators include the rustbgpd route server (host, service, hostgroup, both client session services with rendered alias names), and the pinned Bird's Eye daemon plugin reports `OK` with `Last Reconfigure` against the live adapter; gated by `ixp-compat.yml` | IXP Manager v7.4.0 + Bird's Eye v2.1.0 plugin + live `birdwatcher-adapter` |
 | M99 | RFC 9072 forced-small extended OPEN plus classic control: host-tshark raw TCP payload, independent retransmission-aware stream reassembly, exact 342-byte/307-capability-octet and 49-byte rustbgpd OPENs, exact type-2 parameter consumption, non-empty common capability inventories, and no NOTIFICATION | Digest-pinned FRR 10.3.1 |
 | M100 | Exact five-attribute by four-receiver Partial-flag matrix: frozen `0xa0` bytes, candidate/survivor snapshots, independent observer reconstruction, accepted MED 100, non-forwarded ORIGINATOR_ID/CLUSTER_LIST, and ordered exact UPDATE `3/4` notification/close/reconnect evidence for every reset | rustbgpd 0.67.0 + BIRD 2.19.2 + OpenBGPD 9.2 + FRR 10.3.1 |
@@ -112,26 +112,26 @@ proved with kernel evidence (routes, FDB rows, nexthop groups, netdev state).
 
 | Receipt | Proves | Peer stack |
 |---------|--------|------------|
-| M36 | EVPN VTEP receive-side Linux FDB programming | FRR 10.3.1 |
-| M37 / M37+IP | EVPN local MAC (+MAC/IP) Type 2/Type 3 origination from kernel observation | FRR 10.3.1 |
+| M36 | EVPN VTEP receive-side Linux FDB programming | FRR 10.7.1 |
+| M37 / M37+IP | EVPN local MAC (+MAC/IP) Type 2/Type 3 origination from kernel observation | FRR 10.7.1 |
 | M38 | EVPN multi-homing DF election + Type 1/4 origination | rustbgpd ×2 |
-| M39 | EVPN symmetric Interface-less IRB (Type 5 / L3VNI) bidirectional | FRR 10.3.1 |
-| M39b | Auto-derived Route Targets cross-vendor (RFC 8365 `AS:VNI`) | FRR 10.3.1 |
+| M39 | EVPN symmetric Interface-less IRB (Type 5 / L3VNI) bidirectional | FRR 10.7.1 |
+| M39b | Auto-derived Route Targets cross-vendor (RFC 8365 `AS:VNI`) | FRR 10.7.1 |
 | M40 | ADR-0059 EVPN aliasing dataplane ECMP via FDB nexthop groups | FRR EVPN-MH |
-| M42 | ADR-0061 opt-in general unicast Linux FIB runtime | FRR 10.3.1 |
+| M42 | ADR-0061 opt-in general unicast Linux FIB runtime | FRR 10.7.1 |
 | M43 | TCP-AO dynamic `/24` queued-child deletion-foundation receipt plus two BIRD modes: uninterrupted SIGHUP add/select/deprecate/delete with a 100 ms route-continuity oracle, and SIGKILL/restart recovery after add-only, selection/deprecation `awaiting_peer`, and delete. Every restart requires BIRD disconnect, a new daemon PID, fresh `1/1` / `idle`, exact MKT inventory, mandatory TCP-AO, route/session recovery, and phase-correct Current/RNext; selection explicitly proves authenticated `degraded` `2/13` before the peer moves, then `healthy` `3/13` (probed; skips only if the runner kernel lacks TCP-AO) | BIRD 3.3.2 |
-| M47 / M48 | ADR-0063 runtime EVPN tenant teardown (control plane / kernel L3 datapath) | FRR 10.3.1 |
-| M69 | RFC 9785 Highest-Preference DF election, cross-vendor | FRR 10.3.1 |
-| M50 / M52 | ADR-0066 unicast multipath ECMP FIB install + multipath-relax | FRR 10.3.1 ×2 |
-| M51 | ADR-0067 single-hop BFD + RFC 5882 BGP coupling | FRR 10.3.1 |
-| M108 | RFC 5883 multihop BFD + RFC 5882 BGP coupling over routed loopbacks | FRR 10.3.1 |
-| M53 | ADR-0069 BGP unnumbered / IPv6 link-local peering + scoped FIB | FRR 10.3.1 ×2 |
-| M58 | ADR-0061 runtime `[[fib_tables]]` CRUD over gRPC/CLI | FRR 10.3.1 |
-| M60 / M61 / M62 | Kill-and-restart reaping/re-adoption for FDB and EVPN L3 marker sweeps; M62 additionally pins exact durable BLACKHOLE receipt authority and preservation of an unreceipted marker row | FRR 10.3.1 |
+| M47 / M48 | ADR-0063 runtime EVPN tenant teardown (control plane / kernel L3 datapath) | FRR 10.7.1 |
+| M69 | RFC 9785 Highest-Preference DF election, cross-vendor | FRR 10.7.1 |
+| M50 / M52 | ADR-0066 unicast multipath ECMP FIB install + multipath-relax | FRR 10.7.1 ×2 |
+| M51 | ADR-0067 single-hop BFD + RFC 5882 BGP coupling | FRR 10.7.1 |
+| M108 | RFC 5883 multihop BFD + RFC 5882 BGP coupling over routed loopbacks | FRR 10.7.1 |
+| M53 | ADR-0069 BGP unnumbered / IPv6 link-local peering + scoped FIB | FRR 10.7.1 ×2 |
+| M58 | ADR-0061 runtime `[[fib_tables]]` CRUD over gRPC/CLI | FRR 10.7.1 |
+| M60 / M61 / M62 | Kill-and-restart reaping/re-adoption for FDB and EVPN L3 marker sweeps; M62 additionally pins exact durable BLACKHOLE receipt authority and preservation of an unreceipted marker row | FRR 10.7.1 |
 | M65 | ADR-0083 single-active failover blackout measurement | GoBGP 3.x ×2 |
 | M66 / M67 | ADR-0084/0085 Ethernet Segment drain: operator handover and link-driven failover | rustbgpd ×3 |
-| M68 | ADR-0087 native GW-IP overlay-index Type 5, FRR consume-side recursion | FRR 10.3.1 |
-| M70 | ADR-0089 VLAN-aware bridge FDB attribution | FRR 10.3.1 |
+| M68 | ADR-0087 native GW-IP overlay-index Type 5, FRR consume-side recursion | FRR 10.7.1 |
+| M70 | ADR-0089 VLAN-aware bridge FDB attribution | FRR 10.7.1 |
 | M71 / M72 | RFC 9136 §4.3 ESI overlay-index Type 5 receive: single-active and all-active recursion | GoBGP 3.x |
 | netns selectors | Docker-harness privileged selectors (`fdb_nhg`, `fib_runtime`, `bfd_runtime`, `svd_fdb_vni`, managed-netdev lifecycle, L3 multipath/writer, …) | Linux kernel |
 
@@ -143,23 +143,23 @@ covered by later CI receipts). Procedures and results:
 
 | Receipt | Proves | Peer stack |
 |---------|--------|------------|
-| M0 | Session establishment, restart/reset recovery, 30-min soak | FRR 10.3.1 and BIRD 2.0.12 |
-| M2 | Best-path selection + `ListBestRoutes` pagination | FRR 10.3.1 |
-| M3 | Redistribution, split horizon, injection, withdrawal propagation | FRR 10.3.1 ×2 |
-| M4 | Route-server mode: 10-peer static + dynamic neighbor management | FRR 10.3.1 |
-| M11 | Graceful Restart (RFC 4724): stale marking, EoR, timer sweep | FRR 10.3.1 |
-| M12 | Extended Communities (RFC 4360) receive + inject | FRR 10.3.1 |
-| M18 | Extended Next-Hop (RFC 8950): IPv6 next hop for IPv4 NLRI | FRR 10.3.1 |
-| M20 | Private AS removal (remove/all/replace) | FRR 10.3.1 |
+| M0 | Session establishment, restart/reset recovery, 30-min soak | FRR 10.7.1 and BIRD 2.0.12 |
+| M2 | Best-path selection + `ListBestRoutes` pagination | FRR 10.7.1 |
+| M3 | Redistribution, split horizon, injection, withdrawal propagation | FRR 10.7.1 ×2 |
+| M4 | Route-server mode: 10-peer static + dynamic neighbor management | FRR 10.7.1 |
+| M11 | Graceful Restart (RFC 4724): stale marking, EoR, timer sweep | FRR 10.7.1 |
+| M12 | Extended Communities (RFC 4360) receive + inject | FRR 10.7.1 |
+| M18 | Extended Next-Hop (RFC 8950): IPv6 next hop for IPv4 NLRI | FRR 10.7.1 |
+| M20 | Private AS removal (remove/all/replace) | FRR 10.7.1 |
 | M21 | RPKI origin validation via RTR | FRR + StayRTR |
 | M23 | Bidirectional route exchange with GoBGP | GoBGP 4.3.0 |
-| M30b | EVPN Type 5 IP-prefix origination (RFC 9136) with kernel VRF/L3VNI | FRR 10.3.1 |
-| M31 | EVPN MAC mobility + sticky preservation (RFC 7432 §15.1/§7.7) | FRR 10.3.1 ×3 |
-| M32 / M32b | EVPN multi-homing Type 1 EAD + Type 4 ES reflection (kernel bond / synthetic ESI) | FRR 10.3.1 ×3 |
+| M30b | EVPN Type 5 IP-prefix origination (RFC 9136) with kernel VRF/L3VNI | FRR 10.7.1 |
+| M31 | EVPN MAC mobility + sticky preservation (RFC 7432 §15.1/§7.7) | FRR 10.7.1 ×3 |
+| M32 / M32b | EVPN multi-homing Type 1 EAD + Type 4 ES reflection (kernel bond / synthetic ESI) | FRR 10.7.1 ×3 |
 | M33 | EVPN RR scale: 50k Type 2 routes + 60 s of 1000/s churn | in-tree `bench/evpn-load` |
 | M90 | ADR-0110 filtering differential: one arouteserver site produces BIRD and rustbgpd policy, with exact verdict/explain parity over 11 announcements and a red-producing policy mutation | BIRD 2.0.12 + GoBGP 3.37.0 ×3 + arouteserver 1.23.2 |
-| M96 | [IXP Manager local activation](INTEROP.md#ixp-manager-v74-manual-configuration-oracle): the pinned v7.4 Foil capture through the real renderer/strict checker, then atomic initial, no-op, hot-reload, and pre-effect spawn-failure restoration with exact prior bytes, unchanged daemon PID, and session continuity | FRR 10.3.1 (TCP MD5) + pinned IXP Manager v7.4.0 capture |
-| M97 | [IXP Manager authenticated lifecycle](INTEROP.md#ixp-manager-v74-manual-configuration-oracle): pinned v7.4 API lock/fetch/callback state for two same-host IPv4/IPv6 handles with distinct PIDs, state/UDS endpoints, and TCP/179 listeners, plus a shared durable host fence, paired competing-423 behavior, sequential callbacks, and cross-handle failure containment | FRR 10.3.1 (TCP MD5) + IXP Manager v7.4.0 + MySQL 8.4 |
+| M96 | [IXP Manager local activation](INTEROP.md#ixp-manager-v74-manual-configuration-oracle): the pinned v7.4 Foil capture through the real renderer/strict checker, then atomic initial, no-op, hot-reload, and pre-effect spawn-failure restoration with exact prior bytes, unchanged daemon PID, and session continuity | FRR 10.7.1 (TCP MD5) + pinned IXP Manager v7.4.0 capture |
+| M97 | [IXP Manager authenticated lifecycle](INTEROP.md#ixp-manager-v74-manual-configuration-oracle): pinned v7.4 API lock/fetch/callback state for two same-host IPv4/IPv6 handles with distinct PIDs, state/UDS endpoints, and TCP/179 listeners, plus a shared durable host fence, paired competing-423 behavior, sequential callbacks, and cross-handle failure containment | FRR 10.7.1 (TCP MD5) + IXP Manager v7.4.0 + MySQL 8.4 |
 | [M105](../tests/interop/m105-live-as-set/README.md) | Local IPv4 receiver observation repeated on 2026-08-29 from one raw route-server client with every AS_SET policy default unchanged: the ordinary AS_SEQUENCE control reached all five receivers; rustbgpd, BIRD, and OpenBGPD did not install the two-member AS_SET route; GoBGP installed it in accepted Adj-RIB-In and FRR installed it. Every session and process survived, and withdrawal cleared both routes. Absence is not classified as policy rejection versus treat-as-withdraw, and the matrix is not a conformance ranking | rustbgpd 0.67.0 + BIRD 3.3.2 + OpenBGPD 9.2 + GoBGP 4.8.0 + FRR 10.3.1 |
 
 ## Performance and scale receipts

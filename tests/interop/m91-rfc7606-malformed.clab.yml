@@ -37,7 +37,7 @@ topology:
 
     raw-peer:
       kind: linux
-      image: quay.io/frrouting/frr:10.3.1
+      image: quay.io/frrouting/frr:10.7.1
       cmd: sleep infinity
       binds:
         - ./scripts/m91_rfc7606_raw_bgp.py:/usr/local/bin/m91_rfc7606_raw_bgp.py:ro
