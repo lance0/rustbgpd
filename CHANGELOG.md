@@ -633,9 +633,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tiebreak is unchanged.
 
 - Correct MRT Add-Path entry ordering to Peer Index, Originated Time, then
-  Path Identifier, and use subtype 10 for IPv6 unicast. Snapshot encoders
-  and the reader now follow RFC 8050; subtype 9 is treated as unsupported IPv4
-  multicast. Legacy non-Add-Path encoding is unchanged.
+  Path Identifier, and use subtype 10 for IPv6 unicast. Snapshot encoders,
+  the reader, and the CLI MRT adapter now follow RFC 8050; subtype 9 is
+  treated as unsupported IPv4 multicast. The CLI adapter also rejects
+  trailing bytes after a RIB record's declared entries without emitting
+  a partial snapshot. Legacy non-Add-Path encoding is unchanged.
 
 ### Documentation
 
