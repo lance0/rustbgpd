@@ -1435,12 +1435,19 @@ carries inactive (absent), unlimited (zero), or finite.
   prefixes in the per-peer prefix counter, so `max_prefixes` triggers
   Cease/1 (Maximum Number of Prefixes Reached) when a misbehaving
   VTEP floods Type 2 routes.
-- **Policy context:** EVPN routes pass through the policy engine with
-  attribute / community / RT visibility (placeholder `0.0.0.0/0`
-  prefix matches FlowSpec's pattern); Type 5 IP-Prefix routes
-  additionally surface their actual prefix in `RouteContext`, so a
-  prefix-based clause filters Type 5 routes by the IP prefix carried
-  in the NLRI.
+- **Policy context:** EVPN routes expose attributes, communities, RTs,
+  and route type to import and export policy. Type 5 supplies its actual
+  IP prefix in `RouteContext`; Types 1–4 use `prefix: None`, so prefix
+  predicates do not match them, including a `0.0.0.0/0` prefix-list clause.
+  Use RT, community, or EVPN route-type predicates for those routes.
+- **Route-target retention:** the reflector does not require a received
+  route's RTs to match a local VNI or VRF. A reflector with no local EVPN
+  instances retains eligible routes and reflects selected paths, subject
+  to policy and normal export checks. RT matching for local dataplane
+  import is a separate operation; no `retain route-target all` knob is needed.
+- **Next-hop preservation:** EVPN export preserves the VTEP next hop by
+  default, including over eBGP. An export policy specifying a next-hop
+  address can change it; no next-hop-unchanged knob is required.
 - **GR / LLGR stale handling** (RFC 4724 + RFC 9494, Gate 2): EVPN
   routes participate in the stale-route pipeline alongside unicast
   and FlowSpec. On `PeerGracefulRestart`, `mark_stale_evpn((L2Vpn,
@@ -1682,12 +1689,21 @@ carries inactive (absent), unlimited (zero), or finite.
   carries 4 reserved bytes followed by a 2-byte Tunnel Type. RFC 9012
   §4.1 (Figure 14) keeps the RFC 5512 layout unchanged — Reserved
   (2 octets), Reserved (2 octets), Tunnel Type (2 octets) — so the
-  emitted form is the current standard, not a compatibility deviation.
+  emitted form is the current standard. See
+  [RFC 9012 §4.1](https://www.rfc-editor.org/rfc/rfc9012.html#section-4.1).
+  The contrary layout description in the dated
+  [ADR-0050](../adr/0050-evpn-route-reflector.md#6-typed-extended-community-accessors)
+  is a historical documentation error; the reserved-plus-tunnel-type wire
+  encoding did not change.
 - Tunnel Type values (IANA BGP Tunnel Encapsulation Attribute Tunnel
   Types): 8 = VXLAN, 9 = NVGRE, 11 = MPLS in GRE.
   `as_bgp_encapsulation()` returns the u16 tunnel type.
 - rustbgpd does not yet **negotiate** a preferred encap. VXLAN is
   assumed; non-VXLAN values are passed through untouched.
+- **Automatic RT derivation:** L2VNI auto-RT follows RFC 8365 §5.1.2.1;
+  L3VNI auto-RT uses AS:VNI. Both reject ASNs above 65535 with a typed
+  error. A four-octet-AS RT has only a two-octet local administrator and
+  cannot encode an arbitrary three-octet VNI; configure explicit RTs instead.
 
 ---
 
@@ -1736,12 +1752,15 @@ carries inactive (absent), unlimited (zero), or finite.
 
 ## Later EVPN standards against the VXLAN/Linux lane
 
-EVPN RFCs published after the lane's base set that bear on the VXLAN/Linux
-VTEP lane. Each row records the implementation status and why the standard
-matters to this lane.
+These adjacent EVPN standards affect the reflector, interconnect, or
+VXLAN/Linux VTEP roles. Each row separates attribute preservation from
+implemented service procedures.
 
 | RFC | Status | Relevance |
 |-----|--------|-----------|
+| [RFC 9014](https://www.rfc-editor.org/rfc/rfc9014.html) | Not implemented | EVPN overlay interconnect gateway procedures, including overlay-to-MPLS interworking and Interconnect Ethernet Segments, are not implemented. Reflecting supported EVPN routes does not provide a DCI gateway. |
+| [RFC 9252](https://www.rfc-editor.org/rfc/rfc9252.html) | Partial: opaque attribute preservation | On supported EVPN route types, the BGP Prefix-SID attribute (type 40), including SRv6 L2/L3 Service TLV payloads, survives receive and export with its value bytes intact. The [transport preservation test](../../crates/transport/src/session/tests/outbound_attrs.rs) covers a Type 2 route over iBGP and eBGP. Outer Prefix-SID TLV framing is validated; SRv6 nested TLV validation, SID interpretation, origination, and forwarding are not implemented. This is not full RFC 9252 service support. |
+| [RFC 9251](https://www.rfc-editor.org/rfc/rfc9251.html#section-9) | Not implemented, including reflection | Route Types 6–8 (SMET, Multicast Membership Report Synch, Multicast Leave Synch) are unrecognized and discarded on receive; they do not enter the RIB or propagate to other VTEPs. This follows [RFC 7606 §5.4](https://www.rfc-editor.org/rfc/rfc7606.html#section-5.4) typed-NLRI handling. There is no opaque route-type reflection or IGMP/MLD proxy implementation. |
 | RFC 9746 (Mar 2025; updates RFC 7432, RFC 8365) | Not implemented | Split Horizon Type (SHT) bits in the ESI Label extended community. §2.2: an egress NVE MUST NOT use an SHT other than 00 with VXLAN (tunnel type 8), so local bias is the only multi-homing split-horizon mechanism for VXLAN. This is the normative backing for the Linux softswitch local-bias limitation in [docs/reference/limitations.md](limitations.md); the ESI Label decoder reads only the single-active flag. |
 | RFC 9785 (Jun 2025; updates RFC 8584) | Partial | Highest-/Lowest-Preference DF election is implemented (`df_algorithm`), under the same unanimous-or-default negotiation restated in §4.1. The Don't-Preempt (DP) bit is originated (`df_dont_preempt`) and parsed but is not an election input, so stateful non-revertive election is not implemented. |
 | RFC 9722 (May 2025; updates RFC 8584) | Not implemented | Fast DF recovery: a Service Carving Time extended community on the Type 4 route synchronizes the DF election timer across the segment's PEs so they carve at the same instant. rustbgpd runs each election on its own timer. |

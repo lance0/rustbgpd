@@ -152,8 +152,8 @@ impl RibManager {
     /// uses the same `should_suppress_ibgp_inner` helper with a synthetic
     /// placeholder `Route` carrying the EVPN route's peer metadata.
     ///
-    /// Phase 1: policy uses a placeholder `0.0.0.0/0` prefix; RT / community
-    /// matching works through the existing `RouteContext` fields.
+    /// Policy sees the actual IP prefix for Type 5 and `None` for Types 1–4;
+    /// RT / community matching uses the existing `RouteContext` fields.
     #[expect(
         clippy::fn_params_excessive_bools,
         clippy::too_many_arguments,
