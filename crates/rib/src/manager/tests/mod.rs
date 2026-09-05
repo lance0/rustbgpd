@@ -29,6 +29,53 @@ fn bgpls_sendable() -> Vec<(Afi, Safi)> {
     vec![(Afi::BgpLs, Safi::BgpLs)]
 }
 
+/// Field capture for one tracing event: `str` and `u64` values keep their
+/// own rendering, everything else falls back to `Debug`.
+#[derive(Debug, Default)]
+struct CapturedFields(BTreeMap<String, String>);
+
+impl tracing::field::Visit for CapturedFields {
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        self.0.insert(field.name().to_string(), value.to_string());
+    }
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.0.insert(field.name().to_string(), value.to_string());
+    }
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.0
+            .insert(field.name().to_string(), format!("{value:?}"));
+    }
+}
+
+/// Scoped test subscriber (`tracing::subscriber::with_default`) that records
+/// every event at `level` or more severe into `events`. Sibling tests drive
+/// the same callsites through `manager.run()` on tokio workers with no
+/// subscriber, so warm the callsite under test and call
+/// `tracing::callsite::rebuild_interest_cache()` inside the scope before the
+/// measured call.
+struct CaptureSubscriber {
+    level: tracing::Level,
+    events: Arc<std::sync::Mutex<Vec<CapturedFields>>>,
+}
+
+impl tracing::Subscriber for CaptureSubscriber {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        *metadata.level() <= self.level
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        let mut fields = CapturedFields::default();
+        event.record(&mut fields);
+        self.events.lock().unwrap().push(fields);
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
 /// A chain with one exact-match Deny statement per prefix, default Permit.
 fn deny_prefixes_chain(prefixes: &[Prefix]) -> rustbgpd_policy::PolicyChain {
     rustbgpd_policy::PolicyChain::new(vec![rustbgpd_policy::Policy {

@@ -432,38 +432,6 @@ async fn orf_unknown_when_resets_filter_and_sweeps() {
     handle.await.unwrap();
 }
 
-/// Field capture for one tracing event (see the ASPA/update-group tests for
-/// the same shape).
-#[derive(Debug, Default)]
-struct CapturedFields(std::collections::BTreeMap<String, String>);
-
-impl tracing::field::Visit for CapturedFields {
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        self.0
-            .insert(field.name().to_string(), format!("{value:?}"));
-    }
-}
-
-struct CaptureSubscriber(std::sync::Arc<std::sync::Mutex<Vec<CapturedFields>>>);
-
-impl tracing::Subscriber for CaptureSubscriber {
-    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-        true
-    }
-    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        tracing::span::Id::from_u64(1)
-    }
-    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-    fn event(&self, event: &tracing::Event<'_>) {
-        let mut fields = CapturedFields::default();
-        event.record(&mut fields);
-        self.0.lock().unwrap().push(fields);
-    }
-    fn enter(&self, _: &tracing::span::Id) {}
-    fn exit(&self, _: &tracing::span::Id) {}
-}
-
 /// A manager with `peer` registered for outbound updates and nothing else.
 fn manager_with_outbound_peer(peer: IpAddr) -> (RibManager, mpsc::Receiver<OutboundRouteUpdate>) {
     let (_tx, rx) = mpsc::channel(1);
@@ -485,7 +453,11 @@ async fn orf_unmatchable_entry_is_installed_and_warned() {
     let entry = orf_permit(2, 0, 4, Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8));
     let (mut manager, _out_rx) = manager_with_outbound_peer(peer);
     let captured = StdArc::new(Mutex::new(Vec::new()));
-    tracing::subscriber::with_default(CaptureSubscriber(StdArc::clone(&captured)), || {
+    let subscriber = CaptureSubscriber {
+        level: tracing::Level::WARN,
+        events: StdArc::clone(&captured),
+    };
+    tracing::subscriber::with_default(subscriber, || {
         // Sibling tests drive the same callsite through `manager.run()` on
         // tokio workers with no subscriber; whichever thread registers the
         // callsite first caches its interest process-wide. Warm it on a
