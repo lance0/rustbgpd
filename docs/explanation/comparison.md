@@ -103,6 +103,11 @@ IPv4/IPv6 `Prefix` routes.
     encapsulation, and VPWS/E-Tree remain demand-shaped service-provider
     breadth, not part of the current VXLAN/Linux alpha lane. See
     [evpn-enablement.md](../project/evpn-enablement.md) for the full gate ladder.
+    Route types 6–11 are not reflected: unsupported typed NLRIs are
+    discarded before the RIB under RFC 7606 §5.4. The
+    [per-type discard counter and warnings](../reference/operations.md)
+    expose which peer and route type are affected.
+
 [^evpn-bird]: BIRD [3.3.2](https://bird.nic.cz/doc/bird-3.3.2.html) describes
     its EVPN protocol as "a preliminary release limited to basic handling of
     MAC and IMET EVPN routes"; the same manual lists EAD and ES routes as

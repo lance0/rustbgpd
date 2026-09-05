@@ -1447,6 +1447,35 @@ async fn unsupported_evpn_route_type_is_observed_without_losing_supported_routes
             2.0
         )]
     );
+    let samples = counter_samples(&session.metrics, "bgp_evpn_nlri_discarded_by_type_total");
+    assert_eq!(samples.len(), 1);
+    assert_eq!(samples[0].0["route_type"], "99");
+    assert_eq!(samples[0].0["peer"], session.peer_label);
+    assert!((samples[0].1 - 2.0).abs() < f64::EPSILON);
+
+    // Withdrawals use the same observation path, including both wire bounds.
+    session
+        .process_update(UpdateMessage {
+            withdrawn_routes: Bytes::new(),
+            path_attributes: Bytes::from_static(&[0x80, 15, 9, 0, 25, 70, 0, 0, 99, 0, 255, 0]),
+            nlri: Bytes::new(),
+        })
+        .await;
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert!(
+        (counter_samples(&session.metrics, "bgp_evpn_nlri_discarded_total")[0].1 - 5.0).abs()
+            < f64::EPSILON
+    );
+    let samples = counter_samples(&session.metrics, "bgp_evpn_nlri_discarded_by_type_total");
+    assert_eq!(samples.len(), 3);
+    for (labels, count) in samples {
+        let expected = if labels["route_type"] == "99" {
+            3.0
+        } else {
+            1.0
+        };
+        assert!((count - expected).abs() < f64::EPSILON);
+    }
 }
 
 /// RFC 4724 §2 MP End-of-RIB: an UPDATE whose only content is an empty

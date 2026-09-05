@@ -105,7 +105,12 @@ Known EVPN gaps:
   and for same-family symmetric IRB. The receipts covering it are
   single-homed, so a multi-homed IPv6 underlay is untested rather than
   known unsupported.
-- Route types 6-11, PBB-EVPN, multicast EVPN, MPLS/SRv6 encapsulation,
+- EVPN route types 6–11 are not decoded or reflected. Unsupported typed
+  NLRIs are discarded on receive under RFC 7606 §5.4, including on a
+  reflector; they never enter the RIB. The
+  [per-type discard counter and connection-scoped warnings](operations.md)
+  identify the affected peer and type.
+- PBB-EVPN, multicast EVPN, MPLS/SRv6 encapsulation,
   VPWS, and E-Tree are demand-shaped rather than part of the current
   VXLAN/Linux lane.
 

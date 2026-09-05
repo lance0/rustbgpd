@@ -485,6 +485,8 @@ pub(crate) struct PeerSession {
     /// Accepted EVPN routes from this peer (RFC 7432 keys). Counted
     /// toward max-prefix enforcement for the same reason.
     known_evpn: HashSet<EvpnRouteKey>,
+    /// One warning per unsupported wire route type per TCP connection.
+    evpn_discard_warned: [bool; 256],
     /// Accepted BGP-LS routes from this peer (RFC 9552 opaque keys). Counted
     /// toward max-prefix enforcement for the same reason.
     known_bgpls: HashSet<BgpLsRouteKey>,
@@ -1898,6 +1900,7 @@ impl PeerSession {
             max_prefix_blocking: [false; MaxPrefixScope::ALL.len()],
             known_flowspec: HashSet::new(),
             known_evpn: HashSet::new(),
+            evpn_discard_warned: [false; 256],
             known_bgpls: HashSet::new(),
             known_vpn: HashSet::new(),
             known_labeled: HashSet::new(),

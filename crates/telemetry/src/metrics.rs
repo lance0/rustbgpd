@@ -561,6 +561,7 @@ struct BgpMetricsInner {
     bgpls_nlri_discarded: IntCounterVec,
     path_attribute_discarded: IntCounterVec,
     evpn_nlri_discarded: IntCounterVec,
+    evpn_nlri_discarded_by_type: IntCounterVec,
     update_malformed: IntCounterVec,
     otc_routes_blocked: IntCounterVec,
     role_mismatch: IntCounterVec,
@@ -1764,6 +1765,15 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let evpn_nlri_discarded_by_type = IntCounterVec::new(
+            Opts::new(
+                "bgp_evpn_nlri_discarded_by_type_total",
+                "Unrecognized or unsupported EVPN NLRIs discarded by peer and decimal wire route type (RFC 7606 §5.4)",
+            ),
+            &["peer", "route_type"],
+        )
+        .expect("valid metric definition");
+
         let update_malformed = IntCounterVec::new(
             Opts::new(
                 "bgp_update_malformed_total",
@@ -2809,6 +2819,9 @@ impl BgpMetrics {
             .register(Box::new(evpn_nlri_discarded.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(evpn_nlri_discarded_by_type.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(update_malformed.clone()))
             .expect("metric not already registered");
         registry
@@ -3178,6 +3191,7 @@ impl BgpMetrics {
             bgpls_nlri_discarded,
             path_attribute_discarded,
             evpn_nlri_discarded,
+            evpn_nlri_discarded_by_type,
             update_malformed,
             otc_routes_blocked,
             role_mismatch,
@@ -3394,6 +3408,7 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.0.bgpls_nlri_discarded, peer);
         Self::reap_peer_series_from_vec(&self.0.path_attribute_discarded, peer);
         Self::reap_peer_series_from_vec(&self.0.evpn_nlri_discarded, peer);
+        Self::reap_peer_series_from_vec(&self.0.evpn_nlri_discarded_by_type, peer);
         Self::reap_peer_series_from_vec(&self.0.update_malformed, peer);
         Self::reap_peer_series_from_vec(&self.0.otc_routes_blocked, peer);
         Self::reap_peer_series_from_vec(&self.0.role_mismatch, peer);
@@ -4779,6 +4794,16 @@ impl BgpMetrics {
         self.0
             .evpn_nlri_discarded
             .with_label_values(&[peer])
+            .inc_by(count);
+    }
+
+    /// Record EVPN discards in both the peer aggregate and per-type counter.
+    /// The route-type label is bounded by the one-octet wire field.
+    pub fn record_evpn_nlri_discarded_by_type(&self, peer: &str, route_type: u8, count: u64) {
+        self.record_evpn_nlri_discarded(peer, count);
+        self.0
+            .evpn_nlri_discarded_by_type
+            .with_label_values(&[peer, &route_type.to_string()])
             .inc_by(count);
     }
 
@@ -8390,7 +8415,8 @@ mod tests {
         m.record_rr_loop_detected(peer);
         m.record_bgpls_nlri_discarded(peer, 2);
         m.record_path_attribute_discarded(peer, 4, 1);
-        m.record_evpn_nlri_discarded(peer, 3);
+        m.record_evpn_nlri_discarded_by_type(peer, 0, 1);
+        m.record_evpn_nlri_discarded_by_type(peer, 255, 2);
         m.record_update_malformed(
             peer,
             crate::reason_labels::MalformedUpdateDisposition::TreatAsWithdraw,
@@ -8439,9 +8465,10 @@ mod tests {
         let m = BgpMetrics::new();
         populate_all_peer_families(&m, "10.0.0.1");
         populate_all_peer_families(&m, "10.0.0.2");
-        // 69 peer-labeled series; state transitions hold two, while exact
+        // 71 peer-labeled series; state transitions and EVPN discard types
+        // hold two each, while exact
         // state and down-reason vocabularies materialize six rows each.
-        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 69);
+        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 71);
 
         m.reap_peer_series("10.0.0.1");
 
@@ -8451,7 +8478,7 @@ mod tests {
             "peer-labeled families not reaped: {leftovers:?}"
         );
         // The other peer's series are untouched.
-        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 69);
+        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 71);
     }
 
     /// Load-bearing finite/unlimited proof: removing either finite gauge
@@ -8697,11 +8724,12 @@ mod tests {
     // `gather()`, so no runtime check can catch one that is added and
     // left unpopulated; this list plus the struct doc comment is the
     // practical ceiling.
-    const PEER_LABELED_FAMILIES: [&str; 58] = [
+    const PEER_LABELED_FAMILIES: [&str; 59] = [
         "bfd_session_flaps_total",
         "bfd_session_up",
         "bgp_as_path_loop_detected_total",
         "bgp_bgpls_nlri_discarded_total",
+        "bgp_evpn_nlri_discarded_by_type_total",
         "bgp_evpn_nlri_discarded_total",
         "bgp_exact_export_rejections_total",
         "bgp_fsm_stale_timer_events_total",

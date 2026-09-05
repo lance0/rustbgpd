@@ -29,6 +29,7 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
         self.assertEqual(
             added,
             {
+                "bgp_evpn_nlri_discarded_by_type_total",
                 "bgp_max_prefix_blocked_total",
                 "bgp_max_prefix_blocking",
                 "bgp_max_prefix_warning_total",
