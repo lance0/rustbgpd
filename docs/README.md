@@ -36,6 +36,7 @@ Follow a procedure for a specific task.
 | [Kernel dataplane runner](how-to/kernel-dataplane-runner.md) | Run the privileged Linux dataplane checks. |
 | [Fuzzing](how-to/fuzzing.md) | Build and run the parser fuzz targets. |
 | [Add a configuration field](how-to/config-knob-contributor-guide.md) | Cover validation, reload, persistence, and documentation. |
+| [Answer route questions from an AI agent](how-to/mcp-server.md) | Expose the explain surfaces to an MCP host, read-only. |
 | [Scenario cookbook](cookbook/README.md) | Choose a complete deployment recipe. |
 | [iBGP route reflector](cookbook/route-reflector.md) | Deploy a route reflector for an iBGP client fleet. |
 | [L3VPN route reflector](cookbook/l3vpn-route-reflector.md) | Reflect VPN routes with RT-Constrain filtering. |

@@ -46,7 +46,22 @@ updates:
           - "serde*"
       test-deps:
         dependency-type: "development"
+      # The MCP SDK gets its own group and never rides along with an
+      # unrelated batch: rmcp majors have carried breaking API changes,
+      # and `schemars` must stay compatible with the version rmcp itself
+      # resolves so its `Json<T>` trait bounds keep unifying.
+      mcp-sdk:
+        patterns:
+          - "rmcp*"
+          - "schemars*"
     ignore:
+      # An rmcp major is a deliberate, separately reviewed change — the
+      # server is not shipped in any release artifact, so an unattended
+      # major bump costs more review than it buys.
+      - dependency-name: "rmcp"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "schemars"
+        update-types: ["version-update:semver-major"]
       # Workspace-internal crates are path deps; updates land via the
       # release process, not Dependabot.
       - dependency-name: "rustbgpd-*"
