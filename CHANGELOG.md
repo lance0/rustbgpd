@@ -437,6 +437,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Withdraw every IPv4/IPv6 FlowSpec path immediately when a restarting
+  peer's Graceful Restart capability omits that family. Recompute the best
+  rule and downstream advertisements, selecting an alternate source when
+  available, while keeping GR-covered families stale. Keep the FlowSpec
+  Adj-RIB-In gauge current through GR/LLGR expiry, End-of-RIB cleanup, and
+  peer teardown.
+
 - **Operator-visible:** an IPv6 FlowSpec rule whose destination component
   carries a non-zero offset no longer presents the unshifted address as its
   destination prefix. RFC 8956 §3.1 matches the address shifted right by the
