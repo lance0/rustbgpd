@@ -74,17 +74,21 @@ rustbgpd-mcp --grpc-addr https://10.0.0.1:50051 \
 {
   "mcpServers": {
     "rustbgpd": {
-      "command": "/usr/local/bin/rustbgpd-mcp",
       "args": [
         "--grpc-addr",
         "https://10.0.0.1:50051",
         "--grpc-token-file",
         "/path/to/rustbgpd-observer.token"
-      ]
+      ],
+      "command": "/usr/local/bin/rustbgpd-mcp"
     }
   }
 }
 ```
+
+Note the token path: the real `--grpc-token-file` value is replaced with a
+placeholder, so a pasted snippet never carries a token. `command` is the
+running binary's own path.
 
 Replace the placeholder path with the real token file before pasting. For
 Claude Code:
