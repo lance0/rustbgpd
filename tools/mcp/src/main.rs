@@ -1,8 +1,9 @@
 //! stdio entry point for the read-only rustbgpd MCP server.
 //!
-//! stdout carries newline-delimited JSON-RPC and nothing else; every log line
-//! goes to stderr. A stray `println!` here corrupts the protocol stream, so
-//! `tests/stdio_e2e.rs` asserts every stdout line parses as JSON.
+//! In normal server mode, stdout carries only newline-delimited JSON-RPC;
+//! every log line goes to stderr. `tests/stdio_e2e.rs` checks this protocol
+//! stream. The `--print-config` and `--help` modes intentionally print their
+//! own output and exit without starting the server.
 
 #![deny(unsafe_code)]
 #![deny(clippy::all)]

@@ -289,7 +289,7 @@ pub fn load_bearer_authorization(
             format!("token file is empty: {}", token_file.display()),
         ));
     }
-    let value = AsciiMetadataValue::try_from(format!("Bearer {token}")).map_err(|_| {
+    let mut value = AsciiMetadataValue::try_from(format!("Bearer {token}")).map_err(|_| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!(
@@ -298,6 +298,7 @@ pub fn load_bearer_authorization(
             ),
         )
     })?;
+    value.set_sensitive(true);
     Ok(Some(value))
 }
 
@@ -1233,6 +1234,10 @@ impl RustbgpdMcp {
 }
 
 #[allow(
+    unknown_lints,
+    reason = "Clippy at the supported 1.95 MSRV predates this lint"
+)]
+#[allow(
     clippy::unused_async_trait_impl,
     reason = "the #[tool_handler] macro emits the async ServerHandler methods; get_info resolves \
               immediately and has no call to await"
@@ -1246,7 +1251,7 @@ impl ServerHandler for RustbgpdMcp {
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = Implementation::new("rustbgpd-mcp", env!("CARGO_PKG_VERSION"));
         info.instructions = Some(
-            "Read-only view of a running rustbgpd daemon. Every tool calls a read-tier gRPC \
+            "Read-only view of a running rustbgpd daemon. Every tool calls a sensitive_read gRPC \
              method; this server registers no tool that can change daemon state. Start from \
              rbgp_explain_export for \"why is this prefix not advertised to that peer\" — it \
              returns the daemon's own ordered export-gate ladder, so the answer comes from live \
@@ -1577,6 +1582,21 @@ fn push_list<T: std::fmt::Display>(lines: &mut Vec<String>, label: &str, values:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bearer_file_value_and_sensitivity_survive_interceptor_cloning() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("observer.token");
+        std::fs::write(&path, "dummy-mcp-token\n").unwrap();
+        let authorization = load_bearer_authorization(Some(&path)).unwrap().unwrap();
+        assert_eq!(authorization, "Bearer dummy-mcp-token");
+        assert!(authorization.is_sensitive());
+        let interceptor = BearerInterceptor::new(Some(authorization));
+        let request = interceptor.clone().call(Request::new(())).unwrap();
+        let inserted = request.metadata().get("authorization").unwrap();
+        assert_eq!(inserted, "Bearer dummy-mcp-token");
+        assert!(inserted.is_sensitive());
+    }
 
     #[test]
     fn endpoint_parsing_accepts_the_two_supported_families() {
