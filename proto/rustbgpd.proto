@@ -1934,6 +1934,11 @@ service RibService {
   // (EVENT_CATEGORY_ROUTE); durable replay through SubscribeFromEvent.
   rpc ListFlowSpecRoutes(ListFlowSpecRequest) returns (ListFlowSpecResponse);
   rpc ListEvpnRoutes(ListEvpnRequest) returns (ListEvpnResponse);
+  // Accepted post-policy EVPN Adj-RIB-In for one source neighbor.
+  rpc ListReceivedEvpnRoutes(ListPeerEvpnRoutesRequest) returns (ListPeerEvpnRoutesResponse);
+  // Committed EVPN Adj-RIB-Out for one destination neighbor. Each row's
+  // peer_address remains the route's source, not this destination.
+  rpc ListAdvertisedEvpnRoutes(ListPeerEvpnRoutesRequest) returns (ListPeerEvpnRoutesResponse);
   rpc ListBgpLsRoutes(ListBgpLsRequest) returns (ListBgpLsResponse);
   rpc ListVpnRoutes(ListVpnRoutesRequest) returns (ListVpnRoutesResponse);
   rpc ListLabeledRoutes(ListLabeledRoutesRequest) returns (ListLabeledRoutesResponse);
@@ -3341,6 +3346,29 @@ message ListEvpnRequest {
 
 message ListEvpnResponse {
   repeated EvpnRouteEntry routes = 1;
+}
+
+// Bounded EVPN peer-table query. These methods are separate from unicast
+// listings so older servers return UNIMPLEMENTED instead of the wrong family.
+message ListPeerEvpnRoutesRequest {
+  // Required source (received) or destination (advertised) neighbor IP.
+  string neighbor_address = 1;
+  // 0 = all supported types; otherwise 1..=5.
+  uint32 route_type_filter = 2;
+  // Route Distinguisher display format. Empty = any.
+  string rd_filter = 3;
+  // 0 defaults to 100. Values above 1000 are rejected.
+  uint32 page_size = 4;
+  // Opaque process-local continuation, bound to scope, filters, and version.
+  // Restart with an empty token after ABORTED (a table mutation).
+  string page_token = 5;
+}
+
+message ListPeerEvpnRoutesResponse {
+  repeated EvpnRouteEntry routes = 1;
+  string next_page_token = 2;
+  uint64 total_count = 3;
+  RoutePageVersion page_version = 4;
 }
 
 // BGP-LS route entry in the RIB (RFC 9552). The route identity stays opaque:

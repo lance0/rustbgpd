@@ -126,9 +126,12 @@ number.
 **A leaf's routes aren't reaching another leaf.** (The
 `rbgp rib advertised --explain` gate ladder covers the unicast and
 VPN families, not EVPN — for EVPN, walk the gates by hand; they fail
-in this order.) First `rbgp evpn --neighbor 10.0.0.1` — did the RR accept
-the routes from the source leaf at all? Then the two common
-reflection stops: *family* — the quiet leaf didn't negotiate
+in this order.) First `rbgp evpn received 10.0.0.1` shows accepted
+post-policy routes from the source, including non-best candidates; absence does
+not prove the leaf never sent a route. Compare `rbgp evpn advertised 10.0.0.2`
+for committed output to the destination leaf. Both commands accept type/RD
+filters and show one bounded page; use the returned `--page-token` to continue.
+Then check the two common reflection stops: *family* — the quiet leaf didn't negotiate
 `l2vpn_evpn` (check its row in `rbgp neighbor`; an FRR leaf missing
 `neighbor X activate` under `address-family l2vpn evpn` establishes
 happily and receives nothing — the M29 lesson) — and *RR rules* — the

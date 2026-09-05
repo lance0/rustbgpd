@@ -164,7 +164,7 @@ shape itself does not raise the tier.
 | `SetNeighborPeerGroup` | `mutating` | Single-neighbor reassignment. |
 | `ClearNeighborPeerGroup` | `mutating` | Single-neighbor. |
 
-### RibService (21 RPCs)
+### RibService (23 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
@@ -182,6 +182,8 @@ shape itself does not raise the tier.
 | `ListRouteEvents` | `sensitive_read` | Bounded route-event history. |
 | `ListFlowSpecRoutes` | `sensitive_read` | RFC 5575 flow-spec routes — discloses traffic filter installations. |
 | `ListEvpnRoutes` | `sensitive_read` | EVPN Type 1/2/3/4/5 routes — MAC/IP topology, multi-homing ES layout. |
+| `ListReceivedEvpnRoutes` | `sensitive_read` | Bounded accepted post-policy EVPN routes from one source neighbor. |
+| `ListAdvertisedEvpnRoutes` | `sensitive_read` | Bounded committed EVPN routes to one destination neighbor, retaining route source identity. |
 | `ListBgpLsRoutes` | `sensitive_read` | RFC 9552 BGP-LS / BGP-LS VPN routes — controller-facing topology graph objects exposed as opaque NLRI/TLV bytes. |
 | `ListVpnRoutes` | `sensitive_read` | RFC 4364/4659 VPNv4/VPNv6 routes — RD-scoped customer prefixes, Route Targets, MPLS labels. |
 | `ListLabeledRoutes` | `sensitive_read` | RFC 8277 labeled-unicast (SAFI 4) routes in Loc-RIB view — MPLS label stack plus prefix reachability. |
@@ -263,13 +265,13 @@ shape itself does not raise the tier.
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 0 | 0.0% |
-| `sensitive_read` | 63 | 58.3% |
-| `mutating` | 21 | 19.4% |
-| `operator_only` | 24 | 22.2% |
-| **Total** | **108** | **100%** |
+| `sensitive_read` | 65 | 59.1% |
+| `mutating` | 21 | 19.1% |
+| `operator_only` | 24 | 21.8% |
+| **Total** | **110** | **100%** |
 
-(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 108
-total is 104 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
+(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 110
+total is 106 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
 
 ## Notes for ADR-0064
 

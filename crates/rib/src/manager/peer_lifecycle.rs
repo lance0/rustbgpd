@@ -588,7 +588,13 @@ impl RibManager {
         self.metrics.set_rib_outbound_registered_peers(
             i64::try_from(self.outbound_peers.len()).unwrap_or(i64::MAX),
         );
-        self.adj_ribs_out.remove(&peer);
+        if self
+            .adj_ribs_out
+            .remove(&peer)
+            .is_some_and(|rib| rib.evpn_len() != 0)
+        {
+            self.advance_advertised_pages();
+        }
         // The gauge reports the size of the table removed on the line
         // above, so it is zeroed here rather than at the `PeerDown` call
         // site: the graceful-restart down path empties the same table and

@@ -1617,8 +1617,42 @@ enum EventsAction {
     },
 }
 
+#[derive(Args)]
+struct EvpnPeerViewArgs {
+    /// Source neighbor (received) or destination neighbor (advertised).
+    peer: String,
+    /// Only this route type (1..=5).
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=5))]
+    route_type: Option<u32>,
+    /// Route Distinguisher, e.g. "65000:100".
+    #[arg(long)]
+    rd: Option<String>,
+    /// Maximum rows in this page (1..=1000).
+    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=1000))]
+    page_size: u32,
+    /// Opaque continuation token from the preceding page; restart after a table change.
+    #[arg(long)]
+    page_token: Option<String>,
+}
+
+impl EvpnPeerViewArgs {
+    fn into_request(self) -> proto::ListPeerEvpnRoutesRequest {
+        proto::ListPeerEvpnRoutesRequest {
+            neighbor_address: self.peer,
+            route_type_filter: self.route_type.unwrap_or(0),
+            rd_filter: self.rd.unwrap_or_default(),
+            page_size: self.page_size,
+            page_token: self.page_token.unwrap_or_default(),
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum EvpnAction {
+    /// Accepted post-policy EVPN routes from a peer; absence does not prove it sent none.
+    Received(EvpnPeerViewArgs),
+    /// Committed EVPN routes advertised to a peer (rows retain their source peer).
+    Advertised(EvpnPeerViewArgs),
     /// Inject a Type 2 MAC/IP route.
     AddMacIp {
         /// Route Distinguisher, "asn:value" / "ip:value".
@@ -2425,6 +2459,19 @@ fn validate_neighbor_compare_action(command: &Command) -> Result<(), CliError> {
 
 fn validate_local_command(command: &Command) -> Result<(), CliError> {
     match command {
+        Command::Evpn {
+            action: Some(EvpnAction::Received(args) | EvpnAction::Advertised(args)),
+            route_type,
+            peer,
+            rd,
+        } => {
+            if route_type.is_some() || peer.is_some() || rd.is_some() {
+                return Err(CliError::Argument(
+                    "EVPN peer views take a positional peer; put --route-type and --rd after received or advertised".into(),
+                ));
+            }
+            commands::evpn::validate_peer_view(&args.peer, args.rd.as_deref())
+        }
         Command::Top { interval } if !(1..=60).contains(interval) => Err(CliError::Argument(
             "interval must be between 1 and 60 seconds".into(),
         )),
@@ -3592,6 +3639,12 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             rd,
         } => match action {
             None => commands::evpn::list(connection, route_type, peer, rd, json).await,
+            Some(EvpnAction::Received(args)) => {
+                commands::evpn::list_peer(connection, true, args.into_request(), json).await
+            }
+            Some(EvpnAction::Advertised(args)) => {
+                commands::evpn::list_peer(connection, false, args.into_request(), json).await
+            }
             Some(EvpnAction::AddMacIp {
                 rd,
                 ethernet_tag,
@@ -6310,6 +6363,93 @@ printf '%s\n' "${COMPREPLY[@]}"
                 action: PolicyAction::Stats { .. }
             }
         ));
+    }
+
+    #[test]
+    fn test_parse_evpn_peer_views_and_legacy_best() {
+        for action in ["received", "advertised"] {
+            let cli = Cli::try_parse_from([
+                "rbgp",
+                "evpn",
+                action,
+                "fe80::2%eth0",
+                "--route-type",
+                "3",
+                "--rd",
+                "65000:100",
+                "--page-size",
+                "25",
+                "--page-token",
+                "opaque",
+            ])
+            .unwrap();
+            validate_local_command(&cli.command).unwrap();
+            let Command::Evpn {
+                action: Some(EvpnAction::Received(args) | EvpnAction::Advertised(args)),
+                ..
+            } = cli.command
+            else {
+                panic!("expected EVPN peer view");
+            };
+            let request = args.into_request();
+            assert_eq!(request.neighbor_address, "fe80::2%eth0");
+            assert_eq!(request.route_type_filter, 3);
+            assert_eq!(request.rd_filter, "65000:100");
+            assert_eq!(request.page_size, 25);
+            assert_eq!(request.page_token, "opaque");
+        }
+        let cli = Cli::try_parse_from([
+            "rbgp",
+            "evpn",
+            "--route-type",
+            "2",
+            "--neighbor",
+            "192.0.2.1",
+            "--rd",
+            "65000:100",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Evpn {
+                action: None,
+                route_type: Some(2),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_evpn_peer_view_validation_before_connect() {
+        for args in [
+            vec!["received", "not-an-ip"],
+            vec!["advertised", "192.0.2.1", "--rd", "invalid"],
+            vec!["received", "fe80::1%"],
+            vec!["received", "2001:db8::1%eth0"],
+            vec!["--peer", "192.0.2.2", "received", "192.0.2.1"],
+            vec!["--rd", "65000:100", "advertised", "192.0.2.1"],
+            vec!["--route-type", "2", "received", "192.0.2.1"],
+        ] {
+            let mut command = vec!["rbgp", "evpn"];
+            command.extend(args);
+            let cli = Cli::try_parse_from(command).unwrap();
+            assert!(matches!(
+                validate_local_command(&cli.command),
+                Err(CliError::Argument(_))
+            ));
+        }
+        for (flag, value) in [
+            ("--route-type", "0"),
+            ("--route-type", "6"),
+            ("--page-size", "0"),
+            ("--page-size", "1001"),
+        ] {
+            assert!(
+                Cli::try_parse_from(["rbgp", "evpn", "received", "192.0.2.1", flag, value])
+                    .is_err()
+            );
+        }
+        assert!(Cli::try_parse_from(["rbgp", "evpn", "advertised"]).is_err());
     }
 
     #[test]

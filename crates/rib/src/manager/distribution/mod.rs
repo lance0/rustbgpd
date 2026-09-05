@@ -2771,6 +2771,9 @@ impl RibManager {
         let unicast_changed = !announce.is_empty() || !withdraw.is_empty();
         let flowspec_changed = !flowspec_announce.is_empty() || !flowspec_withdraw.is_empty();
         let evpn_changed = !evpn_announce.is_empty() || !evpn_withdraw.is_empty();
+        if evpn_changed {
+            self.advance_advertised_pages();
+        }
         let bgpls_changed = !bgpls_announce.is_empty() || !bgpls_withdraw.is_empty();
         let vpn_changed = !vpn_announce.is_empty() || !vpn_withdraw.is_empty();
         let labeled_changed = !labeled_announce.is_empty() || !labeled_withdraw.is_empty();

@@ -19,11 +19,11 @@ use crate::adj_rib_out::AdjRibOut;
 use crate::event::{RouteEvent, RouteEventType};
 use crate::update::{
     BestPathCandidate, BestRoutesPage, DataplaneExactQueryError, DataplanePageError,
-    DataplaneVersions, ExactBestRoutes, ExactExportKey, ExactFibInstallCandidates,
-    ExplainAdvertisedRoute, ExplainAdvertisedRouteError, ExplainBestPath, FibInstallCandidatesPage,
-    MrtPeerEntry, MrtSnapshotData, NeighborPolicyStats, NeighborRibSnapshot,
-    NeighborRibSnapshotResponse, RibRowFilter, RoutePage, RoutePageError, RoutePageVersion,
-    RouteQueryFilter, RouteQueryKey, RouteQueryScope, UpdateGroupPeerComparison,
+    DataplaneVersions, EvpnRoutePage, EvpnRouteQueryKey, ExactBestRoutes, ExactExportKey,
+    ExactFibInstallCandidates, ExplainAdvertisedRoute, ExplainAdvertisedRouteError,
+    ExplainBestPath, FibInstallCandidatesPage, MrtPeerEntry, MrtSnapshotData, NeighborPolicyStats,
+    NeighborRibSnapshot, NeighborRibSnapshotResponse, RibRowFilter, RoutePage, RoutePageError,
+    RoutePageVersion, RouteQueryFilter, RouteQueryKey, RouteQueryScope, UpdateGroupPeerComparison,
     VersionedPeerGroups, WarmMrtSnapshotBudget, WarmMrtSnapshotView, ordered_route_query,
     route_query_key,
 };
@@ -264,6 +264,66 @@ pub(super) fn page_routes<'a>(
         version: RoutePageVersion::default(),
     }
 }
+/// Scan an unordered EVPN table with O(page) retained references and clones.
+/// The full scope is visited on each page to compute the filtered total.
+fn page_evpn_routes<'a>(
+    routes: impl Iterator<Item = &'a crate::route::EvpnRibRoute>,
+    filter: Option<&RibRowFilter<crate::route::EvpnRibRoute>>,
+    after: Option<EvpnRouteQueryKey>,
+    page_size: usize,
+) -> EvpnRoutePage {
+    struct Entry<'a>(EvpnRouteQueryKey, &'a crate::route::EvpnRibRoute);
+    impl PartialEq for Entry<'_> {
+        fn eq(&self, other: &Self) -> bool {
+            self.0 == other.0
+        }
+    }
+    impl Eq for Entry<'_> {}
+    impl PartialOrd for Entry<'_> {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+    impl Ord for Entry<'_> {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            self.0.cmp(&other.0)
+        }
+    }
+
+    let n = page_size.clamp(1, ROUTE_QUERY_MAX_PAGE_SIZE);
+    let mut heap = std::collections::BinaryHeap::with_capacity(n);
+    let mut total = 0;
+    let mut remaining = 0;
+    for route in routes {
+        if filter.is_some_and(|filter| !filter(route)) {
+            continue;
+        }
+        total += 1;
+        let key = (route.key(), route.peer);
+        if after.is_some_and(|after| key <= after) {
+            continue;
+        }
+        remaining += 1;
+        if heap.len() < n {
+            heap.push(Entry(key, route));
+        } else if heap.peek().is_some_and(|top| key < top.0) {
+            heap.pop();
+            heap.push(Entry(key, route));
+        }
+    }
+    let routes: Vec<_> = heap
+        .into_sorted_vec()
+        .into_iter()
+        .map(|entry| entry.1.clone())
+        .collect();
+    EvpnRoutePage {
+        has_more: remaining > routes.len(),
+        routes,
+        total,
+        version: RoutePageVersion::default(),
+    }
+}
+
 /// One bounded page over rows yielded in order strictly after the cursor.
 /// At most `page_size + 1` yielded rows are cloned: the extra row proves
 /// `has_more` without restarting the ordered iterator. Callers whose iterator
@@ -526,6 +586,59 @@ impl RibManager {
             (Afi::Ipv6 as u16, Safi::MplsVpn as u8, vpnv6),
         ]);
     }
+    pub(super) fn handle_query_evpn_routes_page(
+        &self,
+        scope: RouteQueryScope,
+        filter: Option<&RibRowFilter<crate::route::EvpnRibRoute>>,
+        after: Option<EvpnRouteQueryKey>,
+        expected_version: Option<RoutePageVersion>,
+        page_size: usize,
+        reply: tokio::sync::oneshot::Sender<Result<EvpnRoutePage, RoutePageError>>,
+    ) {
+        if reply.is_closed() {
+            return;
+        }
+        let result = self.route_page_version(scope).and_then(|version| {
+            if after.is_some() != expected_version.is_some()
+                || expected_version.is_some_and(|expected| expected != version)
+            {
+                return Err(RoutePageError::Invalidated);
+            }
+            let mut page = match scope {
+                RouteQueryScope::Received { peer: Some(peer) } => page_evpn_routes(
+                    self.ribs
+                        .get(&peer)
+                        .into_iter()
+                        .flat_map(AdjRibIn::iter_evpn),
+                    filter,
+                    after,
+                    page_size,
+                ),
+                RouteQueryScope::Received { peer: None } => page_evpn_routes(
+                    self.ribs.values().flat_map(AdjRibIn::iter_evpn),
+                    filter,
+                    after,
+                    page_size,
+                ),
+                RouteQueryScope::Best => {
+                    page_evpn_routes(self.loc_rib.iter_evpn(), filter, after, page_size)
+                }
+                RouteQueryScope::Advertised { peer } => page_evpn_routes(
+                    self.adj_ribs_out
+                        .get(&peer)
+                        .into_iter()
+                        .flat_map(AdjRibOut::iter_evpn),
+                    filter,
+                    after,
+                    page_size,
+                ),
+            };
+            page.version = version;
+            Ok(page)
+        });
+        let _ = reply.send(result);
+    }
+
     /// One bounded page of a resumable route listing. The reply channel
     /// doubles as the cancellation token: an abandoned caller (dropped
     /// receiver — e.g. a canceled gRPC request whose page query was

@@ -13,6 +13,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Per-neighbor EVPN received and advertised route views through additive
+  `ListReceivedEvpnRoutes` / `ListAdvertisedEvpnRoutes` RPCs and
+  `rbgp evpn received|advertised PEER`. Type/RD filters and bounded pages
+  expose accepted post-policy input and committed output while preserving
+  each route's source peer. Continuation tokens reject table changes;
+  EVPN explain remains unavailable.
+
 - EVPN discard visibility by wire route type through the additive
   `bgp_evpn_nlri_discarded_by_type_total{peer,route_type}` counter and one
   warning per type per TCP connection. The existing peer aggregate counter

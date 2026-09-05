@@ -59,32 +59,38 @@ pub async fn list(
         restore_matching_scoped_address(peer.as_deref(), &mut route.peer_address);
     }
 
-    if json {
-        let out: Vec<serde_json::Value> = resp
-            .routes
-            .iter()
-            .map(|r| {
-                serde_json::json!({
-                    "route_type": r.route_type,
-                    "route_type_name": route_type_label(r.route_type),
-                    "rd": r.rd,
-                    "esi": r.esi,
-                    "ethernet_tag": r.ethernet_tag,
-                    "mac": r.mac,
-                    "ip": r.ip,
-                    "prefix": r.prefix,
-                    "gateway": r.gateway,
-                    "label": r.label,
-                    "label2": r.label2,
-                    "tunnel_type": r.tunnel_type,
-                    "next_hop": r.next_hop,
-                    "peer": r.peer_address,
-                    "as_path": r.as_path,
-                })
+    print_routes(&resp.routes, json)
+}
+
+fn routes_to_json(routes: &[crate::proto::EvpnRouteEntry]) -> Vec<serde_json::Value> {
+    routes
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "route_type": r.route_type,
+                "route_type_name": route_type_label(r.route_type),
+                "rd": r.rd,
+                "esi": r.esi,
+                "ethernet_tag": r.ethernet_tag,
+                "mac": r.mac,
+                "ip": r.ip,
+                "prefix": r.prefix,
+                "gateway": r.gateway,
+                "label": r.label,
+                "label2": r.label2,
+                "tunnel_type": r.tunnel_type,
+                "next_hop": r.next_hop,
+                "peer": r.peer_address,
+                "as_path": r.as_path,
             })
-            .collect();
-        output::print_json_pretty(&out)?;
-    } else if resp.routes.is_empty() {
+        })
+        .collect()
+}
+
+fn print_routes(routes: &[crate::proto::EvpnRouteEntry], json: bool) -> Result<(), CliError> {
+    if json {
+        output::print_json_pretty(&routes_to_json(routes))?;
+    } else if routes.is_empty() {
         outln!("No EVPN routes")?;
     } else {
         // Two distinct concepts both spell "tag" in EVPN-land: the
@@ -95,7 +101,7 @@ pub async fn list(
         // don't both render via something named `tag` in the same
         // function — the operator-facing column header `tag=N`
         // matches FRR / Cisco convention and stays untouched.
-        for r in &resp.routes {
+        for r in routes {
             let route_label = route_type_label(r.route_type);
             let mut detail = Vec::new();
             detail.push(format!("rd={}", r.rd));
@@ -137,6 +143,80 @@ pub async fn list(
         }
     }
     Ok(())
+}
+
+pub(crate) fn validate_peer_view(peer: &str, rd: Option<&str>) -> Result<(), CliError> {
+    bare_ip_rpc_address(peer)
+        .parse::<std::net::IpAddr>()
+        .map_err(|_| {
+            CliError::Argument(
+                "EVPN peer must be an IP address (optionally scoped link-local IPv6)".into(),
+            )
+        })?;
+    if let Some(rd) = rd {
+        rd.parse::<rustbgpd_wire::RouteDistinguisher>()
+            .map_err(|err| {
+                CliError::Argument(format!("invalid EVPN Route Distinguisher: {err}"))
+            })?;
+    }
+    Ok(())
+}
+
+pub async fn list_peer(
+    connection: Connection,
+    received: bool,
+    mut request: crate::proto::ListPeerEvpnRoutesRequest,
+    json: bool,
+) -> Result<(), CliError> {
+    let peer = request.neighbor_address.clone();
+    validate_peer_view(
+        &peer,
+        (!request.rd_filter.is_empty()).then_some(request.rd_filter.as_str()),
+    )?;
+    request.neighbor_address = bare_ip_rpc_address(&peer).to_string();
+    let mut client = connection.rib_listing_client();
+    let mut response = if received {
+        client.list_received_evpn_routes(request).await?
+    } else {
+        client.list_advertised_evpn_routes(request).await?
+    }
+    .into_inner();
+    for route in &mut response.routes {
+        restore_matching_scoped_address(Some(&peer), &mut route.peer_address);
+    }
+    if json {
+        output::print_json_pretty(&peer_page_to_json(&response, &peer, received))?;
+    } else {
+        if received {
+            outln!("Accepted post-policy EVPN routes from {peer}")?;
+        } else {
+            outln!("Committed EVPN routes advertised to {peer}")?;
+        }
+        print_routes(&response.routes, false)?;
+        outln!("Total matching rows: {}", response.total_count)?;
+        if !response.next_page_token.is_empty() {
+            outln!("Next page token: {}", response.next_page_token)?;
+        }
+    }
+    Ok(())
+}
+
+fn peer_page_to_json(
+    response: &crate::proto::ListPeerEvpnRoutesResponse,
+    peer: &str,
+    received: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "view": if received { "received" } else { "advertised" },
+        "neighbor": peer,
+        "routes": routes_to_json(&response.routes),
+        "next_page_token": response.next_page_token,
+        "total_count": response.total_count,
+        "page_version": response.page_version.as_ref().map(|version| serde_json::json!({
+            "epoch": version.epoch,
+            "generation": version.generation,
+        })),
+    })
 }
 
 #[expect(
@@ -1326,6 +1406,51 @@ mod tests {
             .clone()
             .expect("EVPN request captured");
         assert_eq!(request.peer_filter, "fe80:0:0:0:0:0:0:2");
+    }
+
+    #[tokio::test]
+    async fn peer_views_forward_filters_and_one_page_without_legacy_fallback() {
+        for received in [true, false] {
+            let server = spawn_mock_server(None).await;
+            server
+                .state
+                .list_peer_evpn_response
+                .lock()
+                .await
+                .next_page_token = "next-page".into();
+            let connection = crate::connection::connect(&server.addr, None)
+                .await
+                .unwrap();
+            super::list_peer(
+                connection,
+                received,
+                crate::proto::ListPeerEvpnRoutesRequest {
+                    neighbor_address: "fe80:0:0:0:0:0:0:2%eth0".into(),
+                    route_type_filter: 4,
+                    rd_filter: "65000:100".into(),
+                    page_size: 25,
+                    page_token: "previous-page".into(),
+                },
+                true,
+            )
+            .await
+            .unwrap();
+            let received_request = server.state.last_list_received_evpn.lock().await.clone();
+            let advertised_request = server.state.last_list_advertised_evpn.lock().await.clone();
+            let request = if received {
+                assert!(advertised_request.is_none());
+                received_request.unwrap()
+            } else {
+                assert!(received_request.is_none());
+                advertised_request.unwrap()
+            };
+            assert_eq!(request.neighbor_address, "fe80:0:0:0:0:0:0:2");
+            assert_eq!(request.route_type_filter, 4);
+            assert_eq!(request.rd_filter, "65000:100");
+            assert_eq!(request.page_size, 25);
+            assert_eq!(request.page_token, "previous-page");
+            assert!(server.state.last_list_evpn.lock().await.is_none());
+        }
     }
 
     fn unique_uds_path() -> (TempDir, PathBuf) {

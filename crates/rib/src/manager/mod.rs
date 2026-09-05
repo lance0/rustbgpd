@@ -2816,6 +2816,21 @@ impl RibManager {
             RibUpdate::QueryEvpnRoutes { filter, reply } => {
                 queries::send_filtered_rows(self.loc_rib.iter_evpn(), filter.as_ref(), reply);
             }
+            RibUpdate::QueryEvpnRoutesPage {
+                scope,
+                filter,
+                after,
+                expected_version,
+                page_size,
+                reply,
+            } => self.handle_query_evpn_routes_page(
+                scope,
+                filter.as_ref(),
+                after,
+                expected_version,
+                page_size,
+                reply,
+            ),
             RibUpdate::QueryEvpnDataplaneRoutes {
                 known_generation,
                 reply,

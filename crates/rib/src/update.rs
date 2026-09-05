@@ -1483,6 +1483,22 @@ pub struct RoutePage {
     pub version: RoutePageVersion,
 }
 
+/// Identity ordering for EVPN pages, including the source peer for all-peer queries.
+pub type EvpnRouteQueryKey = (EvpnRouteKey, IpAddr);
+
+/// One bounded page of accepted or committed EVPN routes.
+#[derive(Debug, Clone, Default)]
+pub struct EvpnRoutePage {
+    /// Routes ascending by typed NLRI key and source peer.
+    pub routes: Vec<EvpnRibRoute>,
+    /// Total matching routes, independent of the cursor.
+    pub total: u64,
+    /// Whether matching routes remain beyond this page.
+    pub has_more: bool,
+    /// Conservative scope-class mutation version.
+    pub version: RoutePageVersion,
+}
+
 /// A bounded internal dataplane page could not be served.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DataplanePageError {
@@ -2610,6 +2626,22 @@ pub enum RibUpdate {
         filter: Option<RibRowFilter<EvpnRibRoute>>,
         /// Response channel.
         reply: oneshot::Sender<Vec<EvpnRibRoute>>,
+    },
+    /// Query one bounded, version-fenced EVPN table page. Each page scans the
+    /// scope but copies at most the clamped page size, ordered by typed key.
+    QueryEvpnRoutesPage {
+        /// Received, best, or committed advertised table.
+        scope: RouteQueryScope,
+        /// Predicate evaluated without cloning nonmatching rows.
+        filter: Option<RibRowFilter<EvpnRibRoute>>,
+        /// Last identity returned by the preceding page.
+        after: Option<EvpnRouteQueryKey>,
+        /// Required with a continuation key; absent for the first page.
+        expected_version: Option<RoutePageVersion>,
+        /// Clamped to 1..=1000 inside the actor.
+        page_size: usize,
+        /// Response channel; closed requests skip the scan.
+        reply: oneshot::Sender<Result<EvpnRoutePage, RoutePageError>>,
     },
     /// Query the dataplane-relevant EVPN Loc-RIB projection input.
     ///
