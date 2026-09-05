@@ -108,10 +108,12 @@ The new output directory contains:
 - `monitor-*.json` and `monitor-*.log`: individual wire-observer reports and logs.
 - `tester-*.log`, `daemon.log`, and their stdout files: process diagnostics.
 - `selected.json`, `neighbors.json`, `metrics.txt`, and `samples.json`: final
-  CLI snapshots, metrics, and raw resource samples.
+  CLI snapshots, metrics, and raw resource samples. CLI stderr is retained
+  in `neighbors.stderr` and `selected.stderr`.
 - `config.toml` and `state/`: generated configuration and runtime state.
 
-Any failed check exits nonzero. Early process or parsing failures can leave a
-partial artifact directory without a summary; preserve its logs when diagnosing
-the failure. Move load-bearing raw evidence into `docs/artifacts/` when writing
-a dated performance receipt; generated run directories do not belong in Git.
+Any failed check exits nonzero. Process or parsing failures write a failed
+summary with an error and retain the available raw artifacts; preserve those
+logs when diagnosing the failure. Move load-bearing raw evidence into
+`docs/artifacts/` when writing a dated performance receipt; generated run
+directories do not belong in Git.

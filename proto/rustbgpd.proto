@@ -1939,6 +1939,8 @@ service RibService {
   // Committed EVPN Adj-RIB-Out for one destination neighbor. Each row's
   // peer_address remains the route's source, not this destination.
   rpc ListAdvertisedEvpnRoutes(ListPeerEvpnRoutesRequest) returns (ListPeerEvpnRoutesResponse);
+  // Exact typed EVPN selection and export diagnostics; outside narrow v1.
+  rpc ExplainEvpnRoute(ExplainEvpnRouteRequest) returns (ExplainEvpnRouteResponse);
   rpc ListBgpLsRoutes(ListBgpLsRequest) returns (ListBgpLsResponse);
   rpc ListVpnRoutes(ListVpnRoutesRequest) returns (ListVpnRoutesResponse);
   rpc ListLabeledRoutes(ListLabeledRoutesRequest) returns (ListLabeledRoutesResponse);
@@ -3369,6 +3371,89 @@ message ListPeerEvpnRoutesResponse {
   string next_page_token = 2;
   uint64 total_count = 3;
   RoutePageVersion page_version = 4;
+}
+
+// Exact route identity, not a wildcard filter. Labels, next hop, and gateway
+// are payload and do not belong to the identity. Type 2's omitted IP means
+// MAC-only, distinct from the same MAC with a host IP.
+message EvpnRouteSelector {
+  string rd = 1;
+  oneof route {
+    EvpnEadSelector ead_per_es = 2;
+    EvpnEadSelector ead_per_evi = 3;
+    EvpnMacIpSelector mac_ip = 4;
+    EvpnImetSelector imet = 5;
+    EvpnEsSelector es = 6;
+    EvpnIpPrefixSelector ip_prefix = 7;
+  }
+}
+
+message EvpnEadSelector {
+  string esi = 1;
+  // MAX_ET (4294967295) for per-ES; any other value for per-EVI.
+  uint32 ethernet_tag = 2;
+}
+
+message EvpnMacIpSelector {
+  uint32 ethernet_tag = 1;
+  string mac = 2;
+  // Empty selects MAC-only. Otherwise an exact IPv4 or IPv6 host address.
+  string ip = 3;
+}
+
+message EvpnImetSelector {
+  uint32 ethernet_tag = 1;
+  string originator_ip = 2;
+}
+
+message EvpnEsSelector {
+  string esi = 1;
+  string originator_ip = 2;
+}
+
+message EvpnIpPrefixSelector {
+  uint32 ethernet_tag = 1;
+  // CIDR prefix. Host bits must be zero; nonzero Ethernet Tags are supported.
+  string prefix = 2;
+}
+
+message ExplainEvpnRouteRequest {
+  EvpnRouteSelector key = 1;
+  // Optional accepted-source lookup. Absence of retained state is not an
+  // import rejection explanation or proof that the peer never sent the key.
+  string received_from = 2;
+  // Optional destination for current export eligibility and committed state.
+  string advertised_to = 3;
+}
+
+message ExplainEvpnRouteResponse {
+  EvpnRouteSelector key = 1;
+  string received_from = 2;
+  EvpnRouteEntry received = 3;
+  // Installed Loc-RIB route. May differ from fresh selection while deferred.
+  EvpnRouteEntry best = 4;
+  EvpnRouteEntry selection_best = 5;
+  // Requested source if not the fresh winner, otherwise its runner-up.
+  EvpnRouteEntry compared = 6;
+  uint64 candidate_count = 7;
+  // Why selection_best beats compared; absent when there is no comparison.
+  ExplainReason selection_reason = 8;
+  bool selection_deferred = 9;
+  ExplainEvpnExport export = 10;
+}
+
+message ExplainEvpnExport {
+  string peer_address = 1;
+  ExplainDecision decision = 2;
+  repeated ExplainReason reasons = 3;
+  repeated ExportGateStep gates = 4;
+  ExplainModifications modifications = 5;
+  // Current dry-run result from the installed best; no state is changed.
+  EvpnRouteEntry staged = 6;
+  // Committed local Adj-RIB-Out, not proof of remote receipt or installation.
+  EvpnRouteEntry advertised = 7;
+  bool already_advertised = 8;
+  bool outbound_dirty = 9;
 }
 
 // BGP-LS route entry in the RIB (RFC 9552). The route identity stays opaque:

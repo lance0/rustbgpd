@@ -1653,6 +1653,11 @@ enum EvpnAction {
     Received(EvpnPeerViewArgs),
     /// Committed EVPN routes advertised to a peer (rows retain their source peer).
     Advertised(EvpnPeerViewArgs),
+    /// Explain one exact EVPN key, its selection, and optional export destination.
+    Explain {
+        #[command(subcommand)]
+        route: EvpnExplainSelector,
+    },
     /// Inject a Type 2 MAC/IP route.
     AddMacIp {
         /// Route Distinguisher, "asn:value" / "ip:value".
@@ -1797,6 +1802,154 @@ enum EvpnAction {
     },
     /// Summarize EVPN VTEP alpha state and key metrics.
     Diagnose,
+}
+
+#[derive(Args)]
+struct EvpnExplainArgs {
+    /// Exact Route Distinguisher, "asn:value" or "ip:value".
+    #[arg(long, value_parser = commands::evpn::parse_rd)]
+    rd: String,
+    /// Look up this accepted source; absence does not explain import rejection.
+    #[arg(long, value_parser = commands::evpn::parse_explain_peer)]
+    received_from: Option<String>,
+    /// Evaluate current export gates and committed local state for this peer.
+    #[arg(long, value_parser = commands::evpn::parse_explain_peer)]
+    advertised_to: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum EvpnExplainSelector {
+    /// Type 2: omitted IP selects the MAC-only key, not all host IPs.
+    MacIp {
+        #[command(flatten)]
+        common: EvpnExplainArgs,
+        #[arg(long, default_value_t = 0)]
+        ethernet_tag: u32,
+        #[arg(long, value_parser = commands::evpn::parse_mac)]
+        mac: String,
+        #[arg(long)]
+        ip: Option<std::net::IpAddr>,
+    },
+    /// Type 3: exact inclusive multicast originator.
+    Imet {
+        #[command(flatten)]
+        common: EvpnExplainArgs,
+        #[arg(long, default_value_t = 0)]
+        ethernet_tag: u32,
+        #[arg(long)]
+        originator_ip: std::net::IpAddr,
+    },
+    /// Type 4: exact Ethernet Segment and originator.
+    Es {
+        #[command(flatten)]
+        common: EvpnExplainArgs,
+        #[arg(long, value_parser = commands::evpn::parse_esi)]
+        esi: String,
+        #[arg(long)]
+        originator_ip: std::net::IpAddr,
+    },
+    /// Type 5: exact canonical prefix; nonzero Ethernet Tags are supported.
+    IpPrefix {
+        #[command(flatten)]
+        common: EvpnExplainArgs,
+        #[arg(long, default_value_t = 0)]
+        ethernet_tag: u32,
+        #[arg(long, value_parser = commands::evpn::parse_exact_prefix)]
+        prefix: String,
+    },
+    /// Type 1 per-ES: the Ethernet Tag is always MAX_ET.
+    EadPerEs {
+        #[command(flatten)]
+        common: EvpnExplainArgs,
+        #[arg(long, value_parser = commands::evpn::parse_esi)]
+        esi: String,
+    },
+    /// Type 1 per-EVI: MAX_ET is not a per-EVI key.
+    EadPerEvi {
+        #[command(flatten)]
+        common: EvpnExplainArgs,
+        #[arg(long, value_parser = commands::evpn::parse_esi)]
+        esi: String,
+        #[arg(long, value_parser = clap::value_parser!(u32).range(..i64::from(u32::MAX)))]
+        ethernet_tag: u32,
+    },
+}
+
+impl EvpnExplainSelector {
+    fn into_request(self) -> proto::ExplainEvpnRouteRequest {
+        use proto::evpn_route_selector::Route;
+        let (common, route) = match self {
+            Self::MacIp {
+                common,
+                ethernet_tag,
+                mac,
+                ip,
+            } => (
+                common,
+                Route::MacIp(proto::EvpnMacIpSelector {
+                    ethernet_tag,
+                    mac,
+                    ip: ip.map(|ip| ip.to_string()).unwrap_or_default(),
+                }),
+            ),
+            Self::Imet {
+                common,
+                ethernet_tag,
+                originator_ip,
+            } => (
+                common,
+                Route::Imet(proto::EvpnImetSelector {
+                    ethernet_tag,
+                    originator_ip: originator_ip.to_string(),
+                }),
+            ),
+            Self::Es {
+                common,
+                esi,
+                originator_ip,
+            } => (
+                common,
+                Route::Es(proto::EvpnEsSelector {
+                    esi,
+                    originator_ip: originator_ip.to_string(),
+                }),
+            ),
+            Self::IpPrefix {
+                common,
+                ethernet_tag,
+                prefix,
+            } => (
+                common,
+                Route::IpPrefix(proto::EvpnIpPrefixSelector {
+                    ethernet_tag,
+                    prefix,
+                }),
+            ),
+            Self::EadPerEs { common, esi } => (
+                common,
+                Route::EadPerEs(proto::EvpnEadSelector {
+                    esi,
+                    ethernet_tag: u32::MAX,
+                }),
+            ),
+            Self::EadPerEvi {
+                common,
+                esi,
+                ethernet_tag,
+            } => (
+                common,
+                Route::EadPerEvi(proto::EvpnEadSelector { esi, ethernet_tag }),
+            ),
+        };
+        proto::ExplainEvpnRouteRequest {
+            key: Some(proto::EvpnRouteSelector {
+                rd: common.rd,
+                route: Some(route),
+            }),
+            received_from: common.received_from.unwrap_or_default(),
+            advertised_to: common.advertised_to.unwrap_or_default(),
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -2850,6 +3003,19 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
     validate_rib_age_action(&cli.command)?;
     validate_rib_route_view_action(&cli.command)?;
     validate_local_command(&cli.command)?;
+    if let Command::Evpn {
+        action: Some(EvpnAction::Explain { .. }),
+        route_type,
+        peer,
+        rd,
+    } = &cli.command
+        && (route_type.is_some() || peer.is_some() || rd.is_some())
+    {
+        return Err(CliError::Argument(
+            "EVPN list filters do not apply to explain; put exact key fields after the selector"
+                .into(),
+        ));
+    }
     if let Command::Events {
         action:
             Some(EventsAction::Watch {
@@ -3644,6 +3810,9 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             }
             Some(EvpnAction::Advertised(args)) => {
                 commands::evpn::list_peer(connection, false, args.into_request(), json).await
+            }
+            Some(EvpnAction::Explain { route }) => {
+                commands::evpn::explain(connection, route.into_request(), json).await
             }
             Some(EvpnAction::AddMacIp {
                 rd,

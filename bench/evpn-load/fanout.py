@@ -11,6 +11,33 @@ import subprocess
 import time
 import urllib.request
 
+
+def convergence_range(reports):
+    values = [report.get("initial_convergence_sec") for report in reports]
+    if not values or any(value is None for value in values):
+        return None, None
+    return min(values), max(values)
+
+
+def cli_snapshot(root, name, command, timeout):
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        for suffix, value in (("json", error.stdout), ("stderr", error.stderr)):
+            data = value.encode() if isinstance(value, str) else value or b""
+            (root / f"{name}.{suffix}").write_bytes(data)
+        return None
+    (root / f"{name}.json").write_text(result.stdout)
+    (root / f"{name}.stderr").write_text(result.stderr)
+    if result.returncode != 0:
+        return None
+    try:
+        rows = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    return rows if isinstance(rows, list) else None
+
+
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument(
     "--bin-dir",
@@ -79,6 +106,15 @@ def start(name, command, threads=1):
     return proc
 
 
+summary = {
+    "receivers": args.receivers,
+    "originators": 2,
+    "routes_per_originator": args.routes,
+    "churn_seconds": args.churn_seconds,
+    "churn_delay_seconds": args.churn_delay_seconds,
+    "correct": False,
+}
+samples = []
 try:
     monitors = []
     for i, peer in enumerate(peers[2:]):
@@ -132,7 +168,6 @@ try:
         raise RuntimeError("peer failed before reflector start; inspect peer logs")
     daemon = start("daemon", [str(args.bin_dir / "rustbgpd"), str(root / "config.toml")], threads=8)
     started = time.monotonic()
-    samples = []
     while any(p.poll() is None for p in monitors):
         if daemon.poll() is not None:
             raise RuntimeError("reflector exited; inspect daemon logs")
@@ -159,16 +194,19 @@ try:
         stamp = re.search(r"\d{4}-\d{2}-\d{2}T[0-9:.]+Z", line).group()
         return datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
 
-    full_table_times = [
-        event_time(f"monitor-{i:03}", "session established, observing")
-        + report["initial_convergence_sec"]
-        for i, report in enumerate(reports)
-    ]
-    before_churn = args.churn_seconds == 0 or max(full_table_times) < min(
-        event_time(f"tester-{i}", "starting churn phase") for i in range(2)
+    convergence_min, convergence_max = convergence_range(reports)
+    before_churn = args.churn_seconds == 0 or (
+        convergence_min is not None
+        and max(
+            event_time(f"monitor-{i:03}", "session established, observing")
+            + report["initial_convergence_sec"]
+            for i, report in enumerate(reports)
+        )
+        < min(event_time(f"tester-{i}", "starting churn phase") for i in range(2))
     )
     valid = (
         before_churn
+        and convergence_min is not None
         and all(p.returncode == 0 for p in monitors)
         and all(
             r["converged"]
@@ -179,28 +217,24 @@ try:
             for r in reports
         )
     )
-    neighbors = subprocess.run(
+    neighbor_rows = cli_snapshot(
+        root,
+        "neighbors",
         [str(args.bin_dir / "rbgp"), "-s", f"unix://{state}/grpc.sock", "--json", "neighbor"],
-        capture_output=True,
-        text=True,
         timeout=10,
     )
-    (root / "neighbors.json").write_text(neighbors.stdout)
     # Monitors deliberately exit after their observation window. Originators must remain live.
-    neighbor_rows = json.loads(neighbors.stdout)
-    valid &= neighbors.returncode == 0 and all(
+    valid &= neighbor_rows is not None and all(
         any(p["address"] == peer and p["state"] == "Established" for p in neighbor_rows)
         for peer in peers[:2]
     )
-    routes = subprocess.run(
+    selected = cli_snapshot(
+        root,
+        "selected",
         [str(args.bin_dir / "rbgp"), "-s", f"unix://{state}/grpc.sock", "--json", "evpn"],
-        capture_output=True,
-        text=True,
         timeout=30,
     )
-    (root / "selected.json").write_text(routes.stdout)
-    selected = json.loads(routes.stdout)
-    selected_count = len(selected)
+    selected_count = len(selected) if selected is not None else None
     expected_keys = {
         (
             f"10.78.0.{source}:1",
@@ -209,20 +243,15 @@ try:
         for source in (1, 2)
         for index in range(args.routes)
     }
-    selected_keys = {(row["rd"], row["mac"]) for row in selected}
-    valid &= (
-        routes.returncode == 0 and selected_count == expected and selected_keys == expected_keys
-    )
+    selected_keys = {(row["rd"], row["mac"]) for row in selected or []}
+    valid &= selected is not None and selected_count == expected and selected_keys == expected_keys
     valid &= all(
         row["route_type"] == 2 and row["ethernet_tag"] == "0" and row["ip"] == ""
-        for row in selected
+        for row in selected or []
     )
-    try:
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        with opener.open("http://127.77.255.254:9179/metrics", timeout=10) as response:
-            (root / "metrics.txt").write_bytes(response.read())
-    finally:
-        (root / "samples.json").write_text(json.dumps(samples))
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open("http://127.77.255.254:9179/metrics", timeout=10) as response:
+        (root / "metrics.txt").write_bytes(response.read())
     summary = {
         "receivers": args.receivers,
         "originators": 2,
@@ -232,8 +261,8 @@ try:
         "churn_delay_seconds": args.churn_delay_seconds,
         "correct": bool(valid),
         "selected_count": selected_count,
-        "initial_convergence_min_sec": min(r["initial_convergence_sec"] for r in reports),
-        "initial_convergence_max_sec": max(r["initial_convergence_sec"] for r in reports),
+        "initial_convergence_min_sec": convergence_min,
+        "initial_convergence_max_sec": convergence_max,
         "expected_withdrawals_per_receiver": 1000 * args.churn_seconds,
         "withdrawals_min": min(r["total_withdrawals"] for r in reports),
         "withdrawals_max": max(r["total_withdrawals"] for r in reports),
@@ -241,10 +270,12 @@ try:
         "elapsed_sec": samples[-1]["elapsed_sec"],
         "peak_rss_bytes": max(s["rss_bytes"] for s in samples),
     }
-    (root / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-    print(json.dumps(summary), flush=True)
     if not valid:
         raise RuntimeError("receiver correctness failed; inspect summary and raw reports")
+except Exception as error:
+    summary["correct"] = False
+    summary["error"] = str(error)
+    raise
 finally:
     for proc in reversed(processes):
         if proc.poll() is None:
@@ -257,3 +288,6 @@ finally:
             proc.wait()
     for handle in handles:
         handle.close()
+    (root / "samples.json").write_text(json.dumps(samples))
+    (root / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    print(json.dumps(summary), flush=True)

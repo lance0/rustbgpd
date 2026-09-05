@@ -17,8 +17,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ListReceivedEvpnRoutes` / `ListAdvertisedEvpnRoutes` RPCs and
   `rbgp evpn received|advertised PEER`. Type/RD filters and bounded pages
   expose accepted post-policy input and committed output while preserving
-  each route's source peer. Continuation tokens reject table changes;
-  EVPN explain remains unavailable.
+  each route's source peer. Continuation tokens reject table changes.
+
+- Exact EVPN route explain through `ExplainEvpnRoute` and
+  `rbgp evpn explain`: typed selectors cover Types 1–5, including both
+  Type 1 forms and distinct MAC-only / MAC+IP keys. The response separates
+  retained accepted input, installed best, fresh selection, current export
+  eligibility, and committed outbound state. Import rejection history and
+  remote receipt or installation are not inferred.
 
 - Reproducible EVPN reflector fanout runner with separate initial-load and
   churn phases, exact withdrawal checks, and a dated receiver-count baseline.

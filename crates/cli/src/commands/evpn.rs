@@ -219,6 +219,265 @@ fn peer_page_to_json(
     })
 }
 
+pub(crate) fn parse_rd(value: &str) -> Result<String, String> {
+    value
+        .parse::<rustbgpd_wire::RouteDistinguisher>()
+        .map(|rd| rd.to_string())
+        .map_err(|err| format!("invalid EVPN RD: {err}"))
+}
+
+fn parse_hex_octets(value: &str, length: usize) -> Result<String, String> {
+    let octets: Vec<_> = value.split(':').collect();
+    if octets.len() != length
+        || octets
+            .iter()
+            .any(|octet| octet.len() != 2 || !octet.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        return Err(format!(
+            "expected {length} colon-separated hexadecimal octets"
+        ));
+    }
+    Ok(value.to_ascii_lowercase())
+}
+
+pub(crate) fn parse_mac(value: &str) -> Result<String, String> {
+    parse_hex_octets(value, 6)
+}
+
+pub(crate) fn parse_esi(value: &str) -> Result<String, String> {
+    parse_hex_octets(value, 10)
+}
+
+pub(crate) fn parse_explain_peer(value: &str) -> Result<String, String> {
+    bare_ip_rpc_address(value)
+        .parse::<std::net::IpAddr>()
+        .map_err(|_| {
+            "expected a peer IP address (optionally scoped link-local IPv6)".to_string()
+        })?;
+    Ok(value.to_string())
+}
+
+pub(crate) fn parse_exact_prefix(value: &str) -> Result<String, String> {
+    if !value.contains('/') {
+        return Err("exact EVPN prefix must include a CIDR length".into());
+    }
+    let (ip, length) = output::parse_prefix_addr(value)?;
+    let host_bits = match ip {
+        std::net::IpAddr::V4(ip) => u32::from(ip).checked_shl(length).unwrap_or(0) != 0,
+        std::net::IpAddr::V6(ip) => u128::from(ip).checked_shl(length).unwrap_or(0) != 0,
+    };
+    if host_bits {
+        return Err("exact EVPN prefix must have zero host bits".into());
+    }
+    Ok(format!("{ip}/{length}"))
+}
+
+fn selector_to_json(key: &crate::proto::EvpnRouteSelector) -> serde_json::Value {
+    use crate::proto::evpn_route_selector::Route;
+    let mut value = serde_json::json!({"rd": key.rd});
+    match &key.route {
+        Some(Route::MacIp(r)) => {
+            value["mac_ip"] =
+                serde_json::json!({"ethernet_tag": r.ethernet_tag, "mac": r.mac, "ip": r.ip})
+        }
+        Some(Route::Imet(r)) => {
+            value["imet"] = serde_json::json!({"ethernet_tag": r.ethernet_tag, "originator_ip": r.originator_ip})
+        }
+        Some(Route::Es(r)) => {
+            value["es"] = serde_json::json!({"esi": r.esi, "originator_ip": r.originator_ip})
+        }
+        Some(Route::IpPrefix(r)) => {
+            value["ip_prefix"] =
+                serde_json::json!({"ethernet_tag": r.ethernet_tag, "prefix": r.prefix})
+        }
+        Some(Route::EadPerEs(r)) => {
+            value["ead_per_es"] = serde_json::json!({"esi": r.esi, "ethernet_tag": r.ethernet_tag})
+        }
+        Some(Route::EadPerEvi(r)) => {
+            value["ead_per_evi"] = serde_json::json!({"esi": r.esi, "ethernet_tag": r.ethernet_tag})
+        }
+        None => {}
+    }
+    value
+}
+
+fn explain_route_to_json(route: &crate::proto::EvpnRouteEntry) -> serde_json::Value {
+    let mut rows = routes_to_json(std::slice::from_ref(route));
+    let mut row = rows.remove(0);
+    row["communities"] = serde_json::json!(
+        route
+            .communities
+            .iter()
+            .map(|c| output::format_community(*c))
+            .collect::<Vec<_>>()
+    );
+    row["extended_communities"] = serde_json::json!(route.extended_communities);
+    row
+}
+
+fn export_decision(decision: i32) -> &'static str {
+    use crate::proto::ExplainDecision;
+    match ExplainDecision::try_from(decision) {
+        Ok(ExplainDecision::Advertise) => "advertise",
+        Ok(ExplainDecision::Deny) => "deny",
+        Ok(ExplainDecision::NoBestRoute) => "no_best_route",
+        Ok(ExplainDecision::UnsupportedFamily) => "unsupported_family",
+        _ => "unspecified",
+    }
+}
+
+fn gate_verdict(verdict: i32) -> &'static str {
+    use crate::proto::ExportGateVerdict;
+    match ExportGateVerdict::try_from(verdict) {
+        Ok(ExportGateVerdict::Pass) => "pass",
+        Ok(ExportGateVerdict::Stop) => "stop",
+        Ok(ExportGateVerdict::NotApplicable) => "not_applicable",
+        _ => "unspecified",
+    }
+}
+
+fn reason_to_json(reason: &crate::proto::ExplainReason) -> serde_json::Value {
+    serde_json::json!({"code": reason.code, "message": reason.message})
+}
+
+fn explain_to_json(response: &crate::proto::ExplainEvpnRouteResponse) -> serde_json::Value {
+    serde_json::json!({
+        "key": response.key.as_ref().map(selector_to_json),
+        "received_from": response.received_from,
+        "received": response.received.as_ref().map(explain_route_to_json),
+        "best": response.best.as_ref().map(explain_route_to_json),
+        "selection_best": response.selection_best.as_ref().map(explain_route_to_json),
+        "compared": response.compared.as_ref().map(explain_route_to_json),
+        "candidate_count": response.candidate_count,
+        "selection_reason": response.selection_reason.as_ref().map(reason_to_json),
+        "selection_deferred": response.selection_deferred,
+        "export": response.export.as_ref().map(|export| serde_json::json!({
+            "peer_address": export.peer_address,
+            "decision": export_decision(export.decision),
+            "reasons": export.reasons.iter().map(reason_to_json).collect::<Vec<_>>(),
+            "gates": export.gates.iter().map(|gate| serde_json::json!({
+                "gate": gate.gate, "code": gate.code, "verdict": gate_verdict(gate.verdict), "detail": gate.detail,
+            })).collect::<Vec<_>>(),
+            "modifications": export.modifications.as_ref().map(|mods| super::rib::modifications_to_json(Some(mods))),
+            "staged": export.staged.as_ref().map(explain_route_to_json),
+            "advertised": export.advertised.as_ref().map(explain_route_to_json),
+            "already_advertised": export.already_advertised,
+            "outbound_dirty": export.outbound_dirty,
+        })),
+    })
+}
+
+fn print_explain_route(
+    label: &str,
+    route: Option<&crate::proto::EvpnRouteEntry>,
+) -> Result<(), CliError> {
+    if let Some(route) = route {
+        outln!("{label}:")?;
+        print_routes(std::slice::from_ref(route), false)
+    } else {
+        outln!("{label}: absent")?;
+        Ok(())
+    }
+}
+
+pub async fn explain(
+    connection: Connection,
+    mut request: crate::proto::ExplainEvpnRouteRequest,
+    json: bool,
+) -> Result<(), CliError> {
+    let received_from = request.received_from.clone();
+    let advertised_to = request.advertised_to.clone();
+    request.received_from = bare_ip_rpc_address(&received_from).to_string();
+    request.advertised_to = bare_ip_rpc_address(&advertised_to).to_string();
+    let mut response = connection
+        .rib_listing_client()
+        .explain_evpn_route(request)
+        .await?
+        .into_inner();
+    restore_matching_scoped_address(Some(&received_from), &mut response.received_from);
+    for route in [
+        &mut response.received,
+        &mut response.best,
+        &mut response.selection_best,
+        &mut response.compared,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        restore_matching_scoped_address(Some(&received_from), &mut route.peer_address);
+    }
+    if let Some(export) = &mut response.export {
+        restore_matching_scoped_address(Some(&advertised_to), &mut export.peer_address);
+        for route in [&mut export.staged, &mut export.advertised]
+            .into_iter()
+            .flatten()
+        {
+            restore_matching_scoped_address(Some(&received_from), &mut route.peer_address);
+        }
+    }
+    if json {
+        return output::print_json_pretty(&explain_to_json(&response));
+    }
+    if let Some(key) = &response.key {
+        outln!("Exact EVPN key: {}", selector_to_json(key))?;
+    }
+    outln!("Accepted candidates: {}", response.candidate_count)?;
+    print_explain_route("Installed best", response.best.as_ref())?;
+    print_explain_route("Fresh selection", response.selection_best.as_ref())?;
+    if !response.received_from.is_empty() {
+        print_explain_route(
+            &format!("Retained accepted source {}", response.received_from),
+            response.received.as_ref(),
+        )?;
+        if response.received.is_none() {
+            outln!(
+                "Import rejection history is not retained; absence does not prove the peer never sent this key."
+            )?;
+        }
+    }
+    print_explain_route("Compared candidate", response.compared.as_ref())?;
+    if let Some(reason) = &response.selection_reason {
+        outln!("Selection reason [{}]: {}", reason.code, reason.message)?;
+    }
+    outln!("Selection deferred: {}", response.selection_deferred)?;
+    if let Some(export) = &response.export {
+        outln!(
+            "Current export to {}: {} (dry run; no state changed)",
+            export.peer_address,
+            export_decision(export.decision)
+        )?;
+        for gate in &export.gates {
+            outln!(
+                "  [{}] {} [{}]: {}",
+                gate_verdict(gate.verdict),
+                gate.gate,
+                gate.code,
+                gate.detail
+            )?;
+        }
+        for reason in &export.reasons {
+            outln!("Export reason [{}]: {}", reason.code, reason.message)?;
+        }
+        if let Some(modifications) = &export.modifications
+            && modifications != &crate::proto::ExplainModifications::default()
+        {
+            outln!(
+                "Policy modifications: {}",
+                serde_json::to_string(&super::rib::modifications_to_json(Some(modifications)))?
+            )?;
+        }
+        print_explain_route("Current staged export", export.staged.as_ref())?;
+        print_explain_route("Committed local Adj-RIB-Out", export.advertised.as_ref())?;
+        outln!(
+            "Already advertised: {}; outbound dirty: {}",
+            export.already_advertised,
+            export.outbound_dirty
+        )?;
+        outln!("Committed state does not prove remote receipt or installation.")?;
+    }
+    Ok(())
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "CLI arguments map directly to one EVPN route request"
@@ -2101,5 +2360,44 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
         let err = super::validate_ip_prefix_ethernet_tag(100).unwrap_err();
         assert!(err.to_string().contains("--ethernet-tag 0"));
         super::validate_ip_prefix_ethernet_tag(0).unwrap();
+    }
+    #[test]
+    fn exact_selector_parser_boundaries() {
+        use super::{parse_esi, parse_exact_prefix, parse_explain_peer, parse_mac, parse_rd};
+        for value in [
+            "0.0.0.0/0",
+            "192.0.2.1/32",
+            "::/0",
+            "2001:db8::1/128",
+            "2001:DB8::/32",
+        ] {
+            assert!(parse_exact_prefix(value).is_ok(), "{value}");
+        }
+        for value in [
+            "192.0.2.1/0",
+            "::1/0",
+            "2001:db8::1/64",
+            "192.0.2.1/31",
+            "192.0.2.0/-1",
+        ] {
+            assert!(parse_exact_prefix(value).is_err(), "{value}");
+        }
+        assert_eq!(parse_mac("AA:BB:CC:DD:EE:FF").unwrap(), "aa:bb:cc:dd:ee:ff");
+        for value in [
+            "aa:bb:cc:dd:ee",
+            "aa:bb:cc:dd:ee:ff:00",
+            "a:bb:cc:dd:ee:ff",
+            "+a:bb:cc:dd:ee:ff",
+        ] {
+            assert!(parse_mac(value).is_err(), "{value}");
+        }
+        assert!(parse_esi("00:11:22:33:44:55:66:77:88:99").is_ok());
+        assert!(parse_esi("00:11:22:33:44:55:66:77:88:9z").is_err());
+        assert_eq!(parse_rd("65000:100").unwrap(), "65000:100");
+        assert!(parse_rd("65536:65536").is_err());
+        assert!(parse_explain_peer("fe80::1%eth0").is_ok());
+        for value in ["fe80::1%", "fe80::1%eth0%eth1", "192.0.2.1%eth0", "invalid"] {
+            assert!(parse_explain_peer(value).is_err(), "{value}");
+        }
     }
 }

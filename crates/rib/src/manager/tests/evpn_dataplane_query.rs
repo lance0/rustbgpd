@@ -29,7 +29,7 @@ fn rib_route(route: EvpnRoute) -> EvpnRibRoute {
     }
 }
 
-fn relevant_routes() -> Vec<EvpnRibRoute> {
+pub(super) fn relevant_routes() -> Vec<EvpnRibRoute> {
     vec![
         rib_route(EvpnRoute::EadPerEs(EvpnEadPerEs {
             rd: RD,
@@ -63,7 +63,7 @@ fn relevant_routes() -> Vec<EvpnRibRoute> {
     ]
 }
 
-fn irrelevant_routes() -> Vec<EvpnRibRoute> {
+pub(super) fn irrelevant_routes() -> Vec<EvpnRibRoute> {
     vec![
         make_evpn_imet(PEER, 100),
         rib_route(EvpnRoute::Es(EvpnEs {
