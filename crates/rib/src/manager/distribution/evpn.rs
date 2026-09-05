@@ -1,8 +1,8 @@
 use super::{
-    AdjRibIn, AdjRibOut, Afi, BgpMetrics, HashMap, HashSet, IpAddr, Ipv4Addr, LOCAL_PEER, LocRib,
-    NeighborPolicyStats, OutboundCommitBatch, PolicyChain, Prefix, RibCommandError, RibManager,
-    RouteContext, RouteFamily, Safi, debug, evpn_routes_equal, gauge_val,
-    record_export_policy_eval, route_type, should_suppress_ibgp_inner, warn,
+    AdjRibIn, AdjRibOut, Afi, HashMap, HashSet, IpAddr, Ipv4Addr, LOCAL_PEER, LocRib,
+    OutboundCommitBatch, PolicyChain, Prefix, RibCommandError, RibManager, RouteContext,
+    RouteFamily, Safi, debug, evpn_routes_equal, gauge_val, route_type, should_suppress_ibgp_inner,
+    warn,
 };
 
 impl RibManager {
@@ -165,9 +165,7 @@ impl RibManager {
         rib_out: &AdjRibOut,
         peer_is_rr_client: &HashMap<IpAddr, bool>,
         keys: &HashSet<rustbgpd_wire::EvpnRouteKey>,
-        target_peer: IpAddr,
-        target_peer_asn: Option<u32>,
-        target_peer_group: Option<&str>,
+        target: &mut super::ExportTarget<'_>,
         target_is_ebgp: bool,
         interpret_rfc1997: bool,
         target_is_rr_client: bool,
@@ -175,40 +173,79 @@ impl RibManager {
         sendable: Option<&Vec<(Afi, Safi)>>,
         llgr: Option<&Vec<(Afi, Safi)>>,
         export_pol: Option<&PolicyChain>,
-        metrics: &BgpMetrics,
-        policy_stats: &mut NeighborPolicyStats,
-        target_peer_label: &str,
         evpn_announce: &mut Vec<crate::route::EvpnRibRoute>,
         evpn_withdraw: &mut Vec<rustbgpd_wire::EvpnRouteKey>,
         force: bool,
     ) {
+        let (target_peer, target_peer_asn, target_peer_group) = target.ctx_peer();
         let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
         let evpn_family = (Afi::L2Vpn, Safi::Evpn);
         let peer_supports_evpn = sendable.is_some_and(|f| f.contains(&evpn_family));
 
         for key in keys {
             if !peer_supports_evpn {
+                target.gate(
+                    "family",
+                    "family_not_sendable",
+                    crate::update::ExportGateVerdict::Stop,
+                    || "peer did not negotiate EVPN".to_string(),
+                );
                 if rib_out.get_evpn(key).is_some() {
                     evpn_withdraw.push(*key);
                 }
                 continue;
             }
+            target.gate(
+                "family",
+                "family",
+                crate::update::ExportGateVerdict::Pass,
+                || "peer negotiated EVPN".to_string(),
+            );
 
             let Some(best) = loc_rib.get_evpn(key) else {
+                target.gate(
+                    "best_route",
+                    "no_best_route",
+                    crate::update::ExportGateVerdict::Stop,
+                    || "no installed EVPN best route".to_string(),
+                );
                 if rib_out.get_evpn(key).is_some() {
                     evpn_withdraw.push(*key);
                 }
                 continue;
             };
 
+            if let Some(trace) = target.trace() {
+                trace.best_peer = Some(best.peer);
+                trace.best_route_type = Some(route_type(best.origin_type));
+            }
+            target.gate(
+                "best_route",
+                "best_route",
+                crate::update::ExportGateVerdict::Pass,
+                || format!("installed EVPN best from {}", best.peer),
+            );
+
             // RFC 1997: NO_ADVERTISE is a pre-policy export restriction.
             // A permit policy cannot remove it to make the route eligible.
             if super::no_advertise_export_suppressed(best.communities()) {
+                target.gate(
+                    "no_advertise",
+                    "no_advertise_suppressed",
+                    crate::update::ExportGateVerdict::Stop,
+                    || "source route carries NO_ADVERTISE".to_string(),
+                );
                 if rib_out.get_evpn(key).is_some() {
                     evpn_withdraw.push(*key);
                 }
                 continue;
             }
+            target.gate(
+                "no_advertise",
+                "no_advertise",
+                crate::update::ExportGateVerdict::Pass,
+                || "source route does not carry NO_ADVERTISE".to_string(),
+            );
 
             // RFC 1997: source-route NO_EXPORT / NO_EXPORT_SUBCONFED is an
             // eBGP export restriction when this neighbor honors the
@@ -219,11 +256,26 @@ impl RibManager {
                 target_is_ebgp,
                 interpret_rfc1997,
             ) {
+                target.gate(
+                    "no_export",
+                    "no_export_suppressed",
+                    crate::update::ExportGateVerdict::Stop,
+                    || {
+                        "source route carries an honored NO_EXPORT restriction toward eBGP"
+                            .to_string()
+                    },
+                );
                 if rib_out.get_evpn(key).is_some() {
                     evpn_withdraw.push(*key);
                 }
                 continue;
             }
+            target.gate(
+                "no_export",
+                "no_export",
+                crate::update::ExportGateVerdict::Pass,
+                || "no source-route NO_EXPORT restriction applies".to_string(),
+            );
 
             // RFC 9494 §4.4: LLGR-stale toward a non-LLGR eBGP peer is
             // suppressed. See `llgr_stale_export_suppressed`.
@@ -244,11 +296,23 @@ impl RibManager {
                 target_is_ebgp,
                 llgr,
             ) {
+                target.gate(
+                    "llgr",
+                    "llgr_stale_suppressed",
+                    crate::update::ExportGateVerdict::Stop,
+                    || "LLGR-stale route cannot be sent to this non-LLGR eBGP peer".to_string(),
+                );
                 if rib_out.get_evpn(key).is_some() {
                     evpn_withdraw.push(*key);
                 }
                 continue;
             }
+            target.gate(
+                "llgr",
+                "llgr",
+                crate::update::ExportGateVerdict::Pass,
+                || "LLGR export restriction cleared".to_string(),
+            );
 
             // Split horizon: don't send an EVPN route back to its source peer.
             // Parallel to the unicast guard earlier in this module. Without
@@ -256,12 +320,24 @@ impl RibManager {
             // back with ORIGINATOR_ID set to its own router-id — FRR and
             // others drop such reflections, but RFC 4456 hygiene says we
             // shouldn't emit them in the first place.
-            if best.peer == target_peer {
+            if Some(best.peer) == target_peer {
+                target.gate(
+                    "split_horizon",
+                    "source_peer",
+                    crate::update::ExportGateVerdict::Stop,
+                    || "route would be sent back to its source peer".to_string(),
+                );
                 if rib_out.get_evpn(key).is_some() {
                     evpn_withdraw.push(*key);
                 }
                 continue;
             }
+            target.gate(
+                "split_horizon",
+                "split_horizon",
+                crate::update::ExportGateVerdict::Pass,
+                || "destination differs from route source".to_string(),
+            );
 
             // Split-horizon / RR suppression check via a synthetic Route that
             // carries only the fields should_suppress_ibgp_inner reads.
@@ -289,11 +365,26 @@ impl RibManager {
                 cluster_id,
                 peer_is_rr_client,
             ) {
+                target.gate(
+                    "ibgp_split_horizon",
+                    "ibgp_split_horizon",
+                    crate::update::ExportGateVerdict::Stop,
+                    || {
+                        "iBGP split horizon / route-reflection rules suppress this route"
+                            .to_string()
+                    },
+                );
                 if rib_out.get_evpn(key).is_some() {
                     evpn_withdraw.push(*key);
                 }
                 continue;
             }
+            target.gate(
+                "ibgp_split_horizon",
+                "ibgp_split_horizon",
+                crate::update::ExportGateVerdict::Pass,
+                || "iBGP split horizon / route-reflection rules permit this route".to_string(),
+            );
 
             // Export policy evaluation. Type 5 EVPN (IP Prefix per RFC 9136)
             // carries a real IP prefix in its NLRI, so prefix-based policy
@@ -329,7 +420,7 @@ impl RibManager {
                 origin_asn,
                 validation_state: rustbgpd_wire::RpkiValidation::NotFound,
                 aspa_state: rustbgpd_wire::AspaValidation::Unknown,
-                peer_address: Some(target_peer),
+                peer_address: target_peer,
                 peer_asn: target_peer_asn,
                 peer_group: target_peer_group,
                 route_type: Some(route_type(best.origin_type)),
@@ -338,14 +429,51 @@ impl RibManager {
                 local_pref: best.local_pref_attr(),
                 med: best.med_attr(),
             };
-            let (result, evaluation) =
-                rustbgpd_policy::evaluate_chain_with_attribution(export_pol, &ctx);
-            record_export_policy_eval(metrics, policy_stats, target_peer_label, &evaluation);
+            let (result, evaluation) = target.evaluate_export_chain(export_pol, &ctx);
+            target.record_eval(&evaluation, best.peer);
+            if let Some(trace) = target.trace() {
+                trace.policy_label = export_pol.map(|chain| {
+                    super::policy_label_with_term(
+                        Some(chain),
+                        &ctx,
+                        evaluation.action,
+                        evaluation.matched_policy.as_deref(),
+                    )
+                });
+            }
             if result.action != rustbgpd_policy::PolicyAction::Permit {
+                if let Some(trace) = target.trace() {
+                    trace.push(
+                        "export_policy",
+                        "policy_denied",
+                        crate::update::ExportGateVerdict::Stop,
+                        format!(
+                            "export policy {:?} denied this route",
+                            trace.policy_label.as_deref().unwrap_or_default()
+                        ),
+                    );
+                }
                 if rib_out.get_evpn(key).is_some() {
                     evpn_withdraw.push(*key);
                 }
                 continue;
+            }
+
+            if let Some(trace) = target.trace() {
+                trace.modifications = result.modifications.clone();
+                let (code, verdict, detail) = match &trace.policy_label {
+                    Some(label) => (
+                        "policy_permitted",
+                        crate::update::ExportGateVerdict::Pass,
+                        format!("export policy {label:?} permitted this route"),
+                    ),
+                    None => (
+                        "export_policy",
+                        crate::update::ExportGateVerdict::NotApplicable,
+                        "no export policy configured (default permit)".to_string(),
+                    ),
+                };
+                trace.push("export_policy", code, verdict, detail);
             }
 
             // Apply export modifications (community add/remove, RT add/remove,
@@ -364,11 +492,23 @@ impl RibManager {
             // Export policy may scope an otherwise eligible route by adding
             // NO_ADVERTISE. Stop it before the Adj-RIB-Out commit.
             if super::no_advertise_export_suppressed(modified.communities()) {
+                target.gate(
+                    "post_policy_no_advertise",
+                    "no_advertise_policy_suppressed",
+                    crate::update::ExportGateVerdict::Stop,
+                    || "export policy produced NO_ADVERTISE".to_string(),
+                );
                 if rib_out.get_evpn(key).is_some() {
                     evpn_withdraw.push(*key);
                 }
                 continue;
             }
+            target.gate(
+                "post_policy_no_advertise",
+                "post_policy_no_advertise",
+                crate::update::ExportGateVerdict::Pass,
+                || "post-policy route does not carry NO_ADVERTISE".to_string(),
+            );
 
             // Skip the announce if rib_out already holds the same route —
             // the dirty-resync path in particular re-evaluates every
@@ -380,11 +520,17 @@ impl RibManager {
             // unchanged — used for outbound-attribute toggles like the
             // RFC 8326 GShut community attach where the wire change is
             // applied later in transport.
-            if !force
+            let identical = !force
                 && rib_out
                     .get_evpn(key)
-                    .is_some_and(|existing| evpn_routes_equal(existing, &modified))
-            {
+                    .is_some_and(|existing| evpn_routes_equal(existing, &modified));
+            if let Some(trace) = target.trace() {
+                trace.staged_evpn = Some(modified.clone());
+                trace.suppressed_identical = identical;
+                trace.push("adj_rib_out", if identical { "already_advertised" } else { "staged_announce" }, crate::update::ExportGateVerdict::Pass,
+                    if identical { "identical route already in committed Adj-RIB-Out; remote acceptance is not observable" } else { "route would be announced to this peer" }.to_string());
+            }
+            if identical {
                 continue;
             }
             evpn_announce.push(modified);
@@ -541,9 +687,14 @@ impl RibManager {
                 rib_out,
                 &self.peer_is_rr_client,
                 &changed_keys,
-                peer,
-                target_peer_asn,
-                target_peer_group,
+                &mut crate::manager::distribution::ExportTarget::Peer {
+                    peer,
+                    peer_asn: target_peer_asn,
+                    peer_group: target_peer_group,
+                    metrics: &metrics,
+                    policy_stats,
+                    peer_label: &target_peer_label,
+                },
                 target_is_ebgp,
                 interpret_rfc1997,
                 target_is_rr_client,
@@ -551,9 +702,6 @@ impl RibManager {
                 sendable.as_ref(),
                 llgr.as_ref(),
                 export_pol.as_ref(),
-                &metrics,
-                policy_stats,
-                &target_peer_label,
                 &mut evpn_announce,
                 &mut evpn_withdraw,
                 false, // EVPN delta path — equality check is correct

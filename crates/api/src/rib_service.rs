@@ -1329,6 +1329,133 @@ fn route_page_to_response(
     }
 }
 
+fn parse_evpn_selector(
+    selector: &proto::EvpnRouteSelector,
+) -> Result<rustbgpd_wire::EvpnRouteKey, Status> {
+    use proto::evpn_route_selector::Route as Selector;
+    use rustbgpd_wire::{EthernetTagId, EvpnIpPrefixValue, EvpnRouteKey};
+
+    let rd = selector
+        .rd
+        .parse::<rustbgpd_wire::RouteDistinguisher>()
+        .map_err(|error| Status::invalid_argument(format!("invalid EVPN RD: {error}")))?;
+    let ip = |value: &str| {
+        value
+            .parse::<IpAddr>()
+            .map_err(|error| Status::invalid_argument(format!("invalid EVPN IP: {error}")))
+    };
+    let esi = |value: &str| {
+        rustbgpd_evpn::parse_esi(value)
+            .map_err(|error| Status::invalid_argument(format!("invalid EVPN ESI: {error}")))
+    };
+    match selector
+        .route
+        .as_ref()
+        .ok_or_else(|| Status::invalid_argument("EVPN route selector is required"))?
+    {
+        Selector::EadPerEs(route) => {
+            if route.ethernet_tag != u32::MAX {
+                return Err(Status::invalid_argument(
+                    "EAD per-ES requires Ethernet Tag MAX_ET (4294967295)",
+                ));
+            }
+            Ok(EvpnRouteKey::EadPerEs {
+                rd,
+                esi: esi(&route.esi)?,
+                ethernet_tag: EthernetTagId::MAX_ET,
+            })
+        }
+        Selector::EadPerEvi(route) => {
+            if route.ethernet_tag == u32::MAX {
+                return Err(Status::invalid_argument(
+                    "EAD per-EVI cannot use Ethernet Tag MAX_ET",
+                ));
+            }
+            Ok(EvpnRouteKey::EadPerEvi {
+                rd,
+                esi: esi(&route.esi)?,
+                ethernet_tag: EthernetTagId(route.ethernet_tag),
+            })
+        }
+        Selector::MacIp(route) => Ok(EvpnRouteKey::MacIp {
+            rd,
+            ethernet_tag: EthernetTagId(route.ethernet_tag),
+            mac: crate::injection_service::parse_mac(&route.mac)?,
+            ip: (!route.ip.is_empty()).then(|| ip(&route.ip)).transpose()?,
+        }),
+        Selector::Imet(route) => Ok(EvpnRouteKey::Imet {
+            rd,
+            ethernet_tag: EthernetTagId(route.ethernet_tag),
+            originator_ip: ip(&route.originator_ip)?,
+        }),
+        Selector::Es(route) => Ok(EvpnRouteKey::Es {
+            rd,
+            esi: esi(&route.esi)?,
+            originator_ip: ip(&route.originator_ip)?,
+        }),
+        Selector::IpPrefix(route) => {
+            let (address, length) = route
+                .prefix
+                .split_once('/')
+                .ok_or_else(|| Status::invalid_argument("EVPN prefix must use CIDR notation"))?;
+            let length = length.parse::<u32>().map_err(|error| {
+                Status::invalid_argument(format!("invalid EVPN prefix length: {error}"))
+            })?;
+            let prefix = parse_prefix_request(address, length)?;
+            if prefix.addr_string() != ip(address)?.to_string() {
+                return Err(Status::invalid_argument(
+                    "EVPN prefix host bits must be zero",
+                ));
+            }
+            Ok(EvpnRouteKey::IpPrefix {
+                rd,
+                ethernet_tag: EthernetTagId(route.ethernet_tag),
+                prefix: match prefix {
+                    Prefix::V4(prefix) => EvpnIpPrefixValue::V4(prefix),
+                    Prefix::V6(prefix) => EvpnIpPrefixValue::V6(prefix),
+                },
+            })
+        }
+    }
+}
+
+fn explain_evpn_to_proto(
+    explain: rustbgpd_rib::update::ExplainEvpnRoute,
+    key: proto::EvpnRouteSelector,
+) -> proto::ExplainEvpnRouteResponse {
+    proto::ExplainEvpnRouteResponse {
+        key: Some(key),
+        received_from: explain
+            .received_from
+            .map_or_else(String::new, |peer| peer.to_string()),
+        received: explain.received.as_ref().map(evpn_route_to_proto),
+        best: explain.best.as_ref().map(evpn_route_to_proto),
+        selection_best: explain.selection_best.as_ref().map(evpn_route_to_proto),
+        compared: explain.compared.as_ref().map(evpn_route_to_proto),
+        candidate_count: u64::try_from(explain.candidate_count).unwrap_or(u64::MAX),
+        selection_reason: explain.reason.map(|reason| proto::ExplainReason {
+            code: reason.code().to_string(),
+            message: explain.reason_detail,
+        }),
+        selection_deferred: explain.selection_deferred,
+        export: explain.export.map(|export| proto::ExplainEvpnExport {
+            peer_address: export.peer.to_string(),
+            decision: explain_decision_to_proto(export.decision),
+            reasons: export
+                .reasons
+                .into_iter()
+                .map(explain_reason_to_proto)
+                .collect(),
+            gates: export.gates.into_iter().map(export_gate_to_proto).collect(),
+            modifications: Some(explain_modifications_to_proto(&export.modifications)),
+            staged: export.staged.as_ref().map(evpn_route_to_proto),
+            advertised: export.advertised.as_ref().map(evpn_route_to_proto),
+            already_advertised: export.already_advertised,
+            outbound_dirty: export.outbound_dirty,
+        }),
+    }
+}
+
 fn parse_prefix_request(prefix: &str, prefix_length: u32) -> Result<Prefix, Status> {
     let addr: IpAddr = prefix
         .parse()
@@ -1423,14 +1550,38 @@ fn explain_modifications_to_proto(
     }
 }
 
+fn explain_decision_to_proto(decision: ExplainDecision) -> i32 {
+    match decision {
+        ExplainDecision::Advertise => proto::ExplainDecision::Advertise as i32,
+        ExplainDecision::Deny => proto::ExplainDecision::Deny as i32,
+        ExplainDecision::NoBestRoute => proto::ExplainDecision::NoBestRoute as i32,
+        ExplainDecision::UnsupportedFamily => proto::ExplainDecision::UnsupportedFamily as i32,
+    }
+}
+
+fn explain_reason_to_proto(reason: rustbgpd_rib::update::ExplainReason) -> proto::ExplainReason {
+    proto::ExplainReason {
+        code: reason.code.to_string(),
+        message: reason.message,
+    }
+}
+
+fn export_gate_to_proto(step: rustbgpd_rib::update::ExportGateStep) -> proto::ExportGateStep {
+    proto::ExportGateStep {
+        gate: step.gate.to_string(),
+        code: step.code.to_string(),
+        detail: step.detail,
+        verdict: match step.verdict {
+            ExportGateVerdict::Pass => proto::ExportGateVerdict::Pass as i32,
+            ExportGateVerdict::Stop => proto::ExportGateVerdict::Stop as i32,
+            ExportGateVerdict::NotApplicable => proto::ExportGateVerdict::NotApplicable as i32,
+        },
+    }
+}
+
 fn explain_to_proto(explain: ExplainAdvertisedRoute) -> proto::ExplainAdvertisedRouteResponse {
     proto::ExplainAdvertisedRouteResponse {
-        decision: match explain.decision {
-            ExplainDecision::Advertise => proto::ExplainDecision::Advertise as i32,
-            ExplainDecision::Deny => proto::ExplainDecision::Deny as i32,
-            ExplainDecision::NoBestRoute => proto::ExplainDecision::NoBestRoute as i32,
-            ExplainDecision::UnsupportedFamily => proto::ExplainDecision::UnsupportedFamily as i32,
-        },
+        decision: explain_decision_to_proto(explain.decision),
         peer_address: explain.peer.to_string(),
         prefix: explain.prefix.addr_string(),
         prefix_length: u32::from(explain.prefix.prefix_len()),
@@ -1452,10 +1603,7 @@ fn explain_to_proto(explain: ExplainAdvertisedRoute) -> proto::ExplainAdvertised
         reasons: explain
             .reasons
             .into_iter()
-            .map(|reason| proto::ExplainReason {
-                code: reason.code.to_string(),
-                message: reason.message,
-            })
+            .map(explain_reason_to_proto)
             .collect(),
         modifications: Some(explain_modifications_to_proto(&explain.modifications)),
         orr_vantage: explain
@@ -1475,18 +1623,7 @@ fn explain_to_proto(explain: ExplainAdvertisedRoute) -> proto::ExplainAdvertised
         gates: explain
             .gates
             .into_iter()
-            .map(|step| proto::ExportGateStep {
-                gate: step.gate.to_string(),
-                code: step.code.to_string(),
-                verdict: match step.verdict {
-                    ExportGateVerdict::Pass => proto::ExportGateVerdict::Pass as i32,
-                    ExportGateVerdict::Stop => proto::ExportGateVerdict::Stop as i32,
-                    ExportGateVerdict::NotApplicable => {
-                        proto::ExportGateVerdict::NotApplicable as i32
-                    }
-                },
-                detail: step.detail,
-            })
+            .map(export_gate_to_proto)
             .collect(),
         update_group_id: explain.update_group_id,
         already_advertised: explain.already_advertised,
@@ -2069,6 +2206,27 @@ impl proto::rib_service_server::RibService for RibService {
         request: Request<proto::ListPeerEvpnRoutesRequest>,
     ) -> Result<Response<proto::ListPeerEvpnRoutesResponse>, Status> {
         self.list_peer_evpn_routes(request.into_inner(), true).await
+    }
+
+    async fn explain_evpn_route(
+        &self,
+        request: Request<proto::ExplainEvpnRouteRequest>,
+    ) -> Result<Response<proto::ExplainEvpnRouteResponse>, Status> {
+        let request = request.into_inner();
+        let selector = request
+            .key
+            .ok_or_else(|| Status::invalid_argument("EVPN key is required"))?;
+        let key = parse_evpn_selector(&selector)?;
+        let received_from = parse_optional_peer_filter(&request.received_from)?;
+        let advertised_to = parse_optional_peer_filter(&request.advertised_to)?;
+        let explanation = rib_manager_read(&self.rib_tx, |reply| RibUpdate::ExplainEvpnRoute {
+            key,
+            received_from,
+            advertised_to,
+            reply,
+        })
+        .await?;
+        Ok(Response::new(explain_evpn_to_proto(explanation, selector)))
     }
 
     async fn list_bgp_ls_routes(
@@ -3027,6 +3185,7 @@ mod tests {
         ListEvpnRoutes,
         ListReceivedEvpnRoutes,
         ListAdvertisedEvpnRoutes,
+        ExplainEvpnRoute,
         ListBgpLsRoutes,
         ListVpnRoutes,
         ListLabeledRoutes,
@@ -3036,7 +3195,7 @@ mod tests {
         ListOrrStatus,
     }
 
-    const UNARY_RIB_READS: [UnaryRibRead; 18] = [
+    const UNARY_RIB_READS: [UnaryRibRead; 19] = [
         UnaryRibRead::ListReceivedRoutes,
         UnaryRibRead::ListBestRoutes,
         UnaryRibRead::ListAdvertisedRoutes,
@@ -3048,6 +3207,7 @@ mod tests {
         UnaryRibRead::ListEvpnRoutes,
         UnaryRibRead::ListReceivedEvpnRoutes,
         UnaryRibRead::ListAdvertisedEvpnRoutes,
+        UnaryRibRead::ExplainEvpnRoute,
         UnaryRibRead::ListBgpLsRoutes,
         UnaryRibRead::ListVpnRoutes,
         UnaryRibRead::ListLabeledRoutes,
@@ -3115,6 +3275,10 @@ mod tests {
                     neighbor_address: "192.0.2.1".into(),
                     ..Default::default()
                 }))
+                .await
+                .map(|_| ()),
+            UnaryRibRead::ExplainEvpnRoute => svc
+                .explain_evpn_route(Request::new(evpn_explain_request()))
                 .await
                 .map(|_| ()),
             UnaryRibRead::ListBgpLsRoutes => svc
@@ -3297,6 +3461,468 @@ mod tests {
             path_id: 0,
         };
         (evpn, bgpls, vpn, labeled, rtc)
+    }
+
+    fn evpn_explain_selector(route: proto::evpn_route_selector::Route) -> proto::EvpnRouteSelector {
+        proto::EvpnRouteSelector {
+            rd: "65000:100".into(),
+            route: Some(route),
+        }
+    }
+
+    fn evpn_explain_request() -> proto::ExplainEvpnRouteRequest {
+        proto::ExplainEvpnRouteRequest {
+            key: Some(evpn_explain_selector(
+                proto::evpn_route_selector::Route::Imet(proto::EvpnImetSelector {
+                    ethernet_tag: 100,
+                    originator_ip: "2001:db8::10".into(),
+                }),
+            )),
+            ..Default::default()
+        }
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keeps all six exact selector fixtures and their typed expectations together"
+    )]
+    fn evpn_selector_cases() -> Vec<(proto::EvpnRouteSelector, rustbgpd_wire::EvpnRouteKey)> {
+        use proto::evpn_route_selector::Route as S;
+        use rustbgpd_wire::{EthernetTagId, EvpnIpPrefixValue, EvpnRouteKey as K};
+        let rd = "65000:100".parse().unwrap();
+        let esi = rustbgpd_evpn::parse_esi("00:11:22:33:44:55:66:77:88:99").unwrap();
+        let mac = rustbgpd_wire::MacAddress::new([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+        let mut cases = vec![
+            (
+                S::EadPerEs(proto::EvpnEadSelector {
+                    esi: esi.to_string(),
+                    ethernet_tag: u32::MAX,
+                }),
+                K::EadPerEs {
+                    rd,
+                    esi,
+                    ethernet_tag: EthernetTagId::MAX_ET,
+                },
+            ),
+            (
+                S::EadPerEvi(proto::EvpnEadSelector {
+                    esi: esi.to_string(),
+                    ethernet_tag: 7,
+                }),
+                K::EadPerEvi {
+                    rd,
+                    esi,
+                    ethernet_tag: EthernetTagId(7),
+                },
+            ),
+            (
+                S::MacIp(proto::EvpnMacIpSelector {
+                    mac: "AA:BB:CC:DD:EE:FF".into(),
+                    ip: String::new(),
+                    ethernet_tag: 7,
+                }),
+                K::MacIp {
+                    rd,
+                    mac,
+                    ip: None,
+                    ethernet_tag: EthernetTagId(7),
+                },
+            ),
+            (
+                S::Imet(proto::EvpnImetSelector {
+                    originator_ip: "2001:db8::10".into(),
+                    ethernet_tag: 100,
+                }),
+                K::Imet {
+                    rd,
+                    originator_ip: "2001:db8::10".parse().unwrap(),
+                    ethernet_tag: EthernetTagId(100),
+                },
+            ),
+            (
+                S::Es(proto::EvpnEsSelector {
+                    esi: esi.to_string(),
+                    originator_ip: "192.0.2.4".into(),
+                }),
+                K::Es {
+                    rd,
+                    esi,
+                    originator_ip: "192.0.2.4".parse().unwrap(),
+                },
+            ),
+            (
+                S::IpPrefix(proto::EvpnIpPrefixSelector {
+                    ethernet_tag: 99,
+                    prefix: "198.51.100.0/24".into(),
+                }),
+                K::IpPrefix {
+                    rd,
+                    ethernet_tag: EthernetTagId(99),
+                    prefix: EvpnIpPrefixValue::V4(Ipv4Prefix::new(
+                        "198.51.100.0".parse().unwrap(),
+                        24,
+                    )),
+                },
+            ),
+            (
+                S::IpPrefix(proto::EvpnIpPrefixSelector {
+                    ethernet_tag: 99,
+                    prefix: "2001:DB8::/48".into(),
+                }),
+                K::IpPrefix {
+                    rd,
+                    ethernet_tag: EthernetTagId(99),
+                    prefix: EvpnIpPrefixValue::V6(Ipv6Prefix::new(
+                        "2001:db8::".parse().unwrap(),
+                        48,
+                    )),
+                },
+            ),
+        ];
+        for ip in ["192.0.2.2", "2001:db8::2"] {
+            cases.push((
+                S::MacIp(proto::EvpnMacIpSelector {
+                    mac: mac.to_string(),
+                    ip: ip.into(),
+                    ethernet_tag: 7,
+                }),
+                K::MacIp {
+                    rd,
+                    mac,
+                    ip: Some(ip.parse().unwrap()),
+                    ethernet_tag: EthernetTagId(7),
+                },
+            ));
+        }
+        cases
+            .into_iter()
+            .map(|(selector, key)| (evpn_explain_selector(selector), key))
+            .collect()
+    }
+
+    #[test]
+    fn evpn_explain_parses_exact_key_variants_and_prefix_boundaries() {
+        for (selector, expected) in evpn_selector_cases() {
+            assert_eq!(
+                parse_evpn_selector(&selector).unwrap(),
+                expected,
+                "{selector:?}"
+            );
+        }
+        for prefix in ["0.0.0.0/0", "192.0.2.1/32", "::/0", "2001:db8::1/128"] {
+            let selector = evpn_explain_selector(proto::evpn_route_selector::Route::IpPrefix(
+                proto::EvpnIpPrefixSelector {
+                    ethernet_tag: 3,
+                    prefix: prefix.into(),
+                },
+            ));
+            assert!(parse_evpn_selector(&selector).is_ok(), "{prefix}");
+        }
+        for ethernet_tag in [0, u32::MAX - 1] {
+            let selector = evpn_explain_selector(proto::evpn_route_selector::Route::EadPerEvi(
+                proto::EvpnEadSelector {
+                    esi: "00:11:22:33:44:55:66:77:88:99".into(),
+                    ethernet_tag,
+                },
+            ));
+            assert!(
+                matches!(parse_evpn_selector(&selector).unwrap(), rustbgpd_wire::EvpnRouteKey::EadPerEvi { ethernet_tag: rustbgpd_wire::EthernetTagId(tag), .. } if tag == ethernet_tag)
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "exercises malformed selector boundaries against one untouched actor channel"
+    )]
+    async fn evpn_explain_invalid_selectors_never_query_actor() {
+        use proto::evpn_route_selector::Route as S;
+        let esi = "00:11:22:33:44:55:66:77:88:99";
+        let mut invalid = vec![
+            S::MacIp(proto::EvpnMacIpSelector::default()),
+            S::MacIp(proto::EvpnMacIpSelector {
+                mac: "aa:bb:cc:dd:ee:ff".into(),
+                ip: "192.0.2.1/32".into(),
+                ..Default::default()
+            }),
+            S::MacIp(proto::EvpnMacIpSelector {
+                mac: "+a:bb:cc:dd:ee:ff".into(),
+                ..Default::default()
+            }),
+            S::Imet(proto::EvpnImetSelector::default()),
+            S::Es(proto::EvpnEsSelector {
+                esi: esi.into(),
+                originator_ip: String::new(),
+            }),
+            S::Es(proto::EvpnEsSelector {
+                esi: String::new(),
+                originator_ip: "192.0.2.4".into(),
+            }),
+            S::EadPerEs(proto::EvpnEadSelector {
+                esi: esi.into(),
+                ethernet_tag: 0,
+            }),
+            S::EadPerEs(proto::EvpnEadSelector {
+                esi: String::new(),
+                ethernet_tag: u32::MAX,
+            }),
+            S::EadPerEvi(proto::EvpnEadSelector {
+                esi: esi.into(),
+                ethernet_tag: u32::MAX,
+            }),
+            S::EadPerEvi(proto::EvpnEadSelector {
+                esi: "00:11".into(),
+                ethernet_tag: 0,
+            }),
+        ];
+        for prefix in [
+            "",
+            "192.0.2.1",
+            "192.0.2.1/24",
+            "192.0.2.1/0",
+            "::1/0",
+            "2001:db8::1/64",
+            "192.0.2.0/33",
+            "::/129",
+            "::/-1",
+            "::/x",
+        ] {
+            invalid.push(S::IpPrefix(proto::EvpnIpPrefixSelector {
+                ethernet_tag: 0,
+                prefix: prefix.into(),
+            }));
+        }
+        let mut requests: Vec<_> = invalid
+            .into_iter()
+            .map(|route| proto::ExplainEvpnRouteRequest {
+                key: Some(evpn_explain_selector(route)),
+                ..Default::default()
+            })
+            .collect();
+        requests.push(proto::ExplainEvpnRouteRequest::default());
+        requests.push(proto::ExplainEvpnRouteRequest {
+            key: Some(proto::EvpnRouteSelector {
+                rd: "65000:100".into(),
+                route: None,
+            }),
+            ..Default::default()
+        });
+        for rd in ["", "invalid", "65536:65536"] {
+            let mut request = evpn_explain_request();
+            request.key.as_mut().unwrap().rd = rd.into();
+            requests.push(request);
+        }
+        for (received, advertised) in [("not-a-peer", ""), ("", "not-a-peer"), ("fe80::1%eth0", "")]
+        {
+            requests.push(proto::ExplainEvpnRouteRequest {
+                received_from: received.into(),
+                advertised_to: advertised.into(),
+                ..evpn_explain_request()
+            });
+        }
+        let (tx, mut rx) = mpsc::channel(1);
+        let service = RibService::new(tx);
+        for request in requests {
+            let error = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                service.explain_evpn_route(Request::new(request.clone())),
+            )
+            .await
+            .expect("malformed key must fail without waiting for the actor")
+            .unwrap_err();
+            assert_eq!(
+                error.code(),
+                tonic::Code::InvalidArgument,
+                "{request:?}: {error}"
+            );
+            assert!(matches!(
+                rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn evpn_explain_forwards_every_typed_key_and_optional_peers() {
+        for (selector, expected_key) in evpn_selector_cases() {
+            for scoped in [false, true] {
+                let received_from = scoped.then(|| "192.0.2.1".parse::<IpAddr>().unwrap());
+                let advertised_to = scoped.then(|| "2001:db8::9".parse::<IpAddr>().unwrap());
+                let (tx, mut rx) = mpsc::channel(1);
+                let actor = tokio::spawn(async move {
+                    let RibUpdate::ExplainEvpnRoute {
+                        key,
+                        received_from: received,
+                        advertised_to: advertised,
+                        reply,
+                    } = rx.recv().await.unwrap()
+                    else {
+                        panic!("expected exact EVPN explain query")
+                    };
+                    assert_eq!(key, expected_key);
+                    assert_eq!(received, received_from);
+                    assert_eq!(advertised, advertised_to);
+                    reply
+                        .send(rustbgpd_rib::update::ExplainEvpnRoute {
+                            key,
+                            received_from: received,
+                            received: None,
+                            best: None,
+                            selection_best: None,
+                            compared: None,
+                            candidate_count: 0,
+                            reason: None,
+                            reason_detail: String::new(),
+                            selection_deferred: false,
+                            export: None,
+                        })
+                        .unwrap();
+                });
+                let response = RibService::new(tx)
+                    .explain_evpn_route(Request::new(proto::ExplainEvpnRouteRequest {
+                        key: Some(selector.clone()),
+                        received_from: received_from.map_or_else(String::new, |p| p.to_string()),
+                        advertised_to: advertised_to.map_or_else(String::new, |p| p.to_string()),
+                    }))
+                    .await
+                    .unwrap()
+                    .into_inner();
+                actor.await.unwrap();
+                assert_eq!(response.key, Some(selector.clone()));
+                assert_eq!(
+                    response.received_from,
+                    received_from.map_or_else(String::new, |p| p.to_string())
+                );
+                assert_eq!(response.candidate_count, 0);
+                assert!(
+                    response.best.is_none()
+                        && response.selection_best.is_none()
+                        && response.received.is_none()
+                        && response.selection_reason.is_none()
+                        && response.export.is_none()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keeps one complete actor response and its distinct state-mapping assertions together"
+    )]
+    async fn evpn_explain_maps_selection_gates_and_committed_export_separately() {
+        use rustbgpd_rib::update::{
+            ExplainEvpnExport, ExplainEvpnRoute, ExplainReason, ExportGateStep,
+        };
+        let installed = non_unicast_routes("192.0.2.1".parse().unwrap()).0;
+        let fresh = non_unicast_routes("192.0.2.2".parse().unwrap()).0;
+        let source = non_unicast_routes("192.0.2.3".parse().unwrap()).0;
+        let mut staged = installed.clone();
+        staged.next_hop = "192.0.2.10".parse().unwrap();
+        let mut committed = installed.clone();
+        committed.next_hop = "192.0.2.11".parse().unwrap();
+        let expected_staged = evpn_route_to_proto(&staged);
+        let expected_committed = evpn_route_to_proto(&committed);
+        let request = proto::ExplainEvpnRouteRequest {
+            received_from: source.peer.to_string(),
+            advertised_to: "192.0.2.9".into(),
+            ..evpn_explain_request()
+        };
+        let explanation = ExplainEvpnRoute {
+            key: installed.key(),
+            received_from: Some(source.peer),
+            received: Some(source),
+            best: Some(installed.clone()),
+            selection_best: Some(fresh),
+            compared: Some(installed),
+            candidate_count: 3,
+            reason: Some(rustbgpd_rib::best_path::BestPathReason::HigherLocalPref),
+            reason_detail: "local preference 200 versus 100".into(),
+            selection_deferred: true,
+            export: Some(ExplainEvpnExport {
+                peer: "192.0.2.9".parse().unwrap(),
+                decision: ExplainDecision::Advertise,
+                reasons: vec![ExplainReason {
+                    code: "export_permitted",
+                    message: "term permit".into(),
+                }],
+                gates: vec![
+                    ExportGateStep {
+                        gate: "family",
+                        code: "family_negotiated",
+                        verdict: ExportGateVerdict::Pass,
+                        detail: "EVPN negotiated".into(),
+                    },
+                    ExportGateStep {
+                        gate: "export_policy",
+                        code: "policy_permitted",
+                        verdict: ExportGateVerdict::Pass,
+                        detail: "term permit".into(),
+                    },
+                ],
+                modifications: rustbgpd_policy::RouteModifications {
+                    set_med: Some(0),
+                    set_local_pref: Some(200),
+                    as_path_prepend: Some((65000, 2)),
+                    ..Default::default()
+                },
+                staged: Some(staged),
+                advertised: Some(committed),
+                already_advertised: false,
+                outbound_dirty: true,
+            }),
+        };
+        let (tx, mut rx) = mpsc::channel(1);
+        let actor = tokio::spawn(async move {
+            let RibUpdate::ExplainEvpnRoute { reply, .. } = rx.recv().await.unwrap() else {
+                panic!("expected exact EVPN explain query")
+            };
+            reply.send(explanation).unwrap();
+        });
+        let response = RibService::new(tx)
+            .explain_evpn_route(Request::new(request))
+            .await
+            .unwrap()
+            .into_inner();
+        actor.await.unwrap();
+        assert_eq!(response.best.unwrap().peer_address, "192.0.2.1");
+        assert_eq!(response.selection_best.unwrap().peer_address, "192.0.2.2");
+        assert_eq!(response.received.unwrap().peer_address, "192.0.2.3");
+        assert_eq!(response.compared.unwrap().peer_address, "192.0.2.1");
+        assert_eq!(response.candidate_count, 3);
+        assert!(response.selection_deferred);
+        let reason = response.selection_reason.unwrap();
+        assert_eq!(reason.code, "higher_local_pref");
+        assert_eq!(reason.message, "local preference 200 versus 100");
+        let export = response.export.unwrap();
+        assert_eq!(export.peer_address, "192.0.2.9");
+        assert_eq!(export.decision, proto::ExplainDecision::Advertise as i32);
+        assert_eq!(export.reasons[0].code, "export_permitted");
+        assert_eq!(export.reasons[0].message, "term permit");
+        assert_eq!(
+            export
+                .gates
+                .iter()
+                .map(|g| g.gate.as_str())
+                .collect::<Vec<_>>(),
+            ["family", "export_policy"]
+        );
+        assert_eq!(export.gates[1].code, "policy_permitted");
+        assert_eq!(
+            export.gates[1].verdict,
+            proto::ExportGateVerdict::Pass as i32
+        );
+        assert_eq!(export.gates[1].detail, "term permit");
+        let modifications = export.modifications.unwrap();
+        assert_eq!(modifications.set_med, Some(0));
+        assert_eq!(modifications.set_local_pref, Some(200));
+        assert_eq!(modifications.as_path_prepend_asn, Some(65000));
+        assert_eq!(modifications.as_path_prepend_count, Some(2));
+        assert_eq!(export.staged, Some(expected_staged));
+        assert_eq!(export.advertised, Some(expected_committed));
+        assert!(!export.already_advertised);
+        assert!(export.outbound_dirty);
     }
 
     /// The RIB actor's copy rule, for the non-unicast listing fakes.

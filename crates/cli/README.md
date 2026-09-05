@@ -272,6 +272,9 @@ the flag and always includes the raw `received_at_epoch_seconds` field.
 rbgp evpn
 rbgp evpn received <addr> --route-type 2 --rd 65000:100
 rbgp evpn advertised <addr> --page-size 100 --page-token '<token>'
+
+rbgp evpn explain mac-ip --rd 65000:100 --mac aa:bb:cc:dd:ee:ff --advertised-to 192.0.2.2
+rbgp evpn explain ip-prefix --rd 65000:100 --prefix 198.51.100.0/24 --received-from 192.0.2.1
 rbgp evpn runtime
 rbgp evpn instances
 rbgp evpn nexthops
@@ -301,6 +304,20 @@ peer never sent a route. Advertised rows are committed Adj-RIB-Out for the
 destination neighbor; each row's `peer` remains its source. Older daemons
 report that the new views are unsupported. Plain `rbgp evpn` retains its
 existing best-route listing.
+
+`evpn explain` selects one exact `mac-ip`, `imet`, `es`, `ip-prefix`,
+`ead-per-es`, or `ead-per-evi` key. Omit Type 2 `--ip` for MAC-only;
+Type 3/4 require `--originator-ip`, and Type 1/4 require `--esi`.
+Per-ES fixes the Ethernet Tag at MAX_ET; per-EVI requires a non-MAX_ET tag.
+Type 5 accepts nonzero tags and requires a canonical CIDR prefix.
+
+The response separates installed best from fresh selection, an optional
+retained accepted source (`--received-from`), and current export gates from
+committed local Adj-RIB-Out (`--advertised-to`). Missing source state does
+not explain an import rejection. Deferred selection and dirty outbound state
+remain visible; committed export is not proof of remote receipt or installation.
+Older daemons fail explicitly when the explain RPC is unavailable.
+
 
 ### Events and Control
 

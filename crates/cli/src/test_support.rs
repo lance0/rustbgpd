@@ -174,6 +174,9 @@ pub(crate) struct MockState {
     pub(crate) last_list_advertised_evpn: Mutex<Option<server_proto::ListPeerEvpnRoutesRequest>>,
     pub(crate) list_peer_evpn_response: Mutex<server_proto::ListPeerEvpnRoutesResponse>,
     pub(crate) list_peer_evpn_error: Mutex<Option<(Code, String)>>,
+    pub(crate) last_explain_evpn: Mutex<Option<server_proto::ExplainEvpnRouteRequest>>,
+    pub(crate) explain_evpn_response: Mutex<server_proto::ExplainEvpnRouteResponse>,
+    pub(crate) explain_evpn_error: Mutex<Option<(Code, String)>>,
     pub(crate) last_list_rejected: Mutex<Option<server_proto::ListRejectedRoutesRequest>>,
     pub(crate) last_list_topology_nodes: Mutex<Option<server_proto::ListTopologyNodesRequest>>,
     pub(crate) last_list_topology_links: Mutex<Option<server_proto::ListTopologyLinksRequest>>,
@@ -2244,6 +2247,21 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         Ok(Response::new(
             self.state.list_peer_evpn_response.lock().await.clone(),
         ))
+    }
+
+    async fn explain_evpn_route(
+        &self,
+        request: Request<server_proto::ExplainEvpnRouteRequest>,
+    ) -> Result<Response<server_proto::ExplainEvpnRouteResponse>, Status> {
+        let request = request.into_inner();
+        *self.state.last_explain_evpn.lock().await = Some(request.clone());
+        if let Some((code, message)) = self.state.explain_evpn_error.lock().await.clone() {
+            return Err(Status::new(code, message));
+        }
+        let mut response = self.state.explain_evpn_response.lock().await.clone();
+        response.key = request.key;
+        response.received_from = request.received_from;
+        Ok(Response::new(response))
     }
 
     async fn list_evpn_routes(

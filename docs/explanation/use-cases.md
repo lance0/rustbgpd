@@ -719,8 +719,11 @@ than reflected; see the
   payloads). BMP route monitoring and MRT `RIB_GENERIC` dumps carry EVPN
   routes as well.
 - Inspect EVPN routes with `rbgp evpn --route-type 2 --rd 65000:100`.
-  EVPN has no import/export or best-path explain entry point;
-  `rbgp rib --prefix <PREFIX> --explain` applies to unicast routes.
+  For an exact key, use `rbgp evpn explain` with a
+  [typed selector](../reference/api.md#explain-an-exact-evpn-route) and optional
+  `--received-from` / `--advertised-to` peers. It separates accepted input,
+  installed best, fresh selection, current export gates, and committed output;
+  historical EVPN import rejection details remain unavailable.
 
 **Example config:** `examples/rr-evpn-fabric/config.toml` — three VTEP
 peers in AS 65000 with `families = ["l2vpn_evpn"]` and

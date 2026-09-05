@@ -789,7 +789,7 @@ fn evpn_stale_rank(route: &EvpnRibRoute) -> u8 {
 /// BGP-preference + EVPN-aware tie-break for EVPN routes (RFC 7432 §15).
 ///
 /// For Type 2 (MAC/IP Advertisement) routes, runs a MAC Mobility head
-/// first: higher sequence number wins, with sticky-MAC preservation —
+/// after freshness: higher sequence number wins, with sticky-MAC preservation —
 /// a sticky MAC is not displaced by a non-sticky advertisement even at
 /// a higher sequence number. Absence of the MAC Mobility community is
 /// treated as sequence=0, sticky=false per RFC 7432 §7.7.
@@ -806,6 +806,14 @@ fn evpn_stale_rank(route: &EvpnRibRoute) -> u8 {
 /// `peer_router_id` is the `0.0.0.0` injection sentinel, not a BGP
 /// Identifier.
 fn evpn_tiebreak_simple(a: &EvpnRibRoute, b: &EvpnRibRoute) -> Ordering {
+    evpn_cmp_with_reason(a, b).0
+}
+
+pub(crate) fn evpn_cmp_with_reason(
+    a: &EvpnRibRoute,
+    b: &EvpnRibRoute,
+) -> (Ordering, crate::best_path::BestPathReason) {
+    use crate::best_path::BestPathReason as R;
     // 0. Three-tier freshness: fresh (0) > GR-stale (1) > LLGR-stale (2)
     //    per RFC 4724 §4.2 / RFC 9494 §4.7. LLGR promotion clears
     //    `is_stale` and sets `is_llgr_stale` (see AdjRibIn::promote_evpn_to_llgr_stale),
@@ -817,7 +825,7 @@ fn evpn_tiebreak_simple(a: &EvpnRibRoute, b: &EvpnRibRoute) -> Ordering {
     //    fresh alternative inside the head and skip this check entirely.
     match evpn_stale_rank(a).cmp(&evpn_stale_rank(b)) {
         Ordering::Equal => {}
-        other => return other,
+        other => return (other, R::StalePreference),
     }
 
     // Type-specific head for Type 2 (MAC/IP): MAC Mobility sequence + sticky.
@@ -827,61 +835,105 @@ fn evpn_tiebreak_simple(a: &EvpnRibRoute, b: &EvpnRibRoute) -> Ordering {
         // Sticky protects against displacement by non-sticky. If one is
         // sticky and the other isn't, the sticky wins regardless of seq.
         match (a_sticky, b_sticky) {
-            (true, false) => return Ordering::Less,
-            (false, true) => return Ordering::Greater,
+            (true, false) => return (Ordering::Less, R::EvpnMacMobility),
+            (false, true) => return (Ordering::Greater, R::EvpnMacMobility),
             _ => {}
         }
         // Higher sequence wins — reverse for `min_by`.
         match b_seq.cmp(&a_seq) {
             Ordering::Equal => {}
-            other => return other,
+            other => return (other, R::EvpnMacMobility),
         }
     }
 
     // 1. Higher LocalPref is better — reverse for `min_by`.
     match b.local_pref().cmp(&a.local_pref()) {
         Ordering::Equal => {}
-        other => return other,
+        other => return (other, R::HigherLocalPref),
     }
     // 2. Shorter AS_PATH is better.
     let a_len = a.as_path().map_or(0, AsPath::len);
     let b_len = b.as_path().map_or(0, AsPath::len);
     match a_len.cmp(&b_len) {
         Ordering::Equal => {}
-        other => return other,
+        other => return (other, R::ShorterAsPath),
     }
     // 3. Lowest ORIGIN (IGP=0 < EGP=1 < Incomplete=2).
     match a.origin().cmp(&b.origin()) {
         Ordering::Equal => {}
-        other => return other,
+        other => return (other, R::LowerOrigin),
     }
     // 4. Lower MED is better.
     match a.med().cmp(&b.med()) {
         Ordering::Equal => {}
-        other => return other,
+        other => return (other, R::LowerMed),
     }
     // 5. eBGP preferred over iBGP.
     match (a.is_ebgp(), b.is_ebgp()) {
-        (true, false) => return Ordering::Less,
-        (false, true) => return Ordering::Greater,
+        (true, false) => return (Ordering::Less, R::EbgpOverIbgp),
+        (false, true) => return (Ordering::Greater, R::EbgpOverIbgp),
         _ => {}
     }
     // 6. Lowest effective BGP Identifier (RFC 4271 §9.1.2.2 step (f);
     //    ORIGINATOR_ID substitutes per RFC 4456 §9). Skipped for a pair
     //    that includes a locally originated route.
-    if let Some((cmp, _)) = compare_bgp_identifier(
+    if let Some((cmp, reason)) = compare_bgp_identifier(
         (a.origin_type, a.originator_id(), a.peer_router_id),
         (b.origin_type, b.originator_id(), b.peer_router_id),
     ) {
-        return cmp;
+        return (cmp, reason);
     }
     // 7. Shorter CLUSTER_LIST wins (RFC 4456 §9).
     match a.cluster_list().len().cmp(&b.cluster_list().len()) {
         Ordering::Equal => {}
-        other => return other,
+        other => return (other, R::ShorterClusterList),
     }
     // 8. Final tiebreak: lower peer address wins (deterministic).
-    a.peer.cmp(&b.peer)
+    (a.peer.cmp(&b.peer), R::LowerPeerAddress)
+}
+
+/// Values for the decisive EVPN comparator step, in winner / comparison order.
+pub(crate) fn evpn_reason_detail(
+    reason: crate::best_path::BestPathReason,
+    a: &EvpnRibRoute,
+    b: &EvpnRibRoute,
+) -> String {
+    use crate::best_path::BestPathReason as R;
+    match reason {
+        R::StalePreference => format!(
+            "freshness rank {} versus {} (fresh=0, GR-stale=1, LLGR-stale=2)",
+            evpn_stale_rank(a),
+            evpn_stale_rank(b)
+        ),
+        R::EvpnMacMobility => {
+            let (a_sticky, a_sequence) = extract_mac_mobility(a);
+            let (b_sticky, b_sequence) = extract_mac_mobility(b);
+            format!(
+                "MAC mobility sticky={a_sticky} sequence={a_sequence} versus sticky={b_sticky} sequence={b_sequence}"
+            )
+        }
+        R::HigherLocalPref => format!("local_pref {} versus {}", a.local_pref(), b.local_pref()),
+        R::ShorterAsPath => format!(
+            "as_path length {} versus {}",
+            a.as_path().map_or(0, AsPath::len),
+            b.as_path().map_or(0, AsPath::len)
+        ),
+        R::LowerOrigin => format!("origin {:?} versus {:?}", a.origin(), b.origin()),
+        R::LowerMed => format!("med {} versus {}", a.med(), b.med()),
+        R::EbgpOverIbgp => format!("eBGP {} versus {}", a.is_ebgp(), b.is_ebgp()),
+        R::LowerOriginatorId | R::LowerBgpIdentifier => format!(
+            "effective BGP identifier {} versus {}",
+            a.originator_id().unwrap_or(a.peer_router_id),
+            b.originator_id().unwrap_or(b.peer_router_id)
+        ),
+        R::ShorterClusterList => format!(
+            "cluster_list length {} versus {}",
+            a.cluster_list().len(),
+            b.cluster_list().len()
+        ),
+        R::LowerPeerAddress => format!("peer {} versus {}", a.peer, b.peer),
+        _ => reason.code().to_string(),
+    }
 }
 
 /// Extract `(sticky, sequence_number)` from the MAC Mobility extended
@@ -2715,6 +2767,66 @@ mod tests {
             peer_router_id: peer,
             is_stale: false,
             is_llgr_stale: false,
+        }
+    }
+
+    #[test]
+    fn evpn_reason_ladder_matches_live_selection_and_compared_values() {
+        use crate::best_path::BestPathReason as R;
+        for reason in [
+            R::HigherLocalPref,
+            R::ShorterAsPath,
+            R::LowerOrigin,
+            R::LowerMed,
+            R::EbgpOverIbgp,
+            R::LowerOriginatorId,
+            R::LowerBgpIdentifier,
+            R::ShorterClusterList,
+            R::LowerPeerAddress,
+        ] {
+            let mut winner = make_evpn_type2(1, vec![]);
+            let mut other = make_evpn_type2(2, vec![]);
+            // Keep the identifier step tied unless it is the intended discriminator.
+            other.peer_router_id = winner.peer_router_id;
+            let attributes = Arc::make_mut(&mut other.attributes);
+            match reason {
+                R::HigherLocalPref => attributes[0] = PathAttribute::LocalPref(50),
+                R::ShorterAsPath => attributes.push(PathAttribute::AsPath(AsPath {
+                    segments: vec![AsPathSegment::AsSequence(vec![65001])],
+                })),
+                R::LowerOrigin => {
+                    Arc::make_mut(&mut winner.attributes).push(PathAttribute::Origin(Origin::Igp));
+                }
+                R::LowerMed => attributes.push(PathAttribute::Med(100)),
+                R::EbgpOverIbgp => winner.origin_type = RouteOrigin::Ebgp,
+                R::LowerOriginatorId => {
+                    Arc::make_mut(&mut winner.attributes)
+                        .push(PathAttribute::OriginatorId(Ipv4Addr::new(1, 1, 1, 1)));
+                    attributes.push(PathAttribute::OriginatorId(Ipv4Addr::new(2, 2, 2, 2)));
+                }
+                R::LowerBgpIdentifier => other.peer_router_id = Ipv4Addr::new(10, 0, 0, 2),
+                R::ShorterClusterList => {
+                    attributes.push(PathAttribute::ClusterList(vec![Ipv4Addr::new(1, 1, 1, 1)]));
+                }
+                R::LowerPeerAddress => {}
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                evpn_cmp_with_reason(&winner, &other),
+                (Ordering::Less, reason)
+            );
+            assert_eq!(
+                evpn_cmp_with_reason(&other, &winner),
+                (Ordering::Greater, reason)
+            );
+            let mut loc = LocRib::new();
+            loc.recompute_evpn(winner.key(), [&other, &winner].into_iter());
+            assert_eq!(loc.get_evpn(&winner.key()).unwrap().peer, winner.peer);
+            let detail = evpn_reason_detail(reason, &winner, &other);
+            assert!(
+                detail.contains("versus"),
+                "missing compared values: {detail}"
+            );
         }
     }
 

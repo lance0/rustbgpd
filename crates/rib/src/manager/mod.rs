@@ -2813,6 +2813,16 @@ impl RibManager {
             RibUpdate::QueryFlowSpecRoutes { filter, reply } => {
                 queries::send_filtered_rows(self.loc_rib.iter_flowspec(), filter.as_ref(), reply);
             }
+            RibUpdate::ExplainEvpnRoute {
+                key,
+                received_from,
+                advertised_to,
+                reply,
+            } => {
+                if !reply.is_closed() {
+                    let _ = reply.send(self.explain_evpn_route(key, received_from, advertised_to));
+                }
+            }
             RibUpdate::QueryEvpnRoutes { filter, reply } => {
                 queries::send_filtered_rows(self.loc_rib.iter_evpn(), filter.as_ref(), reply);
             }

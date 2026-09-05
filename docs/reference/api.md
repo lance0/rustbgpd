@@ -57,7 +57,7 @@ not by itself make it v1-stable.
 | `NeighborService` | `AddNeighbor`, `DeleteNeighbor`, `ListNeighbors`, `GetNeighborState`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `RefreshOutbound`, `ResetNeighbor`, `SetGracefulShutdown`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `ListDynamicNeighbors` | Peer lifecycle, inbound soft reset, single-peer outbound re-advertisement, outside-v1 administrative session reset, RFC 8326 graceful-shutdown toggle, and dynamic-neighbor CRUD — `AddDynamicNeighbor` / `DeleteDynamicNeighbor` add and remove `[[dynamic_neighbors]]` prefix ranges at runtime (queued to the config file), `ListDynamicNeighbors` for visibility |
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `SetPolicy`, `DeletePolicy`, `ListNeighborSets`, `GetNeighborSet`, `SetNeighborSet`, `DeleteNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain`, `ExplainImportPolicy`, `ListRejectedRoutes`, `TestPolicy`, `GetPolicyStats`, `GetValidationPolicyPosture` | Named policy CRUD, neighbor sets, global/per-neighbor chain attachment, import-policy diagnostics, read-only candidate-policy dry runs, live counters, and bounded invalid-validation disposition posture |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup`, `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` | Peer-group CRUD and neighbor membership assignment |
-| `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainAdvertisedRoute`, `ExplainBestPath`, `LookupBestPath`, `ListFlowSpecRoutes`, `ListEvpnRoutes`, `ListReceivedEvpnRoutes`, `ListAdvertisedEvpnRoutes`, `ListBgpLsRoutes`, `ListTopologyNodes`, `ListTopologyLinks`, `ListOrrStatus`, `ListVpnRoutes`, `ListRtcRoutes`, `ListLabeledRoutes`, `ListBlackholeDiscards`, `ListFibRoutes`, `ListFibTables`, `SetFibTable`, `DeleteFibTable`, `ListRouteEvents` | Query-only RIB route surfaces (incl. EVPN, BGP-LS, VPNv4/v6, RT-Constrain, and labeled-unicast), the RFC 9107 ORR / BGP-LS topology read surface (`ListTopologyNodes` / `ListTopologyLinks` / `ListOrrStatus`), BLACKHOLE discard status, paginated FIB status, runtime FIB-table CRUD, exact explain plus outside-v1 global LPM, and recent route-event history; live route streaming is owned by `EventService.WatchEvents` / `SubscribeFromEvent` |
+| `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainAdvertisedRoute`, `ExplainBestPath`, `LookupBestPath`, `ListFlowSpecRoutes`, `ListEvpnRoutes`, `ListReceivedEvpnRoutes`, `ListAdvertisedEvpnRoutes`, `ExplainEvpnRoute`, `ListBgpLsRoutes`, `ListTopologyNodes`, `ListTopologyLinks`, `ListOrrStatus`, `ListVpnRoutes`, `ListRtcRoutes`, `ListLabeledRoutes`, `ListBlackholeDiscards`, `ListFibRoutes`, `ListFibTables`, `SetFibTable`, `DeleteFibTable`, `ListRouteEvents` | Query-only RIB route surfaces (incl. EVPN, BGP-LS, VPNv4/v6, RT-Constrain, and labeled-unicast), the RFC 9107 ORR / BGP-LS topology read surface (`ListTopologyNodes` / `ListTopologyLinks` / `ListOrrStatus`), BLACKHOLE discard status, paginated FIB status, runtime FIB-table CRUD, exact explain plus outside-v1 global LPM, and recent route-event history; live route streaming is owned by `EventService.WatchEvents` / `SubscribeFromEvent` |
 | `BfdService` | `GetBfdSessions` | BFD session inspection (single-hop and multihop) for configured static neighbors |
 | `RpkiService` | `ValidateRouteOrigin`, `ListCaches` | Bounded point validation and configured RTR-cache accepted-epoch inventory |
 | `EventService` | `WatchEvents`, `SubscribeFromEvent`, `ListEvpnEvents`, `ListSessionEvents`, `ListPolicyEvents` | Unified live stream for route, session lifecycle, BGP NOTIFICATION metadata, policy mutation, EVPN route events, BFD session events, and FIB / BLACKHOLE dataplane status-row summary events, with `stream_lagged` warnings for bounded-source backpressure; durable cursor replay via `SubscribeFromEvent` when `[event_history].enabled = true`; plus bounded after-the-fact EVPN, session-lifecycle, and policy-mutation history. Per-MAC EVPN dataplane categories remain follow-up work |
@@ -1291,6 +1291,7 @@ route changes through `EventService.WatchEvents` or `EventService.SubscribeFromE
 | `ListEvpnRoutes` | EVPN routes (RFC 7432 / RFC 9136) in Loc-RIB view, filterable by route type / source peer / RD |
 | `ListReceivedEvpnRoutes` | Bounded accepted post-policy EVPN Adj-RIB-In for one source neighbor, filterable by type / RD |
 | `ListAdvertisedEvpnRoutes` | Bounded committed EVPN Adj-RIB-Out for one destination neighbor, filterable by type / RD |
+| `ExplainEvpnRoute` | Exact typed EVPN candidate selection and optional destination export trace, with installed and committed state kept distinct |
 | `ListBgpLsRoutes` | BGP-LS / BGP-LS VPN routes (RFC 9552) in Loc-RIB view, exposed as opaque NLRI/TLV bytes and filterable by family, peer, and NLRI type |
 | `ListVpnRoutes` | RFC 4364/4659 VPNv4/VPNv6 routes — RD-scoped customer prefixes, Route Targets, and MPLS labels |
 | `ListLabeledRoutes` | RFC 8277 labeled-unicast (SAFI 4) routes in Loc-RIB view — MPLS label stack plus prefix reachability |
@@ -1633,7 +1634,8 @@ historical EVPN import rejection details are not retained. Advertised means
 **committed Adj-RIB-Out** for the requested destination, after export gates and
 successful outbound enqueue. It does not confirm remote receipt or installation.
 Each row's `peer_address` remains its original source peer, which may differ
-from the requested destination. Neither view provides EVPN explain yet.
+from the requested destination. Use [exact EVPN explain](#explain-an-exact-evpn-route)
+for candidate-selection and destination export diagnostics.
 
 These peer methods return one page with `routes`, `total_count`,
 `next_page_token`, and `page_version`. The default page size is 100; the maximum
@@ -1687,6 +1689,90 @@ is an optional typed route-distinguisher match (for example, `"65000:100"`,
 the displayed `0x`/16-hex-digit fallback for unknown types). Empty strings
 disable each filter. Invalid filters fail with `INVALID_ARGUMENT` before the
 RIB actor is queried.
+
+### Explain an exact EVPN route
+
+`RibService.ExplainEvpnRoute` takes a required `EvpnRouteSelector` in `key`:
+its `rd` and exactly one route-specific selector identify a single NLRI.
+Optional `received_from` looks up one retained source, and `advertised_to`
+evaluates one destination. Both are neighbor IP addresses. This additive,
+`sensitive_read` RPC is outside the narrow v1 contract; older servers return
+`UNIMPLEMENTED`. Existing unicast explain requests keep their current meaning.
+
+The CLI uses `rbgp evpn explain <selector> --rd <RD>` with optional
+`--received-from <PEER>` and `--advertised-to <PEER>`. Put these options after
+the selector. Each selector is exact, with no wildcard or longest-prefix match:
+
+| CLI selector | Proto selector | Required key fields beyond RD | Ethernet Tag |
+|---|---|---|---|
+| `ead-per-es` | `ead_per_es` | `--esi` | CLI fixes it to MAX_ET; RPC requires 4294967295 |
+| `ead-per-evi` | `ead_per_evi` | `--esi`, `--ethernet-tag` | Required; MAX_ET is rejected |
+| `mac-ip` | `mac_ip` | `--mac`; optional `--ip` | `--ethernet-tag` defaults to 0 |
+| `imet` | `imet` | `--originator-ip` | `--ethernet-tag` defaults to 0 |
+| `es` | `es` | `--esi`, `--originator-ip` | Not part of the Type 4 key |
+| `ip-prefix` | `ip_prefix` | `--prefix` in canonical CIDR form | `--ethernet-tag` defaults to 0; nonzero tags are supported |
+
+For Type 2, omitting `--ip` (an empty RPC `ip`) selects the MAC-only key;
+it does not match every host IP attached to that MAC. Type 5 prefixes must
+have zero host bits. ESI uses ten colon-separated hex octets; MAC uses six.
+Labels, next hop, and gateway are route payload, not selector fields. Invalid
+selectors return `INVALID_ARGUMENT` before querying the RIB.
+
+```bash
+# Exact MAC-only route, with source and destination diagnostics
+rbgp evpn explain mac-ip --rd 65000:100 --mac 02:00:00:00:00:11 \
+  --received-from 10.0.0.1 --advertised-to 10.0.0.2
+
+# The same MAC with a host IP is a distinct key
+rbgp evpn explain mac-ip --rd 65000:100 --mac 02:00:00:00:00:11 \
+  --ip 192.0.2.11 --advertised-to 10.0.0.2
+
+# Type 5 supports an exact IPv6 prefix and a nonzero Ethernet Tag
+rbgp evpn explain ip-prefix --rd 65000:100 --ethernet-tag 100 \
+  --prefix 2001:db8:100::/64 --advertised-to 10.0.0.2
+
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"key":{"rd":"65000:100","imet":{"ethernet_tag":0,"originator_ip":"10.0.0.1"}},"received_from":"10.0.0.1","advertised_to":"10.0.0.2"}' \
+  localhost:50051 rustbgpd.v1.RibService/ExplainEvpnRoute
+```
+
+The response is a read-only snapshot for that exact key. It walks the peer
+roster using exact lookups and returns a bounded number of routes, rather than
+copying every candidate or scanning the full EVPN table. `--json` exposes the
+same distinctions as the text output:
+
+| Field | Meaning |
+|---|---|
+| `received` | Accepted post-policy Adj-RIB-In route from `received_from`, if retained. Omitted when no source is requested or no accepted route is retained. |
+| `candidate_count` | Number of currently retained accepted candidates across sources. |
+| `best` | Installed Loc-RIB route. |
+| `selection_best` | Winner of a fresh comparison over the retained candidates, without installing it. |
+| `compared` | Requested retained source when it loses; otherwise the runner-up when the source wins or none was requested. Absent when the requested source is not retained or there is no comparison. |
+| `selection_reason` | Decisive reason why `selection_best` beats `compared`; absent without a pair. |
+| `selection_deferred` | EVPN selection is currently deferred; the installed best may differ from fresh selection or be absent. |
+| `export` | Present only when `advertised_to` was requested. |
+
+Selection uses the live EVPN comparator: freshness ranks precede Type 2 sticky
+and MAC Mobility sequence preferences, followed by the remaining BGP criteria.
+A fresh comparison can still select a stale route if that is the best retained
+candidate. Missing input is not an import rejection explanation: historical
+EVPN import rejection details are not retained, and absence does not prove
+that a peer never sent this key.
+
+`export.decision`, `reasons`, `gates`, and `modifications` describe a current
+dry run through the shared export staging path, using **installed `best`**.
+`export.staged` is the post-policy candidate that clears that path, while
+`export.advertised` is the **committed local Adj-RIB-Out** route for the
+requested destination. Each route's `peer_address` remains its source;
+`export.peer_address` names the destination. A missing outbound session is
+reported as a stopping `destination_unavailable` gate.
+
+`already_advertised` means staging found an identical committed route and
+suppressed a duplicate advertisement. `outbound_dirty` is a destination-wide
+resynchronization flag, not proof that this particular route is pending.
+A retained exact-encoder rejection can stop an otherwise eligible candidate.
+The query neither sends nor freshly encodes an UPDATE, and committed state
+is not proof of remote receipt, acceptance, or installation.
 
 ### List BGP-LS routes
 

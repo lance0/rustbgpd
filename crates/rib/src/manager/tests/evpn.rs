@@ -2260,7 +2260,7 @@ fn pending_routes_received_drains_full_evpn_withdraw_batch() {
 /// Build a Type 2 (`MacIp`) `EvpnRibRoute` carrying an optional MAC
 /// Mobility extended community. Tests use this to simulate received
 /// routes with varying mobility sequences.
-fn make_evpn_macip(
+pub(super) fn make_evpn_macip(
     peer: Ipv4Addr,
     mac: [u8; 6],
     mobility_seq: Option<u32>,
