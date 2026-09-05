@@ -245,6 +245,25 @@ and every explain RPC sits in it. Capping a UDS listener at `sensitive_read`
 and giving it an explicit `principal` mapped to `observer` restores control 2
 if colocation is unavoidable.
 
+## Integration coverage
+
+The workspace test suite runs the actual MCP binary against a disposable daemon
+with an Established IPv4 peer. It checks the export-explain allow/deny ladder
+across a policy reload, JSON-RPC stdout, and mutation refusal on the same
+observer listener used by the adapter. Fixture setup uses a separate operator
+connection. This does not establish live coverage of every tool or EVPN case;
+the mock transport tests separately cover mutual TLS and stalled responses.
+
+To run this check alone, build the source-only adapter first:
+
+```sh
+cargo build --locked -p rustbgpd-mcp --bins
+cargo test --locked -p rustbgpd --test mcp_smoke
+```
+
+`cargo test --locked --workspace` builds both executables automatically. A
+focused run fails with build instructions if the adapter binary is missing.
+
 ## Related
 
 - [Explain route decisions](explain.md) — the same answers through `rbgp`.
