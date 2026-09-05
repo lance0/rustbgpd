@@ -61,6 +61,14 @@ class SiteManifestTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 load_manifest(self.root)
 
+    def test_reserved_outputs_cannot_be_destination_directories(self):
+        for reserved in ("index.md", "meta.json", "cookbook/meta.json", "source.json"):
+            for destination in (reserved, f"{reserved}/child.md"):
+                with self.subTest(destination=destination):
+                    self.write({destination: "docs/page.md"})
+                    with self.assertRaises(ValueError):
+                        load_manifest(self.root)
+
     def test_duplicate_destinations_and_sources_fail(self):
         self.manifest.write_text('{"page.md":"docs/page.md","page.md":"docs/page.md"}')
         with self.assertRaisesRegex(ValueError, "duplicate destination"):

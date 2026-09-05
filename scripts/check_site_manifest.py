@@ -38,8 +38,9 @@ def load_manifest(root: Path) -> dict[str, str]:
                 raise ValueError(f"invalid {label} path: {value!r}")
         if any(str(parent) in entries for parent in PurePosixPath(destination).parents):
             raise ValueError(f"destination is inside another output file: {destination}")
-        if destination == "index.md":
-            raise ValueError("index.md is maintained by the site")
+        for reserved in ("index.md", "meta.json", "cookbook/meta.json", "source.json"):
+            if destination == reserved or destination.startswith(f"{reserved}/"):
+                raise ValueError(f"{reserved} is maintained by the site")
         if not source.startswith("docs/"):
             raise ValueError(f"source must be under docs/: {source}")
         if source in sources:
