@@ -94,9 +94,8 @@ IPv4/IPv6 `Prefix` routes.
     underlay for IPv6 tenant prefixes (M110, manual). Interface-less IRB
     does not implement `RTA_VIA`, so the prefix and next-hop families must
     agree: an IPv4 tenant prefix under an IPv6 VTEP is refused at
-    origination and dropped at import. IPv6 VTEPs are single-homed only —
-    FRR documents IPv6 VTEP addresses as unsupported with EVPN
-    multi-homing. Still ahead: Linux
+    origination and dropped at import. Both IPv6 receipts are single-homed;
+    a multi-homed IPv6 underlay is untested here. Still ahead: Linux
     softswitch local-bias split-horizon, the remaining ADR-0063 runtime
     mixed-edit tail, true shared-VNI / non-zero Ethernet Tag service,
     managed netdev ergonomics, and demand-shaped route types 6-11, PBB-EVPN,

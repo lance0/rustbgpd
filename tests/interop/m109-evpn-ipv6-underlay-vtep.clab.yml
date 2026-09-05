@@ -24,9 +24,9 @@
 # an AS boundary does not advertise EVPN, and that detour has nothing to
 # do with the underlay family under test.
 #
-# Single-homed only. FRR's own EVPN documentation states that IPv6 VTEP
-# addresses are not supported with EVPN multi-homing, so a multi-homed
-# IPv6 underlay is out of scope here.
+# Single-homed: this leg exercises the underlay address family, not
+# multi-homing. A multi-homed IPv6 underlay is out of scope here and
+# stays untested.
 #
 # Both VXLAN ports run `nolearning` so EVPN owns the FDB. The rustbgpd
 # side additionally runs `neigh_suppress on` (the M37+IP prerequisite)

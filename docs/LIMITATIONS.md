@@ -98,9 +98,9 @@ Known EVPN gaps:
   origination and dropped at import rather than installed against a
   cross-family gateway. The same constraint applies with the families
   reversed. An IPv6 VXLAN underlay is otherwise supported for the L2 path
-  and for same-family symmetric IRB, and is single-homed only — FRR
-  documents IPv6 VTEP addresses as unsupported with EVPN multi-homing, so
-  there is no cross-vendor multi-homed IPv6 underlay to interoperate with.
+  and for same-family symmetric IRB. The receipts covering it are
+  single-homed, so a multi-homed IPv6 underlay is untested rather than
+  known unsupported.
 - Route types 6-11, PBB-EVPN, multicast EVPN, MPLS/SRv6 encapsulation,
   VPWS, and E-Tree are demand-shaped rather than part of the current
   VXLAN/Linux lane.
