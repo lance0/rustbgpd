@@ -27,7 +27,7 @@ CHECKLIST = ROOT / "docs" / "RELEASE_CHECKLIST.md"
 RECEIPTS_INDEX = ROOT / "docs" / "RECEIPTS.md"
 
 FRONT_DOORS = (
-    "README.md",
+    "docs/perf/README.md",
     "docs/BENCHMARKS.md",
     "docs/COMPARISON.md",
     "docs/ixp-evaluation.md",

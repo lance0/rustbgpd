@@ -433,8 +433,7 @@ claims; each links its full method, configs, and raw artifacts:
   why (a stock-glibc build ratcheted across reload cycles).
 
 Reload, convergence, and propagation behavior at these shapes lives in
-the same receipt; the README's
-[performance section](../../README.md#performance-vs-the-incumbents)
+the same receipt; the [performance evidence index](../perf/README.md)
 states the wins and the losses together. Do not size from any single
 headline number — read the receipt for the shape closest to your
 member count.

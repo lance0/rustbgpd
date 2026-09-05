@@ -89,7 +89,7 @@ convention in `CONTRIBUTING.md`:
       unless they affect users or operators.
 - [ ] Every front-door performance claim inventoried in
       [`docs/perf/receipt-provenance.json`](perf/receipt-provenance.json) — in
-      `README.md`, `docs/BENCHMARKS.md`, `docs/COMPARISON.md`, or
+      `docs/perf/README.md`, `docs/BENCHMARKS.md`, `docs/COMPARISON.md`, or
       `docs/ixp-evaluation.md` — cites a receipt measured within the last three
       releases, or carries an explicit measured-on date in the claim text
       (e.g. "measured 2026-07-03"). Older numbers stay quotable with their
@@ -271,9 +271,18 @@ sed "s#/run/rustbgpd/grpc-test-only-operator.token#$PWD/tests/fixtures/grpc-test
 ./target/release/rustbgpd --strict /tmp/init-lab.toml           # --strict without --check
 ```
 
-### README quickstart smoke
+### README demo smoke
 
-Walk the exact README quickstart from a clean tree and confirm:
+Walk the [README demo](../README.md#try-it-locally) from a clean clone and confirm:
+
+- `docker compose up -d --build` builds and starts both services
+- `rbgp summary` shows the FRR session established
+- `rbgp top` opens and the sample prefix's best-path explain succeeds
+- `docker compose down` stops the demo
+
+### Host quickstart smoke
+
+Walk the [host quickstart](QUICKSTART.md) and confirm:
 
 - the minimal config validates with `--check`
 - the daemon creates the UDS socket under `/tmp/rustbgpd`
@@ -696,9 +705,10 @@ Before rolling any versions:
 2. **Verify changelog completeness**: run `git log <prev-tag>..HEAD --oneline`
    and confirm every user-visible change (features, fixes, interop suites) is
    listed under the new version — not misattributed to a prior release. Check
-   that stale counts (test totals, interop suite counts, script counts) are
-   updated in CHANGELOG.md, README.md, and ROADMAP.md. Also sweep
-   `(post-vX.Y.Z)` annotations in ROADMAP.md and the Maturity row in README.md.
+   that current capability and version claims in README.md and ROADMAP.md
+   match the release. Keep the README stability baseline tied to the contract,
+   not the latest daemon version; preserve dated historical records. Also
+   sweep `(post-vX.Y.Z)` annotations in ROADMAP.md.
 3. Bump versions:
    - Root `Cargo.toml`: move `[workspace.package] version` and every
      daemon-line internal `rustbgpd-*` pin in `[workspace.dependencies]` to

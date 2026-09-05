@@ -115,7 +115,7 @@ Start here if you have never run the daemon.
 | [BENCHMARKS.md](BENCHMARKS.md) | Criterion micro-benchmarks and cross-stack perf snapshots |
 | [INTEROP.md](INTEROP.md) | Interop validation results against FRR, GoBGP, BIRD, and vendor NOSes |
 | [soaks/](soaks/README.md) | Archived long-run soak postmortems and the maintained procedures that govern them (raw artifacts under [artifacts/](artifacts/)) |
-| [perf/](perf/) | Scale receipts (1000-peer / VPN convergence measurements) |
+| [Performance evidence](perf/README.md) | Dated route-server, route-reflector, and route-import measurements with links to source receipts |
 | [evpn-enablement.md](evpn-enablement.md) | Gate-by-gate EVPN roadmap and its history |
 | [milestones.md](milestones.md) | Archived build orders and exit criteria from initial development |
 | [upstream-findings.md](upstream-findings.md) | Bugs and quirks found in peer software during interop development |

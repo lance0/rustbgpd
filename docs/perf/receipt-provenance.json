@@ -2,7 +2,7 @@
   "schema": 1,
   "release_window": 3,
   "front_doors": [
-    "README.md",
+    "docs/perf/README.md",
     "docs/BENCHMARKS.md",
     "docs/COMPARISON.md",
     "docs/ixp-evaluation.md"
@@ -56,36 +56,6 @@
   ],
   "claims": [
     {
-      "source": "README.md",
-      "anchor": "- **IRR-scale filter reload**",
-      "receipt": "docs/perf/irr-reload-v0680-2026-08.md"
-    },
-    {
-      "source": "README.md",
-      "anchor": "- **Policy reload at IXP scale**",
-      "receipt": "docs/perf/ixp-matrix-2026-07.md"
-    },
-    {
-      "source": "README.md",
-      "anchor": "- **Route-reflector scale**",
-      "receipt": "docs/perf/scale-receipt-2026-07.md"
-    },
-    {
-      "source": "README.md",
-      "anchor": "- **Update-group fanout**",
-      "receipt": "docs/perf/scale-receipt-2026-07.md"
-    },
-    {
-      "source": "README.md",
-      "anchor": "At route-reflector shapes, the",
-      "receipt": "docs/perf/scale-receipt-2026-07.md"
-    },
-    {
-      "source": "README.md",
-      "anchor": "The freshest published [v0.68.0 cross-stack bgperf2",
-      "receipt": "docs/perf/competitive-bgperf2-v0680-2026-08.md"
-    },
-    {
       "source": "docs/BENCHMARKS.md",
       "anchor": "`bench/run-fib-kernel-dump.py` is the privileged",
       "receipt": "docs/perf/fib-kernel-dump-2026-08.md"
@@ -134,6 +104,36 @@
       "source": "docs/ixp-evaluation.md",
       "anchor": "| 7 | Reload at IRR scale |",
       "receipt": "docs/perf/irr-reload-v0680-2026-08.md"
+    },
+    {
+      "source": "docs/perf/README.md",
+      "anchor": "**Update-group fanout**",
+      "receipt": "docs/perf/scale-receipt-2026-07.md"
+    },
+    {
+      "source": "docs/perf/README.md",
+      "anchor": "- **IRR-scale filter reload**",
+      "receipt": "docs/perf/irr-reload-v0680-2026-08.md"
+    },
+    {
+      "source": "docs/perf/README.md",
+      "anchor": "- **Policy reload at IXP scale**",
+      "receipt": "docs/perf/ixp-matrix-2026-07.md"
+    },
+    {
+      "source": "docs/perf/README.md",
+      "anchor": "- **Route-reflector scale**",
+      "receipt": "docs/perf/scale-receipt-2026-07.md"
+    },
+    {
+      "source": "docs/perf/README.md",
+      "anchor": "At route-reflector shapes, the",
+      "receipt": "docs/perf/scale-receipt-2026-07.md"
+    },
+    {
+      "source": "docs/perf/README.md",
+      "anchor": "The freshest published [v0.68.0 cross-stack bgperf2",
+      "receipt": "docs/perf/competitive-bgperf2-v0680-2026-08.md"
     }
   ]
 }
