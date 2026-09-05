@@ -46,7 +46,7 @@ check-clippy:
 test-crates:
     cargo test --locked --workspace --lib
 
-# Run the unit tests of every binary target: the daemon, rbgp, the examples, and the tools.
+# Run the unit tests of every binary target: the daemon, rbgp, the example packages under examples/, and the tools.
 test-bins:
     cargo test --locked --workspace --bins
 

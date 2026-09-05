@@ -54,9 +54,10 @@ just --list
 
 The recipes intentionally expose their direct commands:
 
-- `just gate` runs formatting, lightweight repository contracts, strict
-  workspace Clippy, the full workspace tests, and library docs (private items
-  included) and binary docs.
+- `just gate` runs the offline link check, the developer-tooling check,
+  formatting, lightweight repository contracts, strict workspace Clippy, the
+  full workspace tests, and library docs (private items included) and binary
+  docs, in that order.
   This is the broad local baseline and can take several minutes on a cold
   target directory. It is composed from the tiered recipes below and runs the
   same commands in the same order as before the split.
