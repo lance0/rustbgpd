@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# M70 smoke — ADR-0089 VLAN-aware bridge receipt against FRR 10.3.1.
+# M70 smoke — ADR-0089 VLAN-aware bridge receipt against FRR 10.7.1.
 #
 # rustbgpd owns the VLAN-aware side: one vlan_filtering=1 bridge
 # (`brvlan`) with VLAN10/VNI100 and VLAN20/VNI200. FRR owns the

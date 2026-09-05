@@ -1,7 +1,7 @@
 # Containerlab topology: rustbgpd ↔ FRR (M22 — FlowSpec)
 #
 # Validates: FlowSpec rule injection via gRPC, distribution to FRR,
-# withdrawal propagation. FRR 10.3.1 receives FlowSpec but cannot originate.
+# withdrawal propagation. FRR is the receiving side here; rustbgpd originates.
 #
 # Flow: rustbgpd (gRPC inject) → eBGP → FRR (receive and display)
 #

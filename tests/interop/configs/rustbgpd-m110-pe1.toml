@@ -1,0 +1,66 @@
+# M110 PE1 (rustbgpd) — symmetric Interface-less IRB on an IPv6-only
+# VXLAN underlay. The L3 companion to the M109 L2 receipt.
+#
+# Direct iBGP L2VPN/EVPN session to FRR PE2 (fd00:110::2). One IP-VRF
+# (vrf1) bound to L3VNI 110. The operator-managed VRF + L3VXLAN devices
+# are created by start-rustbgpd-m39-pe1.sh — which takes the tunnel
+# source as an argument and is family-agnostic — before the daemon
+# boots.
+#
+# Notes:
+#   - `local_vtep_ip` is an IPv6 address, so the readiness probe's
+#     local-IP match reads IFLA_VXLAN_LOCAL6 off the kernel device
+#     rather than IFLA_VXLAN_LOCAL.
+#   - The tenant prefix must be IPv6 to match. The Interface-less IRB
+#     install path does not implement `RTA_VIA`, so a cross-family
+#     prefix/next-hop pair is refused at origination and dropped at
+#     import. See `docs/LIMITATIONS.md`.
+#   - `router_mac` is operator-supplied (ADR-0058 §4); the startup
+#     script writes it onto the L3VXLAN device so the readiness probe
+#     sees a matching kernel-side link-layer address.
+#   - `2001:db8:110:1::1/64` on lo-vrf1 produces both an `RTN_LOCAL`
+#     host row (filtered by the classifier) and an `RTN_UNICAST`
+#     connected route for the /64 (kept), and the /64 is what is
+#     originated as Type 5.
+#
+# `router_id` is a 4-byte BGP Identifier, not an address: no interface
+# in this topology carries an IPv4 address.
+
+[global]
+asn = 65000
+router_id = "10.110.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
+
+[[neighbors]]
+address = "fd00:110::2"
+remote_asn = 65000
+description = "pe2"
+hold_time = 180
+families = ["l2vpn_evpn"]
+disable_ipv4_unicast = true
+
+[[evpn_ip_vrfs]]
+name = "vrf1"
+vni = 110
+rd = "65000:110"
+route_targets = ["65000:110"]
+local_vtep_ip = "fd00:110::1"
+router_mac = "02:00:00:00:01:10"
+vrf_device = "vrf1"
+l3vxlan_device = "l3vxlan110"
+table_id = 110
+
+[security.grpc]
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"

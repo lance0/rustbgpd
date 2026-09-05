@@ -16,7 +16,7 @@ INTEROP = (
     "m44 m54 m55 m56 m45 m57 m63 m64 m26_m27_m28_m59_m91 m92 m84 m99 m100 m101 m102 m103 m104 m107"
 ).split()
 KERNEL = (
-    "m36 m37 m37-ip m38 m39 m39b m48 m60 m61 m62 m40 m42 m50 m52 "
+    "m36 m37 m37-ip m38 m39 m39b m109 m48 m60 m61 m62 m40 m42 m50 m52 "
     "m58 m53 m51 m108 m43 m47 m69 m70 m65 m71 m72 m66 m67 m68"
 ).split()
 NETNS_MAPPINGS = {

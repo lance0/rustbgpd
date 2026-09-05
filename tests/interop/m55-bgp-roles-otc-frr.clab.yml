@@ -1,6 +1,6 @@
 # Containerlab topology: rustbgpd ↔ FRR + raw-BGP fixture (M55 — ADR-0071)
 #
-# Validates RFC 9234 BGP Roles + Only-to-Customer against FRR 10.3.1 and a
+# Validates RFC 9234 BGP Roles + Only-to-Customer against FRR 10.7.1 and a
 # deliberately non-compliant raw speaker for leak/malformed OTC injection:
 #
 #   * compatible Role pairs establish: Provider↔Customer, RS↔RS-Client,

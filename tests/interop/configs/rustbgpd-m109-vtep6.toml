@@ -1,0 +1,54 @@
+# M109 — rustbgpd as an EVPN VTEP on an IPv6-only VXLAN underlay,
+# peering with an FRR 10.7.1 VTEP over IPv6 BGP transport.
+#
+# `router_id` is a 4-byte BGP Identifier, not an address: no interface
+# in this topology carries an IPv4 address, so the value is purely an
+# identifier. If anything ever leaked it into a tunnel or next-hop
+# position the driver's next-hop and FDB `dst` assertions would fail
+# loudly rather than silently rescuing the test.
+[global]
+asn = 65000
+router_id = "10.109.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+token_file = "/run/rustbgpd/grpc-test-only-operator.token"
+principal = "rustbgpd://operator/test-only"
+
+# Single EVPN instance bound to br109 / vxlan109. The start script
+# pre-creates that topology with `local fd00:109::1` on the VXLAN
+# device, so the readiness probe's local-IP match is itself an
+# IPv6 comparison.
+#
+# The Route Distinguisher uses the `asn:value` form: the RFC 4364
+# type-1 `ip:value` form has a 4-byte IPv4 administrator field and
+# cannot carry an IPv6 VTEP address.
+[[evpn_instances]]
+vni = 109
+rd = "65000:109"
+route_targets = ["65000:109"]
+local_vtep_ip = "fd00:109::1"
+bridge = "br109"
+advertise_svi_mac = false
+
+# `disable_ipv4_unicast` suppresses the RFC 4760 §8 implicit IPv4-unicast
+# fallback. The session must carry L2VPN/EVPN and nothing else, so no
+# IPv4 address family exists to rescue the test.
+[[neighbors]]
+address = "fd00:109::2"
+remote_asn = 65000
+description = "frr-m109-vtep6"
+hold_time = 30
+families = ["l2vpn_evpn"]
+disable_ipv4_unicast = true
+
+[security.grpc]
+enforcement = "tier"
+
+[security.grpc.roles]
+"rustbgpd://operator/test-only" = "operator"

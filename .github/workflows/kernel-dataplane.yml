@@ -250,6 +250,22 @@ jobs:
           topology: tests/interop/m39b-evpn-auto-rt-frr.clab.yml
           script: tests/interop/scripts/test-m39b-evpn-auto-rt-frr.sh
 
+  m109:
+    needs: [grpcurl_archive, prime_dev_image]
+    name: M109 — EVPN L2 over an IPv6-only VXLAN underlay (FRR 10.7.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-dataplane-host
+        id: dataplane
+      - name: Run M109 (deploy + test + destroy with retry)
+        uses: ./.github/actions/run-interop-test
+        with:
+          label: M109
+          topology: tests/interop/m109-evpn-ipv6-underlay-vtep.clab.yml
+          script: tests/interop/scripts/test-m109-evpn-ipv6-underlay-vtep.sh
+
   m48:
     needs: [grpcurl_archive, prime_dev_image]
     name: M48 — EVPN runtime tenant teardown over kernel L3 datapath (FRR 10.7.1)
@@ -950,7 +966,7 @@ jobs:
     timeout-minutes: 5
     if: ${{ always() }}
     needs: [classify_changes, grpcurl_archive, gobgp_archive, bird3_archive, prime_dev_image, m36,
-      m37, m37-ip, m38, m39, m39b, m48, m60, m61, m62, m40, m42, m50, m52,
+      m37, m37-ip, m38, m39, m39b, m109, m48, m60, m61, m62, m40, m42, m50, m52,
       m58, m53, m51, m108, m43, m47, m69, m70, m65, m71, m72, m66,
       m67, m68, netns]
     env:
@@ -958,7 +974,7 @@ jobs:
       EXPECTED_JOBS: >-
         classify_changes grpcurl_archive gobgp_archive bird3_archive prime_dev_image
         m36 m37 m37-ip m38 m39
-        m39b m48 m60 m61 m62 m40 m42 m50 m52 m58 m53 m51 m108 m43 m47
+        m39b m109 m48 m60 m61 m62 m40 m42 m50 m52 m58 m53 m51 m108 m43 m47
         m69 m70 m65 m71 m72 m66 m67 m68 netns
     steps:
       - name: Aggregate required Kernel Dataplane result

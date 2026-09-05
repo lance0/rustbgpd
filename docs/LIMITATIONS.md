@@ -64,6 +64,8 @@ Shipped and interop-tested:
   MAC-only / MAC+IP / SVI Type 2 origination, Type 3 IMET, and push-notified
   sub-second convergence.
 - Symmetric Interface-less IRB / Type 5 with transactional L3 FIB programming.
+- IPv6 VXLAN underlay: IPv6 VTEP addresses, IPv6 BGP transport, 16-octet EVPN
+  next hops, and remote-VTEP FDB rows with an IPv6 `dst`.
 - Active-active multi-homing building blocks: DF election, Type 1/4, BUM
   suppression, aliasing ECMP via FDB nexthop groups, and all-active Type 5
   receive.
@@ -90,6 +92,15 @@ Known EVPN gaps:
   §2.2 makes local bias the only split-horizon mechanism for VXLAN (the ESI
   Label Split Horizon Type MUST be 00 for tunnel type 8), so there is no
   ESI-label alternative to implement for this lane.
+- Symmetric Interface-less IRB does not implement `RTA_VIA`, so a Type 5
+  prefix and its next hop must be the same address family. Under an IPv6
+  VTEP only IPv6 tenant prefixes are carried: an IPv4 prefix is refused at
+  origination and dropped at import rather than installed against a
+  cross-family gateway. The same constraint applies with the families
+  reversed. An IPv6 VXLAN underlay is otherwise supported for the L2 path
+  and for same-family symmetric IRB, and is single-homed only — FRR
+  documents IPv6 VTEP addresses as unsupported with EVPN multi-homing, so
+  there is no cross-vendor multi-homed IPv6 underlay to interoperate with.
 - Route types 6-11, PBB-EVPN, multicast EVPN, MPLS/SRv6 encapsulation,
   VPWS, and E-Tree are demand-shaped rather than part of the current
   VXLAN/Linux lane.

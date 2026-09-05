@@ -11,6 +11,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Operator-visible:** EVPN interop receipts for an IPv6 VXLAN underlay,
+  the first in the suite to run tunnel endpoints, BGP transport, and EVPN
+  next hops entirely on IPv6. M109
+  (`tests/interop/m109-evpn-ipv6-underlay-vtep.clab.yml`) covers the L2 path
+  against FRR 10.7.1 — Type 3 IMET and Type 2 MAC-only plus MAC+IP in both
+  directions with the originator's IPv6 VTEP address as a 16-octet next hop,
+  and remote-MAC kernel FDB rows carrying an IPv6 `dst` — and runs in hosted
+  `kernel-dataplane` CI. M110
+  (`tests/interop/m110-evpn-ipv6-underlay-irb.clab.yml`) covers symmetric
+  Interface-less IRB over the same underlay and is a manual leg. Both
+  topologies assert that the underlay carries no IPv4 address, so no
+  fallback path can satisfy an assertion. `docs/LIMITATIONS.md` now records
+  that Interface-less IRB has no `RTA_VIA`: under an IPv6 VTEP only IPv6
+  tenant prefixes are carried.
+
 - **Operator-visible:** a received Address-Prefix ORF entry whose maximum
   length is below its own prefix length (for example `10.0.0.0/8 le 4`) can
   never match a route. The daemon installs it exactly as before and now logs

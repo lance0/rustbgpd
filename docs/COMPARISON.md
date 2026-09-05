@@ -86,7 +86,17 @@ IPv4/IPv6 `Prefix` routes.
     end-to-end with transactional L3 ownership, receive-side GW-IP
     overlay-index recursion, native GW-IP + ESI overlay-index Type 5
     origination, single-active ESI overlay-index receive proven by M71, and
-    all-active ESI overlay-index receive proven by M72. Still ahead: Linux
+    all-active ESI overlay-index receive proven by M72. The VXLAN underlay
+    runs on IPv4 or IPv6: against FRR 10.7.1 on Linux 7.0, an IPv6 VTEP
+    carries the L2 path end to end (M109 — IPv6 tunnel source, IPv6 BGP
+    transport, 16-octet Type 2 and Type 3 next hops, remote-MAC FDB rows
+    programmed with an IPv6 `dst`), and symmetric IRB works over an IPv6
+    underlay for IPv6 tenant prefixes (M110, manual). Interface-less IRB
+    does not implement `RTA_VIA`, so the prefix and next-hop families must
+    agree: an IPv4 tenant prefix under an IPv6 VTEP is refused at
+    origination and dropped at import. IPv6 VTEPs are single-homed only —
+    FRR documents IPv6 VTEP addresses as unsupported with EVPN
+    multi-homing. Still ahead: Linux
     softswitch local-bias split-horizon, the remaining ADR-0063 runtime
     mixed-edit tail, true shared-VNI / non-zero Ethernet Tag service,
     managed netdev ergonomics, and demand-shaped route types 6-11, PBB-EVPN,

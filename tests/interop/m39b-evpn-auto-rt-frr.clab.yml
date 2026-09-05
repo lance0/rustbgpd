@@ -21,7 +21,7 @@
 # runner.
 #
 # Topology:
-#   PE1 (rustbgpd)              PE2 (FRR 10.3.1)
+#   PE1 (rustbgpd)              PE2 (FRR 10.7.1)
 #   10.0.0.1, AS 65000          10.0.0.2, AS 65000
 #       └─── iBGP L2VPN/EVPN ────────┘
 #   vrf1 / L3VNI 100              vrf1 / L3VNI 100

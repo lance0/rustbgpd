@@ -1,0 +1,126 @@
+# Containerlab topology: rustbgpd PE1 ↔ FRR PE2, EVPN Type 5 symmetric
+# Interface-less IRB on an IPv6-only VXLAN underlay
+# (M110 — RFC 9136 §4.4.2 over an IPv6 underlay)
+#
+# The L3 companion to M109. M109 proves the L2 path (Type 2 / Type 3,
+# kernel FDB toward an IPv6 remote VTEP); M110 proves the L3 path:
+# Type 5 origination from the kernel routing table and import into the
+# tenant VRF, with the VXLAN tunnel endpoints and every EVPN next hop
+# on IPv6.
+#
+#   PE1 (rustbgpd)                PE2 (FRR 10.7.1)
+#   fd00:110::1, AS 65000         fd00:110::2, AS 65000
+#       │                              │
+#       └──── iBGP L2VPN/EVPN over IPv6 transport ────┘
+#       │                              │
+#   vrf1 / L3VNI 110               vrf1 / L3VNI 110
+#   lo-vrf1: 2001:db8:110:1::1/64  lo-vrf1: 2001:db8:110:2::1/64
+#   advertises 2001:db8:110:1::/64 advertises 2001:db8:110:2::/64
+#
+# The `eth1` underlay link carries NO IPv4 address on either side, for
+# the same reason M109 gives: an IPv4 address anywhere on the underlay
+# would let a fallback path rescue the test.
+#
+# **Tenant prefixes are IPv6 by necessity, not by preference.** The
+# symmetric Interface-less IRB install path does not implement
+# `RTA_VIA`, so the prefix family must match the VTEP / next-hop
+# family: an IPv4 tenant prefix under an IPv6 VTEP is refused at
+# origination and dropped at import. That boundary is recorded in
+# `docs/LIMITATIONS.md`; this topology exercises the supported
+# same-family combination.
+#
+# Split from M109 rather than folded into it: the L2 leg needs a bridge
+# with a VXLAN port and a local attachment circuit, while the
+# Interface-less L3 leg needs the L3VXLAN device enslaved directly to
+# the VRF with no bridge at all (ADR-0058 §3). One lab carrying both
+# kernel shapes fails ambiguously; two focused legs each fail for one
+# legible reason.
+#
+# Subnets are non-overlapping so the L3VNI carries every PE1↔PE2
+# packet.
+#
+# **Manual leg, not wired into hosted CI.** FRR 10.7.1's per-VRF
+# `advertise ipv6 unicast` Type 5 origination has a startup race on an
+# IPv6 underlay: if the EVPN session establishes before zebra has
+# published the L3VNI's IPv6 tunnel source to bgpd, bgpd latches the BGP
+# instance's IPv4 `bgp router-id` into the 16-octet IPv6 next-hop field,
+# zero-padded, and advertises that. FRR's own `advertised-routes` view
+# reports the wrong value, so the defect is on the originating side;
+# rustbgpd decodes and programs what it receives, which is what a
+# receiver is supposed to do. Resetting the BGP session does not
+# re-derive the next hop, a VXLAN link event does, and it does not
+# self-heal within the life of a test run. Observed once in four driver
+# runs. Raw capture:
+# `docs/artifacts/interop/m110-frr-ipv6-l3vni-next-hop-20260905T114909Z/`.
+#
+# The assertions are deliberately not relaxed to absorb this. A red here
+# means the received next hop was not the peer's IPv6 VTEP address, and
+# that is worth reading rather than tolerating.
+#
+# Requires the `vrf` and `vxlan` kernel modules.
+#
+# Usage:
+#   docker build --target dev -t rustbgpd:dev .
+#   containerlab deploy -t tests/interop/m110-evpn-ipv6-underlay-irb.clab.yml
+#   bash tests/interop/scripts/test-m110-evpn-ipv6-underlay-irb.sh
+#   containerlab destroy -t tests/interop/m110-evpn-ipv6-underlay-irb.clab.yml --cleanup
+
+name: m110-evpn-ipv6-underlay-irb
+
+topology:
+  nodes:
+    pe1:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m110-pe1.toml:/etc/rustbgpd/config.toml:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
+        - ./scripts/start-rustbgpd-m39-pe1.sh:/usr/local/bin/start-rustbgpd-m39-pe1.sh:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        # `nodad` keeps the address out of the tentative state so the
+        # L3VXLAN device can bind it as its tunnel source immediately.
+        - ip -6 addr add fd00:110::1/64 dev eth1 nodad
+        - ip link set eth1 up
+        # Kernel topology is provisioned by the test driver after
+        # deploy, matching M39: the L3VXLAN device must be fully formed
+        # before the daemon's readiness probe runs.
+      env:
+        RUST_LOG: info,rustbgpd_evpn_linux=debug
+
+    pe2:
+      kind: linux
+      image: quay.io/frrouting/frr:10.7.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m110-pe2.conf:/etc/frr/frr.conf:ro
+        - ./scripts/start-frr-vtep-l3.sh:/usr/local/bin/start-frr-vtep-l3.sh:ro
+      exec:
+        - ip -6 addr add fd00:110::2/64 dev eth1 nodad
+        - ip link set eth1 up
+        # Kernel topology (VRF + L3VXLAN + bridge + SVI + tenant
+        # loopback) BEFORE FRR boots — zebra reads the bridge's VRF
+        # membership when the VXLAN device comes up. The start script
+        # takes the tunnel source and the tenant prefix as arguments and
+        # is family-agnostic, so it is reused unchanged from M39.
+        - /usr/local/bin/start-frr-vtep-l3.sh fd00:110::2 110 vrf1 2001:db8:110:2::1/64
+      env:
+        VTEP_LOOPBACK: fd00:110::2
+        VTEP_VNI: "110"
+        TENANT_VRF: vrf1
+        TENANT_PREFIX: 2001:db8:110:2::1/64
+
+  links:
+    - endpoints: ["pe1:eth1", "pe2:eth1"]
+
+# Underlay: fd00:110::/64 — PE1 fd00:110::1, PE2 fd00:110::2.
+# L3VNI: 110, bound to vrf1 on both PEs and carried in the Type 5 label.
+# Tenant subnets (non-overlapping, so every PE↔PE packet crosses the
+# L3VNI tunnel; a /64 on the dummy produces the RTN_UNICAST connected
+# route the originator picks up, while the RTN_LOCAL host row is
+# filtered):
+#   - PE1: 2001:db8:110:1::1/64 on lo-vrf1 → originates 2001:db8:110:1::/64
+#   - PE2: 2001:db8:110:2::1/64 on lo-vrf1 → originates 2001:db8:110:2::/64
+# Router MAC: operator-supplied for rustbgpd via `router_mac` in
+# `[[evpn_ip_vrfs]]`; zebra-derived for FRR.
