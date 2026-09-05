@@ -633,7 +633,7 @@ After tests 1–4, dump metrics and verify consistency:
 ### FRR
 
 - Primary CI target. Must not break.
-- FRR 10.3.1 used for M0 validation.
+- FRR 10.7.1 used for M0 validation.
 - Requires `no bgp ebgp-requires-policy` in config (rustbgpd has no policy
   engine in M0, so FRR would reject the session without this).
 - FRR sends Cease NOTIFICATION on `clear bgp *` (good for testing TCP reset
@@ -691,7 +691,7 @@ retained as stale.
 
 | Peer | Accepts Cease/1 (Max Prefixes) | Clean Teardown | Notes |
 |------|-------------------------------|----------------|-------|
-| FRR 10.3.1 | Yes | Yes | Reports "Cease/Maximum Number of Prefixes Reached"; peer remains latched until explicit enable (M26) |
+| FRR 10.7.1 | Yes | Yes | Reports "Cease/Maximum Number of Prefixes Reached"; peer remains latched until explicit enable (M26) |
 | BIRD | TBD | TBD | — |
 | GoBGP | TBD | TBD | — |
 
@@ -2185,8 +2185,8 @@ containerlab destroy -t tests/interop/m89-paths-limit-frr.clab.yml --cleanup
 
 | Gap | What exists today | What's missing |
 |-----|-------------------|----------------|
-| **EVPN capability + session** | Done (M29) — L2VPN/EVPN capability negotiated with FRR 10.3.1, session Established, `ListEvpnRoutes` RPC well-formed. | — |
-| **EVPN Type 2 MAC reflection** | Done (M30). Real FRR 10.3.1 VTEPs with kernel VXLAN + bridge per VTEP; MAC injected via `bridge fdb add` on VTEP-A propagates through rustbgpd RR to VTEP-B; assertions cover ORIGINATOR_ID + CLUSTER_LIST (RFC 4456), next-hop preservation, VXLAN encap community, and withdrawal path. | — |
+| **EVPN capability + session** | Done (M29) — L2VPN/EVPN capability negotiated with FRR 10.7.1, session Established, `ListEvpnRoutes` RPC well-formed. | — |
+| **EVPN Type 2 MAC reflection** | Done (M30). Real FRR 10.7.1 VTEPs with kernel VXLAN + bridge per VTEP; MAC injected via `bridge fdb add` on VTEP-A propagates through rustbgpd RR to VTEP-B; assertions cover ORIGINATOR_ID + CLUSTER_LIST (RFC 4456), next-hop preservation, VXLAN encap community, and withdrawal path. | — |
 | **EVPN Type 1 + Type 4 multi-homing reflection** | Done (M32). 4-node containerlab harness: two FRR VTEPs share an ESI on a bond ES interface (same `evpn mh es-id` + `es-sys-mac`); rustbgpd RR reflects both VTEPs' Type 4 ES + Type 1 EAD-per-EVI routes to a third observing VTEP unchanged with correct RFC 4456 attributes (ORIGINATOR_ID + CLUSTER_LIST). The RR does not run DF election — VTEPs do — and the harness asserts the observer receives the inputs DF election needs. | — |
 | **EVPN MAC mobility end-to-end** | Done (M31). 4-node containerlab harness validates: MAC move from VTEP-A → VTEP-C flips VTEP-B's best path and increments the MAC Mobility sequence on the reflected Type 2; sticky MAC on VTEP-A is not displaced by non-sticky takeover from VTEP-C (RFC 7432 §7.7). | — |
 | **EVPN GR / LLGR stale** | Wired end-to-end (RFC 4724 + RFC 9494, graceful restart / LLGR). `mark_stale_evpn` / `promote_to_llgr_stale_evpn` / EoR clear paths validated by 13 unit + integration tests covering stale marking, LLGR promotion with `LLGR_STALE` community injection via `Arc::make_mut`, peer-originated community preservation, `NO_LLGR` drop on promotion, GR / LLGR timer sweep, and ERR `refresh_stale_evpn` tracking. | Live FRR VTEP flap against a rustbgpd RR with tcpdump capture of the reflected `LLGR_STALE` community during the restart window — the unit + integration depth is in place, the lab capture is the one piece still tracked as a follow-up. |
