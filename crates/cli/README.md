@@ -150,7 +150,7 @@ rbgp policy chain set-import [--neighbor <addr>] <names...>
 rbgp policy chain set-export [--neighbor <addr>] <names...>
 rbgp policy chain clear-import [--neighbor <addr>]
 rbgp policy chain clear-export [--neighbor <addr>]
-rbgp policy explain --neighbor <addr> --prefix <cidr> [--path-id <n>]
+rbgp policy explain --neighbor <addr> --prefix <cidr> [--path-id <n>] [--direction import|export]
 rbgp policy check <file.rpol>                          # parse, typecheck, and run in-language tests in-process (no daemon; --coverage-min for a CI coverage gate)
 rbgp policy fmt <file.rpol>... [--check]               # canonical .rpol formatter (in-place; --check for CI; - = stdin)
 rbgp policy test <file.rpol> --policy <name> --direction import|export [--neighbor <addr>]   # dry-run over the live RIB
@@ -193,7 +193,11 @@ normal output from a current server.
 
 `policy explain` requires the daemon's import-decision cache, which is
 opt-in: set `[policy.explain] enabled = true` in the daemon config. On a
-stock daemon the command exits nonzero with that hint.
+stock daemon the command exits nonzero with that hint. `--direction export`
+is the `rib --prefix <cidr> advertised <addr> --explain` dry run under the
+same verb; it needs no configuration and does not take `--path-id` (use the
+`rib advertised --explain --source-peer/--source-path-id` flags for Add-Path
+source selection).
 
 `--count` applies the same family, prefix, longer-prefix, origin-ASN, exact
 AS-path membership, standard-community, large-community, RPKI-verdict, and

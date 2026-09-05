@@ -1207,7 +1207,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and not __fish_seen_su
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and not __fish_seen_subcommand_from list check fmt test get set delete chain stats counters explain help" -f -a "chain" -d 'Manage global / per-neighbor import/export chains'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and not __fish_seen_subcommand_from list check fmt test get set delete chain stats counters explain help" -f -a "stats" -d 'Show live per-term policy hit counters'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and not __fish_seen_subcommand_from list check fmt test get set delete chain stats counters explain help" -f -a "counters" -d 'Show live per-term policy hit counters'
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and not __fish_seen_subcommand_from list check fmt test get set delete chain stats counters explain help" -f -a "explain" -d 'Explain the import-policy decision for a prefix on a neighbor'
+complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and not __fish_seen_subcommand_from list check fmt test get set delete chain stats counters explain help" -f -a "explain" -d 'Explain the policy decision for a prefix on a neighbor'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and not __fish_seen_subcommand_from list check fmt test get set delete chain stats counters explain help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from list" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from list" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
@@ -1316,9 +1316,11 @@ never\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from counters" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from counters" -l no-color -d 'Disable colored output'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from counters" -s h -l help -d 'Print help (see more with \'--help\')'
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from explain" -l neighbor -l peer -d 'Neighbor (peer) address whose import-decision cache to read' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from explain" -l neighbor -l peer -d 'Neighbor (peer) address whose decision to explain' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from explain" -l prefix -d 'Prefix in CIDR form, e.g. `192.0.2.0/24` or `2001:db8::/32`' -r
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from explain" -l path-id -d 'Add-Path identifier; omit to show every matching path' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from explain" -l path-id -d 'Add-Path identifier (import only); omit to show every matching path' -r
+complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from explain" -l direction -d 'Direction: import (default) or export' -r -f -a "import\t''
+export\t''"
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from explain" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from explain" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from explain" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
@@ -1336,7 +1338,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcom
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from help" -f -a "delete" -d 'Delete a policy by name'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from help" -f -a "chain" -d 'Manage global / per-neighbor import/export chains'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from help" -f -a "stats" -d 'Show live per-term policy hit counters'
-complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from help" -f -a "explain" -d 'Explain the import-policy decision for a prefix on a neighbor'
+complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from help" -f -a "explain" -d 'Explain the policy decision for a prefix on a neighbor'
 complete -c rbgp -n "__fish_rbgp_using_subcommand policy; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and not __fish_seen_subcommand_from list get set delete help" -s s -l addr -d 'gRPC server address or unix:///path/to/socket' -r
 complete -c rbgp -n "__fish_rbgp_using_subcommand neighbor-set; and not __fish_seen_subcommand_from list get set delete help" -l token-file -d 'Bearer token file for authenticated gRPC endpoints' -r
@@ -1662,7 +1664,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcomma
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from policy" -f -a "delete" -d 'Delete a policy by name'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from policy" -f -a "chain" -d 'Manage global / per-neighbor import/export chains'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from policy" -f -a "stats" -d 'Show live per-term policy hit counters'
-complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from policy" -f -a "explain" -d 'Explain the import-policy decision for a prefix on a neighbor'
+complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from policy" -f -a "explain" -d 'Explain the policy decision for a prefix on a neighbor'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from neighbor-set" -f -a "list" -d 'List configured neighbor sets'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from neighbor-set" -f -a "get" -d 'Show one neighbor set by name'
 complete -c rbgp -n "__fish_rbgp_using_subcommand help; and __fish_seen_subcommand_from neighbor-set" -f -a "set" -d 'Set (create or replace) a neighbor set from a JSON file'

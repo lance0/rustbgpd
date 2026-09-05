@@ -18,6 +18,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   impossible window (`<prefix> min <n> max <n>`). The entry is not rejected:
   RFC 5291 §5.2 clears the whole list on a malformed entry, which would fail
   open to permit-all.
+- `rbgp policy explain --direction <import|export>`. The default `import`
+  is the existing per-session import-decision cache lookup and still
+  requires `[policy.explain] enabled = true`; `export` runs the read-only
+  export dry run behind `rbgp rib --prefix <cidr> advertised <peer>
+  --explain` (unicast, unlabeled, best source) and needs no configuration.
+  `--path-id` with `--direction export` is rejected before the daemon is
+  dialed, pointing at the `rib advertised --explain --source-peer` /
+  `--source-path-id` flags for Add-Path source selection. Shell completions
+  regenerated.
 
 - **Operator-visible:** RFC 5883 multihop BFD. Setting
   `bfd = { profile = "...", multihop = true }` on a static global neighbor

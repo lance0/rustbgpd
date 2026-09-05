@@ -2283,6 +2283,11 @@ rbgp policy explain --neighbor 10.0.0.2 --prefix 2001:db8::/32 --json
 rbgp policy explain --neighbor 10.0.0.2 --prefix 192.0.2.0/24 --path-id 3
 ```
 
+`--direction export` runs the
+[export dry run](#explain-an-export-decision-why-diddidnt-route-x-go-to-peer-y)
+under the same verb (identical to `rbgp rib --prefix <cidr> advertised <peer>
+--explain` without RD, labeled, or source flags); it needs no configuration.
+
 The address family is inferred from the prefix (IPv4 / IPv6 unicast).
 Each result reports an outcome:
 

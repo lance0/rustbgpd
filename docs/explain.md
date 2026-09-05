@@ -26,7 +26,7 @@ catalog.
 | Question | Command |
 |----------|---------|
 | Why was this path selected as best? | `rbgp rib --prefix <cidr> --explain` |
-| Why did/didn't this prefix go to that peer? | `rbgp rib --prefix <cidr> advertised <peer> --explain` |
+| Why did/didn't this prefix go to that peer? | `rbgp rib --prefix <cidr> advertised <peer> --explain`, or the same answer as `rbgp policy explain --neighbor <peer> --prefix <cidr> --direction export` |
 | What did import policy decide for this prefix from that peer? (opt-in: `[policy.explain] enabled = true`) | `rbgp policy explain --neighbor <peer> --prefix <cidr>` |
 | Which of a member's routes were filtered, and why? | `rbgp rib received <peer> --rejected` |
 | What would this candidate policy do to the live RIB? | `rbgp policy test <file> --policy <name> --direction import` |
@@ -256,8 +256,9 @@ rbgp policy explain --neighbor 198.51.100.2 --prefix 203.0.113.0/24
 rbgp rpki validate 203.0.113.0/24 64501
 
 # 4. Accepted but another member doesn't see it? Walk the export ladder
-#    toward that member.
+#    toward that member (either spelling; the second needs no config).
 rbgp rib --prefix 203.0.113.0/24 advertised 198.51.100.7 --explain
+rbgp policy explain --neighbor 198.51.100.7 --prefix 203.0.113.0/24 --direction export
 
 # 5. Accepted but lost best-path selection? See what beat it.
 rbgp rib --prefix 203.0.113.0/24 --explain

@@ -790,23 +790,34 @@ enum PolicyAction {
         #[arg(long, default_value = "export", value_parser = ["import", "export", "both"])]
         direction: String,
     },
-    /// Explain the import-policy decision for a prefix on a neighbor
+    /// Explain the policy decision for a prefix on a neighbor
     ///
-    /// Explains why a prefix was permitted / denied / withdrawn, or
-    /// not-seen / evicted / stale (ADR-0073). Reads the per-session
-    /// decision cache; requires `[policy.explain].enabled` on the
-    /// daemon (errors distinctly when the cache is disabled or the
-    /// neighbor has no live session — those are not `not_seen`).
+    /// Import (the default) explains why a prefix was permitted /
+    /// denied / withdrawn, or not-seen / evicted / stale (ADR-0073).
+    /// Reads the per-session decision cache; requires
+    /// `[policy.explain].enabled` on the daemon (errors distinctly
+    /// when the cache is disabled or the neighbor has no live session
+    /// — those are not `not_seen`). `--direction export` is the same
+    /// answer as `rib --prefix <cidr> advertised <neighbor> --explain`.
     Explain {
-        /// Neighbor (peer) address whose import-decision cache to read
+        /// Neighbor (peer) address whose decision to explain
         #[arg(long, visible_alias = "peer")]
         neighbor: String,
         /// Prefix in CIDR form, e.g. `192.0.2.0/24` or `2001:db8::/32`
         #[arg(long)]
         prefix: String,
-        /// Add-Path identifier; omit to show every matching path
+        /// Add-Path identifier (import only); omit to show every matching path
         #[arg(long)]
         path_id: Option<u32>,
+        /// Direction: import (default) or export
+        ///
+        /// `import` reads the daemon's per-session import-decision
+        /// cache and requires `[policy.explain] enabled = true` in the
+        /// daemon config. `export` runs the read-only export dry run
+        /// (the same answer as `rib --prefix <cidr> advertised
+        /// <neighbor> --explain`) and needs no configuration.
+        #[arg(long, default_value = "import", value_parser = ["import", "export"])]
+        direction: String,
     },
 }
 
@@ -2435,6 +2446,16 @@ fn validate_local_command(command: &Command) -> Result<(), CliError> {
             "set-export requires at least one policy name; use clear-export to drop the chain"
                 .into(),
         )),
+        Command::Policy {
+            action:
+                PolicyAction::Explain {
+                    direction,
+                    path_id: Some(_),
+                    ..
+                },
+        } if direction == "export" => Err(CliError::Argument(
+            commands::policy::EXPLAIN_EXPORT_PATH_ID_ERROR.into(),
+        )),
         // Every `--family` the connected handlers resolve through
         // `parse_family`, in resolution order, so a typo fails before the
         // transport is dialed. Views that forward the family string to the
@@ -3792,8 +3813,9 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 neighbor,
                 prefix,
                 path_id,
+                direction,
             } => {
-                commands::policy::explain_import(connection, &neighbor, &prefix, path_id, json)
+                commands::policy::explain(connection, &neighbor, &prefix, path_id, &direction, json)
                     .await
             }
             PolicyAction::Chain { action } => match action {
@@ -4025,7 +4047,7 @@ mod tests {
             ("README.md", 4),
             ("docs/QUICKSTART.md", 5),
             ("docs/cookbook/route-server.md", 3),
-            ("docs/explain.md", 6),
+            ("docs/explain.md", 7),
             ("docs/OPERATIONS.md", 2),
         ];
 
@@ -7083,6 +7105,10 @@ printf '%s\n' "${COMPREPLY[@]}"
                 "policy chain set-export",
                 "set-export requires at least one policy name; use clear-export to drop the chain",
             ),
+            (
+                "policy explain --neighbor 10.0.0.2 --prefix 10.0.0.0/24 --path-id 3 --direction export",
+                commands::policy::EXPLAIN_EXPORT_PATH_ID_ERROR,
+            ),
             ("watch --family bogus", "unknown address family: bogus"),
             (
                 "flowspec add --family bogus",
@@ -7245,6 +7271,48 @@ printf '%s\n' "${COMPREPLY[@]}"
             };
             assert_eq!(peer.as_deref(), Some("10.0.0.1"), "evpn {flag}");
         }
+    }
+
+    /// `policy explain` has always been import-only, so omitting
+    /// `--direction` must keep that answer; `export` is the only other
+    /// value (`both` is a `policy stats` notion, not an explain one).
+    #[test]
+    fn policy_explain_direction_parses_and_defaults_to_import() {
+        let base = [
+            "rbgp",
+            "policy",
+            "explain",
+            "--neighbor",
+            "10.0.0.1",
+            "--prefix",
+            "10.0.0.0/24",
+        ];
+        let direction_of = |cli: Cli| {
+            let Command::Policy {
+                action: PolicyAction::Explain { direction, .. },
+            } = cli.command
+            else {
+                panic!("expected Policy Explain");
+            };
+            direction
+        };
+        assert_eq!(direction_of(Cli::try_parse_from(base).unwrap()), "import");
+        for direction in ["import", "export"] {
+            let cli = Cli::try_parse_from(base.into_iter().chain(["--direction", direction]))
+                .unwrap_or_else(|error| panic!("--direction {direction}: {error}"));
+            assert_eq!(direction_of(cli), direction);
+        }
+        assert!(
+            Cli::try_parse_from(base.into_iter().chain(["--direction", "both"])).is_err(),
+            "explain has no `both` direction"
+        );
+        // `--path-id` with export parses; the rejection is a local
+        // argument error (see `local_argument_errors_fail_before_transport`).
+        Cli::try_parse_from(
+            base.into_iter()
+                .chain(["--path-id", "3", "--direction", "export"]),
+        )
+        .unwrap();
     }
 
     /// LAN-329: `--remote-asn` is canonical, `--asn` stays as a
