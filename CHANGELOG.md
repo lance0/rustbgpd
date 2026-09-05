@@ -625,6 +625,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   different or zero ESI are contenders as before, and the receive-side
   tiebreak is unchanged.
 
+- Correct MRT Add-Path entry ordering to Peer Index, Originated Time, then
+  Path Identifier, and use subtype 10 for IPv6 unicast. Snapshot encoders
+  and the reader now follow RFC 8050; subtype 9 is treated as unsupported IPv4
+  multicast. Legacy non-Add-Path encoding is unchanged.
+
 ### Documentation
 
 - Publish a descriptive raw bridge event-skew receipt across six pinned Jammy
@@ -815,6 +820,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   peer's advertisement no longer counts as a move or raises the local
   sequence. Re-baseline alerts keyed on that counter for multihomed VNIs;
   single-homed VNIs are unaffected.
+
+- **MRT Add-Path snapshots and warm checkpoints:** regenerate historical
+  Add-Path dumps, whose peer, time, and path-ID fields could be misread by
+  external tools. Warm manifests now use format version 2 and reject all
+  version-1 bundles before decoding, without automatic conversion. The next
+  coordinated shutdown can replace an old checkpoint; the daemon still does
+  not restore routes from these artifacts at boot.
 
 ## [0.68.0] — 2026-08-30
 

@@ -43,22 +43,24 @@ use tracing::{debug, warn};
 use crate::codec::{WarmSnapshotBudget, WarmSnapshotBudgetError};
 use crate::{ReadError, SnapshotNlri, SnapshotReader};
 
-/// On-disk format understood by this implementation.
-pub const WARM_BUNDLE_FORMAT_VERSION: u32 = 1;
+/// On-disk format understood by this implementation. Version 2 requires
+/// RFC 8050 Add-Path entry ordering and subtype assignments; version 1
+/// artifacts cannot safely distinguish historical misencoded path IDs.
+pub const WARM_BUNDLE_FORMAT_VERSION: u32 = 2;
 /// Version of the deterministic resolved import-policy digest framing.
 pub const WARM_BUNDLE_POLICY_DIGEST_VERSION: u32 = 1;
 /// Fixed manifest file name within a bundle directory.
 pub const WARM_BUNDLE_MANIFEST_FILE: &str = "manifest.json";
 /// Maximum manifest bytes accepted before JSON parsing (8 MiB).
 ///
-/// Compact V1 manifests use about 250 bytes per peer/family view. This cap
+/// Compact manifests use about 250 bytes per peer/family view. This cap
 /// leaves room for more than 10,000 dual-stack RR peers while bounding boot
 /// allocation and rejecting unreasonable JSON before parsing.
 pub const MAX_WARM_BUNDLE_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
-/// Maximum MRT artifact bytes accepted by V1 (512 MiB).
+/// Maximum MRT artifact bytes accepted by the loader (512 MiB).
 ///
-/// V1 currently hands verified bytes to the later restore coordinator as one
-/// allocation. Keep that allocation operationally bounded; raising this cap
+/// The loader returns verified bytes as one allocation for a future restore
+/// consumer. Keep that allocation operationally bounded; raising this cap
 /// requires a fully streaming restore consumer rather than reusing the much
 /// larger decompression-format ceiling from [`crate::reader`].
 pub const MAX_WARM_BUNDLE_SNAPSHOT_BYTES: u64 = 512 * 1024 * 1024;
@@ -259,7 +261,8 @@ pub struct WarmBundleArtifactV1 {
     pub sha256: String,
 }
 
-/// V1 on-disk manifest.
+/// Manifest schema retained under its original Rust name. The on-disk
+/// `format_version` independently identifies the MRT encoding contract.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WarmBundleManifestV1 {
@@ -565,7 +568,7 @@ pub enum WarmBundleError {
     },
 }
 
-/// Atomically publish a V1 warm-checkpoint bundle.
+/// Atomically publish a warm-checkpoint bundle in the current format.
 ///
 /// The directory must already be pinned by [`WarmBundleDirectory::open`].
 /// The snapshot is semantically validated before any filesystem mutation.
@@ -581,7 +584,7 @@ pub fn write_warm_bundle(
     write_warm_bundle_inner(directory, identity, snapshot, FaultPoint::None, None)
 }
 
-/// Atomically publish a V1 bundle while observing the shutdown work budget.
+/// Atomically publish a bundle while observing the shutdown work budget.
 ///
 /// Semantic validation, hashing, chunked writes, fsync boundaries, and the
 /// final manifest commit all recheck the same cancellation token and monotonic
@@ -2445,7 +2448,7 @@ mod tests {
                 WarmBundleFamilyV1::Ipv6Unicast => {
                     payload.push(48);
                     payload.extend_from_slice(&Ipv6Addr::LOCALHOST.octets()[..6]);
-                    if view.add_path_receive { 9 } else { 4 }
+                    if view.add_path_receive { 10 } else { 4 }
                 }
                 WarmBundleFamilyV1::L2vpnEvpn => {
                     payload.extend_from_slice(&25_u16.to_be_bytes());
@@ -2460,11 +2463,11 @@ mod tests {
                 }
             };
             payload.extend_from_slice(&1_u16.to_be_bytes());
+            payload.extend_from_slice(&peer_index.to_be_bytes());
+            payload.extend_from_slice(&u32::try_from(NOW).unwrap().to_be_bytes());
             if view.add_path_receive {
                 payload.extend_from_slice(&u32::try_from(sequence + 1).unwrap().to_be_bytes());
             }
-            payload.extend_from_slice(&peer_index.to_be_bytes());
-            payload.extend_from_slice(&u32::try_from(NOW).unwrap().to_be_bytes());
             payload.extend_from_slice(&0_u16.to_be_bytes());
             record(&mut output, subtype, &payload);
         }
@@ -2605,6 +2608,86 @@ mod tests {
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         mutate(&mut manifest);
         fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn historical_v1_addpath_is_rejected_before_ambiguous_decoding() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = opened(&temp);
+        let id = identity_with(vec![v4_view(1, true)]);
+        let mut corrected = valid_snapshot(&id);
+        // /24 record: common header + sequence + prefix length/address + count.
+        let entry = last_record_offset(&corrected) + 12 + 4 + 1 + 3 + 2;
+        corrected[entry + 6..entry + 10].fill(0); // negotiated Add-Path ID zero
+        let manifest = write_warm_bundle(&dir, id.clone(), &corrected).unwrap();
+        assert_eq!(manifest.format_version, 2);
+        let loaded = load_warm_bundle(&dir, &expected(&id), freshness()).unwrap();
+        let row = SnapshotReader::new(&loaded.snapshot)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.path_id, 0);
+        assert_eq!(row.originated_time, u32::try_from(NOW).unwrap());
+        assert!(row.add_path);
+
+        // Historical writer order: path ID zero, peer index zero, originated time.
+        let mut historical = corrected.clone();
+        historical[entry..entry + 6].fill(0);
+        historical[entry + 6..entry + 10]
+            .copy_from_slice(&u32::try_from(NOW).unwrap().to_be_bytes());
+        let row = SnapshotReader::new(&historical)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.peer_index, 0);
+        assert_eq!(row.originated_time, 0);
+        assert_eq!(row.path_id, u32::try_from(NOW).unwrap());
+        // Even all existing semantic checks would accept the swapped metadata.
+        assert_eq!(
+            validate_snapshot_semantics(&historical, &id, None).unwrap(),
+            vec![1]
+        );
+        install_raw_bundle(&temp, id.clone(), &historical, vec![1]);
+        rewrite_manifest(&temp, |manifest| manifest.format_version = 1);
+        assert!(matches!(
+            load_warm_bundle(&dir, &expected(&id), freshness()),
+            Err(WarmBundleError::UnsupportedVersion {
+                found: 1,
+                expected: 2
+            })
+        ));
+        // The version fence precedes opening or decoding the snapshot.
+        let snapshot_sha = sha256_hex(&historical);
+        fs::remove_file(temp.path().join(snapshot_name(&snapshot_sha))).unwrap();
+        assert!(matches!(
+            load_warm_bundle(&dir, &expected(&id), freshness()),
+            Err(WarmBundleError::UnsupportedVersion {
+                found: 1,
+                expected: 2
+            })
+        ));
+    }
+
+    #[test]
+    fn v1_legacy_bundles_are_also_invalidated_and_new_publication_recovers() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = opened(&temp);
+        let id = identity_with(vec![v4_view(1, false)]);
+        publish(&dir, &id);
+        rewrite_manifest(&temp, |manifest| manifest.format_version = 1);
+        assert!(matches!(
+            load_warm_bundle(&dir, &expected(&id), freshness()),
+            Err(WarmBundleError::UnsupportedVersion {
+                found: 1,
+                expected: 2
+            })
+        ));
+        publish(&dir, &id);
+        let loaded = load_warm_bundle(&dir, &expected(&id), freshness()).unwrap();
+        assert_eq!(loaded.manifest.format_version, 2);
+        assert_eq!(loaded.snapshot, valid_snapshot(&id));
     }
 
     #[test]
@@ -2909,10 +2992,10 @@ mod tests {
         ));
 
         publish(&dir, &id);
-        rewrite_manifest(&temp, |manifest| manifest.format_version = 2);
+        rewrite_manifest(&temp, |manifest| manifest.format_version = 3);
         assert!(matches!(
             load_warm_bundle(&dir, &expected(&id), freshness()),
-            Err(WarmBundleError::UnsupportedVersion { found: 2, .. })
+            Err(WarmBundleError::UnsupportedVersion { found: 3, .. })
         ));
 
         publish(&dir, &id);

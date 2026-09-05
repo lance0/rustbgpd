@@ -13,7 +13,7 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
   - `RIB_GENERIC` (subtype 6) for L2VPN/EVPN (AFI 25 / SAFI 70), following
     RFC 6396 section 4.3.5
   - `RIB_IPV4_UNICAST_ADDPATH` (subtype 8), following RFC 8050
-  - `RIB_IPV6_UNICAST_ADDPATH` (subtype 9), following RFC 8050
+  - `RIB_IPV6_UNICAST_ADDPATH` (subtype 10), following RFC 8050
 - **Periodic + on-demand** — configurable dump interval or gRPC
   `TriggerMrtDump` for immediate snapshots
 - **Optional gzip** compression via flate2
@@ -59,12 +59,18 @@ Public entry points:
   directory as a file descriptor; every subsequent read, create, rename,
   unlink, and fsync is descriptor-relative, so path replacement and symlink
   races cannot redirect publication or loading.
-- `write_warm_bundle` / `write_warm_bundle_bounded` — atomically publish a V1
+- `write_warm_bundle` / `write_warm_bundle_bounded` — atomically publish a format-version-2
   bundle (the bounded form additionally observes a shutdown cancellation
   token and deadline, safe to cancel at any point before the manifest
   rename).
 - `load_warm_bundle` — loads only an exact, fresh, byte- and
   semantically-valid bundle against an independently derived expectation.
+
+Format version 2 requires RFC 8050 Add-Path encoding. All version-1
+manifests are rejected before snapshot decoding, including non-Add-Path
+bundles. Regenerate checkpoints with this version; there is no automatic
+conversion of historical malformed Add-Path artifacts. The existing directory
+name, Rust type names, and resolved-policy digest framing remain unchanged.
 
 Warm bundles remain lossless and fail closed: publication and loading reject
 snapshots whose reader reports any discarded path attributes or BGP-LS NLRIs,

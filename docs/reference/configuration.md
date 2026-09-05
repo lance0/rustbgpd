@@ -3417,7 +3417,7 @@ Each dump contains a complete `TABLE_DUMP_V2` snapshot:
 | `RIB_IPV6_UNICAST` (subtype 4) | IPv6 routes from Adj-RIB-In per peer |
 | `RIB_GENERIC` (subtype 6) | L2VPN/EVPN routes (AFI 25 / SAFI 70) per RFC 6396 section 4.3.5 |
 | `RIB_IPV4_UNICAST_ADDPATH` (subtype 8) | IPv4 routes with path IDs (RFC 8050) |
-| `RIB_IPV6_UNICAST_ADDPATH` (subtype 9) | IPv6 routes with path IDs (RFC 8050) |
+| `RIB_IPV6_UNICAST_ADDPATH` (subtype 10) | IPv6 routes with path IDs (RFC 8050) |
 
 Routes are sourced from Adj-RIB-In (not Loc-RIB) to avoid duplicate entries
 for the best-path winner. Next-hop attributes are synthesized per the MP-BGP

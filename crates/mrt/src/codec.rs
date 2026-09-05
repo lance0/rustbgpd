@@ -24,7 +24,7 @@ pub(crate) const RIB_IPV6_UNICAST: u16 = 4;
 /// Used here for L2VPN/EVPN (AFI 25 / SAFI 70).
 pub(crate) const RIB_GENERIC: u16 = 6;
 pub(crate) const RIB_IPV4_UNICAST_ADDPATH: u16 = 8;
-pub(crate) const RIB_IPV6_UNICAST_ADDPATH: u16 = 9;
+pub(crate) const RIB_IPV6_UNICAST_ADDPATH: u16 = 10;
 /// An individual RIB entry within a RIB_* record.
 pub struct RibEntry {
     /// Index into the `PEER_INDEX_TABLE`.
@@ -713,11 +713,11 @@ fn encode_rib_entry(
     entry: &RibEntry,
     add_path: bool,
 ) -> Result<(), EncodeError> {
+    buf.extend_from_slice(&entry.peer_index.to_be_bytes())?;
+    buf.extend_from_slice(&entry.originated_time.to_be_bytes())?;
     if add_path {
         buf.extend_from_slice(&entry.path_id.to_be_bytes())?;
     }
-    buf.extend_from_slice(&entry.peer_index.to_be_bytes())?;
-    buf.extend_from_slice(&entry.originated_time.to_be_bytes())?;
     let mut attr_buf = Vec::new();
     {
         let mut checked_attrs = EncodeBuffer::child(
@@ -748,11 +748,11 @@ fn encode_route_rib_entry(
     originated_time: u32,
     add_path: bool,
 ) -> Result<(), EncodeError> {
+    buf.extend_from_slice(&peer_index.to_be_bytes())?;
+    buf.extend_from_slice(&originated_time.to_be_bytes())?;
     if add_path {
         buf.extend_from_slice(&route.path_id.to_be_bytes())?;
     }
-    buf.extend_from_slice(&peer_index.to_be_bytes())?;
-    buf.extend_from_slice(&originated_time.to_be_bytes())?;
     let attr_len_offset = buf.len();
     buf.extend_from_slice(&0u16.to_be_bytes())?;
     let attr_start = buf.len();
@@ -2157,6 +2157,107 @@ mod tests {
         // 4 bytes for /32 prefix
         assert_eq!(&buf[17..21], &[0x20, 0x01, 0x0d, 0xb8]);
     }
+    #[test]
+    fn rib_entry_encoders_match_rfc8050_field_order() {
+        let mut route = make_route(
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24)),
+            "192.0.2.1".parse().unwrap(),
+            "192.0.2.9".parse().unwrap(),
+        );
+        route.attributes = Arc::new(vec![PathAttribute::Origin(Origin::Igp)]);
+        for add_path in [false, true] {
+            for path_id in [0, 0x5566_7788_u32] {
+                route.path_id = path_id;
+                // RFC 6396 legacy header, then RFC 8050's inserted path ID,
+                // then literal ORIGIN and synthesized NEXT_HOP attributes.
+                let mut expected = vec![0x01, 0x02, 0x11, 0x22, 0x33, 0x44];
+                if add_path {
+                    expected.extend_from_slice(&path_id.to_be_bytes());
+                }
+                expected.extend_from_slice(&[0, 11, 0x40, 1, 1, 0, 0x40, 3, 4, 192, 0, 2, 9]);
+                let entry = RibEntry {
+                    peer_index: 0x0102,
+                    originated_time: 0x1122_3344,
+                    path_id,
+                    attributes: synthesize_attributes(&route),
+                };
+                let mut owned = Vec::new();
+                encode_rib_entry(&mut EncodeBuffer::new(&mut owned, None), &entry, add_path)
+                    .unwrap();
+                assert_eq!(owned, expected);
+                let mut borrowed = Vec::new();
+                encode_route_rib_entry(
+                    &mut EncodeBuffer::new(&mut borrowed, None),
+                    &route,
+                    entry.peer_index,
+                    entry.originated_time,
+                    add_path,
+                )
+                .unwrap();
+                assert_eq!(borrowed, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn unicast_subtypes_match_rfc8050_assignments() {
+        let entry = RibEntry {
+            peer_index: 1,
+            originated_time: 0x1122_3344,
+            path_id: 0,
+            attributes: vec![],
+        };
+        for (prefix, legacy, addpath) in [
+            (Prefix::V4(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0)), 2, 8),
+            (Prefix::V6(Ipv6Prefix::new(Ipv6Addr::UNSPECIFIED, 0)), 4, 10),
+        ] {
+            for (add_path, subtype) in [(false, legacy), (true, addpath)] {
+                let mut bytes = Vec::new();
+                encode_rib_entries_profile(
+                    &mut EncodeBuffer::new(&mut bytes, None),
+                    0,
+                    0,
+                    &prefix,
+                    std::slice::from_ref(&entry),
+                    add_path,
+                )
+                .unwrap();
+                let mut expected = vec![
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    13,
+                    0,
+                    subtype,
+                    0,
+                    0,
+                    0,
+                    if add_path { 19 } else { 15 },
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    1,
+                    0,
+                    1,
+                    0x11,
+                    0x22,
+                    0x33,
+                    0x44,
+                ];
+                if add_path {
+                    expected.extend_from_slice(&[0; 4]);
+                }
+                expected.extend_from_slice(&[0, 0]);
+                assert_eq!(bytes, expected);
+            }
+        }
+    }
+
     #[test]
     fn addpath_subtype_used_when_path_id_nonzero() {
         let entry = RibEntry {

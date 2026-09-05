@@ -657,6 +657,13 @@ orphan cleanup; and an invalid or changed manifest deletes nothing. Cleanup
 errors are warnings and do not disable the next coordinated-shutdown
 publication attempt.
 
+Warm checkpoint manifests now use format version 2, which requires corrected
+RFC 8050 Add-Path encoding. Version-1 manifests are rejected before snapshot
+decoding, including bundles without Add-Path. Regenerate them through a new
+coordinated shutdown; the `warm-bundle-v1` directory name remains unchanged.
+An old manifest can make startup cleanup skip work until the next successful
+checkpoint replaces it.
+
 **Not restored:** routing state, policy evaluation state, RPKI VRP tables, and
 BMP client state. The optional warm checkpoint persists only eligible
 post-import-policy Adj-RIB-In views as a future-use artifact; the daemon does
