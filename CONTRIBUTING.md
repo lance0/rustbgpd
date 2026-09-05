@@ -385,6 +385,12 @@ These are not guidelines — they are enforced invariants:
 
 ### Documentation Update Discipline
 
+The website consumes the destination-to-source mapping in
+[`docs/site-manifest.json`](docs/site-manifest.json). When moving a listed page,
+update its source path and preserve its destination, which determines the public
+site URL. Run `python3 -m unittest scripts/test_check_site_manifest.py` and
+`python3 scripts/check_site_manifest.py`; the public docs workflow also runs both.
+
 Use [docs/README.md](docs/README.md) as the documentation table of contents. Add each
 maintained page to its task category and directory index. Use lowercase-kebab filenames;
 keep published cookbook paths and anchors stable.
