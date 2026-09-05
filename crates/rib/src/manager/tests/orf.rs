@@ -432,6 +432,128 @@ async fn orf_unknown_when_resets_filter_and_sweeps() {
     handle.await.unwrap();
 }
 
+/// Field capture for one tracing event (see the ASPA/update-group tests for
+/// the same shape).
+#[derive(Debug, Default)]
+struct CapturedFields(std::collections::BTreeMap<String, String>);
+
+impl tracing::field::Visit for CapturedFields {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.0
+            .insert(field.name().to_string(), format!("{value:?}"));
+    }
+}
+
+struct CaptureSubscriber(std::sync::Arc<std::sync::Mutex<Vec<CapturedFields>>>);
+
+impl tracing::Subscriber for CaptureSubscriber {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        let mut fields = CapturedFields::default();
+        event.record(&mut fields);
+        self.0.lock().unwrap().push(fields);
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// A manager with `peer` registered for outbound updates and nothing else.
+fn manager_with_outbound_peer(peer: IpAddr) -> (RibManager, mpsc::Receiver<OutboundRouteUpdate>) {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let (out_tx, out_rx) = mpsc::channel(1);
+    manager.outbound_peers.insert(peer, out_tx);
+    (manager, out_rx)
+}
+
+/// A well-formed ORF entry whose max length is below its own prefix length
+/// (`10/8 le 4`) can never match. It must stay installed — rejecting it would
+/// flush the list and fail open to permit-all — and be reported once per
+/// apply with the peer, family, and the impossible window.
+#[tokio::test]
+async fn orf_unmatchable_entry_is_installed_and_warned() {
+    use std::sync::{Arc as StdArc, Mutex};
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let entry = orf_permit(2, 0, 4, Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8));
+    let (mut manager, _out_rx) = manager_with_outbound_peer(peer);
+    let captured = StdArc::new(Mutex::new(Vec::new()));
+    tracing::subscriber::with_default(CaptureSubscriber(StdArc::clone(&captured)), || {
+        // Sibling tests drive the same callsite through `manager.run()` on
+        // tokio workers with no subscriber; whichever thread registers the
+        // callsite first caches its interest process-wide. Warm it on a
+        // throwaway manager, then re-register against this subscriber.
+        let (mut warm, _warm_rx) = manager_with_outbound_peer(peer);
+        let (warm_reply, _) = oneshot::channel();
+        warm.handle_peer_orf_update(
+            peer,
+            Afi::Ipv4,
+            Safi::Unicast,
+            WhenToRefresh::Defer,
+            &[entry],
+            warm_reply,
+        );
+        tracing::callsite::rebuild_interest_cache();
+        captured.lock().unwrap().clear();
+
+        let (reply, _) = oneshot::channel();
+        manager.handle_peer_orf_update(
+            peer,
+            Afi::Ipv4,
+            Safi::Unicast,
+            WhenToRefresh::Defer,
+            &[entry],
+            reply,
+        );
+    });
+
+    let filter = manager
+        .peer_orf_filters
+        .get(&peer)
+        .and_then(|by_family| by_family.get(&(Afi::Ipv4, Safi::Unicast)))
+        .expect("unmatchable entry stays installed");
+    assert!(
+        !filter.permits(&Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8))),
+        "installed entry never matches, so the non-empty list denies"
+    );
+
+    let events = captured.lock().unwrap();
+    let warned: Vec<&CapturedFields> = events
+        .iter()
+        .filter(|fields| {
+            fields
+                .0
+                .get("message")
+                .is_some_and(|message| message.contains("can never match"))
+        })
+        .collect();
+    assert_eq!(warned.len(), 1, "exactly one warning per apply: {events:?}");
+    let fields = &warned[0].0;
+    assert_eq!(fields.get("peer").map(String::as_str), Some("10.0.0.2"));
+    assert_eq!(
+        fields.get("family").map(String::as_str),
+        Some("(Ipv4, Unicast)")
+    );
+    assert_eq!(
+        fields.get("entries").map(String::as_str),
+        Some(r#"["10.0.0.0/8 min 0 max 4"]"#)
+    );
+    assert!(
+        !events.iter().any(|fields| fields
+            .0
+            .get("message")
+            .is_some_and(|message| message.contains("malformed ORF entry"))),
+        "unmatchable is not malformed: the list must not be reset"
+    );
+}
+
 /// Regression: a graceful-restart flap must clear the RFC 5291 §6
 /// initial-advertisement gate. The gate is per-session; previously
 /// `handle_peer_graceful_restart` left `peer_orf_pending` populated, so a

@@ -981,6 +981,10 @@ does not change that boundary.
 - Unknown `When-to-refresh` values are invalid control input: rustbgpd resets
   the negotiated Address-Prefix ORF list for that family/type and forces a safe
   resync instead of treating the value as defer-like state.
+- A well-formed entry whose maximum length is below its own prefix length
+  (for example `10.0.0.0/8 le 4`) can never match; it is installed as sent and
+  reported with a `warn` log line naming the peer, family, and window, because
+  rejecting it would flush the list and fail open to permit-all.
 - Address-Prefix ORF entries are decoded only for IPv4/IPv6 unicast. L2VPN and
   unknown future SAFIs are preserved as raw ORF groups until their family-specific
   prefix encodings and export semantics are implemented.

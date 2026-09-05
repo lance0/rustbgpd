@@ -11,6 +11,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Operator-visible:** a received Address-Prefix ORF entry whose maximum
+  length is below its own prefix length (for example `10.0.0.0/8 le 4`) can
+  never match a route. The daemon installs it exactly as before and now logs
+  one `warn` line per ORF update naming the peer, the family, and each
+  impossible window (`<prefix> min <n> max <n>`). The entry is not rejected:
+  RFC 5291 §5.2 clears the whole list on a malformed entry, which would fail
+  open to permit-all.
+
 - **Operator-visible:** RFC 5883 multihop BFD. Setting
   `bfd = { profile = "...", multihop = true }` on a static global neighbor
   uses UDP/4784 with the same profiles, inspection, metrics, events, and RFC

@@ -4155,6 +4155,29 @@ impl RibManager {
         if reset && !unknown_when {
             warn!(%peer, ?family, "malformed ORF entry — installed ORF list for this type reset");
         }
+        if !reset {
+            // A well-formed entry whose max length is below its own prefix
+            // length is installed as sent (RFC 5292 §4 allows it) but can
+            // never match. Report it; rejecting it would flush the list and
+            // fail open to permit-all.
+            let unmatchable: Vec<String> = entries
+                .iter()
+                .filter(|entry| entry.action == OrfAction::Add)
+                .filter_map(|entry| {
+                    let prefix = entry.prefix?;
+                    crate::orf::unmatchable_window(&prefix, entry.min_len, entry.max_len)
+                        .then(|| format!("{prefix} min {} max {}", entry.min_len, entry.max_len))
+                })
+                .collect();
+            if !unmatchable.is_empty() {
+                warn!(
+                    %peer,
+                    ?family,
+                    entries = ?unmatchable,
+                    "ORF entry installed but can never match — max length below prefix length"
+                );
+            }
+        }
         // An emptied filter (REMOVE-ALL or a reset) means permit-all again —
         // drop the entry so the absent-filter fast path applies.
         if now_empty && let Some(by_family) = self.peer_orf_filters.get_mut(&peer) {

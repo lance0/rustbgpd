@@ -123,23 +123,41 @@ fn valid_lengths(prefix: &Prefix, min_len: u8, max_len: u8) -> bool {
     true
 }
 
+/// The inclusive route-length window `[lo, hi]` an entry with this prefix and
+/// min/max matches (RFC 5292 §6; 0 = unspecified, both unspecified ⇒ exact
+/// length). The lower bound is clamped to the entry's own prefix length, so a
+/// `min_len` below it is harmless.
+fn length_window(prefix: &Prefix, min_len: u8, max_len: u8) -> (u8, u8) {
+    let entry_len = prefix.prefix_len();
+    if min_len == 0 && max_len == 0 {
+        return (entry_len, entry_len);
+    }
+    let lo = entry_len.max(min_len);
+    let hi = if max_len == 0 {
+        family_max(prefix)
+    } else {
+        max_len
+    };
+    (lo, hi)
+}
+
+/// Whether a well-formed ADD entry can never match any route: a non-zero
+/// `max_len` below the entry's own prefix length leaves an empty window. Such
+/// an entry is valid per RFC 5292 §4 and stays installed — rejecting it would
+/// flush the list and fail open to permit-all — so callers only report it.
+pub(crate) fn unmatchable_window(prefix: &Prefix, min_len: u8, max_len: u8) -> bool {
+    let (lo, hi) = length_window(prefix, min_len, max_len);
+    lo > hi
+}
+
 /// Whether `entry` matches `route` per RFC 5292 §6: containment plus the
 /// min/max length window (0 = unspecified; both unspecified ⇒ exact length).
 fn entry_matches(entry: &OrfFilterEntry, route: &Prefix) -> bool {
     if !prefix_contains(&entry.prefix, route) {
         return false;
     }
-    let entry_len = entry.prefix.prefix_len();
+    let (lo, hi) = length_window(&entry.prefix, entry.min_len, entry.max_len);
     let route_len = route.prefix_len();
-    if entry.min_len == 0 && entry.max_len == 0 {
-        return route_len == entry_len;
-    }
-    let lo = entry_len.max(entry.min_len);
-    let hi = if entry.max_len == 0 {
-        family_max(route)
-    } else {
-        entry.max_len
-    };
     route_len >= lo && route_len <= hi
 }
 
@@ -328,6 +346,28 @@ mod tests {
         let err = f.apply(&[add(2, OrfMatch::Permit, 24, 16, v4([192, 168, 0, 0], 16))]);
         assert!(err.is_err());
         assert!(f.is_empty(), "malformed entry resets the installed list");
+    }
+
+    #[test]
+    fn unmatchable_max_below_prefix_len_is_installed_and_reported() {
+        let mut f = OrfFilterSet::default();
+        // 10/8 le 4: max 4 < prefix length 8, so no route can ever sit in the
+        // window. Rejecting it would flush the list (fail-open flood), so it
+        // stays installed and is only reported.
+        let prefix = v4([10, 0, 0, 0], 8);
+        f.apply(&[add(2, OrfMatch::Permit, 0, 4, prefix)]).unwrap();
+        assert!(!f.is_empty(), "unmatchable entry is still installed");
+        assert!(unmatchable_window(&prefix, 0, 4));
+        assert!(
+            !f.permits(&v4([10, 0, 0, 0], 8)),
+            "never matches: implicit deny"
+        );
+        // min below the prefix length is clamped by the match, not impossible.
+        assert!(!unmatchable_window(&prefix, 4, 0));
+        assert!(!unmatchable_window(&prefix, 4, 8));
+        assert!(!unmatchable_window(&prefix, 0, 0));
+        // max equal to the prefix length still matches the exact prefix.
+        assert!(!unmatchable_window(&prefix, 0, 8));
     }
 
     #[test]
