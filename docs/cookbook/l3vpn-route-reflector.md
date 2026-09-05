@@ -1,5 +1,7 @@
 # L3VPN route reflector (VPNv4/VPNv6 + RT-Constrain)
 
+> **Document class: CURRENT.**
+
 This recipe builds a control-plane-only VPNv4/VPNv6 route reflector.
 
 **When this is you:** Your PE fleet exchanges VPNv4/VPNv6 routes.
@@ -13,7 +15,7 @@ rustbgpd does no VRF import, no MPLS label forwarding, no CE-facing
 attachment circuits — the PEs keep their dataplane; the RR moves
 routes.
 
-**Proven by:** [M74](../RECEIPTS.md#interop-labs--pr-gated-interopyml)
+**Proven by:** [M74](../receipts.md#interop-labs--pr-gated-interopyml)
 (VPNv4/VPNv6 reflection over the same IPv4 sessions, with shared RDs,
 family/peer-scoped API and sink views, field-equal NLRI, and same-path RFC
 4456 attributes vs GoBGP), M75 (RT-Constrain filtering: strict
@@ -130,7 +132,7 @@ Same dashboard rows as the
 gauges (`bgp_update_groups`, `bgp_update_group_members{group}`,
 `bgp_update_group_fallback_peers`) cover the VPN groups too
 (ADR-0099), and `bgp_session_state_transitions_total` catches PE
-flaps. RIB scale panels in the [Grafana overview](../GRAFANA.md)
+flaps. RIB scale panels in the [Grafana overview](../how-to/grafana.md)
 track table growth as VPNs are provisioned.
 
 ## Failure modes

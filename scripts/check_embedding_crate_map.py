@@ -11,7 +11,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DOCUMENT = ROOT / "docs" / "EMBEDDING.md"
+DOCUMENT = ROOT / "docs" / "reference" / "embedding.md"
 COMMAND = "cargo metadata --locked --offline --format-version 1 --no-deps".split()
 BEGIN = "<!-- BEGIN EMBEDDING CRATE MAP -->"
 END = "<!-- END EMBEDDING CRATE MAP -->"

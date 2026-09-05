@@ -1,6 +1,6 @@
 # ADR-0113: Per-peer outbound unicast prefix limits
 
-**Status:** Accepted — released in [v0.61.0](../../CHANGELOG.md#0610--2026-07-27)
+**Status:** Accepted — released in [v0.61.0](../project/changelog/older-releases.md#0610--2026-07-27)
 **Date:** 2026-07-21
 
 ## Context

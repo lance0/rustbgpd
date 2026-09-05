@@ -68,7 +68,7 @@ fn park_pending_ip_binding(
 /// route and emits a MAC+IP route in its place. Receiving the last
 /// `IpRemoved` for a MAC drops it back to MAC-only.
 ///
-/// See `docs/RFC_NOTES.md` for the RFC 9135 §7.2.3 framing and the
+/// See `docs/reference/rfc-notes.md` for the RFC 9135 §7.2.3 framing and the
 /// FRR mailing-list bugs that motivated this model.
 #[expect(
     clippy::too_many_arguments,

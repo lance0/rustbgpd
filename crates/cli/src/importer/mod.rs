@@ -36,7 +36,7 @@ use std::io::Write as IoWrite;
 use serde::Serialize;
 
 /// Guidance attached to every skipped policy stanza.
-pub const RPOL_GUIDANCE: &str = "hand-translate to .rpol; see docs/rpol-language.md";
+pub const RPOL_GUIDANCE: &str = "hand-translate to .rpol; see docs/reference/rpol-language.md";
 /// Guidance for structural stanzas outside the bounded subset.
 pub const GENERIC_GUIDANCE: &str = "outside the structural subset; carry over by hand if needed";
 
@@ -590,7 +590,7 @@ fn emit_toml(
          ({}).\n\
          # Routing POLICY IS NOT translated: every untranslated stanza is listed in\n\
          # the import report (re-run the import to reproduce it). Hand-translate\n\
-         # policy to .rpol (docs/rpol-language.md), then validate with\n\
+         # policy to .rpol (docs/reference/rpol-language.md), then validate with\n\
          # `rustbgpd --check` before use.\n",
         format.name()
     );

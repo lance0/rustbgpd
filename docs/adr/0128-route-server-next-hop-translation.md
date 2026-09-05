@@ -206,4 +206,4 @@ the boundaries above.
 - [RFC 8950](https://www.rfc-editor.org/rfc/rfc8950.html)
 - [RFC 7947](https://www.rfc-editor.org/rfc/rfc7947.html)
 - [ADR-0107](0107-route-server-next-hop-ownership.md)
-- [Route-server limitations](../LIMITATIONS.md)
+- [Route-server limitations](../reference/limitations.md)

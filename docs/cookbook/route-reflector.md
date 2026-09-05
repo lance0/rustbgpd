@@ -1,5 +1,7 @@
 # iBGP route reflector at scale
 
+> **Document class: CURRENT.**
+
 Replace an iBGP full mesh with a dedicated route reflector.
 
 **When this is you:** Your current or planned iBGP full mesh no longer
@@ -10,7 +12,7 @@ clients sit in different corners of the IGP. rustbgpd's RR path needs no
 fanout configuration: peers whose staged output is provably identical
 share one update group automatically.
 
-**Proven by:** [M14](../RECEIPTS.md#interop-labs--pr-gated-interopyml)
+**Proven by:** [M14](../receipts.md#interop-labs--pr-gated-interopyml)
 (RFC 4456 reflection vs FRR), M76 (RFC 9107 Optimal Route Reflection),
 M77 (GR/LLGR stale preservation), and the
 [1000-peer scale receipt](../perf/scale-receipt-2026-07.md): 100k
@@ -165,7 +167,7 @@ standard best — fix the BGP-LS feed, not the client.
 ## Watch
 
 Prometheus (`prometheus_addr`, `/metrics`; dashboard import in
-[`GRAFANA.md`](../GRAFANA.md) — the churn/distribution row carries the
+[`GRAFANA.md`](../how-to/grafana.md) — the churn/distribution row carries the
 update-group gauges):
 
 | Metric | Healthy shape |
@@ -182,7 +184,7 @@ update-group gauges):
 **A client is not grouped (`rbgp neighbor <address>` prints a reason, not
 `group:N`).** Grouping is purely an optimization — semantics are
 identical on the per-peer path — but at fleet scale you want to know
-why. The reasons ([full table](../CONFIGURATION.md#update-groups-automatic)):
+why. The reasons ([full table](../reference/configuration.md#update-groups-automatic)):
 `policy_peer_context` (its export chain matches on peer
 address/ASN/group), `add_path_send`, `orr_vantage`, `orf_installed`.
 The first is the one you can usually fix: rewrite the chain so the
@@ -210,7 +212,7 @@ stay for the peer's advertised GR restart time, then carry
 export-restricted per RFC 9494). If routes vanish immediately instead,
 the client didn't advertise GR — check `rbgp neighbor <address>` capability
 output. Legacy-family edge cases are documented in
-[`KNOWN_ISSUES.md`](../../KNOWN_ISSUES.md).
+[`docs/reference/known-issues.md`](../reference/known-issues.md).
 
 **A client session drops with a send-hold NOTIFICATION.** The client
 stopped reading its socket for `send_hold_time` seconds (RFC 9687) —

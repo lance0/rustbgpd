@@ -75,7 +75,7 @@ zero prefixes for 120 s (RDE wedge, did not recur on rerun).
    daemon-side clocks advisory-only, per-daemon reload-semantic
    asymmetries), reproduction section; commit raw artifacts under
    `docs/perf/artifacts/ixp-matrix-2026-07/`; cross-link from
-   `docs/RECEIPTS.md` and `docs/COMPARISON.md`.
+   `docs/receipts.md` and `docs/explanation/comparison.md`.
 
 ## Run hygiene (learned the hard way)
 

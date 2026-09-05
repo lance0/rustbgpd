@@ -63,7 +63,7 @@ impl From<tonic::Status> for CliError {
                 return CliError::Rpc(format!(
                     "permission denied: {}\n  \
                      hint: gRPC authorization is [security.grpc] daemon config; changes need a \
-                     daemon restart, not a reload — see docs/CONFIGURATION.md",
+                     daemon restart, not a reload — see docs/reference/configuration.md",
                     s.message()
                 ));
             }
@@ -177,7 +177,7 @@ mod tests {
             err.to_string(),
             "permission denied: token lacks write scope\n  \
              hint: gRPC authorization is [security.grpc] daemon config; changes need a \
-             daemon restart, not a reload — see docs/CONFIGURATION.md"
+             daemon restart, not a reload — see docs/reference/configuration.md"
         );
     }
 

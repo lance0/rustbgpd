@@ -162,8 +162,8 @@ fn wait_until_serving(label: &str, grpc_addr: &str, cwd: &Path, daemon: &mut Dae
 }
 
 fn documented_flow() -> (String, Vec<String>) {
-    let quickstart =
-        std::fs::read_to_string(repo_root().join("docs/QUICKSTART.md")).expect("read Quickstart");
+    let quickstart = std::fs::read_to_string(repo_root().join("docs/tutorials/quickstart.md"))
+        .expect("read Quickstart");
     let start = quickstart
         .find("cat > ix-members.json <<'JSON'")
         .expect("Quickstart passwordless JSON start");

@@ -696,7 +696,7 @@ CSV inspection.
   `apply_aliasing_ecmp` (`true` since v0.20.0, ADR-0059 slice 3.5);
   gating evidence for both: Gate 8b 24 h MAC-churn 2026-05-16 +
   M37 local-origination 24 h MAC-churn 2026-05-19. See
-  `docs/evpn-alpha-soak.md`.
+  `docs/how-to/evpn-alpha-soak.md`.
 - **After any change to** the local-MAC origination / withdraw
   path (`crates/evpn-linux/src/reconcile.rs`,
   `src/evpn_originator/`,

@@ -3,7 +3,7 @@
 One-page record of the 24-hour Gate 8b MAC-churn soak, the gating
 evidence for flipping the `apply_bum_enforcement` and
 `apply_aliasing_ecmp` defaults to `true` per
-[`docs/evpn-alpha-soak.md`](../evpn-alpha-soak.md).
+[`docs/evpn-alpha-soak.md`](../how-to/evpn-alpha-soak.md).
 
 ## What this soak exercised
 

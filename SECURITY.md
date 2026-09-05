@@ -2,7 +2,7 @@
 
 This is the vulnerability-reporting policy. For operational security
 guidance — deployment tiers, mTLS setup, gRPC authorization, and audit
-logging — see [docs/SECURITY.md](docs/SECURITY.md).
+logging — see [docs/reference/security.md](docs/reference/security.md).
 
 ## Supported Versions
 
@@ -199,8 +199,8 @@ Integrators documenting rustbgpd's upstream open-source handling can point at:
   front-end (see `examples/envoy-mtls/`) remains a valid alternative for
   multi-host fan-out. Per-RPC authorization tiers
   (ADR-0064, enforced by default since v0.24.0) classify each method on
-  top of the listener split; see [docs/SECURITY.md](docs/SECURITY.md) and
-  [docs/grpc-method-inventory.md](docs/grpc-method-inventory.md).
+  top of the listener split; see [docs/reference/security.md](docs/reference/security.md) and
+  [docs/reference/grpc-method-inventory.md](docs/reference/grpc-method-inventory.md).
 
 ### Inbound Connection Handling
 
@@ -222,4 +222,4 @@ Integrators documenting rustbgpd's upstream open-source handling can point at:
 - The message-processing path between peer sessions and the RIB uses
   bounded channels, so a fast or abusive peer parks on backpressure
   instead of growing daemon memory (see Design Invariant #3 in
-  [ARCHITECTURE.md](ARCHITECTURE.md) for the channel policy).
+  [docs/explanation/architecture.md](docs/explanation/architecture.md) for the channel policy).

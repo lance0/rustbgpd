@@ -150,7 +150,7 @@ rrharness argv lists separately in the manifest, with the concrete `-a` or `-b`
 output stem.
 
 Run the DHAT/bgperf2 `2 peers x 100000 prefixes` shape from
-`docs/BENCHMARKS.md` once after convergence. Archive its classified table,
+`docs/benchmarks.md` once after convergence. Archive its classified table,
 sanitized derivative, and a sanitized same-run bgperf2 CSV. The CSV and DHAT
 derivative must describe the same daemon process/run; a nearby RSS run is not
 equivalent.

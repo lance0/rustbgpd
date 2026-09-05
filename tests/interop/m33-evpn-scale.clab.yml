@@ -1,6 +1,6 @@
 # M33 — EVPN Route Reflector scale validation
 #
-# Gate 5 of docs/evpn-enablement.md. Validates that rustbgpd's EVPN RR
+# Gate 5 of docs/project/evpn-enablement.md. Validates that rustbgpd's EVPN RR
 # sustains the "production-ready at 10k+ MAC scale" claim: 50k Type 2
 # routes flowed through the RR to a third-party observer, with no drops,
 # no session flaps, and measurable convergence.

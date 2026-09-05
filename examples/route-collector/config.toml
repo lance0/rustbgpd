@@ -7,7 +7,7 @@
 # Architecture:
 #   Upstreams (eBGP) → rustbgpd (collector) → gRPC / MRT / BMP
 #
-# See docs/USE_CASES.md for detailed walkthrough and API examples.
+# See docs/explanation/use-cases.md for detailed walkthrough and API examples.
 
 [global]
 asn = 65534                      # Collector ASN (private, or use your own)

@@ -279,7 +279,7 @@ easy operator identification.
   decoder handles any tunnel type value losslessly but rustbgpd does
   not negotiate an encap preference. VXLAN is the deployed case.
 
-See [docs/evpn-enablement.md](../evpn-enablement.md) for the gate-by-gate
+See [docs/evpn-enablement.md](../project/evpn-enablement.md) for the gate-by-gate
 plan. Gates 0-6 (capability, Type 2 reflection, GR/LLGR, MAC mobility,
 multi-homing reflection, scale validation, controller injection) shipped
 on `feat/evpn-rr`. Subsequent gates have since landed under their own

@@ -9,9 +9,9 @@ on:
       - "integrations/ixp-manager/**"
       - "tests/birdwatcher_adapter_smoke.rs"
       - ".github/workflows/ixp-compat.yml"
-      - "docs/INTEROP.md"
+      - "docs/interop.md"
       - "docs/cookbook/ixp-filter-pipeline.md"
-      - "docs/ixp-evaluation.md"
+      - "docs/explanation/ixp-evaluation.md"
   push:
     branches: [main]
     paths:
@@ -21,9 +21,9 @@ on:
       - "integrations/ixp-manager/**"
       - "tests/birdwatcher_adapter_smoke.rs"
       - ".github/workflows/ixp-compat.yml"
-      - "docs/INTEROP.md"
+      - "docs/interop.md"
       - "docs/cookbook/ixp-filter-pipeline.md"
-      - "docs/ixp-evaluation.md"
+      - "docs/explanation/ixp-evaluation.md"
   workflow_dispatch:
 
 permissions:

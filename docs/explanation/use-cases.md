@@ -1,0 +1,925 @@
+# Use Cases
+
+> **Document class: CURRENT.** This maintained page reflects the project as it is now; dated sections remain bounded to their stated scope.
+
+For release-by-release feature history, see [CHANGELOG.md](../../CHANGELOG.md).
+
+Concrete deployment scenarios for rustbgpd, with architecture, example configs,
+and API workflows.
+
+rustbgpd is an API-first BGP daemon. Its default deployment shape is still to
+sit alongside your edge router as the programmable layer your automation talks
+to. The edge router (FRR, BIRD, Junos, EOS) handles forwarding while rustbgpd
+handles control-plane logic that's too dynamic or too complex for static config
+files. For Linux edge-router experiments, default-off FIB integrations now
+exist for RFC 7999 discard routes and explicit `[[fib_tables]]` unicast route
+tables.
+
+Note: rustbgpd defaults to a local UDS gRPC listener. The `grpcurl` examples
+below that target `localhost:50051` require an authenticated TCP listener;
+complete opt-in `[global.telemetry.grpc_tcp]` recipes appear below.
+
+---
+
+## Origin Story: Why rustbgpd Exists
+
+rustbgpd was born out of [prefixd](https://github.com/lance0/prefixd), an
+open-source BGP FlowSpec policy daemon for automated DDoS mitigation. prefixd
+receives attack signals from detectors (FastNetMon, Kentik, Prometheus alerts),
+applies policy-driven playbooks, and announces FlowSpec rules to routers.
+
+prefixd originally used GoBGP as its BGP backend — a separate container in
+the docker-compose stack, managed via gRPC. This worked but had real pain
+points:
+
+- **No config persistence** — if the GoBGP container restarted, all FlowSpec
+  rules were gone. prefixd needed a reconciliation loop to repair state drift
+  every 30 seconds.
+- **Extra failure domain** — a separate container that could crash, get OOM
+  killed, or lose its gRPC connection independently.
+- **Performance overhead** — Go's GC adds latency jitter; under DDoS
+  conditions, you want predictable response times.
+- **Go-flavored API** — GoBGP's protos use `google.protobuf.Any` extensively,
+  making typed clients in other languages awkward.
+
+After building and operating prefixd, the requirements for a better BGP backend
+became clear. rustbgpd is that backend — designed from day one for the
+API-driven, FlowSpec-heavy, persistence-required use case that prefixd
+represents.
+
+**Future integration:** rustbgpd is designed to be embeddable. The long-term
+goal is for prefixd to link against rustbgpd's crates directly, eliminating the
+GoBGP sidecar entirely:
+
+```
+Today:    Detector → prefixd → [gRPC] → GoBGP container → Routers
+Future:   Detector → prefixd (with embedded rustbgpd) → Routers
+```
+
+This removes the separate container, the gRPC hop, the reconciliation loop, and
+the "what if GoBGP restarts" failure mode. A single binary that detects attacks
+and speaks BGP natively.
+
+---
+
+## 1. DDoS Mitigation (FlowSpec + RTBH)
+
+**The problem:** Your detection system (FastNetMon, Kentik, Prometheus alerts)
+identifies an attack. You need to push FlowSpec rules or blackhole routes to
+your routers — in seconds, not minutes. Scripting ExaBGP or GoBGP works until
+it doesn't: no state persistence, no guardrails, no audit trail.
+
+**The architecture:**
+
+```
+Detection system
+    |
+    v  POST /v1/events (your mitigation platform)
+Mitigation platform
+    |
+    v  gRPC: AddFlowSpec / AddPath
+rustbgpd
+    |
+    v  eBGP with FlowSpec + unicast
+Edge routers (Juniper MX, Arista 7xxx, Cisco ASR)
+    |
+    v  Hardware-rate filtering
+Traffic dropped at line rate
+```
+
+**Why rustbgpd over GoBGP/ExaBGP:**
+- Config persistence — injected FlowSpec rules survive daemon restart
+- All 13 FlowSpec component types (destination, source, protocol, ports, ICMP,
+  TCP flags, packet length, DSCP, fragment, flow label)
+- Single binary, no sidecar container needed
+- gRPC API designed for automation, not human CLI use
+
+**Example config** ([`examples/ddos-mitigation/config.toml`](../../examples/ddos-mitigation/config.toml)):
+
+<!-- use-case-config:ddos-mitigation -->
+
+```toml
+[global]
+asn = 65500
+router_id = "10.255.0.1"
+listen_port = 179
+ebgp_requires_policy = true
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+
+# Local automation uses the implicit owner-only UDS and local-operator principal.
+
+# Remote mitigation-platform access over TCP. Under tier a TCP listener needs
+# a bearer token + matching principal (or native mTLS); create the token file
+# first, then uncomment.
+# use-case-remote-tcp:begin
+# [global.telemetry.grpc_tcp]
+# enabled = true
+# address = "127.0.0.1:50051"
+# token_file = "/etc/rustbgpd/grpc-token"
+# principal = "mitigation-platform"
+# [security.grpc.roles]
+# mitigation-platform = "operator"
+# use-case-remote-tcp:end
+
+[policy]
+import_chain = ["reject-edge-routes"]
+export_chain = ["distribute-mitigation"]
+
+[policy.definitions.reject-edge-routes]
+default_action = "deny"
+
+[policy.definitions.distribute-mitigation]
+default_action = "permit"
+
+# Edge routers that enforce FlowSpec rules
+[[neighbors]]
+address = "10.0.0.1"
+remote_asn = 65001
+description = "edge-router-1"
+families = ["ipv4_unicast", "ipv4_flowspec", "ipv6_flowspec"]
+hold_time = 30
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65001
+description = "edge-router-2"
+families = ["ipv4_unicast", "ipv4_flowspec", "ipv6_flowspec"]
+hold_time = 30
+```
+
+**API workflow — inject a FlowSpec rate-limit rule:**
+
+```bash
+# Rate-limit UDP traffic to 203.0.113.10 port 53 at 10 Mbps
+grpcurl -plaintext -d '{
+  "family": "ipv4_flowspec",
+  "rule": {
+    "destination_prefix": "203.0.113.10/32",
+    "protocols": [17],
+    "destination_ports": [53]
+  },
+  "actions": {
+    "traffic_rate_bytes": 1250000
+  }
+}' -unix /var/lib/rustbgpd/grpc.sock rustbgpd.v1.InjectionService/AddFlowSpec
+```
+
+```bash
+# Blackhole a /32 under attack (RTBH via unicast)
+grpcurl -plaintext -d '{
+  "prefix": "203.0.113.10/32",
+  "next_hop": "192.0.2.1",
+  "communities": ["65535:666"]
+}' -unix /var/lib/rustbgpd/grpc.sock rustbgpd.v1.InjectionService/AddPath
+```
+
+```bash
+# Withdraw when the attack subsides
+grpcurl -plaintext -d '{
+  "prefix": "203.0.113.10/32"
+}' -unix /var/lib/rustbgpd/grpc.sock rustbgpd.v1.InjectionService/DeletePath
+```
+
+**Monitoring:** Prometheus metrics track FlowSpec rule counts per peer. BMP
+export streams rule changes to collectors for audit. MRT dumps capture
+point-in-time snapshots for post-incident analysis.
+
+---
+
+## 2. IXP Route Server
+
+**The problem:** You operate an Internet exchange and need a route server that
+distributes member routes with Add-Path, RPKI validation, Prefix ORF, and
+per-member policy — all manageable via API as members join and leave.
+
+**The architecture:**
+
+```
+IXP member A (AS 64501) ──┐
+IXP member B (AS 64502) ──┤── eBGP ──► rustbgpd (route server, AS 65500)
+IXP member C (AS 64503) ──┘
+                                          |
+                              ┌───────────┼───────────┐
+                              v           v           v
+                         Prometheus   BMP collector   MRT archive
+```
+
+**Key features for IXPs:**
+- **Transparent mode** — preserves original NEXT_HOP, no AS prepend (members
+  peer directly via the exchange fabric)
+- **Add-Path send** — members see multiple candidates up to configured and
+  negotiated limits, enabling their own best-path selection
+- **Per-client best-path** (`per_client_best`, RFC 7947 §2.3.2) — the
+  path-hiding mitigation for members that cannot do Add-Path: when a
+  member's export policy denies the best path, it receives the best
+  *permitted* candidate instead of nothing (the BIRD-`secondary`
+  equivalent), and `rbgp rib advertised --explain` shows the per-candidate
+  verdict ladder
+- **RPKI validation** — drop RPKI-invalid routes, prefer valid over not-found
+- **Receive-side Prefix ORF** — let members push prefix filters that constrain
+  what the route server advertises back to them
+- **Policy chains** — per-member import/export filtering via named policies
+- **Peer groups** — share config across members with the same policy profile
+- **Dynamic member management** — add/remove members via gRPC without restart
+- **GR/LLGR** — member sessions survive route server maintenance windows
+
+**Example config:** [`examples/route-server/config.toml`](../../examples/route-server/config.toml)
+
+**API workflow — add a new IXP member at runtime:**
+
+```bash
+# Add member at runtime (persisted to config automatically)
+rbgp neighbor 198.51.100.10 add --remote-asn 64510 \
+  --description new-member \
+  --route-server-client --per-client-best --role rs \
+  --families ipv4_unicast,ipv6_unicast \
+  --max-prefixes 10000 \
+  --max-prefix-restart-seconds 30
+
+# Verify the session comes up
+rbgp neighbor 198.51.100.10
+```
+
+---
+
+## 3. Hosting Provider Prefix Management
+
+**The problem:** Customers buy IP space from you. Their prefixes need to be
+announced to your upstreams and IX peers. Today this involves editing config
+files, reloading daemons, and hoping nobody fat-fingers a prefix. Customer
+churn means constant manual work.
+
+**The architecture:**
+
+```
+Customer portal / billing system
+    |
+    v  gRPC: AddPath / DeletePath
+rustbgpd (route injector)
+    |
+    v  iBGP
+Edge routers (FRR/BIRD with FIB)
+    |
+    ├──► Transit provider A (eBGP)
+    ├──► Transit provider B (eBGP)
+    └──► IXP route server (eBGP)
+```
+
+The conservative model is still that rustbgpd is the **programmable route
+injection layer**. Your provisioning system talks to rustbgpd via gRPC.
+rustbgpd peers with your edge routers via iBGP, and those routers install
+routes into their kernel FIB and announce them upstream. If rustbgpd itself is
+running on a Linux edge box, ADR-0061 `[[fib_tables]]` can optionally install
+selected unicast best routes into explicit non-reserved kernel tables.
+
+**Why this model works:**
+- Customer signs up → automation calls `AddPath` → prefix is announced
+  within seconds
+- Customer cancels → automation calls `DeletePath` → prefix is withdrawn
+- All injected routes persist across rustbgpd restarts (config persistence)
+- RPKI validation prevents announcing prefixes you don't own
+- Audit trail via BMP export to your collector
+- No config file edits, no SIGHUP, no restart
+
+**Example config** ([`examples/hosting-provider/config.toml`](../../examples/hosting-provider/config.toml)):
+
+<!-- use-case-config:hosting-provider -->
+
+```toml
+[global]
+asn = 65100
+router_id = "10.255.0.1"
+listen_port = 1179           # non-standard port (edge routers own 179)
+ebgp_requires_policy = false
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+
+# Local provisioning uses the implicit owner-only UDS and local-operator principal.
+
+# Uncomment this complete recipe for authenticated remote provisioning.
+# use-case-remote-tcp:begin
+# [global.telemetry.grpc_tcp]
+# enabled = true
+# address = "127.0.0.1:50051"
+# token_file = "/etc/rustbgpd/grpc-token"
+# principal = "provisioning-system"
+# [security.grpc.roles]
+# provisioning-system = "operator"
+# use-case-remote-tcp:end
+
+# RPKI validation — don't announce prefixes we can't prove we hold
+[rpki]
+[[rpki.cache_servers]]
+address = "127.0.0.1:3323"
+
+# iBGP to edge routers
+[[neighbors]]
+address = "10.255.0.2"
+remote_asn = 65100             # iBGP (same ASN)
+description = "edge-router-1"
+families = ["ipv4_unicast", "ipv6_unicast"]
+
+[[neighbors]]
+address = "10.255.0.3"
+remote_asn = 65100
+description = "edge-router-2"
+families = ["ipv4_unicast", "ipv6_unicast"]
+```
+
+**API workflow — provision a customer prefix:**
+
+```bash
+# Customer buys 203.0.113.0/24 — announce it
+rbgp rib add 203.0.113.0/24 --nexthop 192.0.2.1
+
+# Customer buys an IPv6 block
+rbgp rib add 2001:db8:1000::/36 --nexthop 2001:db8::1
+
+# Customer cancels — withdraw
+rbgp rib delete 203.0.113.0/24
+
+# List best routes
+rbgp rib
+```
+
+---
+
+## 4. SDN / Network Automation Controller
+
+**The problem:** Your SDN controller or network automation platform needs to
+inject routes, apply traffic engineering policies, or react to network events
+in real time. You need a BGP speaker that's driven entirely by API — not by
+editing config files.
+
+**The architecture:**
+
+```
+SDN controller / orchestrator
+    |
+    v  gRPC (AddPath, SetPolicy, WatchEvents)
+rustbgpd
+    |
+    ├──► eBGP to datacenter fabric (announce service IPs)
+    ├──► eBGP to WAN edge (traffic engineering)
+    └──► iBGP to route reflector (internal reachability)
+```
+
+**Key capabilities:**
+- **Route injection** — announce/withdraw prefixes programmatically
+- **Policy CRUD** — create/modify/delete policies at runtime without restart
+- **WatchEvents unified stream** — one subscription covers route, session lifecycle, BGP NOTIFICATION metadata, policy-mutation audit, and FIB / BLACKHOLE dataplane status; `stream_lagged` signals tell the controller when a slow consumer fell behind
+- **Community manipulation** — set communities for traffic engineering
+- **AS_PATH prepend** — steer traffic across multiple upstreams
+
+**API workflow — traffic engineering via communities:**
+
+```bash
+# Announce a prefix with traffic engineering communities
+grpcurl -plaintext -d '{
+  "prefix": "10.100.0.0/24",
+  "next_hop": "10.255.0.1",
+  "communities": ["65100:1000", "65100:2000"],
+  "local_pref": 200
+}' localhost:50051 rustbgpd.v1.InjectionService/AddPath
+
+# Create an export policy that prepends to deprioritize a transit link
+grpcurl -plaintext -d '{
+  "name": "deprioritize-transit-b",
+  "default_action": "permit",
+  "statements": [{
+    "action": "permit",
+    "match_neighbor_set": "transit-b",
+    "set_as_path_prepend": {"asn": 65100, "count": 2}
+  }]
+}' localhost:50051 rustbgpd.v1.PolicyService/SetPolicy
+
+# Apply the policy to the export chain
+grpcurl -plaintext -d '{
+  "chain": ["deprioritize-transit-b"]
+}' localhost:50051 rustbgpd.v1.PolicyService/SetGlobalExportChain
+
+# Stream route changes in real time for the controller
+grpcurl -plaintext -H "authorization: Bearer $(< /etc/rustbgpd/grpc-token)" -d '{"categories": ["EVENT_CATEGORY_ROUTE"]}' localhost:50051 rustbgpd.v1.EventService/WatchEvents
+```
+
+---
+
+## 5. BGP Looking Glass / Route Collector
+
+**The problem:** You need to collect routes from multiple peers for monitoring,
+analysis, or a public looking glass. You want structured data via API, not
+screen-scraping CLI output.
+
+**The architecture:**
+
+```
+Upstream A ──┐
+Upstream B ──┤── eBGP ──► rustbgpd (collector)
+IX peer C  ──┘
+                              |
+                  ┌───────────┼───────────┐
+                  v           v           v
+             gRPC queries  MRT dumps   BMP stream
+             (looking       (archive)   (OpenBMP /
+              glass app)                 pmacct)
+```
+
+**Key capabilities:**
+- **ListReceivedRoutes / ListBestRoutes** — query Adj-RIB-In and Loc-RIB
+- **WatchEvents** — stream route changes to a dashboard in real time
+- **MRT TABLE_DUMP_V2** — periodic snapshots for offline analysis (compatible
+  with bgpdump, BGPKIT parser, and RouteViews/RIPE RIS tooling)
+- **BMP export** — stream to OpenBMP or pmacct for long-term archival
+- **RPKI validation state** — each route annotated with Valid/Invalid/NotFound
+- **Birdwatcher-shaped REST subset** — the shipped `birdwatcher-adapter`
+  binary (one of the four in the release tarball and packages;
+  [`examples/birdwatcher-adapter`](../../examples/birdwatcher-adapter) carries
+  the source and deployment notes) serves
+  accepted-route, filtered-route (with reject-reason communities synthesized
+  from `PolicyService.ListRejectedRoutes` structured reasons), noexport
+  (best-routes-minus-advertised, each suppression explained by the live
+  export ladder), peer (with real filtered counts), and status views from
+  the gRPC API
+- **Best-path explain** — `rbgp rib --prefix X --explain` shows why a
+  route was selected over alternatives
+
+**Example config** ([`examples/route-collector/config.toml`](../../examples/route-collector/config.toml)):
+
+<!-- use-case-config:route-collector -->
+
+```toml
+[global]
+asn = 65534
+router_id = "10.255.0.1"
+listen_port = 179
+ebgp_requires_policy = true
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_uds]
+path = "/var/lib/rustbgpd/grpc.sock"
+principal = "looking-glass"
+
+[security.grpc.roles]
+looking-glass = "observer"
+
+# Uncomment this complete recipe for an authenticated remote looking glass.
+# Bearer tokens do not encrypt traffic; prefer an mTLS proxy off-box.
+# use-case-remote-tcp:begin
+# [global.telemetry.grpc_tcp]
+# enabled = true
+# address = "0.0.0.0:50051"
+# token_file = "/etc/rustbgpd/grpc-token"
+# principal = "looking-glass"
+# use-case-remote-tcp:end
+
+# RPKI — annotate every route with validation state
+[rpki]
+[[rpki.cache_servers]]
+address = "127.0.0.1:3323"
+
+# MRT periodic dumps for archive
+[mrt]
+output_dir = "/var/lib/rustbgpd/mrt"
+dump_interval = 7200           # every 2 hours
+compress = true
+file_prefix = "collector"
+
+# BMP stream to OpenBMP
+[bmp]
+sys_name = "rustbgpd-collector"
+[[bmp.collectors]]
+address = "10.0.0.100:5000"
+
+# Peers — deliberately import everything and export nothing
+[policy]
+import_chain = ["observe-all"]
+export_chain = ["deny-all"]
+
+[policy.definitions.observe-all]
+default_action = "permit"
+
+[policy.definitions.deny-all]
+default_action = "deny"
+[[policy.definitions.deny-all.statements]]
+action = "deny"
+prefix = "0.0.0.0/0"
+le = 32
+
+[[policy.definitions.deny-all.statements]]
+action = "deny"
+prefix = "::/0"
+le = 128
+
+[[neighbors]]
+address = "10.0.0.1"
+remote_asn = 64501
+description = "upstream-a"
+families = ["ipv4_unicast", "ipv6_unicast"]
+max_prefixes = 1000000
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 64502
+description = "upstream-b"
+families = ["ipv4_unicast", "ipv6_unicast"]
+max_prefixes = 1000000
+```
+
+**API workflow — looking glass queries:**
+
+```bash
+# Query best routes
+rbgp rib
+
+# List all routes received from a specific peer
+rbgp rib received 10.0.0.1
+
+# Explain why a route was selected as best
+rbgp rib --prefix 10.0.0.0/24 --explain
+
+# Stream all route changes (pipe to your analysis tool)
+grpcurl -plaintext -H "authorization: Bearer $(< /etc/rustbgpd/grpc-token)" -d '{"categories": ["EVENT_CATEGORY_ROUTE"]}' localhost:50051 rustbgpd.v1.EventService/WatchEvents
+```
+
+---
+
+## 6. Lab and Testing
+
+**The problem:** You're developing network automation, testing BGP policies, or
+studying for a certification. You need a BGP speaker that's easy to set up,
+has a clean API, and provides good visibility into what's happening.
+
+**Why rustbgpd for labs:**
+- Single binary — `cargo build && ./target/release/rustbgpd config.toml`
+- Structured JSON logging — see every BGP message, FSM transition, and policy
+  decision
+- gRPC API — script interactions in Python, Go, or any gRPC-capable language
+- Docker support — `docker compose up` for multi-node topologies
+- Containerlab interop — tested topologies with FRR and BIRD included
+- `--check` flag — validate configs before deploying
+
+**Quick containerlab topology:**
+
+```yaml
+name: bgp-lab
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:latest
+      binds:
+        # Template + copy, not a read-only bind: config persistence rewrites
+        # this file, so runtime mutation needs a writable config directory.
+        - config.toml:/etc/rustbgpd/config.template.toml:ro
+      exec:
+        - cp -n /etc/rustbgpd/config.template.toml /etc/rustbgpd/config.toml
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - frr.conf:/etc/frr/frr.conf:ro
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr:eth1"]
+```
+
+See [`tests/interop/`](../../tests/interop) for complete working topologies.
+
+---
+
+## 7. VXLAN-EVPN DC Fabric Route Reflector
+
+**The problem:** You're operating a VXLAN-EVPN leaf/spine fabric — GPU
+cluster, multi-tenant DC, container overlay — and you need an iBGP route
+reflector that distributes EVPN routes (MAC advertisements, multicast
+memberships, IP prefixes) between VTEPs. The VTEPs themselves (SONiC or
+FRR leaves) handle local MAC learning, DF election, and VXLAN encap. You
+want a control plane that's API-first (no vtysh scraping), scales to
+thousands of VTEPs, and gives you structured observability.
+
+**What rustbgpd does for you (Phase 1 RR bundle — full RFC 7432 Type 1-5
+reflection through controller injection; see
+[docs/project/evpn-enablement.md](../project/evpn-enablement.md), ADR-0050):**
+
+- **RFC 7432 route reflection for all 5 route types** — EAD per-ES,
+  EAD per-EVI, MAC/IP, IMET, Ethernet Segment, IP Prefix (RFC 9136) —
+  reflected between VTEPs per RFC 4456 with full tie-break ordering
+  (stale → ORIGIN → CLUSTER_LIST length → ORIGINATOR_ID) and
+  source-peer split horizon.
+- **MAC Mobility handling** — Type 2 best-path honors the MAC Mobility
+  sequence number and the sticky flag per RFC 7432 §15.1, so a MAC
+  move converges deterministically and sticky MACs aren't displaced.
+  Validated end-to-end against FRR via M30 (basic Type 2) and M31
+  (mobility + sticky).
+- **Multi-homing Type 4 ES reflection** — reflected unchanged with
+  RFC 4456 ORIGINATOR_ID + CLUSTER_LIST so downstream VTEPs run DF
+  election independently over the same inputs. Validated via M32
+  (two FRR VTEPs sharing an ESI + observer). Type 1 EAD-per-EVI
+  reflection is validated via M32 and the synthetic M32b sibling.
+  As a local VTEP, EVPN multi-homing now originates Type 1/4 routes, runs DF
+  election, and can opt into BUM enforcement; the RR role still only
+  reflects these routes.
+- **GR / LLGR for EVPN** — VTEP restart no longer flaps the rest of
+  the fabric: routes are marked stale on `PeerGracefulRestart`,
+  promoted to `LLGR_STALE` on GR timer expiry per RFC 9494, and
+  swept on EoR. Enhanced Route Refresh tracks unreplaced EVPN keys
+  in `refresh_stale_evpn` and withdraws them on BoRR/EoRR.
+- **VXLAN encapsulation via RFC 8365** — the BGP Encapsulation extended
+  community is decoded and preserved across reflection; `rbgp evpn`
+  surfaces `encap=vxlan` for operator visibility.
+- **Controller injection** — `InjectionService::AddEvpnRoute` /
+  `DeleteEvpnRoute` cover Type 2 MAC/IP, Type 3 IMET, and Type 5
+  IP Prefix (RFC 9136, including non-zero Gateway Address for
+  targeted overlay-index testing), with display-form RDs
+  (`65000:100`, `10.0.0.1:100`, `4200000000:100`); injected
+  routes flow through the same reflection pipeline as iBGP-learned
+  ones. CLI: `rbgp evpn add-mac-ip / add-imet / add-ip-prefix /
+  delete-mac-ip / delete-imet / delete-ip-prefix`.
+- **gRPC observability** — `ListEvpnRoutes(route_type, peer, rd)` for
+  filtered EVPN RIB queries; Prometheus metrics per peer include
+  `adj_rib_out_prefixes{family="evpn"}`. Max-prefix accounting counts
+  EVPN keys alongside unicast prefixes.
+- **RT-based policy** — existing `match_community` against Route Target
+  extended communities filters EVPN routes the same way unicast RT
+  matching works elsewhere. Type 5 IP-Prefix routes surface their
+  prefix in the policy `RouteContext` so prefix-based clauses work
+  on Type 5 too.
+
+**What rustbgpd does for VTEP-mode operators:**
+
+- **MAC-only Type 2 origination** — EVPN local MAC origination (v0.15.0):
+  `RTNLGRP_NEIGH AF_BRIDGE` subscription drives Type 2 origination
+  per RFC 7432 §15.1 with full mobility-sequence handling. One
+  Type 3 IMET (RFC 7432 §7.3) per L2VNI carries the PMSI Tunnel
+  attribute (RFC 6514 §5) for ingress-replication BUM.
+- **MAC-with-IP Type 2 origination via ARP/ND suppression** —
+  v0.16.0: with `bridge link set dev vxlan<vni>
+  neigh_suppress on`, ARP/ND-snooped `(IP, MAC)` bindings on the
+  bridge's neighbour table drive MAC+IP Type 2 origination under
+  the FRR-style replace model (one Type 2 per MAC at any time —
+  `IpAdded` upgrades from MAC-only to MAC+IP, last `IpRemoved`
+  downgrades back). SDN controllers can still inject MAC-with-IP
+  routes directly via `InjectionService::AddEvpnRoute` (controller injection).
+
+**What rustbgpd doesn't do yet (and which VTEPs handle for you):**
+
+- **EVPN multi-homing enforcement** — EVPN multi-homing (ESI, Type-1/Type-4)
+  (v0.17.0, ADR-0057) shipped the observation half: Type 4 ES + Type 1 EAD-per-ES +
+  Type 1 EAD-per-EVI origination, RFC 7432 §8.5 service carving +
+  RFC 8584 §3 algorithm negotiation, and the Prometheus
+  `evpn_df_role` surface. BUM-flood-suppression + DF-election follow-ups now add ESI Label /
+  ES-Import RT origination, DF-role-aware Type 2 ESI attachment,
+  kernel BUM-port enforcement via `apply_bum_enforcement` (RFC 7432
+  §8.5, default `true` since v0.23.0 after both the BUM-state 24 h
+  MAC-churn soak and the M37 local-origination 24 h MAC-churn soak
+  passed clean), RFC 7432 §14 aliasing receive-side projection, and
+  RFC 7432 §8.4 receive-side EAD-per-ES mass-withdraw filtering.
+- **VXLAN data plane** — kernel VXLAN interfaces + bridge setup is the
+  VTEP's job.
+- **IRB / L3VNI / Type 5 dataplane** — EVPN symmetric IRB
+  (Type-5 / L3VNI), Interface-less, shipped end-to-end in v0.18.0 (ADR-0058):
+  `[[evpn_ip_vrfs]]` config schema, `IpVrfStatus` readiness probe,
+  Linux IP-VRF / L3 VXLAN netlink dumps, `Dataplane::probe_ip_vrfs`,
+  per-IP-VRF kernel-route observation with conservative classifier,
+  Type 5 origination via `RibUpdate::InjectEvpn`, remote import +
+  L3 FIB programming through the transactional `L3OwnedState` model
+  with four-phase apply ordering, sub-second
+  `RTNLGRP_IPV4/IPV6_ROUTE` withdraw, `rbgp evpn vrfs` CLI +
+  `ListIpVrfs`/`GetIpVrf` gRPC, M39 hosted smoke against FRR 10.7.1.
+  ADR-0059 (v0.19.0) adds receive-path aliasing-ECMP via FDB
+  nexthop groups (M40 FRR-validated). Shipped since: receive-side
+  RFC 9135 overlay-index Type 5 recursion, native GW-IP + ESI
+  overlay-index Type 5 origination, single-active (M71) / all-active
+  (M72) ESI overlay-index Type 5 receive; remaining EVPN work is the
+  ADR-0063 runtime mixed-edit tail, Linux softswitch local-bias, and
+  service-provider route families.
+
+**Why the API-first shape matters for DC fabric:**
+
+- Spin up a VTEP with a templated FRR config + a gRPC call to register
+  the new peer — no config-file write dance.
+- Pipe EVPN route events into your SDN controller or fabric-observability
+  tool via `WatchEvents` / `SubscribeFromEvent` (typed `EvpnRouteEvent`
+  payloads). BMP route monitoring and MRT `RIB_GENERIC` dumps carry EVPN
+  routes as well.
+- Validate policy changes with `rbgp rib --prefix <PREFIX> --explain` before
+  pushing — routable-surface diffs, not CLI scraping.
+
+**Example config:** `examples/rr-evpn-fabric/config.toml` — three VTEP
+peers in AS 65000 with `families = ["l2vpn_evpn"]` and
+`route_reflector_client = true`.
+
+```toml
+[global]
+asn = 65000
+router_id = "10.0.0.100"
+cluster_id = "10.0.0.100"
+ebgp_requires_policy = false
+
+[[neighbors]]
+address = "10.0.0.1"
+remote_asn = 65000
+families = ["l2vpn_evpn"]
+route_reflector_client = true
+```
+
+**Scale validated (M33):** 50,000 Type 2 routes reflected from two
+originating peers to a third observer, plus 60 s of 1000/sec
+withdraw+re-advertise churn, with no route loss and no session flap.
+The load generator is the in-tree `bench/evpn-load` crate built
+directly on `rustbgpd-wire` — no third-party daemon in the
+measurement path.
+
+**Known gaps:**
+
+- VTEP role is now bidirectional but not feature-complete — the
+  **declarative EVPN instance schema landed (ADR-0052)** with
+  `[[evpn_instances]]` (vni / rd / route_targets / local_vtep_ip /
+  optional bridge / advertise_svi_mac) and the read-only
+  `EvpnService.ListEvpnInstances` surface. **The EVPN VXLAN VTEP
+  dataplane (Linux FDB reconciler) shipped (v0.14.0, ADR-0054)** —
+  rustbgpd programs
+  remote-MAC FDB entries from received Type 2 routes via rtnetlink.
+  **EVPN local MAC origination shipped (v0.15.0,
+  ADR-0055)** — rustbgpd subscribes to `RTNLGRP_NEIGH`, classifies
+  bridge FDB events, and originates Type 2 routes per RFC 7432 §15.1
+  with full mobility sequencing, plus one Type 3 IMET per L2VNI
+  carrying RFC 6514 §5 PMSI Tunnel. M37 validates the loop end-to-end
+  (4/4 PASS, FRR 10.3.1 on Linux 6.17). **Observable DF election +
+  Type 1/4 origination shipped with EVPN multi-homing (v0.17.0, ADR-0057)** and is
+  validated by M38. **EVPN BUM-flood suppression + DF election (alpha)**
+  followed with ESI-aware Type 2 origination, RFC 7432 §14 aliasing
+  receive-side projection, RFC 7432 §8.4 mass-withdraw filtering,
+  and kernel BUM-port enforcement (RFC 7432 §8.5) via
+  `apply_bum_enforcement` (default `true` since v0.23.0).
+  **EVPN symmetric IRB (Type-5 / L3VNI), Interface-less,
+  shipped end-to-end in v0.18.0**: `[[evpn_ip_vrfs]]` config
+  schema, IP-VRF readiness probe, Type 5 origination + remote
+  import + L3 FIB programming through the transactional
+  `L3OwnedState` model, `RTNLGRP_IPV4/IPV6_ROUTE` multicast,
+  `rbgp evpn vrfs` CLI, M39 hosted smoke. **ADR-0059**
+  (v0.19.0) adds receive-path aliasing-ECMP via FDB nexthop
+  groups (M40 FRR-validated). Shipped since: receive-side RFC 9135
+  overlay-index Type 5 recursion, native GW-IP + ESI overlay-index
+  Type 5 origination, single-active (M71) / all-active (M72) ESI
+  overlay-index Type 5 receive; remaining EVPN work is the ADR-0063
+  runtime mixed-edit tail, Linux softswitch local-bias, and
+  service-provider route families. See
+  [docs/project/evpn-enablement.md](../project/evpn-enablement.md)
+  for the full enablement ladder and
+  [docs/how-to/evpn-alpha-soak.md](../how-to/evpn-alpha-soak.md) for the residual
+  alpha-confidence checklist.
+- Controller injection covers Type 2 MAC/IP, Type 3 IMET, and Type 5
+  IP-Prefix (including non-zero Gateway Address for targeted
+  overlay-index testing) via `InjectionService::AddEvpnRoute`. Native
+  Type 1/4 multi-homing origination ships through
+  `[[ethernet_segments]]`, but controller injection for those route
+  types is not exposed.
+- Live FRR VTEP flap with tcpdump validation of the reflected
+  `LLGR_STALE` community on the wire is the one piece of GR/LLGR
+  coverage still tracked as a follow-up — the unit + integration
+  pipeline is wired (graceful restart / LLGR), but the lab capture isn't part of CI yet.
+
+---
+
+## Deployment Patterns
+
+### Pattern A: Sidecar route injector
+
+rustbgpd runs alongside your edge router on the same host. Your automation
+talks to rustbgpd via gRPC; rustbgpd peers with the edge router via iBGP on
+loopback.
+
+```
+┌─────────────────────────────────────┐
+│  Host                               │
+│                                     │
+│  Automation ──► rustbgpd ◄──iBGP──► FRR/BIRD (FIB)  ──► network
+│                   :50051             :179              │
+└─────────────────────────────────────┘
+```
+
+Best for: hosting providers, DDoS mitigation, SDN controllers.
+
+### Pattern B: Standalone route server
+
+rustbgpd is the only BGP speaker, peering directly with external neighbors.
+No edge router needed — rustbgpd is the control plane.
+
+```
+Peer A ──┐
+Peer B ──┤── eBGP ──► rustbgpd (route server)
+Peer C ──┘              :179
+```
+
+Best for: IXP route servers, route collectors, looking glasses.
+
+### Pattern C: Containerized microservice
+
+rustbgpd runs as a container in your orchestration platform. Automation
+talks to it via gRPC over the container network.
+
+```
+┌─────────────────────────────────────┐
+│  Kubernetes / Docker Compose        │
+│                                     │
+│  ┌──────────┐    ┌──────────────┐   │
+│  │ your app ├──► │ rustbgpd     │   │
+│  │          │    │ (container)  │──────► eBGP to network
+│  └──────────┘    └──────────────┘   │
+└─────────────────────────────────────┘
+```
+
+Best for: DDoS platforms (like prefixd), Kubernetes service IP announcement,
+SD-WAN controllers.
+
+---
+
+## Not a Good Fit
+
+Be honest about where rustbgpd isn't the right tool:
+
+- **Full router** — rustbgpd has default-off Linux FIB integrations for RFC
+  7999 discard routes and explicit `[[fib_tables]]` unicast tables, but it is
+  not a full FRR/BIRD replacement. Use a full routing suite when you need
+  default-on main-table ownership, IGPs, broad policy-driven redistribution,
+  crash-restart FIB adoption, or mature multi-protocol forwarding features.
+- **EVPN VTEP role — alpha.** rustbgpd-as-RR has been
+  the supported deployment since Phase 1 (ADR-0050). Phase 2
+  (declarative instance schema, FDB reconciler, local MAC + MAC+IP
+  origination, and VTEP convergence; ADR-0052 / 0054 / 0055 /
+  0056) added the **bidirectional VTEP loop**: kernel FDB
+  programming from received Type 2 routes; local-MAC origination
+  via `RTNLGRP_NEIGH` with RFC 7432 §15.1 mobility sequencing;
+  Type 3 IMET per L2VNI carrying RFC 6514 §5 PMSI Tunnel for
+  ingress-replication BUM; `advertise_svi_mac` originates the
+  bridge's own MAC; `sticky_macs` (ADR-0056) marks origination
+  with the RFC 7432 §15.4 sticky bit; sub-second mobility
+  convergence via the EVPN-keyed `EvpnRouteEvent` broadcast (EVPN VTEP
+  convergence); and MAC-with-IP Type 2 origination via ARP/ND suppression
+  under the FRR-style replace model (requires
+  `bridge link set dev vxlan<vni> neigh_suppress on`). M37 and
+  M37+IP smokes validate the MAC-only and MAC+IP loops against
+  FRR 10.7.1. Multi-homing **foundation** (observable DF election
+  + Type 1/4 origination) shipped with EVPN multi-homing (v0.17.0, ADR-0057),
+  validated by M38. **EVPN BUM-flood-suppression alpha enforcement** then landed:
+  ESI-aware Type 2 origination, RFC 7432 §14 aliasing receive-side
+  projection, RFC 7432 §8.4 mass-withdraw filtering, and kernel
+  BUM-port enforcement (RFC 7432 §8.5) via `apply_bum_enforcement`
+  (default `true` since v0.23.0). **EVPN symmetric IRB (Type-5 / L3VNI), Interface-less,
+  shipped end-to-end in v0.18.0**: `[[evpn_ip_vrfs]]`, IP-VRF
+  readiness probe, Type 5 origination + remote import + L3 FIB
+  programming through the transactional `L3OwnedState` model,
+  sub-second `RTNLGRP_IPV4/IPV6_ROUTE` withdraw, `rbgp evpn
+  vrfs` CLI, M39 hosted smoke. **ADR-0059** (v0.19.0) adds
+	  receive-path aliasing-ECMP via FDB nexthop groups (M40
+	  FRR-validated). Auto-derived RTs, Type 5 gRPC injection
+	  including non-zero Gateway Address, receive-side RFC 9135
+	  overlay-index recursion, native GW-IP overlay-index Type 5
+	  origination, single-active ESI overlay-index Type 5 receive
+	  with M71 GoBGP proof, all-active ESI overlay-index Type 5
+	  receive with M72 GoBGP proof, duplicate-MAC remote suppression +
+	  manual clear, and production-default DF/non-DF BUM suppression
+	  have also shipped. **Still missing for full VTEP parity:**
+	  Linux softswitch local-bias split-horizon, the remaining ADR-0063
+	  runtime mixed-edit tail,
+	  optional import-side ES-Import RT filtering, EVPN over MPLS/PBB,
+	  and EVPN route types 6-11. For a single-homed L2VNI fabric without
+	  MPLS/PBB or service-provider EVPN requirements, rustbgpd is a fit today.
+- **VPLS fabrics** — No RFC 4761 VPLS address family support.
+- **Service provider core** — No Confederation (RFC 5065). VPNv4/VPNv6 and
+  labeled-unicast ship only as a route-reflector / controller-feed slice
+  (receive, store, reflect, withdraw — see ADR-0077 and
+  [gobgp-parity.md](gobgp-parity.md)): no VRF import, no label allocation,
+  and no MPLS FIB, so this is not a PE role. Use FRR or commercial NOS for a
+  full SP PE.
+- **CLI-first operations** — The CLI is a thin gRPC wrapper, not a full
+  interactive shell. If you want IOS-style CLI, use FRR.
+- **Drop-in BIRD replacement at established IXPs — bounded.** BIRD +
+  ARouteServer + IXP Manager is a deep ecosystem, and the integration work is
+  now partly done rather than absent: an IXP Manager v7.4 native target
+  (Foil render → atomic activate → lock/update lifecycle, see
+  [cookbook/ixp-manager-route-server.md](../cookbook/ixp-manager-route-server.md)),
+  the `birdwatcher-adapter` looking-glass binary, ARouteServer-shaped
+  reject-reason tagging, and `rs-config-render` for member data that lives in
+  arouteserver's `general.yml`/`clients.yml`. The looking-glass claim is
+  pinned, not open-ended: `runtime_compatibility` in
+  [`tests/compat/ixp-manager-birdseye/contract.json`](../../tests/compat/ixp-manager-birdseye/contract.json)
+  is `true` — verified IXP Manager 7.4 Bird's Eye API compatibility with
+  documented BIRD-internal divergences, covering the Bird's Eye surface IXP
+  Manager v7.4.0 consumes, driven by the pinned oracle. The route-count
+  endpoints, the table-less `api/route/{net}` lookup, and the whole `lg/`
+  looking-glass surface are out of scope, and arbitrary Alice-LG clients are
+  not a target; protocol aliases are read at sidecar startup or from a file
+  on explicit `SIGHUP`, so adding a member requires republishing the alias
+  file and signaling or restarting the sidecar. No external
+  production pilot has run. Treat it as a shadow-pilot path
+  ([cookbook/route-server-shadow-pilot.md](../cookbook/route-server-shadow-pilot.md)),
+  not a swap-in.

@@ -1,6 +1,6 @@
 [Unit]
 Description=rustbgpd BGP daemon (Docker container)
-Documentation=https://github.com/lance0/rustbgpd/blob/main/docs/deployment.md
+Documentation=https://github.com/lance0/rustbgpd/blob/main/docs/how-to/deployment.md
 After=docker.service network-online.target
 Requires=docker.service
 Wants=network-online.target

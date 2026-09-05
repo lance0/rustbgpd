@@ -1558,7 +1558,7 @@ mod tests {
     /// inventory fence in `crates/api/src/authz.rs`.
     #[test]
     fn benchmarks_doc_type_size_rows_match_compiler() {
-        let doc = include_str!("../../../docs/BENCHMARKS.md");
+        let doc = include_str!("../../../docs/benchmarks.md");
         for (name, size) in [
             ("AdjRibIn", size_of::<crate::adj_rib_in::AdjRibIn>()),
             ("LocRib", size_of::<LocRib>()),
@@ -1566,7 +1566,7 @@ mod tests {
             let row = format!("| `{name}` | {size} bytes |");
             assert!(
                 doc.contains(&row),
-                "docs/BENCHMARKS.md type-size table is missing the row {row:?}: \
+                "docs/benchmarks.md type-size table is missing the row {row:?}: \
                  the struct changed size or the doc was edited; update the \
                  table (and its growth prose) to match the compiler"
             );

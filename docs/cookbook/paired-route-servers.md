@@ -1,5 +1,7 @@
 # Paired route servers — staggered updates and maintenance windows
 
+> **Document class: CURRENT.**
+
 Operate a resilient pair of IXP route servers.
 
 **When this is you:** Your exchange runs or should run two route servers.
@@ -43,7 +45,7 @@ make dual sessions part of member onboarding, not an option.
 - **Distinct `router_id`s**, same ASN, same member ACLs. Members see
   two ordinary sessions to one route-server AS.
 - **Independent RPKI feeds.** Point each instance at the RTR
-  cache set directly ([`[rpki]`](../CONFIGURATION.md#rpki) takes
+  cache set directly ([`[rpki]`](../reference/configuration.md#rpki) takes
   multiple `cache_servers`); do not proxy one instance's view through
   the other's host.
 
@@ -54,7 +56,7 @@ is your rollback while the first proves the change. Per update:
 
 1. **Validate everywhere first:** `rustbgpd --check --strict` on the
    candidate config on both hosts (exit 0 or stop), and check the
-   [reload matrix](../reload-matrix.md) for whether any touched field
+   [reload matrix](../reference/reload-matrix.md) for whether any touched field
    is restart-required.
 2. **Reload RS1 only** (SIGHUP; parse-then-swap — a rejected candidate
    leaves the running config untouched).
@@ -72,14 +74,14 @@ The same stagger applies to daemon upgrades, with the
 Two independently rendered route servers can drift — a stale render on
 one host, a reload that never happened, a member session down on one
 side. The check is mechanical and fail-closed
-([`docs/ribdiff.md`](../ribdiff.md)): snapshot what RS2 advertises,
+([`docs/how-to/ribdiff.md`](../how-to/ribdiff.md)): snapshot what RS2 advertises,
 compare RS1's live Adj-RIB-Out against it, gate on the exit code.
 
 Capture RS2's advertised view from its own BMP feed — wire-true,
 including attributes no CLI view renders. Enable the RFC 8671
 post-policy stream on RS2 (restart-required, so make it part of the
 standing config rather than a per-check toggle; see
-[`[bmp]`](../CONFIGURATION.md#bmp)):
+[`[bmp]`](../reference/configuration.md#bmp)):
 
 ```toml
 [[bmp.collectors]]
@@ -109,7 +111,7 @@ diff the two hosts' render receipts and reload timestamps first.
 Taking RS1 down (upgrade, host maintenance) without a member-visible
 routing gap — RFC 8326 graceful shutdown, initiator side (full
 semantics and verification in
-[OPERATIONS.md](../OPERATIONS.md#rfc-8326-graceful-shutdown-community-planned-maintenance)):
+[OPERATIONS.md](../reference/operations.md#rfc-8326-graceful-shutdown-community-planned-maintenance)):
 
 1. **Confirm RS2 is healthy and consistent** (the diff above, all
    member sessions established). Two-instance redundancy means never

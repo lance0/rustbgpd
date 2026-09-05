@@ -2,7 +2,7 @@
 
 A minimal BGP speaker whose rustbgpd dependencies are `rustbgpd-wire` and
 `rustbgpd-fsm`: the "minimal speaker" consumer from
-[`docs/EMBEDDING.md`](../../docs/EMBEDDING.md) section 3.3. It links no RIB,
+[`docs/reference/embedding.md`](../../docs/reference/embedding.md) section 3.3. It links no RIB,
 policy, or session-runtime workspace crate.
 
 What it does:

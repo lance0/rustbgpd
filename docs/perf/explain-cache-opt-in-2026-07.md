@@ -98,7 +98,7 @@ Two DHAT-instrumented runs at 20 sessions × 5,000 routes, both at
 exactly where the RSS delta says it is. (Two earlier DHAT runs at the same
 shape produced unclassifiable captures because the plain `release` profile
 strips symbols; they are retained but carry no attribution. See
-[`KNOWN_ISSUES.md`](../../KNOWN_ISSUES.md).)
+[`KNOWN_ISSUES.md`](../reference/known-issues.md).)
 
 DHAT reports **allocated** bytes live at the global heap maximum, from a
 `release-prof` build without jemalloc. These numbers are not resident bytes and
@@ -122,7 +122,7 @@ separately records the unrelated `RejectedRouteStore` rows (704,320 B in each
 run):
 [`dhat/explain-bucket-netting.tsv`](artifacts/explain-cache-opt-in-2026-07/dhat/explain-bucket-netting.tsv);
 the capture-time classifier defects exposed by that table are now resolved in
-[`KNOWN_ISSUES.md`](../../KNOWN_ISSUES.md), and the retained component tables
+[`KNOWN_ISSUES.md`](../reference/known-issues.md), and the retained component tables
 were regenerated from unchanged normalized stacks and byte counts.
 
 ## Method and fail-closed gates

@@ -54,6 +54,6 @@ stay in place and new growth is rejected as `route_limit_exceeded`.
 
 ## Related
 
-- [`../../docs/CONFIGURATION.md`](../../docs/CONFIGURATION.md#fib_tables)
-- [`../../docs/OPERATIONS.md`](../../docs/OPERATIONS.md#view-general-fib-route-status)
+- [`../../docs/reference/configuration.md`](../../docs/reference/configuration.md#fib_tables)
+- [`../../docs/reference/operations.md`](../../docs/reference/operations.md#view-general-fib-route-status)
 - [`../../docs/adr/0061-opt-in-unicast-linux-fib-integration.md`](../../docs/adr/0061-opt-in-unicast-linux-fib-integration.md)

@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import check_public_tracker_ids as guard
@@ -104,6 +105,32 @@ class PublicTrackerIdTests(unittest.TestCase):
         for relative, text in documents.items():
             with self.subTest(document=relative):
                 self.assertEqual(guard.audit_document(relative, text), [])
+
+    def test_moved_history_does_not_exempt_other_project_docs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            historical = (
+                "docs/project/roadmap.md",
+                "docs/project/roadmap-history.md",
+                "docs/project/changelog/older-releases.md",
+            )
+            public = (
+                "docs/project/README.md",
+                "docs/project/changelog-notes.md",
+                "docs/explanation/architecture.md",
+                "docs/reference/known-issues.md",
+            )
+            paths = [write_fixture(root, name, "LAN-123\n") for name in historical + public]
+            with mock.patch.multiple(
+                guard,
+                ROOT=root,
+                tracked_files=lambda: paths,
+                sealed_paths=lambda _paths: set(),
+            ):
+                documents = guard.discover_documents()
+            self.assertEqual(set(documents), set(public))
+            for relative, text in documents.items():
+                self.assertTrue(guard.audit_document(relative, text))
 
     def test_every_citation_form_is_rejected(self) -> None:
         for line in CITATIONS:

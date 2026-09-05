@@ -1,7 +1,7 @@
 //! `rbgp diff snapshot from-bmp` — convert a captured RFC 7854 BMP byte
 //! stream carrying the RFC 8671 post-policy Adj-RIB-Out view into an
 //! `rbgp-ribsnap/1` NDJSON snapshot for `rbgp diff advertised` (adapter
-//! contract `from-bmp/1`, see docs/ribdiff.md).
+//! contract `from-bmp/1`, see docs/how-to/ribdiff.md).
 //!
 //! Input is an offline file of raw, concatenated BMP version 3 messages
 //! (e.g. the TCP payload of the incumbent's BMP feed, captured from the

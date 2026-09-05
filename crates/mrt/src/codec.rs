@@ -1723,8 +1723,8 @@ mod tests {
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         [
             (
-                "docs/CONFIGURATION.md",
-                read_subtype_document(&manifest_dir.join("../../docs/CONFIGURATION.md")),
+                "docs/reference/configuration.md",
+                read_subtype_document(&manifest_dir.join("../../docs/reference/configuration.md")),
             ),
             (
                 "crates/mrt/README.md",

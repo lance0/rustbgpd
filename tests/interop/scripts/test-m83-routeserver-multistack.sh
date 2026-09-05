@@ -1251,7 +1251,7 @@ flip_frr_per_client_best() {
         'sed -i "s/^per_client_best = false/per_client_best = true/" /tmp/config.toml'
     rs_sighup
     sleep 2
-    # The knob is live-effective-next-session (docs/reload-matrix.md):
+    # The knob is live-effective-next-session (docs/reference/reload-matrix.md):
     # bounce the session from the member side so the new session
     # registers per-client-best with the RIB manager.
     docker exec "$FRR" vtysh -c "clear bgp ${RS_FRR_ADDR}" >/dev/null 2>&1 || true

@@ -793,7 +793,7 @@ pub enum KernelNexthopKind {
     /// member/gateway object under a group tag, or neither gateway
     /// nor group). rustbgpd never produces this shape, so it is
     /// evidence a co-resident netlink writer violated the reserved
-    /// NHID range contract (see `docs/deployment.md`). The reconcile
+    /// NHID range contract (see `docs/how-to/deployment.md`). The reconcile
     /// actor fails closed on these: the ID is reserved in the
     /// allocator so it can never be handed out (and thus never
     /// `NLM_F_REPLACE`-clobbered), and the object is excluded from

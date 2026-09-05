@@ -26,7 +26,7 @@
 #   7. rustbgpd gRPC stays healthy the entire time (no crashes).
 #   8. Peak RR memory stays under a soft ceiling (logged, not gated).
 #
-# Notes on assertion scope (see docs/evpn-enablement.md § Gate 5):
+# Notes on assertion scope (see docs/project/evpn-enablement.md § Gate 5):
 # this suite validates reflection throughput, churn fidelity, and
 # RR-side process health. It does NOT audit per-MAC identity or full
 # per-route attribute preservation — those are covered by the FRR-based

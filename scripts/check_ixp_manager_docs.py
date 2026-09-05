@@ -7,10 +7,10 @@ pins executably, and each has drifted silently before:
 - the Birdwatcher adapter README's reason-id tables versus
   `reject_reasons.active_ids` / `defined_only_ids` / `fallback_id` / `display`;
 - the same README's capability table versus `runtime_supported` / `unsupported`;
-- `docs/INTEROP.md`, which defines the IXP Manager M-series receipt claims;
-- `docs/RECEIPTS.md`, `docs/OPERATIONAL_PROOF.md`, and `docs/milestones.md`,
+- `docs/interop.md`, which defines the IXP Manager M-series receipt claims;
+- `docs/receipts.md`, `docs/operational-proof.md`, and `docs/project/milestones.md`,
   which must each carry a row for every M-series receipt that
-  `docs/INTEROP.md` claims in its IXP Manager sections.
+  `docs/interop.md` claims in its IXP Manager sections.
 
 The checks parse the markdown tables positively; an absent table or an empty
 M-number set is itself a failure, because a guard that cannot fail is worse
@@ -27,10 +27,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = ROOT / "tests" / "compat" / "ixp-manager-birdseye" / "contract.json"
 README = ROOT / "examples" / "birdwatcher-adapter" / "README.md"
-INTEROP = ROOT / "docs" / "INTEROP.md"
-RECEIPTS = ROOT / "docs" / "RECEIPTS.md"
-PROOF = ROOT / "docs" / "OPERATIONAL_PROOF.md"
-MILESTONES = ROOT / "docs" / "milestones.md"
+INTEROP = ROOT / "docs" / "interop.md"
+RECEIPTS = ROOT / "docs" / "receipts.md"
+PROOF = ROOT / "docs" / "operational-proof.md"
+MILESTONES = ROOT / "docs" / "project" / "milestones.md"
 
 REASON_HEADER = ("Retained cause", "IXP Manager reason id", "Bird's Eye display")
 DEFINED_ONLY_HEADER = ("Defined-only id", "Bird's Eye display", "Emitted as")

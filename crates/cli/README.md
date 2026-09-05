@@ -96,7 +96,7 @@ typed validation, `complete`, exact `omitted`, and up to 256 effective covering
 VRPs. AS0 VRPs remain visible but never authorize the queried route.
 
 `dynamic-neighbor add` requires its peer group to exist first. The
-[Quickstart operating example](../../docs/QUICKSTART.md#5-operate) creates the
+[Quickstart operating example](../../docs/tutorials/quickstart.md#5-operate) creates the
 passwordless `ix-members` group from ordinary JSON before adding the range.
 
 `neighbor add` preserves omission for peer-group inheritance. Positive and
@@ -139,7 +139,7 @@ rbgp rib rtc      # RT-Constrain membership NLRI (RFC 4684, SAFI 132)
 rbgp rib add <prefix> --nexthop <ip> [--origin <0|1|2>] [--local-pref <n>] [--med <n>] [--as-path "<asn> <asn>..."] [--communities <c1,c2,...>] [--large-communities <c1,c2,...>] [--path-id <n>]
 rbgp rib delete <prefix> [--path-id <n>]
 rbgp diff advertised   # compare live Adj-RIB-Out against an incumbent NDJSON snapshot (read-only; own 0/1/2 exit contract)
-rbgp diff snapshot from-mrt <file> --view adj-rib-out-capture --peer <addr> --peer-asn <asn>   # offline: produce an rbgp-ribsnap/1 snapshot from an incumbent MRT dump (see docs/ribdiff.md; from-bmp for BMP captures)
+rbgp diff snapshot from-mrt <file> --view adj-rib-out-capture --peer <addr> --peer-asn <asn>   # offline: produce an rbgp-ribsnap/1 snapshot from an incumbent MRT dump (see docs/how-to/ribdiff.md; from-bmp for BMP captures)
 
 rbgp policy list
 rbgp policy get <name>

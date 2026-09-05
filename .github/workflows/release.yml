@@ -133,7 +133,7 @@ jobs:
           # a single per-arch tarball with a
           # version-less filename. This is what powers the static
           # `https://github.com/lance0/rustbgpd/releases/latest/download/rustbgpd-<arch>.tar.gz`
-          # URL pattern in docs/deployment.md — operators never have to
+          # URL pattern in docs/how-to/deployment.md — operators never have to
           # bump a version pin to get the current release. Pinned
           # downloads still work via the per-tag
           # `releases/download/vX.Y.Z/` path; the asset filename is the
@@ -170,7 +170,7 @@ jobs:
           cp target/${{ matrix.target }}/release/rs-config-render staging/
           cp target/${{ matrix.target }}/release/birdwatcher-adapter staging/
           cp LICENSE-MIT LICENSE-APACHE LICENSES.md staging/
-          cp docs/rustbgpd.schema.json staging/
+          cp docs/reference/rustbgpd.schema.json staging/
           cp examples/systemd/rustbgpd.service examples/systemd/rustbgpd@.service \
             examples/systemd/rustbgpd-dataplane.conf staging/share/systemd/
           cp docs/grafana/rustbgpd-overview.json \
@@ -199,7 +199,7 @@ jobs:
           # `releases/latest/download/rustbgpd.schema.json` URL. Both
           # matrix legs upload an identical copy; the merged artifact
           # download deduplicates them.
-          cp docs/rustbgpd.schema.json dist/
+          cp docs/reference/rustbgpd.schema.json dist/
 
       - name: Assert tarball release payload is complete
         run: |

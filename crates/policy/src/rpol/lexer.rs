@@ -1,6 +1,6 @@
 //! The `.rpol` lexer (`logos`-generated), producing spanned tokens.
 //!
-//! Design notes (documented in `docs/rpol-language.md`):
+//! Design notes (documented in `docs/reference/rpol-language.md`):
 //!
 //! - Structural words are reserved keywords; attribute/field names
 //!   (`local-pref`, `communities`, …) and enum members (`valid`,

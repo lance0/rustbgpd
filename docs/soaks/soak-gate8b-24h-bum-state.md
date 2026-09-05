@@ -3,7 +3,7 @@
 One-page record of the first 24-hour Gate 8b BUM-state soak, used as
 the gating evidence for relaxing the per-port flag-flip primitive
 from "single-pass validated" to "soak-validated" against the alpha
-checklist in [`docs/evpn-alpha-soak.md`](../evpn-alpha-soak.md) §
+checklist in [`docs/evpn-alpha-soak.md`](../how-to/evpn-alpha-soak.md) §
 "remaining multi-homing enforcement work".
 
 ## What this soak exercised
@@ -125,7 +125,7 @@ MAC-churn variant also clears. The two unblocking conditions from
 ## What this unblocks
 
 - Flipping the
-  [`apply_bum_enforcement`](../evpn-enablement.md) default to `true`
+  [`apply_bum_enforcement`](../project/evpn-enablement.md) default to `true`
   is unblocked by **this soak plus the MAC-churn variant**. We
   hold the flag at default-off until the MAC-churn run also
   completes — concurrent FDB churn was not exercised here.
@@ -154,9 +154,9 @@ from a postmortem the same way as this one.
 
 ## Cross-references
 
-- [`docs/evpn-alpha-soak.md`](../evpn-alpha-soak.md) — alpha-soak
+- [`docs/evpn-alpha-soak.md`](../how-to/evpn-alpha-soak.md) — alpha-soak
   checklist where the BUM-state row was the gating item.
-- [`docs/evpn-vtep-troubleshooting.md`](../evpn-vtep-troubleshooting.md)
+- [`docs/evpn-vtep-troubleshooting.md`](../how-to/evpn-vtep-troubleshooting.md)
   — operator runbook the soak harness mirrors for sampling
   cadence.
 - [`ADR-0054`](../adr/0054-evpn-linux-dataplane-boundary.md) §1 / §6

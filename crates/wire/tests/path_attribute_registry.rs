@@ -5,7 +5,7 @@ use rustbgpd_wire::notification::update_subcode;
 use rustbgpd_wire::validate::validate_update_attributes;
 use rustbgpd_wire::{DecodeError, ErrorDisposition, PathAttribute};
 
-const DOC: &str = include_str!("../../../docs/path-attribute-registry.md");
+const DOC: &str = include_str!("../../../docs/reference/path-attribute-registry.md");
 
 fn section(start: &str, end: &str) -> &'static str {
     DOC.split_once(start)

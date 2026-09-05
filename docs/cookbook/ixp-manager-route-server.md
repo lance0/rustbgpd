@@ -25,7 +25,7 @@ initial, no-op, hot reload, and pre-effect restoration against
 MD5-authenticated FRR) and M97 (authenticated lock/fetch/callback lifecycle
 for two IPv4/IPv6 handles on one host, shared fence, MD5-FRR session
 continuity) — both local gates, described in
-[`INTEROP.md`](../INTEROP.md#ixp-manager-v74-manual-configuration-oracle);
+[`INTEROP.md`](../interop.md#ixp-manager-v74-manual-configuration-oracle);
 and the pinned IXP Manager / Bird's Eye contract oracle
 ([`tests/compat/ixp-manager-birdseye/`](../../tests/compat/ixp-manager-birdseye/README.md)),
 which runs the real IXP Manager v7.4.0 router-config generator, PHP
@@ -588,7 +588,7 @@ nothing complained.** If the router row in IXP Manager was added without
 API type `Birdseye` and the Birdwatcher adapter URL, both of IXP Manager's
 Nagios configuration generators return HTTP 200 and silently omit the
 router — an unmonitored route server with no error anywhere
-([M98](../INTEROP.md), against pinned v7.4.0). Fix: set the router row's
+([M98](../interop.md), against pinned v7.4.0). Fix: set the router row's
 API type to `Birdseye` and its API URL to the adapter. Check: the generated
 Nagios configuration must contain the router's host entry.
 
@@ -679,5 +679,5 @@ belong in your evaluation.
   staggered rollout, `rbgp diff advertised`.
 - [`tools/rs-config-render/README.md`](../../tools/rs-config-render/README.md)
   — the renderer's exact contracts, refusals, and the `resume` semantics;
-  [`docs/deployment.md`](../deployment.md#systemd) — install and the
+  [`docs/how-to/deployment.md`](../how-to/deployment.md#systemd) — install and the
   per-handle unit.

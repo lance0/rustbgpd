@@ -75,7 +75,7 @@ principal = "rustbgpd://observer/birdwatcher"
 ```
 
 Then pass that address and the same `token_file` to the adapter. Expose the TCP
-listener beyond loopback only with the mTLS controls in `docs/SECURITY.md`.
+listener beyond loopback only with the mTLS controls in `docs/reference/security.md`.
 
 ## Endpoint → gRPC mapping
 
@@ -285,7 +285,7 @@ them, and such causes fall back to `0` rather than gaining invented semantics:
 `/routes/filtered/{id}` (accepts `bgp_<addr>` protocol ids and bare peer IPs)
 serves every rejected inbound route the peer's session has retained, with
 canonical reason tokens from `PolicyService.ListRejectedRoutes`
-(`[policy.reject_retention]` in `docs/CONFIGURATION.md`; unicast only,
+(`[policy.reject_retention]` in `docs/reference/configuration.md`; unicast only,
 LRU-bounded per peer — at the cap the view shows the most recent rejections).
 Semantics worth knowing:
 

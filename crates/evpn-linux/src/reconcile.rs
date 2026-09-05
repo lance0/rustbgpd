@@ -2253,7 +2253,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
     /// [`crate::dataplane::KernelNexthopKind::ShapeConflict`] (an in-range kernel object
     /// not shaped like anything rustbgpd writes — i.e. a co-resident
     /// netlink writer violated the single-writer contract on our
-    /// documented ranges, see `docs/deployment.md`), fail closed for
+    /// documented ranges, see `docs/how-to/deployment.md`), fail closed for
     /// that ID and return `true` so the caller skips adoption:
     ///
     /// - reserve the allocator slot (best effort) so the ID can never
@@ -2283,7 +2283,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 id = format_args!("{:#010x}", nh.id),
                 "foreign nexthop object inside a rustbgpd-reserved NHID range \
                  (shape conflict — another netlink writer violated the reserved-range \
-                 contract, see docs/deployment.md); failing closed: ID quarantined, \
+                 contract, see docs/how-to/deployment.md); failing closed: ID quarantined, \
                  object left untouched and excluded from adoption/cleanup"
             );
         }

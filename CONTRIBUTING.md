@@ -335,8 +335,24 @@ crates/
   cli/                   # rbgp — gRPC CLI with human-readable and JSON output
 proto/                   # gRPC proto definitions (rustbgpd.v1)
 tests/interop/           # Containerlab topologies and configs
-docs/                    # Design doc, RFC notes, interop results, ADRs
+docs/README.md           # Documentation table of contents
+  tutorials/             # Learn by running an example
+  how-to/                # Task guides and contributor procedures
+  cookbook/              # Complete deployment recipes and operator runbooks
+  reference/             # Configuration, API, protocol, and compatibility contracts
+  explanation/           # Architecture, design, roles, and comparisons
+  project/               # Roadmap, release guidance, and archived history
+  adr/                   # Architecture decision records
+  perf/                  # Dated performance receipts
+  soaks/                 # Soak reports and acceptance gates
+  artifacts/             # Raw evidence supporting published findings
+  images/                # Logos and illustrations
+bench/                   # Standalone performance harnesses and runner scripts
+benches/                 # Root-package Cargo benchmark targets
 ```
+
+The [architecture guide](docs/explanation/architecture.md) describes the workspace boundaries.
+`bench/` holds standalone harnesses and their runner scripts; `benches/` holds the root package's Cargo benchmark targets.
 
 ### Dependency Rules
 
@@ -369,6 +385,15 @@ These are not guidelines — they are enforced invariants:
 
 ### Documentation Update Discipline
 
+Use [docs/README.md](docs/README.md) as the documentation table of contents. Add each
+maintained page to its task category and directory index. Use lowercase-kebab filenames;
+keep published cookbook paths and anchors stable.
+
+Start each maintained page with one H1 on line 1, then its document-class line and a
+short, plain sentence describing what the reader will learn or do. Use the existing
+`CURRENT`, `REFERENCE`, or `HISTORICAL` classes. Preserve dated receipts and decision
+records rather than rewriting them to describe current behavior.
+
 Multi-PR batches often touch the same release and roadmap files. Keep doc
 updates low-conflict and reviewable:
 
@@ -376,11 +401,11 @@ updates low-conflict and reviewable:
   relevant subsection (`Added`, `Changed`, `Fixed`, etc.) instead of rewriting
   existing entries or resorting the whole block. Prefer one compact entry per
   PR concern.
-- **ROADMAP.md:** use one row or checkbox per concern. When a PR ships one
+- **docs/project/roadmap.md:** use one row or checkbox per concern. When a PR ships one
   slice of a broader item, update that row in place with a short "shipped /
   remaining" sentence instead of rewriting surrounding roadmap prose.
-- **Feature tracking docs:** in `docs/evpn-alpha-soak.md`,
-  `docs/evpn-enablement.md`, and similar matrices, update the exact gate or row
+- **Feature tracking docs:** in `docs/how-to/evpn-alpha-soak.md`,
+  `docs/project/evpn-enablement.md`, and similar matrices, update the exact gate or row
   your PR owns. Avoid broad summary rewrites unless the feature state actually
   changed across the whole page.
 - **Process-only docs PRs:** do not add a CHANGELOG entry unless the process
@@ -391,7 +416,7 @@ updates low-conflict and reviewable:
 
 - Architectural changes (open an issue)
 - New protocol extensions (open an issue with RFC citation)
-- Changes to design constraints (these are non-negotiable — read DESIGN.md)
+- Changes to design constraints (these are non-negotiable — read the [design document](docs/explanation/design.md))
 
 ## Interop Testing
 

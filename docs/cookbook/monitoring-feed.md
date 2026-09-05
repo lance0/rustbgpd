@@ -1,5 +1,7 @@
 # Controller / monitoring feed (BMP trio, events, MRT)
 
+> **Document class: CURRENT.**
+
 Export routing state to your monitoring stack.
 
 **When this is you:** Your controller, analytics pipeline, or NOC needs
@@ -11,7 +13,7 @@ monitoring trio on one exporter (RFC 7854 Adj-RIB-In, RFC 8671
 Adj-RIB-Out as byte-exact wire PDUs, RFC 9069 Loc-RIB), selectable per
 collector.
 
-**Proven by:** [M24](../RECEIPTS.md#interop-labs--pr-gated-interopyml)
+**Proven by:** [M24](../receipts.md#interop-labs--pr-gated-interopyml)
 (BMP Initiation / PeerUp / RouteMonitoring ordering vs a BMP receiver)
 and M81 (the trio plus BMPv4, validated against three independent
 decoders at once: pmacct, gobmp, and tshark). Config shape derived
@@ -177,7 +179,7 @@ what each view contains.
 
 ## Watch
 
-Import the overview dashboard per [`GRAFANA.md`](../GRAFANA.md); the
+Import the overview dashboard per [`GRAFANA.md`](../how-to/grafana.md); the
 BMP / event-outbox row is populated once the features above are
 configured. Key series:
 
@@ -205,7 +207,7 @@ slow consumer. That is the signal to resume via the durable cursor
 redials with backoff capped by `reconnect_interval`, replays cached Peer Up
 state, and performs a fresh EoR-closed table dump only for collectors with
 `monitor = ["loc_rib"]`. Adj-RIB-In and Adj-RIB-Out remain live-only after a
-reconnect; see [Known issues](../../KNOWN_ISSUES.md). Check the collector-side
+reconnect; see [Known issues](../reference/known-issues.md). Check the collector-side
 listener first, then the daemon log for connection and bootstrap failures.
 
 **pmacct rejects the v4 stream (`BMPv4 BGP PDU TLV != 1`).** Known and
@@ -216,4 +218,4 @@ expected — see the caveat in the config above. Move that collector to
 `events.db.stale`, the daemon continues (pass-through) unless
 `[event_history].required = true`, and `bgp_event_outbox_degraded`
 latches to 1 until an operator restart. Details:
-[`CONFIGURATION.md` §event_history](../CONFIGURATION.md#event_history).
+[`CONFIGURATION.md` §event_history](../reference/configuration.md#event_history).

@@ -21,7 +21,7 @@ ignore = [
     # (the `rbgp top` command). We do not install a custom rand
     # logger anywhere in the workspace, so the unsoundness isn't
     # reachable. Pending a ratatui-termwiz bump that pulls a fixed
-    # rand. Tracked in ROADMAP.md under the "`cargo deny` for
+    # rand. Tracked in docs/project/roadmap.md under the "`cargo deny` for
     # license / dependency / advisory audit" bullet.
     "RUSTSEC-2026-0097",
     # RUSTSEC-2024-0436 — `paste` 1.0.15 unmaintained (the upstream

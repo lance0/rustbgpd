@@ -6,7 +6,7 @@ Find the measured route-server, route-reflector, and route-import results and th
 
 Each receipt records its workload, versions, measurement dates, limitations,
 and artifacts. These results describe those workloads, not a performance
-guarantee for another deployment. The [complete receipts index](../RECEIPTS.md)
+guarantee for another deployment. The [complete receipts index](../receipts.md)
 also covers interop and archived soaks.
 
 ## Route-server and route-reflector results
@@ -80,11 +80,11 @@ receipt](competitive-bgperf2-v0680-2026-08.md), measured 2026-08-30,
 is the headline same-host IPv4 import/convergence comparison. All 80 cells
 reached the exact expected route count across five fixed shapes; the largest is
 two peers × 100,000 prefixes, not a full-table cell. Microbenchmarks and memory
-scaling are in [Benchmarks](../BENCHMARKS.md). That page also retains
+scaling are in [Benchmarks](../benchmarks.md). That page also retains
 the corrected July campaign as explicitly historical evidence; it supports no
 cross-daemon ranking. Every receipt is indexed in
-[the receipts index](../RECEIPTS.md); GoBGP-specific parity is in
-[the GoBGP parity reference](../gobgp-parity.md).
+[the receipts index](../receipts.md); GoBGP-specific parity is in
+[the GoBGP parity reference](../explanation/gobgp-parity.md).
 
 ## Reading the archive
 

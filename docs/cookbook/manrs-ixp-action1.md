@@ -1,5 +1,7 @@
 # MANRS IXP Programme Action 1 on rustbgpd
 
+> **Document class: CURRENT.**
+
 Map rustbgpd controls to MANRS IXP Programme Action 1.
 
 **When this is you:** Your exchange participates in or is applying to the
@@ -33,7 +35,7 @@ configuration that passes `rustbgpd --check --strict` (the
 
 | Action 1 element | rustbgpd implementation | Verify with |
 |------------------|-------------------------|-------------|
-| RPKI-based filtering (validated cache) | [`[rpki]`](../CONFIGURATION.md#rpki) RTR client + a one-statement deny policy; `maxLength` is enforced in the Invalid determination (RFC 6811) | `rbgp policy explain`, looking-glass filtered view |
+| RPKI-based filtering (validated cache) | [`[rpki]`](../reference/configuration.md#rpki) RTR client + a one-statement deny policy; `maxLength` is enforced in the Invalid determination (RFC 6811) | `rbgp policy explain`, looking-glass filtered view |
 | IRR-based filtering (AS-SET resolution) | Per-member prefix/origin sets rendered from arouteserver's resolved IRR data ([IXP filter pipeline](ixp-filter-pipeline.md)) | render receipt + looking-glass filtered view |
 | Bogon / martian hygiene | Shared hygiene chain: special-purpose prefix rejection, AS_SET reject, ASPA-invalid reject ([`examples/route-server/hygiene.rpol`](../../examples/route-server/hygiene.rpol)); the rendered `rs-hygiene.rpol` adds transit-free and path-length caps | `rbgp rib received <member> --rejected` |
 | Filtering per published policy, fail-closed | RFC 8212 posture (`ebgp_requires_policy`), fail-stale rendering, parse-then-swap reload | `rustbgpd --check --strict`, `rbgp policy` surfaces |
@@ -62,10 +64,10 @@ action = "deny"
 Later VRP updates trigger an inbound Route Refresh for established
 members whose import policy depends on validation state, so verdicts
 track the cache rather than freezing at ingress time. Details:
-[`[rpki]` reference](../CONFIGURATION.md#rpki),
+[`[rpki]` reference](../reference/configuration.md#rpki),
 [ADR-0034](../adr/0034-rpki-origin-validation.md). Reject-at-import
 against a live RTR cache is exercised in the M83 interop lab
-([RECEIPTS.md](../RECEIPTS.md)).
+([RECEIPTS.md](../receipts.md)).
 
 ## IRR filtering: the pipeline
 
@@ -118,7 +120,7 @@ default. Turn it on for a MANRS route server. It is restart-required,
 and `--check` names every eBGP neighbor still resolving no explicit
 policy — `--strict` turns those warnings into a failing exit. See
 [ADR-0112](../adr/0112-rfc-8212-ebgp-requires-policy.md) and the
-[`ebgp_requires_policy` reference](../CONFIGURATION.md#ebgp_requires_policy--rfc-8212-explicit-policy-on-ebgp).
+[`ebgp_requires_policy` reference](../reference/configuration.md#ebgp_requires_policy--rfc-8212-explicit-policy-on-ebgp).
 
 ## Per-member prefix limits
 
@@ -143,7 +145,7 @@ The pipeline sources these ceilings from PeeringDB via arouteserver's
 resolved context. References:
 [ADR-0108](../adr/0108-per-family-max-prefix-limits.md) (per-family
 inbound), [ADR-0113](../adr/0113-outbound-prefix-limits.md) (outbound
-mirrors), [neighbor options](../CONFIGURATION.md#neighbors).
+mirrors), [neighbor options](../reference/configuration.md#neighbors).
 
 ## What members can verify
 
@@ -161,7 +163,7 @@ Action 1 filtering is only credible if members can see it working:
   known in advance.
 - **`rbgp policy explain`**: replays a specific prefix through the
   import ladder and names the statement that rejected it — the
-  support-ticket workflow is in [explain.md](../explain.md).
+  support-ticket workflow is in [explain.md](../how-to/explain.md).
 
 ## Copyable example
 
@@ -204,5 +206,5 @@ inputs you filter on (IRR via your arouteserver site files, RPKI
 invalid = reject including maxLength, the bogon snapshot), the
 max-prefix action and restart window, and where members can see their
 own filtered routes (your Alice-LG instance). The
-[evaluation matrix](../ixp-evaluation.md) is the capability-level
+[evaluation matrix](../explanation/ixp-evaluation.md) is the capability-level
 summary; this page is the per-control detail behind it.

@@ -1,6 +1,6 @@
 <p align="center">
-  <img src="rustbgpd-logo.png#gh-light-mode-only" alt="rustbgpd" width="300">
-  <img src="rustbgpd-logo-dark.png#gh-dark-mode-only" alt="rustbgpd" width="300">
+  <img src="docs/images/rustbgpd-logo.png#gh-light-mode-only" alt="rustbgpd" width="300">
+  <img src="docs/images/rustbgpd-logo-dark.png#gh-dark-mode-only" alt="rustbgpd" width="300">
 </p>
 
 # rustbgpd
@@ -20,10 +20,10 @@ them, and stream routing events to your own tools.
 <a id="project-status"></a>
 
 **Stability:** inventoried IPv4/IPv6 unicast route-server and route-reflector
-surfaces have a [narrow v1 compatibility contract](docs/v1-stable-contract.md),
+surfaces have a [narrow v1 compatibility contract](docs/reference/v1-stable-contract.md),
 with baseline v0.68.0. The project remains alpha overall; unlisted surfaces,
 EVPN, and Linux dataplane features are outside that promise.
-[Stability and compatibility](docs/stability.md) explains the boundaries.
+[Stability and compatibility](docs/reference/stability.md) explains the boundaries.
 
 ## Choose your path
 
@@ -34,7 +34,7 @@ EVPN, and Linux dataplane features are outside that promise.
 IPv4/IPv6 unicast, per-member policy, RPKI, and Add-Path. Inventoried surfaces
 are covered by the narrow v1 contract.
 
-[Evaluate](docs/ixp-evaluation.md) · [Deploy](docs/cookbook/route-server.md) ·
+[Evaluate](docs/explanation/ixp-evaluation.md) · [Deploy](docs/cookbook/route-server.md) ·
 [Shadow pilot](docs/cookbook/route-server-shadow-pilot.md)
 
 ### Route reflector
@@ -44,14 +44,14 @@ RT-Constrain, and BGP-LS reflection have separate, scoped support; EVPN
 remains alpha.
 
 [Deploy](docs/cookbook/route-reflector.md) ·
-[Family boundaries](docs/feature-tour.md#route-reflector-families-beyond-unicast)
+[Family boundaries](docs/explanation/feature-tour.md#route-reflector-families-beyond-unicast)
 
 ### Monitoring and automation
 
 BMP/MRT feeds, route injection, FlowSpec, and gRPC integration. Shipped
 capabilities have individual limits; support does not imply v1 stability.
 
-[Monitoring recipe](docs/cookbook/monitoring-feed.md) · [API reference](docs/API.md) ·
+[Monitoring recipe](docs/cookbook/monitoring-feed.md) · [API reference](docs/reference/api.md) ·
 [DDoS example](examples/ddos-mitigation/config.toml)
 
 <a id="not-the-best-fit-today"></a>
@@ -59,7 +59,7 @@ capabilities have individual limits; support does not imply v1 stability.
 
 Linux FIB integration is opt-in. VPN reflection does not provide PE/VRF or
 MPLS forwarding, and rustbgpd does not provide a full multi-protocol routing
-suite. Check the [current limitations](docs/LIMITATIONS.md) for your role.
+suite. Check the [current limitations](docs/reference/limitations.md) for your role.
 
 ## Try it locally
 
@@ -119,8 +119,8 @@ substitute your prefix and peer for the export example. Import-decision
 explain requires `[policy.explain] enabled = true`; unicast best-path and
 export-gate explain need no decision cache.
 
-[Policy language](docs/rpol-language.md) · [Route explainability](docs/explain.md) ·
-[Feature tour](docs/feature-tour.md)
+[Policy language](docs/reference/rpol-language.md) · [Route explainability](docs/how-to/explain.md) ·
+[Feature tour](docs/explanation/feature-tour.md)
 
 ## Install
 
@@ -132,20 +132,20 @@ export-gate explain need no decision cache.
 The daemon supports **Linux x86_64 and aarch64**. Releases provide tarballs,
 Debian/RPM packages, and container images; consult the
 [platform support contract](SUPPORT.md#platform-support) and the
-[installation guide](docs/deployment.md#install) for platform requirements,
+[installation guide](docs/how-to/deployment.md#install) for platform requirements,
 checksum verification, and image architecture availability.
 
-- **Install a release:** follow the [deployment guide](docs/deployment.md#install)
+- **Install a release:** follow the [deployment guide](docs/how-to/deployment.md#install)
   for packages, tarballs, Docker, and systemd.
 - **Build from source:** follow [Contributing](CONTRIBUTING.md#development-setup)
   for the Rust toolchain and build prerequisites.
-- **Configure real peers:** start with the [host quickstart](docs/QUICKSTART.md)
+- **Configure real peers:** start with the [host quickstart](docs/tutorials/quickstart.md)
   or a [scenario recipe](docs/cookbook/README.md).
 
 <a id="security-posture"></a>
 
 The default gRPC listener is a local Unix socket. For remote administration,
-use the documented [mTLS and authorization setup](docs/SECURITY.md).
+use the documented [mTLS and authorization setup](docs/reference/security.md).
 
 ## Documentation
 
@@ -159,11 +159,11 @@ Start with the [documentation index](docs/README.md), or go directly to your tas
 
 | Task | Guide |
 |------|-------|
-| Configure, operate, or upgrade | [Configuration](docs/CONFIGURATION.md) · [Operations](docs/OPERATIONS.md) · [Deployment](docs/deployment.md) |
-| Automate or embed | [gRPC API](docs/API.md) · [gNMI](docs/GNMI.md) · [Rust libraries](docs/EMBEDDING.md) |
-| Evaluate the evidence | [Performance results](docs/perf/README.md) · [Operational proof](docs/OPERATIONAL_PROOF.md) · [Interop and receipts](docs/RECEIPTS.md) |
-| Understand or contribute | [Architecture](ARCHITECTURE.md) · [Contributing](CONTRIBUTING.md) · [Roadmap](ROADMAP.md) |
-| Check compatibility or get help | [Stability](docs/stability.md) · [Support](SUPPORT.md) · [Security reporting](SECURITY.md) |
+| Configure, operate, or upgrade | [Configuration](docs/reference/configuration.md) · [Operations](docs/reference/operations.md) · [Deployment](docs/how-to/deployment.md) |
+| Automate or embed | [gRPC API](docs/reference/api.md) · [gNMI](docs/reference/gnmi.md) · [Rust libraries](docs/reference/embedding.md) |
+| Evaluate the evidence | [Performance results](docs/perf/README.md) · [Operational proof](docs/operational-proof.md) · [Interop and receipts](docs/receipts.md) |
+| Understand or contribute | [Architecture](docs/explanation/architecture.md) · [Contributing](CONTRIBUTING.md) · [Roadmap](docs/project/roadmap.md) |
+| Check compatibility or get help | [Stability](docs/reference/stability.md) · [Support](SUPPORT.md) · [Security reporting](SECURITY.md) |
 
 ## License
 

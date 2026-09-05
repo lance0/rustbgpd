@@ -2677,7 +2677,7 @@ fn main() -> ExitCode {
             "error: RUSTBGPD_EVPN_ADOPTION_ACCEPT_LEGACY is set, but this escape hatch \
              has been removed: the EVPN L3 legacy-adoption migration window closed at \
              v0.38.0 (ADR-0082). Unset the variable; for the skip-version upgrade path \
-             see docs/evpn-vtep-troubleshooting.md, \"Crash-restart adoption across \
+             see docs/how-to/evpn-vtep-troubleshooting.md, \"Crash-restart adoption across \
              upgrades (ADR-0082)\"."
         );
         process::exit(1);

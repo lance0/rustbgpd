@@ -228,7 +228,7 @@ listener model rather than adding a new one:
 ## Implementation status
 
 User-facing setup, supported-path, `gnmic`, and troubleshooting guidance lives in
-[docs/GNMI.md](../GNMI.md). This ADR records the design boundary and rationale.
+[docs/GNMI.md](../reference/gnmi.md). This ADR records the design boundary and rationale.
 
 | Slice | Status |
 |-------|--------|

@@ -140,7 +140,7 @@ receipts_row = (
     "(perf/policy-attribution-criterion-2026-07.md), "
     "[`artifacts`](perf/artifacts/policy-attribution-criterion-2026-07/README.md) |"
 )
-receipts = (repo / "docs/RECEIPTS.md").read_text()
+receipts = (repo / "docs/receipts.md").read_text()
 if receipts.splitlines().count(receipts_row) != 1:
     fail("RECEIPTS policy-attribution row drift")
 
@@ -154,7 +154,7 @@ operational_row = (
     "[checksummed artifacts]"
     "(perf/artifacts/policy-attribution-criterion-2026-07/README.md). |"
 )
-operational = (repo / "docs/OPERATIONAL_PROOF.md").read_text()
+operational = (repo / "docs/operational-proof.md").read_text()
 if operational.splitlines().count(operational_row) != 1:
     fail("OPERATIONAL_PROOF policy-attribution row drift")
 

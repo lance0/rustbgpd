@@ -1500,7 +1500,7 @@ enforcement = \"tier\"\n\
 \n\
 [security.grpc.roles]\n\
 \"<your-principal>\" = \"operator\"\n\
-(migration: docs/CONFIGURATION.md [security.grpc]; removal decision: docs/adr/0064-grpc-authorization.md)";
+(migration: docs/reference/configuration.md [security.grpc]; removal decision: docs/adr/0064-grpc-authorization.md)";
 
 fn retired_key_error(content: &str) -> Option<String> {
     let document: toml::Value = toml::from_str(content).ok()?;
@@ -1529,7 +1529,7 @@ pub struct NeighborDiff {
 }
 
 /// Live-impact class for a single `[[neighbors]]` / `[peer_groups]` field
-/// edit, surfaced from the reload matrix (`docs/reload-matrix.md`, the
+/// edit, surfaced from the reload matrix (`docs/reference/reload-matrix.md`, the
 /// per-field classification pinned by the reload-matrix structural tests)
 /// so diff renderings can annotate each changed field with what applying
 /// it does to the affected peer.

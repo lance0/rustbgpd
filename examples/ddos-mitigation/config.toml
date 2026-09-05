@@ -8,7 +8,7 @@
 # Architecture:
 #   Detection → Mitigation platform → rustbgpd (gRPC) → Edge routers (eBGP)
 #
-# See docs/USE_CASES.md for detailed walkthrough and API examples.
+# See docs/explanation/use-cases.md for detailed walkthrough and API examples.
 
 [global]
 asn = 65500

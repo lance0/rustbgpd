@@ -1,6 +1,6 @@
 //! One exit-code namespace for every subcommand: the `Exit` enum is the only
 //! source of numbers, every error type maps into it, and the README table
-//! (plus its `docs/deployment.md` mirror) must list exactly those codes.
+//! (plus its `docs/how-to/deployment.md` mirror) must list exactly those codes.
 
 use std::collections::BTreeSet;
 
@@ -223,7 +223,7 @@ fn check_deployment_prune_contract(deployment: &str) -> Result<(), String> {
             refusal.code()
         ),
         "The host lock remains held through removal, so recovery state cannot appear between planning and deletion.".to_owned(),
-        "The [tool README's pruning section](../tools/rs-config-render/README.md#pruning-retained-generations) is authoritative for the complete command, stable output, and cron-safe pattern.".to_owned(),
+        "The [tool README's pruning section](../../tools/rs-config-render/README.md#pruning-retained-generations) is authoritative for the complete command, stable output, and cron-safe pattern.".to_owned(),
     ];
     for clause in required {
         if !normalized.contains(&clause) {
@@ -285,12 +285,12 @@ fn every_exit_code_is_unique_and_enumerated() {
 fn readme_table_and_deployment_mirror_list_exactly_the_enum() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let readme = std::fs::read_to_string(root.join("README.md")).unwrap();
-    let deployment = std::fs::read_to_string(root.join("../../docs/deployment.md")).unwrap();
+    let deployment = std::fs::read_to_string(root.join("../../docs/how-to/deployment.md")).unwrap();
     let rows = table_rows(&readme);
     assert_eq!(
         rows,
         table_rows(&deployment),
-        "docs/deployment.md exit-code table must mirror the README byte for byte"
+        "docs/how-to/deployment.md exit-code table must mirror the README byte for byte"
     );
     let documented: Vec<u8> = rows.iter().map(|r| row_code(r)).collect();
     let defined: Vec<u8> = Exit::ALL.iter().map(|e| e.code()).collect();
@@ -303,14 +303,14 @@ fn readme_table_and_deployment_mirror_list_exactly_the_enum() {
 #[test]
 fn deployment_prune_section_matches_source_contract() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let deployment = std::fs::read_to_string(root.join("../../docs/deployment.md")).unwrap();
+    let deployment = std::fs::read_to_string(root.join("../../docs/how-to/deployment.md")).unwrap();
     check_deployment_prune_contract(&deployment).unwrap();
 }
 
 #[test]
 fn deployment_prune_contract_rejects_roster_mutations() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let deployment = std::fs::read_to_string(root.join("../../docs/deployment.md")).unwrap();
+    let deployment = std::fs::read_to_string(root.join("../../docs/how-to/deployment.md")).unwrap();
     let row = "| `current` | The current symlink target |";
     let mutations = [
         ("missing", deployment.replacen(&format!("{row}\n"), "", 1)),

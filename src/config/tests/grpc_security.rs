@@ -174,7 +174,7 @@ fn explicit_legacy_grpc_enforcement_is_rejected() {
         "rejection must carry the copy-pasteable tier fix: {err}"
     );
     assert!(
-        err.contains("docs/CONFIGURATION.md") && err.contains("docs/adr/0064"),
+        err.contains("docs/reference/configuration.md") && err.contains("docs/adr/0064"),
         "rejection must cite the migration references: {err}"
     );
 }
@@ -367,7 +367,7 @@ fn grpc_security_tier_diagnoses_uds_principal_missing_from_roles() {
         "error must not offer the removed legacy mode: {reason}"
     );
     assert!(
-        reason.contains("docs/CONFIGURATION.md"),
+        reason.contains("docs/reference/configuration.md"),
         "error must point at the migration checklist: {reason}"
     );
 }

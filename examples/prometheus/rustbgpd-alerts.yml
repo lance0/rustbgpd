@@ -7,7 +7,7 @@
 #
 # Every expression references only metrics the daemon actually exports
 # (crates/telemetry/src/metrics.rs). The rules assume the scrape config
-# from docs/GRAFANA.md (`job_name: rustbgpd`) — adjust the `job` label
+# from docs/how-to/grafana.md (`job_name: rustbgpd`) — adjust the `job` label
 # in RustbgpdDown, RustbgpdRestarted, and MrtDumpStale if yours differs.
 #
 # Current peer health uses the level gauges
@@ -207,7 +207,7 @@ groups:
 
       - alert: BgpMaxPrefixLimitExceeded
         # Each increment is followed by a Cease NOTIFICATION and
-        # session teardown (docs/OPERATIONS.md "Peer max-prefix
+        # session teardown (docs/reference/operations.md "Peer max-prefix
         # exceeded").
         expr: increase(bgp_max_prefix_exceeded_total[10m]) > 0
         for: 0m
@@ -374,7 +374,7 @@ groups:
       - alert: BgpEventOutboxDegraded
         # Latches to 1 on any durability-impacting drop, decode/codec
         # failure, or DB-open failure; does not auto-clear (operator
-        # restarts to clear — docs/OPERATIONS.md event-outbox section).
+        # restarts to clear — docs/reference/operations.md event-outbox section).
         expr: bgp_event_outbox_degraded == 1
         for: 5m
         labels:

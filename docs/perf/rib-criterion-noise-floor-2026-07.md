@@ -7,7 +7,7 @@ noise floor is per-shape and per-host** — a single global percentage is
 misleading in both directions.
 
 All numbers are *measured* on the primary host described in
-[`BENCHMARKS.md`](../BENCHMARKS.md): AMD Ryzen Threadripper 7970X, `performance`
+[`BENCHMARKS.md`](../benchmarks.md): AMD Ryzen Threadripper 7970X, `performance`
 governor, `taskset -c 8`, six alternating A/B attempts per comparison (odd
 attempts base-first, even attempts head-first, so first-vs-second bias
 cancels). Every comparison below is a `bench/compare-criterion.sh` run.
@@ -38,7 +38,7 @@ The spread across shapes is over thirtyfold, on one host, in one sitting, at
 one commit. `adj_rib_in_insert/100000` is the outlier: its same-SHA control
 swung −17.20%..+25.44% while `/10000` stayed inside −0.30%..+3.50%.
 
-Alongside the host figures, [`BENCHMARKS.md`](../BENCHMARKS.md) records a
+Alongside the host figures, [`BENCHMARKS.md`](../benchmarks.md) records a
 single ~11.2% empirical floor calibrated on the secondary virtualized bench
 runner, at `adj_rib_in_insert/10000`. That same shape measures 1.44% here. Used
 as one global number, an 11.2% floor does both harmful things at once:

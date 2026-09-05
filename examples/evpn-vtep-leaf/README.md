@@ -56,7 +56,7 @@ relink away from an IP-VRF deleted in the same candidate, a relink onto an
 IP-VRF added in the same candidate, and an Ethernet Segment left memberless
 mid-sequence. Every other mixed ES / IP-VRF edit hot-applies through the
 decomposer, one committed runtime generation per step. See ADR-0063,
-`docs/reload-matrix.md`, and `KNOWN_ISSUES.md`.
+`docs/reference/reload-matrix.md`, and `docs/reference/known-issues.md`.
 
 ## Pre-create the Linux bridge/VXLAN devices
 
@@ -150,5 +150,5 @@ rbgp evpn diagnose
 
 - [`../rr-evpn-fabric/`](../rr-evpn-fabric/) — RR-side counterpart
 - [`../../docs/adr/0052-evpn-vtep-foundation.md`](../../docs/adr/0052-evpn-vtep-foundation.md) — boundaries between this slice and the future dataplane crate
-- [`../../docs/evpn-enablement.md`](../../docs/evpn-enablement.md) — Gate 7a / 7b roadmap
-- [`../../KNOWN_ISSUES.md`](../../KNOWN_ISSUES.md) — `[[evpn_instances]]` SIGHUP semantics
+- [`../../docs/project/evpn-enablement.md`](../../docs/project/evpn-enablement.md) — Gate 7a / 7b roadmap
+- [`../../docs/reference/known-issues.md`](../../docs/reference/known-issues.md) — `[[evpn_instances]]` SIGHUP semantics

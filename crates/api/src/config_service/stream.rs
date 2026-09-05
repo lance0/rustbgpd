@@ -2487,7 +2487,7 @@ mod tests {
 
     // The streamed-candidate contract is 384 MiB of TOML spooled in 1 MiB
     // chunks, with at most 256 live plan tokens that expire after 30 minutes
-    // (docs/API.md; the CLI pins the matching finite decode ceiling in
+    // (docs/reference/api.md; the CLI pins the matching finite decode ceiling in
     // crates/cli/src/connection.rs). Any widened or unbounded replacement
     // makes this red.
     #[test]

@@ -57,7 +57,7 @@ profile strips symbols, so DHAT emitted points with empty frame stacks — which
 is why the receipt's DHAT attribution uses the `release-prof` D3/D4 pair
 instead. The runs themselves succeeded and their resident-memory streams are
 retained; only the heap profiles are unusable. That defect is recorded in
-[`KNOWN_ISSUES.md`](../../../../KNOWN_ISSUES.md).
+[`KNOWN_ISSUES.md`](../../../reference/known-issues.md).
 
 The retained driver,
 [`run-explain-cache-variant.sh`](../../run-explain-cache-variant.sh), is its

@@ -1,5 +1,7 @@
 # Route-server migration notes
 
+> **Document class: CURRENT.**
+
 Map incumbent route-server concepts to rustbgpd.
 
 This page maps common FRR, BIRD, OpenBGPD, and ARouteServer route-server
@@ -20,7 +22,7 @@ traffic.
 rbgp config import bird.conf --out config.toml
 
 # 2. Hand-translate the reported policy stanzas to .rpol
-#    (docs/rpol-language.md), wire them into import/export chains, then
+#    (docs/reference/rpol-language.md), wire them into import/export chains, then
 #    validate — --check also compiles every referenced .rpol file, and
 #    warns (exit stays 0) for every eBGP neighbor still resolving no
 #    explicit policy, by name and direction.
@@ -265,7 +267,7 @@ per_client_best = true
 
 One snapshot per member, produced on (or from) the incumbent route
 server with the bundled adapters (`scripts/ribsnap/`, stdlib-only
-Python 3; adapter contract in [`docs/ribdiff.md`](../ribdiff.md)). All
+Python 3; adapter contract in [`docs/how-to/ribdiff.md`](../how-to/ribdiff.md)). All
 converters exit 0 with the snapshot on stdout, or 2 (nothing emitted)
 when the input is malformed or not the expected form — a truncated or
 wrong-form capture can never read as "in sync".
@@ -422,7 +424,7 @@ Prerequisites and limitations:
   the initial dump supersede it, and post-End-of-RIB stats (RFC 8671
   types 15/17) are cross-checked against the folded state.
 - Offline only: capture to a file first; the adapter does not read from
-  a socket. Full contract in [`docs/ribdiff.md`](../ribdiff.md).
+  a socket. Full contract in [`docs/how-to/ribdiff.md`](../how-to/ribdiff.md).
 
 ### Example reports
 
@@ -485,7 +487,7 @@ cutover blockers.
    with a bundled BIRD/FRR/GoBGP adapter (below; OpenBGPD is manual unless an
    independently captured MRT/BMP source satisfies the stated boundary;
    format details in
-   [`docs/ribdiff.md`](../ribdiff.md)) and compare it against the live
+   [`docs/how-to/ribdiff.md`](../how-to/ribdiff.md)) and compare it against the live
    Adj-RIB-Out:
 
    ```bash

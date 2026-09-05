@@ -1983,7 +1983,7 @@ fn reload_matrix_documents_every_neighbor_field() {
         assert!(
             section.contains(&needle),
             "Neighbor field {needle} is in RELOAD_MATRIX_NEIGHBOR_FIELDS \
-             (src/config/tests/mod.rs) but absent from docs/reload-matrix.md. \
+             (src/config/tests/mod.rs) but absent from docs/reference/reload-matrix.md. \
              Either add a row for it in the [[neighbors]] section of the \
              matrix, or remove the entry from the list."
         );
@@ -2004,7 +2004,7 @@ fn reload_matrix_documents_every_peer_group_field() {
             section.contains(&needle),
             "PeerGroupConfig field {needle} is in \
              RELOAD_MATRIX_PEER_GROUP_FIELDS (src/config/tests/mod.rs) but \
-             absent from docs/reload-matrix.md. Either add a row for it \
+             absent from docs/reference/reload-matrix.md. Either add a row for it \
              in the [[peer_groups]] section of the matrix, or remove the \
              entry from the list."
         );

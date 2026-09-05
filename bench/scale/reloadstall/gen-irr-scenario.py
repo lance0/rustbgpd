@@ -739,7 +739,7 @@ def txn_config(args, members: list[Member], gen: str, rundir: pathlib.Path) -> s
     """Full candidate config: the same dataset as [policy.definitions] chains.
 
     The transaction seam refuses out-of-band .rpol content changes by
-    design (docs/reload-matrix.md), so this cell carries the policy in the
+    design (docs/reference/reload-matrix.md), so this cell carries the policy in the
     inline chain engine: per member an origin definition (AS_PATH origin
     anchor) and a prefix-list definition (one exact-match statement per
     filter entry), plus a shared hygiene definition (path-length cap +

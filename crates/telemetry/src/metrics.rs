@@ -8303,7 +8303,7 @@ mod tests {
 
     #[test]
     fn stale_session_message_kinds_match_operations_inventory() {
-        let operations = repo_doc("docs/OPERATIONS.md");
+        let operations = repo_doc("docs/reference/operations.md");
         let row = operations
             .lines()
             .find(|line| {
@@ -8320,7 +8320,7 @@ mod tests {
 
     #[test]
     fn stale_session_message_kinds_match_roadmap_inventory() {
-        let roadmap = repo_doc("ROADMAP.md");
+        let roadmap = repo_doc("docs/project/roadmap.md");
         let paragraph = roadmap
             .split("\n\n")
             .find(|text| {

@@ -23,14 +23,14 @@ from urllib.parse import unquote, urlsplit
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "docs" / "perf" / "receipt-provenance.json"
 WORKFLOW = ROOT / ".github" / "workflows" / "public-docs-contract.yml"
-CHECKLIST = ROOT / "docs" / "RELEASE_CHECKLIST.md"
-RECEIPTS_INDEX = ROOT / "docs" / "RECEIPTS.md"
+CHECKLIST = ROOT / "docs" / "project" / "release-checklist.md"
+RECEIPTS_INDEX = ROOT / "docs" / "receipts.md"
 
 FRONT_DOORS = (
     "docs/perf/README.md",
-    "docs/BENCHMARKS.md",
-    "docs/COMPARISON.md",
-    "docs/ixp-evaluation.md",
+    "docs/benchmarks.md",
+    "docs/explanation/comparison.md",
+    "docs/explanation/ixp-evaluation.md",
 )
 RELEASE_WINDOW = 3
 COMMIT = re.compile(r"[0-9a-f]{40}")

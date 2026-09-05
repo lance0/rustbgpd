@@ -88,8 +88,9 @@ fn crate_manifests() -> BTreeMap<String, toml::Value> {
 }
 
 fn architecture_graph() -> (DependencyGraph, BTreeSet<String>) {
-    let architecture = fs::read_to_string(repository_root().join("ARCHITECTURE.md"))
-        .expect("ARCHITECTURE.md must be readable");
+    let architecture =
+        fs::read_to_string(repository_root().join("docs/explanation/architecture.md"))
+            .expect("docs/explanation/architecture.md must be readable");
     let section = architecture
         .split_once("## Crate Dependency Graph\n")
         .expect("crate dependency graph heading must exist")
@@ -162,7 +163,7 @@ fn architecture_graph_matches_every_crate_manifest_exactly() {
     assert_eq!(
         graph.keys().collect::<BTreeSet<_>>(),
         manifests.keys().collect::<BTreeSet<_>>(),
-        "ARCHITECTURE.md must have exactly one row for every crates/*/Cargo.toml"
+        "docs/explanation/architecture.md must have exactly one row for every crates/*/Cargo.toml"
     );
     for (name, manifest) in &manifests {
         assert_eq!(

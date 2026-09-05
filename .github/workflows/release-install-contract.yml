@@ -7,9 +7,9 @@ on:
       - Cargo.lock
       - Dockerfile
       - README.md
-      - docs/deployment.md
-      - docs/QUICKSTART.md
-      - docs/OPERATIONS.md
+      - docs/how-to/deployment.md
+      - docs/tutorials/quickstart.md
+      - docs/reference/operations.md
       - docs/adr/0127-config-transaction-settlement-watchdog.md
       - docs/grafana/**
       - docs/cookbook/ixp-filter-pipeline.md
@@ -39,9 +39,9 @@ on:
       - Cargo.lock
       - Dockerfile
       - README.md
-      - docs/deployment.md
-      - docs/QUICKSTART.md
-      - docs/OPERATIONS.md
+      - docs/how-to/deployment.md
+      - docs/tutorials/quickstart.md
+      - docs/reference/operations.md
       - docs/adr/0127-config-transaction-settlement-watchdog.md
       - docs/grafana/**
       - docs/cookbook/ixp-filter-pipeline.md

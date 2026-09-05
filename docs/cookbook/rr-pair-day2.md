@@ -1,5 +1,7 @@
 # Runbook: RR pair day-2 operations
 
+> **Document class: CURRENT.**
+
 Operate a production route-reflector pair safely.
 
 **When this is you:** Your redundant route-reflector pair is in
@@ -30,7 +32,7 @@ rbgp metrics | grep -E 'bgp_gr_active_peers|bgp_gr_stale_routes|bgp_gr_timer_exp
 ```
 
 `gr_stale_routes_time` is hot-applied per the
-[reload matrix](../reload-matrix.md); `graceful_restart` itself binds at
+[reload matrix](../reference/reload-matrix.md); `graceful_restart` itself binds at
 OPEN negotiation, so changing it resets the session (see below).
 
 ## Adding a client
@@ -54,7 +56,7 @@ existing update group automatically; there is nothing to tune.
 ## Config edits: hot vs session reset
 
 Before touching a live RR, classify the edit — the
-[reload matrix](../reload-matrix.md) is the index, the daemon is the
+[reload matrix](../reference/reload-matrix.md) is the index, the daemon is the
 oracle:
 
 ```bash
@@ -111,7 +113,7 @@ rbgp config abort rr1-edit-...     # or roll back now
 If the timer expires unconfirmed — or the daemon restarts inside the
 window — the pre-commit config is re-applied. While a confirm is
 pending, SIGHUP and other config mutators are fenced off. Full
-lifecycle and failure states: [`OPERATIONS.md`](../OPERATIONS.md).
+lifecycle and failure states: [`OPERATIONS.md`](../reference/operations.md).
 
 ## Draining an RR for maintenance
 

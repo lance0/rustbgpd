@@ -1,5 +1,7 @@
 # Runbook: a peer is flapping
 
+> **Document class: CURRENT.**
+
 Diagnose a BGP session that keeps flapping.
 
 **When this is you:** A session keeps cycling in and out of Established.
@@ -55,7 +57,7 @@ irregular spacing points at the transport or the peer.
   socket; the problem is on their side.
 - **TCP resets with no BGP NOTIFICATION** — MD5/TCP-AO key mismatch or
   a middlebox; see "Debugging a session that won't establish" in
-  [`OPERATIONS.md`](../OPERATIONS.md).
+  [`OPERATIONS.md`](../reference/operations.md).
 - **BFD down events** — if the neighbor has BFD, check
   `rbgp bfd` and the `bfd_session_flaps_total{peer}` counter before
   blaming BGP.

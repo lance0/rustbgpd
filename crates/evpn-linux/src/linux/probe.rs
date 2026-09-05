@@ -567,7 +567,7 @@ mod tests {
         const START: &str = "### L2VNI readiness predicates (ADR-0054 §4)";
         const END: &str = "### MAC+IP origination (ARP/ND suppression)";
 
-        let docs = include_str!("../../../../docs/evpn-vtep-setup.md");
+        let docs = include_str!("../../../../docs/how-to/evpn-vtep-setup.md");
         assert_eq!(docs.matches(START).count(), 1, "unique section start");
         assert_eq!(docs.matches(END).count(), 1, "unique section end");
         let (_, after_start) = docs.split_once(START).expect("readiness section start");

@@ -138,7 +138,7 @@ impl Default for Options {
 /// One code has exactly one meaning regardless of subcommand, so a wrapper can
 /// branch on the code alone. The `repr(u8)` discriminants are the only source
 /// of numbers; every error type maps into this enum, and the "Exit codes" table
-/// in `README.md` (mirrored in `docs/deployment.md`) is asserted against it.
+/// in `README.md` (mirrored in `docs/how-to/deployment.md`) is asserted against it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Exit {

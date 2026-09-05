@@ -202,8 +202,8 @@ fn every_example_config_passes_check_strict() {
 
 #[test]
 fn use_case_config_fences_pass_base_and_authenticated_tcp_check_strict() {
-    let document =
-        fs::read_to_string(repo_root().join("docs/USE_CASES.md")).expect("read use-case guide");
+    let document = fs::read_to_string(repo_root().join("docs/explanation/use-cases.md"))
+        .expect("read use-case guide");
     assert_eq!(document.matches("<!-- use-case-config:").count(), 3);
     let bearer_header = r#"-H "authorization: Bearer $(< /etc/rustbgpd/grpc-token)""#;
     assert_eq!(document.matches(bearer_header).count(), 2);

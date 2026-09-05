@@ -815,7 +815,8 @@ fn m55_interop_config_pins_role_matrix_and_strict_neighbor() {
 
 #[test]
 fn config_knob_contributor_guide_pins_required_review_surfaces() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/config-knob-contributor-guide.md");
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/how-to/config-knob-contributor-guide.md");
     let guide = fs::read_to_string(&path).unwrap_or_else(|err| {
         panic!(
             "could not read {} for config-knob guide structural test: {err}",
@@ -825,10 +826,10 @@ fn config_knob_contributor_guide_pins_required_review_surfaces() {
     for required in [
         "src/config/schema.rs",
         "src/config/validation.rs",
-        "docs/reload-matrix.md",
+        "docs/reference/reload-matrix.md",
         "RELOAD_MATRIX_NEIGHBOR_FIELDS",
         "RELOAD_MATRIX_PEER_GROUP_FIELDS",
-        "docs/CONFIGURATION.md",
+        "docs/reference/configuration.md",
         "persist",
     ] {
         assert!(
@@ -844,14 +845,17 @@ fn config_knob_contributor_guide_pins_required_review_surfaces() {
 #[test]
 fn config_json_schema_committed_copy_is_fresh() {
     let generated = config_json_schema();
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/docs/rustbgpd.schema.json");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/docs/reference/rustbgpd.schema.json"
+    );
     if std::env::var_os("BLESS").is_some() {
         fs::write(path, &generated).unwrap();
     }
     let committed = fs::read_to_string(path).unwrap();
     assert_eq!(
         generated, committed,
-        "docs/rustbgpd.schema.json is stale — regenerate with `cargo run --bin rustbgpd -- \
-         --dump-config-schema > docs/rustbgpd.schema.json` (or rerun this test with BLESS=1)"
+        "docs/reference/rustbgpd.schema.json is stale — regenerate with `cargo run --bin rustbgpd -- \
+         --dump-config-schema > docs/reference/rustbgpd.schema.json` (or rerun this test with BLESS=1)"
     );
 }
