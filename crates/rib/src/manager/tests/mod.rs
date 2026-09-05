@@ -1308,6 +1308,7 @@ mod dataplane_paging;
 mod events_metrics;
 mod evpn;
 mod evpn_dataplane_query;
+mod evpn_explain;
 mod evpn_peer_pages;
 mod exact_export_lifecycle;
 mod explain_mrt;

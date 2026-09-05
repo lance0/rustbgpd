@@ -1142,6 +1142,43 @@ pub struct ExplainAdvertisedRoute {
     pub source: Option<RouteSourceIdentity>,
 }
 
+/// Bounded exact-key EVPN selection and optional export snapshot.
+#[derive(Debug, Clone)]
+pub struct ExplainEvpnRoute {
+    pub key: EvpnRouteKey,
+    pub received_from: Option<IpAddr>,
+    /// Retained accepted source route; absence is not import-rejection history.
+    pub received: Option<EvpnRibRoute>,
+    /// Installed Loc-RIB route, which may lag current candidates during deferral.
+    pub best: Option<EvpnRibRoute>,
+    /// Winner of a fresh comparison over currently retained candidates.
+    pub selection_best: Option<EvpnRibRoute>,
+    /// Requested retained source, or runner-up when the source is the winner/unspecified.
+    pub compared: Option<EvpnRibRoute>,
+    pub candidate_count: usize,
+    /// Decisive comparison of `selection_best` against `compared`; absent without a pair.
+    pub reason: Option<crate::best_path::BestPathReason>,
+    pub reason_detail: String,
+    pub selection_deferred: bool,
+    pub export: Option<ExplainEvpnExport>,
+}
+
+/// Current installed-best export eligibility alongside committed send-side state.
+#[derive(Debug, Clone)]
+pub struct ExplainEvpnExport {
+    pub peer: IpAddr,
+    pub decision: ExplainDecision,
+    pub reasons: Vec<ExplainReason>,
+    pub gates: Vec<ExportGateStep>,
+    pub modifications: rustbgpd_policy::RouteModifications,
+    /// Post-policy candidate; absent when a gate or retained encoder rejection stops it.
+    pub staged: Option<EvpnRibRoute>,
+    /// Committed Adj-RIB-Out state; not proof of remote receipt or acceptance.
+    pub advertised: Option<EvpnRibRoute>,
+    pub already_advertised: bool,
+    pub outbound_dirty: bool,
+}
+
 /// Verdict of one export gate for one (route, peer) explain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportGateVerdict {
@@ -2619,6 +2656,13 @@ pub enum RibUpdate {
         filter: Option<RibRowFilter<FlowSpecRoute>>,
         /// Response channel.
         reply: oneshot::Sender<Vec<FlowSpecRoute>>,
+    },
+    /// Explain a typed EVPN key without changing selection, counters, or outbound state.
+    ExplainEvpnRoute {
+        key: EvpnRouteKey,
+        received_from: Option<IpAddr>,
+        advertised_to: Option<IpAddr>,
+        reply: oneshot::Sender<ExplainEvpnRoute>,
     },
     /// Query EVPN routes from the Loc-RIB (RFC 7432).
     QueryEvpnRoutes {

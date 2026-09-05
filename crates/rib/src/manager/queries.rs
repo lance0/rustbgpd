@@ -1422,6 +1422,128 @@ impl RibManager {
         });
         trace.into_explain(peer, prefix, rd, None)
     }
+    /// Exact EVPN explain walks peers but retains at most a winner and comparison.
+    pub(super) fn explain_evpn_route(
+        &self,
+        key: rustbgpd_wire::EvpnRouteKey,
+        received_from: Option<IpAddr>,
+        advertised_to: Option<IpAddr>,
+    ) -> crate::update::ExplainEvpnRoute {
+        use crate::loc_rib::{evpn_cmp_with_reason, evpn_reason_detail};
+        let candidates = || self.ribs.values().filter_map(|rib| rib.get_evpn(&key));
+        let candidate_count = candidates().count();
+        let selection_best = candidates().min_by(|a, b| evpn_cmp_with_reason(a, b).0);
+        let received = received_from.and_then(|peer| self.ribs.get(&peer)?.get_evpn(&key));
+        let compared = match (selection_best, received_from, received) {
+            (Some(best), _, Some(source)) if source.peer != best.peer => Some(source),
+            (_, Some(_), None) | (None, _, _) => None,
+            (Some(best), _, _) => candidates()
+                .filter(|route| route.peer != best.peer)
+                .min_by(|a, b| evpn_cmp_with_reason(a, b).0),
+        };
+        let (reason, reason_detail) = match (selection_best, compared) {
+            (Some(best), Some(other)) => {
+                let (_, reason) = evpn_cmp_with_reason(best, other);
+                (Some(reason), evpn_reason_detail(reason, best, other))
+            }
+            _ if received_from.is_some() && received.is_none() =>
+                (None, "requested source has no retained accepted route; import rejection history is not retained".to_string()),
+            (Some(_), None) => (None, "only retained candidate".to_string()),
+            _ => (None, "no retained accepted candidates; absence does not establish whether a peer sent the route".to_string()),
+        };
+        crate::update::ExplainEvpnRoute {
+            key,
+            received_from,
+            received: received.cloned(),
+            best: self.loc_rib.get_evpn(&key).cloned(),
+            selection_best: selection_best.cloned(),
+            compared: compared.cloned(),
+            candidate_count,
+            reason,
+            reason_detail,
+            selection_deferred: self.selection_deferred((Afi::L2Vpn, Safi::Evpn)),
+            export: advertised_to.map(|peer| self.explain_evpn_export(key, peer)),
+        }
+    }
+
+    fn explain_evpn_export(
+        &self,
+        key: rustbgpd_wire::EvpnRouteKey,
+        peer: IpAddr,
+    ) -> crate::update::ExplainEvpnExport {
+        use crate::update::{ExplainDecision, ExplainReason, ExportGateStep, ExportGateVerdict};
+        let empty = AdjRibOut::new(peer);
+        let rib_out = self.adj_ribs_out.get(&peer).unwrap_or(&empty);
+        let mut trace = distribution::ExportGateTrace::default();
+        if self.outbound_peers.contains_key(&peer) {
+            let mut target = distribution::ExportTarget::Explain {
+                peer,
+                peer_asn: self.peer_asn.get(&peer).copied(),
+                peer_group: self.peer_group.get(&peer).map(String::as_str),
+                local_role: self.peer_local_roles.get(&peer).copied().flatten(),
+                trace: &mut trace,
+            };
+            Self::stage_evpn_routes(
+                &self.loc_rib,
+                rib_out,
+                &self.peer_is_rr_client,
+                &HashSet::from([key]),
+                &mut target,
+                self.peer_is_ebgp.get(&peer).copied().unwrap_or(true),
+                self.peer_interpret_rfc1997.contains(&peer),
+                self.peer_is_rr_client.get(&peer).copied().unwrap_or(false),
+                self.cluster_id,
+                self.peer_sendable_families.get(&peer),
+                self.peer_advertised_llgr_families.get(&peer),
+                self.export_policy_for(peer),
+                &mut Vec::new(),
+                &mut Vec::new(),
+                false,
+            );
+        } else {
+            trace.gates.push(ExportGateStep {
+                gate: "destination",
+                code: "destination_unavailable",
+                verdict: ExportGateVerdict::Stop,
+                detail: "destination has no active outbound session".to_string(),
+            });
+        }
+        let (mut decision, mut reasons) = trace.decision_and_reasons();
+        if decision == ExplainDecision::Advertise
+            && self
+                .peer_unexportable
+                .get(&peer)
+                .is_some_and(|rejected| rejected.contains(&ExactExportKey::Evpn(key)))
+        {
+            let detail = "the active session's exact wire encoder rejected this post-policy route"
+                .to_string();
+            decision = ExplainDecision::Deny;
+            trace.staged_evpn = None;
+            trace.suppressed_identical = false;
+            reasons = vec![ExplainReason {
+                code: "exact_export_rejected",
+                message: detail.clone(),
+            }];
+            trace.gates.push(ExportGateStep {
+                gate: "exact_export",
+                code: "exact_export_rejected",
+                verdict: ExportGateVerdict::Stop,
+                detail,
+            });
+        }
+        crate::update::ExplainEvpnExport {
+            peer,
+            decision,
+            reasons,
+            gates: trace.gates,
+            modifications: trace.modifications,
+            staged: trace.staged_evpn,
+            advertised: rib_out.get_evpn(&key).cloned(),
+            already_advertised: trace.suppressed_identical,
+            outbound_dirty: self.dirty_peers.contains(&peer),
+        }
+    }
+
     fn apply_exact_export_overlay_to_explain(
         &self,
         peer: IpAddr,

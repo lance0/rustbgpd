@@ -1290,6 +1290,47 @@ fn fib_state_label(state: i32) -> &'static str {
     }
 }
 
+pub(super) fn modifications_to_json(
+    modifications: Option<&crate::proto::ExplainModifications>,
+) -> JsonExplainModifications {
+    modifications.map_or_else(
+        || JsonExplainModifications {
+            set_local_pref: None,
+            set_med: None,
+            set_next_hop: String::new(),
+            communities_add: vec![],
+            communities_remove: vec![],
+            extended_communities_add: vec![],
+            extended_communities_remove: vec![],
+            large_communities_add: vec![],
+            large_communities_remove: vec![],
+            as_path_prepend_asn: None,
+            as_path_prepend_count: None,
+        },
+        |mods| JsonExplainModifications {
+            set_local_pref: mods.set_local_pref,
+            set_med: mods.set_med,
+            set_next_hop: mods.set_next_hop.clone(),
+            communities_add: mods
+                .communities_add
+                .iter()
+                .map(|c| output::format_community(*c))
+                .collect(),
+            communities_remove: mods
+                .communities_remove
+                .iter()
+                .map(|c| output::format_community(*c))
+                .collect(),
+            extended_communities_add: mods.extended_communities_add.clone(),
+            extended_communities_remove: mods.extended_communities_remove.clone(),
+            large_communities_add: mods.large_communities_add.clone(),
+            large_communities_remove: mods.large_communities_remove.clone(),
+            as_path_prepend_asn: mods.as_path_prepend_asn,
+            as_path_prepend_count: mods.as_path_prepend_count,
+        },
+    )
+}
+
 pub(crate) fn explain_to_json(
     explain: &crate::proto::ExplainAdvertisedRouteResponse,
 ) -> JsonExplainAdvertisedRoute {
@@ -1318,42 +1359,7 @@ pub(crate) fn explain_to_json(
                 message: reason.message.clone(),
             })
             .collect(),
-        modifications: explain.modifications.as_ref().map_or_else(
-            || JsonExplainModifications {
-                set_local_pref: None,
-                set_med: None,
-                set_next_hop: String::new(),
-                communities_add: vec![],
-                communities_remove: vec![],
-                extended_communities_add: vec![],
-                extended_communities_remove: vec![],
-                large_communities_add: vec![],
-                large_communities_remove: vec![],
-                as_path_prepend_asn: None,
-                as_path_prepend_count: None,
-            },
-            |mods| JsonExplainModifications {
-                set_local_pref: mods.set_local_pref,
-                set_med: mods.set_med,
-                set_next_hop: mods.set_next_hop.clone(),
-                communities_add: mods
-                    .communities_add
-                    .iter()
-                    .map(|c| output::format_community(*c))
-                    .collect(),
-                communities_remove: mods
-                    .communities_remove
-                    .iter()
-                    .map(|c| output::format_community(*c))
-                    .collect(),
-                extended_communities_add: mods.extended_communities_add.clone(),
-                extended_communities_remove: mods.extended_communities_remove.clone(),
-                large_communities_add: mods.large_communities_add.clone(),
-                large_communities_remove: mods.large_communities_remove.clone(),
-                as_path_prepend_asn: mods.as_path_prepend_asn,
-                as_path_prepend_count: mods.as_path_prepend_count,
-            },
-        ),
+        modifications: modifications_to_json(explain.modifications.as_ref()),
         orr_vantage: explain.orr_vantage.clone(),
         orr_candidates: explain
             .orr_candidates

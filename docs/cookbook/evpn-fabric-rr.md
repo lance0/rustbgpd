@@ -123,20 +123,33 @@ number.
 
 ## Failure modes
 
-**A leaf's routes aren't reaching another leaf.** (The
-`rbgp rib advertised --explain` gate ladder covers the unicast and
-VPN families, not EVPN — for EVPN, walk the gates by hand; they fail
-in this order.) First `rbgp evpn received 10.0.0.1` shows accepted
-post-policy routes from the source, including non-best candidates; absence does
-not prove the leaf never sent a route. Compare `rbgp evpn advertised 10.0.0.2`
-for committed output to the destination leaf. Both commands accept type/RD
-filters and show one bounded page; use the returned `--page-token` to continue.
-Then check the two common reflection stops: *family* — the quiet leaf didn't negotiate
-`l2vpn_evpn` (check its row in `rbgp neighbor`; an FRR leaf missing
-`neighbor X activate` under `address-family l2vpn evpn` establishes
-happily and receives nothing — the M29 lesson) — and *RR rules* — the
-leaf isn't marked `route_reflector_client`, so client→non-client
-reflection rules apply.
+**A leaf's routes aren't reaching another leaf.** Start with
+`rbgp evpn received 10.0.0.1` for accepted post-policy source routes and
+`rbgp evpn advertised 10.0.0.2` for committed destination output. Both
+commands accept type/RD filters and return a bounded page; use the returned
+`--page-token` to continue. Then explain the exact key with its source and
+destination. For a MAC-only Type 2 route:
+
+```bash
+rbgp evpn explain mac-ip --rd 65000:100 --mac 02:00:00:00:00:11 \
+  --received-from 10.0.0.1 --advertised-to 10.0.0.2
+```
+
+Add `--ip` for a MAC+IP key; use the route's actual `--ethernet-tag` when it
+is nonzero. Other route types have their own
+[exact selectors](../reference/api.md#explain-an-exact-evpn-route).
+The result separates retained accepted input, installed best, fresh selection,
+current export gates, and committed output. A missing accepted source does not
+prove the leaf never sent the route, and committed output does not prove the
+other leaf received it. Check `selection_deferred` and `outbound_dirty` before
+expecting installed or committed state to match a current comparison.
+
+Two common reflection stops are *family* — the destination did not negotiate
+`l2vpn_evpn` — and *RR rules* — the source and destination's
+`route_reflector_client` settings do not permit this reflection. The trace
+shows the stopping gate. An FRR leaf missing `neighbor X activate` under
+`address-family l2vpn evpn` can establish a session while receiving no EVPN
+routes, as demonstrated by the M29 fixture.
 
 **Vendor NOS quirks.** From the M82 SR Linux leg: SR Linux enforces
 one EVI per mac-vrf (bundle identity = shared RT + Ethernet Tag,

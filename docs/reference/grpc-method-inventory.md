@@ -164,7 +164,7 @@ shape itself does not raise the tier.
 | `SetNeighborPeerGroup` | `mutating` | Single-neighbor reassignment. |
 | `ClearNeighborPeerGroup` | `mutating` | Single-neighbor. |
 
-### RibService (23 RPCs)
+### RibService (24 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
@@ -184,6 +184,7 @@ shape itself does not raise the tier.
 | `ListEvpnRoutes` | `sensitive_read` | EVPN Type 1/2/3/4/5 routes — MAC/IP topology, multi-homing ES layout. |
 | `ListReceivedEvpnRoutes` | `sensitive_read` | Bounded accepted post-policy EVPN routes from one source neighbor. |
 | `ListAdvertisedEvpnRoutes` | `sensitive_read` | Bounded committed EVPN routes to one destination neighbor, retaining route source identity. |
+| `ExplainEvpnRoute` | `sensitive_read` | Exact EVPN candidate selection and export diagnostics, including policy gates and committed outbound topology. |
 | `ListBgpLsRoutes` | `sensitive_read` | RFC 9552 BGP-LS / BGP-LS VPN routes — controller-facing topology graph objects exposed as opaque NLRI/TLV bytes. |
 | `ListVpnRoutes` | `sensitive_read` | RFC 4364/4659 VPNv4/VPNv6 routes — RD-scoped customer prefixes, Route Targets, MPLS labels. |
 | `ListLabeledRoutes` | `sensitive_read` | RFC 8277 labeled-unicast (SAFI 4) routes in Loc-RIB view — MPLS label stack plus prefix reachability. |
@@ -265,13 +266,13 @@ shape itself does not raise the tier.
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 0 | 0.0% |
-| `sensitive_read` | 65 | 59.1% |
-| `mutating` | 21 | 19.1% |
-| `operator_only` | 24 | 21.8% |
-| **Total** | **110** | **100%** |
+| `sensitive_read` | 66 | 59.5% |
+| `mutating` | 21 | 18.9% |
+| `operator_only` | 24 | 21.6% |
+| **Total** | **111** | **100%** |
 
-(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 110
-total is 106 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
+(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 111
+total is 107 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
 
 ## Notes for ADR-0064
 

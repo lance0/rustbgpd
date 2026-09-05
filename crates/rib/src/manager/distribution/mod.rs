@@ -1024,6 +1024,8 @@ pub(in crate::manager) struct ExportGateTrace {
     /// `true` when the staged route equals the advertised state and the
     /// live path would suppress re-announcement.
     pub suppressed_identical: bool,
+    /// Full post-policy EVPN route, captured only for an exact-key dry run.
+    pub staged_evpn: Option<crate::route::EvpnRibRoute>,
 }
 
 impl ExportGateTrace {
@@ -1049,18 +1051,8 @@ impl ExportGateTrace {
             .find(|step| step.verdict == ExportGateVerdict::Stop)
     }
 
-    /// Assemble the operator-facing explanation from a completed dry
-    /// run. The legacy `reasons` list keeps its pre-ladder shape (one
-    /// decisive stop reason, or route-type + policy-permit on
-    /// advertise) so existing consumers see unchanged output.
-    pub(in crate::manager) fn into_explain(
-        self,
-        peer: IpAddr,
-        prefix: Prefix,
-        rd: Option<rustbgpd_wire::RouteDistinguisher>,
-        update_group_id: Option<u64>,
-    ) -> ExplainAdvertisedRoute {
-        let (decision, reasons) = if let Some(step) = self.stopped() {
+    pub(in crate::manager) fn decision_and_reasons(&self) -> (ExplainDecision, Vec<ExplainReason>) {
+        if let Some(step) = self.stopped() {
             let decision = match step.code {
                 "no_best_route" | "no_orr_candidate" => ExplainDecision::NoBestRoute,
                 "family_not_sendable" => ExplainDecision::UnsupportedFamily,
@@ -1088,7 +1080,21 @@ impl ExportGateTrace {
                 });
             }
             (ExplainDecision::Advertise, reasons)
-        };
+        }
+    }
+
+    /// Assemble the operator-facing explanation from a completed dry
+    /// run. The legacy `reasons` list keeps its pre-ladder shape (one
+    /// decisive stop reason, or route-type + policy-permit on
+    /// advertise) so existing consumers see unchanged output.
+    pub(in crate::manager) fn into_explain(
+        self,
+        peer: IpAddr,
+        prefix: Prefix,
+        rd: Option<rustbgpd_wire::RouteDistinguisher>,
+        update_group_id: Option<u64>,
+    ) -> ExplainAdvertisedRoute {
+        let (decision, reasons) = self.decision_and_reasons();
         ExplainAdvertisedRoute {
             decision,
             peer,
@@ -5547,9 +5553,14 @@ impl RibManager {
                     rib_out,
                     &self.peer_is_rr_client,
                     &effective_evpn_keys,
-                    peer,
-                    target_peer_asn,
-                    target_peer_group,
+                    &mut crate::manager::distribution::ExportTarget::Peer {
+                        peer,
+                        peer_asn: target_peer_asn,
+                        peer_group: target_peer_group,
+                        metrics: &metrics,
+                        policy_stats,
+                        peer_label: &target_peer_label,
+                    },
                     target_is_ebgp,
                     interpret_rfc1997,
                     target_is_rr_client,
@@ -5557,9 +5568,6 @@ impl RibManager {
                     sendable.as_ref(),
                     llgr.as_ref(),
                     export_pol.as_ref(),
-                    &metrics,
-                    policy_stats,
-                    &target_peer_label,
                     &mut evpn_announce,
                     &mut evpn_withdraw,
                     is_force,
