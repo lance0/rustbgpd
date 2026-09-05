@@ -5,7 +5,7 @@ use std::net::IpAddr;
 
 use serde::Serialize;
 
-use crate::connection::Connection;
+use crate::connection::{Connection, read_rpc};
 use crate::error::CliError;
 use crate::output;
 use crate::proto::rpki_service_client::RpkiServiceClient;
@@ -164,14 +164,16 @@ async fn fetch(
     let (prefix, prefix_length) = split_prefix(prefix)?;
     let mut client =
         RpkiServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    Ok(client
-        .validate_route_origin(ValidateRouteOriginRequest {
+    Ok(read_rpc(
+        "ValidateRouteOrigin",
+        client.validate_route_origin(ValidateRouteOriginRequest {
             prefix,
             prefix_length: Some(prefix_length),
             origin_asn,
-        })
-        .await?
-        .into_inner())
+        }),
+    )
+    .await?
+    .into_inner())
 }
 
 /// Validate one route prefix and origin against the daemon's current VRPs.
@@ -274,8 +276,7 @@ fn caches_json(response: &ListRpkiCachesResponse) -> serde_json::Value {
 pub async fn caches(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client =
         RpkiServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let response = client
-        .list_caches(ListRpkiCachesRequest {})
+    let response = read_rpc("ListCaches", client.list_caches(ListRpkiCachesRequest {}))
         .await?
         .into_inner();
     if json {

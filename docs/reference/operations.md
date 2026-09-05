@@ -1973,6 +1973,17 @@ directional policy presence, daemon `nofile` rlimits, recent panic reports)
 plus first-deploy environment probes, and writes one redacted
 `rustbgpd-doctor-<ts>.tar.gz`:
 
+Each lightweight gRPC collection call has a 30-second response deadline,
+including response-body transfer, for both TCP and Unix sockets. A timeout
+names the RPC and budget, preserves successful evidence, and marks the
+affected section incomplete. The effective-config collection has a separate
+30-minute-and-30-second allowance; doctor can therefore take longer than
+30 seconds overall. No timeout triggers an automatic retry. Native one-shot
+CLI reads, including config status and history, use the same 30-second limit
+per call or RIB page. Long-running config diff, plan, and effective export,
+config mutations and streams, and live watches keep their existing budgets
+and lifetimes.
+
 `peer.<addr>.rfc8212_policy` is the ADR-0112 check. It is green for
 `not_required` — the compatibility default, so it never turns an existing
 deployment yellow — and for `present`. It is **red** when a direction reports

@@ -8,7 +8,7 @@
 
 use serde::Serialize;
 
-use crate::connection::Connection;
+use crate::connection::{Connection, read_rpc};
 use crate::error::CliError;
 use crate::output::{self, outln};
 use crate::proto::rib_service_client::RibServiceClient;
@@ -104,10 +104,12 @@ fn render(resp: &ListFibTablesResponse, json: bool) -> Result<(), CliError> {
 pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client =
         RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
-        .list_fib_tables(ListFibTablesRequest {})
-        .await?
-        .into_inner();
+    let resp = read_rpc(
+        "ListFibTables",
+        client.list_fib_tables(ListFibTablesRequest {}),
+    )
+    .await?
+    .into_inner();
     render(&resp, json)
 }
 

@@ -1,5 +1,5 @@
 use crate::commands::neighbor::{bare_ip_rpc_address, restore_matching_scoped_address};
-use crate::connection::Connection;
+use crate::connection::{Connection, read_rpc};
 use crate::error::CliError;
 use crate::output::{self, outln};
 use crate::proto::control_service_client::ControlServiceClient;
@@ -43,8 +43,9 @@ pub async fn list(
     json: bool,
 ) -> Result<(), CliError> {
     let mut client = connection.rib_listing_client();
-    let mut resp = client
-        .list_evpn_routes(ListEvpnRequest {
+    let mut resp = read_rpc(
+        "ListEvpnRoutes",
+        client.list_evpn_routes(ListEvpnRequest {
             route_type_filter: route_type.unwrap_or(0),
             peer_filter: peer
                 .as_deref()
@@ -52,9 +53,10 @@ pub async fn list(
                 .unwrap_or_default()
                 .to_string(),
             rd_filter: rd.unwrap_or_default(),
-        })
-        .await?
-        .into_inner();
+        }),
+    )
+    .await?
+    .into_inner();
     for route in &mut resp.routes {
         restore_matching_scoped_address(peer.as_deref(), &mut route.peer_address);
     }
@@ -176,9 +178,17 @@ pub async fn list_peer(
     request.neighbor_address = bare_ip_rpc_address(&peer).to_string();
     let mut client = connection.rib_listing_client();
     let mut response = if received {
-        client.list_received_evpn_routes(request).await?
+        read_rpc(
+            "ListReceivedEvpnRoutes",
+            client.list_received_evpn_routes(request),
+        )
+        .await?
     } else {
-        client.list_advertised_evpn_routes(request).await?
+        read_rpc(
+            "ListAdvertisedEvpnRoutes",
+            client.list_advertised_evpn_routes(request),
+        )
+        .await?
     }
     .into_inner();
     for route in &mut response.routes {
@@ -389,11 +399,12 @@ pub async fn explain(
     let advertised_to = request.advertised_to.clone();
     request.received_from = bare_ip_rpc_address(&received_from).to_string();
     request.advertised_to = bare_ip_rpc_address(&advertised_to).to_string();
-    let mut response = connection
-        .rib_listing_client()
-        .explain_evpn_route(request)
-        .await?
-        .into_inner();
+    let mut response = read_rpc(
+        "ExplainEvpnRoute",
+        connection.rib_listing_client().explain_evpn_route(request),
+    )
+    .await?
+    .into_inner();
     restore_matching_scoped_address(Some(&received_from), &mut response.received_from);
     for route in [
         &mut response.received,
@@ -749,10 +760,12 @@ pub async fn list_duplicate_mac_quarantines(
 ) -> Result<(), CliError> {
     let mut client =
         EvpnServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
-        .list_duplicate_mac_quarantines(ListDuplicateMacQuarantinesRequest {})
-        .await?
-        .into_inner();
+    let resp = read_rpc(
+        "ListDuplicateMacQuarantines",
+        client.list_duplicate_mac_quarantines(ListDuplicateMacQuarantinesRequest {}),
+    )
+    .await?
+    .into_inner();
     if json {
         output::print_json_pretty(&serde_json::json!({
             "quarantines": resp.quarantines.iter().map(|row| serde_json::json!({
@@ -826,12 +839,14 @@ pub async fn list_ethernet_segments(
     let mut client =
         EvpnServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let filter = esi.unwrap_or_default();
-    let resp = client
-        .list_ethernet_segments(ListEthernetSegmentsRequest {
+    let resp = read_rpc(
+        "ListEthernetSegments",
+        client.list_ethernet_segments(ListEthernetSegmentsRequest {
             esi: filter.clone(),
-        })
-        .await?
-        .into_inner();
+        }),
+    )
+    .await?
+    .into_inner();
 
     if json {
         output::print_json_pretty(&ethernet_segments_to_json(&resp))?;
@@ -853,10 +868,12 @@ pub async fn list_ethernet_segments(
 pub async fn runtime(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client =
         EvpnServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let state = client
-        .get_evpn_runtime(GetEvpnRuntimeRequest {})
-        .await?
-        .into_inner();
+    let state = read_rpc(
+        "GetEvpnRuntime",
+        client.get_evpn_runtime(GetEvpnRuntimeRequest {}),
+    )
+    .await?
+    .into_inner();
 
     if json {
         output::print_json_pretty(&runtime_to_json(&state))?;
@@ -887,10 +904,12 @@ pub async fn runtime(connection: Connection, json: bool) -> Result<(), CliError>
 pub async fn list_instances(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client =
         EvpnServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
-        .list_evpn_instances(ListEvpnInstancesRequest {})
-        .await?
-        .into_inner();
+    let resp = read_rpc(
+        "ListEvpnInstances",
+        client.list_evpn_instances(ListEvpnInstancesRequest {}),
+    )
+    .await?
+    .into_inner();
 
     if json {
         let out: Vec<serde_json::Value> =
@@ -966,10 +985,12 @@ fn evpn_instance_to_json(instance: &EvpnInstanceState) -> serde_json::Value {
 pub async fn list_managed_netdevs(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client =
         EvpnServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
-        .list_managed_netdevs(ListManagedNetdevsRequest {})
-        .await?
-        .into_inner();
+    let resp = read_rpc(
+        "ListManagedNetdevs",
+        client.list_managed_netdevs(ListManagedNetdevsRequest {}),
+    )
+    .await?
+    .into_inner();
 
     if json {
         let out: Vec<serde_json::Value> = resp.netdevs.iter().map(managed_netdev_to_json).collect();
@@ -1138,10 +1159,12 @@ fn managed_netdev_to_json(row: &ManagedNetdevState) -> serde_json::Value {
 pub async fn list_nexthops(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client =
         EvpnServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
-        .list_evpn_nexthops(ListEvpnNexthopsRequest {})
-        .await?
-        .into_inner();
+    let resp = read_rpc(
+        "ListEvpnNexthops",
+        client.list_evpn_nexthops(ListEvpnNexthopsRequest {}),
+    )
+    .await?
+    .into_inner();
 
     if json {
         output::print_json_pretty(&fdb_nexthops_to_json(&resp))?;
@@ -1348,8 +1371,7 @@ fn runtime_mutation_label(state: i32) -> &'static str {
 pub async fn list_ip_vrfs(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client =
         EvpnServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
-        .list_ip_vrfs(ListIpVrfsRequest {})
+    let resp = read_rpc("ListIpVrfs", client.list_ip_vrfs(ListIpVrfsRequest {}))
         .await?
         .into_inner();
 
@@ -1371,8 +1393,7 @@ pub async fn list_ip_vrfs(connection: Connection, json: bool) -> Result<(), CliE
 pub async fn get_ip_vrf(connection: Connection, name: String, json: bool) -> Result<(), CliError> {
     let mut client =
         EvpnServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let vrf = client
-        .get_ip_vrf(GetIpVrfRequest { name })
+    let vrf = read_rpc("GetIpVrf", client.get_ip_vrf(GetIpVrfRequest { name }))
         .await?
         .into_inner();
 
@@ -1468,36 +1489,41 @@ fn format_ip_vrf_human(vrf: &IpVrfState) -> String {
 pub async fn diagnose(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut evpn_client =
         EvpnServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let instances = evpn_client
-        .list_evpn_instances(ListEvpnInstancesRequest {})
-        .await?
-        .into_inner()
-        .instances;
+    let instances = read_rpc(
+        "ListEvpnInstances",
+        evpn_client.list_evpn_instances(ListEvpnInstancesRequest {}),
+    )
+    .await?
+    .into_inner()
+    .instances;
 
     let mut rib_client = connection.rib_listing_client();
-    let type2_routes = rib_client
-        .list_evpn_routes(ListEvpnRequest {
+    let type2_routes = read_rpc(
+        "ListEvpnRoutes",
+        rib_client.list_evpn_routes(ListEvpnRequest {
             route_type_filter: 2,
             peer_filter: String::new(),
             rd_filter: String::new(),
-        })
-        .await?
-        .into_inner()
-        .routes;
-    let type3_routes = rib_client
-        .list_evpn_routes(ListEvpnRequest {
+        }),
+    )
+    .await?
+    .into_inner()
+    .routes;
+    let type3_routes = read_rpc(
+        "ListEvpnRoutes",
+        rib_client.list_evpn_routes(ListEvpnRequest {
             route_type_filter: 3,
             peer_filter: String::new(),
             rd_filter: String::new(),
-        })
-        .await?
-        .into_inner()
-        .routes;
+        }),
+    )
+    .await?
+    .into_inner()
+    .routes;
 
     let mut control_client =
         ControlServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let metrics = control_client
-        .get_metrics(MetricsRequest {})
+    let metrics = read_rpc("GetMetrics", control_client.get_metrics(MetricsRequest {}))
         .await?
         .into_inner()
         .prometheus_text;
