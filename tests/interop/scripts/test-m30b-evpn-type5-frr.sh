@@ -68,6 +68,23 @@ wait_frr_type5_originated() {
 }
 
 # Poll rustbgpd's ListEvpnRoutes until a Type 5 entry for $TENANT_PREFIX
+# is present. Returns 0 on success, 1 on timeout.
+wait_rustbgpd_type5_present() {
+    local timeout=${1:-30}
+    local attempts=$((timeout / 2))
+    for _ in $(seq 1 "$attempts"); do
+        local n
+        n=$(grpc_list_evpn | jq -r --arg p "$TENANT_PREFIX" \
+            '[.routes[]? | select(.routeType == 5 and .prefix == $p)] | length')
+        if [ "${n:-0}" != "0" ]; then
+            return 0
+        fi
+        sleep 2
+    done
+    return 1
+}
+
+# Poll rustbgpd's ListEvpnRoutes until a Type 5 entry for $TENANT_PREFIX
 # is absent. Returns 0 on success, 1 on timeout.
 wait_rustbgpd_type5_withdrawn() {
     local timeout=${1:-30}
@@ -112,6 +129,10 @@ fi
 
 # Test 3: rustbgpd surfaces the Type 5 with expected fields
 log "[test] rustbgpd ListEvpnRoutes shows the Type 5 with expected fields"
+# The route reaches the RR a couple of seconds after FRR originates it, so
+# wait for it rather than sampling once. A genuine timeout leaves the entry
+# absent and falls through to the failure below.
+wait_rustbgpd_type5_present 30 || true
 evpn_json=$(grpc_list_evpn)
 type5_entry=$(echo "$evpn_json" | jq -c --arg p "$TENANT_PREFIX" \
     '.routes[]? | select(.routeType == 5 and .prefix == $p)' 2>/dev/null | head -1)
