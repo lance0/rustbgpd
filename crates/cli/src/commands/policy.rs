@@ -15,7 +15,7 @@ use serde::Serialize;
 
 use crate::commands::neighbor::bare_ip_rpc_address;
 use crate::commands::policy_input::{JsonPolicyDefinition, load_json};
-use crate::connection::Connection;
+use crate::connection::{Connection, read_rpc};
 use crate::error::CliError;
 use crate::output::{self, outln};
 use crate::proto::policy_service_client::PolicyServiceClient;
@@ -767,8 +767,9 @@ pub async fn test(
     };
     let mut client =
         PolicyServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
-        .test_policy(proto::TestPolicyRequest {
+    let resp = read_rpc(
+        "TestPolicy",
+        client.test_policy(proto::TestPolicyRequest {
             rpol_source,
             policy: opts.policy.to_string(),
             direction: opts.direction.to_string(),
@@ -780,9 +781,10 @@ pub async fn test(
             afi_safi: afi_safi as i32,
             limit: opts.limit,
             show_changes: opts.show_changes,
-        })
-        .await?
-        .into_inner();
+        }),
+    )
+    .await?
+    .into_inner();
 
     if json {
         #[derive(Serialize)]
@@ -943,16 +945,18 @@ pub async fn stats(
 ) -> Result<(), CliError> {
     let mut client =
         PolicyServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
-        .get_policy_stats(GetPolicyStatsRequest {
+    let resp = read_rpc(
+        "GetPolicyStats",
+        client.get_policy_stats(GetPolicyStatsRequest {
             peer_address: peer
                 .map(bare_ip_rpc_address)
                 .unwrap_or_default()
                 .to_string(),
             direction: direction.to_string(),
-        })
-        .await?
-        .into_inner();
+        }),
+    )
+    .await?
+    .into_inner();
 
     if json {
         let chains: Vec<JsonPolicyStats> = resp
@@ -1079,8 +1083,7 @@ pub async fn stats(
 pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client =
         PolicyServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
-        .list_policies(ListPoliciesRequest {})
+    let resp = read_rpc("ListPolicies", client.list_policies(ListPoliciesRequest {}))
         .await?
         .into_inner();
 
@@ -1120,12 +1123,14 @@ pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
 pub async fn get(connection: Connection, name: &str, json: bool) -> Result<(), CliError> {
     let mut client =
         PolicyServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
-        .get_policy(GetPolicyRequest {
+    let resp = read_rpc(
+        "GetPolicy",
+        client.get_policy(GetPolicyRequest {
             name: name.to_string(),
-        })
-        .await?
-        .into_inner();
+        }),
+    )
+    .await?
+    .into_inner();
 
     let def = resp.definition.unwrap_or_default();
     if json {
@@ -1384,16 +1389,18 @@ pub async fn explain_import(
     let (addr, prefix_length, afi_safi) = parse_cidr(prefix)?;
     let mut client =
         PolicyServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
-        .explain_import_policy(ExplainImportPolicyRequest {
+    let resp = read_rpc(
+        "ExplainImportPolicy",
+        client.explain_import_policy(ExplainImportPolicyRequest {
             peer_address: bare_ip_rpc_address(neighbor).to_string(),
             afi_safi: afi_safi as i32,
             prefix: addr,
             prefix_length,
             path_id,
-        })
-        .await?
-        .into_inner();
+        }),
+    )
+    .await?
+    .into_inner();
 
     // LAN-320: cache-disabled / no-session mean the daemon could not
     // evaluate the question — surface an error (nonzero exit) instead
@@ -1644,12 +1651,14 @@ pub async fn chain_show(
 
     let (import, export, address) = match neighbor {
         Some(addr) => {
-            let resp = client
-                .get_neighbor_policy_chains(GetNeighborPolicyChainsRequest {
+            let resp = read_rpc(
+                "GetNeighborPolicyChains",
+                client.get_neighbor_policy_chains(GetNeighborPolicyChainsRequest {
                     address: bare_ip_rpc_address(addr).to_string(),
-                })
-                .await?
-                .into_inner();
+                }),
+            )
+            .await?
+            .into_inner();
             (
                 resp.import_policy_names,
                 resp.export_policy_names,
@@ -1657,10 +1666,12 @@ pub async fn chain_show(
             )
         }
         None => {
-            let resp = client
-                .get_global_policy_chains(GetGlobalPolicyChainsRequest {})
-                .await?
-                .into_inner();
+            let resp = read_rpc(
+                "GetGlobalPolicyChains",
+                client.get_global_policy_chains(GetGlobalPolicyChainsRequest {}),
+            )
+            .await?
+            .into_inner();
             (resp.import_policy_names, resp.export_policy_names, None)
         }
     };

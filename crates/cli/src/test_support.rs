@@ -43,6 +43,11 @@ pub(crate) struct MockState {
     pub(crate) health_failures_remaining: AtomicUsize,
     pub(crate) metrics_calls: AtomicUsize,
     pub(crate) global_calls: AtomicUsize,
+    pub(crate) global_read_stall: AtomicBool,
+    pub(crate) health_read_stall: AtomicBool,
+    pub(crate) neighbor_read_stall: AtomicBool,
+    pub(crate) effective_config_delay_ms: AtomicUsize,
+    pub(crate) list_route_continuation_stall: AtomicBool,
     pub(crate) validation_policy_posture_calls: AtomicUsize,
     pub(crate) metrics_failures_remaining: AtomicUsize,
     pub(crate) global_failures_remaining: AtomicUsize,
@@ -84,6 +89,7 @@ pub(crate) struct MockState {
     pub(crate) config_abort_calls: AtomicUsize,
     pub(crate) add_neighbor_calls: AtomicUsize,
     pub(crate) config_status_calls: AtomicUsize,
+    pub(crate) config_snapshot_read_stall: AtomicBool,
     pub(crate) config_history_calls: AtomicUsize,
     pub(crate) config_rollback_calls: AtomicUsize,
     pub(crate) config_rollback_error: Mutex<Option<(Code, String)>>,
@@ -177,6 +183,7 @@ pub(crate) struct MockState {
     pub(crate) last_explain_evpn: Mutex<Option<server_proto::ExplainEvpnRouteRequest>>,
     pub(crate) explain_evpn_response: Mutex<server_proto::ExplainEvpnRouteResponse>,
     pub(crate) explain_evpn_error: Mutex<Option<(Code, String)>>,
+    pub(crate) explain_evpn_read_stall: AtomicBool,
     pub(crate) last_list_rejected: Mutex<Option<server_proto::ListRejectedRoutesRequest>>,
     pub(crate) last_list_topology_nodes: Mutex<Option<server_proto::ListTopologyNodesRequest>>,
     pub(crate) last_list_topology_links: Mutex<Option<server_proto::ListTopologyLinksRequest>>,
@@ -752,6 +759,9 @@ impl rustbgpd_api::proto::config_service_server::ConfigService for MockConfigSer
         self.state
             .config_status_calls
             .fetch_add(1, Ordering::SeqCst);
+        if self.state.config_snapshot_read_stall.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
         if let Some((code, message)) = self.state.config_status_error.lock().await.clone() {
             return Err(Status::new(code, message));
         }
@@ -778,6 +788,9 @@ impl rustbgpd_api::proto::config_service_server::ConfigService for MockConfigSer
         self.state
             .config_history_calls
             .fetch_add(1, Ordering::SeqCst);
+        if self.state.config_snapshot_read_stall.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
         Ok(Response::new(server_proto::ListConfigHistoryResponse {
             entries: vec![
                 server_proto::ConfigHistoryEntry {
@@ -833,6 +846,10 @@ impl rustbgpd_api::proto::config_service_server::ConfigService for MockConfigSer
         self.state
             .config_effective_calls
             .fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(
+            self.state.effective_config_delay_ms.load(Ordering::SeqCst) as u64,
+        ))
+        .await;
         if let Some((code, message)) = self.state.config_effective_error.lock().await.clone() {
             return Err(Status::new(code, message));
         }
@@ -852,6 +869,9 @@ impl rustbgpd_api::proto::global_service_server::GlobalService for MockGlobalSer
         _request: Request<server_proto::GetGlobalRequest>,
     ) -> Result<Response<server_proto::GlobalState>, Status> {
         self.state.global_calls.fetch_add(1, Ordering::SeqCst);
+        if self.state.global_read_stall.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
         if self
             .state
             .global_failures_remaining
@@ -910,6 +930,9 @@ impl rustbgpd_api::proto::control_service_server::ControlService for MockControl
         _request: Request<server_proto::HealthRequest>,
     ) -> Result<Response<server_proto::HealthResponse>, Status> {
         self.state.health_calls.fetch_add(1, Ordering::SeqCst);
+        if self.state.health_read_stall.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
         if consume_failure(&self.state.health_failures_remaining) {
             return Err(Status::unavailable("transient health failure"));
         }
@@ -1005,6 +1028,9 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
         self.state
             .list_neighbors_calls
             .fetch_add(1, Ordering::SeqCst);
+        if self.state.neighbor_read_stall.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
         if consume_failure(&self.state.list_neighbors_failures_remaining) {
             return Err(Status::unavailable("transient neighbor-list failure"));
         }
@@ -1397,7 +1423,16 @@ impl MockRibService {
         &self,
         request: server_proto::ListRoutesRequest,
     ) -> server_proto::ListRoutesResponse {
+        let continuation = !request.page_token.is_empty();
         self.state.list_route_requests.lock().await.push(request);
+        if continuation
+            && self
+                .state
+                .list_route_continuation_stall
+                .load(Ordering::SeqCst)
+        {
+            std::future::pending::<()>().await;
+        }
         let mut pages = self.state.list_route_pages.lock().await;
         if pages.is_empty() {
             server_proto::ListRoutesResponse {
@@ -2255,6 +2290,9 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
     ) -> Result<Response<server_proto::ExplainEvpnRouteResponse>, Status> {
         let request = request.into_inner();
         *self.state.last_explain_evpn.lock().await = Some(request.clone());
+        if self.state.explain_evpn_read_stall.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
         if let Some((code, message)) = self.state.explain_evpn_error.lock().await.clone() {
             return Err(Status::new(code, message));
         }

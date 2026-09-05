@@ -5,6 +5,7 @@
 //! loaded from a file.
 
 use std::fs;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -22,8 +23,35 @@ use crate::proto::config_service_client::ConfigServiceClient;
 use crate::proto::rib_service_client::RibServiceClient;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Budget for one completed lightweight read, including the response body.
+pub(crate) const READ_RPC_TIMEOUT: Duration = Duration::from_secs(30);
+/// Allow the server's 30-minute effective-config operation plus response transfer.
+pub(crate) const EFFECTIVE_CONFIG_RPC_TIMEOUT: Duration = Duration::from_secs(30 * 60 + 30);
 const AUTHORIZATION_HEADER: &str = "authorization";
 const BEARER_PREFIX: &str = "Bearer ";
+
+/// Bound a generated unary read future through decoding its full response.
+/// Connection and response-header timeouts alone do not bound a stalled body.
+pub(crate) async fn read_rpc<T>(
+    name: &str,
+    future: impl Future<Output = Result<T, Status>>,
+) -> Result<T, Status> {
+    rpc_with_timeout(name, READ_RPC_TIMEOUT, future).await
+}
+
+/// Method-specific budget for reads with a separate supported allowance.
+pub(crate) async fn rpc_with_timeout<T>(
+    name: &str,
+    budget: Duration,
+    future: impl Future<Output = Result<T, Status>>,
+) -> Result<T, Status> {
+    tokio::time::timeout(budget, future).await.map_err(|_| {
+        Status::deadline_exceeded(format!(
+            "{name} response timed out after {}s",
+            budget.as_secs_f64()
+        ))
+    })?
+}
 
 /// Decode ceiling for full unary listing responses, replacing tonic's
 /// 4 MiB client default on the clients built by
@@ -268,6 +296,43 @@ mod tests {
     use tonic::metadata::MetadataValue;
 
     use super::*;
+
+    #[tokio::test]
+    async fn read_deadline_cancels_pending_response_and_names_method_and_budget() {
+        struct Cancelled<'a>(&'a std::sync::atomic::AtomicBool);
+        impl Drop for Cancelled<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        let error = rpc_with_timeout("GetGlobal", Duration::from_millis(20), async {
+            let _guard = Cancelled(&cancelled);
+            std::future::pending::<Result<(), Status>>().await
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::DeadlineExceeded);
+        assert_eq!(error.message(), "GetGlobal response timed out after 0.02s");
+        assert!(cancelled.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn read_deadline_preserves_success_and_server_errors() {
+        assert_eq!(read_rpc("GetGlobal", async { Ok(42) }).await.unwrap(), 42);
+        let expected = Status::permission_denied("principal observer cannot perform this read");
+        let error = read_rpc("GetGlobal", async { Err::<(), _>(expected.clone()) })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), expected.code());
+        assert_eq!(error.message(), expected.message());
+    }
+
+    #[test]
+    fn effective_config_keeps_its_supported_server_budget() {
+        assert_eq!(READ_RPC_TIMEOUT, Duration::from_secs(30));
+        assert!(EFFECTIVE_CONFIG_RPC_TIMEOUT > Duration::from_secs(30 * 60));
+    }
 
     #[test]
     fn parse_endpoint_target_accepts_plain_tcp_address() {

@@ -835,6 +835,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   coordinated shutdown can replace an old checkpoint; the daemon still does
   not restore routes from these artifacts at boot.
 
+- Lightweight native CLI reads now bound the complete RPC response to
+  30 seconds per call or page, so stalled TCP or Unix-socket endpoints
+  cannot hang scripts indefinitely. Doctor preserves successful evidence
+  and marks timed-out sections incomplete, with a separate allowance for
+  large effective-config exports. A failed health collection no longer
+  leaves the system section marked collected.
+
 ## [0.68.0] — 2026-08-30
 
 > **Release framing — broader control surfaces, faster route-server release.**

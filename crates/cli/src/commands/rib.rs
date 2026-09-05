@@ -1,5 +1,5 @@
 use crate::commands::neighbor::{bare_ip_rpc_address, restore_matching_scoped_address};
-use crate::connection::Connection;
+use crate::connection::{Connection, read_rpc};
 use crate::error::CliError;
 use crate::output::{
     self, JsonExplainAdvertisedRoute, JsonExplainModifications, JsonExplainReason,
@@ -226,9 +226,23 @@ async fn fetch_route_listing(
     let mut routes = Vec::new();
     loop {
         let resp = match rpc {
-            RouteListRpc::Best => client.list_best_routes(req.clone()).await?,
-            RouteListRpc::Received => client.list_received_routes(req.clone()).await?,
-            RouteListRpc::Advertised => client.list_advertised_routes(req.clone()).await?,
+            RouteListRpc::Best => {
+                read_rpc("ListBestRoutes", client.list_best_routes(req.clone())).await?
+            }
+            RouteListRpc::Received => {
+                read_rpc(
+                    "ListReceivedRoutes",
+                    client.list_received_routes(req.clone()),
+                )
+                .await?
+            }
+            RouteListRpc::Advertised => {
+                read_rpc(
+                    "ListAdvertisedRoutes",
+                    client.list_advertised_routes(req.clone()),
+                )
+                .await?
+            }
         }
         .into_inner();
         let total_count = resp.total_count;
@@ -258,9 +272,13 @@ async fn fetch_route_count(
     req.page_size = 1;
     req.page_token.clear();
     let resp = match rpc {
-        RouteListRpc::Best => client.list_best_routes(req).await?,
-        RouteListRpc::Received => client.list_received_routes(req).await?,
-        RouteListRpc::Advertised => client.list_advertised_routes(req).await?,
+        RouteListRpc::Best => read_rpc("ListBestRoutes", client.list_best_routes(req)).await?,
+        RouteListRpc::Received => {
+            read_rpc("ListReceivedRoutes", client.list_received_routes(req)).await?
+        }
+        RouteListRpc::Advertised => {
+            read_rpc("ListAdvertisedRoutes", client.list_advertised_routes(req)).await?
+        }
     }
     .into_inner();
     Ok(resp.total_count)
@@ -1855,17 +1873,19 @@ pub async fn explain_best_path(
     let (addr, len) = output::parse_prefix(prefix).map_err(CliError::Argument)?;
     let mut client =
         RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let mut resp = client
-        .explain_best_path(ExplainBestPathRequest {
+    let mut resp = read_rpc(
+        "ExplainBestPath",
+        client.explain_best_path(ExplainBestPathRequest {
             prefix: addr,
             prefix_length: len,
             peer_address: peer
                 .map(bare_ip_rpc_address)
                 .unwrap_or_default()
                 .to_string(),
-        })
-        .await?
-        .into_inner();
+        }),
+    )
+    .await?
+    .into_inner();
     restore_matching_scoped_address(peer, &mut resp.peer_address);
     print_explain_best_path(&resp, json)
 }
@@ -1883,13 +1903,15 @@ pub async fn lookup_best_path(
     let (addr, len) = output::parse_prefix(target).map_err(CliError::Argument)?;
     let mut client =
         RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let resp = client
-        .lookup_best_path(LookupBestPathRequest {
+    let resp = read_rpc(
+        "LookupBestPath",
+        client.lookup_best_path(LookupBestPathRequest {
             prefix: addr,
             prefix_length: len,
-        })
-        .await?
-        .into_inner();
+        }),
+    )
+    .await?
+    .into_inner();
     print_explain_best_path(&resp, json)
 }
 
@@ -1924,10 +1946,12 @@ pub async fn count_best(
 
 pub async fn blackholes(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client = connection.rib_listing_client();
-    let resp = client
-        .list_blackhole_discards(ListBlackholeDiscardsRequest {})
-        .await?
-        .into_inner();
+    let resp = read_rpc(
+        "ListBlackholeDiscards",
+        client.list_blackhole_discards(ListBlackholeDiscardsRequest {}),
+    )
+    .await?
+    .into_inner();
     print_blackhole_discards(&resp.discards, json)
 }
 
@@ -1937,10 +1961,12 @@ pub async fn fib(
     json: bool,
 ) -> Result<(), CliError> {
     let mut client = connection.rib_listing_client();
-    let mut resp = client
-        .list_fib_routes(make_fib_request(&filters)?)
-        .await?
-        .into_inner();
+    let mut resp = read_rpc(
+        "ListFibRoutes",
+        client.list_fib_routes(make_fib_request(&filters)?),
+    )
+    .await?
+    .into_inner();
     for route in &mut resp.routes {
         restore_matching_scoped_address(filters.peer.as_deref(), &mut route.peer_address);
     }
@@ -1956,10 +1982,12 @@ pub async fn bgpls(
 ) -> Result<(), CliError> {
     let requested_peer = peer.clone();
     let mut client = connection.rib_listing_client();
-    let mut resp = client
-        .list_bgp_ls_routes(make_bgpls_request(family, peer, nlri_type)?)
-        .await?
-        .into_inner();
+    let mut resp = read_rpc(
+        "ListBgpLsRoutes",
+        client.list_bgp_ls_routes(make_bgpls_request(family, peer, nlri_type)?),
+    )
+    .await?
+    .into_inner();
     for route in &mut resp.routes {
         restore_matching_scoped_address(requested_peer.as_deref(), &mut route.peer_address);
     }
@@ -1974,10 +2002,12 @@ pub async fn vpn(
 ) -> Result<(), CliError> {
     let requested_peer = peer.clone();
     let mut client = connection.rib_listing_client();
-    let mut resp = client
-        .list_vpn_routes(make_vpn_request(family, peer)?)
-        .await?
-        .into_inner();
+    let mut resp = read_rpc(
+        "ListVpnRoutes",
+        client.list_vpn_routes(make_vpn_request(family, peer)?),
+    )
+    .await?
+    .into_inner();
     for route in &mut resp.routes {
         restore_matching_scoped_address(requested_peer.as_deref(), &mut route.peer_address);
     }
@@ -1992,10 +2022,12 @@ pub async fn labeled(
 ) -> Result<(), CliError> {
     let requested_peer = peer.clone();
     let mut client = connection.rib_listing_client();
-    let mut resp = client
-        .list_labeled_routes(make_labeled_request(family, peer)?)
-        .await?
-        .into_inner();
+    let mut resp = read_rpc(
+        "ListLabeledRoutes",
+        client.list_labeled_routes(make_labeled_request(family, peer)?),
+    )
+    .await?
+    .into_inner();
     for route in &mut resp.routes {
         restore_matching_scoped_address(requested_peer.as_deref(), &mut route.peer_address);
     }
@@ -2004,16 +2036,18 @@ pub async fn labeled(
 
 pub async fn rtc(connection: Connection, peer: Option<String>, json: bool) -> Result<(), CliError> {
     let mut client = connection.rib_listing_client();
-    let mut resp = client
-        .list_rtc_routes(ListRtcRoutesRequest {
+    let mut resp = read_rpc(
+        "ListRtcRoutes",
+        client.list_rtc_routes(ListRtcRoutesRequest {
             peer_filter: peer
                 .as_deref()
                 .map(bare_ip_rpc_address)
                 .unwrap_or_default()
                 .to_string(),
-        })
-        .await?
-        .into_inner();
+        }),
+    )
+    .await?
+    .into_inner();
     for route in &mut resp.routes {
         restore_matching_scoped_address(peer.as_deref(), &mut route.peer_address);
     }
@@ -2069,12 +2103,14 @@ pub async fn count_received(
 pub async fn rejected(connection: Connection, address: &str, json: bool) -> Result<(), CliError> {
     let mut client =
         PolicyServiceClient::with_interceptor(connection.channel(), connection.interceptor());
-    let mut resp = client
-        .list_rejected_routes(ListRejectedRoutesRequest {
+    let mut resp = read_rpc(
+        "ListRejectedRoutes",
+        client.list_rejected_routes(ListRejectedRoutesRequest {
             peer_address: bare_ip_rpc_address(address).to_string(),
-        })
-        .await?
-        .into_inner();
+        }),
+    )
+    .await?
+    .into_inner();
     restore_matching_scoped_address(Some(address), &mut resp.peer_address);
     print_rejected_routes(&resp, json)
 }
@@ -2272,8 +2308,9 @@ pub async fn explain_advertised(
     let mut client =
         RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let requested_source = source_peer.filter(|_| source_path_id.is_some());
-    let mut resp = client
-        .explain_advertised_route(ExplainAdvertisedRouteRequest {
+    let mut resp = read_rpc(
+        "ExplainAdvertisedRoute",
+        client.explain_advertised_route(ExplainAdvertisedRouteRequest {
             peer_address: bare_ip_rpc_address(address).to_string(),
             prefix: addr,
             prefix_length: len,
@@ -2285,9 +2322,10 @@ pub async fn explain_advertised(
                     path_id,
                 }
             }),
-        })
-        .await?
-        .into_inner();
+        }),
+    )
+    .await?
+    .into_inner();
     restore_matching_scoped_address(Some(address), &mut resp.peer_address);
     restore_matching_scoped_address(requested_source, &mut resp.route_peer_address);
     if let Some(source) = &mut resp.source {
