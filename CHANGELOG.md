@@ -13,6 +13,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `just lab quickstart up|verify|break|explain|down`: a guided local BGP
+  exercise using the Docker Compose demo. Verify a route, remove its import
+  policy, explain the RFC 8212 rejection, and restore the policy.
+  See the [operator lab guide](docs/tutorials/operator-labs.md).
+
 - **Operator-visible:** EVPN interop receipts for an IPv6 VXLAN underlay,
   the first in the suite to run tunnel endpoints, BGP transport, and EVPN
   next hops entirely on IPv6. M109
@@ -24,7 +29,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`tests/interop/m110-evpn-ipv6-underlay-irb.clab.yml`) covers symmetric
   Interface-less IRB over the same underlay and is a manual leg. Both
   topologies assert that the underlay carries no IPv4 address, so no
-  fallback path can satisfy an assertion. `docs/LIMITATIONS.md` now records
+  fallback path can satisfy an assertion. `docs/reference/limitations.md` now records
   that Interface-less IRB has no `RTA_VIA`: under an IPv6 VTEP only IPv6
   tenant prefixes are carried.
 
@@ -116,7 +121,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Established, performs the required socket, timer, and session actions,
   sends KEEPALIVEs on the negotiated timer, and prints each successfully
   parsed UPDATE. Its loopback tests exercise the library-embedding shape in
-  `docs/EMBEDDING.md`.
+  `docs/reference/embedding.md`.
 - `[[rpki.cache_servers]]` accepts `md5_password` (RFC 2385) or a
   neighbor-shaped `tcp_ao` keyring (RFC 5925); the key is installed on the
   RTR socket before connect. **Operator-visible:** key material the kernel

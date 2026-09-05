@@ -7,3 +7,4 @@ Learn by running a small example.
 [All documentation](../README.md)
 
 - [Quickstart](quickstart.md) — Start a daemon, establish a session, and use the CLI.
+- [Operator labs](operator-labs.md) — Introduce a local policy fault, explain the rejected routes, and recover.
