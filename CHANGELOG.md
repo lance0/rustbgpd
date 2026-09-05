@@ -236,6 +236,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   duplicate origin, inspect the route reflector's identifier tie-break and
   split-horizon export decision, and restore the intended source.
 
+- `just lab monitoring up|verify|break|explain|down`: stop a BMP collector
+  while BGP remains live, inspect delivery diagnostics, and verify a decoded
+  Loc-RIB route snapshot after the collector reconnects.
+
 ### Changed
 
 - The three example programs (`event-bridge`, `peer-loop`, `birdwatcher-adapter`)

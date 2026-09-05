@@ -10,8 +10,8 @@ lab name phase:
     #!/usr/bin/env bash
     set -euo pipefail
     case "$1" in
-        quickstart|ixp|rr) exec bash "labs/$1/lab.sh" "$2" ;;
-        *) echo "unknown lab: $1 (available: quickstart, ixp, rr)" >&2; exit 2 ;;
+        quickstart|ixp|rr|monitoring) exec bash "labs/$1/lab.sh" "$2" ;;
+        *) echo "unknown lab: $1 (available: quickstart, ixp, rr, monitoring)" >&2; exit 2 ;;
     esac
 
 # Run the broad local correctness baseline in diagnostic order.
