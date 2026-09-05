@@ -26,6 +26,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   eligibility, and committed outbound state. Import rejection history and
   remote receipt or installation are not inferred.
 
+- Reproducible EVPN reflector fanout runner with separate initial-load and
+  churn phases, exact withdrawal checks, and a dated receiver-count baseline.
+  The load generator accepts `--churn-delay-sec` (default zero).
+
 - EVPN discard visibility by wire route type through the additive
   `bgp_evpn_nlri_discarded_by_type_total{peer,route_type}` counter and one
   warning per type per TCP connection. The existing peer aggregate counter
