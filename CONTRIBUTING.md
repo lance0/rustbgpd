@@ -54,11 +54,28 @@ just --list
 
 The recipes intentionally expose their direct commands:
 
-- `just gate` runs formatting, lightweight repository contracts, strict
-  workspace Clippy, the full workspace tests, and library docs (private items
-  included) and binary docs.
+- `just gate` runs the offline link check, the developer-tooling check,
+  formatting, lightweight repository contracts, strict workspace Clippy, the
+  full workspace tests, and library docs (private items included) and binary
+  docs, in that order.
   This is the broad local baseline and can take several minutes on a cold
-  target directory.
+  target directory. It is composed from the tiered recipes below and runs the
+  same commands in the same order as before the split.
+- `just check-fast` runs formatting and the cheap repository contracts in
+  seconds without compiling anything. `just check-contracts` runs the slower
+  contract checkers (public tracker identifiers, documentation paths, metric
+  consumers) in a few minutes, also without compiling. `just check-devtools`
+  checks the pinned developer tooling and `just check-clippy` runs the strict
+  workspace lint.
+- `just test-crates` runs the library unit tests of every workspace crate
+  (the same command as the pre-push hook). `just test-bins` runs the unit
+  tests of every binary target; the daemon's own unit tests live in its
+  binary rather than a library. `just test-integration` runs every `tests/`
+  integration binary. Together with the doctests these three cover what
+  `cargo test --workspace` runs; each takes seconds to a few minutes on a
+  warm target directory.
+- `just docs` builds the library docs (private items included) and both
+  binary docs.
 - `just gate-rib` compiles the feature-gated RIB, transport, and API benchmark
   surfaces that the default workspace build cannot see, including the root
   FIB projection and both API feature combinations.
