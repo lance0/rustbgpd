@@ -114,22 +114,53 @@ The feature set pulls no HTTP stack: `cargo tree -p rmcp -e normal` shows no
 behind its own `tower` feature. `chrono` enters through rmcp's `schemars`
 feature selection.
 
-### Six tools, `rbgp_`-prefixed
+### Seven tools, `rbgp_`-prefixed
 
 `rbgp_explain_export`, `rbgp_explain_import`, `rbgp_explain_best_path`,
-`rbgp_list_rejected`, `rbgp_list_peers`, `rbgp_get_health`. The prefix matches
-the CLI binary operators already know.
+`rbgp_explain_evpn_route`, `rbgp_list_rejected`, `rbgp_list_peers`,
+`rbgp_get_health`. The prefix matches the CLI binary operators already know.
 
 `rbgp_explain_export` is the headline: it surfaces the whole `gates` ladder in
 evaluation order with each rung's gate name, code, verdict, and detail, plus a
-`stopped_at_gate` field naming the rung that halted the route. `rbgp_list_rejected`
-surfaces `retention_enabled` and `capacity` alongside the listing and states in
-words what an empty list means, because an empty list with retention disabled
-means something completely different from an empty list with retention on.
+`stopped_at_gate` field naming the rung that halted the route.
+
+`rbgp_explain_evpn_route` covers the EVPN equivalent through `ExplainEvpnRoute`,
+and answers more per call than either unicast explain tool: one response carries
+the selection story (installed best, fresh selection, compared candidate,
+candidate count, deciding reason, deferral state) and, when `advertised_to` is
+supplied, the same `ExportGateStep` ladder toward that peer, numbered and
+reduced to `stopped_at_gate` by the code path the unicast tool uses.
+
+#### Stating what a result does not mean
+
+Three fields on this surface are read wrongly by default, and the responses say
+so in words rather than leaving the inference to a model:
+
+- **`retention_note`** on `rbgp_list_rejected`. An empty list with retention
+  disabled means something completely different from an empty list with
+  retention on, and the tool must never report "no rejected routes" for the
+  first case.
+- **`received_note`** on `rbgp_explain_evpn_route`. The proto is explicit that
+  absence of retained accepted state is neither an import-rejection explanation
+  nor proof the peer never sent the key — EVPN import rejection history is not
+  retained. An agent reading a bare empty `received` will state "the peer never
+  advertised it"; the note says the absence supports no such conclusion, and
+  distinguishes it from the case where no lookup was requested at all.
+- **`selection_note`** on `rbgp_explain_evpn_route`. While `selection_deferred`
+  is set, the installed Loc-RIB `best` can differ from fresh selection, so
+  reporting it as current state is reporting something untrue. A boolean beside
+  the data it invalidates is skimmable, so the note names the hazard and points
+  at `selection_best` instead.
+
+Each is unit-tested on the property that matters: that the disclaiming case
+cannot be confused with the ordinary one.
 
 #### Scope corrections
 
 Two tools from the original scope cannot be built and are not faked:
+
+These are unchanged by the EVPN addition — `ExplainEvpnRoute` is an existing
+`sensitive_read` RPC, so the seventh tool needed no new daemon surface.
 
 - **No BMP RPC exists.** BMP is outbound-only export to configured collectors
   (`crates/bmp`); the proto has no BMP service. A BMP tool would require a new
@@ -250,7 +281,14 @@ built for this; `tests/birdwatcher_adapter_smoke.rs` stands up a real daemon
 and a hand-rolled BGP speaker, which is the pattern to reuse if that coverage
 is wanted later.
 
-The six tools are a vertical slice, not a complete operator surface. The
-remaining explain surfaces (`rbgp policy stats`, `rbgp doctor`, RPKI validation,
-EVPN explain) are unaddressed, and whether they belong in an MCP tool list at
-all is a question this ADR does not answer.
+The seven tools are a vertical slice, not a complete operator surface. The
+remaining explain surfaces (`rbgp policy stats`, `rbgp doctor`, RPKI validation)
+are unaddressed, and whether they belong in an MCP tool list at all is a
+question this ADR does not answer.
+
+`rbgp_explain_evpn_route` is the only tool without live evidence. Its unit
+coverage (selector mapping including the MAC-only and MAX_ET forms, both note
+functions, the shared gate-ladder numbering) and the inventory contract hold,
+but no captured transcript exercises it against a running daemon: reaching a
+real EVPN route means an established EVPN session with a carried route, which
+is a lab this slice deliberately does not build.

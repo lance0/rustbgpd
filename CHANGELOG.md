@@ -25,6 +25,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   [how-to](docs/how-to/mcp-server.md) and
   [ADR-0131](docs/adr/0131-read-only-mcp-server.md).
 
+- `rbgp_explain_evpn_route` on the MCP server: exact EVPN route explain
+  (RFC 7432 Types 1-5) carrying the selection story and the export gate ladder
+  from `ExplainEvpnRoute`. The response states in words that an empty retained
+  source is neither an import-rejection explanation nor proof the peer never
+  sent the key, and that a deferred selection means the installed best may
+  differ from fresh selection.
+
 - Per-neighbor EVPN received and advertised route views through additive
   `ListReceivedEvpnRoutes` / `ListAdvertisedEvpnRoutes` RPCs and
   `rbgp evpn received|advertised PEER`. Type/RD filters and bounded pages

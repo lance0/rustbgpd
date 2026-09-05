@@ -13,6 +13,7 @@ use std::process::{Child, Command, Stdio};
 /// The tool surface this server is allowed to expose, in sorted order.
 const EXPECTED_TOOLS: &[&str] = &[
     "rbgp_explain_best_path",
+    "rbgp_explain_evpn_route",
     "rbgp_explain_export",
     "rbgp_explain_import",
     "rbgp_get_health",
@@ -114,7 +115,7 @@ fn initialize_then_list_tools_over_stdio() {
     expected.sort();
     assert_eq!(
         names, expected,
-        "the stdio tool surface must be exactly the six read-only tools"
+        "the stdio tool surface must be exactly the seven read-only tools"
     );
 
     // Every tool must declare an input schema; a host cannot call one without.

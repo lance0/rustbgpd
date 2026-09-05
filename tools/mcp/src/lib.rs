@@ -73,6 +73,10 @@ pub const TOOL_METHOD_PATHS: &[(&str, &str)] = &[
         "/rustbgpd.v1.NeighborService/ListNeighbors",
     ),
     ("rbgp_get_health", "/rustbgpd.v1.ControlService/GetHealth"),
+    (
+        "rbgp_explain_evpn_route",
+        "/rustbgpd.v1.RibService/ExplainEvpnRoute",
+    ),
 ];
 
 // ---------------------------------------------------------------------------
@@ -525,6 +529,207 @@ pub struct ListRejectedResult {
     pub evictions_since_reset: Option<u64>,
 }
 
+/// Exact EVPN route key, mirroring the `rbgp evpn explain` selector vocabulary.
+///
+/// Every variant is an exact key, not a filter. Type 2 with `ip` omitted
+/// selects the MAC-only key rather than every host IP under that MAC.
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(tag = "route_type", rename_all = "snake_case")]
+pub enum EvpnKey {
+    /// Type 2 MAC/IP. Omitting `ip` selects the MAC-only key.
+    MacIp {
+        /// Ethernet Tag; `0` for a single-tag EVI.
+        #[serde(default)]
+        ethernet_tag: u32,
+        /// MAC address, colon-separated.
+        mac: String,
+        /// Exact host address. Omit for the MAC-only key.
+        #[serde(default)]
+        ip: Option<String>,
+    },
+    /// Type 3 inclusive multicast, by exact originator.
+    Imet {
+        /// Ethernet Tag; `0` for a single-tag EVI.
+        #[serde(default)]
+        ethernet_tag: u32,
+        /// Originating VTEP address.
+        originator_ip: String,
+    },
+    /// Type 4 Ethernet Segment route, by exact segment and originator.
+    Es {
+        /// Ethernet Segment Identifier.
+        esi: String,
+        /// Originating VTEP address.
+        originator_ip: String,
+    },
+    /// Type 5 IP prefix. Host bits must be zero.
+    IpPrefix {
+        /// Ethernet Tag; `0` for a single-tag EVI.
+        #[serde(default)]
+        ethernet_tag: u32,
+        /// Canonical CIDR prefix.
+        prefix: String,
+    },
+    /// Type 1 per-ES Ethernet A-D. The Ethernet Tag is always `MAX_ET` and is
+    /// not a caller parameter.
+    EadPerEs {
+        /// Ethernet Segment Identifier.
+        esi: String,
+    },
+    /// Type 1 per-EVI Ethernet A-D. `MAX_ET` is not a per-EVI key.
+    EadPerEvi {
+        /// Ethernet Segment Identifier.
+        esi: String,
+        /// Ethernet Tag; must not be `MAX_ET`.
+        ethernet_tag: u32,
+    },
+}
+
+impl EvpnKey {
+    fn into_selector(self, rd: String) -> proto::EvpnRouteSelector {
+        use proto::evpn_route_selector::Route;
+        let route = match self {
+            Self::MacIp {
+                ethernet_tag,
+                mac,
+                ip,
+            } => Route::MacIp(proto::EvpnMacIpSelector {
+                ethernet_tag,
+                mac,
+                ip: ip.unwrap_or_default(),
+            }),
+            Self::Imet {
+                ethernet_tag,
+                originator_ip,
+            } => Route::Imet(proto::EvpnImetSelector {
+                ethernet_tag,
+                originator_ip,
+            }),
+            Self::Es { esi, originator_ip } => {
+                Route::Es(proto::EvpnEsSelector { esi, originator_ip })
+            }
+            Self::IpPrefix {
+                ethernet_tag,
+                prefix,
+            } => Route::IpPrefix(proto::EvpnIpPrefixSelector {
+                ethernet_tag,
+                prefix,
+            }),
+            // MAX_ET identifies the per-ES form; the caller does not supply it.
+            Self::EadPerEs { esi } => Route::EadPerEs(proto::EvpnEadSelector {
+                esi,
+                ethernet_tag: u32::MAX,
+            }),
+            Self::EadPerEvi { esi, ethernet_tag } => {
+                Route::EadPerEvi(proto::EvpnEadSelector { esi, ethernet_tag })
+            }
+        };
+        proto::EvpnRouteSelector {
+            rd,
+            route: Some(route),
+        }
+    }
+}
+
+/// "What happened to this exact EVPN route?"
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct ExplainEvpnRouteParams {
+    /// Route Distinguisher, `asn:nn` or `ip:nn`.
+    pub rd: String,
+    /// The exact route key.
+    pub key: EvpnKey,
+    /// Optional peer whose retained accepted state to look up. Absence of
+    /// retained state is not an import-rejection explanation.
+    #[serde(default)]
+    pub received_from: Option<String>,
+    /// Optional peer to evaluate current export eligibility toward.
+    #[serde(default)]
+    pub advertised_to: Option<String>,
+}
+
+/// One EVPN route as the daemon holds it.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct EvpnRouteLine {
+    /// RFC 7432 route type (1-5).
+    pub route_type: u32,
+    /// Route Distinguisher.
+    pub rd: String,
+    /// Ethernet Segment Identifier; empty when the type carries none.
+    pub esi: String,
+    /// Ethernet Tag as the daemon renders it.
+    pub ethernet_tag: String,
+    /// MAC address; empty for types that carry none.
+    pub mac: String,
+    /// Host IP; empty for types that carry none.
+    pub ip: String,
+    /// Type 5 prefix; empty for other types.
+    pub prefix: String,
+    /// Next hop.
+    pub next_hop: String,
+    /// Peer this route came from; empty when locally originated.
+    pub peer_address: String,
+    /// `AS_PATH` rendering.
+    pub as_path: String,
+    /// MPLS label 1.
+    pub label: u32,
+}
+
+/// Current export evaluation toward one peer.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct EvpnExportResult {
+    /// Peer the export was evaluated toward.
+    pub peer_address: String,
+    /// `advertise`, `deny`, `no_best_route`, or `unsupported_family`.
+    pub decision: String,
+    /// Full gate ladder in live evaluation order.
+    pub gates: Vec<GateStep>,
+    /// The gate that stopped the route, when one did.
+    pub stopped_at_gate: Option<String>,
+    /// Reason codes and messages attached to the decision.
+    pub reasons: Vec<ReasonLine>,
+    /// Attribute modifications export policy would apply.
+    pub modifications: Vec<String>,
+    /// Dry-run staged result from the installed best. No state was changed.
+    pub staged: Option<EvpnRouteLine>,
+    /// Committed local Adj-RIB-Out entry. This is send-side state only: it is
+    /// not proof the peer received or installed the route.
+    pub advertised: Option<EvpnRouteLine>,
+    /// True when an identical route already sits in the advertised state.
+    pub already_advertised: bool,
+    /// True when outbound state for this peer has pending work.
+    pub outbound_dirty: bool,
+}
+
+/// Selection and export story for one exact EVPN route.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ExplainEvpnRouteResult {
+    /// Installed Loc-RIB route. **Read `selection_note` before trusting this**
+    /// — while selection is deferred it can differ from fresh selection.
+    pub best: Option<EvpnRouteLine>,
+    /// Fresh selection winner, recomputed for this query.
+    pub selection_best: Option<EvpnRouteLine>,
+    /// The requested source when it is not the fresh winner, otherwise the
+    /// winner's runner-up.
+    pub compared: Option<EvpnRouteLine>,
+    /// How many candidates the selection considered.
+    pub candidate_count: u64,
+    /// Why `selection_best` beats `compared`. Absent when nothing was compared.
+    pub selection_reason: Option<ReasonLine>,
+    /// True when selection is deferred, so `best` may be stale.
+    pub selection_deferred: bool,
+    /// Plain statement of whether `best` is current. Always populated.
+    pub selection_note: String,
+    /// Peer whose retained accepted state was looked up; empty when none was
+    /// requested.
+    pub received_from: String,
+    /// The retained accepted route from that peer, when one is retained.
+    pub received: Option<EvpnRouteLine>,
+    /// What the `received` field does and does not establish. Always populated.
+    pub received_note: String,
+    /// Current export evaluation, when `advertised_to` was supplied.
+    pub export: Option<EvpnExportResult>,
+}
+
 /// No parameters.
 #[derive(Debug, Default, Deserialize, Serialize, JsonSchema)]
 pub struct NoParams {}
@@ -572,7 +777,7 @@ pub struct HealthResult {
 // Server
 // ---------------------------------------------------------------------------
 
-/// The MCP server: a gRPC client of one daemon, exposing six read-only tools.
+/// The MCP server: a gRPC client of one daemon, exposing seven read-only tools.
 #[derive(Clone)]
 pub struct RustbgpdMcp {
     upstream: Upstream,
@@ -615,18 +820,7 @@ impl RustbgpdMcp {
             .map_err(|status| map_status(&status))?
             .into_inner();
 
-        let gates: Vec<GateStep> = response
-            .gates
-            .iter()
-            .enumerate()
-            .map(|(index, step)| GateStep {
-                step: u32::try_from(index + 1).unwrap_or(u32::MAX),
-                gate: step.gate.clone(),
-                code: step.code.clone(),
-                verdict: verdict_label(step.verdict),
-                detail: step.detail.clone(),
-            })
-            .collect();
+        let gates = gate_ladder(&response.gates);
 
         Ok(Json(ExplainExportResult {
             decision: decision_label(response.decision),
@@ -634,10 +828,7 @@ impl RustbgpdMcp {
             prefix: format!("{}/{}", response.prefix, response.prefix_length),
             next_hop: response.next_hop,
             route_peer_address: response.route_peer_address,
-            stopped_at_gate: gates
-                .iter()
-                .find(|step| step.verdict == "stop")
-                .map(|step| step.gate.clone()),
+            stopped_at_gate: stopped_at_gate(&gates),
             gates,
             reasons: response
                 .reasons
@@ -869,6 +1060,80 @@ impl RustbgpdMcp {
             daemon_version: response.daemon_version,
         }))
     }
+
+    /// Explain one exact EVPN route: selection story plus current export.
+    #[tool(
+        name = "rbgp_explain_evpn_route",
+        description = "Explain one exact EVPN route (RFC 7432 Types 1-5): the selection story \
+                       (installed best, fresh selection, compared candidate, candidate count, \
+                       deciding reason) and, when `advertised_to` is given, the current export \
+                       gate ladder toward that peer. Every key is exact, not a filter. Two \
+                       results must not be over-read, and the response states both in words: an \
+                       empty `received` for a peer is NOT an import-rejection explanation and NOT \
+                       proof the peer never sent the key — import rejection history is not \
+                       retained, so it supports no conclusion about what the peer sent. And when \
+                       `selection_deferred` is true, the installed `best` may differ from fresh \
+                       selection, so reporting it as current state would be wrong. Read \
+                       `received_note` and `selection_note`."
+    )]
+    pub async fn explain_evpn_route(
+        &self,
+        Parameters(params): Parameters<ExplainEvpnRouteParams>,
+    ) -> Result<Json<ExplainEvpnRouteResult>, ErrorData> {
+        let mut client = proto::rib_service_client::RibServiceClient::new(self.upstream.clone());
+        let received_from = params.received_from.unwrap_or_default();
+        let response = client
+            .explain_evpn_route(proto::ExplainEvpnRouteRequest {
+                key: Some(params.key.into_selector(params.rd)),
+                received_from: received_from.clone(),
+                advertised_to: params.advertised_to.unwrap_or_default(),
+            })
+            .await
+            .map_err(|status| map_status(&status))?
+            .into_inner();
+
+        let received = response.received.as_ref().map(evpn_route_line);
+        Ok(Json(ExplainEvpnRouteResult {
+            selection_note: selection_note(
+                response.selection_deferred,
+                response.selection_best.is_some(),
+            ),
+            received_note: received_note(&response.received_from, received.is_some()),
+            best: response.best.as_ref().map(evpn_route_line),
+            selection_best: response.selection_best.as_ref().map(evpn_route_line),
+            compared: response.compared.as_ref().map(evpn_route_line),
+            candidate_count: response.candidate_count,
+            selection_reason: response.selection_reason.map(|reason| ReasonLine {
+                code: reason.code,
+                message: reason.message,
+            }),
+            selection_deferred: response.selection_deferred,
+            received_from: response.received_from,
+            received,
+            export: response.export.map(|export| {
+                let gates = gate_ladder(&export.gates);
+                EvpnExportResult {
+                    peer_address: export.peer_address,
+                    decision: decision_label(export.decision),
+                    stopped_at_gate: stopped_at_gate(&gates),
+                    gates,
+                    reasons: export
+                        .reasons
+                        .into_iter()
+                        .map(|reason| ReasonLine {
+                            code: reason.code,
+                            message: reason.message,
+                        })
+                        .collect(),
+                    modifications: render_modifications(export.modifications.as_ref()),
+                    staged: export.staged.as_ref().map(evpn_route_line),
+                    advertised: export.advertised.as_ref().map(evpn_route_line),
+                    already_advertised: export.already_advertised,
+                    outbound_dirty: export.outbound_dirty,
+                }
+            }),
+        }))
+    }
 }
 
 #[allow(
@@ -1043,6 +1308,81 @@ fn render_modifications(modifications: Option<&proto::ExplainModifications>) -> 
         lines.push(format!("as_path_prepend = {asn} x{count}"));
     }
     lines
+}
+
+/// Number an export gate ladder in live evaluation order.
+fn gate_ladder(gates: &[proto::ExportGateStep]) -> Vec<GateStep> {
+    gates
+        .iter()
+        .enumerate()
+        .map(|(index, step)| GateStep {
+            step: u32::try_from(index + 1).unwrap_or(u32::MAX),
+            gate: step.gate.clone(),
+            code: step.code.clone(),
+            verdict: verdict_label(step.verdict),
+            detail: step.detail.clone(),
+        })
+        .collect()
+}
+
+/// Name the rung that halted the route, when one did.
+fn stopped_at_gate(gates: &[GateStep]) -> Option<String> {
+    gates
+        .iter()
+        .find(|step| step.verdict == "stop")
+        .map(|step| step.gate.clone())
+}
+
+fn evpn_route_line(entry: &proto::EvpnRouteEntry) -> EvpnRouteLine {
+    EvpnRouteLine {
+        route_type: entry.route_type,
+        rd: entry.rd.clone(),
+        esi: entry.esi.clone(),
+        ethernet_tag: entry.ethernet_tag.clone(),
+        mac: entry.mac.clone(),
+        ip: entry.ip.clone(),
+        prefix: entry.prefix.clone(),
+        next_hop: entry.next_hop.clone(),
+        peer_address: entry.peer_address.clone(),
+        as_path: render_as_path(&entry.as_path),
+        label: entry.label,
+    }
+}
+
+/// State in words whether the installed best is current.
+///
+/// A bare `selection_deferred: true` sitting beside `best` is easy to skim
+/// past, and reporting a deferred `best` as current state is wrong. This says
+/// so in the result itself.
+fn selection_note(deferred: bool, has_fresh: bool) -> String {
+    if deferred {
+        return "SELECTION IS DEFERRED: the installed `best` may be stale and may differ from \
+                `selection_best`. Do not report `best` as current state; `selection_best` is the \
+                fresh winner for this query."
+            .into();
+    }
+    if has_fresh {
+        return "selection is not deferred, so the installed `best` reflects current selection"
+            .into();
+    }
+    "selection is not deferred and no candidate was selected for this key".into()
+}
+
+/// State in words what an absent retained source does and does not establish.
+fn received_note(received_from: &str, present: bool) -> String {
+    if received_from.is_empty() {
+        return "no accepted-source lookup was requested; `received` is empty for that reason \
+                alone"
+            .into();
+    }
+    if present {
+        return format!("retained accepted state from {received_from}");
+    }
+    format!(
+        "no retained accepted state from {received_from}. This is NOT an import-rejection \
+         explanation and NOT proof that the peer never sent this key: import rejection history \
+         is not retained for EVPN, so absence supports no conclusion about what the peer sent."
+    )
 }
 
 /// Render an `AS_PATH` as the space-separated ASN list operators read.
@@ -1259,6 +1599,99 @@ mod tests {
             false,
         );
         assert!(!without.contains("token"), "{without}");
+    }
+
+    #[test]
+    fn a_deferred_selection_says_the_installed_best_may_be_stale() {
+        let deferred = selection_note(true, true);
+        assert!(deferred.contains("DEFERRED"), "{deferred}");
+        assert!(
+            deferred.contains("may be stale") && deferred.contains("Do not report `best`"),
+            "a bare boolean is skimmable; the note must say what not to conclude: {deferred}"
+        );
+
+        let settled = selection_note(false, true);
+        assert!(settled.contains("reflects current selection"), "{settled}");
+        assert!(!settled.contains("DEFERRED"), "{settled}");
+    }
+
+    #[test]
+    fn an_absent_retained_source_is_not_an_import_rejection() {
+        let absent = received_note("192.0.2.1", false);
+        assert!(
+            absent.contains("NOT an import-rejection explanation")
+                && absent.contains("NOT proof that the peer never sent"),
+            "absence must not read as evidence: {absent}"
+        );
+
+        let present = received_note("192.0.2.1", true);
+        assert!(present.contains("retained accepted state"), "{present}");
+        assert!(!present.contains("NOT proof"), "{present}");
+
+        let unrequested = received_note("", false);
+        assert!(
+            unrequested.contains("no accepted-source lookup was requested"),
+            "an unrequested lookup must not read as an absent one: {unrequested}"
+        );
+    }
+
+    #[test]
+    fn evpn_keys_map_onto_the_exact_selector_forms() {
+        use proto::evpn_route_selector::Route;
+
+        // Omitting `ip` selects the MAC-only key, not every host IP.
+        let mac_only = EvpnKey::MacIp {
+            ethernet_tag: 0,
+            mac: "aa:bb:cc:dd:ee:01".into(),
+            ip: None,
+        }
+        .into_selector("65001:100".into());
+        assert_eq!(mac_only.rd, "65001:100");
+        match mac_only.route {
+            Some(Route::MacIp(selector)) => assert!(selector.ip.is_empty()),
+            other => panic!("expected a MAC/IP selector, got {other:?}"),
+        }
+
+        // MAX_ET identifies the per-ES form and is not a caller parameter.
+        match (EvpnKey::EadPerEs { esi: "es-1".into() })
+            .into_selector("65001:100".into())
+            .route
+        {
+            Some(Route::EadPerEs(selector)) => assert_eq!(selector.ethernet_tag, u32::MAX),
+            other => panic!("expected a per-ES A-D selector, got {other:?}"),
+        }
+
+        match (EvpnKey::EadPerEvi {
+            esi: "es-1".into(),
+            ethernet_tag: 7,
+        })
+        .into_selector("65001:100".into())
+        .route
+        {
+            Some(Route::EadPerEvi(selector)) => assert_eq!(selector.ethernet_tag, 7),
+            other => panic!("expected a per-EVI A-D selector, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_gate_ladder_is_numbered_and_names_its_stop() {
+        let gates = gate_ladder(&[
+            proto::ExportGateStep {
+                gate: "split_horizon".into(),
+                code: "split_horizon".into(),
+                verdict: proto::ExportGateVerdict::Pass as i32,
+                detail: String::new(),
+            },
+            proto::ExportGateStep {
+                gate: "export_policy".into(),
+                code: "policy_denied".into(),
+                verdict: proto::ExportGateVerdict::Stop as i32,
+                detail: String::new(),
+            },
+        ]);
+        assert_eq!(gates.iter().map(|g| g.step).collect::<Vec<_>>(), vec![1, 2]);
+        assert_eq!(stopped_at_gate(&gates).as_deref(), Some("export_policy"));
+        assert_eq!(stopped_at_gate(&gates[..1]), None);
     }
 
     #[tokio::test]

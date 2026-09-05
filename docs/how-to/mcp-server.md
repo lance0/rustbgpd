@@ -105,6 +105,7 @@ claude mcp add rustbgpd -- /usr/local/bin/rustbgpd-mcp \
 | `rbgp_explain_export` | Why is this prefix advertised, or not advertised, to this peer? |
 | `rbgp_explain_import` | Why did this prefix from this peer get accepted or rejected? |
 | `rbgp_explain_best_path` | Which path won for this prefix, and at which decision step? |
+| `rbgp_explain_evpn_route` | What happened to this exact EVPN route — selection and export? |
 | `rbgp_list_rejected` | What did this peer send that was thrown away? |
 | `rbgp_list_peers` | What sessions exist and what state are they in? |
 | `rbgp_get_health` | Is the daemon up, and how much is in the RIB? |
@@ -136,14 +137,42 @@ on every rung. A `stop` verdict names the gate that halted the route, and the
 ladder is recorded by a dry run of the same staging body live distribution
 executes — it cannot drift from the real decision.
 
-Two surfaces the agent must not be allowed to misread, and which the tools
-label explicitly:
+`rbgp_explain_evpn_route` covers the EVPN side and answers more per call: one
+response carries the selection story (installed best, fresh selection, compared
+candidate, candidate count, deciding reason) and, when `advertised_to` is given,
+the same gate ladder toward that peer. Keys are exact, not filters — a Type 2
+lookup with `ip` omitted selects the MAC-only key, not every host IP under that
+MAC:
+
+```json
+{
+  "rd": "65001:100",
+  "key": { "route_type": "mac_ip", "ethernet_tag": 0, "mac": "aa:bb:cc:dd:ee:01" },
+  "received_from": "192.0.2.1",
+  "advertised_to": "192.0.2.9"
+}
+```
+
+### Results an agent must not over-read
+
+Empty is not the same as absent, and absent is not the same as denied. Four
+fields carry an explicit note so the distinction does not depend on a model
+inferring it:
 
 - `rbgp_list_rejected` returns `retention_enabled` and a `retention_note`. When
   retention is off, an empty list is a configuration fact, not "nothing was
   rejected". When the store is at `capacity`, older rejections were displaced.
 - `rbgp_explain_import` outcomes `cache_disabled`, `no_session`, and `evicted`
   mean the question could not be answered. They are not rejections.
+- `rbgp_explain_evpn_route` returns a `received_note`. EVPN import rejection
+  history is not retained, so an empty `received` for a peer is **not** an
+  import-rejection explanation and **not** proof the peer never sent the key —
+  it supports no conclusion about what the peer sent. The note also separates
+  that case from "no accepted-source lookup was requested".
+- `rbgp_explain_evpn_route` returns a `selection_note`. While
+  `selection_deferred` is set the installed `best` may differ from fresh
+  selection, so reporting it as current state would be wrong; the note says so
+  and points at `selection_best`.
 
 Two tools that might be expected are absent because the RPCs do not exist: BMP
 is outbound-only export to configured collectors with no query surface, and the
