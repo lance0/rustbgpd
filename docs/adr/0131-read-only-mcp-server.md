@@ -1,6 +1,6 @@
 # ADR-0131: Read-Only MCP Server for the Explain Surfaces
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-09-05
 
 ## Context
@@ -49,8 +49,9 @@ production router. Any packaging that makes running it the default is wrong.
 
 `rustbgpd-mcp` is a `publish = false` workspace member with a lib and a bin
 target, depending on `rustbgpd-api` for the generated gRPC client — the same
-shape as `examples/event-bridge` and `examples/birdwatcher-adapter`. It depends
-on neither `rustbgpctl`, `rustbgpd-rib`, nor `rustbgpd-mrt`. The lib target
+shape as `examples/event-bridge` and `examples/birdwatcher-adapter`. Its direct
+project dependency is `rustbgpd-api`, which transitively includes
+`rustbgpd-rib`; this adds no dependencies to the `rbgp` CLI. The lib target
 exists so tests can call handler methods and inspect the registered tool router
 directly.
 
@@ -292,14 +293,13 @@ control 2 is advice an operator can ignore by pointing the server at the
 default local socket, which works and gives the process Operator-tier
 credentials. The how-to states this plainly rather than assuming it away.
 
-**Neutral / outstanding.** Unit coverage is the pure mapping logic — request
-construction, response to structured result, error mapping, truncation
-accounting, label rendering — plus the stdio end-to-end handshake against the
-compiled binary and the inventory contract. There is no in-repo mock gRPC
-server harness to drive handler methods against a faked backend, and none was
-built for this; `tests/birdwatcher_adapter_smoke.rs` stands up a real daemon
-and a hand-rolled BGP speaker, which is the pattern to reuse if that coverage
-is wanted later.
+**Neutral / outstanding.** Tests cover mapping logic, retention semantics,
+the stdio handshake against the compiled binary, and the inventory contract.
+A mock gRPC health service exercises mutual TLS, including rejected server
+and client credentials. TCP and Unix transport tests hold responses before
+and after headers to verify the complete-response deadline. These backend
+tests do not replace the recorded live-daemon evidence or provide live
+coverage of every handler.
 
 The seven tools are a vertical slice, not a complete operator surface. The
 remaining explain surfaces (`rbgp policy stats`, `rbgp doctor`, RPKI validation)

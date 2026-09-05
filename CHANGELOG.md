@@ -457,6 +457,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `rustbgpd-wire` shutdown communication errors now implement `Display` and
+  `std::error::Error` for downstream error propagation, with bounded static
+  descriptions. Decoding and structured log categories are unchanged.
+
 - Withdraw every IPv4/IPv6 FlowSpec path immediately when a restarting
   peer's Graceful Restart capability omits that family. Recompute the best
   rule and downstream advertisements, selecting an alternate source when
