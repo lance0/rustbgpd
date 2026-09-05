@@ -7,13 +7,28 @@ default:
 # Run the broad local correctness baseline in diagnostic order.
 gate:
     just links
+    just check-devtools
+    just check-fast
+    just check-contracts
+    just check-clippy
+    cargo test --locked --workspace
+    just docs
+
+# Check the pinned developer tooling versions.
+check-devtools:
     python3 scripts/check_developer_tooling.py --self-test
     python3 scripts/check_developer_tooling.py
+
+# Check formatting and the cheap repository contracts (seconds, no compilation).
+check-fast:
     cargo fmt --all -- --check
     python3 -m unittest -v scripts/test_check_clippy_reasons.py
     python3 scripts/check-clippy-reasons.py
     python3 scripts/check-v1-stable-surface.py
     python3 scripts/reflow-release-notes.py --selftest
+
+# Check the slower repository contracts: public tracker ids, documentation paths, and metric consumers (minutes, no compilation).
+check-contracts:
     python3 -m unittest -v scripts/test_check_public_tracker_ids.py
     python3 scripts/check_public_tracker_ids.py
     python3 -m unittest -v scripts/test_check_ixp_manager_docs.py
@@ -22,8 +37,30 @@ gate:
     python3 scripts/check_release_checklist_paths.py
     python3 -m unittest -v scripts/test_check_metric_consumers.py
     python3 scripts/check-metric-consumers.py
+
+# Lint every workspace target with warnings denied.
+check-clippy:
     cargo clippy --locked --workspace --all-targets -- -D warnings
-    cargo test --locked --workspace
+
+# Run the library unit tests of every workspace crate (the daemon's unit tests live in its binary; see test-bins).
+test-crates:
+    cargo test --locked --workspace --lib
+
+# Run the unit tests of every binary target: the daemon, rbgp, the examples, and the tools.
+test-bins:
+    cargo test --locked --workspace --bins
+
+# Two root-crate test targets carry required-features, and a `--test` glob
+# refuses those instead of skipping them, so the root package is selected
+# with `--tests`; that runs the daemon's binary unit tests again.
+
+# Run every integration test binary in the workspace (no library unit tests or doctests).
+test-integration:
+    cargo test --locked --workspace --exclude rustbgpd --test '*'
+    cargo test --locked -p rustbgpd --tests
+
+# Build the library docs (private items included) and both binary docs.
+docs:
     cargo doc --locked --workspace --lib --no-deps --document-private-items
     cargo doc --locked -p rustbgpd --bin rustbgpd --no-deps
     cargo doc --locked -p rustbgpctl --bin rbgp --no-deps

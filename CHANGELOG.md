@@ -27,6 +27,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   dialed, pointing at the `rib advertised --explain --source-peer` /
   `--source-path-id` flags for Add-Path source selection. Shell completions
   regenerated.
+- Tiered `just` recipes for the local developer loop: `check-fast`,
+  `check-contracts`, `check-devtools`, `check-clippy`, `docs`, `test-crates`,
+  `test-bins`, and `test-integration` split `just gate` into runnable
+  pieces, and `test-feature-gated`, `test-ignored`, and `netns` expose the
+  feature-gated, ignored, and privileged network-namespace test surfaces that
+  hosted CI runs. `just gate` runs the same commands in the same order as
+  before.
 
 - **Operator-visible:** RFC 5883 multihop BFD. Setting
   `bfd = { profile = "...", multihop = true }` on a static global neighbor
