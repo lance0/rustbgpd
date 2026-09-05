@@ -1,0 +1,46 @@
+services:
+  rustbgpd:
+    build:
+      context: ../..
+      target: dev
+    volumes:
+      - ./rustbgpd.toml:/etc/rustbgpd/config.toml:ro
+      - ../../tests/fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
+    environment:
+      RUSTBGPD_TOKEN_FILE: /run/rustbgpd/grpc-test-only-operator.token
+    networks:
+      rr:
+        ipv4_address: 10.97.0.1
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 524288
+
+  client-a:
+    image: quay.io/frrouting/frr:10.7.1
+    volumes:
+      - ../../examples/docker-compose/frr-daemons:/etc/frr/daemons:ro
+      - ./client-a.conf:/etc/frr/frr.conf:ro
+      - ./vtysh.conf:/etc/frr/vtysh.conf:ro
+    networks:
+      rr:
+        ipv4_address: 10.97.0.20
+    cap_add: [NET_ADMIN, NET_RAW, SYS_ADMIN]
+
+  client-b:
+    image: quay.io/frrouting/frr:10.7.1
+    volumes:
+      - ../../examples/docker-compose/frr-daemons:/etc/frr/daemons:ro
+      - ./client-b.conf:/etc/frr/frr.conf:ro
+      - ./vtysh.conf:/etc/frr/vtysh.conf:ro
+    networks:
+      rr:
+        ipv4_address: 10.97.0.30
+    cap_add: [NET_ADMIN, NET_RAW, SYS_ADMIN]
+
+networks:
+  rr:
+    ipam:
+      config:
+        - subnet: 10.97.0.0/24
+          gateway: 10.97.0.254

@@ -105,6 +105,42 @@ with expiry checking disabled in StayRTR; it is not a public RPKI validator.
 For the production configuration shape, see the
 [route-server example](../../examples/route-server/README.md).
 
+## Route reflector: an unintended origin wins
+
+This lab runs a route reflector and two FRR 10.7.1 clients in AS65001.
+Client A is the intended sole origin of `198.51.100.0/24`; client B receives
+its reflected route. It uses the same host prerequisites as the quickstart.
+
+```bash
+just lab rr up
+just lab rr verify
+just lab rr break
+just lab rr explain
+```
+
+`verify` checks both client sessions, the selected source, and receipt at
+client B with the original next hop and ORIGINATOR_ID. It also checks that
+the reflector does not advertise the route back to its source.
+
+`break` makes client B originate the same prefix. Its otherwise equal path
+wins because B has the lower BGP Identifier. Both sessions remain
+Established, but `verify` now fails because A is no longer the sole origin.
+`explain` shows the winning source, the identifier tie-break, and the
+`split_horizon` export stop toward that source.
+
+Remove B's unintended announcement and verify recovery:
+
+```bash
+just lab rr up
+just lab rr verify
+just lab rr down
+```
+
+The lab uses the dedicated Compose project `rustbgpd-lab-rr` and subnet
+`10.97.0.0/24`, with no published host ports. Run one instance at a time
+and avoid overlapping local networks. Repeating `up` restores the intended
+origin; repeating `down` safely removes the lab's containers and network.
+
 For complete deployment scenarios, use the [cookbook](../cookbook/README.md).
 The [interop receipts](../receipts.md) describe the separate protocol validation
 labs and their measured evidence.
