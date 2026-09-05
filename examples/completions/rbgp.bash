@@ -7714,7 +7714,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__policy__subcmd__explain)
-            opts="-s -j -h --peer --neighbor --prefix --path-id --addr --token-file --json --no-color --pager --help"
+            opts="-s -j -h --peer --neighbor --prefix --path-id --direction --addr --token-file --json --no-color --pager --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -7734,6 +7734,10 @@ _rbgp() {
                     ;;
                 --path-id)
                     COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --direction)
+                    COMPREPLY=($(compgen -W "import export" -- "${cur}"))
                     return 0
                     ;;
                 --addr)

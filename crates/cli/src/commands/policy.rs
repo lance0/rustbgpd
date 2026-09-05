@@ -1331,6 +1331,49 @@ fn parse_cidr(prefix: &str) -> Result<(String, u32, proto::AddressFamily), CliEr
     }
 }
 
+/// Rejection for `--path-id` with `--direction export`: the identifier
+/// selects an Add-Path entry in the import-decision cache, while the
+/// export dry run takes its source identity from the `rib advertised
+/// --explain` flags.
+pub const EXPLAIN_EXPORT_PATH_ID_ERROR: &str = "--path-id applies to --direction import only; \
+     for Add-Path source selection on the export side use \
+     `rib --prefix <cidr> advertised <peer> --explain --source-peer <addr> --source-path-id <id>`";
+
+/// `rbgp policy explain --direction <import|export>`.
+///
+/// `import` reads the per-session import-decision cache
+/// ([`explain_import`]); `export` is the read-only export dry run
+/// behind `rib --prefix <cidr> advertised <peer> --explain`
+/// ([`super::rib::explain_advertised`]) for the unicast, unlabeled,
+/// best-source case. The CLI's `value_parser` and `validate_local_command`
+/// refuse an unknown direction and `--path-id` with `export` before
+/// dialing the daemon; the checks here keep this entry point honest for
+/// any other caller.
+pub async fn explain(
+    connection: Connection,
+    neighbor: &str,
+    prefix: &str,
+    path_id: Option<u32>,
+    direction: &str,
+    json: bool,
+) -> Result<(), CliError> {
+    match direction {
+        "import" => explain_import(connection, neighbor, prefix, path_id, json).await,
+        "export" if path_id.is_some() => {
+            Err(CliError::Argument(EXPLAIN_EXPORT_PATH_ID_ERROR.into()))
+        }
+        "export" => {
+            super::rib::explain_advertised(
+                connection, neighbor, prefix, None, false, None, None, json,
+            )
+            .await
+        }
+        other => Err(CliError::Argument(format!(
+            "unknown explain direction {other:?}; expected import or export"
+        ))),
+    }
+}
+
 pub async fn explain_import(
     connection: Connection,
     neighbor: &str,
@@ -2374,6 +2417,106 @@ mod tests {
             captured.afi_safi,
             crate::proto::AddressFamily::Ipv4Unicast as i32
         );
+    }
+
+    /// `--direction export` is the `rib advertised --explain` dry run:
+    /// it must reach `ExplainAdvertisedRoute` (not the import cache)
+    /// with the neighbor and prefix, no RD, unlabeled, no source
+    /// identity, and render in both text and JSON.
+    #[tokio::test]
+    async fn explain_direction_export_calls_advertised_rpc() {
+        let server = spawn_mock_server(None).await;
+        for json in [true, false] {
+            let connection = connect(&server.addr, None).await.unwrap();
+            explain(
+                connection,
+                "fe80::1%eth0",
+                "203.0.113.0/24",
+                None,
+                "export",
+                json,
+            )
+            .await
+            .unwrap();
+            let req = server
+                .state
+                .last_explain_advertised
+                .lock()
+                .await
+                .take()
+                .expect("export explain reached ExplainAdvertisedRoute");
+            assert_eq!(req.peer_address, "fe80::1");
+            assert_eq!(req.prefix, "203.0.113.0");
+            assert_eq!(req.prefix_length, 24);
+            assert_eq!(req.rd, "");
+            assert!(!req.labeled);
+            assert_eq!(req.source, None);
+        }
+        assert!(
+            server.state.last_explain_import.lock().await.is_none(),
+            "export explain must not consult the import-decision cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn explain_direction_import_is_the_cache_lookup() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+        explain(
+            connection,
+            "192.0.2.1",
+            "192.0.2.0/24",
+            Some(7),
+            "import",
+            true,
+        )
+        .await
+        .unwrap();
+        let req = server
+            .state
+            .last_explain_import
+            .lock()
+            .await
+            .clone()
+            .expect("import explain reached ExplainImportPolicy");
+        assert_eq!(req.path_id, Some(7));
+        assert!(server.state.last_explain_advertised.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn explain_direction_export_rejects_path_id_before_any_rpc() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+        let err = explain(
+            connection,
+            "192.0.2.1",
+            "192.0.2.0/24",
+            Some(3),
+            "export",
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, CliError::Argument(_)), "{err}");
+        assert_eq!(err.to_string(), EXPLAIN_EXPORT_PATH_ID_ERROR);
+        assert!(server.state.last_explain_advertised.lock().await.is_none());
+        assert!(server.state.last_explain_import.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn explain_rejects_unknown_direction_before_any_rpc() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+        let err = explain(connection, "192.0.2.1", "192.0.2.0/24", None, "both", false)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CliError::Argument(_)), "{err}");
+        assert_eq!(
+            err.to_string(),
+            "unknown explain direction \"both\"; expected import or export"
+        );
+        assert!(server.state.last_explain_advertised.lock().await.is_none());
+        assert!(server.state.last_explain_import.lock().await.is_none());
     }
 
     #[tokio::test]
