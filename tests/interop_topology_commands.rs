@@ -12,6 +12,67 @@ fn repo_path(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
 }
 
+#[test]
+fn route_server_cli_predicates_drain_output_and_preserve_errors() {
+    for script in [
+        "scripts/test-m102-routeserver-openbgpd92.sh",
+        "scripts/test-m104-arouteserver-current-rs-differential.sh",
+        "scripts/test-m106-rs-white-list-control-differential.sh",
+    ] {
+        let source = fs::read_to_string(interop_path(script)).unwrap();
+        let line = source
+            .lines()
+            .find(|line| line.contains("rs_ctl ") && line.contains("| grep "))
+            .expect("live route-server CLI predicate");
+        let predicate = &line[line.find("rs_ctl ").unwrap()..];
+        let predicate = predicate
+            .split(" && ")
+            .next()
+            .unwrap()
+            .trim_end_matches("; }");
+        let output = Command::new("bash")
+            .args([
+                "-c",
+                r#"
+set -euo pipefail
+FRR_ADDR=192.0.2.1 EXPORT_DENY=203.0.113.0/24
+set -- "$FRR_ADDR" m102-export-to-frr
+rs_ctl() {
+    printf '%s\n' "$reply" || return $?
+    # More than a pipe buffer after the matching first line makes early
+    # consumer exit fail the producer deterministically, without sleeps.
+    printf '%*s\n' 1048576 '' || return $?
+    return "$producer_exit"
+}
+reply=m102-export-to-frr producer_exit=0
+old=${PREDICATE/grep /grep -q }
+if eval "$old" >/dev/null 2>&1; then
+    echo 'early-closing negative control unexpectedly passed' >&2
+    exit 1
+fi
+eval "$PREDICATE"
+reply=unrelated-output
+if eval "$PREDICATE"; then
+    echo 'nonmatching output was accepted' >&2
+    exit 1
+fi
+reply=m102-export-to-frr producer_exit=7
+status=0
+eval "$PREDICATE" || status=$?
+test "$status" -eq 7
+"#,
+            ])
+            .env("PREDICATE", predicate)
+            .output()
+            .expect("run offline CLI predicate regression");
+        assert!(
+            output.status.success(),
+            "{script}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
 fn topology(relative: &str) -> serde_yaml::Value {
     let path = interop_path(relative);
     let source = fs::read_to_string(&path)

@@ -1092,7 +1092,7 @@ assert_policy() {
  import_explain_names_m102_import && ok "import explain names m102-import" || fail "import explain missing"
  rs_loc "$EXPORT_DENY" && ok "export-denied route remains in Loc-RIB" || fail "export source missing"
  rs_advertised_absent "$FRR_ADDR" ipv4 "$EXPORT_DENY" && ok "FRR advertised view omits export deny" || fail "export deny advertised"
- rs_ctl rib --prefix "$EXPORT_DENY" advertised "$FRR_ADDR" --explain | grep -q m102-export-to-frr && ok "export explain names m102-export-to-frr" || fail "export explain missing"
+ rs_ctl rib --prefix "$EXPORT_DENY" advertised "$FRR_ADDR" --explain | grep m102-export-to-frr >/dev/null && ok "export explain names m102-export-to-frr" || fail "export explain missing"
  frr_has ipv4 "$OPEN_V4" && open_has "$FRR_V4" && ok "policy positive controls pass both directions" || fail "policy positive control missing"
 }
 assert_wire() {
