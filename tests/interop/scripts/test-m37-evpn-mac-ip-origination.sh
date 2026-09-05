@@ -56,7 +56,7 @@ frr_vtysh_strict() {
 }
 
 # Returns 0 if FRR sees a Type 2 for `$mac` with a "no IP" NLRI
-# (MAC-only). FRR 10.3.1 prints macip routes as
+# (MAC-only). FRR prints macip routes as
 # `[2]:[EthTag]:[MAClen]:[MAC]` for MAC-only and
 # `[2]:[EthTag]:[MAClen]:[MAC]:[IPlen]:[IP]` for MAC+IP. Older
 # diagnostic comments in this tree used an extra field before

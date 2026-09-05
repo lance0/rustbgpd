@@ -1,0 +1,120 @@
+M110 — FRR 10.7.1 Type 5 next-hop startup race on an IPv6 VXLAN underlay
+Captured 2026-09-05, Linux 7.0 (7.0.0-30-generic), quay.io/frrouting/frr:10.7.1,
+topology tests/interop/m110-evpn-ipv6-underlay-irb.clab.yml.
+
+Commands are shown as run; output is verbatim. `pe2` is the FRR container,
+`pe1` the rustbgpd container.
+
+
+== 1. FRR's own view of the route it originated ==
+
+  pe2$ vtysh -c "show bgp l2vpn evpn route type prefix"
+
+   *>  [5]:[0]:[64]:[2001:db8:110:2::] RD 65000:110
+                      a6e:2::                  0         32768 ?
+                      ET:8 RT:65000:110 Rmac:6e:f1:60:d7:28:a9
+
+The next hop reads a6e:2::. The expected value is fd00:110::2, the L3VNI's
+VXLAN tunnel source.
+
+
+== 2. FRR's own view of what it advertised to the peer ==
+
+  pe2$ vtysh -c "show bgp l2vpn evpn neighbors fd00:110::1 advertised-routes"
+
+  BGP table version is 0, local router ID is 10.110.0.2
+  Default local pref 100, local AS 65000
+     Network          Next Hop            Metric LocPrf Weight Path
+  Route Distinguisher: 65000:110
+   *> [5]:[0]:[64]:[2001:db8:110:2::]
+                      a6e:2::                  0    100      0 ?
+
+  Total number of prefixes 1
+
+FRR reports a6e:2:: as the value it sent. The wrong next hop therefore
+originates on the FRR side; it is not a decode error on the receiving side.
+
+
+== 3. What the value is ==
+
+a6e:2:: expands to the 16 octets
+
+  0a 6e 00 02 00 00 00 00 00 00 00 00 00 00 00 00
+
+The first four octets are 0x0a 0x6e 0x00 0x02 = 10.110.0.2, which is the
+`bgp router-id` configured on FRR's per-VRF BGP instance. FRR placed that
+4-octet IPv4 identifier at the front of the 16-octet IPv6 next-hop field and
+zero-padded the remainder.
+
+
+== 4. What rustbgpd did with it ==
+
+  pe1$ grpcurl ... rustbgpd.v1.RibService/ListEvpnRoutes
+
+  {"routeType":5,"rd":"65000:110","prefix":"2001:db8:110:2::/64",
+   "gateway":"::","label":110,"nextHop":"a6e:2::",
+   "peerAddress":"fd00:110::2","tunnelType":8}
+
+  pe1$ ip -6 route show table 110
+
+  2001:db8:110:2::/64 via a6e:2:: dev l3vxlan110 proto bgp metric 1024 onlink
+
+  pe1$ ip -6 neigh show dev l3vxlan110
+
+  a6e:2:: lladdr 6e:f1:60:d7:28:a9 extern_learn PERMANENT proto bgp
+
+  pe1$ bridge fdb show dev l3vxlan110
+
+  6e:f1:60:d7:28:a9 dst a6e:2:: self extern_learn permanent
+
+rustbgpd decoded the 16-octet next hop faithfully and programmed the kernel
+with exactly the value it received, including the resolution rows. The tenant
+ping fails because a6e:2:: is not a reachable VTEP. This is the correct
+behavior for a BGP speaker: nothing in RFC 9136 or RFC 8365 licenses a
+receiver to second-guess a syntactically valid next hop.
+
+FRR's L3VNI state was correct at the same moment, which is what makes this a
+latch rather than a misconfiguration:
+
+  pe2$ vtysh -c "show evpn vni detail"
+
+  VNI: 110
+    Type: L3
+    Tenant VRF: vrf1
+    Local Vtep Ip: fd00:110::2
+    State: Up
+
+
+== 5. What clears it ==
+
+  pe2$ vtysh -c "clear bgp *"          -> next hop still a6e:2::
+  pe2$ ip link set vxlan110 down
+  pe2$ ip link set vxlan110 up         -> next hop becomes fd00:110::2
+  pe2$ ip addr del/add on lo-vrf1      -> next hop stays fd00:110::2
+
+Resetting the BGP session does not re-derive the next hop; the value is
+latched at origination. A VXLAN link event re-originates the route and the
+correct tunnel source is used from then on.
+
+
+== 6. Frequency ==
+
+Four fresh deploys left to settle for 25 s with no BGP peer present: the
+self-originated next hop was fd00:110::2 in all four.
+
+Four fresh deploys driven by the M110 test script, which starts the rustbgpd
+peer roughly one second after deploy: one run latched a6e:2:: (the driver log
+in this directory), three runs were correct and passed 19/19.
+
+The race needs the EVPN session to establish before zebra has published the
+L3VNI's IPv6 tunnel source to bgpd. It is a peer-side startup race, it does
+not self-heal within the life of a test run, and it is the reason M110 is
+documented as a manual leg rather than wired into hosted CI.
+
+
+== 7. Scope ==
+
+Only the per-VRF `advertise ipv6 unicast` Type 5 path is affected. In the
+same image and the same underlay family, the L2 routes carry the correct
+IPv6 tunnel source every time — see M109, whose Type 2 and Type 3 next hops
+were fd00:109::2 on every run.

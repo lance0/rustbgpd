@@ -1,0 +1,107 @@
+# Containerlab topology: rustbgpd ↔ FRR EVPN VTEPs on an IPv6-only
+# VXLAN underlay (M109 — L2 path)
+#
+# Every other EVPN topology in this suite runs the VXLAN underlay over
+# IPv4. M109 is the first to carry the tunnel endpoints, the BGP
+# transport, and the EVPN next hops entirely over IPv6:
+#
+#   rustbgpd VTEP (fd00:109::1, AS 65000)
+#        │
+#        └── iBGP L2VPN/EVPN over IPv6 transport ──┐
+#                                                  │
+#                              FRR 10.7.1 VTEP (fd00:109::2, AS 65000)
+#
+# The `eth1` underlay link carries NO IPv4 address on either side. That
+# is deliberate: an IPv4 address anywhere on the underlay would let a
+# fallback path rescue the test and produce a false green. The driver
+# asserts the absence before it asserts anything else.
+#
+# VNI 109 (`br109` / `vxlan109`) rather than the suite's usual 100, so
+# log and FDB greps are unambiguous against the other EVPN legs running
+# on the same box.
+#
+# iBGP for the same reason M36 gives: FRR's default export policy across
+# an AS boundary does not advertise EVPN, and that detour has nothing to
+# do with the underlay family under test.
+#
+# Single-homed: this leg exercises the underlay address family, not
+# multi-homing. A multi-homed IPv6 underlay is out of scope here and
+# stays untested.
+#
+# Both VXLAN ports run `nolearning` so EVPN owns the FDB. The rustbgpd
+# side additionally runs `neigh_suppress on` (the M37+IP prerequisite)
+# so the kernel snoops ND into the bridge neighbour table and the
+# daemon can originate a MAC+IP Type 2.
+#
+# Asserted by tests/interop/scripts/test-m109-evpn-ipv6-underlay-vtep.sh:
+#
+#   1. No IPv4 on either underlay interface (premise).
+#   2. L2VPN/EVPN session Established over the IPv6 transport.
+#   3. Type 3 IMET in both directions, each carrying the originator's
+#      IPv6 VTEP address as the MP_REACH next hop.
+#   4. Type 2 MAC-only and MAC+IP in both directions, again with an
+#      IPv6 next hop.
+#   5. rustbgpd programs FRR's MAC into the kernel FDB with
+#      `extern_learn` and `dst fd00:109::2`, and withdraws it again.
+#   6. A foreign static row pointing at an IPv6 dst survives both cycles.
+#
+# Usage:
+#   docker build --target dev -t rustbgpd:dev .
+#   containerlab deploy -t tests/interop/m109-evpn-ipv6-underlay-vtep.clab.yml
+#   bash tests/interop/scripts/test-m109-evpn-ipv6-underlay-vtep.sh
+#   containerlab destroy -t tests/interop/m109-evpn-ipv6-underlay-vtep.clab.yml --cleanup
+
+name: m109-evpn-ipv6-underlay-vtep
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m109-vtep6.toml:/etc/rustbgpd/config.toml:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
+        - ./scripts/start-rustbgpd-originator-mac-ip.sh:/usr/local/bin/start-rustbgpd-originator-mac-ip.sh:ro
+      exec:
+        # `nodad` keeps the address out of the tentative state, so the
+        # VXLAN device created milliseconds later can bind it as its
+        # tunnel source without racing duplicate-address detection.
+        - ip -6 addr add fd00:109::1/64 dev eth1 nodad
+        - ip link set eth1 up
+        - /usr/local/bin/start-rustbgpd-originator-mac-ip.sh fd00:109::1 109
+      env:
+        RUST_LOG: info,rustbgpd_evpn_linux=debug,rustbgpd::evpn_originator=debug
+        VTEP_LOOPBACK: fd00:109::1
+        VTEP_VNI: "109"
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr:10.7.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m109.conf:/etc/frr/frr.conf:ro
+        - ./scripts/start-frr-vtep.sh:/usr/local/bin/start-frr-vtep.sh:ro
+      exec:
+        - ip -6 addr add fd00:109::2/64 dev eth1 nodad
+        - ip link set eth1 up
+        - /usr/local/bin/start-frr-vtep.sh fd00:109::2 109
+        # An L3 address on the bridge gives zebra the SVI it needs before
+        # it will originate a MAC+IP Type 2, and `neigh_suppress` routes
+        # snooped ND into the bridge neighbour table where zebra reads
+        # it. Both are applied here rather than inside start-frr-vtep.sh,
+        # which M36/M37 share and which has no L3 anchor by design.
+        - ip -6 addr add 2001:db8:109::2/64 dev br109 nodad
+        - bridge link set dev vxlan109 neigh_suppress on
+      env:
+        VTEP_LOOPBACK: fd00:109::2
+        VTEP_VNI: "109"
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr:eth1"]
+
+# Underlay: fd00:109::/64 — rustbgpd fd00:109::1, FRR fd00:109::2.
+# L2VNI: 109 on both sides (br109 / vxlan109).
+# Route Distinguisher is the `asn:value` form (65000:109) on both sides;
+# the RFC 4364 type-1 `ip:value` form carries a 4-byte IPv4 administrator
+# field and therefore cannot express an IPv6 VTEP.

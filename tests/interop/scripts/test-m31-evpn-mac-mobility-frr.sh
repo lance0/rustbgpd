@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # M31 interop test — EVPN MAC mobility (RFC 7432 §15.1) through rustbgpd RR
 #
-# Validates the following end-to-end, against real FRR 10.3.1 VTEPs:
+# Validates the following end-to-end, against real FRR 10.7.1 VTEPs:
 #
 # Baseline:
 #   1. All three VTEPs reach Established with L2VPN/EVPN negotiated.

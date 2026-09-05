@@ -1,0 +1,138 @@
+[07:49:09 TEST] Provisioning PE1 kernel topology (IPv6 tunnel source fd00:110::1)
+[07:49:09 TEST] gRPC endpoint: 172.20.20.3:50051
+[07:49:09 TEST] Starting rustbgpd daemon...
+[07:49:09 TEST] rustbgpd is running (after 1s)
+[07:49:09 TEST] Waiting for gRPC to become available...
+  [07:49:09] PASS gRPC endpoint ready (attempt 1)
+[07:49:09 TEST] [1] underlay premise: eth1 holds no IPv4 address on either side
+  [07:49:10] PASS clab-m110-evpn-ipv6-underlay-irb-pe1 eth1 has no IPv4 address
+  [07:49:10] PASS clab-m110-evpn-ipv6-underlay-irb-pe2 eth1 has no IPv4 address
+[07:49:10 TEST] [1b] both L3VXLAN devices use an IPv6 tunnel source
+  [07:49:10] PASS clab-m110-evpn-ipv6-underlay-irb-pe1 l3vxlan110 has local fd00:110::1
+  [07:49:10] PASS clab-m110-evpn-ipv6-underlay-irb-pe2 vxlan110 has local fd00:110::2
+[07:49:10 TEST] [2] L2VPN/EVPN session Established over the IPv6 transport
+[07:49:10 TEST] Waiting for PE1↔PE2 L2VPN/EVPN over IPv6 session to reach Established...
+  [07:49:10] PASS PE1↔PE2 L2VPN/EVPN over IPv6 session established (attempt 1)
+[07:49:10 TEST] [3] FRR sees PE1's Type 5 for 2001:db8:110:1::/64
+  [07:49:10] PASS FRR received rustbgpd's Type 5 — next hop 'fd00:110::1 ipv6'
+[07:49:10 TEST] [3b] rustbgpd sees PE2's Type 5 for 2001:db8:110:2::/64
+  [07:50:12] FAIL rustbgpd received FRR's Type 5 — want next hop fd00:110::2 for 2001:db8:110:2::/64, got 'a6e:2::'
+--- PE1: ip -6 route show table 110 ---
+local 2001:db8:110:1::1 dev lo-vrf1 proto kernel metric 0 pref medium
+2001:db8:110:1::/64 dev lo-vrf1 proto kernel metric 256 pref medium
+2001:db8:110:2::/64 via a6e:2:: dev l3vxlan110 proto bgp metric 1024 onlink pref medium
+local fe80::ff:fe00:110 dev l3vxlan110 proto kernel metric 0 pref medium
+local fe80::3c0b:61ff:fe5e:e89a dev lo-vrf1 proto kernel metric 0 pref medium
+fe80::/64 dev l3vxlan110 proto kernel metric 256 pref medium
+fe80::/64 dev lo-vrf1 proto kernel metric 256 pref medium
+multicast ff00::/8 dev l3vxlan110 proto kernel metric 256 pref medium
+multicast ff00::/8 dev lo-vrf1 proto kernel metric 256 pref medium
+--- PE1: ip -6 neigh show dev l3vxlan110 ---
+a6e:2:: lladdr 6e:f1:60:d7:28:a9 extern_learn PERMANENT proto bgp 
+--- PE1: bridge fdb show dev l3vxlan110 ---
+6e:f1:60:d7:28:a9 dst a6e:2:: self extern_learn permanent
+--- PE1: ListEvpnRoutes (type 5) ---
+{"routeType":5,"rd":"65000:110","esi":"00:00:00:00:00:00:00:00:00:00","ethernetTag":"0","prefix":"2001:db8:110:1::/64","gateway":"::","label":110,"nextHop":"fd00:110::1","peerAddress":"0.0.0.0","extendedCommunities":["842122827661422","219550481834311688","433192188180955408"],"tunnelType":8}
+{"routeType":5,"rd":"65000:110","esi":"00:00:00:00:00:00:00:00:00:00","ethernetTag":"0","prefix":"2001:db8:110:2::/64","gateway":"::","label":110,"nextHop":"a6e:2::","peerAddress":"fd00:110::2","extendedCommunities":["219550481834311688","842122827661422","433311972148586665"],"tunnelType":8}
+--- PE2: show bgp l2vpn evpn route type prefix ---
+[07:50:13 TEST] [4] PE1 kernel installs 2001:db8:110:2::/64 in table 110
+  [07:51:15] FAIL PE2's prefix never installed with via fd00:110::2 dev l3vxlan110 proto bgp onlink
+--- PE1: ip -6 route show table 110 ---
+local 2001:db8:110:1::1 dev lo-vrf1 proto kernel metric 0 pref medium
+2001:db8:110:1::/64 dev lo-vrf1 proto kernel metric 256 pref medium
+2001:db8:110:2::/64 via a6e:2:: dev l3vxlan110 proto bgp metric 1024 onlink pref medium
+local fe80::ff:fe00:110 dev l3vxlan110 proto kernel metric 0 pref medium
+local fe80::3c0b:61ff:fe5e:e89a dev lo-vrf1 proto kernel metric 0 pref medium
+fe80::/64 dev l3vxlan110 proto kernel metric 256 pref medium
+fe80::/64 dev lo-vrf1 proto kernel metric 256 pref medium
+multicast ff00::/8 dev l3vxlan110 proto kernel metric 256 pref medium
+multicast ff00::/8 dev lo-vrf1 proto kernel metric 256 pref medium
+--- PE1: ip -6 neigh show dev l3vxlan110 ---
+a6e:2:: lladdr 6e:f1:60:d7:28:a9 extern_learn PERMANENT proto bgp 
+--- PE1: bridge fdb show dev l3vxlan110 ---
+6e:f1:60:d7:28:a9 dst a6e:2:: self extern_learn permanent
+--- PE1: ListEvpnRoutes (type 5) ---
+{"routeType":5,"rd":"65000:110","esi":"00:00:00:00:00:00:00:00:00:00","ethernetTag":"0","prefix":"2001:db8:110:1::/64","gateway":"::","label":110,"nextHop":"fd00:110::1","peerAddress":"0.0.0.0","extendedCommunities":["842122827661422","219550481834311688","433192188180955408"],"tunnelType":8}
+{"routeType":5,"rd":"65000:110","esi":"00:00:00:00:00:00:00:00:00:00","ethernetTag":"0","prefix":"2001:db8:110:2::/64","gateway":"::","label":110,"nextHop":"a6e:2::","peerAddress":"fd00:110::2","extendedCommunities":["219550481834311688","842122827661422","433311972148586665"],"tunnelType":8}
+--- PE2: show bgp l2vpn evpn route type prefix ---
+[07:51:15 TEST] [5] PE1 L3 neighbor row maps fd00:110::2 → PE2's router MAC
+  [07:51:16] FAIL neighbor row for fd00:110::2 missing or wrong shape
+a6e:2:: lladdr 6e:f1:60:d7:28:a9 extern_learn PERMANENT proto bgp 
+[07:51:16 TEST] [6] PE1 L3VXLAN FDB row maps PE2's router MAC → dst fd00:110::2
+  [07:51:16] FAIL no L3VXLAN FDB row with dst fd00:110::2 — the encap target for the L3VNI is missing
+6e:f1:60:d7:28:a9 dst a6e:2:: self extern_learn permanent
+[07:51:16 TEST] [7] gRPC IpVrfState.installed_routes_count == 1 for vrf1
+  [07:51:16] PASS installed_routes_count=1 on vrf1
+[07:51:16 TEST] [8] ping 2001:db8:110:2::1 from PE1 vrf1 (PE1 → PE2 over the IPv6 underlay)
+  [07:51:20] FAIL tenant ping PE1 → PE2 failed
+PING 2001:db8:110:2::1(2001:db8:110:2::1) from 2001:db8:110:1::1 : 56 data bytes
+
+--- 2001:db8:110:2::1 ping statistics ---
+3 packets transmitted, 0 received, 100% packet loss, time 2047ms
+
+--- PE1: ip -6 route show table 110 ---
+local 2001:db8:110:1::1 dev lo-vrf1 proto kernel metric 0 pref medium
+2001:db8:110:1::/64 dev lo-vrf1 proto kernel metric 256 pref medium
+2001:db8:110:2::/64 via a6e:2:: dev l3vxlan110 proto bgp metric 1024 onlink pref medium
+local fe80::ff:fe00:110 dev l3vxlan110 proto kernel metric 0 pref medium
+local fe80::3c0b:61ff:fe5e:e89a dev lo-vrf1 proto kernel metric 0 pref medium
+fe80::/64 dev l3vxlan110 proto kernel metric 256 pref medium
+fe80::/64 dev lo-vrf1 proto kernel metric 256 pref medium
+multicast ff00::/8 dev l3vxlan110 proto kernel metric 256 pref medium
+multicast ff00::/8 dev lo-vrf1 proto kernel metric 256 pref medium
+--- PE1: ip -6 neigh show dev l3vxlan110 ---
+a6e:2:: lladdr 6e:f1:60:d7:28:a9 extern_learn PERMANENT proto bgp 
+--- PE1: bridge fdb show dev l3vxlan110 ---
+6e:f1:60:d7:28:a9 dst a6e:2:: self extern_learn permanent
+--- PE1: ListEvpnRoutes (type 5) ---
+{"routeType":5,"rd":"65000:110","esi":"00:00:00:00:00:00:00:00:00:00","ethernetTag":"0","prefix":"2001:db8:110:1::/64","gateway":"::","label":110,"nextHop":"fd00:110::1","peerAddress":"0.0.0.0","extendedCommunities":["842122827661422","219550481834311688","433192188180955408"],"tunnelType":8}
+{"routeType":5,"rd":"65000:110","esi":"00:00:00:00:00:00:00:00:00:00","ethernetTag":"0","prefix":"2001:db8:110:2::/64","gateway":"::","label":110,"nextHop":"a6e:2::","peerAddress":"fd00:110::2","extendedCommunities":["219550481834311688","842122827661422","433311972148586665"],"tunnelType":8}
+--- PE2: show bgp l2vpn evpn route type prefix ---
+[07:51:24 TEST] [8b] ping 2001:db8:110:1::1 from PE2 vrf1 (PE2 → PE1 over the IPv6 underlay)
+  [07:51:28] FAIL tenant ping PE2 → PE1 failed
+% Can't open configuration file /etc/frr/vtysh.conf due to 'No such file or directory'.
+Configuration file[/etc/frr/frr.conf] processing failure: 11
+Codes: K - kernel route, C - connected, L - local, S - static,
+       R - RIPng, O - OSPFv3, I - IS-IS, B - BGP, N - NHRP,
+       T - Table, v - VNC, V - VNC-Direct, A - Babel, F - PBR,
+       f - OpenFabric, t - Table-Direct,
+       > - selected route, * - FIB route, q - queued, r - rejected, b - backup
+       t - trapped, o - offload failure
+
+IPv6 unicast VRF vrf1:
+B>* 2001:db8:110:1::/64 [200/0] via fd00:110::1, br110 onlink, weight 1, 00:02:18
+C>* 2001:db8:110:2::/64 is directly connected, lo-vrf1, weight 1, 00:02:20
+L>* 2001:db8:110:2::1/128 is directly connected, lo-vrf1, weight 1, 00:02:20
+C * fe80::/64 is directly connected, vlan110, weight 1, 00:02:18
+C>* fe80::/64 is directly connected, lo-vrf1, weight 1, 00:02:20
+--- PE1: ip -6 route show table 110 ---
+local 2001:db8:110:1::1 dev lo-vrf1 proto kernel metric 0 pref medium
+2001:db8:110:1::/64 dev lo-vrf1 proto kernel metric 256 pref medium
+2001:db8:110:2::/64 via a6e:2:: dev l3vxlan110 proto bgp metric 1024 onlink pref medium
+local fe80::ff:fe00:110 dev l3vxlan110 proto kernel metric 0 pref medium
+local fe80::3c0b:61ff:fe5e:e89a dev lo-vrf1 proto kernel metric 0 pref medium
+fe80::/64 dev l3vxlan110 proto kernel metric 256 pref medium
+fe80::/64 dev lo-vrf1 proto kernel metric 256 pref medium
+multicast ff00::/8 dev l3vxlan110 proto kernel metric 256 pref medium
+multicast ff00::/8 dev lo-vrf1 proto kernel metric 256 pref medium
+--- PE1: ip -6 neigh show dev l3vxlan110 ---
+a6e:2:: lladdr 6e:f1:60:d7:28:a9 extern_learn PERMANENT proto bgp 
+--- PE1: bridge fdb show dev l3vxlan110 ---
+6e:f1:60:d7:28:a9 dst a6e:2:: self extern_learn permanent
+--- PE1: ListEvpnRoutes (type 5) ---
+{"routeType":5,"rd":"65000:110","esi":"00:00:00:00:00:00:00:00:00:00","ethernetTag":"0","prefix":"2001:db8:110:1::/64","gateway":"::","label":110,"nextHop":"fd00:110::1","peerAddress":"0.0.0.0","extendedCommunities":["842122827661422","219550481834311688","433192188180955408"],"tunnelType":8}
+{"routeType":5,"rd":"65000:110","esi":"00:00:00:00:00:00:00:00:00:00","ethernetTag":"0","prefix":"2001:db8:110:2::/64","gateway":"::","label":110,"nextHop":"a6e:2::","peerAddress":"fd00:110::2","extendedCommunities":["219550481834311688","842122827661422","433311972148586665"],"tunnelType":8}
+--- PE2: show bgp l2vpn evpn route type prefix ---
+[07:51:28 TEST] [9] withdraw: remove 2001:db8:110:1::1/64 on PE1, expect FRR to drop the Type 5
+  [07:51:29] PASS FRR dropped PE1's Type 5 for 2001:db8:110:1::/64 (and still holds its own)
+[07:51:29 TEST] [10] reverse withdraw: remove 2001:db8:110:2::1/64 on PE2, expect PE1 dataplane cleanup
+[07:51:29 TEST] [11] PE1 kernel removes 2001:db8:110:2::/64 from vrf1's table
+  [07:51:31] PASS kernel route absent from table 110 (table still readable)
+[07:51:31 TEST] [12] PE1 L3 neighbor row for fd00:110::2 cleared
+  [07:51:31] PASS neighbor row for fd00:110::2 gone
+[07:51:31 TEST] [12b] PE1 L3VXLAN FDB row for dst fd00:110::2 cleared
+  [07:51:31] PASS FDB row for dst fd00:110::2 gone
+[07:51:31 TEST] [13] gRPC IpVrfState.installed_routes_count drops back to 0 for vrf1
+  [07:51:31] PASS installed_routes_count converged to 0 on vrf1
+
+[07:51:31 TEST] Results: 13 passed, 6 failed
