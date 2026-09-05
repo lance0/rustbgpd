@@ -25,6 +25,8 @@
 //! `event_id`. See ADR-0072.
 
 #![deny(unsafe_code)]
+#![deny(clippy::all)]
+#![warn(clippy::pedantic)]
 
 use std::io::Write;
 

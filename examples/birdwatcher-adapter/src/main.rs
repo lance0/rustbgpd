@@ -41,6 +41,8 @@
 //! present but empty/zero.
 
 #![deny(unsafe_code)]
+#![deny(clippy::all)]
+#![warn(clippy::pedantic)]
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -190,8 +192,8 @@ fn load_arouteserver_reject_communities(path: &FsPath) -> io::Result<ArsRejectCo
             .map(|value| parse_ars_family(value, count, max))
             .transpose()
     };
-    let std = family("std", 2, u16::MAX as u64)?;
-    let lrg = family("lrg", 3, u32::MAX as u64)?;
+    let std = family("std", 2, u64::from(u16::MAX))?;
+    let lrg = family("lrg", 3, u64::from(u32::MAX))?;
     if std.is_none() && lrg.is_none() {
         return Err(ars_artifact_error());
     }
@@ -305,13 +307,16 @@ impl ResolverStore {
     fn snapshot(&self) -> Arc<IdentityResolver> {
         self.0
             .read()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .resolver
             .clone()
     }
 
     fn replace(&self, resolver: IdentityResolver) -> Result<(u64, bool), String> {
-        let mut current = self.0.write().unwrap_or_else(|e| e.into_inner());
+        let mut current = self
+            .0
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if *current.resolver == resolver {
             return Ok((current.number, false));
         }
@@ -336,13 +341,13 @@ fn spawn_alias_reloader(path: PathBuf, store: Arc<ResolverStore>) -> io::Result<
                 .and_then(|resolver| store.replace(resolver).map_err(io::Error::other))
             {
                 Ok((generation, true)) => {
-                    info!(generation, path = %path.display(), "reloaded protocol aliases")
+                    info!(generation, path = %path.display(), "reloaded protocol aliases");
                 }
                 Ok((generation, false)) => {
-                    info!(generation, path = %path.display(), "protocol aliases unchanged")
+                    info!(generation, path = %path.display(), "protocol aliases unchanged");
                 }
                 Err(error) => {
-                    error!(%error, path = %path.display(), "protocol alias reload rejected; retaining prior generation")
+                    error!(%error, path = %path.display(), "protocol alias reload rejected; retaining prior generation");
                 }
             }
         }
@@ -937,11 +942,11 @@ enum CaptureError {
     Fatal(HttpError),
 }
 
-fn capture_error(what: &'static str, error: tonic::Status) -> CaptureError {
+fn capture_error(what: &'static str, error: &tonic::Status) -> CaptureError {
     if error.code() == tonic::Code::Aborted {
         CaptureError::Retry
     } else {
-        CaptureError::Fatal(bad_gateway(what, &error))
+        CaptureError::Fatal(bad_gateway(what, error))
     }
 }
 
@@ -983,7 +988,7 @@ async fn capture_best_route_keys(
                 ..Default::default()
             })
             .await
-            .map_err(|error| capture_error("ListBestRoutes", error))?
+            .map_err(|error| capture_error("ListBestRoutes", &error))?
             .into_inner();
         capture_version(&mut version, response.page_version.as_ref())?;
         // Marker set, not a served view: the max-routes cap applies to
@@ -1691,6 +1696,22 @@ async fn serve_exact_route(
     })))
 }
 
+/// One page of a version-checked received-route capture. `Retry` means the
+/// upstream generation moved under the capture, which starts over.
+async fn received_routes_page(
+    client: &mut proto::rib_service_client::RibServiceClient<Upstream>,
+    request: proto::ListRoutesRequest,
+    version: &mut Option<RouteCaptureVersion>,
+) -> Result<proto::ListRoutesResponse, CaptureError> {
+    let response = client
+        .list_received_routes(request)
+        .await
+        .map_err(|error| capture_error("ListReceivedRoutes", &error))?
+        .into_inner();
+    capture_version(version, response.page_version.as_ref())?;
+    Ok(response)
+}
+
 async fn serve_exact_received_route(
     state: &AppState,
     peer: IpAddr,
@@ -1703,30 +1724,16 @@ async fn serve_exact_received_route(
         let mut received_version = None;
         let mut retry = false;
         loop {
-            let response = match client
-                .list_received_routes(exact_route_request(
-                    peer,
-                    prefix,
-                    page_token,
-                    ExactRouteSource::Received,
-                ))
-                .await
-            {
-                Ok(response) => response.into_inner(),
-                Err(error) if error.code() == tonic::Code::Aborted => {
-                    retry = true;
-                    break;
-                }
-                Err(error) => return Err(bad_gateway("ListReceivedRoutes", &error)),
-            };
-            match capture_version(&mut received_version, response.page_version.as_ref()) {
-                Ok(()) => {}
-                Err(CaptureError::Retry) => {
-                    retry = true;
-                    break;
-                }
-                Err(CaptureError::Fatal(error)) => return Err(error),
-            }
+            let request = exact_route_request(peer, prefix, page_token, ExactRouteSource::Received);
+            let response =
+                match received_routes_page(&mut client, request, &mut received_version).await {
+                    Ok(response) => response,
+                    Err(CaptureError::Retry) => {
+                        retry = true;
+                        break;
+                    }
+                    Err(CaptureError::Fatal(error)) => return Err(error),
+                };
             append_exact_routes(&mut routes, response.routes, prefix, state.max_routes)?;
             if response.next_page_token.is_empty() {
                 break;
@@ -1743,25 +1750,16 @@ async fn serve_exact_received_route(
             page_token = String::new();
             loop {
                 let remaining = state.max_lpm_scan_routes.saturating_sub(view.len() as u64);
-                let response = match client
-                    .list_received_routes(view_route_request(peer, prefix, page_token, remaining))
-                    .await
-                {
-                    Ok(response) => response.into_inner(),
-                    Err(error) if error.code() == tonic::Code::Aborted => {
-                        retry = true;
-                        break;
-                    }
-                    Err(error) => return Err(bad_gateway("ListReceivedRoutes", &error)),
-                };
-                match capture_version(&mut received_version, response.page_version.as_ref()) {
-                    Ok(()) => {}
-                    Err(CaptureError::Retry) => {
-                        retry = true;
-                        break;
-                    }
-                    Err(CaptureError::Fatal(error)) => return Err(error),
-                }
+                let request = view_route_request(peer, prefix, page_token, remaining);
+                let response =
+                    match received_routes_page(&mut client, request, &mut received_version).await {
+                        Ok(response) => response,
+                        Err(CaptureError::Retry) => {
+                            retry = true;
+                            break;
+                        }
+                        Err(CaptureError::Fatal(error)) => return Err(error),
+                    };
                 let next = response.next_page_token;
                 append_view_page(&mut view, response.routes, &next, state.max_lpm_scan_routes)?;
                 if next.is_empty() {
@@ -2031,7 +2029,7 @@ fn aggregate_retention(
 }
 
 /// Every retained reject of every live session in the table, rendered
-/// exactly like the peer's own filtered view (alias, ARouteServer
+/// exactly like the peer's own filtered view (alias, `ARouteServer`
 /// presentation, synthesized reason) and scoped to the table's family.
 fn filtered_table_body(
     stores: &[(IpAddr, Option<proto::ListRejectedRoutesResponse>)],
@@ -2746,11 +2744,10 @@ fn route_to_birdwatcher_with_primary(
         .map(extended_community_to_birdwatcher)
         .collect();
 
-    let from_protocol = route
-        .peer_address
-        .parse()
-        .map(|peer| identities.identity(peer).protocol)
-        .unwrap_or_else(|_| format!("bgp_{}", route.peer_address).replace(':', "_"));
+    let from_protocol = route.peer_address.parse().map_or_else(
+        |_| format!("bgp_{}", route.peer_address).replace(':', "_"),
+        |peer| identities.identity(peer).protocol,
+    );
 
     // Receive wall time, same source and format as the in-daemon
     // server's `age`. 0 (unknown) renders as the empty string, which
@@ -2826,17 +2823,23 @@ fn extended_community_to_birdwatcher(raw: u64) -> Value {
         _ => format!("unknown {type_field:#x}"),
     };
     let (key, value) = match raw >> 56 {
-        0x00 | 0x40 => (((raw >> 32) & 0xffff).to_string(), (raw as u32).to_string()),
+        0x00 | 0x40 => (
+            ((raw >> 32) & 0xffff).to_string(),
+            (raw & 0xffff_ffff).to_string(),
+        ),
         0x01 | 0x41 => (
-            Ipv4Addr::from((raw >> 16) as u32).to_string(),
+            Ipv4Addr::from(((raw >> 16) & 0xffff_ffff) as u32).to_string(),
             (raw & 0xffff).to_string(),
         ),
-        0x02 | 0x42 => (((raw >> 16) as u32).to_string(), (raw & 0xffff).to_string()),
+        0x02 | 0x42 => (
+            ((raw >> 16) & 0xffff_ffff).to_string(),
+            (raw & 0xffff).to_string(),
+        ),
         _ => {
             return serde_json::json!([
                 "generic",
                 format!("{:#x}", (raw >> 32) as u32),
-                format!("{:#x}", raw as u32),
+                format!("{:#x}", raw & 0xffff_ffff),
             ]);
         }
     };
@@ -2912,6 +2915,11 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    /// `asn:value` as the RFC 1997 32-bit community.
+    fn community(asn: u32, value: u32) -> u32 {
+        (asn << 16) | value
+    }
 
     fn token_file(name: &str, contents: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -3186,7 +3194,7 @@ mod tests {
             local_pref: 200,
             med: 50,
             med_attr: Some(50),
-            communities: vec![(65001 << 16) | 100],
+            communities: vec![community(65001, 100)],
             large_communities: vec!["65001:1:2".to_string()],
             // 2026-01-02 03:04:05 UTC
             received_at_epoch_seconds: 1_767_323_045,
@@ -3247,7 +3255,7 @@ mod tests {
                 // Four-octet AS route target 4200000000:5 (RFC 5668).
                 (0x0202 << 48) | (4_200_000_000u64 << 16) | 5,
                 // IPv4-address route origin 192.0.2.1:200 (RFC 4360 §3.2).
-                (0x0103 << 48) | (0xc000_0201u64 << 16) | 200,
+                (0x0103 << 48) | (0xc000_0201u64 << 16) | 0xc8,
                 // Non-transitive two-octet AS route target: BIRD 2.0.12
                 // names only the transitive rt/ro subtypes.
                 0x4002_fde8_0000_0064,
@@ -3337,7 +3345,7 @@ mod tests {
             next_hop: "192.0.2.99".to_string(),
             // Lossless display form incl. an AS_SET — must flatten.
             as_path: "65020 {65030 65031}".to_string(),
-            communities: vec![(65001 << 16) | 666],
+            communities: vec![community(65001, 666)],
             large_communities: vec!["65001:1000:1".to_string()],
             rpki_validation: "not_found".to_string(),
             aspa_validation: "unverified".to_string(),
@@ -3447,10 +3455,10 @@ mod tests {
             reason: "policy_reject".into(),
             reason_detail: "rs-hygiene:reject-black-list-prefix".into(),
             communities: vec![
-                (65520 << 16) | 99,
-                (64512 << 16) | 3,
-                (65000 << 16) | 7,
-                (65000 << 16) | 7,
+                community(65520, 99),
+                community(64512, 3),
+                community(65000, 7),
+                community(65000, 7),
             ],
             large_communities: vec![
                 "64496:65520:99".into(),
@@ -3663,7 +3671,7 @@ mod tests {
     #[test]
     fn wildcard_scan_matches_only_x_y_star_large_communities() {
         let route = |lcs: &[&str]| proto::Route {
-            large_communities: lcs.iter().map(|lc| lc.to_string()).collect(),
+            large_communities: lcs.iter().map(ToString::to_string).collect(),
             ..Default::default()
         };
         assert!(carries_large_community(&route(&["64496:1:1"]), 64496, 1));
@@ -3726,10 +3734,10 @@ mod tests {
                 peer_address: peer.to_string(),
                 retention_enabled: enabled,
                 capacity: 1024,
-                routes: if !enabled {
-                    vec![Default::default()]
+                routes: if enabled {
+                    Vec::new()
                 } else {
-                    Default::default()
+                    vec![proto::RejectedRoute::default()]
                 },
                 evictions_since_reset: Some(0),
             };
@@ -3769,6 +3777,7 @@ mod tests {
     /// leaves completeness unknown, disabled retention contributes no
     /// rows, and one eviction anywhere marks the whole view incomplete.
     #[test]
+    #[expect(clippy::too_many_lines, reason = "one linear behavior arc")]
     fn filtered_table_body_unions_live_stores_and_aggregates_retention() {
         let identities = IdentityResolver::parse(&[
             "pb_as64496=192.0.2.1@master4".into(),
@@ -4348,7 +4357,8 @@ mod tests {
         assert!(load(&vec![b'#'; MAX_ALIAS_FILE_BYTES + 1]).is_err());
         let aliases = (0..=MAX_ALIAS_FILE_ENTRIES)
             .map(|i| format!("p{i}=2001:db8::{i:x}@master6\n"))
-            .collect::<String>();
+            .collect::<Vec<_>>()
+            .concat();
         assert!(load(aliases.trim_end().rsplit_once('\n').unwrap().0.as_bytes()).is_ok());
         assert!(load(aliases.as_bytes()).is_err());
         std::fs::remove_file(path).unwrap();
@@ -4695,6 +4705,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "one linear behavior arc")]
     fn table_lookup_is_selected_first_all_path_capped_and_fail_closed() {
         let route = |peer: &str, med: u32| proto::Route {
             prefix: "192.0.2.0".to_string(),
@@ -4865,7 +4876,7 @@ mod tests {
             assert!(matches!(
                 capture_error(
                     "ListReceivedRoutes",
-                    tonic::Status::aborted("generation moved")
+                    &tonic::Status::aborted("generation moved")
                 ),
                 CaptureError::Retry
             ));
