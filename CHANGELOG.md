@@ -294,6 +294,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   routes, and duplicate-MAC-quarantined contenders are excluded. This slice
   does not quarantine IPs, probe neighbors, or change routing actions.
 
+- `rbgp policy check --coverage-matched-min PCT` independently gates the
+  percentage of source terms matched by in-language tests. Coverage reports
+  include matched totals; existing evaluated-term percentages and
+  `--coverage-min` semantics remain unchanged. Matched coverage does not
+  guarantee branch coverage or detect every widened guard.
+
 ### Changed
 
 - `rbgp rib add` uses `--next-hop` as the canonical flag, retaining

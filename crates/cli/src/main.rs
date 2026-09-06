@@ -57,6 +57,16 @@ fn parse_lookup_target(value: &str) -> Result<String, String> {
     Ok(value.to_string())
 }
 
+fn parse_coverage_percentage(value: &str) -> Result<f64, String> {
+    let percentage = value
+        .parse::<f64>()
+        .map_err(|_| "coverage percentage must be a number from 0 through 100".to_string())?;
+    if !(0.0..=100.0).contains(&percentage) {
+        return Err("coverage percentage must be a number from 0 through 100".to_string());
+    }
+    Ok(percentage)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum RouteRpkiState {
     Valid,
@@ -120,7 +130,7 @@ const EXIT_CODES_HELP: &str = "Exit codes:\n  \
     config diff, plan    0 no changes / 1 error / 2 changes present\n  \
     config import        0 clean / 1 error / 2 warnings or skips / 3 nothing translatable\n  \
     doctor               0 all checks green / 1 error / 2 red checks found\n  \
-    policy check         0 clean / 1 diagnostics / 2 test failures / 3 coverage below --coverage-min\n  \
+    policy check         0 clean / 1 diagnostics / 2 test failures / 3 coverage below a threshold\n  \
     policy test          0 ran / 1 compile diagnostics\n  \
     policy fmt           0 clean or formatted / 1 needs formatting (--check) or error";
 
@@ -709,7 +719,7 @@ enum PolicyAction {
     /// Resolves the file's `import` graph, parses, typechecks, and runs
     /// its in-language `test` blocks (from every module). No daemon
     /// connection. Exit codes: 0 clean, 1 diagnostics, 2 test failures,
-    /// 3 coverage below --coverage-min.
+    /// 3 coverage below an explicit threshold.
     Check {
         /// Path to the main `.rpol` file
         #[arg(value_hint = clap::ValueHint::FilePath)]
@@ -743,6 +753,13 @@ enum PolicyAction {
         /// precedence
         #[arg(long, value_name = "PCT")]
         coverage_min: Option<f64>,
+        /// Minimum acceptable matched-term percentage, from 0 through
+        /// 100 (implies --coverage): exit 3 when fewer source terms
+        /// match a test route. Independent of --coverage-min;
+        /// diagnostics (1) and test failures (2) take precedence.
+        /// Does not guarantee branch coverage or detect every widened guard
+        #[arg(long, value_name = "PCT", value_parser = parse_coverage_percentage)]
+        coverage_matched_min: Option<f64>,
     },
     /// Format `.rpol` files in the one canonical style
     ///
@@ -3055,6 +3072,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 list_deps,
                 coverage,
                 coverage_min,
+                coverage_matched_min,
                 max_graph_bytes,
             },
     } = &cli.command
@@ -3065,6 +3083,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             *list_deps,
             *coverage,
             *coverage_min,
+            *coverage_matched_min,
             *max_graph_bytes,
             cli.json,
         ));
