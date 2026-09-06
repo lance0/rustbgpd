@@ -635,3 +635,191 @@ fn prepare_outbound_attributes_vpn_strips_rr_attrs_for_ebgp() {
         vec![AsPathSegment::AsSequence(vec![65001, 65002])]
     );
 }
+
+/// RFC 8950 §5 preserves the original `VPNv4` next-hop encoding on reflection.
+/// Exercise both RD+IPv6 forms and Add-Path against the actual writer bytes.
+#[tokio::test]
+async fn vpnv4_ipv6_next_hop_reflection_matches_exact_probe() {
+    use super::super::export::{ExportCandidate, ExportWithdrawal};
+
+    let family = (Afi::Ipv4, Safi::MplsVpn);
+    for remote_asn in [65001, 65002] {
+        for link_local in [None, Some("fe80::7".parse().unwrap())] {
+            for add_path in [false, true] {
+                let (mut session, _rib_rx) = make_test_session_with_rib(65001, remote_asn);
+                let (client, mut server) = connected_stream_pair().await;
+                session.test_install_stream(client);
+                let mut negotiated = negotiated_session(remote_asn, false);
+                negotiated.negotiated_families = vec![family];
+                negotiated
+                    .extended_nexthop_families
+                    .insert(family, Afi::Ipv6);
+                if add_path {
+                    negotiated
+                        .add_path_families
+                        .insert(family, AddPathMode::Both);
+                }
+                install_test_negotiated_session(&mut session, negotiated);
+                let mut route = make_vpn_rib_route(4093);
+                route.next_hop = "2001:db8::7".parse().unwrap();
+                route.link_local_next_hop = link_local;
+                route.path_id = if add_path { 42 } else { 0 };
+                let profile = session.publish_export_profile();
+                let probe = profile
+                    .probe_announcement(ExportCandidate::Vpn(&route))
+                    .unwrap();
+                let expected =
+                    rustbgpd_wire::encode_message(&Message::Update(probe.message)).unwrap();
+                let mut update = empty_outbound_update();
+                update.exact_export_snapshot = Some(profile.clone());
+                update.vpn_announce = vec![route.clone()];
+                session.send_route_update(update);
+                let actual = read_single_raw_bgp_message(&mut server).await;
+                assert_eq!(actual.as_slice(), expected.as_ref());
+                let Message::Update(message) = rustbgpd_wire::decode_message(
+                    &mut bytes::Bytes::from(actual),
+                    rustbgpd_wire::MAX_MESSAGE_LEN,
+                )
+                .unwrap() else {
+                    panic!("expected VPNv4 MP_REACH");
+                };
+                let add_path_families = if add_path { vec![family] } else { Vec::new() };
+                let parsed = message.parse(true, false, &add_path_families).unwrap();
+                let mp = parsed
+                    .attributes
+                    .iter()
+                    .find_map(|attr| match attr {
+                        PathAttribute::MpReachNlri(mp) => Some(mp),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert_eq!((mp.afi, mp.safi), family);
+                assert_eq!(mp.next_hop, route.next_hop);
+                assert_eq!(mp.link_local_next_hop, link_local);
+                assert_eq!(
+                    mp.vpn_announced,
+                    vec![rustbgpd_wire::VpnNlriEntry {
+                        path_id: route.path_id,
+                        nlri: route.nlri.clone(),
+                    }]
+                );
+
+                let key = route.key();
+                let probe = profile
+                    .probe_withdrawal(ExportWithdrawal::Vpn(&key))
+                    .unwrap();
+                let expected =
+                    rustbgpd_wire::encode_message(&Message::Update(probe.message)).unwrap();
+                let mut update = empty_outbound_update();
+                update.exact_export_snapshot = Some(profile);
+                update.vpn_withdraw = vec![key];
+                session.send_route_update(update);
+                assert_eq!(
+                    read_single_raw_bgp_message(&mut server).await.as_slice(),
+                    expected.as_ref()
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn vpnv4_ipv6_next_hop_without_peer_capability_rejects_only_announcements() {
+    use super::super::export::{ExportCandidate, ExportWithdrawal};
+    use rustbgpd_rib::{ExactExportCandidate, ExactExportErrorCode, ExactExportSnapshot};
+
+    let family = (Afi::Ipv4, Safi::MplsVpn);
+    for unicast_capability in [false, true] {
+        let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+        let (client, mut server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        let mut negotiated = negotiated_session(65002, unicast_capability);
+        negotiated.negotiated_families = vec![family];
+        install_test_negotiated_session(&mut session, negotiated);
+        let mut route = make_vpn_rib_route(4093);
+        let profile = session.publish_export_profile();
+        assert!(
+            profile
+                .probe_announcement(ExportCandidate::Vpn(&route))
+                .is_ok(),
+            "legacy VPNv4 IPv4 next hops need no Extended Next Hop capability"
+        );
+        route.next_hop = "2001:db8::7".parse().unwrap();
+        let error = ExactExportSnapshot::probe_announcement(
+            profile.as_ref(),
+            ExactExportCandidate::Vpn(&route),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.code(),
+            ExactExportErrorCode::Ipv4RequiresExtendedNextHop
+        );
+        assert_eq!(
+            error.detail(),
+            "VPNv4 with an IPv6 next-hop requires peer Extended Next Hop support"
+        );
+        let key = route.key();
+        let withdrawal = profile
+            .probe_withdrawal(ExportWithdrawal::Vpn(&key))
+            .unwrap();
+        let expected = rustbgpd_wire::encode_message(&Message::Update(withdrawal.message)).unwrap();
+        let mut update = empty_outbound_update();
+        update.exact_export_snapshot = Some(profile);
+        update.vpn_announce = vec![route];
+        update.vpn_withdraw = vec![key];
+        session.send_route_update(update);
+        assert_eq!(
+            read_single_raw_bgp_message(&mut server).await.as_slice(),
+            expected.as_ref()
+        );
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                read_single_raw_bgp_message(&mut server)
+            )
+            .await
+            .is_err(),
+            "the unsupported announcement must not reach the wire"
+        );
+    }
+}
+
+#[tokio::test]
+async fn vpnv4_ipv6_next_hop_receive_does_not_require_peer_receive_capability() {
+    let family = (Afi::Ipv4, Safi::MplsVpn);
+    for link_local in [None, Some("fe80::7".parse().unwrap())] {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        session.config.peer.families = vec![family];
+        let mut negotiated = negotiated_session(65002, false);
+        negotiated.negotiated_families = vec![family];
+        install_test_negotiated_session(&mut session, negotiated);
+        let route = make_vpn_rib_route(4093);
+        let next_hop = "2001:db8::7".parse().unwrap();
+        let mut attrs = route.attributes.as_ref().clone();
+        attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
+            afi: family.0,
+            safi: family.1,
+            next_hop,
+            link_local_next_hop: link_local,
+            announced: vec![],
+            flowspec_announced: vec![],
+            evpn_announced: vec![],
+            bgpls_announced: vec![],
+            labeled_announced: vec![],
+            vpn_announced: vec![rustbgpd_wire::VpnNlriEntry {
+                path_id: 0,
+                nlri: route.nlri.clone(),
+            }],
+            rtc_announced: vec![],
+        }));
+        let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::Body);
+        session.process_update(update).await;
+        let RibUpdate::VpnRoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+            panic!("expected VPNv4 route admission");
+        };
+        assert_eq!(announced.len(), 1);
+        assert_eq!(announced[0].nlri, route.nlri);
+        assert_eq!(announced[0].next_hop, next_hop);
+        assert_eq!(announced[0].link_local_next_hop, link_local);
+    }
+}
