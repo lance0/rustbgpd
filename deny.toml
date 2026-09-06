@@ -8,11 +8,9 @@
 #
 # Advisory ignores broadly mirror .cargo/audit.toml (the local
 # `cargo audit` pre-flight keeps its own copy); every entry MUST carry
-# a tracked follow-up. The two lists are NOT identical by design:
-# cargo-deny treats unsound-class advisories as warnings (they don't
-# fail the check, so no ignore is needed — e.g. the rand RUSTSEC-2026-
-# 0097 entry that audit.toml carries), while unmaintained-class ones
-# fail and need listing here.
+# a tracked follow-up. The lists may differ when cargo-deny treats an
+# advisory class as a warning while cargo-audit reports it; currently
+# both retain only the tracked paste advisory below.
 
 [advisories]
 ignore = [
