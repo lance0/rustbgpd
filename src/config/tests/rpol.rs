@@ -761,10 +761,7 @@ fn chain_node_budget_named_mixed_unused_and_implicit_tails() {
         .push("toml-pass".to_string());
     let error = config.validate().unwrap_err();
     assert!(error.to_string().contains("MAX_CHAIN_NODES"), "{error}");
-    assert!(matches!(
-        crate::policy_admin::catalog_config_error(error),
-        rustbgpd_api::peer_types::CatalogMutationError::Invalid(_)
-    ));
+    assert!(matches!(error, ConfigError::PolicyChainTooLarge { .. }));
     let path = dir.path().join("config.toml");
     let text = fs::read_to_string(&path).unwrap();
     let refs = serde_json::to_string(&config.neighbors[0].import_policy_chain).unwrap();
