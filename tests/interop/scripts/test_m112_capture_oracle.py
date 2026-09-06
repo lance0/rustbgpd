@@ -31,17 +31,27 @@ def reflected(body):
     return b"\0\0" + struct.pack("!H", len(encoded)) + encoded
 
 
-def capture(*, missing_malformed_withdraw=False, survivor_churn=False):
+def capture(*, missing_malformed_withdraw=False, survivor_churn=False,
+            withdrawal_label=bytes(3), withdrawal_esi=bytes(10),
+            wrong_withdrawal_key=False, wrong_announcement_label=False):
+    def withdraw(mac):
+        body = source.withdrawal(mac)
+        nlri = source.nlri(mac)
+        return body[:-len(nlri)] + nlri[:10] + withdrawal_esi + nlri[20:32] + withdrawal_label
+
     inbound = [body for phase in oracle.PHASES for body in source.phase_updates(phase)]
     outbound = [reflected(source.announcement(oracle.TARGET)),
                 reflected(source.announcement(oracle.SURVIVOR)),
-                source.withdrawal(oracle.TARGET),
+                withdraw(oracle.SURVIVOR if wrong_withdrawal_key else oracle.TARGET),
                 reflected(source.announcement(oracle.TARGET)),
-                source.withdrawal(oracle.TARGET), source.withdrawal(oracle.SURVIVOR)]
+                withdraw(oracle.TARGET), withdraw(oracle.SURVIVOR)]
+    if wrong_announcement_label:
+        nlri = source.nlri(oracle.TARGET)
+        outbound[0] = outbound[0].replace(nlri, nlri[:-3] + bytes(3))
     if missing_malformed_withdraw:
         del outbound[2]
     if survivor_churn:
-        outbound[2:2] = [source.withdrawal(oracle.SURVIVOR),
+        outbound[2:2] = [withdraw(oracle.SURVIVOR),
                          reflected(source.announcement(oracle.SURVIVOR))]
     rows = []
     for (sender, receiver), name in oracle.DIRECTIONS.items():
@@ -122,6 +132,26 @@ class M112OracleTests(unittest.TestCase):
         self.assertEqual(result["label_hex"], "000030")
         self.assertEqual(result["reflected_actions"][oracle.TARGET],
                          ["announce", "withdraw", "announce", "withdraw"])
+        self.assertEqual([event["label_hex"] for event in result["withdrawals"]["rr_to_sink"]],
+                         ["000000"] * 3)
+        self.assertEqual([event["label_hex"] for event in result["withdrawals"]["source_to_rr"]],
+                         ["000030"] * 2)
+
+    def test_withdrawal_uses_key_without_nonkey_label_or_esi(self):
+        for label in (bytes(3), bytes.fromhex("000030"), bytes.fromhex("abcdef")):
+            with self.subTest(label=label.hex()):
+                result = oracle.analyze(capture(withdrawal_label=label, withdrawal_esi=b"\x01" * 10))
+                for event in result["withdrawals"]["rr_to_sink"]:
+                    self.assertEqual(event["label_hex"], label.hex())
+                    self.assertEqual(event["esi_hex"], "01" * 10)
+
+    def test_withdrawal_wrong_route_key_fails(self):
+        with self.assertRaisesRegex(ValueError, "transition history"):
+            oracle.analyze(capture(wrong_withdrawal_key=True))
+
+    def test_announcement_label_preservation_remains_strict(self):
+        with self.assertRaisesRegex(ValueError, "implicit-null label differs"):
+            oracle.analyze(capture(wrong_announcement_label=True))
 
     def test_tcp_fragmentation_and_identical_retransmit(self):
         rows = capture()

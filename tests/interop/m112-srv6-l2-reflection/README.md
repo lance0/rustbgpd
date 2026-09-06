@@ -25,12 +25,18 @@ session. Captures cover both RR links. The test runs these phases:
 5. Withdraw the survivor and verify both route tables are empty.
 
 The packet oracle requires the exact per-route transition history. It checks
-each Prefix-SID value, Type2 NLRI, next hop, route target, and expected RR
+each Prefix-SID value, announced Type2 NLRI, next hop, route target, and expected RR
 attributes, including the permitted Prefix-SID Partial flag change. It also
 requires one initial OPEN per direction, one TCP session per link, and no
 NOTIFICATION. The source's final state and both daemons' session views provide
 the final liveness checks. A missing malformed-input withdrawal or temporary
 survivor withdrawal fails even if the final table later looks correct.
+
+Withdrawals must carry the same RD, Ethernet tag, MAC and IP route key.
+[RFC 7432 §7.2](https://www.rfc-editor.org/rfc/rfc7432.html#section-7.2)
+excludes ESI and labels from that key, so their withdrawal bytes need not
+match the announcement. The receipt records each raw withdrawal label and
+ESI. Announcements still require exact implicit-null label and ESI bytes.
 
 ## Observer boundary
 

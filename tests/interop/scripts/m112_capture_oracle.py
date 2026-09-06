@@ -66,7 +66,7 @@ def service(value: bytes) -> dict:
             "prefix_sid_hex": value.hex()}
 
 
-def type2s(raw: bytes) -> list[tuple[str, bytes]]:
+def type2s(raw: bytes, *, withdrawn: bool = False) -> list[tuple[str, bytes]]:
     rows = []
     while raw:
         need(len(raw) >= 2 and raw[0] == 2 and raw[1] == 33,
@@ -75,11 +75,16 @@ def type2s(raw: bytes) -> list[tuple[str, bytes]]:
         need(len(nlri) == 35, "truncated Type2")
         body = nlri[2:]
         need(body[:8] == bytes.fromhex("00010a7000020070"), "RD differs")
-        need(body[8:22] == bytes(14), "ESI or Ethernet tag differs")
+        need(body[18:22] == bytes(4), "Ethernet tag differs")
         need(body[22] == 48 and body[29] == 0, "MAC/IP lengths differ")
         mac = body[23:29].hex(":")
         need(mac in (TARGET, SURVIVOR), "unexpected MAC")
-        need(body[30:] == bytes.fromhex("000030"), "EVPN implicit-null label differs")
+        # RFC 7432 section 7.2 excludes ESI and labels from the Type2 key.
+        # Announcements still prove exact service bytes; withdrawals identify
+        # a route without requiring those non-key fields to be retained.
+        if not withdrawn:
+            need(body[8:18] == bytes(10), "ESI differs")
+            need(body[30:] == bytes.fromhex("000030"), "EVPN implicit-null label differs")
         rows.append((mac, nlri))
     need(len({mac for mac, _ in rows}) == len(rows), "duplicate Type2 in UPDATE")
     return rows
@@ -88,7 +93,7 @@ def type2s(raw: bytes) -> list[tuple[str, bytes]]:
 def mp(code: int, value: bytes) -> tuple[bytes, list[tuple[str, bytes]]]:
     need(value[:3] == FAMILY, "unexpected MP family")
     if code == 15:
-        return b"", type2s(value[3:])
+        return b"", type2s(value[3:], withdrawn=True)
     need(len(value) >= 21 and value[3] == 16 and value[20] == 0,
          "expected 16-byte IPv6 next hop and zero reserved byte")
     next_hop = value[4:20]
@@ -208,16 +213,31 @@ def analyze(lines: list[str]) -> dict:
     for mac in (TARGET, SURVIVOR):
         incoming, outgoing = routes["source_to_rr"][mac], routes["rr_to_sink"][mac]
         for source, reflected in zip(incoming, outgoing, strict=True):
-            need(source["nlri"] == reflected["nlri"], "reflected NLRI differs")
             if source["action"] == "announce":
+                need(source["nlri"] == reflected["nlri"], "reflected NLRI differs")
                 need(source["next_hop"] == reflected["next_hop"], "reflected next hop differs")
                 for code in (1, 2, 5, 16, 40):
                     need(source["attrs"][code][1] == reflected["attrs"][code][1],
                          f"reflected attribute {code} value differs")
+            else:
+                # Compare RD plus Ethernet tag / MAC / empty IP fields. Both
+                # rows have already passed the exact MAC-only Type2 shape.
+                need((source["nlri"][2:10], source["nlri"][20:32])
+                     == (reflected["nlri"][2:10], reflected["nlri"][20:32]),
+                     "reflected withdrawal key differs")
+    withdrawals = {
+        name: sorted(({
+            "mac": mac, "message_index": event["index"],
+            "label_hex": event["nlri"][32:].hex(), "esi_hex": event["nlri"][10:20].hex(),
+        } for mac, events in routes[name].items() for event in events
+            if event["action"] == "withdraw"), key=lambda event: event["message_index"])
+        for name in ("source_to_rr", "rr_to_sink")
+    }
     return {"schema": "m112-wire/1", "streams": streams,
             "target": TARGET, "survivor": SURVIVOR, "rd": RD, "next_hop": SOURCE,
             "label_hex": "000030", **service(routes["source_to_rr"][TARGET][0]["attrs"][40][1]),
-            "source_actions": expected_source, "reflected_actions": expected_sink}
+            "source_actions": expected_source, "reflected_actions": expected_sink,
+            "withdrawals": withdrawals}
 
 
 def observer(snapshot: list[dict], phase: str) -> dict:
