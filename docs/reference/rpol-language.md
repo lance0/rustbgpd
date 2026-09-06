@@ -1188,8 +1188,9 @@ when the exercised-term percentage falls below the threshold —
 distinct from `1` (diagnostics) and `2` (test failures), which take
 precedence. `--coverage-matched-min PCT` independently gates the
 percentage of source terms matched by at least one test route. It
-accepts a finite percentage from **0 through 100**, also implies
-`--coverage`, and uses the same exit codes and precedence. Both
+also implies `--coverage` and uses the same exit codes and precedence.
+Both thresholds accept a finite percentage from **0 through 100**;
+invalid values exit **2** before the policy file is loaded. Both
 thresholds can be supplied; both must pass.
 
 The matched threshold uses the same source-term denominator, including
