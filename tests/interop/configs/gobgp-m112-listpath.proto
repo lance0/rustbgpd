@@ -1,0 +1,38 @@
+// Minimal read-only binary ListPath schema, matching GoBGP v3.37.0:
+// https://github.com/osrg/gobgp/blob/v3.37.0/api/gobgp.proto
+// Deliberately omits unused fields. enable_only_binary avoids typed Any
+// conversion, whose reverse L2 Service conversion is missing in this pin.
+syntax = "proto3";
+package apipb;
+
+service GobgpApi {
+  rpc ListPath(ListPathRequest) returns (stream ListPathResponse);
+}
+message Family {
+  uint32 afi = 1;
+  uint32 safi = 2;
+}
+message ListPathRequest {
+  uint32 table_type = 1;
+  string name = 2;
+  Family family = 3;
+  bool enable_only_binary = 9;
+}
+message ListPathResponse { Destination destination = 1; }
+message Destination {
+  string prefix = 1;
+  repeated Path paths = 2;
+}
+message Path {
+  bool best = 4;
+  bool is_withdraw = 5;
+  Family family = 9;
+  uint32 source_asn = 10;
+  string source_id = 11;
+  bool filtered = 12;
+  bool stale = 13;
+  string neighbor_ip = 15;
+  bool is_nexthop_invalid = 17;
+  bytes nlri_binary = 20;
+  repeated bytes pattrs_binary = 21;
+}
