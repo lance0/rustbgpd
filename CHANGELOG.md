@@ -283,6 +283,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `rbgp rib add` uses `--next-hop` as the canonical flag, retaining
+  `--nexthop` as a visible compatibility alias. The default RIB pager now
+  wraps long lines (`less -FRX` in auto mode, `less -RX` in always mode);
+  explicit `RBGP_PAGER` and `PAGER` arguments remain unchanged.
+
 - The three example programs (`event-bridge`, `peer-loop`, `birdwatcher-adapter`)
   now build under the same lint policy as the workspace crates
   (`deny(unsafe_code)`, `deny(clippy::all)`, `warn(clippy::pedantic)`).
@@ -679,6 +684,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - EVPN Linux route withdrawal treats an already-absent kernel route as
   successfully removed, including single-path and ECMP IP-VRF routes. This
   clears owned state instead of retrying the deletion indefinitely.
+
+- Unicast CLI JSON now includes AGGREGATOR and ATOMIC_AGGREGATE when present,
+  including best-route and candidate rows in best-path explanations. Routes
+  without either attribute retain their existing JSON shape.
+
+- `rbgp neighbor` rejects malformed addresses before connecting, including
+  accidental `neighbor list` invocations. Valid scoped IPv6 peer addresses
+  remain supported. Help and man pages now distinguish parser/usage exit `2`
+  from argument-validation and execution exit `1`, preserving detailed
+  per-command exit codes.
+
+- `rbgp top` honors `--no-color` and the presence of `NO_COLOR` with a
+  monochrome theme that preserves bold emphasis and selection markers.
 
 ### Documentation
 

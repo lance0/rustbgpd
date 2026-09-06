@@ -29,6 +29,15 @@ pub(super) fn bare_ip_rpc_address(address: &str) -> &str {
     }
 }
 
+pub(crate) fn parse_peer_address(value: &str) -> Result<String, String> {
+    bare_ip_rpc_address(value)
+        .parse::<std::net::IpAddr>()
+        .map_err(|_| {
+            "expected a peer IP address (optionally scoped link-local IPv6)".to_string()
+        })?;
+    Ok(value.to_string())
+}
+
 pub(super) fn restore_matching_scoped_address(requested: Option<&str>, response: &mut String) {
     let Some(address) = requested else {
         return;

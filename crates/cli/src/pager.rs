@@ -88,8 +88,8 @@ fn pager_argv_from(mode: PagerMode, rbgp_pager: Option<&str>, pager: Option<&str
         .or_else(|| pager.filter(|value| !value.trim_ascii().is_empty()))
         .map(|value| value.split_ascii_whitespace().map(str::to_owned).collect())
         .unwrap_or_else(|| match mode {
-            PagerMode::Auto => vec!["less".into(), "-FRSX".into()],
-            PagerMode::Always => vec!["less".into(), "-RSX".into()],
+            PagerMode::Auto => vec!["less".into(), "-FRX".into()],
+            PagerMode::Always => vec!["less".into(), "-RX".into()],
             PagerMode::Never => unreachable!("never mode writes directly"),
         })
 }
@@ -203,13 +203,20 @@ mod tests {
             pager_argv_from(PagerMode::Always, Some("cat -n"), Some("more")),
             ["cat", "-n"]
         );
+        for mode in [PagerMode::Auto, PagerMode::Always] {
+            assert_eq!(
+                pager_argv_from(mode, Some("less -S"), Some("more -f")),
+                ["less", "-S"]
+            );
+            assert_eq!(pager_argv_from(mode, None, Some("less -S")), ["less", "-S"]);
+        }
         assert_eq!(
             pager_argv_from(PagerMode::Auto, None, None),
-            ["less", "-FRSX"]
+            ["less", "-FRX"]
         );
         assert_eq!(
             pager_argv_from(PagerMode::Always, None, None),
-            ["less", "-RSX"]
+            ["less", "-RX"]
         );
     }
 

@@ -1122,7 +1122,8 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (add)
 _arguments "${_arguments_options[@]}" : \
-'--nexthop=[Next hop address]:NEXTHOP:_default' \
+'--next-hop=[Next hop address]:NEXT_HOP:_default' \
+'--nexthop=[Next hop address]:NEXT_HOP:_default' \
 '--origin=[Origin (0=igp, 1=egp, 2=incomplete)]:ORIGIN:_default' \
 '--local-pref=[Local preference]:LOCAL_PREF:_default' \
 '--med=[MED]:MED:_default' \

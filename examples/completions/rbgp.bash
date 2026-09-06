@@ -9219,12 +9219,16 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__rib__subcmd__add)
-            opts="-s -j -h --nexthop --origin --local-pref --med --as-path --communities --large-communities --path-id --addr --token-file --json --no-color --pager --help"
+            opts="-s -j -h --nexthop --next-hop --origin --local-pref --med --as-path --communities --large-communities --path-id --addr --token-file --json --no-color --pager --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
+                --next-hop)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 --nexthop)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
