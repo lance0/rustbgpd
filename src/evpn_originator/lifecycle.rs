@@ -131,6 +131,16 @@ pub(super) async fn apply_runtime_model(
             super::duplicate_ip::reset_vni(state, inst);
         }
     }
+    // An unsuccessful repoll must not leave a floor from the previous ESI or
+    // import-RT scope available to the replay below.
+    for vni in redefined.iter().chain(esi_only_changed.iter()) {
+        state
+            .peer_sync_sequences
+            .retain(|(entry_vni, _), _| entry_vni != vni);
+        state
+            .peer_sync_participants
+            .retain(|(entry_vni, _)| entry_vni != vni);
+    }
 
     for inst in model.instances.iter() {
         state
@@ -199,6 +209,12 @@ pub(super) fn remove_vni_state(
     state.mac_originators.remove(&vni);
     state.mac_ip_originators.remove(&vni);
     state.local_macs.remove(&vni);
+    state
+        .peer_sync_sequences
+        .retain(|(entry_vni, _), _| *entry_vni != vni);
+    state
+        .peer_sync_participants
+        .retain(|(entry_vni, _)| *entry_vni != vni);
     state.duplicate_ip.clear_vni(vni);
     state.live_mac_ip.remove(&vni);
     state

@@ -54,7 +54,10 @@
 //! VNI's own Ethernet Segment are dropped at the same point: they are
 //! peer-sync routes (RFC 7432 §15, RFC 9721 §6.4), and treating them
 //! as contenders would make an all-active pair ratchet each other's
-//! sequence and count the echo as duplicate-MAC moves.
+//! sequence and count the echo as duplicate-MAC moves. A separate peer-sync
+//! view retains eligible sequence floors: locally owned MACs and their local
+//! IP bindings adopt higher floors exactly, without creating peer-only local
+//! ownership or feeding either duplicate detector.
 //!
 //! ## Reference
 //!
@@ -547,6 +550,11 @@ struct OriginatorState {
     remote_mac_view: RemoteMacViewMap,
     /// Cached MAC+IP contender map.
     remote_mac_ip_view: RemoteMacIpViewMap,
+    /// Same-segment sequence floors, separate from mobility contenders.
+    peer_sync_sequences: BTreeMap<(EvpnInstanceId, MacAddress), u32>,
+    /// Locally owned MACs that participated in peer sync in this VNI/ESI scope.
+    /// Retained local sequences still synchronize children after the peer leaves.
+    peer_sync_participants: BTreeSet<(EvpnInstanceId, MacAddress)>,
     /// RFC 7432 §15.1 duplicate-MAC detector. The pure detector owns
     /// the M/N window and active suppressions; this daemon state owns
     /// the route-withdraw/replay policy.
@@ -591,6 +599,8 @@ impl OriginatorState {
             live_mac_ip: BTreeMap::new(),
             remote_mac_view: BTreeMap::new(),
             remote_mac_ip_view: BTreeMap::new(),
+            peer_sync_sequences: BTreeMap::new(),
+            peer_sync_participants: BTreeSet::new(),
             duplicate_mac_detector: DuplicateMacDetector::default(),
             duplicate_ip: duplicate_ip::DuplicateIpState::default(),
             known_duplicate_mac_keys: BTreeSet::new(),
@@ -598,6 +608,65 @@ impl OriginatorState {
             duplicate_mac_quarantine_tx,
             pending_rib_ops: PendingRibOps::new(),
         }
+    }
+
+    /// Fold exact peer-sequence adoption into an existing local action batch.
+    /// Replacing an Inject before submission avoids briefly advertising the old
+    /// sequence. The RIB acknowledgement tracker remains the sole writer.
+    fn prepare_peer_sync_actions(
+        &mut self,
+        vni: EvpnInstanceId,
+        mac: MacAddress,
+        mut actions: Vec<OriginationAction>,
+    ) -> Vec<OriginationAction> {
+        if !self
+            .local_macs
+            .get(&vni)
+            .is_some_and(|macs| macs.contains_key(&mac))
+        {
+            return actions;
+        }
+        let peer_sequence = match self.peer_sync_sequences.get(&(vni, mac)).copied() {
+            Some(sequence) => {
+                self.peer_sync_participants.insert((vni, mac));
+                sequence
+            }
+            None if self.peer_sync_participants.contains(&(vni, mac)) => 0,
+            None => return actions,
+        };
+        let sequence = peer_sequence
+            .max(
+                self.mac_originators
+                    .get(&vni)
+                    .and_then(|orig| orig.sequence_for_mac(mac))
+                    .unwrap_or(0),
+            )
+            .max(
+                self.mac_ip_originators
+                    .get(&vni)
+                    .and_then(|orig| orig.sequence_for_mac(mac))
+                    .unwrap_or(0),
+            );
+        let mut adopted = Vec::new();
+        if let Some(orig) = self.mac_originators.get_mut(&vni) {
+            adopted.extend(orig.adopt_peer_sequence(mac, sequence));
+        }
+        if let Some(orig) = self.mac_ip_originators.get_mut(&vni) {
+            adopted.extend(orig.adopt_peer_sequence(mac, sequence));
+        }
+        for action in adopted {
+            let OriginationAction::Inject { key, .. } = &action else {
+                continue;
+            };
+            if let Some(existing) = actions.iter_mut().find(|candidate| {
+                matches!(candidate, OriginationAction::Inject { key: candidate_key, .. } if candidate_key == key)
+            }) {
+                *existing = action;
+            } else {
+                actions.push(action);
+            }
+        }
+        actions
     }
 
     /// Whether this MAC currently has any MAC+IP route advertising.

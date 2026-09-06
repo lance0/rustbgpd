@@ -129,8 +129,8 @@ pub struct RemoteMacView {
 ///
 /// RFC 7432 §15 and RFC 9721 §6.4/§6.5: a MAC or MAC/IP advertised by
 /// another PE on the same Ethernet Segment is a peer-sync route, not a
-/// mobility event, so it must neither raise the local MAC Mobility
-/// sequence nor count as a duplicate-MAC move. The zero ESI means
+/// mobility event. Its sequence may be adopted exactly, but must not
+/// trigger a mobility increment or count as a duplicate-MAC move. The zero ESI means
 /// single-homed on either side and never identifies a shared segment.
 #[must_use]
 pub fn is_same_segment_peer(
@@ -266,6 +266,37 @@ impl LocalMacOriginator {
             .values()
             .filter(|s| s.originated_key.is_some())
             .count()
+    }
+
+    /// Retained local sequence, including history after withdrawal.
+    #[must_use]
+    pub fn sequence_for_mac(&self, mac: MacAddress) -> Option<u32> {
+        self.by_mac.get(&mac).map(|state| state.our_seq)
+    }
+
+    /// Adopt a same-segment peer's sequence without treating it as a move.
+    /// Unknown MACs remain unknown; withdrawn entries retain the floor without
+    /// re-advertising. The local sticky bit and remote contention history stay intact.
+    pub fn adopt_peer_sequence(
+        &mut self,
+        mac: MacAddress,
+        sequence: u32,
+    ) -> Vec<OriginationAction> {
+        let Some(state) = self.by_mac.get_mut(&mac) else {
+            return Vec::new();
+        };
+        if state.our_seq >= sequence {
+            return Vec::new();
+        }
+        state.our_seq = sequence;
+        state.originated_key.map_or_else(Vec::new, |key| {
+            vec![OriginationAction::Inject {
+                mac,
+                mobility_seq: state.rendered_seq(),
+                sticky: state.sticky,
+                key,
+            }]
+        })
     }
 
     /// Build the wire-shaped key for `mac`.
@@ -514,6 +545,26 @@ mod tests {
         bytes[0] = 0x03;
         bytes[9] = seed;
         EthernetSegmentIdentifier::new(bytes)
+    }
+
+    #[test]
+    fn peer_sequence_adoption_preserves_ownership_sticky_and_history() {
+        let mut o = fresh();
+        assert!(o.adopt_peer_sequence(mac(0xAA), 3).is_empty());
+        assert_eq!(o.sequence_for_mac(mac(0xAA)), None);
+        o.on_local_learned(mac(0xAA), 7, true, None);
+        let actions = o.adopt_peer_sequence(mac(0xAA), 3);
+        assert_eq!(actions.len(), 1);
+        assert_inject(&actions[0], Some(3), true);
+        assert!(o.adopt_peer_sequence(mac(0xAA), 3).is_empty());
+        assert!(o.adopt_peer_sequence(mac(0xAA), 2).is_empty());
+        assert_eq!(o.by_mac[&mac(0xAA)].last_seen_remote_seq, None);
+        o.on_local_aged(mac(0xAA));
+        assert!(o.adopt_peer_sequence(mac(0xAA), u32::MAX).is_empty());
+        assert_eq!(o.sequence_for_mac(mac(0xAA)), Some(u32::MAX));
+        assert_eq!(o.advertised_count(), 0);
+        let actions = o.on_local_learned(mac(0xAA), 7, true, None);
+        assert_inject(&actions[0], Some(u32::MAX), true);
     }
 
     #[test]

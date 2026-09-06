@@ -488,6 +488,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Locally learned EVPN MACs now adopt a higher sequence from a peer on the
+  same nonzero Ethernet Segment, including all locally learned IPv4/IPv6
+  bindings. Adoption uses the exact sequence without a mobility increment,
+  preserves local sticky state, and does not count as duplicate-MAC or
+  duplicate-IP movement. Only matching import RTs, VNI, tag zero, and a
+  nonlocal next hop qualify; peer routes alone do not create local ownership.
+
 - Preserve fresh routes and live peer state when GR or LLGR retention expires
   while a re-established peer's initial outbound registration is deferred.
   Stale routes still expire, and the pending registration completes normally.
@@ -765,6 +772,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   semantics without renaming existing commands.
 
 ### Upgrade notes
+
+- **Same-segment EVPN sequence adoption:** locally owned MAC and MAC/IP
+  advertisements can now advance to an eligible ES peer's higher sequence.
+  Existing higher local sequences never decrease. Withdrawn, quarantined, or
+  drained routes stay suppressed until normal local replay permits origination.
+  A host learned only from the ES peer is still not originated locally.
 
 - **EVPN RPCs apply the configuration MAC and ESI grammar:** `AddEvpnRoute`,
   `DeleteEvpnRoute`, and `ClearDuplicateMacQuarantine` now parse `mac` and

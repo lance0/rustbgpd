@@ -93,6 +93,14 @@ pub(super) async fn repoll_rib(
     vni_to_esi: &std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
 ) -> Result<(), RibQueryError> {
     let routes = query_evpn_routes(rib_tx).await?;
+    let peer_sync_sequences = build_peer_sync_sequences(instances, &routes, vni_to_esi);
+    let peer_sync_changed: Vec<_> = peer_sync_sequences
+        .iter()
+        .filter_map(|(key, sequence)| {
+            (state.peer_sync_sequences.get(key) != Some(sequence)).then_some(*key)
+        })
+        .collect();
+    state.peer_sync_sequences = peer_sync_sequences;
     let (new_mac_view, new_mac_ip_view) = build_remote_views(instances, &routes, vni_to_esi);
     let mut suppressed_remote_diffs: BTreeSet<(EvpnInstanceId, MacAddress)> = BTreeSet::new();
 
@@ -211,6 +219,26 @@ pub(super) async fn repoll_rib(
     }
 
     super::duplicate_ip::observe_remote(&new_mac_ip_view, state, instances, metrics);
+    for (vni, mac) in peer_sync_changed {
+        if remote_route_processing_suppressed(state, vni, mac) {
+            continue;
+        }
+        let Some(inst) = instances.get(vni) else {
+            continue;
+        };
+        let actions = state.prepare_peer_sync_actions(vni, mac, Vec::new());
+        super::rib_write::apply_actions(
+            &mut state.pending_rib_ops,
+            actions,
+            inst,
+            rib_tx,
+            metrics,
+            originated_local_mac_counts,
+            vni_to_esi,
+        )
+        .await;
+    }
+
     state.remote_mac_view = new_mac_view;
     state.remote_mac_ip_view = new_mac_ip_view;
     Ok(())
@@ -323,6 +351,41 @@ pub(super) async fn handle_evpn_event_coalesced(
             "EVPN originator: event-triggered repoll failed"
         );
     }
+}
+
+/// Sequence floors for locally scoped peer-sync routes. Unlike mobility
+/// contenders, these never feed duplicate detection. Tag zero is the local
+/// origination scope; an exact configured RT match is required for adoption.
+fn build_peer_sync_sequences(
+    instances: &EvpnInstanceTable,
+    routes: &[EvpnRibRoute],
+    vni_to_esi: &BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
+) -> BTreeMap<(EvpnInstanceId, MacAddress), u32> {
+    let mut sequences = BTreeMap::new();
+    for route in routes {
+        let EvpnRoute::MacIp(mac_ip) = &route.route else {
+            continue;
+        };
+        let Ok(vni) = EvpnInstanceId::new(mac_ip.label1.as_vni()) else {
+            continue;
+        };
+        let Some(inst) = instances.get(vni) else {
+            continue;
+        };
+        if !inst.imports_mac_ip(mac_ip, route.next_hop, &route.attributes)
+            || !vni_to_esi
+                .get(&vni)
+                .is_some_and(|local| is_same_segment_peer(mac_ip.esi, *local))
+        {
+            continue;
+        }
+        let sequence = extract_mac_mobility_full(&route.attributes).1.unwrap_or(0);
+        sequences
+            .entry((vni, mac_ip.mac))
+            .and_modify(|current: &mut u32| *current = (*current).max(sequence))
+            .or_insert(sequence);
+    }
+    sequences
 }
 
 /// `(sticky, esi)` of each projected route keyed by the fields

@@ -66,8 +66,9 @@
 //!
 //! - [`LocalMacOriginator`] — MAC-only Type 2 (Gate 7b+1).
 //! - [`LocalMacIpOriginator`] — MAC+IP Type 2 (Gate 7b+2 slice 2),
-//!   keyed on `(MAC, IP)` with independent sequence chains per
-//!   RFC 9135 §4.4 coexistence.
+//!   keyed on `(MAC, IP)` with independent mobility sequence chains. Both
+//!   originators support exact same-segment sequence adoption; the daemon
+//!   coordinates the common floor for locally owned MACs and IP bindings.
 //! - [`LocalEsOriginator`], [`LocalEadPerEsOriginator`],
 //!   [`LocalEadPerEviOriginator`] — Type 4 ES and Type 1 EAD
 //!   origination state machines for Gate 8 multi-homing.
