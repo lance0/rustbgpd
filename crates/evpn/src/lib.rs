@@ -97,6 +97,7 @@ pub mod aliasing;
 pub mod colon_hex;
 pub mod dataplane;
 pub mod df_election;
+pub mod duplicate_ip;
 pub mod duplicate_mac;
 pub mod instance;
 pub mod ip_vrf;
@@ -126,6 +127,9 @@ pub use dataplane::{
     SameEsiBiasTable, SingleActiveCounters,
 };
 pub use df_election::{DfCandidate, DfElection, DfElectionError};
+pub use duplicate_ip::{
+    DuplicateIpConfig, DuplicateIpConfigError, DuplicateIpDetector, DuplicateIpKey,
+};
 pub use duplicate_mac::{
     DEFAULT_DUPLICATE_MAC_RECOVERY, DEFAULT_DUPLICATE_MAC_THRESHOLD, DEFAULT_DUPLICATE_MAC_WINDOW,
     DuplicateMacAction, DuplicateMacConfig, DuplicateMacConfigError, DuplicateMacDecision,

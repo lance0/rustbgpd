@@ -26,6 +26,8 @@ EVPN_METRICS: dict[str, tuple[str, tuple[str, ...]]] = {
     "evpn_local_originations_total": ("counter", ("action",)),
     "evpn_local_origination_errors_total": ("counter", ("action",)),
     "evpn_local_observations_dropped_total": ("counter", ("reason",)),
+    "evpn_duplicate_ip_moves_total": ("counter", ("vni",)),
+    "evpn_duplicate_ip_threshold_exceeded_total": ("counter", ("vni",)),
     "evpn_duplicate_mac_moves_total": ("counter", ("vni", "mac")),
     "evpn_duplicate_mac_first_move_timestamp_seconds": ("gauge", ("vni", "mac")),
     "evpn_duplicate_mac_threshold_exceeded_total": (

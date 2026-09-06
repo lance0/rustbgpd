@@ -72,7 +72,8 @@ fn park_pending_ip_binding(
 /// FRR mailing-list bugs that motivated this model.
 #[expect(
     clippy::too_many_arguments,
-    reason = "the ADR-0084 drain gate shares explicit observation and actor context"
+    clippy::too_many_lines,
+    reason = "drain handling and diagnostic accounting share the ordered observation dispatch"
 )]
 pub(super) async fn handle_observation(
     obs: &LocalMacObservation,
@@ -101,6 +102,7 @@ pub(super) async fn handle_observation(
             "EVPN originator: caching kernel observation for drained Ethernet Segment without origination"
         );
         handle_observation_while_drained(obs, state);
+        super::duplicate_ip::observe_local(obs, state, instances, metrics);
         return;
     }
     match *obs {
@@ -200,6 +202,7 @@ pub(super) async fn handle_observation(
             .await;
         }
     }
+    super::duplicate_ip::observe_local(obs, state, instances, metrics);
 }
 
 /// Cache-only observation handling for a drained VNI (ADR-0084):

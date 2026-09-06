@@ -606,6 +606,8 @@ struct BgpMetricsInner {
     evpn_local_originations: IntCounterVec,
     evpn_local_origination_errors: IntCounterVec,
     evpn_local_observations_dropped: IntCounterVec,
+    evpn_duplicate_ip_moves: IntCounterVec,
+    evpn_duplicate_ip_threshold_exceeded: IntCounterVec,
     evpn_duplicate_mac_moves: IntCounterVec,
     evpn_duplicate_mac_first_move_timestamp: IntGaugeVec,
     evpn_duplicate_mac_threshold_exceeded: IntCounterVec,
@@ -2026,6 +2028,23 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let evpn_duplicate_ip_moves = IntCounterVec::new(
+            Opts::new(
+                "evpn_duplicate_ip_moves_total",
+                "EVPN conflicting IP ownership observations by VNI",
+            ),
+            &["vni"],
+        )
+        .expect("valid metric definition");
+        let evpn_duplicate_ip_threshold_exceeded = IntCounterVec::new(
+            Opts::new(
+                "evpn_duplicate_ip_threshold_exceeded_total",
+                "EVPN detect-only duplicate-IP M/N threshold crossings by VNI",
+            ),
+            &["vni"],
+        )
+        .expect("valid metric definition");
+
         let evpn_duplicate_mac_moves = IntCounterVec::new(
             Opts::new(
                 "evpn_duplicate_mac_moves_total",
@@ -2900,6 +2919,12 @@ impl BgpMetrics {
             .register(Box::new(evpn_local_observations_dropped.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(evpn_duplicate_ip_moves.clone()))
+            .expect("register metric");
+        registry
+            .register(Box::new(evpn_duplicate_ip_threshold_exceeded.clone()))
+            .expect("register metric");
+        registry
             .register(Box::new(evpn_duplicate_mac_moves.clone()))
             .expect("metric not already registered");
         registry
@@ -3218,6 +3243,8 @@ impl BgpMetrics {
             evpn_local_originations,
             evpn_local_origination_errors,
             evpn_local_observations_dropped,
+            evpn_duplicate_ip_moves,
+            evpn_duplicate_ip_threshold_exceeded,
             evpn_duplicate_mac_moves,
             evpn_duplicate_mac_first_move_timestamp,
             evpn_duplicate_mac_threshold_exceeded,
@@ -5236,6 +5263,23 @@ impl BgpMetrics {
         self.0
             .evpn_local_observations_dropped
             .with_label_values(&[reason])
+            .inc();
+    }
+
+    /// Record a conflicting IP ownership observation. IP identity stays in
+    /// structured diagnostics rather than unbounded metric labels.
+    pub fn record_evpn_duplicate_ip_move(&self, vni: u32) {
+        self.0
+            .evpn_duplicate_ip_moves
+            .with_label_values(&[&vni.to_string()])
+            .inc();
+    }
+
+    /// Record a detect-only duplicate-IP threshold crossing.
+    pub fn record_evpn_duplicate_ip_threshold_exceeded(&self, vni: u32) {
+        self.0
+            .evpn_duplicate_ip_threshold_exceeded
+            .with_label_values(&[&vni.to_string()])
             .inc();
     }
 
@@ -7660,6 +7704,19 @@ mod tests {
         assert!(text.contains("bgp_session_state_transitions_total"));
         assert!(text.contains("bgp_messages_sent_total"));
         assert!(text.contains("10.0.0.1"));
+    }
+
+    #[test]
+    fn duplicate_ip_metrics_are_cumulative_and_vni_scoped() {
+        let m = BgpMetrics::new();
+        m.record_evpn_duplicate_ip_move(100);
+        m.record_evpn_duplicate_ip_move(100);
+        m.record_evpn_duplicate_ip_move(200);
+        m.record_evpn_duplicate_ip_threshold_exceeded(100);
+        let text = gather_text(&m);
+        assert!(text.contains("evpn_duplicate_ip_moves_total{vni=\"100\"} 2"));
+        assert!(text.contains("evpn_duplicate_ip_moves_total{vni=\"200\"} 1"));
+        assert!(text.contains("evpn_duplicate_ip_threshold_exceeded_total{vni=\"100\"} 1"));
     }
 
     fn assert_duplicate_mac_metrics(m: &BgpMetrics, first_move_timestamp: i64, text: &str) {

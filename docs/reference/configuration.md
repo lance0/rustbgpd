@@ -3725,6 +3725,34 @@ duplicate_mac_detection = { action = "detect", window_seconds = 180, threshold =
 | `ip_vrf`              | string   | no       | --      | Name of an `[[evpn_ip_vrfs]]` entry to link this L2VNI to (Gate 9 IRB binding) |
 | `apply_aliasing_ecmp` | bool     | no       | `true`  | Program ADR-0059 FDB nexthop groups for multi-homed Type 2 routes (aliasing-ECMP via `NDA_NH_ID` + `NHA_FDB`). Flip to `false` to roll this L2VNI back to single-dst FDB rows at the primary VTEP. Single-homed Type 2 entries are unaffected |
 | `duplicate_mac_detection` | table | no | `{ action = "detect", window_seconds = 180, threshold = 5, recovery_seconds = 540 }` | RFC 7432 §15.1 duplicate-MAC M/N detector. `action = "detect"` records threshold crossings only; `action = "suppress_local"` additionally withdraws/suppresses locally-originated Type 2 MAC-only and MAC+IP routes for the offending `(VNI, MAC)` until `recovery_seconds` elapses |
+| `duplicate_ip_detection` | table | no | `{ enabled = false, window_seconds = 180, threshold = 5 }` | Optional per-IP M/N diagnostics for conflicting MAC ownership within a VNI. Detect-only: increments counters and logs threshold crossings, without suppressing or withdrawing routes |
+
+Duplicate-IP diagnostics can be enabled independently of duplicate-MAC policy:
+
+```toml
+duplicate_ip_detection = { enabled = true, window_seconds = 180, threshold = 5 }
+```
+
+A new local IPv4 or IPv6 binding counts once if another local or remote MAC
+claims the same IP. A new remote binding counts against a different local
+MAC; remote-only conflicts are not counted. Repeated neighbor notifications,
+FDB replay, and unchanged remote membership do not count again. A removed
+local owner remains eligible for comparison for `window_seconds`, including
+the removed-then-added pair from a kernel neighbor rebind. The window resets
+after each threshold crossing. Sticky MACs and MACs under duplicate-MAC
+quarantine are excluded from both sides of a conflict. Same-segment peer-sync
+routes remain excluded by the existing remote-view filter.
+
+This is diagnostic accounting for RFC 9721 §8.2, not the full RFC 9161
+ARP/ND duplicate-address procedure: it does not probe, freeze an IP, change
+MAC Mobility sequence selection, or add route withdrawals. Existing kernel
+rebind withdrawals and duplicate-MAC suppression retain their behavior.
+Configuration reload follows the existing full L2VNI redefine path, even
+when only this diagnostic setting changes. That path withdraws and replays
+local routes and clears duplicate-MAC quarantine as well as IP move history.
+Preserved bindings are seeded without counting the replay as an IP move.
+The routing-neutral guarantee applies to IP observations and threshold
+crossings, not to applying a configuration change.
 
 ### Validation
 
@@ -3754,6 +3782,9 @@ duplicate_mac_detection = { action = "detect", window_seconds = 180, threshold =
   so those deployments must configure `route_targets` manually.
 - `ip_vrf` (when set) must name an `[[evpn_ip_vrfs]]` entry declared
   in the same config.
+- `duplicate_ip_detection.window_seconds` and `threshold` must be greater
+  than zero, even when detection is disabled. `action` and `recovery_seconds`
+  are not supported in this detect-only table.
 - `duplicate_mac_detection.window_seconds`, `threshold`, and
   `recovery_seconds` must all be greater than zero.
 - `duplicate_mac_detection.recovery_seconds` must be no greater than

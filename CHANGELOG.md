@@ -281,6 +281,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   while BGP remains live, inspect delivery diagnostics, and verify a decoded
   Loc-RIB route snapshot after the collector reconnects.
 
+- Add optional EVPN `duplicate_ip_detection` diagnostics per L2VNI, disabled
+  by default. Conflicting local/local and local/remote IPv4 or IPv6 ownership
+  uses an M/N window, with `evpn_duplicate_ip_moves_total{vni}` and
+  `evpn_duplicate_ip_threshold_exceeded_total{vni}` counters and an
+  IP-specific warning. Replayed bindings, sticky MACs, same-segment peer-sync
+  routes, and duplicate-MAC-quarantined contenders are excluded. This slice
+  does not quarantine IPs, probe neighbors, or change routing actions.
+
 ### Changed
 
 - The three example programs (`event-bridge`, `peer-loop`, `birdwatcher-adapter`)

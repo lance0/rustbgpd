@@ -1088,6 +1088,33 @@ pub enum EvpnDuplicateMacActionConfig {
     SuppressLocal,
 }
 
+/// Per-instance detect-only duplicate-IP accounting (RFC 9721 §8.2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EvpnDuplicateIpDetectionConfig {
+    /// Enable diagnostic accounting without changing route actions. Default false.
+    #[serde(default)]
+    pub enabled: bool,
+    /// M window in seconds. Default 180.
+    #[serde(default = "default_duplicate_mac_window_seconds")]
+    #[schemars(range(min = 1))]
+    pub window_seconds: u64,
+    /// N move threshold. Default 5.
+    #[serde(default = "default_duplicate_mac_threshold")]
+    #[schemars(range(min = 1))]
+    pub threshold: u32,
+}
+
+impl Default for EvpnDuplicateIpDetectionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            window_seconds: default_duplicate_mac_window_seconds(),
+            threshold: default_duplicate_mac_threshold(),
+        }
+    }
+}
+
 /// Per-`[[evpn_instances]]` RFC 7432 §15.1 duplicate-MAC detector.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -2740,6 +2767,9 @@ pub struct EvpnInstanceConfig {
     /// for the offending `(VNI, MAC)` until `recovery_seconds` elapses.
     #[serde(default)]
     pub duplicate_mac_detection: EvpnDuplicateMacDetectionConfig,
+    /// Optional duplicate-IP diagnostics; never suppresses routes. Disabled by default.
+    #[serde(default)]
+    pub duplicate_ip_detection: EvpnDuplicateIpDetectionConfig,
 }
 
 /// One IP-VRF / L3VNI tenant served by this VTEP (Gate 9 symmetric

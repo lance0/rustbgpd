@@ -684,6 +684,32 @@
       },
       "additionalProperties": false
     },
+    "EvpnDuplicateIpDetectionConfig": {
+      "description": "Per-instance detect-only duplicate-IP accounting (RFC 9721 §8.2).",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Enable diagnostic accounting without changing route actions. Default false.",
+          "type": "boolean",
+          "default": false
+        },
+        "threshold": {
+          "description": "N move threshold. Default 5.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 5,
+          "minimum": 1
+        },
+        "window_seconds": {
+          "description": "M window in seconds. Default 180.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 180,
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
     "EvpnDuplicateMacActionConfig": {
       "oneOf": [
         {
@@ -767,6 +793,15 @@
           "format": "uint32",
           "default": null,
           "minimum": 0
+        },
+        "duplicate_ip_detection": {
+          "description": "Optional duplicate-IP diagnostics; never suppresses routes. Disabled by default.",
+          "$ref": "#/$defs/EvpnDuplicateIpDetectionConfig",
+          "default": {
+            "enabled": false,
+            "threshold": 5,
+            "window_seconds": 180
+          }
         },
         "duplicate_mac_detection": {
           "description": "RFC 7432 §15.1 duplicate-MAC detection and optional local\nquarantine policy. Default is detect-only with the RFC M/N\nwindow (5 moves in 180s). `action = \"suppress_local\"` is\nopt-in and withdraws/suppresses locally-originated Type 2 routes\nfor the offending `(VNI, MAC)` until `recovery_seconds` elapses.",

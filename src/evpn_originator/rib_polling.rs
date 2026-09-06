@@ -210,6 +210,7 @@ pub(super) async fn repoll_rib(
         .await;
     }
 
+    super::duplicate_ip::observe_remote(&new_mac_ip_view, state, instances, metrics);
     state.remote_mac_view = new_mac_view;
     state.remote_mac_ip_view = new_mac_ip_view;
     Ok(())

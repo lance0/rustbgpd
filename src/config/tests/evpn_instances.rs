@@ -1595,3 +1595,74 @@ fn apply_bum_enforcement_diff_marks_restart_required() {
     assert!(diff.apply_bum_enforcement_changed);
     assert!(diff.has_restart_required_changes());
 }
+
+#[test]
+fn evpn_duplicate_ip_detection_defaults_and_reload_round_trip() {
+    let base = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+"#,
+    );
+    let old = parse(&base).unwrap();
+    let table = old.resolve_evpn_instances().unwrap();
+    assert_eq!(
+        table
+            .get(EvpnInstanceId::new(100).unwrap())
+            .unwrap()
+            .duplicate_ip_detection,
+        rustbgpd_evpn::DuplicateIpConfig::default()
+    );
+    let enabled = format!(
+        "{base}\nduplicate_ip_detection = {{ enabled = true, window_seconds = 30, threshold = 2 }}\n"
+    );
+    let new = parse(&enabled).unwrap();
+    let round_trip: Config = toml::from_str(&toml::to_string(&new).unwrap()).unwrap();
+    round_trip.validate().unwrap();
+    let table = round_trip.resolve_evpn_instances().unwrap();
+    assert_eq!(
+        table
+            .get(EvpnInstanceId::new(100).unwrap())
+            .unwrap()
+            .duplicate_ip_detection,
+        rustbgpd_evpn::DuplicateIpConfig::new(true, std::time::Duration::from_secs(30), 2).unwrap()
+    );
+    let diff = diff_config(&old, &new);
+    assert!(diff.evpn_instances_changed);
+    assert_eq!(
+        diff.evpn_runtime_change_class,
+        EvpnRuntimeChangeClass::ReloadApplied
+    );
+    assert!(!diff.has_restart_required_changes());
+}
+
+#[test]
+fn evpn_duplicate_ip_detection_rejects_invalid_and_suppression_settings() {
+    let schema: serde_json::Value = serde_json::from_str(&config_json_schema()).unwrap();
+    let properties = &schema["$defs"]["EvpnDuplicateIpDetectionConfig"]["properties"];
+    for field in ["window_seconds", "threshold"] {
+        assert_eq!(properties[field]["minimum"], 1);
+    }
+    for setting in [
+        "window_seconds = 0",
+        "threshold = 0",
+        "action = 'suppress_local'",
+        "recovery_seconds = 30",
+        "enabled = 'yes'",
+    ] {
+        let text = evpn_toml_with(&format!(
+            r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+duplicate_ip_detection = {{ {setting} }}
+"#
+        ));
+        assert!(parse(&text).is_err(), "accepted {setting}");
+    }
+}
