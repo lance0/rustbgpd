@@ -6097,3 +6097,57 @@ test fails {
         );
     }
 }
+
+#[test]
+fn chain_node_budget_compile_rpol_composition() {
+    use std::fmt::Write as _;
+    let mut body = String::new();
+    for i in 0..3333 {
+        writeln!(body, "term t{i} {{ if route.med >= {i} {{ accept }} }}").unwrap();
+    }
+    let mut source = String::new();
+    for i in 0..100 {
+        writeln!(source, "policy p{i} {{ {body} }}").unwrap();
+    }
+    // 100 * (1 policy + 3333 * (term + guard + action)) = 1,000,000.
+    let chain = compile_ok(&source);
+    assert_eq!(chain.policies.len(), 100);
+    drop(chain);
+    source.push_str("policy one-over {}\n");
+    let Err(error) = compile_rpol(&source, &mut SetStore::new()) else {
+        panic!("oversized composed chain must fail");
+    };
+    assert!(format!("{error:?}").contains("MAX_CHAIN_NODES"));
+    // A file registry does not compose its unused definitions into a chain.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("large.rpol");
+    std::fs::write(&path, &source).unwrap();
+    let file = RpolFile::load(&path, &[], super::modules::DEFAULT_MAX_GRAPH_BYTES).unwrap();
+    let selected = file
+        .compile_policy("p0", &[], &mut SetStore::new())
+        .unwrap();
+    assert_eq!(selected.policies.len(), 1);
+}
+
+#[test]
+fn chain_node_budget_excludes_shared_set_contents_and_unused_policies() {
+    use std::fmt::Write as _;
+    let mut source = String::from("asn-set shared { ");
+    for asn in 1..=100_001 {
+        write!(source, "{asn},").unwrap();
+    }
+    source.push_str(
+        "}\npolicy template(x: u32) { term t { if route.origin-as in shared { accept } } }\n",
+    );
+    // Templates are not chain members merely because the registry contains them.
+    for i in 0..20 {
+        writeln!(
+            source,
+            "policy p{i} {{ term t {{ if apply(template(1)) {{ accept }} }} }}"
+        )
+        .unwrap();
+    }
+    let chain = compile_ok(&source);
+    assert_eq!(chain.policies.len(), 20);
+    assert_eq!(chain.asn_sets.len(), 1);
+}

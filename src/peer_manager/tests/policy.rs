@@ -2035,3 +2035,208 @@ async fn owned_policy_noop_is_typed_success_without_convergence_debt() {
         rustbgpd_api::peer_types::OwnedCatalogMutationOutcome::Success
     ));
 }
+
+fn chain_budget_registry(source: &str) -> rustbgpd_policy::rpol::RpolPolicySet {
+    use rustbgpd_policy::rpol::{RpolFile, RpolPolicyEntry, RpolPolicySet};
+    let file = Arc::new(RpolFile::parse(source).unwrap());
+    RpolPolicySet {
+        policies: file
+            .policies()
+            .map(|(name, params)| {
+                (
+                    name.to_string(),
+                    RpolPolicyEntry {
+                        file: file.clone(),
+                        params,
+                        path: "policy.rpol".to_string(),
+                    },
+                )
+            })
+            .collect(),
+    }
+}
+
+#[tokio::test]
+async fn chain_node_budget_rejects_api_and_reload_without_effect() {
+    use rustbgpd_api::peer_types::{ConfigEvent, OwnedCatalogMutationOutcome};
+    use std::fmt::Write as _;
+
+    let mut body = String::new();
+    for i in 0..3333 {
+        writeln!(body, "term t{i} {{ if route.med >= {i} {{ accept }} }}").unwrap();
+    }
+    let (_tx, rx) = mpsc::channel(4);
+    let (rib_tx, mut rib_rx) = mpsc::channel(4);
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    mgr.current_config = make_dynamic_manager_config();
+    mgr.current_config.global.honor_graceful_shutdown = true;
+    mgr.current_config.policy.rpol =
+        chain_budget_registry(&format!("policy small {{}} policy bulk {{ {body} }}"));
+    let peer: IpAddr = "192.0.2.9".parse().unwrap();
+    let mut neighbor = config_neighbor(peer, 65002);
+    neighbor.import_policy_chain = vec!["small".to_string(); 100];
+    mgr.current_config.neighbors = vec![neighbor];
+    let counters = Arc::new(FakePeerCounters::default());
+    insert_test_managed_peer(
+        &mut mgr,
+        peer,
+        acking_counted_policy_handle(peer, counters.clone()),
+        false,
+    );
+    let (installed, _) = mgr
+        .current_config
+        .effective_policy_chains_for_neighbor(&mgr.current_config.neighbors[0])
+        .unwrap();
+    mgr.peers.get_mut(&key(peer)).unwrap().import_policy = installed.clone();
+    let before = mgr.current_config.clone();
+
+    // The named chain fits exactly; its implicit tail crosses the cap.
+    let outcome = mgr
+        .apply_policy_change_owned(
+            ConfigEvent::SetNeighborImportChain {
+                address: peer,
+                policy_names: vec!["bulk".to_string(); 100],
+                ack: None,
+            },
+            Some(vec![peer]),
+        )
+        .await;
+    assert!(
+        matches!(outcome, OwnedCatalogMutationOutcome::RejectedNoEffect(CatalogMutationError::Invalid(ref message)) if message.contains("MAX_CHAIN_NODES"))
+    );
+    assert_eq!(mgr.current_config, before);
+    assert_eq!(mgr.peers[&key(peer)].import_policy, installed);
+
+    // Both configured static peers and retained orphaned dynamic peers reject
+    // before registry adoption. The orphan has no range to preflight against.
+    for dynamic in [false, true] {
+        if dynamic {
+            mgr.current_config.neighbors.clear();
+            mgr.current_config.dynamic_neighbors.clear();
+            mgr.current_config
+                .peer_groups
+                .get_mut("ix-members")
+                .unwrap()
+                .import_policy_chain = vec!["small".to_string(); 100];
+            let managed = mgr.peers.get_mut(&key(peer)).unwrap();
+            managed.is_dynamic = true;
+            managed.peer_group = Some("ix-members".to_string());
+        }
+        let before = mgr.current_config.clone();
+        let outcome = mgr
+            .sync_rpol_policies_owned(
+                vec!["policy.rpol".to_string()],
+                chain_budget_registry(&format!(
+                    "policy small {{ {body} }} policy bulk {{ {body} }}"
+                )),
+                rustbgpd_policy::datasets::DatasetBindings::default(),
+            )
+            .await;
+        assert!(
+            matches!(
+                outcome,
+                OwnedCatalogMutationOutcome::RejectedNoEffect(CatalogMutationError::Invalid(_))
+            ),
+            "dynamic={dynamic}: {outcome:?}"
+        );
+        assert_eq!(mgr.current_config, before);
+        assert_eq!(mgr.peers[&key(peer)].import_policy, installed);
+    }
+    assert!(matches!(
+        rib_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    assert_eq!(counters.query_state.load(Ordering::SeqCst), 0);
+    assert_eq!(counters.route_refresh.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn chain_node_budget_dynamic_reload_intermediate_rejects_without_adoption() {
+    use rustbgpd_api::peer_types::OwnedCatalogMutationOutcome;
+    use std::fmt::Write as _;
+
+    let (_tx, rx) = mpsc::channel(4);
+    let (rib_tx, mut rib_rx) = mpsc::channel(4);
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    mgr.current_config = make_dynamic_manager_config();
+    mgr.current_config.global.honor_graceful_shutdown = true;
+    mgr.current_config.policy.rpol = chain_budget_registry("policy p {}");
+    mgr.current_config
+        .peer_groups
+        .get_mut("ix-members")
+        .unwrap()
+        .import_policy_chain = vec!["p".to_string(); 100];
+    mgr.current_config.validate().unwrap();
+    let before = mgr.current_config.clone();
+    let mut source = String::from("policy p { ");
+    for i in 0..3333 {
+        writeln!(source, "term t{i} {{ if route.med >= {i} {{ accept }} }}").unwrap();
+    }
+    source.push('}');
+    let next_registry = chain_budget_registry(&source);
+    let mut desired = before.clone();
+    desired.policy.rpol = next_registry.clone();
+    desired
+        .peer_groups
+        .get_mut("ix-members")
+        .unwrap()
+        .import_policy_chain
+        .pop();
+    desired.validate().unwrap();
+
+    // Reload installs the registry before shrinking the group's chain. That
+    // intermediate candidate must reject even with no active dynamic session.
+    let outcome = mgr
+        .sync_rpol_policies_owned(
+            vec!["policy.rpol".to_string()],
+            next_registry,
+            rustbgpd_policy::datasets::DatasetBindings::default(),
+        )
+        .await;
+    assert!(
+        matches!(
+            outcome,
+            OwnedCatalogMutationOutcome::RejectedNoEffect(CatalogMutationError::Invalid(_))
+        ),
+        "{outcome:?}"
+    );
+    assert_eq!(mgr.current_config, before);
+    assert!(matches!(
+        rib_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    // Existing mixed-reload tolerance remains: a later chain edit can repair
+    // renamed or newly parameterized references after the registry is adopted.
+    for source in ["policy renamed {}", "policy p(x: u32) {}"] {
+        let candidate = chain_budget_registry(source);
+        let outcome = mgr
+            .sync_rpol_policies_owned(
+                vec!["policy.rpol".to_string()],
+                candidate,
+                rustbgpd_policy::datasets::DatasetBindings::default(),
+            )
+            .await;
+        assert!(
+            matches!(outcome, OwnedCatalogMutationOutcome::Success),
+            "{outcome:?}"
+        );
+    }
+}
