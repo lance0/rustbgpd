@@ -2119,7 +2119,10 @@ fn reject_duplicate_route_view_option<T>(
 }
 
 fn validate_explain_family(family: Option<&str>, prefix: Option<&str>) -> Result<(), CliError> {
-    let (Some(family), Some(prefix)) = (family, prefix) else {
+    let prefix = prefix.ok_or_else(|| {
+        CliError::Argument("--explain requires --prefix with an exact CIDR".into())
+    })?;
+    let Some(family) = family else {
         return Ok(());
     };
     let ipv4 = match parse_family(family) {
@@ -7497,6 +7500,14 @@ printf '%s\n' "${COMPREPLY[@]}"
             (
                 "rib --family ipv6 --prefix 203.0.113.0/24 --explain",
                 "--family ipv6 does not match prefix 203.0.113.0/24",
+            ),
+            (
+                "rib advertised 192.0.2.1 --explain",
+                "--explain requires --prefix with an exact CIDR",
+            ),
+            (
+                "rib advertised 192.0.2.1 --family ipv4 --explain",
+                "--explain requires --prefix with an exact CIDR",
             ),
             (
                 "rib --family ipv4 --prefix 2001:db8::/32 --explain",

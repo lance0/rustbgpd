@@ -44,8 +44,8 @@ translates the usual show-commands into these.
 
 Best-path and export explanations infer IPv4 or IPv6 from the exact prefix.
 An optional `--family` must be a matching IPv4/IPv6 unicast alias; conflicting
-or unsupported families fail before connecting. Export `--rd` and `--labeled`
-selectors continue to choose VPN and labeled-unicast explanations.
+or unsupported families fail before connecting. The `--rd` and `--labeled`
+selectors on `rib advertised --explain` choose VPN and labeled-unicast explanations.
 
 Why did this path win? Every losing candidate is annotated with the
 decisive comparison step (`only_path`, `higher_local_pref`,
