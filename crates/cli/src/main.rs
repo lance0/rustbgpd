@@ -2479,7 +2479,66 @@ fn invoked_binary_name() -> &'static str {
 }
 
 fn cli_command(binary_name: &'static str) -> clap::Command {
-    Cli::command().name(binary_name).bin_name(binary_name)
+    group_root_help(Cli::command().name(binary_name).bin_name(binary_name))
+}
+
+// Presentation only: command paths, aliases, and parser order stay in Clap.
+const ROOT_HELP_GROUPS: &[(&str, &[&str])] = &[
+    (
+        "Inspect",
+        &["global", "neighbor", "bfd", "rpki", "topology", "orr"],
+    ),
+    ("Routes", &["rib", "flowspec", "evpn", "diff"]),
+    ("Policy", &["policy", "neighbor-set"]),
+    (
+        "Configuration",
+        &[
+            "config",
+            "peer-group",
+            "dynamic-neighbor",
+            "fib-table",
+            "gshut",
+            "shutdown",
+        ],
+    ),
+    (
+        "Diagnostics",
+        &[
+            "health", "doctor", "metrics", "top", "watch", "events", "mrt-dump",
+        ],
+    ),
+    ("Reference", &["completions", "man", "help"]),
+];
+
+fn group_root_help(command: clap::Command) -> clap::Command {
+    // Native help prepares root metadata, including the generated help command,
+    // without recursively building every descendant as Command::build would.
+    let mut display = command.clone();
+    let _ = display.render_help();
+    let header = *command.get_styles().get_header();
+    let mut groups = String::new();
+    for (heading, names) in ROOT_HELP_GROUPS {
+        let mut group = display
+            .clone()
+            .help_template("{subcommands}")
+            .mut_subcommands(|sub| {
+                let hidden = sub.is_hide_set() || !names.contains(&sub.get_name());
+                sub.hide(hidden)
+            });
+        groups.push_str(&format!("{header}{heading}:{header:#}\n"));
+        // Clap uses the same short summaries in both short and long help.
+        let rendered = group.render_help().ansi().to_string();
+        groups.push_str(rendered.trim_end());
+        groups.push_str("\n\n");
+    }
+    // Root help has no existing before_help content. Using its native value
+    // slot keeps braces in command descriptions from becoming template tags.
+    command
+        .before_help(groups.trim_end().to_string())
+        .help_template(format!(
+            "{{about-with-newline}}\n{{usage-heading}} {{usage}}\n\n\
+         {{before-help}}{header}Options:{header:#}\n{{options}}{{after-help}}"
+        ))
 }
 
 fn parse_cli(binary_name: &'static str) -> Cli {
@@ -2793,13 +2852,20 @@ fn generate_man(binary_name: &'static str, output: &mut dyn std::io::Write) -> s
     // that section cross-references `rbgp-<sub>(1)` pages that do not
     // exist in this single-page layout.
     writeln!(output, ".SH SUBCOMMANDS")?;
-    for sub in cmd.get_subcommands() {
-        if sub.is_hide_set() || sub.get_name() == "help" {
-            continue;
-        }
-        writeln!(output, ".TP\n\\fB{} {}\\fR", binary_name, sub.get_name())?;
-        if let Some(about) = sub.get_about() {
-            writeln!(output, "{about}")?;
+    for (heading, names) in ROOT_HELP_GROUPS {
+        writeln!(output, ".SS {heading}")?;
+        for sub in cmd
+            .get_subcommands()
+            .filter(|sub| !sub.is_hide_set() && names.contains(&sub.get_name()))
+        {
+            writeln!(output, ".TP\n\\fB{} {}\\fR", binary_name, sub.get_name())?;
+            let aliases: Vec<_> = sub.get_visible_aliases().collect();
+            if !aliases.is_empty() {
+                writeln!(output, "(aliases: {})", aliases.join(", "))?;
+            }
+            if let Some(about) = sub.get_about() {
+                writeln!(output, "{about}")?;
+            }
         }
     }
 
@@ -4441,6 +4507,172 @@ mod tests {
 
         assert!(help.contains("Usage: rbgp"));
         assert!(!help.contains("Usage: rustbgpctl"));
+    }
+
+    #[test]
+    fn root_help_groups_cover_visible_commands_once() {
+        let mut command = Cli::command();
+        command.build();
+        assert!(command.get_before_help().is_none());
+        assert!(command.get_before_long_help().is_none());
+        let mut grouped: Vec<_> = ROOT_HELP_GROUPS
+            .iter()
+            .flat_map(|(_, names)| names.iter().copied())
+            .collect();
+        grouped.sort_unstable();
+        assert!(grouped.windows(2).all(|pair| pair[0] != pair[1]));
+        let mut visible: Vec<_> = command
+            .get_subcommands()
+            .filter(|sub| !sub.is_hide_set())
+            .map(clap::Command::get_name)
+            .collect();
+        visible.sort_unstable();
+        assert_eq!(grouped, visible, "new commands need a root help group");
+    }
+
+    #[test]
+    fn root_help_groups_preserve_native_options_and_exit_details() {
+        for (long, width) in [(false, 48), (true, 48), (false, 100), (true, 100)] {
+            let mut native = Cli::command().term_width(width);
+            let mut grouped = group_root_help(Cli::command().term_width(width));
+            let native = if long {
+                native.render_long_help()
+            } else {
+                native.render_help()
+            };
+            let grouped = if long {
+                grouped.render_long_help()
+            } else {
+                grouped.render_help()
+            };
+            let native = native.to_string();
+            let grouped = grouped.to_string();
+            assert_eq!(
+                native.split_once("Options:").unwrap().1,
+                grouped.split_once("Options:").unwrap().1,
+            );
+            for (heading, names) in ROOT_HELP_GROUPS {
+                assert_eq!(grouped.matches(&format!("{heading}:\n")).count(), 1);
+                let section = grouped
+                    .split_once(&format!("{heading}:\n"))
+                    .unwrap()
+                    .1
+                    .split("\n\n")
+                    .next()
+                    .unwrap();
+                for name in *names {
+                    assert_eq!(
+                        section
+                            .lines()
+                            .filter(|line| { line.split_whitespace().next() == Some(name) })
+                            .count(),
+                        1,
+                        "{name}: {section}"
+                    );
+                }
+            }
+            let normalized = grouped.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert_eq!(normalized.matches("[alias: summary]").count(), 1);
+            assert!(!grouped.contains("Commands:\n"));
+            assert!(!grouped.contains('\u{1b}'));
+        }
+    }
+
+    #[test]
+    fn root_help_groups_preserve_subcommands_and_completions() {
+        let mut native = Cli::command();
+        native.build();
+        let mut grouped = cli_command(BINARY_NAME);
+        grouped.build();
+        for sub in native
+            .get_subcommands()
+            .filter(|sub| sub.get_name() != "help")
+        {
+            let mut original = sub.clone();
+            let mut current = grouped.find_subcommand(sub.get_name()).unwrap().clone();
+            assert_eq!(
+                original.render_help(),
+                current.render_help(),
+                "{}",
+                sub.get_name()
+            );
+            assert_eq!(
+                original.render_long_help(),
+                current.render_long_help(),
+                "{}",
+                sub.get_name()
+            );
+            assert_eq!(
+                original.get_all_aliases().collect::<Vec<_>>(),
+                current.get_all_aliases().collect::<Vec<_>>()
+            );
+        }
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
+            let mut original = Vec::new();
+            let mut current = Vec::new();
+            clap_complete::generate(shell, &mut native.clone(), BINARY_NAME, &mut original);
+            clap_complete::generate(shell, &mut grouped.clone(), BINARY_NAME, &mut current);
+            assert_eq!(original, current, "{shell}");
+        }
+    }
+
+    #[test]
+    fn root_help_groups_keep_native_styles_and_literal_descriptions() {
+        let mut command = group_root_help(Cli::command().mut_subcommand("health", |sub| {
+            sub.about("Show {usage} and {options} literally")
+                .long_about("Only shown in the health command's long help")
+        }));
+        let help = command.render_help();
+        assert!(
+            help.to_string()
+                .contains("Show {usage} and {options} literally")
+        );
+        let styled = help.ansi().to_string();
+        let header = command.get_styles().get_header();
+        assert!(styled.contains(&format!("{header}Inspect:{header:#}")));
+        assert!(styled.contains(&format!("{header}Options:{header:#}")));
+        let long_help = command.render_long_help().to_string();
+        assert!(long_help.contains("Show {usage} and {options} literally"));
+        assert!(!long_help.contains("Only shown in the health command"));
+    }
+
+    #[test]
+    fn root_help_groups_apply_to_help_dispatch() {
+        for flag in ["-h", "--help", "help"] {
+            let error = cli_command(BINARY_NAME)
+                .try_get_matches_from([BINARY_NAME, flag])
+                .unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+            assert!(error.to_string().contains("Inspect:"), "{flag}: {error}");
+        }
+    }
+
+    #[test]
+    fn root_help_groups_match_man_index() {
+        let mut output = Vec::new();
+        generate_man(BINARY_NAME, &mut output).unwrap();
+        let man = String::from_utf8(output).unwrap();
+        let index = man
+            .split_once(".SH SUBCOMMANDS\n")
+            .unwrap()
+            .1
+            .split(".SH ")
+            .next()
+            .unwrap();
+        for (heading, names) in ROOT_HELP_GROUPS {
+            let section = index
+                .split_once(&format!(".SS {heading}\n"))
+                .unwrap()
+                .1
+                .split(".SS ")
+                .next()
+                .unwrap();
+            for name in *names {
+                assert_eq!(section.matches(&format!("\\fBrbgp {name}\\fR")).count(), 1);
+            }
+        }
+        assert_eq!(index.matches("(aliases: summary)").count(), 1);
+        assert!(man.contains(".SH \"RBGP NEIGHBOR RESET\""));
     }
 
     #[test]
