@@ -34,8 +34,9 @@
 #                     observation-drop counters, dup-MAC moves,
 #                     the four ADR-0059 drift counters)
 #   - soak.log        stdout + stderr from this script
-#   - pe1.log         daemon log streamed from `docker logs pe1`
-#   - pe2.log         daemon log streamed from `docker logs pe2`
+#   - pe1.log         actual /var/log/rustbgpd.log from PE1
+#   - pe2.log         current daemon log, with complete older process logs
+#                     retained before each PE2 restart
 #   - flips.log       per-flip event log (timestamp, action, target)
 #   - churn.log       per-batch FDB-churn event log
 #   - state/          live MAC pool state (one file per PE)
@@ -59,7 +60,9 @@ set -euo pipefail
 
 SOAK_SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SOAK_SCRIPT_DIR/../.." && pwd)"
-TOPOLOGY="$SOAK_SCRIPT_DIR/gate8b-soak.clab.yml"
+TOPOLOGY="${TOPOLOGY_OVERRIDE:-$SOAK_SCRIPT_DIR/gate8b-soak.clab.yml}"
+MAC_CHURN_PROOF="${MAC_CHURN_PROOF:-0}"
+LAB_NAME="${LAB_NAME:-gate8b-soak}"
 
 # ---------------------------------------------------------------------------
 # Tunables
@@ -74,8 +77,8 @@ BGP_ESTABLISHED_TIMEOUT_SEC="${BGP_ESTABLISHED_TIMEOUT_SEC:-300}"
                                                   # gate before churn — refuse
                                                   # to start the validation if
                                                   # BGP never establishes
-PE1_NAME="${PE1_NAME:-clab-gate8b-soak-pe1}"
-PE2_NAME="${PE2_NAME:-clab-gate8b-soak-pe2}"
+PE1_NAME="${PE1_NAME:-clab-${LAB_NAME}-pe1}"
+PE2_NAME="${PE2_NAME:-clab-${LAB_NAME}-pe2}"
 CLEANUP="${CLEANUP:-0}"                           # 1 = destroy topology on EXIT
 
 # Flip mechanism. The previous `docker stop` / `docker start` approach
@@ -108,6 +111,7 @@ POOL_MAX=$((POOL_TARGET + POOL_TARGET / 2))
 START_TS="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_DIR="${RUN_DIR_OVERRIDE:-$SOAK_SCRIPT_DIR/runs/gate8b-mac-churn-$START_TS}"
 mkdir -p "$RUN_DIR" "$RUN_DIR/state"
+mkdir -p "$RUN_DIR/scrapes"
 
 SAMPLES_CSV="$RUN_DIR/samples.csv"
 SOAK_LOG="$RUN_DIR/soak.log"
@@ -125,7 +129,7 @@ PE2_POOL="$RUN_DIR/state/pe2_macs.txt"
 # runs in a background subshell — bash variable writes there are
 # invisible to the parent shell that owns the CSV. Counter files
 # are owned by the (serial) churn loop and read by the (separate)
-# sampling loop; cat / printf are atomic for the small payload.
+# sampling loop; tmp + rename keeps readers from observing a truncated file.
 CHURN_ADDS_FILE="$RUN_DIR/state/churn_adds"
 CHURN_DELS_FILE="$RUN_DIR/state/churn_dels"
 CHURN_MOVES_FILE="$RUN_DIR/state/churn_moves"
@@ -178,8 +182,17 @@ prom_scrape() {
     ip=$(docker inspect --format \
         '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' \
         "$container" 2>/dev/null | awk '{print $1}')
-    [ -z "$ip" ] && return 0
-    curl -sfm 5 "http://${ip}:9179/metrics" 2>/dev/null || true
+    [ -z "$ip" ] && return 1
+    curl -sfm 5 "http://${ip}:9179/metrics" 2>/dev/null
+}
+
+prom_sum() {
+    # CSV convenience only. The proof analyzer validates the raw scrape and
+    # records absent lazy series explicitly instead of treating NaN as zero.
+    printf '%s\n' "$1" | awk -v metric="$2" '
+        $0 ~ "^"metric"( |\\{)" { total += $NF; found = 1 }
+        END { if (found) print total }
+    '
 }
 
 prom_extract() {
@@ -283,7 +296,7 @@ prom_established_current() {
 }
 
 pe_established_current() {
-    prom_established_current "$(prom_scrape "$1")"
+    prom_established_current "$(prom_scrape "$1" || true)"
 }
 
 # Refuse to start churn until both PEs are currently Established.
@@ -317,7 +330,7 @@ dump_session_state_on_failure() {
     for pe in "$PE1_NAME" "$PE2_NAME"; do
         log "=== session-state metrics: $pe ==="
         local prom matched
-        prom="$(prom_scrape "$pe")"
+        prom="$(prom_scrape "$pe" || true)"
         if [ -z "$prom" ]; then
             log "  (scrape returned empty — metrics endpoint unreachable)"
             continue
@@ -432,6 +445,8 @@ stop_pe2_daemon() {
 }
 
 start_pe2_daemon() {
+    # The startup script truncates this file on each process restart.
+    docker cp "$PE2_NAME:/var/log/rustbgpd.log" "$RUN_DIR/pe2-before-restart-$(date +%s).log" || return
     flip_start_daemon "$PE2_NAME" 10.0.0.2 10.0.0.1 || return
     wait_established_post_flip "$PE2_NAME" || return; PE2_RUNNING=1
 }
@@ -521,7 +536,21 @@ fdb_add_pe() {
     local pe="$1" mac="$2" container
     container="$(container_for_pe "$pe")"
     if container_is_running "$container"; then
-        if docker exec "$container" bridge fdb add "$mac" dev "$CE_PORT" master static 2>/dev/null; then
+        # A received route may already own this bridge's MASTER row. A
+        # replace retains extern_learn, so remove only the exact remote
+        # MASTER row before adding the genuinely local CE ownership.
+        if docker exec "$container" sh -c '
+            rows=$(bridge fdb show dev "vxlan$3") || exit
+            if printf "%s\n" "$rows" | awk -v mac="$1" -v br="br$3" '"'"'
+                $1 == mac && /extern_learn/ {
+                    for (i = 2; i < NF; i++) if ($i == "master" && $(i + 1) == br) found = 1
+                }
+                END { exit !found }
+            '"'"'; then
+                bridge fdb del "$1" dev "vxlan$3" master || exit
+            fi
+            bridge fdb add "$1" dev "$2" master static
+        ' sh "$mac" "$CE_PORT" "$VNI" 2>/dev/null; then
             return 0
         fi
         churn_log "ADD failed pe=$pe mac=$mac"
@@ -561,7 +590,8 @@ container_for_pe() {
 counter_incr() {
     local file="$1" by="$2" n
     n=$(< "$file")
-    echo $((n + by)) >"$file"
+    echo $((n + by)) >"$file.tmp"
+    mv "$file.tmp" "$file"
 }
 
 churn_batch_add() {
@@ -634,6 +664,14 @@ churn_step() {
     p1="$(pool_size 1)"
     p2="$(pool_size 2)"
 
+    # Both PEs draw from one bounded set. A full combined pool has no
+    # free MAC even when neither individual pool exceeds its ceiling.
+    if [ "$((p1 + p2))" -ge "$MAC_POOL_SIZE" ]; then
+        if [ "$p1" -ge "$p2" ]; then churn_batch_del 1 "$batch_size"
+        else churn_batch_del 2 "$batch_size"; fi
+        return
+    fi
+
     # Force grow if both pools below the floor.
     if [ "$p1" -lt "$POOL_MIN" ] && [ "$p2" -lt "$POOL_MIN" ]; then
         churn_batch_add 1 "$batch_size"
@@ -671,6 +709,7 @@ churn_loop() {
         churn_step
         sleep "$CHURN_INTERVAL_SEC"
     done
+    date +%s >"$RUN_DIR/active-end-unix"
 }
 
 recover_terminal_pe2() {
@@ -685,10 +724,14 @@ sample_row() {
     local PE1_POOL_N PE2_POOL_N PE1_FDB_TOTAL PE2_FDB_TOTAL PE1_FDB_EXT PE2_FDB_EXT
     local PE1_NH PE2_NH PE1_ORIGS PE2_ORIGS PE1_ORIG_ERR PE2_ORIG_ERR
     local PE1_OBS_DROPS PE2_OBS_DROPS PE1_DUP_MOVES PE2_DUP_MOVES
-    local PE1_REPAIRED PE2_REPAIRED PE1_REPLACED PE2_REPLACED
+    local PE1_REPAIRED PE2_REPAIRED PE1_REPLACED PE2_REPLACED PE1_SCRAPE_OK PE2_SCRAPE_OK
     local PE1_ORPHANS PE2_ORPHANS PE1_DDISABLED PE2_DDISABLED
     ELAPSED="${2:-$((NOW - START_UNIX))}"
-    PE1_PROM="$(prom_scrape "$PE1_NAME")"; PE2_PROM="$(prom_scrape "$PE2_NAME")"
+    PE1_SCRAPE_OK=1; PE2_SCRAPE_OK=1
+    PE1_PROM="$(prom_scrape "$PE1_NAME")" || PE1_SCRAPE_OK=0
+    PE2_PROM="$(prom_scrape "$PE2_NAME")" || PE2_SCRAPE_OK=0
+    printf '%s\n' "$PE1_PROM" >"$RUN_DIR/scrapes/${NOW}-pe1.prom"
+    printf '%s\n' "$PE2_PROM" >"$RUN_DIR/scrapes/${NOW}-pe2.prom"
     PE1_RSS="$(container_rss_mb "$PE1_NAME" || echo "")"; PE2_RSS="$(container_rss_mb "$PE2_NAME" || echo "")"
     PE1_DF="$(prom_extract "$PE1_PROM" evpn_df_role 'role="df"')"; PE2_DF="$(prom_extract "$PE2_PROM" evpn_df_role 'role="df"')"
     PE1_DF_CHANGES="$(prom_extract "$PE1_PROM" evpn_df_role_changes_total)"; PE2_DF_CHANGES="$(prom_extract "$PE2_PROM" evpn_df_role_changes_total)"
@@ -702,7 +745,7 @@ sample_row() {
     PE1_ORIGS="$(prom_extract "$PE1_PROM" evpn_local_originations_total)"; PE2_ORIGS="$(prom_extract "$PE2_PROM" evpn_local_originations_total)"
     PE1_ORIG_ERR="$(prom_extract "$PE1_PROM" evpn_local_origination_errors_total)"; PE2_ORIG_ERR="$(prom_extract "$PE2_PROM" evpn_local_origination_errors_total)"
     PE1_OBS_DROPS="$(prom_extract "$PE1_PROM" evpn_local_observations_dropped_total)"; PE2_OBS_DROPS="$(prom_extract "$PE2_PROM" evpn_local_observations_dropped_total)"
-    PE1_DUP_MOVES="$(prom_extract "$PE1_PROM" evpn_duplicate_mac_moves_total)"; PE2_DUP_MOVES="$(prom_extract "$PE2_PROM" evpn_duplicate_mac_moves_total)"
+    PE1_DUP_MOVES="$(prom_sum "$PE1_PROM" evpn_duplicate_mac_moves_total)"; PE2_DUP_MOVES="$(prom_sum "$PE2_PROM" evpn_duplicate_mac_moves_total)"
     PE1_REPAIRED="$(prom_extract "$PE1_PROM" evpn_fdb_nhg_drift_members_repaired_total)"; PE2_REPAIRED="$(prom_extract "$PE2_PROM" evpn_fdb_nhg_drift_members_repaired_total)"
     PE1_REPLACED="$(prom_extract "$PE1_PROM" evpn_fdb_nhg_drift_groups_replaced_total)"; PE2_REPLACED="$(prom_extract "$PE2_PROM" evpn_fdb_nhg_drift_groups_replaced_total)"
     PE1_ORPHANS="$(prom_extract "$PE1_PROM" evpn_fdb_nhg_orphans_cleaned_total)"; PE2_ORPHANS="$(prom_extract "$PE2_PROM" evpn_fdb_nhg_orphans_cleaned_total)"
@@ -710,7 +753,7 @@ sample_row() {
     {
         printf '%s' "$NOW"
         printf ',%s' "$ELAPSED" "${PE1_RSS:-NaN}" "${PE2_RSS:-NaN}" "${PE1_DF:-NaN}" "${PE2_DF:-NaN}" "${PE1_DF_CHANGES:-NaN}" "${PE2_DF_CHANGES:-NaN}" "${PE1_FLAGS:-unknown}" "${PE2_FLAGS:-unknown}" "$PE2_RUNNING" "${PE1_CURRENT:-NaN}" "${PE2_CURRENT:-NaN}" "${PE1_ESTAB:-NaN}" "${PE2_ESTAB:-NaN}" "$PE1_POOL_N" "$PE2_POOL_N" "${PE1_FDB_TOTAL:-NaN}" "${PE2_FDB_TOTAL:-NaN}" "${PE1_FDB_EXT:-NaN}" "${PE2_FDB_EXT:-NaN}" "${PE1_NH:-NaN}" "${PE2_NH:-NaN}" "${PE1_ORIGS:-NaN}" "${PE2_ORIGS:-NaN}" "${PE1_ORIG_ERR:-NaN}" "${PE2_ORIG_ERR:-NaN}" "${PE1_OBS_DROPS:-NaN}" "${PE2_OBS_DROPS:-NaN}" "${PE1_DUP_MOVES:-NaN}" "${PE2_DUP_MOVES:-NaN}" "${PE1_REPAIRED:-NaN}" "${PE2_REPAIRED:-NaN}" "${PE1_REPLACED:-NaN}" "${PE2_REPLACED:-NaN}" "${PE1_ORPHANS:-NaN}" "${PE2_ORPHANS:-NaN}" "${PE1_DDISABLED:-NaN}" "${PE2_DDISABLED:-NaN}" "$(< "$CHURN_ADDS_FILE")" "$(< "$CHURN_DELS_FILE")" "$(< "$CHURN_MOVES_FILE")"
-        printf '\n'
+        printf ',%s,%s\n' "$PE1_SCRAPE_OK" "$PE2_SCRAPE_OK"
     } >>"$SAMPLES_CSV"
 }
 
@@ -723,6 +766,23 @@ require_tool containerlab
 require_tool curl
 require_tool awk
 require_tool shuf
+
+if [ "$MAC_CHURN_PROOF" = 1 ]; then
+    if [[ ! "$LAB_NAME" =~ ^gate8b-proof-[a-z0-9-]+$ ]] || [ -z "${TOPOLOGY_OVERRIDE:-}" ] || [ "$CLEANUP" != 1 ]; then
+        log "ERROR: proof requires a unique gate8b-proof-* LAB_NAME, TOPOLOGY_OVERRIDE and CLEANUP=1"
+        exit 2
+    fi
+    for pe in "$PE1_NAME" "$PE2_NAME"; do
+        if [ "$(docker inspect -f '{{index .Config.Labels "containerlab"}}' "$pe")" != "$LAB_NAME" ]; then
+            log "ERROR: $pe is not owned by lab $LAB_NAME"
+            exit 2
+        fi
+        if ! docker inspect -f '{{range $name, $network := .NetworkSettings.Networks}}{{println $name}}{{end}}' "$pe" | grep -Fxq "$LAB_NAME"; then
+            log "ERROR: $pe is not attached to the named proof network $LAB_NAME"
+            exit 2
+        fi
+    done
+fi
 
 if ! container_is_running "$PE1_NAME"; then
     log "ERROR: container $PE1_NAME not running. Deploy the topology first:"
@@ -738,6 +798,11 @@ fi
 GIT_REV="$(cd "$REPO_ROOT" && git rev-parse HEAD 2>/dev/null || echo unknown)"
 GIT_DIRTY="$(cd "$REPO_ROOT" && [ -n "$(git status --porcelain 2>/dev/null)" ] && echo true || echo false)"
 IMAGE_ID="$(docker inspect --format='{{.Image}}' "$PE1_NAME" 2>/dev/null || echo unknown)"
+PE2_IMAGE_ID="$(docker inspect --format='{{.Image}}' "$PE2_NAME" 2>/dev/null || echo unknown)"
+if [ "$MAC_CHURN_PROOF" = 1 ] && [ "$IMAGE_ID" != "$PE2_IMAGE_ID" ]; then
+    log "ERROR: proof requires both PEs to use the same identified image"
+    exit 2
+fi
 KERNEL="$(uname -r)"
 
 cat >"$RUN_JSON" <<EOF
@@ -746,11 +811,15 @@ cat >"$RUN_JSON" <<EOF
   "git_rev": "$GIT_REV",
   "git_dirty": $GIT_DIRTY,
   "image_id": "$IMAGE_ID",
+  "pe2_image_id": "$PE2_IMAGE_ID",
+  "mac_churn_proof": $MAC_CHURN_PROOF,
+  "lab_name": "$LAB_NAME",
   "kernel": "$KERNEL",
   "soak_hours": $SOAK_HOURS,
   "sample_interval_sec": $SAMPLE_INTERVAL,
   "flip_interval_sec": $FLIP_INTERVAL_SEC,
   "warmup_sec": $WARMUP_SEC,
+  "bgp_timeout_sec": $BGP_ESTABLISHED_TIMEOUT_SEC,
   "churn_interval_sec": $CHURN_INTERVAL_SEC,
   "churn_batch_size": $CHURN_BATCH_SIZE,
   "mac_pool_size": $MAC_POOL_SIZE,
@@ -765,45 +834,66 @@ cat >"$RUN_JSON" <<EOF
 }
 EOF
 
-# Background daemon log tails. The cleanup trap kills them so they
-# don't leak across runs.
-docker logs -f "$PE1_NAME" >>"$PE1_LOG" 2>&1 &
+# The daemon redirects its output into this file, not Docker stdout.
+# Preserve complete per-process files before restart and on cleanup too.
+docker exec "$PE1_NAME" tail -n +1 -F /var/log/rustbgpd.log >>"$PE1_LOG" 2>&1 &
 PE1_TAIL_PID=$!
-docker logs -f "$PE2_NAME" >>"$PE2_LOG" 2>&1 &
+docker exec "$PE2_NAME" tail -n +1 -F /var/log/rustbgpd.log >>"$PE2_LOG" 2>&1 &
 PE2_TAIL_PID=$!
 
 CHURN_PID=""
 
 cleanup() {
+    local result=$? cleanup_failed=0
     set +e
     log "soak loop exiting; cleaning up background tasks"
     if [ -n "$CHURN_PID" ]; then
         kill "$CHURN_PID" 2>/dev/null || true
+        wait "$CHURN_PID" 2>/dev/null || true
     fi
     kill "$PE1_TAIL_PID" "$PE2_TAIL_PID" 2>/dev/null || true
-    wait "$CHURN_PID" "$PE1_TAIL_PID" "$PE2_TAIL_PID" 2>/dev/null || true
+    wait "$PE1_TAIL_PID" "$PE2_TAIL_PID" 2>/dev/null || true
+    docker cp "$PE1_NAME:/var/log/rustbgpd.log" "$PE1_LOG" || cleanup_failed=1
+    docker cp "$PE2_NAME:/var/log/rustbgpd.log" "$PE2_LOG" || cleanup_failed=1
     if [ "$CLEANUP" = "1" ]; then
         log "CLEANUP=1: destroying topology"
-        sudo containerlab destroy -t "$TOPOLOGY" --cleanup || true
+        sudo containerlab destroy -t "$TOPOLOGY" --name "$LAB_NAME" --cleanup || cleanup_failed=1
+        if ! docker ps -a --filter "label=containerlab=$LAB_NAME" --format '{{.Names}}' >"$RUN_DIR/cleanup-containers.txt"; then
+            cleanup_failed=1
+        elif [ -s "$RUN_DIR/cleanup-containers.txt" ]; then
+            cleanup_failed=1
+        fi
+        if [ "$MAC_CHURN_PROOF" = 1 ]; then
+            if ! docker network ls --format '{{.Name}}' >"$RUN_DIR/cleanup-networks.txt"; then
+                cleanup_failed=1
+            elif grep -Fxq "$LAB_NAME" "$RUN_DIR/cleanup-networks.txt"; then
+                cleanup_failed=1
+            fi
+        fi
     fi
+    if [ "$MAC_CHURN_PROOF" = 1 ]; then
+        printf '%s\n' "$cleanup_failed" >"$RUN_DIR/cleanup.exit"
+        if [ "$cleanup_failed" != 0 ]; then result=4; fi
+    fi
+    trap - EXIT
+    exit "$result"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # ---------------------------------------------------------------------------
 # CSV header
 # ---------------------------------------------------------------------------
 
 cat >"$SAMPLES_CSV" <<'EOF'
-ts_unix,elapsed_sec,pe1_rss_mb,pe2_rss_mb,pe1_df_role,pe2_df_role,pe1_df_changes,pe2_df_changes,pe1_bum_flags,pe2_bum_flags,pe2_running,pe1_session_established,pe2_session_established,pe1_established_seen,pe2_established_seen,pe1_pool_size,pe2_pool_size,pe1_fdb_total,pe2_fdb_total,pe1_fdb_extern_learn,pe2_fdb_extern_learn,pe1_nh_count,pe2_nh_count,pe1_local_origs,pe2_local_origs,pe1_local_orig_errors,pe2_local_orig_errors,pe1_local_obs_drops,pe2_local_obs_drops,pe1_dup_mac_moves,pe2_dup_mac_moves,pe1_drift_members_repaired,pe2_drift_members_repaired,pe1_drift_groups_replaced,pe2_drift_groups_replaced,pe1_drift_orphans_cleaned,pe2_drift_orphans_cleaned,pe1_drift_disabled,pe2_drift_disabled,churn_adds_total,churn_dels_total,churn_moves_total
+ts_unix,elapsed_sec,pe1_rss_mb,pe2_rss_mb,pe1_df_role,pe2_df_role,pe1_df_changes,pe2_df_changes,pe1_bum_flags,pe2_bum_flags,pe2_running,pe1_session_established,pe2_session_established,pe1_established_seen,pe2_established_seen,pe1_pool_size,pe2_pool_size,pe1_fdb_total,pe2_fdb_total,pe1_fdb_extern_learn,pe2_fdb_extern_learn,pe1_nh_count,pe2_nh_count,pe1_local_origs,pe2_local_origs,pe1_local_orig_errors,pe2_local_orig_errors,pe1_local_obs_drops,pe2_local_obs_drops,pe1_dup_mac_moves,pe2_dup_mac_moves,pe1_drift_members_repaired,pe2_drift_members_repaired,pe1_drift_groups_replaced,pe2_drift_groups_replaced,pe1_drift_orphans_cleaned,pe2_drift_orphans_cleaned,pe1_drift_disabled,pe2_drift_disabled,churn_adds_total,churn_dels_total,churn_moves_total,pe1_scrape_ok,pe2_scrape_ok
 EOF
 
 # ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
 
-START_UNIX="$(date +%s)"
-END_UNIX="$(awk -v s="$START_UNIX" -v h="$SOAK_HOURS" 'BEGIN { printf "%d\n", s + h * 3600 }')"
-NEXT_FLIP_UNIX="$((START_UNIX + FLIP_INTERVAL_SEC))"
 PE2_RUNNING=1
 
 log "Gate 8b MAC-churn soak starting"
@@ -837,6 +927,10 @@ if ! wait_established; then
 fi
 
 # Kick off the churn loop now that the dataplane is warm.
+START_UNIX="$(date +%s)"
+END_UNIX="$(awk -v s="$START_UNIX" -v h="$SOAK_HOURS" 'BEGIN { printf "%d\n", s + h * 3600 }')"
+NEXT_FLIP_UNIX="$((START_UNIX + FLIP_INTERVAL_SEC))"
+printf '%s\n' "$START_UNIX" >"$RUN_DIR/active-start-unix"
 churn_loop "$END_UNIX" &
 CHURN_PID=$!
 log "churn loop started pid=$CHURN_PID"
@@ -897,6 +991,12 @@ while [ "$(date +%s)" -lt "$END_UNIX" ]; do
 
     sleep "$SAMPLE_INTERVAL"
 done
+
+if ! wait "$CHURN_PID"; then
+    log "FATAL: churn worker failed"
+    exit 4
+fi
+CHURN_PID=""
 
 if ! gate8b_terminal_recovery "$PE2_RUNNING" recover_terminal_pe2 sample_row; then
     log "FATAL: terminal PE2 recovery failed; final evidence row retained"
