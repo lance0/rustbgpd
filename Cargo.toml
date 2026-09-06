@@ -119,7 +119,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # Daemon boot ID stamping for restart detection (ADR-0072).
 uuid = { version = "1", features = ["v4"] }
 zeroize = "1"
-ureq = { version = "=3.4.0", default-features = false, features = ["rustls", "platform-verifier"] }
+ureq = { version = "3.4.1", default-features = false, features = ["rustls", "platform-verifier"] }
 
 [package]
 name = "rustbgpd"
