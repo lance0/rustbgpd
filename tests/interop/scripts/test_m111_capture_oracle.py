@@ -233,7 +233,7 @@ class CaptureOracleTests(unittest.TestCase):
         ]
         for error, change in mutations:
             with self.subTest(error=error):
-                def mutate(name, afi, kind, attrs):
+                def mutate(name, afi, kind, attrs, change=change):
                     if (name, afi, kind) == ("rr_to_sink", 1, "announce"):
                         change(attrs)
                 with self.assertRaisesRegex(ValueError, error):
