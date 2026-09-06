@@ -4370,6 +4370,7 @@ impl RibManager {
             .peers(prefix)
             .filter_map(move |peer| ribs.get(&peer))
             .flat_map(move |rib| rib.iter_prefix(prefix))
+            .filter(|route| crate::srv6::unicast_eligible(route))
     }
 
     /// Announce fast path: full per-prefix rescans only where the
@@ -4386,7 +4387,7 @@ impl RibManager {
     ///
     /// 1. No current best exists → full rescan (the announce almost
     ///    certainly installs one; also re-establishes the "a best exists
-    ///    iff any candidate exists" invariant cheaply — few candidates).
+    ///    iff any eligible candidate exists" invariant cheaply — few candidates).
     /// 2. The announcing peer OWNS the current best → full rescan: the
     ///    best itself may have been replaced (payload change, possibly now
     ///    losing to another candidate). `best_path_cmp` now totally orders
@@ -4449,10 +4450,11 @@ impl RibManager {
                 };
                 let challenger = self.ribs.get(&peer).and_then(|rib| {
                     rib.iter_prefix(prefix)
+                        .filter(|route| crate::srv6::unicast_eligible(route))
                         .min_by(|a, b| crate::best_path::best_path_cmp(a, b))
                 });
                 let Some(challenger) = challenger else {
-                    break 'fast None; // announce raced a removal: rescan
+                    break 'fast None; // no eligible challenger: rescan
                 };
                 match crate::best_path::best_path_cmp(challenger, best_in_rib) {
                     Ordering::Greater => Some(false),                      // case 4
@@ -4471,6 +4473,7 @@ impl RibManager {
                     // ended above): the announcing peer's best candidate.
                     let Some(winner) = self.ribs.get(&peer).and_then(|rib| {
                         rib.iter_prefix(prefix)
+                            .filter(|route| crate::srv6::unicast_eligible(route))
                             .min_by(|a, b| crate::best_path::best_path_cmp(a, b))
                     }) else {
                         needs_full.insert(*prefix);
@@ -4546,6 +4549,8 @@ impl RibManager {
                     }
                     candidates.len() > before
                 });
+                // Index membership represents received routes, including
+                // ineligible ones; LocRib::recompute applies eligibility.
                 let did_change = self.loc_rib.recompute(*prefix, candidates.iter().copied());
                 if did_change {
                     // RFC 9069 Loc-RIB tap: any change to the best is a
@@ -4567,6 +4572,7 @@ impl RibManager {
                                     .iter()
                                     .copied()
                                     .filter(|c| !(c.peer == best.peer && c.path_id == best.path_id))
+                                    .filter(|route| crate::srv6::unicast_eligible(route))
                                     .min_by(|a, b| crate::best_path::best_path_cmp(a, b));
                                 let reason = runner_up.map(|r| {
                                     crate::best_path::best_path_cmp_with_reason(best, r).1

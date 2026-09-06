@@ -40,7 +40,7 @@ fn export_deny_attribution(
 }
 
 /// Candidate paths for `prefix` visible to `target_peer` under RFC 9107
-/// ORR: every Adj-RIB-In entry that survives split horizon and the
+/// ORR: every eligible Adj-RIB-In entry that survives split horizon and the
 /// iBGP / RFC 4456 reflection rules. Shared by the ORR distribution and
 /// explain paths so both rank the exact same set. Collection goes through
 /// the announcing-peers reverse index so only peers that actually hold the
@@ -331,6 +331,21 @@ impl RibManager {
                         .find(|route| route.path_id == source.path_id)
                 })
                 .expect("source identity was validated before export explain");
+            if !crate::srv6::unicast_eligible(selected) {
+                explain.decision = ExplainDecision::Deny;
+                gate(
+                    &mut explain.gates,
+                    "srv6_service",
+                    "srv6_sid_invalid",
+                    Stop,
+                    crate::srv6::INVALID_DETAIL.to_string(),
+                );
+                explain.reasons.push(ExplainReason {
+                    code: "srv6_sid_invalid",
+                    message: crate::srv6::INVALID_DETAIL.to_string(),
+                });
+                return explain;
+            }
             gate(
                 &mut explain.gates,
                 "best_route",
@@ -390,15 +405,16 @@ impl RibManager {
                     "best_route",
                     "no_orr_candidate",
                     Stop,
-                    "no candidate for this prefix survives split-horizon / reflection \
+                    "no candidate for this prefix survives SRv6 eligibility / split-horizon / reflection \
                      filtering for this ORR peer"
                         .to_string(),
                 );
                 explain.reasons.push(ExplainReason {
                     code: "no_orr_candidate",
-                    message: "no candidate for this prefix survives split-horizon / \
+                    message:
+                        "no candidate for this prefix survives SRv6 eligibility / split-horizon / \
                               reflection filtering for this ORR peer"
-                        .to_string(),
+                            .to_string(),
                 });
                 return explain;
             };
@@ -460,10 +476,11 @@ impl RibManager {
             .collect();
             ranked.sort_by(|a, b| crate::best_path::best_path_cmp(a, b));
             if ranked.is_empty() {
-                let message = "no candidate for this prefix survives split-horizon / \
+                let message =
+                    "no candidate for this prefix survives SRv6 eligibility / split-horizon / \
                                reflection / NO_ADVERTISE / LLGR filtering for this per-client \
                                best-path peer"
-                    .to_string();
+                        .to_string();
                 gate(
                     &mut explain.gates,
                     "best_route",

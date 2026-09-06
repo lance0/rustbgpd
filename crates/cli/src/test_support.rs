@@ -139,6 +139,7 @@ pub(crate) struct MockState {
     pub(crate) refresh_outbound_declined: AtomicBool,
     pub(crate) last_explain_advertised: Mutex<Option<server_proto::ExplainAdvertisedRouteRequest>>,
     pub(crate) last_explain_best_path: Mutex<Option<server_proto::ExplainBestPathRequest>>,
+    pub(crate) explain_best_path_response: Mutex<Option<server_proto::ExplainBestPathResponse>>,
     pub(crate) last_lookup_best_path: Mutex<Option<server_proto::LookupBestPathRequest>>,
     pub(crate) lookup_best_path_calls: AtomicUsize,
     pub(crate) lookup_best_path_error: Mutex<Option<(Code, String)>>,
@@ -1859,6 +1860,9 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
     ) -> Result<Response<server_proto::ExplainBestPathResponse>, Status> {
         let req = request.into_inner();
         *self.state.last_explain_best_path.lock().await = Some(req.clone());
+        if let Some(response) = self.state.explain_best_path_response.lock().await.clone() {
+            return Ok(Response::new(response));
+        }
         let response_peer = canonical_ip_or_original(&req.peer_address);
         Ok(Response::new(server_proto::ExplainBestPathResponse {
             prefix: "203.0.113.0".to_string(),

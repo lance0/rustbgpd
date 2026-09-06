@@ -25,6 +25,283 @@ const FAMILY: (Afi, Safi) = (Afi::Ipv4, Safi::Unicast);
 const PEERS: u8 = 4;
 const PREFIXES: u8 = 6;
 
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one lifecycle compares four export modes and ECMP through invalidation, withdrawal, and recovery"
+)]
+fn srv6_unicast_eligibility_covers_incremental_export_multipath_and_recovery() {
+    use crate::best_path::{BestPathReason, MultipathEligibility};
+    use crate::srv6::tests::service_attribute;
+
+    let (_tx, rx) = mpsc::channel(16);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let topology_peer = Ipv4Addr::new(10, 9, 9, 9);
+    manager.handle_update(RibUpdate::BgpLsRoutesReceived {
+        session_id: 0,
+        peer: topology_peer.into(),
+        announced: crate::orr::fixtures::square_topology(topology_peer),
+        withdrawn: vec![],
+    });
+    let mut receivers = Vec::new();
+    for (octet, add_path, per_client_best, vantage) in [
+        (30, 0, false, None),
+        (31, 2, false, None),
+        (32, 0, true, None),
+        (33, 0, false, Some(vantage_at_node_a())),
+    ] {
+        let peer = IpAddr::V4(Ipv4Addr::new(192, 0, 2, octet));
+        let (outbound_tx, mut out) = mpsc::channel(16);
+        manager.handle_update(RibUpdate::PeerUp {
+            per_client_best,
+            interpret_rfc1997: true,
+            session_id: 0,
+            peer,
+            peer_asn: 65000,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx,
+            export_policy: None,
+            sendable_families: vec![FAMILY],
+            is_ebgp: vantage.is_none(),
+            route_reflector_client: vantage.is_some(),
+            orr_vantage: vantage,
+            add_path_send_families: if add_path > 0 { vec![FAMILY] } else { vec![] },
+            add_path_send_max: add_path,
+            negotiated_orf_recv: vec![],
+            negotiated_llgr_families: vec![],
+        });
+        while out.try_recv().is_ok() {}
+        receivers.push((peer, out));
+    }
+    assert!(manager.orr.spf.contains_key(&vantage_at_node_a()));
+    let sid = "2001:db8:111:1::".parse().unwrap();
+    let valid_service = service_attribute(5, sid, 19, Some([40, 24, 16, 0, 0, 0]));
+    let mut fallback = build_route(0, 0, 0, 0, Instant::now());
+    fallback.next_hop = "2001:db8::10".parse().unwrap();
+    Arc::make_mut(&mut fallback.attributes).push(valid_service.clone());
+    let mut invalid = build_route(1, 0, 0, 0, Instant::now());
+    invalid.next_hop = "2001:db8::11".parse().unwrap();
+    Arc::make_mut(&mut invalid.attributes)[2] = PathAttribute::LocalPref(200);
+    Arc::make_mut(&mut invalid.attributes).push(service_attribute(
+        5,
+        sid,
+        19,
+        Some([100, 24, 16, 0, 0, 0]),
+    ));
+    let announce = |manager: &mut RibManager, route: &Route| {
+        manager.enqueue_routes_received(
+            route.peer,
+            vec![route.clone()],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+        drain_route_chunks(manager);
+    };
+    announce(&mut manager, &fallback);
+    for (_, out) in &mut receivers {
+        let mut routes = Vec::new();
+        while let Ok(update) = out.try_recv() {
+            routes.extend(update.announce.iter().cloned());
+        }
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].peer, fallback.peer);
+    }
+    announce(&mut manager, &invalid);
+    assert_eq!(
+        manager.loc_rib.get(&fallback.prefix).unwrap().peer,
+        fallback.peer
+    );
+    for (_, out) in &mut receivers {
+        while let Ok(update) = out.try_recv() {
+            assert!(update.announce.is_empty());
+            assert!(update.withdraw.is_empty());
+        }
+    }
+    for peer in std::iter::once(None).chain(receivers.iter().map(|(peer, _)| Some(*peer))) {
+        let (reply, mut response) = oneshot::channel();
+        manager.handle_explain_best_path(fallback.prefix, peer, reply);
+        let explain = response.try_recv().unwrap().unwrap();
+        assert_eq!(explain.best.unwrap().peer, fallback.peer);
+        assert_eq!(explain.candidates.len(), 1);
+        assert_eq!(explain.candidates[0].route.attributes, invalid.attributes);
+        assert_eq!(
+            explain.candidates[0].vs_best_reason,
+            BestPathReason::Srv6SidInvalid
+        );
+        assert_eq!(explain.candidates[0].multipath, MultipathEligibility::None);
+        assert_eq!(explain.candidates[0].advertised_path_id, 0);
+        assert!(explain.best_reason.is_none());
+    }
+    // With equal BGP preferences, the invalid sibling must still stay out of ECMP.
+    Arc::make_mut(&mut invalid.attributes)[2] = PathAttribute::LocalPref(100);
+    announce(&mut manager, &invalid);
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::QueryFibInstallCandidates {
+        max_paths: 8,
+        relax: true,
+        weighted: false,
+        deadline: tokio::time::Instant::now() + Duration::from_secs(5),
+        reply,
+    });
+    let fib = response.try_recv().unwrap();
+    assert_eq!(fib.len(), 1);
+    assert_eq!(fib[0].next_hops.len(), 1);
+
+    manager.enqueue_routes_received(
+        fallback.peer,
+        vec![],
+        vec![(fallback.prefix, 0)],
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+    );
+    drain_route_chunks(&mut manager);
+    assert!(manager.loc_rib.get(&fallback.prefix).is_none());
+    assert_eq!(
+        manager.ribs[&invalid.peer]
+            .get(&invalid.prefix, 0)
+            .unwrap()
+            .attributes,
+        invalid.attributes
+    );
+    assert!(
+        manager
+            .unicast_prefix_peers
+            .peers(&invalid.prefix)
+            .any(|peer| peer == invalid.peer)
+    );
+    for (_, out) in &mut receivers {
+        let mut withdrawn = Vec::new();
+        while let Ok(update) = out.try_recv() {
+            assert!(update.announce.is_empty());
+            withdrawn.extend(update.withdraw);
+        }
+        assert_eq!(withdrawn.len(), 1);
+    }
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_explain_best_path(invalid.prefix, None, reply);
+    let explain = response.try_recv().unwrap().unwrap();
+    assert!(explain.best.is_none());
+    assert_eq!(explain.candidates.len(), 1);
+    assert_eq!(
+        explain.candidates[0].vs_best_reason,
+        BestPathReason::Srv6SidInvalid
+    );
+
+    *Arc::make_mut(&mut invalid.attributes).last_mut().unwrap() = valid_service;
+    announce(&mut manager, &invalid);
+    assert_eq!(
+        manager.loc_rib.get(&invalid.prefix).unwrap().peer,
+        invalid.peer
+    );
+    for (_, out) in &mut receivers {
+        let mut announced = Vec::new();
+        while let Ok(update) = out.try_recv() {
+            announced.extend(update.announce.iter().cloned());
+        }
+        assert_eq!(announced.len(), 1);
+        assert_eq!(announced[0].peer, invalid.peer);
+    }
+    // Replacing the installed winner itself exercises the owner fast-path rescan.
+    *Arc::make_mut(&mut invalid.attributes).last_mut().unwrap() =
+        service_attribute(5, sid, 19, Some([100, 24, 16, 0, 0, 0]));
+    announce(&mut manager, &invalid);
+    assert!(manager.loc_rib.get(&invalid.prefix).is_none());
+    for (_, out) in &mut receivers {
+        let mut withdrawn = Vec::new();
+        while let Ok(update) = out.try_recv() {
+            assert!(update.announce.is_empty());
+            withdrawn.extend(update.withdraw);
+        }
+        assert_eq!(withdrawn.len(), 1);
+    }
+}
+
+#[test]
+fn srv6_local_injection_retains_invalid_input_without_selecting_it() {
+    use crate::srv6::tests::service_attribute;
+    let (_tx, rx) = mpsc::channel(16);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let sid = "2001:db8:111:1::".parse().unwrap();
+    let mut route = build_route(0, 0, 0, 0, Instant::now());
+    route.peer = LOCAL_PEER;
+    route.origin_type = RouteOrigin::Local;
+    route.next_hop = "2001:db8::10".parse().unwrap();
+    Arc::make_mut(&mut route.attributes).push(service_attribute(
+        5,
+        sid,
+        19,
+        Some([100, 24, 16, 0, 0, 0]),
+    ));
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::InjectRoute {
+        route: route.clone(),
+        reply,
+    });
+    assert!(response.try_recv().unwrap().is_ok());
+    assert!(manager.loc_rib.get(&route.prefix).is_none());
+    assert_eq!(
+        manager.ribs[&LOCAL_PEER]
+            .get(&route.prefix, 0)
+            .unwrap()
+            .attributes,
+        route.attributes
+    );
+    *Arc::make_mut(&mut route.attributes).last_mut().unwrap() =
+        service_attribute(5, sid, 19, Some([40, 24, 16, 0, 0, 0]));
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::InjectRoute {
+        route: route.clone(),
+        reply,
+    });
+    assert!(response.try_recv().unwrap().is_ok());
+    assert_eq!(
+        manager.loc_rib.get(&route.prefix).unwrap().attributes,
+        route.attributes
+    );
+    let mut evpn =
+        super::evpn::make_evpn_macip(Ipv4Addr::UNSPECIFIED, [0, 1, 2, 3, 4, 5], None, false);
+    evpn.peer = LOCAL_PEER;
+    evpn.origin_type = RouteOrigin::Local;
+    evpn.next_hop = "2001:db8::10".parse().unwrap();
+    Arc::make_mut(&mut evpn.attributes).push(service_attribute(
+        6,
+        sid,
+        23,
+        Some([100, 24, 16, 0, 0, 0]),
+    ));
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::InjectEvpn {
+        route: evpn.clone(),
+        reply,
+    });
+    assert!(response.try_recv().unwrap().is_ok());
+    assert!(manager.loc_rib.get_evpn(&evpn.key()).is_none());
+    assert_eq!(
+        manager.ribs[&LOCAL_PEER]
+            .get_evpn(&evpn.key())
+            .unwrap()
+            .attributes,
+        evpn.attributes
+    );
+    *Arc::make_mut(&mut evpn.attributes).last_mut().unwrap() =
+        service_attribute(6, sid, 23, Some([40, 24, 16, 0, 0, 0]));
+    let (reply, mut response) = oneshot::channel();
+    manager.handle_update(RibUpdate::InjectEvpn {
+        route: evpn.clone(),
+        reply,
+    });
+    assert!(response.try_recv().unwrap().is_ok());
+    assert_eq!(
+        manager.loc_rib.get_evpn(&evpn.key()).unwrap().attributes,
+        evpn.attributes
+    );
+}
+
 fn peer_addr(peer: u8) -> IpAddr {
     IpAddr::V4(Ipv4Addr::new(10, 0, 0, 10 + peer))
 }

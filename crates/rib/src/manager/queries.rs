@@ -35,6 +35,17 @@ pub(super) const DATAPLANE_PAGE_MAX_PREFIXES: usize = 1_000;
 pub(super) const DATAPLANE_PAGE_MAX_NEXT_HOPS: usize = 8_192;
 const DATAPLANE_PAGE_MAX_PATHS: u32 = 256;
 
+fn srv6_ineligible_candidate(route: crate::route::Route) -> BestPathCandidate {
+    BestPathCandidate {
+        route,
+        vs_best_reason: crate::best_path::BestPathReason::Srv6SidInvalid,
+        vs_best_ordering: std::cmp::Ordering::Greater,
+        advertised_path_id: 0,
+        vs_best_detail: crate::srv6::INVALID_DETAIL.to_string(),
+        multipath: crate::best_path::MultipathEligibility::None,
+    }
+}
+
 fn canceled_at_stride(completed: usize, canceled: &mut impl FnMut() -> bool) -> bool {
     completed.is_multiple_of(FULL_SNAPSHOT_CANCELLATION_STRIDE) && canceled()
 }
@@ -1432,23 +1443,34 @@ impl RibManager {
         use crate::loc_rib::{evpn_cmp_with_reason, evpn_reason_detail};
         let candidates = || self.ribs.values().filter_map(|rib| rib.get_evpn(&key));
         let candidate_count = candidates().count();
-        let selection_best = candidates().min_by(|a, b| evpn_cmp_with_reason(a, b).0);
+        let selection_best = candidates()
+            .filter(|route| crate::srv6::evpn_eligible(route))
+            .min_by(|a, b| evpn_cmp_with_reason(a, b).0);
         let received = received_from.and_then(|peer| self.ribs.get(&peer)?.get_evpn(&key));
         let compared = match (selection_best, received_from, received) {
             (Some(best), _, Some(source)) if source.peer != best.peer => Some(source),
             (_, Some(_), None) | (None, _, _) => None,
             (Some(best), _, _) => candidates()
                 .filter(|route| route.peer != best.peer)
+                .filter(|route| crate::srv6::evpn_eligible(route))
                 .min_by(|a, b| evpn_cmp_with_reason(a, b).0),
         };
         let (reason, reason_detail) = match (selection_best, compared) {
+            _ if received.is_some_and(|route| !crate::srv6::evpn_eligible(route))
+                || (selection_best.is_none() && candidate_count != 0) =>
+            {
+                (
+                    Some(crate::best_path::BestPathReason::Srv6SidInvalid),
+                    crate::srv6::INVALID_DETAIL.to_string(),
+                )
+            }
             (Some(best), Some(other)) => {
                 let (_, reason) = evpn_cmp_with_reason(best, other);
                 (Some(reason), evpn_reason_detail(reason, best, other))
             }
             _ if received_from.is_some() && received.is_none() =>
                 (None, "requested source has no retained accepted route; import rejection history is not retained".to_string()),
-            (Some(_), None) => (None, "only retained candidate".to_string()),
+            (Some(_), None) => (None, "only eligible candidate".to_string()),
             _ => (None, "no retained accepted candidates; absence does not establish whether a peer sent the route".to_string()),
         };
         crate::update::ExplainEvpnRoute {
@@ -1506,6 +1528,19 @@ impl RibManager {
                 code: "destination_unavailable",
                 verdict: ExportGateVerdict::Stop,
                 detail: "destination has no active outbound session".to_string(),
+            });
+        }
+        let mut received = self
+            .ribs
+            .values()
+            .filter_map(|rib| rib.get_evpn(&key))
+            .peekable();
+        if received.peek().is_some() && received.all(|route| !crate::srv6::evpn_eligible(route)) {
+            trace.gates.push(crate::update::ExportGateStep {
+                gate: "srv6_service",
+                code: "srv6_sid_invalid",
+                verdict: ExportGateVerdict::Stop,
+                detail: crate::srv6::INVALID_DETAIL.to_string(),
             });
         }
         let (mut decision, mut reasons) = trace.decision_and_reasons();
@@ -1881,6 +1916,19 @@ impl RibManager {
             &mut vpn_announce,
             &mut vpn_withdraw,
         );
+        let mut received = self
+            .ribs
+            .values()
+            .flat_map(|rib| rib.iter_vpn_for_nlri(&key))
+            .peekable();
+        if received.peek().is_some() && received.all(|route| !crate::srv6::vpn_eligible(route)) {
+            trace.gates.push(crate::update::ExportGateStep {
+                gate: "srv6_service",
+                code: "srv6_sid_invalid",
+                verdict: crate::update::ExportGateVerdict::Stop,
+                detail: crate::srv6::INVALID_DETAIL.to_string(),
+            });
+        }
         let explanation =
             trace.into_explain(peer, prefix, Some(rd), vpn_grouped.map(|gid| gid as u64));
         self.apply_exact_export_overlay_to_explain(
@@ -2105,7 +2153,11 @@ impl RibManager {
 
         // Global/non-ORR queries use the ordinary best-path ladder;
         // a resolved ORR peer uses its per-vantage ladder.
-        let best = all_candidates.iter().min_by(|a, b| compare(a, b)).cloned();
+        let best = all_candidates
+            .iter()
+            .filter(|route| crate::srv6::unicast_eligible(route))
+            .min_by(|a, b| compare(a, b))
+            .cloned();
 
         // For the peer-aware path, build the ranked advertised set so
         // each candidate can be tagged with its `advertised_path_id`.
@@ -2167,6 +2219,7 @@ impl RibManager {
                 let export_pol = self.export_policy_for(peer_addr);
                 let mut filtered: Vec<&crate::route::Route> = all_candidates
                     .iter()
+                    .filter(|route| crate::srv6::unicast_eligible(route))
                     .filter(|route| {
                         if route.peer == peer_addr {
                             return false; // split horizon
@@ -2281,6 +2334,9 @@ impl RibManager {
                 .drain(..)
                 .filter(|c| !(c.peer == best_route.peer && c.path_id == best_route.path_id))
                 .map(|candidate| {
+                    if !crate::srv6::unicast_eligible(&candidate) {
+                        return srv6_ineligible_candidate(candidate);
+                    }
                     let (ordering, reason) = compare_with_reason(&candidate, best_route);
                     let vs_best_detail = reason_detail(reason, &candidate, best_route);
                     let multipath = crate::best_path::multipath_eligibility(best_route, &candidate);
@@ -2299,7 +2355,10 @@ impl RibManager {
                 })
                 .collect()
         } else {
-            vec![]
+            all_candidates
+                .into_iter()
+                .map(srv6_ineligible_candidate)
+                .collect()
         };
 
         // The step that *won*: the comparison against the runner-up —
@@ -2307,13 +2366,13 @@ impl RibManager {
         // decision the winner had to survive. Re-derived on demand from
         // the same explain-only ladder (`best_path_cmp_with_reason`);
         // the hot-path comparator never records anything.
-        let (best_reason, best_reason_detail) = match (&best, candidates.is_empty()) {
-            (Some(best_route), false) => {
-                let runner_up = candidates
-                    .iter()
-                    .map(|c| &c.route)
-                    .min_by(|a, b| compare(a, b))
-                    .expect("non-empty candidate list has a minimum");
+        let runner_up = candidates
+            .iter()
+            .filter(|candidate| candidate.vs_best_reason != BestPathReason::Srv6SidInvalid)
+            .map(|candidate| &candidate.route)
+            .min_by(|a, b| compare(a, b));
+        let (best_reason, best_reason_detail) = match (&best, runner_up) {
+            (Some(best_route), Some(runner_up)) => {
                 let (_, reason) = compare_with_reason(best_route, runner_up);
                 let detail = reason_detail(reason, best_route, runner_up);
                 (Some(reason), detail)
@@ -2361,6 +2420,9 @@ impl RibManager {
             .flat_map(|rib| rib.iter_prefix(&prefix).cloned())
             .filter(|route| !(route.peer == best.peer && route.path_id == best.path_id))
             .map(|route| {
+                if !crate::srv6::unicast_eligible(&route) {
+                    return srv6_ineligible_candidate(route);
+                }
                 let (vs_best_ordering, vs_best_reason) = best_path_cmp_with_reason(&route, &best);
                 BestPathCandidate {
                     vs_best_detail: best_path_reason_detail(vs_best_reason, &route, &best),
@@ -2374,6 +2436,9 @@ impl RibManager {
             .collect();
         let (best_reason, best_reason_detail) = candidates
             .iter()
+            .filter(|candidate| {
+                candidate.vs_best_reason != crate::best_path::BestPathReason::Srv6SidInvalid
+            })
             .map(|candidate| &candidate.route)
             .min_by(|a, b| best_path_cmp(a, b))
             .map_or_else(

@@ -1912,21 +1912,27 @@ fn print_explain_best_path(
             best.next_hop,
             best.as_path
         )?;
+        if resp.best_reason == "only_path" {
+            if resp
+                .candidates
+                .iter()
+                .any(|candidate| candidate.vs_best_reason == "srv6_sid_invalid")
+            {
+                outln!("Selected:   only eligible path for this prefix")?;
+            } else {
+                outln!("Selected:   only path for this prefix")?;
+            }
+        } else if resp.best_reason_detail.is_empty() {
+            outln!("Selected:   {}", resp.best_reason)?;
+        } else {
+            outln!(
+                "Selected:   {} ({}) vs runner-up",
+                resp.best_reason,
+                resp.best_reason_detail
+            )?;
+        }
     } else {
-        outln!("No best route")?;
-        return Ok(());
-    }
-
-    if resp.best_reason == "only_path" {
-        outln!("Selected:   only path for this prefix")?;
-    } else if resp.best_reason_detail.is_empty() {
-        outln!("Selected:   {}", resp.best_reason)?;
-    } else {
-        outln!(
-            "Selected:   {} ({}) vs runner-up",
-            resp.best_reason,
-            resp.best_reason_detail
-        )?;
+        outln!("No eligible best route")?;
     }
 
     if resp.candidates.is_empty() {
