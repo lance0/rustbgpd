@@ -12,8 +12,11 @@ import uuid
 from dataclasses import asdict
 from pathlib import Path
 
-from evpn_peer_sync_oracle import Oracle, Route, duplicate_totals, process_start_time
-from evpn_peer_sync_peer import CONTROLS, DUT, DUT_RD, IPS, LOCAL, MACS, SOURCE, SOURCE_RD
+from evpn_peer_sync_oracle import COUNTERS, Oracle, Route, duplicate_totals, process_start_time
+from evpn_peer_sync_peer import (
+    CONTROLS, DUT, DUT_RD, IPS, LOCAL, MACS, OWNER_CHILDREN, OWNER_LOCAL, OWNER_SOURCES,
+    SOURCE, SOURCE_RD,
+)
 from m94_as4_oracle import write_receipt
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -48,6 +51,13 @@ def received_routes(raw: str) -> list[dict]:
                 or not isinstance(row.get("mac"), str) or not isinstance(row.get("ip"), str)):
             raise ValueError("unexpected row in received-route page")
     return page["routes"]
+
+
+def expect_duplicate_counts(totals: dict, ip_moves: int = 0, ip_thresholds: int = 0) -> None:
+    """Sequence changes/replays do not count as new MAC or IP ownership."""
+    expected = dict(zip(COUNTERS, (0, 0, ip_moves, ip_thresholds), strict=True))
+    if any(totals[family]["total"] != value for family, value in expected.items()):
+        raise AssertionError(f"unexpected duplicate accounting: {totals}; expected {expected}")
 
 
 def main() -> None:
@@ -104,32 +114,31 @@ def main() -> None:
                     raise TimeoutError(f"wire condition failed: {error}") from error
                 time.sleep(0.2)
 
-    def send(command: int, sequence: int | None) -> tuple[dict, Oracle]:
+    def send(command: int, sequence: int | None, scenario: str = "peer-sync") -> tuple[dict, Oracle]:
         write_receipt(str(output / "command.json"),
-                      {"run_id": run_id, "id": command, "sequence": sequence})
+                      {"run_id": run_id, "id": command, "sequence": sequence, "scenario": scenario})
         return wait(command, lambda _receipt, _oracle: None)
 
-    def source_view(name: str, present: bool) -> None:
+    def source_view(name: str, present: bool, required=None) -> None:
         raw = run([*compose, "exec", "-T", "dut", "rbgp", "-j", "evpn", "received",
                    SOURCE, "--route-type", "2", "--rd", SOURCE_RD])
         (output / f"{name}.json").write_text(raw)
         rows = received_routes(raw)
         if present:
             keys = {(row["mac"], row["ip"]) for row in rows}
-            if not {(MACS["a"], ""), (MACS["b"], "")} <= keys:
+            if not (required or {(MACS["a"], ""), (MACS["b"], "")}) <= keys:
                 raise AssertionError("positive control is missing the eligible source MAC routes")
         elif rows:
             raise AssertionError("accepted peer routes have not been withdrawn")
 
-    def metrics(name: str) -> None:
+    def metrics(name: str, ip_moves: int = 0, ip_thresholds: int = 0) -> None:
         # HTTP status/read errors propagate from the existing Python-equipped peer.
         scrape = run([*compose, "exec", "-T", "peer", "python3", "-c",
                       "import urllib.request; "
                       f"print(urllib.request.urlopen('http://{DUT}:9179/metrics', timeout=5).read().decode(), end='')"])
         (output / f"{name}.prom").write_text(scrape)
         totals = duplicate_totals(scrape)
-        if any(row["total"] != 0 for row in totals.values()):
-            raise AssertionError(f"duplicate accounting changed: {totals}")
+        expect_duplicate_counts(totals, ip_moves, ip_thresholds)
         process = process_start_time(scrape)
         if "process_start" in ledger and ledger["process_start"] != process:
             raise AssertionError("DUT restarted during proof")
@@ -259,6 +268,94 @@ def main() -> None:
         oracle.expect_never_owned(rd=DUT_RD, mac=MACS["d"])
         oracle.expect_quiet(after=sent["checkpoint"], rd=DUT_RD)
         metrics("after-age")
+        # Preserve all preceding exact same-ESI cases, then isolate IP ownership.
+        preserved = [route for route in retained_local if route.mac != MACS["c"]]
+        send(7, None)
+        wait(7, lambda _receipt, _oracle: source_view("same-esi-removed", False))
+        owner_start, _ = send(8, 9, "ip-owner")
+        required = {(route.mac, route.ip) for route in OWNER_SOURCES}
+        wait(8, lambda _receipt, _oracle: source_view("ip-owner-before-learn", True, required))
+        time.sleep(12)
+        for index, route in enumerate(OWNER_LOCAL):
+            if index < 2:  # IPv4/IPv6 MAC-first, then IPv4/IPv6 IP-first.
+                dut("bridge", "fdb", "replace", route.mac, "dev", "ce100a", "master", "static")
+                wait(8, lambda _receipt, oracle, route=route: oracle.expect(
+                    [Route(DUT_RD, route.mac)], 0, next_hop=DUT))
+            dut("ip", "neigh", "replace", route.ip, "lladdr", route.mac,
+                "dev", "br100", "nud", "reachable")
+            if index >= 2:
+                dut("bridge", "fdb", "replace", route.mac, "dev", "ce100a", "master", "static")
+        _, oracle = wait(8, lambda _receipt, oracle: oracle.expect_transition(
+            OWNER_LOCAL, 10, next_hop=DUT, after=owner_start["checkpoint"]))
+        for route in OWNER_LOCAL[2:]:
+            if any(row["rd"] == DUT_RD and row["mac"] == route.mac and not row["ip"]
+                   and row["action"] == "announce" for row in oracle.events):
+                raise AssertionError("IP-owner binding was not learned IP-first")
+        oracle.expect_owned_keys(preserved + CONTROLS + OWNER_LOCAL, rd=DUT_RD)
+        metrics("ip-owner-first-ten", 4)
+
+        raised, _ = send(9, 19, "ip-owner")
+        time.sleep(12)
+        for _ in range(2):
+            for route in OWNER_LOCAL:
+                dut("bridge", "fdb", "replace", route.mac, "dev", "ce100a", "master", "static")
+                dut("ip", "neigh", "replace", route.ip, "lladdr", route.mac,
+                    "dev", "br100", "nud", "reachable")
+        time.sleep(12)
+        _, oracle = state(9)
+        oracle.expect_transition(OWNER_LOCAL, 10, next_hop=DUT, after=owner_start["checkpoint"])
+        oracle.expect_quiet(after=raised["checkpoint"], rd=DUT_RD)
+        metrics("ip-owner-repeated-observations", 4)
+
+        checkpoint = len(oracle.events)
+        for route in OWNER_CHILDREN:
+            dut("ip", "neigh", "replace", route.ip, "lladdr", route.mac,
+                "dev", "br100", "nud", "reachable")
+        _, oracle = wait(9, lambda _receipt, oracle: oracle.expect_transition(
+            OWNER_CHILDREN, 10, next_hop=DUT, after=checkpoint))
+        oracle.expect_transition(OWNER_LOCAL, 10, next_hop=DUT, after=owner_start["checkpoint"])
+        oracle.expect_owned_keys(preserved + CONTROLS + OWNER_LOCAL + OWNER_CHILDREN, rd=DUT_RD)
+        metrics("ip-owner-uncontested-children", 4)
+
+        withdrawn, _ = send(10, None, "ip-owner")
+        wait(10, lambda _receipt, _oracle: source_view("ip-owner-withdrawn", False))
+        time.sleep(12)
+        _, oracle = state(10)
+        oracle.expect_transition(OWNER_LOCAL, 10, next_hop=DUT, after=owner_start["checkpoint"])
+        oracle.expect_transition(OWNER_CHILDREN, 10, next_hop=DUT, after=checkpoint)
+        oracle.expect_quiet(after=withdrawn["checkpoint"], rd=DUT_RD)
+        metrics("ip-owner-withdrawn", 4)
+
+        checkpoint = len(oracle.events)
+        for route in OWNER_LOCAL + OWNER_CHILDREN:
+            dut("ip", "neigh", "del", route.ip, "dev", "br100")
+        parents = [Route(DUT_RD, route.mac) for route in OWNER_LOCAL]
+        _, oracle = wait(10, lambda _receipt, oracle: oracle.expect_transition(
+            parents, 10, next_hop=DUT, after=checkpoint))
+        oracle.expect_owned_keys(preserved + CONTROLS + parents, rd=DUT_RD)
+        metrics("ip-owner-downgrade", 4)
+
+        # A genuinely new contested activation may outbid 19. Replays above may not.
+        send(11, 19, "ip-owner")
+        wait(11, lambda _receipt, _oracle: source_view("ip-owner-reactivation-source", True, required))
+        time.sleep(12)
+        _, oracle = state(11)
+        oracle.expect_transition(parents, 10, next_hop=DUT, after=checkpoint)
+        checkpoint = len(oracle.events)
+        for route in OWNER_LOCAL:
+            dut("ip", "neigh", "replace", route.ip, "lladdr", route.mac,
+                "dev", "br100", "nud", "reachable")
+        wait(11, lambda _receipt, oracle: oracle.expect_transition(
+            OWNER_LOCAL, 20, next_hop=DUT, after=checkpoint))
+        time.sleep(12)
+        final, oracle = state(11)
+        oracle.expect_transition(OWNER_LOCAL, 20, next_hop=DUT, after=checkpoint)
+        oracle.expect(preserved, 9, next_hop=DUT)
+        oracle.expect(CONTROLS, 0, next_hop=DUT)
+        oracle.expect_owned_keys(preserved + CONTROLS + OWNER_LOCAL, rd=DUT_RD)
+        for route in OWNER_SOURCES:
+            oracle.expect_never_owned(rd=DUT_RD, mac=route.mac)
+        metrics("ip-owner-reactivated-twenty", 8, 4)
         ledger.update(passed=True, final_event_count=len(final["events"]))
     except BaseException as error:
         ledger["error"] = str(error)

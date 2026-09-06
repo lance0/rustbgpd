@@ -29,8 +29,28 @@ SOURCES = [Route(SOURCE_RD, MACS["a"]), Route(SOURCE_RD, MACS["b"]),
            Route(SOURCE_RD, MACS["f"], tag=1)]
 
 
-def command_updates(sequence: int | None) -> list[bytes]:
-    """The fixed proof supports two announcement values and a complete withdrawal."""
+# Separate local/remote MACs and a different ESI make these IP-ownership
+# activations, not the exact same-segment adoption exercised above.
+OWNER_LOCAL = [Route(DUT_RD, "02:aa:bb:cc:ee:" + suffix, ip)
+               for suffix, ip in (("11", "192.0.2.101"), ("22", "2001:db8::102"),
+                                  ("33", "192.0.2.103"), ("44", "2001:db8::104"))]
+OWNER_SOURCES = [Route(SOURCE_RD, route.mac.replace(":ee:", ":ff:"), route.ip,
+                       esi="00:00:00:00:00:00:00:00:00:02") for route in OWNER_LOCAL]
+OWNER_CHILDREN = [Route(DUT_RD, route.mac, ip) for route, ip in zip(
+    OWNER_LOCAL, ("192.0.2.111", "2001:db8::112", "192.0.2.113", "2001:db8::114"),
+    strict=True)]
+
+
+def command_updates(sequence: int | None, scenario: str = "peer-sync") -> list[bytes]:
+    """Keep the original peer cases separate from different-MAC IP ownership."""
+    if scenario == "ip-owner":
+        if sequence is None:
+            return [withdrawal(OWNER_SOURCES)]
+        if sequence not in (9, 19):
+            raise ValueError("unsupported IP-owner sequence")
+        return [announcement(OWNER_SOURCES, sequence, next_hop=SOURCE)]
+    if scenario != "peer-sync":
+        raise ValueError("unsupported proof scenario")
     wrong_rt = [Route(SOURCE_RD, MACS["e"])]
     if sequence is None:
         return [withdrawal(SOURCES + wrong_rt)]
@@ -99,7 +119,7 @@ def serve(directory: Path, run_id: str) -> None:
                     raise ValueError("expected initial KEEPALIVE")
                 receipt["established"] = True
                 connection.settimeout(0.2)
-                deadline, last_send, last_receive = time.monotonic() + 240, time.monotonic(), time.monotonic()
+                deadline, last_send, last_receive = time.monotonic() + 420, time.monotonic(), time.monotonic()
                 while time.monotonic() < deadline:
                     command_path = directory / "command.json"
                     if command_path.exists():
@@ -110,7 +130,7 @@ def serve(directory: Path, run_id: str) -> None:
                             if command["id"] != receipt["ack"] + 1:
                                 raise ValueError("nonsequential command")
                             receipt["checkpoint"] = len(oracle.events)
-                            for update in command_updates(command["sequence"]):
+                            for update in command_updates(command["sequence"], command.get("scenario", "peer-sync")):
                                 send_message(connection, 2, update)
                                 receipt["sent"].append({"command": command["id"], "body": update.hex()})
                             receipt["ack"] = command["id"]
