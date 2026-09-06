@@ -49,6 +49,7 @@ pub(crate) struct SessionExportProfile {
     four_octet_as: bool,
     extended_messages: bool,
     extended_nexthop_ipv4: bool,
+    extended_nexthop_vpnv4: bool,
     add_path_send_families: Arc<[(Afi, Safi)]>,
     peer_llgr_families: Arc<[(Afi, Safi)]>,
     local_addr: Option<IpAddr>,
@@ -80,6 +81,7 @@ impl std::fmt::Debug for SessionExportProfile {
             .field("four_octet_as", &self.four_octet_as)
             .field("extended_messages", &self.extended_messages)
             .field("extended_nexthop_ipv4", &self.extended_nexthop_ipv4)
+            .field("extended_nexthop_vpnv4", &self.extended_nexthop_vpnv4)
             .field("add_path_send_families", &self.add_path_send_families)
             .field("peer_llgr_families", &self.peer_llgr_families)
             .field("local_addr", &self.local_addr)
@@ -151,6 +153,11 @@ impl SessionExportProfile {
                     .get(&(Afi::Ipv4, Safi::Unicast))
                     .is_some_and(|afi| *afi == Afi::Ipv6)
             }),
+            extended_nexthop_vpnv4: session.negotiated.as_ref().is_some_and(|neg| {
+                neg.extended_nexthop_families
+                    .get(&(Afi::Ipv4, Safi::MplsVpn))
+                    .is_some_and(|afi| *afi == Afi::Ipv6)
+            }),
             add_path_send_families: Arc::from(
                 session
                     .negotiated
@@ -211,6 +218,7 @@ impl SessionExportProfile {
             four_octet_as: false,
             extended_messages: false,
             extended_nexthop_ipv4: false,
+            extended_nexthop_vpnv4: false,
             add_path_send_families: Arc::from(Vec::new()),
             peer_llgr_families: Arc::from(Vec::new()),
             local_addr,
@@ -785,9 +793,14 @@ impl SessionExportProfile {
     pub(super) fn prepare_vpn_candidate(
         &self,
         route: &VpnRibRoute,
-    ) -> PreparedMpCandidate<rustbgpd_wire::VpnNlriEntry> {
+    ) -> Result<PreparedMpCandidate<rustbgpd_wire::VpnNlriEntry>, ExportProbeError> {
         let (afi, safi) = route.afi_safi();
-        PreparedMpCandidate {
+        // RFC 8950 §5: reflect the received next-hop encoding unchanged,
+        // but only to a recipient that advertised support for that encoding.
+        if afi == Afi::Ipv4 && route.next_hop.is_ipv6() && !self.extended_nexthop_vpnv4 {
+            return Err(ExportProbeError::Vpnv4RequiresExtendedNextHop);
+        }
+        Ok(PreparedMpCandidate {
             afi,
             safi,
             next_hop: route.next_hop,
@@ -797,7 +810,7 @@ impl SessionExportProfile {
                 path_id: route.path_id,
                 nlri: route.nlri.clone(),
             },
-        }
+        })
     }
 
     pub(super) fn prepare_labeled_candidate(
@@ -1157,7 +1170,7 @@ impl SessionExportProfile {
                 .map_err(Into::into)
             }
             ExportCandidate::Vpn(route) => {
-                let prepared = self.prepare_vpn_candidate(route);
+                let prepared = self.prepare_vpn_candidate(route)?;
                 self.probe_mp_reach(
                     prepared.afi,
                     prepared.safi,
@@ -1619,6 +1632,7 @@ pub(crate) enum ExportProbeError {
     Encode(EncodeError),
     MissingIpv6NextHop,
     Ipv4RequiresExtendedNextHop,
+    Vpnv4RequiresExtendedNextHop,
     /// An EVPN route type this build does not model (non-exhaustive
     /// `EvpnRouteKey`) cannot be converted back into wire NLRI.
     UnmodeledEvpnRouteType,
@@ -1637,6 +1651,8 @@ impl std::fmt::Display for ExportProbeError {
             Self::MissingIpv6NextHop => formatter.write_str("no usable local IPv6 next-hop"),
             Self::Ipv4RequiresExtendedNextHop => formatter
                 .write_str("IPv4 on a scoped link-local session requires Extended Next Hop"),
+            Self::Vpnv4RequiresExtendedNextHop => formatter
+                .write_str("VPNv4 with an IPv6 next-hop requires peer Extended Next Hop support"),
             Self::UnmodeledEvpnRouteType => {
                 formatter.write_str("EVPN route type not modeled by this build")
             }
@@ -1902,7 +1918,8 @@ fn exact_export_result(
                 ExactExportErrorCode::Encoding
             }
             ExportProbeError::MissingIpv6NextHop => ExactExportErrorCode::MissingIpv6NextHop,
-            ExportProbeError::Ipv4RequiresExtendedNextHop => {
+            ExportProbeError::Ipv4RequiresExtendedNextHop
+            | ExportProbeError::Vpnv4RequiresExtendedNextHop => {
                 ExactExportErrorCode::Ipv4RequiresExtendedNextHop
             }
         };
@@ -2152,6 +2169,7 @@ pub fn fanout_bench_add_path_export_encoder() -> Arc<dyn ExactExportEncoder> {
         four_octet_as: true,
         extended_messages: false,
         extended_nexthop_ipv4: false,
+        extended_nexthop_vpnv4: false,
         add_path_send_families: Arc::from(Vec::new()),
         peer_llgr_families: Arc::from(Vec::new()),
         local_addr: Some(IpAddr::V4(Ipv4Addr::new(10, 255, 255, 255))),
@@ -2183,6 +2201,7 @@ fn fanout_bench_encoder(
         four_octet_as: true,
         extended_messages: false,
         extended_nexthop_ipv4: false,
+        extended_nexthop_vpnv4: false,
         add_path_send_families: Arc::from(Vec::new()),
         peer_llgr_families: Arc::from(Vec::new()),
         local_addr: Some(IpAddr::V4(Ipv4Addr::new(10, 255, 255, 255))),
@@ -2714,7 +2733,7 @@ mod tests {
 
         let config = config_with_auth_secret("not-retained");
         let target = SessionExportProfile::initial(&config, None, false);
-        let cases: [(&str, ProfileMutation); 9] = [
+        let cases: [(&str, ProfileMutation); 10] = [
             ("local ASN", |profile| profile.local_asn += 1),
             ("router ID", |profile| {
                 profile.local_router_id = Ipv4Addr::new(192, 0, 2, 99);
@@ -2731,6 +2750,9 @@ mod tests {
             }),
             ("extended next hop", |profile| {
                 profile.extended_nexthop_ipv4 = !profile.extended_nexthop_ipv4;
+            }),
+            ("VPNv4 extended next hop", |profile| {
+                profile.extended_nexthop_vpnv4 = !profile.extended_nexthop_vpnv4;
             }),
             ("Add-Path", |profile| {
                 profile.add_path_send_families = Arc::from(vec![(Afi::Ipv4, Safi::Unicast)]);

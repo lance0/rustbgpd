@@ -1610,6 +1610,95 @@ async fn grouped_vpn_force_rejection_withdraws_stale_route_once() {
     handle.await.unwrap();
 }
 
+/// Exact precommit must remove an old `VPNv4` advertisement when its replacement
+/// changes next-hop encoding and the target's snapshot rejects that encoding.
+#[tokio::test]
+async fn grouped_vpn_ineligible_replacement_withdraws_previous_advertisement() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+    let target = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 30));
+    let sibling = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 31));
+    let source = Ipv4Addr::new(198, 51, 100, 30);
+    let mut route = make_vpn_rib_route(source, 30, 1030, 100);
+    let key = route.key();
+    let target_encoder = MockExactExportEncoder::accepting(51);
+    let mut target_rx = vpn_peer_up_with_encoder(&tx, target, target_encoder.clone()).await;
+    let mut sibling_rx =
+        vpn_peer_up_with_encoder(&tx, sibling, MockExactExportEncoder::accepting(52)).await;
+    assert_eq!(
+        update_group(&tx, target).await,
+        update_group(&tx, sibling).await
+    );
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source.into(),
+        announced: vec![route.clone()],
+        withdrawn: Vec::new(),
+    })
+    .await
+    .unwrap();
+    assert_eq!(target_rx.recv().await.unwrap().vpn_announce.len(), 1);
+    assert_eq!(sibling_rx.recv().await.unwrap().vpn_announce.len(), 1);
+
+    // The transport's real snapshot tests pin the RFC 8950 rejection. Here
+    // the same exact-precommit failure is applied to a changed route, without
+    // an explicit source withdrawal or a forced outbound refresh.
+    target_encoder.set_profile(53, [ExactExportKey::Vpn(key.clone())]);
+    route.next_hop = "2001:db8::7".parse().unwrap();
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source.into(),
+        announced: vec![route],
+        withdrawn: Vec::new(),
+    })
+    .await
+    .unwrap();
+    let rejected = target_rx.recv().await.unwrap();
+    assert!(rejected.vpn_announce.is_empty());
+    assert_eq!(rejected.vpn_withdraw, vec![key.clone()]);
+    let accepted = sibling_rx.recv().await.unwrap();
+    assert_eq!(accepted.vpn_announce.len(), 1);
+    assert!(accepted.vpn_announce[0].next_hop.is_ipv6());
+    assert!(accepted.vpn_withdraw.is_empty());
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 30, 0), 24));
+    let rd = key.nlri_key.route_distinguisher;
+    let denied = query_explain_advertised_vpn_route(&tx, target, prefix, rd).await;
+    assert_eq!(denied.decision, crate::update::ExplainDecision::Deny);
+    assert!(!denied.already_advertised);
+    assert_eq!(denied.reasons[0].code, "exact_export_rejected");
+    let allowed = query_explain_advertised_vpn_route(&tx, sibling, prefix, rd).await;
+    assert_eq!(allowed.decision, crate::update::ExplainDecision::Advertise);
+    assert!(allowed.already_advertised);
+    let (reply, result) = oneshot::channel();
+    tx.send(RibUpdate::QueryBmpPeerStats { reply })
+        .await
+        .unwrap();
+    let counts = result.await.unwrap().adj_rib_out_post;
+    assert!(counts[&target].is_empty());
+    assert_eq!(counts[&sibling], vec![((Afi::Ipv4, Safi::MplsVpn), 1)]);
+
+    tx.send(RibUpdate::VpnRoutesReceived {
+        session_id: 0,
+        peer: source.into(),
+        announced: Vec::new(),
+        withdrawn: vec![key.clone()],
+    })
+    .await
+    .unwrap();
+    assert_eq!(sibling_rx.recv().await.unwrap().vpn_withdraw, vec![key]);
+    if let Ok(Some(update)) =
+        tokio::time::timeout(Duration::from_millis(25), target_rx.recv()).await
+    {
+        assert!(
+            update.vpn_withdraw.is_empty(),
+            "the rejected replacement already withdrew the route"
+        );
+    }
+    drop(tx);
+    handle.await.unwrap();
+}
+
 #[tokio::test]
 async fn add_path_explain_does_not_mark_exact_rejected_rank_as_advertised() {
     let (tx, rx) = mpsc::channel(64);
