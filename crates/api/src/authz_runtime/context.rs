@@ -22,9 +22,9 @@ pub enum GrpcAuthnKind {
     Mtls,
     /// Listener protected by the existing bearer-token interceptor.
     BearerToken,
-    /// Unix domain socket protected by filesystem permissions.
+    /// Unix domain socket protected by filesystem permissions without a bearer token.
     Uds,
-    /// Owner-only Unix domain socket whose clients are authorized as
+    /// Permissions-only owner-only Unix domain socket whose clients are authorized as
     /// the implicit `local-operator` principal (ADR-0064 amendment).
     UdsOwner,
     /// No listener authentication configured.

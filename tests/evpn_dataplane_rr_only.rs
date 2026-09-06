@@ -155,6 +155,8 @@ fn wait_for_health(grpc_addr: &str, daemon: &mut Daemon) {
 fn write_config(dir: &Path) -> PathBuf {
     let runtime_dir = dir.join("runtime");
     std::fs::create_dir_all(&runtime_dir).expect("failed to create runtime dir");
+    std::fs::set_permissions(&runtime_dir, std::fs::Permissions::from_mode(0o700))
+        .expect("make runtime dir private");
     let config_path = dir.join("rustbgpd.toml");
     let config = format!(
         r#"

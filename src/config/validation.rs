@@ -3201,12 +3201,12 @@ fn validate_grpc_tier_enforcement(config: &Config) -> Result<(), ConfigError> {
                 cfg.mode
             ));
             listener_fixes.push(
-                "# add to your [global.telemetry.grpc_uds] table \
-                 (or set mode = 0o600 to keep it owner-only):\n\
-                 principal = \"local-admin\""
+                "# replace mode in your [global.telemetry.grpc_uds] table:\n\
+                 mode = 0o600\n\
+                 # Deliberate shared access instead requires an explicit principal\n\
+                 # and a matching role for every client allowed by the socket mode."
                     .to_string(),
             );
-            role_fixes.push("\"local-admin\" = \"operator\"".to_string());
         }
         // Owner-only UDS with no declared principal authorizes as the
         // implicit `local-operator` identity — nothing to require. The
