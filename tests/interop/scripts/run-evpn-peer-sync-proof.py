@@ -12,7 +12,7 @@ import uuid
 from dataclasses import asdict
 from pathlib import Path
 
-from evpn_peer_sync_oracle import Oracle, Route, duplicate_totals
+from evpn_peer_sync_oracle import Oracle, Route, duplicate_totals, process_start_time
 from evpn_peer_sync_peer import CONTROLS, DUT, DUT_RD, IPS, LOCAL, MACS, SOURCE, SOURCE_RD
 from m94_as4_oracle import write_receipt
 
@@ -130,7 +130,7 @@ def main() -> None:
         totals = duplicate_totals(scrape)
         if any(row["total"] != 0 for row in totals.values()):
             raise AssertionError(f"duplicate accounting changed: {totals}")
-        process = next(line for line in scrape.splitlines() if line.startswith("process_start_time_seconds "))
+        process = process_start_time(scrape)
         if "process_start" in ledger and ledger["process_start"] != process:
             raise AssertionError("DUT restarted during proof")
         ledger["process_start"] = process

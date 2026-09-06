@@ -14,7 +14,7 @@ import unittest
 
 from evpn_peer_sync_oracle import (
     BgpReader, COUNTERS, ESI, FAMILY, Oracle, RT, Route, VXLAN,
-    announcement, attribute, decode_type2s, duplicate_totals, type2, withdrawal,
+    announcement, attribute, decode_type2s, duplicate_totals, process_start_time, type2, withdrawal,
 )
 
 
@@ -339,6 +339,34 @@ class PeerSyncOracleTests(unittest.TestCase):
                 oracle.expect_transition(replacement, 9, next_hop=DUT,
                                          after=len(oracle.events) - len(replacement))
                 oracle.expect_owned_keys(replacement, rd=parent.rd)
+
+    def test_malformed_exact_metric_samples_never_count_as_missing(self):
+        for family in COUNTERS:
+            for malformed in (family, family + "\tbroken extra junk", family + "\t",
+                              family + "{broken", family + "\tNaN", family + "\t-1"):
+                with self.subTest(sample=malformed), self.assertRaises(ValueError):
+                    duplicate_totals("process_start_time_seconds 123\n" + malformed + "\n")
+        valid = duplicate_totals("process_start_time_seconds 123\n" + COUNTERS[0] + "_other\tbroken extra junk\n")
+        self.assertEqual(valid[COUNTERS[0]], {"present": False, "series": 0, "total": 0})
+
+    def test_process_start_uses_shared_numeric_identity_for_valid_sample_shapes(self):
+        for sample in ("process_start_time_seconds 123", "process_start_time_seconds\t123",
+                       'process_start_time_seconds{instance="dut"} 123',
+                       'process_start_time_seconds{instance="dut"}\t123.0 1000'):
+            with self.subTest(sample=sample):
+                scrape = sample + "\n" + COUNTERS[0] + "\t2\n"
+                self.assertEqual(process_start_time(scrape), 123.0)
+                self.assertEqual(duplicate_totals(scrape)[COUNTERS[0]],
+                                 {"present": True, "series": 1, "total": 2})
+        self.assertNotEqual(process_start_time("process_start_time_seconds 123\n"),
+                            process_start_time("process_start_time_seconds 124\n"))
+        for sample in ("", "process_start_time_seconds", "process_start_time_seconds\tbroken extra junk",
+                       "process_start_time_seconds NaN", "process_start_time_seconds Inf",
+                       "process_start_time_seconds 0", "process_start_time_seconds -1",
+                       "process_start_time_seconds_other 123",
+                       'process_start_time_seconds 123\nprocess_start_time_seconds{instance="dut"} 123'):
+            with self.subTest(sample=sample), self.assertRaises(ValueError):
+                process_start_time(sample + "\n")
 
     def test_encoder_rejects_out_of_range_and_oversized_inputs(self):
         for route in (Route("10.0.0.2:100", "00"), Route("10.0.0.2:100", MAC, vni=0),

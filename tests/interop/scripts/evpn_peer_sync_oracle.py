@@ -229,28 +229,40 @@ def send_announcement(connection, routes: list[Route], sequence: int, *, next_ho
     send_message(connection, 2, announcement(routes, sequence, next_hop=next_hop))
 
 
+def _metric_values(scrape: str, family: str) -> list[float]:
+    boundary = re.compile(re.escape(family) + r"(?=$|[\s{])")
+    pattern = re.compile(re.escape(family) + r"(?:\{[^}]*\})?\s+(\S+)(?:\s+[0-9]+)?$")
+    values = []
+    for line in scrape.splitlines():
+        if not boundary.match(line):
+            continue
+        match = pattern.fullmatch(line)
+        if not match:
+            raise ValueError(f"malformed sample for {family}")
+        value = float(match[1])
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"invalid metric value for {family}")
+        values.append(value)
+    return values
+
+
+def process_start_time(scrape: str) -> float:
+    """Return one positive finite process identity, regardless of sample labels."""
+    values = _metric_values(scrape, "process_start_time_seconds")
+    if len(values) != 1 or values[0] <= 0:
+        raise ValueError("missing or ambiguous process identity in metrics scrape")
+    return values[0]
+
+
 def duplicate_totals(scrape: str) -> dict[str, dict]:
     """Aggregate all label sets. Missing lazy series is explicit, never NaN.
 
     Caller must obtain a complete successful scrape. A required process sample
     rejects empty/error bodies; HTTP failures must propagate before this call.
     """
+    process_start_time(scrape)
     result = {}
-    for family in ("process_start_time_seconds", *COUNTERS):
-        values = []
-        pattern = re.compile(r"^" + re.escape(family) + r"(?:\{[^}]*\})?\s+(\S+)(?:\s+[0-9]+)?$")
-        for line in scrape.splitlines():
-            match = pattern.fullmatch(line)
-            if match:
-                value = float(match[1])
-                if not math.isfinite(value) or value < 0:
-                    raise ValueError(f"invalid counter value for {family}")
-                values.append(value)
-            elif line.startswith((family + " ", family + "{")):
-                raise ValueError(f"malformed sample for {family}")
-        if family == "process_start_time_seconds":
-            if len(values) != 1 or values[0] <= 0:
-                raise ValueError("missing or ambiguous process identity in metrics scrape")
-        else:
-            result[family] = {"present": bool(values), "series": len(values), "total": sum(values)}
+    for family in COUNTERS:
+        values = _metric_values(scrape, family)
+        result[family] = {"present": bool(values), "series": len(values), "total": sum(values)}
     return result
