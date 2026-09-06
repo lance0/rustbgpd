@@ -725,8 +725,10 @@ result without this separate instrumentation control is incomplete evidence.
 
 Use a receipt-local copy of `gate8b-soak.clab.yml`: give it a unique
 `gate8b-proof-*` lab name, set its `mgmt.network` to that same name with an
-unused management subnet, pin both nodes to the validated image ID, and
-resolve config/startup binds to absolute paths. Record the runtime source
+unused management subnet, pin both nodes to the validated image tag, and
+verify its image ID before deployment and on both created containers.
+Containerlab treats a bare `sha256:...` image ID as a repository name.
+Resolve config/startup binds to absolute paths. Record the runtime source
 commit and image provenance; a harness checkout revision alone does not
 identify the image's source. Do not reuse another lab's containers or network.
 
