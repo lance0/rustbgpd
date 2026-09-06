@@ -143,7 +143,7 @@ struct Cli {
     token_file: Option<String>,
 
     /// Output in JSON format
-    #[arg(long, short = 'j', global = true)]
+    #[arg(long, short = 'j', global = true, conflicts_with = "json_lines")]
     json: bool,
 
     /// Stream accepted unicast RIB routes as versioned JSON lines
@@ -5060,6 +5060,42 @@ printf '%s\n' "${COMPREPLY[@]}"
             let mut output = Vec::new();
             generate_completions(shell, BINARY_NAME, &mut output).unwrap();
             assert!(!output.is_empty(), "{shell} completions are empty");
+        }
+    }
+
+    #[test]
+    fn json_lines_completion_conflicts_are_reciprocal() {
+        let mut command = cli_command(BINARY_NAME);
+        command.build();
+        for path in [
+            vec![],
+            vec!["rib"],
+            vec!["rib", "received"],
+            vec!["rib", "advertised"],
+        ] {
+            let mut view = &command;
+            for name in &path {
+                view = view.find_subcommand(name).unwrap();
+            }
+            for (flag, conflict) in [("json", "json_lines"), ("json_lines", "json")] {
+                let arg = view
+                    .get_arguments()
+                    .find(|arg| arg.get_id() == flag)
+                    .unwrap();
+                assert!(
+                    view.get_arg_conflicts_with(arg)
+                        .iter()
+                        .any(|arg| arg.get_id() == conflict),
+                    "{path:?}: {flag} must exclude {conflict} from completions"
+                );
+            }
+        }
+        let mut generated = Vec::new();
+        generate_completions(Shell::Zsh, BINARY_NAME, &mut generated).unwrap();
+        let generated = String::from_utf8(generated).unwrap();
+        for flag in ["-j", "--json"] {
+            assert!(generated.contains(&format!("'(--json-lines){flag}[")));
+            assert!(!generated.contains(&format!("'{flag}[")));
         }
     }
 

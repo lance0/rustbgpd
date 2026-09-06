@@ -19,8 +19,8 @@ _rbgp() {
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -42,8 +42,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -56,8 +56,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -78,8 +78,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -94,8 +94,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -115,8 +115,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -130,8 +130,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -145,8 +145,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -160,8 +160,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -174,8 +174,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -193,8 +193,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -208,8 +208,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -224,8 +224,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -305,8 +305,8 @@ _arguments "${_arguments_options[@]}" : \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '()--wide[Append summary columns to the list\: MsgRcvd, MsgSent, Flaps, RRC (route-reflector client), Slow (\`!\` marks a slow peer), and State/PfxRcd (prefix count when Established). Display-only; JSON is unaffected by --wide and may omit optional false healthy-state fields]' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -351,8 +351,8 @@ _arguments "${_arguments_options[@]}" : \
 '(--no-add-path)--add-path-receive[Enable Add-Path receive]' \
 '(--no-add-path)--add-path-send[Enable Add-Path send]' \
 '--no-add-path[Explicitly disable the complete inherited Add-Path block]' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -365,8 +365,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -379,8 +379,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -394,8 +394,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -409,8 +409,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -425,8 +425,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -439,8 +439,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -507,8 +507,8 @@ _arguments "${_arguments_options[@]}" : \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '()--wide[Append summary columns to the list\: MsgRcvd, MsgSent, Flaps, RRC (route-reflector client), Slow (\`!\` marks a slow peer), and State/PfxRcd (prefix count when Established). Display-only; JSON is unaffected by --wide and may omit optional false healthy-state fields]' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -553,8 +553,8 @@ _arguments "${_arguments_options[@]}" : \
 '(--no-add-path)--add-path-receive[Enable Add-Path receive]' \
 '(--no-add-path)--add-path-send[Enable Add-Path send]' \
 '--no-add-path[Explicitly disable the complete inherited Add-Path block]' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -567,8 +567,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -581,8 +581,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -596,8 +596,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -611,8 +611,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -627,8 +627,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -641,8 +641,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -707,8 +707,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -729,8 +729,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -772,8 +772,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -794,8 +794,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -808,8 +808,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -874,8 +874,8 @@ _arguments "${_arguments_options[@]}" : \
 '(--count)--explain[Show why the best route was selected (requires --prefix)]' \
 '(--age)--count[Print only the number of matching best, received, or advertised routes]' \
 '(--explain)--age[Append the original route receive age to best, received, or advertised rows]' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -896,8 +896,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -928,8 +928,8 @@ _arguments "${_arguments_options[@]}" : \
 '(--count)--rejected[Show the retained rejected routes with their reject reasons instead of the accepted Adj-RIB-In (the looking-glass filtered-route view; \[policy.reject_retention\])]' \
 '-l[Show longer (more specific) prefixes matching --prefix]' \
 '--longer[Show longer (more specific) prefixes matching --prefix]' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -960,8 +960,8 @@ _arguments "${_arguments_options[@]}" : \
 '(--count)--rejected[Show the retained rejected routes with their reject reasons instead of the accepted Adj-RIB-In (the looking-glass filtered-route view; \[policy.reject_retention\])]' \
 '-l[Show longer (more specific) prefixes matching --prefix]' \
 '--longer[Show longer (more specific) prefixes matching --prefix]' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -996,8 +996,8 @@ _arguments "${_arguments_options[@]}" : \
 '(--rd)--labeled[Explain the labeled-unicast (SAFI 4, RFC 8277) export ladder for the prefix instead of the plain unicast ladder]' \
 '-l[Show longer (more specific) prefixes matching --prefix]' \
 '--longer[Show longer (more specific) prefixes matching --prefix]' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1032,8 +1032,8 @@ _arguments "${_arguments_options[@]}" : \
 '(--rd)--labeled[Explain the labeled-unicast (SAFI 4, RFC 8277) export ladder for the prefix instead of the plain unicast ladder]' \
 '-l[Show longer (more specific) prefixes matching --prefix]' \
 '--longer[Show longer (more specific) prefixes matching --prefix]' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1047,8 +1047,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1069,8 +1069,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1088,8 +1088,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1107,8 +1107,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1125,8 +1125,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1143,8 +1143,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1159,8 +1159,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1182,8 +1182,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1198,8 +1198,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1281,8 +1281,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1303,8 +1303,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1317,8 +1317,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1363,8 +1363,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1377,8 +1377,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1409,8 +1409,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1423,8 +1423,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1450,8 +1450,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1468,8 +1468,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1569,8 +1569,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1595,8 +1595,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1612,8 +1612,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1662,8 +1662,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1688,8 +1688,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1707,8 +1707,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1722,8 +1722,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1750,8 +1750,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1769,8 +1769,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1788,8 +1788,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1807,8 +1807,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1825,8 +1825,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1844,8 +1844,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1915,8 +1915,8 @@ _arguments "${_arguments_options[@]}" : \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '--no-vxlan-encap[Disable the RFC 8365 VXLAN encapsulation ext community]' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1935,8 +1935,8 @@ _arguments "${_arguments_options[@]}" : \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '--no-vxlan-encap[]' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1958,8 +1958,8 @@ _arguments "${_arguments_options[@]}" : \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '--no-vxlan-encap[]' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1976,8 +1976,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -1993,8 +1993,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2010,8 +2010,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2026,8 +2026,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2040,8 +2040,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2054,8 +2054,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2076,8 +2076,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2091,8 +2091,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2106,8 +2106,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2157,8 +2157,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2171,8 +2171,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2185,8 +2185,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2199,8 +2199,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2213,8 +2213,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2228,8 +2228,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2400,8 +2400,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2421,8 +2421,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2451,8 +2451,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2469,8 +2469,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2487,8 +2487,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2507,8 +2507,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2561,8 +2561,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2577,8 +2577,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2591,8 +2591,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2606,8 +2606,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2620,8 +2620,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2637,8 +2637,8 @@ _arguments "${_arguments_options[@]}" : \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '--clear[Clear instead of enabling]' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2653,8 +2653,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2667,8 +2667,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2689,8 +2689,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2708,8 +2708,8 @@ _arguments "${_arguments_options[@]}" : \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '--list-deps[Print the resolved import graph — each module'\''s path, SHA-256 content hash, and imports — instead of running tests (audit/packaging aid)]' \
 '--coverage[Report which policy terms the in-language tests exercised (evaluated vs. matched, per term) plus static lints (unused sets/datasets/fns, unreachable terms, unreferenced policies). A report only — it never changes the exit code by itself]' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2724,8 +2724,8 @@ _arguments "${_arguments_options[@]}" : \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
 '--check[Rewrite nothing; print a diff and exit 1 when any file is not canonically formatted (CI mode)]' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2747,8 +2747,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2762,8 +2762,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2778,8 +2778,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2793,8 +2793,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2808,8 +2808,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2832,8 +2832,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2848,8 +2848,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2865,8 +2865,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2882,8 +2882,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2898,8 +2898,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2959,8 +2959,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2976,8 +2976,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -2995,8 +2995,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -3105,8 +3105,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -3127,8 +3127,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -3141,8 +3141,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -3157,8 +3157,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -3172,8 +3172,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -3227,8 +3227,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -3249,8 +3249,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -3263,8 +3263,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -3279,8 +3279,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -3294,8 +3294,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -3310,8 +3310,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -3325,8 +3325,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -3388,8 +3388,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -3410,8 +3410,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -3428,8 +3428,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -3443,8 +3443,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -3494,8 +3494,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -3516,8 +3516,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -3539,8 +3539,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -3554,8 +3554,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -3605,8 +3605,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
@@ -3620,8 +3620,8 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
-'-j[Output in JSON format]' \
-'--json[Output in JSON format]' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
 '--no-color[Disable colored output]' \
 '-h[Print help (see more with '\''--help'\'')]' \
