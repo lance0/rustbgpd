@@ -2371,6 +2371,8 @@ message BestPathCandidate {
   Route route = 1;
   // Decisive best-path step in stable snake_case vocabulary, including
   // lower_path_id when otherwise-equal routes came from one Add-Path peer.
+  // srv6_sid_invalid denotes a retained candidate excluded before ranking;
+  // its multipath is none and advertised_path_id is zero.
   string vs_best_reason = 2;
   string vs_best_ordering = 3;
   // Compared values behind vs_best_reason, candidate's value first,
@@ -2432,10 +2434,10 @@ message ExplainBestPathResponse {
   // shorter_cluster_list, lower_peer_address, lower_path_id, plus
   // orr_interior_cost for a peer-scoped explanation using a resolved
   // RFC 9107 vantage).
-  // "only_path" when the prefix has
-  // exactly one path (trivial winner, no competing candidates). A prefix
-  // with no paths at all is NOT_FOUND at the RPC layer, so this field is
-  // never empty on a successful response.
+  // "only_path" when the prefix has exactly one eligible path. Retained
+  // srv6_sid_invalid candidates do not count as competing paths. If all
+  // retained paths are ineligible, best_route is absent, candidates still
+  // describe them, and best_reason is empty. No retained paths is NOT_FOUND.
   string best_reason = 7;
   // Compared values behind best_reason, winner's value first
   // (e.g. "local_pref 200 > 100"). Empty when best_reason is

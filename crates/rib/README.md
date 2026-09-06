@@ -19,6 +19,12 @@ Single-task ownership — `RibManager` runs as one tokio task with no
   extensions: RPKI validation (step 0.5), stale demotion (step 0),
   deterministic MED (always-compare), route reflector tiebreakers, and a
   deterministic same-peer unicast Add-Path identity tie after all BGP criteria
+- **SRv6 service eligibility** — RFC 9252 service SID structure and
+  family-specific transposition checks exclude unusable candidates before
+  selection, Add-Path, ORR, and ECMP, while preserving received attributes.
+  Unicast and EVPN explain report `srv6_sid_invalid`; VPN received rows remain
+  internal because no received-VPN query is exposed. This does not originate
+  SRv6 services or install SRv6 forwarding state.
 - **Adj-RIB-Out** — per-peer outbound route tracking with split horizon,
   iBGP suppression, route reflector reflection rules
 - **Outbound prefix limits** — per-peer, per-family Adj-RIB-Out prefix

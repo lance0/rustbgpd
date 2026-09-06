@@ -509,6 +509,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   An ineligible replacement withdraws the old advertisement; IPv4 next-hop
   VPNv4 routes and VPN withdrawals retain their existing behavior.
 
+- SRv6 service routes with no semantically valid applicable SID now remain
+  retained but cannot win selection, Add-Path, ORR, or ECMP. Invalid-only
+  input withdraws existing advertisements; a corrected replacement recovers
+  normally. Unicast and EVPN explain identify `srv6_sid_invalid`, including
+  successful unicast API/CLI explanations with candidates and no best route.
+
 - gRPC Unix sockets now reject unsafe parent directories and ancestor paths,
   bind without a permission window, and preserve existing live or uncertain
   sockets. Descriptor-relative operations and cooperative startup locking
@@ -520,8 +526,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   RFC 9252 §7. Recognized service malformation returns the additive
   `DecodeError::MalformedSrv6ServiceTlv` and uses treat-as-withdraw in revised
   decoding; generic Prefix-SID length errors keep attribute-discard. Valid
-  opaque values and unknown/reserved fields remain unchanged. This adds no
-  SID interpretation, service eligibility, origination, or forwarding.
+  opaque values and unknown/reserved fields remain unchanged. These framing
+  checks are separate from RIB service eligibility and do not originate or
+  forward SRv6 services.
 
 - EVPN local MAC/IP activation now advertises above the effective sequence of
   a different imported remote MAC holding the same IPv4 or IPv6 address

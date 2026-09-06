@@ -231,13 +231,45 @@ framed generic Label-Index/SRGB length error cannot hide a later recognized
 Service error. Duplicate Prefix-SID attributes keep the existing first-attribute
 rule.
 
-Unknown types, reserved values, endpoint behaviors, SIDs, and transposition
-field values remain opaque. These checks do not establish service eligibility,
-origination, forwarding, or a typed operator API. Valid values retain their
-bytes through VPNv4/VPNv6 and EVPN receive/export. No-reachable-NLRI or
+The wire framing checks preserve unknown types, reserved values, endpoint
+behaviors, SIDs, and transposition fields. Selection applies the separate
+[service eligibility rules](#srv6-service-eligibility) below. Eligible values
+retain their bytes through VPNv4/VPNv6 and EVPN receive/export. No-reachable-NLRI or
 unparseable-NLRI cases retain the existing session-reset escalation; snapshot
 readers reject and fuse on the stronger error instead of admitting the entry
 without its Prefix-SID attribute.
+
+## SRv6 service eligibility
+
+[RFC 9252 §7](https://www.rfc-editor.org/rfc/rfc9252.html#section-7) separates
+malformed framing from semantically invalid SIDs. A route with an applicable
+Service TLV needs at least one valid SID Information entry in the first L3 or
+first L2 Service TLV, according to its service encoding. Invalid candidates
+stay in Adj-RIB-In with their raw attributes, but are excluded before best-path
+selection, Add-Path, ORR, and ECMP. An invalid-only replacement withdraws the
+selected advertisement without treating the received UPDATE as withdrawn.
+Unicast and EVPN explain report `srv6_sid_invalid`.
+
+The checks bound SID Structure component sums to 128 bits, require the
+transposition range to fit the applicable Function or Argument component and
+label field, require the transposed SID bits to be zero, and require zero
+offset when transposition length is zero. The sum may equal offset plus length
+([verified erratum 7817](https://www.rfc-editor.org/errata/eid7817)). Global
+IPv4/IPv6 unicast uses L3 service without transposition; VPNv4/VPNv6 allows up
+to 20 Function bits. EVPN uses the applicable 24-bit label field: EAD-per-ES
+uses the ESI Label extended community and Argument bits; EAD-per-EVI and
+MAC-only use L2 Function bits; MAC+IP can use L2 or L3 service, with L3
+transposition requiring its second label; IMET uses the ingress-replication
+PMSI label; IP Prefix routes use L3 Function bits. EVPN Type 4 and families
+outside these encodings keep their existing selection behavior.
+
+An unknown endpoint behavior with no arguments remains eligible. Nonzero
+Argument Length requires the understood argument-capable End.DT2M behavior;
+End.DT2M requires SID Structure, including the zero-SID EAD encoding specified
+by [RFC 9819 §3](https://www.rfc-editor.org/rfc/rfc9819.html#section-3).
+Reserved bits, unknown extensions, unused SID tail bits, and later duplicate
+Service TLVs remain preserved. These checks do not implement PE import,
+service origination, SID reconstruction, next-hop rewriting, or SRv6 forwarding.
 
 ## PMSI tunnel-type matrix
 

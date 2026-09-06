@@ -166,11 +166,12 @@ impl RibManager {
                 );
                 // Multi-path: collect the per-target candidate set (every
                 // Adj-RIB-In entry for the identity, any received path ID,
-                // that survives split horizon and RFC 4456 reflection),
+                // that survives SRv6 eligibility, split horizon and RFC 4456 reflection),
                 // rank it, and stage the top N with path IDs 1..=N.
                 let mut candidates: Vec<&VpnRibRoute> = ribs
                     .values()
                     .flat_map(|rib| rib.iter_vpn_for_nlri(key))
+                    .filter(|route| crate::srv6::vpn_eligible(route))
                     .filter(|candidate| {
                         split_horizon_peer != Some(candidate.peer)
                             && !should_suppress_ibgp_inner(
@@ -327,7 +328,7 @@ impl RibManager {
 
             // Single-best. An RFC 9107 ORR peer with a resolved vantage
             // does NOT take the Loc-RIB best: the per-target candidate
-            // set (every Adj-RIB-In entry for the key that survives split
+            // set (every eligible Adj-RIB-In entry for the key that survives split
             // horizon and RFC 4456 reflection — the unicast
             // `orr_candidates` filter adapted to `VpnRibRoute`) is ranked
             // with the vantage's interior cost to each candidate's
@@ -336,6 +337,7 @@ impl RibManager {
                 let winner = ribs
                     .values()
                     .flat_map(|rib| rib.iter_vpn_for_nlri(key))
+                    .filter(|route| crate::srv6::vpn_eligible(route))
                     .filter(|candidate| {
                         split_horizon_peer != Some(candidate.peer)
                             && !should_suppress_ibgp_inner(
@@ -360,7 +362,7 @@ impl RibManager {
                         "no_orr_candidate",
                         crate::update::ExportGateVerdict::Stop,
                         || {
-                            "no candidate for this identity survives split-horizon / \
+                            "no candidate for this identity survives SRv6 eligibility / split-horizon / \
                              reflection filtering for this ORR peer"
                                 .to_string()
                         },

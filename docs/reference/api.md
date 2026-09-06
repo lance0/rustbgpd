@@ -1456,6 +1456,17 @@ unchanged. Unknown `peer_address` → `NOT_FOUND`. Import explain is available v
 `PolicyService.ExplainImportPolicy` (ADR-0073), including structured
 statement/term traces for matched policies.
 
+SRv6 semantic ineligibility is distinct from an import-policy rejection.
+`ExplainBestPath` retains these candidates with `vs_best_reason =
+"srv6_sid_invalid"`, `multipath = "none"`, and `advertised_path_id = 0`.
+If no eligible candidate remains, the RPC succeeds with an absent `best_route`
+and empty `best_reason`; the CLI prints the retained candidates. A prefix with
+no retained candidates still returns `NOT_FOUND`. `only_path` means one
+eligible candidate, even if other retained candidates are ineligible. EVPN
+received views and exact explain likewise retain the received route and its
+eligibility reason. `ListVpnRoutes` exposes selected VPN routes only; no
+received-VPN query is available.
+
 ### Longest-prefix lookup in the global Loc-RIB
 
 ```bash

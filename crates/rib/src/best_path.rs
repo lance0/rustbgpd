@@ -99,6 +99,8 @@ fn bgp_identity(route: &Route) -> (RouteOrigin, Option<Ipv4Addr>, Ipv4Addr) {
 /// The decisive step in a best-path comparison.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BestPathReason {
+    /// RFC 9252 section 7: no valid applicable `SRv6` service SID.
+    Srv6SidInvalid,
     /// Step 0: non-stale preferred over stale (RFC 4724 / RFC 9494).
     StalePreference,
     /// Step 0.5: RPKI validation preference (`Valid` > `NotFound` > `Invalid`).
@@ -147,6 +149,7 @@ impl BestPathReason {
     #[must_use]
     pub const fn code(self) -> &'static str {
         match self {
+            Self::Srv6SidInvalid => "srv6_sid_invalid",
             Self::StalePreference => "stale_preference",
             Self::RpkiPreference => "rpki_preference",
             Self::AspaPreference => "aspa_preference",
@@ -332,6 +335,7 @@ fn stale_tier_name(route: &Route) -> &'static str {
 #[must_use]
 pub fn best_path_reason_detail(reason: BestPathReason, a: &Route, b: &Route) -> String {
     match reason {
+        BestPathReason::Srv6SidInvalid => crate::srv6::INVALID_DETAIL.to_string(),
         BestPathReason::StalePreference => {
             format!(
                 "stale_tier {} vs {}",
@@ -624,6 +628,9 @@ fn cmp_chain(a: &Route, b: &Route, orr_costs: Option<(Option<u64>, Option<u64>)>
 /// disqualifies grouping (see `same_multipath_class`).
 #[must_use]
 pub fn multipath_equal(best: &Route, other: &Route, relax: bool) -> bool {
+    if !crate::srv6::unicast_eligible(best) || !crate::srv6::unicast_eligible(other) {
+        return false;
+    }
     // `relax` is ADR-0066 multipath-relax (FRR's `bgp bestpath as-path
     // multipath-relax`): group by AS_PATH *length* rather than an exact AS_PATH
     // match, so equal-length paths through different ASes co-install as ECMP.

@@ -64,7 +64,8 @@ pub fn path_marking_reason_code(reason: BestPathReason) -> Option<u16> {
             Some(bmp_tlv::REASON_ROUTER_ID)
         }
         BestPathReason::LowerPeerAddress => Some(bmp_tlv::REASON_PEER_ADDRESS),
-        BestPathReason::StalePreference
+        BestPathReason::Srv6SidInvalid
+        | BestPathReason::StalePreference
         | BestPathReason::RpkiPreference
         | BestPathReason::AspaPreference
         | BestPathReason::ShorterClusterList
