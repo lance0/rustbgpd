@@ -60,7 +60,7 @@ impl Drop for TerminalGuard {
     }
 }
 
-pub async fn run(connection: Connection, interval: u64) -> Result<(), CliError> {
+pub async fn run(connection: Connection, interval: u64, no_color: bool) -> Result<(), CliError> {
     let (signal_tx, mut signal_rx) = mpsc::channel(1);
     spawn_signal_forwarder(signal_tx)?;
     enable_raw_mode()?;
@@ -71,7 +71,11 @@ pub async fn run(connection: Connection, interval: u64) -> Result<(), CliError> 
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
-    let theme = Theme::default();
+    let theme = if no_color {
+        Theme::monochrome()
+    } else {
+        Theme::default()
+    };
     let mut app = App::new();
 
     let (data_tx, mut data_rx) = mpsc::channel(4);

@@ -335,10 +335,10 @@ families = ["ipv4_unicast", "ipv6_unicast"]
 
 ```bash
 # Customer buys 203.0.113.0/24 — announce it
-rbgp rib add 203.0.113.0/24 --nexthop 192.0.2.1
+rbgp rib add 203.0.113.0/24 --next-hop 192.0.2.1
 
 # Customer buys an IPv6 block
-rbgp rib add 2001:db8:1000::/36 --nexthop 2001:db8::1
+rbgp rib add 2001:db8:1000::/36 --next-hop 2001:db8::1
 
 # Customer cancels — withdraw
 rbgp rib delete 203.0.113.0/24

@@ -1309,6 +1309,29 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     #[test]
+    fn monochrome_retains_text_bold_and_selection() {
+        let mut app = App::new();
+        app.on_data(snapshot(vec![safety_neighbor()], Freshness::Fresh));
+        app.peer_table_state.select(Some(0));
+        let mut terminal = Terminal::new(TestBackend::new(160, 24)).unwrap();
+        terminal
+            .draw(|frame| draw(frame, &mut app, &Theme::monochrome()))
+            .unwrap();
+        let cells = &terminal.backend().buffer().content;
+        assert!(cells.iter().all(|cell| {
+            cell.fg == ratatui::style::Color::Reset && cell.bg == ratatui::style::Color::Reset
+        }));
+        assert!(
+            cells
+                .iter()
+                .any(|cell| { cell.symbol() == "N" && cell.modifier.contains(Modifier::BOLD) })
+        );
+        let text = cells.iter().map(|cell| cell.symbol()).collect::<String>();
+        assert!(text.contains("Neighbor"));
+        assert!(text.contains("> "), "selected row remains identifiable");
+    }
+
+    #[test]
     fn test_format_number() {
         assert_eq!(format_number(0), "0");
         assert_eq!(format_number(1), "1");

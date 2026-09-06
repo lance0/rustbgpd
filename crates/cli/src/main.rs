@@ -80,6 +80,8 @@ pub enum RouteAspaState {
 //   `visible_alias = "peer"` so both spellings work; commands that
 //   take the address as a positional (`rbgp neighbor <ADDRESS>`)
 //   keep it positional.
+// - Next-hop address: use `--next-hop`; `rib add` keeps `--nexthop` as
+//   a visible compatibility alias.
 // - ASNs: a remote AS flag is `--remote-asn` (visible alias
 //   `--asn`); an unqualified "ASN" in output means the local AS.
 // - TOML and policy-program file arguments are positional (`policy check
@@ -94,9 +96,9 @@ pub enum RouteAspaState {
 // - Empty results: JSON list output prints `[]` (or `{}` for
 //   objects), never nothing; human list output prints a one-line
 //   empty state ("No ... recorded/configured").
-// - Exit codes: 0 success / 1 error everywhere, with detailed
-//   contracts only where documented. Any new detailed contract must
-//   be added to EXIT_CODES_HELP and the subcommand's after_help.
+// - Exit codes: parser/usage failures are 2; after parsing, 0 success /
+//   1 error by default, with detailed contracts only where documented. Any
+//   new detailed contract must be added to EXIT_CODES_HELP and after_help.
 // - Help text: list entries (`about`) are one terse line; details go
 //   in `long_about` (the doc-comment paragraph after a blank line).
 // ===============================================================
@@ -105,8 +107,9 @@ pub enum RouteAspaState {
 /// and in the EXTRA section of `rbgp man`.
 const EXIT_CODES_HELP: &str = "Exit codes:\n  \
     0  success\n  \
-    1  error (argument, connection, daemon, or runtime failure)\n\n\
-    Detailed contracts (also in each subcommand's --help):\n  \
+    1  error (argument validation, connection, daemon, or runtime failure)\n  \
+    2  parser or usage error\n\n\
+    Detailed contracts after parsing (also in each subcommand's --help):\n  \
     diff advertised      0 no differences / 1 differences / 2 non-comparable input or error\n  \
     diff snapshot ...    0 snapshot emitted / 2 refused or malformed input\n  \
     config diff, plan    0 no changes / 1 error / 2 changes present\n  \
@@ -173,6 +176,7 @@ enum Command {
     #[command(visible_alias = "summary")]
     Neighbor {
         /// Neighbor address (omit to list all)
+        #[arg(value_parser = commands::neighbor::parse_peer_address)]
         address: Option<String>,
 
         #[command(subcommand)]
@@ -1449,7 +1453,7 @@ enum RibAction {
         /// Prefix (e.g., 10.0.0.0/24)
         prefix: String,
         /// Next hop address
-        #[arg(long)]
+        #[arg(long = "next-hop", visible_alias = "nexthop", value_name = "NEXT_HOP")]
         nexthop: String,
         /// Origin (0=igp, 1=egp, 2=incomplete)
         #[arg(long)]
@@ -1810,10 +1814,10 @@ struct EvpnExplainArgs {
     #[arg(long, value_parser = commands::evpn::parse_rd)]
     rd: String,
     /// Look up this accepted source; absence does not explain import rejection.
-    #[arg(long, value_parser = commands::evpn::parse_explain_peer)]
+    #[arg(long, value_parser = commands::neighbor::parse_peer_address)]
     received_from: Option<String>,
     /// Evaluate current export gates and committed local state for this peer.
-    #[arg(long, value_parser = commands::evpn::parse_explain_peer)]
+    #[arg(long, value_parser = commands::neighbor::parse_peer_address)]
     advertised_to: Option<String>,
 }
 
@@ -2444,10 +2448,10 @@ fn parse_community_str(s: &str) -> Result<u32, String> {
 #[tokio::main]
 async fn main() {
     let binary_name = invoked_binary_name();
-    let cli = parse_cli(binary_name);
+    let mut cli = parse_cli(binary_name);
 
-    let no_color = cli.no_color || std::env::var_os("NO_COLOR").is_some();
-    if no_color || cli.json {
+    cli.no_color |= std::env::var_os("NO_COLOR").is_some();
+    if cli.no_color || cli.json {
         owo_colors::set_override(false);
     }
 
@@ -4028,7 +4032,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             if json {
                 eprintln!("warning: --json has no effect on `top`; it is an interactive TUI");
             }
-            tui::run(connection, interval).await
+            tui::run(connection, interval, cli.no_color).await
         }
         Command::Policy { action } => match action {
             PolicyAction::Check { .. } | PolicyAction::Fmt { .. } => {
@@ -4898,6 +4902,30 @@ printf '%s\n' "${COMPREPLY[@]}"
                 compare: None,
             }
         ));
+    }
+
+    #[test]
+    fn test_parse_neighbor_address_preserves_scoped_inputs() {
+        for address in [
+            "192.0.2.1",
+            "2001:DB8::1",
+            "fe80::1",
+            "fe80::1%eth0",
+            "fe80::1%7",
+        ] {
+            for noun in ["neighbor", "summary"] {
+                let cli = Cli::try_parse_from(["rbgp", noun, address, "reset"]).unwrap();
+                let Command::Neighbor {
+                    address: Some(parsed),
+                    action: Some(NeighborAction::Reset { .. }),
+                    ..
+                } = cli.command
+                else {
+                    panic!("expected neighbor reset");
+                };
+                assert_eq!(parsed, address);
+            }
+        }
     }
 
     #[test]
@@ -6916,21 +6944,78 @@ printf '%s\n' "${COMPREPLY[@]}"
 
     #[test]
     fn test_parse_rib_add() {
-        let cli =
-            Cli::try_parse_from(["rbgp", "rib", "add", "10.0.0.0/24", "--nexthop", "10.0.0.1"])
+        for flag in ["--next-hop", "--nexthop"] {
+            for (expected_prefix, expected_next_hop) in [
+                ("10.0.0.0/24", "10.0.0.1"),
+                ("2001:db8::/32", "2001:db8::1"),
+            ] {
+                let cli = Cli::try_parse_from([
+                    "rbgp",
+                    "rib",
+                    "add",
+                    expected_prefix,
+                    flag,
+                    expected_next_hop,
+                ])
                 .unwrap();
-        if let Command::Rib {
-            action: Some(RibAction::Add {
-                prefix, nexthop, ..
-            }),
-            ..
-        } = cli.command
-        {
-            assert_eq!(prefix, "10.0.0.0/24");
-            assert_eq!(nexthop, "10.0.0.1");
-        } else {
-            panic!("expected Rib Add command");
+                if let Command::Rib {
+                    action:
+                        Some(RibAction::Add {
+                            prefix, nexthop, ..
+                        }),
+                    ..
+                } = cli.command
+                {
+                    assert_eq!(prefix, expected_prefix);
+                    assert_eq!(nexthop, expected_next_hop);
+                } else {
+                    panic!("expected Rib Add command");
+                }
+            }
         }
+    }
+
+    #[test]
+    fn rib_add_next_hop_alias_rejects_duplicate_values() {
+        let error = Cli::try_parse_from([
+            "rbgp",
+            "rib",
+            "add",
+            "10.0.0.0/24",
+            "--next-hop",
+            "10.0.0.1",
+            "--nexthop",
+            "10.0.0.2",
+        ])
+        .err()
+        .expect("both spellings name the same argument");
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn rib_add_next_hop_help_and_man_use_canonical_spelling() {
+        let mut command = cli_command(BINARY_NAME);
+        let help = command
+            .find_subcommand_mut("rib")
+            .unwrap()
+            .find_subcommand_mut("add")
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("--next-hop <NEXT_HOP>"), "{help}");
+        assert!(help.contains("[alias: --nexthop]"), "{help}");
+
+        let mut output = Vec::new();
+        generate_man(BINARY_NAME, &mut output).unwrap();
+        let man = String::from_utf8(output).unwrap();
+        let add_section = man
+            .split(".SH \"RBGP RIB ADD\"")
+            .nth(1)
+            .unwrap()
+            .split(".SH \"RBGP ")
+            .next()
+            .unwrap();
+        assert!(add_section.contains("next\\-hop"), "{add_section}");
     }
 
     #[test]
@@ -7603,6 +7688,14 @@ printf '%s\n' "${COMPREPLY[@]}"
         let mut command = cli_command(BINARY_NAME);
         let help = command.render_long_help().to_string();
         assert!(help.contains("Exit codes:"), "help was: {help}");
+        assert!(
+            help.contains("1  error (argument validation,"),
+            "help was: {help}"
+        );
+        assert!(
+            help.contains("2  parser or usage error"),
+            "help was: {help}"
+        );
         assert!(help.contains("config diff, plan"), "help was: {help}");
         assert!(help.contains("policy fmt"), "help was: {help}");
     }
@@ -7616,6 +7709,11 @@ printf '%s\n' "${COMPREPLY[@]}"
             man.contains("Exit codes:"),
             "man page must carry the exit-code list"
         );
+        assert!(
+            man.contains("1  error (argument validation,"),
+            "man was: {man}"
+        );
+        assert!(man.contains("2  parser or usage error"), "man was: {man}");
     }
 
     /// LAN-329 noun standardization: `--neighbor` is canonical,

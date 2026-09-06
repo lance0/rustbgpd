@@ -5,6 +5,12 @@ surface with human-readable and JSON output modes.
 
 Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 
+Parser and usage errors, such as an unknown flag or malformed neighbor address,
+exit with code `2` before connecting. Argument validation after parsing, such as
+an out-of-range `top --interval` or an empty policy-chain list, keeps exit code
+`1`, as do connection and execution failures. Commands with detailed exit codes
+document them in `--help`; those codes apply after parsing.
+
 ## Commands
 
 ### Runtime Snapshot
@@ -105,6 +111,10 @@ rbgp rpki validate 192.0.2.0/24 64496       # complete verdict + bounded coverin
 rbgp rpki caches                             # configured caches + accepted RTR epochs
 ```
 
+Neighbor addresses accept IPv4, IPv6, and scoped link-local IPv6 such as
+`fe80::1%eth0` or `fe80::1%7`. Omit the address to list neighbors; `list` is
+not a neighbor subcommand.
+
 `rpki validate` requires the daemon's first authoritative VRP snapshot. Before
 that snapshot it fails with `FAILED_PRECONDITION`; an authoritative empty
 snapshot returns `not_found`. JSON reports the canonical prefix, origin ASN,
@@ -152,7 +162,7 @@ rbgp rib bgpls    # BGP-LS routes learned from peers (RFC 9552)
 rbgp rib vpn      # VPNv4/VPNv6 routes (RFC 4364/4659, SAFI 128)
 rbgp rib labeled  # labeled-unicast routes (RFC 8277, SAFI 4)
 rbgp rib rtc      # RT-Constrain membership NLRI (RFC 4684, SAFI 132)
-rbgp rib add <prefix> --nexthop <ip> [--origin <0|1|2>] [--local-pref <n>] [--med <n>] [--as-path "<asn> <asn>..."] [--communities <c1,c2,...>] [--large-communities <c1,c2,...>] [--path-id <n>]
+rbgp rib add <prefix> --next-hop <ip> [--origin <0|1|2>] [--local-pref <n>] [--med <n>] [--as-path "<asn> <asn>..."] [--communities <c1,c2,...>] [--large-communities <c1,c2,...>] [--path-id <n>]
 rbgp rib delete <prefix> [--path-id <n>]
 rbgp diff advertised   # compare live Adj-RIB-Out against an incumbent NDJSON snapshot (read-only; own 0/1/2 exit contract)
 rbgp diff snapshot from-mrt <file> --view adj-rib-out-capture --peer <addr> --peer-asn <asn>   # offline: produce an rbgp-ribsnap/1 snapshot from an incumbent MRT dump (see docs/how-to/ribdiff.md; from-bmp for BMP captures)
@@ -178,6 +188,8 @@ rbgp fib-table list
 rbgp fib-table set edge --table-id 1000 --metric 200 --families ipv4_unicast,ipv6_unicast
 ```
 
+`rib add --nexthop` remains a compatibility alias for `--next-hop`.
+
 Complete human `rib`, `rib received`, and `rib advertised` unicast listings
 use `--pager auto` by default: a pager starts only when stdout is a terminal,
 the terminal height is known, and the complete rendered table plus any
@@ -187,7 +199,9 @@ listings; JSON and all other commands are rejected before connecting.
 
 The pager command is the first non-empty value of `RBGP_PAGER`, then `PAGER`,
 split on ASCII whitespace without a shell. With neither set, auto mode uses
-`less -FRSX` and always mode uses `less -RSX`. If auto mode cannot find the
+`less -FRX` and always mode uses `less -RX`, allowing long lines to wrap.
+Custom pager arguments are unchanged; set `RBGP_PAGER='less -FRSX'` to opt
+back into horizontal scrolling. If auto mode cannot find the
 pager executable, it writes the same rendered bytes directly; other pager
 startup failures and unsuccessful exits are errors.
 
@@ -254,6 +268,18 @@ N of the exact matching total. JSON uses
 This is the bounded inspection path for a live full table. Without `--limit`,
 the CLI still follows every page and fails closed if the table changes; it
 never labels a torn multi-page walk complete.
+
+Unicast JSON route rows expose `aggregator` as `{"asn":65551,"router_id":"192.0.2.9"}`
+when AGGREGATOR is present, and `atomic_aggregate: true` only when
+ATOMIC_AGGREGATE is present. Best-route and candidate rows in best-path
+explanations use the same projection. Rows remain separate for each Add-Path
+path identifier, even when their prefixes match.
+
+The projection combines API `prefix` and `prefix_length` into a CIDR `prefix`.
+JSON `med` comes from optional API `med_attr`: absent is `null`, and explicit
+zero is `0`; the obsolete scalar API `med` is not authoritative. `local_pref`
+is the effective value, while optional `local_pref_attr` records attribute
+presence. This is an API route view, not a complete copy of wire attributes.
 
 In JSON route rows, `validation_state` is the route's recorded RPKI
 origin-validation verdict, not an indicator that `[rpki]` is enabled.

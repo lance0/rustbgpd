@@ -984,6 +984,12 @@ fn hex_lower(bytes: &[u8]) -> String {
 
 struct JsonRouteRef<'a>(&'a Route);
 
+#[derive(Serialize)]
+struct JsonRouteAggregator<'a> {
+    asn: u32,
+    router_id: &'a str,
+}
+
 impl Serialize for JsonRouteRef<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -1007,6 +1013,12 @@ impl Serialize for JsonRouteRef<'_> {
             len += 1;
         }
         if route.local_pref_attr.is_some() {
+            len += 1;
+        }
+        if route.aggregator.is_some() {
+            len += 1;
+        }
+        if route.atomic_aggregate {
             len += 1;
         }
 
@@ -1043,6 +1055,18 @@ impl Serialize for JsonRouteRef<'_> {
         }
         if route.llgr_stale {
             map.serialize_entry("llgr_stale", &route.llgr_stale)?;
+        }
+        if let Some(aggregator) = &route.aggregator {
+            map.serialize_entry(
+                "aggregator",
+                &JsonRouteAggregator {
+                    asn: aggregator.asn,
+                    router_id: &aggregator.router_id,
+                },
+            )?;
+        }
+        if route.atomic_aggregate {
+            map.serialize_entry("atomic_aggregate", &route.atomic_aggregate)?;
         }
         map.end()
     }
@@ -2478,6 +2502,8 @@ mod tests {
     }
 
     fn route_for_json(path_id: u32, validation_state: &str) -> Route {
+        // Keep this generated message exhaustive: adding an API field must prompt
+        // a projection decision and an update to route_json_covers_proto_fields.
         Route {
             prefix: "203.0.113.0".to_string(),
             prefix_length: 24,
@@ -2496,7 +2522,11 @@ mod tests {
             validation_state: validation_state.to_string(),
             aspa_state: "valid".to_string(),
             received_at_epoch_seconds: 1_750_000_000,
-            ..Default::default()
+            local_pref_attr: None,
+            stale: false,
+            llgr_stale: false,
+            aggregator: None,
+            atomic_aggregate: false,
         }
     }
 
@@ -3538,6 +3568,89 @@ mod tests {
         assert_eq!(sampling.len(), 2);
         assert_eq!(sampling[0].table_name, "edge");
         assert_eq!(sampling[1].table_name, "core");
+    }
+
+    #[test]
+    fn route_json_covers_proto_fields() {
+        let mut route = route_for_json(7, "valid");
+        route.local_pref_attr = Some(200);
+        // The legacy scalar is deliberately not authoritative.
+        route.med = 999;
+        route.stale = true;
+        route.llgr_stale = true;
+        // This nested generated message must also remain exhaustive.
+        route.aggregator = Some(crate::proto::RouteAggregator {
+            asn: 65551,
+            router_id: "192.0.2.9".to_string(),
+        });
+        route.atomic_aggregate = true;
+        let expected = serde_json::json!({
+            "prefix": "203.0.113.0/24",
+            "next_hop": "198.51.100.1",
+            "as_path": [64512, 64496],
+            "local_pref": 200,
+            "local_pref_attr": 200,
+            "med": 50,
+            "origin": "igp",
+            "best": true,
+            "peer_address": "192.0.2.1",
+            "communities": ["NO_EXPORT", "64512:100"],
+            "extended_communities": [0x0002_fc00_0000_0064_u64, 0x4004_c000_0201_0032_u64],
+            "large_communities": ["64512:1:100"],
+            "path_id": 7,
+            "validation_state": "valid",
+            "aspa_state": "valid",
+            "received_at_epoch_seconds": 1_750_000_000,
+            "stale": true,
+            "llgr_stale": true,
+            "aggregator": {"asn": 65551, "router_id": "192.0.2.9"},
+            "atomic_aggregate": true,
+        });
+        assert_eq!(
+            serde_json::to_value(JsonRouteRef(&route)).unwrap(),
+            expected
+        );
+
+        // Two paths for the same prefix stay separate, including their own
+        // attribute presence. An aggregate need not carry ATOMIC_AGGREGATE.
+        let mut second = route.clone();
+        second.path_id = 8;
+        second.best = false;
+        second.atomic_aggregate = false;
+        let routes = [route.clone(), second];
+        let value = serde_json::to_value(JsonRoutes(&routes)).unwrap();
+        assert_eq!(value.as_array().unwrap().len(), 2);
+        assert_eq!(value[0], expected);
+        assert_eq!(value[1]["prefix"], expected["prefix"]);
+        assert_eq!(value[1]["path_id"], 8);
+        assert_eq!(value[1]["aggregator"], expected["aggregator"]);
+        assert!(value[1].get("atomic_aggregate").is_none());
+
+        let resp = ExplainBestPathResponse {
+            best_route: Some(route.clone()),
+            candidates: vec![crate::proto::BestPathCandidate {
+                route: Some(route),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let value = serde_json::to_value(explain_best_path_to_json(&resp)).unwrap();
+        assert_eq!(value["best_route"], expected);
+        assert_eq!(value["candidates"][0]["route"], expected);
+    }
+
+    #[test]
+    fn route_json_omits_absent_aggregate_attributes() {
+        let mut route = route_for_json(0, "");
+        let value = serde_json::to_value(JsonRouteRef(&route)).unwrap();
+        assert!(value.get("aggregator").is_none());
+        assert!(value.get("atomic_aggregate").is_none());
+
+        // The two attributes have independent presence semantics.
+        route.atomic_aggregate = true;
+        let value = serde_json::to_value(JsonRouteRef(&route)).unwrap();
+        assert!(value.get("aggregator").is_none());
+        assert_eq!(value["atomic_aggregate"], true);
     }
 
     #[test]

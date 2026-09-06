@@ -35,6 +35,23 @@ impl Default for Theme {
 }
 
 impl Theme {
+    pub fn monochrome() -> Self {
+        Self {
+            border: Color::Reset,
+            header_fg: Color::Reset,
+            text: Color::Reset,
+            text_dim: Color::Reset,
+            highlight: Color::Reset,
+            state_established: Color::Reset,
+            state_connecting: Color::Reset,
+            state_down: Color::Reset,
+            event_added: Color::Reset,
+            event_withdrawn: Color::Reset,
+            error: Color::Reset,
+            accent: Color::Reset,
+        }
+    }
+
     pub fn state_color(&self, state: i32) -> Color {
         match state {
             6 => self.state_established,

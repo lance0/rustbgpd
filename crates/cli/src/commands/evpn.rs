@@ -258,15 +258,6 @@ pub(crate) fn parse_esi(value: &str) -> Result<String, String> {
     parse_hex_octets(value, 10)
 }
 
-pub(crate) fn parse_explain_peer(value: &str) -> Result<String, String> {
-    bare_ip_rpc_address(value)
-        .parse::<std::net::IpAddr>()
-        .map_err(|_| {
-            "expected a peer IP address (optionally scoped link-local IPv6)".to_string()
-        })?;
-    Ok(value.to_string())
-}
-
 pub(crate) fn parse_exact_prefix(value: &str) -> Result<String, String> {
     if !value.contains('/') {
         return Err("exact EVPN prefix must include a CIDR length".into());
@@ -2389,7 +2380,8 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
     }
     #[test]
     fn exact_selector_parser_boundaries() {
-        use super::{parse_esi, parse_exact_prefix, parse_explain_peer, parse_mac, parse_rd};
+        use super::{parse_esi, parse_exact_prefix, parse_mac, parse_rd};
+        use crate::commands::neighbor::parse_peer_address;
         for value in [
             "0.0.0.0/0",
             "192.0.2.1/32",
@@ -2421,9 +2413,9 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
         assert!(parse_esi("00:11:22:33:44:55:66:77:88:9z").is_err());
         assert_eq!(parse_rd("65000:100").unwrap(), "65000:100");
         assert!(parse_rd("65536:65536").is_err());
-        assert!(parse_explain_peer("fe80::1%eth0").is_ok());
+        assert!(parse_peer_address("fe80::1%eth0").is_ok());
         for value in ["fe80::1%", "fe80::1%eth0%eth1", "192.0.2.1%eth0", "invalid"] {
-            assert!(parse_explain_peer(value).is_err(), "{value}");
+            assert!(parse_peer_address(value).is_err(), "{value}");
         }
     }
 }
