@@ -18,6 +18,16 @@ Diagnostics, and Reference. `rbgp man` uses the same groups in its command
 index. Existing command paths and aliases are unchanged; use
 `rbgp <command> --help` for each command's flags and subcommands.
 
+`rbgp --help`, `rbgp neighbor --help`, and `rbgp rib --help` include examples
+for common inspection tasks. The same examples appear in `rbgp man`.
+
+Named configuration objects use `list` and `get` for inspection, `set` for
+full-definition creation or replacement, and `delete` for removal. `add`
+creates a resource or injects a route; it does not promise replacement of an
+existing definition. Existing bare commands such as `rbgp neighbor` and
+`rbgp rib` keep their inspection defaults. EVPN mutation names such as
+`add-mac-ip` retain their existing syntax.
+
 ### Runtime Snapshot
 
 ```bash
