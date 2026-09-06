@@ -23,7 +23,10 @@ def cap(code, value=b""):
     return bytes([code, len(value)]) + value
 
 
-def maximum_caps(next_hops=bytes.fromhex("000100010002000100800002")):
+NEXT_HOP_TUPLES = bytes.fromhex("000100010002000100800002")
+
+
+def maximum_caps(next_hops=NEXT_HOP_TUPLES):
     families = [afi.to_bytes(2, "big") + bytes([safi]) for afi, safi in FAMILIES]
     add_path = [family for family in families if family[2] in (1, 128, 4)]
     return b"".join([
