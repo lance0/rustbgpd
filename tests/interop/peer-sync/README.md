@@ -21,6 +21,11 @@ from a MAC-only peer route, and children synchronized from a MAC/IP peer route.
 A peer-only MAC shares another local host's IPs but must never acquire local
 ownership. Wrong-RT and nonzero-tag controls must retain local sequence zero.
 Removing one local host and replaying its remote route must not resurrect it.
+The peer also withdraws its routes while keeping BGP established. A successful
+received-route positive control and empty complete page establish that boundary.
+After two originator polls, new IPv4/IPv6 children must inherit the retained MAC
+sequence 9; removing the last IP from an IP-first host must create MAC-only at
+sequence 9. Wire history proves that host had no earlier MAC-only advertisement.
 
 All four duplicate-MAC/IP counter families are summed across every label set.
 A missing lazy counter is recorded explicitly as `present: false`, `series: 0`,

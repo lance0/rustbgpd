@@ -9,7 +9,7 @@ import struct
 import time
 from pathlib import Path
 
-from evpn_peer_sync_oracle import FAMILY, Oracle, Route, announcement
+from evpn_peer_sync_oracle import FAMILY, Oracle, Route, announcement, withdrawal
 from m94_as4_oracle import BgpReader, parse_open, send_message, write_receipt
 
 DUT = "10.99.0.1"
@@ -27,6 +27,18 @@ SOURCES = [Route(SOURCE_RD, MACS["a"]), Route(SOURCE_RD, MACS["b"]),
            # Peer-only D shares B's IPs: it must not become a local IP owner.
            *(Route(SOURCE_RD, MACS["d"], ip) for ip in IPS["b"]),
            Route(SOURCE_RD, MACS["f"], tag=1)]
+
+
+def command_updates(sequence: int | None) -> list[bytes]:
+    """The fixed proof supports two announcement values and a complete withdrawal."""
+    wrong_rt = [Route(SOURCE_RD, MACS["e"])]
+    if sequence is None:
+        return [withdrawal(SOURCES + wrong_rt)]
+    if sequence not in (3, 9):
+        raise ValueError("unsupported proof sequence")
+    return [announcement(routes, sequence, next_hop=SOURCE, route_target=rt)
+            for routes, rt in ((SOURCES, bytes.fromhex("0002fde800000064")),
+                               (wrong_rt, bytes.fromhex("0002fde8000000c8")))]
 
 
 def open_body() -> bytes:
@@ -98,13 +110,7 @@ def serve(directory: Path, run_id: str) -> None:
                             if command["id"] != receipt["ack"] + 1:
                                 raise ValueError("nonsequential command")
                             receipt["checkpoint"] = len(oracle.events)
-                            if command["sequence"] not in (3, 9):
-                                raise ValueError("unsupported proof sequence")
-                            for routes, rt in ((SOURCES, bytes.fromhex("0002fde800000064")),
-                                               ([Route(SOURCE_RD, MACS["e"])],
-                                                bytes.fromhex("0002fde8000000c8"))):
-                                update = announcement(routes, command["sequence"], next_hop=SOURCE,
-                                                      route_target=rt)
+                            for update in command_updates(command["sequence"]):
                                 send_message(connection, 2, update)
                                 receipt["sent"].append({"command": command["id"], "body": update.hex()})
                             receipt["ack"] = command["id"]

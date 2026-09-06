@@ -13,7 +13,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from evpn_peer_sync_oracle import Oracle, Route, duplicate_totals
-from evpn_peer_sync_peer import CONTROLS, DUT, DUT_RD, IPS, LOCAL, MACS
+from evpn_peer_sync_peer import CONTROLS, DUT, DUT_RD, IPS, LOCAL, MACS, SOURCE, SOURCE_RD
 from m94_as4_oracle import write_receipt
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -31,6 +31,23 @@ def receipt_oracle(receipt: dict, run_id: str, command: int) -> Oracle:
         route = Route(**{name: row[name] for name in asdict(LOCAL[0])})
         oracle.live[route.key()] = row
     return oracle
+
+
+def received_routes(raw: str) -> list[dict]:
+    """Validate the complete bounded CLI page before testing route absence."""
+    page = json.loads(raw)
+    if (not isinstance(page, dict) or page.get("view") != "received"
+            or page.get("neighbor") != SOURCE or page.get("next_page_token") != ""
+            or not isinstance(page.get("routes"), list)
+            or type(page.get("total_count")) is not int
+            or page["total_count"] != len(page["routes"])):
+        raise ValueError("malformed, incomplete, or wrong-source received-route page")
+    for row in page["routes"]:
+        if (not isinstance(row, dict) or row.get("rd") != SOURCE_RD
+                or row.get("peer") != SOURCE or row.get("route_type") != 2
+                or not isinstance(row.get("mac"), str) or not isinstance(row.get("ip"), str)):
+            raise ValueError("unexpected row in received-route page")
+    return page["routes"]
 
 
 def main() -> None:
@@ -87,10 +104,22 @@ def main() -> None:
                     raise TimeoutError(f"wire condition failed: {error}") from error
                 time.sleep(0.2)
 
-    def send(command: int, sequence: int) -> tuple[dict, Oracle]:
+    def send(command: int, sequence: int | None) -> tuple[dict, Oracle]:
         write_receipt(str(output / "command.json"),
                       {"run_id": run_id, "id": command, "sequence": sequence})
         return wait(command, lambda _receipt, _oracle: None)
+
+    def source_view(name: str, present: bool) -> None:
+        raw = run([*compose, "exec", "-T", "dut", "rbgp", "-j", "evpn", "received",
+                   SOURCE, "--route-type", "2", "--rd", SOURCE_RD])
+        (output / f"{name}.json").write_text(raw)
+        rows = received_routes(raw)
+        if present:
+            keys = {(row["mac"], row["ip"]) for row in rows}
+            if not {(MACS["a"], ""), (MACS["b"], "")} <= keys:
+                raise AssertionError("positive control is missing the eligible source MAC routes")
+        elif rows:
+            raise AssertionError("accepted peer routes have not been withdrawn")
 
     def metrics(name: str) -> None:
         # HTTP status/read errors propagate from the existing Python-equipped peer.
@@ -136,17 +165,24 @@ def main() -> None:
         metrics("baseline")
         first, _ = send(1, 3)
         time.sleep(12)  # At least two default originator polls before local observation.
+        # B must enter through pending IP bindings, without a prior MAC-only
+        # advertisement. Netlink delivers these earlier neighbor events before
+        # the later FDB learn; the wire history below verifies that shape.
+        for address in IPS["b"]:
+            dut("ip", "neigh", "replace", address, "lladdr", MACS["b"], "dev", "br100", "nud", "reachable")
         for name in "abcef":
             dut("bridge", "fdb", "replace", MACS[name], "dev", "ce100a", "master", "static")
-        for name, addresses in IPS.items():
-            for address in addresses:
-                dut("ip", "neigh", "replace", address, "lladdr", MACS[name], "dev", "br100", "nud", "reachable")
+        for address in IPS["c"]:
+            dut("ip", "neigh", "replace", address, "lladdr", MACS["c"], "dev", "br100", "nud", "reachable")
 
         def adopted(receipt, oracle, sequence, checkpoint):
             oracle.expect_transition(LOCAL, sequence, next_hop=DUT, after=checkpoint)
             oracle.expect(CONTROLS, 0, next_hop=DUT)
             oracle.expect_owned_keys(LOCAL + CONTROLS, rd=DUT_RD)
             oracle.expect_never_owned(rd=DUT_RD, mac=MACS["d"])
+            if any(row["rd"] == DUT_RD and row["mac"] == MACS["b"] and not row["ip"]
+                   and row["action"] == "announce" for row in oracle.events):
+                raise AssertionError("B was not learned through the IP-first path")
 
         wait(1, lambda receipt, oracle: adopted(receipt, oracle, 3, first["checkpoint"]))
         time.sleep(12)
@@ -170,16 +206,55 @@ def main() -> None:
             oracle.expect_quiet(after=sent["checkpoint"], rd=DUT_RD)
             oracle.expect_never_owned(rd=DUT_RD, mac=MACS["d"])
             metrics(f"replay-{sequence}")
+        # Remove eligible peers without resetting the BGP session. Prove the
+        # input existed and is now absent before allowing two originator polls.
+        source_view("peer-before-withdrawal", True)
+        withdrawn, _ = send(5, None)
+        wait(5, lambda _receipt, _oracle: source_view("peer-withdrawn", False))
+        time.sleep(12)
+        _, oracle = state(5)
+        source_view("peer-withdrawn-settled", False)
+        oracle.expect(LOCAL, 9, next_hop=DUT)
+        oracle.expect(CONTROLS, 0, next_hop=DUT)
+        oracle.expect_quiet(after=withdrawn["checkpoint"], rd=DUT_RD)
+        metrics("peer-withdrawn")
+
+        # A only has a MAC route. New children must inherit its retained sequence 9 even
+        # though the current peer view is empty.
+        children = [Route(DUT_RD, MACS["a"], ip) for ip in ("192.0.2.11", "2001:db8::11")]
+        checkpoint = len(oracle.events)
+        for route in children:
+            dut("ip", "neigh", "replace", route.ip, "lladdr", route.mac, "dev", "br100", "nud", "reachable")
+        _, oracle = wait(5, lambda _receipt, oracle: oracle.expect_transition(
+            children, 9, next_hop=DUT, after=checkpoint))
+        retained_local = [route for route in LOCAL if route.mac != MACS["a"]] + children
+        oracle.expect_owned_keys(retained_local + CONTROLS, rd=DUT_RD)
+        metrics("retained-new-children")
+
+        # B began IP-first. Removing its last child must create MAC-only at 9,
+        # rather than initializing a new MAC-only tracker at zero.
+        checkpoint = len(oracle.events)
+        for address in IPS["b"]:
+            dut("ip", "neigh", "del", address, "dev", "br100")
+        mac_only = Route(DUT_RD, MACS["b"])
+        _, oracle = wait(5, lambda _receipt, oracle: oracle.expect_transition(
+            [mac_only], 9, next_hop=DUT, after=checkpoint))
+        retained_local = [route for route in retained_local if route.mac != MACS["b"]] + [mac_only]
+        oracle.expect(retained_local, 9, next_hop=DUT)
+        oracle.expect(CONTROLS, 0, next_hop=DUT)
+        oracle.expect_owned_keys(retained_local + CONTROLS, rd=DUT_RD)
+        oracle.expect_never_owned(rd=DUT_RD, mac=MACS["d"])
+        metrics("retained-mac-only")
         # Remove C's actual local ownership, then replay the remote owner.
         for address in IPS["c"]:
             dut("ip", "neigh", "del", address, "dev", "br100")
         dut("bridge", "fdb", "del", MACS["c"], "dev", "ce100a", "master")
-        wait(4, lambda _receipt, oracle: oracle.expect_absent(rd=DUT_RD, mac=MACS["c"]))
-        sent, _ = send(5, 9)
+        wait(5, lambda _receipt, oracle: oracle.expect_absent(rd=DUT_RD, mac=MACS["c"]))
+        sent, _ = send(6, 9)
         time.sleep(12)
-        final, oracle = state(5)
+        final, oracle = state(6)
         oracle.expect_absent(rd=DUT_RD, mac=MACS["c"])
-        oracle.expect_owned_keys([route for route in LOCAL if route.mac != MACS["c"]] + CONTROLS,
+        oracle.expect_owned_keys([route for route in retained_local if route.mac != MACS["c"]] + CONTROLS,
                                  rd=DUT_RD)
         oracle.expect_never_owned(rd=DUT_RD, mac=MACS["d"])
         oracle.expect_quiet(after=sent["checkpoint"], rd=DUT_RD)

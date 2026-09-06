@@ -18,7 +18,7 @@ from evpn_peer_sync_oracle import (
 )
 
 
-from evpn_peer_sync_peer import open_body, validate_open
+from evpn_peer_sync_peer import command_updates, open_body, validate_open
 
 
 SOURCE = "10.0.0.2"
@@ -271,6 +271,74 @@ class PeerSyncOracleTests(unittest.TestCase):
             else:
                 with self.assertRaises(AssertionError):
                     oracle.expect([route], 3, next_hop=DUT)
+
+    def test_withdraw_command_removes_every_announced_source_key(self):
+        oracle = Oracle()
+        for body in command_updates(9):
+            oracle.apply(body)
+        announced = set(oracle.live)
+        self.assertEqual(len(announced), 7)
+        updates = command_updates(None)
+        self.assertEqual(len(updates), 1)
+        # Independent UPDATE prefix: no classic withdrawals, a single optional
+        # MP_UNREACH attribute, AFI25/SAFI70, with no announcement attribute.
+        # Seven NLRIs total 269 bytes; AFI/SAFI makes a 272-byte extended-
+        # length MP_UNREACH value and 276-byte attributes block.
+        self.assertEqual(updates[0][:11].hex(), "00000114900f0110001946")
+        before = len(oracle.events)
+        oracle.apply(updates[0])
+        self.assertEqual(oracle.live, {})
+        self.assertEqual({(row["rd"], row["tag"], row["mac"], row["ip"])
+                          for row in oracle.events[before:]}, announced)
+        self.assertTrue(all(row["action"] == "withdraw" for row in oracle.events[before:]))
+        for bad in (0, 4, "withdraw", False):
+            with self.subTest(sequence=bad), self.assertRaises(ValueError):
+                command_updates(bad)
+
+    def test_received_page_requires_complete_success_shape_before_absence(self):
+        from evpn_peer_sync_peer import SOURCE, SOURCE_RD
+        module = runpy.run_path(str(Path(__file__).with_name("run-evpn-peer-sync-proof.py")))
+        parse = module["received_routes"]
+        empty = {"view": "received", "neighbor": SOURCE, "routes": [],
+                 "next_page_token": "", "total_count": 0}
+        import json
+        self.assertEqual(parse(json.dumps(empty)), [])
+        route = {"rd": SOURCE_RD, "peer": SOURCE, "route_type": 2, "mac": MAC, "ip": ""}
+        positive = {**empty, "routes": [route], "total_count": 1}
+        self.assertEqual(parse(json.dumps(positive)), [route])
+        malformed = [[], None, {}, {**empty, "view": "advertised"},
+                     {**empty, "neighbor": DUT}, {**empty, "next_page_token": "more"},
+                     {**empty, "total_count": 1}, {**empty, "total_count": False},
+                     {**positive, "routes": [{}]}, {**positive, "routes": [None]},
+                     {**positive, "routes": [{**route, "peer": DUT}]}]
+        for value in malformed:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                parse(json.dumps(value))
+        for raw in ("", "not JSON", json.dumps(empty) + json.dumps(empty)):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                parse(raw)
+
+    def test_cross_shape_transitions_require_fresh_nine_not_retained_other_key(self):
+        parent = Route("10.0.0.1:100", MAC)
+        children = [Route(parent.rd, MAC, ip) for ip, _ in VECTORS if ip]
+        for original, replacement in (([parent], children), (children, [parent])):
+            with self.subTest(replacement=replacement):
+                oracle = Oracle()
+                oracle.apply(announcement(original, 9, next_hop=DUT))
+                checkpoint = len(oracle.events)
+                with self.assertRaises(AssertionError):
+                    oracle.expect_transition(replacement, 9, next_hop=DUT, after=checkpoint)
+                oracle.apply(withdrawal(original))
+                oracle.apply(announcement(replacement, 0, next_hop=DUT))
+                with self.assertRaises(AssertionError):
+                    oracle.expect_transition(replacement, 9, next_hop=DUT, after=checkpoint)
+                oracle.apply(announcement(replacement, 9, next_hop=DUT))
+                # A later correction cannot hide a transient zero export.
+                with self.assertRaises(AssertionError):
+                    oracle.expect_transition(replacement, 9, next_hop=DUT, after=checkpoint)
+                oracle.expect_transition(replacement, 9, next_hop=DUT,
+                                         after=len(oracle.events) - len(replacement))
+                oracle.expect_owned_keys(replacement, rd=parent.rd)
 
     def test_encoder_rejects_out_of_range_and_oversized_inputs(self):
         for route in (Route("10.0.0.2:100", "00"), Route("10.0.0.2:100", MAC, vni=0),
