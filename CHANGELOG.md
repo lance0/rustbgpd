@@ -495,6 +495,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   duplicate-IP movement. Only matching import RTs, VNI, tag zero, and a
   nonlocal next hop qualify; peer routes alone do not create local ownership.
 
+- Reject explicitly incompatible EVPN encapsulations before local VXLAN
+  forwarding, mobility, and gateway or alias/backup resolution. Absent
+  encapsulation uses the configured VXLAN fallback; advertised sets containing
+  VXLAN remain eligible. Global retention and reflection are unchanged.
+
 - Preserve fresh routes and live peer state when GR or LLGR retention expires
   while a re-established peer's initial outbound registration is deferred.
   Stale routes still expire, and the pending registration completes normally.
@@ -778,6 +783,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Existing higher local sequences never decrease. Withdrawn, quarantined, or
   drained routes stay suppressed until normal local replay permits origination.
   A host learned only from the ES peer is still not originated locally.
+
+- **EVPN VXLAN import:** Type 2, Type 5, and EAD-per-EVI advertisements with
+  explicit encapsulation sets lacking VXLAN no longer contribute local state.
+  Check remote Encapsulation communities before upgrading; absent communities
+  continue to use the configured VXLAN profile. See
+  [encapsulation compatibility](docs/how-to/evpn-vtep-setup.md#vxlan-encapsulation-compatibility).
 
 - **EVPN RPCs apply the configuration MAC and ESI grammar:** `AddEvpnRoute`,
   `DeleteEvpnRoute`, and `ClearDuplicateMacQuarantine` now parse `mac` and
