@@ -130,7 +130,7 @@ fn matched_threshold_preserves_imports_parameters_and_apply_only_denominator() {
 }
 
 #[test]
-fn matched_threshold_keeps_error_precedence_and_validates_percentages() {
+fn coverage_thresholds_keep_error_precedence() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("policy.rpol");
     for (source, expected) in [
@@ -143,17 +143,66 @@ fn matched_threshold_keeps_error_precedence_and_validates_percentages() {
         ("policy p {}", 0),
     ] {
         std::fs::write(&path, source).unwrap();
-        let output = run(&path, &["--coverage-matched-min", "100", "-j"]);
-        assert_eq!(output.status.code(), Some(expected), "{source}: {output:?}");
+        for thresholds in [
+            &["--coverage-min", "100"][..],
+            &["--coverage-matched-min", "100"][..],
+            &["--coverage-min", "100", "--coverage-matched-min", "100"][..],
+        ] {
+            let mut args = thresholds.to_vec();
+            args.push("-j");
+            let output = run(&path, &args);
+            assert_eq!(output.status.code(), Some(expected), "{source}: {output:?}");
+        }
     }
-    for threshold in ["-1", "100.1", "NaN", "inf", "-inf", "wrong"] {
-        let option = format!("--coverage-matched-min={threshold}");
-        let output = run(&path, &[&option]);
-        assert_eq!(output.status.code(), Some(2), "{threshold}: {output:?}");
-        assert!(output.stdout.is_empty(), "{output:?}");
-        assert!(
-            String::from_utf8_lossy(&output.stderr)
-                .contains("coverage percentage must be a number from 0 through 100")
-        );
+}
+
+#[test]
+fn coverage_thresholds_reject_invalid_percentages_before_loading_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let valid = directory.path().join("policy.rpol");
+    std::fs::write(&valid, TWO_OF_THREE).unwrap();
+    let missing = directory.path().join("missing.rpol");
+    for flag in ["--coverage-min", "--coverage-matched-min"] {
+        for threshold in ["NaN", "-1", "100.1", "inf", "-inf", "1e309", "wrong"] {
+            let option = format!("{flag}={threshold}");
+            for path in [&valid, &missing] {
+                let output = run(path, &[&option, "-j"]);
+                assert_eq!(output.status.code(), Some(2), "{option}: {output:?}");
+                assert!(output.stdout.is_empty(), "{output:?}");
+                assert!(
+                    String::from_utf8_lossy(&output.stderr)
+                        .contains("coverage percentage must be a number from 0 through 100")
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn evaluated_threshold_preserves_valid_boundaries_and_number_formats() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("policy.rpol");
+    std::fs::write(
+        &path,
+        "policy p { term all { accept } term dead { reject } }
+         test accepts { route { med 0 } expect p == accept }",
+    )
+    .unwrap();
+    for (threshold, expected) in [
+        ("0", 0),
+        ("-0", 0),
+        ("50", 0),
+        ("5e1", 0),
+        ("50.1", 3),
+        ("100", 3),
+    ] {
+        let option = format!("--coverage-min={threshold}");
+        let output = run(&path, &[&option, "-j"]);
+        assert_eq!(output.status.code(), Some(expected), "{option}: {output:?}");
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["coverage"]["terms_total"], 2);
+        assert_eq!(json["coverage"]["terms_exercised"], 1);
+        assert_eq!(json["coverage"]["percent"], 50.0);
+        assert_eq!(json["ok"], true);
     }
 }

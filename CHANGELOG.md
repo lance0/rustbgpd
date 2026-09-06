@@ -297,7 +297,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `rbgp policy check --coverage-matched-min PCT` independently gates the
   percentage of source terms matched by in-language tests. Coverage reports
   include matched totals; existing evaluated-term percentages and
-  `--coverage-min` semantics remain unchanged. Matched coverage does not
+  valid `--coverage-min` semantics remain unchanged. Matched coverage does not
   guarantee branch coverage or detect every widened guard.
 
 ### Changed
@@ -501,6 +501,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   preserves local sticky state, and does not count as duplicate-MAC or
   duplicate-IP movement. Only matching import RTs, VNI, tag zero, and a
   nonlocal next hop qualify; peer routes alone do not create local ownership.
+
+- Gate 8b MAC-churn receipts aggregate all duplicate-MAC series and retain
+  raw scrapes, process epochs, and actual daemon logs. An opt-in proof mode
+  requires ten active minutes after readiness, sustained churn, recovery,
+  and owned-resource cleanup without treating missing scrapes as zero.
+
+- `rbgp policy check --coverage-min` rejects nonfinite and out-of-range
+  percentages instead of allowing `NaN` or negative values to bypass the
+  evaluated-coverage gate. Valid thresholds retain their existing behavior.
 
 - Reject explicitly incompatible EVPN encapsulations before local VXLAN
   forwarding, mobility, and gateway or alias/backup resolution. Absent
@@ -749,6 +758,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   requires a matching Route Target and zero Ethernet Tag, including Type 5
   ESI overlay resolution. The backup-window gauge counts each VNI separately.
 
+- Bound configured policy chains to 1,000,000 structural IR nodes across
+  `.rpol` and TOML members, including legacy inline policies and implicit
+  GSHUT/BLACKHOLE tails. Reject oversized candidates before installation;
+  `compile_rpol` enforces the same cap when composing zero-parameter policies.
+
 ### Documentation
 
 - Publish a descriptive raw bridge event-skew receipt across six pinned Jammy
@@ -800,6 +814,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Existing higher local sequences never decrease. Withdrawn, quarantined, or
   drained routes stay suppressed until normal local replay permits origination.
   A host learned only from the ES peer is still not originated locally.
+
+- **Coverage thresholds require finite percentages from 0 through 100:**
+  invalid `--coverage-min` values now exit 2 before loading the policy file.
+  Previously, `NaN` and negative values could pass, while values above 100
+  and positive infinity forced a coverage failure (exit 3). Valid percentages,
+  including fractional and scientific notation, retain their existing results
+  and diagnostic/test-failure precedence.
 
 - **EVPN VXLAN import:** Type 2, Type 5, and EAD-per-EVI advertisements with
   explicit encapsulation sets lacking VXLAN no longer contribute local state.
@@ -993,6 +1014,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   retention, reflection, and export are unchanged. The
   `evpn_single_active_backup_active` gauge may increase when multiple VNIs
   share an ESI and tag because each forwarding group is now counted.
+
+- **Policy chain size:** chains exceeding 1,000,000 structural IR nodes now
+  fail startup/reload validation or return `INVALID_ARGUMENT` on policy API
+  mutations. Reduce repeated members or expanded policy structure before
+  upgrading. Policy/term/action overhead and nested guards/value expressions
+  count; shared set contents and unused definitions do not. Per-policy cost,
+  runtime loop fuel, and trusted infallible Rust compilation APIs are unchanged.
+  A reload's new definitions combined with its old chain references must also
+  fit: shorten chains in a separate reload before loading larger definitions
+  when that intermediate combination would exceed the cap.
+  See [policy bounds](docs/reference/rpol-language.md#loops--for).
 
 ## [0.68.0] — 2026-08-30
 
