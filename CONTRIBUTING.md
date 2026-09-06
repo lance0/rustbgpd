@@ -273,6 +273,15 @@ the same offline boundary; a weekly lane checks external destinations.
 - Keep lines under 100 characters when possible
 - `#![deny(unsafe_code)]` on every crate — this is enforced, not advisory
 
+For CLI commands, use verbs by meaning: `list` inspects a collection, `get`
+inspects one named object, `set` creates or replaces a full definition, `add`
+creates a resource or injects a route, `delete` removes it, and `explain`
+diagnoses a decision. Do not make a create-only `add` an alias for a replacing
+`set`. Preserve existing bare-noun inspection shortcuts and EVPN mutation
+names such as `add-mac-ip`; their existing paths remain compatible. Keep
+help examples close to the command definition and parse-test the displayed
+invocations. The detailed flag conventions live in `crates/cli/src/main.rs`.
+
 ### Postmortem artifacts
 
 Any postmortem doc that cites raw data — soak runs, scale tests,

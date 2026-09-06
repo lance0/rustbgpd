@@ -101,6 +101,11 @@ pub enum RouteAspaState {
 //   new detailed contract must be added to EXIT_CODES_HELP and after_help.
 // - Help text: list entries (`about`) are one terse line; details go
 //   in `long_about` (the doc-comment paragraph after a blank line).
+// - Verbs describe behavior: list/get inspect collections/one object; set
+//   creates or replaces a full definition; add creates a resource or injects
+//   a route; delete removes it; explain diagnoses a decision. Do not alias
+//   create-only add to replacing set. Keep existing bare-noun inspection
+//   shortcuts and EVPN route-type mutation names compatible.
 // ===============================================================
 
 /// The one authoritative exit-code list: rendered in `rbgp --help`
@@ -119,13 +124,43 @@ const EXIT_CODES_HELP: &str = "Exit codes:\n  \
     policy test          0 ran / 1 compile diagnostics\n  \
     policy fmt           0 clean or formatted / 1 needs formatting (--check) or error";
 
+const ROOT_EXAMPLES: &str = "Examples:
+  # Check the daemon and inspect peers
+  rbgp health
+  rbgp neighbor
+  # Inspect a bounded route page and explain one prefix
+  rbgp rib --limit 20
+  rbgp rib --prefix 203.0.113.0/24 --explain
+  # Preview a configuration change without applying it
+  rbgp config plan config.toml";
+
+const NEIGHBOR_EXAMPLES: &str = "Examples:
+  # List peers, with optional summary columns
+  rbgp neighbor
+  rbgp neighbor --wide
+  # Inspect one peer, including a scoped IPv6 peer
+  rbgp neighbor 192.0.2.1
+  rbgp neighbor fe80::1%eth0
+  # Compare two peers' live update-group membership
+  rbgp neighbor 192.0.2.1 --compare 192.0.2.2";
+
+const RIB_EXAMPLES: &str = "Examples:
+  # Inspect bounded best, received, and advertised views
+  rbgp rib --limit 20
+  rbgp rib received 192.0.2.1 --limit 20
+  rbgp rib advertised 192.0.2.1 --limit 20
+  # Explain best-path selection and export to one peer
+  rbgp rib --prefix 203.0.113.0/24 --explain
+  rbgp rib --prefix 203.0.113.0/24 advertised 192.0.2.1 --explain";
+
 #[derive(Parser)]
 #[command(
     name = "rbgp",
     bin_name = "rbgp",
     about = "CLI for rustbgpd",
     version,
-    after_long_help = EXIT_CODES_HELP
+    after_help = ROOT_EXAMPLES,
+    after_long_help = format!("{ROOT_EXAMPLES}\n\n{EXIT_CODES_HELP}")
 )]
 struct Cli {
     /// gRPC server address or unix:///path/to/socket
@@ -177,7 +212,7 @@ enum Command {
     },
 
     /// Manage BGP neighbors
-    #[command(visible_alias = "summary")]
+    #[command(visible_alias = "summary", after_help = NEIGHBOR_EXAMPLES)]
     Neighbor {
         /// Neighbor address (omit to list all)
         #[arg(value_parser = commands::neighbor::parse_peer_address)]
@@ -217,6 +252,7 @@ enum Command {
     },
 
     /// Query and manage the RIB
+    #[command(after_help = RIB_EXAMPLES)]
     Rib {
         #[command(subcommand)]
         action: Option<RibAction>,
@@ -2898,6 +2934,7 @@ fn render_subcommand_sections(
         man.render_synopsis_section(output)?;
         man.render_description_section(output)?;
         man.render_options_section(output)?;
+        man.render_extra_section(output)?;
         render_subcommand_sections(&sub, &path, global_args, output)?;
     }
     Ok(())
@@ -8111,6 +8148,57 @@ printf '%s\n' "${COMPREPLY[@]}"
         let mut cmd = cli_command(BINARY_NAME);
         cmd.build();
         assert_terse(&cmd, BINARY_NAME);
+    }
+
+    #[test]
+    fn help_examples_are_parseable_and_present_in_man() {
+        let mut output = Vec::new();
+        generate_man(BINARY_NAME, &mut output).unwrap();
+        let man = String::from_utf8(output).unwrap().replace("\\-", "-");
+        for path in ["", "neighbor", "rib"] {
+            for long in [false, true] {
+                let mut command = cli_command(BINARY_NAME);
+                let page = if path.is_empty() {
+                    &mut command
+                } else {
+                    command.find_subcommand_mut(path).unwrap()
+                };
+                let help = if long {
+                    page.render_long_help()
+                } else {
+                    page.render_help()
+                }
+                .to_string();
+                let examples: Vec<_> = help
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| line.starts_with("rbgp "))
+                    .collect();
+                assert_eq!(examples.len(), 5, "{path}: {help}");
+                let section = if path.is_empty() {
+                    man.split(".SH SUBCOMMANDS").next().unwrap()
+                } else {
+                    man.split(&format!(".SH \"RBGP {}\"", path.to_uppercase()))
+                        .nth(1)
+                        .unwrap()
+                        .split(".SH \"RBGP ")
+                        .next()
+                        .unwrap()
+                };
+                for example in examples {
+                    let cli = Cli::try_parse_from(example.split_whitespace()).unwrap();
+                    validate_local_command(&cli.command).unwrap();
+                    validate_rib_route_view_action(&cli.command).unwrap();
+                    validate_neighbor_compare_action(&cli.command).unwrap();
+                    assert!(
+                        section.contains(example),
+                        "{path}: {example} missing from man"
+                    );
+                }
+            }
+        }
+        assert!(man.contains("0  all checks green"));
+        assert!(man.contains("2  bundle written but one or more checks are red"));
     }
 
     #[test]

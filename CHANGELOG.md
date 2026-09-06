@@ -748,6 +748,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   from draft-ietf-sidrops-avoid-rpki-state-in-bgp and RFC 9736; the
   rs-config-render README corrects the RTT-community refusal rationale.
 
+- Root, neighbor, and RIB CLI help include practical inspection examples.
+  The man page includes subcommand help footers, including examples and
+  detailed exit codes. Contributor guidance defines verbs by operation
+  semantics without renaming existing commands.
+
 ### Upgrade notes
 
 - **EVPN RPCs apply the configuration MAC and ESI grammar:** `AddEvpnRoute`,
