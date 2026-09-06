@@ -15,15 +15,6 @@
 
 [advisories]
 ignore = [
-    # RUSTSEC-2026-0097 — rand 0.8.5 + 0.9.2 soundness warning with a
-    # custom logger using `rand::rng()`. Transitive via
-    # phf_generator → phf_macros → phf → termwiz → ratatui-termwiz
-    # (the `rbgp top` command). We do not install a custom rand
-    # logger anywhere in the workspace, so the unsoundness isn't
-    # reachable. Pending a ratatui-termwiz bump that pulls a fixed
-    # rand. Tracked in docs/project/roadmap.md under the "`cargo deny` for
-    # license / dependency / advisory audit" bullet.
-    "RUSTSEC-2026-0097",
     # RUSTSEC-2024-0436 — `paste` 1.0.15 unmaintained (the upstream
     # author archived the repo). Informational, no security
     # vulnerability. The netlink stack no longer carries it; the sole
