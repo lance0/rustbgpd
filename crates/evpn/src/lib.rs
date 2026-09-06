@@ -138,7 +138,7 @@ pub use duplicate_mac::{
 };
 pub use instance::{
     BridgeVlan, BridgeVlanError, EvpnInstance, EvpnInstanceId, EvpnInstanceIdError,
-    EvpnInstanceTable, EvpnInstanceTableError,
+    EvpnInstanceTable, EvpnInstanceTableError, vxlan_encapsulation_compatible,
 };
 pub use ip_vrf::{
     IpVrf, IpVrfError, IpVrfId, IpVrfIdError, IpVrfRouteDump, IpVrfTable, IpVrfTableError,
