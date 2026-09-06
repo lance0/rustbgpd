@@ -681,13 +681,94 @@ tail -F tests/soak/runs/gate8b-mac-churn-<UTC>/flips.log
 
 ## Analyze
 
-No dedicated analyzer yet — `tests/soak/analyze-gate8b-soak.py`
+By default, `tests/soak/analyze-gate8b-soak.py`
 covers the BUM-state gates that still apply (memory slope, peak
 RSS, DF transition monotonicity). MAC-churn-specific gates
 (`evpn_local_origination_errors_total == 0`, `extern_learn` count
 stable around the pool target on the receiver, ADR-0059 drift
 counters non-monotone but bounded) currently surface from manual
 CSV inspection.
+
+### Short shared-ESI MAC accounting proof
+
+Use `MAC_CHURN_PROOF=1` and the analyzer's `--mac-churn-proof` for a fresh
+MAC-only accounting/recovery receipt. This explicit mode requires at least
+600 seconds of successful churn **after** warmup and session readiness.
+It requires continuing add/delete/move activity, local originations and
+remote FDB entries on both PEs, a deliberate PE2 process restart, recovered
+terminal sessions, and successful owned-resource cleanup. It does not apply
+the historical memory-slope gates: ten minutes is not long-term memory proof.
+
+Before the shared-ESI run, perform a separate positive control with the same
+image, VNI and route targets but different nonzero ESIs on the two PEs.
+Add the same MAC to both CE ports, allowing the first announcement to reach
+the second PE before its local learn:
+
+```bash
+docker exec "$CONTROL_PE1" bridge fdb add 02:aa:ff:00:00:01 dev ce100a master static
+# Wait for its Type 2 route to be received by CONTROL_PE2.
+# The received route installs a remote MASTER row keyed by MAC/VLAN.
+# Remove that exact row before creating a genuinely local CE entry.
+docker exec "$CONTROL_PE2" bridge fdb show dev vxlan100
+docker exec "$CONTROL_PE2" bridge fdb del 02:aa:ff:00:00:01 dev vxlan100 master
+docker exec "$CONTROL_PE2" bridge fdb add 02:aa:ff:00:00:01 dev ce100a master static
+docker exec "$CONTROL_PE2" bridge fdb show dev ce100a
+```
+
+Require the second PE's exact MAC row to show `master br100` on `ce100a`
+without `extern_learn`; an existing remote row or an unsuccessful add is
+not a local-learn control. Retain the command exits, FDB snapshots, and
+successful raw scrapes showing a nonzero
+`evpn_duplicate_mac_moves_total` on the second PE. Destroy the control lab,
+verify its resources are gone, and deploy fresh shared-ESI daemons. A zero
+result without this separate instrumentation control is incomplete evidence.
+
+Use a receipt-local copy of `gate8b-soak.clab.yml`: give it a unique
+`gate8b-proof-*` lab name, set its `mgmt.network` to that same name with an
+unused management subnet, pin both nodes to the validated image ID, and
+resolve config/startup binds to absolute paths. Record the runtime source
+commit and image provenance; a harness checkout revision alone does not
+identify the image's source. Do not reuse another lab's containers or network.
+
+```bash
+sudo containerlab deploy -t "$RUN_TOPOLOGY"
+
+MAC_CHURN_PROOF=1 LAB_NAME="$LAB_NAME" \
+TOPOLOGY_OVERRIDE="$RUN_TOPOLOGY" RUN_DIR_OVERRIDE="$RUN_DIR" CLEANUP=1 \
+SOAK_HOURS=0.166667 WARMUP_SEC=30 SAMPLE_INTERVAL=10 \
+FLIP_INTERVAL_SEC=120 CHURN_INTERVAL_SEC=2 CHURN_BATCH_SIZE=16 \
+MAC_POOL_SIZE=256 MOBILITY_FRACTION=25 \
+bash tests/soak/run-gate8b-mac-churn-soak.sh
+
+python3 tests/soak/analyze-gate8b-soak.py "$RUN_DIR/samples.csv" \
+  --mac-churn-proof --output "$RUN_DIR/report.json"
+```
+
+The runner verifies container ownership before working, preserves actual
+daemon logs before each restart and at exit, and records each scrape's HTTP
+success separately from its raw body. The analyzer sums every label set in
+all four duplicate MAC/IP counter families. A successful scrape with no lazy
+series is reported as `present: false, series: 0, total: 0`; an unavailable or
+malformed running-daemon scrape fails. PE2's deliberately stopped periods
+remain explicitly unavailable. PE1's process epoch must remain constant;
+PE2's may change only after a recorded stopped period.
+
+Keep the topology, configs, raw scrapes, logs, CSV, active start/end times,
+cleanup status and report together. Independently check that the named
+containers/network are gone; if setup failed before the runner installed
+its cleanup trap, destroy only that receipt's topology with
+`sudo containerlab destroy -t "$RUN_TOPOLOGY" --name "$LAB_NAME" --cleanup`.
+Preserve failed receipts. Default analyzer behavior and dated receipts are
+unchanged. No neighbor events are driven here, so zero duplicate-IP counters
+are idle controls, not proof of IP-churn handling or MAC/IP sequence adoption.
+
+Offline checks:
+
+```bash
+bash -n tests/soak/run-gate8b-mac-churn-soak.sh
+python3 -m unittest -v tests/soak/test_gate8b_recovery_contract.py
+python3 -m unittest -v tests/soak/test_gate8b_mac_churn_contract.py
+```
 
 ## When to run
 
