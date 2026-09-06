@@ -71,6 +71,7 @@ use super::ast::{
     ActionStmt, CmpOp, CommunityArg, CommunityLit, Expr, FnDef, ForSource, NextHopArg, PolicyDef,
     PrependAsArg, Rhs, SourceFile, Stmt, U32Arg, ValueExprAst,
 };
+use super::diag::Diagnostic;
 use super::typeck::{Field, resolve_field, value_field_of};
 
 /// Static slot allocation for `let` bindings (LAN-302/LAN-303): one
@@ -450,16 +451,27 @@ impl<'a> Lowerer<'a> {
         &mut self,
         store: &mut SetStore,
         bindings: &DatasetBindings,
-    ) -> CompiledChain {
+    ) -> Result<CompiledChain, Diagnostic> {
         self.begin_chain(bindings);
+        let mut budget = crate::compile::ChainNodeBudget::default();
         let policies: Vec<CompiledPolicy> = self
             .file
             .policies
             .iter()
             .filter(|def| def.params.is_empty())
-            .map(|def| self.lower_policy(def, &[], store))
-            .collect();
-        CompiledChain {
+            .map(|def| {
+                let policy = self.lower_policy(def, &[], store);
+                budget.add_policy(&policy).map_err(|reason| {
+                    Diagnostic::new(
+                        def.name.span,
+                        reason,
+                        "this policy exceeds the remaining chain node budget",
+                    )
+                })?;
+                Ok(policy)
+            })
+            .collect::<Result<_, Diagnostic>>()?;
+        Ok(CompiledChain {
             policies,
             prefix_sets: self.prefix_sets.clone(),
             community_sets: self.community_sets.clone(),
@@ -470,7 +482,7 @@ impl<'a> Lowerer<'a> {
             asn_set_names: self.asn_set_names.clone(),
             datasets: std::mem::take(&mut self.datasets),
             local_asn: None,
-        }
+        })
     }
 
     /// Monomorphize one policy with concrete arguments into a chain of

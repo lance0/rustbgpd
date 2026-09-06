@@ -497,12 +497,15 @@ impl Eq for RpolPolicySet {}
 ///
 /// # Errors
 ///
-/// All lex, parse, and type errors found in one pass.
+/// All lex, parse, and type errors found in one pass, or a composed chain
+/// exceeding [`crate::compile::MAX_CHAIN_NODES`].
 pub fn compile_rpol(source: &str, store: &mut SetStore) -> Result<CompiledChain, Diagnostics> {
     let (file, diags) = front(source)?;
     debug_assert!(diags.is_empty());
     let mut lowerer = lower::Lowerer::new(&file, store);
-    let chain = lowerer.zero_param_chain(store, &DatasetBindings::new());
+    let chain = lowerer
+        .zero_param_chain(store, &DatasetBindings::new())
+        .map_err(|error| Diagnostics(vec![error]))?;
     // Inline compilation has no config to bind datasets from
     // (LAN-305): a zero-parameter policy probing one is an error here,
     // like `import` — file-based loading through the daemon config is

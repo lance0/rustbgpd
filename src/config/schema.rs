@@ -3262,6 +3262,10 @@ pub enum ConfigError {
     InvalidSlowPeerThreshold { value: u8 },
     #[error("invalid policy entry: {reason}")]
     InvalidPolicyEntry { reason: String },
+    /// Structural chain overflow is distinct from unresolved references so
+    /// registry reloads cannot mistake it for a tolerated orphaned dynamic peer.
+    #[error("invalid policy entry: {reason}")]
+    PolicyChainTooLarge { reason: String },
     #[error("invalid local_ipv6_nexthop {value:?}: {reason}")]
     InvalidLocalIpv6Nexthop { value: String, reason: String },
     #[error("invalid graceful restart config: {reason}")]

@@ -383,6 +383,67 @@ impl Config {
         self.effective_policy_for_neighbor_with_store(neighbor, group, external_pinned, &mut store)
     }
 
+    /// Check only structural chain budgets for a candidate snapshot. Registry
+    /// reloads can temporarily leave references unresolved before later chain
+    /// edits; those retain their existing validation/attachment behavior.
+    ///
+    /// # Errors
+    /// Returns only [`ConfigError::PolicyChainTooLarge`]. General config
+    /// validation remains responsible for all other errors.
+    pub(crate) fn validate_policy_chain_nodes(&self) -> Result<(), ConfigError> {
+        let check = |error| match error {
+            Some(error @ ConfigError::PolicyChainTooLarge { .. }) => Err(error),
+            _ => Ok(()),
+        };
+        let named = [
+            (&self.policy.import_chain, ChainDirection::Import),
+            (&self.policy.export_chain, ChainDirection::Export),
+        ]
+        .into_iter()
+        .chain(self.peer_groups.values().flat_map(|group| {
+            [
+                (&group.import_policy_chain, ChainDirection::Import),
+                (&group.export_policy_chain, ChainDirection::Export),
+            ]
+        }))
+        .chain(self.neighbors.iter().flat_map(|neighbor| {
+            [
+                (&neighbor.import_policy_chain, ChainDirection::Import),
+                (&neighbor.export_policy_chain, ChainDirection::Export),
+            ]
+        }));
+        for (names, direction) in named {
+            check(
+                resolve_chain(
+                    names,
+                    &self.policy.definitions,
+                    &self.policy.rpol,
+                    &self.policy.dataset_bindings,
+                    &self.policy.neighbor_sets,
+                    &self.peer_groups,
+                    direction,
+                    self.global.asn,
+                )
+                .err(),
+            )?;
+        }
+        for neighbor in &self.neighbors {
+            check(self.effective_policy_for_neighbor(neighbor, false).err())?;
+        }
+        for range in &self.dynamic_neighbors {
+            if let Some(addr) = super::dynamic_range_representative_addr(&range.prefix) {
+                let neighbor = Self::synthetic_dynamic_neighbor(
+                    addr,
+                    range.remote_asn,
+                    range.description.as_deref().unwrap_or(&range.peer_group),
+                    &range.peer_group,
+                );
+                check(self.effective_policy_for_neighbor(&neighbor, false).err())?;
+            }
+        }
+        Ok(())
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "one linear inheritance resolution (global, group, neighbor, implicit tails); splitting would hide the precedence order"
@@ -560,6 +621,20 @@ impl Config {
         } else {
             export
         };
+
+        for (direction, chain) in [("import", &import), ("export", &export)] {
+            let mut budget = rustbgpd_policy::compile::ChainNodeBudget::default();
+            for named in chain.iter().flat_map(|chain| &chain.policies) {
+                budget.add_named(named, store).map_err(|reason| {
+                    ConfigError::PolicyChainTooLarge {
+                        reason: format!(
+                            "neighbor {} effective {direction} chain: {reason}",
+                            neighbor.address
+                        ),
+                    }
+                })?;
+            }
+        }
 
         Ok(EffectivePolicyChains {
             import,

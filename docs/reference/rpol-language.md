@@ -742,9 +742,28 @@ route as it arrived — staged modifications are never read back
 `for c in route.communities` body cannot extend its own iteration
 (pinned by test).
 
-**Bounds and fuel (ADR-0103 Decision 3).** Every budget provable at
-compile time is enforced at compile time, in the same cost DP that
-bounds `apply`:
+**Bounds and fuel (ADR-0103 Decision 3).** Compilation, chain attachment,
+and evaluation enforce the following bounds:
+
+- **1,000,000 structural IR nodes per chain** (`MAX_CHAIN_NODES`). Named
+  chains and finalized effective import/export chains share this cap across
+  `.rpol`, TOML, legacy inline policies, and implicit GSHUT/BLACKHOLE tails.
+  Each policy, lowered term, action, guard, and value-expression node counts
+  once; loop bodies count once regardless of iterations. Repeated policy
+  references count each occurrence. Interned match-set contents and regex
+  data do not count, and unused policy definitions are not summed together.
+  `compile_rpol` applies the cap when composing all zero-parameter policies.
+  Oversized startup, reload, and API candidates are rejected before installation;
+  policy API requests return `INVALID_ARGUMENT`. Reload installs new policy
+  definitions before later chain-reference edits, so that intermediate
+  combination must also fit. If a change both grows definitions and shortens
+  their chains, shorten the chains and reload first, then load the larger
+  definitions. An oversized registry replacement preserves the installed
+  registry and chains. This is a structural size
+  bound, separate from per-policy evaluation cost and runtime loop fuel; it
+  is not a universal CPU-time bound. The infallible Rust `PolicyChain` and
+  `compile_chain` APIs retain their trusted, hand-built IR boundary; embedding
+  callers can check `compile::ChainNodeBudget` before accepting external input.
 
 - **4,096 iterations per loop** (`MAX_LOOP_ITERATIONS`). Set sources
   are checked at compile time. Route-attribute sources are checked at

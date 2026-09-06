@@ -362,21 +362,27 @@ pub(super) fn resolve_chain_with_store(
     if names.is_empty() {
         return Ok(None);
     }
+    let mut budget = rustbgpd_policy::compile::ChainNodeBudget::default();
     let policies = names
         .iter()
         .map(|name| {
-            if let Some(cfg) = definitions.get(name.as_str()) {
-                return parse_named_policy(name, cfg, neighbor_sets, peer_groups).map(|policy| {
-                    rustbgpd_policy::NamedPolicy {
-                        name: Some(name.clone()),
-                        policy,
-                        rpol: None,
-                    }
-                });
-            }
-            resolve_rpol_chain_ref(name, rpol, datasets, store, local_asn)
+            let member = if let Some(cfg) = definitions.get(name.as_str()) {
+                rustbgpd_policy::NamedPolicy {
+                    name: Some(name.clone()),
+                    policy: parse_named_policy(name, cfg, neighbor_sets, peer_groups)?,
+                    rpol: None,
+                }
+            } else {
+                resolve_rpol_chain_ref(name, rpol, datasets, store, local_asn)?
+            };
+            budget.add_named(&member, store).map_err(|reason| {
+                ConfigError::PolicyChainTooLarge {
+                    reason: format!("chain member {name:?}: {reason}"),
+                }
+            })?;
+            Ok(member)
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, ConfigError>>()?;
     // LAN-296 direction legality: `prepend as peer` on an export chain
     // would prepend the RECEIVING peer's own ASN — rejected by the
     // receiver as an own-AS loop (RFC 4271 §9.1.2) — so it is refused
