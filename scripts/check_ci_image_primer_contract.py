@@ -131,7 +131,8 @@ BIRD332_VERSION = "3.3.2"
 BIRD332_SHA256 = "21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c"
 BIRD332_ARCHIVE = f"bird-{BIRD332_VERSION}.tar.gz"
 BIRD332_ARTIFACT = f"bird332-v{BIRD332_VERSION}-source"
-BIRD332_CACHE_KEY = f"{BIRD332_ARTIFACT}-{BIRD332_SHA256}"
+BIRD332_CACHE_KEY = BIRD3_CACHE_KEY
+BIRD332_CACHE_DIR = "bird3-cache"
 FRR1070_IMAGE = (
     "quay.io/frrouting/frr@sha256:"
     "a0ed0e4f8727631c8303dd9a4e8199b47464a17a5253135a2c622286aeaec46b"
@@ -725,7 +726,7 @@ def check(root: Path) -> list[str]:
                     BIRD332_ARCHIVE,
                     BIRD332_ARTIFACT,
                     BIRD332_CACHE_KEY,
-                    "bird332-cache",
+                    BIRD332_CACHE_DIR,
                     "M101 BIRD 3.3.2 image blocked",
                 ),
             )
