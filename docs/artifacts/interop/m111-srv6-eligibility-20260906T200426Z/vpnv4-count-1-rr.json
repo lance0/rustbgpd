@@ -1,0 +1,44 @@
+[
+  {
+    "afi_safi": "l3vpn_ipv4_unicast",
+    "route_distinguisher": "65001:111",
+    "route_distinguisher_bytes": "0000fde90000006f",
+    "prefix": "198.51.111.0/24",
+    "labels": [
+      16
+    ],
+    "next_hop": "2001:db8:111:10::2",
+    "peer_address": "2001:db8:111:10::2",
+    "as_path": [],
+    "communities": [],
+    "extended_communities": [
+      "RT:65001:111"
+    ],
+    "prefix_sid": {
+      "flags": 192,
+      "raw_value": "0500220001001e0020010db801110001000000000000000000001300010006281810001040",
+      "services": [
+        {
+          "sids": [
+            {
+              "endpoint_behavior": 19,
+              "flags": 0,
+              "sid_value": "2001:db8:111:1::",
+              "structures": [
+                {
+                  "argument_length": 0,
+                  "function_length": 16,
+                  "locator_block_length": 40,
+                  "locator_node_length": 24,
+                  "transposition_length": 16,
+                  "transposition_offset": 64
+                }
+              ]
+            }
+          ],
+          "tlv_type": 5
+        }
+      ]
+    }
+  }
+]

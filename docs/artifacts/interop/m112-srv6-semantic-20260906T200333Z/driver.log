@@ -1,0 +1,13 @@
+config OK: /etc/rustbgpd/config.toml
+{"Topic":"Config","level":"info","msg":"Finished reading the config file","time":"2026-09-06T20:03:54Z"}
+cat: can't open '/tmp/m112-source.json': No such file or directory
+PASS: baseline
+PASS: malformed
+PASS: recovery
+PASS: semantic_invalid
+PASS: semantic_recovery
+PASS: withdraw
+PASS: cleanup
+PASS: semantic SID retention, exclusion and recovery
+PASS: MAC-only SRv6 L2 reflection, malformed replacement, recovery and withdrawals (typed required=1)
+[16:04:08 TEST] [cleanup] containerlab destroy -t <repo>/tests/interop/scripts/../m112-srv6-l2-reflection.clab.yml

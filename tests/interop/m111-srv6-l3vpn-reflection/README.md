@@ -66,7 +66,10 @@ the VPNv4 survivor snapshot. Its typed verifier compares raw Prefix-SID bytes,
 SID values, endpoint behavior, SID Structure, labels, route identity and next
 hop with `wire.json`, reconstructs each allocated SID from the typed view and
 label, and checks FRR's SID allocation. It then checks both withdrawn views.
-The typed-visibility receipt records the passing rerun. CI replays its wire
+The typed-visibility receipt records the passing rerun. A separate
+[semantic-eligibility rerun](../../../docs/artifacts/interop/m111-srv6-eligibility-20260906T200426Z/README.md)
+confirms these valid transposed services remain reflected and visible with
+semantic SID eligibility enabled. CI replays its wire
 and typed results without containers; the original dated receipt above
 remains evidence for its original wire scope.
 

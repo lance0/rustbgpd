@@ -32,6 +32,7 @@ def reflected(body):
 
 
 def capture(*, missing_malformed_withdraw=False, survivor_churn=False,
+            semantic_control=False, semantic_leak=False, missing_semantic_withdraw=False,
             withdrawal_label=bytes(3), withdrawal_esi=bytes(10),
             wrong_withdrawal_key=False, wrong_announcement_label=False):
     def withdraw(mac):
@@ -39,12 +40,18 @@ def capture(*, missing_malformed_withdraw=False, survivor_churn=False,
         nlri = source.nlri(mac)
         return body[:-len(nlri)] + nlri[:10] + withdrawal_esi + nlri[20:32] + withdrawal_label
 
-    inbound = [body for phase in oracle.PHASES for body in source.phase_updates(phase)]
+    phases = oracle.SEMANTIC_PHASES if semantic_control else oracle.PHASES
+    inbound = [body for phase in phases for body in source.phase_updates(phase)]
     outbound = [reflected(source.announcement(oracle.TARGET)),
                 reflected(source.announcement(oracle.SURVIVOR)),
                 withdraw(oracle.SURVIVOR if wrong_withdrawal_key else oracle.TARGET),
                 reflected(source.announcement(oracle.TARGET)),
                 withdraw(oracle.TARGET), withdraw(oracle.SURVIVOR)]
+    if semantic_control:
+        invalid_result = (reflected(source.announcement(oracle.TARGET, semantic_invalid=True))
+                          if semantic_leak else withdraw(oracle.TARGET))
+        outbound[4:4] = ([invalid_result] if not missing_semantic_withdraw else []) + [
+            reflected(source.announcement(oracle.TARGET))]
     if wrong_announcement_label:
         nlri = source.nlri(oracle.TARGET)
         outbound[0] = outbound[0].replace(nlri, nlri[:-3] + bytes(3))
@@ -93,6 +100,33 @@ def rr_snapshot(macs):
             for mac in macs]
 
 
+def semantic_received(phase):
+    rows = rr_snapshot([oracle.TARGET, oracle.SURVIVOR])
+    if phase == "semantic_invalid":
+        rows[0]["prefix_sid"]["raw_value"] = source.prefix_sid(semantic_invalid=True).hex()
+        rows[0]["prefix_sid"]["services"][0]["sids"][0]["structures"][0]["locator_block_length"] = 100
+    return {"view": "received", "neighbor": oracle.SOURCE, "routes": rows,
+            "total_count": 2, "next_page_token": ""}
+
+
+def semantic_explain(phase):
+    route = semantic_received(phase)["routes"][0]
+    invalid = phase == "semantic_invalid"
+    return {"key": {"rd": oracle.RD, "mac_ip": {
+                "ethernet_tag": 0, "mac": oracle.TARGET, "ip": ""}},
+            "received_from": oracle.SOURCE, "candidate_count": 1, "selection_deferred": False,
+            "received": route, "best": None if invalid else copy.deepcopy(route),
+            "selection_best": None if invalid else copy.deepcopy(route),
+            "selection_reason": {"code": "srv6_sid_invalid"} if invalid else None,
+            "export": {"peer_address": oracle.SINK, "outbound_dirty": False,
+                       "decision": "no_best_route" if invalid else "advertise",
+                       "already_advertised": not invalid,
+                       "staged": None if invalid else copy.deepcopy(route),
+                       "advertised": None if invalid else copy.deepcopy(route),
+                       "gates": [{"gate": "srv6_service", "code": "srv6_sid_invalid",
+                                  "verdict": "stop"}] if invalid else []}}
+
+
 class M112OracleTests(unittest.TestCase):
     def test_existing_artifact_directory_is_unchanged_on_rejection(self):
         root = Path(__file__).resolve().parents[3]
@@ -119,6 +153,96 @@ class M112OracleTests(unittest.TestCase):
             self.assertIn("File exists", result.stderr)
             self.assertEqual({path.name: path.read_text() for path in receipt.iterdir()},
                              {name: "retained prior receipt\n" for name in names})
+
+    def test_semantic_fixture_changes_only_locator_block_length(self):
+        valid, invalid = source.prefix_sid(), source.prefix_sid(semantic_invalid=True)
+        self.assertEqual(invalid.hex(),
+                         "0600220001001e0020010db801120001000100000000000000001700010006641810000000")
+        self.assertEqual([i for i, (a, b) in enumerate(zip(valid, invalid, strict=True)) if a != b], [31])
+        self.assertEqual(oracle.service(invalid, semantic_invalid=True)["structure"],
+                         [100, 24, 16, 0, 0, 0])
+        self.assertEqual(source.phase_updates("semantic_recovery"), source.phase_updates("recovery"))
+        with self.assertRaises(ValueError):
+            oracle.service(source.prefix_sid(malformed=True), semantic_invalid=True)
+
+    def test_semantic_wire_history_requires_explicit_mode(self):
+        result = oracle.analyze(capture(semantic_control=True), semantic_control=True)
+        self.assertEqual(result["schema"], "m112-semantic-wire/1")
+        self.assertEqual(result["source_actions"][oracle.TARGET],
+                         ["announce", "malformed", "announce", "semantic_invalid", "announce", "withdraw"])
+        with self.assertRaises(ValueError):
+            oracle.analyze(capture(semantic_control=True))
+        with self.assertRaises(ValueError):
+            oracle.analyze(capture(), semantic_control=True)
+
+    def test_semantic_missing_withdraw_leak_and_survivor_churn_fail(self):
+        for mutation in ("missing_semantic_withdraw", "semantic_leak", "survivor_churn"):
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                oracle.analyze(capture(semantic_control=True, **{mutation: True}), semantic_control=True)
+
+    def test_semantic_retention_selection_observer_and_recovery(self):
+        for phase in ("semantic_invalid", "semantic_recovery"):
+            oracle.received(semantic_received(phase), phase)
+            oracle.explain(semantic_explain(phase), phase)
+            oracle.rr(rr_snapshot(oracle.EXPECTED[phase]), phase, require_typed=True)
+            oracle.observer(observer_snapshot(oracle.EXPECTED[phase]), phase)
+        for check, snapshot in ((oracle.rr, rr_snapshot), (oracle.observer, observer_snapshot)):
+            with self.assertRaises(ValueError):
+                kwargs = {"require_typed": True} if check == oracle.rr else {}
+                check(snapshot([oracle.TARGET, oracle.SURVIVOR]), "semantic_invalid", **kwargs)
+
+    def test_semantic_received_requires_raw_typed_target_and_survivor(self):
+        for mutation in ("missing_target", "missing_survivor", "valid_raw", "valid_typed",
+                         "decode_error", "survivor_changed", "incomplete"):
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                page = semantic_received("semantic_invalid")
+                target = page["routes"][0]["prefix_sid"]
+                if mutation == "missing_target":
+                    page["routes"].pop(0)
+                elif mutation == "missing_survivor":
+                    page["routes"].pop()
+                elif mutation == "valid_raw":
+                    target["raw_value"] = source.prefix_sid().hex()
+                elif mutation == "valid_typed":
+                    target["services"][0]["sids"][0]["structures"][0]["locator_block_length"] = 40
+                elif mutation == "decode_error":
+                    target["decode_error"] = "invalid structure"
+                elif mutation == "survivor_changed":
+                    page["routes"][1]["next_hop"] = oracle.RR_SOURCE
+                else:
+                    page["next_page_token"] = "more"
+                oracle.received(page, "semantic_invalid")
+
+    def test_semantic_explain_missing_evidence_fails(self):
+        for key, value in (("candidate_count", 0), ("received", None),
+                           ("selection_reason", None), ("best", {}), ("selection_best", {}),
+                           ("selection_deferred", True)):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                row = semantic_explain("semantic_invalid")
+                row[key] = value
+                oracle.explain(row, "semantic_invalid")
+        for key, value in (("gates", []), ("advertised", {}), ("staged", {}),
+                           ("already_advertised", True), ("outbound_dirty", True)):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                row = semantic_explain("semantic_invalid")
+                row["export"][key] = value
+                oracle.explain(row, "semantic_invalid")
+        row = semantic_explain("semantic_invalid")
+        row["export"]["gates"][0]["verdict"] = "pass"
+        with self.assertRaises(ValueError):
+            oracle.explain(row, "semantic_invalid")
+
+    def test_semantic_recovery_requires_exact_valid_attributes(self):
+        for key in ("received", "best", "selection_best"):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                row = semantic_explain("semantic_recovery")
+                row[key] = semantic_received("semantic_invalid")["routes"][0]
+                oracle.explain(row, "semantic_recovery")
+        for key in ("staged", "advertised"):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                row = semantic_explain("semantic_recovery")
+                row["export"][key]["prefix_sid"]["raw_value"] = source.prefix_sid(semantic_invalid=True).hex()
+                oracle.explain(row, "semantic_recovery")
 
     def test_literal_rfc_fixture(self):
         self.assertEqual(source.prefix_sid().hex(),
