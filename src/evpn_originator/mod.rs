@@ -73,7 +73,8 @@ use std::time::{Duration, Instant};
 
 use crate::evpn_ack::PendingRibOps;
 use crate::evpn_originator::duplicate_mac::{handle_originator_command, recover_duplicate_macs};
-use crate::evpn_originator::lifecycle::apply_runtime_model;
+use crate::evpn_originator::lifecycle::{apply_runtime_model, replay_pending_local_macs};
+#[cfg(test)]
 use crate::evpn_originator::observation::handle_observation;
 use crate::evpn_originator::rib_polling::{
     handle_evpn_event_coalesced, recv_evpn_event, repoll_rib, subscribe_evpn_events,
@@ -550,6 +551,18 @@ struct OriginatorState {
     remote_mac_view: RemoteMacViewMap,
     /// Cached MAC+IP contender map.
     remote_mac_ip_view: RemoteMacIpViewMap,
+    /// Current admitted remote IP owners, carrying each MAC's effective sequence.
+    /// Refreshed with the contender snapshot, independently of duplicate diagnostics.
+    remote_ip_owners: BTreeMap<(EvpnInstanceId, IpAddr), BTreeMap<MacAddress, u32>>,
+    /// Floors computed by real local IP ownership activations. Retained across
+    /// withdrawal and suppression; a snapshot or replay cannot raise them.
+    local_ip_owner_sequences: BTreeMap<(EvpnInstanceId, MacAddress), u32>,
+    /// New local observations must not consume an absent or failed RIB snapshot.
+    remote_snapshot_ready: bool,
+    /// Runtime-model replay waits for a successful snapshot in the new scope.
+    pending_local_replays: LocalMacReplaySet,
+    /// Recreated VNI/ESI scopes initialize ownership floors once on that replay.
+    pending_ip_owner_scopes: BTreeSet<EvpnInstanceId>,
     /// Same-segment sequence floors, separate from mobility contenders.
     peer_sync_sequences: BTreeMap<(EvpnInstanceId, MacAddress), u32>,
     /// Locally owned MACs that participated in peer sync in this VNI/ESI scope.
@@ -599,6 +612,11 @@ impl OriginatorState {
             live_mac_ip: BTreeMap::new(),
             remote_mac_view: BTreeMap::new(),
             remote_mac_ip_view: BTreeMap::new(),
+            remote_ip_owners: BTreeMap::new(),
+            local_ip_owner_sequences: BTreeMap::new(),
+            remote_snapshot_ready: false,
+            pending_local_replays: BTreeMap::new(),
+            pending_ip_owner_scopes: BTreeSet::new(),
             peer_sync_sequences: BTreeMap::new(),
             peer_sync_participants: BTreeSet::new(),
             duplicate_mac_detector: DuplicateMacDetector::default(),
@@ -610,7 +628,40 @@ impl OriginatorState {
         }
     }
 
-    /// Fold exact peer-sequence adoption into an existing local action batch.
+    fn has_live_ip_binding(&self, vni: EvpnInstanceId, mac: MacAddress, ip: IpAddr) -> bool {
+        self.live_mac_ip
+            .get(&vni)
+            .and_then(|macs| macs.get(&mac))
+            .is_some_and(|ips| ips.contains(&ip))
+    }
+
+    /// Record a new local binding's cross-MAC ownership floor once. Call only
+    /// for a newly active binding or a recreated VNI/ESI scope, never for a
+    /// kernel refresh or recovery of an already live binding.
+    fn record_ip_owner_sequence(&mut self, vni: EvpnInstanceId, mac: MacAddress, ip: IpAddr) {
+        let Some(remote_sequence) = self.remote_ip_owners.get(&(vni, ip)).and_then(|owners| {
+            owners
+                .iter()
+                .filter_map(|(owner, sequence)| (*owner != mac).then_some(*sequence))
+                .max()
+        }) else {
+            return;
+        };
+        let sequence = remote_sequence
+            .max(
+                self.remote_mac_view
+                    .get(&(vni, mac))
+                    .and_then(|view| view.mobility_sequence)
+                    .unwrap_or(0),
+            )
+            .saturating_add(1);
+        self.local_ip_owner_sequences
+            .entry((vni, mac))
+            .and_modify(|current| *current = (*current).max(sequence))
+            .or_insert(sequence);
+    }
+
+    /// Fold exact peer and retained local ownership floors into an action batch.
     /// Replacing an Inject before submission avoids briefly advertising the old
     /// sequence. The RIB acknowledgement tracker remains the sole writer.
     fn prepare_peer_sync_actions(
@@ -631,10 +682,20 @@ impl OriginatorState {
                 self.peer_sync_participants.insert((vni, mac));
                 sequence
             }
-            None if self.peer_sync_participants.contains(&(vni, mac)) => 0,
+            None if self.peer_sync_participants.contains(&(vni, mac))
+                || self.local_ip_owner_sequences.contains_key(&(vni, mac)) =>
+            {
+                0
+            }
             None => return actions,
         };
         let sequence = peer_sequence
+            .max(
+                self.local_ip_owner_sequences
+                    .get(&(vni, mac))
+                    .copied()
+                    .unwrap_or(0),
+            )
             .max(
                 self.mac_originators
                     .get(&vni)
@@ -647,6 +708,9 @@ impl OriginatorState {
                     .and_then(|orig| orig.sequence_for_mac(mac))
                     .unwrap_or(0),
             );
+        if let Some(retained) = self.local_ip_owner_sequences.get_mut(&(vni, mac)) {
+            *retained = (*retained).max(sequence);
+        }
         let mut adopted = Vec::new();
         if let Some(orig) = self.mac_originators.get_mut(&vni) {
             adopted.extend(orig.adopt_peer_sequence(mac, sequence));
@@ -718,7 +782,14 @@ async fn originator_loop(
         );
     }
 
+    // A native bounded receive batch shares one current snapshot. In poll-only
+    // mode it is collected before the scheduled query and retained if that
+    // query fails; no binding can advertise against an unknown ownership view.
+    let batch_limit = local_mac_rx.max_capacity();
+    let mut observations = Vec::with_capacity(batch_limit);
     loop {
+        let mut recovery_due = false;
+        let batch_remaining = batch_limit - observations.len();
         tokio::select! {
             biased;
             () = runtime.shutdown.cancelled() => {
@@ -759,26 +830,37 @@ async fn originator_loop(
                 let model = runtime.model_rx.borrow_and_update().clone();
                 apply_runtime_model(model, &mut state, &mut runtime).await;
             }
-            obs = local_mac_rx.recv(), if local_mac_rx_open => {
-                let Some(obs) = obs else {
-                    debug!("local-mac channel closed; originator idle");
-                    // Don't exit — RIB polls and operator control still matter
-                    // for telemetry and already-learned quarantine state.
-                    local_mac_rx_open = false;
-                    continue;
-                };
-                handle_observation(
-                    &obs,
+            // ADR-0102: re-drive RIB operations whose acknowledgement
+            // was lost (dropped reply, timeout, backpressure). Parks
+            // forever while nothing is pending.
+            () = crate::evpn_ack::retry_delay(state.pending_rib_ops.next_deadline()) => {
+                retry_pending_rib_ops(
                     &mut state,
                     &runtime.instances,
                     &runtime.rib_tx,
                     &runtime.metrics,
                     &runtime.originated_local_mac_counts,
                     &runtime.vni_to_esi,
-                    &runtime.drained_esis,
                 ).await;
             }
-            event = recv_evpn_event(&mut evpn_event_rx) => match event {
+            _ = poll_tick.tick() => {
+                collect_ready_observations(&mut local_mac_rx, &mut observations);
+                if let Err(e) = repoll_rib(
+                    &runtime.instances,
+                    &runtime.rib_tx,
+                    &mut state,
+                    &runtime.metrics,
+                    &runtime.originated_local_mac_counts,
+                    &runtime.vni_to_esi,
+                ).await {
+                    warn!(error = %e, "EVPN originator: RIB poll failed");
+                } else {
+                    recovery_due = true;
+                }
+            }
+            event = recv_evpn_event(&mut evpn_event_rx) => {
+                collect_ready_observations(&mut local_mac_rx, &mut observations);
+                match event {
                 Ok(ev) => {
                     handle_evpn_event_coalesced(
                         ev,
@@ -810,22 +892,26 @@ async fn originator_loop(
                 Err(broadcast::error::RecvError::Closed) => {
                     warn!("EVPN originator: RIB event broadcast closed; reverting to poll-only");
                     evpn_event_rx = None;
+                    state.remote_snapshot_ready = false;
+                }
                 }
             },
-            // ADR-0102: re-drive RIB operations whose acknowledgement
-            // was lost (dropped reply, timeout, backpressure). Parks
-            // forever while nothing is pending.
-            () = crate::evpn_ack::retry_delay(state.pending_rib_ops.next_deadline()) => {
-                retry_pending_rib_ops(
-                    &mut state,
-                    &runtime.instances,
-                    &runtime.rib_tx,
-                    &runtime.metrics,
-                    &runtime.originated_local_mac_counts,
-                    &runtime.vni_to_esi,
-                ).await;
+            count = local_mac_rx.recv_many(&mut observations, batch_remaining),
+                if local_mac_rx_open && batch_remaining > 0 => {
+                if count == 0 {
+                    debug!("local-mac channel closed; originator idle");
+                    local_mac_rx_open = false;
+                    continue;
+                }
+                if evpn_event_rx.is_none() {
+                    state.remote_snapshot_ready = false;
+                }
             }
-            _ = poll_tick.tick() => {
+        }
+        observation::process_observation_batch(&mut observations, &mut state, &runtime).await;
+        if state.remote_snapshot_ready {
+            replay_pending_local_macs(&mut state, &runtime).await;
+            if recovery_due {
                 state.duplicate_ip.expire(Instant::now());
                 recover_duplicate_macs(
                     &mut state,
@@ -835,19 +921,23 @@ async fn originator_loop(
                     &runtime.originated_local_mac_counts,
                     &runtime.vni_to_esi,
                     &runtime.drained_esis,
-                ).await;
-                if let Err(e) = repoll_rib(
-                    &runtime.instances,
-                    &runtime.rib_tx,
-                    &mut state,
-                    &runtime.metrics,
-                    &runtime.originated_local_mac_counts,
-                    &runtime.vni_to_esi,
-                ).await {
-                    warn!(error = %e, "EVPN originator: RIB poll failed");
-                }
+                )
+                .await;
             }
         }
+    }
+}
+
+/// Collect at most one channel capacity, keeping an older failed batch ordered
+/// ahead of new observations. A full deferred batch backpressures the channel
+/// until a snapshot succeeds; snapshot failure cannot grow an unbounded queue.
+fn collect_ready_observations(
+    rx: &mut mpsc::Receiver<LocalMacObservation>,
+    observations: &mut Vec<LocalMacObservation>,
+) {
+    for _ in observations.len()..rx.max_capacity() {
+        let Ok(obs) = rx.try_recv() else { break };
+        observations.push(obs);
     }
 }
 

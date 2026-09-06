@@ -205,6 +205,73 @@ pub(super) async fn handle_observation(
     super::duplicate_ip::observe_local(obs, state, instances, metrics);
 }
 
+/// Withdraw lost ownership even when a RIB snapshot is unavailable. Only
+/// activations wait in the bounded input batch; a later terminal observation
+/// cancels earlier queued activations for the same ownership key.
+pub(super) async fn process_observation_batch(
+    observations: &mut Vec<LocalMacObservation>,
+    state: &mut OriginatorState,
+    runtime: &super::OriginatorRuntime,
+) {
+    let mut batch = std::mem::take(observations);
+    for mut obs in batch.drain(..) {
+        if !state.remote_snapshot_ready {
+            match obs {
+                LocalMacObservation::Learned { .. } | LocalMacObservation::IpAdded { .. } => {
+                    observations.push(obs);
+                    continue;
+                }
+                LocalMacObservation::ObservedOnVxlanPort { vni, mac }
+                    if !state
+                        .local_macs
+                        .get(&vni)
+                        .is_some_and(|macs| macs.contains_key(&mac))
+                        && !observations.iter().any(|queued| {
+                            matches!(queued,
+                                LocalMacObservation::Learned { vni: qv, mac: qm, .. }
+                                if *qv == vni && *qm == mac
+                            )
+                        }) => {}
+                LocalMacObservation::Aged { vni, mac }
+                | LocalMacObservation::ObservedOnVxlanPort { vni, mac } => {
+                    // A deferred Learn still represents a local claim followed
+                    // by VXLAN takeover; clear its older pending IP cache too.
+                    obs = LocalMacObservation::Aged { vni, mac };
+                    observations.retain(|queued| {
+                        !matches!(queued,
+                            LocalMacObservation::Learned { vni: qv, mac: qm, .. }
+                            | LocalMacObservation::IpAdded { vni: qv, mac: qm, .. }
+                            if *qv == vni && *qm == mac
+                        )
+                    });
+                }
+                LocalMacObservation::IpRemoved { vni, mac, ip } => {
+                    observations.retain(|queued| {
+                        !matches!(queued,
+                            LocalMacObservation::IpAdded { vni: qv, mac: qm, ip: qi }
+                            if *qv == vni && *qm == mac && *qi == ip
+                        )
+                    });
+                }
+            }
+        }
+        handle_observation(
+            &obs,
+            state,
+            &runtime.instances,
+            &runtime.rib_tx,
+            &runtime.metrics,
+            &runtime.originated_local_mac_counts,
+            &runtime.vni_to_esi,
+            &runtime.drained_esis,
+        )
+        .await;
+    }
+    if observations.is_empty() {
+        *observations = batch;
+    }
+}
+
 /// Cache-only observation handling for a drained VNI (ADR-0084):
 /// mirrors the cache bookkeeping of the live handlers without ever
 /// touching the origination state machines (they hold no outstanding
@@ -221,6 +288,11 @@ fn handle_observation_while_drained(obs: &LocalMacObservation, state: &mut Origi
             // the live handler would have advertised MAC+IP for them;
             // the undrain replay will.
             if let Some(pending) = state.pending_ip_bindings.remove(&(vni, mac)) {
+                for &ip in &pending {
+                    if !state.has_live_ip_binding(vni, mac, ip) {
+                        state.record_ip_owner_sequence(vni, mac, ip);
+                    }
+                }
                 state
                     .live_mac_ip
                     .entry(vni)
@@ -258,6 +330,9 @@ fn handle_observation_while_drained(obs: &LocalMacObservation, state: &mut Origi
                 .get(&vni)
                 .is_some_and(|m| m.contains_key(&mac));
             if mac_is_local {
+                if !state.has_live_ip_binding(vni, mac, ip) {
+                    state.record_ip_owner_sequence(vni, mac, ip);
+                }
                 state
                     .live_mac_ip
                     .entry(vni)
@@ -337,6 +412,11 @@ pub(super) async fn handle_learned(
         .map(|s| s.into_iter().collect())
         .unwrap_or_default();
     let quarantined = duplicate_mac_is_quarantined(state, vni, mac);
+    for &ip in &pending_ips {
+        if !state.has_live_ip_binding(vni, mac, ip) {
+            state.record_ip_owner_sequence(vni, mac, ip);
+        }
+    }
 
     if pending_ips.is_empty() {
         // No IP bindings yet. Two sub-cases:
@@ -593,6 +673,9 @@ pub(super) async fn handle_ip_added(
 
     let sticky = sticky_for(instances, vni, mac);
     let was_mac_only = !state.is_mac_ip_advertising(vni, mac);
+    if !state.has_live_ip_binding(vni, mac, ip) {
+        state.record_ip_owner_sequence(vni, mac, ip);
+    }
     if duplicate_mac_is_quarantined(state, vni, mac) {
         state
             .live_mac_ip
@@ -728,6 +811,14 @@ pub(super) async fn handle_ip_removed(
         .get(&vni)
         .and_then(|m| m.get(&mac).copied());
     if empty_after && let Some(ifindex) = ifindex_for_mac {
+        if !state.remote_snapshot_ready {
+            state
+                .pending_local_replays
+                .entry(vni)
+                .or_default()
+                .insert(mac);
+            return;
+        }
         if duplicate_mac_is_quarantined(state, vni, mac) {
             suppress_local_originations_for_mac(
                 vni,

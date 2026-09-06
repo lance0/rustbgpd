@@ -488,6 +488,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- EVPN local MAC/IP activation now advertises above the effective sequence of
+  a different imported remote MAC holding the same IPv4 or IPv6 address
+  (RFC 9721 §6.1). The retained floor applies to the local MAC and its IP
+  children without treating the different MAC as a duplicate-MAC move.
+  Repeated observations, remote updates, and suppression recovery do not
+  repeatedly raise this floor.
+
 - Locally learned EVPN MACs now adopt a higher sequence from a peer on the
   same nonzero Ethernet Segment, including all locally learned IPv4/IPv6
   bindings. Adoption uses the exact sequence without a mobility increment,
@@ -791,6 +798,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   semantics without renaming existing commands.
 
 ### Upgrade notes
+
+- **EVPN IP ownership sequence:** a newly learned local MAC/IP binding can
+  now carry a higher MAC Mobility sequence when another eligible remote MAC
+  advertises its IP. Existing higher local and same-segment peer sequences
+  are preserved. Local activations wait for the first successful RIB snapshot
+  and after a failed refresh; without the event subscription, they wait for
+  the next successful scheduled poll. Prolonged query failure can fill the
+  bounded deferred queue and backpressure further observations. This remains
+  part of the EVPN alpha boundary and does not implement stale-entry probing
+  or full duplicate-address resolution.
 
 - **Same-segment EVPN sequence adoption:** locally owned MAC and MAC/IP
   advertisements can now advance to an eligible ES peer's higher sequence.

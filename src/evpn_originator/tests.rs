@@ -31,7 +31,11 @@ fn duplicate_mac_quarantine_tx() -> watch::Sender<Arc<BTreeSet<DuplicateMacKey>>
 }
 
 fn originator_state(instances: &EvpnInstanceTable) -> OriginatorState {
-    OriginatorState::new(instances, duplicate_mac_quarantine_tx())
+    let mut state = OriginatorState::new(instances, duplicate_mac_quarantine_tx());
+    // Direct-handler tests start from an authoritative empty snapshot; actor
+    // tests use spawn(), whose real state starts behind the initial barrier.
+    state.remote_snapshot_ready = true;
+    state
 }
 
 fn local_instance(v: u32) -> EvpnInstance {
@@ -496,6 +500,7 @@ async fn duplicate_mac_recovery_replays_local_route_and_resets_metric() {
     let counts = OriginatedLocalMacCounts::default();
     let (quarantine_tx, quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
     let mut state = OriginatorState::new(&instances, quarantine_tx);
+    state.remote_snapshot_ready = true; // authoritative empty snapshot for this direct-handler test
 
     handle_observation(
         &LocalMacObservation::Learned {
@@ -621,6 +626,7 @@ async fn duplicate_mac_manual_clear_replays_local_route_and_resets_metric() {
     let counts = OriginatedLocalMacCounts::default();
     let (quarantine_tx, quarantine_rx) = watch::channel(Arc::new(BTreeSet::new()));
     let mut state = OriginatorState::new(&instances, quarantine_tx);
+    state.remote_snapshot_ready = true; // authoritative empty snapshot for this direct-handler test
 
     observe_test(
         LocalMacObservation::Learned {
@@ -5007,6 +5013,7 @@ struct PeerSyncHarness {
     segments: BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
     rib_tx: mpsc::Sender<RibUpdate>,
     log: Arc<tokio::sync::Mutex<Vec<RibActionWithSeq>>>,
+    advertised: Arc<tokio::sync::Mutex<BTreeMap<EvpnRouteKey, EvpnRibRoute>>>,
     routes_tx: watch::Sender<Vec<EvpnRibRoute>>,
     metrics: BgpMetrics,
     counts: OriginatedLocalMacCounts,
@@ -5023,6 +5030,8 @@ impl PeerSyncHarness {
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
         let log = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let log_clone = log.clone();
+        let advertised = Arc::new(tokio::sync::Mutex::new(BTreeMap::new()));
+        let advertised_clone = advertised.clone();
         let (routes_tx, routes_rx) = watch::channel(routes);
         let responder = tokio::spawn(async move {
             while let Some(msg) = rib_rx.recv().await {
@@ -5032,6 +5041,10 @@ impl PeerSyncHarness {
                     }
                     RibUpdate::InjectEvpn { route, reply } => {
                         let (_, seq) = extract_mac_mobility_full(&route.attributes);
+                        advertised_clone
+                            .lock()
+                            .await
+                            .insert(route.key(), route.clone());
                         log_clone
                             .lock()
                             .await
@@ -5039,6 +5052,7 @@ impl PeerSyncHarness {
                         let _ = reply.send(Ok(()));
                     }
                     RibUpdate::WithdrawEvpn { key, reply } => {
+                        advertised_clone.lock().await.remove(&key);
                         log_clone.lock().await.push(RibActionWithSeq::Withdraw(key));
                         let _ = reply.send(Ok(()));
                     }
@@ -5052,6 +5066,7 @@ impl PeerSyncHarness {
             segments,
             rib_tx,
             log,
+            advertised,
             routes_tx,
             metrics: BgpMetrics::new(),
             counts: OriginatedLocalMacCounts::default(),
@@ -5089,6 +5104,21 @@ impl PeerSyncHarness {
 
     async fn take_log(&self) -> Vec<RibActionWithSeq> {
         std::mem::take(&mut *self.log.lock().await)
+    }
+
+    async fn replay(&mut self, mac: MacAddress) {
+        replay_local_mac_after_recovery(
+            vni(100),
+            mac,
+            &mut self.state,
+            &self.instances,
+            &self.rib_tx,
+            &self.metrics,
+            &self.counts,
+            &self.segments,
+            &BTreeSet::new(),
+        )
+        .await;
     }
 }
 
@@ -5187,6 +5217,1268 @@ fn eligible_peer_sync_route(seq: u32, ip: Option<&str>) -> EvpnRibRoute {
         evpn_macip_route_with_ip(100, 0xAA, ip, "10.0.0.2", Some(seq), false),
         segment_esi(1),
     )
+}
+
+#[tokio::test]
+async fn ip_owner_sequence_elevates_new_local_bindings_in_both_orders() {
+    for ip in ["192.0.2.10", "2001:db8::10"] {
+        for ip_first in [false, true] {
+            let remote = evpn_macip_route_with_ip(100, 0xBB, Some(ip), "10.0.0.2", Some(9), false);
+            let mut h = PeerSyncHarness::new(BTreeMap::new(), vec![remote]);
+            h.repoll().await;
+            let binding = LocalMacObservation::IpAdded {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ip: ipa(ip),
+            };
+            if ip_first {
+                h.observe(binding).await;
+                h.observe(learned_aa()).await;
+            } else {
+                h.observe(learned_aa()).await;
+                h.observe(binding).await;
+            }
+            let key = macip_key_with(100, 0xAA, Some(ip));
+            let log = h.take_log().await;
+            let sequences: Vec<_> = log
+                .iter()
+                .filter_map(|action| match action {
+                    RibActionWithSeq::Inject(route_key, sequence) if *route_key == key => {
+                        Some(*sequence)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                sequences,
+                vec![Some(10)],
+                "{ip}, ip_first={ip_first}: {log:?}"
+            );
+            assert_no_duplicate_mac_moves(&h.metrics, 100, 0xAA);
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn ip_owner_sequence_actor_refreshes_before_queued_local_activation() {
+    for (drop_first_query, subscribed) in
+        [(false, true), (true, true), (false, false), (true, false)]
+    {
+        let instances = instance_table(100);
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let (local_tx, local_rx) = mpsc::channel(16);
+        local_tx.send(learned_aa()).await.unwrap();
+        local_tx.send(ip_added_aa()).await.unwrap();
+        let (captured_tx, captured_rx) = oneshot::channel();
+        let responder = tokio::spawn(async move {
+            let (events_tx, _) = broadcast::channel(16);
+            let mut captured_tx = Some(captured_tx);
+            let mut query_count = 0;
+            while let Some(message) = rib_rx.recv().await {
+                match message {
+                    RibUpdate::SubscribeEvpnRouteEvents { reply } => {
+                        if subscribed {
+                            let _ = reply.send(events_tx.subscribe());
+                        }
+                    }
+                    RibUpdate::QueryEvpnRoutes { reply, .. } => {
+                        query_count += 1;
+                        if !drop_first_query || query_count > 1 {
+                            let _ = reply.send(vec![evpn_macip_route_with_ip(
+                                100,
+                                0xBB,
+                                Some("192.0.2.10"),
+                                "10.0.0.2",
+                                Some(9),
+                                false,
+                            )]);
+                        }
+                    }
+                    RibUpdate::InjectEvpn { route, reply } => {
+                        if matches!(route.key(), EvpnRouteKey::MacIp { ip: Some(_), .. })
+                            && let Some(captured_tx) = captured_tx.take()
+                        {
+                            let _ = captured_tx.send((
+                                extract_mac_mobility_full(&route.attributes).1,
+                                query_count,
+                            ));
+                        }
+                        let _ = reply.send(Ok(()));
+                    }
+                    RibUpdate::WithdrawEvpn { reply, .. } => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let handle = spawn(
+            OriginatorConfig {
+                poll_interval: Duration::from_secs(5),
+            },
+            &instances,
+            rib_tx,
+            Some(local_rx),
+            BgpMetrics::new(),
+            OriginatedLocalMacCounts::default(),
+            CancellationToken::new(),
+            Arc::new(BTreeMap::new()),
+        )
+        .unwrap();
+        let (sequence, query_count) = captured_rx.await.unwrap();
+        handle.shutdown().await;
+        responder.await.unwrap();
+        assert_eq!(
+            sequence,
+            Some(10),
+            "drop_first_query={drop_first_query}, subscribed={subscribed}"
+        );
+        assert_eq!(
+            query_count,
+            1 + usize::from(drop_first_query),
+            "a queued local burst shares one successful snapshot"
+        );
+    }
+}
+
+async fn assert_ip_owner_sequence(h: &PeerSyncHarness, m: u8, sequence: u32) {
+    let advertised = h.advertised.lock().await;
+    let routes: Vec<_> = advertised.values().filter(|route| {
+        matches!(route.key(), EvpnRouteKey::MacIp { mac: route_mac, .. } if route_mac == mac(m))
+    }).collect();
+    assert!(!routes.is_empty(), "MAC {m:02x} must advertise");
+    for route in routes {
+        assert_eq!(
+            extract_mac_mobility_full(&route.attributes).1.unwrap_or(0),
+            sequence,
+            "unexpected sequence for {:?}",
+            route.key()
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "ordered actor fixture covers snapshot failure and both subscription modes"
+)]
+async fn ip_owner_sequence_actor_orders_dirty_snapshot_retry_and_cached_batches() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    for subscribed in [true, false] {
+        let instances = instance_table(100);
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let (local_tx, local_rx) = mpsc::channel(16);
+        local_tx.send(learned_aa()).await.unwrap();
+        local_tx.send(ip_added_aa()).await.unwrap();
+        let remote = |ip, sequence| {
+            evpn_macip_route_with_ip(100, 0xBB, Some(ip), "10.0.0.2", Some(sequence), false)
+        };
+        let (routes_tx, routes_rx) = watch::channel(vec![remote("192.0.2.10", 9)]);
+        let (events_tx, _) = broadcast::channel(16);
+        let responder_events = events_tx.clone();
+        let (captured_tx, mut captured_rx) = mpsc::channel(16);
+        let (release_tx, release_rx) = oneshot::channel();
+        let drop_next_query = Arc::new(AtomicBool::new(false));
+        let responder_drop = drop_next_query.clone();
+        let responder = tokio::spawn(async move {
+            let mut query_count = 0;
+            let mut release_rx = Some(release_rx);
+            while let Some(message) = rib_rx.recv().await {
+                match message {
+                    RibUpdate::SubscribeEvpnRouteEvents { reply } => {
+                        if subscribed {
+                            let _ = reply.send(responder_events.subscribe());
+                        }
+                    }
+                    RibUpdate::QueryEvpnRoutes { reply, .. } => {
+                        query_count += 1;
+                        if !responder_drop.swap(false, Ordering::SeqCst) {
+                            let _ = reply.send(routes_rx.borrow().clone());
+                        }
+                    }
+                    RibUpdate::InjectEvpn { route, reply } => {
+                        if let EvpnRouteKey::MacIp { ip: Some(ip), .. } = route.key() {
+                            captured_tx
+                                .send((
+                                    ip,
+                                    extract_mac_mobility_full(&route.attributes).1,
+                                    query_count,
+                                ))
+                                .await
+                                .unwrap();
+                            if let Some(release_rx) = release_rx.take() {
+                                release_rx.await.unwrap();
+                            }
+                        }
+                        let _ = reply.send(Ok(()));
+                    }
+                    RibUpdate::WithdrawEvpn { reply, .. } => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let handle = spawn(
+            OriginatorConfig {
+                poll_interval: Duration::from_secs(5),
+            },
+            &instances,
+            rib_tx,
+            Some(local_rx),
+            BgpMetrics::new(),
+            OriginatedLocalMacCounts::default(),
+            CancellationToken::new(),
+            Arc::new(BTreeMap::new()),
+        )
+        .unwrap();
+        assert_eq!(
+            captured_rx.recv().await.unwrap(),
+            (ipa("192.0.2.10"), Some(10), 1)
+        );
+        // Hold the first Inject acknowledgement while queuing both inputs. The
+        // next actor turn must consume the RIB invalidation before this binding.
+        local_tx
+            .send(LocalMacObservation::IpAdded {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ip: ipa("2001:db8::10"),
+            })
+            .await
+            .unwrap();
+        routes_tx.send_replace(vec![remote("192.0.2.10", 9), remote("2001:db8::10", 19)]);
+        drop_next_query.store(true, Ordering::SeqCst);
+        if subscribed {
+            for _ in 0..4 {
+                events_tx
+                    .send(Arc::new(evpn_event_macip(
+                        100,
+                        0xBB,
+                        "10.0.0.2",
+                        Some(19),
+                        false,
+                        rustbgpd_rib::RouteEventType::BestChanged,
+                        None,
+                    )))
+                    .unwrap();
+            }
+        }
+        release_tx.send(()).unwrap();
+        let (ip, sequence, queries) = captured_rx.recv().await.unwrap();
+        assert_eq!(
+            (ip, sequence, queries),
+            (ipa("2001:db8::10"), Some(20), 3),
+            "one coalesced failed refresh, then one successful scheduled retry; subscribed={subscribed}"
+        );
+
+        local_tx
+            .send(LocalMacObservation::IpAdded {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ip: ipa("2001:db8::11"),
+            })
+            .await
+            .unwrap();
+        let (sequence, queries) = loop {
+            let (ip, sequence, queries) = captured_rx.recv().await.unwrap();
+            if ip == ipa("2001:db8::11") {
+                break (sequence, queries);
+            }
+        };
+        handle.shutdown().await;
+        responder.await.unwrap();
+        assert_eq!(sequence, Some(20));
+        assert_eq!(
+            queries,
+            if subscribed { 3 } else { 4 },
+            "subscribed observations reuse a current snapshot; poll-only batches await the scheduled snapshot"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn ip_owner_sequence_actor_makes_local_progress_with_busy_invalidations() {
+    let instances = instance_table(100);
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let (local_tx, local_rx) = mpsc::channel(16);
+    local_tx.send(learned_aa()).await.unwrap();
+    local_tx.send(ip_added_aa()).await.unwrap();
+    let (captured_tx, captured_rx) = oneshot::channel();
+    let responder = tokio::spawn(async move {
+        let (events_tx, _) = broadcast::channel(16);
+        let event = Arc::new(evpn_event_macip(
+            100,
+            0xBB,
+            "10.0.0.2",
+            Some(9),
+            false,
+            rustbgpd_rib::RouteEventType::BestChanged,
+            None,
+        ));
+        let mut queries = 0;
+        let mut captured_tx = Some(captured_tx);
+        while let Some(message) = rib_rx.recv().await {
+            match message {
+                RibUpdate::SubscribeEvpnRouteEvents { reply } => {
+                    let _ = reply.send(events_tx.subscribe());
+                    let _ = events_tx.send(event.clone());
+                }
+                RibUpdate::QueryEvpnRoutes { reply, .. } => {
+                    queries += 1;
+                    if queries == 4
+                        && let Some(captured_tx) = captured_tx.take()
+                    {
+                        let _ =
+                            captured_tx.send(Err("busy notifications starved queued local input"));
+                    }
+                    // Every query leaves another invalidation ready. Waiting
+                    // for an empty event stream would never release the batch.
+                    let _ = events_tx.send(event.clone());
+                    let _ = reply.send(vec![evpn_macip_route_with_ip(
+                        100,
+                        0xBB,
+                        Some("192.0.2.10"),
+                        "10.0.0.2",
+                        Some(9),
+                        false,
+                    )]);
+                }
+                RibUpdate::InjectEvpn { route, reply } => {
+                    if matches!(route.key(), EvpnRouteKey::MacIp { ip: Some(_), .. })
+                        && let Some(captured_tx) = captured_tx.take()
+                    {
+                        let _ = captured_tx.send(Ok((
+                            extract_mac_mobility_full(&route.attributes).1,
+                            queries,
+                        )));
+                    }
+                    let _ = reply.send(Ok(()));
+                }
+                RibUpdate::WithdrawEvpn { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+                _ => {}
+            }
+        }
+    });
+    let handle = spawn(
+        OriginatorConfig {
+            poll_interval: Duration::from_secs(5),
+        },
+        &instances,
+        rib_tx,
+        Some(local_rx),
+        BgpMetrics::new(),
+        OriginatedLocalMacCounts::default(),
+        CancellationToken::new(),
+        Arc::new(BTreeMap::new()),
+    )
+    .unwrap();
+    let result = captured_rx.await.unwrap();
+    handle.shutdown().await;
+    responder.await.unwrap();
+    assert_eq!(result, Ok((Some(10), 1)));
+}
+
+#[tokio::test(start_paused = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one busy-stream actor fixture proves initial, cached, timer, and shutdown progress"
+)]
+async fn ip_owner_sequence_actor_services_local_control_and_poll_during_irrelevant_events() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let instances = instance_table(100);
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let (local_tx, local_rx) = mpsc::channel(16);
+    let queries = Arc::new(AtomicUsize::new(0));
+    let query_count = queries.clone();
+    let (injected_tx, mut injected_rx) = mpsc::unbounded_channel();
+    let (events_tx, _) = broadcast::channel(65_536);
+    let event = Arc::new(EvpnRouteEvent {
+        event_type: rustbgpd_rib::RouteEventType::Added,
+        key: EvpnRouteKey::Imet {
+            rd: rd(65000, 100),
+            ethernet_tag: EthernetTagId(0),
+            originator_ip: ipa("10.0.0.2"),
+        },
+        best: None,
+        previous_best: None,
+        peer: None,
+        previous_peer: None,
+        timestamp: "0".into(),
+    });
+    let flood_tx = events_tx.clone();
+    let flood_event = event.clone();
+    let flooding = tokio::spawn(async move {
+        loop {
+            for _ in 0..128 {
+                let _ = flood_tx.send(flood_event.clone());
+            }
+            tokio::task::yield_now().await;
+        }
+    });
+    let responder = tokio::spawn(async move {
+        while let Some(message) = rib_rx.recv().await {
+            match message {
+                RibUpdate::SubscribeEvpnRouteEvents { reply } => {
+                    let _ = reply.send(events_tx.subscribe());
+                    for _ in 0..32_768 {
+                        let _ = events_tx.send(event.clone());
+                    }
+                }
+                RibUpdate::QueryEvpnRoutes { reply, .. } => {
+                    query_count.fetch_add(1, Ordering::SeqCst);
+                    let _ = reply.send(vec![evpn_macip_route_with_ip(
+                        100,
+                        0xBB,
+                        Some("192.0.2.10"),
+                        "10.0.0.2",
+                        Some(9),
+                        false,
+                    )]);
+                }
+                RibUpdate::InjectEvpn { route, reply } => {
+                    let _ = injected_tx.send(extract_mac_mobility_full(&route.attributes).1);
+                    let _ = reply.send(Ok(()));
+                }
+                RibUpdate::WithdrawEvpn { reply, .. } => {
+                    let _ = reply.send(Ok(()));
+                }
+                _ => {}
+            }
+        }
+    });
+    let handle = spawn(
+        OriginatorConfig {
+            poll_interval: Duration::from_secs(5),
+        },
+        &instances,
+        rib_tx,
+        Some(local_rx),
+        BgpMetrics::new(),
+        OriginatedLocalMacCounts::default(),
+        CancellationToken::new(),
+        Arc::new(BTreeMap::new()),
+    )
+    .unwrap();
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    let initial_queries = queries.load(Ordering::SeqCst);
+    local_tx.send(ip_added_aa()).await.unwrap();
+    local_tx.send(learned_aa()).await.unwrap();
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    let injected = injected_rx.try_recv();
+    let cached_queries = queries.load(Ordering::SeqCst);
+    tokio::time::advance(Duration::from_secs(5)).await;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    let polled_queries = queries.load(Ordering::SeqCst);
+    // Shutdown is a priority control operation and must complete with the
+    // irrelevant sender still active, just as the command arm must be reachable.
+    handle.shutdown().await;
+    flooding.abort();
+    let _ = flooding.await;
+    responder.await.unwrap();
+    assert_eq!(
+        initial_queries, 1,
+        "irrelevant events cannot starve the initial poll"
+    );
+    assert_eq!(injected.unwrap(), Some(10));
+    assert_eq!(
+        cached_queries, 1,
+        "irrelevant events do not force a query per binding"
+    );
+    assert_eq!(
+        polled_queries, 2,
+        "irrelevant events cannot starve the poll timer"
+    );
+}
+
+#[tokio::test]
+async fn ip_owner_sequence_failed_snapshot_withdraws_and_cancels_superseded_activations() {
+    for terminal in [
+        LocalMacObservation::Aged {
+            vni: vni(100),
+            mac: mac(0xAA),
+        },
+        LocalMacObservation::IpRemoved {
+            vni: vni(100),
+            mac: mac(0xAA),
+            ip: ipa("192.0.2.10"),
+        },
+        LocalMacObservation::ObservedOnVxlanPort {
+            vni: vni(100),
+            mac: mac(0xAA),
+        },
+    ] {
+        for relearn in [false, true] {
+            let remote = |seq| {
+                evpn_macip_route_with_ip(
+                    100,
+                    0xBB,
+                    Some("192.0.2.10"),
+                    "10.0.0.2",
+                    Some(seq),
+                    false,
+                )
+            };
+            let mut h = PeerSyncHarness::new(BTreeMap::new(), vec![remote(9)]);
+            h.repoll().await;
+            h.observe(learned_aa()).await;
+            h.observe(ip_added_aa()).await;
+            h.take_log().await;
+            let runtime = originator_runtime_for_test(
+                h.instances.clone(),
+                h.rib_tx.clone(),
+                h.metrics.clone(),
+                h.counts.clone(),
+                Arc::new(BTreeMap::new()),
+            );
+            h.state.remote_snapshot_ready = false;
+            let mut batch = vec![learned_aa(), ip_added_aa(), terminal.clone()];
+            if relearn {
+                batch.extend([learned_aa(), ip_added_aa()]);
+            }
+            observation::process_observation_batch(&mut batch, &mut h.state, &runtime).await;
+            assert!(
+                h.advertised.lock().await.is_empty(),
+                "withdrawal must not wait for refresh"
+            );
+            assert_eq!(h.counts.count(vni(100)), 0);
+            assert!(
+                !h.take_log()
+                    .await
+                    .iter()
+                    .any(|action| matches!(action, RibActionWithSeq::Inject(..)))
+            );
+            h.routes_tx.send_replace(vec![remote(19)]);
+            h.repoll().await;
+            observation::process_observation_batch(&mut batch, &mut h.state, &runtime).await;
+            replay_pending_local_macs(&mut h.state, &runtime).await;
+            let advertised = h.advertised.lock().await;
+            let ip_key = macip_key_with(100, 0xAA, Some("192.0.2.10"));
+            assert_eq!(
+                advertised.contains_key(&ip_key),
+                relearn,
+                "only a later legitimate activation may restore the withdrawn IP"
+            );
+            drop(advertised);
+            if relearn {
+                assert_ip_owner_sequence(&h, 0xAA, 20).await;
+            }
+            assert!(batch.is_empty());
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "actor fixture keeps failed-query withdrawal and successful downgrade ordering together"
+)]
+async fn ip_owner_sequence_actor_withdraws_before_failed_snapshot_recovers() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let instances = instance_table(100);
+    let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+    let (local_tx, local_rx) = mpsc::channel(16);
+    local_tx.send(ip_added_aa()).await.unwrap();
+    local_tx.send(learned_aa()).await.unwrap();
+    let (events_tx, _) = broadcast::channel(16);
+    let responder_events = events_tx.clone();
+    let fail_queries = Arc::new(AtomicBool::new(false));
+    let responder_fail = fail_queries.clone();
+    let (failed_tx, mut failed_rx) = mpsc::unbounded_channel();
+    let (actions_tx, mut actions_rx) = mpsc::unbounded_channel();
+    let responder = tokio::spawn(async move {
+        while let Some(message) = rib_rx.recv().await {
+            match message {
+                RibUpdate::SubscribeEvpnRouteEvents { reply } => {
+                    let _ = reply.send(responder_events.subscribe());
+                }
+                RibUpdate::QueryEvpnRoutes { reply, .. } => {
+                    if responder_fail.load(Ordering::SeqCst) {
+                        drop(reply);
+                        let _ = failed_tx.send(());
+                    } else {
+                        let _ = reply.send(vec![evpn_macip_route_with_ip(
+                            100,
+                            0xBB,
+                            Some("192.0.2.10"),
+                            "10.0.0.2",
+                            Some(9),
+                            false,
+                        )]);
+                    }
+                }
+                RibUpdate::InjectEvpn { route, reply } => {
+                    let _ = actions_tx.send(RibActionWithSeq::Inject(
+                        route.key(),
+                        extract_mac_mobility_full(&route.attributes).1,
+                    ));
+                    let _ = reply.send(Ok(()));
+                }
+                RibUpdate::WithdrawEvpn { key, reply, .. } => {
+                    let _ = actions_tx.send(RibActionWithSeq::Withdraw(key));
+                    let _ = reply.send(Ok(()));
+                }
+                _ => {}
+            }
+        }
+    });
+    let handle = spawn(
+        OriginatorConfig {
+            poll_interval: Duration::from_secs(5),
+        },
+        &instances,
+        rib_tx,
+        Some(local_rx),
+        BgpMetrics::new(),
+        OriginatedLocalMacCounts::default(),
+        CancellationToken::new(),
+        Arc::new(BTreeMap::new()),
+    )
+    .unwrap();
+    let binding = macip_key_with(100, 0xAA, Some("192.0.2.10"));
+    assert_eq!(
+        actions_rx.recv().await.unwrap(),
+        RibActionWithSeq::Inject(binding, Some(10))
+    );
+    fail_queries.store(true, Ordering::SeqCst);
+    events_tx
+        .send(Arc::new(evpn_event_macip(
+            100,
+            0xBB,
+            "10.0.0.2",
+            Some(9),
+            false,
+            rustbgpd_rib::RouteEventType::BestChanged,
+            None,
+        )))
+        .unwrap();
+    failed_rx.recv().await.unwrap();
+    local_tx.send(ip_added_aa()).await.unwrap();
+    local_tx
+        .send(LocalMacObservation::IpRemoved {
+            vni: vni(100),
+            mac: mac(0xAA),
+            ip: ipa("192.0.2.10"),
+        })
+        .await
+        .unwrap();
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    let withdrawal = actions_rx.try_recv();
+    assert!(fail_queries.load(Ordering::SeqCst));
+    let premature_action = actions_rx.try_recv();
+    fail_queries.store(false, Ordering::SeqCst);
+    tokio::time::advance(Duration::from_secs(5)).await;
+    let downgrade = actions_rx.recv().await.unwrap();
+    handle.shutdown().await;
+    responder.await.unwrap();
+    assert_eq!(withdrawal.unwrap(), RibActionWithSeq::Withdraw(binding));
+    assert!(
+        premature_action.is_err(),
+        "MAC-only fallback must also wait for a current snapshot"
+    );
+    assert_eq!(
+        downgrade,
+        RibActionWithSeq::Inject(macip_key_with(100, 0xAA, None), Some(10))
+    );
+}
+
+#[tokio::test]
+async fn ip_owner_sequence_full_deferred_batch_backpressures_until_snapshot_recovery() {
+    let mut h = PeerSyncHarness::new(
+        BTreeMap::new(),
+        vec![evpn_macip_route_with_ip(
+            100,
+            0xBB,
+            Some("192.0.2.10"),
+            "10.0.0.2",
+            Some(9),
+            false,
+        )],
+    );
+    h.repoll().await;
+    h.observe(learned_aa()).await;
+    let runtime = originator_runtime_for_test(
+        h.instances.clone(),
+        h.rib_tx.clone(),
+        h.metrics.clone(),
+        h.counts.clone(),
+        Arc::new(BTreeMap::new()),
+    );
+    h.state.remote_snapshot_ready = false;
+    let (tx, mut rx) = mpsc::channel(4);
+    for ip in ["192.0.2.10", "192.0.2.11", "192.0.2.12", "192.0.2.13"] {
+        tx.send(LocalMacObservation::IpAdded {
+            vni: vni(100),
+            mac: mac(0xAA),
+            ip: ipa(ip),
+        })
+        .await
+        .unwrap();
+    }
+    let mut batch = Vec::with_capacity(rx.max_capacity());
+    collect_ready_observations(&mut rx, &mut batch);
+    observation::process_observation_batch(&mut batch, &mut h.state, &runtime).await;
+    tx.send(LocalMacObservation::Aged {
+        vni: vni(100),
+        mac: mac(0xAA),
+    })
+    .await
+    .unwrap();
+    collect_ready_observations(&mut rx, &mut batch);
+    assert_eq!(
+        batch.len(),
+        4,
+        "deferred activation storage stays at one channel capacity"
+    );
+    assert_eq!(
+        rx.len(),
+        1,
+        "a full deferred batch applies ordinary channel backpressure"
+    );
+    h.repoll().await;
+    observation::process_observation_batch(&mut batch, &mut h.state, &runtime).await;
+    assert!(batch.is_empty());
+    assert_ip_owner_sequence(&h, 0xAA, 10).await;
+    collect_ready_observations(&mut rx, &mut batch);
+    observation::process_observation_batch(&mut batch, &mut h.state, &runtime).await;
+    assert!(batch.is_empty() && rx.is_empty());
+    assert!(h.advertised.lock().await.is_empty());
+    assert_eq!(h.counts.count(vni(100)), 0);
+}
+
+#[tokio::test]
+async fn ip_owner_sequence_requires_admitted_different_segment_owners() {
+    for ip in ["192.0.2.10", "2001:db8::10"] {
+        for case in [
+            "missing RT",
+            "wrong RT",
+            "tag",
+            "VNI",
+            "self",
+            "NVGRE",
+            "same ESI",
+            "partial VXLAN",
+        ] {
+            let mut route =
+                evpn_macip_route_with_ip(100, 0xBB, Some(ip), "10.0.0.2", Some(9), false);
+            match case {
+                "missing RT" => {
+                    route.attributes = Arc::new(vec![PathAttribute::ExtendedCommunities(vec![
+                        ExtendedCommunity::mac_mobility(false, 9),
+                    ])]);
+                }
+                "wrong RT" => {
+                    route.attributes = Arc::new(vec![PathAttribute::ExtendedCommunities(vec![
+                        RouteTarget::TwoOctetAs {
+                            asn: 65000,
+                            value: 999,
+                        }
+                        .to_extended_community(),
+                        ExtendedCommunity::mac_mobility(false, 9),
+                    ])]);
+                }
+                "tag" | "VNI" | "same ESI" => {
+                    let EvpnRoute::MacIp(macip) = &mut route.route else {
+                        unreachable!()
+                    };
+                    match case {
+                        "tag" => macip.ethernet_tag = EthernetTagId(1),
+                        "VNI" => macip.label1 = MplsLabel::new(200),
+                        _ => macip.esi = segment_esi(1),
+                    }
+                }
+                "self" => route.next_hop = ipa("10.0.0.1"),
+                "NVGRE" | "partial VXLAN" => {
+                    let mut communities = vec![ExtendedCommunity::bgp_encapsulation(9)];
+                    if case == "partial VXLAN" {
+                        communities.push(ExtendedCommunity::bgp_encapsulation(8));
+                    }
+                    Arc::make_mut(&mut route.attributes)
+                        .push(PathAttribute::ExtendedCommunitiesPartial(communities));
+                }
+                _ => unreachable!(),
+            }
+            let mut h =
+                PeerSyncHarness::new(BTreeMap::from([(vni(100), segment_esi(1))]), vec![route]);
+            h.repoll().await;
+            h.observe(learned_aa()).await;
+            h.observe(LocalMacObservation::IpAdded {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ip: ipa(ip),
+            })
+            .await;
+            let admitted = case == "partial VXLAN";
+            assert_eq!(h.state.remote_ip_owners.is_empty(), !admitted, "{case}");
+            assert_ip_owner_sequence(&h, 0xAA, if admitted { 10 } else { 0 }).await;
+            assert_no_duplicate_mac_moves(&h.metrics, 100, 0xAA);
+        }
+    }
+}
+
+#[tokio::test]
+async fn ip_owner_sequence_survives_first_learning_under_drain_or_quarantine() {
+    for quarantined in [false, true] {
+        let remote = |sequence| {
+            evpn_macip_route_with_ip(
+                100,
+                0xBB,
+                Some("192.0.2.10"),
+                "10.0.0.2",
+                Some(sequence),
+                false,
+            )
+        };
+        let mut h = PeerSyncHarness::new(
+            BTreeMap::from([(vni(100), segment_esi(1))]),
+            vec![remote(9)],
+        );
+        let inst = suppress_local_instance(100);
+        h.instances = instance_table_with(inst.clone());
+        h.state = originator_state(&h.instances);
+        h.repoll().await;
+        let key = DuplicateMacKey::new(vni(100), mac(0xAA));
+        let drained = if quarantined {
+            assert!(record_duplicate_mac_move(
+                &h.metrics,
+                &mut h.state,
+                &inst,
+                key.vni,
+                key.mac
+            ));
+            BTreeSet::new()
+        } else {
+            BTreeSet::from([segment_esi(1)])
+        };
+        // IP-first while suppressed: there is no pure originator entry yet.
+        for obs in [ip_added_aa(), learned_aa()] {
+            handle_observation(
+                &obs,
+                &mut h.state,
+                &h.instances,
+                &h.rib_tx,
+                &h.metrics,
+                &h.counts,
+                &h.segments,
+                &drained,
+            )
+            .await;
+        }
+        assert!(h.take_log().await.is_empty());
+        h.routes_tx.send_replace(vec![remote(19)]);
+        h.repoll().await;
+        assert!(h.take_log().await.is_empty());
+        if quarantined {
+            // Clearing remains responsive when a snapshot has failed. Only
+            // re-origination is queued until a current snapshot is available.
+            h.state.remote_snapshot_ready = false;
+            assert_eq!(
+                clear_duplicate_mac_quarantine(
+                    key,
+                    &mut h.state,
+                    &h.instances,
+                    &h.rib_tx,
+                    &h.metrics,
+                    &h.counts,
+                    &h.segments,
+                    &BTreeSet::new(),
+                )
+                .await,
+                ClearDuplicateMacQuarantineResult::Cleared
+            );
+            assert!(h.take_log().await.is_empty());
+            assert!(!h.state.active_duplicate_mac_quarantines.contains(&key));
+            h.repoll().await;
+            let runtime = originator_runtime_for_test(
+                h.instances.clone(),
+                h.rib_tx.clone(),
+                h.metrics.clone(),
+                h.counts.clone(),
+                Arc::new(h.segments.clone()),
+            );
+            replay_pending_local_macs(&mut h.state, &runtime).await;
+        } else {
+            h.replay(mac(0xAA)).await;
+        }
+        assert_ip_owner_sequence(&h, 0xAA, 10).await;
+        h.take_log().await;
+        h.observe(ip_added_aa()).await;
+        h.replay(mac(0xAA)).await;
+        assert!(
+            h.take_log().await.is_empty(),
+            "recovery must not recalculate the now-higher remote floor"
+        );
+    }
+}
+
+#[tokio::test]
+async fn ip_owner_sequence_uses_effective_maximum_and_recomputes_withdrawals() {
+    let owner =
+        |m, ip, sequence| evpn_macip_route_with_ip(100, m, ip, "10.0.0.2", Some(sequence), false);
+    let low = owner(0xBB, Some("192.0.2.10"), 9);
+    let sibling = owner(0xBB, Some("2001:db8::20"), 20);
+    let other = owner(0xCC, Some("192.0.2.10"), 12);
+    let mut h = PeerSyncHarness::new(BTreeMap::new(), vec![low.clone(), sibling, other.clone()]);
+    h.repoll().await;
+    h.observe(learned_aa()).await;
+    h.observe(ip_added_aa()).await;
+    assert_ip_owner_sequence(&h, 0xAA, 21).await;
+    h.observe(LocalMacObservation::IpAdded {
+        vni: vni(100),
+        mac: mac(0xAA),
+        ip: ipa("2001:db8::10"),
+    })
+    .await;
+    assert_ip_owner_sequence(&h, 0xAA, 21).await;
+    h.take_log().await;
+
+    h.routes_tx.send_replace(vec![low, other]);
+    h.repoll().await;
+    assert!(
+        h.take_log().await.is_empty(),
+        "snapshot changes do not move local bindings"
+    );
+    h.observe(LocalMacObservation::Learned {
+        vni: vni(100),
+        mac: mac(0xDD),
+        ifindex: 11,
+    })
+    .await;
+    h.observe(LocalMacObservation::IpAdded {
+        vni: vni(100),
+        mac: mac(0xDD),
+        ip: ipa("192.0.2.10"),
+    })
+    .await;
+    assert_ip_owner_sequence(&h, 0xDD, 13).await;
+    assert_ip_owner_sequence(&h, 0xAA, 21).await;
+
+    h.routes_tx.send_replace(Vec::new());
+    h.repoll().await;
+    assert!(h.state.remote_ip_owners.is_empty());
+    h.observe(LocalMacObservation::IpRemoved {
+        vni: vni(100),
+        mac: mac(0xDD),
+        ip: ipa("192.0.2.10"),
+    })
+    .await;
+    assert_ip_owner_sequence(&h, 0xDD, 13).await;
+    h.observe(LocalMacObservation::IpAdded {
+        vni: vni(100),
+        mac: mac(0xDD),
+        ip: ipa("2001:db8::30"),
+    })
+    .await;
+    assert_ip_owner_sequence(&h, 0xDD, 13).await;
+    h.observe(LocalMacObservation::Aged {
+        vni: vni(100),
+        mac: mac(0xDD),
+    })
+    .await;
+    h.replay(mac(0xDD)).await;
+    assert!(
+        !h.advertised
+            .lock()
+            .await
+            .keys()
+            .any(|key| { matches!(key, EvpnRouteKey::MacIp { mac: m, .. } if *m == mac(0xDD)) })
+    );
+    assert_no_duplicate_mac_moves(&h.metrics, 100, 0xAA);
+    assert_no_duplicate_mac_moves(&h.metrics, 100, 0xDD);
+}
+
+#[tokio::test]
+async fn ip_owner_sequence_retains_higher_local_and_exact_peer_floors() {
+    let segments = BTreeMap::from([(vni(100), segment_esi(1))]);
+    let remote =
+        evpn_macip_route_with_ip(100, 0xBB, Some("192.0.2.10"), "10.0.0.3", Some(9), false);
+    let mut h = PeerSyncHarness::new(segments, vec![remote, eligible_peer_sync_route(30, None)]);
+    h.repoll().await;
+    h.observe(learned_aa()).await;
+    h.observe(ip_added_aa()).await;
+    assert_ip_owner_sequence(&h, 0xAA, 30).await;
+    h.observe(LocalMacObservation::Learned {
+        vni: vni(100),
+        mac: mac(0xAA),
+        ifindex: 11,
+    })
+    .await;
+    assert_ip_owner_sequence(&h, 0xAA, 31).await;
+    h.routes_tx.send_replace(Vec::new());
+    h.repoll().await;
+    h.observe(LocalMacObservation::IpAdded {
+        vni: vni(100),
+        mac: mac(0xAA),
+        ip: ipa("2001:db8::10"),
+    })
+    .await;
+    assert_ip_owner_sequence(&h, 0xAA, 31).await;
+    for ip in ["192.0.2.10", "2001:db8::10"] {
+        h.observe(LocalMacObservation::IpRemoved {
+            vni: vni(100),
+            mac: mac(0xAA),
+            ip: ipa(ip),
+        })
+        .await;
+    }
+    assert_ip_owner_sequence(&h, 0xAA, 31).await;
+    assert_no_duplicate_mac_moves(&h.metrics, 100, 0xAA);
+}
+
+#[tokio::test]
+async fn ip_owner_sequence_distinguishes_config_replay_from_new_scope() {
+    for change_scope in [false, true] {
+        let remote = |sequence| {
+            evpn_macip_route_with_ip(
+                100,
+                0xBB,
+                Some("192.0.2.10"),
+                "10.0.0.2",
+                Some(sequence),
+                false,
+            )
+        };
+        let mut h = PeerSyncHarness::new(BTreeMap::new(), vec![remote(9)]);
+        h.repoll().await;
+        h.observe(learned_aa()).await;
+        h.observe(ip_added_aa()).await;
+        assert_ip_owner_sequence(&h, 0xAA, 10).await;
+        h.routes_tx.send_replace(vec![remote(19)]);
+        let mut runtime = originator_runtime_for_test(
+            h.instances.clone(),
+            h.rib_tx.clone(),
+            h.metrics.clone(),
+            h.counts.clone(),
+            Arc::new(BTreeMap::new()),
+        );
+        let instances = instance_table_with(local_instance(100).with_duplicate_ip_detection(
+            rustbgpd_evpn::DuplicateIpConfig::new(true, Duration::from_secs(30), 2).unwrap(),
+        ));
+        let segments = if change_scope {
+            BTreeMap::from([(vni(100), segment_esi(1))])
+        } else {
+            BTreeMap::new()
+        };
+        apply_runtime_model(
+            Arc::new(OriginatorRuntimeModel {
+                instances: instances.clone(),
+                vni_to_esi: Arc::new(segments.clone()),
+                drained_esis: Arc::new(BTreeSet::new()),
+            }),
+            &mut h.state,
+            &mut runtime,
+        )
+        .await;
+        h.instances = instances;
+        h.segments = segments;
+        assert_ip_owner_sequence(&h, 0xAA, if change_scope { 20 } else { 10 }).await;
+        h.observe(ip_added_aa()).await;
+        h.replay(mac(0xAA)).await;
+        assert_ip_owner_sequence(&h, 0xAA, if change_scope { 20 } else { 10 }).await;
+        assert_no_duplicate_mac_moves(&h.metrics, 100, 0xAA);
+        remove_vni_state(&mut h.state, vni(100), &h.metrics);
+        assert!(h.state.local_ip_owner_sequences.is_empty());
+        assert!(h.state.remote_ip_owners.is_empty());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn ip_owner_sequence_supersedes_unacknowledged_binding_inject() {
+    let instances = instance_table(100);
+    let mut state = originator_state(&instances);
+    let metrics = BgpMetrics::new();
+    let counts = OriginatedLocalMacCounts::default();
+    let rib = ScriptedRib::spawn(RibReplyMode::Ok);
+    state.remote_ip_owners.insert(
+        (vni(100), ipa("192.0.2.10")),
+        BTreeMap::from([(mac(0xBB), 9)]),
+    );
+    observe_test(
+        learned_aa(),
+        &mut state,
+        &instances,
+        &rib.rib_tx,
+        &metrics,
+        &counts,
+    )
+    .await;
+    rib.set_mode(RibReplyMode::DropReply);
+    observe_test(
+        ip_added_aa(),
+        &mut state,
+        &instances,
+        &rib.rib_tx,
+        &metrics,
+        &counts,
+    )
+    .await;
+    // A local port move advances the pending binding before its first success.
+    observe_test(
+        LocalMacObservation::Learned {
+            vni: vni(100),
+            mac: mac(0xAA),
+            ifindex: 11,
+        },
+        &mut state,
+        &instances,
+        &rib.rib_tx,
+        &metrics,
+        &counts,
+    )
+    .await;
+    let operations = state
+        .pending_rib_ops
+        .due(tokio::time::Instant::now() + Duration::from_mins(1));
+    let binding = macip_key_with(100, 0xAA, Some("192.0.2.10"));
+    assert!(operations.iter().any(|(_, op)| matches!(
+        &op.action, OriginationAction::Inject { key, mobility_seq: Some(11), .. } if *key == binding
+    )));
+    assert!(!operations.iter().any(|(_, op)| matches!(
+        op.action,
+        OriginationAction::Inject {
+            mobility_seq: Some(10),
+            ..
+        }
+    )));
+    rib.set_mode(RibReplyMode::Ok);
+    retry_after_backoff(&mut state, &instances, &rib, &metrics, &counts).await;
+    assert!(state.pending_rib_ops.is_empty());
+    assert_eq!(counts.count(vni(100)), 1);
+}
+
+#[tokio::test]
+async fn ip_owner_sequence_missing_mobility_and_saturation() {
+    for (remote_sequence, expected) in [(None, 1), (Some(u32::MAX), u32::MAX)] {
+        let remote = evpn_macip_route_with_ip(
+            100,
+            0xBB,
+            Some("192.0.2.10"),
+            "10.0.0.2",
+            remote_sequence,
+            false,
+        );
+        let mut h = PeerSyncHarness::new(BTreeMap::new(), vec![remote]);
+        h.repoll().await;
+        h.observe(learned_aa()).await;
+        h.observe(ip_added_aa()).await;
+        assert_ip_owner_sequence(&h, 0xAA, expected).await;
+        h.take_log().await;
+        h.repoll().await;
+        h.observe(ip_added_aa()).await;
+        h.replay(mac(0xAA)).await;
+        assert!(h.take_log().await.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn ip_owner_sequence_crossed_ownership_settles_through_replay_and_recovery() {
+    let mut first = PeerSyncHarness::new(BTreeMap::new(), Vec::new());
+    let mut second = PeerSyncHarness::new(BTreeMap::new(), Vec::new());
+    let mut second_inst = local_instance(100);
+    second_inst.local_vtep_ip = ipa("10.0.0.2");
+    second_inst.rd = rd(65000, 200);
+    second.instances = instance_table_with(second_inst);
+    second.state = originator_state(&second.instances);
+    for (h, m, ips) in [
+        (&mut first, 0xAA, ["192.0.2.1", "2001:db8::2"]),
+        (&mut second, 0xBB, ["192.0.2.3", "2001:db8::4"]),
+    ] {
+        h.observe(LocalMacObservation::Learned {
+            vni: vni(100),
+            mac: mac(m),
+            ifindex: 10,
+        })
+        .await;
+        for ip in ips {
+            h.observe(LocalMacObservation::IpAdded {
+                vni: vni(100),
+                mac: mac(m),
+                ip: ipa(ip),
+            })
+            .await;
+        }
+    }
+    first
+        .routes_tx
+        .send_replace(second.advertised.lock().await.values().cloned().collect());
+    second
+        .routes_tx
+        .send_replace(first.advertised.lock().await.values().cloned().collect());
+    first.repoll().await;
+    second.repoll().await;
+    // Each PE learns an IP previously owned by the other's MAC while the stale
+    // bindings still exist. This intentionally does not model stale-entry probing.
+    let moves = [(0xAA, "192.0.2.3"), (0xBB, "192.0.2.1")];
+    for (h, (m, ip)) in [(&mut first, moves[0]), (&mut second, moves[1])] {
+        h.observe(LocalMacObservation::IpAdded {
+            vni: vni(100),
+            mac: mac(m),
+            ip: ipa(ip),
+        })
+        .await;
+        assert_ip_owner_sequence(h, m, 1).await;
+        h.take_log().await;
+    }
+    for _ in 0..3 {
+        first
+            .routes_tx
+            .send_replace(second.advertised.lock().await.values().cloned().collect());
+        second
+            .routes_tx
+            .send_replace(first.advertised.lock().await.values().cloned().collect());
+        for (h, (m, ip)) in [(&mut first, moves[0]), (&mut second, moves[1])] {
+            h.repoll().await;
+            h.observe(LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: mac(m),
+                ifindex: 10,
+            })
+            .await;
+            h.observe(LocalMacObservation::IpAdded {
+                vni: vni(100),
+                mac: mac(m),
+                ip: ipa(ip),
+            })
+            .await;
+            h.replay(mac(m)).await;
+            assert!(
+                h.take_log().await.is_empty(),
+                "remote updates and replay must not outbid again"
+            );
+            assert_ip_owner_sequence(h, m, 1).await;
+            assert_no_duplicate_mac_moves(&h.metrics, 100, m);
+        }
+    }
+    // Repeated recovery of the same still-live bindings must also preserve the
+    // original activation floor instead of treating the remote's new value as a move.
+    for (h, (m, _)) in [(&mut first, moves[0]), (&mut second, moves[1])] {
+        for _ in 0..2 {
+            suppress_local_originations_for_mac(
+                vni(100),
+                mac(m),
+                &mut h.state,
+                h.instances.get(vni(100)).unwrap(),
+                None,
+                &h.rib_tx,
+                &h.metrics,
+                &h.counts,
+                &h.segments,
+            )
+            .await;
+            h.replay(mac(m)).await;
+            assert_ip_owner_sequence(h, m, 1).await;
+        }
+    }
 }
 
 #[tokio::test]
@@ -5703,6 +6995,27 @@ async fn peer_sync_model_change_clears_old_scope_even_when_repoll_fails() {
         .await;
         assert!(h.state.peer_sync_sequences.is_empty());
         assert!(h.state.peer_sync_participants.is_empty());
+        assert!(!h.state.remote_snapshot_ready);
+        assert!(h.state.pending_local_replays.contains_key(&vni(100)));
+        assert_eq!(
+            h.state.mac_ip_originators[&vni(100)].sequence_for_mac(mac(0xAA)),
+            None
+        );
+        // Recovery must wait for a successful snapshot, then replay the owned MAC
+        // in the new scope before accepting another local binding.
+        runtime.rib_tx = h.rib_tx.clone();
+        h.routes_tx.send_replace(Vec::new());
+        repoll_rib(
+            &runtime.instances,
+            &runtime.rib_tx,
+            &mut h.state,
+            &runtime.metrics,
+            &runtime.originated_local_mac_counts,
+            &runtime.vni_to_esi,
+        )
+        .await
+        .unwrap();
+        replay_pending_local_macs(&mut h.state, &runtime).await;
         handle_observation(
             &ip_added_aa(),
             &mut h.state,
@@ -6271,9 +7584,12 @@ async fn duplicate_ip_runtime_model_enables_and_disables_without_recounting_cach
             h.take_log().await,
             vec![
                 RibActionWithSeq::Withdraw(macip_key_with(100, 0xAA, Some("192.0.2.10"))),
-                RibActionWithSeq::Inject(macip_key_with(100, 0xAA, Some("192.0.2.10")), None),
+                RibActionWithSeq::Inject(
+                    macip_key_with(100, 0xAA, Some("192.0.2.10")),
+                    (!enabled).then_some(1)
+                ),
             ],
-            "a diagnostic config change still performs the existing full VNI redefine"
+            "a diagnostic config change preserves the sequence; the explicit remove/add below is a new ownership event"
         );
         h.instances = instances;
         h.observe(ip_added_aa()).await;

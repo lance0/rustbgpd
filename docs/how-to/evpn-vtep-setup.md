@@ -165,6 +165,25 @@ origination under the FRR-style replace model (one Type 2 per MAC;
 `IpAdded` upgrades MAC-only → MAC+IP). Without `neigh_suppress on`,
 only MAC-only Type 2 routes are originated.
 
+When a newly learned local IPv4 or IPv6 binding shares its IP with a different
+eligible remote MAC, its Type 2 sequence is at least one above that remote
+MAC's effective maximum sequence (RFC 9721 §6.1, saturating at `u32::MAX`).
+Higher retained local or same-segment peer sequences remain in force and apply
+to all locally learned IP children of the MAC. Repeated neighbour notifications,
+remote updates, and drain or quarantine recovery do not cause another increment
+for the same live binding. The different remote MAC does not count as a
+same-MAC mobility move.
+
+Local activations wait for a successful initial or refreshed RIB snapshot.
+If the event subscription is unavailable, they wait for the next successful
+scheduled poll. Ownership-loss events can withdraw existing routes while a
+snapshot is unavailable, and the last-IP MAC-only replacement waits for refresh.
+Deferred activations use a bounded queue; prolonged query failures can fill it
+and backpressure further observations, including ownership-loss events.
+This bounded ownership update does not implement stale-entry probing, full
+duplicate-address resolution, or simultaneous-move convergence;
+see the [RFC 9721 coverage](../reference/rfc-notes.md#later-evpn-standards-against-the-vxlanlinux-lane).
+
 ### SVI MAC
 
 Set `advertise_svi_mac = true` on the instance to originate a Type 2 for

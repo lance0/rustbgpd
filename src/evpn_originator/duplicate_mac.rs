@@ -396,6 +396,14 @@ pub(super) async fn replay_local_mac_after_recovery(
     vni_to_esi: &std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
     drained_esis: &BTreeSet<EthernetSegmentIdentifier>,
 ) {
+    if !state.remote_snapshot_ready {
+        state
+            .pending_local_replays
+            .entry(vni)
+            .or_default()
+            .insert(mac);
+        return;
+    }
     // ADR-0084: the replay primitive is the single chokepoint for
     // re-origination from preserved caches — quarantine recovery,
     // manual clear, and runtime-model replays all land here. While the
