@@ -18,7 +18,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::net::IpAddr;
 
-use rustbgpd_wire::{EvpnMacIp, MacAddress, PathAttribute, RouteDistinguisher};
+use rustbgpd_wire::{EthernetTagId, EvpnMacIp, MacAddress, PathAttribute, RouteDistinguisher};
 
 use crate::duplicate_ip::DuplicateIpConfig;
 use crate::duplicate_mac::DuplicateMacConfig;
@@ -252,9 +252,22 @@ impl EvpnInstance {
         next_hop: IpAddr,
         attributes: &[PathAttribute],
     ) -> bool {
-        route.label1.as_vni() == self.id.as_u32()
-            && route.ethernet_tag.0 == 0
-            && next_hop != self.local_vtep_ip
+        next_hop != self.local_vtep_ip
+            && self.imports_evi(route.label1.as_vni(), route.ethernet_tag, attributes)
+    }
+
+    /// Whether a route belongs to this local VLAN-based EVI: matching VNI,
+    /// zero Ethernet Tag, and at least one configured Route Target.
+    /// This gates local consumption, not global RIB retention or export.
+    #[must_use]
+    pub fn imports_evi(
+        &self,
+        vni: u32,
+        ethernet_tag: EthernetTagId,
+        attributes: &[PathAttribute],
+    ) -> bool {
+        vni == self.id.as_u32()
+            && ethernet_tag.0 == 0
             && attributes
                 .iter()
                 .filter_map(PathAttribute::extended_communities)

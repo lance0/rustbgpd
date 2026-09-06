@@ -1324,7 +1324,7 @@ fn project_intent_tables(
             ),
         routes
             .iter()
-            .filter_map(|r| project_ead_per_evi_unfiltered(r, &local_vtep_ips)),
+            .filter_map(|r| project_ead_per_evi_unfiltered(r, &local_vtep_ips, instances)),
     );
 
     let projected: Vec<ProjectedEvpnRoute> = routes
@@ -1342,10 +1342,10 @@ fn project_intent_tables(
         .collect();
     let ead_per_evi: Vec<ProjectedEvpnEadPerEvi> = routes
         .iter()
-        .filter_map(|r| project_ead_per_evi(r, &local_vtep_ips, &ead_per_es_modes))
+        .filter_map(|r| project_ead_per_evi(r, &local_vtep_ips, instances, &ead_per_es_modes))
         .collect();
 
-    // ADR-0083 slice 3 observability: the number of (ESI, EthernetTag)
+    // ADR-0083 slice 3 observability: the number of (VNI, ESI, EthernetTag)
     // groups currently in the post-failover backup window — i.e. with
     // at least one locally-relevant Type 2 kept by the swap arm of
     // the mass-withdraw gate. Drives the
@@ -1421,7 +1421,7 @@ fn project_intent_tables(
     }
 }
 
-/// ADR-0083 slice 3: returns the `(ESI, EthernetTag)` group key when
+/// ADR-0083 slice 3: returns the `(VNI, ESI, EthernetTag)` group key when
 /// `route` is a Type 2 in the post-failover swap window — its origin
 /// VTEP advertises NO EAD-per-ES for the segment (the RFC 7432 §8.2
 /// mass-withdraw condition that used to flush the MAC) but the
@@ -1438,6 +1438,7 @@ fn single_active_swap_window_key(
     )>,
     single_active_index: &rustbgpd_evpn::SingleActiveEligibleIndex,
 ) -> Option<(
+    rustbgpd_evpn::EvpnInstanceId,
     rustbgpd_wire::EthernetSegmentIdentifier,
     rustbgpd_wire::EthernetTagId,
 )> {
@@ -1449,9 +1450,10 @@ fn single_active_swap_window_key(
     {
         return None;
     }
+    let vni = rustbgpd_evpn::EvpnInstanceId::new(macip.label1.as_vni()).ok()?;
     single_active_index
-        .backup_pe(macip.esi, macip.ethernet_tag, route.next_hop)
-        .map(|_| (macip.esi, macip.ethernet_tag))
+        .backup_pe(vni, macip.esi, macip.ethernet_tag, route.next_hop)
+        .map(|_| (vni, macip.esi, macip.ethernet_tag))
 }
 
 fn projected_route_is_quarantined(
@@ -1622,22 +1624,19 @@ fn ead_per_es_is_single_active(attrs: &[PathAttribute]) -> bool {
 fn project_ead_per_evi(
     route: &EvpnRibRoute,
     local_vtep_ips: &std::collections::BTreeSet<std::net::IpAddr>,
+    instances: &EvpnInstanceTable,
     ead_per_es_modes: &std::collections::BTreeMap<
         (std::net::IpAddr, rustbgpd_wire::EthernetSegmentIdentifier),
         bool,
     >,
 ) -> Option<ProjectedEvpnEadPerEvi> {
-    let EvpnRoute::EadPerEvi(ead) = &route.route else {
-        return None;
-    };
-    if local_vtep_ips.contains(&route.next_hop) {
-        return None;
-    }
+    let ead = project_ead_per_evi_unfiltered(route, local_vtep_ips, instances)?;
     let single_active = ead_per_es_modes.get(&(route.next_hop, ead.esi)).copied()?;
     if single_active {
         return None;
     }
     Some(ProjectedEvpnEadPerEvi {
+        vni: ead.vni,
         esi: ead.esi,
         ethernet_tag: ead.ethernet_tag,
         next_hop: route.next_hop,
@@ -1647,10 +1646,9 @@ fn project_ead_per_evi(
 /// Translate a Type 1 EAD-per-EVI [`EvpnRibRoute`] into the scoped
 /// resolver input used by ESI overlay-index Type 5 receive. The row is
 /// usable only when it is remote, its label names a configured local
-/// L2VNI, and a matching EAD-per-ES row supplied the ES redundancy
-/// mode. Both single-active and all-active rows are passed through so
-/// the Type 5 projection can import the former and fail closed on the
-/// latter with a precise drop reason.
+/// L2VNI with a matching Route Target and zero Ethernet Tag, and a matching
+/// EAD-per-ES row supplied the ES redundancy mode. Both single-active and
+/// all-active rows retain their mode for the Type 5 resolver.
 fn project_esi_overlay_ead_per_evi(
     route: &EvpnRibRoute,
     local_vtep_ips: &std::collections::BTreeSet<std::net::IpAddr>,
@@ -1660,14 +1658,8 @@ fn project_esi_overlay_ead_per_evi(
         rustbgpd_evpn::ip_vrf::EsiOverlayRedundancyMode,
     >,
 ) -> Option<rustbgpd_evpn::ip_vrf::ProjectedEsiOverlayEadPerEvi> {
-    let EvpnRoute::EadPerEvi(ead) = &route.route else {
-        return None;
-    };
-    if local_vtep_ips.contains(&route.next_hop) {
-        return None;
-    }
-    let l2vni = rustbgpd_evpn::EvpnInstanceId::new(ead.label.as_vni()).ok()?;
-    instances.get(l2vni)?;
+    let ead = project_ead_per_evi_unfiltered(route, local_vtep_ips, instances)?;
+    let l2vni = ead.vni;
     let mode = ead_per_es_modes.get(&(route.next_hop, ead.esi)).copied()?;
     Some(rustbgpd_evpn::ip_vrf::ProjectedEsiOverlayEadPerEvi {
         l2vni,
@@ -1684,10 +1676,12 @@ fn project_esi_overlay_ead_per_evi(
 /// the `SingleActiveEligibleIndex` build performs the
 /// "single-active EAD-per-ES AND EAD-per-EVI" join itself (decision
 /// 2's both-route-types rule). Self-originated rows are still
-/// filtered: we are never our own backup path.
+/// filtered: we are never our own backup path. All consumers require a
+/// configured VNI, matching Route Target, and zero Ethernet Tag.
 fn project_ead_per_evi_unfiltered(
     route: &EvpnRibRoute,
     local_vtep_ips: &std::collections::BTreeSet<std::net::IpAddr>,
+    instances: &EvpnInstanceTable,
 ) -> Option<rustbgpd_evpn::AliasEadPerEvi> {
     let EvpnRoute::EadPerEvi(ead) = &route.route else {
         return None;
@@ -1695,7 +1689,15 @@ fn project_ead_per_evi_unfiltered(
     if local_vtep_ips.contains(&route.next_hop) {
         return None;
     }
+    let vni = rustbgpd_evpn::EvpnInstanceId::new(ead.label.as_vni()).ok()?;
+    if !instances
+        .get(vni)?
+        .imports_evi(ead.label.as_vni(), ead.ethernet_tag, &route.attributes)
+    {
+        return None;
+    }
     Some(rustbgpd_evpn::AliasEadPerEvi {
+        vni,
         esi: ead.esi,
         ethernet_tag: ead.ethernet_tag,
         vtep_ip: route.next_hop,
@@ -2074,7 +2076,7 @@ mod tests {
         ethernet_tag: u32,
         next_hop: &str,
     ) -> EvpnRibRoute {
-        evpn_ead_per_evi_route_with_label(esi, ethernet_tag, ethernet_tag, next_hop)
+        evpn_ead_per_evi_route_with_label(esi, ethernet_tag, 100, next_hop)
     }
 
     fn evpn_ead_per_evi_route_with_label(
@@ -2093,7 +2095,13 @@ mod tests {
             next_hop: ipa(next_hop),
             link_local_next_hop: None,
             peer: ipa("10.0.0.99"),
-            attributes: Arc::new(vec![]),
+            attributes: Arc::new(vec![PathAttribute::ExtendedCommunities(vec![
+                RouteTarget::TwoOctetAs {
+                    asn: 65001,
+                    value: label,
+                }
+                .to_extended_community(),
+            ])]),
             received_at: std::time::Instant::now(),
             origin_type: rustbgpd_rib::route::RouteOrigin::Ebgp,
             peer_router_id: std::net::Ipv4Addr::new(10, 0, 0, 99),
@@ -2683,23 +2691,24 @@ mod tests {
     fn project_ead_per_evi_requires_all_active_ead_per_es_reachability() {
         let esi = EthernetSegmentIdentifier::new([8; 10]);
         let local_vteps = BTreeSet::new();
-        let ead = evpn_ead_per_evi_route(esi, 100, "10.0.0.2");
+        let instances = local_instance_table(100, None);
+        let ead = evpn_ead_per_evi_route(esi, 0, "10.0.0.2");
 
         let no_ead_per_es = BTreeMap::new();
         assert!(
-            project_ead_per_evi(&ead, &local_vteps, &no_ead_per_es).is_none(),
+            project_ead_per_evi(&ead, &local_vteps, &instances, &no_ead_per_es).is_none(),
             "EAD-per-EVI without EAD-per-ES reachability must not create aliasing input"
         );
 
         let all_active = BTreeMap::from([((ipa("10.0.0.2"), esi), false)]);
         assert!(
-            project_ead_per_evi(&ead, &local_vteps, &all_active).is_some(),
+            project_ead_per_evi(&ead, &local_vteps, &instances, &all_active).is_some(),
             "all-active EAD-per-ES reachability allows aliasing input"
         );
 
         let single_active = BTreeMap::from([((ipa("10.0.0.2"), esi), true)]);
         assert!(
-            project_ead_per_evi(&ead, &local_vteps, &single_active).is_none(),
+            project_ead_per_evi(&ead, &local_vteps, &instances, &single_active).is_none(),
             "single-active EAD-per-ES reachability must suppress all-active alias ECMP"
         );
     }
@@ -2711,7 +2720,7 @@ mod tests {
         let esi = EthernetSegmentIdentifier::new([8; 10]);
         let local_vteps = BTreeSet::new();
         let instances = local_instance_table(100, Some("br100"));
-        let ead = evpn_ead_per_evi_route_with_label(esi, 42, 100, "10.0.0.2");
+        let ead = evpn_ead_per_evi_route_with_label(esi, 0, 100, "10.0.0.2");
         let all_active = BTreeMap::from([((ipa("10.0.0.2"), esi), AllActive)]);
         let single_active = BTreeMap::from([((ipa("10.0.0.2"), esi), SingleActive)]);
 
@@ -2719,7 +2728,7 @@ mod tests {
             project_esi_overlay_ead_per_evi(&ead, &local_vteps, &instances, &all_active)
                 .expect("all-active still feeds the fail-closed Type 5 resolver");
         assert_eq!(all_active_projected.l2vni, vni(100));
-        assert_eq!(all_active_projected.ethernet_tag, EthernetTagId(42));
+        assert_eq!(all_active_projected.ethernet_tag, EthernetTagId(0));
         assert_eq!(all_active_projected.next_hop, ipa("10.0.0.2"));
         assert_eq!(all_active_projected.mode, AllActive);
 
@@ -2900,6 +2909,164 @@ mod tests {
             macip.esi = esi;
         }
         route
+    }
+
+    #[test]
+    fn ead_evi_scope_is_preserved_for_aliases_backups_and_swaps() {
+        let instances = local_instance_table_many(&[(100, None), (200, None)]);
+        let esi = EthernetSegmentIdentifier::new([7; 10]);
+        let valid = evpn_ead_per_evi_route(esi, 0, "10.0.0.3");
+        let foreign = evpn_ead_per_evi_route_with_label(esi, 0, 200, "10.0.0.3");
+        let mut wrong_rt = valid.clone();
+        wrong_rt.attributes = foreign.attributes.clone();
+        let mut missing_rt = valid.clone();
+        missing_rt.attributes = Arc::new(vec![]);
+        let unsupported_tag = evpn_ead_per_evi_route(esi, 42, "10.0.0.3");
+        for (name, candidate, eligible) in [
+            ("same EVI", valid, true),
+            ("other configured EVI", foreign, false),
+            ("wrong RT", wrong_rt, false),
+            ("missing RT", missing_rt, false),
+            ("unsupported tag", unsupported_tag, false),
+        ] {
+            for single_active in [false, true] {
+                for primary_reachable in [false, true] {
+                    let mut routes = vec![
+                        evpn_macip_route_with_esi(100, 1, "10.0.0.2", esi),
+                        evpn_ead_per_es_route(esi, "10.0.0.3", single_active),
+                        candidate.clone(),
+                    ];
+                    if primary_reachable {
+                        routes.push(evpn_ead_per_es_route(esi, "10.0.0.2", single_active));
+                    }
+                    let tables = project_intent_tables(
+                        &routes,
+                        &instances,
+                        &IpVrfTable::new(),
+                        &BTreeSet::new(),
+                        &no_bias(),
+                    );
+                    let entry = tables.remote_macs.get(vni(100), mac(1));
+                    let swapped = !primary_reachable && single_active && eligible;
+                    assert_eq!(entry.is_some(), primary_reachable || swapped, "{name}");
+                    assert_eq!(
+                        tables.single_active_backup_active,
+                        usize::from(swapped),
+                        "{name}"
+                    );
+                    if let Some(entry) = entry {
+                        assert_eq!(
+                            entry.remote_vtep_ip,
+                            ipa(if swapped { "10.0.0.3" } else { "10.0.0.2" }),
+                            "{name}"
+                        );
+                        assert_eq!(
+                            entry.alias_vtep_ips,
+                            if !single_active && eligible {
+                                vec![ipa("10.0.0.3")]
+                            } else {
+                                vec![]
+                            },
+                            "{name}"
+                        );
+                        assert_eq!(
+                            entry.single_active_backup_vtep_ip,
+                            (single_active && primary_reachable && eligible)
+                                .then(|| ipa("10.0.0.3")),
+                            "{name}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ead_evi_scope_counts_each_vni_backup_window() {
+        let instances = local_instance_table_many(&[(100, None), (200, None)]);
+        let esi = EthernetSegmentIdentifier::new([7; 10]);
+        let routes = vec![
+            evpn_macip_route_with_esi(100, 1, "10.0.0.2", esi),
+            evpn_macip_route_with_esi(200, 1, "10.0.0.2", esi),
+            evpn_ead_per_es_route(esi, "10.0.0.3", true),
+            evpn_ead_per_es_route(esi, "10.0.0.4", true),
+            evpn_ead_per_evi_route_with_label(esi, 0, 100, "10.0.0.3"),
+            evpn_ead_per_evi_route_with_label(esi, 0, 200, "10.0.0.4"),
+        ];
+        let tables = project_intent_tables(
+            &routes,
+            &instances,
+            &IpVrfTable::new(),
+            &BTreeSet::new(),
+            &no_bias(),
+        );
+        assert_eq!(tables.single_active_backup_active, 2);
+        for (id, peer) in [(100, "10.0.0.3"), (200, "10.0.0.4")] {
+            let entry = tables.remote_macs.get(vni(id), mac(1)).unwrap();
+            assert_eq!(entry.remote_vtep_ip, ipa(peer));
+            assert_eq!(entry.single_active_backup_vtep_ip, None);
+        }
+    }
+
+    #[test]
+    fn ead_evi_scope_gates_esi_overlay_type5_resolution() {
+        let instances = local_instance_table_many(&[(100, None), (200, None)]);
+        let mut ip_vrfs = ip_vrf_table_one("blue", 5000, 5000);
+        ip_vrfs.mark_referenced_by_l2vni("blue".to_string(), vni(100));
+        let esi = EthernetSegmentIdentifier::new([7; 10]);
+        let valid = evpn_ead_per_evi_route(esi, 0, "10.0.0.3");
+        let foreign = evpn_ead_per_evi_route_with_label(esi, 0, 200, "10.0.0.3");
+        let mut wrong_rt = valid.clone();
+        wrong_rt.attributes = foreign.attributes.clone();
+        let mut missing_rt = valid.clone();
+        missing_rt.attributes = Arc::new(vec![]);
+        for (name, ead, tag, accepted) in [
+            ("same EVI", valid, 0, true),
+            ("other configured EVI", foreign, 0, false),
+            ("wrong RT", wrong_rt, 0, false),
+            ("missing RT", missing_rt, 0, false),
+            (
+                "unsupported tag",
+                evpn_ead_per_evi_route(esi, 42, "10.0.0.3"),
+                42,
+                false,
+            ),
+        ] {
+            for single_active in [false, true] {
+                let routes = vec![
+                    ead.clone(),
+                    evpn_ead_per_es_route(esi, "10.0.0.3", single_active),
+                    type5_with_esi_and_router_mac(
+                        "10.58.0.0/24",
+                        "10.0.0.9",
+                        5000,
+                        esi,
+                        tag,
+                        [2; 6],
+                    ),
+                ];
+                let tables = project_intent_tables(
+                    &routes,
+                    &instances,
+                    &ip_vrfs,
+                    &BTreeSet::new(),
+                    &no_bias(),
+                );
+                assert_eq!(
+                    tables
+                        .remote_ip_prefixes
+                        .for_vrf(IpVrfId::new(5000).unwrap())
+                        .count(),
+                    usize::from(accepted),
+                    "{name}"
+                );
+                assert_eq!(
+                    tables.remote_ip_prefixes.drops().is_empty(),
+                    accepted,
+                    "{name}"
+                );
+            }
+        }
     }
 
     // ─── ADR-0083 slice 2: single-active projection wiring ───
@@ -3422,13 +3589,13 @@ mod tests {
             if let Some(RibUpdate::QueryEvpnRoutes { reply, .. }) = rib_rx.recv().await {
                 let routes = vec![
                     evpn_ead_per_es_route(esi, "10.0.0.2", true),
-                    evpn_ead_per_evi_route_with_label(esi, 42, 100, "10.0.0.2"),
+                    evpn_ead_per_evi_route_with_label(esi, 0, 100, "10.0.0.2"),
                     type5_with_esi_and_router_mac(
                         "10.58.0.0/24",
                         "10.0.0.9",
                         5000,
                         esi,
-                        42,
+                        0,
                         overlay_mac,
                     ),
                 ];

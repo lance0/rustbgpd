@@ -2321,7 +2321,7 @@ impl BgpMetrics {
 
         let evpn_single_active_backup_active = IntGauge::new(
             "evpn_single_active_backup_active",
-            "Number of (ESI, EthernetTag) single-active groups currently retargeted at \
+            "Number of (VNI, ESI, EthernetTag) single-active groups currently retargeted at \
              their backup PE (the ADR-0083 post-failover window: the origin VTEP \
              withdrew its EAD-per-ES, eligible survivors remain, and the new active \
              PE has not yet re-advertised the MACs). Non-zero values are expected \
@@ -5650,7 +5650,7 @@ impl BgpMetrics {
     }
 
     /// Set the ADR-0083 backup-window gauge: how many
-    /// `(ESI, EthernetTag)` single-active groups are currently
+    /// `(VNI, ESI, EthernetTag)` single-active groups are currently
     /// retargeted at their backup PE.
     pub fn set_evpn_single_active_backup_active(&self, value: i64) {
         self.0.evpn_single_active_backup_active.set(value);
