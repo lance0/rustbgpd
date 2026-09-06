@@ -4,10 +4,36 @@ use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
 
+use rustbgpd_api::proto;
 use rustbgpd_api::proto::global_service_server::{GlobalService, GlobalServiceServer};
 use rustbgpd_api::proto::{GetGlobalRequest, GlobalState};
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status};
+
+#[path = "../src/test_support.rs"]
+#[allow(
+    dead_code,
+    reason = "shared CLI mock includes services unused by this contract"
+)]
+mod test_support;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn json_lines_closed_stdout_is_quiet_and_fetches_no_routes() {
+    let server = test_support::spawn_mock_server(None).await;
+    let (reader, writer) = UnixStream::pair().unwrap();
+    drop(reader);
+    let writer: OwnedFd = writer.into();
+    let output = Command::new(env!("CARGO_BIN_EXE_rbgp"))
+        .args(["--addr", &server.addr, "--json-lines", "rib"])
+        .stdout(Stdio::from(writer))
+        .stderr(Stdio::piped())
+        .env_remove("RUSTBGPD_TOKEN_FILE")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert!(server.state.list_route_requests.lock().await.is_empty());
+}
 
 struct MockGlobalService;
 

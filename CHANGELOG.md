@@ -13,6 +13,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Explicit `rbgp --json-lines` output for accepted unicast best, received,
+  and advertised routes. The versioned stream emits routes page by page and
+  ends with matching-row counts and completeness; ordinary JSON arrays and
+  limited envelopes retain their existing output and failure behavior.
+
 - Website ingest manifest in `docs/site-manifest.json`, checked in the public
   docs workflow so moving a consumed page without updating its source mapping
   fails CI. Site destinations remain independent of repository page paths.

@@ -163,6 +163,24 @@
     "scoped_rr_only_command_paths": ["orr", "rib bgpls", "rib labeled", "rib rtc", "rib vpn", "topology links", "topology nodes"],
     "versioned_json_contracts": [
       {
+        "id": "rbgp-rib/1.0",
+        "command_paths": ["rib", "rib advertised", "rib received"],
+        "source": "crates/cli/src/commands/rib.rs",
+        "test": "json_lines_inventory_contract_pins_record_and_route_types",
+        "test_linkage": "assert_json_lines_inventory_shape",
+        "evolution": "additive_fields_only",
+        "executable_type_floor": true,
+        "record_json_contracts": {
+          "end": {"required_json_types": {"complete": "boolean", "returned_count": "number", "total_count": "number", "type": "string"}, "optional_json_types": {}},
+          "header": {"required_json_types": {"format": "string", "format_version": "string", "type": "string", "view": "string"}, "optional_json_types": {}},
+          "route": {"required_json_types": {"route": "object", "type": "string"}, "optional_json_types": {}}
+        },
+        "nested_json_contracts": [
+          {"path": "route", "required_json_types": {"as_path": "array", "best": "boolean", "communities": "array", "extended_communities": "array", "large_communities": "array", "local_pref": "number", "med": ["null", "number"], "next_hop": "string", "origin": "string", "peer_address": "string", "prefix": "string", "received_at_epoch_seconds": "number"}, "optional_json_types": {"aggregator": "object", "aspa_state": "string", "atomic_aggregate": "boolean", "llgr_stale": "boolean", "local_pref_attr": "number", "path_id": "number", "stale": "boolean", "validation_state": "string"}},
+          {"path": "route.aggregator", "required_json_types": {"asn": "number", "router_id": "string"}, "optional_json_types": {}}
+        ]
+      },
+      {
         "id": "rbgp-ribdiff/1",
         "command_paths": ["diff advertised"],
         "source": "crates/cli/src/ribdiff.rs",

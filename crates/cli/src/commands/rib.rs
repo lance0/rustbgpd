@@ -219,11 +219,33 @@ struct RouteListing {
 async fn fetch_route_listing(
     client: &mut RibClient,
     rpc: &RouteListRpc,
-    mut req: ListRoutesRequest,
+    req: ListRoutesRequest,
     limit: Option<u32>,
 ) -> Result<RouteListing, CliError> {
-    req.page_size = limit.unwrap_or(ROUTE_PAGE_SIZE);
     let mut routes = Vec::new();
+    let (total_count, complete) = walk_route_pages(client, rpc, req, limit, |page| {
+        routes.extend(page);
+        Ok(())
+    })
+    .await?;
+    Ok(RouteListing {
+        routes,
+        total_count,
+        complete,
+        limit,
+    })
+}
+
+/// Consume each page before requesting its continuation. A failed consumer or
+/// RPC stops the walk without retrying an opaque continuation token.
+async fn walk_route_pages(
+    client: &mut RibClient,
+    rpc: &RouteListRpc,
+    mut req: ListRoutesRequest,
+    limit: Option<u32>,
+    mut consume: impl FnMut(Vec<Route>) -> Result<(), CliError>,
+) -> Result<(u64, bool), CliError> {
+    req.page_size = limit.unwrap_or(ROUTE_PAGE_SIZE);
     loop {
         let resp = match rpc {
             RouteListRpc::Best => {
@@ -246,18 +268,105 @@ async fn fetch_route_listing(
         }
         .into_inner();
         let total_count = resp.total_count;
-        routes.extend(resp.routes);
+        consume(resp.routes)?;
         let complete = resp.next_page_token.is_empty();
         if limit.is_some() || complete {
-            return Ok(RouteListing {
-                routes,
-                total_count,
-                complete,
-                limit,
-            });
+            return Ok((total_count, complete));
         }
         req.page_token = resp.next_page_token;
     }
+}
+
+#[derive(Serialize)]
+struct JsonLinesHeader {
+    r#type: &'static str,
+    format: &'static str,
+    format_version: &'static str,
+    view: &'static str,
+}
+
+#[derive(Serialize)]
+struct JsonLinesRoute<'a> {
+    r#type: &'static str,
+    route: JsonRouteRef<'a>,
+}
+
+#[derive(Serialize)]
+struct JsonLinesEnd {
+    r#type: &'static str,
+    returned_count: u64,
+    total_count: u64,
+    complete: bool,
+}
+
+async fn write_route_json_lines(
+    writer: &mut impl Write,
+    client: &mut RibClient,
+    rpc: RouteListRpc,
+    request: ListRoutesRequest,
+    limit: Option<u32>,
+    peer: Option<&str>,
+) -> Result<(), CliError> {
+    output::write_json_line(
+        writer,
+        &JsonLinesHeader {
+            r#type: "header",
+            format: "rbgp-rib",
+            format_version: "1.0",
+            view: match rpc {
+                RouteListRpc::Best => "best",
+                RouteListRpc::Received => "received",
+                RouteListRpc::Advertised => "advertised",
+            },
+        },
+    )?;
+    let mut returned_count = 0;
+    let (total_count, complete) = walk_route_pages(client, &rpc, request, limit, |page| {
+        for mut route in page {
+            restore_matching_scoped_address(peer, &mut route.peer_address);
+            output::write_json_line(
+                writer,
+                &JsonLinesRoute {
+                    r#type: "route",
+                    route: JsonRouteRef(&route),
+                },
+            )?;
+            returned_count += 1;
+        }
+        Ok(())
+    })
+    .await?;
+    output::write_json_line(
+        writer,
+        &JsonLinesEnd {
+            r#type: "end",
+            returned_count,
+            total_count,
+            complete,
+        },
+    )
+}
+
+/// Stream the accepted unicast view, retaining at most one response page.
+pub(crate) async fn json_lines(
+    connection: Connection,
+    rpc: RouteListRpc,
+    peer: Option<&str>,
+    family: Option<i32>,
+    filters: &RouteFilterOpts,
+) -> Result<(), CliError> {
+    let mut client =
+        RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let request = make_route_request(peer, family, filters)?;
+    write_route_json_lines(
+        &mut std::io::stdout().lock(),
+        &mut client,
+        rpc,
+        request,
+        filters.limit,
+        peer,
+    )
+    .await
 }
 
 /// Fetch only the backend's exact matching-row count for one route
@@ -2426,6 +2535,259 @@ mod tests {
     use crate::connection::connect;
     use crate::test_support::spawn_mock_server;
     use prost::Message;
+
+    fn json_lines_records(bytes: &[u8]) -> Vec<serde_json::Value> {
+        std::str::from_utf8(bytes)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    fn assert_json_lines_inventory_shape(value: &serde_json::Value, shape: &serde_json::Value) {
+        for (key, expected) in shape["required_json_types"].as_object().unwrap() {
+            assert!(value.get(key).is_some(), "missing {key}");
+            assert_json_lines_field_type(&value[key], expected);
+        }
+        for (key, expected) in shape["optional_json_types"].as_object().unwrap() {
+            if let Some(value) = value.get(key) {
+                assert_json_lines_field_type(value, expected);
+            }
+        }
+    }
+
+    fn assert_json_lines_field_type(value: &serde_json::Value, expected: &serde_json::Value) {
+        let actual = match value {
+            serde_json::Value::Null => "null",
+            serde_json::Value::Bool(_) => "boolean",
+            serde_json::Value::Number(_) => "number",
+            serde_json::Value::String(_) => "string",
+            serde_json::Value::Array(_) => "array",
+            serde_json::Value::Object(_) => "object",
+        };
+        assert!(
+            expected.as_str() == Some(actual)
+                || expected
+                    .as_array()
+                    .is_some_and(|types| types.iter().any(|value| value == actual)),
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn json_lines_inventory_contract_pins_record_and_route_types() {
+        let inventory: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../docs/reference/v1-stable-surface.json"
+        ))
+        .unwrap();
+        let contract = inventory["cli"]["versioned_json_contracts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == "rbgp-rib/1.0")
+            .unwrap();
+        let shapes = &contract["record_json_contracts"];
+        let header = serde_json::to_value(JsonLinesHeader {
+            r#type: "header",
+            format: "rbgp-rib",
+            format_version: "1.0",
+            view: "received",
+        })
+        .unwrap();
+        assert_json_lines_inventory_shape(&header, &shapes["header"]);
+        let mut route = route_for_json(7, "Valid");
+        route.local_pref_attr = Some(100);
+        route.stale = true;
+        route.llgr_stale = true;
+        route.aggregator = Some(crate::proto::RouteAggregator {
+            asn: 64512,
+            router_id: "192.0.2.9".into(),
+        });
+        route.atomic_aggregate = true;
+        let record = serde_json::to_value(JsonLinesRoute {
+            r#type: "route",
+            route: JsonRouteRef(&route),
+        })
+        .unwrap();
+        assert_json_lines_inventory_shape(&record, &shapes["route"]);
+        assert_json_lines_inventory_shape(&record["route"], &contract["nested_json_contracts"][0]);
+        assert_json_lines_inventory_shape(
+            &record["route"]["aggregator"],
+            &contract["nested_json_contracts"][1],
+        );
+        let end = serde_json::to_value(JsonLinesEnd {
+            r#type: "end",
+            returned_count: 1,
+            total_count: 2,
+            complete: false,
+        })
+        .unwrap();
+        assert_json_lines_inventory_shape(&end, &shapes["end"]);
+        // The nested route is exactly the existing curated projection.
+        assert_eq!(
+            record["route"],
+            serde_json::to_value(JsonRouteRef(&route)).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn json_lines_preserves_views_filters_paths_and_limits() {
+        for rpc in [
+            RouteListRpc::Best,
+            RouteListRpc::Received,
+            RouteListRpc::Advertised,
+        ] {
+            for limit in [None, Some(1)] {
+                let server = spawn_mock_server(None).await;
+                let route = rustbgpd_api::proto::Route {
+                    prefix: "2001:db8::".into(),
+                    prefix_length: 32,
+                    peer_address: "fe80::1".into(),
+                    path_id: 7,
+                    ..Default::default()
+                };
+                *server.state.list_route_pages.lock().await = vec![
+                    rustbgpd_api::proto::ListRoutesResponse {
+                        routes: vec![route.clone()],
+                        next_page_token: "opaque-second".into(),
+                        total_count: 2,
+                        page_version: None,
+                    },
+                    rustbgpd_api::proto::ListRoutesResponse {
+                        routes: vec![rustbgpd_api::proto::Route {
+                            path_id: 8,
+                            ..route
+                        }],
+                        next_page_token: String::new(),
+                        total_count: 2,
+                        page_version: None,
+                    },
+                ];
+                let connection = connect(&server.addr, None).await.unwrap();
+                let mut client = RibServiceClient::with_interceptor(
+                    connection.channel(),
+                    connection.interceptor(),
+                );
+                let peer = (rpc != RouteListRpc::Best).then_some("fe80::1%eth0");
+                let filters = count_filters();
+                let request =
+                    make_route_request(peer, Some(AddressFamily::Ipv6Unicast as i32), &filters)
+                        .unwrap();
+                let mut bytes = Vec::new();
+                write_route_json_lines(&mut bytes, &mut client, rpc, request, limit, peer)
+                    .await
+                    .unwrap();
+                let records = json_lines_records(&bytes);
+                assert_eq!(records[0]["format"], "rbgp-rib");
+                assert_eq!(records[0]["format_version"], "1.0");
+                assert_eq!(
+                    records[0]["view"],
+                    match rpc {
+                        RouteListRpc::Best => "best",
+                        RouteListRpc::Received => "received",
+                        RouteListRpc::Advertised => "advertised",
+                    }
+                );
+                assert_eq!(records[1]["route"]["path_id"], 7);
+                assert_eq!(
+                    records[1]["route"]["peer_address"],
+                    peer.unwrap_or("fe80::1")
+                );
+                let returned = if limit.is_some() { 1 } else { 2 };
+                assert_eq!(
+                    records.last().unwrap(),
+                    &serde_json::json!({
+                        "type": "end", "returned_count": returned, "total_count": 2,
+                        "complete": limit.is_none(),
+                    })
+                );
+                if limit.is_none() {
+                    assert_eq!(records[2]["route"]["path_id"], 8);
+                }
+                let requests = server.state.list_route_requests.lock().await;
+                assert_eq!(requests.len(), returned);
+                for request in requests.iter() {
+                    assert_eq!(request.neighbor_address, peer.map_or("", |_| "fe80::1"));
+                    assert_eq!(request.page_size, limit.unwrap_or(ROUTE_PAGE_SIZE));
+                    let mut count_request = request.clone();
+                    count_request.page_size = 1;
+                    count_request.page_token.clear();
+                    assert_count_request(&count_request, peer.map_or("", |_| "fe80::1"));
+                }
+                assert!(requests[0].page_token.is_empty());
+                if limit.is_none() {
+                    assert_eq!(requests[1].page_token, "opaque-second");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn json_lines_empty_table_has_successful_end() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+        let mut client =
+            RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+        let mut bytes = Vec::new();
+        write_route_json_lines(
+            &mut bytes,
+            &mut client,
+            RouteListRpc::Best,
+            make_route_request(None, None, &no_route_filters()).unwrap(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let records = json_lines_records(&bytes);
+        assert_eq!(records.len(), 2);
+        assert_eq!(
+            records[1],
+            serde_json::json!({"type":"end", "returned_count":0, "total_count":0, "complete":true})
+        );
+    }
+
+    #[tokio::test]
+    async fn json_lines_write_failure_stops_before_continuation() {
+        struct FailAfterHeader {
+            lines: usize,
+        }
+        impl Write for FailAfterHeader {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if self.lines != 0 {
+                    return Err(std::io::ErrorKind::BrokenPipe.into());
+                }
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.lines += 1;
+                Ok(())
+            }
+        }
+        let server = spawn_mock_server(None).await;
+        server
+            .state
+            .list_route_pages
+            .lock()
+            .await
+            .push(count_page(2));
+        let connection = connect(&server.addr, None).await.unwrap();
+        let mut client =
+            RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+        let result = write_route_json_lines(
+            &mut FailAfterHeader { lines: 0 },
+            &mut client,
+            RouteListRpc::Best,
+            make_route_request(None, None, &no_route_filters()).unwrap(),
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(CliError::Io(error)) if error.kind() == std::io::ErrorKind::BrokenPipe)
+        );
+        assert_eq!(server.state.list_route_requests.lock().await.len(), 1);
+    }
 
     fn legacy_route_to_json(r: &Route) -> output::JsonRoute {
         output::JsonRoute {
