@@ -382,7 +382,8 @@ impl Serialize for JsonEvpnRouteEntry<'_> {
         // Keys are emitted in flattened alphabetical order to match the
         // pre-#515 serde_json::Value (BTreeMap) byte output. Locked by
         // `direct_bgp_event_json_matches_legacy_value` — keep sorted.
-        let mut map = serializer.serialize_map(Some(17))?;
+        let mut map =
+            serializer.serialize_map(Some(17 + usize::from(route.prefix_sid.is_some())))?;
         map.serialize_entry("as_path", &route.as_path)?;
         map.serialize_entry("communities", &route.communities)?;
         map.serialize_entry("esi", &route.esi)?;
@@ -396,6 +397,9 @@ impl Serialize for JsonEvpnRouteEntry<'_> {
         map.serialize_entry("next_hop", &route.next_hop)?;
         map.serialize_entry("peer", &route.peer_address)?;
         map.serialize_entry("prefix", &route.prefix)?;
+        if let Some(view) = &route.prefix_sid {
+            map.serialize_entry("prefix_sid", &output::prefix_sid_json(view))?;
+        }
         map.serialize_entry("rd", &route.rd)?;
         map.serialize_entry("route_type", &route.route_type)?;
         map.serialize_entry("route_type_name", evpn_route_type_label(route.route_type))?;
@@ -622,13 +626,21 @@ fn format_bgp_event_line(event: &BgpEvent) -> String {
         .event_id
         .or_else(|| route_event_id(event).filter(|id| *id > 0))
         .map_or_else(String::new, |id| format!(" id={id}"));
-    format!(
+    let mut line = format!(
         "[{}] {} {}{}",
         event.timestamp,
         output::colored_event_type(bgp_event_type_display_label(event.event_type)),
         event.summary,
         event_id
-    )
+    );
+    if let Some(crate::proto::bgp_event::Payload::Evpn(evpn)) = &event.payload {
+        for (label, route) in [("current", &evpn.route), ("previous", &evpn.previous_route)] {
+            if let Some(view) = route.as_ref().and_then(|route| route.prefix_sid.as_ref()) {
+                line.push_str(&format!(" {label}: {}", output::prefix_sid_summary(view)));
+            }
+        }
+    }
+    line
 }
 
 fn print_bgp_event(event: &BgpEvent, json: bool) -> Result<(), CliError> {
@@ -2331,6 +2343,42 @@ mod tests {
             );
         }
         value
+    }
+
+    #[test]
+    fn evpn_event_prefix_sid_keeps_current_and_previous_views() {
+        let route = crate::proto::EvpnRouteEntry {
+            prefix_sid: Some(Box::new(
+                crate::proto::PrefixSidView::decode(
+                    crate::test_support::mock_prefix_sid()
+                        .encode_to_vec()
+                        .as_slice(),
+                )
+                .unwrap(),
+            )),
+            ..Default::default()
+        };
+        let event = BgpEvent {
+            payload: Some(crate::proto::bgp_event::Payload::Evpn(
+                crate::proto::EvpnRouteEvent {
+                    route: Some(route.clone()),
+                    previous_route: Some(route),
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        };
+        let value = bgp_event_json_value(&event).unwrap();
+        for key in ["route", "previous_route"] {
+            assert_eq!(value[key]["prefix_sid"]["raw_value"], "deadbeef");
+            assert_eq!(
+                value[key]["prefix_sid"]["services"][0]["sids"][0]["endpoint_behavior"],
+                65535
+            );
+        }
+        let text = format_bgp_event_line(&event);
+        assert!(text.contains("current: prefix-sid flags=0xe0"));
+        assert!(text.contains("previous: prefix-sid flags=0xe0"));
     }
 
     #[test]

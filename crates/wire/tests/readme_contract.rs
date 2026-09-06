@@ -340,7 +340,13 @@ fn source_public_error_roster() -> BTreeMap<String, bool> {
 #[test]
 fn usage_matches_the_published_wire_contract() {
     let usage = section(README, "## Usage");
-    assert!(usage.contains(&expected_dependency_block(env!("CARGO_PKG_VERSION"))));
+    // The prepared package can be ahead of crates.io; the ordinary registry
+    // example must retain the published release until publication.
+    assert!(usage.contains(&expected_dependency_block("0.19.0")));
+    assert!(usage.contains(&format!(
+        "rustbgpd-wire = {{ version = \"{}\", path = \"../rustbgpd/crates/wire\" }}",
+        env!("CARGO_PKG_VERSION")
+    )));
     assert!(usage.contains("`decode_message` accepts `&mut bytes::Bytes`"));
     assert!(usage.contains("the crate root does not expose a stable\n`Bytes` re-export"));
     assert!(decode_message_has_documented_signature(MESSAGE_SOURCE));

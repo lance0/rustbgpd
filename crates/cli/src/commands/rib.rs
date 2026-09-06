@@ -3,7 +3,7 @@ use crate::connection::{Connection, read_rpc};
 use crate::error::CliError;
 use crate::output::{
     self, JsonExplainAdvertisedRoute, JsonExplainModifications, JsonExplainReason,
-    JsonOrrExplainCandidate, JsonRouteSourceIdentity, outln,
+    JsonOrrExplainCandidate, JsonRouteSourceIdentity, hex_lower, outln,
 };
 use crate::pager;
 use crate::proto::injection_service_client::InjectionServiceClient;
@@ -723,6 +723,9 @@ fn print_vpn_routes(routes: &[VpnRouteEntry], json: bool) -> Result<(), CliError
                 route.peer_address,
                 vpn_route_targets(route).join(" ")
             )?;
+            if let Some(view) = &route.prefix_sid {
+                outln!("  {}", output::prefix_sid_summary(view))?;
+            }
         }
     }
     Ok(())
@@ -949,7 +952,7 @@ impl Serialize for JsonVpnRouteRef<'_> {
         S: Serializer,
     {
         let route = self.0;
-        let mut len = 10;
+        let mut len = 10 + usize::from(route.prefix_sid.is_some());
         if route.path_id != 0 {
             len += 1;
         }
@@ -974,6 +977,9 @@ impl Serialize for JsonVpnRouteRef<'_> {
         map.serialize_entry("as_path", &route.as_path)?;
         map.serialize_entry("communities", &route.communities)?;
         map.serialize_entry("extended_communities", &route.extended_communities)?;
+        if let Some(view) = &route.prefix_sid {
+            map.serialize_entry("prefix_sid", &output::prefix_sid_json(view))?;
+        }
         if route.path_id != 0 {
             map.serialize_entry("path_id", &route.path_id)?;
         }
@@ -1079,16 +1085,6 @@ fn bgpls_type_display(route: &BgpLsRouteEntry) -> String {
     } else {
         format!("{} ({})", route.nlri_type, route.nlri_type_name)
     }
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
 }
 
 struct JsonRouteRef<'a>(&'a Route);

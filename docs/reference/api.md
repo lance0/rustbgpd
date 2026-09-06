@@ -1322,6 +1322,35 @@ The three unicast route-listing RPCs return raw ordered
 retains the zero receive-time sentinel. The same native route serializer is
 used by best, received, advertised, and embedded `ExplainBestPath` routes.
 
+### Prefix-SID inspection on VPN and EVPN routes
+
+`VpnRouteEntry.prefix_sid` (field 14) and `EvpnRouteEntry.prefix_sid`
+(field 17) are optional views of the retained Prefix-SID path attribute.
+VPN Loc-RIB listings and all EVPN route views, explain snapshots, and current
+or previous event snapshots use the same conversion. An absent attribute
+leaves the field absent; older daemons and stored event records decode with
+no view.
+
+The view carries the complete attribute value in `raw_value` and the original
+path-attribute `flags`. `services` contains the first L3 (type 5) and first
+L2 (type 6) Service TLV, preserving service, SID Information, and SID Structure
+order. Each SID exposes its advertised IPv6 `sid_value`, numeric
+`endpoint_behavior` (including unknown codes), separate SID `flags`, and all
+six structure fields: locator block, locator node, function, argument,
+transposition length, and transposition offset. Reserved bytes, unknown TLVs,
+and ignored duplicate services remain available in `raw_value`.
+
+`rbgp --json rib vpn`, EVPN route lists and explain output, and EVPN event
+JSON expose an optional `prefix_sid` object with lowercase hex `raw_value`.
+Text output adds an advertised SID summary; `structure` lists the six fields
+in the order above. JSON includes a nonempty `decode_error` and no decoded
+services if stored raw data fails structural inspection; the raw bytes remain
+available. Routes without Prefix-SID keep their existing JSON shape.
+
+This is attribute inspection. It does not reconstruct a SID using NLRI label
+bits, validate endpoint behavior against the route family, select a service,
+originate SRv6 routes, or program forwarding. EVPN remains alpha.
+
 ### Runtime observability surfaces
 
 Runtime visibility is intentionally split by access pattern rather than forced

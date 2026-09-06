@@ -3,7 +3,11 @@
 This changelog covers the independently versioned `rustbgpd-rpki` crate.
 Daemon and workspace changes remain in the repository-level `CHANGELOG.md`.
 
-## Unreleased
+## 0.2.0 - Unreleased
+
+- Prepared the wire dependency move to `0.20.0`. Public signatures expose
+  wire types, so embedders sharing them must upgrade both dependencies to the
+  corresponding compatibility line.
 
 - Added `RtrClient::with_dialer` so embedders can supply custom cache connection setup.
 

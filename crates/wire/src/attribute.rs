@@ -8757,6 +8757,7 @@ mod tests {
                         panic!("Prefix-SID must remain raw");
                     };
                     assert_eq!(raw.data.as_ref(), value);
+                    assert!(crate::decode_prefix_sid_services(&raw.data).is_ok());
                     let mut encoded = Vec::new();
                     encode_path_attributes(&strict, &mut encoded, true, false).unwrap();
                     assert_eq!(encoded, attr_bytes(0xe0, attr_type::PREFIX_SID, &value));
@@ -8789,6 +8790,7 @@ mod tests {
                 malformed.push(srv6_test_service(kind, &srv6_test_tlv(1, &vec![0; length])));
             }
             for value in malformed {
+                assert!(crate::decode_prefix_sid_services(&value).is_err());
                 for flags in [0xc0, 0xe0, 0xd0, 0xf0] {
                     let wire = framed_test_attribute(flags, attr_type::PREFIX_SID, &value);
                     let error = decode_path_attributes(&wire, true, &[]).unwrap_err();
@@ -8881,6 +8883,76 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn prefix_sid_inspection_retains_advertised_order_and_transposition() {
+        fn sid(value: &str, behavior: u16, structures: &[[u8; 6]]) -> Vec<u8> {
+            let mut body = vec![0xa5];
+            body.extend(value.parse::<std::net::Ipv6Addr>().unwrap().octets());
+            body.push(0xff);
+            body.extend(behavior.to_be_bytes());
+            body.push(0x5a);
+            body.extend(srv6_test_tlv(254, &[7, 8]));
+            for structure in structures {
+                body.extend(srv6_test_tlv(1, structure));
+            }
+            srv6_test_tlv(1, &body)
+        }
+        let mut l2 = vec![0xff];
+        l2.extend(sid("2001:db8::1", 65535, &[[255; 6]]));
+        l2.extend(sid("::", 0, &[]));
+        let mut l3 = vec![0xa5];
+        l3.extend(sid(
+            "fc00:0:1::",
+            19,
+            &[[40, 24, 16, 0, 16, 64], [32, 16, 16, 64, 0, 0]],
+        ));
+        let value = [
+            srv6_test_tlv(254, &[0xff]),
+            srv6_test_tlv(6, &l2),
+            srv6_test_tlv(5, &l3),
+            srv6_test_tlv(6, &[]), // Ignored duplicate retains only outer framing.
+        ]
+        .concat();
+        let services = crate::decode_prefix_sid_services(&value).unwrap();
+        assert_eq!(
+            services.iter().map(|s| s.tlv_type).collect::<Vec<_>>(),
+            [6, 5]
+        );
+        assert_eq!(services[0].sids.len(), 2);
+        assert_eq!(services[0].sids[0].endpoint_behavior, 65535);
+        assert_eq!(services[0].sids[0].flags, 255);
+        assert_eq!(services[0].sids[0].structures[0].function_length, 255);
+        assert_eq!(
+            services[0].sids[1].sid_value,
+            std::net::Ipv6Addr::UNSPECIFIED
+        );
+        let sid = &services[1].sids[0];
+        assert_eq!(sid.sid_value.to_string(), "fc00:0:1::");
+        assert_eq!(sid.endpoint_behavior, 19);
+        assert_eq!(sid.structures.len(), 2);
+        let first = sid.structures[0];
+        assert_eq!(
+            [
+                first.locator_block_length,
+                first.locator_node_length,
+                first.function_length,
+                first.argument_length,
+                first.transposition_length,
+                first.transposition_offset,
+            ],
+            [40, 24, 16, 0, 16, 64]
+        );
+        assert_eq!(sid.structures[1].transposition_length, 0);
+        assert!(
+            crate::decode_prefix_sid_services(&srv6_test_tlv(254, &[1]))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(crate::decode_prefix_sid_services(&[]).is_err());
+        // A malformed suffix invalidates the whole view, including earlier valid services.
+        assert!(crate::decode_prefix_sid_services(&[value, vec![254, 0, 1]].concat()).is_err());
     }
 
     #[test]

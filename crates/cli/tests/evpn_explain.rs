@@ -136,6 +136,7 @@ async fn explain_distinguishes_fresh_selection_retained_source_and_committed_exp
         mac: "aa:bb:cc:dd:ee:ff".into(),
         peer_address: peer.into(),
         next_hop: peer.into(),
+        prefix_sid: Some(Box::new(test_support::mock_prefix_sid())),
         ..Default::default()
     };
     *server.state.explain_evpn_response.lock().await = proto::ExplainEvpnRouteResponse {
@@ -188,6 +189,8 @@ async fn explain_distinguishes_fresh_selection_retained_source_and_committed_exp
     assert!(result.status.success(), "{result:?}");
     let text = String::from_utf8(result.stdout).unwrap();
     for expected in [
+        "sid-value=fc00:0:1:: behavior=65535",
+        "structure=40/24/16/0/16/64",
         "Installed best:",
         "Fresh selection:",
         "Retained accepted source 192.0.2.7: absent",
@@ -206,6 +209,18 @@ async fn explain_distinguishes_fresh_selection_retained_source_and_committed_exp
     let result = run(&server.addr, &[vec!["--json"], args.to_vec()].concat());
     assert!(result.status.success(), "{result:?}");
     let value: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    for row in [
+        &value["best"],
+        &value["selection_best"],
+        &value["compared"],
+        &value["export"]["advertised"],
+    ] {
+        assert_eq!(row["prefix_sid"]["raw_value"], "deadbeef");
+        assert_eq!(
+            row["prefix_sid"]["services"][0]["sids"][0]["endpoint_behavior"],
+            65535
+        );
+    }
     assert_eq!(value["best"]["peer"], "192.0.2.1");
     assert_eq!(value["selection_best"]["peer"], "192.0.2.2");
     assert!(value["received"].is_null());

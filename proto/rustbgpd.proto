@@ -3298,6 +3298,51 @@ message ListFlowSpecResponse {
 // preserved by the RIB; this gRPC view is for human-readable inspection.
 // ---------------------------------------------------------------------------
 
+// Inspection of a retained Prefix-SID path attribute (type 40). The raw value
+// is authoritative; decoded fields neither rewrite it nor establish service
+// eligibility, SID reachability or forwarding support.
+message PrefixSidView {
+  // Complete attribute value, excluding the BGP attribute header. Preserves
+  // reserved octets, unknown extensions and ignored duplicate Service TLVs.
+  bytes raw_value = 1;
+  // Stored BGP path-attribute flags, distinct from Service SID flags below.
+  uint32 flags = 2;
+  // First instance of each L3/L2 Service TLV, in advertised order.
+  repeated Srv6Service services = 3;
+  // Empty on success. An inspection failure retains raw_value and flags but
+  // returns no partial services. Human-readable text, not a stable error code.
+  string decode_error = 4;
+}
+
+message Srv6Service {
+  // 5 = L3 Service; 6 = L2 Service. No family eligibility is inferred.
+  uint32 tlv_type = 1;
+  // Every SID Information entry in advertised order; no SID is selected.
+  repeated Srv6SidInformation sids = 2;
+}
+
+message Srv6SidInformation {
+  // IPv6 text for the advertised 16-byte SID value. This is not a reconstructed
+  // full SID when transposition carries additional bits in an NLRI label.
+  string sid_value = 1;
+  // Numeric endpoint behavior, including unknown values and opaque 65535.
+  uint32 endpoint_behavior = 2;
+  // Advertised Service SID flags, distinct from PrefixSidView.flags.
+  uint32 flags = 3;
+  // Every advertised SID Structure, including duplicates; no semantic checks.
+  repeated Srv6SidStructure structures = 4;
+}
+
+// All lengths and offsets are the advertised numbers of bits.
+message Srv6SidStructure {
+  uint32 locator_block_length = 1;
+  uint32 locator_node_length = 2;
+  uint32 function_length = 3;
+  uint32 argument_length = 4;
+  uint32 transposition_length = 5;
+  uint32 transposition_offset = 6;
+}
+
 // EVPN route entry in the RIB (any of 5 RFC 7432 route types).
 message EvpnRouteEntry {
   // RFC 7432 route type (1..=5).
@@ -3334,6 +3379,8 @@ message EvpnRouteEntry {
   // Decoded tunnel type from the BGP Encapsulation ext community, 0 if absent.
   // (VXLAN = 8 per RFC 8365.)
   uint32 tunnel_type = 16;
+  // Present only when the retained route has a Prefix-SID path attribute.
+  PrefixSidView prefix_sid = 17;
 }
 
 // Filter EVPN route listings. All filters are optional.
@@ -3517,6 +3564,8 @@ message VpnRouteEntry {
   bool stale = 11;
   bool llgr_stale = 12;
   uint32 path_id = 13;
+  // Present only when the retained route has a Prefix-SID path attribute.
+  PrefixSidView prefix_sid = 14;
 }
 
 // Filter VPN route listings. All filters are optional.
