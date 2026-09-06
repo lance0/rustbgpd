@@ -235,7 +235,7 @@ enum Ctx {
     /// The file: imports, dataset declarations, sets, fns, policies,
     /// tests.
     Top,
-    /// A `policy` body: `term` statements.
+    /// A `policy` body: an optional `default-action`, then `term` statements.
     Policy,
     /// A `test` body: `dataset` overrides, `route`/`peer` fixtures,
     /// `expect` lines.
@@ -406,7 +406,15 @@ fn is_starter(children: &[Node<'_>], i: usize, ctx: Ctx, prev: Tok, expr_head: b
             },
             _ => false,
         },
-        Ctx::Policy => *kind == Tok::TermKw,
+        Ctx::Policy => {
+            *kind == Tok::TermKw
+                || (*kind == Tok::Ident
+                    && *text == "default-action"
+                    && matches!(
+                        peek_kind(children, i, 1),
+                        Some(Tok::AcceptKw | Tok::RejectKw)
+                    ))
+        }
         Ctx::Test => match kind {
             Tok::RouteKw | Tok::PeerKw | Tok::ExpectKw => true,
             Tok::Ident => {
@@ -779,6 +787,33 @@ mod tests {
 
     fn fmt(source: &str) -> String {
         format_rpol(source).expect("formats cleanly")
+    }
+
+    #[test]
+    fn default_action_layout_preserves_comments_tokens_and_compiled_identity() {
+        for separator in ["", ";"] {
+            let source = format!(
+                "policy p{{# fallback\n default-action reject{separator} # keep this\n\
+                 term default-action{{if route.med==7{{accept}}}}}}"
+            );
+            let formatted = fmt(&source);
+            assert_eq!(
+                formatted,
+                format!(
+                    "policy p {{\n    # fallback\n    default-action reject{separator} # keep this\n\
+                     \x20   term default-action {{ if route.med == 7 {{ accept }} }}\n}}\n"
+                )
+            );
+            assert_eq!(fmt(&formatted), formatted);
+            assert_eq!(
+                super::super::compile_rpol(&source, &mut SetStore::new()).unwrap(),
+                super::super::compile_rpol(&formatted, &mut SetStore::new()).unwrap()
+            );
+        }
+        assert_eq!(
+            fmt("policy p{default-action accept}"),
+            "policy p {\n    default-action accept\n}\n"
+        );
     }
 
     #[test]

@@ -9,7 +9,7 @@ use std::net::IpAddr;
 
 use rustbgpd_wire::{LargeCommunity, Prefix};
 
-use crate::engine::CommunityMatch;
+use crate::engine::{CommunityMatch, PolicyAction};
 
 use super::diag::{Span, Spanned};
 
@@ -226,13 +226,15 @@ impl CommunityLit {
     }
 }
 
-/// `policy NAME(params) { terms }`.
+/// `policy NAME(params) { [default-action accept|reject] terms }`.
 #[derive(Debug)]
 pub struct PolicyDef {
     /// Policy name.
     pub name: Spanned<String>,
     /// Declared parameters (all `u32` in V1).
     pub params: Vec<Spanned<String>>,
+    /// Optional policy fallback; omission preserves accept-and-continue.
+    pub default_action: Option<Spanned<PolicyAction>>,
     /// Named terms, in source order.
     pub terms: Vec<TermDef>,
 }
