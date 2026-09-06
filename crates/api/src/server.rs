@@ -69,6 +69,7 @@ use crate::runtime_config_settlement::{
 use rustbgpd_rib::{RibReadinessQuery, RibUpdate};
 use rustbgpd_rpki::CacheQueryHandle;
 use rustbgpd_telemetry::BgpMetrics;
+use rustbgpd_telemetry::reason_labels::GrpcTlsHandshakeFailureReason;
 
 const MAX_CONCURRENT_GRPC_TLS_HANDSHAKES: usize = 64;
 const GRPC_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -207,6 +208,60 @@ where
         FuturesStreamExt::buffer_unordered(incoming, MAX_CONCURRENT_GRPC_TLS_HANDSHAKES),
         std::future::ready,
     )
+}
+
+fn tls_handshake_failure_reason(error: &std::io::Error) -> GrpcTlsHandshakeFailureReason {
+    use GrpcTlsHandshakeFailureReason as Reason;
+    use tokio_rustls::rustls::{CertificateError, Error};
+
+    match error
+        .get_ref()
+        .and_then(|error| error.downcast_ref::<Error>())
+    {
+        Some(Error::NoCertificatesPresented) => Reason::MissingCertificate,
+        Some(Error::InvalidCertificate(error)) => match error {
+            CertificateError::Expired | CertificateError::ExpiredContext { .. } => {
+                Reason::CertificateExpired
+            }
+            CertificateError::NotValidYet | CertificateError::NotValidYetContext { .. } => {
+                Reason::CertificateNotYetValid
+            }
+            CertificateError::UnknownIssuer => Reason::UnknownIssuer,
+            _ => Reason::InvalidCertificate,
+        },
+        Some(_) => Reason::TlsError,
+        None => Reason::IoError,
+    }
+}
+
+async fn accept_tls(
+    stream: tokio::net::TcpStream,
+    tls: Arc<tokio_rustls::rustls::ServerConfig>,
+    metrics: &BgpMetrics,
+) -> Option<RustbgpdTcpStream> {
+    match tokio::time::timeout(
+        GRPC_TLS_HANDSHAKE_TIMEOUT,
+        TlsAcceptor::from(tls).accept(stream),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => Some(RustbgpdTcpStream::from_tls(stream)),
+        Ok(Err(error)) => {
+            let reason = tls_handshake_failure_reason(&error);
+            metrics.record_grpc_tls_handshake_failure(reason);
+            warn!(%error, reason = reason.as_str(), "rejected gRPC mTLS handshake");
+            None
+        }
+        Err(_) => {
+            metrics.record_grpc_tls_handshake_failure(GrpcTlsHandshakeFailureReason::Timeout);
+            warn!(
+                timeout_seconds = GRPC_TLS_HANDSHAKE_TIMEOUT.as_secs(),
+                reason = GrpcTlsHandshakeFailureReason::Timeout.as_str(),
+                "timed out gRPC mTLS handshake"
+            );
+            None
+        }
+    }
 }
 
 /// Error returned by the daemon-owned config transaction apply hook.
@@ -1885,33 +1940,17 @@ async fn run_tcp_listener(
     let interceptor = AuthInterceptor::new(credential_store.clone(), credential_index);
     let builder = Server::builder();
     let mut builder = builder.layer(GrpcAuthzLayer::new(audit_context, metrics.clone()));
+    let handshake_metrics = metrics.clone();
     let incoming = FuturesStreamExt::map(TcpListenerStream::new(tcp_listener), move |accepted| {
         let generation = credential_store.load();
+        let metrics = handshake_metrics.clone();
         async move {
             let stream = match accepted {
                 Ok(stream) => stream,
                 Err(error) => return Some(Err(error)),
             };
             if let Some(tls) = generation.listener(credential_index).tls.clone() {
-                match tokio::time::timeout(
-                    GRPC_TLS_HANDSHAKE_TIMEOUT,
-                    TlsAcceptor::from(tls).accept(stream),
-                )
-                .await
-                {
-                    Ok(Ok(stream)) => Some(Ok(RustbgpdTcpStream::from_tls(stream))),
-                    Ok(Err(error)) => {
-                        warn!(%error, "rejected gRPC mTLS handshake");
-                        None
-                    }
-                    Err(_) => {
-                        warn!(
-                            timeout_seconds = GRPC_TLS_HANDSHAKE_TIMEOUT.as_secs(),
-                            "timed out gRPC mTLS handshake"
-                        );
-                        None
-                    }
-                }
+                accept_tls(stream, tls, &metrics).await.map(Ok)
             } else {
                 Some(Ok(RustbgpdTcpStream::new(stream)))
             }
@@ -3454,6 +3493,335 @@ mod tests {
         new.metadata_mut()
             .insert("authorization", "Bearer new".parse().unwrap());
         assert!(interceptor.call(new).is_ok());
+    }
+
+    mod tls_handshake_metrics {
+        use rcgen::{
+            BasicConstraints, Certificate, CertificateParams, DnType, ExtendedKeyUsagePurpose,
+            IsCa, Issuer, KeyPair,
+        };
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpStream;
+        use tokio_rustls::TlsConnector;
+        use tokio_rustls::rustls::{self, ClientConfig, RootCertStore, ServerConfig};
+        use tonic::transport::{Certificate as TonicCertificate, ClientTlsConfig, Identity};
+
+        use super::*;
+        use crate::credentials::TlsSource;
+        use crate::test_support::metrics_text;
+
+        fn ca(name: &str) -> (Certificate, Issuer<'static, KeyPair>) {
+            let mut params = CertificateParams::new(Vec::new()).unwrap();
+            params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+            params.distinguished_name.push(DnType::CommonName, name);
+            let key = KeyPair::generate().unwrap();
+            (params.self_signed(&key).unwrap(), Issuer::new(params, key))
+        }
+
+        fn leaf(
+            issuer: &Issuer<'static, KeyPair>,
+            eku: ExtendedKeyUsagePurpose,
+            validity: Option<(i32, i32)>,
+        ) -> (Certificate, KeyPair) {
+            let mut params = CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+            params.distinguished_name.push(DnType::CommonName, "test");
+            params.extended_key_usages.push(eku);
+            if let Some((start, end)) = validity {
+                params.not_before = rcgen::date_time_ymd(start, 1, 1);
+                params.not_after = rcgen::date_time_ymd(end, 1, 1);
+            }
+            let key = KeyPair::generate().unwrap();
+            (params.signed_by(&key, issuer).unwrap(), key)
+        }
+
+        fn server_config(ca: &Certificate, issuer: &Issuer<'static, KeyPair>) -> Arc<ServerConfig> {
+            let (cert, key) = leaf(issuer, ExtendedKeyUsagePurpose::ServerAuth, None);
+            let dir = tempfile::tempdir().unwrap();
+            let cert_file = dir.path().join("cert.pem");
+            let key_file = dir.path().join("key.pem");
+            let ca_file = dir.path().join("ca.pem");
+            std::fs::write(&cert_file, cert.pem()).unwrap();
+            std::fs::write(&key_file, key.serialize_pem()).unwrap();
+            std::fs::write(&ca_file, ca.pem()).unwrap();
+            CredentialStore::stage(vec![CredentialSource {
+                token_file: None,
+                tls: Some(TlsSource {
+                    cert_file,
+                    key_file,
+                    client_ca_file: ca_file,
+                }),
+            }])
+            .unwrap()
+            .load()
+            .listener(0)
+            .tls
+            .clone()
+            .unwrap()
+        }
+
+        fn client_config(
+            roots: RootCertStore,
+            identity: Option<&(Certificate, KeyPair)>,
+            version: &'static rustls::SupportedProtocolVersion,
+        ) -> Arc<ClientConfig> {
+            let builder = ClientConfig::builder_with_protocol_versions(&[version])
+                .with_root_certificates(roots);
+            let mut config = if let Some((cert, key)) = identity {
+                builder
+                    .with_client_auth_cert(
+                        vec![cert.der().clone()],
+                        rustls::pki_types::PrivateKeyDer::Pkcs8(key.serialize_der().into()),
+                    )
+                    .unwrap()
+            } else {
+                builder.with_no_client_auth()
+            };
+            config.alpn_protocols = vec![b"h2".to_vec()];
+            Arc::new(config)
+        }
+
+        async fn connect(
+            addr: SocketAddr,
+            config: Arc<ClientConfig>,
+        ) -> std::io::Result<tokio_rustls::client::TlsStream<TcpStream>> {
+            TlsConnector::from(config)
+                .connect(
+                    "localhost".to_string().try_into().unwrap(),
+                    TcpStream::connect(addr).await.unwrap(),
+                )
+                .await
+        }
+
+        fn failure_count(metrics: &BgpMetrics, reason: &str) -> u64 {
+            let line = format!("bgp_grpc_tls_handshake_failures_total{{reason=\"{reason}\"}} ");
+            metrics_text(metrics)
+                .lines()
+                .find_map(|sample| sample.strip_prefix(&line))
+                .unwrap()
+                .parse()
+                .unwrap()
+        }
+
+        fn authz_count(metrics: &BgpMetrics) -> u64 {
+            metrics_text(metrics)
+                .lines()
+                .filter(|line| line.starts_with("bgp_grpc_authz_decisions_total{"))
+                .map(|line| line.rsplit_once(' ').unwrap().1.parse::<u64>().unwrap())
+                .sum()
+        }
+
+        #[test]
+        fn typed_failures_keep_certificate_detail_out_of_labels() {
+            use GrpcTlsHandshakeFailureReason as Reason;
+            use rustls::{CertificateError, Error};
+            let time = rustls::pki_types::UnixTime::since_unix_epoch(Duration::from_secs(1));
+            for (error, expected) in [
+                (Error::NoCertificatesPresented, Reason::MissingCertificate),
+                (
+                    Error::InvalidCertificate(CertificateError::Expired),
+                    Reason::CertificateExpired,
+                ),
+                (
+                    Error::InvalidCertificate(CertificateError::ExpiredContext {
+                        time,
+                        not_after: time,
+                    }),
+                    Reason::CertificateExpired,
+                ),
+                (
+                    Error::InvalidCertificate(CertificateError::NotValidYet),
+                    Reason::CertificateNotYetValid,
+                ),
+                (
+                    Error::InvalidCertificate(CertificateError::NotValidYetContext {
+                        time,
+                        not_before: time,
+                    }),
+                    Reason::CertificateNotYetValid,
+                ),
+                (
+                    Error::InvalidCertificate(CertificateError::UnknownIssuer),
+                    Reason::UnknownIssuer,
+                ),
+                (
+                    Error::InvalidCertificate(CertificateError::BadEncoding),
+                    Reason::InvalidCertificate,
+                ),
+                (
+                    Error::General("unbounded error detail".to_string()),
+                    Reason::TlsError,
+                ),
+            ] {
+                assert_eq!(
+                    tls_handshake_failure_reason(&std::io::Error::other(error)),
+                    expected
+                );
+            }
+            assert_eq!(
+                tls_handshake_failure_reason(&std::io::Error::other("arbitrary transport error")),
+                Reason::IoError
+            );
+        }
+
+        #[tokio::test]
+        #[allow(
+            clippy::too_many_lines,
+            reason = "One live listener and authenticated connection span the rejection matrix and timeout"
+        )]
+        async fn live_rejections_are_counted_before_rpc_authorization() {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            let (ca_cert, issuer) = ca("trusted CA");
+            let tls = server_config(&ca_cert, &issuer);
+            let valid = leaf(&issuer, ExtendedKeyUsagePurpose::ClientAuth, None);
+            let (_, other_issuer) = ca("untrusted CA");
+            let wrong_ca = leaf(&other_issuer, ExtendedKeyUsagePurpose::ClientAuth, None);
+            let expired = leaf(
+                &issuer,
+                ExtendedKeyUsagePurpose::ClientAuth,
+                Some((2000, 2001)),
+            );
+            let future = leaf(
+                &issuer,
+                ExtendedKeyUsagePurpose::ClientAuth,
+                Some((4090, 4091)),
+            );
+            let mut roots = RootCertStore::empty();
+            roots.add(ca_cert.der().clone()).unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let metrics = BgpMetrics::new();
+            let incoming_metrics = metrics.clone();
+            let incoming = bounded_handshakes(FuturesStreamExt::map(
+                TcpListenerStream::new(listener),
+                move |accepted| {
+                    let tls = tls.clone();
+                    let metrics = incoming_metrics.clone();
+                    async move {
+                        match accepted {
+                            Ok(stream) => accept_tls(stream, tls, &metrics).await.map(Ok),
+                            Err(error) => Some(Err(error)),
+                        }
+                    }
+                },
+            ));
+            let context = tcp_audit_context(
+                addr,
+                AccessMode::ReadOnly,
+                AuthTier::SensitiveRead,
+                tier_authz("test"),
+                false,
+                true,
+                None,
+            );
+            let (shutdown_tx, shutdown_rx) = oneshot::channel();
+            let server_metrics = metrics.clone();
+            let server = tokio::spawn(async move {
+                Server::builder()
+                    .layer(GrpcAuthzLayer::new(context, server_metrics.clone()))
+                    .add_service(GlobalServiceServer::new(GlobalService::new(
+                        65000,
+                        "192.0.2.1".into(),
+                        179,
+                        server_metrics,
+                    )))
+                    .serve_with_incoming_shutdown(incoming, async {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await
+                    .unwrap();
+            });
+            // Real TLS 1.2 and 1.3 handshakes, using the production staged server defaults.
+            for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+                let mut client = connect(addr, client_config(roots.clone(), Some(&valid), version))
+                    .await
+                    .unwrap();
+                assert_eq!(client.get_ref().1.protocol_version(), Some(version.version));
+                let mut byte = [0];
+                tokio::time::timeout(Duration::from_secs(2), client.read_exact(&mut byte))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+            let channel = tonic::transport::Endpoint::from_shared(format!("https://{addr}"))
+                .unwrap()
+                .tls_config(
+                    ClientTlsConfig::new()
+                        .domain_name("localhost")
+                        .ca_certificate(TonicCertificate::from_pem(ca_cert.pem()))
+                        .identity(Identity::from_pem(valid.0.pem(), valid.1.serialize_pem())),
+                )
+                .unwrap()
+                .connect()
+                .await
+                .unwrap();
+            let mut rpc = GlobalServiceClient::new(channel);
+            rpc.get_global(GetGlobalRequest {}).await.unwrap();
+            assert_eq!(authz_count(&metrics), 1);
+            for reason in GrpcTlsHandshakeFailureReason::ALL {
+                assert_eq!(failure_count(&metrics, reason.as_str()), 0);
+            }
+            for (reason, identity, alert) in [
+                (
+                    "missing_certificate",
+                    None,
+                    rustls::AlertDescription::CertificateRequired,
+                ),
+                (
+                    "unknown_issuer",
+                    Some(&wrong_ca),
+                    rustls::AlertDescription::UnknownCA,
+                ),
+                (
+                    "certificate_expired",
+                    Some(&expired),
+                    rustls::AlertDescription::CertificateExpired,
+                ),
+                (
+                    "certificate_not_yet_valid",
+                    Some(&future),
+                    rustls::AlertDescription::CertificateExpired,
+                ),
+            ] {
+                let config = client_config(roots.clone(), identity, &rustls::version::TLS13);
+                let error = tokio::time::timeout(Duration::from_secs(2), async {
+                    match connect(addr, config).await {
+                        Err(error) => error,
+                        Ok(mut stream) => stream.read_u8().await.unwrap_err(),
+                    }
+                })
+                .await
+                .unwrap();
+                // tokio-rustls attempts a final alert write. Loopback actually receives it;
+                // this assertion does not promise delivery under arbitrary network failure.
+                assert!(
+                    matches!(error.get_ref().and_then(|error| error.downcast_ref::<rustls::Error>()),
+                    Some(rustls::Error::AlertReceived(received)) if *received == alert),
+                    "{reason}: {error:?}"
+                );
+                assert_eq!(failure_count(&metrics, reason), 1);
+                assert_eq!(authz_count(&metrics), 1);
+            }
+            let stalled = TcpStream::connect(addr).await.unwrap();
+            tokio::time::timeout(GRPC_TLS_HANDSHAKE_TIMEOUT + Duration::from_secs(2), async {
+                while failure_count(&metrics, "timeout") == 0 {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap();
+            drop(stalled);
+            assert_eq!(failure_count(&metrics, "timeout"), 1);
+            assert_eq!(authz_count(&metrics), 1);
+            // The already authenticated HTTP/2 connection remains usable after all failures.
+            rpc.get_global(GetGlobalRequest {}).await.unwrap();
+            assert_eq!(authz_count(&metrics), 2);
+            drop(rpc);
+            shutdown_tx.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(2), server)
+                .await
+                .unwrap()
+                .unwrap();
+        }
     }
 
     #[tokio::test]

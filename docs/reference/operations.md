@@ -1549,9 +1549,25 @@ journalctl -u rustbgpd -o cat --since -24h \
       | map({principal: .[0].principal, count: length})'
 ```
 
-Prometheus should watch both authorization volume and stream pressure:
+TLS handshake failures occur before request authorization and increment
+`bgp_grpc_tls_handshake_failures_total{reason}` once per rejected handshake,
+including the ten-second handshake timeout. The fixed reasons are
+`missing_certificate`, `certificate_expired`, `certificate_not_yet_valid`,
+`unknown_issuer`, `invalid_certificate` (other certificate validation failures),
+`tls_error` (other typed TLS errors), `io_error` (transport failures), and
+`timeout`. All eight series start at zero. These failures do not increment
+`bgp_grpc_authz_decisions_total`; successful handshakes and TCP accept errors
+also do not increment the handshake-failure counter. Labels contain no
+certificate contents, principal, listener address, or peer address. TLS alert
+delivery to the client remains best effort; use the server metric to observe
+its rejection reason.
+
+Prometheus should watch handshake failures, authorization volume, and stream pressure:
 
 ```promql
+# Rejected TLS handshakes, including clients that never reach an RPC.
+sum by (reason) (increase(bgp_grpc_tls_handshake_failures_total[5m]))
+
 # Any denied management-plane call in the last five minutes.
 sum by (tier, result, authn, access_mode) (
   increase(bgp_grpc_authz_decisions_total{
