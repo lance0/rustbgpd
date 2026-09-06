@@ -48,6 +48,7 @@ struct Response {
     location: Option<String>,
     expected_state: Option<(PathBuf, &'static str)>,
     delay: Option<Duration>,
+    body_byte_delay: Option<Duration>,
     chmod_before_reply: Option<(PathBuf, u32)>,
 }
 
@@ -60,6 +61,7 @@ impl Response {
             location: None,
             expected_state: None,
             delay: None,
+            body_byte_delay: None,
             chmod_before_reply: None,
         }
     }
@@ -72,6 +74,7 @@ impl Response {
             location: None,
             expected_state: None,
             delay: None,
+            body_byte_delay: None,
             chmod_before_reply: None,
         }
     }
@@ -161,7 +164,17 @@ impl Server {
                         let _ = write!(stream, "Location: {location}\r\n");
                     }
                     let _ = write!(stream, "\r\n");
-                    let _ = stream.write_all(&response.body);
+                    if let Some(delay) = response.body_byte_delay {
+                        stream.set_nodelay(true).unwrap();
+                        for byte in response.body {
+                            if stream.write_all(&[byte]).is_err() {
+                                break;
+                            }
+                            thread::sleep(delay);
+                        }
+                    } else {
+                        let _ = stream.write_all(&response.body);
+                    }
                 }));
             }
             for writer in writers {
@@ -551,6 +564,7 @@ fn redirects_and_unsafe_origins_or_key_files_are_refused_without_key_forwarding(
         location: Some(format!("http://{}/stolen", sink.local_addr().unwrap())),
         expected_state: None,
         delay: None,
+        body_byte_delay: None,
         chmod_before_reply: None,
     }]);
     assert_eq!(
@@ -601,6 +615,23 @@ fn redirects_and_unsafe_origins_or_key_files_are_refused_without_key_forwarding(
 }
 
 #[test]
+fn control_body_cannot_continue_past_the_global_deadline() {
+    let _lifecycle_guard = lifecycle_test_guard();
+    let rig = Rig::new();
+    let mut response = Response::json(200);
+    response.body.splice(0..0, vec![b' '; 1_500]);
+    response.body_byte_delay = Some(Duration::from_millis(1));
+    let server = Server::start(vec![response]);
+    let mut options = rig.options(&server.origin);
+    options.timeout = Duration::from_secs(1);
+    let result = lifecycle::run(&options);
+    let requests = server.finish();
+    assert_eq!(result, Err(Error::ManualRecovery));
+    assert_eq!(requests.len(), 1);
+    assert_request(&requests[0], "POST", "get-update-lock");
+}
+
+#[test]
 fn control_and_configuration_body_caps_fail_closed() {
     let _lifecycle_guard = lifecycle_test_guard();
     let rig = Rig::new();
@@ -620,6 +651,7 @@ fn control_and_configuration_body_caps_fail_closed() {
         location: None,
         expected_state: None,
         delay: None,
+        body_byte_delay: None,
         chmod_before_reply: None,
     }]);
     assert_eq!(
@@ -636,6 +668,7 @@ fn control_and_configuration_body_caps_fail_closed() {
         location: None,
         expected_state: None,
         delay: None,
+        body_byte_delay: None,
         chmod_before_reply: None,
     }]);
     assert_eq!(
@@ -1207,6 +1240,6 @@ fn every_lifecycle_test_acquires_the_process_guard_first() {
         .collect::<Vec<_>>();
     assert_eq!(
         tests.join(","),
-        "noop_lifecycle_uses_exact_authenticated_order_and_acknowledges,definite_lock_and_render_failures_have_bounded_release_semantics,failed_callback_is_durable_and_resume_never_refetches_or_activates,started_activation_uncertainty_retains_remote_lock_for_manual_recovery,redirects_and_unsafe_origins_or_key_files_are_refused_without_key_forwarding,control_and_configuration_body_caps_fail_closed,in_memory_renderer_is_byte_identical_to_private_file_entry_point,host_lock_is_exclusive_before_any_network_request,guard_clear_is_bound_to_the_claimed_host,per_handle_state_lock_refuses_before_publishing_host_fence,topology_mismatches_are_refused_before_network_effects,killed_run_retains_owner_fence_and_foreign_resume_cannot_bypass_it,journal_write_failure_after_lock_acquisition_fences_without_activation,callback_cleanup_failure_retains_fence_until_matching_resume,additive_cli_help_pins_run_and_callback_only_resume,poisoned_proxy_is_ignored_and_cli_reports_the_exact_terminal_status,only_the_pinned_definite_lock_statuses_clear_the_intent,corrupt_or_contradictory_durable_state_never_sends_a_callback,release_resume_preserves_the_original_refusal_or_rollback_exit,every_lifecycle_test_acquires_the_process_guard_first"
+        "noop_lifecycle_uses_exact_authenticated_order_and_acknowledges,definite_lock_and_render_failures_have_bounded_release_semantics,failed_callback_is_durable_and_resume_never_refetches_or_activates,started_activation_uncertainty_retains_remote_lock_for_manual_recovery,redirects_and_unsafe_origins_or_key_files_are_refused_without_key_forwarding,control_body_cannot_continue_past_the_global_deadline,control_and_configuration_body_caps_fail_closed,in_memory_renderer_is_byte_identical_to_private_file_entry_point,host_lock_is_exclusive_before_any_network_request,guard_clear_is_bound_to_the_claimed_host,per_handle_state_lock_refuses_before_publishing_host_fence,topology_mismatches_are_refused_before_network_effects,killed_run_retains_owner_fence_and_foreign_resume_cannot_bypass_it,journal_write_failure_after_lock_acquisition_fences_without_activation,callback_cleanup_failure_retains_fence_until_matching_resume,additive_cli_help_pins_run_and_callback_only_resume,poisoned_proxy_is_ignored_and_cli_reports_the_exact_terminal_status,only_the_pinned_definite_lock_statuses_clear_the_intent,corrupt_or_contradictory_durable_state_never_sends_a_callback,release_resume_preserves_the_original_refusal_or_rollback_exit,every_lifecycle_test_acquires_the_process_guard_first"
     );
 }

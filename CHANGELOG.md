@@ -517,6 +517,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- IXP Manager lifecycle requests now abort slow control-response bodies when
+  the global request budget expires. Uncertain update-lock acquisition stays
+  in manual recovery instead of continuing the lifecycle.
+
 - VPNv4 sessions now advertise RFC 8950 IPv6 next-hop receive support,
   including VPN-only configurations. Reflection preserves the IPv6 next hop
   and exports it only to recipients advertising the matching capability.
