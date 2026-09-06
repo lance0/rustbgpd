@@ -588,13 +588,15 @@ retained opaquely regardless of how its flags and framing were encoded.
   requires a Hop TLV and walks its sub-TLVs; BFD Discriminator (38) requires
   a Source IP TLV of length 4 or 16; NHC (39) walks the next hop and requires
   at least one characteristic; BGP Prefix-SID (40) length-checks the
-  Label-Index and Originator SRGB TLVs; and BIER (41) must carry at least one
-  TLV and walks its sub-TLV nesting. Values that pass stay opaque bytes.
+  Label-Index and Originator SRGB TLVs and validates RFC 9252 Service
+  nesting; and BIER (41) must carry at least one TLV and walks its sub-TLV
+  nesting. Values that pass stay opaque bytes.
 - **Framing dispositions split by type.** A framing failure in BFD
-  Discriminator (38), NHC (39), BGP Prefix-SID (40), or BIER (41) is
+  Discriminator (38), NHC (39), generic BGP Prefix-SID (40), or BIER (41) is
   attribute-discard: the malformed value cannot affect route selection, so
-  the UPDATE's routes survive without it. A framing failure in IPv6 Address
-  Specific Extended Community (25), Community Container (34), D-PATH (36), or
+  the UPDATE's routes survive without it. Recognized SRv6 L3/L2 Service TLV
+  malformation instead follows RFC 9252 §7 treat-as-withdraw. A framing failure
+  in IPv6 Address Specific Extended Community (25), Community Container (34), D-PATH (36), or
   SFP (37) is treat-as-withdraw. A *class* conflict on any of the eight is
   treat-as-withdraw regardless — §3 (h) takes the stronger of the two
   actions. Zero-length BIER is the case that changed disposition in v0.67.0:
@@ -1766,7 +1768,7 @@ implemented service procedures.
 | RFC | Status | Relevance |
 |-----|--------|-----------|
 | [RFC 9014](https://www.rfc-editor.org/rfc/rfc9014.html) | Not implemented | EVPN overlay interconnect gateway procedures, including overlay-to-MPLS interworking and Interconnect Ethernet Segments, are not implemented. Reflecting supported EVPN routes does not provide a DCI gateway. |
-| [RFC 9252](https://www.rfc-editor.org/rfc/rfc9252.html) | Partial: opaque attribute preservation | On supported EVPN route types, the BGP Prefix-SID attribute (type 40), including SRv6 L2/L3 Service TLV payloads, survives receive and export with its value bytes intact. The [transport preservation test](../../crates/transport/src/session/tests/outbound_attrs.rs) covers a Type 2 route over iBGP and eBGP. Outer Prefix-SID TLV framing is validated; SRv6 nested TLV validation, SID interpretation, origination, and forwarding are not implemented. This is not full RFC 9252 service support. |
+| [RFC 9252](https://www.rfc-editor.org/rfc/rfc9252.html) | Partial: structural validation and opaque reflection | Prefix-SID L3/L2 Service TLVs receive bounded nested framing checks with §7 treat-as-withdraw for malformed recognized services. Valid value bytes survive VPNv4/VPNv6 and EVPN receive/export over iBGP and eBGP; see the [transport tests](../../crates/transport/src/session/tests/outbound_attrs.rs) and [framing contract](path-attribute-registry.md#srv6-service-framing-within-prefix-sid). SID/behavior interpretation, semantic transposition validation, origination, and forwarding remain unimplemented. This is not full RFC 9252 service support. |
 | [RFC 9251](https://www.rfc-editor.org/rfc/rfc9251.html#section-9) | Not implemented, including reflection | Route Types 6–8 (SMET, Multicast Membership Report Synch, Multicast Leave Synch) are unrecognized and discarded on receive; they do not enter the RIB or propagate to other VTEPs. This follows [RFC 7606 §5.4](https://www.rfc-editor.org/rfc/rfc7606.html#section-5.4) typed-NLRI handling. There is no opaque route-type reflection or IGMP/MLD proxy implementation. |
 | RFC 9746 (Mar 2025; updates RFC 7432, RFC 8365) | Not implemented | Split Horizon Type (SHT) bits in the ESI Label extended community. §2.2: an egress NVE MUST NOT use an SHT other than 00 with VXLAN (tunnel type 8), so local bias is the only multi-homing split-horizon mechanism for VXLAN. This is the normative backing for the Linux softswitch local-bias limitation in [docs/reference/limitations.md](limitations.md); the ESI Label decoder reads only the single-active flag. |
 | RFC 9785 (Jun 2025; updates RFC 8584) | Partial | Highest-/Lowest-Preference DF election is implemented (`df_algorithm`), under the same unanimous-or-default negotiation restated in §4.1. The Don't-Preempt (DP) bit is originated (`df_dont_preempt`) and parsed but is not an election input, so stateful non-revertive election is not implemented. |

@@ -1315,76 +1315,87 @@ async fn rfc7606_treat_as_withdraw_covers_previously_accepted_evpn_routes() {
         EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, EvpnRoute, MacAddress, MpReachNlri,
         MplsLabel, RouteDistinguisher,
     };
-    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
-    let (client, _server) = connected_stream_pair().await;
-    session.test_install_stream(client);
-    establish_test_session(&mut session, 65002).await;
-    let mut negotiated = session.negotiated.as_deref().unwrap().clone();
-    negotiated
-        .negotiated_families
-        .push((Afi::L2Vpn, Safi::Evpn));
-    session.negotiated = Some(Arc::new(negotiated));
-    rfc7606_drain(&mut rib_rx);
-    let evpn_route = EvpnRoute::MacIp(EvpnMacIp {
-        rd: RouteDistinguisher([0x00, 0x00, 0xFD, 0xE8, 0x00, 0x00, 0x00, 0x64]),
-        esi: EthernetSegmentIdentifier::ZERO,
-        ethernet_tag: EthernetTagId(0),
-        mac: MacAddress([0xaa, 0xbb, 0xcc, 0x00, 0x00, 0x01]),
-        ip: Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))),
-        label1: MplsLabel::new(100),
-        label2: None,
-    });
-    let attrs = vec![
-        PathAttribute::Origin(Origin::Igp),
-        PathAttribute::AsPath(AsPath {
-            segments: vec![AsPathSegment::AsSequence(vec![65002])],
-        }),
-        PathAttribute::MpReachNlri(MpReachNlri {
-            afi: Afi::L2Vpn,
-            safi: Safi::Evpn,
-            next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
-            link_local_next_hop: None,
-            announced: vec![],
-            flowspec_announced: vec![],
-            evpn_announced: vec![evpn_route.clone()],
-            bgpls_announced: vec![],
-            labeled_announced: vec![],
-            vpn_announced: vec![],
-            rtc_announced: vec![],
-        }),
-    ];
-    let clean = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::Body);
-    session.process_update(clean.clone()).await;
-    let RibUpdate::RoutesReceived { evpn_announced, .. } = rib_rx.try_recv().unwrap() else {
-        panic!("expected the clean EVPN announcement to be accepted");
-    };
-    assert_eq!(evpn_announced.len(), 1);
-    assert!(session.known_evpn.contains(&evpn_route.key()));
-    // Re-announce the same EVPN route with a malformed MED appended.
-    let mut attr_bytes = clean.path_attributes.to_vec();
-    attr_bytes.extend([0x80, 4, 3, 0, 0, 1]);
-    session
-        .process_update(UpdateMessage {
-            withdrawn_routes: Bytes::new(),
-            path_attributes: Bytes::from(attr_bytes),
-            nlri: Bytes::new(),
-        })
-        .await;
-    let RibUpdate::RoutesReceived {
-        evpn_announced,
-        evpn_withdrawn,
-        ..
-    } = rib_rx.try_recv().unwrap()
-    else {
-        panic!("expected treat-as-withdraw RoutesReceived for the EVPN route");
-    };
-    assert!(evpn_announced.is_empty());
-    assert_eq!(evpn_withdrawn, vec![evpn_route.key()]);
-    assert!(
-        session.known_evpn.is_empty(),
-        "the previously accepted EVPN route must leave the session's accepted set"
-    );
-    assert_eq!(session.fsm.state(), SessionState::Established);
+    for malformed in [vec![0x80, 4, 3, 0, 0, 1], vec![0xc0, 40, 3, 6, 0, 0]] {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        let (client, _server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        establish_test_session(&mut session, 65002).await;
+        let mut negotiated = session.negotiated.as_deref().unwrap().clone();
+        negotiated
+            .negotiated_families
+            .push((Afi::L2Vpn, Safi::Evpn));
+        session.negotiated = Some(Arc::new(negotiated));
+        rfc7606_drain(&mut rib_rx);
+        let evpn_route = EvpnRoute::MacIp(EvpnMacIp {
+            rd: RouteDistinguisher([0x00, 0x00, 0xFD, 0xE8, 0x00, 0x00, 0x00, 0x64]),
+            esi: EthernetSegmentIdentifier::ZERO,
+            ethernet_tag: EthernetTagId(0),
+            mac: MacAddress([0xaa, 0xbb, 0xcc, 0x00, 0x00, 0x01]),
+            ip: Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))),
+            label1: MplsLabel::new(100),
+            label2: None,
+        });
+        let attrs = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::MpReachNlri(MpReachNlri {
+                afi: Afi::L2Vpn,
+                safi: Safi::Evpn,
+                next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                link_local_next_hop: None,
+                announced: vec![],
+                flowspec_announced: vec![],
+                evpn_announced: vec![evpn_route.clone()],
+                bgpls_announced: vec![],
+                labeled_announced: vec![],
+                vpn_announced: vec![],
+                rtc_announced: vec![],
+            }),
+        ];
+        let clean = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::Body);
+        session.process_update(clean.clone()).await;
+        let RibUpdate::RoutesReceived { evpn_announced, .. } = rib_rx.try_recv().unwrap() else {
+            panic!("expected the clean EVPN announcement to be accepted");
+        };
+        assert_eq!(evpn_announced.len(), 1);
+        assert!(session.known_evpn.contains(&evpn_route.key()));
+        // Re-announce with malformed MED or an SRv6 L2 Service TLV.
+        let mut attr_bytes = clean.path_attributes.to_vec();
+        attr_bytes.extend(malformed);
+        session
+            .process_update(UpdateMessage {
+                withdrawn_routes: Bytes::new(),
+                path_attributes: Bytes::from(attr_bytes),
+                nlri: Bytes::new(),
+            })
+            .await;
+        let RibUpdate::RoutesReceived {
+            evpn_announced,
+            evpn_withdrawn,
+            ..
+        } = rib_rx.try_recv().unwrap()
+        else {
+            panic!("expected treat-as-withdraw RoutesReceived for the EVPN route");
+        };
+        assert!(evpn_announced.is_empty());
+        assert_eq!(evpn_withdrawn, vec![evpn_route.key()]);
+        assert!(
+            session.known_evpn.is_empty(),
+            "the previously accepted EVPN route must leave the session's accepted set"
+        );
+        assert_eq!(session.fsm.state(), SessionState::Established);
+        assert_max_prefix_gauge(&session, "bgp_max_prefix_usage", "aggregate", Some(0.0));
+        assert_single_malformed_disposition(&session, "treat_as_withdraw");
+        session.process_update(clean).await;
+        let RibUpdate::RoutesReceived { evpn_announced, .. } = rib_rx.try_recv().unwrap() else {
+            panic!("expected recovery announcement");
+        };
+        assert_eq!(evpn_announced.len(), 1);
+        assert!(session.known_evpn.contains(&evpn_route.key()));
+        assert_eq!(session.fsm.state(), SessionState::Established);
+    }
 }
 
 /// RFC 7606 §5.4 / RFC 9136 §3: an unsupported EVPN route type is isolated,
@@ -1752,4 +1763,154 @@ async fn as_path_ceiling_withdraws_route_and_keeps_session() {
         "the ceiling must keep the session Established"
     );
     assert_single_malformed_disposition(&session, "treat_as_withdraw");
+}
+
+#[tokio::test]
+async fn srv6_service_malformed_vpn_replacement_withdraws_and_recovers() {
+    for afi in [Afi::Ipv4, Afi::Ipv6] {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        let (client, _server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        establish_test_session(&mut session, 65002).await;
+        let mut negotiated = session.negotiated.as_deref().unwrap().clone();
+        negotiated.negotiated_families.push((afi, Safi::MplsVpn));
+        session.negotiated = Some(Arc::new(negotiated));
+        rfc7606_drain(&mut rib_rx);
+        let mut route = make_vpn_rib_route(3);
+        if afi == Afi::Ipv6 {
+            route.nlri.prefix = VpnPrefix::v6("2001:db8:100::".parse().unwrap(), 48).unwrap();
+            route.next_hop = "2001:db8::2".parse().unwrap();
+        }
+        let key = route.key();
+        let mut attrs = route.attributes.as_ref().clone();
+        attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
+            afi,
+            safi: Safi::MplsVpn,
+            next_hop: route.next_hop,
+            link_local_next_hop: None,
+            announced: vec![],
+            flowspec_announced: vec![],
+            evpn_announced: vec![],
+            bgpls_announced: vec![],
+            labeled_announced: vec![],
+            vpn_announced: vec![rustbgpd_wire::VpnNlriEntry {
+                path_id: 0,
+                nlri: route.nlri,
+            }],
+            rtc_announced: vec![],
+        }));
+        let clean = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
+        session.process_update(clean.clone()).await;
+        let RibUpdate::VpnRoutesReceived {
+            announced: vpn_announced,
+            ..
+        } = rib_rx.try_recv().unwrap()
+        else {
+            panic!("expected clean VPN announcement");
+        };
+        assert_eq!(vpn_announced.len(), 1);
+        assert!(session.known_vpn.contains(&key));
+        assert_max_prefix_gauge(&session, "bgp_max_prefix_usage", "aggregate", Some(1.0));
+        let mut malformed = clean.clone();
+        let mut bytes = clean.path_attributes.to_vec();
+        // L3 Service reserved byte followed by an undersized SID Information sub-TLV.
+        bytes.extend([0xc0, 40, 7, 5, 0, 4, 0, 1, 0, 0]);
+        malformed.path_attributes = Bytes::from(bytes);
+        session.process_update(malformed).await;
+        let RibUpdate::VpnRoutesReceived {
+            announced: vpn_announced,
+            withdrawn: vpn_withdrawn,
+            ..
+        } = rib_rx.try_recv().unwrap()
+        else {
+            panic!("expected VPN withdrawal");
+        };
+        assert!(vpn_announced.is_empty());
+        assert_eq!(vpn_withdrawn, vec![key.clone()]);
+        assert!(!session.known_vpn.contains(&key));
+        assert_max_prefix_gauge(&session, "bgp_max_prefix_usage", "aggregate", Some(0.0));
+        assert_single_malformed_disposition(&session, "treat_as_withdraw");
+        assert_eq!(session.fsm.state(), SessionState::Established);
+        session.process_update(clean).await;
+        let RibUpdate::VpnRoutesReceived {
+            announced: vpn_announced,
+            ..
+        } = rib_rx.try_recv().unwrap()
+        else {
+            panic!("expected recovered VPN announcement");
+        };
+        assert_eq!(vpn_announced.len(), 1);
+        assert!(session.known_vpn.contains(&key));
+        assert_eq!(session.fsm.state(), SessionState::Established);
+    }
+}
+
+#[tokio::test]
+async fn srv6_service_without_usable_nlri_resets_session() {
+    for malformed_mp in [false, true] {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        let (client, mut server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        establish_test_session(&mut session, 65002).await;
+        rfc7606_drain(&mut rib_rx);
+        let mut attrs = rfc7606_attr_bytes(&[0xc0, 40, 3, 5, 0, 0]);
+        if malformed_mp {
+            attrs.extend([0x80, 14, 2, 0, 1]);
+        }
+        let prefixes = if malformed_mp {
+            vec![Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24)]
+        } else {
+            vec![]
+        };
+        session
+            .process_update(rfc7606_update(attrs, &prefixes))
+            .await;
+        assert_ne!(session.fsm.state(), SessionState::Established);
+        assert_single_malformed_disposition(&session, "session_reset");
+        while let Ok(message) = rib_rx.try_recv() {
+            assert!(!matches!(message, RibUpdate::RoutesReceived { .. }));
+        }
+        let notification = read_until_notification(&mut server).await;
+        assert_eq!(
+            notification.code,
+            rustbgpd_wire::notification::NotificationCode::UpdateMessage
+        );
+        assert_eq!(
+            notification.subcode,
+            rustbgpd_wire::notification::update_subcode::ATTRIBUTE_LENGTH_ERROR
+        );
+    }
+}
+
+#[tokio::test]
+async fn srv6_service_generic_prefix_sid_failure_still_discards_only_attribute() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    rfc7606_drain(&mut rib_rx);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    // Invalid Label-Index followed by a structurally valid L3 Service TLV.
+    let attrs = rfc7606_attr_bytes(&[0xc0, 40, 7, 1, 0, 0, 5, 0, 1, 0]);
+    session
+        .process_update(rfc7606_update(attrs, &[prefix]))
+        .await;
+    let RibUpdate::RoutesReceived {
+        announced,
+        withdrawn,
+        ..
+    } = rib_rx.try_recv().unwrap()
+    else {
+        panic!("expected accepted route without malformed generic Prefix-SID");
+    };
+    assert_eq!(announced.len(), 1);
+    assert!(withdrawn.is_empty());
+    assert!(
+        announced[0]
+            .attributes
+            .iter()
+            .all(|attr| attr.type_code() != 40)
+    );
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert_single_malformed_disposition(&session, "attribute_discard");
 }

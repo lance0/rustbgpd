@@ -499,6 +499,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   An ineligible replacement withdraws the old advertisement; IPv4 next-hop
   VPNv4 routes and VPN withdrawals retain their existing behavior.
 
+- Prefix-SID SRv6 L3/L2 Service TLVs now validate nested framing under
+  RFC 9252 §7. Recognized service malformation returns the additive
+  `DecodeError::MalformedSrv6ServiceTlv` and uses treat-as-withdraw in revised
+  decoding; generic Prefix-SID length errors keep attribute-discard. Valid
+  opaque values and unknown/reserved fields remain unchanged. This adds no
+  SID interpretation, service eligibility, origination, or forwarding.
+
 - EVPN local MAC/IP activation now advertises above the effective sequence of
   a different imported remote MAC holding the same IPv4 or IPv6 address
   (RFC 9721 §6.1). The retained floor applies to the local MAC and its IP
@@ -815,6 +822,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   A recipient without RFC 8950 tuple 1/128/2 no longer receives VPNv4 IPv6
   next-hop announcements; exact-export rejection also removes an older
   advertisement when an IPv4 next hop is replaced by an IPv6 next hop.
+
+- **SRv6 Prefix-SID structural validation:** malformed recognized L3/L2
+  Service TLVs now withdraw the UPDATE's reachable routes while preserving
+  the session when NLRI can be recovered. Unusable NLRI retains session reset;
+  malformed snapshot entries fail admission. Generic Prefix-SID errors retain
+  attribute-discard, and valid opaque reflection is unchanged. Embedders using
+  prepared wire `0.19.1` can receive `DecodeError::MalformedSrv6ServiceTlv`.
 
 - **EVPN IP ownership sequence:** a newly learned local MAC/IP binding can
   now carry a higher MAC Mobility sequence when another eligible remote MAC
