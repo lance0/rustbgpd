@@ -278,6 +278,8 @@ fn run_starter(label: &str, source: &str, group_json: &str, commands: &[String])
         .expect("make temp dir private");
     let runtime_dir = temp.path().join(format!("{label}-runtime"));
     std::fs::create_dir_all(&runtime_dir).expect("create runtime dir");
+    std::fs::set_permissions(&runtime_dir, std::fs::Permissions::from_mode(0o700))
+        .expect("make runtime dir private");
     let config_path = temp.path().join("config.toml");
     std::fs::write(&config_path, isolated_config(source, &runtime_dir))
         .expect("write isolated config");

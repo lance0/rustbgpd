@@ -499,6 +499,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   An ineligible replacement withdraws the old advertisement; IPv4 next-hop
   VPNv4 routes and VPN withdrawals retain their existing behavior.
 
+- gRPC Unix sockets now reject unsafe parent directories and ancestor paths,
+  bind without a permission window, and preserve existing live or uncertain
+  sockets. Descriptor-relative operations and cooperative startup locking
+  protect endpoint creation and cleanup. UDS authorization diagnostics now
+  recommend owner-only access, and token-protected UDS listeners report
+  `authn = "bearer_token"` without changing their principal or role.
+
 - Prefix-SID SRv6 L3/L2 Service TLVs now validate nested framing under
   RFC 9252 §7. Recognized service malformation returns the additive
   `DecodeError::MalformedSrv6ServiceTlv` and uses treat-as-withdraw in revised
@@ -822,6 +829,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   A recipient without RFC 8950 tuple 1/128/2 no longer receives VPNv4 IPv6
   next-hop announcements; exact-export rejection also removes an older
   advertisement when an IPv4 next hop is replaced by an IPv6 next hop.
+
+- **gRPC Unix socket paths:** the immediate parent must be effective-UID-owned,
+  readable/searchable and writable by the daemon, and not group/world-writable.
+  Paths must be absolute, have no symlink or `..` components, and use trusted
+  root/effective-UID ancestors. Sticky ancestors such as `/tmp` are allowed
+  only above a protected child directory; move `/tmp/name.sock` to a private
+  directory. Linux `/proc/self/fd` must be available. Both the configured and
+  descriptor-relative socket paths must fit the Unix socket pathname limit.
+  Existing live listeners now cause startup failure instead of losing their
+  socket. Token-protected UDS audit labels change from `uds`/`uds_owner` to
+  `bearer_token`; permissions-only labels and supported group-sharing roles
+  remain unchanged. See the [UDS path requirements](docs/reference/security.md#unix-socket-path-integrity).
 
 - **SRv6 Prefix-SID structural validation:** malformed recognized L3/L2
   Service TLVs now withdraw the UPDATE's reachable routes while preserving

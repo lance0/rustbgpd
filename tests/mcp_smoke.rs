@@ -5,6 +5,7 @@
 //! `cargo test --workspace` builds both executables before running tests.
 
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread::JoinHandle;
@@ -435,7 +436,12 @@ async fn run_fixture(path: &Path) {
 
 #[tokio::test]
 async fn live_export_explain_and_observer_mutation_denial() {
-    let directory = support::RetainOnPanic::new(tempfile::tempdir().unwrap());
+    let directory = support::RetainOnPanic::new(
+        tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap(),
+    );
     // Canceling the fixture drops its guards, kills and waits for every child,
     // and joins the protocol reader before a timeout is reported as failure.
     tokio::time::timeout(Duration::from_secs(120), run_fixture(directory.path()))

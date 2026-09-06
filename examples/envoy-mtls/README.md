@@ -65,6 +65,13 @@ Envoy must be able to open the backend socket. The default UDS is created with
 mode `0o600` owned by the daemon user, so run Envoy as that user (or as root);
 any other identity gets `EACCES` on connect.
 
+Keep the socket parent owned by the daemon user, with read/write/search access
+for that user and no group/world write bits. Current source rejects insecure
+parents and ancestor symlinks at gRPC startup; a shared container volume must
+meet the same ownership rules. Use a private child directory under `/tmp`,
+not a socket directly in `/tmp`. See
+[Unix socket path integrity](../../docs/reference/security.md#unix-socket-path-integrity).
+
 ## Example client call
 
 ```bash

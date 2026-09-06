@@ -643,15 +643,51 @@ local operation. Group/world-accessible modes still require an explicit
 `principal` plus a matching role entry, and `local-operator` itself is
 reserved (rejected in roles and listener `principal` fields).
 
+Keep the socket owner-only unless shared access is intentional. A configured
+`token_file` requires its bearer token in addition to filesystem access and
+sets the audit label to `authn = "bearer_token"`. It does not change the
+listener's principal or role: an owner-only socket without a principal still
+uses `local-operator`. Without a token, that implicit identity uses
+`authn = "uds_owner"`; an explicit UDS principal uses `authn = "uds"`.
+
 | Field        | Type   | Required | Default | Description |
 |--------------|--------|----------|---------|-------------|
 | `enabled`    | bool   | no       | `true`  | Enable this listener when the table is present |
-| `path`       | string | no       | `<runtime_state_dir>/grpc.sock` | Absolute Unix socket path |
-| `mode`       | u32    | no       | `0o600` | Filesystem mode applied to the socket after bind |
+| `path`       | string | no       | `<runtime_state_dir>/grpc.sock` | Absolute Unix socket path without symlinks or `..` components |
+| `mode`       | u32    | no       | `0o600` | Filesystem socket mode; creation never grants wider access |
 | `access_mode` | string | no      | `"read_write"` | Listener authorization mode: `"read_write"` or `"read_only"` |
 | `max_tier`   | string | no       | implied by `access_mode` | ADR-0064 per-method listener cap: `read`, `sensitive_read`, `mutating`, or `operator_only` |
 | `token_file` | string | no       | --      | Optional bearer token file for listener auth |
 | `principal`  | string | no       | --      | Stable ADR-0064 audit principal label for this UDS listener |
+
+At bind time the daemon verifies the parent directory and its ancestors;
+unsafe paths fail gRPC startup. Missing directories are created owner-only.
+The immediate parent must belong to the daemon's effective UID, allow it
+read/write/search access, and have no group/world write bits. Ancestors must
+be root- or effective-UID-owned, with group/world write allowed only for
+sticky directories whose next path component has a trusted owner. Use a
+private child such as `/tmp/rustbgpd/grpc.sock`, rather than a socket directly
+in `/tmp`. See [Unix socket path integrity](security.md#unix-socket-path-integrity).
+
+Mode `0o660` alone cannot admit group clients through an auto-created `0700`
+directory. For deliberate sharing, pre-create a daemon-owned parent with
+search access for the intended group and no group write. For example, with
+daemon account `rustbgpd` and an existing `bgp-operators` group:
+
+```bash
+sudo install -d -o rustbgpd -g bgp-operators -m 2750 /run/rustbgpd-api
+```
+
+The setgid directory makes a socket at `/run/rustbgpd-api/grpc.sock` inherit
+`bgp-operators`; configure socket mode `0o660` and the intended principal/role.
+All ancestors must also permit those clients to search the path. Without a
+setgid parent, the socket uses the daemon's effective group instead.
+
+Secure binding requires Linux with `/proc/self/fd` available. Both the
+configured path and `/proc/self/fd/<descriptor>/<socket-filename>` must fit
+Linux's 107-byte pathname limit. A live or uncertain existing socket is
+retained; concurrent startup in the same parent directory fails instead of
+removing another listener's endpoint.
 
 ### `[global.telemetry.grpc_tcp]`
 
@@ -834,8 +870,9 @@ log_format = "json"
 # requires an explicit principal with a matching role entry below. An
 # owner-only socket (default 0o600) with no principal would instead ride the
 # implicit local-operator identity and need neither.
+# Pre-create the group-searchable setgid parent as shown in the UDS section.
 [global.telemetry.grpc_uds]
-path = "/var/lib/rustbgpd/grpc.sock"
+path = "/run/rustbgpd-api/grpc.sock"
 mode = 0o660
 access_mode = "read_write"
 principal = "local-admin"
