@@ -63,7 +63,7 @@ $ echo $?
 ```
 
 Exit codes: `0` clean, `1` compile diagnostics (or unreadable file),
-`2` in-language test failures, `3` coverage below `--coverage-min`
+`2` in-language test failures, `3` coverage below an explicit threshold
 (see [Coverage and lints](#coverage-and-lints)). `--json` emits a
 machine-readable report.
 
@@ -1141,6 +1141,7 @@ tested policy it reports two distinct facts: was the guard ever
 
 ```text
 coverage: 2/5 terms exercised by tests
+matched coverage: 1/5 terms matched by tests
   policy edge-in
     term bogon-guard      evaluated 5x, matched 2x
     term customer-routes  evaluated 3x, never matched   <- no test route hits this
@@ -1185,10 +1186,29 @@ Coverage is a report: it never changes the exit code by itself. For
 CI, `--coverage-min PCT` (which implies `--coverage`) exits **3**
 when the exercised-term percentage falls below the threshold —
 distinct from `1` (diagnostics) and `2` (test failures), which take
-precedence. `-j` adds a `coverage` object with stable keys
-(`terms_total`, `terms_exercised`, `percent`, per-policy `status` of
+precedence. `--coverage-matched-min PCT` independently gates the
+percentage of source terms matched by at least one test route. It
+accepts a finite percentage from **0 through 100**, also implies
+`--coverage`, and uses the same exit codes and precedence. Both
+thresholds can be supplied; both must pass.
+
+The matched threshold uses the same source-term denominator, including
+untested and apply-only policies. A file with no terms reports 100%
+for both percentages. This gate detects terms no fixture matches; it
+does **not** guarantee branch coverage or detect every widened guard.
+Removing a narrowing condition can increase matched coverage. Keep
+negative-case fixtures that assert the intended route verdict and
+modifications alongside positive fixtures.
+
+`-j` adds a `coverage` object with stable keys
+(`terms_total`, `terms_exercised`, `percent`, `terms_matched`,
+`matched_percent`, per-policy `status` of
 `tested`/`apply-only`/`untested`, per-term `evaluated`/`matched`
-counts, and `lints` with machine-readable `kind` labels).
+counts, and `lints` with machine-readable `kind` labels). `percent`
+continues to mean evaluated-term coverage; `matched_percent` is the
+separate matched-term percentage. The existing top-level `ok` describes
+compilation and test success; use the process exit code to enforce a
+requested coverage threshold.
 
 ## Modules and imports
 

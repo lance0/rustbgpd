@@ -8525,7 +8525,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__policy__subcmd__check)
-            opts="-s -j -h --root --max-graph-bytes --list-deps --coverage --coverage-min --addr --token-file --json --json-lines --no-color --pager --help"
+            opts="-s -j -h --root --max-graph-bytes --list-deps --coverage --coverage-min --coverage-matched-min --addr --token-file --json --json-lines --no-color --pager --help"
             if [[ ${cur} == -* ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -8548,6 +8548,10 @@ _rbgp() {
                     return 0
                     ;;
                 --coverage-min)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --coverage-matched-min)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;

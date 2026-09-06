@@ -146,20 +146,24 @@ struct JsonChains {
 /// tests); no daemon. `roots` are extra `import` resolution roots
 /// (the file's own directory is always one); `list_deps` prints the
 /// resolved import graph + content hashes instead of running tests.
-/// `coverage` (or a `coverage_min` threshold, which implies it)
-/// additionally reports per-term test coverage and the static lints
-/// (LAN-323) — a report that never fails the check by itself; only
-/// `coverage_min` consumes it for the exit code.
+/// `coverage` (or either coverage threshold, which implies it)
+/// additionally reports per-term test coverage and static lints.
+/// Only the explicit thresholds affect the exit code.
 ///
 /// Returns the process exit code: 0 clean, 1 diagnostics (or an
-/// unreadable file), 2 test failures, 3 coverage below `coverage_min`.
+/// unreadable file), 2 test failures, 3 coverage below an explicit threshold.
 /// Diagnostics render to stderr, results to stdout.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "thin CLI plumbing mirroring the flag surface; a struct would only relabel it"
+)]
 pub fn check_local(
     path: &str,
     roots: &[String],
     list_deps: bool,
     coverage: bool,
     coverage_min: Option<f64>,
+    coverage_matched_min: Option<f64>,
     max_graph_bytes: Option<usize>,
     json: bool,
 ) -> i32 {
@@ -169,6 +173,7 @@ pub fn check_local(
         list_deps,
         coverage,
         coverage_min,
+        coverage_matched_min,
         max_graph_bytes,
         json,
         &mut std::io::stdout().lock(),
@@ -185,6 +190,7 @@ fn check_local_with_writer(
     list_deps: bool,
     coverage: bool,
     coverage_min: Option<f64>,
+    coverage_matched_min: Option<f64>,
     max_graph_bytes: Option<usize>,
     json: bool,
     stdout: &mut dyn std::io::Write,
@@ -228,7 +234,7 @@ fn check_local_with_writer(
     if list_deps && let Some(file) = &file {
         return print_deps(path, file, json, stdout);
     }
-    let want_coverage = coverage || coverage_min.is_some();
+    let want_coverage = coverage || coverage_min.is_some() || coverage_matched_min.is_some();
     let (tests, cov) = match &file {
         Some(file) if want_coverage => {
             let (tests, cov) = file.run_tests_with_coverage();
@@ -300,6 +306,15 @@ fn check_local_with_writer(
         );
         return 3;
     }
+    if let (Some(min), Some(cov)) = (coverage_matched_min, &cov)
+        && cov.matched_percent() < min
+    {
+        eprintln!(
+            "{path}: matched coverage {:.1}% is below --coverage-matched-min {min}%",
+            cov.matched_percent()
+        );
+        return 3;
+    }
     0
 }
 
@@ -317,6 +332,12 @@ fn write_coverage_text(
         out,
         "coverage: {}/{} terms exercised by tests",
         cov.terms_exercised(),
+        cov.terms_total()
+    )?;
+    writeln!(
+        out,
+        "matched coverage: {}/{} terms matched by tests",
+        cov.terms_matched(),
         cov.terms_total()
     )?;
     let module_path = |index: u32| -> &str {
@@ -372,7 +393,7 @@ fn write_coverage_text(
 }
 
 /// The `-j` form of `rbgp policy check` output (stable keys; the
-/// `coverage` object appears only under `--coverage`/`--coverage-min`).
+/// `coverage` object appears only under `--coverage` or either coverage threshold).
 fn print_check_json(
     path: &str,
     diagnostics: &[String],
@@ -410,6 +431,8 @@ fn print_check_json(
         terms_total: usize,
         terms_exercised: usize,
         percent: f64,
+        terms_matched: usize,
+        matched_percent: f64,
         policies: Vec<JsonCoveragePolicy<'a>>,
         lints: Vec<JsonLint<'a>>,
     }
@@ -432,6 +455,8 @@ fn print_check_json(
         terms_total: cov.terms_total(),
         terms_exercised: cov.terms_exercised(),
         percent: cov.percent(),
+        terms_matched: cov.terms_matched(),
+        matched_percent: cov.matched_percent(),
         policies: cov
             .policies
             .iter()
@@ -2027,6 +2052,7 @@ mod tests {
                 false,
                 None,
                 None,
+                None,
                 false
             ),
             0
@@ -2037,6 +2063,7 @@ mod tests {
                 &[],
                 false,
                 false,
+                None,
                 None,
                 None,
                 true
@@ -2120,6 +2147,7 @@ mod tests {
                 false,
                 None,
                 None,
+                None,
                 true,
                 &mut BrokenWriter,
             ),
@@ -2143,6 +2171,7 @@ mod tests {
                     coverage,
                     None,
                     None,
+                    None,
                     false,
                     &mut BrokenWriter
                 ),
@@ -2162,6 +2191,7 @@ mod tests {
                     coverage,
                     None,
                     None,
+                    None,
                     false,
                     &mut flush
                 ),
@@ -2170,13 +2200,13 @@ mod tests {
         }
         let mut bytes = Vec::new();
         assert_eq!(
-            check_local_with_writer(path, &[], false, true, None, None, false, &mut bytes),
+            check_local_with_writer(path, &[], false, true, None, None, None, false, &mut bytes),
             0
         );
         assert_eq!(
             String::from_utf8(bytes).unwrap(),
             format!(
-                "{path}: 1 passed, 0 failed\ncoverage: 1/1 terms exercised by tests\n  policy p\n    term t  evaluated 1x, matched 1x\n"
+                "{path}: 1 passed, 0 failed\ncoverage: 1/1 terms exercised by tests\nmatched coverage: 1/1 terms matched by tests\n  policy p\n    term t  evaluated 1x, matched 1x\n"
             )
         );
     }
@@ -2192,6 +2222,7 @@ mod tests {
                 false,
                 None,
                 None,
+                None,
                 false
             ),
             1
@@ -2203,6 +2234,7 @@ mod tests {
                 &[],
                 false,
                 false,
+                None,
                 None,
                 None,
                 false
@@ -2238,7 +2270,10 @@ mod tests {
         let main = main.to_str().unwrap();
         let root = lib.path().to_str().unwrap().to_string();
         // Without the root the import cannot resolve.
-        assert_eq!(check_local(main, &[], false, false, None, None, false), 1);
+        assert_eq!(
+            check_local(main, &[], false, false, None, None, None, false),
+            1
+        );
         // With it: clean check (the cross-module test runs) and deps.
         assert_eq!(
             check_local(
@@ -2246,6 +2281,7 @@ mod tests {
                 std::slice::from_ref(&root),
                 false,
                 false,
+                None,
                 None,
                 None,
                 false
@@ -2260,13 +2296,20 @@ mod tests {
                 false,
                 None,
                 None,
+                None,
                 false
             ),
             0
         );
-        assert_eq!(check_local(main, &[root], true, false, None, None, true), 0);
+        assert_eq!(
+            check_local(main, &[root], true, false, None, None, None, true),
+            0
+        );
         // --list-deps on a broken graph still exits 1.
-        assert_eq!(check_local(main, &[], true, false, None, None, false), 1);
+        assert_eq!(
+            check_local(main, &[], true, false, None, None, None, false),
+            1
+        );
     }
 
     #[test]
@@ -2284,6 +2327,7 @@ mod tests {
                 &[],
                 false,
                 false,
+                None,
                 None,
                 None,
                 false
@@ -2307,14 +2351,20 @@ mod tests {
              }",
         );
         let path = tmp.path().to_str().unwrap();
-        assert_eq!(check_local(path, &[], false, true, None, None, false), 0);
-        assert_eq!(check_local(path, &[], false, true, None, None, true), 0);
         assert_eq!(
-            check_local(path, &[], false, false, Some(100.0), None, false),
+            check_local(path, &[], false, true, None, None, None, false),
+            0
+        );
+        assert_eq!(
+            check_local(path, &[], false, true, None, None, None, true),
+            0
+        );
+        assert_eq!(
+            check_local(path, &[], false, false, Some(100.0), None, None, false),
             3
         );
         assert_eq!(
-            check_local(path, &[], false, true, Some(50.0), None, false),
+            check_local(path, &[], false, true, Some(50.0), None, None, false),
             0
         );
         // A failing test wins over the coverage threshold.
@@ -2327,7 +2377,7 @@ mod tests {
         );
         let failing = failing.path().to_str().unwrap();
         assert_eq!(
-            check_local(failing, &[], false, false, Some(100.0), None, false),
+            check_local(failing, &[], false, false, Some(100.0), None, None, false),
             2
         );
     }
@@ -2963,7 +3013,7 @@ mod tests {
         // No temp residue from the atomic write.
         assert!(!dir.path().join("p.rpol.tmp").exists());
         assert_eq!(
-            check_local(&files[0], &[], false, false, None, None, false),
+            check_local(&files[0], &[], false, false, None, None, None, false),
             0
         );
     }

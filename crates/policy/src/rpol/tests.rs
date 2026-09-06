@@ -5795,6 +5795,9 @@ test falls-to-c {
         );
         assert_eq!(cov.terms_total(), 3);
         assert_eq!(cov.terms_exercised(), 3);
+        assert!((cov.percent() - (100.0)).abs() < f64::EPSILON);
+        assert_eq!(cov.terms_matched(), 2);
+        assert!((cov.matched_percent() - (2.0 / 3.0 * 100.0)).abs() < f64::EPSILON);
     }
 
     /// A term earlier walks always decide past is never evaluated, and
@@ -5825,6 +5828,9 @@ test med-200 {
         assert_eq!(term(&cov, "pin", "fallthrough").matched, 1);
         assert_eq!(term(&cov, "pin", "never").evaluated, 0);
         assert_eq!(cov.terms_exercised(), 2);
+        assert_eq!(cov.terms_total(), 3);
+        assert_eq!(cov.terms_matched(), 2);
+        assert!((cov.matched_percent() - (2.0 / 3.0 * 100.0)).abs() < f64::EPSILON);
         // ... and the unreachable-term lint agrees about `never`.
         assert!(
             cov.lints
@@ -5833,6 +5839,33 @@ test med-200 {
             "{:?}",
             cov.lints
         );
+    }
+
+    #[test]
+    fn matched_coverage_counts_source_terms_not_branches() {
+        let cov = coverage_of(
+            "policy p {
+                term split { if route.med == 1 { accept } else { reject } }
+            }
+            test t { route { med 1 } expect p == accept }",
+        );
+        assert_eq!(cov.terms_total(), 1);
+        assert_eq!(cov.terms_matched(), 1);
+        assert!((cov.matched_percent() - (100.0)).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn matched_coverage_empty_and_untested_units() {
+        let empty = coverage_of("policy p {}");
+        assert_eq!(empty.terms_total(), 0);
+        assert_eq!(empty.terms_matched(), 0);
+        assert!((empty.percent() - (100.0)).abs() < f64::EPSILON);
+        assert!((empty.matched_percent() - (100.0)).abs() < f64::EPSILON);
+
+        let untested = coverage_of("policy p { term t { accept } }");
+        assert_eq!(untested.terms_total(), 1);
+        assert_eq!(untested.terms_matched(), 0);
+        assert!((untested.matched_percent() - (0.0)).abs() < f64::EPSILON);
     }
 
     /// `apply` targets are exercised as inlined predicates — reported
@@ -5874,6 +5907,10 @@ test t {
         // Term-level facts through apply are not attributable: helper's
         // terms stay unexercised in the headline count.
         assert_eq!(term(&cov, "helper", "inner").evaluated, 0);
+        assert_eq!(cov.terms_total(), 4);
+        assert_eq!(cov.terms_exercised(), 1);
+        assert_eq!(cov.terms_matched(), 1);
+        assert!((cov.matched_percent() - (25.0)).abs() < f64::EPSILON);
         // Unreferenced-policy flags only the orphan — helper is
         // applied, outer is tested.
         let unreferenced: Vec<&str> = cov

@@ -193,7 +193,8 @@ rbgp policy chain set-export [--neighbor <addr>] <names...>
 rbgp policy chain clear-import [--neighbor <addr>]
 rbgp policy chain clear-export [--neighbor <addr>]
 rbgp policy explain --neighbor <addr> --prefix <cidr> [--path-id <n>] [--direction import|export]
-rbgp policy check <file.rpol>                          # parse, typecheck, and run in-language tests in-process (no daemon; --coverage-min for a CI coverage gate)
+rbgp policy check <file.rpol>                          # parse, typecheck, and run in-language tests in-process (no daemon)
+rbgp policy check <file.rpol> --coverage-matched-min 100 # require every source term to match a test route; --coverage-min gates evaluated terms separately
 rbgp policy fmt <file.rpol>... [--check]               # canonical .rpol formatter (in-place; --check for CI; - = stdin)
 rbgp policy test <file.rpol> --policy <name> --direction import|export [--neighbor <addr>]   # dry-run over the live RIB
 rbgp policy stats [--neighbor <addr>]                     # live per-term hit counters

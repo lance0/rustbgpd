@@ -141,7 +141,7 @@ pub struct Lint {
 
 /// The `--coverage` result: per-policy term coverage plus static
 /// lints. Reporting only — it never fails a check by itself; the CLI's
-/// `--coverage-min` threshold is the one exit-code consumer.
+/// coverage thresholds consume it for the exit code.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CoverageReport {
     /// Every policy of the compilation unit, in source order.
@@ -168,6 +168,19 @@ impl CoverageReport {
             .count()
     }
 
+    /// Source terms whose guard matched in at least one test walk.
+    ///
+    /// This counts source terms, not individual branches. Apply-only
+    /// and untested policies contribute no matches.
+    #[must_use]
+    pub fn terms_matched(&self) -> usize {
+        self.policies
+            .iter()
+            .flat_map(|p| &p.terms)
+            .filter(|t| t.matched > 0)
+            .count()
+    }
+
     /// Exercised percentage; 100 for a unit with no terms.
     #[must_use]
     #[expect(clippy::cast_precision_loss, reason = "term counts are tiny")]
@@ -177,6 +190,20 @@ impl CoverageReport {
             100.0
         } else {
             self.terms_exercised() as f64 / total as f64 * 100.0
+        }
+    }
+
+    /// Matched source-term percentage; 100 for a unit with no terms.
+    /// Uses the same denominator as [`Self::percent`], including
+    /// terms of untested and apply-only policies.
+    #[must_use]
+    #[expect(clippy::cast_precision_loss, reason = "term counts are tiny")]
+    pub fn matched_percent(&self) -> f64 {
+        let total = self.terms_total();
+        if total == 0 {
+            100.0
+        } else {
+            self.terms_matched() as f64 / total as f64 * 100.0
         }
     }
 }
