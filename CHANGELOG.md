@@ -805,6 +805,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   GSHUT/BLACKHOLE tails. Reject oversized candidates before installation;
   `compile_rpol` enforces the same cap when composing zero-parameter policies.
 
+- `rustbgpd --check` and `--check --strict` validate TLS credential content
+  through the same staging path as startup, rejecting invalid certificates,
+  keys, client CA bundles, and mismatched cert/key pairs before reporting
+  success. Neither mode binds listeners.
+
 - Rejected native gRPC TLS handshakes now increment
   `bgp_grpc_tls_handshake_failures_total{reason}`, including handshake timeouts.
   Fixed reason labels distinguish missing, expired, not-yet-valid, untrusted,

@@ -2,6 +2,8 @@
 //! refresh loop (`render → rustbgpd --check --strict → swap → SIGHUP`).
 
 #![deny(unsafe_code)]
+#![deny(clippy::all)]
+#![warn(clippy::pedantic)]
 
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
@@ -171,7 +173,7 @@ struct RollbackArgs {
     #[arg(long, allow_hyphen_values = true)]
     activation_arg: Vec<OsString>,
     /// Generation to re-stage (`generations/<digest>`); defaults to the
-    /// activation receipt's previous_generation when that receipt describes
+    /// activation receipt's `previous_generation` when that receipt describes
     /// the current attempt
     #[arg(long)]
     to: Option<String>,
@@ -315,7 +317,7 @@ struct Cli {
     /// Abort when a client's generated origin asn-set has fewer members
     #[arg(long)]
     min_origins: Option<u32>,
-    /// RTR cache endpoint (host:port) for [[rpki.cache_servers]]; repeatable.
+    /// RTR cache endpoint (host:port) for `[[rpki.cache_servers]]`; repeatable.
     /// Required when the context enables RPKI origin validation.
     #[arg(long = "rtr-cache")]
     rtr_cache: Vec<String>,
@@ -519,6 +521,10 @@ fn lifecycle_exit(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the entrypoint keeps subcommand dispatch, argument validation, and exit-code mapping together"
+)]
 fn main() -> ExitCode {
     if let Some(args) = parse_status() {
         let binding = match args.host.binding() {

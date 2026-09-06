@@ -81,9 +81,17 @@ Preferred posture:
   the server certificate, requires every client to present a
   certificate signed by `tls_client_ca_file`, and rejects unverified
   clients at the TLS layer before any gRPC handler runs. There is
-  no "TLS-without-mTLS" half-mode by design. PEM material is
-  pre-flight-validated at load and `--check` time so a successful
-  `--check` rules out cert-rotation surprises at startup.
+  no "TLS-without-mTLS" half-mode by design. Config loading checks file
+  readability and PEM framing. After staging replacement files at the
+  configured paths, run `rustbgpd --check --strict /etc/rustbgpd/config.toml`
+  before SIGHUP or restart: both `--check`
+  modes also run startup credential staging, parsing the certificates,
+  private key, and client CA bundle and checking the cert/key match without
+  binding listeners. This validates the files at check time, not certificate
+  expiry, client trust, hostname matching, or subsequent file changes.
+- Native mTLS accepts TLS 1.2 and TLS 1.3 with the rustls/ring default cipher
+  suites. There is no configuration setting for a different protocol-version
+  floor or cipher list.
 - For multi-host fan-out, off-host TLS termination, or richer
   authorization fan-out, an Envoy / nginx mTLS sidecar in front of
   the daemon is still a valid pattern; see
@@ -111,6 +119,11 @@ Preferred posture:
   Legacy migration mode (roles as audit context only) was removed in v0.63.0;
   v0.65 accepts only `tier` in the typed schema and gives the exact retired
   value an actionable load diagnostic.
+  A trusted client certificate can complete TLS even when its principal has
+  no role mapping; each RPC then receives `PERMISSION_DENIED`. The
+  handshake-time rejection described in the historical
+  [ADR-0064 role-mapping decision](../adr/0064-grpc-authorization.md) does not
+  describe this per-request authorization boundary.
 - Listener `max_tier` caps are enforced now and should be used to bound remote
   TCP listeners to the smallest required method tier. `access_mode =
   "read_only"` remains a compatibility ceiling equivalent to
