@@ -1,0 +1,25 @@
+locator_name: srv6-proof
+  prefix: 2001:db8:111:1::/64
+  block-length: 40
+  node-length: 24
+  func-length: 16
+  arg-length: 0
+locator_chunks:
+functions:
+- sid: 2001:db8:111:1:1::
+  locator: srv6-proof
+- sid: 2001:db8:111:1:2::
+  locator: srv6-proof
+bgps:
+- name: default
+  vpn_policy[AFI_IP].tovpn_sid: (null)
+  vpn_policy[AFI_IP6].tovpn_sid: (null)
+  per-vrf tovpn_sid: (null)
+  srv6_unicast[AFI_IP].sid: (null)
+  srv6_unicast[AFI_IP6].sid: (null)
+- name: vrf111
+  vpn_policy[AFI_IP].tovpn_sid: 2001:db8:111:1:1::
+  vpn_policy[AFI_IP6].tovpn_sid: 2001:db8:111:1:2::
+  per-vrf tovpn_sid: (null)
+  srv6_unicast[AFI_IP].sid: (null)
+  srv6_unicast[AFI_IP6].sid: (null)
