@@ -295,6 +295,147 @@ fn diagnostics_of(source: &str) -> (super::Diagnostics, String) {
 // ── compile + IR shape goldens ─────────────────────────────────────
 
 #[test]
+fn default_action_preserves_omission_and_controls_fallback() {
+    let source = "policy p {
+        term shape { set med 17 }
+        term authorized { if route.prefix == 192.0.2.0/24 { accept } }
+    }";
+    let omitted = compile_ok(source);
+    let explicit_accept = compile_ok(&source.replacen('{', "{ default-action accept;", 1));
+    assert_eq!(omitted, explicit_accept);
+    assert_eq!(
+        compile_ok("policy empty {}"),
+        compile_ok("policy empty { default-action accept }")
+    );
+    let reject = compile_ok(&source.replacen('{', "{ default-action reject", 1));
+    assert_eq!(reject.policies[0].terms, omitted.policies[0].terms);
+    assert_eq!(reject.policies[0].default_action, PolicyAction::Deny);
+
+    let accepted = route_ctx(v4(192, 0, 2, 0, 24), &[], RpkiValidation::NotFound);
+    let result = reject.evaluate(&accepted);
+    assert_eq!(result.action, PolicyAction::Permit);
+    assert_eq!(result.modifications.set_med, Some(17));
+    let unmatched = route_ctx(v4(198, 51, 100, 0, 24), &[], RpkiValidation::NotFound);
+    assert_eq!(omitted.evaluate(&unmatched).action, PolicyAction::Permit);
+    let denied = reject.evaluate(&unmatched);
+    assert_eq!(denied.action, PolicyAction::Deny);
+    assert!(
+        denied.modifications.is_empty(),
+        "fallback drops staged changes"
+    );
+    assert_eq!(
+        compile_ok("policy empty { default-action reject }")
+            .evaluate(&accepted)
+            .action,
+        PolicyAction::Deny
+    );
+}
+
+#[test]
+fn default_action_composes_with_parameters_apply_and_later_policies() {
+    let source = r"
+policy authorized(lp: u32) {
+    default-action reject
+    term match { if route.local-pref == lp { accept } }
+}
+policy caller {
+    default-action reject;
+    term match { if apply(authorized(200)) { accept } }
+}
+test matched {
+    route { local-pref 200 }
+    expect authorized(200) == accept
+    expect caller == accept
+}
+test unmatched {
+    route { local-pref 100 }
+    expect authorized(200) == reject
+    expect caller == reject
+}
+";
+    let report = run_rpol_tests(source).expect("defaults compile at every use site");
+    assert_eq!(report.total, 2);
+    assert!(report.all_passed(), "{:?}", report.failures);
+
+    let chain = compile_ok(
+        "policy first { default-action accept term shape { set med 17 } }
+         policy last { term deny { reject } }",
+    );
+    let ctx = route_ctx(v4(192, 0, 2, 0, 24), &[], RpkiValidation::NotFound);
+    let (result, attribution) = chain.evaluate_with_attribution(&ctx);
+    assert_eq!(result.action, PolicyAction::Deny);
+    assert_eq!(attribution.matched_policy.as_deref(), Some("last"));
+    assert!(result.modifications.is_empty());
+}
+
+#[test]
+fn default_action_has_default_explain_attribution_and_no_coverage_term() {
+    let source = r"
+policy p {
+    default-action reject
+    term authorized { if route.prefix == 192.0.2.0/24 { accept } }
+}
+test matched { route { prefix 192.0.2.0/24 } expect p == accept }
+test unmatched { route { prefix 198.51.100.0/24 } expect p == reject }
+";
+    let file = RpolFile::parse(source).expect("default declaration parses");
+    let (report, coverage) = file.run_tests_with_coverage();
+    assert!(report.all_passed(), "{:?}", report.failures);
+    assert_eq!(coverage.terms_total(), 1);
+    let term = &coverage.policies[0].terms[0];
+    assert_eq!(term.name, "authorized");
+    assert_eq!((term.evaluated, term.matched), (2, 1));
+
+    let chain = crate::PolicyChain::from_named(vec![crate::NamedPolicy::from_rpol(
+        "p".into(),
+        Arc::new(compile_ok(source)),
+    )]);
+    let ctx = route_ctx(v4(198, 51, 100, 0, 24), &[], RpkiValidation::NotFound);
+    let trace = crate::explain_chain_statements(Some(&chain), &ctx);
+    assert_eq!(trace.action, PolicyAction::Deny);
+    assert_eq!(trace.steps.len(), 1);
+    let step = &trace.steps[0];
+    assert_eq!(step.policy_name.as_deref(), Some("p"));
+    assert_eq!(step.statement_index, None);
+    assert_eq!(step.term_name, None);
+    assert!(step.modifications.is_empty());
+}
+
+#[test]
+fn default_action_rejects_invalid_duplicate_and_misplaced_declarations() {
+    for source in [
+        "policy p { default-action }",
+        "policy p { default-action",
+        "policy p { default-action deny }",
+        "policy p { default-action = reject }",
+        "policy p { default-action accept default-action reject }",
+        "policy p { default-action accept; default-action accept; }",
+        "policy p { term t {} default-action reject }",
+        "policy p { term t { default-action reject } }",
+        "default-action reject policy p {}",
+    ] {
+        let (diagnostics, rendered) = diagnostics_of(source);
+        assert!(!diagnostics.is_empty(), "{source}");
+        assert!(rendered.contains("default-action"), "{rendered}");
+    }
+
+    // Recovery must progress through bad declarations and still find a later
+    // independent policy. No new reserved word steals existing identifiers.
+    let (file, diagnostics) = super::parser::parse(
+        "policy bad { default-action deny term t { accept } }
+         policy later { term t { accept } }",
+    );
+    assert_eq!(diagnostics.len(), 1);
+    assert!(file.policies.iter().any(|p| p.name.node == "later"));
+    compile_ok(
+        "policy default-action(default-action: u32) {
+            term default-action { if route.local-pref == default-action { accept } }
+        }
+        policy caller { term t { if apply(default-action(200)) { reject } } }",
+    );
+}
+
+#[test]
 fn adr_example_compiles_zero_param_policies_only() {
     let chain = compile_ok(ADR_EXAMPLE);
     // `customer-in` takes a parameter → template only; `bogon-filter`
