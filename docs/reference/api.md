@@ -42,6 +42,11 @@ For readability the examples omit the accompanying
 
 The proto definition lives at `proto/rustbgpd.proto`.
 
+For a worked client in a general-purpose language — stub generation, mTLS with
+composed bearer-token call credentials, per-call deadlines, and the
+authorization tiers each call needs — see
+[`examples/python-client/`](../../examples/python-client/README.md).
+
 The project-wide API remains alpha outside the explicit native-gRPC methods
 listed in the narrow [v1 route-server / route-reflector contract](v1-stable-contract.md).
 That machine inventory pins method names, streaming modes, and top-level

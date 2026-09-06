@@ -13,6 +13,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Python gRPC client example under `examples/python-client/`: an export-gate
+  explain script and a controller script that checks health, watches the live
+  event stream, and injects then withdraws a route. Both call only v1-stable
+  methods, attach the bearer token as channel-composed call credentials rather
+  than per-call metadata, and set an explicit deadline on every RPC. The README
+  covers stub generation and warns that an owner-only Unix socket authorizes
+  its clients at operator tier, so a local run proves nothing about the
+  authorization the deployed identity will meet.
+
 - Explicit `rbgp --json-lines` output for accepted unicast best, received,
   and advertised routes. The versioned stream emits routes page by page and
   ends with matching-row counts and completeness; ordinary JSON arrays and
