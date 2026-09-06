@@ -96,3 +96,7 @@ A fresh Gate 8b churn run is separate evidence. Record its actual duration, sour
 images, restart epochs, raw metrics, and terminal recovery. A short FDB churn run
 does not establish long-term memory stability or MAC/IP churn behavior. Dated soak
 receipts and their missing metric samples remain unchanged.
+
+The [2026-09-06 controlled wire receipt](../../../docs/artifacts/interop/evpn-ip-owner-20260906T143533Z/README.md)
+records the original same-ESI phases and the different-MAC IP ownership extension
+against their exact source and harness revisions.
