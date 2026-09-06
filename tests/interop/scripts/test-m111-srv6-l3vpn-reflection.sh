@@ -75,11 +75,12 @@ start_capture() {
     fi
     docker volume create --label rustbgpd.interop.milestone=M111 "$CAPTURE" >/dev/null
     VOLUME_OWNED=1
-    docker run -d --name "$CAPTURE" --label rustbgpd.interop.milestone=M111 \
+    docker create --name "$CAPTURE" --label rustbgpd.interop.milestone=M111 \
         --network "container:$RUSTBGPD" --cap-add=NET_ADMIN --cap-add=NET_RAW \
         --mount "type=volume,src=$CAPTURE,dst=/capture" \
         "$CAPTURE_IMAGE" tshark -p -i any -f 'tcp port 179' -w /capture/m111.pcap >/dev/null
     CAPTURE_OWNED=1
+    docker start "$CAPTURE" >/dev/null
     wait_for 'packet capture ready' capture_ready
 }
 
