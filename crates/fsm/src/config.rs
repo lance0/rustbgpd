@@ -342,24 +342,31 @@ impl PeerConfig {
     /// Build Extended Next Hop capability entries for our outgoing OPEN
     /// message (RFC 8950).
     ///
-    /// The capability is advertised automatically when both IPv4 and IPv6
-    /// unicast are configured. We advertise support for IPv4 unicast NLRI
-    /// using an IPv6 next hop. With `disable_ipv4_unicast` set the IPv4
-    /// unicast family is never negotiated, so the capability is omitted.
+    /// Advertises IPv6 next-hop receive support for IPv4 unicast when both
+    /// unicast families are configured, and for `VPNv4` whenever that family
+    /// is configured. `disable_ipv4_unicast` suppresses only the unicast
+    /// entry; `VPNv4` does not require IPv6 unicast or `VPNv6` negotiation.
     #[must_use]
     pub fn extended_nexthop_capabilities(&self) -> Vec<ExtendedNextHopFamily> {
         let families = self.effective_families();
         let has_ipv4 = families.contains(&(Afi::Ipv4, Safi::Unicast));
         let has_ipv6 = families.contains(&(Afi::Ipv6, Safi::Unicast));
+        let mut capabilities = Vec::new();
         if has_ipv4 && has_ipv6 {
-            vec![ExtendedNextHopFamily {
+            capabilities.push(ExtendedNextHopFamily {
                 nlri_afi: Afi::Ipv4,
                 nlri_safi: Safi::Unicast,
                 next_hop_afi: Afi::Ipv6,
-            }]
-        } else {
-            Vec::new()
+            });
         }
+        if families.contains(&(Afi::Ipv4, Safi::MplsVpn)) {
+            capabilities.push(ExtendedNextHopFamily {
+                nlri_afi: Afi::Ipv4,
+                nlri_safi: Safi::MplsVpn,
+                next_hop_afi: Afi::Ipv6,
+            });
+        }
+        capabilities
     }
 
     /// The 2-byte `my_as` field for the OPEN wire format.
@@ -467,6 +474,45 @@ mod tests {
                 .iter()
                 .any(|cap| matches!(cap, Capability::ExtendedNextHop(_)))
         );
+    }
+
+    #[test]
+    fn local_capabilities_include_vpnv4_extended_nexthop_independently() {
+        for disable_ipv4_unicast in [false, true] {
+            for families in [
+                vec![(Afi::Ipv4, Safi::MplsVpn)],
+                vec![(Afi::Ipv4, Safi::MplsVpn), (Afi::Ipv6, Safi::MplsVpn)],
+                vec![
+                    (Afi::Ipv4, Safi::MplsVpn),
+                    (Afi::Ipv4, Safi::Unicast),
+                    (Afi::Ipv6, Safi::Unicast),
+                ],
+            ] {
+                let mut cfg = test_config();
+                cfg.families = families;
+                cfg.disable_ipv4_unicast = disable_ipv4_unicast;
+                let expected = ExtendedNextHopFamily {
+                    nlri_afi: Afi::Ipv4,
+                    nlri_safi: Safi::MplsVpn,
+                    next_hop_afi: Afi::Ipv6,
+                };
+                assert!(cfg.local_capabilities().iter().any(|cap| matches!(
+                    cap, Capability::ExtendedNextHop(entries) if entries.contains(&expected)
+                )));
+                let entries = cfg.extended_nexthop_capabilities();
+                assert_eq!(
+                    entries.iter().filter(|entry| **entry == expected).count(),
+                    1
+                );
+                assert_eq!(
+                    entries.iter().any(|entry| entry.nlri_safi == Safi::Unicast),
+                    !disable_ipv4_unicast && cfg.families.contains(&(Afi::Ipv6, Safi::Unicast))
+                );
+            }
+        }
+        let mut cfg = test_config();
+        cfg.families = vec![(Afi::Ipv6, Safi::MplsVpn)];
+        assert!(cfg.extended_nexthop_capabilities().is_empty());
     }
 
     #[test]

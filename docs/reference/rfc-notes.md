@@ -1090,12 +1090,19 @@ carries inactive (absent), unlimited (zero), or finite.
 
 ## RFC 8950 — Extended Next Hop
 
-- Capability code 5. Advertised automatically when both `ipv4_unicast` and
-  `ipv6_unicast` are configured.
+- Capability code 5. IPv4-unicast IPv6-next-hop receive support is advertised
+  automatically when both `ipv4_unicast` and `ipv6_unicast` are configured.
+  VPNv4 IPv6-next-hop receive support (tuple 1/128/2) is advertised whenever
+  `l3vpn_ipv4_unicast` is configured, independently of those unicast families.
 - Negotiation: exact 6-byte tuple matching (NLRI AFI, NLRI SAFI, NH AFI).
 - When negotiated, IPv4 unicast uses `MP_REACH_NLRI` / `MP_UNREACH_NLRI`
   with IPv6 next hop instead of body NLRI.
-- See ADR-0037.
+- VPNv4 reflection preserves the 24- or 48-octet next-hop encoding (§3/§5)
+  and requires the recipient's VPNv4 IPv6-next-hop receive capability. A
+  rejected replacement withdraws any previously advertised route; ordinary
+  IPv4-next-hop VPNv4 routes and VPN withdrawals remain eligible without it.
+  The peer's receive capability is not an inbound admission requirement.
+- See ADR-0037 for the IPv4-unicast behavior.
 
 ---
 

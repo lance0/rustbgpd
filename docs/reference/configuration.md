@@ -1550,6 +1550,15 @@ IPv6 next hop. For eBGP exports, `local_ipv6_nexthop` (if configured) is
 used as the IPv6 self next-hop; otherwise the local IPv6 socket address is
 used when available.
 
+Configuring `"l3vpn_ipv4_unicast"` also advertises IPv6 next-hop receive
+support for VPNv4 (AFI 1, SAFI 128, next-hop AFI 2), independently of the
+unicast families and `"l3vpn_ipv6_unicast"`. Reflected VPNv4 routes retain
+their original next hop, including the IPv6 link-local companion when present.
+An IPv6 next-hop VPNv4 announcement is exported only to a peer advertising
+that exact receive capability; IPv4 next-hop VPNv4 routes and VPN withdrawals
+do not require it. This remains route reflection, with no next-hop rewrite,
+VRF import, or forwarding behavior.
+
 ---
 
 ## `[[dynamic_neighbors]]`

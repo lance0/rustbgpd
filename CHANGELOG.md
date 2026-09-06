@@ -493,6 +493,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- VPNv4 sessions now advertise RFC 8950 IPv6 next-hop receive support,
+  including VPN-only configurations. Reflection preserves the IPv6 next hop
+  and exports it only to recipients advertising the matching capability.
+  An ineligible replacement withdraws the old advertisement; IPv4 next-hop
+  VPNv4 routes and VPN withdrawals retain their existing behavior.
+
 - EVPN local MAC/IP activation now advertises above the effective sequence of
   a different imported remote MAC holding the same IPv4 or IPv6 address
   (RFC 9721 §6.1). The retained floor applies to the local MAC and its IP
@@ -803,6 +809,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   semantics without renaming existing commands.
 
 ### Upgrade notes
+
+- **VPNv4 IPv6 next hops:** VPNv4 peers advertise the additional receive
+  capability on the next OPEN exchange, with no new configuration setting.
+  A recipient without RFC 8950 tuple 1/128/2 no longer receives VPNv4 IPv6
+  next-hop announcements; exact-export rejection also removes an older
+  advertisement when an IPv4 next hop is replaced by an IPv6 next hop.
 
 - **EVPN IP ownership sequence:** a newly learned local MAC/IP binding can
   now carry a higher MAC Mobility sequence when another eligible remote MAC

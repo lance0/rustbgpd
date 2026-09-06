@@ -5,6 +5,12 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+- `PeerConfig::local_capabilities` and `extended_nexthop_capabilities` now
+  advertise RFC 8950 tuple 1/128/2 whenever VPNv4 is configured, without
+  requiring IPv6 unicast or VPNv6. `validate_open` records the peer's matching
+  receive capability only when VPNv4 is in the negotiated MP intersection.
+  Existing signatures and IPv4-unicast capability rules are unchanged.
+
 - `validate_open` now limits `NegotiatedSession::add_path_families` and
   `NegotiatedSession::extended_nexthop_families` to the address families in
   the negotiated MultiProtocol intersection, matching the existing Graceful
