@@ -39,6 +39,40 @@ excludes ESI and labels from that key, so their withdrawal bytes need not
 match the announcement. The receipt records each raw withdrawal label and
 ESI. Announcements still require exact implicit-null label and ESI bytes.
 
+## Optional semantic eligibility control
+
+Set `M112_SEMANTIC_CONTROL=1` to insert two phases after the normal recovery.
+This mode is prepared with offline mutation checks; its live receipt is pending.
+It requires a DUT with SRv6 semantic eligibility and matching typed CLI support,
+and rejects `M112_REQUIRE_TYPED=0`. The default five-phase run and historical
+receipt replay are unchanged.
+
+The extra replacement changes only the locator-block length from 40 to 100:
+SID Structure `100/24/16/0/0/0` totals 140 bits, while every TLV length remains
+structurally valid. The driver requires the target to disappear from the
+installed-best and GoBGP views while remaining in `evpn received` with exact
+raw bytes, all typed fields, and no decode error. The exact-key explain must
+show one retained candidate, no installed or selected best, selection reason
+`srv6_sid_invalid`, and a `srv6_service` stop gate with that code. Its export
+decision remains `no_best_route`, the earlier stopping gate. The next phase
+restores the original bytes and requires selection and advertisement to recover.
+
+Both extra phases save received and explain snapshots alongside the existing
+RR, observer, and source snapshots. The packet oracle requires the extra target
+withdrawal and recovery announcement, unchanged survivor history, and continuous
+sessions. The original malformed replacement still runs separately. Use a fresh
+artifact directory and retain this mode's separate `m112-semantic-wire/1` result:
+
+```console
+M112_SEMANTIC_CONTROL=1 M112_SOURCE_REVISION="$revision" \
+  bash tests/interop/scripts/test-m112-srv6-l2-reflection.sh
+```
+
+Replay its packet capture with `m112_capture_oracle.py wire payloads.tsv
+--semantic-control`. Replay the additional received/explain snapshots using the
+`received` and `explain` modes with `--phase semantic_invalid` or
+`--phase semantic_recovery`. The existing snapshot modes also accept those phases.
+
 ## Observer boundary
 
 GoBGP's pinned [wire decoder](https://github.com/osrg/gobgp/blob/v3.37.0/pkg/packet/bgp/prefix_sid.go#L114)

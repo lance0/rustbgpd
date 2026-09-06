@@ -23,13 +23,16 @@ SINK_ID = "10.112.0.3"
 RD = "10.112.0.2:112"
 SID = "2001:db8:112:1:1::"
 STRUCTURE = [40, 24, 16, 0, 0, 0]
+INVALID_STRUCTURE = [100, 24, 16, 0, 0, 0]
 FAMILY = bytes.fromhex("001946")
 TARGET = "02:00:00:00:01:12"
 SURVIVOR = "02:00:00:00:02:12"
 PHASES = ("baseline", "malformed", "recovery", "withdraw", "cleanup")
+SEMANTIC_PHASES = PHASES[:3] + ("semantic_invalid", "semantic_recovery") + PHASES[3:]
 EXPECTED = {
     "baseline": {TARGET, SURVIVOR}, "malformed": {SURVIVOR},
     "recovery": {TARGET, SURVIVOR}, "withdraw": {SURVIVOR}, "cleanup": set(),
+    "semantic_invalid": {SURVIVOR}, "semantic_recovery": {TARGET, SURVIVOR},
 }
 DIRECTIONS = {
     (SOURCE, RR_SOURCE): "source_to_rr", (RR_SOURCE, SOURCE): "rr_to_source",
@@ -49,7 +52,8 @@ def tlvs(raw: bytes) -> list[tuple[int, bytes]]:
     return result
 
 
-def service(value: bytes) -> dict:
+def service(value: bytes, *, semantic_invalid: bool = False) -> dict:
+    structure = INVALID_STRUCTURE if semantic_invalid else STRUCTURE
     outer = tlvs(value)
     need(len(outer) == 1 and outer[0][0] == 6, "expected one L2 Service TLV6")
     body = outer[0][1]
@@ -61,8 +65,8 @@ def service(value: bytes) -> dict:
     need(info[0] == info[17] == info[20] == 0, "SID reserved bytes or flags differ")
     need(str(ipaddress.IPv6Address(info[1:17])) == SID, "service SID differs")
     need(info[18:20] == b"\0\x17", "expected End.DT2U23")
-    need(tlvs(info[21:]) == [(1, bytes(STRUCTURE))], "SID Structure differs")
-    return {"sid": SID, "endpoint_behavior": 23, "structure": STRUCTURE,
+    need(tlvs(info[21:]) == [(1, bytes(structure))], "SID Structure differs")
+    return {"sid": SID, "endpoint_behavior": 23, "structure": structure,
             "prefix_sid_hex": value.hex()}
 
 
@@ -103,7 +107,8 @@ def mp(code: int, value: bytes) -> tuple[bytes, list[tuple[str, bytes]]]:
     return next_hop, routes
 
 
-def attributes(attrs: dict, *, reflected: bool, malformed: bool = False) -> dict:
+def attributes(attrs: dict, *, reflected: bool, malformed: bool = False,
+               semantic_invalid: bool = False) -> dict:
     expected = {1, 2, 5, 14, 16, 40} | ({9, 10} if reflected else set())
     need(set(attrs) == expected, "announcement attribute set differs")
     for code, flags, value in (
@@ -128,10 +133,11 @@ def attributes(attrs: dict, *, reflected: bool, malformed: bool = False) -> dict
              "malformed control is not the expected nested-length error")
         repaired = value[:-7] + b"\x06" + value[-6:]
         return service(repaired)
-    return service(value)
+    return service(value, semantic_invalid=semantic_invalid)
 
 
-def verify_stream(data: bytes, source: str, name: str) -> tuple[dict, dict]:
+def verify_stream(data: bytes, source: str, name: str, *,
+                  semantic_control: bool = False) -> tuple[dict, dict]:
     decoded = messages(data)
     counts = Counter(kind for kind, _ in decoded)
     need(bool(decoded) and decoded[0][0] == 1 and counts[1] == 1,
@@ -166,7 +172,13 @@ def verify_stream(data: bytes, source: str, name: str) -> tuple[dict, dict]:
         if code == 14:
             need(40 in attrs, "Prefix-SID absent")
             malformed = name == "source_to_rr" and attrs[40][1][-9:-6] == b"\x01\0\x07"
-            attributes(attrs, reflected=name == "rr_to_sink", malformed=malformed)
+            invalid = (semantic_control and name == "source_to_rr"
+                       and attrs[40][1][-6:] == bytes(INVALID_STRUCTURE))
+            attributes(attrs, reflected=name == "rr_to_sink", malformed=malformed,
+                       semantic_invalid=invalid)
+            if invalid:
+                need([mac for mac, _ in rows] == [TARGET], "invalid UPDATE affects survivor")
+                action = "semantic_invalid"
             if malformed:
                 need([mac for mac, _ in rows] == [TARGET], "malformed UPDATE affects survivor")
                 action = "malformed"
@@ -177,7 +189,7 @@ def verify_stream(data: bytes, source: str, name: str) -> tuple[dict, dict]:
             "message_counts": dict(sorted(counts.items()))}, events
 
 
-def analyze(lines: list[str]) -> dict:
+def analyze(lines: list[str], *, semantic_control: bool = False) -> dict:
     parts, ids = defaultdict(list), defaultdict(set)
     for number, line in enumerate(lines, 1):
         fields = line.rstrip("\n").split("\t")
@@ -196,12 +208,16 @@ def analyze(lines: list[str]) -> dict:
     for pair, name in DIRECTIONS.items():
         need(len(ids[pair]) == 1, f"{name}: reconnect or multiple TCP streams")
         need(ids[pair] == ids[(pair[1], pair[0])], "reverse stream ID differs")
-        streams[name], routes[name] = verify_stream(reassemble(parts[pair]), pair[0], name)
+        streams[name], routes[name] = verify_stream(
+            reassemble(parts[pair]), pair[0], name, semantic_control=semantic_control)
         streams[name]["tcp_stream"] = next(iter(ids[pair]))
     expected_source = {TARGET: ["announce", "malformed", "announce", "withdraw"],
                        SURVIVOR: ["announce", "withdraw"]}
     expected_sink = {TARGET: ["announce", "withdraw", "announce", "withdraw"],
                      SURVIVOR: ["announce", "withdraw"]}
+    if semantic_control:
+        expected_source[TARGET][3:3] = ["semantic_invalid", "announce"]
+        expected_sink[TARGET][3:3] = ["withdraw", "announce"]
     for name, expected in (("source_to_rr", expected_source), ("rr_to_sink", expected_sink)):
         for mac, actions in expected.items():
             need([event["action"] for event in routes[name][mac]] == actions,
@@ -233,7 +249,7 @@ def analyze(lines: list[str]) -> dict:
             if event["action"] == "withdraw"), key=lambda event: event["message_index"])
         for name in ("source_to_rr", "rr_to_sink")
     }
-    return {"schema": "m112-wire/1", "streams": streams,
+    return {"schema": "m112-semantic-wire/1" if semantic_control else "m112-wire/1", "streams": streams,
             "target": TARGET, "survivor": SURVIVOR, "rd": RD, "next_hop": SOURCE,
             "label_hex": "000030", **service(routes["source_to_rr"][TARGET][0]["attrs"][40][1]),
             "source_actions": expected_source, "reflected_actions": expected_sink,
@@ -270,6 +286,34 @@ def observer(snapshot: list[dict], phase: str) -> dict:
     return {"phase": phase, "macs": sorted(found), "binary_attributes_verified": True}
 
 
+def rr_route(row: dict, *, require_typed: bool, semantic_invalid: bool = False) -> bool:
+    need(row.get("route_type") == 2 and row.get("rd") == RD
+         and row.get("ip", "") == "" and row.get("next_hop") == SOURCE
+         and row.get("peer") == SOURCE and row.get("label") == 48
+         and row.get("label2") == 0 and row.get("tunnel_type") == 0
+         and row.get("ethernet_tag") == "0" and row.get("esi") == bytes(10).hex(":"),
+         "RR route fields differ")
+    view = row.get("prefix_sid")
+    if view is None:
+        need(not require_typed, "RR Prefix-SID typed visibility is required")
+        return False
+    service(bytes.fromhex(view.get("raw_value", "")), semantic_invalid=semantic_invalid)
+    need(view.get("flags") == 0xC0, "RR stored Prefix-SID flags differ")
+    need(not view.get("decode_error"), "RR typed Prefix-SID decode failed")
+    services = view.get("services", [])
+    need(len(services) == 1 and services[0].get("tlv_type") == 6, "RR service kind differs")
+    infos = services[0].get("sids", [])
+    need(len(infos) == 1 and infos[0].get("sid_value") == SID
+         and infos[0].get("endpoint_behavior") == 23 and infos[0].get("flags") == 0,
+         "RR SID information differs")
+    structures = infos[0].get("structures", [])
+    keys = ("locator_block_length", "locator_node_length", "function_length",
+            "argument_length", "transposition_length", "transposition_offset")
+    need(len(structures) == 1 and [structures[0].get(key) for key in keys] == (INVALID_STRUCTURE if semantic_invalid else STRUCTURE),
+         "RR typed SID structure differs")
+    return True
+
+
 def rr(snapshot: list[dict], phase: str, *, require_typed: bool) -> dict:
     found = set()
     typed = True
@@ -277,50 +321,86 @@ def rr(snapshot: list[dict], phase: str, *, require_typed: bool) -> dict:
         mac = row.get("mac")
         need(mac in (TARGET, SURVIVOR) and mac not in found, "unexpected or duplicate RR MAC")
         found.add(mac)
-        need(row.get("route_type") == 2 and row.get("rd") == RD
-             and row.get("ip", "") == "" and row.get("next_hop") == SOURCE
-             and row.get("peer") == SOURCE and row.get("label") == 48
-             and row.get("label2") == 0 and row.get("tunnel_type") == 0
-             and row.get("ethernet_tag") == "0" and row.get("esi") == bytes(10).hex(":"),
-             "RR route fields differ")
-        view = row.get("prefix_sid")
-        if view is None:
-            typed = False
-            need(not require_typed, "RR Prefix-SID typed visibility is required")
-            continue
-        service(bytes.fromhex(view.get("raw_value", "")))
-        need(view.get("flags") == 0xC0, "RR stored Prefix-SID flags differ")
-        need(not view.get("decode_error"), "RR typed Prefix-SID decode failed")
-        services = view.get("services", [])
-        need(len(services) == 1 and services[0].get("tlv_type") == 6, "RR service kind differs")
-        infos = services[0].get("sids", [])
-        need(len(infos) == 1 and infos[0].get("sid_value") == SID
-             and infos[0].get("endpoint_behavior") == 23 and infos[0].get("flags") == 0,
-             "RR SID information differs")
-        structures = infos[0].get("structures", [])
-        keys = ("locator_block_length", "locator_node_length", "function_length",
-                "argument_length", "transposition_length", "transposition_offset")
-        need(len(structures) == 1 and [structures[0].get(key) for key in keys] == STRUCTURE,
-             "RR typed SID structure differs")
+        typed = rr_route(row, require_typed=require_typed) and typed
     need(found == EXPECTED[phase], f"RR {phase}: route set differs")
     return {"phase": phase, "macs": sorted(found), "typed_visibility_verified": typed and bool(found)}
 
 
+def received(snapshot: dict, phase: str) -> dict:
+    need(snapshot.get("view") == "received" and snapshot.get("neighbor") == SOURCE,
+         "received view or neighbor differs")
+    need(snapshot.get("next_page_token") == "", "received page is incomplete")
+    expected = {TARGET, SURVIVOR} if phase == "semantic_invalid" else EXPECTED[phase]
+    rows = snapshot.get("routes", [])
+    need(snapshot.get("total_count") == len(expected) == len(rows), "received count differs")
+    need({row.get("mac") for row in rows} == expected, "received route set differs")
+    for row in rows:
+        rr_route(row, require_typed=True,
+                 semantic_invalid=phase == "semantic_invalid" and row["mac"] == TARGET)
+    return {"phase": phase, "macs": sorted(expected), "retained_attributes_verified": True}
+
+
+def explain(snapshot: dict, phase: str) -> dict:
+    need(phase in ("semantic_invalid", "semantic_recovery"), "unexpected explain phase")
+    need(snapshot.get("key") == {"rd": RD, "mac_ip": {
+        "ethernet_tag": 0, "mac": TARGET, "ip": ""}}, "explain key differs")
+    need(snapshot.get("received_from") == SOURCE and snapshot.get("candidate_count") == 1,
+         "explain source or candidate count differs")
+    need(snapshot.get("selection_deferred") is False, "selection is deferred")
+    invalid = phase == "semantic_invalid"
+    route = snapshot.get("received")
+    need(isinstance(route, dict) and route.get("mac") == TARGET, "retained target is absent")
+    rr_route(route, require_typed=True, semantic_invalid=invalid)
+    export = snapshot.get("export") or {}
+    need(export.get("peer_address") == SINK and export.get("outbound_dirty") is False,
+         "export destination differs or remains dirty")
+    if invalid:
+        need(snapshot.get("best") is None and snapshot.get("selection_best") is None,
+             "invalid target remains selected")
+        need((snapshot.get("selection_reason") or {}).get("code") == "srv6_sid_invalid",
+             "semantic selection reason is absent")
+        need(any(gate.get("gate") == "srv6_service" and gate.get("code") == "srv6_sid_invalid"
+                 and gate.get("verdict") == "stop" for gate in export.get("gates", [])),
+             "semantic export stop gate is absent")
+        need(export.get("decision") == "no_best_route", "invalid export decision differs")
+        need(export.get("staged") is None and export.get("advertised") is None
+             and export.get("already_advertised") is False, "invalid target remains exported")
+    else:
+        need(snapshot.get("selection_reason") is None, "recovered target remains ineligible")
+        for name in ("best", "selection_best"):
+            need(snapshot.get(name) == route, f"recovered {name} differs from received")
+        need(export.get("decision") == "advertise" and export.get("already_advertised") is True,
+             "recovered target is not advertised")
+        for name in ("staged", "advertised"):
+            exported = export.get(name)
+            need(isinstance(exported, dict) and exported.get("mac") == TARGET,
+                 f"recovered {name} target absent")
+            rr_route(exported, require_typed=True)
+        need(not any(gate.get("code") == "srv6_sid_invalid" for gate in export.get("gates", [])),
+             "recovered target retains semantic stop")
+    return {"phase": phase, "target": TARGET, "retention_and_selection_verified": True}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("wire", "observer", "rr"))
+    parser.add_argument("mode", choices=("wire", "observer", "rr", "received", "explain"))
     parser.add_argument("path", type=Path)
-    parser.add_argument("--phase", choices=PHASES)
+    parser.add_argument("--phase", choices=SEMANTIC_PHASES)
     parser.add_argument("--require-typed", action="store_true")
+    parser.add_argument("--semantic-control", action="store_true")
     args = parser.parse_args()
     if args.mode == "wire":
-        result = analyze(args.path.read_text().splitlines())
+        result = analyze(args.path.read_text().splitlines(), semantic_control=args.semantic_control)
     else:
         need(args.phase is not None, "snapshot mode requires --phase")
         value = json.loads(args.path.read_text())
-        need(isinstance(value, list), "snapshot must be a JSON array")
-        result = observer(value, args.phase) if args.mode == "observer" else rr(
-            value, args.phase, require_typed=args.require_typed)
+        if args.mode in ("received", "explain"):
+            need(isinstance(value, dict), "snapshot must be a JSON object")
+            result = received(value, args.phase) if args.mode == "received" else explain(value, args.phase)
+        else:
+            need(isinstance(value, list), "snapshot must be a JSON array")
+            result = observer(value, args.phase) if args.mode == "observer" else rr(
+                value, args.phase, require_typed=args.require_typed)
     print(json.dumps(result, sort_keys=True))
 
 

@@ -15,10 +15,17 @@ CAPTURE_IMAGE=bmpsink:m102
 ARTIFACT_DIR="${M112_ARTIFACT_DIR:-/tmp/m112-srv6-l2-$(date -u +%Y%m%dT%H%M%SZ)}"
 ARTIFACT_DIR_OWNED=0
 REQUIRE_TYPED="${M112_REQUIRE_TYPED:-1}"
+SEMANTIC_CONTROL="${M112_SEMANTIC_CONTROL:-0}"
 CAPTURE_OWNED=0
 VOLUME_OWNED=0
 CAPTURE_STOPPED=0
 SINK_ADDR=""
+PHASES=(baseline malformed recovery withdraw cleanup)
+SEMANTIC_ARGS=()
+if [ "$SEMANTIC_CONTROL" = 1 ]; then
+    PHASES=(baseline malformed recovery semantic_invalid semantic_recovery withdraw cleanup)
+    SEMANTIC_ARGS=(--semantic-control)
+fi
 TYPED_ARGS=()
 if [ "$REQUIRE_TYPED" = 1 ]; then TYPED_ARGS=(--require-typed); fi
 
@@ -150,13 +157,35 @@ observer_state() {
             --phase "$phase" >"$ARTIFACT_DIR/observer-current-check.json" 2>"$ARTIFACT_DIR/observer-current-error.log"
 }
 
+semantic_state() {
+    local phase=$1
+    docker exec "$RUSTBGPD" rbgp -s http://127.0.0.1:50051 evpn received \
+        2001:db8:112:10::2 --route-type 2 --rd 10.112.0.2:112 -j \
+        >"$ARTIFACT_DIR/received-current.json" \
+        && python3 "$SCRIPT_DIR/m112_capture_oracle.py" received \
+            "$ARTIFACT_DIR/received-current.json" --phase "$phase" \
+            >"$ARTIFACT_DIR/received-current-check.json" 2>"$ARTIFACT_DIR/received-current-error.log" \
+        && docker exec "$RUSTBGPD" rbgp -s http://127.0.0.1:50051 evpn explain mac-ip \
+            --rd 10.112.0.2:112 --mac 02:00:00:00:01:12 \
+            --received-from 2001:db8:112:10::2 --advertised-to 2001:db8:112:20::2 -j \
+            >"$ARTIFACT_DIR/explain-current.json" \
+        && python3 "$SCRIPT_DIR/m112_capture_oracle.py" explain \
+            "$ARTIFACT_DIR/explain-current.json" --phase "$phase" \
+            >"$ARTIFACT_DIR/explain-current-check.json" 2>"$ARTIFACT_DIR/explain-current-error.log"
+}
+
 phase() {
     local name=$1
     docker exec "$RAW" python3 /m112_raw_peer.py command "$name"
     wait_for "source phase $name" source_state "$name"
     wait_for "RR phase $name" rr_state "$name"
     wait_for "observer phase $name" observer_state "$name"
-    for kind in rr observer; do
+    local kinds=(rr observer)
+    if [[ "$name" == semantic_* ]]; then
+        wait_for "retained/explain phase $name" semantic_state "$name"
+        kinds+=(received explain)
+    fi
+    for kind in "${kinds[@]}"; do
         cp "$ARTIFACT_DIR/$kind-current.json" "$ARTIFACT_DIR/$name-$kind.json"
         cp "$ARTIFACT_DIR/$kind-current-check.json" "$ARTIFACT_DIR/$name-$kind-check.json"
     done
@@ -166,6 +195,11 @@ phase() {
 
 main() {
     case "$REQUIRE_TYPED" in 0|1) ;; *) echo 'M112_REQUIRE_TYPED must be 0 or 1' >&2; return 1 ;; esac
+    case "$SEMANTIC_CONTROL" in 0|1) ;; *) echo 'M112_SEMANTIC_CONTROL must be 0 or 1' >&2; return 1 ;; esac
+    if [ "$SEMANTIC_CONTROL" = 1 ] && [ "$REQUIRE_TYPED" != 1 ]; then
+        echo 'semantic control requires M112_REQUIRE_TYPED=1' >&2
+        return 1
+    fi
     : "${M112_SOURCE_REVISION:?Set M112_SOURCE_REVISION to the exact labeled DUT image revision}"
     mkdir "$ARTIFACT_DIR"
     ARTIFACT_DIR_OWNED=1
@@ -173,8 +207,9 @@ main() {
     revision=$(docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$RUSTBGPD")
     [ "$revision" = "$M112_SOURCE_REVISION" ] || { echo 'DUT source revision label differs' >&2; return 1; }
     jq -n --arg source_revision "$revision" --arg harness_revision "$(git rev-parse HEAD)" \
-        --argjson require_typed "$REQUIRE_TYPED" \
-        '{source_revision:$source_revision,harness_revision:$harness_revision,require_typed:($require_typed == 1)}' \
+        --argjson require_typed "$REQUIRE_TYPED" --argjson semantic_control "$SEMANTIC_CONTROL" \
+        '{source_revision:$source_revision,harness_revision:$harness_revision,require_typed:($require_typed == 1)}
+         + (if $semantic_control == 1 then {semantic_control:true} else {} end)' \
         >"$ARTIFACT_DIR/identity.json"
     git diff HEAD -- tests/interop >"$ARTIFACT_DIR/harness.diff"
     git status --porcelain -- tests/interop >"$ARTIFACT_DIR/harness-status.txt"
@@ -191,13 +226,14 @@ main() {
     docker exec "$RUSTBGPD" rustbgpd --version >"$ARTIFACT_DIR/rustbgpd-version.txt"
     SINK_ADDR="$(resolve_ip "$SINK"):50051"
     start_capture
-    docker exec -d "$RAW" sh -c 'python3 /m112_raw_peer.py serve >/tmp/m112-source.log 2>&1'
+    docker exec -d "$RAW" sh -c 'python3 /m112_raw_peer.py serve "$@" >/tmp/m112-source.log 2>&1' \
+        sh "${SEMANTIC_ARGS[@]}"
     docker exec -d "$SINK" sh -c 'gobgpd -f /config/gobgp.toml >/tmp/m112-gobgp.log 2>&1'
     wait_for 'source listener ready' source_state listening
     wait_for 'GoBGP configured' sink_ready
     # Both passive peers are ready before the RR opens the two sessions.
     docker exec -d "$RUSTBGPD" sh -c '/usr/local/bin/start-rustbgpd.sh >/tmp/m112-rustbgpd.log 2>&1'
-    for name in baseline malformed recovery withdraw cleanup; do phase "$name"; done
+    for name in "${PHASES[@]}"; do phase "$name"; done
     source_state cleanup
     docker exec "$SINK" gobgp neighbor 2001:db8:112:20::1 -j >"$ARTIFACT_DIR/sink-final-session.json"
     jq -e '.state.session_state == 6' "$ARTIFACT_DIR/sink-final-session.json" >/dev/null
@@ -206,7 +242,8 @@ main() {
         and ([.[].address] | sort) == ["2001:db8:112:10::2", "2001:db8:112:20::2"]' \
         "$ARTIFACT_DIR/rr-final-sessions.json" >/dev/null
     stop_capture
-    python3 "$SCRIPT_DIR/m112_capture_oracle.py" wire "$ARTIFACT_DIR/payloads.tsv" >"$ARTIFACT_DIR/wire.json"
+    python3 "$SCRIPT_DIR/m112_capture_oracle.py" wire "$ARTIFACT_DIR/payloads.tsv" "${SEMANTIC_ARGS[@]}" >"$ARTIFACT_DIR/wire.json"
+    if [ "$SEMANTIC_CONTROL" = 1 ]; then echo "PASS: semantic SID retention, exclusion and recovery"; fi
     echo "PASS: MAC-only SRv6 L2 reflection, malformed replacement, recovery and withdrawals (typed required=$REQUIRE_TYPED)"
 }
 main "$@"

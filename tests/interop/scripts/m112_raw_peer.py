@@ -15,7 +15,7 @@ from evpn_peer_sync_oracle import Route, attribute, type2
 from m94_as4_oracle import BgpReader, send_message
 from m105_capture_oracle import capabilities, need, update
 from m112_capture_oracle import (
-    FAMILY, PHASES, RD, RR_ID, RR_SOURCE, SID, SOURCE, SOURCE_ID, STRUCTURE,
+    FAMILY, INVALID_STRUCTURE, PHASES, SEMANTIC_PHASES, RD, RR_ID, RR_SOURCE, SID, SOURCE, SOURCE_ID, STRUCTURE,
     SURVIVOR, TARGET,
 )
 
@@ -23,9 +23,10 @@ STATE = Path("/tmp/m112-source.json")
 COMMAND = Path("/tmp/m112-command.json")
 
 
-def prefix_sid(*, malformed: bool = False) -> bytes:
+def prefix_sid(*, malformed: bool = False, semantic_invalid: bool = False) -> bytes:
     # RFC 9252 sections 3/6.2.1; RFC 8986 End.DT2U is 0x0017.
-    structure = struct.pack("!BH", 1, 7 if malformed else 6) + bytes(STRUCTURE)
+    structure = struct.pack("!BH", 1, 7 if malformed else 6) + bytes(
+        INVALID_STRUCTURE if semantic_invalid else STRUCTURE)
     info = b"\0" + ipaddress.IPv6Address(SID).packed + b"\0\0\x17\0" + structure
     service = b"\0" + struct.pack("!BH", 1, len(info)) + info
     return struct.pack("!BH", 6, len(service)) + service
@@ -37,12 +38,13 @@ def nlri(mac: str) -> bytes:
     return type2(Route(RD, mac, esi=bytes(10).hex(":"), vni=0x30))
 
 
-def announcement(mac: str, *, malformed: bool = False) -> bytes:
+def announcement(mac: str, *, malformed: bool = False, semantic_invalid: bool = False) -> bytes:
     reach = FAMILY + b"\x10" + ipaddress.IPv6Address(SOURCE).packed + b"\0" + nlri(mac)
     attrs = attribute(1, b"\0", 0x40) + attribute(2, b"", 0x40)
     attrs += attribute(5, struct.pack("!I", 100), 0x40)
     attrs += attribute(16, bytes.fromhex("0002fde900000070"), 0xC0)
-    attrs += attribute(14, reach) + attribute(40, prefix_sid(malformed=malformed), 0xC0)
+    attrs += attribute(14, reach) + attribute(40, prefix_sid(
+        malformed=malformed, semantic_invalid=semantic_invalid), 0xC0)
     return b"\0\0" + struct.pack("!H", len(attrs)) + attrs
 
 
@@ -56,6 +58,8 @@ def phase_updates(phase: str) -> list[bytes]:
         "baseline": [announcement(TARGET), announcement(SURVIVOR)],
         "malformed": [announcement(TARGET, malformed=True)],
         "recovery": [announcement(TARGET)],
+        "semantic_invalid": [announcement(TARGET, semantic_invalid=True)],
+        "semantic_recovery": [announcement(TARGET)],
         "withdraw": [withdrawal(TARGET)],
         "cleanup": [withdrawal(SURVIVOR)],
     }[phase]
@@ -74,7 +78,8 @@ def save(state: dict) -> None:
     temporary.replace(STATE)
 
 
-def serve() -> None:
+def serve(*, semantic_control: bool = False) -> None:
+    phases = SEMANTIC_PHASES if semantic_control else PHASES
     need(not STATE.exists() and not COMMAND.exists(), "stale M112 source state")
     state = {"listening": False, "established": False, "phase": "", "sent": [],
              "received": [], "error": ""}
@@ -114,7 +119,7 @@ def serve() -> None:
                     if COMMAND.exists():
                         phase = json.loads(COMMAND.read_text())["phase"]
                         if phase != state["phase"]:
-                            need(phase_index < len(PHASES) and phase == PHASES[phase_index],
+                            need(phase_index < len(phases) and phase == phases[phase_index],
                                  "nonsequential source command")
                             for payload in phase_updates(phase):
                                 send_message(connection, 2, payload)
@@ -152,10 +157,11 @@ def serve() -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("serve", "command"))
-    parser.add_argument("phase", nargs="?", choices=PHASES)
+    parser.add_argument("phase", nargs="?", choices=SEMANTIC_PHASES)
+    parser.add_argument("--semantic-control", action="store_true")
     args = parser.parse_args()
     if args.mode == "serve":
-        serve()
+        serve(semantic_control=args.semantic_control)
     else:
         need(args.phase is not None, "command requires phase")
         temporary = COMMAND.with_suffix(".tmp")
