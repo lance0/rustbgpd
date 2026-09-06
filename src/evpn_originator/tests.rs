@@ -196,7 +196,13 @@ fn evpn_macip_route_with_ip(
         label1: MplsLabel::new(v),
         label2: None,
     };
-    let mut attrs: Vec<PathAttribute> = Vec::new();
+    let mut attrs = vec![PathAttribute::ExtendedCommunities(vec![
+        rustbgpd_evpn::RouteTarget::TwoOctetAs {
+            asn: 65000,
+            value: v,
+        }
+        .to_extended_community(),
+    ])];
     if seq.is_some() || sticky {
         attrs.push(PathAttribute::ExtendedCommunities(vec![
             ExtendedCommunity::mac_mobility(sticky, seq.unwrap_or(0)),
@@ -5673,5 +5679,71 @@ async fn duplicate_ip_runtime_model_enables_and_disables_without_recounting_cach
         h.observe(ip_observation(0xAA, "192.0.2.10", false)).await;
         h.observe(ip_added_aa()).await;
         assert_duplicate_ip_metrics(&h.metrics, 1, 0);
+    }
+}
+
+#[tokio::test]
+async fn type2_import_eligibility_gates_contenders_and_duplicate_accounting() {
+    for ip in ["192.0.2.10", "2001:db8::10"] {
+        for case in ["missing", "mismatched", "tag", "vni", "self"] {
+            let mut h = duplicate_ip_harness(true);
+            h.observe(learned_aa()).await;
+            h.observe(ip_observation(0xaa, ip, true)).await;
+            h.take_log().await;
+            let mut routes: Vec<_> = [0xaa, 0xbb]
+                .into_iter()
+                .map(|m| evpn_macip_route_with_ip(100, m, Some(ip), "10.0.0.2", Some(9), false))
+                .collect();
+            for route in &mut routes {
+                match case {
+                    "missing" => route.attributes = Arc::new(vec![]),
+                    "mismatched" => {
+                        route.attributes =
+                            Arc::new(vec![PathAttribute::ExtendedCommunities(vec![
+                                rustbgpd_evpn::RouteTarget::TwoOctetAs {
+                                    asn: 65000,
+                                    value: 999,
+                                }
+                                .to_extended_community(),
+                                ExtendedCommunity::mac_mobility(false, 9),
+                            ])]);
+                    }
+                    "tag" | "vni" => {
+                        let EvpnRoute::MacIp(macip) = &mut route.route else {
+                            unreachable!()
+                        };
+                        if case == "tag" {
+                            macip.ethernet_tag = EthernetTagId(77);
+                        } else {
+                            macip.label1 = MplsLabel::new(200);
+                        }
+                    }
+                    "self" => route.next_hop = ipa("10.0.0.1"),
+                    _ => unreachable!(),
+                }
+            }
+            let views = build_remote_views(&h.instances, &routes, &h.segments);
+            assert!(views.0.is_empty() && views.1.is_empty(), "{case}, {ip}");
+            h.routes_tx.send(routes).unwrap();
+            h.repoll().await;
+            h.repoll().await;
+            assert!(
+                h.take_log().await.is_empty(),
+                "ineligible contender changed local routes: {case}"
+            );
+            assert_duplicate_ip_metrics(&h.metrics, 0, 0);
+            assert!(!gather_metrics_text(&h.metrics).contains("evpn_duplicate_mac_moves_total{"));
+
+            // Restoring eligible routes makes both contender views visible and
+            // counts the different remote MAC claiming the local IP exactly once.
+            let valid = evpn_macip_route_with_ip(100, 0xbb, Some(ip), "10.0.0.2", Some(9), false);
+            let views = build_remote_views(&h.instances, std::slice::from_ref(&valid), &h.segments);
+            assert_eq!(views.0.len(), 1);
+            assert_eq!(views.1.len(), 1);
+            h.routes_tx.send(vec![valid]).unwrap();
+            h.repoll().await;
+            h.repoll().await;
+            assert_duplicate_ip_metrics(&h.metrics, 1, 0);
+        }
     }
 }

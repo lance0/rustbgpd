@@ -122,6 +122,20 @@ the SVD shape, see `[[managed_netdevs.svd_vxlans]]` in
 EAD-per-EVI routes remain Ethernet Tag ID `0`. It is the local Linux VLAN
 selector used for readiness and for `NDA_VLAN` on remote-MAC FDB writes.
 
+### Local Type 2 import
+
+Remote Type 2 routes contribute to local FDB state, MAC/MAC+IP mobility,
+duplicate detection, and Type 5 gateway-IP resolution only when their VNI
+matches a configured instance, Ethernet Tag is `0`, next hop differs from
+that instance's local VTEP, and at least one Route Target matches its
+`route_targets`. Missing or mismatched RTs do not satisfy local import.
+Global EVPN retention and reflection remain independent of this local filter.
+
+When upgrading from a version without this filter, check the RTs advertised
+by remote VTEPs. Previously installed Type 2 rows that fail these requirements
+are removed from local forwarding and gateway-IP resolution; correct the
+sender's RTs or the intended instance configuration before upgrading.
+
 ### MAC+IP origination (ARP/ND suppression)
 
 To originate Type 2 routes carrying the host IP (MAC+IP), enable

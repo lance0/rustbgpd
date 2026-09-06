@@ -18,7 +18,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::net::IpAddr;
 
-use rustbgpd_wire::{MacAddress, RouteDistinguisher};
+use rustbgpd_wire::{EvpnMacIp, MacAddress, PathAttribute, RouteDistinguisher};
 
 use crate::duplicate_ip::DuplicateIpConfig;
 use crate::duplicate_mac::DuplicateMacConfig;
@@ -239,6 +239,28 @@ impl EvpnInstance {
             duplicate_mac_detection: DuplicateMacConfig::default(),
             duplicate_ip_detection: DuplicateIpConfig::default(),
         })
+    }
+
+    /// Whether a remote Type 2 is eligible for this local VLAN-based service.
+    ///
+    /// Call before discarding path attributes for forwarding, mobility, or
+    /// gateway-IP recursion. This does not filter global RIB retention or export.
+    #[must_use]
+    pub fn imports_mac_ip(
+        &self,
+        route: &EvpnMacIp,
+        next_hop: IpAddr,
+        attributes: &[PathAttribute],
+    ) -> bool {
+        route.label1.as_vni() == self.id.as_u32()
+            && route.ethernet_tag.0 == 0
+            && next_hop != self.local_vtep_ip
+            && attributes
+                .iter()
+                .filter_map(PathAttribute::extended_communities)
+                .flatten()
+                .filter_map(|ec| RouteTarget::from_extended_community(*ec))
+                .any(|rt| self.route_targets.contains(&rt))
     }
 
     /// Replace the sticky-MAC set on this instance. Used by the config
@@ -487,6 +509,57 @@ mod tests {
             false,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn imports_mac_ip_requires_local_vni_tag_next_hop_and_matching_rt() {
+        use rustbgpd_wire::{
+            EthernetSegmentIdentifier, EthernetTagId, ExtendedCommunity, MplsLabel,
+        };
+        let mut instance = make_instance(100, "65000:100", "10.0.0.1");
+        let mut route = EvpnMacIp {
+            rd: rd("65001:100"),
+            esi: EthernetSegmentIdentifier::ZERO,
+            ethernet_tag: EthernetTagId(0),
+            mac: MacAddress::new([0xaa; 6]),
+            ip: Some(vtep_ip("192.0.2.10")),
+            label1: MplsLabel::new(100),
+            label2: None,
+        };
+        let remote = vtep_ip("10.0.0.2");
+        let matching = rt("65000:100").to_extended_community();
+        let wrong = rt("65000:999").to_extended_community();
+        let attributes = [PathAttribute::ExtendedCommunities(vec![wrong, matching])];
+        assert!(instance.imports_mac_ip(&route, remote, &attributes));
+        assert!(!instance.imports_mac_ip(&route, remote, &[]));
+        assert!(!instance.imports_mac_ip(
+            &route,
+            remote,
+            &[PathAttribute::ExtendedCommunities(vec![
+                wrong,
+                ExtendedCommunity::mac_mobility(false, 9)
+            ])]
+        ));
+        assert!(!instance.imports_mac_ip(&route, instance.local_vtep_ip, &attributes));
+        route.ethernet_tag = EthernetTagId(77);
+        assert!(!instance.imports_mac_ip(&route, remote, &attributes));
+        route.ethernet_tag = EthernetTagId(0);
+        route.label1 = MplsLabel::new(200);
+        assert!(!instance.imports_mac_ip(&route, remote, &attributes));
+        route.label1 = MplsLabel::new(100);
+        // All supported RT encodings and the Partial attribute use the same
+        // existing decoder; a nonmatching first attribute cannot hide a match.
+        for target in [rt("65000:100"), rt("192.0.2.1:100"), rt("4200000000:100")] {
+            instance.route_targets = vec![rt("65000:200"), target];
+            assert!(instance.imports_mac_ip(
+                &route,
+                remote,
+                &[
+                    PathAttribute::ExtendedCommunities(vec![wrong]),
+                    PathAttribute::ExtendedCommunitiesPartial(vec![target.to_extended_community()]),
+                ]
+            ));
+        }
     }
 
     #[test]
