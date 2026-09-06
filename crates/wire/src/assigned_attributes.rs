@@ -2,9 +2,16 @@
 
 use crate::constants::{attr_flags, attr_type};
 
+/// `SRv6` Service framing has a stronger disposition than generic Prefix-SID
+/// framing (RFC 9252 §7 versus RFC 8669 §6).
+pub(crate) enum FramingError {
+    Generic(&'static str),
+    Srv6Service(&'static str),
+}
+
 /// Called unconditionally from attribute decode; type codes without a
 /// framing check here fall through to `Ok(())`.
-pub(crate) fn validate(type_code: u8, value: &[u8]) -> Result<(), &'static str> {
+pub(crate) fn validate(type_code: u8, value: &[u8]) -> Result<(), FramingError> {
     match type_code {
         attr_type::TUNNEL_ENCAPSULATION => tunnel_encapsulation(value),
         attr_type::COMMUNITY_CONTAINER => community_container(value),
@@ -15,11 +22,12 @@ pub(crate) fn validate(type_code: u8, value: &[u8]) -> Result<(), &'static str> 
         attr_type::SFP => sfp(value),
         attr_type::BFD_DISCRIMINATOR => bfd_discriminator(value),
         attr_type::NHC => nhc(value),
-        attr_type::PREFIX_SID => prefix_sid(value),
+        attr_type::PREFIX_SID => return prefix_sid(value),
         attr_type::BIER => bier(value),
         attr_type::ATTR_SET => attr_set(value),
         _ => Ok(()),
     }
+    .map_err(FramingError::Generic)
 }
 
 fn tunnel_encapsulation(mut value: &[u8]) -> Result<(), &'static str> {
@@ -284,21 +292,68 @@ fn nhc(value: &[u8]) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn prefix_sid(mut value: &[u8]) -> Result<(), &'static str> {
-    if value.len() < 3 {
-        return Err("Prefix-SID attribute is shorter than one TLV header");
+fn prefix_sid(mut value: &[u8]) -> Result<(), FramingError> {
+    if value.is_empty() {
+        return Err(FramingError::Generic(
+            "Prefix-SID attribute is shorter than one TLV header",
+        ));
     }
+    let mut generic_error = None;
+    let mut seen_service = [false; 2];
     while !value.is_empty() {
-        let (kind, body, rest) = tlv_u8_u16(value)?;
+        // A visible Service type identifies the stronger error even when its
+        // own length field is truncated or runs beyond the Prefix-SID value.
+        let (kind, body, rest) = tlv_u8_u16(value).map_err(|detail| {
+            if matches!(value[0], 5 | 6) {
+                FramingError::Srv6Service(detail)
+            } else {
+                FramingError::Generic(detail)
+            }
+        })?;
         match kind {
-            1 if body.len() != 7 => return Err("Prefix-SID Label-Index TLV length is not 7"),
+            1 if body.len() != 7 => {
+                generic_error.get_or_insert("Prefix-SID Label-Index TLV length is not 7");
+            }
             3 if body.len() < 8 || (body.len() - 2) % 6 != 0 => {
-                return Err("Prefix-SID Originator SRGB TLV length is invalid");
+                generic_error.get_or_insert("Prefix-SID Originator SRGB TLV length is invalid");
+            }
+            // RFC 9252 §7 ignores all but the first instance of each
+            // Service TLV. Still frame ignored instances above so the
+            // next TLV can be located; never rewrite the raw attribute.
+            5 | 6 if !std::mem::replace(&mut seen_service[usize::from(kind - 5)], true) => {
+                srv6_service(body).map_err(FramingError::Srv6Service)?;
             }
             _ => {}
         }
+        // A safely framed generic failure cannot hide a later, identifiable
+        // SRv6 Service failure with treat-as-withdraw disposition.
         value = rest;
     }
+    generic_error.map_or(Ok(()), |detail| Err(FramingError::Generic(detail)))
+}
+
+fn srv6_service(value: &[u8]) -> Result<(), &'static str> {
+    let Some(mut subtlvs) = value.get(1..) else {
+        return Err("SRv6 Service TLV lacks its reserved octet");
+    };
+    while !subtlvs.is_empty() {
+        let (kind, body, rest) = tlv_u8_u16(subtlvs)?;
+        if kind == 1 {
+            let Some(mut data) = body.get(21..) else {
+                return Err("SRv6 SID Information Sub-TLV is shorter than 21 octets");
+            };
+            while !data.is_empty() {
+                let (kind, body, rest) = tlv_u8_u16(data)?;
+                if kind == 1 && body.len() != 6 {
+                    return Err("SRv6 SID Structure Sub-Sub-TLV length is not 6");
+                }
+                data = rest;
+            }
+        }
+        subtlvs = rest;
+    }
+    // Reserved bytes, unknown types/behaviors and SID/transposition semantics
+    // are not structural malformations (RFC 9252 §§2, 3 and 7).
     Ok(())
 }
 

@@ -33,6 +33,43 @@ Preferred posture:
 - For occasional remote administration, tunnel to the local listener or socket
   rather than exposing raw management TCP on a routed interface.
 
+### Unix socket path integrity
+
+UDS startup fails if the socket's immediate parent is not owned by the daemon's
+effective UID or has group/world write bits. That directory must also allow
+the daemon read/write/search access for locking and socket creation. Missing
+parents are created owner-only. The configured path must be absolute, end in
+a filename, contain no `..`, and traverse no symlinks, including ancestor
+symlinks such as `/var/run` on systems where it points to `/run`.
+
+Each ancestor must be owned by root or the daemon's effective UID. Group/world
+write is allowed on an ancestor only when it is sticky and the next path
+component is root- or daemon-owned. This permits root-owned `/tmp` followed by
+a private daemon-owned directory, but rejects `/tmp/grpc.sock` and writable
+non-sticky ancestors that would let another UID replace the socket's subtree.
+Root, the daemon UID, and privileged mount-namespace administrators remain
+trusted; use a local filesystem that enforces Linux permissions and sticky
+directory semantics.
+
+Binding, permission changes, stale-socket removal, and cleanup stay relative
+to pinned directory or inode descriptors. Linux creates the socket with no
+permissions wider than the configured mode, including before its final chmod.
+An existing socket is removed only after a nonblocking probe establishes
+connection refusal; live or uncertain sockets are retained. A directory lock
+serializes cooperating starts through bind and listen, so another daemon's
+startup interval cannot be mistaken for a stale socket. Secure binding needs
+`/proc/self/fd`; see the [UDS configuration](configuration.md#globaltelemetrygrpc_uds)
+for pathname limits.
+
+Keep mode `0o600` for ordinary local administration. Deliberately sharing a
+socket requires an explicit principal and role mapping, but does not require
+a bearer token: every client admitted by filesystem permissions receives that
+listener-wide role. Optional bearer authentication is an additional check;
+it does not introduce per-UID roles. Auto-created parents are `0700`, so
+deliberate group sharing also needs a pre-created group-searchable parent
+without group write and the correct socket group. A setgid parent can supply
+that group; see the [UDS configuration example](configuration.md#globaltelemetrygrpc_uds).
+
 ### Remote administration
 
 Preferred posture:
@@ -532,7 +569,9 @@ the roadmap:
   sockets still require an explicit `principal` plus a matching role entry,
   and `local-operator` is reserved (rejected in roles and listener
   `principal` fields, like `mtls-unresolved`). Audit records label the
-  implicit path distinctly (`authn = "uds_owner"`).
+  implicit permissions-only path distinctly (`authn = "uds_owner"`). A UDS
+  listener with `token_file` instead reports `authn = "bearer_token"`, while
+  preserving the same principal and role ceiling.
 - Per-principal request-rate and stream-count budgets are not implemented in
   the daemon. Use listener tier caps, role enforcement, management-network
   controls, client deadlines, and the documented `grpc_authz` / stream metrics

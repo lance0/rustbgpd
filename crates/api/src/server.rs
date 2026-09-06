@@ -1,6 +1,8 @@
 //! gRPC server startup and wiring.
 
 use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
+use std::fs::File;
 use std::net::SocketAddr;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -1236,13 +1238,12 @@ fn uds_audit_context(
     access_mode: AccessMode,
     max_tier: AuthTier,
     roles: Arc<BTreeMap<String, PrincipalRole>>,
-    auth_token: Option<&str>,
+    bearer_enabled: bool,
     configured_principal: Option<&str>,
 ) -> GrpcAuthAuditContext {
-    let auth_enabled = auth_token.is_some();
     let (authn, principal, implicit_operator) = if let Some(principal) = configured_principal {
         (
-            if auth_enabled {
+            if bearer_enabled {
                 GrpcAuthnKind::BearerToken
             } else {
                 GrpcAuthnKind::Uds
@@ -1255,11 +1256,15 @@ fn uds_audit_context(
         // authentication, so clients are authorized as the implicit
         // `local-operator` operator identity without a roles entry.
         (
-            GrpcAuthnKind::UdsOwner,
+            if bearer_enabled {
+                GrpcAuthnKind::BearerToken
+            } else {
+                GrpcAuthnKind::UdsOwner
+            },
             LOCAL_OPERATOR_PRINCIPAL.to_string(),
             true,
         )
-    } else if auth_enabled {
+    } else if bearer_enabled {
         (
             GrpcAuthnKind::BearerToken,
             "bearer-token".to_string(),
@@ -1275,8 +1280,7 @@ fn uds_audit_context(
         authn,
         principal,
     )
-    .with_roles(roles)
-    .with_bearer_token(auth_token);
+    .with_roles(roles);
     if implicit_operator {
         context.with_implicit_local_operator()
     } else {
@@ -2146,7 +2150,7 @@ async fn run_uds_listener(
         access_mode,
         max_tier,
         roles,
-        None,
+        auth_enabled,
         principal.as_deref(),
     );
     info!(
@@ -2304,75 +2308,330 @@ async fn run_uds_listener(
 }
 
 fn bind_uds_listener(path: &Path, mode: u32) -> Result<(UnixListener, UdsSocketCleanup), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("failed to create UDS parent {}: {e}", parent.display()))?;
-    }
+    bind_uds_listener_inner(path, mode)
+        .map_err(|error| format!("gRPC UDS listener {}: {error}", path.display()))
+}
 
-    if path.exists() {
-        let metadata = std::fs::symlink_metadata(path)
-            .map_err(|e| format!("failed to stat existing UDS path {}: {e}", path.display()))?;
-        if metadata.file_type().is_socket() {
-            std::fs::remove_file(path).map_err(|e| {
-                format!("failed to remove stale UDS socket {}: {e}", path.display())
-            })?;
-        } else {
-            return Err(format!(
-                "refusing to replace non-socket file at {}",
-                path.display()
-            ));
-        }
-    }
+#[cfg(not(target_os = "linux"))]
+fn bind_uds_listener_inner(
+    _path: &Path,
+    _mode: u32,
+) -> Result<(UnixListener, UdsSocketCleanup), String> {
+    Err("secure filesystem socket creation requires Linux".to_string())
+}
 
-    let listener = UnixListener::bind(path)
-        .map_err(|e| format!("failed to bind UDS listener {}: {e}", path.display()))?;
-    let metadata = std::fs::symlink_metadata(path)
-        .map_err(|e| format!("failed to stat bound UDS listener {}: {e}", path.display()))?;
-    if !metadata.file_type().is_socket() {
-        return Err(format!(
-            "bound UDS listener path {} is not a socket",
-            path.display()
-        ));
+#[cfg(target_os = "linux")]
+fn bind_uds_listener_inner(
+    path: &Path,
+    mode: u32,
+) -> Result<(UnixListener, UdsSocketCleanup), String> {
+    use nix::fcntl::{OFlag, openat};
+    use nix::sys::socket::{Backlog, UnixAddr, listen};
+    use nix::sys::stat::Mode;
+    use std::os::fd::AsRawFd;
+
+    if mode > 0o777 {
+        return Err("socket mode exceeds 0o777".to_string());
     }
-    let cleanup = UdsSocketCleanup::new(path.to_path_buf(), metadata.dev(), metadata.ino());
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(|e| {
-        format!(
-            "failed to set permissions on UDS listener {}: {e}",
-            path.display()
-        )
+    // Validate both sockaddr lengths before inspecting or removing an existing
+    // endpoint. Binding through procfs keeps every operation beneath this fd.
+    UnixAddr::new(path).map_err(|error| format!("invalid socket path: {error}"))?;
+    let directory = prepare_uds_parent(path)?;
+    let name = path.file_name().ok_or("socket path has no filename")?;
+    let anchored_path =
+        PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd())).join(name);
+    let address = UnixAddr::new(&anchored_path).map_err(|error| {
+        format!("socket filename is too long for a descriptor-relative bind: {error}")
     })?;
+    // A bound socket refuses connections until listen(). Serialize that gap
+    // with stale probing by other daemon starts in this directory.
+    let _lock = lock_uds_directory(&directory)?;
+    remove_stale_uds_socket(&directory, name, &address)?;
+    let socket = bind_uds_socket(&address, mode)?;
+
+    let inode = File::from(
+        openat(
+            &directory,
+            name,
+            OFlag::O_PATH | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| format!("failed to pin bound socket: {error}"))?,
+    );
+    let metadata = inode
+        .metadata()
+        .map_err(|error| format!("failed to stat bound socket: {error}"))?;
+    if !metadata.file_type().is_socket() {
+        return Err("bound socket path was replaced by a non-socket".to_string());
+    }
+    let cleanup = UdsSocketCleanup {
+        directory,
+        inode,
+        name: name.to_os_string(),
+        path: path.to_path_buf(),
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+    };
+    // umask may only narrow the mode supplied before bind. Restore the exact
+    // configured mode through the pinned inode, so a replacement is untouched.
+    // O_PATH + procfs also works on the glibc 2.31 baseline, whose fchmodat
+    // rejects AT_SYMLINK_NOFOLLOW.
+    std::fs::set_permissions(
+        format!("/proc/self/fd/{}", cleanup.inode.as_raw_fd()),
+        std::fs::Permissions::from_mode(mode),
+    )
+    .map_err(|error| format!("failed to set bound socket permissions: {error}"))?;
+    // Match the Linux backlog used by the standard library and Tokio.
+    listen(
+        &socket,
+        Backlog::new(-1).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| format!("failed to listen on socket: {error}"))?;
+    let listener = UnixListener::from_std(std::os::unix::net::UnixListener::from(socket))
+        .map_err(|error| format!("failed to register socket: {error}"))?;
     Ok((listener, cleanup))
 }
 
-fn cleanup_uds_socket(path: &Path) -> Result<(), String> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!(
-            "failed to remove UDS socket {}: {e}",
-            path.display()
-        )),
+#[cfg(target_os = "linux")]
+fn prepare_uds_parent(path: &Path) -> Result<File, String> {
+    use nix::errno::Errno;
+    use nix::fcntl::{OFlag, open, openat};
+    use nix::sys::stat::{Mode, mkdirat};
+    use nix::unistd::geteuid;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Component;
+
+    let last = path
+        .as_os_str()
+        .as_bytes()
+        .rsplit(|byte| *byte == b'/')
+        .next();
+    if !path.is_absolute() || matches!(last, None | Some(b"" | b"." | b"..")) {
+        return Err("socket path must be absolute and end with a filename".to_string());
+    }
+    let parent = path.parent().ok_or("socket path has no parent")?;
+    if parent
+        .components()
+        .any(|part| matches!(part, Component::ParentDir))
+    {
+        return Err("socket path must not contain '..' components".to_string());
+    }
+    let flags = OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW;
+    let mut directory = File::from(
+        open(Path::new("/"), flags, Mode::empty())
+            .map_err(|error| format!("failed to open root directory: {error}"))?,
+    );
+    let owner = geteuid().as_raw();
+    let mut traversed = PathBuf::from("/");
+    for component in parent.components() {
+        let Component::Normal(name) = component else {
+            continue;
+        };
+        validate_uds_directory(&directory, &traversed, owner, false)?;
+        traversed.push(name);
+        let fd = match openat(&directory, name, flags, Mode::empty()) {
+            Err(Errno::ENOENT) => {
+                match mkdirat(&directory, name, Mode::from_bits_truncate(0o700)) {
+                    Ok(()) | Err(Errno::EEXIST) => {}
+                    Err(error) => {
+                        return Err(format!(
+                            "failed to create parent {}: {error}",
+                            traversed.display()
+                        ));
+                    }
+                }
+                openat(&directory, name, flags, Mode::empty())
+            }
+            result => result,
+        }
+        .map_err(|error| {
+            format!(
+                "failed to open parent {} without symlinks: {error}",
+                traversed.display()
+            )
+        })?;
+        directory = File::from(fd);
+    }
+    validate_uds_directory(&directory, parent, owner, true)?;
+    // O_PATH traverses execute-only ancestors without requiring read access.
+    // The final directory needs a readable descriptor for flock.
+    openat(
+        &directory,
+        ".",
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+        Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(|error| format!("failed to open socket parent for locking: {error}"))
+}
+
+#[cfg(target_os = "linux")]
+fn validate_uds_directory(
+    directory: &File,
+    path: &Path,
+    owner: u32,
+    socket_parent: bool,
+) -> Result<(), String> {
+    let metadata = directory
+        .metadata()
+        .map_err(|error| format!("failed to stat parent {}: {error}", path.display()))?;
+    // Every child is checked on the next iteration (or as the final parent).
+    // Sticky ancestors therefore only contain a root/daemon-owned path entry;
+    // another uid cannot rename that subtree, even through a writable /tmp.
+    let trusted_owner = metadata.uid() == owner || (!socket_parent && metadata.uid() == 0);
+    let trusted_mode =
+        metadata.mode() & 0o022 == 0 || (!socket_parent && metadata.mode() & 0o1000 != 0);
+    if !metadata.is_dir() || !trusted_owner || !trusted_mode {
+        return Err(format!(
+            "unsafe {} {}: directory must be {}owned and {}; uid={}, mode={:o}",
+            if socket_parent {
+                "socket parent"
+            } else {
+                "ancestor"
+            },
+            path.display(),
+            if socket_parent {
+                "effective-UID "
+            } else {
+                "root/effective-UID "
+            },
+            if socket_parent {
+                "not group/world-writable"
+            } else {
+                "not group/world-writable unless sticky"
+            },
+            metadata.uid(),
+            metadata.mode() & 0o7777,
+        ));
+    }
+    Ok(())
+}
+
+fn lock_uds_directory(directory: &File) -> Result<nix::fcntl::Flock<File>, String> {
+    use nix::fcntl::{Flock, FlockArg};
+
+    let file = directory
+        .try_clone()
+        .map_err(|error| format!("failed to duplicate socket parent descriptor: {error}"))?;
+    Flock::lock(file, FlockArg::LockExclusiveNonblock).map_err(|(_, error)| {
+        format!("cannot lock socket parent; another listener may be starting or stopping: {error}")
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn bind_uds_socket(
+    address: &nix::sys::socket::UnixAddr,
+    mode: u32,
+) -> Result<std::os::fd::OwnedFd, String> {
+    use nix::sys::socket::{AddressFamily, SockFlag, SockType, bind, socket};
+    use nix::sys::stat::{Mode, fchmod};
+    use std::os::fd::AsRawFd;
+
+    let socket = socket(
+        AddressFamily::Unix,
+        SockType::Stream,
+        SockFlag::SOCK_CLOEXEC | SockFlag::SOCK_NONBLOCK,
+        None,
+    )
+    .map_err(|error| format!("failed to create socket: {error}"))?;
+    // Linux derives the filesystem inode's initial mode from this socket
+    // inode and umask. Set it before the pathname can accept any connection.
+    fchmod(&socket, Mode::from_bits_truncate(mode))
+        .map_err(|error| format!("failed to set socket mode before bind: {error}"))?;
+    bind(socket.as_raw_fd(), address).map_err(|error| {
+        format!(
+            "failed to bind socket (descriptor-relative binding requires /proc/self/fd): {error}"
+        )
+    })?;
+    Ok(socket)
+}
+
+#[cfg(target_os = "linux")]
+fn remove_stale_uds_socket(
+    directory: &File,
+    name: &OsStr,
+    address: &nix::sys::socket::UnixAddr,
+) -> Result<(), String> {
+    use nix::errno::Errno;
+    use nix::fcntl::AtFlags;
+    use nix::sys::socket::{AddressFamily, SockFlag, SockType, connect, socket};
+    use nix::sys::stat::fstatat;
+    use std::os::fd::AsRawFd;
+
+    let metadata = match fstatat(directory, name, AtFlags::AT_SYMLINK_NOFOLLOW) {
+        Ok(metadata) => metadata,
+        Err(Errno::ENOENT) => return Ok(()),
+        Err(error) => return Err(format!("failed to stat existing socket path: {error}")),
+    };
+    if metadata.st_mode & libc::S_IFMT != libc::S_IFSOCK {
+        return Err("refusing to replace non-socket file".to_string());
+    }
+    let probe = socket(
+        AddressFamily::Unix,
+        SockType::Stream,
+        SockFlag::SOCK_CLOEXEC | SockFlag::SOCK_NONBLOCK,
+        None,
+    )
+    .map_err(|error| format!("failed to create socket liveness probe: {error}"))?;
+    match connect(probe.as_raw_fd(), address) {
+        Err(Errno::ECONNREFUSED) => {}
+        Ok(()) => return Err("existing socket is live; refusing to replace it".to_string()),
+        Err(error) => {
+            return Err(format!(
+                "cannot prove existing socket is stale; retaining it: {error}"
+            ));
+        }
+    }
+    let current = fstatat(directory, name, AtFlags::AT_SYMLINK_NOFOLLOW)
+        .map_err(|error| format!("failed to recheck stale socket: {error}"))?;
+    if current.st_dev != metadata.st_dev || current.st_ino != metadata.st_ino {
+        return Err("socket path changed during liveness probe; retaining replacement".to_string());
+    }
+    cleanup_uds_socket(directory, name)
+}
+
+fn cleanup_uds_socket(directory: &File, name: &OsStr) -> Result<(), String> {
+    use nix::errno::Errno;
+    use nix::unistd::{UnlinkatFlags, unlinkat};
+
+    match unlinkat(directory, name, UnlinkatFlags::NoRemoveDir) {
+        Ok(()) | Err(Errno::ENOENT) => Ok(()),
+        Err(error) => Err(format!("failed to remove socket: {error}")),
     }
 }
 
 /// Removes a bound UDS path whether its listener completes or is cancelled.
 struct UdsSocketCleanup {
+    directory: File,
+    // Keep the filesystem inode allocated until identity-checked cleanup;
+    // dropping the listener must not allow its inode number to be reused.
+    inode: File,
+    name: OsString,
     path: PathBuf,
     dev: u64,
     ino: u64,
 }
 
-impl UdsSocketCleanup {
-    fn new(path: PathBuf, dev: u64, ino: u64) -> Self {
-        Self { path, dev, ino }
-    }
-}
-
 impl Drop for UdsSocketCleanup {
     fn drop(&mut self) {
-        let metadata = match std::fs::symlink_metadata(&self.path) {
+        use nix::errno::Errno;
+        use nix::fcntl::AtFlags;
+        use nix::sys::stat::fstatat;
+
+        let _lock = match lock_uds_directory(&self.directory) {
+            Ok(lock) => lock,
+            Err(error) => {
+                warn!(path = %self.path.display(), %error, "retaining gRPC UDS socket during concurrent startup or cleanup");
+                return;
+            }
+        };
+        let metadata = match fstatat(
+            &self.directory,
+            self.name.as_os_str(),
+            AtFlags::AT_SYMLINK_NOFOLLOW,
+        ) {
             Ok(metadata) => metadata,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
+            Err(Errno::ENOENT) => return,
             Err(err) => {
                 warn!(
                     path = %self.path.display(),
@@ -2382,29 +2641,29 @@ impl Drop for UdsSocketCleanup {
                 return;
             }
         };
-        if !metadata.file_type().is_socket() {
+        if metadata.st_mode & libc::S_IFMT != libc::S_IFSOCK {
             warn!(
                 path = %self.path.display(),
                 expected_dev = self.dev,
                 expected_ino = self.ino,
-                current_dev = metadata.dev(),
-                current_ino = metadata.ino(),
+                current_dev = metadata.st_dev,
+                current_ino = metadata.st_ino,
                 "gRPC UDS path is no longer a socket; retaining replacement"
             );
             return;
         }
-        if metadata.dev() != self.dev || metadata.ino() != self.ino {
+        if metadata.st_dev != self.dev || metadata.st_ino != self.ino {
             warn!(
                 path = %self.path.display(),
                 expected_dev = self.dev,
                 expected_ino = self.ino,
-                current_dev = metadata.dev(),
-                current_ino = metadata.ino(),
+                current_dev = metadata.st_dev,
+                current_ino = metadata.st_ino,
                 "gRPC UDS socket identity changed; retaining replacement"
             );
             return;
         }
-        if let Err(err) = cleanup_uds_socket(&self.path) {
+        if let Err(err) = cleanup_uds_socket(&self.directory, &self.name) {
             warn!(
                 path = %self.path.display(),
                 error = %err,
@@ -2438,9 +2697,374 @@ mod tests {
     use crate::proto::{EventCategory, WatchEventsRequest};
     use crate::test_support::{session_event, spawn_fake_peer_manager, spawn_fake_rib};
 
+    #[cfg(target_os = "linux")]
+    fn uds_test_directory() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn uds_rejects_unsafe_parent_directories_and_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        for mode in [0o770, 0o777, 0o1777] {
+            let temp = uds_test_directory();
+            let path = temp.path().join("grpc.sock");
+            std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(mode)).unwrap();
+            let error = bind_uds_listener(&path, 0o600).err().unwrap();
+            assert!(
+                error.contains("gRPC UDS listener") && error.contains("unsafe socket parent"),
+                "{error}"
+            );
+            assert!(error.contains(&path.display().to_string()), "{error}");
+            assert!(!path.exists());
+        }
+
+        let temp = uds_test_directory();
+        let file = temp.path().join("file");
+        std::fs::write(&file, b"not a directory").unwrap();
+        assert!(bind_uds_listener(&file.join("grpc.sock"), 0o600).is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), b"not a directory");
+
+        let real = temp.path().join("real");
+        std::fs::create_dir_all(real.join("child")).unwrap();
+        let alias = temp.path().join("alias");
+        symlink(&real, &alias).unwrap();
+        for path in [alias.join("grpc.sock"), alias.join("child/grpc.sock")] {
+            let error = bind_uds_listener(&path, 0o600).err().unwrap();
+            assert!(error.contains("without symlinks"), "{error}");
+        }
+        assert!(!real.join("grpc.sock").exists());
+        assert!(!real.join("child/grpc.sock").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn uds_requires_protected_ancestors_and_creates_private_parents() {
+        let temp = uds_test_directory();
+        let ancestor = temp.path().join("shared");
+        std::fs::create_dir(&ancestor).unwrap();
+        std::fs::set_permissions(&ancestor, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let path = ancestor.join("private/new/grpc.sock");
+        let error = bind_uds_listener(&path, 0o600).err().unwrap();
+        assert!(error.contains("unsafe ancestor"), "{error}");
+        assert!(!ancestor.join("private").exists());
+
+        // Sticky shared ancestors are safe when the next component is owned
+        // by root/the daemon, as with a private directory beneath /tmp.
+        std::fs::set_permissions(&ancestor, std::fs::Permissions::from_mode(0o1777)).unwrap();
+        let (listener, cleanup) = bind_uds_listener(&path, 0o600).unwrap();
+        for directory in [ancestor.join("private"), ancestor.join("private/new")] {
+            let metadata = std::fs::metadata(directory).unwrap();
+            assert_eq!(metadata.uid(), nix::unistd::geteuid().as_raw());
+            assert_eq!(metadata.mode() & 0o077, 0);
+        }
+        drop(listener);
+        drop(cleanup);
+        assert!(!path.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn uds_preserves_deliberate_group_directory_access() {
+        let temp = uds_test_directory();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o2750)).unwrap();
+        let path = temp.path().join("grpc.sock");
+        let (listener, cleanup) = bind_uds_listener(&path, 0o660).unwrap();
+        let parent = std::fs::metadata(temp.path()).unwrap();
+        let socket = std::fs::symlink_metadata(&path).unwrap();
+        assert_eq!(parent.mode() & 0o7777, 0o2750);
+        assert_eq!(socket.mode() & 0o777, 0o660);
+        assert_eq!(socket.gid(), parent.gid());
+        drop(listener);
+        drop(cleanup);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn uds_rejects_a_socket_directly_in_shared_tmp() {
+        // Historical examples used /tmp/name.sock. Sticky /tmp protects an
+        // owned child directory, but is not an acceptable immediate parent.
+        let error = prepare_uds_parent(Path::new("/tmp/rustbgpd-uds-boundary.sock"))
+            .err()
+            .unwrap();
+        assert!(error.contains("unsafe socket parent /tmp"), "{error}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn uds_directory_ownership_distinguishes_ancestors_from_socket_parent() {
+        let root = File::open("/").unwrap();
+        let root_metadata = root.metadata().unwrap();
+        assert_eq!(root_metadata.uid(), 0);
+        // An ordinary root-owned ancestor is trusted for an unprivileged
+        // daemon, but the final socket directory must belong to that daemon.
+        validate_uds_directory(&root, Path::new("/"), 1, false).unwrap();
+        assert!(validate_uds_directory(&root, Path::new("/"), 1, true).is_err());
+
+        let temp = uds_test_directory();
+        let directory = File::open(temp.path()).unwrap();
+        let actual_uid = directory.metadata().unwrap().uid();
+        let other_uid = actual_uid.wrapping_add(1);
+        assert!(validate_uds_directory(&directory, temp.path(), other_uid, true).is_err());
+        if actual_uid != 0 {
+            // A different uid owns the inode and could chmod it even when
+            // its current permissions prohibit group/world writes.
+            assert!(validate_uds_directory(&directory, temp.path(), other_uid, false).is_err());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn uds_rejects_ambiguous_paths_and_preserves_non_socket_entries() {
+        use std::os::unix::fs::symlink;
+
+        let temp = uds_test_directory();
+        for path in [
+            PathBuf::from("relative.sock"),
+            temp.path().join("child/../grpc.sock"),
+            temp.path().join("child/"),
+            temp.path().join("child/."),
+        ] {
+            assert!(
+                bind_uds_listener(&path, 0o600).is_err(),
+                "{}",
+                path.display()
+            );
+        }
+        assert!(!temp.path().join("child").exists());
+        let path = temp.path().join("grpc.sock");
+        std::fs::write(&path, b"preserve me").unwrap();
+        assert!(
+            bind_uds_listener(&path, 0o600)
+                .err()
+                .unwrap()
+                .contains("non-socket")
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"preserve me");
+        std::fs::remove_file(&path).unwrap();
+        let missing = temp.path().join("missing");
+        symlink(&missing, &path).unwrap();
+        assert!(
+            bind_uds_listener(&path, 0o600)
+                .err()
+                .unwrap()
+                .contains("non-socket")
+        );
+        assert_eq!(std::fs::read_link(&path).unwrap(), missing);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn uds_preserves_live_socket_and_replaces_confirmed_stale_socket() {
+        let temp = uds_test_directory();
+        let path = temp.path().join("grpc.sock");
+        let original = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let metadata = std::fs::symlink_metadata(&path).unwrap();
+        let error = bind_uds_listener(&path, 0o600).err().unwrap();
+        assert!(error.contains("existing socket is live"), "{error}");
+        let current = std::fs::symlink_metadata(&path).unwrap();
+        assert_eq!(
+            (current.dev(), current.ino()),
+            (metadata.dev(), metadata.ino())
+        );
+        std::os::unix::net::UnixStream::connect(&path).unwrap();
+        drop(original);
+
+        let (listener, cleanup) = bind_uds_listener(&path, 0o600).unwrap();
+        std::os::unix::net::UnixStream::connect(&path).unwrap();
+        drop(listener);
+        drop(cleanup);
+        assert!(!path.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn uds_rejects_descriptor_path_overflow_before_touching_existing_socket() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let temp = tempfile::Builder::new()
+            .prefix("")
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir_in("/tmp")
+            .unwrap();
+        // The configured path fits sun_path, but /proc/self/fd/<fd>/name does
+        // not. Keep the existing endpoint even at this less common boundary.
+        let filename = "s".repeat(107 - temp.path().as_os_str().as_bytes().len() - 1);
+        let path = temp.path().join(filename);
+        let original = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let metadata = std::fs::symlink_metadata(&path).unwrap();
+        let error = bind_uds_listener(&path, 0o600).err().unwrap();
+        assert!(
+            error.contains("too long for a descriptor-relative bind"),
+            "{error}"
+        );
+        let current = std::fs::symlink_metadata(&path).unwrap();
+        assert_eq!(
+            (current.dev(), current.ino()),
+            (metadata.dev(), metadata.ino())
+        );
+        std::os::unix::net::UnixStream::connect(&path).unwrap();
+        drop(original);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn uds_serializes_the_bound_but_not_listening_startup_gap() {
+        use nix::sys::socket::{Backlog, UnixAddr, listen};
+
+        let temp = uds_test_directory();
+        let path = temp.path().join("grpc.sock");
+        let parent = prepare_uds_parent(&path).unwrap();
+        let lock = lock_uds_directory(&parent).unwrap();
+        let socket = bind_uds_socket(&UnixAddr::new(&path).unwrap(), 0o600).unwrap();
+        let metadata = std::fs::symlink_metadata(&path).unwrap();
+        let contender_path = path.clone();
+        let error =
+            std::thread::spawn(move || bind_uds_listener(&contender_path, 0o600).err().unwrap())
+                .join()
+                .unwrap();
+        assert!(error.contains("cannot lock socket parent"), "{error}");
+        let current = std::fs::symlink_metadata(&path).unwrap();
+        assert_eq!(
+            (current.dev(), current.ino()),
+            (metadata.dev(), metadata.ino())
+        );
+        listen(&socket, Backlog::new(1).unwrap()).unwrap();
+        drop(lock);
+        std::os::unix::net::UnixStream::connect(&path).unwrap();
+        drop(socket);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn uds_preserves_a_live_socket_with_a_full_accept_queue() {
+        use nix::errno::Errno;
+        use nix::sys::socket::{
+            AddressFamily, Backlog, SockFlag, SockType, UnixAddr, connect, listen, socket,
+        };
+        use std::os::fd::AsRawFd;
+
+        let temp = uds_test_directory();
+        let path = temp.path().join("grpc.sock");
+        let address = UnixAddr::new(&path).unwrap();
+        let server = bind_uds_socket(&address, 0o600).unwrap();
+        listen(&server, Backlog::new(0).unwrap()).unwrap();
+        let client = socket(
+            AddressFamily::Unix,
+            SockType::Stream,
+            SockFlag::SOCK_NONBLOCK,
+            None,
+        )
+        .unwrap();
+        connect(client.as_raw_fd(), &address).unwrap();
+        let full = socket(
+            AddressFamily::Unix,
+            SockType::Stream,
+            SockFlag::SOCK_NONBLOCK,
+            None,
+        )
+        .unwrap();
+        assert_eq!(connect(full.as_raw_fd(), &address), Err(Errno::EAGAIN));
+        let metadata = std::fs::symlink_metadata(&path).unwrap();
+        let error = bind_uds_listener(&path, 0o600).err().unwrap();
+        assert!(
+            error.contains("cannot prove existing socket is stale"),
+            "{error}"
+        );
+        let current = std::fs::symlink_metadata(&path).unwrap();
+        assert_eq!(
+            (current.dev(), current.ino()),
+            (metadata.dev(), metadata.ino())
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn uds_socket_mode_is_bounded_before_chmod() {
+        use nix::sys::socket::UnixAddr;
+        use nix::sys::stat::{Mode, umask};
+
+        const CHILD_ENV: &str = "RUSTBGPD_UDS_MODE_TEST_CHILD";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            // umask is process-wide: alter it only in a dedicated invocation
+            // with this one test, never in the shared test process.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "server::tests::uds_socket_mode_is_bounded_before_chmod",
+                    "--test-threads=1",
+                ])
+                .env(CHILD_ENV, "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let temp = uds_test_directory();
+        umask(Mode::empty());
+        for mode in [0o600, 0o660] {
+            let path = temp.path().join(format!("initial-{mode:o}.sock"));
+            let socket = bind_uds_socket(&UnixAddr::new(&path).unwrap(), mode).unwrap();
+            assert_eq!(
+                std::fs::symlink_metadata(&path).unwrap().mode() & 0o777,
+                mode
+            );
+            drop(socket);
+            std::fs::remove_file(path).unwrap();
+        }
+        umask(Mode::from_bits_truncate(0o077));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _entered = runtime.enter();
+        let path = temp.path().join("restored.sock");
+        let (listener, cleanup) = bind_uds_listener(&path, 0o660).unwrap();
+        assert_eq!(
+            std::fs::symlink_metadata(&path).unwrap().mode() & 0o777,
+            0o660
+        );
+        drop(listener);
+        drop(cleanup);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn uds_cleanup_stays_in_pinned_parent_after_directory_replacement() {
+        let temp = uds_test_directory();
+        let parent = temp.path().join("parent");
+        let original_parent = temp.path().join("original");
+        let path = parent.join("grpc.sock");
+        let (listener, cleanup) = bind_uds_listener(&path, 0o600).unwrap();
+        std::fs::rename(&parent, &original_parent).unwrap();
+        std::fs::create_dir(&parent).unwrap();
+        let replacement = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let metadata = std::fs::symlink_metadata(&path).unwrap();
+        drop(listener);
+        drop(cleanup);
+        assert!(!original_parent.join("grpc.sock").exists());
+        let current = std::fs::symlink_metadata(&path).unwrap();
+        assert_eq!(
+            (current.dev(), current.ino()),
+            (metadata.dev(), metadata.ino())
+        );
+        drop(replacement);
+    }
+
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn uds_cleanup_retains_replacement_socket() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = uds_test_directory();
         let path = temp.path().join("grpc.sock");
         let moved = temp.path().join("original.sock");
         let (listener, cleanup) = bind_uds_listener(&path, 0o600).unwrap();
@@ -2459,9 +3083,10 @@ mod tests {
         drop(replacement);
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn uds_cleanup_retains_replacement_regular_file() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = uds_test_directory();
         let path = temp.path().join("grpc.sock");
         let moved = temp.path().join("original.sock");
         let (listener, cleanup) = bind_uds_listener(&path, 0o600).unwrap();
@@ -3008,7 +3633,7 @@ mod tests {
             AccessMode::ReadWrite,
             AuthTier::SensitiveRead,
             tier_authz("local-admin"),
-            None,
+            false,
             Some("local-admin"),
         );
         assert_eq!(context.authn(), GrpcAuthnKind::Uds);
@@ -3027,7 +3652,7 @@ mod tests {
             AccessMode::ReadWrite,
             AuthTier::OperatorOnly,
             Arc::new(BTreeMap::new()),
-            None,
+            false,
             None,
         );
         assert_eq!(context.authn(), GrpcAuthnKind::UdsOwner);
@@ -3045,11 +3670,92 @@ mod tests {
             AccessMode::ReadWrite,
             AuthTier::OperatorOnly,
             Arc::new(BTreeMap::new()),
-            None,
+            false,
             None,
         );
         assert_eq!(context.authn(), GrpcAuthnKind::Uds);
         assert_eq!(context.principal(), "uds:/run/rustbgpd/grpc.sock");
+    }
+
+    #[tokio::test]
+    async fn uds_bearer_audit_labels_preserve_authentication_and_role_ceilings() {
+        use std::convert::Infallible;
+        use tonic::body::Body;
+        use tonic::codegen::http;
+        use tower::{Layer, Service};
+
+        let mut token = tempfile::NamedTempFile::new().unwrap();
+        token.write_all(b"secret").unwrap();
+        token.flush().unwrap();
+        for (principal, mode, role) in [
+            (None, 0o600, PrincipalRole::Operator),
+            (Some("local"), 0o600, PrincipalRole::Operator),
+            (Some("local"), 0o660, PrincipalRole::Observer),
+        ] {
+            for bearer_enabled in [false, true] {
+                let store = CredentialStore::stage(vec![CredentialSource {
+                    token_file: bearer_enabled.then(|| token.path().to_path_buf()),
+                    tls: None,
+                }])
+                .unwrap();
+                let roles = principal.map_or_else(BTreeMap::new, |name| {
+                    BTreeMap::from([(name.to_string(), role)])
+                });
+                let context = uds_audit_context(
+                    Path::new("/run/rustbgpd/grpc.sock"),
+                    mode,
+                    AccessMode::ReadWrite,
+                    AuthTier::OperatorOnly,
+                    Arc::new(roles),
+                    bearer_enabled,
+                    principal,
+                )
+                .with_dynamic_bearer(store, 0);
+                let expected_authn = if bearer_enabled {
+                    GrpcAuthnKind::BearerToken
+                } else if principal.is_none() {
+                    GrpcAuthnKind::UdsOwner
+                } else {
+                    GrpcAuthnKind::Uds
+                };
+                assert_eq!(context.authn(), expected_authn);
+                assert_eq!(
+                    context.principal(),
+                    principal.unwrap_or(LOCAL_OPERATOR_PRINCIPAL)
+                );
+                let metrics = BgpMetrics::new();
+                let mut service = GrpcAuthzLayer::new(context, metrics.clone()).layer(
+                    tower::service_fn(move |request: http::Request<Body>| async move {
+                        assert_eq!(request.extensions().get::<PrincipalRole>(), Some(&role));
+                        Ok::<_, Infallible>(http::Response::new(Body::empty()))
+                    }),
+                );
+                for header in [None, Some("Bearer wrong"), Some("Bearer secret")] {
+                    let mut request =
+                        http::Request::builder().uri("/rustbgpd.v1.ControlService/Shutdown");
+                    if let Some(header) = header {
+                        request = request.header("authorization", header);
+                    }
+                    let response = service
+                        .call(request.body(Body::empty()).unwrap())
+                        .await
+                        .unwrap();
+                    let status = Status::from_header_map(response.headers());
+                    let expected = if bearer_enabled && header != Some("Bearer secret") {
+                        Some(tonic::Code::Unauthenticated)
+                    } else if role == PrincipalRole::Observer {
+                        Some(tonic::Code::PermissionDenied)
+                    } else {
+                        None
+                    };
+                    assert_eq!(status.map(|status| status.code()), expected);
+                }
+                assert!(
+                    crate::test_support::metrics_text(&metrics)
+                        .contains(&format!("authn=\"{}\"", expected_authn.as_str()))
+                );
+            }
+        }
     }
 
     #[test]

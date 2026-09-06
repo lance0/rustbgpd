@@ -807,7 +807,7 @@ fn ebgp_remove_private_as_all_prepends_after_removal() {
     );
 }
 
-/// RFC 9252 service TLVs remain opaque on supported EVPN routes. Pin value
+/// RFC 9252 service TLVs are structurally checked and kept opaque. Pin value
 /// preservation through the receive path and normal iBGP/eBGP export.
 #[tokio::test]
 async fn evpn_srv6_prefix_sid_value_survives_receive_and_export() {
@@ -820,11 +820,8 @@ async fn evpn_srv6_prefix_sid_value_survives_receive_and_export() {
     negotiated.negotiated_families = vec![(Afi::L2Vpn, Safi::Evpn)];
     receiver.negotiated = Some(Arc::new(negotiated));
 
-    // RFC 9252 sections 3/3.1: L2 Service TLV (6), reserved byte, SID
-    // Information sub-TLV (1), End.DX2 SID, no optional sub-sub-TLVs.
-    let mut service = vec![6, 0, 25, 0, 1, 0, 21, 0];
-    service.extend("2001:db8:100::1".parse::<Ipv6Addr>().unwrap().octets());
-    service.extend([0, 0, 0x15, 0]);
+    // RFC 9252 sections 3/3.1: structurally valid L2 Service TLV (6).
+    let service = srv6_test_service(6);
     let prefix_sid = PathAttribute::Unknown(RawAttribute {
         flags: 0xe0,
         type_code: rustbgpd_wire::constants::attr_type::PREFIX_SID,
@@ -901,5 +898,100 @@ async fn evpn_srv6_prefix_sid_value_survives_receive_and_export() {
             attr, PathAttribute::MpReachNlri(mp)
                 if mp.evpn_announced == [route.clone()] && mp.next_hop == next_hop
         )));
+    }
+}
+
+// Reserved octets, an unknown endpoint behavior, an unknown sub-TLV, and
+// an unknown sub-sub-TLV all survive the bounded structural walk.
+fn srv6_test_service(kind: u8) -> Vec<u8> {
+    let mut value = vec![kind, 0, 40, 0xfe, 1, 0, 33, 0xfd];
+    value.extend("2001:db8:100::1".parse::<Ipv6Addr>().unwrap().octets());
+    value.extend([0xff, 0xff, 0xff, 0xfc]);
+    value.extend([1, 0, 6, 32, 16, 16, 0, 0, 0]);
+    value.extend([99, 0, 0]);
+    value.extend([99, 0, 0]);
+    value
+}
+
+#[tokio::test]
+async fn vpn_srv6_prefix_sid_value_survives_receive_and_export() {
+    for afi in [Afi::Ipv4, Afi::Ipv6] {
+        let (mut receiver, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        let mut negotiated = negotiated_session(65002, false);
+        negotiated.negotiated_families = vec![(afi, Safi::MplsVpn)];
+        receiver.negotiated = Some(Arc::new(negotiated));
+        let mut route = make_vpn_rib_route(3);
+        route.next_hop = "2001:db8::2".parse().unwrap();
+        if afi == Afi::Ipv6 {
+            route.nlri.prefix = VpnPrefix::v6("2001:db8:100::".parse().unwrap(), 48).unwrap();
+        }
+        let prefix_sid = PathAttribute::Unknown(RawAttribute {
+            flags: 0xe0,
+            type_code: 40,
+            data: Bytes::from(srv6_test_service(5)),
+        });
+        let mut attrs = route.attributes.as_ref().clone();
+        attrs.push(prefix_sid.clone());
+        attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
+            afi,
+            safi: Safi::MplsVpn,
+            next_hop: route.next_hop,
+            link_local_next_hop: None,
+            announced: vec![],
+            flowspec_announced: vec![],
+            evpn_announced: vec![],
+            bgpls_announced: vec![],
+            labeled_announced: vec![],
+            vpn_announced: vec![rustbgpd_wire::VpnNlriEntry {
+                path_id: 0,
+                nlri: route.nlri.clone(),
+            }],
+            rtc_announced: vec![],
+        }));
+        receiver
+            .process_update(UpdateMessage::build(
+                &[],
+                &[],
+                &attrs,
+                true,
+                false,
+                Ipv4UnicastMode::MpReach,
+            ))
+            .await;
+        let RibUpdate::VpnRoutesReceived {
+            announced: vpn_announced,
+            ..
+        } = rib_rx.try_recv().unwrap()
+        else {
+            panic!("expected VPN announcement");
+        };
+        assert_eq!(vpn_announced.len(), 1);
+        assert!(vpn_announced[0].attributes.contains(&prefix_sid));
+        for remote_asn in [65001, 65003] {
+            let mut exporter = make_test_session(65001, remote_asn);
+            exporter.negotiated = Some(Arc::new(negotiated_session(remote_asn, false)));
+            let profile = exporter.publish_export_profile();
+            let candidate = profile.prepare_vpn_candidate(&vpn_announced[0]);
+            let update = profile
+                .build_mp_reach(
+                    candidate.afi,
+                    candidate.safi,
+                    candidate.next_hop,
+                    None,
+                    &candidate.attrs,
+                    export::ReachNlri::Vpn(&[candidate.nlri]),
+                    Ipv4UnicastMode::MpReach,
+                )
+                .unwrap();
+            let parsed = update.parse(true, false, &[]).unwrap();
+            assert!(
+                parsed.attributes.contains(&prefix_sid),
+                "peer ASN {remote_asn}"
+            );
+            assert!(parsed.attributes.iter().any(|attr| matches!(attr,
+                PathAttribute::MpReachNlri(mp) if mp.next_hop == route.next_hop
+                && mp.vpn_announced.len() == 1 && mp.vpn_announced[0].nlri == route.nlri
+            )));
+        }
     }
 }
