@@ -1,0 +1,33 @@
+apply_bum_enforcement = true
+
+[global]
+asn = 65000
+router_id = "10.99.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+prometheus_addr = "0.0.0.0:9179"
+
+[[evpn_instances]]
+vni = 100
+rd = "10.99.0.1:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.99.0.1"
+bridge = "br100"
+advertise_svi_mac = false
+duplicate_ip_detection = { enabled = true, window_seconds = 180, threshold = 2 }
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+df_preference = 32768
+df_algorithm = "default-modulo"
+originator_ip = "10.99.0.1"
+
+[[neighbors]]
+address = "10.99.0.2"
+remote_asn = 65000
+description = "controlled EVPN wire peer"
+hold_time = 30
+families = ["l2vpn_evpn"]

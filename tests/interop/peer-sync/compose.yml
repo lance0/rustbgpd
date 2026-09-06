@@ -1,0 +1,27 @@
+# Images are resolved to immutable local IDs by the runner before deployment.
+services:
+  dut:
+    image: ${PEER_SYNC_DUT_IMAGE:?required}
+    privileged: true
+    entrypoint: ["sleep", "infinity"]
+    volumes:
+      - ./rustbgpd.toml:/etc/rustbgpd/config.toml:ro
+      - ../../soak/scripts/start-rustbgpd-soak-gate8b.sh:/start.sh:ro
+    networks:
+      proof:
+        ipv4_address: 10.99.0.1
+  peer:
+    image: ${PEER_SYNC_RAW_IMAGE:?required}
+    entrypoint: ["python3", "/scripts/evpn_peer_sync_peer.py", "/receipt", "${PEER_SYNC_RUN_ID:?required}"]
+    volumes:
+      - ../scripts:/scripts:ro
+      - ${PEER_SYNC_RECEIPT:?required}:/receipt
+    networks:
+      proof:
+        ipv4_address: 10.99.0.2
+networks:
+  proof:
+    ipam:
+      config:
+        - subnet: 10.99.0.0/24
+          gateway: 10.99.0.254
