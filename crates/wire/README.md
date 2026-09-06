@@ -295,11 +295,20 @@ later registry additions land without a breaking release.
 
 ## Usage
 
-Add the codec and its buffer type as direct dependencies:
+Add the published codec and its buffer type as direct dependencies:
 
 ```toml
 [dependencies]
-rustbgpd-wire = "0.20.0"
+rustbgpd-wire = "0.19.0"
+bytes = "1"
+```
+
+Prepared `0.20.0`, including `decode_prefix_sid_services`, is not yet on
+crates.io. To use it from a source checkout, use the matching versioned path:
+
+```toml
+[dependencies]
+rustbgpd-wire = { version = "0.20.0", path = "../rustbgpd/crates/wire" }
 bytes = "1"
 ```
 

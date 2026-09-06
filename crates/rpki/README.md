@@ -62,7 +62,7 @@ from one rustbgpd checkout:
 ```toml
 [dependencies]
 rustbgpd-rpki = { version = "0.2.0", path = "../rustbgpd/crates/rpki" }
-rustbgpd-wire = { version = "0.19.0", path = "../rustbgpd/crates/wire" }
+rustbgpd-wire = { version = "0.20.0", path = "../rustbgpd/crates/wire" }
 ```
 
 ```rust
