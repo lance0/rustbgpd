@@ -29,6 +29,7 @@ import argparse
 import csv
 import json
 import math
+from pathlib import Path
 import sys
 
 
@@ -67,6 +68,101 @@ def safe_float(v):
     return x if math.isfinite(x) else None
 
 
+def mac_churn_proof(samples_csv, rows):
+    """Opt-in short MAC-only proof; historical memory gates stay separate."""
+    # Shared with the controlled-peer proof; no alternate counter parser.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "interop" / "scripts"))
+    from evpn_peer_sync_oracle import duplicate_totals, process_start_time
+
+    directory = Path(samples_csv).parent
+    metadata = json.loads((directory / "run.json").read_text())
+    start = int((directory / "active-start-unix").read_text())
+    end = int((directory / "active-end-unix").read_text())
+    if end - start < 600:
+        raise ValueError("less than 600 active seconds of successful churn")
+    if metadata.get("mac_churn_proof") != 1:
+        raise ValueError("run was not collected in MAC proof mode")
+    if not metadata.get("image_id", "").startswith("sha256:") or metadata["image_id"] != metadata.get("pe2_image_id"):
+        raise ValueError("missing or different PE image identities")
+    if (directory / "cleanup.exit").read_text().strip() != "0":
+        raise ValueError("owned-resource cleanup did not succeed")
+    for pe in ("pe1", "pe2"):
+        if not (directory / f"{pe}.log").is_file() or not (directory / f"{pe}.log").stat().st_size:
+            raise ValueError(f"missing actual daemon log for {pe}")
+
+    epochs = {"pe1": [], "pe2": []}
+    samples = []
+    prior_time = None
+    prior_progress = None
+    stopped = False
+    previous_running = True
+    originations = {"pe1": False, "pe2": False}
+    remote_fdb = {"pe1": False, "pe2": False}
+    progress_keys = ("churn_adds_total", "churn_dels_total", "churn_moves_total")
+    for index, row in enumerate(rows):
+        now = int(row["ts_unix"])
+        if now < start or (prior_time is not None and now <= prior_time):
+            raise ValueError("samples must advance after readiness")
+        if int(row["elapsed_sec"]) != now - start:
+            raise ValueError("elapsed time does not match active start")
+        if prior_time is not None and now - prior_time > 2 * int(metadata["sample_interval_sec"]) + int(metadata["bgp_timeout_sec"]) + 30:
+            raise ValueError("gap in active sampling")
+        running = row["pe2_running"] == "1"
+        if row["pe2_running"] not in ("0", "1"):
+            raise ValueError("invalid PE2 phase")
+        stopped |= not running
+        progress = tuple(int(row[key]) for key in progress_keys)
+        if min(progress) < 0 or (prior_progress is not None and any(a < b for a, b in zip(progress, prior_progress))):
+            raise ValueError("churn counters reset or became negative")
+        # The terminal recovery row may follow the end of the churn worker.
+        if index not in (0, len(rows) - 1) and progress == prior_progress:
+            raise ValueError("churn made no progress between samples")
+        result = {"ts_unix": now, "pe2_running": running}
+        for pe in ("pe1", "pe2"):
+            ok = row[f"{pe}_scrape_ok"]
+            if ok not in ("0", "1"):
+                raise ValueError(f"invalid scrape status for {pe}")
+            if ok == "0":
+                if pe != "pe2" or running:
+                    raise ValueError(f"failed scrape from running {pe}")
+                result[pe] = {"available": False, "reason": "planned_stop"}
+                continue
+            if pe == "pe2" and not running:
+                raise ValueError("PE2 scrape succeeded while its daemon was recorded stopped")
+            scrape = (directory / "scrapes" / f"{now}-{pe}.prom").read_text()
+            totals = duplicate_totals(scrape)
+            epoch = process_start_time(scrape)
+            changed = epochs[pe] and epochs[pe][-1] != epoch
+            if epoch > now or (changed and epoch < prior_time):
+                raise ValueError(f"process epoch outside the recorded interval for {pe}")
+            if changed and (pe == "pe1" or previous_running):
+                raise ValueError(f"unplanned restart of {pe}")
+            if pe == "pe2" and not previous_running and not changed:
+                raise ValueError("PE2 recovery lacks a new process epoch")
+            if not epochs[pe] or changed:
+                epochs[pe].append(epoch)
+            if any(value["total"] != 0 for value in totals.values()):
+                raise ValueError(f"duplicate MAC/IP activity on {pe} at {now}")
+            originations[pe] |= (safe_float(row[f"{pe}_local_origs"]) or 0) > 0
+            remote_fdb[pe] |= (safe_float(row[f"{pe}_fdb_extern_learn"]) or 0) > 0
+            result[pe] = {"available": True, "process_start": epoch, "counters": totals}
+        samples.append(result)
+        prior_time, prior_progress, previous_running = now, progress, running
+    if len(rows) < 5 or int(rows[0]["ts_unix"]) - start > int(metadata["sample_interval_sec"]):
+        raise ValueError("missing initial or sustained samples")
+    if prior_time < end:
+        raise ValueError("terminal evidence precedes the end of churn")
+    if not stopped or len(epochs["pe2"]) < 2:
+        raise ValueError("no complete deliberate PE2 restart cycle")
+    terminal = rows[-1]
+    if terminal["pe2_running"] != "1" or any(safe_float(terminal[f"{pe}_session_established"]) != 1 for pe in epochs):
+        raise ValueError("terminal sessions did not recover")
+    if not all(originations.values()) or not all(remote_fdb.values()) or not all(value > 0 for value in prior_progress):
+        raise ValueError("missing local origination, remote FDB, add, delete or move activity")
+    return {"verdict": "pass", "scope": "MAC-only shared-ESI churn; no long-term memory or MAC/IP proof",
+            "active_seconds": end - start, "process_epochs": epochs, "samples": samples}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("samples_csv")
@@ -78,6 +174,8 @@ def main():
                     help="fraction of run discarded from slope regression")
     ap.add_argument("--output", default=None,
                     help="optional path to write the JSON verdict")
+    ap.add_argument("--mac-churn-proof", action="store_true",
+                    help="require fresh raw MAC-only churn evidence, 600 active seconds and cleanup; do not apply historical memory gates")
     args = ap.parse_args()
 
     try:
@@ -97,6 +195,17 @@ def main():
     except OSError as e:
         print(f"ERROR: cannot read {args.samples_csv}: {e}", file=sys.stderr)
         sys.exit(2)
+
+    if args.mac_churn_proof:
+        try:
+            out = mac_churn_proof(args.samples_csv, rows)
+        except (OSError, ValueError, KeyError, IndexError, ImportError, TypeError, StopIteration) as error:
+            out = {"verdict": "fail", "error": str(error)}
+        text = json.dumps(out, indent=2)
+        print(text)
+        if args.output:
+            Path(args.output).write_text(text + "\n")
+        sys.exit(0 if out["verdict"] == "pass" else 1)
 
     if len(rows) < 5:
         print("ERROR: too few sample rows for analysis (need >= 5)", file=sys.stderr)

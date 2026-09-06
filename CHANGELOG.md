@@ -495,6 +495,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   duplicate-IP movement. Only matching import RTs, VNI, tag zero, and a
   nonlocal next hop qualify; peer routes alone do not create local ownership.
 
+- Gate 8b MAC-churn receipts aggregate all duplicate-MAC series and retain
+  raw scrapes, process epochs, and actual daemon logs. An opt-in proof mode
+  requires ten active minutes after readiness, sustained churn, recovery,
+  and owned-resource cleanup without treating missing scrapes as zero.
+
 - `rbgp policy check --coverage-min` rejects nonfinite and out-of-range
   percentages instead of allowing `NaN` or negative values to bypass the
   evaluated-coverage gate. Valid thresholds retain their existing behavior.
