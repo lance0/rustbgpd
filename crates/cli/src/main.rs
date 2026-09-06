@@ -143,8 +143,12 @@ struct Cli {
     token_file: Option<String>,
 
     /// Output in JSON format
-    #[arg(long, short = 'j', global = true)]
+    #[arg(long, short = 'j', global = true, conflicts_with = "json_lines")]
     json: bool,
+
+    /// Stream accepted unicast RIB routes as versioned JSON lines
+    #[arg(long, global = true, conflicts_with = "json")]
+    json_lines: bool,
 
     /// Disable colored output
     ///
@@ -2451,7 +2455,7 @@ async fn main() {
     let mut cli = parse_cli(binary_name);
 
     cli.no_color |= std::env::var_os("NO_COLOR").is_some();
-    if cli.no_color || cli.json {
+    if cli.no_color || cli.json || cli.json_lines {
         owo_colors::set_override(false);
     }
 
@@ -2933,8 +2937,65 @@ fn pager_supported(command: &Command) -> bool {
     }
 }
 
+fn validate_json_lines(cli: &Cli) -> Result<(), CliError> {
+    if !cli.json_lines {
+        return Ok(());
+    }
+    let unsupported = || {
+        CliError::Argument(
+        "--json-lines supports only accepted unicast rib, rib received, and rib advertised listings; it cannot be combined with --count, --explain, or --age".into(),
+    )
+    };
+    let Command::Rib {
+        action,
+        family,
+        count,
+        explain,
+        age,
+        ..
+    } = &cli.command
+    else {
+        return Err(unsupported());
+    };
+    if *count || *explain || *age {
+        return Err(unsupported());
+    }
+    let view_family = match action {
+        None => None,
+        Some(RibAction::Received {
+            family,
+            count: false,
+            age: false,
+            rejected: false,
+            ..
+        })
+        | Some(RibAction::Advertised {
+            family,
+            count: false,
+            age: false,
+            explain: false,
+            ..
+        }) => family.as_deref(),
+        _ => return Err(unsupported()),
+    };
+    for family in [family.as_deref(), view_family].into_iter().flatten() {
+        match parse_family(family) {
+            Some(value)
+                if value == proto::AddressFamily::Ipv4Unicast as i32
+                    || value == proto::AddressFamily::Ipv6Unicast as i32 => {}
+            _ => return Err(unsupported()),
+        }
+    }
+    Ok(())
+}
+
 async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
-    pager::validate_request(cli.pager, cli.json, pager_supported(&cli.command))?;
+    validate_json_lines(&cli)?;
+    pager::validate_request(
+        cli.pager,
+        cli.json || cli.json_lines,
+        pager_supported(&cli.command),
+    )?;
 
     // Shell completions don't need a gRPC connection.
     if let Command::Completions { shell } = cli.command {
@@ -3595,6 +3656,15 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                         .await
                     } else if count {
                         commands::rib::count_best(connection, family_val, &filters, json).await
+                    } else if cli.json_lines {
+                        commands::rib::json_lines(
+                            connection,
+                            commands::rib::RouteListRpc::Best,
+                            None,
+                            family_val,
+                            &filters,
+                        )
+                        .await
                     } else {
                         commands::rib::best(connection, family_val, &filters, age, json, cli.pager)
                             .await
@@ -3638,6 +3708,15 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                     let f = resolve_family(&fam.or(family))?;
                     if count {
                         commands::rib::count_received(connection, &address, f, &filters, json).await
+                    } else if cli.json_lines {
+                        commands::rib::json_lines(
+                            connection,
+                            commands::rib::RouteListRpc::Received,
+                            Some(&address),
+                            f,
+                            &filters,
+                        )
+                        .await
                     } else {
                         commands::rib::received(
                             connection, &address, f, &filters, age, json, cli.pager,
@@ -3714,6 +3793,15 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                         }
                         commands::rib::count_advertised(connection, &address, f, &filters, json)
                             .await
+                    } else if cli.json_lines {
+                        commands::rib::json_lines(
+                            connection,
+                            commands::rib::RouteListRpc::Advertised,
+                            Some(&address),
+                            f,
+                            &filters,
+                        )
+                        .await
                     } else {
                         commands::rib::advertised(
                             connection, &address, f, &filters, age, json, cli.pager,
@@ -4289,6 +4377,80 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn json_lines_mode_parses_and_rejects_incompatible_views() {
+        for args in [
+            vec!["rbgp", "--json-lines", "rib"],
+            vec![
+                "rbgp",
+                "rib",
+                "received",
+                "fe80::1%eth0",
+                "--json-lines",
+                "--limit",
+                "1",
+            ],
+            vec![
+                "rbgp",
+                "rib",
+                "advertised",
+                "192.0.2.1",
+                "--family",
+                "ipv6",
+                "--json-lines",
+            ],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(cli.json_lines);
+            validate_json_lines(&cli).unwrap();
+        }
+        for args in [
+            vec!["rbgp", "--json-lines", "rib", "lookup", "192.0.2.1"],
+            vec![
+                "rbgp",
+                "--json-lines",
+                "rib",
+                "--prefix",
+                "192.0.2.0/24",
+                "--explain",
+            ],
+            vec![
+                "rbgp",
+                "--json-lines",
+                "rib",
+                "--prefix",
+                "192.0.2.0/24",
+                "advertised",
+                "192.0.2.1",
+                "--explain",
+            ],
+            vec![
+                "rbgp",
+                "--json-lines",
+                "rib",
+                "received",
+                "192.0.2.1",
+                "--count",
+            ],
+            vec![
+                "rbgp",
+                "--json-lines",
+                "rib",
+                "received",
+                "192.0.2.1",
+                "--family",
+                "bgpls",
+            ],
+            vec!["rbgp", "--json-lines", "rib", "delete", "192.0.2.0/24"],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(validate_json_lines(&cli).is_err());
+        }
+        assert!(Cli::try_parse_from(["rbgp", "--json", "--json-lines", "rib"]).is_err());
+        // The new mode must not tighten the existing JSON age behavior.
+        validate_json_lines(&Cli::try_parse_from(["rbgp", "--json", "rib", "--age"]).unwrap())
+            .unwrap();
+    }
     use super::*;
     use crate::test_support::spawn_mock_server;
     use clap::Parser;
@@ -4898,6 +5060,42 @@ printf '%s\n' "${COMPREPLY[@]}"
             let mut output = Vec::new();
             generate_completions(shell, BINARY_NAME, &mut output).unwrap();
             assert!(!output.is_empty(), "{shell} completions are empty");
+        }
+    }
+
+    #[test]
+    fn json_lines_completion_conflicts_are_reciprocal() {
+        let mut command = cli_command(BINARY_NAME);
+        command.build();
+        for path in [
+            vec![],
+            vec!["rib"],
+            vec!["rib", "received"],
+            vec!["rib", "advertised"],
+        ] {
+            let mut view = &command;
+            for name in &path {
+                view = view.find_subcommand(name).unwrap();
+            }
+            for (flag, conflict) in [("json", "json_lines"), ("json_lines", "json")] {
+                let arg = view
+                    .get_arguments()
+                    .find(|arg| arg.get_id() == flag)
+                    .unwrap();
+                assert!(
+                    view.get_arg_conflicts_with(arg)
+                        .iter()
+                        .any(|arg| arg.get_id() == conflict),
+                    "{path:?}: {flag} must exclude {conflict} from completions"
+                );
+            }
+        }
+        let mut generated = Vec::new();
+        generate_completions(Shell::Zsh, BINARY_NAME, &mut generated).unwrap();
+        let generated = String::from_utf8(generated).unwrap();
+        for flag in ["-j", "--json"] {
+            assert!(generated.contains(&format!("'(--json-lines){flag}[")));
+            assert!(!generated.contains(&format!("'{flag}[")));
         }
     }
 

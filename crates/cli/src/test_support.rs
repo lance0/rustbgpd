@@ -147,6 +147,7 @@ pub(crate) struct MockState {
     // (received/best/advertised) — drives the CLI pagination loop.
     // Empty = every call returns an empty final page.
     pub(crate) list_route_pages: Mutex<Vec<server_proto::ListRoutesResponse>>,
+    pub(crate) list_route_continuation_error: Mutex<Option<(Code, String)>>,
     pub(crate) list_route_requests: Mutex<Vec<server_proto::ListRoutesRequest>>,
     pub(crate) list_best_route_calls: AtomicUsize,
     pub(crate) list_received_route_calls: AtomicUsize,
@@ -1422,9 +1423,19 @@ impl MockRibService {
     async fn next_route_page(
         &self,
         request: server_proto::ListRoutesRequest,
-    ) -> server_proto::ListRoutesResponse {
+    ) -> Result<server_proto::ListRoutesResponse, Status> {
         let continuation = !request.page_token.is_empty();
         self.state.list_route_requests.lock().await.push(request);
+        if continuation
+            && let Some((code, message)) = self
+                .state
+                .list_route_continuation_error
+                .lock()
+                .await
+                .clone()
+        {
+            return Err(Status::new(code, message));
+        }
         if continuation
             && self
                 .state
@@ -1434,7 +1445,7 @@ impl MockRibService {
             std::future::pending::<()>().await;
         }
         let mut pages = self.state.list_route_pages.lock().await;
-        if pages.is_empty() {
+        Ok(if pages.is_empty() {
             server_proto::ListRoutesResponse {
                 routes: vec![],
                 next_page_token: String::new(),
@@ -1443,7 +1454,7 @@ impl MockRibService {
             }
         } else {
             pages.remove(0)
-        }
+        })
     }
 }
 
@@ -1807,7 +1818,7 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
             .list_received_route_calls
             .fetch_add(1, Ordering::SeqCst);
         Ok(Response::new(
-            self.next_route_page(request.into_inner()).await,
+            self.next_route_page(request.into_inner()).await?,
         ))
     }
 
@@ -1826,7 +1837,7 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         }
         let response = self.next_route_page(request.into_inner()).await;
         active.complete();
-        Ok(Response::new(response))
+        response.map(Response::new)
     }
 
     async fn list_advertised_routes(
@@ -1837,7 +1848,7 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
             .list_advertised_route_calls
             .fetch_add(1, Ordering::SeqCst);
         Ok(Response::new(
-            self.next_route_page(request.into_inner()).await,
+            self.next_route_page(request.into_inner()).await?,
         ))
     }
 

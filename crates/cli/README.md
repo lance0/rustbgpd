@@ -30,8 +30,9 @@ rbgp top          # live terminal dashboard
 
 Lightweight one-shot reads have a 30-second deadline for the complete RPC
 response, including its body, on TCP and Unix sockets. Each automatically
-fetched RIB page gets its own deadline; a failed later page exits with an
-error before printing an incomplete listing. Timeout errors name the RPC
+fetched RIB page gets its own deadline. Human and ordinary JSON listings print
+nothing if a later page fails; explicit `--json-lines` output retains emitted
+routes but omits the terminal end record. Timeout errors name the RPC
 and its budget. Config status and history are lightweight snapshots with the
 same limit. The CLI does not retry these reads automatically.
 
@@ -194,6 +195,43 @@ rbgp fib-table set edge --table-id 1000 --metric 200 --families ipv4_unicast,ipv
 ```
 
 `rib add --nexthop` remains a compatibility alias for `--next-hop`.
+
+For large accepted unicast listings, use `rbgp --json-lines rib`,
+`rbgp --json-lines rib received 192.0.2.1`, or
+`rbgp --json-lines rib advertised 192.0.2.1`. Routes are written as each
+page arrives, retaining only one response page. Existing `--json` arrays
+and `--json --limit` envelopes keep their shapes and print nothing if
+fetching a later page fails.
+
+The JSON-lines format starts with a header, contains one nested `route`
+record per path (including Add-Path identities), and ends with counts:
+
+```json
+{"type":"header","format":"rbgp-rib","format_version":"1.0","view":"best"}
+{"type":"route","route":{"prefix":"203.0.113.0/24","path_id":7}}
+{"type":"end","returned_count":1,"total_count":42,"complete":false}
+```
+
+The route above is abbreviated; real records use the same curated fields
+as ordinary route JSON. This is a daemon RIB view, not a wire-complete
+`rbgp-ribsnap/1` export. `format_version` is independent of daemon and
+protobuf versions: additive optional fields increment the minor version;
+incompatible field types, meaning, or removal require a major version.
+Consumers must ignore unknown fields within a supported major version.
+
+An `end` record means the requested walk succeeded. With `--limit`,
+`complete: false` means more matching routes exist; `total_count` counts
+all matching routes and `returned_count` counts emitted route records.
+An empty successful view emits a header and an end with zero counts.
+A failed continuation or timeout exits 1 without an end record: previously
+emitted routes do not constitute a completed result. The CLI does not
+restart the walk or retry stale tokens. A closed pipe exits 1 quietly and
+stops fetching. Check both process status and the end record before
+accepting a complete result.
+
+JSON-lines supports the existing accepted-unicast filters and `--limit`.
+It cannot be combined with `--json`, `--count`, `--explain`, `--age`,
+`--rejected`, other RIB families, or `--pager always`.
 
 Complete human `rib`, `rib received`, and `rib advertised` unicast listings
 use `--pager auto` by default: a pager starts only when stdout is a terminal,
