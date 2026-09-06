@@ -1,0 +1,332 @@
+{
+  "best": {
+    "as_path": [],
+    "communities": [],
+    "esi": "00:00:00:00:00:00:00:00:00:00",
+    "ethernet_tag": "0",
+    "extended_communities": [
+      842127122628720
+    ],
+    "gateway": "",
+    "ip": "",
+    "label": 48,
+    "label2": 0,
+    "mac": "02:00:00:00:01:12",
+    "next_hop": "2001:db8:112:10::2",
+    "peer": "2001:db8:112:10::2",
+    "prefix": "",
+    "prefix_sid": {
+      "flags": 192,
+      "raw_value": "0600220001001e0020010db801120001000100000000000000001700010006281810000000",
+      "services": [
+        {
+          "sids": [
+            {
+              "endpoint_behavior": 23,
+              "flags": 0,
+              "sid_value": "2001:db8:112:1:1::",
+              "structures": [
+                {
+                  "argument_length": 0,
+                  "function_length": 16,
+                  "locator_block_length": 40,
+                  "locator_node_length": 24,
+                  "transposition_length": 0,
+                  "transposition_offset": 0
+                }
+              ]
+            }
+          ],
+          "tlv_type": 6
+        }
+      ]
+    },
+    "rd": "10.112.0.2:112",
+    "route_type": 2,
+    "route_type_name": "mac-ip",
+    "tunnel_type": 0
+  },
+  "candidate_count": 1,
+  "compared": null,
+  "export": {
+    "advertised": {
+      "as_path": [],
+      "communities": [],
+      "esi": "00:00:00:00:00:00:00:00:00:00",
+      "ethernet_tag": "0",
+      "extended_communities": [
+        842127122628720
+      ],
+      "gateway": "",
+      "ip": "",
+      "label": 48,
+      "label2": 0,
+      "mac": "02:00:00:00:01:12",
+      "next_hop": "2001:db8:112:10::2",
+      "peer": "2001:db8:112:10::2",
+      "prefix": "",
+      "prefix_sid": {
+        "flags": 192,
+        "raw_value": "0600220001001e0020010db801120001000100000000000000001700010006281810000000",
+        "services": [
+          {
+            "sids": [
+              {
+                "endpoint_behavior": 23,
+                "flags": 0,
+                "sid_value": "2001:db8:112:1:1::",
+                "structures": [
+                  {
+                    "argument_length": 0,
+                    "function_length": 16,
+                    "locator_block_length": 40,
+                    "locator_node_length": 24,
+                    "transposition_length": 0,
+                    "transposition_offset": 0
+                  }
+                ]
+              }
+            ],
+            "tlv_type": 6
+          }
+        ]
+      },
+      "rd": "10.112.0.2:112",
+      "route_type": 2,
+      "route_type_name": "mac-ip",
+      "tunnel_type": 0
+    },
+    "already_advertised": true,
+    "decision": "advertise",
+    "gates": [
+      {
+        "code": "family",
+        "detail": "peer negotiated EVPN",
+        "gate": "family",
+        "verdict": "pass"
+      },
+      {
+        "code": "best_route",
+        "detail": "installed EVPN best from 2001:db8:112:10::2",
+        "gate": "best_route",
+        "verdict": "pass"
+      },
+      {
+        "code": "no_advertise",
+        "detail": "source route does not carry NO_ADVERTISE",
+        "gate": "no_advertise",
+        "verdict": "pass"
+      },
+      {
+        "code": "no_export",
+        "detail": "no source-route NO_EXPORT restriction applies",
+        "gate": "no_export",
+        "verdict": "pass"
+      },
+      {
+        "code": "llgr",
+        "detail": "LLGR export restriction cleared",
+        "gate": "llgr",
+        "verdict": "pass"
+      },
+      {
+        "code": "split_horizon",
+        "detail": "destination differs from route source",
+        "gate": "split_horizon",
+        "verdict": "pass"
+      },
+      {
+        "code": "ibgp_split_horizon",
+        "detail": "iBGP split horizon / route-reflection rules permit this route",
+        "gate": "ibgp_split_horizon",
+        "verdict": "pass"
+      },
+      {
+        "code": "export_policy",
+        "detail": "no export policy configured (default permit)",
+        "gate": "export_policy",
+        "verdict": "not_applicable"
+      },
+      {
+        "code": "post_policy_no_advertise",
+        "detail": "post-policy route does not carry NO_ADVERTISE",
+        "gate": "post_policy_no_advertise",
+        "verdict": "pass"
+      },
+      {
+        "code": "already_advertised",
+        "detail": "identical route already in committed Adj-RIB-Out; remote acceptance is not observable",
+        "gate": "adj_rib_out",
+        "verdict": "pass"
+      }
+    ],
+    "modifications": {
+      "communities_add": [],
+      "communities_remove": [],
+      "extended_communities_add": [],
+      "extended_communities_remove": [],
+      "large_communities_add": [],
+      "large_communities_remove": []
+    },
+    "outbound_dirty": false,
+    "peer_address": "2001:db8:112:20::2",
+    "reasons": [
+      {
+        "code": "ibgp_route",
+        "message": "best route was learned from an iBGP peer"
+      }
+    ],
+    "staged": {
+      "as_path": [],
+      "communities": [],
+      "esi": "00:00:00:00:00:00:00:00:00:00",
+      "ethernet_tag": "0",
+      "extended_communities": [
+        842127122628720
+      ],
+      "gateway": "",
+      "ip": "",
+      "label": 48,
+      "label2": 0,
+      "mac": "02:00:00:00:01:12",
+      "next_hop": "2001:db8:112:10::2",
+      "peer": "2001:db8:112:10::2",
+      "prefix": "",
+      "prefix_sid": {
+        "flags": 192,
+        "raw_value": "0600220001001e0020010db801120001000100000000000000001700010006281810000000",
+        "services": [
+          {
+            "sids": [
+              {
+                "endpoint_behavior": 23,
+                "flags": 0,
+                "sid_value": "2001:db8:112:1:1::",
+                "structures": [
+                  {
+                    "argument_length": 0,
+                    "function_length": 16,
+                    "locator_block_length": 40,
+                    "locator_node_length": 24,
+                    "transposition_length": 0,
+                    "transposition_offset": 0
+                  }
+                ]
+              }
+            ],
+            "tlv_type": 6
+          }
+        ]
+      },
+      "rd": "10.112.0.2:112",
+      "route_type": 2,
+      "route_type_name": "mac-ip",
+      "tunnel_type": 0
+    }
+  },
+  "key": {
+    "mac_ip": {
+      "ethernet_tag": 0,
+      "ip": "",
+      "mac": "02:00:00:00:01:12"
+    },
+    "rd": "10.112.0.2:112"
+  },
+  "received": {
+    "as_path": [],
+    "communities": [],
+    "esi": "00:00:00:00:00:00:00:00:00:00",
+    "ethernet_tag": "0",
+    "extended_communities": [
+      842127122628720
+    ],
+    "gateway": "",
+    "ip": "",
+    "label": 48,
+    "label2": 0,
+    "mac": "02:00:00:00:01:12",
+    "next_hop": "2001:db8:112:10::2",
+    "peer": "2001:db8:112:10::2",
+    "prefix": "",
+    "prefix_sid": {
+      "flags": 192,
+      "raw_value": "0600220001001e0020010db801120001000100000000000000001700010006281810000000",
+      "services": [
+        {
+          "sids": [
+            {
+              "endpoint_behavior": 23,
+              "flags": 0,
+              "sid_value": "2001:db8:112:1:1::",
+              "structures": [
+                {
+                  "argument_length": 0,
+                  "function_length": 16,
+                  "locator_block_length": 40,
+                  "locator_node_length": 24,
+                  "transposition_length": 0,
+                  "transposition_offset": 0
+                }
+              ]
+            }
+          ],
+          "tlv_type": 6
+        }
+      ]
+    },
+    "rd": "10.112.0.2:112",
+    "route_type": 2,
+    "route_type_name": "mac-ip",
+    "tunnel_type": 0
+  },
+  "received_from": "2001:db8:112:10::2",
+  "selection_best": {
+    "as_path": [],
+    "communities": [],
+    "esi": "00:00:00:00:00:00:00:00:00:00",
+    "ethernet_tag": "0",
+    "extended_communities": [
+      842127122628720
+    ],
+    "gateway": "",
+    "ip": "",
+    "label": 48,
+    "label2": 0,
+    "mac": "02:00:00:00:01:12",
+    "next_hop": "2001:db8:112:10::2",
+    "peer": "2001:db8:112:10::2",
+    "prefix": "",
+    "prefix_sid": {
+      "flags": 192,
+      "raw_value": "0600220001001e0020010db801120001000100000000000000001700010006281810000000",
+      "services": [
+        {
+          "sids": [
+            {
+              "endpoint_behavior": 23,
+              "flags": 0,
+              "sid_value": "2001:db8:112:1:1::",
+              "structures": [
+                {
+                  "argument_length": 0,
+                  "function_length": 16,
+                  "locator_block_length": 40,
+                  "locator_node_length": 24,
+                  "transposition_length": 0,
+                  "transposition_offset": 0
+                }
+              ]
+            }
+          ],
+          "tlv_type": 6
+        }
+      ]
+    },
+    "rd": "10.112.0.2:112",
+    "route_type": 2,
+    "route_type_name": "mac-ip",
+    "tunnel_type": 0
+  },
+  "selection_deferred": false,
+  "selection_reason": null
+}

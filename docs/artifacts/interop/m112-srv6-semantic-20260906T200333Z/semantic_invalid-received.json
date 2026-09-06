@@ -1,0 +1,98 @@
+{
+  "neighbor": "2001:db8:112:10::2",
+  "next_page_token": "",
+  "page_version": {
+    "epoch": 14655000431815060677,
+    "generation": 7
+  },
+  "routes": [
+    {
+      "as_path": [],
+      "esi": "00:00:00:00:00:00:00:00:00:00",
+      "ethernet_tag": "0",
+      "gateway": "",
+      "ip": "",
+      "label": 48,
+      "label2": 0,
+      "mac": "02:00:00:00:01:12",
+      "next_hop": "2001:db8:112:10::2",
+      "peer": "2001:db8:112:10::2",
+      "prefix": "",
+      "prefix_sid": {
+        "flags": 192,
+        "raw_value": "0600220001001e0020010db801120001000100000000000000001700010006641810000000",
+        "services": [
+          {
+            "sids": [
+              {
+                "endpoint_behavior": 23,
+                "flags": 0,
+                "sid_value": "2001:db8:112:1:1::",
+                "structures": [
+                  {
+                    "argument_length": 0,
+                    "function_length": 16,
+                    "locator_block_length": 100,
+                    "locator_node_length": 24,
+                    "transposition_length": 0,
+                    "transposition_offset": 0
+                  }
+                ]
+              }
+            ],
+            "tlv_type": 6
+          }
+        ]
+      },
+      "rd": "10.112.0.2:112",
+      "route_type": 2,
+      "route_type_name": "mac-ip",
+      "tunnel_type": 0
+    },
+    {
+      "as_path": [],
+      "esi": "00:00:00:00:00:00:00:00:00:00",
+      "ethernet_tag": "0",
+      "gateway": "",
+      "ip": "",
+      "label": 48,
+      "label2": 0,
+      "mac": "02:00:00:00:02:12",
+      "next_hop": "2001:db8:112:10::2",
+      "peer": "2001:db8:112:10::2",
+      "prefix": "",
+      "prefix_sid": {
+        "flags": 192,
+        "raw_value": "0600220001001e0020010db801120001000100000000000000001700010006281810000000",
+        "services": [
+          {
+            "sids": [
+              {
+                "endpoint_behavior": 23,
+                "flags": 0,
+                "sid_value": "2001:db8:112:1:1::",
+                "structures": [
+                  {
+                    "argument_length": 0,
+                    "function_length": 16,
+                    "locator_block_length": 40,
+                    "locator_node_length": 24,
+                    "transposition_length": 0,
+                    "transposition_offset": 0
+                  }
+                ]
+              }
+            ],
+            "tlv_type": 6
+          }
+        ]
+      },
+      "rd": "10.112.0.2:112",
+      "route_type": 2,
+      "route_type_name": "mac-ip",
+      "tunnel_type": 0
+    }
+  ],
+  "total_count": 2,
+  "view": "received"
+}

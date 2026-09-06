@@ -42,7 +42,8 @@ ESI. Announcements still require exact implicit-null label and ESI bytes.
 ## Optional semantic eligibility control
 
 Set `M112_SEMANTIC_CONTROL=1` to insert two phases after the normal recovery.
-This mode is prepared with offline mutation checks; its live receipt is pending.
+The [2026-09-06 semantic receipt](../../../docs/artifacts/interop/m112-srv6-semantic-20260906T200333Z/README.md)
+records a passing seven-phase run with received/explain evidence.
 It requires a DUT with SRv6 semantic eligibility and matching typed CLI support,
 and rejects `M112_REQUIRE_TYPED=0`. The default five-phase run and historical
 receipt replay are unchanged.
@@ -142,7 +143,8 @@ grpcurl -import-path tests/interop/configs -proto gobgp-m112-listpath.proto desc
 
 This is a controlled-source reflection and malformed-input proof with an
 independent pinned receiver. It is not vendor SRv6 service origination,
-complete EVPN-over-SRv6 support, SID eligibility validation, forwarding,
-scale, or service convergence evidence. Expectations follow
+complete EVPN-over-SRv6 support, full SID eligibility-rule coverage, forwarding,
+scale, or service convergence evidence. The optional semantic mode proves one
+invalid SID Structure replacement and recovery. Expectations follow
 [RFC 9252 §§3, 6.2.1 and 7](https://www.rfc-editor.org/rfc/rfc9252.html) and
 [RFC 8986](https://www.rfc-editor.org/rfc/rfc8986.html).

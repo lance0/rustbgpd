@@ -1,0 +1,109 @@
+{
+  "best": null,
+  "candidate_count": 1,
+  "compared": null,
+  "export": {
+    "advertised": null,
+    "already_advertised": false,
+    "decision": "no_best_route",
+    "gates": [
+      {
+        "code": "family",
+        "detail": "peer negotiated EVPN",
+        "gate": "family",
+        "verdict": "pass"
+      },
+      {
+        "code": "no_best_route",
+        "detail": "no installed EVPN best route",
+        "gate": "best_route",
+        "verdict": "stop"
+      },
+      {
+        "code": "srv6_sid_invalid",
+        "detail": "no semantically valid applicable SRv6 service SID; received attributes remain retained",
+        "gate": "srv6_service",
+        "verdict": "stop"
+      }
+    ],
+    "modifications": {
+      "communities_add": [],
+      "communities_remove": [],
+      "extended_communities_add": [],
+      "extended_communities_remove": [],
+      "large_communities_add": [],
+      "large_communities_remove": []
+    },
+    "outbound_dirty": false,
+    "peer_address": "2001:db8:112:20::2",
+    "reasons": [
+      {
+        "code": "no_best_route",
+        "message": "no installed EVPN best route"
+      }
+    ],
+    "staged": null
+  },
+  "key": {
+    "mac_ip": {
+      "ethernet_tag": 0,
+      "ip": "",
+      "mac": "02:00:00:00:01:12"
+    },
+    "rd": "10.112.0.2:112"
+  },
+  "received": {
+    "as_path": [],
+    "communities": [],
+    "esi": "00:00:00:00:00:00:00:00:00:00",
+    "ethernet_tag": "0",
+    "extended_communities": [
+      842127122628720
+    ],
+    "gateway": "",
+    "ip": "",
+    "label": 48,
+    "label2": 0,
+    "mac": "02:00:00:00:01:12",
+    "next_hop": "2001:db8:112:10::2",
+    "peer": "2001:db8:112:10::2",
+    "prefix": "",
+    "prefix_sid": {
+      "flags": 192,
+      "raw_value": "0600220001001e0020010db801120001000100000000000000001700010006641810000000",
+      "services": [
+        {
+          "sids": [
+            {
+              "endpoint_behavior": 23,
+              "flags": 0,
+              "sid_value": "2001:db8:112:1:1::",
+              "structures": [
+                {
+                  "argument_length": 0,
+                  "function_length": 16,
+                  "locator_block_length": 100,
+                  "locator_node_length": 24,
+                  "transposition_length": 0,
+                  "transposition_offset": 0
+                }
+              ]
+            }
+          ],
+          "tlv_type": 6
+        }
+      ]
+    },
+    "rd": "10.112.0.2:112",
+    "route_type": 2,
+    "route_type_name": "mac-ip",
+    "tunnel_type": 0
+  },
+  "received_from": "2001:db8:112:10::2",
+  "selection_best": null,
+  "selection_deferred": false,
+  "selection_reason": {
+    "code": "srv6_sid_invalid",
+    "message": "no semantically valid applicable SRv6 service SID; received attributes remain retained"
+  }
+}

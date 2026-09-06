@@ -1,0 +1,10 @@
+{
+  "image_id": "sha256:90b671563eec8e9ef999aba14bb3c758cfe41dec4509cc12b902ed12a21d9e07",
+  "repo_tags": [
+    "rustbgpd:srv6-eligibility-cdbf7ebd5"
+  ],
+  "source_revision": "cdbf7ebd5d12ac07434b3ae99dd693784f1164c9",
+  "created": "2026-09-06T15:49:18.459172229-04:00",
+  "profile": "ci",
+  "cargo_build_jobs": 2
+}
