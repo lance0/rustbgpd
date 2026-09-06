@@ -903,7 +903,17 @@ impl PeerSession {
                 if !self.negotiated_families().contains(&family) {
                     continue;
                 }
-                let prepared = export.prepare_vpn_candidate(vpn_route);
+                let prepared = match export.prepare_vpn_candidate(vpn_route) {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        warn!(
+                            peer = %self.peer_label,
+                            %error,
+                            "not sending VPN announcement: exact export preparation failed"
+                        );
+                        continue;
+                    }
+                };
                 let attrs = prepared.attrs;
                 let nh = prepared.next_hop;
                 let ll = prepared.link_local_next_hop;

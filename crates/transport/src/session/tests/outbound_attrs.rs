@@ -969,9 +969,16 @@ async fn vpn_srv6_prefix_sid_value_survives_receive_and_export() {
         assert!(vpn_announced[0].attributes.contains(&prefix_sid));
         for remote_asn in [65001, 65003] {
             let mut exporter = make_test_session(65001, remote_asn);
-            exporter.negotiated = Some(Arc::new(negotiated_session(remote_asn, false)));
+            let mut negotiated = negotiated_session(remote_asn, false);
+            negotiated.negotiated_families = vec![(afi, Safi::MplsVpn)];
+            if afi == Afi::Ipv4 {
+                negotiated
+                    .extended_nexthop_families
+                    .insert((afi, Safi::MplsVpn), Afi::Ipv6);
+            }
+            exporter.negotiated = Some(Arc::new(negotiated));
             let profile = exporter.publish_export_profile();
-            let candidate = profile.prepare_vpn_candidate(&vpn_announced[0]);
+            let candidate = profile.prepare_vpn_candidate(&vpn_announced[0]).unwrap();
             let update = profile
                 .build_mp_reach(
                     candidate.afi,
