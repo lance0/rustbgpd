@@ -413,6 +413,12 @@ async fn json_lines_rejects_unsupported_offline_and_route_commands_before_connec
         let error = String::from_utf8_lossy(&output.stderr);
         assert!(!error.contains("cannot reach"), "{args:?}: {error}");
         assert!(!error.is_empty());
+        if args.contains(&"--pager") {
+            assert!(
+                error.contains("--pager always cannot be combined with --json or --json-lines"),
+                "{error}"
+            );
+        }
     }
 }
 

@@ -32,7 +32,7 @@ fn validate_request_with_tty(
     }
     if json {
         return Err(CliError::Argument(
-            "--pager always cannot be combined with --json".into(),
+            "--pager always cannot be combined with --json or --json-lines".into(),
         ));
     }
     if !stdout_is_tty {
