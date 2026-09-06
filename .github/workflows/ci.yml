@@ -174,6 +174,12 @@ jobs:
           bash tests/interop/scripts/test-test-operator-auth-helper.sh
           bash tests/interop/scripts/test-test-vtep-route-oracles.sh
           python3 tests/interop/scripts/test_evpn_peer_sync_oracle.py
+      - name: Check SRv6 reflection proof helpers
+        run: |
+          python3 tests/interop/scripts/test_m112_capture_oracle.py
+          python3 tests/interop/scripts/test_m111_typed_visibility.py
+          bash -n tests/interop/scripts/test-m112-srv6-l2-reflection.sh
+          shellcheck -x tests/interop/scripts/test-m112-srv6-l2-reflection.sh
       - run: python3 scripts/check-v1-stable-surface.py
       - run: python3 scripts/reflow-release-notes.py --selftest
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings

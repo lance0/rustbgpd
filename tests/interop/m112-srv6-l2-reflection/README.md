@@ -3,6 +3,10 @@
 M112 checks one MAC-only EVPN Type2 service form from a controlled raw source,
 through a rustbgpd route reflector, to a GoBGP 3.37.0 observer.
 
+Status: the harness and offline negative controls are prepared. The live
+scenario has not yet been exercised; no M112 interoperability receipt is
+claimed. CI runs the offline Python tests and Bash/ShellCheck checks only.
+
 The fixture uses SRv6 L2 Service TLV6, End.DT2U23, full SID
 `2001:db8:112:1:1::`, and SID Structure `40/24/16/0/0/0`. It carries one
 16-byte IPv6 next hop and Label1 bytes `00 00 30`: implicit-null in the high
