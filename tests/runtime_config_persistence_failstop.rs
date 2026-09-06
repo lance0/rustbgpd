@@ -389,8 +389,10 @@ fn post_rename_failure_fences_and_restart_loads_complete_candidate() {
 
 fn exercise_sighup_ack_loss(fault: &str) {
     let dir = RetainOnPanic::new(tempfile::tempdir().expect("create test dir"));
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let runtime_dir = dir.path().join("runtime");
     std::fs::create_dir(&runtime_dir).unwrap();
+    std::fs::set_permissions(&runtime_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     let config_path = dir.path().join("rustbgpd.toml");
     let metrics = unused_loopback_addr();
     let initial = config(&runtime_dir, metrics);
