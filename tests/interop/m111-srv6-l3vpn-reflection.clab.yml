@@ -1,0 +1,57 @@
+# FRR 10.7.1 source -> rustbgpd RR -> GoBGP observer.
+# Control-plane SRv6 L3VPN reflection; no RR SID allocation or forwarding.
+name: m111-srv6-l3vpn-reflection
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m111-srv6-rr.toml:/etc/rustbgpd/config.toml:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip -6 addr add 2001:db8:111:10::1/64 dev eth1
+        - ip link set eth1 up
+        - ip -6 addr add 2001:db8:111:20::1/64 dev eth2
+        - ip link set eth2 up
+      env:
+        RUST_LOG: info
+        RUSTBGPD_TOKEN_FILE: /run/rustbgpd/grpc-test-only-operator.token
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr:10.7.1
+      cmd: sleep infinity
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-m111-srv6.conf:/etc/frr/frr.conf:ro
+      exec:
+        - touch /etc/frr/vtysh.conf
+        - ip -6 addr add 2001:db8:111:10::2/64 dev eth1
+        - ip link set eth1 up
+        - ip link add vrf111 type vrf table 111
+        - ip link set vrf111 up
+        - ip link add service0 type dummy
+        - ip link set service0 master vrf111
+        - ip addr add 198.51.111.1/24 dev service0
+        - ip -6 addr add 2001:db8:111:1000::1/64 dev service0
+        - ip link set service0 up
+        - sysctl -w net.vrf.strict_mode=1
+        - sysctl -w net.ipv6.conf.all.forwarding=1
+
+    gobgp:
+      kind: linux
+      image: gobgp:interop
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m111-srv6-sink.toml:/config/gobgp.toml:ro
+      exec:
+        - ip -6 addr add 2001:db8:111:20::2/64 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr:eth1"]
+    - endpoints: ["rustbgpd:eth2", "gobgp:eth1"]
