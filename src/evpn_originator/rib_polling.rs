@@ -44,6 +44,8 @@ pub(super) struct ReadyEvpnEventDrain {
     /// Ready events consumed from the broadcast receiver after the triggering
     /// event. The triggering event itself is not included.
     pub(super) drained_events: usize,
+    /// Whether the ready backlog includes a Type 2 invalidation.
+    pub(super) requires_repoll: bool,
     /// Number of lagged events reported while draining.
     pub(super) lagged_events: u64,
     /// Whether the broadcast channel closed while draining.
@@ -58,14 +60,21 @@ pub(super) fn drain_ready_evpn_events(
     rx: &mut broadcast::Receiver<Arc<EvpnRouteEvent>>,
 ) -> ReadyEvpnEventDrain {
     let mut drain = ReadyEvpnEventDrain::default();
-    loop {
+    // Consume the backlog present at entry. Chasing an indefinitely replenished
+    // stream would prevent both the authoritative query and local observations.
+    let mut remaining = rx.len();
+    while remaining > 0 {
         match rx.try_recv() {
-            Ok(_event) => {
+            Ok(event) => {
+                drain.requires_repoll |= evpn_event_requires_repoll(&event);
                 drain.drained_events += 1;
+                remaining -= 1;
             }
             Err(broadcast::error::TryRecvError::Empty) => break,
             Err(broadcast::error::TryRecvError::Lagged(skipped)) => {
                 drain.lagged_events = drain.lagged_events.saturating_add(skipped);
+                remaining =
+                    remaining.saturating_sub(usize::try_from(skipped).unwrap_or(usize::MAX));
             }
             Err(broadcast::error::TryRecvError::Closed) => {
                 drain.closed = true;
@@ -92,6 +101,7 @@ pub(super) async fn repoll_rib(
     originated_local_mac_counts: &OriginatedLocalMacCounts,
     vni_to_esi: &std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
 ) -> Result<(), RibQueryError> {
+    state.remote_snapshot_ready = false;
     let routes = query_evpn_routes(rib_tx).await?;
     let peer_sync_sequences = build_peer_sync_sequences(instances, &routes, vni_to_esi);
     let peer_sync_changed: Vec<_> = peer_sync_sequences
@@ -102,6 +112,19 @@ pub(super) async fn repoll_rib(
         .collect();
     state.peer_sync_sequences = peer_sync_sequences;
     let (new_mac_view, new_mac_ip_view) = build_remote_views(instances, &routes, vni_to_esi);
+    // The MAC view already selects the highest sequence across the admitted
+    // MAC-only and MAC/IP siblings. Index owners by IP once per snapshot so a
+    // local binding activation only visits the owners of that IP (RFC 9721 §6.6).
+    state.remote_ip_owners.clear();
+    for &(vni, mac, ip) in new_mac_ip_view.keys() {
+        if let Some(view) = new_mac_view.get(&(vni, mac)) {
+            state
+                .remote_ip_owners
+                .entry((vni, ip))
+                .or_default()
+                .insert(mac, view.mobility_sequence.unwrap_or(0));
+        }
+    }
     let mut suppressed_remote_diffs: BTreeSet<(EvpnInstanceId, MacAddress)> = BTreeSet::new();
 
     // --- MAC-only contender diff ---
@@ -241,6 +264,7 @@ pub(super) async fn repoll_rib(
 
     state.remote_mac_view = new_mac_view;
     state.remote_mac_ip_view = new_mac_ip_view;
+    state.remote_snapshot_ready = true;
     Ok(())
 }
 
@@ -320,10 +344,15 @@ pub(super) async fn handle_evpn_event_coalesced(
     originated_local_mac_counts: &OriginatedLocalMacCounts,
     vni_to_esi: &std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
 ) {
-    if !evpn_event_requires_repoll(&event) {
+    let drain = rx.as_mut().map(drain_ready_evpn_events).unwrap_or_default();
+    if !evpn_event_requires_repoll(&event)
+        && !drain.requires_repoll
+        && drain.lagged_events == 0
+        && state.remote_snapshot_ready
+        && !drain.closed
+    {
         return;
     }
-    let drain = rx.as_mut().map(drain_ready_evpn_events).unwrap_or_default();
     if drain.lagged_events > 0 {
         warn!(
             skipped = drain.lagged_events,

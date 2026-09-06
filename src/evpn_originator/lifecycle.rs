@@ -1,5 +1,5 @@
 use super::{
-    Arc, BTreeMap, BgpMetrics, DuplicateMacKey, EvpnInstanceId, LocalMacIpOriginator,
+    Arc, BTreeMap, BTreeSet, BgpMetrics, DuplicateMacKey, EvpnInstanceId, LocalMacIpOriginator,
     LocalMacOriginator, LocalMacReplaySet, OriginatorRuntime, OriginatorRuntimeModel,
     OriginatorState, debug, warn,
 };
@@ -42,6 +42,7 @@ pub(super) async fn apply_runtime_model(
     let mut esi_only_changed: Vec<EvpnInstanceId> = Vec::new();
     let mut newly_drained: Vec<EvpnInstanceId> = Vec::new();
     let mut newly_undrained: Vec<EvpnInstanceId> = Vec::new();
+    let mut ownership_scope_changed = BTreeSet::new();
     for old in runtime.instances.iter() {
         let was_drained = super::vni_is_drained(old.id, &runtime.vni_to_esi, &runtime.drained_esis);
         let now_drained = super::vni_is_drained(old.id, &model.vni_to_esi, &model.drained_esis);
@@ -49,13 +50,25 @@ pub(super) async fn apply_runtime_model(
             Some(next) if next == old => {
                 if runtime.vni_to_esi.get(&old.id) != model.vni_to_esi.get(&old.id) {
                     esi_only_changed.push(old.id);
+                    ownership_scope_changed.insert(old.id);
                 } else if !was_drained && now_drained {
                     newly_drained.push(old.id);
                 } else if was_drained && !now_drained {
                     newly_undrained.push(old.id);
                 }
             }
-            Some(_) => redefined.push(old.id),
+            Some(next) => {
+                redefined.push(old.id);
+                if old.rd != next.rd
+                    || old.route_targets != next.route_targets
+                    || old.local_vtep_ip != next.local_vtep_ip
+                    || old.bridge != next.bridge
+                    || old.bridge_vlan != next.bridge_vlan
+                    || runtime.vni_to_esi.get(&old.id) != model.vni_to_esi.get(&old.id)
+                {
+                    ownership_scope_changed.insert(old.id);
+                }
+            }
             None => removed.push(old.id),
         }
     }
@@ -135,6 +148,15 @@ pub(super) async fn apply_runtime_model(
     // import-RT scope available to the replay below.
     for vni in redefined.iter().chain(esi_only_changed.iter()) {
         state
+            .remote_ip_owners
+            .retain(|(entry_vni, _), _| entry_vni != vni);
+        if ownership_scope_changed.contains(vni) {
+            state.pending_ip_owner_scopes.insert(*vni);
+            state
+                .local_ip_owner_sequences
+                .retain(|(entry_vni, _), _| entry_vni != vni);
+        }
+        state
             .peer_sync_sequences
             .retain(|(entry_vni, _), _| entry_vni != vni);
         state
@@ -157,6 +179,14 @@ pub(super) async fn apply_runtime_model(
     runtime.vni_to_esi = model.vni_to_esi.clone();
     runtime.drained_esis = model.drained_esis.clone();
 
+    for (vni, macs) in replay_local_macs {
+        state
+            .pending_local_replays
+            .entry(vni)
+            .or_default()
+            .extend(macs);
+    }
+
     if let Err(e) = repoll_rib(
         runtime.instances.as_ref(),
         &runtime.rib_tx,
@@ -168,6 +198,7 @@ pub(super) async fn apply_runtime_model(
     .await
     {
         warn!(error = %e, "EVPN originator: runtime model repoll failed");
+        return;
     }
 
     // Replay the preserved local MAC/IP state under the new ESI map. This
@@ -175,8 +206,35 @@ pub(super) async fn apply_runtime_model(
     // mobility sequencing is correct. Without this, an ESI-map change would
     // withdraw the member VNI's local Type 2 routes and never re-originate
     // them until the next kernel local-MAC event.
-    for (vni, macs) in replay_local_macs {
+    replay_pending_local_macs(state, runtime).await;
+}
+
+/// A failed model snapshot leaves replay intent here until a later successful
+/// poll. Kernel observations remain ordered behind the same snapshot barrier.
+pub(super) async fn replay_pending_local_macs(
+    state: &mut OriginatorState,
+    runtime: &OriginatorRuntime,
+) {
+    if !state.remote_snapshot_ready {
+        return;
+    }
+    for (vni, macs) in std::mem::take(&mut state.pending_local_replays) {
+        if super::vni_is_drained(vni, &runtime.vni_to_esi, &runtime.drained_esis) {
+            continue;
+        }
+        let new_scope = state.pending_ip_owner_scopes.remove(&vni);
         for mac in macs {
+            if new_scope {
+                let ips: Vec<_> = state
+                    .live_mac_ip
+                    .get(&vni)
+                    .and_then(|macs| macs.get(&mac))
+                    .map(|ips| ips.iter().copied().collect())
+                    .unwrap_or_default();
+                for ip in ips {
+                    state.record_ip_owner_sequence(vni, mac, ip);
+                }
+            }
             if duplicate_mac_is_quarantined(state, vni, mac) {
                 debug!(
                     ?vni,
@@ -209,6 +267,14 @@ pub(super) fn remove_vni_state(
     state.mac_originators.remove(&vni);
     state.mac_ip_originators.remove(&vni);
     state.local_macs.remove(&vni);
+    state.pending_local_replays.remove(&vni);
+    state.pending_ip_owner_scopes.remove(&vni);
+    state
+        .remote_ip_owners
+        .retain(|(entry_vni, _), _| *entry_vni != vni);
+    state
+        .local_ip_owner_sequences
+        .retain(|(entry_vni, _), _| *entry_vni != vni);
     state
         .peer_sync_sequences
         .retain(|(entry_vni, _), _| *entry_vni != vni);
