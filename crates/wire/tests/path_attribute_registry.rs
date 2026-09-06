@@ -190,7 +190,7 @@ fn assigned_payload_contract(code: u8) -> &'static str {
             "AFI/SAFI/next-hop-length boundary followed by one or more exact two-octet-type/two-octet-length characteristic TLVs"
         }
         40 => {
-            "exact one-octet-type/two-octet-length TLVs; Label-Index length 7; Originator SRGB length `2 + nonzero*6`"
+            "exact one-octet-type/two-octet-length TLVs; Label-Index length 7; Originator SRGB length `2 + nonzero*6`; SRv6 Service nested framing below"
         }
         41 => {
             "non-empty exact two-octet-type/length TLV stream; known containers consume nested length framing only when their four-octet fixed prefix is present; semantic field shapes remain opaque"

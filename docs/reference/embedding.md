@@ -448,6 +448,12 @@ current paired boundary, `rpki` on its first release. `rib`, `bmp`, `mrt`, and
    and MP_UNREACH_NLRI retain session reset. Moving off `0.18.0` means moving
    `rustbgpd-fsm` to `0.6.0` in the same step.
 
+   Prepared `0.19.1` also adds `DecodeError::MalformedSrv6ServiceTlv` for
+   recognized RFC 9252 L3/L2 Service framing errors. Revised decoding uses
+   treat-as-withdraw, while generic Prefix-SID errors retain attribute-discard.
+   Valid nested unknown/reserved values remain opaque; see the
+   [framing contract](path-attribute-registry.md#srv6-service-framing-within-prefix-sid).
+
 2. **`rustbgpd-fsm` (published as `0.6.0`).** The `0.4.0` release makes no
    FSM API changes of its own — it exists because the FSM's public surface
    re-exports `rustbgpd-wire` types (`Action` carries wire messages), so the
