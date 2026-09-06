@@ -9,6 +9,11 @@ into the VPN label field. The reflector preserves the source next hop and
 service bytes; it allocates no SIDs and installs neither inner prefix into
 its kernel routing tables.
 
+The [2026-09-06 receipt](../../../docs/artifacts/interop/m111-srv6-l3vpn-20260906T172814Z/README.md)
+records the passing local run, exact development source and image identities,
+packet capture, and FRR SID allocation checks. Both vendor peers are passive
+and configured before the RR starts, avoiding competing startup connections.
+
 Run from the repository root after building the interop images:
 
 ```console

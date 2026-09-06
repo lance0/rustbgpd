@@ -1,0 +1,17 @@
+[
+  {
+    "name": "/clab-m111-srv6-l3vpn-reflection-frr",
+    "image": "sha256:e995beaa50fdc9edb35eadcfefa29b7f062cc06f2b812613789b68fa541554d2",
+    "configured_image": "quay.io/frrouting/frr:10.7.1"
+  },
+  {
+    "name": "/clab-m111-srv6-l3vpn-reflection-rustbgpd",
+    "image": "sha256:9a70b74aaa18059ab54e777751fe50d644c424fc4afb4cb03dfccebaede0061d",
+    "configured_image": "rustbgpd:dev"
+  },
+  {
+    "name": "/clab-m111-srv6-l3vpn-reflection-gobgp",
+    "image": "sha256:4575cbd773da6e98512cb82d369a7e7a1677883c80058a4b66caf21fcad12b62",
+    "configured_image": "gobgp:interop"
+  }
+]

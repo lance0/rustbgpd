@@ -1,0 +1,36 @@
+{
+  "2001:db8:111:1:1::":{
+    "sid":"2001:db8:111:1:1::",
+    "behavior":"End.DT4",
+    "context":{
+      "vrfId":3,
+      "vrfName":"vrf111",
+      "table":111
+    },
+    "locator":"srv6-proof",
+    "allocationMode":"dynamic",
+    "clients":[
+      {
+        "protocol":"bgp",
+        "instance":0
+      }
+    ]
+  },
+  "2001:db8:111:1:2::":{
+    "sid":"2001:db8:111:1:2::",
+    "behavior":"End.DT6",
+    "context":{
+      "vrfId":3,
+      "vrfName":"vrf111",
+      "table":111
+    },
+    "locator":"srv6-proof",
+    "allocationMode":"dynamic",
+    "clients":[
+      {
+        "protocol":"bgp",
+        "instance":0
+      }
+    ]
+  }
+}

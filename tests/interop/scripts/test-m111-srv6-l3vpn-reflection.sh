@@ -3,6 +3,7 @@
 set -euo pipefail
 TOPO=m111-srv6-l3vpn-reflection
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+CLEANUP="${CLEANUP:-1}"
 INTEROP_TEST_OPERATOR_AUTH=1
 export INTEROP_TEST_OPERATOR_AUTH
 # shellcheck disable=SC1091 # resolved from SCRIPT_DIR at runtime
@@ -59,6 +60,10 @@ trap 'exit 129' HUP
 
 capture_ready() {
     docker logs "$CAPTURE" 2>&1 | grep -q 'Capturing on'
+}
+
+sink_ready() {
+    docker exec "$SINK" gobgp neighbor 2001:db8:111:20::1 -j >/dev/null 2>&1
 }
 
 start_capture() {
@@ -135,9 +140,11 @@ main() {
     grep -qx 'gobgpd version 3\.37\.0' "$ARTIFACT_DIR/gobgp-version.txt"
     docker exec "$RUSTBGPD" rustbgpd --version >"$ARTIFACT_DIR/rustbgpd-version.txt"
     start_capture
-    docker exec -d "$RUSTBGPD" sh -c '/usr/local/bin/start-rustbgpd.sh >/tmp/m111-rustbgpd.log 2>&1'
     docker exec -d "$SINK" sh -c 'gobgpd -f /config/gobgp.toml >/tmp/m111-gobgp.log 2>&1'
     docker exec "$FRR" /usr/lib/frr/frrinit.sh start
+    wait_for 'GoBGP configured' sink_ready
+    # Passive vendor peers are configured before the RR initiates either link.
+    docker exec -d "$RUSTBGPD" sh -c '/usr/local/bin/start-rustbgpd.sh >/tmp/m111-rustbgpd.log 2>&1'
     family_state vpnv4 1 198.51.111.0/24 l3vpn_ipv4_unicast
     family_state vpnv6 1 2001:db8:111:1000::/64 l3vpn_ipv6_unicast
     docker exec "$FRR" vtysh -c 'show segment-routing srv6 locator' >"$ARTIFACT_DIR/frr-locator.txt"

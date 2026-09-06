@@ -8,6 +8,9 @@ neighbor-address = "2001:db8:111:20::1"
 peer-as = 65001
 description = "srv6-rustbgpd-rr"
 
+[neighbors.transport.config]
+passive-mode = true
+
 [[neighbors.afi-safis]]
 [neighbors.afi-safis.config]
 afi-safi-name = "l3vpn-ipv4-unicast"
