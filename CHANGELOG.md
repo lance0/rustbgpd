@@ -327,6 +327,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Refreshed the transitive HTTP/gRPC stack: `hyper` 1.8.1 → 1.11.1 and `h2`
+  0.4.16 → 0.4.19. This lockfile-only update applies upstream HTTP/2 trailer
+  handling and frame-budget hardening to the tonic gRPC and gNMI listeners.
+
 - `rbgp rib add` uses `--next-hop` as the canonical flag, retaining
   `--nexthop` as a visible compatibility alias. The default RIB pager now
   wraps long lines (`less -FRX` in auto mode, `less -RX` in always mode);
