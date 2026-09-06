@@ -3,6 +3,8 @@
 
 import copy
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -46,6 +48,52 @@ def fixture():
 
 
 class TypedVisibilityTests(unittest.TestCase):
+    def test_driver_preserves_existing_receipts_and_requires_matching_revision(self):
+        root = Path(__file__).resolve().parents[3]
+        for mode in ("existing", "mismatch", "missing", "invalid"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                tools = directory / "bin"
+                tools.mkdir()
+                for name in ("docker", "grpcurl", "jq"):
+                    path = tools / name
+                    script = "#!/bin/sh\nexit 0\n"
+                    if name == "docker":
+                        script = '#!/bin/sh\nprintf "%s\\n" "$*" >> "$M111_TEST_COMMAND_LOG"\n'
+                        script += 'if [ "$1" = inspect ]; then echo ' + "b" * 40 + '; fi\n'
+                    path.write_text(script, encoding="utf-8")
+                    path.chmod(0o755)
+                receipt = directory / "receipt"
+                retained = {name: "original receipt\n" for name in (
+                    "rustbgpd.log", "gobgp.log", "frr-running.conf", "capture.log", "exit-code.txt")}
+                if mode == "existing":
+                    receipt.mkdir()
+                    for name, value in retained.items():
+                        (receipt / name).write_text(value, encoding="utf-8")
+                commands = directory / "commands.log"
+                commands.touch()
+                environment = {**os.environ, "PATH": f"{tools}:{os.environ['PATH']}", "CLEANUP": "0",
+                               "M111_ARTIFACT_DIR": str(receipt), "M111_SOURCE_REVISION": "a" * 40,
+                               "M111_TEST_COMMAND_LOG": str(commands)}
+                if mode == "missing": del environment["M111_SOURCE_REVISION"]
+                if mode == "invalid": environment["M111_SOURCE_REVISION"] = "not-a-sha"
+                result = subprocess.run(
+                    ["bash", "tests/interop/scripts/test-m111-srv6-l3vpn-reflection.sh"], cwd=root,
+                    env=environment, capture_output=True, text=True, timeout=10, check=False,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                expected = {"existing": "File exists", "mismatch": "revision label differs",
+                            "missing": "Set M111_SOURCE_REVISION", "invalid": "full commit SHA"}
+                self.assertIn(expected[mode], result.stderr)
+                self.assertNotIn("rustbgpd --check", commands.read_text())
+                if mode == "existing":
+                    self.assertEqual({p.name: p.read_text() for p in receipt.iterdir()}, retained)
+                elif mode == "mismatch":
+                    self.assertEqual((receipt / "exit-code.txt").read_text(), "1\n")
+                    self.assertFalse((receipt / "identity.json").exists())
+                else:
+                    self.assertFalse(receipt.exists())
+
     def check(self, files):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
