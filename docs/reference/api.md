@@ -89,8 +89,12 @@ Config loading checks file readability and PEM framing. Both `--check` and
 certificate, private key, and client CA bundle and check the cert/key match
 without binding listeners. After staging replacement files at the configured
 paths, run `rustbgpd --check --strict /etc/rustbgpd/config.toml` before SIGHUP
-or restart. This checks the files at that moment, not certificate
-expiry, client trust, hostname matching, or subsequent file changes.
+or restart. This checks the files at that moment; it does not prove client
+trust or hostname matching, or cover subsequent file changes. A positive
+`tls_expiry_warning_seconds` adds expiry warnings from that staged generation;
+the default `0` disables those warnings. See
+[native gRPC certificate expiry](operations.md#native-grpc-certificate-expiry)
+for metrics, successful-client metadata logs, and bundle-date limits.
 
 Native mTLS accepts TLS 1.2 and TLS 1.3 using the rustls/ring default cipher
 suites; protocol versions and cipher suites have no configuration overrides.

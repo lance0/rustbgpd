@@ -706,6 +706,13 @@ the stop, stops rustbgpd cleanly so the restart marker is written, checks the
 package manager's preserved-config files, and verifies the restarted daemon.
 The package hooks do not stop or restart a running service.
 
+Native TLS expiry warnings remain off on upgrade unless
+`tls_expiry_warning_seconds` is positive. Enabling the setting requires a
+restart and makes matching expiry warnings fail `--check --strict`; ordinary
+`--check` still returns 0. Before rolling back to a binary without this field,
+remove it from the configuration, including a default `0` written by a newer
+configuration edit.
+
 Finish any pending confirmed transaction before any upgrade. Before upgrading
 past v0.64.0, also clear retired v1/v2 authority — v0.65.0 and every later
 release refuse to boot while it is present. The candidate binary's `--check`
@@ -1494,6 +1501,52 @@ What to do when it fires:
    guards, not this feature: the RFC 9687 send-hold timer tears down a
    wedged socket, and outbound-buffer saturation tears the session
    down with `Cease/Out of Resources`.
+
+## Native gRPC certificate expiry
+
+`bgp_grpc_tls_certificate_not_after_seconds{kind}` reports certificate
+`notAfter` as Unix seconds from the active credential generation. Its only
+label is `kind`:
+
+| Kind | Meaning |
+|------|---------|
+| `server_leaf` | First certificate in the configured server PEM bundle |
+| `server_bundle_min` | Earliest date across every certificate supplied in that bundle, including an optional root |
+| `client_ca_bundle_min` | Earliest date across every certificate supplied in the client trust bundle |
+
+These are raw certificate dates. A bundle minimum does not determine the
+effective peer certification path or its handshake cutoff. In particular,
+the client CA bundle is not an inventory of client leaf certificates, and a
+trust anchor's date is not an automatic rustls handshake cutoff.
+
+```promql
+# Active server leaf is within seven days of notAfter, including past dates.
+bgp_grpc_tls_certificate_not_after_seconds{kind="server_leaf"} - time() <= 604800
+```
+
+Without native TLS, the family has no series. Unavailable metadata is omitted;
+if any supplied bundle member cannot be inspected, that bundle minimum is
+omitted rather than calculated over an incomplete subset. Metadata parsing
+does not add a credential rejection rule. File changes alone do not alter
+these gauges: successful SIGHUP credential publication replaces the snapshot,
+while failed reloads retain the prior snapshot. Existing connections cannot
+overwrite the active values.
+
+Set `tls_expiry_warning_seconds = 604800` in
+`[global.telemetry.grpc_tcp]` to request warnings within seven days, including
+past dates. The default `0` disables expiry warnings while preserving metrics
+and successful-client metadata logs. The setting requires a restart. Warnings
+appear at startup, after successful credential reload, and during `--check`;
+ordinary `--check` returns 0 for warnings, while `--check --strict` returns 1.
+The setting does not reject startup solely because a certificate date is past.
+
+After each successful native TLS handshake, the `grpc_tls_client_certificate`
+log event reports the observed client's leaf `certificate_not_after_seconds`
+when available. A positive warning window also enables the
+`grpc_tls_client_certificate_expiry` warning event. These records describe
+clients that completed a handshake, not unseen clients or a guarantee about
+future connections. RPC role authorization remains a separate check. There
+is no per-client expiry metric or client certificate inventory.
 
 <a id="grpc-authorization-audit-and-resource-guardrails"></a>
 ## gRPC audit and resource guardrails

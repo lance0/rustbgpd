@@ -42,6 +42,42 @@ fn grpc_tcp_listener_parses_when_enabled() {
 }
 
 #[test]
+fn grpc_tls_expiry_warning_window_defaults_off_and_accepts_u32() {
+    let base = format!(
+        "{}\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\n",
+        valid_toml()
+    );
+    let config = parse_schema_only(&base).unwrap();
+    assert_eq!(
+        config
+            .global
+            .telemetry
+            .grpc_tcp
+            .unwrap()
+            .tls_expiry_warning_seconds,
+        0
+    );
+    for value in [0, 604_800, u32::MAX] {
+        let config =
+            parse_schema_only(&format!("{base}tls_expiry_warning_seconds = {value}\n")).unwrap();
+        assert_eq!(
+            config
+                .global
+                .telemetry
+                .grpc_tcp
+                .unwrap()
+                .tls_expiry_warning_seconds,
+            value
+        );
+    }
+    for value in ["-1", "4294967296", "1.5", "\"7d\""] {
+        assert!(
+            parse_schema_only(&format!("{base}tls_expiry_warning_seconds = {value}\n")).is_err()
+        );
+    }
+}
+
+#[test]
 fn grpc_explicit_uds_opt_out_disables_the_implicit_listener() {
     let toml_str = format!(
         "{}\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\n\n[global.telemetry.grpc_uds]\nenabled = false\n",

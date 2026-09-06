@@ -74,9 +74,42 @@ use rustbgpd_telemetry::reason_labels::GrpcTlsHandshakeFailureReason;
 const MAX_CONCURRENT_GRPC_TLS_HANDSHAKES: usize = 64;
 const GRPC_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const GRPC_LISTENER_SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
+
 const FULLY_COMPENSATED_STATUS_PREFIX: &str =
     "runtime effects were fully compensated; retry may repeat transient runtime changes:";
 const RUNTIME_CONFIG_OUTCOME_METADATA: &str = "rustbgpd-runtime-config-outcome";
+
+fn log_tls_client_expiry(
+    stream: &tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+    warning_seconds: u32,
+) {
+    let (tcp, session) = stream.get_ref();
+    let certificate_not_after_seconds = session
+        .peer_certificates()
+        .and_then(|certificates| certificates.first())
+        .and_then(crate::credentials::certificate_not_after);
+    info!(
+        event = "grpc_tls_client_certificate",
+        peer_addr = ?tcp.peer_addr().ok(),
+        certificate_not_after_seconds,
+        "accepted gRPC mTLS client certificate"
+    );
+    if certificate_not_after_seconds.is_some_and(|not_after| {
+        crate::credentials::tls_expiry_warning_due(
+            not_after,
+            x509_parser::time::ASN1Time::now().timestamp(),
+            warning_seconds,
+        )
+    }) {
+        warn!(
+            event = "grpc_tls_client_certificate_expiry",
+            peer_addr = ?tcp.peer_addr().ok(),
+            certificate_not_after_seconds,
+            tls_expiry_warning_seconds = warning_seconds,
+            "observed gRPC client leaf notAfter is within the configured warning window"
+        );
+    }
+}
 
 /// Mark a runtime-config error whose forward effects were fully compensated.
 ///
@@ -238,6 +271,7 @@ async fn accept_tls(
     stream: tokio::net::TcpStream,
     tls: Arc<tokio_rustls::rustls::ServerConfig>,
     metrics: &BgpMetrics,
+    warning_seconds: u32,
 ) -> Option<RustbgpdTcpStream> {
     match tokio::time::timeout(
         GRPC_TLS_HANDSHAKE_TIMEOUT,
@@ -245,7 +279,10 @@ async fn accept_tls(
     )
     .await
     {
-        Ok(Ok(stream)) => Some(RustbgpdTcpStream::from_tls(stream)),
+        Ok(Ok(stream)) => {
+            log_tls_client_expiry(&stream, warning_seconds);
+            Some(RustbgpdTcpStream::from_tls(stream))
+        }
         Ok(Err(error)) => {
             let reason = tls_handshake_failure_reason(&error);
             metrics.record_grpc_tls_handshake_failure(reason);
@@ -1204,6 +1241,8 @@ pub struct ListenerConfig {
     pub roles: Arc<BTreeMap<String, PrincipalRole>>,
     pub credential_store: CredentialStore,
     pub credential_index: usize,
+    /// Restart-pinned opt-in TLS expiry warning window; zero disables warnings.
+    pub tls_expiry_warning_seconds: u32,
     /// Optional stable principal label for audit records. Bearer-token
     /// and UDS listeners may use it to avoid placeholder identities in
     /// `grpc_authz` logs; mTLS listeners derive their audit principal
@@ -1698,6 +1737,7 @@ async fn run_listener(
         roles,
         credential_store,
         credential_index,
+        tls_expiry_warning_seconds,
         principal,
     } = listener;
 
@@ -1710,6 +1750,7 @@ async fn run_listener(
                 roles,
                 credential_store,
                 credential_index,
+                tls_expiry_warning_seconds,
                 principal,
                 rib_tx,
                 rib_query_tx,
@@ -1848,6 +1889,7 @@ async fn run_tcp_listener(
     roles: Arc<BTreeMap<String, PrincipalRole>>,
     credential_store: CredentialStore,
     credential_index: usize,
+    tls_expiry_warning_seconds: u32,
     principal: Option<String>,
     rib_tx: mpsc::Sender<RibUpdate>,
     rib_query_tx: mpsc::Sender<RibUpdate>,
@@ -1950,7 +1992,9 @@ async fn run_tcp_listener(
                 Err(error) => return Some(Err(error)),
             };
             if let Some(tls) = generation.listener(credential_index).tls.clone() {
-                accept_tls(stream, tls, &metrics).await.map(Ok)
+                accept_tls(stream, tls, &metrics, tls_expiry_warning_seconds)
+                    .await
+                    .map(Ok)
             } else {
                 Some(Ok(RustbgpdTcpStream::new(stream)))
             }
@@ -3698,7 +3742,7 @@ mod tests {
                     let metrics = incoming_metrics.clone();
                     async move {
                         match accepted {
-                            Ok(stream) => accept_tls(stream, tls, &metrics).await.map(Ok),
+                            Ok(stream) => accept_tls(stream, tls, &metrics, 0).await.map(Ok),
                             Err(error) => Some(Err(error)),
                         }
                     }

@@ -1426,6 +1426,13 @@
             "null"
           ]
         },
+        "tls_expiry_warning_seconds": {
+          "description": "Warn when a TLS certificate notAfter is within this many seconds,\nincluding past dates. Default 0 disables warnings only; expiry metrics\nand successful client handshake metadata remain available. Restart-required.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
         "tls_key_file": {
           "description": "Server private key (PEM file path). Required when `tls_cert_file`\nis set.",
           "type": [
