@@ -276,8 +276,8 @@ jobs:
       - name: Restore exact BIRD 3.3.2 archive cache
         uses: actions/cache@v6
         with:
-          path: ${{ runner.temp }}/bird332-cache/bird-3.3.2.tar.gz
-          key: bird332-v3.3.2-source-21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c
+          path: ${{ runner.temp }}/bird3-cache/bird-3.3.2.tar.gz
+          key: bird3-v3.3.2-source-21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c
       - name: Prepare exact BIRD 3.3.2 archive
         run: |
           set -euo pipefail
@@ -286,12 +286,12 @@ jobs:
             --sha256 21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c \
             --coverage-label "M101 BIRD 3.3.2 image blocked" \
             --prepare-archive \
-            "$RUNNER_TEMP/bird332-cache/bird-3.3.2.tar.gz"
+            "$RUNNER_TEMP/bird3-cache/bird-3.3.2.tar.gz"
       - name: Upload verified BIRD 3.3.2 archive
         uses: actions/upload-artifact@v7
         with:
           name: bird332-v3.3.2-source
-          path: ${{ runner.temp }}/bird332-cache/bird-3.3.2.tar.gz
+          path: ${{ runner.temp }}/bird3-cache/bird-3.3.2.tar.gz
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
