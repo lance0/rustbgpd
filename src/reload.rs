@@ -1977,8 +1977,8 @@ pub(crate) async fn reload_config_with_tcp_ao(
     if new_config.global.telemetry.grpc_tcp.as_ref() != live_grpc_tcp {
         error!(
             "[global.telemetry.grpc_tcp] differs from the live listener \
-             (address / token / TLS): live listener is unchanged. \
-             Restart rustbgpd to apply path/auth-mode changes. Credential \
+             (address / token / TLS / expiry warning window): live listener is unchanged. \
+             Restart rustbgpd to apply listener setting changes. Credential \
              bytes behind unchanged token/TLS paths rotate independently \
              on SIGHUP."
         );
@@ -4290,6 +4290,7 @@ token_file = {token:?}
 tls_cert_file = {cert:?}
 tls_key_file = {key:?}
 tls_client_ca_file = {ca:?}
+tls_expiry_warning_seconds = 604800
 
 [security.grpc]
 enforcement = "tier"
@@ -4322,6 +4323,27 @@ hold_time = 90
         .await
         .expect("reload should return a config even when grpc_tcp drifts");
         assert_tier_authorized_test_config(&returned);
+        assert_eq!(
+            returned
+                .global
+                .telemetry
+                .grpc_tcp
+                .as_ref()
+                .unwrap()
+                .tls_expiry_warning_seconds,
+            0
+        );
+        assert_eq!(
+            returned
+                .desired
+                .global
+                .telemetry
+                .grpc_tcp
+                .as_ref()
+                .unwrap()
+                .tls_expiry_warning_seconds,
+            604_800
+        );
         assert_eq!(
             returned.desired.security.grpc.enforcement,
             crate::config::GrpcEnforcementConfig::Tier

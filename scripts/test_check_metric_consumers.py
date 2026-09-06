@@ -47,7 +47,7 @@ class MetricConsumerContractTests(unittest.TestCase):
 
     def test_live_inventory_and_consumer_counts_are_exact(self):
         self.assertEqual(set(self.sources), set(CHECK.EMITTER_FILES))
-        self.assertEqual(len(self.inventory), 212)
+        self.assertEqual(len(self.inventory), 213)
         self.assertEqual(
             len(CHECK.DASHBOARD_CHECK.rust_metric_inventory(self.sources[CHECK.TELEMETRY])),
             199,
@@ -58,10 +58,10 @@ class MetricConsumerContractTests(unittest.TestCase):
         self.assertEqual(len(CHECK.PROCESS_FAMILIES), 7)
         self.assertEqual(len(self.dashboard_refs), 98)
         self.assertEqual(len(self.rule_refs), 44)
-        self.assertEqual(len(self.public_doc_refs), 201)
-        self.assertEqual(len(self.doc_refs), 201)
+        self.assertEqual(len(self.public_doc_refs), 202)
+        self.assertEqual(len(self.doc_refs), 202)
         consumers = self.dashboard_refs | self.rule_refs | self.doc_refs
-        self.assertEqual(len(consumers), 206)
+        self.assertEqual(len(consumers), 207)
         self.assertEqual(set(self.inventory) - consumers, set(CHECK.ALLOWLIST))
         self.assertEqual(
             set(CHECK.ALLOWLIST), CHECK.PROCESS_FAMILIES - {"process_start_time_seconds"}
@@ -72,9 +72,9 @@ class MetricConsumerContractTests(unittest.TestCase):
         stdout = io.StringIO()
         with redirect_stdout(stdout):
             self.assertEqual(CHECK.main(), 0)
-        self.assertIn("212 emitted families", stdout.getvalue())
-        self.assertIn("201 normative-doc families", stdout.getvalue())
-        self.assertIn("206 consumed, 6 justified raw diagnostics", stdout.getvalue())
+        self.assertIn("213 emitted families", stdout.getvalue())
+        self.assertIn("202 normative-doc families", stdout.getvalue())
+        self.assertIn("207 consumed, 6 justified raw diagnostics", stdout.getvalue())
 
     def test_blackhole_metric_inventory_has_one_operations_row_per_family(self):
         prefix = "bgp_blackhole_discard_"
@@ -360,6 +360,26 @@ fn alias_metric(registry: &Registry) {
         )
         with self.assertRaisesRegex(ValueError, "special collector registrations changed"):
             CHECK.workspace_metric_inventory(sources, self.lock_text)
+
+    def test_tls_expiry_collector_shape_and_registration_are_fail_closed(self):
+        source = self.sources[CHECK.CREDENTIALS]
+        emitted = CHECK.tls_expiry_metric_inventory(source)
+        self.assertEqual(emitted, {"bgp_grpc_tls_certificate_not_after_seconds": "ordinary"})
+        mutations = [
+            (source.replace('"bgp_grpc_tls_certificate_not_after_seconds"', '"bgp_other_seconds"'),
+             "uniquely named local gauge"),
+            (source.replace('&["kind"],', '&["identity"],'), "with the kind label"),
+            (source.replace("gauges.collect()", "Vec::new()", 1), "return its local gauge vector"),
+            (source.replace("return Vec::new();", "return self.hidden.collect();", 1),
+             "returns families outside"),
+            (source.replace("TlsExpiryCollector::new(", "UnknownCollector::new(", 1),
+             "special collector registrations changed"),
+        ]
+        for mutated, diagnostic in mutations:
+            with self.subTest(diagnostic=diagnostic):
+                self.assertNotEqual(mutated, source)
+                with self.assertRaisesRegex(ValueError, diagnostic):
+                    CHECK.tls_expiry_metric_inventory(mutated)
 
     def test_process_dependency_drift_is_rejected(self):
         drifted = self.lock_text.replace(

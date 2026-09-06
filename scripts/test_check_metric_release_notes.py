@@ -31,6 +31,7 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
             {
                 "bgp_evpn_nlri_discarded_by_type_total",
                 "bgp_grpc_tls_handshake_failures_total",
+                "bgp_grpc_tls_certificate_not_after_seconds",
                 "bgp_max_prefix_blocked_total",
                 "bgp_max_prefix_blocking",
                 "bgp_max_prefix_warning_total",

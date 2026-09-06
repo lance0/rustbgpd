@@ -87,8 +87,10 @@ Preferred posture:
   before SIGHUP or restart: both `--check`
   modes also run startup credential staging, parsing the certificates,
   private key, and client CA bundle and checking the cert/key match without
-  binding listeners. This validates the files at check time, not certificate
-  expiry, client trust, hostname matching, or subsequent file changes.
+  binding listeners. This validates the files at check time; it does not prove
+  client trust or hostname matching, or cover subsequent file changes.
+  A positive `tls_expiry_warning_seconds` adds expiry warnings from the same
+  staged bytes; the default `0` disables those warnings.
 - Native mTLS accepts TLS 1.2 and TLS 1.3 with the rustls/ring default cipher
   suites. There is no configuration setting for a different protocol-version
   floor or cipher list.
@@ -603,3 +605,6 @@ the roadmap:
   all-listener generation. Alert on
   `bgp_grpc_credential_reloads_total{outcome="failure"}`; failures retain the
   last-known-good generation and logs never include secret bytes.
+  [Native gRPC expiry visibility](operations.md#native-grpc-certificate-expiry)
+  exposes active certificate dates and opt-in warning windows. Supplied bundle
+  minima are metadata, not effective peer-path cutoffs or client leaf inventories.

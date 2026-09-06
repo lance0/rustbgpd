@@ -705,6 +705,7 @@ container/network exposure.
 | `tls_cert_file` | string | no   | --      | PEM-encoded server certificate (mTLS — requires the two siblings below) |
 | `tls_key_file`  | string | no   | --      | PEM-encoded server private key |
 | `tls_client_ca_file` | string | no | --   | PEM-encoded CA bundle that must sign every client certificate |
+| `tls_expiry_warning_seconds` | integer (`u32`) | no | `0` | Opt-in certificate expiry warning window in seconds, including past dates; `0` disables warnings only. Restart-required. |
 
 **Native gRPC mTLS.** Setting any of `tls_cert_file` / `tls_key_file` /
 `tls_client_ca_file` requires *all three* together; a partial config is
@@ -720,6 +721,15 @@ server identity and client CA for every listener, then atomically publishes one
 process-wide credential generation. A malformed or partial rotation leaves the
 last-known-good generation active. Changing a path or TLS/auth mode remains
 **restart-required** and stays visible as drift until restart.
+
+Expiry metrics and successful-client metadata logs are available independently
+of `tls_expiry_warning_seconds`. A positive window adds warnings at startup,
+after successful credential reload, during `--check`, and for observed client
+leaves after successful TLS handshakes. Plain `--check` keeps exit 0 for these
+warnings; `--check --strict` returns 1. No new date-based startup rejection is
+introduced. Bundle minima describe supplied certificate metadata, not an
+effective path or trust-anchor cutoff. See
+[native gRPC certificate expiry](operations.md#native-grpc-certificate-expiry).
 
 Native gNMI / OpenConfig telemetry (`gnmi.gNMI`) is registered on TCP only when
 this native mTLS config is present. Plaintext or bearer-token-only TCP listeners

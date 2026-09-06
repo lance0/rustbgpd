@@ -1033,6 +1033,11 @@ pub struct GrpcTcpListenerConfig {
     /// always enforces client-cert auth when TLS is on (no
     /// "TLS-without-mTLS" half-mode).
     pub tls_client_ca_file: Option<String>,
+    /// Warn when a TLS certificate notAfter is within this many seconds,
+    /// including past dates. Default 0 disables warnings only; expiry metrics
+    /// and successful client handshake metadata remain available. Restart-required.
+    #[serde(default)]
+    pub tls_expiry_warning_seconds: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

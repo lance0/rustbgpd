@@ -569,3 +569,72 @@ fn check_tls_rejects_invalid_client_ca_der() {
         check_tls_material(CHECK_CERT, CHECK_KEY, &ca, Some("client-CA"));
     }
 }
+
+// Public expired certificate signed by CHECK_KEY; no production trust or identity.
+const EXPIRED_CHECK_CERT: &str = r#"-----BEGIN CERTIFICATE-----
+MIIBfTCCASKgAwIBAgIBATAKBggqhkjOPQQDAjAdMRswGQYDVQQDDBJjaGVjay1v
+bmx5LmludmFsaWQwHhcNOTAwMTAxMDAwMDAwWhcNMDAwMTAxMDAwMDAwWjAdMRsw
+GQYDVQQDDBJjaGVjay1vbmx5LmludmFsaWQwWTATBgcqhkjOPQIBBggqhkjOPQMB
+BwNCAAQXpxOPohjjciNp9QoIOBbMOcfcvfG8HSDVxnJSAh7pMGExMb0MC8eZFIGx
+IzruHB5P4ngSmaL12b53Ulf8LzP2o1MwUTAdBgNVHQ4EFgQUs8OQThYHP98r+3/s
+2vLfUNDj1TEwHwYDVR0jBBgwFoAUs8OQThYHP98r+3/s2vLfUNDj1TEwDwYDVR0T
+AQH/BAUwAwEB/zAKBggqhkjOPQQDAgNJADBGAiEAitu0Kk47oqMvy0h5yJRWN2sq
+mLQpzHQWk5jofogVaVsCIQCwIyGG8Dbh5p+RnM0ktM/TtxbZ+EDqy3UnaIrJYRsp
+wQ==
+-----END CERTIFICATE-----
+"#;
+
+#[test]
+fn check_tls_expiry_warnings_are_opt_in_and_strict_sensitive() {
+    for (cert, window, expected_warning) in [
+        (CHECK_CERT, Some(1), false),
+        (CHECK_CERT, Some(u32::MAX), true),
+        (EXPIRED_CHECK_CERT, None, false),
+        (EXPIRED_CHECK_CERT, Some(0), false),
+        (EXPIRED_CHECK_CERT, Some(1), true),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let cert_file = dir.path().join("server.pem");
+        let key_file = dir.path().join("server.key");
+        let ca_file = dir.path().join("client-ca.pem");
+        std::fs::write(&cert_file, cert).unwrap();
+        std::fs::write(&key_file, CHECK_KEY).unwrap();
+        std::fs::write(&ca_file, cert).unwrap();
+        let window_config = window.map_or_else(String::new, |seconds| {
+            format!("tls_expiry_warning_seconds = {seconds}\n")
+        });
+        let runtime_dir = dir.path().join("not-created");
+        let config = format!(
+            "{}\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\n\
+             tls_cert_file = {cert_file:?}\ntls_key_file = {key_file:?}\n\
+             tls_client_ca_file = {ca_file:?}\n{window_config}",
+            CLEAN.replace("/tmp/rustbgpd-check-strict", runtime_dir.to_str().unwrap()),
+        );
+        for args in [&["--check"][..], &["--check", "--strict"][..]] {
+            let (code, stdout, stderr) = run(&config, args);
+            let expected_code = i32::from(expected_warning && args.contains(&"--strict"));
+            assert_eq!(
+                code,
+                Some(expected_code),
+                "window={window:?} {args:?}: {stdout}\n{stderr}"
+            );
+            if expected_warning {
+                assert!(stdout.contains("config VALID, 3 WARNINGS"), "{stdout}");
+                for kind in ["server_leaf", "server_bundle_min", "client_ca_bundle_min"] {
+                    assert!(
+                        stderr.contains(&format!("gRPC TLS {kind} notAfter")),
+                        "{stderr}"
+                    );
+                }
+                assert!(
+                    stderr.contains("not effective peer path cutoffs"),
+                    "{stderr}"
+                );
+            } else {
+                assert!(stdout.contains("config OK"), "{stdout}");
+                assert!(stderr.is_empty(), "{stderr}");
+            }
+            assert!(!runtime_dir.exists(), "check created runtime state");
+        }
+    }
+}
