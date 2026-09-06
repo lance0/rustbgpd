@@ -1,0 +1,5 @@
+{"level":"info","msg":"gobgpd started","time":"2026-09-06T19:11:58Z"}
+{"Topic":"Config","level":"info","msg":"Finished reading the config file","time":"2026-09-06T19:11:58Z"}
+{"Key":"2001:db8:111:20::1","Topic":"config","level":"info","msg":"Add Peer","time":"2026-09-06T19:11:58Z"}
+{"Key":"2001:db8:111:20::1","Topic":"Peer","level":"info","msg":"Add a peer configuration","time":"2026-09-06T19:11:58Z"}
+{"Key":"2001:db8:111:20::1","State":"BGP_FSM_OPENCONFIRM","Topic":"Peer","level":"info","msg":"Peer Up","time":"2026-09-06T19:12:01Z"}

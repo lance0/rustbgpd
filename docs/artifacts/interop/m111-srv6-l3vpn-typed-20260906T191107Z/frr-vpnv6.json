@@ -1,0 +1,10 @@
+{
+ "vrfId": 0,
+ "vrfName": "default",
+ "tableVersion": 2,
+ "routerId": "10.111.0.2",
+ "defaultLocPrf": 100,
+ "localAS": 65001,
+ "routes": {  "routeDistinguishers" : { "65001:111" : { "2001:db8:111:1000::/64": [{"valid":true,"bestpath":true,"selectionReason":"First path received","pathFrom":"external","prefix":"2001:db8:111:1000::","prefixLen":64,"network":"2001:db8:111:1000::/64","version":2,"metric":0,"weight":32768,"peerId":"(unspec)","path":"","origin":"IGP","announceNexthopSelf":true,"nhVrfName":"vrf111","nhVrfId":3,"nexthops":[{"ip":"::","hostname":"frr","afi":"ipv6","used":true}]}]
+ }  }  } , "totalRoutes": 1, "totalPaths": 1,"numRoutes":1
+ } 

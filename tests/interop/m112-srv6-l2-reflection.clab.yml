@@ -1,0 +1,50 @@
+# Controlled source -> rustbgpd RR -> pinned GoBGP observer.
+# MAC-only EVPN reflection; no SRv6 service origination or forwarding claim.
+name: m112-srv6-l2-reflection
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m112-srv6-rr.toml:/etc/rustbgpd/config.toml:ro
+        - ../fixtures/grpc-test-only-operator.token:/run/rustbgpd/grpc-test-only-operator.token:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip -6 addr add 2001:db8:112:10::1/64 dev eth1
+        - ip link set eth1 up
+        - ip -6 addr add 2001:db8:112:20::1/64 dev eth2
+        - ip link set eth2 up
+      env:
+        RUST_LOG: info
+        RUSTBGPD_TOKEN_FILE: /run/rustbgpd/grpc-test-only-operator.token
+
+    source:
+      kind: linux
+      image: bmpsink:m102
+      cmd: sleep infinity
+      binds:
+        - ./scripts/m112_raw_peer.py:/m112_raw_peer.py:ro
+        - ./scripts/m112_capture_oracle.py:/m112_capture_oracle.py:ro
+        - ./scripts/m105_capture_oracle.py:/m105_capture_oracle.py:ro
+        - ./scripts/m94_as4_oracle.py:/m94_as4_oracle.py:ro
+        - ./scripts/evpn_peer_sync_oracle.py:/evpn_peer_sync_oracle.py:ro
+      exec:
+        - ip -6 addr add 2001:db8:112:10::2/64 dev eth1
+        - ip link set eth1 up
+
+    gobgp:
+      kind: linux
+      image: gobgp:interop
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m112-srv6-sink.toml:/config/gobgp.toml:ro
+      exec:
+        - ip -6 addr add 2001:db8:112:20::2/64 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "source:eth1"]
+    - endpoints: ["rustbgpd:eth2", "gobgp:eth1"]

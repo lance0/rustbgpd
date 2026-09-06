@@ -1,0 +1,17 @@
+[
+  {
+    "name": "/clab-m112-srv6-l2-reflection-source",
+    "image": "sha256:dbf9cad241bf0220b24cef681a6f567c46f365b714f66f7ee3d912b2caa70d09",
+    "configured_image": "bmpsink:m102"
+  },
+  {
+    "name": "/clab-m112-srv6-l2-reflection-rustbgpd",
+    "image": "sha256:9affad13a7f90f1f4109e08bd8617935448f866952d94e25a6c5673e385e2a09",
+    "configured_image": "rustbgpd:dev"
+  },
+  {
+    "name": "/clab-m112-srv6-l2-reflection-gobgp",
+    "image": "sha256:4575cbd773da6e98512cb82d369a7e7a1677883c80058a4b66caf21fcad12b62",
+    "configured_image": "gobgp:interop"
+  }
+]

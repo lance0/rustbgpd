@@ -12,7 +12,8 @@ FRR="clab-${TOPO}-frr"
 SINK="clab-${TOPO}-gobgp"
 CAPTURE="${TOPO}-capture"
 CAPTURE_IMAGE=bmpsink:m102
-ARTIFACT_DIR="${M111_ARTIFACT_DIR:-/tmp/m111-srv6-l3vpn-artifacts}"
+ARTIFACT_DIR="${M111_ARTIFACT_DIR:-/tmp/m111-srv6-l3vpn-$(date -u +%Y%m%dT%H%M%SZ)}"
+ARTIFACT_DIR_OWNED=0
 CAPTURE_OWNED=0
 VOLUME_OWNED=0
 
@@ -43,7 +44,7 @@ on_exit() {
         && [ "$(docker inspect -f '{{.State.Running}}' "$CAPTURE" 2>/dev/null)" = true ]; then
         stop_capture >"$ARTIFACT_DIR/capture-stop.log" 2>&1 || true
     fi
-    if [ -d "$ARTIFACT_DIR" ]; then
+    if [ "$ARTIFACT_DIR_OWNED" -eq 1 ]; then
         docker exec "$RUSTBGPD" cat /tmp/m111-rustbgpd.log >"$ARTIFACT_DIR/rustbgpd.log" 2>&1 || true
         docker exec "$SINK" cat /tmp/m111-gobgp.log >"$ARTIFACT_DIR/gobgp.log" 2>&1 || true
         docker exec "$FRR" vtysh -c 'show running-config' >"$ARTIFACT_DIR/frr-running.conf" 2>&1 || true
@@ -51,6 +52,7 @@ on_exit() {
     fi
     capture_cleanup
     _cleanup_on_exit
+    if [ "$ARTIFACT_DIR_OWNED" -eq 1 ]; then printf '%s\n' "$status" >"$ARTIFACT_DIR/exit-code.txt"; fi
     exit "$status"
 }
 trap on_exit EXIT
@@ -128,7 +130,22 @@ family_state() {
 
 main() {
     preflight
-    mkdir -p "$ARTIFACT_DIR"
+    : "${M111_SOURCE_REVISION:?Set M111_SOURCE_REVISION to the exact labeled DUT image revision}"
+    [[ "$M111_SOURCE_REVISION" =~ ^[0-9a-f]{40}$ ]] || { echo 'DUT revision must be a full commit SHA' >&2; return 1; }
+    mkdir "$ARTIFACT_DIR"
+    ARTIFACT_DIR_OWNED=1
+    local revision
+    revision=$(docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$RUSTBGPD")
+    [ "$revision" = "$M111_SOURCE_REVISION" ] || { echo 'DUT source revision label differs' >&2; return 1; }
+    jq -n --arg source_revision "$revision" --arg harness_revision "$(git rev-parse HEAD)" \
+        '{source_revision:$source_revision,harness_revision:$harness_revision,require_typed:true}' \
+        >"$ARTIFACT_DIR/identity.json"
+    git diff HEAD -- tests/interop >"$ARTIFACT_DIR/harness.diff"
+    git status --porcelain -- tests/interop >"$ARTIFACT_DIR/harness-status.txt"
+    sha256sum tests/interop/scripts/{m111_capture_oracle,m111_typed_visibility,m105_capture_oracle}.py \
+        tests/interop/scripts/{test-m111-srv6-l3vpn-reflection,test-lib,start-rustbgpd}.sh \
+        tests/interop/configs/{frr-daemons,frr-m111-srv6.conf,gobgp-m111-srv6-sink.toml,rustbgpd-m111-srv6-rr.toml} \
+        tests/interop/m111-srv6-l3vpn-reflection.clab.yml >"$ARTIFACT_DIR/harness-sha256.txt"
     docker exec "$RUSTBGPD" rustbgpd --check --strict /etc/rustbgpd/config.toml
     docker exec "$SINK" gobgpd -d -f /config/gobgp.toml
     docker exec "$FRR" vtysh -C -f /etc/frr/frr.conf
@@ -148,6 +165,10 @@ main() {
     docker exec -d "$RUSTBGPD" sh -c '/usr/local/bin/start-rustbgpd.sh >/tmp/m111-rustbgpd.log 2>&1'
     family_state vpnv4 1 198.51.111.0/24 l3vpn_ipv4_unicast
     family_state vpnv6 1 2001:db8:111:1000::/64 l3vpn_ipv6_unicast
+    # Preserve both initial typed views before the later VPNv4 survivor query.
+    for family in vpnv4 vpnv6; do
+        cp "$ARTIFACT_DIR/$family-count-1-rr.json" "$ARTIFACT_DIR/baseline-$family-rr.json"
+    done
     docker exec "$FRR" vtysh -c 'show segment-routing srv6 locator' >"$ARTIFACT_DIR/frr-locator.txt"
     docker exec "$FRR" vtysh -c 'show segment-routing srv6 locator srv6-proof sid json' \
         >"$ARTIFACT_DIR/frr-sids.json"
@@ -182,6 +203,7 @@ main() {
             and $sid.context.vrfName == "vrf111" and $sid.context.table == 111
             and $sid.locator == "srv6-proof"
             and any($sid.clients[]; .protocol == "bgp"))' "$ARTIFACT_DIR/frr-sids.json" >/dev/null
-    echo 'PASS: dual-family SRv6 L3VPN wire preservation and independent withdrawals'
+    python3 "$SCRIPT_DIR/m111_typed_visibility.py" "$ARTIFACT_DIR" >"$ARTIFACT_DIR/typed-visibility.json"
+    echo 'PASS: dual-family SRv6 L3VPN wire preservation, typed visibility and independent withdrawals'
 }
 main "$@"
