@@ -9,5 +9,5 @@ rustbgpd-transport = { path = "../../../crates/transport", features = ["bench-in
 rustbgpd-wire = { path = "../../../crates/wire" }
 rustbgpd-telemetry = { path = "../../../crates/telemetry" }
 tokio = { version = "1", features = ["full"] }
-pprof = { version = "0.14", features = ["flamegraph"] }
+pprof = { version = "0.15", features = ["flamegraph"] }
 libc = "0.2"
