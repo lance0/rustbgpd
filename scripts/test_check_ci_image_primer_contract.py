@@ -1118,18 +1118,20 @@ class PrimerContractTests(unittest.TestCase):
                 "aff89abba3b92b7637bd57e0168b8d7ae887747f160ada4973378ad72f5f3660",
                 "bird2192-cache",
                 "bird2192-v2.19.2-source",
+                "bird2192-v2.19.2-source",
             ),
             (
                 "bird332_archive",
                 "3.3.2",
                 "21297d7a02edd700ae82de5a630055a9cb88a99e2e7e45551bc7d6c1e5b4de2c",
-                "bird332-cache",
+                "bird3-cache",
                 "bird332-v3.3.2-source",
+                "bird3-v3.3.2-source",
             ),
         )
-        for job, version, checksum, cache_dir, artifact in specs:
+        for job, version, checksum, cache_dir, artifact, cache_artifact in specs:
             archive = f"bird-{version}.tar.gz"
-            cache_key = f"{artifact}-{checksum}"
+            cache_key = f"{cache_artifact}-{checksum}"
             for old, new in (
                 (f"  {job}:\n", f"  removed_{job}:\n"),
                 (f"key: {cache_key}", "key: bird-latest"),

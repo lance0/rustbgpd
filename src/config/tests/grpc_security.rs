@@ -290,7 +290,7 @@ hold_time = 90
 #[test]
 fn grpc_security_tier_enforcement_parses_with_explicit_uds_principal() {
     let toml_str = format!(
-        "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[security.grpc.roles]\n\"local-admin\" = \"operator\"\n\n[global.telemetry.grpc_uds]\npath = \"/tmp/rustbgpd-test.sock\"\nprincipal = \"local-admin\"\n",
+        "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[security.grpc.roles]\n\"local-admin\" = \"operator\"\n\n[global.telemetry.grpc_uds]\npath = \"/tmp/rustbgpd-test/grpc.sock\"\nmode = 0o660\nprincipal = \"local-admin\"\n",
         valid_toml_no_grpc_security()
     );
     let config = parse_strict(&toml_str).unwrap();
@@ -301,6 +301,15 @@ fn grpc_security_tier_enforcement_parses_with_explicit_uds_principal() {
     assert_eq!(
         config.security.grpc.roles["local-admin"],
         GrpcRoleConfig::Operator
+    );
+    assert!(
+        config
+            .global
+            .telemetry
+            .grpc_uds
+            .unwrap()
+            .token_file
+            .is_none()
     );
 }
 
@@ -400,24 +409,31 @@ fn grpc_security_tier_rejects_group_accessible_uds_without_principal() {
     // accept group-accessible modes (e.g. 0o660) makes this config
     // valid and fails this test. Group/world access buys real scoping,
     // so it keeps the explicit principal ceremony.
-    let toml_str = format!(
-        "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[global.telemetry.grpc_uds]\npath = \"/tmp/rustbgpd-test.sock\"\nmode = 0o660\n",
-        valid_toml_no_grpc_security()
-    );
-    let err = parse_strict(&toml_str).unwrap_err();
-    let ConfigError::InvalidGrpcConfig { reason } = err else {
-        panic!("expected InvalidGrpcConfig");
-    };
-    assert!(
-        reason.contains("group/world-accessible (mode 0o660)") && reason.contains("local-operator"),
-        "got unexpected reason: {reason}"
-    );
-    assert!(
-        reason.contains("add this to fix it:")
-            && reason.contains("principal = \"local-admin\"")
-            && reason.contains("\"local-admin\" = \"operator\""),
-        "error must end with a paste-ready fix: {reason}"
-    );
+    for mode in [0o660, 0o666] {
+        let mode_line = format!("mode = 0o{mode:o}");
+        let toml_str = format!(
+            "{}\n[security.grpc]\nenforcement = \"tier\"\n\n[global.telemetry.grpc_uds]\npath = \"/tmp/rustbgpd-test/grpc.sock\"\n{mode_line}\n",
+            valid_toml_no_grpc_security()
+        );
+        let err = parse_strict(&toml_str).unwrap_err();
+        let ConfigError::InvalidGrpcConfig { reason } = err else {
+            panic!("expected InvalidGrpcConfig");
+        };
+        assert!(
+            reason.contains(&format!("group/world-accessible (mode 0o{mode:o})"))
+                && reason.contains("local-operator"),
+            "got unexpected reason: {reason}"
+        );
+        assert!(
+            reason.contains("add this to fix it:")
+                && reason.contains("\nmode = 0o600\n")
+                && !reason.contains("principal = \"local-admin\"")
+                && !reason.contains("\"local-admin\" = \"operator\""),
+            "error must end with a paste-ready fix: {reason}"
+        );
+        parse_strict(&toml_str.replace(&mode_line, "mode = 0o600"))
+            .expect("the suggested owner-only mode must fix validation without a roles grant");
+    }
 }
 
 #[test]

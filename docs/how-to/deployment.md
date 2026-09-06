@@ -745,8 +745,12 @@ Do not omit the host state bind when overriding the image user. The directory
 baked into the image is owned by uid 999; a root daemon expects uid 0. The
 runtime-state owner guard treats that mismatch as unsafe, logs
 `runtime-state marker/checkpoint storage unavailable`, and continues with the
-graceful-restart marker and warm checkpoint storage disabled. A root-owned,
-non-group/world-writable bind mount makes the authority match the running uid.
+graceful-restart marker and warm checkpoint storage disabled in the pinned
+`0.68.0` image above. Unreleased builds also reject the default gRPC UDS
+listener at startup. A root-owned, non-group/world-writable bind mount makes
+the authority match the running uid. The socket parent must allow the daemon
+read/write/search access, with no symlinks or untrusted writable ancestors;
+see [Unix socket path integrity](../reference/security.md#unix-socket-path-integrity).
 
 Adding `NET_BIND_SERVICE` to uid 999 is not a third supported host-network
 recipe. If changing the host's low-port sysctl is part of a separately managed

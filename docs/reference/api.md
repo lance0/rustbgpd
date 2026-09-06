@@ -166,8 +166,13 @@ adds only expected-token and confirm-handle presence — never candidate bytes, 
 plan token, path, or spool name. Transaction apply comments are not logged verbatim, and
 `SetPeerGroup` logs MD5 state without the MD5 value.
 Operators declare `[security.grpc.roles]` and set explicit listener
-`principal` labels for bearer-token TCP and UDS listeners; those labels are
-the principal strings looked up in `[security.grpc.roles]`.
+`principal` labels for bearer-token TCP and explicitly named UDS listeners;
+those labels are the principal strings looked up in `[security.grpc.roles]`.
+An owner-only UDS without a principal retains its implicit `local-operator`
+role even when a bearer token is required. Token-protected UDS listeners use
+`authn="bearer_token"`; permissions-only UDS listeners use `uds` for an explicit
+principal or `uds_owner` for the implicit identity. Their parent directories
+must meet the [UDS path requirements](security.md#unix-socket-path-integrity).
 Native mTLS listeners derive the audit principal from the client certificate
 using ADR-0064 precedence: `rustbgpd:` URI SAN, then email SAN, then Subject
 CN. Extracted principal values must fit the bounded
