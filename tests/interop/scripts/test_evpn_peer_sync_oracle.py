@@ -368,6 +368,86 @@ class PeerSyncOracleTests(unittest.TestCase):
             with self.subTest(sample=sample), self.assertRaises(ValueError):
                 process_start_time(sample + "\n")
 
+    def test_different_mac_owner_source_scope_and_withdrawal(self):
+        from evpn_peer_sync_peer import OWNER_LOCAL, OWNER_SOURCES, SOURCE
+        self.assertEqual([":" in route.ip for route in OWNER_LOCAL], [False, True, False, True])
+        for local, remote in zip(OWNER_LOCAL, OWNER_SOURCES, strict=True):
+            self.assertEqual(local.ip, remote.ip)
+            self.assertNotEqual(local.mac, remote.mac)
+            self.assertNotEqual(local.esi, remote.esi)
+        oracle = Oracle()
+        for sequence in (9, 19):
+            for body in command_updates(sequence, "ip-owner"):
+                oracle.apply(body)
+            oracle.expect(OWNER_SOURCES, sequence, next_hop=SOURCE)
+            oracle.expect_owned_keys(OWNER_SOURCES, rd=OWNER_SOURCES[0].rd)
+            for route in OWNER_LOCAL:
+                with self.assertRaises(AssertionError):
+                    oracle.expect([route], 10, next_hop=DUT)
+        for body in command_updates(None, "ip-owner"):
+            oracle.apply(body)
+        self.assertFalse(oracle.live)
+        for sequence, scenario in ((3, "ip-owner"), (20, "ip-owner"), (9, "unknown")):
+            with self.subTest(sequence=sequence, scenario=scenario), self.assertRaises(ValueError):
+                command_updates(sequence, scenario)
+
+    def test_ip_owner_first_wire_ten_rejects_transient_zero_adoption_and_outbid(self):
+        from evpn_peer_sync_peer import OWNER_LOCAL, DUT
+        for bad_sequence in (0, 9, 11, 20):
+            with self.subTest(sequence=bad_sequence):
+                oracle = Oracle()
+                oracle.apply(announcement(OWNER_LOCAL, 10, next_hop=DUT))
+                oracle.expect_transition(OWNER_LOCAL, 10, next_hop=DUT, after=0)
+                checkpoint = len(oracle.events)
+                # No fresh wire message must not satisfy an activation phase.
+                with self.assertRaises(AssertionError):
+                    oracle.expect_transition(OWNER_LOCAL, 10, next_hop=DUT, after=checkpoint)
+                oracle.apply(announcement(OWNER_LOCAL, bad_sequence, next_hop=DUT))
+                oracle.apply(announcement(OWNER_LOCAL, 10, next_hop=DUT))
+                with self.assertRaises(AssertionError):
+                    oracle.expect_transition(OWNER_LOCAL, 10, next_hop=DUT, after=checkpoint)
+                with self.assertRaises(AssertionError):
+                    oracle.expect_quiet(after=checkpoint, rd=OWNER_LOCAL[0].rd)
+
+    def test_ip_owner_uncontested_children_downgrade_and_reactivation(self):
+        from evpn_peer_sync_peer import OWNER_CHILDREN, OWNER_LOCAL, DUT
+        oracle = Oracle()
+        oracle.apply(announcement(OWNER_LOCAL, 10, next_hop=DUT))
+        checkpoint = len(oracle.events)
+        oracle.apply(announcement(OWNER_CHILDREN, 10, next_hop=DUT))
+        oracle.expect_transition(OWNER_CHILDREN, 10, next_hop=DUT, after=checkpoint)
+        oracle.expect_transition(OWNER_LOCAL, 10, next_hop=DUT, after=0)
+        checkpoint = len(oracle.events)
+        parents = [Route(route.rd, route.mac) for route in OWNER_LOCAL]
+        oracle.apply(withdrawal(OWNER_LOCAL + OWNER_CHILDREN))
+        oracle.apply(announcement(parents, 10, next_hop=DUT))
+        oracle.expect_transition(parents, 10, next_hop=DUT, after=checkpoint)
+        oracle.expect_owned_keys(parents, rd=parents[0].rd)
+        checkpoint = len(oracle.events)
+        oracle.apply(withdrawal(parents))
+        oracle.apply(announcement(OWNER_LOCAL, 20, next_hop=DUT))
+        oracle.expect_transition(OWNER_LOCAL, 20, next_hop=DUT, after=checkpoint)
+        with self.assertRaises(AssertionError):
+            oracle.expect_transition(OWNER_LOCAL, 10, next_hop=DUT, after=checkpoint)
+
+    def test_ip_owner_metrics_require_detection_and_flat_mac_counters(self):
+        module = runpy.run_path(str(Path(__file__).with_name("run-evpn-peer-sync-proof.py")))
+        check = module["expect_duplicate_counts"]
+        totals = duplicate_totals("process_start_time_seconds 123\n")
+        check(totals)
+        with self.assertRaises(AssertionError):
+            check(totals, 4)
+        totals[COUNTERS[2]] = {"present": True, "series": 1, "total": 4}
+        check(totals, 4)
+        for family in COUNTERS:
+            malformed = copy.deepcopy(totals)
+            malformed[family]["total"] += 1
+            with self.subTest(family=family), self.assertRaises(AssertionError):
+                check(malformed, 4)
+        totals[COUNTERS[2]]["total"] = 8
+        totals[COUNTERS[3]] = {"present": True, "series": 1, "total": 4}
+        check(totals, 8, 4)
+
     def test_encoder_rejects_out_of_range_and_oversized_inputs(self):
         for route in (Route("10.0.0.2:100", "00"), Route("10.0.0.2:100", MAC, vni=0),
                       Route("10.0.0.2:100", MAC, esi="00")):

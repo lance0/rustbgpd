@@ -1,4 +1,4 @@
-# Same-ESI sequence adoption wire proof
+# EVPN sequence adoption and IP ownership wire proof
 
 This isolated lab checks exact local Type-2 sequence adoption with a controlled
 BGP source and independent wire receiver. It is not interoperability evidence
@@ -27,7 +27,22 @@ After two originator polls, new IPv4/IPv6 children must inherit the retained MAC
 sequence 9; removing the last IP from an IP-first host must create MAC-only at
 sequence 9. Wire history proves that host had no earlier MAC-only advertisement.
 
+A second bounded phase advertises four different-MAC, different-ESI remote IP
+owners at sequence 9. IPv4 and IPv6 bindings enter through both MAC-first and
+IP-first learning; their first local MAC/IP wire announcements must be 10. After
+the source rises to 19, two rounds of repeated kernel observations must remain
+quiet at 10. New uncontested children inherit 10, withdrawal retains it, and
+removing the last IP downgrades to MAC-only 10. A fresh contested activation
+against remote 19 must then advertise 20. This checks local activation behavior;
+it does not establish complete simultaneous-move convergence or stale-entry
+procedures from RFC 9721.
+
 All four duplicate-MAC/IP counter families are summed across every label set.
+The original same-ESI phases require zero throughout. The different-MAC phase
+requires four duplicate-IP moves with no threshold crossings, unchanged through
+repeated observations, new uncontested children, withdrawal, and downgrade.
+Reactivating the four contested bindings adds four moves and four threshold
+crossings. Both duplicate-MAC counters must remain zero throughout.
 A missing lazy counter is recorded explicitly as `present: false`, `series: 0`,
 `total: 0`; an unsuccessful scrape, malformed value, or missing process sample
 fails. A changed process-start sample also fails. Duplicate-IP diagnostics are
@@ -59,7 +74,7 @@ Docker Compose and Linux bridge/VXLAN support are required. The DUT is privilege
 inside its owned container, with no host network namespace or host socket mount.
 The runner rejects an existing Docker network overlapping `10.99.0.0/24`, starts
 a unique Compose project, and applies neighbor-lifetime settings only inside the
-DUT container. Allow about two minutes for the single attempt. Run it separately
+DUT container. Allow about four minutes for the single attempt. Run it separately
 from tests that require an idle host or no running daemon.
 
 Every command's output and exit status, source UPDATE bytes, received BGP message
@@ -81,3 +96,7 @@ A fresh Gate 8b churn run is separate evidence. Record its actual duration, sour
 images, restart epochs, raw metrics, and terminal recovery. A short FDB churn run
 does not establish long-term memory stability or MAC/IP churn behavior. Dated soak
 receipts and their missing metric samples remain unchanged.
+
+The [2026-09-06 controlled wire receipt](../../../docs/artifacts/interop/evpn-ip-owner-20260906T143533Z/README.md)
+records the original same-ESI phases and the different-MAC IP ownership extension
+against their exact source and harness revisions.

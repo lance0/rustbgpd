@@ -1,0 +1,77 @@
+{
+  "raw_update_replay_matches_events": true,
+  "first_owner_announcements": [
+    {
+      "action": "announce",
+      "rd": "10.99.0.1:100",
+      "mac": "02:aa:bb:cc:ee:11",
+      "ip": "192.0.2.101",
+      "tag": 0,
+      "esi": "00:00:00:00:00:00:00:00:00:01",
+      "vni": 100,
+      "sequence": 10,
+      "sticky": false,
+      "next_hop": "10.99.0.1",
+      "communities": [
+        "0002fde800000064",
+        "060000000000000a"
+      ]
+    },
+    {
+      "action": "announce",
+      "rd": "10.99.0.1:100",
+      "mac": "02:aa:bb:cc:ee:22",
+      "ip": "2001:db8::102",
+      "tag": 0,
+      "esi": "00:00:00:00:00:00:00:00:00:01",
+      "vni": 100,
+      "sequence": 10,
+      "sticky": false,
+      "next_hop": "10.99.0.1",
+      "communities": [
+        "0002fde800000064",
+        "060000000000000a"
+      ]
+    },
+    {
+      "action": "announce",
+      "rd": "10.99.0.1:100",
+      "mac": "02:aa:bb:cc:ee:33",
+      "ip": "192.0.2.103",
+      "tag": 0,
+      "esi": "00:00:00:00:00:00:00:00:00:01",
+      "vni": 100,
+      "sequence": 10,
+      "sticky": false,
+      "next_hop": "10.99.0.1",
+      "communities": [
+        "0002fde800000064",
+        "060000000000000a"
+      ]
+    },
+    {
+      "action": "announce",
+      "rd": "10.99.0.1:100",
+      "mac": "02:aa:bb:cc:ee:44",
+      "ip": "2001:db8::104",
+      "tag": 0,
+      "esi": "00:00:00:00:00:00:00:00:00:01",
+      "vni": 100,
+      "sequence": 10,
+      "sticky": false,
+      "next_hop": "10.99.0.1",
+      "communities": [
+        "0002fde800000064",
+        "060000000000000a"
+      ]
+    }
+  ],
+  "final_owner_sequence": 20,
+  "terminal_session": {
+    "established": true,
+    "ack": 11,
+    "error": null,
+    "heartbeat": 1788705333.2514398
+  },
+  "event_count": 56
+}
