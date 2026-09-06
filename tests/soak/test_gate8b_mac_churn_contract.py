@@ -213,6 +213,67 @@ exit 0
         self.assertEqual(counter.read_text().strip(), "10")
         self.assertFalse(counter.with_suffix(".tmp").exists())
 
+    def test_local_add_removes_only_matching_remote_master_ownership(self):
+        source = (HERE / "run-gate8b-mac-churn-soak.sh").read_text()
+        function = "fdb_add_pe() {" + source.split("fdb_add_pe() {", 1)[1].split("\n}\n", 1)[0] + "\n}"
+        binaries = self.directory / "bin"
+        binaries.mkdir()
+        bridge = binaries / "bridge"
+        bridge.write_text("""#!/bin/sh
+printf '%s\n' "$*" >> "$COMMAND_LOG"
+case "$2" in
+  show) [ "$CASE" != dump-error ] || exit 1; printf '%s\n' "$FDB_ROWS" ;;
+  del) [ "$CASE" != delete-error ] || exit 1 ;;
+esac
+""")
+        bridge.chmod(0o755)
+        remote = "02:aa:00:00:00:01 vlan 1 extern_learn master br100"
+        cases = (("remote", remote, True),
+                 ("self", "02:aa:00:00:00:01 dst 10.0.0.2 self extern_learn", False),
+                 ("other-mac", remote.replace(":01", ":02"), False),
+                 ("other-bridge", remote.replace("br100", "br1000"), False),
+                 ("local", remote.replace("extern_learn ", ""), False),
+                 ("dump-error", remote, False), ("delete-error", remote, True))
+        for case, rows, delete in cases:
+            with self.subTest(case=case):
+                trace = self.directory / "commands"
+                trace.write_text("")
+                environment = dict(os.environ, PATH=f"{binaries}:{os.environ['PATH']}",
+                                   COMMAND_LOG=str(trace), CASE=case, FDB_ROWS=rows)
+                prefix = """container_for_pe() { echo owned-pe; }
+container_is_running() { return 0; }
+churn_log() { :; }
+docker() { shift 2; "$@"; }
+CE_PORT=ce100a VNI=100
+"""
+                result = subprocess.run(["bash", "-c", prefix + function +
+                                         "\nfdb_add_pe 1 02:aa:00:00:00:01"],
+                                        env=environment, capture_output=True, text=True, check=False)
+                expected = ["fdb show dev vxlan100"]
+                if delete:
+                    expected.append("fdb del 02:aa:00:00:00:01 dev vxlan100 master")
+                if not case.endswith("-error"):
+                    expected.append("fdb add 02:aa:00:00:00:01 dev ce100a master static")
+                self.assertEqual(trace.read_text().splitlines(), expected)
+                self.assertEqual(result.returncode, 1 if case.endswith("-error") else 0,
+                                 result.stderr)
+
+    def test_full_combined_pool_forces_delete_from_larger_pool(self):
+        source = (HERE / "run-gate8b-mac-churn-soak.sh").read_text()
+        function = "churn_step() {" + source.split("churn_step() {", 1)[1].split("\n}\n", 1)[0] + "\n}"
+        for first, second, expected in ((134, 122, 1), (122, 134, 2)):
+            with self.subTest(first=first, second=second):
+                body = f"""pool_size() {{ if [ "$1" = 1 ]; then echo {first}; else echo {second}; fi; }}
+churn_batch_add() {{ echo add; }}
+churn_batch_del() {{ echo "delete $1 $2"; }}
+churn_batch_mobility() {{ echo move; }}
+CHURN_BATCH_SIZE=16 MAC_POOL_SIZE=256 POOL_MIN=64 POOL_MAX=192 MOBILITY_FRACTION=100
+""" + function + "\nchurn_step"
+                result = subprocess.run(["bash", "-c", body], text=True, capture_output=True,
+                                        check=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), f"delete {expected} 16")
+
     def test_shared_lab_is_rejected_before_any_docker_action(self):
         binaries = self.directory / "bin"
         binaries.mkdir()

@@ -536,7 +536,21 @@ fdb_add_pe() {
     local pe="$1" mac="$2" container
     container="$(container_for_pe "$pe")"
     if container_is_running "$container"; then
-        if docker exec "$container" bridge fdb add "$mac" dev "$CE_PORT" master static 2>/dev/null; then
+        # A received route may already own this bridge's MASTER row. A
+        # replace retains extern_learn, so remove only the exact remote
+        # MASTER row before adding the genuinely local CE ownership.
+        if docker exec "$container" sh -c '
+            rows=$(bridge fdb show dev "vxlan$3") || exit
+            if printf "%s\n" "$rows" | awk -v mac="$1" -v br="br$3" '"'"'
+                $1 == mac && /extern_learn/ {
+                    for (i = 2; i < NF; i++) if ($i == "master" && $(i + 1) == br) found = 1
+                }
+                END { exit !found }
+            '"'"'; then
+                bridge fdb del "$1" dev "vxlan$3" master || exit
+            fi
+            bridge fdb add "$1" dev "$2" master static
+        ' sh "$mac" "$CE_PORT" "$VNI" 2>/dev/null; then
             return 0
         fi
         churn_log "ADD failed pe=$pe mac=$mac"
@@ -649,6 +663,14 @@ churn_step() {
     local p1 p2 batch_size="$CHURN_BATCH_SIZE"
     p1="$(pool_size 1)"
     p2="$(pool_size 2)"
+
+    # Both PEs draw from one bounded set. A full combined pool has no
+    # free MAC even when neither individual pool exceeds its ceiling.
+    if [ "$((p1 + p2))" -ge "$MAC_POOL_SIZE" ]; then
+        if [ "$p1" -ge "$p2" ]; then churn_batch_del 1 "$batch_size"
+        else churn_batch_del 2 "$batch_size"; fi
+        return
+    fi
 
     # Force grow if both pools below the floor.
     if [ "$p1" -lt "$POOL_MIN" ] && [ "$p2" -lt "$POOL_MIN" ]; then
