@@ -137,6 +137,9 @@ pub(super) async fn apply_runtime_model(
         state
             .peer_sync_sequences
             .retain(|(entry_vni, _), _| entry_vni != vni);
+        state
+            .peer_sync_participants
+            .retain(|(entry_vni, _)| entry_vni != vni);
     }
 
     for inst in model.instances.iter() {
@@ -209,6 +212,9 @@ pub(super) fn remove_vni_state(
     state
         .peer_sync_sequences
         .retain(|(entry_vni, _), _| *entry_vni != vni);
+    state
+        .peer_sync_participants
+        .retain(|(entry_vni, _)| *entry_vni != vni);
     state.duplicate_ip.clear_vni(vni);
     state.live_mac_ip.remove(&vni);
     state

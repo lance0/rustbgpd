@@ -552,6 +552,9 @@ struct OriginatorState {
     remote_mac_ip_view: RemoteMacIpViewMap,
     /// Same-segment sequence floors, separate from mobility contenders.
     peer_sync_sequences: BTreeMap<(EvpnInstanceId, MacAddress), u32>,
+    /// Locally owned MACs that participated in peer sync in this VNI/ESI scope.
+    /// Retained local sequences still synchronize children after the peer leaves.
+    peer_sync_participants: BTreeSet<(EvpnInstanceId, MacAddress)>,
     /// RFC 7432 §15.1 duplicate-MAC detector. The pure detector owns
     /// the M/N window and active suppressions; this daemon state owns
     /// the route-withdraw/replay policy.
@@ -597,6 +600,7 @@ impl OriginatorState {
             remote_mac_view: BTreeMap::new(),
             remote_mac_ip_view: BTreeMap::new(),
             peer_sync_sequences: BTreeMap::new(),
+            peer_sync_participants: BTreeSet::new(),
             duplicate_mac_detector: DuplicateMacDetector::default(),
             duplicate_ip: duplicate_ip::DuplicateIpState::default(),
             known_duplicate_mac_keys: BTreeSet::new(),
@@ -615,9 +619,6 @@ impl OriginatorState {
         mac: MacAddress,
         mut actions: Vec<OriginationAction>,
     ) -> Vec<OriginationAction> {
-        let Some(&peer_sequence) = self.peer_sync_sequences.get(&(vni, mac)) else {
-            return actions;
-        };
         if !self
             .local_macs
             .get(&vni)
@@ -625,6 +626,14 @@ impl OriginatorState {
         {
             return actions;
         }
+        let peer_sequence = match self.peer_sync_sequences.get(&(vni, mac)).copied() {
+            Some(sequence) => {
+                self.peer_sync_participants.insert((vni, mac));
+                sequence
+            }
+            None if self.peer_sync_participants.contains(&(vni, mac)) => 0,
+            None => return actions,
+        };
         let sequence = peer_sequence
             .max(
                 self.mac_originators

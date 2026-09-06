@@ -5325,6 +5325,111 @@ async fn peer_sync_synchronizes_local_ip_children_without_duplicate_accounting()
 }
 
 #[tokio::test]
+async fn peer_sync_withdrawal_preserves_sequence_for_new_ip_children() {
+    let mut h = PeerSyncHarness::new(
+        BTreeMap::from([(vni(100), segment_esi(1))]),
+        vec![eligible_peer_sync_route(9, None)],
+    );
+    h.repoll().await;
+    h.observe(learned_aa()).await;
+    assert_eq!(
+        h.take_log().await,
+        vec![RibActionWithSeq::Inject(
+            macip_key_with(100, 0xAA, None),
+            Some(9),
+        )]
+    );
+    h.routes_tx.send_replace(Vec::new());
+    h.repoll().await;
+    assert!(h.take_log().await.is_empty());
+    h.observe(ip_added_aa()).await;
+    h.observe(ip_observation(0xAA, "2001:db8::10", true)).await;
+    assert_eq!(
+        h.take_log().await,
+        vec![
+            RibActionWithSeq::Withdraw(macip_key_with(100, 0xAA, None)),
+            RibActionWithSeq::Inject(macip_key_with(100, 0xAA, Some("192.0.2.10")), Some(9)),
+            RibActionWithSeq::Inject(macip_key_with(100, 0xAA, Some("2001:db8::10")), Some(9)),
+        ]
+    );
+    assert_no_duplicate_mac_moves(&h.metrics, 100, 0xAA);
+}
+
+#[tokio::test]
+async fn peer_sync_withdrawal_preserves_sequence_on_pending_ip_downgrade() {
+    for ip in ["192.0.2.10", "2001:db8::10"] {
+        let mut h = PeerSyncHarness::new(
+            BTreeMap::from([(vni(100), segment_esi(1))]),
+            vec![eligible_peer_sync_route(9, None)],
+        );
+        h.repoll().await;
+        h.observe(ip_observation(0xAA, ip, true)).await;
+        assert!(
+            h.take_log().await.is_empty(),
+            "pending IP does not create ownership"
+        );
+        h.observe(learned_aa()).await;
+        assert_eq!(
+            h.take_log().await,
+            vec![RibActionWithSeq::Inject(
+                macip_key_with(100, 0xAA, Some(ip)),
+                Some(9),
+            )]
+        );
+        h.routes_tx.send_replace(Vec::new());
+        h.repoll().await;
+        assert!(h.take_log().await.is_empty());
+        h.observe(ip_observation(0xAA, ip, false)).await;
+        assert_eq!(
+            h.take_log().await,
+            vec![
+                RibActionWithSeq::Withdraw(macip_key_with(100, 0xAA, Some(ip))),
+                RibActionWithSeq::Inject(macip_key_with(100, 0xAA, None), Some(9)),
+            ]
+        );
+        assert_no_duplicate_mac_moves(&h.metrics, 100, 0xAA);
+    }
+}
+
+#[tokio::test]
+async fn peer_sync_absence_keeps_never_participating_ratchets_independent() {
+    for remote_contender in [false, true] {
+        let routes = if remote_contender {
+            vec![with_esi(eligible_peer_sync_route(9, None), segment_esi(2))]
+        } else {
+            Vec::new()
+        };
+        let mut h = PeerSyncHarness::new(BTreeMap::from([(vni(100), segment_esi(1))]), routes);
+        h.repoll().await;
+        h.observe(learned_aa()).await;
+        if !remote_contender {
+            h.observe(LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ifindex: 11,
+            })
+            .await;
+        }
+        assert_eq!(
+            h.state.mac_originators[&vni(100)].sequence_for_mac(mac(0xAA)),
+            Some(if remote_contender { 10 } else { 1 })
+        );
+        h.take_log().await;
+        h.routes_tx.send_replace(Vec::new());
+        h.repoll().await;
+        h.observe(ip_added_aa()).await;
+        assert_eq!(
+            h.take_log().await,
+            vec![
+                RibActionWithSeq::Withdraw(macip_key_with(100, 0xAA, None)),
+                RibActionWithSeq::Inject(macip_key_with(100, 0xAA, Some("192.0.2.10")), None),
+            ]
+        );
+        assert!(h.state.peer_sync_participants.is_empty());
+    }
+}
+
+#[tokio::test]
 async fn peer_sync_keeps_higher_local_sequence_across_new_children_and_downgrade() {
     let mut h = PeerSyncHarness::new(
         BTreeMap::from([(vni(100), segment_esi(1))]),
@@ -5499,6 +5604,7 @@ async fn peer_sync_does_not_resurrect_aged_or_suppressed_local_routes() {
     assert_eq!(h.counts.count(vni(100)), 0);
     remove_vni_state(&mut h.state, vni(100), &h.metrics);
     assert!(h.state.peer_sync_sequences.is_empty());
+    assert!(h.state.peer_sync_participants.is_empty());
 }
 
 #[tokio::test]
@@ -5580,6 +5686,23 @@ async fn peer_sync_model_change_clears_old_scope_even_when_repoll_fails() {
         )
         .await;
         assert!(h.state.peer_sync_sequences.is_empty());
+        assert!(h.state.peer_sync_participants.is_empty());
+        handle_observation(
+            &ip_added_aa(),
+            &mut h.state,
+            &runtime.instances,
+            &runtime.rib_tx,
+            &runtime.metrics,
+            &runtime.originated_local_mac_counts,
+            &runtime.vni_to_esi,
+            &runtime.drained_esis,
+        )
+        .await;
+        assert_eq!(
+            h.state.mac_ip_originators[&vni(100)].sequence_for_mac(mac(0xAA)),
+            Some(0),
+            "new scope must not inherit old peer-sync participation"
+        );
         assert_eq!(
             h.state.mac_originators[&vni(100)].sequence_for_mac(mac(0xAA)),
             Some(if change_esi { 3 } else { 0 }),
