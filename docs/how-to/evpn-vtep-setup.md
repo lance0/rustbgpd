@@ -179,8 +179,9 @@ If the event subscription is unavailable, they wait for the next successful
 scheduled poll. Ownership-loss events can withdraw existing routes while a
 snapshot is unavailable, and the last-IP MAC-only replacement waits for refresh.
 Deferred activations use a bounded queue; prolonged query failures can fill it
-and backpressure further observations, including ownership-loss events. This bounded ownership update does not implement stale-entry
-probing, full duplicate-address resolution, or simultaneous-move convergence;
+and backpressure further observations, including ownership-loss events.
+This bounded ownership update does not implement stale-entry probing, full
+duplicate-address resolution, or simultaneous-move convergence;
 see the [RFC 9721 coverage](../reference/rfc-notes.md#later-evpn-standards-against-the-vxlanlinux-lane).
 
 ### SVI MAC
