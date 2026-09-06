@@ -3432,6 +3432,15 @@ impl PeerManager {
         next_config.policy.rpol_files = rpol_files;
         next_config.policy.rpol = rpol;
         next_config.policy.dataset_bindings = dataset_bindings;
+        // A reload installs its registry before later chain edits. Preserve
+        // unresolved-reference tolerance, but never adopt an oversized interim
+        // chain, including dynamic ranges with no currently connected peers.
+        if let Err(error) = next_config.validate_policy_chain_nodes() {
+            return OwnedCatalogMutationOutcome::RejectedNoEffect(
+                PolicySnapshotFailure::rejected(&catalog_config_error(error))
+                    .closed_catalog_error(),
+            );
+        }
         match self
             .refresh_policies_for_config_classified(next_config, None, true)
             .await
@@ -3523,6 +3532,11 @@ impl PeerManager {
                 .map(|resolved| (resolved.import, resolved.export));
             let (import_policy, export_policy) = match chains {
                 Ok(chains) => chains,
+                Err(error @ crate::config::ConfigError::PolicyChainTooLarge { .. }) => {
+                    return Err(PolicySnapshotFailure::rejected(&catalog_config_error(
+                        error,
+                    )));
+                }
                 // An orphaned dynamic peer (accepted range deleted, then its
                 // peer group deleted) has no resolvable chains; its session
                 // keeps the chains it already runs. Don't fail the whole

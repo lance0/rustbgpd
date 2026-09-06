@@ -741,3 +741,112 @@ fn rpol_edit_classifies_policy_chain_impact_for_referencing_peers_only() {
     // No resolved chain moved, so no per-neighbor impact.
     assert!(diff.effective_neighbor_impact.is_empty(), "{diff:?}");
 }
+
+#[test]
+fn chain_node_budget_named_mixed_unused_and_implicit_tails() {
+    use std::fmt::Write as _;
+    let mut source = String::from("policy bulk(x: u32) {\n");
+    for i in 0..3333 {
+        writeln!(source, "term t{i} {{ if route.med >= {i} {{ accept }} }}").unwrap();
+    }
+    source.push_str("}\npolicy empty {}\n");
+    let dir = rpol_config_dir(&source, "\"toml-pass\"");
+    let mut config = load_dir(&dir).unwrap();
+    // Each instantiated bulk is 1 policy + 3333 * (term + guard + action).
+    // The unused parameterized definition is valid until attached.
+    config.neighbors[0].import_policy_chain = vec!["bulk(1)".to_string(); 100];
+    config.validate().unwrap();
+    config.neighbors[0]
+        .import_policy_chain
+        .push("toml-pass".to_string());
+    let error = config.validate().unwrap_err();
+    assert!(error.to_string().contains("MAX_CHAIN_NODES"), "{error}");
+    assert!(matches!(
+        crate::policy_admin::catalog_config_error(error),
+        rustbgpd_api::peer_types::CatalogMutationError::Invalid(_)
+    ));
+    let path = dir.path().join("config.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    let refs = serde_json::to_string(&config.neighbors[0].import_policy_chain).unwrap();
+    fs::write(
+        &path,
+        text.replacen(
+            "import_policy_chain = [\"toml-pass\"]",
+            &format!("import_policy_chain = {refs}"),
+            1,
+        ),
+    )
+    .unwrap();
+    assert!(load_dir(&dir).unwrap_err().contains("MAX_CHAIN_NODES"));
+    fs::write(&path, text).unwrap();
+    config.neighbors[0]
+        .import_policy_chain
+        .push("missing-after-overflow".to_string());
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("MAX_CHAIN_NODES")
+    );
+    config.neighbors[0].import_policy_chain.pop();
+    config.neighbors[0].import_policy_chain.pop();
+
+    // A mixed chain with 999,992 nodes leaves exactly eight for both tails.
+    // The TOML empty policies each charge their one policy node.
+    config.neighbors[0].import_policy_chain.truncate(99);
+    config.neighbors[0]
+        .import_policy_chain
+        .extend(vec!["toml-pass".to_string(); 9992]);
+    config.global.honor_graceful_shutdown = true;
+    config.global.honor_blackhole = true;
+    config.validate().unwrap();
+    config.neighbors[0]
+        .import_policy_chain
+        .push("toml-pass".to_string());
+    let error = config.validate().unwrap_err().to_string();
+    assert!(error.contains("effective import chain"), "{error}");
+    assert!(error.contains("MAX_CHAIN_NODES"), "{error}");
+}
+
+#[test]
+fn chain_node_budget_inline_and_dynamic_attachment() {
+    let dir = rpol_config_dir("policy empty {}", "\"toml-pass\"");
+    let mut config = load_dir(&dir).unwrap();
+    let statement: PolicyStatementConfig =
+        toml::from_str("action = 'permit'\nprefix = '10.0.0.0/8'").unwrap();
+    config.neighbors[0].import_policy_chain.clear();
+    config.neighbors[0].import_policy = vec![statement; 333_333];
+    // Exactly 1,000,000 structural nodes, including inline policy overhead.
+    config
+        .effective_policy_chains_for_neighbor(&config.neighbors[0])
+        .unwrap();
+    config.global.honor_graceful_shutdown = true;
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("MAX_CHAIN_NODES")
+    );
+
+    // Dynamic peers inherit the same inline shape before any session exists.
+    let entries = std::mem::take(&mut config.neighbors[0].import_policy);
+    let mut group: PeerGroupConfig = toml::from_str("").unwrap();
+    group.import_policy = entries;
+    config.peer_groups.insert("dynamic".to_string(), group);
+    config.dynamic_neighbors.push(DynamicNeighborConfig {
+        prefix: "198.51.100.0/24".to_string(),
+        peer_group: "dynamic".to_string(),
+        remote_asn: 65002,
+        description: None,
+        tcp_ao: None,
+    });
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("MAX_CHAIN_NODES")
+    );
+}
