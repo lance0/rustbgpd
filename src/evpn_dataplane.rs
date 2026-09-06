@@ -1504,6 +1504,9 @@ fn project_type5(route: &EvpnRibRoute) -> Option<rustbgpd_evpn::ip_vrf::Projecte
     let EvpnRoute::IpPrefix(prefix_route) = &route.route else {
         return None;
     };
+    if !rustbgpd_evpn::vxlan_encapsulation_compatible(&route.attributes) {
+        return None;
+    }
     let ext_comms: Vec<rustbgpd_wire::ExtendedCommunity> = route
         .attributes
         .iter()
@@ -2923,6 +2926,21 @@ mod tests {
         missing_rt.attributes = Arc::new(vec![]);
         let unsupported_tag = evpn_ead_per_evi_route(esi, 42, "10.0.0.3");
         for (name, candidate, eligible) in [
+            (
+                "NVGRE only",
+                with_encapsulations(valid.clone(), &[9], false),
+                false,
+            ),
+            (
+                "MPLS only",
+                with_encapsulations(valid.clone(), &[10], true),
+                false,
+            ),
+            (
+                "VXLAN shared",
+                with_encapsulations(valid.clone(), &[9, 8], true),
+                true,
+            ),
             ("same EVI", valid, true),
             ("other configured EVI", foreign, false),
             ("wrong RT", wrong_rt, false),
@@ -3021,6 +3039,24 @@ mod tests {
         let mut missing_rt = valid.clone();
         missing_rt.attributes = Arc::new(vec![]);
         for (name, ead, tag, accepted) in [
+            (
+                "NVGRE only",
+                with_encapsulations(valid.clone(), &[9], false),
+                0,
+                false,
+            ),
+            (
+                "MPLS only",
+                with_encapsulations(valid.clone(), &[10], true),
+                0,
+                false,
+            ),
+            (
+                "VXLAN shared",
+                with_encapsulations(valid.clone(), &[9, 8], true),
+                0,
+                true,
+            ),
             ("same EVI", valid, 0, true),
             ("other configured EVI", foreign, 0, false),
             ("wrong RT", wrong_rt, 0, false),
@@ -3537,6 +3573,85 @@ mod tests {
                 assert_eq!(route.route, before.route);
                 assert_eq!(route.attributes, before.attributes);
                 assert_eq!(route.next_hop, before.next_hop);
+            }
+        }
+    }
+
+    fn with_encapsulations(mut route: EvpnRibRoute, types: &[u16], partial: bool) -> EvpnRibRoute {
+        let attrs = Arc::make_mut(&mut route.attributes);
+        let ecs = attrs
+            .iter_mut()
+            .find_map(PathAttribute::extended_communities_mut)
+            .unwrap();
+        ecs.extend(
+            types
+                .iter()
+                .copied()
+                .map(ExtendedCommunity::bgp_encapsulation),
+        );
+        if partial {
+            for attr in attrs {
+                if let PathAttribute::ExtendedCommunities(ecs) = attr {
+                    *attr = PathAttribute::ExtendedCommunitiesPartial(std::mem::take(ecs));
+                }
+            }
+        }
+        route
+    }
+
+    #[test]
+    fn encapsulation_eligibility_gates_type2_and_type5_forwarding() {
+        let instances = local_instance_table(100, Some("br100"));
+        let mut ip_vrfs = ip_vrf_table_one("blue", 5000, 5000);
+        ip_vrfs.mark_referenced_by_l2vni("blue".to_string(), vni(100));
+        for (encapsulations, accepted) in [
+            (&[][..], true),
+            (&[8][..], true),
+            (&[9, 8][..], true),
+            (&[9][..], false),
+            (&[10][..], false),
+            (&[12, 65535][..], false),
+        ] {
+            for partial in [false, true] {
+                for subject in [0, 1] {
+                    let mut routes = vec![
+                        evpn_macip_route_with_host_ip(
+                            100,
+                            0xaa,
+                            Some("192.0.2.10"),
+                            "10.0.0.2",
+                            Some(9),
+                        ),
+                        evpn_ip_prefix_route("10.1.0.0/24", "192.0.2.10", "10.0.0.9", 5000),
+                    ];
+                    routes[subject] =
+                        with_encapsulations(routes[subject].clone(), encapsulations, partial);
+                    let retained = routes.clone();
+                    let tables = project_intent_tables(
+                        &routes,
+                        &instances,
+                        &ip_vrfs,
+                        &BTreeSet::new(),
+                        &no_bias(),
+                    );
+                    assert_eq!(
+                        tables.remote_macs.len(),
+                        usize::from(subject == 1 || accepted),
+                        "route index {subject}: {encapsulations:?}, partial={partial}"
+                    );
+                    assert_eq!(
+                        tables
+                            .remote_ip_prefixes
+                            .for_vrf(IpVrfId::new(5000).unwrap())
+                            .count(),
+                        usize::from(accepted),
+                        "route index {subject}: {encapsulations:?}, partial={partial}"
+                    );
+                    for (route, before) in routes.iter().zip(&retained) {
+                        assert_eq!(route.attributes, before.attributes);
+                        assert_eq!(route.route, before.route);
+                    }
+                }
             }
         }
     }

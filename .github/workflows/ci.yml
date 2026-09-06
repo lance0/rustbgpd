@@ -173,6 +173,7 @@ jobs:
             tests/interop/scripts/test-m1-frr.sh
           bash tests/interop/scripts/test-test-operator-auth-helper.sh
           bash tests/interop/scripts/test-test-vtep-route-oracles.sh
+          python3 tests/interop/scripts/test_evpn_peer_sync_oracle.py
       - run: python3 scripts/check-v1-stable-surface.py
       - run: python3 scripts/reflow-release-notes.py --selftest
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings

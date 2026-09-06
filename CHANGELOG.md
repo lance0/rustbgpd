@@ -499,6 +499,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   percentages instead of allowing `NaN` or negative values to bypass the
   evaluated-coverage gate. Valid thresholds retain their existing behavior.
 
+- Reject explicitly incompatible EVPN encapsulations before local VXLAN
+  forwarding, mobility, and gateway or alias/backup resolution. Absent
+  encapsulation uses the configured VXLAN fallback; advertised sets containing
+  VXLAN remain eligible. Global retention and reflection are unchanged.
+
 - Preserve fresh routes and live peer state when GR or LLGR retention expires
   while a re-established peer's initial outbound registration is deferred.
   Stale routes still expire, and the pending registration completes normally.
@@ -789,6 +794,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and positive infinity forced a coverage failure (exit 3). Valid percentages,
   including fractional and scientific notation, retain their existing results
   and diagnostic/test-failure precedence.
+
+- **EVPN VXLAN import:** Type 2, Type 5, and EAD-per-EVI advertisements with
+  explicit encapsulation sets lacking VXLAN no longer contribute local state.
+  Check remote Encapsulation communities before upgrading; absent communities
+  continue to use the configured VXLAN profile. See
+  [encapsulation compatibility](docs/how-to/evpn-vtep-setup.md#vxlan-encapsulation-compatibility).
 
 - **EVPN RPCs apply the configuration MAC and ESI grammar:** `AddEvpnRoute`,
   `DeleteEvpnRoute`, and `ClearDuplicateMacQuarantine` now parse `mac` and

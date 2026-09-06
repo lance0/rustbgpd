@@ -5477,10 +5477,26 @@ async fn peer_sync_keeps_higher_local_sequence_across_new_children_and_downgrade
 }
 
 #[tokio::test]
-async fn peer_sync_requires_import_rt_tag_zero_and_nonself_next_hop() {
-    for invalid in ["missing_rt", "wrong_rt", "tag", "self", "vni"] {
+async fn peer_sync_requires_local_import_eligibility() {
+    for (case, eligible) in [
+        ("missing_rt", false),
+        ("wrong_rt", false),
+        ("tag", false),
+        ("self", false),
+        ("vni", false),
+        ("nvgre", false),
+        ("mixed_vxlan", true),
+    ] {
         let mut route = eligible_peer_sync_route(9, None);
-        match invalid {
+        match case {
+            "nvgre" | "mixed_vxlan" => {
+                let mut ecs = vec![ExtendedCommunity::bgp_encapsulation(9)];
+                if eligible {
+                    ecs.push(ExtendedCommunity::bgp_encapsulation(8));
+                }
+                Arc::make_mut(&mut route.attributes)
+                    .push(PathAttribute::ExtendedCommunitiesPartial(ecs));
+            }
             "missing_rt" => {
                 Arc::make_mut(&mut route.attributes).remove(0);
             }
@@ -5500,7 +5516,7 @@ async fn peer_sync_requires_import_rt_tag_zero_and_nonself_next_hop() {
                 let EvpnRoute::MacIp(mac_ip) = &mut route.route else {
                     unreachable!()
                 };
-                if invalid == "tag" {
+                if case == "tag" {
                     mac_ip.ethernet_tag = EthernetTagId(1);
                 } else {
                     mac_ip.label1 = MplsLabel::new(200);
@@ -5514,11 +5530,11 @@ async fn peer_sync_requires_import_rt_tag_zero_and_nonself_next_hop() {
             h.take_log().await,
             vec![RibActionWithSeq::Inject(
                 macip_key_with(100, 0xAA, None),
-                None,
+                eligible.then_some(9),
             )],
-            "ineligible {invalid} route must not seed sequence adoption"
+            "{case} sequence adoption"
         );
-        assert!(h.state.peer_sync_sequences.is_empty());
+        assert_eq!(h.state.peer_sync_sequences.is_empty(), !eligible, "{case}");
     }
 }
 
@@ -6272,7 +6288,15 @@ async fn duplicate_ip_runtime_model_enables_and_disables_without_recounting_cach
 #[tokio::test]
 async fn type2_import_eligibility_gates_contenders_and_duplicate_accounting() {
     for ip in ["192.0.2.10", "2001:db8::10"] {
-        for case in ["missing", "mismatched", "tag", "vni", "self"] {
+        for case in [
+            "missing",
+            "mismatched",
+            "tag",
+            "vni",
+            "self",
+            "nvgre",
+            "mpls",
+        ] {
             let mut h = duplicate_ip_harness(true);
             h.observe(learned_aa()).await;
             h.observe(ip_observation(0xaa, ip, true)).await;
@@ -6283,6 +6307,17 @@ async fn type2_import_eligibility_gates_contenders_and_duplicate_accounting() {
                 .collect();
             for route in &mut routes {
                 match case {
+                    "nvgre" | "mpls" => {
+                        Arc::make_mut(&mut route.attributes).push(
+                            PathAttribute::ExtendedCommunitiesPartial(vec![
+                                ExtendedCommunity::bgp_encapsulation(if case == "nvgre" {
+                                    9
+                                } else {
+                                    10
+                                }),
+                            ]),
+                        );
+                    }
                     "missing" => route.attributes = Arc::new(vec![]),
                     "mismatched" => {
                         route.attributes =
@@ -6323,7 +6358,16 @@ async fn type2_import_eligibility_gates_contenders_and_duplicate_accounting() {
 
             // Restoring eligible routes makes both contender views visible and
             // counts the different remote MAC claiming the local IP exactly once.
-            let valid = evpn_macip_route_with_ip(100, 0xbb, Some(ip), "10.0.0.2", Some(9), false);
+            let mut valid =
+                evpn_macip_route_with_ip(100, 0xbb, Some(ip), "10.0.0.2", Some(9), false);
+            if matches!(case, "nvgre" | "mpls") {
+                Arc::make_mut(&mut valid.attributes).push(
+                    PathAttribute::ExtendedCommunitiesPartial(vec![
+                        ExtendedCommunity::bgp_encapsulation(9),
+                        ExtendedCommunity::bgp_encapsulation(8),
+                    ]),
+                );
+            }
             let views = build_remote_views(&h.instances, std::slice::from_ref(&valid), &h.segments);
             assert_eq!(views.0.len(), 1);
             assert_eq!(views.1.len(), 1);
