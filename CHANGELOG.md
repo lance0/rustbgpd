@@ -810,6 +810,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   keys, client CA bundles, and mismatched cert/key pairs before reporting
   success. Neither mode binds listeners.
 
+- Rejected native gRPC TLS handshakes now increment
+  `bgp_grpc_tls_handshake_failures_total{reason}`, including handshake timeouts.
+  Fixed reason labels distinguish missing, expired, not-yet-valid, untrusted,
+  and other invalid client certificates from other TLS or transport failures.
+  Request authorization counters continue to count RPC decisions only.
+
 ### Documentation
 
 - Publish a descriptive raw bridge event-skew receipt across six pinned Jammy
