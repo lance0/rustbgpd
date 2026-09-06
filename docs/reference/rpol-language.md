@@ -346,6 +346,7 @@ the daemon config's bindings.
 
 ```rpol
 policy NAME[(param: u32, ...)] {
+    [default-action accept|reject]
     term NAME { statement... }
     ...
 }
@@ -364,14 +365,34 @@ policy NAME[(param: u32, ...)] {
   without a verdict, evaluation continues to the next term.
   Modifications executed along the way (Junos-style
   modify-and-continue) are kept and merged into the eventual accept.
-- **End of policy without a verdict = accept** (with any accumulated
-  modifications). In chain terms: the policy raises no objection and
-  the chain continues — this matches the GoBGP-style chain semantics
-  the daemon already uses (each policy's permit accumulates and
-  continues; a deny terminates the chain).
+- **End of policy without a verdict** uses the policy's `default-action`.
+  When omitted, it remains `accept`, with accumulated modifications.
+  An accepting policy continues the chain; a rejecting policy stops it
+  and discards staged modifications.
 - Statements after a bare `accept`/`reject` in the same term (or
   actions after a verdict in the same `if` body) are **unreachable
   and a compile error**.
+
+An optional `default-action accept|reject` declaration must appear at most
+once, before the first term. Its semicolon is optional. For example:
+
+```rpol
+prefix-set customers { 192.0.2.0/24 }
+
+policy authorized-customers {
+    default-action reject
+    term authorized {
+        if route.prefix in customers { accept }
+    }
+}
+```
+
+The default decides only when no term has returned a verdict. Explicit
+`default-action accept` has the same behavior as omission, including continuing
+to later policies in a chain. Existing unconditional terms, such as
+`term reject-rest { reject }`, remain valid. A default declaration does not
+detect an accidentally removed guard or conjunct: include negative route
+assertions that would fail if the allowed set widened.
 
 ### Lowering into the IR (normative)
 
@@ -1010,10 +1031,10 @@ Two consequences worth internalizing:
 
 - Policy composition must form a **DAG** — recursion through `apply`
   (including self-application) is a compile error naming the cycle.
-- Since end-of-policy defaults to accept, a policy that never
-  `reject`s is constant-true under `apply`. Predicate policies should
-  decide both ways (see `bogon-filter` above: match → `accept`,
-  final term → `reject`).
+- With an accepting default, a policy that never `reject`s is
+  constant-true under `apply`. Predicate policies should decide both
+  ways: use `default-action reject` with guarded `accept` terms, or
+  retain a final rejecting term (as in `bogon-filter` above).
 - A policy that declares `let` bindings cannot be applied:
   the inlined predicate has no term walk to execute bindings in. The
   compile error names the target's first `let`. The same rule covers
@@ -1197,6 +1218,11 @@ unconditional term (`term catch-all { accept }`) matches whenever it
 is reached. Parameterized policies aggregate across instantiations
 (`expect p(200)` and `expect p(300)` both count toward `p`). With
 imports, each policy is attributed to its defining file.
+
+A policy's `default-action` is a fallback, not a source term: it adds no
+term to coverage or hit counters. Explain reports a default verdict without
+a matched term name. Test the unmatched case explicitly to exercise the
+fallback; a coverage percentage does not prove that case ran.
 
 Two boundaries, both deliberate:
 

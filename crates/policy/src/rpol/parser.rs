@@ -10,7 +10,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix, LargeCommunity, Prefix};
 
-use crate::engine::{CommunityMatch, parse_community_match};
+use crate::engine::{CommunityMatch, PolicyAction, parse_community_match};
 
 use crate::ir::ArithOp;
 
@@ -708,11 +708,38 @@ impl Parser<'_> {
             self.expect(Tok::RParen, "`)`")?;
         }
         self.expect(Tok::LBrace, "`{`")?;
+        let mut default_action = None;
         let mut terms = Vec::new();
         while !self.at(Tok::RBrace) {
-            if let Ok(term) = self.term_def() {
-                terms.push(term);
+            let item = if self
+                .peek()
+                .is_some_and(|t| t.kind == Tok::Ident && self.text(t) == "default-action")
+            {
+                let span = self.bump().expect("peeked").span;
+                if default_action.is_some() || !terms.is_empty() {
+                    self.diags.push(Diagnostic::new(
+                        span,
+                        "`default-action` is allowed at most once, before all terms",
+                        "move a single default declaration before the first term",
+                    ));
+                }
+                let action = match self.peek().map(|t| t.kind) {
+                    Some(Tok::AcceptKw) => Some(PolicyAction::Permit),
+                    Some(Tok::RejectKw) => Some(PolicyAction::Deny),
+                    _ => None,
+                };
+                if let Some(action) = action {
+                    self.bump();
+                    self.eat(Tok::Semi);
+                    default_action.get_or_insert(Spanned::new(action, span));
+                    Ok(())
+                } else {
+                    Err(self.error_expected("`accept` or `reject` after `default-action`"))
+                }
             } else {
+                self.term_def().map(|term| terms.push(term))
+            };
+            if item.is_err() {
                 self.recover_to(&[Tok::TermKw, Tok::RBrace], false);
                 if self.peek().is_none() {
                     return Err(Fail);
@@ -723,6 +750,7 @@ impl Parser<'_> {
         Ok(PolicyDef {
             name,
             params,
+            default_action,
             terms,
         })
     }

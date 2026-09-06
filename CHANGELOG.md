@@ -300,6 +300,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   valid `--coverage-min` semantics remain unchanged. Matched coverage does not
   guarantee branch coverage or detect every widened guard.
 
+- Opt-in `.rpol` policy fallbacks with `default-action accept|reject`,
+  declared before terms. Omission keeps accept-and-continue behavior;
+  a rejecting fallback stops the chain and discards staged changes.
+  Defaults also apply to parameterized policies and `apply` predicates.
+
 ### Changed
 
 - `rbgp rib add` uses `--next-hop` as the canonical flag, retaining
@@ -1025,6 +1030,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fit: shorten chains in a separate reload before loading larger definitions
   when that intermediate combination would exceed the cap.
   See [policy bounds](docs/reference/rpol-language.md#loops--for).
+
+- **Policy language:** `default-action` is optional; existing `.rpol` files
+  retain their behavior. Upgrade readers before adding the new declaration,
+  since older releases reject its syntax. `default-action accept` continues
+  the policy chain; `reject` affects only fallthrough and does not diagnose
+  widened guards. Keep negative route assertions when adopting it.
 
 ## [0.68.0] — 2026-08-30
 
