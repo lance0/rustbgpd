@@ -1,0 +1,9 @@
+config OK: /etc/rustbgpd/config.toml
+{"Topic":"Config","level":"info","msg":"Finished reading the config file","time":"2026-09-06T19:20:54Z"}
+PASS: baseline
+PASS: malformed
+PASS: recovery
+PASS: withdraw
+PASS: cleanup
+PASS: MAC-only SRv6 L2 reflection, malformed replacement, recovery and withdrawals (typed required=1)
+[15:21:04 TEST] [cleanup] containerlab destroy -t <repo>/tests/interop/scripts/../m112-srv6-l2-reflection.clab.yml

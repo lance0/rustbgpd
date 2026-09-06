@@ -13,6 +13,9 @@ The [2026-09-06 receipt](../../../docs/artifacts/interop/m111-srv6-l3vpn-2026090
 records the passing local run, exact development source and image identities,
 packet capture, and FRR SID allocation checks. Both vendor peers are passive
 and configured before the RR starts, avoiding competing startup connections.
+The later [typed-visibility receipt](../../../docs/artifacts/interop/m111-srv6-l3vpn-typed-20260906T191107Z/README.md)
+also checks the CLI's raw and typed service fields against the captured
+advertisement and FRR allocation.
 
 Run from the repository root after building the interop images:
 
@@ -63,8 +66,9 @@ the VPNv4 survivor snapshot. Its typed verifier compares raw Prefix-SID bytes,
 SID values, endpoint behavior, SID Structure, labels, route identity and next
 hop with `wire.json`, reconstructs each allocated SID from the typed view and
 label, and checks FRR's SID allocation. It then checks both withdrawn views.
-This added operator-visibility assertion awaits a fresh live receipt; the
-original dated receipt above remains evidence for its original wire scope.
+The typed-visibility receipt records the passing rerun. CI replays its wire
+and typed results without containers; the original dated receipt above
+remains evidence for its original wire scope.
 
 Run the offline oracle regressions without a lab:
 

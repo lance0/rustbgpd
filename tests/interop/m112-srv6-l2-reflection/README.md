@@ -3,9 +3,10 @@
 M112 checks one MAC-only EVPN Type2 service form from a controlled raw source,
 through a rustbgpd route reflector, to a GoBGP 3.37.0 observer.
 
-Status: the harness and offline negative controls are prepared. The live
-scenario has not yet been exercised; no M112 interoperability receipt is
-claimed. CI runs the offline Python tests and Bash/ShellCheck checks only.
+The [2026-09-06 local receipt](../../../docs/artifacts/interop/m112-srv6-l2-20260906T192025Z/README.md)
+records a passing run with typed visibility required. CI runs the offline
+negative controls, Bash/ShellCheck checks, and committed receipt replays;
+the live topology remains manual.
 
 The fixture uses SRv6 L2 Service TLV6, End.DT2U23, full SID
 `2001:db8:112:1:1::`, and SID Structure `40/24/16/0/0/0`. It carries one
