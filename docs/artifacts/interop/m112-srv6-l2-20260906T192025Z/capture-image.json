@@ -1,0 +1,7 @@
+[
+  {
+    "name": "/m112-srv6-l2-reflection-capture",
+    "image": "sha256:dbf9cad241bf0220b24cef681a6f567c46f365b714f66f7ee3d912b2caa70d09",
+    "configured_image": "bmpsink:m102"
+  }
+]

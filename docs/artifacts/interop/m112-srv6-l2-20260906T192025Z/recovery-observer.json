@@ -1,0 +1,58 @@
+[
+  {
+    "destination": {
+      "prefix": "[type:macadv][rd:10.112.0.2:112][etag:0][mac:02:00:00:00:01:12][ip:<nil>]",
+      "paths": [
+        {
+          "best": true,
+          "family": {
+            "afi": 25,
+            "safi": 70
+          },
+          "sourceAsn": 65001,
+          "sourceId": "10.112.0.1",
+          "neighborIp": "2001:db8:112:20::1",
+          "nlriBinary": "AiEAAQpwAAIAcAAAAAAAAAAAAAAAAAAAMAIAAAABEgAAADA=",
+          "pattrsBinary": [
+            "QAEBAA==",
+            "QAIA",
+            "QAUEAAAAZA==",
+            "wBAIAAL96QAAAHA=",
+            "4CglBgAiAAEAHgAgAQ24ARIAAQABAAAAAAAAAAAXAAEABigYEAAAAA==",
+            "gAkECnAAAg==",
+            "gAoECnAAAQ==",
+            "gA44ABlGECABDbgBEgAQAAAAAAAAAAIAAiEAAQpwAAIAcAAAAAAAAAAAAAAAAAAAMAIAAAABEgAAADA="
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "destination": {
+      "prefix": "[type:macadv][rd:10.112.0.2:112][etag:0][mac:02:00:00:00:02:12][ip:<nil>]",
+      "paths": [
+        {
+          "best": true,
+          "family": {
+            "afi": 25,
+            "safi": 70
+          },
+          "sourceAsn": 65001,
+          "sourceId": "10.112.0.1",
+          "neighborIp": "2001:db8:112:20::1",
+          "nlriBinary": "AiEAAQpwAAIAcAAAAAAAAAAAAAAAAAAAMAIAAAACEgAAADA=",
+          "pattrsBinary": [
+            "QAEBAA==",
+            "QAIA",
+            "QAUEAAAAZA==",
+            "wBAIAAL96QAAAHA=",
+            "4CglBgAiAAEAHgAgAQ24ARIAAQABAAAAAAAAAAAXAAEABigYEAAAAA==",
+            "gAkECnAAAg==",
+            "gAoECnAAAQ==",
+            "gA44ABlGECABDbgBEgAQAAAAAAAAAAIAAiEAAQpwAAIAcAAAAAAAAAAAAAAAAAAAMAIAAAACEgAAADA="
+          ]
+        }
+      ]
+    }
+  }
+]

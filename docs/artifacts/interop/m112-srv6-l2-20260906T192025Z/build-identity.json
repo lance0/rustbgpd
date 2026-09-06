@@ -1,0 +1,10 @@
+{
+  "source_revision": "b8ecd80ec699274bbc86cff95e454b1ec54a4c93",
+  "image": "rustbgpd:srv6-visibility-b8ecd80ec",
+  "image_id": "sha256:9affad13a7f90f1f4109e08bd8617935448f866952d94e25a6c5673e385e2a09",
+  "build_target": "dev",
+  "profile": "ci",
+  "build_jobs": 4,
+  "rustbgpd_version": "0.68.0",
+  "rbgp_version": "0.68.0"
+}
