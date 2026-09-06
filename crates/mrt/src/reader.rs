@@ -1415,6 +1415,58 @@ mod tests {
     }
 
     #[test]
+    fn srv6_service_malformed_snapshot_fails_and_fuses() {
+        for service_type in [5, 6] {
+            let peer = make_peer(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 65001);
+            let mut data = encode_snapshot(COLLECTOR, &[peer], &[], &[], TS).unwrap();
+            // Recognized Service TLV without its mandatory reserved octet.
+            let attr = [0xc0, attr_type::PREFIX_SID, 3, service_type, 0, 0];
+            append_v4_rib_with_attributes(&mut data, &attr);
+            let mut reader = SnapshotReader::new(&data).unwrap();
+            assert!(matches!(
+                reader.next(),
+                Some(Err(ReadError::AttributeDecode(
+                    DecodeError::MalformedSrv6ServiceTlv { .. }
+                )))
+            ));
+            assert!(reader.next().is_none());
+            assert_eq!(reader.discarded_path_attributes(), 0);
+        }
+    }
+
+    #[test]
+    fn srv6_service_snapshot_preserves_valid_values_and_generic_discard() {
+        for (value, discarded) in [
+            (vec![5, 0, 4, 0xff, 99, 0, 0], 0),
+            (vec![6, 0, 4, 0xff, 99, 0, 0], 0),
+            (vec![1, 0, 0], 1), // Generic Label-Index length failure.
+        ] {
+            let peer = make_peer(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 65001);
+            let mut data = encode_snapshot(COLLECTOR, &[peer], &[], &[], TS).unwrap();
+            let mut attr = vec![
+                0xe0,
+                attr_type::PREFIX_SID,
+                u8::try_from(value.len()).unwrap(),
+            ];
+            attr.extend_from_slice(&value);
+            append_v4_rib_with_attributes(&mut data, &attr);
+            let mut reader = SnapshotReader::new(&data).unwrap();
+            let (entries, err) = drain(&mut reader);
+            assert!(err.is_none(), "unexpected error: {err:?}");
+            assert_eq!(entries.len(), 1);
+            assert_eq!(reader.discarded_path_attributes(), discarded);
+            if discarded == 0 {
+                assert!(entries[0].attributes.iter().any(|attr| matches!(
+                    attr, PathAttribute::Unknown(raw)
+                    if raw.type_code == attr_type::PREFIX_SID && raw.data.as_ref() == value
+                )));
+            } else {
+                assert!(entries[0].attributes.is_empty());
+            }
+        }
+    }
+
+    #[test]
     fn reduced_mp_reach_flag_conflict_fails_and_fuses() {
         let peer = make_peer(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 65001);
         let mut data =

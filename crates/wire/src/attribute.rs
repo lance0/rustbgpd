@@ -1286,6 +1286,11 @@ pub(crate) fn decode_path_attributes_revised_observed(
                 // lists inconsistent flags among what makes the MP attribute
                 // itself incorrect).
                 let mut disposition = malformed_attr_disposition(type_code, is_ibgp);
+                if matches!(error, DecodeError::MalformedSrv6ServiceTlv { .. }) {
+                    // RFC 9252 §7 overrides only recognized SRv6 Service
+                    // framing errors, not RFC 8669's generic type-40 default.
+                    disposition = disposition.max(ErrorDisposition::TreatAsWithdraw);
+                }
                 let received_class = flags & (attr_flags::OPTIONAL | attr_flags::TRANSITIVE);
                 let partial_only_rr_attribute_error = matches!(
                     type_code,
@@ -1762,11 +1767,19 @@ fn decode_attribute_value(
             ),
         });
     }
-    crate::assigned_attributes::validate(type_code, value).map_err(|detail| {
-        DecodeError::UpdateAttributeError {
-            subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
-            data: attr_error_data(flags, type_code, value),
-            detail: format!("attribute type {type_code}: {detail}"),
+    crate::assigned_attributes::validate(type_code, value).map_err(|error| match error {
+        crate::assigned_attributes::FramingError::Generic(detail) => {
+            DecodeError::UpdateAttributeError {
+                subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
+                data: attr_error_data(flags, type_code, value),
+                detail: format!("attribute type {type_code}: {detail}"),
+            }
+        }
+        crate::assigned_attributes::FramingError::Srv6Service(detail) => {
+            DecodeError::MalformedSrv6ServiceTlv {
+                data: attr_error_data(flags, type_code, value),
+                detail: detail.to_owned(),
+            }
         }
     })?;
     match type_code {
@@ -8701,5 +8714,206 @@ mod tests {
         let mut encoded = Vec::new();
         encode_path_attributes(&attributes, &mut encoded, false, false).unwrap();
         assert!(encoded.is_empty());
+    }
+
+    fn srv6_test_tlv(kind: u8, value: &[u8]) -> Vec<u8> {
+        let mut tlv = vec![kind];
+        tlv.extend(u16::try_from(value.len()).unwrap().to_be_bytes());
+        tlv.extend(value);
+        tlv
+    }
+
+    fn srv6_test_service(kind: u8, data: &[u8]) -> Vec<u8> {
+        // Nonzero reserved/flags and unknown behavior are intentionally opaque.
+        let mut sid = vec![0xff; 21];
+        sid.extend(data);
+        let mut service = vec![0xa5];
+        service.extend(srv6_test_tlv(1, &sid));
+        srv6_test_tlv(kind, &service)
+    }
+
+    #[test]
+    fn srv6_service_preserves_unknown_reserved_and_semantic_values() {
+        for kind in [5, 6] {
+            let structure = srv6_test_tlv(1, &[255; 6]);
+            let mut multiple = vec![0x5a];
+            multiple.extend(srv6_test_tlv(254, &[1, 0, 0]));
+            multiple.extend(srv6_test_tlv(1, &[0xff; 21]));
+            multiple.extend(srv6_test_tlv(1, &[0; 21]));
+            for value in [
+                srv6_test_tlv(kind, &[0xff]), // Reserved-only is structurally valid.
+                srv6_test_service(kind, &[]),
+                srv6_test_service(kind, &structure), // Invalid SID semantics are out of scope.
+                srv6_test_service(kind, &srv6_test_tlv(254, &[])),
+                srv6_test_tlv(kind, &multiple),
+            ] {
+                for flags in [0xc0, 0xe0] {
+                    let wire = attr_bytes(flags, attr_type::PREFIX_SID, &value);
+                    let strict = decode_path_attributes(&wire, true, &[]).unwrap();
+                    let revised = decode_path_attributes_revised(&wire, true, true, &[]).unwrap();
+                    assert!(revised.malformed.is_empty());
+                    assert_eq!(strict, revised.attributes);
+                    let [PathAttribute::Unknown(raw)] = strict.as_slice() else {
+                        panic!("Prefix-SID must remain raw");
+                    };
+                    assert_eq!(raw.data.as_ref(), value);
+                    let mut encoded = Vec::new();
+                    encode_path_attributes(&strict, &mut encoded, true, false).unwrap();
+                    assert_eq!(encoded, attr_bytes(0xe0, attr_type::PREFIX_SID, &value));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn srv6_service_nested_boundaries_are_typed_treat_as_withdraw() {
+        for kind in [5, 6] {
+            let mut malformed = vec![
+                vec![kind],
+                vec![kind, 0],
+                vec![kind, 0, 2, 0], // Outer overrun.
+                srv6_test_tlv(kind, &[]),
+                srv6_test_tlv(kind, &[0, 1]),
+                srv6_test_tlv(kind, &[0, 1, 0]),
+                srv6_test_tlv(kind, &[0, 254, 0, 1]), // Unknown sub-TLV overrun.
+                srv6_test_service(kind, &[254]),
+                srv6_test_service(kind, &[254, 0]),
+                srv6_test_service(kind, &[254, 0, 1]), // Unknown sub-sub-TLV overrun.
+            ];
+            for length in 0..21 {
+                let mut service = vec![0];
+                service.extend(srv6_test_tlv(1, &vec![0; length]));
+                malformed.push(srv6_test_tlv(kind, &service));
+            }
+            for length in [0, 1, 2, 3, 4, 5, 7] {
+                malformed.push(srv6_test_service(kind, &srv6_test_tlv(1, &vec![0; length])));
+            }
+            for value in malformed {
+                for flags in [0xc0, 0xe0, 0xd0, 0xf0] {
+                    let wire = framed_test_attribute(flags, attr_type::PREFIX_SID, &value);
+                    let error = decode_path_attributes(&wire, true, &[]).unwrap_err();
+                    let DecodeError::MalformedSrv6ServiceTlv { data, .. } = &error else {
+                        panic!("expected typed SRv6 framing failure for {value:?}: {error:?}");
+                    };
+                    assert_eq!(data, &wire);
+                    let (code, subcode, data) = error.to_notification();
+                    assert_eq!(code, crate::notification::NotificationCode::UpdateMessage);
+                    assert_eq!(subcode, update_subcode::ATTRIBUTE_LENGTH_ERROR);
+                    assert_eq!(data.as_ref(), wire);
+                    for is_ibgp in [false, true] {
+                        let revised =
+                            decode_path_attributes_revised(&wire, true, is_ibgp, &[]).unwrap();
+                        assert!(revised.attributes.is_empty());
+                        assert_eq!(revised.malformed.len(), 1);
+                        assert_eq!(revised.malformed[0].error, error);
+                        assert_eq!(
+                            revised.malformed[0].disposition,
+                            ErrorDisposition::TreatAsWithdraw
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn srv6_service_failure_overrides_safely_traversable_generic_prefix_sid_failure() {
+        for generic in [vec![1, 0, 0], vec![3, 0, 0]] {
+            let wire = attr_bytes(0xc0, attr_type::PREFIX_SID, &generic);
+            let revised = decode_path_attributes_revised(&wire, true, true, &[]).unwrap();
+            assert_eq!(
+                revised.malformed[0].disposition,
+                ErrorDisposition::AttributeDiscard
+            );
+            assert!(matches!(
+                revised.malformed[0].error,
+                DecodeError::UpdateAttributeError { .. }
+            ));
+            for service in [vec![5, 0, 0], vec![6, 0, 2, 0]] {
+                for value in [
+                    [generic.clone(), service.clone()].concat(),
+                    [service.clone(), generic.clone()].concat(),
+                ] {
+                    let wire = attr_bytes(0xc0, attr_type::PREFIX_SID, &value);
+                    let revised = decode_path_attributes_revised(&wire, true, true, &[]).unwrap();
+                    assert_eq!(
+                        revised.malformed[0].disposition,
+                        ErrorDisposition::TreatAsWithdraw
+                    );
+                    assert!(matches!(
+                        revised.malformed[0].error,
+                        DecodeError::MalformedSrv6ServiceTlv { .. }
+                    ));
+                }
+            }
+        }
+        // An untraversable generic TLV cannot identify purported service bytes
+        // inside its value as another TLV; generic RFC 8669 discard remains.
+        for value in [vec![], vec![1], vec![1, 0], vec![1, 0, 9, 5, 0, 0]] {
+            let wire = attr_bytes(0xc0, attr_type::PREFIX_SID, &value);
+            let revised = decode_path_attributes_revised(&wire, true, true, &[]).unwrap();
+            assert_eq!(
+                revised.malformed[0].disposition,
+                ErrorDisposition::AttributeDiscard
+            );
+        }
+    }
+
+    #[test]
+    fn srv6_service_duplicate_tlvs_ignore_contents_but_require_traversable_framing() {
+        for kind in [5, 6] {
+            let first = srv6_test_service(kind, &[]);
+            let ignored = srv6_test_tlv(kind, &[0, 1, 0, 0]); // Short SID Information.
+            let value = [first.clone(), ignored].concat();
+            let wire = attr_bytes(0xe0, attr_type::PREFIX_SID, &value);
+            let revised = decode_path_attributes_revised(&wire, true, true, &[]).unwrap();
+            assert!(revised.malformed.is_empty());
+            let mut encoded = Vec::new();
+            encode_path_attributes(&revised.attributes, &mut encoded, true, false).unwrap();
+            assert_eq!(encoded, wire);
+            for suffix in [vec![kind, 0, 9], vec![11 - kind, 0, 0]] {
+                let value = [first.clone(), suffix].concat();
+                let wire = attr_bytes(0xc0, attr_type::PREFIX_SID, &value);
+                let revised = decode_path_attributes_revised(&wire, true, true, &[]).unwrap();
+                assert_eq!(
+                    revised.malformed[0].disposition,
+                    ErrorDisposition::TreatAsWithdraw
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn srv6_service_duplicate_attributes_keep_existing_first_occurrence_rule() {
+        let valid = attr_bytes(0xe0, attr_type::PREFIX_SID, &srv6_test_service(5, &[]));
+        let malformed = attr_bytes(0xc0, attr_type::PREFIX_SID, &[6, 0, 0]);
+        let revised = decode_path_attributes_revised(
+            &[valid.clone(), malformed.clone()].concat(),
+            true,
+            true,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            revised.attributes,
+            decode_path_attributes(&valid, true, &[]).unwrap()
+        );
+        assert_eq!(revised.malformed.len(), 1);
+        assert_eq!(
+            revised.malformed[0].disposition,
+            ErrorDisposition::AttributeDiscard
+        );
+        let revised =
+            decode_path_attributes_revised(&[malformed, valid].concat(), true, true, &[]).unwrap();
+        assert!(revised.attributes.is_empty());
+        assert_eq!(revised.malformed.len(), 2);
+        assert_eq!(
+            revised.malformed[0].disposition,
+            ErrorDisposition::TreatAsWithdraw
+        );
+        assert_eq!(
+            revised.malformed[1].disposition,
+            ErrorDisposition::AttributeDiscard
+        );
     }
 }

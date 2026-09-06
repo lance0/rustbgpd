@@ -70,7 +70,7 @@ octet from 0 through 255 to appear exactly once with no blank cell.
 | 37 | SFP attribute | optional transitive; flags `0xc0`; RFC 9015 §3.2.1 | opaque retention with TLV, Hop, and Hop sub-TLV framing; malformed is treat-as-withdraw | assigned framing matrix below |
 | 38 | BFD Discriminator | optional transitive; flags `0xc0`; RFC 9026 §3.1.6 | opaque retention with base and Source-IP TLV framing; malformed is attribute-discard | assigned framing matrix below |
 | 39 | Next Hop Dependent Characteristic (NHC) | optional transitive; flags `0xc0`; draft-ietf-idr-nhc-07 | opaque retention with next-hop and characteristic-TLV framing; malformed or empty characteristics is attribute-discard | assigned framing matrix below |
-| 40 | BGP Prefix-SID | optional transitive; flags `0xc0`; RFC 8669 §§3, 6 | opaque retention with complete TLV framing and known-length checks; malformed is attribute-discard | assigned framing matrix below |
+| 40 | BGP Prefix-SID | optional transitive; flags `0xc0`; RFC 8669 §§3, 6 | opaque retention with complete TLV framing and known-length checks; generic malformed is attribute-discard, recognized SRv6 Service malformation is treat-as-withdraw | assigned framing matrix below |
 | 41 | BIER | optional transitive; flags `0xc0`; RFC 9793 §§3-4 | opaque retention with exact TLV/sub-TLV length-boundary framing; boundary failure is attribute-discard | assigned framing matrix below |
 | 42 | Edge Metadata Path Attribute (TEMPORARY - registered 2025-04-23, extension registered 2026-04-03, expires 2027-04-23) | optional non-transitive; flags `0x80`; draft-ietf-idr-5g-edge-service-metadata-27 | payload unsupported; correct class ignored and never emitted; every class or Partial conflict is treat-as-withdraw | assigned framing matrix below |
 | 43-127 | Unassigned | pending follow-up audit | pending follow-up audit | IANA CSV digest above |
@@ -205,11 +205,39 @@ remain opaque.
 | 37 | optional transitive; flags `0xc0` | exact one-octet-type/two-octet-length TLVs, at least one Hop TLV, and at least one exactly framed sub-TLV after every Hop service index | treat-as-withdraw |
 | 38 | optional transitive; flags `0xc0` | five-octet base, exact one-octet-type/length optional TLVs, and a Source IP TLV of length 4 or 16 | attribute-discard |
 | 39 | optional transitive; flags `0xc0` | AFI/SAFI/next-hop-length boundary followed by one or more exact two-octet-type/two-octet-length characteristic TLVs | attribute-discard |
-| 40 | optional transitive; flags `0xc0` | exact one-octet-type/two-octet-length TLVs; Label-Index length 7; Originator SRGB length `2 + nonzero*6` | attribute-discard |
+| 40 | optional transitive; flags `0xc0` | exact one-octet-type/two-octet-length TLVs; Label-Index length 7; Originator SRGB length `2 + nonzero*6`; SRv6 Service nested framing below | generic attribute-discard; SRv6 Service treat-as-withdraw |
 | 41 | optional transitive; flags `0xc0` | non-empty exact two-octet-type/length TLV stream; known containers consume nested length framing only when their four-octet fixed prefix is present; semantic field shapes remain opaque | attribute-discard |
 | 42 | optional non-transitive; flags `0x80` | no payload validation; exact registered class is dropped before value decoding | class conflict is treat-as-withdraw |
 | 128 | optional transitive; flags `0xc0` | four-octet Origin AS followed by an exact embedded path-attribute stream using each inner Extended Length bit; embedded MP_REACH_NLRI and MP_UNREACH_NLRI are rejected; inner values remain opaque | treat-as-withdraw |
 <!-- assigned-framing:end -->
+
+## SRv6 Service framing within Prefix-SID
+
+[RFC 9252 §§3, 7](https://www.rfc-editor.org/rfc/rfc9252.html) adds a
+stronger disposition for recognized L3 Service (5) and L2 Service (6) TLVs.
+Each requires its reserved octet and an exactly framed sub-TLV stream. SID
+Information sub-TLV 1 requires its 21-octet fixed body and an exactly framed
+sub-sub-TLV stream; SID Structure sub-sub-TLV 1 has exactly six value octets.
+Truncated headers, enclosing-length overruns, and these known-length failures
+are treat-as-withdraw. Strict decoding returns
+`DecodeError::MalformedSrv6ServiceTlv`; its notification mapping is Attribute
+Length Error with the received attribute bytes.
+
+Only the first Service TLV of each kind is inspected internally. Later
+same-kind TLVs remain in the opaque value, with their contents ignored as
+required by §7. Their outer framing must still allow traversal; an identifiable
+Service TLV with an outer overrun takes the stronger disposition. A safely
+framed generic Label-Index/SRGB length error cannot hide a later recognized
+Service error. Duplicate Prefix-SID attributes keep the existing first-attribute
+rule.
+
+Unknown types, reserved values, endpoint behaviors, SIDs, and transposition
+field values remain opaque. These checks do not establish service eligibility,
+origination, forwarding, or a typed operator API. Valid values retain their
+bytes through VPNv4/VPNv6 and EVPN receive/export. No-reachable-NLRI or
+unparseable-NLRI cases retain the existing session-reset escalation; snapshot
+readers reject and fuse on the stronger error instead of admitting the entry
+without its Prefix-SID attribute.
 
 ## PMSI tunnel-type matrix
 

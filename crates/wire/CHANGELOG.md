@@ -7,6 +7,12 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## 0.19.1 - Unreleased
 
+- Prefix-SID SRv6 L3/L2 Service TLVs now validate nested framing under
+  RFC 9252 §7. Recognized service malformation returns the additive
+  `DecodeError::MalformedSrv6ServiceTlv` and uses treat-as-withdraw in revised
+  decoding; generic Prefix-SID length errors keep attribute-discard. Valid
+  opaque values and unknown/reserved fields remain unchanged. This adds no
+  SID interpretation, service eligibility, origination, or forwarding.
 - `ShutdownCommunicationError` now implements `Display` and
   `std::error::Error`, allowing `extract_shutdown_communication` failures to
   propagate into standard error containers. Descriptions are bounded static
