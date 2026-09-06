@@ -19,6 +19,7 @@ use nix::unistd::Pid;
 use rustbgpd_api::proto::{
     PeerGroupDefinition, SetPeerGroupRequest, peer_group_service_client::PeerGroupServiceClient,
 };
+use rustbgpd_api::runtime_config_settlement::AMBIGUITY_FENCE_GRACE;
 use tonic::{Code, Request, Status, transport::Endpoint};
 
 use support::{RetainOnPanic, rbgp_binary};
@@ -37,9 +38,11 @@ const BUDGET: Duration = Duration::from_secs(2);
 // a stalled setup hits the harness's own bound (with the directory
 // retained) instead of killing the daemon mid-RPC.
 const SETUP_BUDGET: Duration = Duration::from_secs(30);
-const GRACE: Duration = Duration::from_millis(500);
+// Readiness, metrics, and queued-refusal observations run during grace;
+// give the real-process observer the same window as a production supervisor.
+const GRACE: Duration = AMBIGUITY_FENCE_GRACE;
 const EXIT_JITTER: Duration = Duration::from_secs(2);
-const MATRIX_LIMIT: Duration = Duration::from_secs(120);
+const MATRIX_LIMIT: Duration = Duration::from_secs(180);
 const TOKEN: &str = "settlement-matrix-token";
 #[derive(Clone, Copy, Debug)]
 enum MatrixRow {
@@ -511,6 +514,8 @@ enforcement = "tier"
 asn = 65001
 router_id = "10.0.0.1"
 listen_port = 0
+# Keep ephemeral BGP binds away from the API and metrics loopback address.
+listen_addresses = ["127.0.0.2"]
 runtime_state_dir = "{}"
 
 [global.telemetry]
