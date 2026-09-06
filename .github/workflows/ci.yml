@@ -213,6 +213,9 @@ jobs:
       # LAN-198: `config` referenced binary-only modules, so the lib
       # failed to build under `--all-features` while the bin stayed green.
       - run: cargo check --locked -p rustbgpd --all-features --lib
+      # Bench targets also compile config's tests; keep their binary-module
+      # boundary checked in addition to the production library surface.
+      - run: cargo check --locked -p rustbgpd --features bench-internals --benches
       # The root `Config` API is exported only by `bench-internals`, so the
       # normal workspace test cannot compile this cheap allocation gate.
       - name: Gate eager policy-set sharing allocation shape

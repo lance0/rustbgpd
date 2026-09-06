@@ -971,6 +971,18 @@ remote_asn = 65002
     }
 
     #[test]
+    fn chain_node_budget_config_error_maps_to_invalid_catalog_request() {
+        let error = ConfigError::PolicyChainTooLarge {
+            reason: "chain exceeds node budget".to_string(),
+        };
+        let expected = error.to_string();
+        assert!(matches!(
+            catalog_config_error(error),
+            CatalogMutationError::Invalid(message) if message == expected
+        ));
+    }
+
+    #[test]
     fn raw_neighbor_persists_canonical_family_labels() {
         let families = rustbgpd_wire::CONFIGURED_FAMILIES
             .iter()
