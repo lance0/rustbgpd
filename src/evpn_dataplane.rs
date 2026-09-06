@@ -1329,7 +1329,15 @@ fn project_intent_tables(
 
     let projected: Vec<ProjectedEvpnRoute> = routes
         .iter()
-        .filter_map(|r| project_one(r, &active_ead_per_es, &single_active_index, same_esi_bias))
+        .filter_map(|r| {
+            project_one(
+                r,
+                instances,
+                &active_ead_per_es,
+                &single_active_index,
+                same_esi_bias,
+            )
+        })
         .filter(|route| !projected_route_is_quarantined(route, quarantined_macs))
         .collect();
     let ead_per_evi: Vec<ProjectedEvpnEadPerEvi> = routes
@@ -1351,7 +1359,10 @@ fn project_intent_tables(
                 return None;
             };
             let vni = rustbgpd_evpn::EvpnInstanceId::new(macip.label1.as_vni()).ok()?;
-            instances.get(vni)?;
+            let instance = instances.get(vni)?;
+            if !instance.imports_mac_ip(macip, r.next_hop, &r.attributes) {
+                return None;
+            }
             // Mirror the projection's quarantine + same-ESI bias gates
             // — a route that contributes no desired state must not
             // light the gauge either.
@@ -1694,7 +1705,8 @@ fn project_ead_per_evi_unfiltered(
 /// Translate a single [`EvpnRibRoute`] into the projection input
 /// shape, returning `None` for non-Type-2 routes (Gate 7b L2VNI
 /// dataplane only programs MAC/IP entries) and for Type 2 routes
-/// that fail the RFC 7432 §8.4 mass-withdraw reachability gate
+/// that fail local VNI/RT/tag/next-hop import eligibility or the
+/// RFC 7432 §8.4 mass-withdraw reachability gate
 /// (non-zero ESI without a matching EAD-per-ES from the same
 /// origin VTEP next-hop). ADR-0083 slice 3 reinterprets that gate
 /// for single-active segments: a Type 2 whose origin VTEP lost its
@@ -1722,6 +1734,7 @@ fn project_ead_per_evi_unfiltered(
 /// behavior is the failure path, by design.
 fn project_one(
     route: &EvpnRibRoute,
+    instances: &EvpnInstanceTable,
     active_ead_per_es: &std::collections::BTreeSet<(
         std::net::IpAddr,
         rustbgpd_wire::EthernetSegmentIdentifier,
@@ -1733,13 +1746,20 @@ fn project_one(
         return None;
     };
 
-    // ADR-0085 decision 5 same-ESI local bias: suppress before any
-    // other gate — an eligible (ESI, VNI) has no remote row regardless
+    let vni = rustbgpd_evpn::EvpnInstanceId::new(macip.label1.as_vni()).ok()?;
+    if !instances
+        .get(vni)?
+        .imports_mac_ip(macip, route.next_hop, &route.attributes)
+    {
+        return None;
+    }
+
+    // ADR-0085 decision 5 same-ESI local bias: an eligible (ESI, VNI)
+    // has no remote row regardless
     // of the mass-withdraw / swap-window outcome. ESI=0 (single-homed)
     // can never be eligible; the eligibility table only carries
     // configured, bound segments.
     if macip.esi != rustbgpd_wire::EthernetSegmentIdentifier::ZERO
-        && let Ok(vni) = rustbgpd_evpn::EvpnInstanceId::new(macip.label1.as_vni())
         && same_esi_bias.is_eligible(macip.esi, vni)
     {
         return None;
@@ -1931,7 +1951,13 @@ mod tests {
             label1: MplsLabel::new(v),
             label2: None,
         };
-        let mut attrs: Vec<PathAttribute> = Vec::new();
+        let mut attrs = vec![PathAttribute::ExtendedCommunities(vec![
+            RouteTarget::TwoOctetAs {
+                asn: 65001,
+                value: v,
+            }
+            .to_extended_community(),
+        ])];
         if let Some(seq) = seq {
             attrs.push(PathAttribute::ExtendedCommunities(vec![
                 ExtendedCommunity::mac_mobility(false, seq),
@@ -2320,7 +2346,14 @@ mod tests {
         // ESI=0 → bypasses the mass-withdraw filter regardless of
         // the active set's contents.
         let active = std::collections::BTreeSet::new();
-        let projected = project_one(&route, &active, &empty_sa_index(), &no_bias()).unwrap();
+        let projected = project_one(
+            &route,
+            &local_instance_table(100, None),
+            &active,
+            &empty_sa_index(),
+            &no_bias(),
+        )
+        .unwrap();
         assert_eq!(projected.mac.octets(), [1; 6]);
         assert_eq!(projected.next_hop, ipa("10.0.0.2"));
         assert_eq!(projected.mobility_sequence, Some(7));
@@ -2345,7 +2378,16 @@ mod tests {
             is_llgr_stale: false,
         };
         let active = std::collections::BTreeSet::new();
-        assert!(project_one(&imet, &active, &empty_sa_index(), &no_bias()).is_none());
+        assert!(
+            project_one(
+                &imet,
+                &local_instance_table(100, None),
+                &active,
+                &empty_sa_index(),
+                &no_bias()
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -2355,39 +2397,46 @@ mod tests {
         // segment reachability (no current EAD-per-ES from the same
         // origin VTEP for the same ESI) fails the receiver-side
         // reachability precondition and is dropped from projection.
-        use rustbgpd_wire::{EthernetSegmentIdentifier, EvpnMacIp, MplsLabel};
         let esi = EthernetSegmentIdentifier::new([1; 10]);
-        let route = EvpnRibRoute {
-            route: EvpnRoute::MacIp(EvpnMacIp {
-                rd: RouteDistinguisher::ZERO,
-                esi,
-                ethernet_tag: EthernetTagId(0),
-                mac: rustbgpd_wire::MacAddress::new([2; 6]),
-                ip: None,
-                label1: MplsLabel::new(100),
-                label2: None,
-            }),
-            next_hop: ipa("10.0.0.2"),
-            link_local_next_hop: None,
-            peer: ipa("10.0.0.99"),
-            attributes: Arc::new(vec![]),
-            received_at: std::time::Instant::now(),
-            origin_type: rustbgpd_rib::route::RouteOrigin::Ebgp,
-            peer_router_id: std::net::Ipv4Addr::new(10, 0, 0, 99),
-            is_stale: false,
-            is_llgr_stale: false,
-        };
+        let route = evpn_macip_route_with_esi(100, 2, "10.0.0.2", esi);
         // No EAD-per-ES from VTEP 10.0.0.2 for this ESI → filter.
         let empty = std::collections::BTreeSet::new();
-        assert!(project_one(&route, &empty, &empty_sa_index(), &no_bias()).is_none());
+        assert!(
+            project_one(
+                &route,
+                &local_instance_table(100, None),
+                &empty,
+                &empty_sa_index(),
+                &no_bias()
+            )
+            .is_none()
+        );
         // Same route with the active set populated → route survives.
         let mut active = std::collections::BTreeSet::new();
         active.insert((ipa("10.0.0.2"), esi));
-        assert!(project_one(&route, &active, &empty_sa_index(), &no_bias()).is_some());
+        assert!(
+            project_one(
+                &route,
+                &local_instance_table(100, None),
+                &active,
+                &empty_sa_index(),
+                &no_bias()
+            )
+            .is_some()
+        );
         // Different VTEP in the active set doesn't satisfy the gate.
         let mut wrong_vtep = std::collections::BTreeSet::new();
         wrong_vtep.insert((ipa("10.0.0.55"), esi));
-        assert!(project_one(&route, &wrong_vtep, &empty_sa_index(), &no_bias()).is_none());
+        assert!(
+            project_one(
+                &route,
+                &local_instance_table(100, None),
+                &wrong_vtep,
+                &empty_sa_index(),
+                &no_bias()
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -2415,9 +2464,25 @@ mod tests {
         let mut active = std::collections::BTreeSet::new();
         active.insert((ipa("10.0.0.2"), esi));
 
-        assert!(project_one(&from_vtep_a, &active, &empty_sa_index(), &no_bias()).is_some());
         assert!(
-            project_one(&from_vtep_b, &active, &empty_sa_index(), &no_bias()).is_none(),
+            project_one(
+                &from_vtep_a,
+                &local_instance_table(100, None),
+                &active,
+                &empty_sa_index(),
+                &no_bias()
+            )
+            .is_some()
+        );
+        assert!(
+            project_one(
+                &from_vtep_b,
+                &local_instance_table(100, None),
+                &active,
+                &empty_sa_index(),
+                &no_bias()
+            )
+            .is_none(),
             "EAD-per-ES from VTEP A must not satisfy VTEP B"
         );
     }
@@ -2453,7 +2518,16 @@ mod tests {
         active.insert((ipa("10.0.0.2"), esi));
         // Control: the route passes the mass-withdraw gate and
         // projects without the bias.
-        assert!(project_one(&route, &active, &empty_sa_index(), &no_bias()).is_some());
+        assert!(
+            project_one(
+                &route,
+                &local_instance_table(100, None),
+                &active,
+                &empty_sa_index(),
+                &no_bias()
+            )
+            .is_some()
+        );
 
         // Locally attached (bound), healthy (not drained), all-active
         // — entitled to forward even as non-DF: suppressed.
@@ -2463,7 +2537,14 @@ mod tests {
             &[(esi, RedundancyMode::AllActive, 100, DfRole::NonDf)],
         );
         assert!(
-            project_one(&route, &active, &empty_sa_index(), &bias).is_none(),
+            project_one(
+                &route,
+                &local_instance_table(100, None),
+                &active,
+                &empty_sa_index(),
+                &bias
+            )
+            .is_none(),
             "an all-active member with a healthy local AC must not program a remote row"
         );
 
@@ -2476,7 +2557,14 @@ mod tests {
             inner.esi = esi;
         }
         assert!(
-            project_one(&macip, &active, &empty_sa_index(), &bias).is_none(),
+            project_one(
+                &macip,
+                &local_instance_table(100, None),
+                &active,
+                &empty_sa_index(),
+                &bias
+            )
+            .is_none(),
             "MAC-IP (neighbor) rows follow the MAC's bias"
         );
     }
@@ -2494,7 +2582,14 @@ mod tests {
             &[(esi, RedundancyMode::SingleActive, 100, DfRole::Df)],
         );
         assert!(
-            project_one(&route, &active, &empty_sa_index(), &bias).is_none(),
+            project_one(
+                &route,
+                &local_instance_table(100, None),
+                &active,
+                &empty_sa_index(),
+                &bias
+            )
+            .is_none(),
             "the single-active DF forwards on its own AC; the peer's Type 2 must not usurp it"
         );
     }
@@ -2517,7 +2612,14 @@ mod tests {
             &[(esi, RedundancyMode::SingleActive, 100, DfRole::NonDf)],
         );
         assert!(
-            project_one(&route, &active, &empty_sa_index(), &bias).is_some(),
+            project_one(
+                &route,
+                &local_instance_table(100, None),
+                &active,
+                &empty_sa_index(),
+                &bias
+            )
+            .is_some(),
             "a healthy single-active backup must keep the remote row toward the active PE"
         );
     }
@@ -2538,7 +2640,14 @@ mod tests {
             &[(esi, RedundancyMode::AllActive, 100, DfRole::Df)],
         );
         assert!(
-            project_one(&route, &active, &empty_sa_index(), &bias).is_some(),
+            project_one(
+                &route,
+                &local_instance_table(100, None),
+                &active,
+                &empty_sa_index(),
+                &bias
+            )
+            .is_some(),
             "a drained segment must program remote rows so the peer PE takes over"
         );
     }
@@ -2558,7 +2667,14 @@ mod tests {
             &[(esi, RedundancyMode::AllActive, 100, DfRole::Df)],
         );
         assert!(
-            project_one(&route, &active, &empty_sa_index(), &bias).is_some(),
+            project_one(
+                &route,
+                &local_instance_table(100, None),
+                &active,
+                &empty_sa_index(),
+                &bias
+            )
+            .is_some(),
             "unbound segments must keep today's remote-row behavior"
         );
     }
@@ -2943,10 +3059,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_intent_tables_single_active_swap_is_independent_per_ethernet_tag() {
-        // Groups are keyed per (ESI, EthernetTag): an ES spanning two
-        // tags takes one retarget each, derived from each tag's own
-        // eligible set.
+    async fn build_intent_tables_single_active_swap_rejects_unsupported_ethernet_tag() {
+        // The low-level aliasing algorithm supports distinct tags, but the
+        // local VLAN-based service imports only tag 0, including in a swap.
         let instances = local_instance_table(100, Some("br100"));
         let ip_vrfs = IpVrfTable::new();
         let esi = EthernetSegmentIdentifier::new([7; 10]);
@@ -2979,18 +3094,8 @@ mod tests {
         assert_eq!(tag0.remote_vtep_ip, ipa("10.0.0.3"));
         assert_eq!(tag0.alias_group_key, Some((esi, EthernetTagId(0))));
         assert_eq!(tag0.single_active_backup_vtep_ip, Some(ipa("10.0.0.4")));
-        let tag1 = tables.remote_macs.get(vni(100), mac(2)).unwrap();
-        assert_eq!(
-            tag1.remote_vtep_ip,
-            ipa("10.0.0.4"),
-            "tag 1 retargets from its own eligible set"
-        );
-        assert_eq!(tag1.alias_group_key, Some((esi, EthernetTagId(1))));
-        assert!(tag1.single_active_backup_vtep_ip.is_none());
-        assert_eq!(
-            tables.single_active_backup_active, 2,
-            "two (ESI, EthTag) groups in the backup window"
-        );
+        assert!(tables.remote_macs.get(vni(100), mac(2)).is_none());
+        assert_eq!(tables.single_active_backup_active, 1);
     }
 
     #[tokio::test]
@@ -3182,6 +3287,91 @@ mod tests {
             entry.single_active_backup_vtep_ip.is_none(),
             "all-active entries never carry the backup intent"
         );
+    }
+
+    #[test]
+    fn type2_import_eligibility_gates_fdb_and_gateway_ip_recursion() {
+        let instances = local_instance_table(100, Some("br100"));
+        let mut ip_vrfs = ip_vrf_table_one("blue", 5000, 5000);
+        ip_vrfs.mark_referenced_by_l2vni("blue".to_string(), vni(100));
+        let valid =
+            evpn_macip_route_with_host_ip(100, 0xaa, Some("192.0.2.10"), "10.0.0.2", Some(9));
+        for case in [
+            "matching",
+            "partial",
+            "missing",
+            "mismatched",
+            "tag",
+            "vni",
+            "self",
+        ] {
+            let mut route = valid.clone();
+            match case {
+                "partial" => {
+                    route.attributes =
+                        Arc::new(vec![PathAttribute::ExtendedCommunitiesPartial(vec![
+                            RouteTarget::TwoOctetAs {
+                                asn: 65001,
+                                value: 999,
+                            }
+                            .to_extended_community(),
+                            RouteTarget::TwoOctetAs {
+                                asn: 65001,
+                                value: 100,
+                            }
+                            .to_extended_community(),
+                        ])]);
+                }
+                "missing" => route.attributes = Arc::new(vec![]),
+                "mismatched" => {
+                    route.attributes = Arc::new(vec![PathAttribute::ExtendedCommunities(vec![
+                        RouteTarget::TwoOctetAs {
+                            asn: 65001,
+                            value: 999,
+                        }
+                        .to_extended_community(),
+                    ])]);
+                }
+                "tag" | "vni" => {
+                    let EvpnRoute::MacIp(macip) = &mut route.route else {
+                        unreachable!()
+                    };
+                    if case == "tag" {
+                        macip.ethernet_tag = EthernetTagId(77);
+                    } else {
+                        macip.label1 = MplsLabel::new(200);
+                    }
+                }
+                "self" => route.next_hop = ipa("10.0.0.1"),
+                _ => {}
+            }
+            let routes = vec![
+                route,
+                evpn_ip_prefix_route("10.1.0.0/24", "192.0.2.10", "10.0.0.9", 5000),
+            ];
+            let retained = routes.clone();
+            let tables =
+                project_intent_tables(&routes, &instances, &ip_vrfs, &BTreeSet::new(), &no_bias());
+            let accepted = matches!(case, "matching" | "partial");
+            assert_eq!(
+                tables.remote_macs.get(vni(100), mac(0xaa)).is_some(),
+                accepted,
+                "{case}"
+            );
+            let entries: Vec<_> = tables
+                .remote_ip_prefixes
+                .for_vrf(IpVrfId::new(5000).unwrap())
+                .collect();
+            assert_eq!(entries.len(), usize::from(accepted), "{case}");
+            if accepted {
+                assert_eq!(entries[0].1.next_hop, ipa("10.0.0.2"));
+            }
+            for (route, before) in routes.iter().zip(&retained) {
+                assert_eq!(route.route, before.route);
+                assert_eq!(route.attributes, before.attributes);
+                assert_eq!(route.next_hop, before.next_hop);
+            }
+        }
     }
 
     #[tokio::test]

@@ -709,6 +709,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `rbgp top` honors `--no-color` and the presence of `NO_COLOR` with a
   monochrome theme that preserves bold emphasis and selection markers.
 
+- Local EVPN Type 2 consumption now requires a matching instance VNI and
+  Route Target, Ethernet Tag 0, and a nonlocal next hop before forwarding,
+  mobility, duplicate accounting, or Type 5 gateway-IP recursion. Global RIB
+  retention and reflection are unchanged.
+
 ### Documentation
 
 - Publish a descriptive raw bridge event-skew receipt across six pinned Jammy
@@ -913,6 +918,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and marks timed-out sections incomplete, with a separate allowance for
   large effective-config exports. A failed health collection no longer
   leaves the system section marked collected.
+
+- **EVPN local VTEP upgrades:** Type 2 routes with missing or mismatched RTs,
+  or nonzero Ethernet Tags, no longer contribute local forwarding or mobility
+  state. Check remote advertisements and configured `route_targets` before
+  upgrading; see [local Type 2 import](docs/how-to/evpn-vtep-setup.md#local-type-2-import).
 
 ## [0.68.0] — 2026-08-30
 

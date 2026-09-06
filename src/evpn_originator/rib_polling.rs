@@ -348,7 +348,8 @@ fn sticky_and_esi_by_mac_winner(
 }
 
 /// Build both contender maps from a flat set of best-path
-/// `EvpnRibRoute`s. Drops self-NH routes per the module-level
+/// `EvpnRibRoute`s. Requires local Type 2 import eligibility before losing
+/// attributes. Drops self-NH routes per the module-level
 /// "self-origination filter" rule, and drops routes advertised by a PE
 /// on the VNI's own Ethernet Segment (`vni_to_esi`, RFC 9721 §6.4):
 /// those are peer-sync routes, not mobility contenders, so they must
@@ -376,9 +377,12 @@ pub(super) fn build_remote_views(
             let EvpnRoute::MacIp(macip) = &r.route else {
                 return None;
             };
-            let local_esi = rustbgpd_evpn::EvpnInstanceId::new(macip.label1.as_vni())
-                .ok()
-                .and_then(|vni| vni_to_esi.get(&vni).copied());
+            let vni = EvpnInstanceId::new(macip.label1.as_vni()).ok()?;
+            let instance = instances.get(vni)?;
+            if !instance.imports_mac_ip(macip, r.next_hop, &r.attributes) {
+                return None;
+            }
+            let local_esi = vni_to_esi.get(&vni).copied();
             if local_esi.is_some_and(|local| is_same_segment_peer(macip.esi, local)) {
                 return None;
             }
@@ -562,8 +566,15 @@ mod partial_extended_community_tests {
     #[test]
     fn partial_mac_mobility_preserves_sticky_sequence_contender_state() {
         let mobility = ExtendedCommunity::mac_mobility(true, 7);
-        let canonical = contender(PathAttribute::ExtendedCommunities(vec![mobility]));
-        let partial = contender(PathAttribute::ExtendedCommunitiesPartial(vec![mobility]));
+        let rt = rustbgpd_evpn::RouteTarget::TwoOctetAs {
+            asn: 65000,
+            value: 100,
+        }
+        .to_extended_community();
+        let canonical = contender(PathAttribute::ExtendedCommunities(vec![rt, mobility]));
+        let partial = contender(PathAttribute::ExtendedCommunitiesPartial(vec![
+            rt, mobility,
+        ]));
         let mut instances = EvpnInstanceTable::new();
         instances
             .insert(evpn_instance(
