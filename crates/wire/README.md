@@ -16,12 +16,19 @@ Requires Rust 1.95 or newer.
 
 Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 
-### 0.19.1 compatibility note
+### 0.20.0 compatibility note
 
-`rustbgpd-wire` 0.19.1 is **additive**. No public item is removed and no
-existing signature is changed; code that builds against 0.19.0 builds
-unchanged against 0.19.1. Consumers should account for these additions and
-decode-behavior refinements when upgrading:
+`rustbgpd-wire` 0.20.0 is prepared for release. The new public inspection
+helper and types use a new pre-1.0 compatibility line. Existing items and
+signatures remain available, but consumers sharing wire types with FSM or
+RPKI must move together to FSM 0.7 and RPKI 0.2. Consumers should account for
+these additions and decode-behavior refinements when upgrading:
+
+- `decode_prefix_sid_services` inspects the complete raw Prefix-SID value and
+  returns the first L3/L2 services, advertised SID values, numeric endpoint
+  behavior codes, flags and all SID Structure fields. Unknown or reserved data
+  stays in the raw attribute. The helper performs structural validation; it
+  does not reconstruct transposed SIDs or decide forwarding eligibility.
 
 - Prefix-SID SRv6 L3/L2 Service TLVs now validate nested framing under
   RFC 9252 §7. Recognized service malformation returns the additive
@@ -292,7 +299,7 @@ Add the codec and its buffer type as direct dependencies:
 
 ```toml
 [dependencies]
-rustbgpd-wire = "0.19.1"
+rustbgpd-wire = "0.20.0"
 bytes = "1"
 ```
 

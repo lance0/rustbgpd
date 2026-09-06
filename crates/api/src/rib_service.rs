@@ -2789,6 +2789,55 @@ fn vpn_family_label(route: &VpnRibRoute) -> &'static str {
     }
 }
 
+fn prefix_sid_to_proto(attributes: &[PathAttribute]) -> Option<proto::PrefixSidView> {
+    let raw = attributes.iter().find_map(|attribute| match attribute {
+        PathAttribute::Unknown(raw)
+            if raw.type_code == rustbgpd_wire::constants::attr_type::PREFIX_SID =>
+        {
+            Some(raw)
+        }
+        _ => None,
+    })?;
+    let mut view = proto::PrefixSidView {
+        raw_value: raw.data.to_vec(),
+        flags: u32::from(raw.flags),
+        ..Default::default()
+    };
+    match rustbgpd_wire::decode_prefix_sid_services(&raw.data) {
+        Ok(services) => {
+            view.services = services
+                .into_iter()
+                .map(|service| proto::Srv6Service {
+                    tlv_type: u32::from(service.tlv_type),
+                    sids: service
+                        .sids
+                        .into_iter()
+                        .map(|sid| proto::Srv6SidInformation {
+                            sid_value: sid.sid_value.to_string(),
+                            endpoint_behavior: u32::from(sid.endpoint_behavior),
+                            flags: u32::from(sid.flags),
+                            structures: sid
+                                .structures
+                                .into_iter()
+                                .map(|structure| proto::Srv6SidStructure {
+                                    locator_block_length: u32::from(structure.locator_block_length),
+                                    locator_node_length: u32::from(structure.locator_node_length),
+                                    function_length: u32::from(structure.function_length),
+                                    argument_length: u32::from(structure.argument_length),
+                                    transposition_length: u32::from(structure.transposition_length),
+                                    transposition_offset: u32::from(structure.transposition_offset),
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                })
+                .collect();
+        }
+        Err(error) => view.decode_error = error.to_string(),
+    }
+    Some(view)
+}
+
 pub(crate) fn vpn_route_to_proto(route: &VpnRibRoute) -> proto::VpnRouteEntry {
     let mut as_path = Vec::new();
     let mut communities = Vec::new();
@@ -2827,6 +2876,7 @@ pub(crate) fn vpn_route_to_proto(route: &VpnRibRoute) -> proto::VpnRouteEntry {
         stale: route.is_stale,
         llgr_stale: route.is_llgr_stale,
         path_id: route.path_id,
+        prefix_sid: prefix_sid_to_proto(&route.attributes),
     }
 }
 
@@ -3085,6 +3135,7 @@ pub(crate) fn evpn_route_to_proto(route: &EvpnRibRoute) -> proto::EvpnRouteEntry
         communities,
         extended_communities,
         tunnel_type,
+        prefix_sid: prefix_sid_to_proto(&route.attributes),
     }
 }
 
@@ -3461,6 +3512,139 @@ mod tests {
             path_id: 0,
         };
         (evpn, bgpls, vpn, labeled, rtc)
+    }
+
+    #[test]
+    fn prefix_sid_frr_transposition_exposes_advertised_value_without_reconstruction() {
+        // FRR 10.7.1 VPNv4/6 Prefix-SID values captured by the M111 lab.
+        // The service functions 1 and 2 are in NLRI labels, not these SID bytes.
+        for (behavior, value) in [
+            (
+                19,
+                &[
+                    0x05, 0x00, 0x22, 0x00, 0x01, 0x00, 0x1e, 0x00, 0x20, 0x01, 0x0d, 0xb8, 0x01,
+                    0x11, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    0x13, 0x00, 0x01, 0x00, 0x06, 0x28, 0x18, 0x10, 0x00, 0x10, 0x40,
+                ][..],
+            ),
+            (
+                18,
+                &[
+                    0x05, 0x00, 0x22, 0x00, 0x01, 0x00, 0x1e, 0x00, 0x20, 0x01, 0x0d, 0xb8, 0x01,
+                    0x11, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    0x12, 0x00, 0x01, 0x00, 0x06, 0x28, 0x18, 0x10, 0x00, 0x10, 0x40,
+                ][..],
+            ),
+        ] {
+            let view = prefix_sid_to_proto(&[PathAttribute::Unknown(RawAttribute {
+                flags: 0xe0,
+                type_code: 40,
+                data: Bytes::copy_from_slice(value),
+            })])
+            .unwrap();
+            assert!(view.decode_error.is_empty());
+            assert_eq!(view.raw_value, value);
+            let sid = &view.services[0].sids[0];
+            assert_eq!(sid.sid_value, "2001:db8:111:1::");
+            assert_eq!(sid.endpoint_behavior, behavior);
+            assert_eq!(sid.structures[0].transposition_length, 16);
+            assert_eq!(sid.structures[0].transposition_offset, 64);
+        }
+    }
+
+    #[test]
+    fn pre_prefix_sid_route_bytes_decode_without_changing_their_encoding() {
+        use prost::Message;
+        // Produced with the preceding protobuf schema: next_hop field 6/11,
+        // peer_address field 7/12, no Prefix-SID field on either route type.
+        let vpn_bytes = b"\x32\x0b2001:db8::1\x3a\x09192.0.2.1";
+        let evpn_bytes = b"\x5a\x0b2001:db8::1\x62\x09192.0.2.1";
+        let vpn = proto::VpnRouteEntry::decode(vpn_bytes.as_slice()).unwrap();
+        let evpn = proto::EvpnRouteEntry::decode(evpn_bytes.as_slice()).unwrap();
+        assert_eq!(vpn.next_hop, "2001:db8::1");
+        assert_eq!(evpn.next_hop, "2001:db8::1");
+        assert!(vpn.prefix_sid.is_none());
+        assert!(evpn.prefix_sid.is_none());
+        assert_eq!(vpn.encode_to_vec(), vpn_bytes);
+        assert_eq!(evpn.encode_to_vec(), evpn_bytes);
+    }
+
+    #[test]
+    fn prefix_sid_views_preserve_raw_bytes_and_never_return_partial_decode() {
+        use prost::Message;
+        let (mut evpn, _, mut vpn, _, _) = non_unicast_routes("192.0.2.1".parse().unwrap());
+        let vpn_before = vpn_route_to_proto(&vpn);
+        let ethernet_before = evpn_route_to_proto(&evpn);
+        assert!(vpn_before.prefix_sid.is_none());
+        assert!(ethernet_before.prefix_sid.is_none());
+        assert!(
+            proto::VpnRouteEntry::decode(vpn_before.encode_to_vec().as_slice())
+                .unwrap()
+                .prefix_sid
+                .is_none()
+        );
+        assert!(
+            proto::EvpnRouteEntry::decode(ethernet_before.encode_to_vec().as_slice())
+                .unwrap()
+                .prefix_sid
+                .is_none()
+        );
+        // L3 Service, SID Information, SID Structure, then an opaque extension.
+        let mut value = vec![5, 0, 34, 0xa5, 1, 0, 30, 0xff];
+        value.extend("fc00:0:1::".parse::<Ipv6Addr>().unwrap().octets());
+        value.extend([0x80, 0, 19, 0xff, 1, 0, 6, 40, 24, 16, 0, 16, 64]);
+        value.extend([254, 0, 2, 0xde, 0xad]);
+        for raw in [value.clone(), [value, vec![254, 0, 1]].concat()] {
+            let attributes = Arc::new(vec![PathAttribute::Unknown(RawAttribute {
+                flags: 0xe0,
+                type_code: 40,
+                data: Bytes::from(raw.clone()),
+            })]);
+            evpn.attributes = Arc::clone(&attributes);
+            vpn.attributes = attributes;
+            let vpn_entry = vpn_route_to_proto(&vpn);
+            let evpn_entry = evpn_route_to_proto(&evpn);
+            let view = vpn_entry.prefix_sid.as_ref().unwrap();
+            assert_eq!(Some(view), evpn_entry.prefix_sid.as_ref());
+            assert_eq!(view.raw_value, raw);
+            assert_eq!(view.flags, 0xe0);
+            if raw.last() == Some(&1) {
+                assert!(!view.decode_error.is_empty());
+                assert!(view.services.is_empty());
+            } else {
+                assert!(view.decode_error.is_empty());
+                assert_eq!(view.services[0].tlv_type, 5);
+                let sid = &view.services[0].sids[0];
+                assert_eq!(sid.sid_value, "fc00:0:1::");
+                assert_eq!(sid.endpoint_behavior, 19);
+                assert_eq!(sid.flags, 0x80);
+                assert_eq!(sid.structures[0].transposition_offset, 64);
+            }
+            assert_eq!(
+                proto::VpnRouteEntry::decode(vpn_entry.encode_to_vec().as_slice()).unwrap(),
+                vpn_entry
+            );
+            assert_eq!(
+                proto::EvpnRouteEntry::decode(evpn_entry.encode_to_vec().as_slice()).unwrap(),
+                evpn_entry
+            );
+        }
+        // Existing first path-attribute occurrence remains authoritative.
+        let first = PathAttribute::Unknown(RawAttribute {
+            flags: 0xc0,
+            type_code: 40,
+            data: Bytes::from_static(&[254, 0, 0]),
+        });
+        let second = PathAttribute::Unknown(RawAttribute {
+            flags: 0xe0,
+            type_code: 40,
+            data: Bytes::new(),
+        });
+        let view = prefix_sid_to_proto(&[first, second]).unwrap();
+        assert_eq!(view.raw_value, [254, 0, 0]);
+        assert_eq!(view.flags, 0xc0);
+        assert!(view.services.is_empty());
+        assert!(view.decode_error.is_empty());
     }
 
     fn evpn_explain_selector(route: proto::evpn_route_selector::Route) -> proto::EvpnRouteSelector {

@@ -13,6 +13,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- VPN and EVPN route views now expose optional Prefix-SID raw bytes and flags,
+  advertised SRv6 SID values, numeric endpoint behavior, and SID Structure
+  fields. EVPN explain and current/previous event snapshots retain the same
+  view. CLI text summarizes advertised values; JSON retains complete raw
+  attribute hex and reports malformed stored data without partial decoding.
+  This adds inspection only, with no SID reconstruction or forwarding.
+- Prepared wire `0.20.0`, FSM `0.7.0`, and RPKI `0.2.0` compatibility lines
+  for the new public Prefix-SID inspection API and shared wire types. Registry
+  dependency examples continue to name the currently published versions.
+
 - Explicit `rbgp --json-lines` output for accepted unicast best, received,
   and advertised routes. The versioned stream emits routes page by page and
   ends with matching-row counts and completeness; ordinary JSON arrays and

@@ -3,7 +3,11 @@
 This changelog covers the independently published `rustbgpd-fsm` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
-## Unreleased
+## 0.7.0 - Unreleased
+
+- Prepared the wire dependency move to `0.20.0`. Public signatures expose
+  wire types, so embedders sharing them must upgrade both dependencies to the
+  corresponding compatibility line.
 
 - `validate_open` now limits `NegotiatedSession::add_path_families` and
   `NegotiatedSession::extended_nexthop_families` to the address families in

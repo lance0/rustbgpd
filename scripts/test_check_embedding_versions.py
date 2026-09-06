@@ -113,14 +113,13 @@ class EmbeddingVersionContractTests(unittest.TestCase):
     def test_prepared_boundary_is_guarded(self) -> None:
         """Fails if §7 loses any authoritative prepared-version slot.
 
-        Wire is staged ahead of the registry, so its prepared slot is the only
-        `rustbgpd-wire 0.19.1` marker; FSM and RPKI share their published
-        version and the prepared slot is the second occurrence.
+        All three crates are staged ahead of the registry, so each prepared
+        version has its own authoritative slot.
         """
         for package, version, occurrence in (
-            ("wire", "0.19.1", 0),
-            ("fsm", "0.6.0", 1),
-            ("rpki", "0.1.0", 1),
+            ("wire", "0.20.0", 0),
+            ("fsm", "0.7.0", 0),
+            ("rpki", "0.2.0", 0),
         ):
             with self.subTest(package=package):
                 self.assert_fails(
@@ -142,36 +141,29 @@ class EmbeddingVersionContractTests(unittest.TestCase):
     def test_coordinated_prepared_version_drift_is_rejected(self) -> None:
         """Prepared prose and snippets stay anchored to package manifests."""
         self.assert_fails(
-            DOCUMENT.replace("0.6.0", "9.9.9"),
+            DOCUMENT.replace("0.7.0", "9.9.9"),
             "prepared-boundary-version",
         )
 
     def test_prepared_clause_expresses_a_tree_ahead_of_the_registry(self) -> None:
-        """The published/prepared split tracks the manifest as the gap moves.
-
-        Wire `0.19.1` is staged ahead of crates.io today. Moving the §4 clause
-        and the §7 prepared paragraph to the next prepared version must still
-        validate against manifests carrying that version.
-        """
-        changed = DOCUMENT.replace(
-            "1. **`rustbgpd-wire` (published as `0.19.0`; `0.19.1` prepared).**",
-            "1. **`rustbgpd-wire` (published as `0.19.0`; `0.20.0` prepared).**",
-            1,
-        )
+        """A subsequent prepared patch keeps the published boundary unchanged."""
+        changed = DOCUMENT.replace("`0.20.0` prepared", "`0.20.1` prepared", 1)
         self.assertNotEqual(changed, DOCUMENT)
-        changed = changed.replace("`rustbgpd-wire 0.19.1`", "`rustbgpd-wire 0.20.0`", 1)
+        changed = changed.replace("`rustbgpd-wire 0.20.0`", "`rustbgpd-wire 0.20.1`", 1)
         self.assertEqual(
-            check(changed, {"wire": "0.20.0", "fsm": "0.6.0", "rpki": "0.1.0"}),
+            check(changed, {"wire": "0.20.1", "fsm": "0.7.0", "rpki": "0.2.0"}),
             [],
         )
 
     def test_a_staged_version_cannot_hide_by_omitting_the_prepared_clause(self) -> None:
-        """An absent clause claims tree == registry, so a bumped tree is rejected."""
-        changed = DOCUMENT.replace("; `0.19.1` prepared", "", 1)
-        self.assertNotEqual(changed, DOCUMENT)
-        errors = check(changed, {"wire": "0.19.1", "fsm": "0.6.0", "rpki": "0.1.0"})
-        self.assertIn("publish-status-version", errors)
-        errors = check(DOCUMENT, {"wire": "0.20.0", "fsm": "0.6.0", "rpki": "0.1.0"})
+        """Every absent clause falsely claims that the tree equals the registry."""
+        versions = {"wire": "0.20.0", "fsm": "0.7.0", "rpki": "0.2.0"}
+        for version in versions.values():
+            with self.subTest(version=version):
+                changed = DOCUMENT.replace(f"; `{version}` prepared", "", 1)
+                self.assertNotEqual(changed, DOCUMENT)
+                self.assertIn("publish-status-version", check(changed, versions))
+        errors = check(DOCUMENT, {**versions, "wire": "0.20.1"})
         self.assertIn("publish-status-version", errors)
         self.assertIn("prepared-boundary-version", errors)
 
@@ -199,7 +191,7 @@ class EmbeddingVersionContractTests(unittest.TestCase):
         """Fails if the published RPKI release is relabeled as merely prepared."""
         self.assert_fails(
             self.replace_nth(
-                "3. **`rustbgpd-rpki` (published as `0.1.0`).**",
+                "3. **`rustbgpd-rpki` (published as `0.1.0`; `0.2.0` prepared).**",
                 "3. **`rustbgpd-rpki` (first publish prepared as `0.1.0`).**",
             ),
             "publish-status-version",
