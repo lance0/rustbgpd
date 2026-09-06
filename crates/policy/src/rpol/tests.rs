@@ -1692,6 +1692,7 @@ fn absent_route_attribute_matches_neither_eq_nor_ne() {
         ("peer.address", "192.0.2.1"),
         ("peer.asn", "65010"),
         ("peer.group", "\"leaf\""),
+        ("route.origin-as", "64500"),
     ];
     let absent = absent_ctx();
     for (field, literal) in fields {
@@ -1703,6 +1704,13 @@ fn absent_route_attribute_matches_neither_eq_nor_ne() {
                 "absent `{field}` must not match `{field} {op} {literal}`"
             );
         }
+        let negated = reject_if(&format!("!({field} == {literal})"));
+        let (result, evaluation) = negated.evaluate_with_attribution(&absent);
+        assert_eq!(result.action, PolicyAction::Deny, "explicit ! for {field}");
+        assert!(
+            evaluation.eval_error.is_none(),
+            "Boolean negation is a match"
+        );
     }
 }
 
@@ -2923,35 +2931,45 @@ fn eval_error_denies_discards_mods_and_counts() {
 
 /// An absent operand without a documented default (origin-as on an
 /// AS_SET-only path, unknown peer.asn) is unresolvable → the same
-/// eval-error rail. Plain (arithmetic-free) comparisons keep their
+/// eval-error rail. Plain field/literal comparisons keep their
 /// legacy never-match semantics — the two deliberately diverge.
 #[test]
 fn absent_operand_is_an_eval_error_not_a_non_match() {
-    // Arithmetic form: absent origin denies the route.
-    let arith = reject_if("route.origin-as * 1 == 64500");
-    assert_eq!(
-        arith.evaluate(&absent_ctx()).action,
-        PolicyAction::Deny,
-        "absent origin in arithmetic fails closed"
-    );
-    // Plain form: absent origin matches neither == nor != and the
-    // route falls through to the accepting term.
-    let plain = reject_if("route.origin-as == 64500");
-    assert_eq!(
-        plain.evaluate(&absent_ctx()).action,
-        PolicyAction::Permit,
-        "plain comparison keeps never-match-on-absent semantics"
-    );
-    // peer.asn as an operand behaves the same.
-    let peer = reject_if("peer.asn + 0 == 65010");
-    assert_eq!(peer.evaluate(&absent_ctx()).action, PolicyAction::Deny);
-    let mut ctx = absent_ctx();
-    ctx.peer_asn = Some(65010);
-    assert_eq!(
-        peer.evaluate(&ctx).action,
-        PolicyAction::Deny,
-        "matches → reject term fires"
-    );
+    use crate::eval::EvalErrorKind;
+    use crate::ir::ValueField;
+    use PolicyAction::{Deny, Permit};
+
+    // Verdicts are ordered: absent, present/equal, present/different.
+    let cases = [
+        ("FIELD == 64500", [Permit, Deny, Permit], false),
+        ("FIELD != 64500", [Permit, Permit, Deny], false),
+        ("!(FIELD == 64500)", [Deny, Permit, Deny], false),
+        ("(FIELD == 64500)", [Permit, Deny, Permit], false),
+        ("FIELD * 1 == 64500", [Deny, Deny, Permit], true),
+        ("FIELD + 0 == 64500", [Deny, Deny, Permit], true),
+        ("FIELD == (64500)", [Deny, Deny, Permit], true),
+        ("!(FIELD == (64500))", [Deny, Permit, Deny], true),
+    ];
+    for field in [ValueField::OriginAs, ValueField::PeerAsn] {
+        for (template, actions, absent_error) in cases {
+            let guard = template.replace("FIELD", field.as_str());
+            let chain = reject_if(&guard);
+            for (index, value) in [None, Some(64500), Some(64501)].into_iter().enumerate() {
+                let ctx = RouteContext {
+                    origin_asn: value,
+                    peer_asn: value,
+                    ..absent_ctx()
+                };
+                let (result, evaluation) = chain.evaluate_with_attribution(&ctx);
+                assert_eq!(result.action, actions[index], "{guard}, field={value:?}");
+                assert_eq!(
+                    evaluation.eval_error.map(|error| error.kind),
+                    (absent_error && value.is_none()).then_some(EvalErrorKind::AbsentField(field)),
+                    "{guard}, field={value:?}"
+                );
+            }
+        }
+    }
 }
 
 /// min/max/clamp evaluate per route with checked operand evaluation;

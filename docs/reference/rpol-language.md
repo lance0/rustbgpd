@@ -446,7 +446,20 @@ absent on empty and `AS_SET`-only paths and then matches neither `==`
 nor `!=` nor `in` (`!(... in ...)` negates plainly, matching the
 prefix-set precedent).
 
-`==` on u32 fields lowers to `>= v && <= v`; `!=` is its negation.
+For plain comparisons on optional attributes, `!=` and explicit Boolean
+negation are different. With an optional field `x` and a literal `y`:
+
+| Field state | `x == y` | `x != y` | `!(x == y)` |
+|---|---|---|---|
+| Present, equal | true | false | false |
+| Present, different | false | true | true |
+| Absent, without an implicit default | false | false | true |
+
+For example, an ungrouped peer matches `!(peer.group == "leaf")`, but
+does not match `peer.group != "leaf"`. Include fixtures with omitted
+attributes when testing guards over optional fields. `route.local-pref`
+and `route.med` use their implicit defaults, so they do not have the
+absent-field behavior in the last row.
 
 ### Checked u32 value expressions
 
@@ -495,12 +508,21 @@ policy/term retained, surfaced by `rbgp policy stats`), a
 rate-limited WARN names the failing policy and term, and explain
 traces render the error in place of a verdict. `route.local-pref` and `route.med` read their
 implicit defaults (100 / 0) when absent, consistent with comparisons.
-Note the deliberate divergence from plain comparisons: an
-arithmetic-free `route.origin-as == 64500` on an origin-less route
+Note the deliberate divergence from plain comparisons:
+`route.origin-as == 64500` on an origin-less route
 matches neither `==` nor `!=` (never-match), while
 `route.origin-as * 1 == 64500` is unresolvable and **denies** — the
 computed form has no non-verdict to fall back to, exactly like
 computed prepend operands.
+
+A value comparison does not need arithmetic: `route.origin-as == (64500)`
+also reads a checked value and denies an absent origin with
+`absent-operand`. A runtime `let` binding on the right has the same
+behavior. Grouping the whole condition, `(route.origin-as == 64500)`,
+keeps the plain comparison's no-match behavior. Explicit `!` does not
+suppress an evaluation error: `!(route.origin-as == (64500))` still
+denies an absent origin. Test errors with `expect … == error absent-operand`;
+a plain `reject` expectation does not count an evaluation error as a pass.
 
 **Update-group note.** `peer.asn` as an operand (guard or computed
 `set` value) reads peer identity and keeps its peers out of shared
