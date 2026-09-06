@@ -370,7 +370,7 @@ registry dependency (§3.4); its published pairing with wire is recorded in §7.
 current paired boundary, `rpki` on its first release. `rib`, `bmp`, `mrt`, and
 `policy` remain demand-gated.**
 
-1. **`rustbgpd-wire` (published as `0.19.0`; `0.19.1` prepared).** This is the foundation —
+1. **`rustbgpd-wire` (published as `0.19.0`; `0.20.0` prepared).** This is the foundation —
    dependent crate versions cannot publish before their wire dependency exists
    on crates.io. `0.15.0` brought `Capability::PathsLimit`
    with its `PathsLimitFamily` entry type (experimental capability code 76),
@@ -448,13 +448,18 @@ current paired boundary, `rpki` on its first release. `rib`, `bmp`, `mrt`, and
    and MP_UNREACH_NLRI retain session reset. Moving off `0.18.0` means moving
    `rustbgpd-fsm` to `0.6.0` in the same step.
 
-   Prepared `0.19.1` also adds `DecodeError::MalformedSrv6ServiceTlv` for
+   Prepared `0.20.0` adds `decode_prefix_sid_services` and public SRv6
+   service/SID/structure inspection types. They preserve advertised values;
+   raw Prefix-SID bytes retain unknown and reserved data. This requires the
+   coordinated prepared FSM `0.7.0` and RPKI `0.2.0` wire-type boundary.
+
+   Prepared `0.20.0` also adds `DecodeError::MalformedSrv6ServiceTlv` for
    recognized RFC 9252 L3/L2 Service framing errors. Revised decoding uses
    treat-as-withdraw, while generic Prefix-SID errors retain attribute-discard.
    Valid nested unknown/reserved values remain opaque; see the
    [framing contract](path-attribute-registry.md#srv6-service-framing-within-prefix-sid).
 
-2. **`rustbgpd-fsm` (published as `0.6.0`).** The `0.4.0` release makes no
+2. **`rustbgpd-fsm` (published as `0.6.0`; `0.7.0` prepared).** The `0.4.0` release makes no
    FSM API changes of its own — it exists because the FSM's public surface
    re-exports `rustbgpd-wire` types (`Action` carries wire messages), so the
    wire `0.16.2 → 0.17.0` breaking transition changes the identity of those
@@ -501,7 +506,7 @@ current paired boundary, `rpki` on its first release. `rib`, `bmp`, `mrt`, and
    both crates in one step. It also adds `Event::AdministrativeReset` to the
    non-exhaustive event enum.
 
-3. **`rustbgpd-rpki` (published as `0.1.0`).** This is the crate's first
+3. **`rustbgpd-rpki` (published as `0.1.0`; `0.2.0` prepared).** This is the crate's first
    registry release. Why it is independent:
    - Its direct dependencies are `rustbgpd-wire`, `tokio`, `tracing`,
      `smallvec`, `thiserror`, and `rustc-hash`; it has no `rib`/`policy` edge.
@@ -587,16 +592,14 @@ Registry-visible releases are `rustbgpd-wire 0.19.0`,
 `rustbgpd-fsm 0.6.0`, and `rustbgpd-rpki 0.1.0`. The registry
 dependency examples in §3 name only those published versions.
 
-The prepared package boundary is `rustbgpd-wire 0.19.1`,
-`rustbgpd-fsm 0.6.0`, and first-published `rustbgpd-rpki 0.1.0` — the versions
-the working tree carries. Wire `0.19.1` is staged ahead of crates.io: an
-additive patch that adds the `mrt` module's `TABLE_DUMP_V2` next-hop decoder.
-The FSM and RPKI boundaries coincide with the paragraph above.
-The wire/FSM pair moved together because the FSM re-exports codec types. RPKI
-also exposes wire types in public method signatures, and it had no frozen
-baseline, so its first `0.1.0` line starts on wire `0.19.0`. That baseline now
-exists: a further incompatible wire move requires the corresponding RPKI
-compatibility-line bump. The ordering rules that govern these publishes are:
+The prepared package boundary is `rustbgpd-wire 0.20.0`,
+`rustbgpd-fsm 0.7.0`, and `rustbgpd-rpki 0.2.0` — the versions the working
+tree carries. Wire adds the Prefix-SID SRv6 inspection helper and public
+service/SID/structure types, alongside the earlier prepared decoder changes.
+FSM and RPKI expose wire types in public signatures, so all three move to
+matching compatibility lines. This is release preparation; the registry
+examples above keep the published versions.
+The ordering rules that govern these publishes are:
 
 - Publish `rustbgpd-wire` first, then verify it is registry-visible. Only then
   run the fully verified package/dry-run gates for `rustbgpd-fsm` and

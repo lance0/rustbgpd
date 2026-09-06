@@ -840,6 +840,7 @@ mod tests {
             stale: false,
             llgr_stale: false,
             path_id: 0,
+            prefix_sid: None,
         };
         let row_len = widest_row.encoded_len();
         // Representative encoded-row band across the listing fixtures.

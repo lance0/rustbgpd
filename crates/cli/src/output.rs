@@ -8,6 +8,92 @@ use crate::error::CliError;
 use crate::proto;
 use owo_colors::{OwoColorize, Stream::Stdout};
 
+/// Encode retained wire bytes without changing their order or contents.
+pub(crate) fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+/// Shared VPN/EVPN inspection JSON; raw bytes remain authoritative.
+pub(crate) fn prefix_sid_json(view: &proto::PrefixSidView) -> serde_json::Value {
+    let services: Vec<_> = view
+        .services
+        .iter()
+        .map(|service| {
+            let sids: Vec<_> = service
+                .sids
+                .iter()
+                .map(|sid| {
+                    let structures: Vec<_> = sid
+                        .structures
+                        .iter()
+                        .map(|structure| {
+                            serde_json::json!({
+                                "locator_block_length": structure.locator_block_length,
+                                "locator_node_length": structure.locator_node_length,
+                                "function_length": structure.function_length,
+                                "argument_length": structure.argument_length,
+                                "transposition_length": structure.transposition_length,
+                                "transposition_offset": structure.transposition_offset,
+                            })
+                        })
+                        .collect();
+                    serde_json::json!({
+                        "sid_value": sid.sid_value,
+                        "endpoint_behavior": sid.endpoint_behavior,
+                        "flags": sid.flags,
+                        "structures": structures,
+                    })
+                })
+                .collect();
+            serde_json::json!({ "tlv_type": service.tlv_type, "sids": sids })
+        })
+        .collect();
+    let mut value = serde_json::json!({
+        "raw_value": hex_lower(&view.raw_value),
+        "flags": view.flags,
+        "services": services,
+    });
+    if !view.decode_error.is_empty() {
+        value["decode_error"] = serde_json::json!(view.decode_error);
+    }
+    value
+}
+
+/// Summarize advertised values; JSON also includes the complete raw attribute.
+pub(crate) fn prefix_sid_summary(view: &proto::PrefixSidView) -> String {
+    let mut parts = vec![format!("prefix-sid flags={:#04x}", view.flags)];
+    if !view.decode_error.is_empty() {
+        parts.push(format!("decode-error={}", view.decode_error));
+    }
+    for service in &view.services {
+        parts.push(format!("tlv={}", service.tlv_type));
+        for sid in &service.sids {
+            parts.push(format!(
+                "sid-value={} behavior={} sid-flags={:#04x}",
+                sid.sid_value, sid.endpoint_behavior, sid.flags
+            ));
+            for structure in &sid.structures {
+                parts.push(format!(
+                    "structure={}/{}/{}/{}/{}/{}",
+                    structure.locator_block_length,
+                    structure.locator_node_length,
+                    structure.function_length,
+                    structure.argument_length,
+                    structure.transposition_length,
+                    structure.transposition_offset,
+                ));
+            }
+        }
+    }
+    parts.join(" ")
+}
+
 /// Format seconds as a human-readable uptime.
 ///
 /// - >= 7 days: "7d 3h"
@@ -1258,6 +1344,43 @@ pub fn parse_prefix(s: &str) -> Result<(String, u32), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prefix_sid_json_and_text_retain_numeric_fields_and_decode_errors() {
+        use prost::Message;
+        let mut view = proto::PrefixSidView::decode(
+            crate::test_support::mock_prefix_sid()
+                .encode_to_vec()
+                .as_slice(),
+        )
+        .unwrap();
+        let json = prefix_sid_json(&view);
+        assert_eq!(json["raw_value"], "deadbeef");
+        assert_eq!(json["flags"], 224);
+        assert_eq!(json["services"][0]["sids"][0]["endpoint_behavior"], 65535);
+        assert_eq!(json["services"][0]["sids"][0]["flags"], 128);
+        assert_eq!(
+            json["services"][0]["sids"][0]["structures"][0],
+            serde_json::json!({
+                "locator_block_length": 40, "locator_node_length": 24,
+                "function_length": 16, "argument_length": 0,
+                "transposition_length": 16, "transposition_offset": 64,
+            })
+        );
+        assert!(json.get("decode_error").is_none());
+        assert_eq!(
+            prefix_sid_summary(&view),
+            "prefix-sid flags=0xe0 tlv=5 sid-value=fc00:0:1:: behavior=65535 sid-flags=0x80 structure=40/24/16/0/16/64"
+        );
+        view.services.clear();
+        view.decode_error = "malformed framing".into();
+        assert_eq!(prefix_sid_json(&view)["decode_error"], "malformed framing");
+        assert_eq!(prefix_sid_json(&view)["raw_value"], "deadbeef");
+        assert_eq!(
+            prefix_sid_summary(&view),
+            "prefix-sid flags=0xe0 decode-error=malformed framing"
+        );
+    }
 
     fn json_type(value: &Value) -> &'static str {
         match value {

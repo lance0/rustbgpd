@@ -250,6 +250,9 @@ impl std::str::FromStr for AspaValidation {
 }
 
 // Re-export attribute types
+pub use assigned_attributes::{
+    Srv6Service, Srv6SidInformation, Srv6SidStructure, decode_prefix_sid_services,
+};
 pub use attribute::{
     Aggregator, AsPath, AsPathSegment, ExtendedCommunity, LargeCommunity, MalformedAttribute,
     MpReachNlri, MpUnreachNlri, Origin, PathAttribute, RawAttribute, RevisedAttributeDecode,

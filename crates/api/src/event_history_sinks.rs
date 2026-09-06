@@ -635,6 +635,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn evpn_snapshot_payload_retains_prefix_sid_in_current_and_previous_routes() {
+        let mut event = sample_evpn_event();
+        let best = event.best.as_mut().unwrap();
+        best.attributes = Arc::new(vec![rustbgpd_wire::PathAttribute::Unknown(
+            rustbgpd_wire::RawAttribute {
+                flags: 0xe0,
+                type_code: 40,
+                // Structurally valid reserved-only L2 Service plus unknown extension.
+                data: bytes::Bytes::from_static(&[6, 0, 1, 0xff, 254, 0, 1, 0xab]),
+            },
+        )]);
+        event.previous_best = event.best.clone();
+        let envelope = evpn_event_envelope(event, 42);
+        let decoded = proto::BgpEvent::decode(envelope.payload.as_slice()).unwrap();
+        let Some(proto::bgp_event::Payload::Evpn(evpn)) = decoded.payload.as_ref() else {
+            panic!("expected EVPN payload");
+        };
+        for route in [&evpn.route, &evpn.previous_route] {
+            let view = route.as_ref().unwrap().prefix_sid.as_ref().unwrap();
+            assert_eq!(view.raw_value, [6, 0, 1, 0xff, 254, 0, 1, 0xab]);
+            assert_eq!(view.flags, 0xe0);
+            assert_eq!(view.services[0].tlv_type, 6);
+            assert!(view.services[0].sids.is_empty());
+        }
+        assert_eq!(decoded.encode_to_vec(), envelope.payload);
+    }
+
     /// Order + cursor-contiguity pin: events published through the
     /// offloaded sink commit in publish order (route and EVPN
     /// interleaved on the one snapshot channel) with contiguous

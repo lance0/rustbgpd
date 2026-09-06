@@ -5,7 +5,15 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
-## 0.19.1 - Unreleased
+## 0.20.0 - Unreleased
+
+- Added `decode_prefix_sid_services` and the `Srv6Service`,
+  `Srv6SidInformation`, and `Srv6SidStructure` inspection types. The helper
+  validates the complete raw Prefix-SID value, then exposes the first L3/L2
+  service, advertised SID values, numeric behavior codes, flags and structure
+  fields. It does not reconstruct transposed SIDs or change UPDATE validation.
+- Prepared the wire `0.20` boundary with FSM `0.7` and RPKI `0.2`; their public
+  wire types must use the same dependency line.
 
 - Prefix-SID SRv6 L3/L2 Service TLVs now validate nested framing under
   RFC 9252 §7. Recognized service malformation returns the additive
