@@ -51,8 +51,11 @@ resolved.
   also reads each PEM file at config load / `--check` time and
   rejects missing, unreadable, empty, non-PEM, or wrong-kind files
   (e.g., a key path swapped with a cert path) before the daemon
-  starts — a successful `--check` proves the listed TLS material
-  is at least structurally usable. UDS listeners stay
+  starts. Both `--check` modes also run startup credential staging, rejecting
+  invalid certificate/key content, mismatched cert/key pairs, and client CA
+  bundles rejected by rustls without binding listeners. This checks the files
+  at that moment; it does not verify expiry, client trust, or hostname matching.
+  UDS listeners stay
   file-system-permission-authenticated, unchanged.
 
 - **BMP drop / replay Prometheus counters (resolved).** Four new

@@ -2743,6 +2743,12 @@ fn main() -> ExitCode {
     let config = accepted.config();
 
     if check_only {
+        // Resolve the same credential generation as startup without binding
+        // listeners, so invalid TLS content cannot pass the preflight check.
+        if let Err(error) = resolve_grpc_listeners(&config) {
+            eprintln!("error: invalid gRPC listener configuration: {error}");
+            return ExitCode::FAILURE;
+        }
         // The summary line is the only thing some operators read. When
         // anything was flagged it must not be able to pass for a clean
         // result, so `OK` is spent only on a check with nothing to report

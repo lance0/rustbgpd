@@ -84,9 +84,20 @@ daemon presents the server certificate, requires every client to
 present a certificate signed by `tls_client_ca_file`, and rejects
 unverified clients at the TLS layer before any gRPC handler runs.
 
-PEM material is pre-flight-validated at config load and `--check`
-time, so a successful `--check` rules out cert-rotation surprises
-at startup. Valid credential bytes behind unchanged TLS paths rotate on SIGHUP.
+Config loading checks file readability and PEM framing. Both `--check` and
+`--check --strict` also run startup credential staging: they parse the server
+certificate, private key, and client CA bundle and check the cert/key match
+without binding listeners. After staging replacement files at the configured
+paths, run `rustbgpd --check --strict /etc/rustbgpd/config.toml` before SIGHUP
+or restart. This checks the files at that moment, not certificate
+expiry, client trust, hostname matching, or subsequent file changes.
+
+Native mTLS accepts TLS 1.2 and TLS 1.3 using the rustls/ring default cipher
+suites; protocol versions and cipher suites have no configuration overrides.
+A client whose certificate is trusted can complete TLS without a mapped
+principal, but its RPCs receive `PERMISSION_DENIED` from role authorization.
+
+Valid credential bytes behind unchanged TLS paths rotate on SIGHUP.
 Adding or removing TLS, changing a configured TLS path, or changing TLS/auth
 mode remains **restart-required**; runtime config pins that drift to the live
 values until the daemon is restarted.

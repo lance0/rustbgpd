@@ -805,6 +805,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   GSHUT/BLACKHOLE tails. Reject oversized candidates before installation;
   `compile_rpol` enforces the same cap when composing zero-parameter policies.
 
+- `rustbgpd --check` and `--check --strict` validate TLS credential content
+  through the same staging path as startup, rejecting invalid certificates,
+  keys, client CA bundles, and mismatched cert/key pairs before reporting
+  success. Neither mode binds listeners.
+
 ### Documentation
 
 - Publish a descriptive raw bridge event-skew receipt across six pinned Jammy

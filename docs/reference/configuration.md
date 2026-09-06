@@ -712,7 +712,9 @@ rejected at `Config::load`. There is no "TLS-without-mTLS" half-mode by
 design. When enabled, the daemon presents the server certificate, requires
 every client to present a certificate signed by `tls_client_ca_file`, and
 rejects unverified clients at the TLS layer before any gRPC handler runs.
-PEM material is pre-flight-validated at config load and `--check` time. SIGHUP
+Config loading checks file readability and PEM framing. Both `--check` modes
+also run startup credential staging to parse the TLS material and check the
+cert/key match without binding listeners. SIGHUP
 re-reads the bytes behind the three unchanged paths, validates the complete
 server identity and client CA for every listener, then atomically publishes one
 process-wide credential generation. A malformed or partial rotation leaves the
