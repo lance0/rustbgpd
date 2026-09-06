@@ -17,14 +17,115 @@
 //! [`MatchExpr::PrefixInSet`] — prefix sets arrive with the `.rpol`
 //! frontend (and are already evaluable for hand-built IR).
 
+use std::cell::Cell;
 use std::sync::Arc;
 
-use crate::engine::{AsPathRegex, PolicyAction, PolicyChain, PolicyStatement};
+use crate::engine::{AsPathRegex, NamedPolicy, PolicyAction, PolicyChain, PolicyStatement};
 use crate::ir::{
     Cmp, CompiledChain, CompiledPolicy, DatasetId, DatasetSlot, MatchExpr, PolicySource, RegexId,
     SetId, Term, TermAction,
 };
 use crate::sets::{AsnSet, CommunitySet, PrefixSet, SetStore};
+
+/// Maximum structural IR nodes in a configured chain (ADR-0103 Decision 3).
+/// This bounds chain size, independently of per-policy evaluation cost and
+/// runtime loop fuel. Match-set contents and regex data are not IR nodes.
+pub const MAX_CHAIN_NODES: usize = 1_000_000;
+
+const CHAIN_NODE_LIMIT: &str = "compiled policy chain exceeds MAX_CHAIN_NODES (1000000 IR nodes)";
+
+/// Incremental structural budget for fallible frontend composition.
+///
+/// Each policy, term, action, guard and value-expression node counts once.
+/// Loop bodies count once structurally, and repeated members count separately.
+/// Public infallible compilation and hand-built IR remain trusted embedding
+/// boundaries; callers accepting untrusted chains must check this budget.
+#[derive(Debug)]
+pub struct ChainNodeBudget(Cell<usize>);
+
+impl Default for ChainNodeBudget {
+    fn default() -> Self {
+        Self(Cell::new(MAX_CHAIN_NODES))
+    }
+}
+
+impl ChainNodeBudget {
+    fn exhausted(&self, nodes: usize) -> bool {
+        match self.0.get().checked_sub(nodes) {
+            Some(remaining) => {
+                self.0.set(remaining);
+                false
+            }
+            None => true,
+        }
+    }
+
+    fn term_exhausted(&self, term: &Term) -> bool {
+        term.any_term(&|term| {
+            self.exhausted(2)
+                || term.guard.any_node(&|guard| {
+                    self.exhausted(1)
+                        || matches!(guard, MatchExpr::ValueCmp(node)
+                            if node.lhs.any_node(&|_| self.exhausted(1))
+                                || node.rhs.any_node(&|_| self.exhausted(1)))
+                })
+                || match &term.action {
+                    TermAction::Bind { expr, .. } => expr.any_node(&|_| self.exhausted(1)),
+                    TermAction::Permit(mods) | TermAction::Continue(mods) => mods
+                        .set_local_pref_computed
+                        .iter()
+                        .chain(mods.set_med_computed.iter())
+                        .any(|expr| expr.any_node(&|_| self.exhausted(1))),
+                    TermAction::Deny
+                    | TermAction::ForEach(_)
+                    | TermAction::Break
+                    | TermAction::ContinueLoop
+                    | TermAction::CommunityVar { .. }
+                    | TermAction::RemoveLargeCommunityAdmin { .. } => false,
+                }
+        })
+    }
+
+    /// Charge one compiled policy, stopping at the first node over the limit.
+    ///
+    /// # Errors
+    /// Returns a diagnostic when the cumulative chain exceeds the node cap.
+    pub fn add_policy(&mut self, policy: &CompiledPolicy) -> Result<(), &'static str> {
+        if self.exhausted(1) || policy.terms.iter().any(|term| self.term_exhausted(term)) {
+            return Err(CHAIN_NODE_LIMIT);
+        }
+        Ok(())
+    }
+
+    /// Charge one named member using the same IR accounting for both frontends.
+    /// TOML statements compile individually so oversized inline policies do not
+    /// require an oversized compiled chain or populate its lazy evaluation cache.
+    ///
+    /// # Errors
+    /// Returns a diagnostic when the cumulative chain exceeds the node cap.
+    pub fn add_named(
+        &mut self,
+        named: &NamedPolicy,
+        store: &mut SetStore,
+    ) -> Result<(), &'static str> {
+        if let Some(chain) = named.rpol.as_deref() {
+            for policy in &chain.policies {
+                self.add_policy(policy)?;
+            }
+        } else {
+            if self.exhausted(1) {
+                return Err(CHAIN_NODE_LIMIT);
+            }
+            for statement in &named.policy.entries {
+                let term = compile_statement(statement, store, &mut ChainSets::default());
+                if self.term_exhausted(&term) {
+                    return Err(CHAIN_NODE_LIMIT);
+                }
+            }
+        }
+        Ok(())
+    }
+}
 
 /// Compile a TOML policy chain into the IR, interning match sets and
 /// regexes through `store` (identical set data across policies — or
@@ -607,5 +708,106 @@ policy bogon-filter {
         let chain = PolicyChain::from_named(vec![member]);
         let (result, _) = chain.evaluate_with_attribution(&ctx(v4(10, 0, 0, 0, 24), ""));
         assert_eq!(result.action, PolicyAction::Permit);
+    }
+    #[test]
+    fn chain_node_budget_exact_limit_and_one_over() {
+        use super::{ChainNodeBudget, MAX_CHAIN_NODES};
+        use crate::ir::{CompiledPolicy, MatchExpr, PolicySource, Term, TermAction};
+
+        // One policy + one term + one action + one And + its leaves.
+        let mut policy = CompiledPolicy {
+            name: None,
+            terms: vec![Term {
+                name: None,
+                guard: MatchExpr::And(vec![MatchExpr::True; MAX_CHAIN_NODES - 4]),
+                action: TermAction::Deny,
+            }],
+            default_action: crate::PolicyAction::Permit,
+            source: PolicySource::Rpol,
+        };
+        ChainNodeBudget::default().add_policy(&policy).unwrap();
+        let MatchExpr::And(children) = &mut policy.terms[0].guard else {
+            unreachable!()
+        };
+        children.push(MatchExpr::True);
+        assert!(
+            ChainNodeBudget::default()
+                .add_policy(&policy)
+                .unwrap_err()
+                .contains("MAX_CHAIN_NODES")
+        );
+
+        // Empty policies still consume overhead, including repeated members.
+        policy.terms.clear();
+        let mut budget = ChainNodeBudget(std::cell::Cell::new(1));
+        budget.add_policy(&policy).unwrap();
+        assert!(budget.add_policy(&policy).is_err());
+    }
+
+    #[test]
+    fn chain_node_budget_nested_guards_values_and_loop_body() {
+        use super::ChainNodeBudget;
+        use crate::ir::{
+            CompiledPolicy, ForEachNode, LoopSource, MatchExpr, PolicySource, Term, TermAction,
+            ValueCmpNode, ValueCmpOp, ValueExpr,
+        };
+
+        let value = ValueExpr::Clamp(
+            Box::new(ValueExpr::Min(
+                Box::new(ValueExpr::Const(1)),
+                Box::new(ValueExpr::Const(2)),
+            )),
+            Box::new(ValueExpr::Const(0)),
+            Box::new(ValueExpr::Const(3)),
+        ); // Six value nodes.
+        let policy = CompiledPolicy {
+            name: None,
+            terms: vec![Term {
+                name: None,
+                guard: MatchExpr::Not(Box::new(MatchExpr::Or(vec![MatchExpr::ValueCmp(
+                    Box::new(ValueCmpNode {
+                        op: ValueCmpOp::Eq,
+                        lhs: value.clone(),
+                        rhs: ValueExpr::Const(0),
+                    }),
+                )]))), // Three guards + seven value nodes.
+                action: TermAction::ForEach(Box::new(ForEachNode {
+                    source: LoopSource::Communities,
+                    slot: 0,
+                    var: "c".into(),
+                    body: vec![
+                        Term {
+                            name: None,
+                            guard: MatchExpr::True,
+                            action: TermAction::Bind {
+                                slot: 1,
+                                name: "v".into(),
+                                expr: value.clone(),
+                            },
+                        },
+                        Term {
+                            name: None,
+                            guard: MatchExpr::True,
+                            action: TermAction::Continue(crate::RouteModifications {
+                                set_local_pref_computed: Some(Arc::new(value.clone())),
+                                set_med_computed: Some(Arc::new(value)),
+                                ..Default::default()
+                            }),
+                        },
+                    ],
+                })),
+            }],
+            default_action: crate::PolicyAction::Permit,
+            source: PolicySource::Rpol,
+        };
+        // Policy 1 + outer term/action 2 + guard/value 10 + body (9 + 15).
+        ChainNodeBudget(std::cell::Cell::new(37))
+            .add_policy(&policy)
+            .unwrap();
+        assert!(
+            ChainNodeBudget(std::cell::Cell::new(36))
+                .add_policy(&policy)
+                .is_err()
+        );
     }
 }

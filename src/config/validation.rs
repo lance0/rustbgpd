@@ -1519,6 +1519,7 @@ impl Config {
         validate_managed_netdevs(self)?;
         validate_fib_tables(self)?;
         validate_bfd(self)?;
+        self.validate_policy_chain_nodes()?;
 
         Ok(())
     }
