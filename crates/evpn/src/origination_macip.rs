@@ -18,7 +18,10 @@
 //!   bump our MAC-only sequence (and vice versa) without justification.
 //!   We do **not** claim RFC 7432 §15.1 is keyed by full NLRI; we
 //!   claim only that the chains are kept independent because the
-//!   advertisements are independent.
+//!   advertisements are independent. For a locally owned MAC, the daemon
+//!   synchronizes existing children to the highest retained or eligible
+//!   same-segment peer sequence through [`LocalMacIpOriginator::adopt_peer_sequence`].
+//!   This exact adoption does not count as a mobility increment.
 //! - **No local-port move axis** — the `ifindex`-bump that
 //!   [`crate::origination::LocalMacOriginator`] uses for local moves doesn't apply here.
 //!   Bridge-resident IP bindings don't carry a port; an IP migrating
@@ -67,7 +70,8 @@
 //! it's documented for the future hot-apply path.
 
 use std::collections::BTreeMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::ops::RangeInclusive;
 
 use rustbgpd_wire::{
     EthernetSegmentIdentifier, EthernetTagId, EvpnRouteKey, MacAddress, RouteDistinguisher,
@@ -94,6 +98,12 @@ impl MacIpKey {
     pub const fn new(mac: MacAddress, ip: IpAddr) -> Self {
         Self { mac, ip }
     }
+}
+
+// MacIpKey orders by MAC, then IpAddr (IPv4 before IPv6).
+fn mac_ip_range(mac: MacAddress) -> RangeInclusive<MacIpKey> {
+    MacIpKey::new(mac, IpAddr::V4(Ipv4Addr::UNSPECIFIED))
+        ..=MacIpKey::new(mac, IpAddr::V6(Ipv6Addr::from(u128::MAX)))
 }
 
 /// What the daemon hands the MAC+IP originator describing the RIB's
@@ -208,6 +218,41 @@ impl LocalMacIpOriginator {
             .values()
             .filter(|s| s.originated_key.is_some())
             .count()
+    }
+
+    /// Highest retained local sequence for this MAC, including withdrawn bindings.
+    #[must_use]
+    pub fn sequence_for_mac(&self, mac: MacAddress) -> Option<u32> {
+        self.by_key
+            .range(mac_ip_range(mac))
+            .map(|(_, state)| state.our_seq)
+            .max()
+    }
+
+    /// Adopt a same-segment sequence floor for this MAC's existing bindings.
+    /// Only advertising bindings re-emit; no new binding or local ownership is
+    /// created, and each binding retains its local sticky bit and contention history.
+    pub fn adopt_peer_sequence(
+        &mut self,
+        mac: MacAddress,
+        sequence: u32,
+    ) -> Vec<OriginationAction> {
+        let mut actions = Vec::new();
+        for (_, state) in self.by_key.range_mut(mac_ip_range(mac)) {
+            if state.our_seq >= sequence {
+                continue;
+            }
+            state.our_seq = sequence;
+            if let Some(key) = state.originated_key {
+                actions.push(OriginationAction::Inject {
+                    mac,
+                    mobility_seq: state.rendered_seq(),
+                    sticky: state.sticky,
+                    key,
+                });
+            }
+        }
+        actions
     }
 
     /// Build the wire-shaped key for `(mac, ip)`.
@@ -534,6 +579,42 @@ mod tests {
             matches!(action, OriginationAction::Withdraw { .. }),
             "expected Withdraw, got {action:?}"
         );
+    }
+
+    #[test]
+    fn peer_sequence_adoption_updates_existing_children_without_resurrection() {
+        for (v4, v6) in [
+            ("0.0.0.0", "::"),
+            ("255.255.255.255", "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
+        ] {
+            let mut o = fresh();
+            assert!(o.adopt_peer_sequence(mac(0xAA), 3).is_empty());
+            assert_eq!(o.sequence_for_mac(mac(0xAA)), None);
+            let (v4, v6) = (ipa(v4), ipa(v6));
+            o.on_local_ip_learned(mac(0xAA), v4, false, None);
+            o.on_local_ip_learned(mac(0xAA), v6, true, None);
+            for other_mac in [mac(0x99), mac(0xBB)] {
+                o.on_local_ip_learned(other_mac, v4, false, Some(&remote(Some(19))));
+            }
+            assert_eq!(o.sequence_for_mac(mac(0xAA)), Some(0));
+            let actions = o.adopt_peer_sequence(mac(0xAA), 3);
+            assert_eq!(actions.len(), 2);
+            assert_inject(&actions[0], Some(3), false);
+            assert_inject(&actions[1], Some(3), true);
+            assert!(o.adopt_peer_sequence(mac(0xAA), 3).is_empty());
+            assert!(o.adopt_peer_sequence(mac(0xAA), 2).is_empty());
+            o.on_local_ip_aged(mac(0xAA), v4);
+            let actions = o.adopt_peer_sequence(mac(0xAA), u32::MAX);
+            assert_eq!(actions.len(), 1);
+            assert_inject(&actions[0], Some(u32::MAX), true);
+            assert_eq!(o.sequence_for_mac(mac(0xAA)), Some(u32::MAX));
+            for other_mac in [mac(0x99), mac(0xBB)] {
+                assert_eq!(o.sequence_for_mac(other_mac), Some(20));
+            }
+            assert_eq!(o.advertised_count(), 3);
+            let actions = o.on_local_ip_learned(mac(0xAA), v4, false, None);
+            assert_inject(&actions[0], Some(u32::MAX), false);
+        }
     }
 
     // --- on_local_ip_learned ---

@@ -5110,17 +5110,17 @@ fn ip_added_aa() -> LocalMacObservation {
 
 /// An all-active peer on our own Ethernet Segment advertises the MAC
 /// we learn locally: that is a peer-sync route, not a mobility event.
-/// The first advertisement stays at seq 0, the peer echo is not a
-/// duplicate-MAC move, and the peer raising its sequence afterwards
-/// does not ratchet ours.
+/// With no matching import RT this route is ineligible for sequence adoption.
 #[tokio::test]
 async fn same_segment_peer_mac_is_not_a_mobility_contender() {
     let segments = BTreeMap::from([(vni(100), segment_esi(1))]);
     let peer = |seq| {
-        with_esi(
+        let mut route = with_esi(
             evpn_macip_route(100, 0xAA, "10.0.0.2", Some(seq), false),
             segment_esi(1),
-        )
+        );
+        Arc::make_mut(&mut route.attributes).remove(0); // No import RT.
+        route
     };
     let mut h = PeerSyncHarness::new(segments, vec![peer(3)]);
 
@@ -5145,16 +5145,17 @@ async fn same_segment_peer_mac_is_not_a_mobility_contender() {
     assert_no_duplicate_mac_moves(&h.metrics, 100, 0xAA);
 }
 
-/// Same rule for the MAC+IP originator: the peer's MAC/IP route on our
-/// segment neither bumps the MAC+IP sequence nor counts as a move.
+/// A MAC/IP route without an import RT is likewise ineligible for adoption.
 #[tokio::test]
 async fn same_segment_peer_mac_ip_is_not_a_mobility_contender() {
     let segments = BTreeMap::from([(vni(100), segment_esi(1))]);
     let peer = |seq| {
-        with_esi(
+        let mut route = with_esi(
             evpn_macip_route_with_ip(100, 0xAA, Some("192.0.2.10"), "10.0.0.2", Some(seq), false),
             segment_esi(1),
-        )
+        );
+        Arc::make_mut(&mut route.attributes).remove(0); // No import RT.
+        route
     };
     let mut h = PeerSyncHarness::new(segments, vec![peer(3)]);
 
@@ -5179,6 +5180,466 @@ async fn same_segment_peer_mac_ip_is_not_a_mobility_contender() {
         "peer-sync MAC/IP re-advertisement must not ratchet the local sequence"
     );
     assert_no_duplicate_mac_moves(&h.metrics, 100, 0xAA);
+}
+
+fn eligible_peer_sync_route(seq: u32, ip: Option<&str>) -> EvpnRibRoute {
+    with_esi(
+        evpn_macip_route_with_ip(100, 0xAA, ip, "10.0.0.2", Some(seq), false),
+        segment_esi(1),
+    )
+}
+
+#[tokio::test]
+async fn peer_sync_adopts_exact_sequence_in_both_arrival_orders() {
+    for peer_first in [false, true] {
+        for peer_ip in [None, Some("192.0.2.10")] {
+            let mut h =
+                PeerSyncHarness::new(BTreeMap::from([(vni(100), segment_esi(1))]), Vec::new());
+            if peer_first {
+                h.routes_tx
+                    .send_replace(vec![eligible_peer_sync_route(3, peer_ip)]);
+                h.repoll().await;
+                assert!(
+                    h.take_log().await.is_empty(),
+                    "peer alone creates no ownership"
+                );
+                assert_eq!(h.counts.count(vni(100)), 0);
+            }
+            h.observe(learned_aa()).await;
+            assert_eq!(
+                h.take_log().await,
+                vec![RibActionWithSeq::Inject(
+                    macip_key_with(100, 0xAA, None),
+                    peer_first.then_some(3),
+                )]
+            );
+            if !peer_first {
+                h.routes_tx
+                    .send_replace(vec![eligible_peer_sync_route(3, peer_ip)]);
+                h.repoll().await;
+                assert_eq!(
+                    h.take_log().await,
+                    vec![RibActionWithSeq::Inject(
+                        macip_key_with(100, 0xAA, None),
+                        Some(3),
+                    )]
+                );
+            }
+            h.routes_tx
+                .send_replace(vec![eligible_peer_sync_route(9, peer_ip)]);
+            h.repoll().await;
+            assert_eq!(
+                h.take_log().await,
+                vec![RibActionWithSeq::Inject(
+                    macip_key_with(100, 0xAA, None),
+                    Some(9),
+                )]
+            );
+            for seq in [9, 3, 9] {
+                h.routes_tx
+                    .send_replace(vec![eligible_peer_sync_route(seq, peer_ip)]);
+                h.repoll().await;
+                assert!(
+                    h.take_log().await.is_empty(),
+                    "equal/lower/replay cannot change intent"
+                );
+            }
+            h.routes_tx.send_replace(Vec::new());
+            h.repoll().await;
+            assert!(h.take_log().await.is_empty());
+            assert_eq!(
+                h.state.mac_originators[&vni(100)].sequence_for_mac(mac(0xAA)),
+                Some(9)
+            );
+            assert_no_duplicate_mac_moves(&h.metrics, 100, 0xAA);
+        }
+    }
+}
+
+#[tokio::test]
+async fn peer_sync_synchronizes_local_ip_children_without_duplicate_accounting() {
+    for peer_first in [false, true] {
+        for peer_ip in [None, Some("192.0.2.10")] {
+            let mut h = duplicate_ip_harness(true);
+            h.segments.insert(vni(100), segment_esi(1));
+            if peer_first {
+                h.routes_tx
+                    .send_replace(vec![eligible_peer_sync_route(3, peer_ip)]);
+                h.repoll().await;
+            }
+            h.observe(learned_aa()).await;
+            h.observe(ip_added_aa()).await;
+            h.observe(ip_observation(0xAA, "2001:db8::10", true)).await;
+            let initial = h.take_log().await;
+            assert_eq!(
+                initial,
+                vec![
+                    RibActionWithSeq::Inject(
+                        macip_key_with(100, 0xAA, None),
+                        peer_first.then_some(3)
+                    ),
+                    RibActionWithSeq::Withdraw(macip_key_with(100, 0xAA, None)),
+                    RibActionWithSeq::Inject(
+                        macip_key_with(100, 0xAA, Some("192.0.2.10")),
+                        peer_first.then_some(3)
+                    ),
+                    RibActionWithSeq::Inject(
+                        macip_key_with(100, 0xAA, Some("2001:db8::10")),
+                        peer_first.then_some(3)
+                    ),
+                ]
+            );
+            // A different same-segment MAC holding our IP must not enter IP conflict accounting.
+            let mut other = eligible_peer_sync_route(9, Some("192.0.2.10"));
+            let EvpnRoute::MacIp(route) = &mut other.route else {
+                unreachable!()
+            };
+            route.mac = mac(0xBB);
+            h.routes_tx
+                .send_replace(vec![eligible_peer_sync_route(9, peer_ip), other]);
+            h.repoll().await;
+            assert_eq!(
+                h.take_log().await,
+                vec![
+                    RibActionWithSeq::Inject(
+                        macip_key_with(100, 0xAA, Some("192.0.2.10")),
+                        Some(9)
+                    ),
+                    RibActionWithSeq::Inject(
+                        macip_key_with(100, 0xAA, Some("2001:db8::10")),
+                        Some(9)
+                    ),
+                ]
+            );
+            h.repoll().await;
+            assert!(h.take_log().await.is_empty());
+            assert_no_duplicate_mac_moves(&h.metrics, 100, 0xAA);
+            assert_duplicate_ip_metrics(&h.metrics, 0, 0);
+            assert_eq!(
+                h.counts.count(vni(100)),
+                1,
+                "peer-only MAC must not be originated"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn peer_sync_keeps_higher_local_sequence_across_new_children_and_downgrade() {
+    let mut h = PeerSyncHarness::new(
+        BTreeMap::from([(vni(100), segment_esi(1))]),
+        vec![eligible_peer_sync_route(3, None)],
+    );
+    h.repoll().await;
+    h.observe(learned_aa()).await;
+    h.observe(ip_added_aa()).await;
+    h.take_log().await;
+    h.observe(LocalMacObservation::Learned {
+        vni: vni(100),
+        mac: mac(0xAA),
+        ifindex: 11,
+    })
+    .await;
+    assert_eq!(
+        h.take_log().await,
+        vec![RibActionWithSeq::Inject(
+            macip_key_with(100, 0xAA, Some("192.0.2.10")),
+            Some(4),
+        )]
+    );
+    h.routes_tx
+        .send_replace(vec![eligible_peer_sync_route(2, None)]);
+    h.repoll().await;
+    assert!(h.take_log().await.is_empty());
+    h.observe(ip_observation(0xAA, "2001:db8::10", true)).await;
+    assert_eq!(
+        h.take_log().await,
+        vec![RibActionWithSeq::Inject(
+            macip_key_with(100, 0xAA, Some("2001:db8::10")),
+            Some(4),
+        )]
+    );
+    h.observe(ip_observation(0xAA, "192.0.2.10", false)).await;
+    h.take_log().await;
+    h.observe(ip_observation(0xAA, "2001:db8::10", false)).await;
+    assert_eq!(
+        h.take_log().await,
+        vec![
+            RibActionWithSeq::Withdraw(macip_key_with(100, 0xAA, Some("2001:db8::10"))),
+            RibActionWithSeq::Inject(macip_key_with(100, 0xAA, None), Some(4)),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn peer_sync_requires_import_rt_tag_zero_and_nonself_next_hop() {
+    for invalid in ["missing_rt", "wrong_rt", "tag", "self", "vni"] {
+        let mut route = eligible_peer_sync_route(9, None);
+        match invalid {
+            "missing_rt" => {
+                Arc::make_mut(&mut route.attributes).remove(0);
+            }
+            "wrong_rt" => {
+                Arc::make_mut(&mut route.attributes).remove(0);
+                Arc::make_mut(&mut route.attributes).push(PathAttribute::ExtendedCommunities(
+                    vec![
+                        "65000:999"
+                            .parse::<RouteTarget>()
+                            .unwrap()
+                            .to_extended_community(),
+                    ],
+                ));
+            }
+            "self" => route.next_hop = local_instance(100).local_vtep_ip,
+            _ => {
+                let EvpnRoute::MacIp(mac_ip) = &mut route.route else {
+                    unreachable!()
+                };
+                if invalid == "tag" {
+                    mac_ip.ethernet_tag = EthernetTagId(1);
+                } else {
+                    mac_ip.label1 = MplsLabel::new(200);
+                }
+            }
+        }
+        let mut h = PeerSyncHarness::new(BTreeMap::from([(vni(100), segment_esi(1))]), vec![route]);
+        h.repoll().await;
+        h.observe(learned_aa()).await;
+        assert_eq!(
+            h.take_log().await,
+            vec![RibActionWithSeq::Inject(
+                macip_key_with(100, 0xAA, None),
+                None,
+            )],
+            "ineligible {invalid} route must not seed sequence adoption"
+        );
+        assert!(h.state.peer_sync_sequences.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn peer_sync_does_not_resurrect_aged_or_suppressed_local_routes() {
+    let mut h = PeerSyncHarness::new(
+        BTreeMap::from([(vni(100), segment_esi(1))]),
+        vec![eligible_peer_sync_route(3, None)],
+    );
+    h.repoll().await;
+    h.observe(learned_aa()).await;
+    h.observe(ip_added_aa()).await;
+    h.take_log().await;
+    suppress_local_originations_for_mac(
+        vni(100),
+        mac(0xAA),
+        &mut h.state,
+        h.instances.get(vni(100)).unwrap(),
+        None,
+        &h.rib_tx,
+        &h.metrics,
+        &h.counts,
+        &h.segments,
+    )
+    .await;
+    h.take_log().await;
+    h.routes_tx
+        .send_replace(vec![eligible_peer_sync_route(9, None)]);
+    h.repoll().await;
+    assert!(
+        h.take_log().await.is_empty(),
+        "peer update cannot undo suppression"
+    );
+    assert_eq!(h.counts.count(vni(100)), 0);
+    replay_local_mac_after_recovery(
+        vni(100),
+        mac(0xAA),
+        &mut h.state,
+        &h.instances,
+        &h.rib_tx,
+        &h.metrics,
+        &h.counts,
+        &h.segments,
+        &BTreeSet::from([segment_esi(1)]),
+    )
+    .await;
+    assert!(
+        h.take_log().await.is_empty(),
+        "drained replay remains suppressed"
+    );
+    replay_local_mac_after_recovery(
+        vni(100),
+        mac(0xAA),
+        &mut h.state,
+        &h.instances,
+        &h.rib_tx,
+        &h.metrics,
+        &h.counts,
+        &h.segments,
+        &BTreeSet::new(),
+    )
+    .await;
+    assert_eq!(
+        h.take_log().await,
+        vec![RibActionWithSeq::Inject(
+            macip_key_with(100, 0xAA, Some("192.0.2.10")),
+            Some(9),
+        )]
+    );
+    h.observe(LocalMacObservation::Aged {
+        vni: vni(100),
+        mac: mac(0xAA),
+    })
+    .await;
+    h.take_log().await;
+    h.routes_tx
+        .send_replace(vec![eligible_peer_sync_route(12, None)]);
+    h.repoll().await;
+    assert!(
+        h.take_log().await.is_empty(),
+        "aged local ownership must not be recreated"
+    );
+    assert_eq!(h.counts.count(vni(100)), 0);
+    remove_vni_state(&mut h.state, vni(100), &h.metrics);
+    assert!(h.state.peer_sync_sequences.is_empty());
+}
+
+#[tokio::test]
+async fn peer_sync_preserves_duplicate_mac_quarantine() {
+    let inst = suppress_local_instance(100);
+    let mut h = PeerSyncHarness::new(
+        BTreeMap::from([(vni(100), segment_esi(1))]),
+        vec![eligible_peer_sync_route(3, None)],
+    );
+    h.instances = instance_table_with(inst.clone());
+    h.state = originator_state(&h.instances);
+    h.repoll().await;
+    h.observe(learned_aa()).await;
+    h.take_log().await;
+    assert!(record_duplicate_mac_move(
+        &h.metrics,
+        &mut h.state,
+        &inst,
+        vni(100),
+        mac(0xAA)
+    ));
+    suppress_local_originations_for_mac(
+        vni(100),
+        mac(0xAA),
+        &mut h.state,
+        &inst,
+        None,
+        &h.rib_tx,
+        &h.metrics,
+        &h.counts,
+        &h.segments,
+    )
+    .await;
+    h.take_log().await;
+    h.routes_tx
+        .send_replace(vec![eligible_peer_sync_route(9, None)]);
+    h.repoll().await;
+    h.observe(learned_aa()).await;
+    assert!(h.take_log().await.is_empty());
+    assert_eq!(h.counts.count(vni(100)), 0);
+    assert_duplicate_mac_moves(&h.metrics, 100, 0xAA, 1);
+    assert_quarantine_metric(&h.metrics, 100, 0xAA, 1);
+}
+
+#[tokio::test]
+async fn peer_sync_model_change_clears_old_scope_even_when_repoll_fails() {
+    for change_esi in [false, true] {
+        let mut h = PeerSyncHarness::new(
+            BTreeMap::from([(vni(100), segment_esi(1))]),
+            vec![eligible_peer_sync_route(3, None)],
+        );
+        h.repoll().await;
+        h.observe(learned_aa()).await;
+        h.state.peer_sync_sequences.insert((vni(100), mac(0xAA)), 9);
+        let (closed_tx, closed_rx) = mpsc::channel(1);
+        drop(closed_rx);
+        let mut runtime = originator_runtime_for_test(
+            h.instances.clone(),
+            closed_tx,
+            h.metrics.clone(),
+            h.counts.clone(),
+            Arc::new(h.segments.clone()),
+        );
+        let mut new_inst = local_instance(100);
+        let new_segments = if change_esi {
+            BTreeMap::from([(vni(100), segment_esi(2))])
+        } else {
+            new_inst.route_targets = vec!["65000:999".parse().unwrap()];
+            h.segments.clone()
+        };
+        apply_runtime_model(
+            Arc::new(OriginatorRuntimeModel {
+                instances: instance_table_with(new_inst),
+                vni_to_esi: Arc::new(new_segments),
+                drained_esis: Arc::new(BTreeSet::new()),
+            }),
+            &mut h.state,
+            &mut runtime,
+        )
+        .await;
+        assert!(h.state.peer_sync_sequences.is_empty());
+        assert_eq!(
+            h.state.mac_originators[&vni(100)].sequence_for_mac(mac(0xAA)),
+            Some(if change_esi { 3 } else { 0 }),
+            "failed poll cannot reuse a floor from the old ESI or import RT"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn peer_sync_latest_sequence_supersedes_unacknowledged_inject() {
+    let instances = instance_table(100);
+    let mut state = originator_state(&instances);
+    let metrics = BgpMetrics::new();
+    let counts = OriginatedLocalMacCounts::default();
+    let rib = ScriptedRib::spawn(RibReplyMode::DropReply);
+    state.peer_sync_sequences.insert((vni(100), mac(0xAA)), 3);
+    observe_test(
+        learned_aa(),
+        &mut state,
+        &instances,
+        &rib.rib_tx,
+        &metrics,
+        &counts,
+    )
+    .await;
+    assert_eq!(counts.count(vni(100)), 0);
+    state.peer_sync_sequences.insert((vni(100), mac(0xAA)), 9);
+    let actions = state.prepare_peer_sync_actions(vni(100), mac(0xAA), Vec::new());
+    rib_write::apply_actions(
+        &mut state.pending_rib_ops,
+        actions,
+        instances.get(vni(100)).unwrap(),
+        &rib.rib_tx,
+        &metrics,
+        &counts,
+        &BTreeMap::new(),
+    )
+    .await;
+    assert_eq!(state.pending_rib_ops.len(), 1);
+    let (_, op) = state
+        .pending_rib_ops
+        .due(tokio::time::Instant::now() + Duration::from_mins(1))
+        .pop()
+        .expect("newest intent remains pending");
+    assert!(matches!(
+        op.action,
+        OriginationAction::Inject {
+            mobility_seq: Some(9),
+            ..
+        }
+    ));
+    rib.set_mode(RibReplyMode::Ok);
+    retry_after_backoff(&mut state, &instances, &rib, &metrics, &counts).await;
+    assert!(state.pending_rib_ops.is_empty());
+    assert_eq!(counts.count(vni(100)), 1);
+    assert_eq!(
+        rib.inject_count(),
+        3,
+        "two attempts and one retry of newest intent"
+    );
 }
 
 /// Control: a remote on a *different* Ethernet Segment is a genuine
@@ -5301,39 +5762,42 @@ async fn zero_esi_never_makes_a_same_segment_peer() {
 /// our segment cannot flip the local advertisement sticky either way.
 #[tokio::test]
 async fn same_segment_peer_sticky_bit_does_not_leak_into_local_advertisement() {
-    let segments = BTreeMap::from([(vni(100), segment_esi(1))]);
-    let sticky_peer = with_esi(
-        evpn_macip_route(100, 0xAA, "10.0.0.2", Some(3), /* sticky */ true),
-        segment_esi(1),
-    );
-    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
-    let (_log, routes, _responder) = rib_capture_responder_with_routes(rib_rx);
-    let instances = instance_table(100);
-    let metrics = BgpMetrics::new();
-    let counts = OriginatedLocalMacCounts::default();
-    let mut state = originator_state(&instances);
-    let (mac_view, _) = build_remote_views(&instances, &[sticky_peer], &segments);
-    state.remote_mac_view = mac_view;
-
-    handle_observation(
-        &learned_aa(),
-        &mut state,
-        &instances,
-        &rib_tx,
-        &metrics,
-        &counts,
-        &segments,
-        &BTreeSet::new(),
-    )
-    .await;
-
-    let routes = routes.lock().await;
-    assert_eq!(routes.len(), 1);
-    assert_eq!(
-        extract_mac_mobility_full(&routes[0].attributes),
-        (false, None),
-        "local advertisement carries the configured sticky bit (unset) and no sequence"
-    );
+    for local_sticky in [false, true] {
+        let mut peer = eligible_peer_sync_route(3, None);
+        Arc::make_mut(&mut peer.attributes)[1] =
+            PathAttribute::ExtendedCommunities(vec![ExtendedCommunity::mac_mobility(
+                !local_sticky,
+                3,
+            )]);
+        let mut h = PeerSyncHarness::new(BTreeMap::from([(vni(100), segment_esi(1))]), vec![peer]);
+        if local_sticky {
+            h.instances = instance_table_with(
+                local_instance(100).with_sticky_macs(BTreeSet::from([mac(0xAA)])),
+            );
+            h.state = originator_state(&h.instances);
+        }
+        h.repoll().await;
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let (_log, routes, _responder) = rib_capture_responder_with_routes(rib_rx);
+        handle_observation(
+            &learned_aa(),
+            &mut h.state,
+            &h.instances,
+            &rib_tx,
+            &h.metrics,
+            &h.counts,
+            &h.segments,
+            &BTreeSet::new(),
+        )
+        .await;
+        let routes = routes.lock().await;
+        assert_eq!(routes.len(), 1);
+        assert_eq!(
+            extract_mac_mobility_full(&routes[0].attributes),
+            (local_sticky, Some(3)),
+            "adoption preserves configured local sticky state"
+        );
+    }
 }
 
 /// `build_remote_views` is the only producer of both contender maps:

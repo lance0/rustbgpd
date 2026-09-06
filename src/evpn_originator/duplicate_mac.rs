@@ -227,6 +227,7 @@ pub(super) async fn apply_actions_with_duplicate_policy(
         .await;
         return;
     }
+    let actions = state.prepare_peer_sync_actions(vni, mac, actions);
     apply_actions(
         &mut state.pending_rib_ops,
         actions,
@@ -431,6 +432,7 @@ pub(super) async fn replay_local_mac_after_recovery(
         };
         let view = state.remote_mac_view.get(&(vni, mac));
         let actions = orig.on_local_learned(mac, ifindex, sticky, view);
+        let actions = state.prepare_peer_sync_actions(vni, mac, actions);
         apply_actions(
             &mut state.pending_rib_ops,
             actions,
@@ -443,12 +445,13 @@ pub(super) async fn replay_local_mac_after_recovery(
         .await;
         return;
     }
-    let Some(orig) = state.mac_ip_originators.get_mut(&vni) else {
-        return;
-    };
     for ip in live_ips {
         let view = state.remote_mac_ip_view.get(&(vni, mac, ip));
+        let Some(orig) = state.mac_ip_originators.get_mut(&vni) else {
+            return;
+        };
         let actions = orig.on_local_ip_learned(mac, ip, sticky, view);
+        let actions = state.prepare_peer_sync_actions(vni, mac, actions);
         apply_actions(
             &mut state.pending_rib_ops,
             actions,
