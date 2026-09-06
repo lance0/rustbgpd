@@ -1641,6 +1641,11 @@ local_vtep_ip = "10.0.0.100"
 
 #[test]
 fn evpn_duplicate_ip_detection_rejects_invalid_and_suppression_settings() {
+    let schema: serde_json::Value = serde_json::from_str(&config_json_schema()).unwrap();
+    let properties = &schema["$defs"]["EvpnDuplicateIpDetectionConfig"]["properties"];
+    for field in ["window_seconds", "threshold"] {
+        assert_eq!(properties[field]["minimum"], 1);
+    }
     for setting in [
         "window_seconds = 0",
         "threshold = 0",

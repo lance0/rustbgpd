@@ -1097,9 +1097,11 @@ pub struct EvpnDuplicateIpDetectionConfig {
     pub enabled: bool,
     /// M window in seconds. Default 180.
     #[serde(default = "default_duplicate_mac_window_seconds")]
+    #[schemars(range(min = 1))]
     pub window_seconds: u64,
     /// N move threshold. Default 5.
     #[serde(default = "default_duplicate_mac_threshold")]
+    #[schemars(range(min = 1))]
     pub threshold: u32,
 }
 

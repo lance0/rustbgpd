@@ -698,14 +698,14 @@
           "type": "integer",
           "format": "uint32",
           "default": 5,
-          "minimum": 0
+          "minimum": 1
         },
         "window_seconds": {
           "description": "M window in seconds. Default 180.",
           "type": "integer",
           "format": "uint64",
           "default": 180,
-          "minimum": 0
+          "minimum": 1
         }
       },
       "additionalProperties": false
