@@ -533,22 +533,24 @@ pub struct BestPathCandidateLine {
     pub multipath: String,
 }
 
-/// The best-path winner and the candidates it beat.
+/// Best-path selection and retained candidates, including ineligible paths.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ExplainBestPathResult {
     /// Prefix explained, in CIDR form.
     pub prefix: String,
     /// Peer the explanation was scoped to; empty for the global view.
     pub peer_address: String,
-    /// Source peer of the winning path.
+    /// Source peer of the winning path; empty when no retained path is eligible.
     pub best_peer_address: String,
-    /// Next hop of the winning path.
+    /// Next hop of the winning path; empty when no retained path is eligible.
     pub best_next_hop: String,
-    /// `AS_PATH` of the winning path.
+    /// `AS_PATH` of the winning path; empty when no retained path is eligible.
     pub best_as_path: String,
-    /// The step at which the runner-up was eliminated, or `only_path`.
+    /// The step at which the eligible runner-up was eliminated, or `only_path`.
+    /// Empty when all retained candidates are ineligible.
     pub best_reason: String,
     /// Compared values behind `best_reason`, winner's value first.
+    /// Empty when there is no eligible runner-up.
     pub best_reason_detail: String,
     /// Every non-best path the RIB knows for the prefix, in the daemon's order.
     pub candidates: Vec<BestPathCandidateLine>,
@@ -991,12 +993,13 @@ impl RustbgpdMcp {
         }))
     }
 
-    /// Explain which path won best-path selection for a prefix.
+    /// Explain best-path selection and retained eligibility reasons for a prefix.
     #[tool(
         name = "rbgp_explain_best_path",
-        description = "Explain which path won best-path selection for a prefix and at which \
-                       decision step, listing every losing candidate with the step that \
-                       eliminated it. Optionally scoped to one peer."
+        description = "Explain best-path selection for a prefix and its retained candidates. \
+                       When a path wins, identify the decisive step against eligible competitors. \
+                       When all retained candidates are ineligible, best_* fields are empty and \
+                       candidate reasons explain why. Optionally scoped to one peer."
     )]
     pub async fn explain_best_path(
         &self,

@@ -1641,9 +1641,9 @@ fn explain_best_path_to_proto(explain: ExplainBestPath) -> proto::ExplainBestPat
         prefix_length: u32::from(explain.prefix.prefix_len()),
         best_route: explain.best.as_ref().map(|r| route_to_proto(r, true)),
         // The step that selected the winner (vs the runner-up). A best
-        // route with no competing candidates is the trivial winner:
-        // "only_path". The no-best-route case never reaches this
-        // conversion — the handler maps it to NOT_FOUND.
+        // route with no eligible competing candidates is the trivial winner:
+        // "only_path". Invalid-only input retains candidate diagnostics with
+        // no best route and an empty best_reason.
         best_reason: explain.best_reason.map_or_else(
             || {
                 if explain.best.is_some() {
@@ -2011,7 +2011,7 @@ impl proto::rib_service_server::RibService for RibService {
             })?;
         // No paths in any Adj-RIB-In for this prefix: there is nothing
         // to explain, so say so instead of returning an empty trace.
-        if explain.best.is_none() {
+        if explain.best.is_none() && explain.candidates.is_empty() {
             return Err(Status::not_found(format!(
                 "no paths for prefix {}/{} in any Adj-RIB-In",
                 req.prefix, req.prefix_length
@@ -5198,6 +5198,39 @@ mod tests {
         assert_eq!(resp.best_reason, "only_path");
         assert!(resp.best_reason_detail.is_empty());
         assert!(resp.candidates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn explain_best_path_preserves_srv6_ineligible_only_candidates() {
+        let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
+        let explanation = rustbgpd_rib::ExplainBestPath {
+            prefix,
+            best: None,
+            candidates: vec![rustbgpd_rib::BestPathCandidate {
+                route: test_route(prefix, vec![PathAttribute::LocalPref(200)]),
+                vs_best_reason: rustbgpd_rib::BestPathReason::Srv6SidInvalid,
+                vs_best_ordering: std::cmp::Ordering::Greater,
+                advertised_path_id: 0,
+                vs_best_detail: "no semantically valid applicable SRv6 service SID".to_string(),
+                multipath: rustbgpd_rib::MultipathEligibility::None,
+            }],
+            peer: None,
+            orr_vantage: None,
+            add_path_send_max: 0,
+            best_reason: None,
+            best_reason_detail: String::new(),
+        };
+        let response = make_explain_best_path_service(Some(explanation))
+            .explain_best_path(Request::new(explain_best_path_request()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(response.best_route.is_none());
+        assert!(response.best_reason.is_empty());
+        assert_eq!(response.candidates.len(), 1);
+        assert_eq!(response.candidates[0].vs_best_reason, "srv6_sid_invalid");
+        assert_eq!(response.candidates[0].advertised_path_id, 0);
+        assert_eq!(response.candidates[0].multipath, "none");
     }
 
     #[tokio::test]

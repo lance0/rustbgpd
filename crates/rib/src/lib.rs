@@ -42,6 +42,8 @@ mod prefix_map;
 pub mod route;
 /// Slab storage for route bodies behind `u32` handles (LAN-335).
 mod slab;
+/// `SRv6` service SID eligibility before selection and export.
+mod srv6;
 /// Shared unit-test fixtures (canonical test route builders).
 #[cfg(test)]
 mod test_support;

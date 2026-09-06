@@ -125,7 +125,10 @@ impl LocRib {
         prefix: Prefix,
         candidates: impl Iterator<Item = &'a Route>,
     ) -> bool {
-        let best = candidates.min_by(|a, b| best_path_cmp(a, b)).cloned();
+        let best = candidates
+            .filter(|route| crate::srv6::unicast_eligible(route))
+            .min_by(|a, b| best_path_cmp(a, b))
+            .cloned();
 
         if let Some(new_best) = best {
             // Detect preference-relevant changes AND same-peer payload
@@ -458,6 +461,7 @@ impl LocRib {
         candidates: impl Iterator<Item = &'a EvpnRibRoute>,
     ) -> bool {
         let best = candidates
+            .filter(|route| crate::srv6::evpn_eligible(route))
             .min_by(|a, b| evpn_tiebreak_simple(a, b))
             .cloned();
         match best {
@@ -581,7 +585,10 @@ impl LocRib {
         key: rustbgpd_wire::VpnRouteKey,
         candidates: impl Iterator<Item = &'a VpnRibRoute>,
     ) -> bool {
-        let best = candidates.min_by(|a, b| vpn_tiebreak(a, b)).cloned();
+        let best = candidates
+            .filter(|route| crate::srv6::vpn_eligible(route))
+            .min_by(|a, b| vpn_tiebreak(a, b))
+            .cloned();
         match best {
             Some(new_best) => {
                 let changed = self.vpn_routes.get(&key).is_none_or(|(old, _)| {
