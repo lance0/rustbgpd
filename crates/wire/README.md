@@ -23,6 +23,12 @@ existing signature is changed; code that builds against 0.19.0 builds
 unchanged against 0.19.1. Consumers should account for these additions and
 decode-behavior refinements when upgrading:
 
+- Prefix-SID SRv6 L3/L2 Service TLVs now validate nested framing under
+  RFC 9252 §7. Recognized service malformation returns the additive
+  `DecodeError::MalformedSrv6ServiceTlv` and uses treat-as-withdraw in revised
+  decoding; generic Prefix-SID length errors keep attribute-discard. Valid
+  opaque values and unknown/reserved fields remain unchanged. This adds no
+  SID interpretation, service eligibility, origination, or forwarding.
 - The new `mrt` module adds `decode_table_dump_v2_mp_reach_next_hop`, the
   next-hop decoder for the `MP_REACH_NLRI` inside an RFC 6396 `TABLE_DUMP_V2`
   RIB entry. It accepts both the §4.3.4 reduced form (next-hop length, next
