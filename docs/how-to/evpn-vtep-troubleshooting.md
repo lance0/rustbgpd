@@ -370,9 +370,13 @@ nexthop **group**, not a single-dst `dst <ip>` row.
    parked in a range is quarantined (left untouched, never adopted or
    deleted) and surfaces on `evpn_foreign_nhid_range_conflicts_total`.
 3. Confirm rustbgpd actually observed both alias VTEPs' Type 1
-   EAD-per-EVI routes for the shared ESI — check
-   `rbgp evpn instances` or the gRPC `ListEvpnInstances`,
-   and verify peer sessions are Established.
+   EAD-per-EVI routes for the shared ESI in the same local VNI. The label
+   must name that VNI, at least one Route Target must match its configured
+   `route_targets`, and Ethernet Tag must be zero. An EAD for another
+   configured VNI cannot supply an alias or single-active backup. The same
+   admission rule applies to EAD inputs for Type 5 ESI overlay resolution.
+   Check `rbgp evpn instances` or gRPC `ListEvpnInstances`, inspect the
+   received routes, and verify peer sessions are Established.
 4. If the FDB row has `dst <ip>` (not `nhid`), the entry is in
    the single-dst fallback path. Common causes:
    - Mixed address-family alias members: one FDB nexthop group

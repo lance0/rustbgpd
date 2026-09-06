@@ -86,6 +86,8 @@ pub struct ProjectedEvpnRoute {
 /// keeps this struct purely declarative.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProjectedEvpnEadPerEvi {
+    /// Local VNI whose import policy admitted this advertisement.
+    pub vni: EvpnInstanceId,
     /// Ethernet Segment Identifier the EAD-per-EVI route names.
     pub esi: rustbgpd_wire::EthernetSegmentIdentifier,
     /// Ethernet Tag identifying the EVI.
@@ -224,6 +226,7 @@ where
     // single-homed Type 2 routes resolve to no alternatives even if
     // the index has rows for unrelated ESIs.
     let alias_rows = ead_per_evi.into_iter().map(|e| crate::AliasEadPerEvi {
+        vni: e.vni,
         esi: e.esi,
         ethernet_tag: e.ethernet_tag,
         vtep_ip: e.next_hop,
@@ -270,7 +273,7 @@ where
         // arm). `Some(entry)` means the route is governed by the
         // single-active machinery; `None` falls through to the
         // all-active aliasing path.
-        if let Some(entry) = single_active_entry(&route, single_active) {
+        if let Some(entry) = single_active_entry(vni, &route, single_active) {
             builder
                 .insert(vni, mac, entry)
                 .expect("staged BTreeMap already deduped (VNI, MAC) keys");
@@ -292,6 +295,7 @@ where
                 Vec::new()
             } else {
                 let resolved = crate::alias_resolved_next_hops(
+                    vni,
                     route.next_hop,
                     route.esi,
                     route.ethernet_tag,
@@ -377,6 +381,7 @@ where
 ///   segment) does NOT take this arm: its own mode stays
 ///   authoritative (slice-2 pinned behavior).
 fn single_active_entry(
+    vni: EvpnInstanceId,
     route: &ProjectedEvpnRoute,
     single_active: &crate::SingleActiveEligibleIndex,
 ) -> Option<RemoteMacEntry> {
@@ -384,7 +389,7 @@ fn single_active_entry(
         return None;
     }
     if single_active.pair_is_single_active(route.next_hop, route.esi) {
-        let backup = single_active.backup_pe(route.esi, route.ethernet_tag, route.next_hop);
+        let backup = single_active.backup_pe(vni, route.esi, route.ethernet_tag, route.next_hop);
         return Some(RemoteMacEntry {
             remote_vtep_ip: route.next_hop,
             mobility_sequence: route.mobility_sequence,
@@ -395,12 +400,13 @@ fn single_active_entry(
         });
     }
     if !single_active.pair_has_ead_per_es(route.next_hop, route.esi)
-        && let Some(member) = single_active.backup_pe(route.esi, route.ethernet_tag, route.next_hop)
+        && let Some(member) =
+            single_active.backup_pe(vni, route.esi, route.ethernet_tag, route.next_hop)
     {
         // The swap window. New standby: the lowest eligible PE
         // excluding the new member (the withdrawn primary is not in
         // the eligible set — eligibility requires its EAD pair).
-        let standby = single_active.backup_pe(route.esi, route.ethernet_tag, member);
+        let standby = single_active.backup_pe(vni, route.esi, route.ethernet_tag, member);
         return Some(RemoteMacEntry {
             remote_vtep_ip: member,
             mobility_sequence: route.mobility_sequence,
@@ -659,6 +665,7 @@ mod tests {
         dst: &str,
     ) -> ProjectedEvpnEadPerEvi {
         ProjectedEvpnEadPerEvi {
+            vni: vni(100),
             esi,
             ethernet_tag: rustbgpd_wire::EthernetTagId(eth_tag),
             next_hop: ipa(dst),
@@ -818,6 +825,7 @@ mod tests {
             evi_rows
                 .iter()
                 .map(|&(seed, tag, vtep)| crate::AliasEadPerEvi {
+                    vni: vni(100),
                     esi: esi_seed(seed),
                     ethernet_tag: rustbgpd_wire::EthernetTagId(tag),
                     vtep_ip: ipa(vtep),

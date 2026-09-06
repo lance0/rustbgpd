@@ -3,7 +3,7 @@
 //! When a peer announces a Type 2 MAC/IP route with a non-zero
 //! Ethernet Segment Identifier, the multi-homed CE the route names
 //! is reachable via *all* PEs that announce a Type 1 EAD-per-EVI
-//! route for the same `(ESI, Ethernet Tag)`. The receiver should
+//! route for the same `(VNI, ESI, Ethernet Tag)`. The receiver should
 //! treat those PE next-hops as alternative paths for the MAC, both
 //! for ECMP load balancing and for fast failover when the primary
 //! path goes away.
@@ -12,9 +12,9 @@
 //!
 //! Pure-logic indexing and portable-intent shaping for aliasing:
 //!
-//! - Given a stream of `(ESI, EthTag, PE_IP)` tuples extracted
+//! - Given a stream of `(VNI, ESI, EthTag, PE_IP)` tuples extracted
 //!   from the receiver's RIB best-path EAD-per-EVI routes, build
-//!   an [`AliasIndex`] that answers `vtep_ips_for(esi, eth_tag)`
+//!   an [`AliasIndex`] that answers `vtep_ips_for(vni, esi, eth_tag)`
 //!   in O(log n). Self-originated routes are filtered at the
 //!   caller (the resolver doesn't know which PE *we* are).
 //! - [`alias_resolved_next_hops`] combines a Type 2 route's
@@ -32,7 +32,7 @@
 //!   `RTM_NEWNEXTHOP` + `NHA_FDB`.
 //! - [`SingleActiveEligibleIndex`] derives the ADR-0083
 //!   single-active eligible-PE set and backup PE per
-//!   `(ESI, EthTag)` — the receive-side backup-path companion to
+//!   `(VNI, ESI, EthTag)` — the receive-side backup-path companion to
 //!   the all-active index above. The projection
 //!   ([`crate::projection::project_evpn_routes_with_backup_paths`])
 //!   consumes it (ADR-0083 slice 2) to give single-active MAC
@@ -63,6 +63,7 @@ use std::net::IpAddr;
 
 use rustbgpd_wire::{EthernetSegmentIdentifier, EthernetTagId};
 
+use crate::EvpnInstanceId;
 use crate::mac::RemoteMacEntry;
 
 /// One EAD-per-EVI advertisement, trimmed to the fields the resolver
@@ -70,10 +71,11 @@ use crate::mac::RemoteMacEntry;
 /// `EvpnRoute::EadPerEvi` and the resolver here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AliasEadPerEvi {
+    /// Local VNI whose import policy admitted this advertisement.
+    pub vni: EvpnInstanceId,
     /// Ethernet Segment Identifier the EAD-per-EVI route names.
     pub esi: EthernetSegmentIdentifier,
-    /// Ethernet Tag identifying the EVI. Always paired with `esi`
-    /// because RFC 7432 §14 aliasing is `(ESI, EthTag)`-keyed.
+    /// Ethernet Tag within the local VNI and Ethernet Segment.
     pub ethernet_tag: EthernetTagId,
     /// Next-hop / VTEP IP advertised on the EAD-per-EVI route. The
     /// resolver dedupes by IP before returning, so the caller
@@ -81,15 +83,15 @@ pub struct AliasEadPerEvi {
     pub vtep_ip: IpAddr,
 }
 
-/// Built index of `(ESI, EthTag) -> [VTEP IP]` for fast lookup.
+/// Built index of `(VNI, ESI, EthTag) -> [VTEP IP]` for fast lookup.
 ///
 /// Construction is O(n log n) on the input length; lookups are
-/// O(log m) where m is the number of distinct `(ESI, EthTag)`
-/// pairs. The index is read-only after `build`; rebuild on every
+/// O(log m) where m is the number of distinct `(VNI, ESI, EthTag)`
+/// keys. The index is read-only after `build`; rebuild on every
 /// projection pass to stay aligned with the RIB best-path snapshot.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct AliasIndex {
-    by_key: BTreeMap<(EthernetSegmentIdentifier, EthernetTagId), Vec<IpAddr>>,
+    by_key: BTreeMap<(EvpnInstanceId, EthernetSegmentIdentifier, EthernetTagId), Vec<IpAddr>>,
 }
 
 impl AliasIndex {
@@ -102,15 +104,15 @@ impl AliasIndex {
     /// Build from a stream of EAD-per-EVI advertisements. Single-
     /// homed entries (`ESI == ZERO`) are filtered out — they'd
     /// never resolve aliasing alternatives even if the caller
-    /// somehow surfaced them. Duplicate `(ESI, EthTag, VTEP IP)`
-    /// triples are deduped to keep the result list minimal.
+    /// somehow surfaced them. Duplicate `(VNI, ESI, EthTag, VTEP IP)`
+    /// rows are deduped to keep the result list minimal.
     #[must_use]
     pub fn build<I>(rows: I) -> Self
     where
         I: IntoIterator<Item = AliasEadPerEvi>,
     {
         let mut staged: BTreeMap<
-            (EthernetSegmentIdentifier, EthernetTagId),
+            (EvpnInstanceId, EthernetSegmentIdentifier, EthernetTagId),
             std::collections::BTreeSet<IpAddr>,
         > = BTreeMap::new();
 
@@ -119,7 +121,7 @@ impl AliasIndex {
                 continue;
             }
             staged
-                .entry((row.esi, row.ethernet_tag))
+                .entry((row.vni, row.esi, row.ethernet_tag))
                 .or_default()
                 .insert(row.vtep_ip);
         }
@@ -131,19 +133,20 @@ impl AliasIndex {
         Self { by_key }
     }
 
-    /// VTEP IPs that advertise an EAD-per-EVI for `(esi, eth_tag)`.
+    /// VTEP IPs that advertise an EAD-per-EVI for `(vni, esi, eth_tag)`.
     /// Returns `None` if there are no aliasing alternatives — the
     /// caller treats that as "use the Type 2's own next-hop only."
     #[must_use]
     pub fn vtep_ips_for(
         &self,
+        vni: EvpnInstanceId,
         esi: EthernetSegmentIdentifier,
         eth_tag: EthernetTagId,
     ) -> Option<&[IpAddr]> {
-        self.by_key.get(&(esi, eth_tag)).map(Vec::as_slice)
+        self.by_key.get(&(vni, esi, eth_tag)).map(Vec::as_slice)
     }
 
-    /// Number of `(ESI, EthTag)` pairs with at least one
+    /// Number of `(VNI, ESI, EthTag)` keys with at least one
     /// aliasing alternative.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -164,6 +167,7 @@ impl AliasIndex {
 /// ready.
 #[must_use]
 pub fn alias_resolved_next_hops(
+    vni: EvpnInstanceId,
     primary_next_hop: IpAddr,
     esi: EthernetSegmentIdentifier,
     eth_tag: EthernetTagId,
@@ -173,7 +177,7 @@ pub fn alias_resolved_next_hops(
     if esi == EthernetSegmentIdentifier::ZERO {
         return out;
     }
-    if let Some(aliases) = index.vtep_ips_for(esi, eth_tag) {
+    if let Some(aliases) = index.vtep_ips_for(vni, esi, eth_tag) {
         for &ip in aliases {
             if ip != primary_next_hop && !out.contains(&ip) {
                 out.push(ip);
@@ -230,7 +234,7 @@ pub struct EadPerEsMode {
     pub single_active: bool,
 }
 
-/// The portable single-active backup view for one `(ESI, EthTag)`
+/// The portable single-active backup view for one `(VNI, ESI, EthTag)`
 /// given a primary PE — what ADR-0083 slice 2 consumes to decide
 /// whether to program the NHG indirection (eligible set beyond the
 /// primary?) and which per-VTEP nexthop object to pre-create (the
@@ -250,12 +254,12 @@ pub struct SingleActiveBackupView {
     pub backup_pe: Option<IpAddr>,
 }
 
-/// Built index of single-active `(ESI, EthTag) -> eligible-PE set`
+/// Built index of single-active `(VNI, ESI, EthTag) -> eligible-PE set`
 /// for the ADR-0083 receive-side backup path.
 ///
-/// The eligible set for `(ESI, EthTag)` is every PE (VTEP IP)
+/// The eligible set for `(VNI, ESI, EthTag)` is every PE (VTEP IP)
 /// advertising *both* an EAD-per-ES with the Single-Active bit set
-/// *and* an EAD-per-EVI for that `(ESI, EthTag)` — RFC 7432 §8.4's
+/// *and* an EAD-per-EVI for that `(VNI, ESI, EthTag)` — RFC 7432 §8.4's
 /// "reachable via any PE" set (ADR-0083 decision
 /// 2). All-active segments never appear here; they stay on the
 /// [`AliasIndex`] ECMP path.
@@ -268,7 +272,7 @@ pub struct SingleActiveBackupView {
 /// ordering dependence.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SingleActiveEligibleIndex {
-    by_key: BTreeMap<(EthernetSegmentIdentifier, EthernetTagId), Vec<IpAddr>>,
+    by_key: BTreeMap<(EvpnInstanceId, EthernetSegmentIdentifier, EthernetTagId), Vec<IpAddr>>,
     /// `(VTEP, ESI)` pairs whose EAD-per-ES rows OR-fold to
     /// single-active. Retained from the build's mode fold so the
     /// projection can ask "is this MAC route's origin pair
@@ -317,8 +321,10 @@ impl SingleActiveEligibleIndex {
             *entry = *entry || row.single_active;
         }
 
-        let mut staged: BTreeMap<(EthernetSegmentIdentifier, EthernetTagId), BTreeSet<IpAddr>> =
-            BTreeMap::new();
+        let mut staged: BTreeMap<
+            (EvpnInstanceId, EthernetSegmentIdentifier, EthernetTagId),
+            BTreeSet<IpAddr>,
+        > = BTreeMap::new();
         for row in ead_per_evi {
             if row.esi == EthernetSegmentIdentifier::ZERO {
                 continue;
@@ -332,7 +338,7 @@ impl SingleActiveEligibleIndex {
                 continue;
             }
             staged
-                .entry((row.esi, row.ethernet_tag))
+                .entry((row.vni, row.esi, row.ethernet_tag))
                 .or_default()
                 .insert(row.vtep_ip);
         }
@@ -382,20 +388,21 @@ impl SingleActiveEligibleIndex {
         self.pairs_with_ead_per_es.contains(&(vtep_ip, esi))
     }
 
-    /// Eligible PEs for `(esi, eth_tag)`, sorted by `IpAddr` natural
+    /// Eligible PEs for `(vni, esi, eth_tag)`, sorted by `IpAddr` natural
     /// order; the current primary is present only while its own EAD pair
     /// is advertised. Returns `None` when no PE qualifies
     /// — the key is not a single-active segment we know a path for.
     #[must_use]
     pub fn eligible_pes(
         &self,
+        vni: EvpnInstanceId,
         esi: EthernetSegmentIdentifier,
         eth_tag: EthernetTagId,
     ) -> Option<&[IpAddr]> {
-        self.by_key.get(&(esi, eth_tag)).map(Vec::as_slice)
+        self.by_key.get(&(vni, esi, eth_tag)).map(Vec::as_slice)
     }
 
-    /// Backup PE for `(esi, eth_tag)` given the primary (the MAC
+    /// Backup PE for `(vni, esi, eth_tag)` given the primary (the MAC
     /// routes' advertising next-hop): the numerically lowest VTEP IP
     /// in the eligible set excluding the primary (ADR-0083 decision
     /// 2 — the `BTreeSet<IpAddr>` total order, IPv4 before IPv6; an
@@ -409,35 +416,37 @@ impl SingleActiveEligibleIndex {
     #[must_use]
     pub fn backup_pe(
         &self,
+        vni: EvpnInstanceId,
         esi: EthernetSegmentIdentifier,
         eth_tag: EthernetTagId,
         primary: IpAddr,
     ) -> Option<IpAddr> {
-        self.eligible_pes(esi, eth_tag)?
+        self.eligible_pes(vni, esi, eth_tag)?
             .iter()
             .copied()
             .find(|&ip| ip != primary)
     }
 
-    /// Combined [`SingleActiveBackupView`] for `(esi, eth_tag)`
+    /// Combined [`SingleActiveBackupView`] for `(vni, esi, eth_tag)`
     /// given the primary. Returns `None` when the key has no
     /// eligible set at all (not single-active, or no PE advertises
     /// both route types).
     #[must_use]
     pub fn backup_view(
         &self,
+        vni: EvpnInstanceId,
         esi: EthernetSegmentIdentifier,
         eth_tag: EthernetTagId,
         primary: IpAddr,
     ) -> Option<SingleActiveBackupView> {
-        let eligible = self.eligible_pes(esi, eth_tag)?;
+        let eligible = self.eligible_pes(vni, esi, eth_tag)?;
         Some(SingleActiveBackupView {
             eligible_pes: eligible.to_vec(),
             backup_pe: eligible.iter().copied().find(|&ip| ip != primary),
         })
     }
 
-    /// Number of `(ESI, EthTag)` pairs with a non-empty eligible set.
+    /// Number of `(VNI, ESI, EthTag)` keys with a non-empty eligible set.
     #[must_use]
     pub fn len(&self) -> usize {
         self.by_key.len()
@@ -454,6 +463,10 @@ impl SingleActiveEligibleIndex {
 mod tests {
     use super::*;
 
+    fn vni(value: u32) -> EvpnInstanceId {
+        EvpnInstanceId::new(value).unwrap()
+    }
+
     fn esi(seed: u8) -> EthernetSegmentIdentifier {
         EthernetSegmentIdentifier::new([seed; 10])
     }
@@ -465,18 +478,23 @@ mod tests {
     fn empty_index_resolves_nothing() {
         let idx = AliasIndex::new();
         assert!(idx.is_empty());
-        assert!(idx.vtep_ips_for(esi(1), EthernetTagId(0)).is_none());
+        assert!(
+            idx.vtep_ips_for(vni(100), esi(1), EthernetTagId(0))
+                .is_none()
+        );
     }
 
     #[test]
     fn build_filters_zero_esi() {
         let idx = AliasIndex::build([
             AliasEadPerEvi {
+                vni: vni(100),
                 esi: EthernetSegmentIdentifier::ZERO,
                 ethernet_tag: EthernetTagId(0),
                 vtep_ip: ip("10.0.0.1"),
             },
             AliasEadPerEvi {
+                vni: vni(100),
                 esi: esi(1),
                 ethernet_tag: EthernetTagId(0),
                 vtep_ip: ip("10.0.0.2"),
@@ -484,7 +502,9 @@ mod tests {
         ]);
         assert_eq!(idx.len(), 1);
         assert_eq!(
-            idx.vtep_ips_for(esi(1), EthernetTagId(0)).unwrap().to_vec(),
+            idx.vtep_ips_for(vni(100), esi(1), EthernetTagId(0))
+                .unwrap()
+                .to_vec(),
             vec![ip("10.0.0.2")],
         );
     }
@@ -493,18 +513,22 @@ mod tests {
     fn build_dedups_identical_triples() {
         let idx = AliasIndex::build([
             AliasEadPerEvi {
+                vni: vni(100),
                 esi: esi(1),
                 ethernet_tag: EthernetTagId(0),
                 vtep_ip: ip("10.0.0.2"),
             },
             AliasEadPerEvi {
+                vni: vni(100),
                 esi: esi(1),
                 ethernet_tag: EthernetTagId(0),
                 vtep_ip: ip("10.0.0.2"),
             },
         ]);
         assert_eq!(
-            idx.vtep_ips_for(esi(1), EthernetTagId(0)).unwrap().to_vec(),
+            idx.vtep_ips_for(vni(100), esi(1), EthernetTagId(0))
+                .unwrap()
+                .to_vec(),
             vec![ip("10.0.0.2")],
         );
     }
@@ -513,18 +537,20 @@ mod tests {
     fn build_groups_distinct_pes_under_same_key() {
         let idx = AliasIndex::build([
             AliasEadPerEvi {
+                vni: vni(100),
                 esi: esi(1),
                 ethernet_tag: EthernetTagId(100),
                 vtep_ip: ip("10.0.0.2"),
             },
             AliasEadPerEvi {
+                vni: vni(100),
                 esi: esi(1),
                 ethernet_tag: EthernetTagId(100),
                 vtep_ip: ip("10.0.0.3"),
             },
         ]);
         let ips = idx
-            .vtep_ips_for(esi(1), EthernetTagId(100))
+            .vtep_ips_for(vni(100), esi(1), EthernetTagId(100))
             .unwrap()
             .to_vec();
         assert_eq!(ips.len(), 2);
@@ -536,24 +562,26 @@ mod tests {
     fn build_keeps_eth_tags_separate() {
         let idx = AliasIndex::build([
             AliasEadPerEvi {
+                vni: vni(100),
                 esi: esi(1),
                 ethernet_tag: EthernetTagId(100),
                 vtep_ip: ip("10.0.0.2"),
             },
             AliasEadPerEvi {
+                vni: vni(100),
                 esi: esi(1),
                 ethernet_tag: EthernetTagId(200),
                 vtep_ip: ip("10.0.0.3"),
             },
         ]);
         assert_eq!(
-            idx.vtep_ips_for(esi(1), EthernetTagId(100))
+            idx.vtep_ips_for(vni(100), esi(1), EthernetTagId(100))
                 .unwrap()
                 .to_vec(),
             vec![ip("10.0.0.2")],
         );
         assert_eq!(
-            idx.vtep_ips_for(esi(1), EthernetTagId(200))
+            idx.vtep_ips_for(vni(100), esi(1), EthernetTagId(200))
                 .unwrap()
                 .to_vec(),
             vec![ip("10.0.0.3")],
@@ -563,11 +591,13 @@ mod tests {
     #[test]
     fn resolved_next_hops_zero_esi_returns_primary_only() {
         let idx = AliasIndex::build([AliasEadPerEvi {
+            vni: vni(100),
             esi: esi(1),
             ethernet_tag: EthernetTagId(0),
             vtep_ip: ip("10.0.0.5"),
         }]);
         let nhs = alias_resolved_next_hops(
+            vni(100),
             ip("10.0.0.1"),
             EthernetSegmentIdentifier::ZERO,
             EthernetTagId(0),
@@ -580,17 +610,20 @@ mod tests {
     fn resolved_next_hops_appends_unique_alias_ips() {
         let idx = AliasIndex::build([
             AliasEadPerEvi {
+                vni: vni(100),
                 esi: esi(1),
                 ethernet_tag: EthernetTagId(0),
                 vtep_ip: ip("10.0.0.2"),
             },
             AliasEadPerEvi {
+                vni: vni(100),
                 esi: esi(1),
                 ethernet_tag: EthernetTagId(0),
                 vtep_ip: ip("10.0.0.3"),
             },
         ]);
-        let nhs = alias_resolved_next_hops(ip("10.0.0.2"), esi(1), EthernetTagId(0), &idx);
+        let nhs =
+            alias_resolved_next_hops(vni(100), ip("10.0.0.2"), esi(1), EthernetTagId(0), &idx);
         // Primary first, then aliases minus the primary.
         assert_eq!(nhs[0], ip("10.0.0.2"));
         assert_eq!(nhs.len(), 2);
@@ -601,18 +634,21 @@ mod tests {
     fn resolved_next_hops_dedupes_primary_against_alias() {
         // Primary is also in the alias list; result must dedupe.
         let idx = AliasIndex::build([AliasEadPerEvi {
+            vni: vni(100),
             esi: esi(1),
             ethernet_tag: EthernetTagId(0),
             vtep_ip: ip("10.0.0.2"),
         }]);
-        let nhs = alias_resolved_next_hops(ip("10.0.0.2"), esi(1), EthernetTagId(0), &idx);
+        let nhs =
+            alias_resolved_next_hops(vni(100), ip("10.0.0.2"), esi(1), EthernetTagId(0), &idx);
         assert_eq!(nhs, vec![ip("10.0.0.2")]);
     }
 
     #[test]
     fn resolved_next_hops_no_aliases_returns_primary_only() {
         let idx = AliasIndex::new();
-        let nhs = alias_resolved_next_hops(ip("10.0.0.2"), esi(1), EthernetTagId(0), &idx);
+        let nhs =
+            alias_resolved_next_hops(vni(100), ip("10.0.0.2"), esi(1), EthernetTagId(0), &idx);
         assert_eq!(nhs, vec![ip("10.0.0.2")]);
     }
 
@@ -665,6 +701,7 @@ mod tests {
 
     fn evi_row(seed: u8, tag: u32, vtep: &str) -> AliasEadPerEvi {
         AliasEadPerEvi {
+            vni: vni(100),
             esi: esi(seed),
             ethernet_tag: EthernetTagId(tag),
             vtep_ip: ip(vtep),
@@ -675,13 +712,16 @@ mod tests {
     fn eligible_set_empty_index_resolves_nothing() {
         let idx = SingleActiveEligibleIndex::new();
         assert!(idx.is_empty());
-        assert!(idx.eligible_pes(esi(1), EthernetTagId(0)).is_none());
         assert!(
-            idx.backup_pe(esi(1), EthernetTagId(0), ip("10.0.0.2"))
+            idx.eligible_pes(vni(100), esi(1), EthernetTagId(0))
                 .is_none()
         );
         assert!(
-            idx.backup_view(esi(1), EthernetTagId(0), ip("10.0.0.2"))
+            idx.backup_pe(vni(100), esi(1), EthernetTagId(0), ip("10.0.0.2"))
+                .is_none()
+        );
+        assert!(
+            idx.backup_view(vni(100), esi(1), EthernetTagId(0), ip("10.0.0.2"))
                 .is_none()
         );
     }
@@ -695,7 +735,8 @@ mod tests {
             [evi_row(1, 100, "10.0.0.3"), evi_row(1, 100, "10.0.0.4")],
         );
         assert_eq!(
-            idx.eligible_pes(esi(1), EthernetTagId(100)).unwrap(),
+            idx.eligible_pes(vni(100), esi(1), EthernetTagId(100))
+                .unwrap(),
             &[ip("10.0.0.4")],
         );
     }
@@ -704,14 +745,20 @@ mod tests {
     fn eligible_set_ead_per_es_alone_yields_no_key() {
         let idx = SingleActiveEligibleIndex::build([es_row(1, "10.0.0.2", true)], []);
         assert!(idx.is_empty());
-        assert!(idx.eligible_pes(esi(1), EthernetTagId(0)).is_none());
+        assert!(
+            idx.eligible_pes(vni(100), esi(1), EthernetTagId(0))
+                .is_none()
+        );
     }
 
     #[test]
     fn eligible_set_ead_per_evi_alone_yields_no_key() {
         let idx = SingleActiveEligibleIndex::build([], [evi_row(1, 0, "10.0.0.2")]);
         assert!(idx.is_empty());
-        assert!(idx.eligible_pes(esi(1), EthernetTagId(0)).is_none());
+        assert!(
+            idx.eligible_pes(vni(100), esi(1), EthernetTagId(0))
+                .is_none()
+        );
     }
 
     #[test]
@@ -724,7 +771,8 @@ mod tests {
             [evi_row(1, 0, "10.0.0.2"), evi_row(1, 0, "10.0.0.3")],
         );
         assert_eq!(
-            idx.eligible_pes(esi(1), EthernetTagId(0)).unwrap(),
+            idx.eligible_pes(vni(100), esi(1), EthernetTagId(0))
+                .unwrap(),
             &[ip("10.0.0.3")],
         );
     }
@@ -741,7 +789,8 @@ mod tests {
         ] {
             let idx = SingleActiveEligibleIndex::build(rows, [evi_row(1, 0, "10.0.0.2")]);
             assert_eq!(
-                idx.eligible_pes(esi(1), EthernetTagId(0)).unwrap(),
+                idx.eligible_pes(vni(100), esi(1), EthernetTagId(0))
+                    .unwrap(),
                 &[ip("10.0.0.2")],
                 "single-active must win the (VTEP, ESI) fold",
             );
@@ -757,6 +806,7 @@ mod tests {
                 single_active: true,
             }],
             [AliasEadPerEvi {
+                vni: vni(100),
                 esi: EthernetSegmentIdentifier::ZERO,
                 ethernet_tag: EthernetTagId(0),
                 vtep_ip: ip("10.0.0.2"),
@@ -784,7 +834,7 @@ mod tests {
     fn backup_pe_is_lowest_excluding_primary_when_primary_is_lowest() {
         let idx = three_pe_index();
         assert_eq!(
-            idx.backup_pe(esi(1), EthernetTagId(0), ip("10.0.0.2")),
+            idx.backup_pe(vni(100), esi(1), EthernetTagId(0), ip("10.0.0.2")),
             Some(ip("10.0.0.3")),
         );
     }
@@ -793,11 +843,11 @@ mod tests {
     fn backup_pe_is_lowest_excluding_primary_when_primary_is_not_lowest() {
         let idx = three_pe_index();
         assert_eq!(
-            idx.backup_pe(esi(1), EthernetTagId(0), ip("10.0.0.3")),
+            idx.backup_pe(vni(100), esi(1), EthernetTagId(0), ip("10.0.0.3")),
             Some(ip("10.0.0.2")),
         );
         assert_eq!(
-            idx.backup_pe(esi(1), EthernetTagId(0), ip("10.0.0.4")),
+            idx.backup_pe(vni(100), esi(1), EthernetTagId(0), ip("10.0.0.4")),
             Some(ip("10.0.0.2")),
         );
     }
@@ -812,7 +862,7 @@ mod tests {
             [evi_row(1, 0, "10.0.0.3"), evi_row(1, 0, "10.0.0.4")],
         );
         assert_eq!(
-            idx.backup_pe(esi(1), EthernetTagId(0), ip("10.0.0.2")),
+            idx.backup_pe(vni(100), esi(1), EthernetTagId(0), ip("10.0.0.2")),
             Some(ip("10.0.0.3")),
         );
     }
@@ -824,11 +874,11 @@ mod tests {
             [evi_row(1, 0, "10.0.0.2")],
         );
         assert!(
-            idx.backup_pe(esi(1), EthernetTagId(0), ip("10.0.0.2"))
+            idx.backup_pe(vni(100), esi(1), EthernetTagId(0), ip("10.0.0.2"))
                 .is_none()
         );
         let view = idx
-            .backup_view(esi(1), EthernetTagId(0), ip("10.0.0.2"))
+            .backup_view(vni(100), esi(1), EthernetTagId(0), ip("10.0.0.2"))
             .unwrap();
         assert_eq!(view.eligible_pes, vec![ip("10.0.0.2")]);
         assert_eq!(view.backup_pe, None);
@@ -838,7 +888,7 @@ mod tests {
     fn backup_view_carries_eligible_set_and_backup() {
         let idx = three_pe_index();
         let view = idx
-            .backup_view(esi(1), EthernetTagId(0), ip("10.0.0.3"))
+            .backup_view(vni(100), esi(1), EthernetTagId(0), ip("10.0.0.3"))
             .unwrap();
         assert_eq!(
             view.eligible_pes,
@@ -860,19 +910,21 @@ mod tests {
             ],
         );
         assert_eq!(
-            idx.eligible_pes(esi(1), EthernetTagId(100)).unwrap(),
+            idx.eligible_pes(vni(100), esi(1), EthernetTagId(100))
+                .unwrap(),
             &[ip("10.0.0.2"), ip("10.0.0.3")],
         );
         assert_eq!(
-            idx.eligible_pes(esi(1), EthernetTagId(200)).unwrap(),
+            idx.eligible_pes(vni(100), esi(1), EthernetTagId(200))
+                .unwrap(),
             &[ip("10.0.0.2")],
         );
         assert_eq!(
-            idx.backup_pe(esi(1), EthernetTagId(100), ip("10.0.0.2")),
+            idx.backup_pe(vni(100), esi(1), EthernetTagId(100), ip("10.0.0.2")),
             Some(ip("10.0.0.3")),
         );
         assert!(
-            idx.backup_pe(esi(1), EthernetTagId(200), ip("10.0.0.2"))
+            idx.backup_pe(vni(100), esi(1), EthernetTagId(200), ip("10.0.0.2"))
                 .is_none()
         );
     }
@@ -887,7 +939,8 @@ mod tests {
             [evi_row(1, 0, "10.0.0.2"), evi_row(1, 0, "10.0.0.3")],
         );
         assert_eq!(
-            full.eligible_pes(esi(1), EthernetTagId(0)).unwrap(),
+            full.eligible_pes(vni(100), esi(1), EthernetTagId(0))
+                .unwrap(),
             &[ip("10.0.0.2"), ip("10.0.0.3")],
         );
 
@@ -896,7 +949,9 @@ mod tests {
             [evi_row(1, 0, "10.0.0.2"), evi_row(1, 0, "10.0.0.3")],
         );
         assert_eq!(
-            without_es.eligible_pes(esi(1), EthernetTagId(0)).unwrap(),
+            without_es
+                .eligible_pes(vni(100), esi(1), EthernetTagId(0))
+                .unwrap(),
             &[ip("10.0.0.2")],
         );
 
@@ -905,7 +960,9 @@ mod tests {
             [evi_row(1, 0, "10.0.0.2")],
         );
         assert_eq!(
-            without_evi.eligible_pes(esi(1), EthernetTagId(0)).unwrap(),
+            without_evi
+                .eligible_pes(vni(100), esi(1), EthernetTagId(0))
+                .unwrap(),
             &[ip("10.0.0.2")],
         );
     }
@@ -1000,13 +1057,13 @@ mod tests {
         );
         let dead_primary = ip("10.0.0.2");
         let member = idx
-            .backup_pe(esi(1), EthernetTagId(0), dead_primary)
+            .backup_pe(vni(100), esi(1), EthernetTagId(0), dead_primary)
             .expect("survivors exist");
         assert_eq!(member, ip("10.0.0.3"));
         // New standby for the swapped group: lowest excluding the
         // new member (the dead primary is not eligible anyway).
         assert_eq!(
-            idx.backup_pe(esi(1), EthernetTagId(0), member),
+            idx.backup_pe(vni(100), esi(1), EthernetTagId(0), member),
             Some(ip("10.0.0.4")),
         );
     }
@@ -1028,17 +1085,18 @@ mod tests {
             ],
         );
         assert_eq!(
-            idx.eligible_pes(esi(1), EthernetTagId(0)).unwrap(),
+            idx.eligible_pes(vni(100), esi(1), EthernetTagId(0))
+                .unwrap(),
             &[ip("10.0.0.9"), ip("2001:db8::1"), ip("2001:db8::2")],
         );
         // IPv4 primary: backup is the lowest IPv6.
         assert_eq!(
-            idx.backup_pe(esi(1), EthernetTagId(0), ip("10.0.0.9")),
+            idx.backup_pe(vni(100), esi(1), EthernetTagId(0), ip("10.0.0.9")),
             Some(ip("2001:db8::1")),
         );
         // IPv6 primary: the IPv4 PE is the lowest non-primary.
         assert_eq!(
-            idx.backup_pe(esi(1), EthernetTagId(0), ip("2001:db8::1")),
+            idx.backup_pe(vni(100), esi(1), EthernetTagId(0), ip("2001:db8::1")),
             Some(ip("10.0.0.9")),
         );
     }

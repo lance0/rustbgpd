@@ -720,12 +720,13 @@ mod tests {
         // All-active aliasing: the EAD-per-EVI row must resolve under
         // the Type 2's (ESI, tag) lookup key.
         let alias_index = AliasIndex::build([AliasEadPerEvi {
+            vni: vni(100),
             esi: ead_esi,
             ethernet_tag: ead_tag,
             vtep_ip: remote_pe,
         }]);
         assert_eq!(
-            alias_index.vtep_ips_for(segment, mac_tag),
+            alias_index.vtep_ips_for(vni(100), segment, mac_tag),
             Some(&[remote_pe][..]),
             "EAD-per-EVI tag {ead_tag:?} must join the Type 2 tag {mac_tag:?}",
         );
@@ -739,13 +740,14 @@ mod tests {
                 single_active: true,
             }],
             [AliasEadPerEvi {
+                vni: vni(100),
                 esi: ead_esi,
                 ethernet_tag: ead_tag,
                 vtep_ip: remote_pe,
             }],
         );
         assert_eq!(
-            eligible.eligible_pes(segment, mac_tag),
+            eligible.eligible_pes(vni(100), segment, mac_tag),
             Some(&[remote_pe][..]),
             "EAD-per-EVI tag {ead_tag:?} must make the eligible set for the Type 2 tag {mac_tag:?}",
         );

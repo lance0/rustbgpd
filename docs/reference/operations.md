@@ -1841,7 +1841,7 @@ per-cache readiness metrics and RTR logs for those questions.
 | `evpn_fdb_nhg_drift_groups_replaced_total` | FDB nexthop groups re-created or replaced after kernel drift. Investigate sustained increases alongside member repairs for competing kernel writers. |
 | `evpn_fdb_nhg_orphans_cleaned_total` | Unreferenced rustbgpd-tagged FDB nexthops removed by ownership-aware garbage collection. Sustained growth outside restart recovery indicates unstable group membership or cleanup churn. |
 | `evpn_fdb_nhg_drift_disabled_total` | Permanent dump failures that disabled FDB-NHG drift recovery for this daemon lifetime. Any increase means automatic repair is unavailable; use the accompanying error to correct kernel support, privilege, or netlink-message failures, then restart the daemon. |
-| `evpn_single_active_backup_active` | Single-active groups currently retargeted to a backup PE during the post-failover window |
+| `evpn_single_active_backup_active` | Distinct (VNI, ESI, Ethernet Tag) single-active groups currently retargeted to a backup PE during the post-failover window |
 
 For an instance with `duplicate_ip_detection.enabled = true`, investigate an
 increase in `evpn_duplicate_ip_threshold_exceeded_total` alongside the

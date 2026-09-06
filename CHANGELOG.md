@@ -719,6 +719,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   mobility, duplicate accounting, or Type 5 gateway-IP recursion. Global RIB
   retention and reflection are unchanged.
 
+- Scope EVPN EAD-per-EVI alias and single-active backup selection to the
+  local VNI as well as ESI and Ethernet Tag. Local EAD consumption now
+  requires a matching Route Target and zero Ethernet Tag, including Type 5
+  ESI overlay resolution. The backup-window gauge counts each VNI separately.
+
 ### Documentation
 
 - Publish a descriptive raw bridge event-skew receipt across six pinned Jammy
@@ -933,6 +938,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or nonzero Ethernet Tags, no longer contribute local forwarding or mobility
   state. Check remote advertisements and configured `route_targets` before
   upgrading; see [local Type 2 import](docs/how-to/evpn-vtep-setup.md#local-type-2-import).
+
+- **EVPN EAD import scope:** alias or backup paths previously admitted from
+  another VNI, a nonmatching or missing Route Target, or a nonzero Ethernet
+  Tag are removed from local forwarding intent. Check remote EAD labels and
+  Route Targets if a path disappears after upgrading. Global EVPN RIB
+  retention, reflection, and export are unchanged. The
+  `evpn_single_active_backup_active` gauge may increase when multiple VNIs
+  share an ESI and tag because each forwarding group is now counted.
 
 ## [0.68.0] — 2026-08-30
 
