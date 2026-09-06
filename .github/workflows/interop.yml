@@ -42,7 +42,7 @@ name: Interop
 #     capability-negotiation fragility.
 #   - M99 (~15 s test): RFC 9072 extended OPEN framing against stock
 #     FRR 10.3.1. A host-tshark raw TCP capture proves FRR's forced-small
-#     extended form, rustbgpd's exact 342-byte maximum production OPEN,
+#     extended form, rustbgpd's exact 348-byte maximum production OPEN,
 #     and a parallel exact 49-byte classic control. The oracle reassembles
 #     the TCP streams itself and does not trust tshark's BGP dissector.
 #   - M89 (~15 s test): experimental Paths-Limit capability 76 —
