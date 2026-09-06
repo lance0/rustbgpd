@@ -136,7 +136,7 @@ async fn explain_distinguishes_fresh_selection_retained_source_and_committed_exp
         mac: "aa:bb:cc:dd:ee:ff".into(),
         peer_address: peer.into(),
         next_hop: peer.into(),
-        prefix_sid: Some(test_support::mock_prefix_sid()),
+        prefix_sid: Some(Box::new(test_support::mock_prefix_sid())),
         ..Default::default()
     };
     *server.state.explain_evpn_response.lock().await = proto::ExplainEvpnRouteResponse {

@@ -2348,14 +2348,14 @@ mod tests {
     #[test]
     fn evpn_event_prefix_sid_keeps_current_and_previous_views() {
         let route = crate::proto::EvpnRouteEntry {
-            prefix_sid: Some(
+            prefix_sid: Some(Box::new(
                 crate::proto::PrefixSidView::decode(
                     crate::test_support::mock_prefix_sid()
                         .encode_to_vec()
                         .as_slice(),
                 )
                 .unwrap(),
-            ),
+            )),
             ..Default::default()
         };
         let event = BgpEvent {

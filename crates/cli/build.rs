@@ -7,6 +7,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_prost_build::configure()
         .build_server(false)
         .build_client(true)
+        // Match the API's pointer-sized optional Prefix-SID views.
+        .boxed(".rustbgpd.v1.VpnRouteEntry.prefix_sid")
+        .boxed(".rustbgpd.v1.EvpnRouteEntry.prefix_sid")
         .compile_protos(
             &[proto_root.join("rustbgpd.proto")],
             &[proto_root, well_known_include],

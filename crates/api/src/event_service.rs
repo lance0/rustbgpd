@@ -1849,10 +1849,14 @@ mod tests {
     /// (prost oneof sized by its largest variant). Shrinking the never-used
     /// FIB (4096-slot) and BFD (1024-slot) proto rings to 1-slot placeholders
     /// removes 4095 + 1023 = 5118 slots of eager payload capacity per daemon:
-    /// 5118 × 944 B = 4,831,392 B of slot payload, before per-slot metadata.
+    /// 5118 × 960 B = 4,913,280 B of slot payload, before per-slot metadata.
+    /// The two boxed optional Prefix-SID views add 16 B to the previous 944 B
+    /// layout: 32 B across unused placeholders, or 81,920 B with both actors
+    /// enabled. Unboxed views would add 160 B per slot. Populated views also
+    /// allocate their boxes and retained attribute data outside this payload.
     #[test]
     fn watch_events_ring_slot_payload_size_pin() {
-        assert_eq!(std::mem::size_of::<Option<proto::BgpEvent>>(), 944);
+        assert_eq!(std::mem::size_of::<Option<proto::BgpEvent>>(), 960);
     }
 
     #[test]

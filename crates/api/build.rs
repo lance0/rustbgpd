@@ -13,18 +13,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // had the includes — passed. Putting the bundled include dir on the protoc
     // search path fixes codegen identically in every environment.
     let well_known_include = protoc_bin_vendored::include_path()?;
-    tonic_prost_build::configure().compile_protos(
-        &[
-            "../../proto/rustbgpd.proto",
-            "../../proto/github.com/openconfig/gnmi/proto/gnmi/gnmi.proto",
-        ],
-        &[
-            "../../proto",
-            well_known_include
-                .to_str()
-                .ok_or("protoc-bin-vendored include path is not valid UTF-8")?,
-        ],
-    )?;
+    // Keep absent Prefix-SID views pointer-sized, including both EVPN
+    // snapshots in every BgpEvent's largest oneof variant.
+    tonic_prost_build::configure()
+        .boxed(".rustbgpd.v1.VpnRouteEntry.prefix_sid")
+        .boxed(".rustbgpd.v1.EvpnRouteEntry.prefix_sid")
+        .compile_protos(
+            &[
+                "../../proto/rustbgpd.proto",
+                "../../proto/github.com/openconfig/gnmi/proto/gnmi/gnmi.proto",
+            ],
+            &[
+                "../../proto",
+                well_known_include
+                    .to_str()
+                    .ok_or("protoc-bin-vendored include path is not valid UTF-8")?,
+            ],
+        )?;
     // The dial-out proto imports the gnmi package compiled above. Compile it
     // separately with `extern_path` so its references resolve to the flat
     // `crate::gnmi` module instead of prost's package-relative `super::…`

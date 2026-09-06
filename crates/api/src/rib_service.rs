@@ -2789,7 +2789,7 @@ fn vpn_family_label(route: &VpnRibRoute) -> &'static str {
     }
 }
 
-fn prefix_sid_to_proto(attributes: &[PathAttribute]) -> Option<proto::PrefixSidView> {
+fn prefix_sid_to_proto(attributes: &[PathAttribute]) -> Option<Box<proto::PrefixSidView>> {
     let raw = attributes.iter().find_map(|attribute| match attribute {
         PathAttribute::Unknown(raw)
             if raw.type_code == rustbgpd_wire::constants::attr_type::PREFIX_SID =>
@@ -2835,7 +2835,7 @@ fn prefix_sid_to_proto(attributes: &[PathAttribute]) -> Option<proto::PrefixSidV
         }
         Err(error) => view.decode_error = error.to_string(),
     }
-    Some(view)
+    Some(Box::new(view))
 }
 
 pub(crate) fn vpn_route_to_proto(route: &VpnRibRoute) -> proto::VpnRouteEntry {
