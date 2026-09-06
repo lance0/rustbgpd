@@ -5374,3 +5374,304 @@ fn build_remote_views_drops_same_segment_routes_and_carries_esi() {
         segment_esi(1)
     );
 }
+
+// Duplicate-IP diagnostics share the live observation/poll harness, including
+// its exact route-action/sequence log. No separate routing implementation.
+fn duplicate_ip_harness(enabled: bool) -> PeerSyncHarness {
+    let mut harness = PeerSyncHarness::new(BTreeMap::new(), Vec::new());
+    harness.instances = instance_table_with(local_instance(100).with_duplicate_ip_detection(
+        rustbgpd_evpn::DuplicateIpConfig::new(enabled, Duration::from_secs(30), 2).unwrap(),
+    ));
+    harness.state = originator_state(&harness.instances);
+    harness
+}
+
+fn ip_observation(mac_byte: u8, ip: &str, added: bool) -> LocalMacObservation {
+    if added {
+        LocalMacObservation::IpAdded {
+            vni: vni(100),
+            mac: mac(mac_byte),
+            ip: ipa(ip),
+        }
+    } else {
+        LocalMacObservation::IpRemoved {
+            vni: vni(100),
+            mac: mac(mac_byte),
+            ip: ipa(ip),
+        }
+    }
+}
+
+fn assert_duplicate_ip_metrics(metrics: &BgpMetrics, moves: u32, thresholds: u32) {
+    let text = gather_metrics_text(metrics);
+    for (family, value) in [
+        ("evpn_duplicate_ip_moves_total", moves),
+        ("evpn_duplicate_ip_threshold_exceeded_total", thresholds),
+    ] {
+        let sample = format!("{family}{{vni=\"100\"}}");
+        if value == 0 {
+            assert!(!text.contains(&sample), "unexpected {sample}: {text}");
+        } else {
+            assert!(
+                text.contains(&format!("{sample} {value}\n")),
+                "missing {sample} {value}: {text}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn duplicate_ip_rebind_counts_once_and_never_changes_routing_actions() {
+    for ip in ["192.0.2.10", "2001:db8::10"] {
+        let mut disabled = duplicate_ip_harness(false);
+        let mut enabled = duplicate_ip_harness(true);
+        for harness in [&mut disabled, &mut enabled] {
+            for m in [0xAA, 0xBB] {
+                harness
+                    .observe(LocalMacObservation::Learned {
+                        vni: vni(100),
+                        mac: mac(m),
+                        ifindex: 10,
+                    })
+                    .await;
+            }
+            harness.observe(ip_observation(0xAA, ip, true)).await;
+            for (old, new) in [(0xAA, 0xBB), (0xBB, 0xAA), (0xAA, 0xBB)] {
+                harness.observe(ip_observation(old, ip, false)).await;
+                harness.observe(ip_observation(new, ip, true)).await;
+                harness.observe(ip_observation(new, ip, true)).await;
+                harness.repoll().await;
+            }
+            replay_local_mac_after_recovery(
+                vni(100),
+                mac(0xBB),
+                &mut harness.state,
+                &harness.instances,
+                &harness.rib_tx,
+                &harness.metrics,
+                &harness.counts,
+                &harness.segments,
+                &BTreeSet::new(),
+            )
+            .await;
+        }
+        assert_duplicate_ip_metrics(&disabled.metrics, 0, 0);
+        assert_duplicate_ip_metrics(&enabled.metrics, 3, 1);
+        assert_eq!(
+            enabled.take_log().await,
+            disabled.take_log().await,
+            "detect-only changed route actions for {ip}"
+        );
+        assert!(enabled.state.active_duplicate_mac_quarantines.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn duplicate_ip_local_remote_both_arrival_orders_and_poll_deduplication() {
+    for ip in ["192.0.2.10", "2001:db8::10"] {
+        for remote_first in [true, false] {
+            let mut h = duplicate_ip_harness(true);
+            let remote =
+                |seq| evpn_macip_route_with_ip(100, 0xBB, Some(ip), "10.0.0.2", Some(seq), false);
+            if remote_first {
+                h.routes_tx.send(vec![remote(1)]).unwrap();
+                h.repoll().await;
+            }
+            // Neighbour before FDB: pending replay must not count a second learn.
+            h.observe(ip_observation(0xAA, ip, true)).await;
+            h.observe(learned_aa()).await;
+            if !remote_first {
+                h.routes_tx.send(vec![remote(1)]).unwrap();
+                h.repoll().await;
+            }
+            h.observe(ip_observation(0xAA, ip, true)).await;
+            h.repoll().await;
+            h.routes_tx.send(vec![remote(2)]).unwrap();
+            h.repoll().await;
+            assert_duplicate_ip_metrics(&h.metrics, 1, 0);
+            h.routes_tx.send(Vec::new()).unwrap();
+            h.repoll().await;
+            h.routes_tx.send(vec![remote(3)]).unwrap();
+            h.repoll().await;
+            assert_duplicate_ip_metrics(&h.metrics, 2, 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn duplicate_ip_ignores_same_mac_remote_only_and_same_segment_peer() {
+    for same_segment in [true, false] {
+        let mut h = duplicate_ip_harness(true);
+        let esi = segment_esi(1);
+        if same_segment {
+            h.segments.insert(vni(100), esi);
+        }
+        let remote_mac = if same_segment { 0xBB } else { 0xAA };
+        let remote = with_esi(
+            evpn_macip_route_with_ip(
+                100,
+                remote_mac,
+                Some("192.0.2.10"),
+                "10.0.0.2",
+                Some(0),
+                false,
+            ),
+            esi,
+        );
+        h.routes_tx.send(vec![remote]).unwrap();
+        h.repoll().await;
+        h.observe(ip_added_aa()).await;
+        h.observe(learned_aa()).await;
+        h.repoll().await;
+        assert_duplicate_ip_metrics(&h.metrics, 0, 0);
+    }
+    let mut h = duplicate_ip_harness(true);
+    for m in [0xAA, 0xBB, 0xAA] {
+        h.routes_tx
+            .send(vec![evpn_macip_route_with_ip(
+                100,
+                m,
+                Some("192.0.2.10"),
+                "10.0.0.2",
+                Some(1),
+                false,
+            )])
+            .unwrap();
+        h.repoll().await;
+    }
+    assert_duplicate_ip_metrics(&h.metrics, 0, 0);
+}
+
+#[tokio::test]
+async fn duplicate_ip_sticky_and_mac_quarantine_exempt_both_contenders() {
+    for exempt_mac in [0xAA, 0xBB] {
+        for sticky in [true, false] {
+            let mut h = duplicate_ip_harness(true);
+            if sticky {
+                let inst = h
+                    .instances
+                    .get(vni(100))
+                    .unwrap()
+                    .clone()
+                    .with_sticky_macs(BTreeSet::from([mac(exempt_mac)]));
+                h.instances = instance_table_with(inst);
+            } else {
+                h.state.duplicate_mac_detector.record_move(
+                    DuplicateMacKey::new(vni(100), mac(exempt_mac)),
+                    Instant::now(),
+                    DuplicateMacConfig::new(
+                        DuplicateMacAction::SuppressLocal,
+                        Duration::from_secs(30),
+                        1,
+                        Duration::from_secs(30),
+                    )
+                    .unwrap(),
+                );
+            }
+            h.observe(ip_added_aa()).await;
+            h.observe(ip_observation(0xAA, "192.0.2.10", false)).await;
+            h.observe(ip_observation(0xBB, "192.0.2.10", true)).await;
+            // Still track the exempt binding: clearing the gate must not turn
+            // the next identical observation into a new conflict.
+            h.state
+                .duplicate_mac_detector
+                .clear(DuplicateMacKey::new(vni(100), mac(exempt_mac)));
+            h.observe(ip_observation(0xBB, "192.0.2.10", true)).await;
+            assert_duplicate_ip_metrics(&h.metrics, 0, 0);
+        }
+    }
+    for remote_first in [true, false] {
+        let mut h = duplicate_ip_harness(true);
+        let remote =
+            evpn_macip_route_with_ip(100, 0xBB, Some("192.0.2.10"), "10.0.0.2", Some(1), true);
+        if remote_first {
+            h.routes_tx.send(vec![remote.clone()]).unwrap();
+            h.repoll().await;
+        }
+        h.observe(ip_added_aa()).await;
+        if !remote_first {
+            h.routes_tx.send(vec![remote]).unwrap();
+            h.repoll().await;
+        }
+        assert_duplicate_ip_metrics(&h.metrics, 0, 0);
+    }
+}
+
+#[tokio::test]
+async fn duplicate_ip_expiry_redefine_and_delete_drop_old_history() {
+    let mut h = duplicate_ip_harness(true);
+    h.observe(ip_added_aa()).await;
+    h.observe(ip_observation(0xAA, "192.0.2.10", false)).await;
+    h.state
+        .duplicate_ip
+        .expire(Instant::now() + Duration::from_secs(31));
+    h.observe(ip_observation(0xBB, "192.0.2.10", true)).await;
+    assert_duplicate_ip_metrics(&h.metrics, 0, 0);
+    h.observe(ip_observation(0xAA, "192.0.2.10", true)).await;
+    assert_duplicate_ip_metrics(&h.metrics, 1, 0);
+    super::duplicate_ip::reset_vni(&mut h.state, h.instances.get(vni(100)).unwrap());
+    h.observe(ip_observation(0xAA, "192.0.2.10", true)).await;
+    assert_duplicate_ip_metrics(&h.metrics, 1, 0);
+    h.observe(ip_observation(0xAA, "192.0.2.10", false)).await;
+    h.observe(ip_observation(0xAA, "192.0.2.10", true)).await;
+    assert_duplicate_ip_metrics(&h.metrics, 2, 0); // reset discarded the previous M/N window
+    remove_vni_state(&mut h.state, vni(100), &h.metrics);
+    h.observe(ip_observation(0xCC, "192.0.2.10", true)).await;
+    assert_duplicate_ip_metrics(&h.metrics, 2, 0);
+}
+
+#[tokio::test]
+async fn duplicate_ip_runtime_model_enables_and_disables_without_recounting_caches() {
+    let mut h = duplicate_ip_harness(false);
+    h.observe(learned_aa()).await;
+    h.observe(ip_added_aa()).await;
+    h.routes_tx
+        .send(vec![evpn_macip_route_with_ip(
+            100,
+            0xBB,
+            Some("192.0.2.10"),
+            "10.0.0.2",
+            Some(0),
+            false,
+        )])
+        .unwrap();
+    h.repoll().await;
+    let mut runtime = originator_runtime_for_test(
+        h.instances.clone(),
+        h.rib_tx.clone(),
+        h.metrics.clone(),
+        h.counts.clone(),
+        Arc::new(BTreeMap::new()),
+    );
+    for enabled in [true, false] {
+        let instances = instance_table_with(local_instance(100).with_duplicate_ip_detection(
+            rustbgpd_evpn::DuplicateIpConfig::new(enabled, Duration::from_secs(30), 2).unwrap(),
+        ));
+        h.take_log().await;
+        apply_runtime_model(
+            Arc::new(OriginatorRuntimeModel {
+                instances: instances.clone(),
+                vni_to_esi: Arc::new(BTreeMap::new()),
+                drained_esis: Arc::new(BTreeSet::new()),
+            }),
+            &mut h.state,
+            &mut runtime,
+        )
+        .await;
+        assert_eq!(
+            h.take_log().await,
+            vec![
+                RibActionWithSeq::Withdraw(macip_key_with(100, 0xAA, Some("192.0.2.10"))),
+                RibActionWithSeq::Inject(macip_key_with(100, 0xAA, Some("192.0.2.10")), None),
+            ],
+            "a diagnostic config change still performs the existing full VNI redefine"
+        );
+        h.instances = instances;
+        h.observe(ip_added_aa()).await;
+        h.repoll().await;
+        assert_duplicate_ip_metrics(&h.metrics, u32::from(!enabled), 0);
+        h.observe(ip_observation(0xAA, "192.0.2.10", false)).await;
+        h.observe(ip_added_aa()).await;
+        assert_duplicate_ip_metrics(&h.metrics, 1, 0);
+    }
+}

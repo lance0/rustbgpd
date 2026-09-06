@@ -35,6 +35,8 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
                 "bgp_max_prefix_warning_total",
                 "bgp_peer_info",
                 "bgp_session_event_source_dropped_total",
+                "evpn_duplicate_ip_moves_total",
+                "evpn_duplicate_ip_threshold_exceeded_total",
             },
         )
         self.assertEqual(removed, {"bgp_session_lifecycle_source_dropped_total"})

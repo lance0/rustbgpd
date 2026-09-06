@@ -127,6 +127,9 @@ pub(super) async fn apply_runtime_model(
         state.mac_originators.remove(vni);
         state.mac_ip_originators.remove(vni);
         clear_duplicate_mac_state(state, *vni, &runtime.metrics);
+        if let Some(inst) = model.instances.get(*vni) {
+            super::duplicate_ip::reset_vni(state, inst);
+        }
     }
 
     for inst in model.instances.iter() {
@@ -196,6 +199,7 @@ pub(super) fn remove_vni_state(
     state.mac_originators.remove(&vni);
     state.mac_ip_originators.remove(&vni);
     state.local_macs.remove(&vni);
+    state.duplicate_ip.clear_vni(vni);
     state.live_mac_ip.remove(&vni);
     state
         .pending_ip_bindings

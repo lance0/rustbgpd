@@ -20,6 +20,7 @@ use std::net::IpAddr;
 
 use rustbgpd_wire::{MacAddress, RouteDistinguisher};
 
+use crate::duplicate_ip::DuplicateIpConfig;
 use crate::duplicate_mac::DuplicateMacConfig;
 use crate::route_target::RouteTarget;
 
@@ -194,6 +195,8 @@ pub struct EvpnInstance {
     /// window (`5` moves in `180s`); operators can opt a VNI into
     /// daemon-side local-origin suppression.
     pub duplicate_mac_detection: DuplicateMacConfig,
+    /// Optional detect-only duplicate-IP accounting. Disabled by default.
+    pub duplicate_ip_detection: DuplicateIpConfig,
 }
 
 impl EvpnInstance {
@@ -234,6 +237,7 @@ impl EvpnInstance {
             sticky_macs: BTreeSet::new(),
             apply_aliasing_ecmp: true,
             duplicate_mac_detection: DuplicateMacConfig::default(),
+            duplicate_ip_detection: DuplicateIpConfig::default(),
         })
     }
 
@@ -263,6 +267,13 @@ impl EvpnInstance {
     #[must_use]
     pub fn with_apply_aliasing_ecmp(mut self, enabled: bool) -> Self {
         self.apply_aliasing_ecmp = enabled;
+        self
+    }
+
+    /// Override the per-instance detect-only duplicate-IP policy.
+    #[must_use]
+    pub fn with_duplicate_ip_detection(mut self, config: DuplicateIpConfig) -> Self {
+        self.duplicate_ip_detection = config;
         self
     }
 

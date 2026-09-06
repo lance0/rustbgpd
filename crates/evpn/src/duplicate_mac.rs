@@ -131,10 +131,53 @@ pub enum DuplicateMacDecision {
 }
 
 #[derive(Debug, Clone, Default)]
-struct DuplicateMacWindow {
+pub(crate) struct DuplicateMacWindow {
     moves: VecDeque<Instant>,
     quarantined_until: Option<Instant>,
     window: Option<Duration>,
+}
+
+impl DuplicateMacWindow {
+    pub(crate) fn record(
+        &mut self,
+        now: Instant,
+        config: DuplicateMacConfig,
+    ) -> DuplicateMacDecision {
+        // Expire under the prior policy before accepting a wider new window.
+        self.retain_moves(now);
+        expire_window(self, now);
+        if let Some(until) = active_until(self, now) {
+            return DuplicateMacDecision::AlreadyQuarantined { until };
+        }
+        self.window = Some(config.window);
+        prune_old_moves(&mut self.moves, now, config.window);
+        self.moves.push_back(now);
+        let window_count = u32::try_from(self.moves.len()).unwrap_or(u32::MAX);
+        if window_count < config.threshold {
+            return DuplicateMacDecision::Recorded { window_count };
+        }
+        self.moves.clear();
+        match config.action {
+            DuplicateMacAction::DetectOnly => {
+                DuplicateMacDecision::ThresholdExceeded { window_count }
+            }
+            DuplicateMacAction::SuppressLocal => {
+                let until = now.checked_add(config.recovery).unwrap_or(now);
+                self.quarantined_until = Some(until);
+                DuplicateMacDecision::Quarantined {
+                    window_count,
+                    until,
+                }
+            }
+        }
+    }
+
+    pub(crate) fn retain_moves(&mut self, now: Instant) -> bool {
+        if let Some(span) = self.window {
+            prune_old_moves(&mut self.moves, now, span);
+        }
+        !self.moves.is_empty()
+    }
 }
 
 /// Sliding-window detector keyed by `(VNI, MAC)`.
@@ -151,34 +194,7 @@ impl DuplicateMacDetector {
         now: Instant,
         config: DuplicateMacConfig,
     ) -> DuplicateMacDecision {
-        let _ = self.expire_key(key, now);
-        let window = self.windows.entry(key).or_default();
-        if let Some(until) = active_until(window, now) {
-            return DuplicateMacDecision::AlreadyQuarantined { until };
-        }
-
-        window.window = Some(config.window);
-        prune_old_moves(&mut window.moves, now, config.window);
-        window.moves.push_back(now);
-        let window_count = u32::try_from(window.moves.len()).unwrap_or(u32::MAX);
-        if window_count < config.threshold {
-            return DuplicateMacDecision::Recorded { window_count };
-        }
-
-        window.moves.clear();
-        match config.action {
-            DuplicateMacAction::DetectOnly => {
-                DuplicateMacDecision::ThresholdExceeded { window_count }
-            }
-            DuplicateMacAction::SuppressLocal => {
-                let until = now.checked_add(config.recovery).unwrap_or(now);
-                window.quarantined_until = Some(until);
-                DuplicateMacDecision::Quarantined {
-                    window_count,
-                    until,
-                }
-            }
-        }
+        self.windows.entry(key).or_default().record(now, config)
     }
 
     /// Return true while the key is actively suppressed.
@@ -283,6 +299,29 @@ mod tests {
     fn config(action: DuplicateMacAction) -> DuplicateMacConfig {
         DuplicateMacConfig::new(action, Duration::from_secs(10), 3, Duration::from_secs(30))
             .unwrap()
+    }
+
+    #[test]
+    fn widening_window_does_not_revive_expired_moves() {
+        let mut detector = DuplicateMacDetector::default();
+        let now = Instant::now();
+        let old = DuplicateMacConfig {
+            window: Duration::from_secs(1),
+            threshold: 2,
+            ..DuplicateMacConfig::default()
+        };
+        let wider = DuplicateMacConfig {
+            window: Duration::from_secs(10),
+            ..old
+        };
+        assert_eq!(
+            detector.record_move(key(), now, old),
+            DuplicateMacDecision::Recorded { window_count: 1 }
+        );
+        assert_eq!(
+            detector.record_move(key(), now + Duration::from_secs(2), wider),
+            DuplicateMacDecision::Recorded { window_count: 1 }
+        );
     }
 
     #[test]

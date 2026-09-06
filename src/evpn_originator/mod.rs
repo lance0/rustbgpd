@@ -551,6 +551,7 @@ struct OriginatorState {
     /// the M/N window and active suppressions; this daemon state owns
     /// the route-withdraw/replay policy.
     duplicate_mac_detector: DuplicateMacDetector,
+    duplicate_ip: duplicate_ip::DuplicateIpState,
     /// Keys ever inserted into [`Self::duplicate_mac_detector`] and not
     /// later explicitly cleared. The detector intentionally hides its
     /// window map, so the daemon tracks keys here to purge all stale
@@ -591,6 +592,7 @@ impl OriginatorState {
             remote_mac_view: BTreeMap::new(),
             remote_mac_ip_view: BTreeMap::new(),
             duplicate_mac_detector: DuplicateMacDetector::default(),
+            duplicate_ip: duplicate_ip::DuplicateIpState::default(),
             known_duplicate_mac_keys: BTreeSet::new(),
             active_duplicate_mac_quarantines: BTreeSet::new(),
             duplicate_mac_quarantine_tx,
@@ -755,6 +757,7 @@ async fn originator_loop(
                 ).await;
             }
             _ = poll_tick.tick() => {
+                state.duplicate_ip.expire(Instant::now());
                 recover_duplicate_macs(
                     &mut state,
                     &runtime.instances,
@@ -922,6 +925,7 @@ enum RibQueryError {
     ReplyDropped,
 }
 
+mod duplicate_ip;
 mod duplicate_mac;
 mod lifecycle;
 mod observation;

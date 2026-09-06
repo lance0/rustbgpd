@@ -16,9 +16,10 @@ use std::sync::Arc;
 
 use rustbgpd_evpn::runtime_plan_shape::validate_supported_plan_shape;
 use rustbgpd_evpn::{
-    BridgeVlan, DfAlgorithm, DuplicateMacAction, DuplicateMacConfig, EthernetSegment, EvpnInstance,
-    EvpnInstanceId, EvpnInstanceTable, EvpnRuntimeCandidate, EvpnRuntimeModel, IpVrf, IpVrfId,
-    IpVrfTable, OverlayIndexMode, RedundancyMode, RouteTarget, parse_esi, parse_mac_address,
+    BridgeVlan, DfAlgorithm, DuplicateIpConfig, DuplicateMacAction, DuplicateMacConfig,
+    EthernetSegment, EvpnInstance, EvpnInstanceId, EvpnInstanceTable, EvpnRuntimeCandidate,
+    EvpnRuntimeModel, IpVrf, IpVrfId, IpVrfTable, OverlayIndexMode, RedundancyMode, RouteTarget,
+    parse_esi, parse_mac_address,
 };
 use rustbgpd_policy::{
     CommunityMatch, NextHopAction, Policy, PolicyAction, PolicyChain, PolicyStatement,
@@ -5403,11 +5404,28 @@ fn parse_evpn_instance(
     })?;
     let duplicate_mac_detection =
         parse_duplicate_mac_detection(cfg.vni, &cfg.duplicate_mac_detection)?;
+    let duplicate_ip_detection =
+        parse_duplicate_ip_detection(cfg.vni, &cfg.duplicate_ip_detection)?;
     Ok(inst
+        .with_duplicate_ip_detection(duplicate_ip_detection)
         .with_bridge_vlan(bridge_vlan)
         .with_sticky_macs(sticky_macs)
         .with_apply_aliasing_ecmp(cfg.apply_aliasing_ecmp)
         .with_duplicate_mac_detection(duplicate_mac_detection))
+}
+
+fn parse_duplicate_ip_detection(
+    vni: u32,
+    cfg: &EvpnDuplicateIpDetectionConfig,
+) -> Result<DuplicateIpConfig, ConfigError> {
+    DuplicateIpConfig::new(
+        cfg.enabled,
+        std::time::Duration::from_secs(cfg.window_seconds),
+        cfg.threshold,
+    )
+    .map_err(|e| ConfigError::InvalidEvpnInstance {
+        reason: format!("vni {vni}: {e}"),
+    })
 }
 
 fn parse_duplicate_mac_detection(

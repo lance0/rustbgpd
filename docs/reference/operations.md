@@ -1822,6 +1822,8 @@ per-cache readiness metrics and RTR logs for those questions.
 | `evpn_local_origination_errors_total{action="withdraw"}` | Failed local Type 2 withdraw attempts: RIB channel closed, RIB rejected the withdraw, or the reply was dropped |
 | `evpn_local_observations_dropped_total{reason="channel_full"}` | Kernel local-MAC observations classified by the netlink notify loop but dropped because the originator channel was full |
 | `evpn_local_observations_dropped_total{reason="channel_closed"}` | Kernel local-MAC observations classified by the netlink notify loop after the originator receiver was gone |
+| `evpn_duplicate_ip_moves_total{vni}` | Conflicting IPv4/IPv6 ownership observations counted by the optional detect-only IP detector |
+| `evpn_duplicate_ip_threshold_exceeded_total{vni}` | Per-IP M/N threshold crossings; each crossing logs the VNI, IP, observed MAC, threshold, and window without changing routes |
 | `evpn_duplicate_mac_moves_total{vni,mac}` | Cross-VTEP MAC mobility contention events detected by the local originator |
 | `evpn_duplicate_mac_first_move_timestamp_seconds{vni,mac}` | Unix timestamp of the first observed duplicate-MAC / mobility contention event for that key |
 | `evpn_duplicate_mac_threshold_exceeded_total{vni,mac,action}` | RFC 7432 §15.1 M/N threshold crossings. `action` is `detect` or `suppress_local` from the per-instance config |
@@ -1840,6 +1842,17 @@ per-cache readiness metrics and RTR logs for those questions.
 | `evpn_fdb_nhg_orphans_cleaned_total` | Unreferenced rustbgpd-tagged FDB nexthops removed by ownership-aware garbage collection. Sustained growth outside restart recovery indicates unstable group membership or cleanup churn. |
 | `evpn_fdb_nhg_drift_disabled_total` | Permanent dump failures that disabled FDB-NHG drift recovery for this daemon lifetime. Any increase means automatic repair is unavailable; use the accompanying error to correct kernel support, privilege, or netlink-message failures, then restart the daemon. |
 | `evpn_single_active_backup_active` | Single-active groups currently retargeted to a backup PE during the post-failover window |
+
+For an instance with `duplicate_ip_detection.enabled = true`, investigate an
+increase in `evpn_duplicate_ip_threshold_exceeded_total` alongside the
+`EVPN duplicate-IP threshold exceeded; action is detect-only` warning. The
+warning identifies the IP and observed MAC; compare the local neighbor table
+with received EVPN Type 2 routes before changing host addressing. Counters
+are cumulative per VNI rather than per-IP labels. A normal one-off host
+rebind can increment `evpn_duplicate_ip_moves_total`; it need not indicate a
+persistent duplicate. The detector neither suppresses routes nor provides an
+IP clear/quarantine command. See the [configuration reference](configuration.md#evpn_instances)
+for defaults, exclusions, and window semantics.
 
 During M37 or a synthetic MAC-churn soak, the inject and withdraw counters
 should follow the `bridge fdb add` / `bridge fdb del` cadence. Any non-zero
