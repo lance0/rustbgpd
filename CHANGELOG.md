@@ -493,6 +493,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- VPNv4 sessions now advertise RFC 8950 IPv6 next-hop receive support,
+  including VPN-only configurations. Reflection preserves the IPv6 next hop
+  and exports it only to recipients advertising the matching capability.
+  An ineligible replacement withdraws the old advertisement; IPv4 next-hop
+  VPNv4 routes and VPN withdrawals retain their existing behavior.
+
 - gRPC Unix sockets now reject unsafe parent directories and ancestor paths,
   bind without a permission window, and preserve existing live or uncertain
   sockets. Descriptor-relative operations and cooperative startup locking
@@ -817,6 +823,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   semantics without renaming existing commands.
 
 ### Upgrade notes
+
+- **VPNv4 IPv6 next hops:** VPNv4 peers advertise the additional receive
+  capability on the next OPEN exchange, with no new configuration setting.
+  A recipient without RFC 8950 tuple 1/128/2 no longer receives VPNv4 IPv6
+  next-hop announcements; exact-export rejection also removes an older
+  advertisement when an IPv4 next hop is replaced by an IPv6 next hop.
 
 - **gRPC Unix socket paths:** the immediate parent must be effective-UID-owned,
   readable/searchable and writable by the daemon, and not group/world-writable.

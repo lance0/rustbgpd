@@ -195,7 +195,7 @@ def need(condition: bool, detail: str) -> None:
         raise ProofError(detail)
 
 
-def decode_capabilities(message: bytes) -> set[int]:
+def decode_capabilities(message: bytes) -> tuple[set[int], set[tuple[int, int, int]]]:
     need(len(message) >= 29, "OPEN is shorter than its fixed fields")
     non_extended_len = message[28]
     cursor = 29
@@ -213,6 +213,7 @@ def decode_capabilities(message: bytes) -> set[int]:
         parameter_len_width = 1
 
     capabilities: set[int] = set()
+    next_hops: set[tuple[int, int, int]] = set()
     while cursor < end:
         need(cursor + 1 + parameter_len_width <= end, "Optional Parameter header is truncated")
         parameter_type = message[cursor]
@@ -231,10 +232,17 @@ def decode_capabilities(message: bytes) -> set[int]:
             cursor += 2
             need(cursor + length <= parameter_end, f"capability {code} exceeds type 2 parameter")
             capabilities.add(code)
+            if code == 5:
+                need(length % 6 == 0, "Extended Next Hop capability has a partial tuple")
+                for offset in range(cursor, cursor + length, 6):
+                    next_hops.add(tuple(
+                        int.from_bytes(message[index : index + 2], "big")
+                        for index in range(offset, offset + 6, 2)
+                    ))
             cursor += length
         need(cursor == parameter_end, "type 2 Optional Parameter was not consumed exactly")
     need(cursor == end, "Optional Parameters aggregate was not consumed exactly")
-    return capabilities
+    return capabilities, next_hops
 
 
 def decode_messages(payload: bytes, label: str) -> list[bytes]:
@@ -290,7 +298,7 @@ expected_pairs = {
     ("10.99.1.2", "10.99.1.1"): "FRR->B",
     ("10.99.1.1", "10.99.1.2"): "rustbgpd->B",
 }
-decoded: dict[str, tuple[bytes, set[int]]] = {}
+decoded: dict[str, tuple[bytes, set[int], set[tuple[int, int, int]]]] = {}
 print("M99 captured TCP stream inventory:", file=sys.stderr)
 for key in sorted(segments):
     stream, source, source_port, destination, destination_port = key
@@ -315,7 +323,7 @@ for key, rows in segments.items():
     notifications = [message for message in messages if message[18] == 3]
     need(len(opens) == 1, f"{label}: expected exactly one OPEN, found {len(opens)}")
     need(not notifications, f"{label}: captured a BGP NOTIFICATION")
-    decoded[label] = (opens[0], decode_capabilities(opens[0]))
+    decoded[label] = (opens[0], *decode_capabilities(opens[0]))
 
 need(set(decoded) == set(expected_pairs.values()), "one or more required directions are absent")
 
@@ -326,11 +334,16 @@ need(1 <= frr_a_aggregate <= 255, f"FRR->A aggregate is not forced-small: {frr_a
 need(len(frr_a) == 32 + frr_a_aggregate, "FRR->A OPEN length disagrees with aggregate")
 
 rust_a = decoded["rustbgpd->A"][0]
-need(len(rust_a) == 342, f"rustbgpd->A OPEN is {len(rust_a)} bytes, expected 342")
-need(rust_a[16:19] == bytes.fromhex("015601"), "rustbgpd->A header is not length 0x0156/type 1")
+need(len(rust_a) == 348, f"rustbgpd->A OPEN is {len(rust_a)} bytes, expected 348")
+need(rust_a[16:19] == bytes.fromhex("015c01"), "rustbgpd->A header is not length 0x015c/type 1")
 need(
-    rust_a[28:35] == bytes.fromhex("ffff0136020133"),
+    rust_a[28:35] == bytes.fromhex("ffff013c020139"),
     f"rustbgpd->A RFC 9072 prefix drifted: {rust_a[28:35].hex()}",
+)
+
+need(
+    decoded["rustbgpd->A"][2] == {(1, 1, 2), (1, 128, 2)},
+    "rustbgpd->A Extended Next Hop tuples must cover IPv4 unicast and VPNv4 with IPv6",
 )
 
 frr_b = decoded["FRR->B"][0]

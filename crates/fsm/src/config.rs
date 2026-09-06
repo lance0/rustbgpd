@@ -342,24 +342,31 @@ impl PeerConfig {
     /// Build Extended Next Hop capability entries for our outgoing OPEN
     /// message (RFC 8950).
     ///
-    /// The capability is advertised automatically when both IPv4 and IPv6
-    /// unicast are configured. We advertise support for IPv4 unicast NLRI
-    /// using an IPv6 next hop. With `disable_ipv4_unicast` set the IPv4
-    /// unicast family is never negotiated, so the capability is omitted.
+    /// Advertises IPv6 next-hop receive support for IPv4 unicast when both
+    /// unicast families are configured, and for `VPNv4` whenever that family
+    /// is configured. `disable_ipv4_unicast` suppresses only the unicast
+    /// entry; `VPNv4` does not require IPv6 unicast or `VPNv6` negotiation.
     #[must_use]
     pub fn extended_nexthop_capabilities(&self) -> Vec<ExtendedNextHopFamily> {
         let families = self.effective_families();
         let has_ipv4 = families.contains(&(Afi::Ipv4, Safi::Unicast));
         let has_ipv6 = families.contains(&(Afi::Ipv6, Safi::Unicast));
+        let mut capabilities = Vec::new();
         if has_ipv4 && has_ipv6 {
-            vec![ExtendedNextHopFamily {
+            capabilities.push(ExtendedNextHopFamily {
                 nlri_afi: Afi::Ipv4,
                 nlri_safi: Safi::Unicast,
                 next_hop_afi: Afi::Ipv6,
-            }]
-        } else {
-            Vec::new()
+            });
         }
+        if families.contains(&(Afi::Ipv4, Safi::MplsVpn)) {
+            capabilities.push(ExtendedNextHopFamily {
+                nlri_afi: Afi::Ipv4,
+                nlri_safi: Safi::MplsVpn,
+                next_hop_afi: Afi::Ipv6,
+            });
+        }
+        capabilities
     }
 
     /// The 2-byte `my_as` field for the OPEN wire format.
@@ -467,6 +474,45 @@ mod tests {
                 .iter()
                 .any(|cap| matches!(cap, Capability::ExtendedNextHop(_)))
         );
+    }
+
+    #[test]
+    fn local_capabilities_include_vpnv4_extended_nexthop_independently() {
+        for disable_ipv4_unicast in [false, true] {
+            for families in [
+                vec![(Afi::Ipv4, Safi::MplsVpn)],
+                vec![(Afi::Ipv4, Safi::MplsVpn), (Afi::Ipv6, Safi::MplsVpn)],
+                vec![
+                    (Afi::Ipv4, Safi::MplsVpn),
+                    (Afi::Ipv4, Safi::Unicast),
+                    (Afi::Ipv6, Safi::Unicast),
+                ],
+            ] {
+                let mut cfg = test_config();
+                cfg.families = families;
+                cfg.disable_ipv4_unicast = disable_ipv4_unicast;
+                let expected = ExtendedNextHopFamily {
+                    nlri_afi: Afi::Ipv4,
+                    nlri_safi: Safi::MplsVpn,
+                    next_hop_afi: Afi::Ipv6,
+                };
+                assert!(cfg.local_capabilities().iter().any(|cap| matches!(
+                    cap, Capability::ExtendedNextHop(entries) if entries.contains(&expected)
+                )));
+                let entries = cfg.extended_nexthop_capabilities();
+                assert_eq!(
+                    entries.iter().filter(|entry| **entry == expected).count(),
+                    1
+                );
+                assert_eq!(
+                    entries.iter().any(|entry| entry.nlri_safi == Safi::Unicast),
+                    !disable_ipv4_unicast && cfg.families.contains(&(Afi::Ipv6, Safi::Unicast))
+                );
+            }
+        }
+        let mut cfg = test_config();
+        cfg.families = vec![(Afi::Ipv6, Safi::MplsVpn)];
+        assert!(cfg.extended_nexthop_capabilities().is_empty());
     }
 
     #[test]
@@ -861,9 +907,24 @@ mod tests {
         cfg.prefix_orf_receive = true;
         cfg.local_role = Some(BgpRole::RouteServer);
 
+        assert_eq!(
+            cfg.extended_nexthop_capabilities(),
+            vec![
+                ExtendedNextHopFamily {
+                    nlri_afi: Afi::Ipv4,
+                    nlri_safi: Safi::Unicast,
+                    next_hop_afi: Afi::Ipv6,
+                },
+                ExtendedNextHopFamily {
+                    nlri_afi: Afi::Ipv4,
+                    nlri_safi: Safi::MplsVpn,
+                    next_hop_afi: Afi::Ipv6,
+                },
+            ]
+        );
         let capabilities = cfg.local_capabilities();
         let capability_octets: usize = capabilities.iter().map(Capability::encoded_len).sum();
-        assert_eq!(capability_octets, 307);
+        assert_eq!(capability_octets, 313);
 
         let open = OpenMessage {
             version: 4,
@@ -874,16 +935,16 @@ mod tests {
         };
         let encoded = encode_message(&Message::Open(open.clone())).unwrap();
 
-        // Mutation-red: reverting RFC 9072 framing makes the 307 capability
+        // Mutation-red: reverting RFC 9072 framing makes the 313 capability
         // octets fail the old u8 ceiling. Omitting any production capability
-        // changes the pinned 307/342-byte fleet fixture.
-        assert_eq!(encoded.len(), 342);
-        assert_eq!(open.encoded_len(), 342);
+        // changes the pinned 313/348-byte fleet fixture.
+        assert_eq!(encoded.len(), 348);
+        assert_eq!(open.encoded_len(), 348);
         assert_eq!(encoded[28], 255); // Non-Ext OP Len
         assert_eq!(encoded[29], 255); // Non-Ext OP Type marker
-        assert_eq!(&encoded[30..32], &310_u16.to_be_bytes());
+        assert_eq!(&encoded[30..32], &316_u16.to_be_bytes());
         assert_eq!(encoded[32], 2); // Capabilities Optional Parameter
-        assert_eq!(&encoded[33..35], &307_u16.to_be_bytes());
+        assert_eq!(&encoded[33..35], &313_u16.to_be_bytes());
 
         let decoded = decode_message(&mut encoded.freeze(), MAX_MESSAGE_LEN).unwrap();
         assert_eq!(decoded, Message::Open(open));

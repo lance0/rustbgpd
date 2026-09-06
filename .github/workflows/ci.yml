@@ -177,6 +177,7 @@ jobs:
           bash -n tests/interop/scripts/test-m111-srv6-l3vpn-reflection.sh
           shellcheck tests/interop/scripts/test-m111-srv6-l3vpn-reflection.sh
           python3 tests/interop/scripts/test_m111_capture_oracle.py
+          python3 tests/interop/scripts/test_m99_open_oracle.py
       - run: python3 scripts/check-v1-stable-surface.py
       - run: python3 scripts/reflow-release-notes.py --selftest
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings

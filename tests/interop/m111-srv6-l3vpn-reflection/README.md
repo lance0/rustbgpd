@@ -27,7 +27,8 @@ bash tests/interop/scripts/test-m111-srv6-l3vpn-reflection.sh
 Set `M111_ARTIFACT_DIR` to choose the output directory (default
 `/tmp/m111-srv6-l3vpn-artifacts`). The driver destroys its topology by default;
 set `CLEANUP=0` to retain it for investigation, then use `containerlab destroy`
-with the same topology file. Capture containers and volumes are always removed.
+with the same topology file. Capture containers and volumes created by the driver
+are always removed.
 
 The packet oracle independently reassembles both TCP sessions and checks:
 

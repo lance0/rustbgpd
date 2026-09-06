@@ -1,7 +1,7 @@
 # M99 — RFC 9072 extended OPEN against stock FRR 10.3.1.
 #
 # The first peer enables every production capability attachment so its OPEN is
-# the fleet maximum pinned by crates/fsm: 307 capability octets and 342 bytes
+# the fleet maximum pinned by crates/fsm: 313 capability octets and 348 bytes
 # total. The second peer is the exact 49-byte classic-format control.
 
 [global]
