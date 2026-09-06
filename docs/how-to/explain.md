@@ -42,6 +42,11 @@ translates the usual show-commands into these.
 <a id="best-path-explain--decisive-comparison-attribution"></a>
 ## Best-path explain
 
+Best-path and export explanations infer IPv4 or IPv6 from the exact prefix.
+An optional `--family` must be a matching IPv4/IPv6 unicast alias; conflicting
+or unsupported families fail before connecting. The `--rd` and `--labeled`
+selectors on `rib advertised --explain` choose VPN and labeled-unicast explanations.
+
 Why did this path win? Every losing candidate is annotated with the
 decisive comparison step (`only_path`, `higher_local_pref`,
 `shorter_as_path`, `lower_origin`, `lower_med`, ... down to

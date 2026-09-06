@@ -2118,6 +2118,36 @@ fn reject_duplicate_route_view_option<T>(
     Ok(())
 }
 
+fn validate_explain_family(family: Option<&str>, prefix: Option<&str>) -> Result<(), CliError> {
+    let prefix = prefix.ok_or_else(|| {
+        CliError::Argument("--explain requires --prefix with an exact CIDR".into())
+    })?;
+    let Some(family) = family else {
+        return Ok(());
+    };
+    let ipv4 = match parse_family(family) {
+        Some(value) if value == proto::AddressFamily::Ipv4Unicast as i32 => true,
+        Some(value) if value == proto::AddressFamily::Ipv6Unicast as i32 => false,
+        Some(_) => {
+            return Err(CliError::Argument(format!(
+                "--explain does not support address family: {family}"
+            )));
+        }
+        None => {
+            return Err(CliError::Argument(format!(
+                "unknown address family: {family}"
+            )));
+        }
+    };
+    let (address, _) = output::parse_prefix_addr(prefix).map_err(CliError::Argument)?;
+    if address.is_ipv4() != ipv4 {
+        return Err(CliError::Argument(format!(
+            "--family {family} does not match prefix {prefix}"
+        )));
+    }
+    Ok(())
+}
+
 /// Reject route-view combinations before opening the gRPC transport.
 ///
 /// Clap catches conflicts within one argument scope, but parent-compatible
@@ -2146,6 +2176,9 @@ fn validate_rib_route_view_action(command: &Command) -> Result<(), CliError> {
 
     match action {
         None => {
+            if *parent_explain {
+                validate_explain_family(family.as_deref(), prefix.as_deref())?;
+            }
             if limit.is_some() && *parent_explain {
                 return Err(CliError::Argument(
                     "--explain cannot be combined with --limit".into(),
@@ -2246,6 +2279,12 @@ fn validate_rib_route_view_action(command: &Command) -> Result<(), CliError> {
                 return Err(CliError::Argument(
                     "--explain cannot be combined with --limit".into(),
                 ));
+            }
+            if *explain {
+                validate_explain_family(
+                    family.as_deref().or(view_family.as_deref()),
+                    prefix.as_deref().or(filters.prefix.as_deref()),
+                )?;
             }
         }
         Some(_) if limit.is_some() => {
@@ -7395,6 +7434,46 @@ printf '%s\n' "${COMPREPLY[@]}"
         }
     }
 
+    #[test]
+    fn rib_explain_family_preserves_matching_aliases_and_selectors() {
+        for (prefix, families) in [
+            ("203.0.113.0/24", ["ipv4", "ipv4_unicast", "ipv4-unicast"]),
+            ("2001:db8::/32", ["ipv6", "ipv6_unicast", "ipv6-unicast"]),
+        ] {
+            for family in std::iter::once("").chain(families) {
+                let family = if family.is_empty() {
+                    String::new()
+                } else {
+                    format!("--family {family}")
+                };
+                for command in [
+                    format!("rib {family} --prefix {prefix} --explain"),
+                    format!("rib {family} --prefix {prefix} advertised 192.0.2.1 --explain"),
+                    format!("rib advertised 192.0.2.1 {family} --prefix {prefix} --explain"),
+                ] {
+                    let cli = Cli::try_parse_from(
+                        std::iter::once("rbgp").chain(command.split_whitespace()),
+                    )
+                    .unwrap();
+                    validate_rib_route_view_action(&cli.command).unwrap();
+                    validate_local_command(&cli.command).unwrap();
+                }
+                for selector in [
+                    "--rd 65000:100",
+                    "--labeled",
+                    "--source-peer 198.51.100.2 --source-path-id 0",
+                ] {
+                    let command = format!(
+                        "rbgp rib advertised 192.0.2.1 {family} --prefix {prefix} --explain {selector}"
+                    );
+                    let cli = Cli::try_parse_from(command.split_whitespace()).unwrap();
+                    validate_rib_route_view_action(&cli.command).unwrap();
+                    validate_local_command(&cli.command).unwrap();
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn local_argument_errors_fail_before_transport() {
         for (args, expected) in [
@@ -7417,6 +7496,38 @@ printf '%s\n' "${COMPREPLY[@]}"
             (
                 "policy explain --neighbor 10.0.0.2 --prefix 10.0.0.0/24 --path-id 3 --direction export",
                 commands::policy::EXPLAIN_EXPORT_PATH_ID_ERROR,
+            ),
+            (
+                "rib --family ipv6 --prefix 203.0.113.0/24 --explain",
+                "--family ipv6 does not match prefix 203.0.113.0/24",
+            ),
+            (
+                "rib advertised 192.0.2.1 --explain",
+                "--explain requires --prefix with an exact CIDR",
+            ),
+            (
+                "rib advertised 192.0.2.1 --family ipv4 --explain",
+                "--explain requires --prefix with an exact CIDR",
+            ),
+            (
+                "rib --family ipv4 --prefix 2001:db8::/32 --explain",
+                "--family ipv4 does not match prefix 2001:db8::/32",
+            ),
+            (
+                "rib --family ipv6 --prefix 203.0.113.0/24 advertised 192.0.2.1 --explain",
+                "--family ipv6 does not match prefix 203.0.113.0/24",
+            ),
+            (
+                "rib advertised 192.0.2.1 --family ipv4 --prefix 2001:db8::/32 --explain",
+                "--family ipv4 does not match prefix 2001:db8::/32",
+            ),
+            (
+                "rib --family ipv4_flowspec --prefix 203.0.113.0/24 --explain",
+                "--explain does not support address family: ipv4_flowspec",
+            ),
+            (
+                "rib advertised 192.0.2.1 --family bgpls --prefix 203.0.113.0/24 --explain",
+                "--explain does not support address family: bgpls",
             ),
             ("watch --family bogus", "unknown address family: bogus"),
             (
