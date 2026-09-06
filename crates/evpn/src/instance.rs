@@ -27,6 +27,26 @@ use crate::route_target::RouteTarget;
 /// Maximum 24-bit VXLAN Network Identifier (RFC 8365 §5).
 pub const MAX_VNI: u32 = (1 << 24) - 1;
 
+/// Whether an advertisement can be consumed by the local VXLAN profile.
+/// RFC 8365 §6 requires a common advertised encapsulation; absence uses the
+/// statically configured VXLAN fallback. Global retention/export is separate.
+#[must_use]
+pub fn vxlan_encapsulation_compatible(attributes: &[PathAttribute]) -> bool {
+    let mut advertised = false;
+    for encapsulation in attributes
+        .iter()
+        .filter_map(PathAttribute::extended_communities)
+        .flatten()
+        .filter_map(|ec| ec.as_bgp_encapsulation())
+    {
+        if encapsulation == 8 {
+            return true;
+        }
+        advertised = true;
+    }
+    !advertised
+}
+
 /// A validated 24-bit VXLAN Network Identifier (RFC 8365 §5).
 ///
 /// Constructed only via [`EvpnInstanceId::new`], which rejects 0 (RFC
@@ -257,7 +277,8 @@ impl EvpnInstance {
     }
 
     /// Whether a route belongs to this local VLAN-based EVI: matching VNI,
-    /// zero Ethernet Tag, and at least one configured Route Target.
+    /// zero Ethernet Tag, at least one configured Route Target, and compatible
+    /// encapsulation for the local VXLAN profile.
     /// This gates local consumption, not global RIB retention or export.
     #[must_use]
     pub fn imports_evi(
@@ -268,6 +289,7 @@ impl EvpnInstance {
     ) -> bool {
         vni == self.id.as_u32()
             && ethernet_tag.0 == 0
+            && vxlan_encapsulation_compatible(attributes)
             && attributes
                 .iter()
                 .filter_map(PathAttribute::extended_communities)
@@ -522,6 +544,30 @@ mod tests {
             false,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn vxlan_encapsulation_uses_exact_decoder_and_all_attributes() {
+        use rustbgpd_wire::ExtendedCommunity;
+        let nvgre = ExtendedCommunity::bgp_encapsulation(9);
+        let vxlan = ExtendedCommunity::bgp_encapsulation(8);
+        assert!(vxlan_encapsulation_compatible(&[]));
+        assert!(!vxlan_encapsulation_compatible(&[
+            PathAttribute::ExtendedCommunities(vec![nvgre]),
+        ]));
+        assert!(vxlan_encapsulation_compatible(&[
+            PathAttribute::ExtendedCommunities(vec![nvgre]),
+            PathAttribute::ExtendedCommunitiesPartial(vec![vxlan]),
+        ]));
+        for type_byte in [0x43_u64, 0x83, 0xc3] {
+            let unassigned = ExtendedCommunity::new((type_byte << 56) | 0x000c_0000_0000_0008);
+            assert!(vxlan_encapsulation_compatible(&[
+                PathAttribute::ExtendedCommunities(vec![unassigned]),
+            ]));
+            assert!(!vxlan_encapsulation_compatible(&[
+                PathAttribute::ExtendedCommunitiesPartial(vec![nvgre, unassigned]),
+            ]));
+        }
     }
 
     #[test]

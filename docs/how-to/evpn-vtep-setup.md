@@ -136,6 +136,20 @@ by remote VTEPs. Previously installed Type 2 rows that fail these requirements
 are removed from local forwarding and gateway-IP resolution; correct the
 sender's RTs or the intended instance configuration before upgrading.
 
+### VXLAN encapsulation compatibility
+
+Local Type 2, Type 5, and EAD-per-EVI consumers require a compatible
+encapsulation. When a route advertises BGP Encapsulation extended communities,
+at least one must specify VXLAN (`8`). A set containing both VXLAN and NVGRE
+qualifies; NVGRE-only, MPLS-only, or other sets without VXLAN do not. When
+the community is absent, the configured VXLAN profile supplies the fallback,
+as allowed by [RFC 8365 section 6](https://www.rfc-editor.org/rfc/rfc8365.html#section-6).
+
+This check applies to forwarding, mobility, gateway resolution, and alias or
+backup selection. It leaves global EVPN retention and reflection unchanged.
+Before upgrading, correct explicitly incompatible advertisements: their local
+FDB, prefix, or next-hop state is removed when the updated daemon reconciles.
+
 ### MAC+IP origination (ARP/ND suppression)
 
 To originate Type 2 routes carrying the host IP (MAC+IP), enable

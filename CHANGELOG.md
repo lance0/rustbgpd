@@ -297,7 +297,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `rbgp policy check --coverage-matched-min PCT` independently gates the
   percentage of source terms matched by in-language tests. Coverage reports
   include matched totals; existing evaluated-term percentages and
-  `--coverage-min` semantics remain unchanged. Matched coverage does not
+  valid `--coverage-min` semantics remain unchanged. Matched coverage does not
   guarantee branch coverage or detect every widened guard.
 
 ### Changed
@@ -499,6 +499,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   raw scrapes, process epochs, and actual daemon logs. An opt-in proof mode
   requires ten active minutes after readiness, sustained churn, recovery,
   and owned-resource cleanup without treating missing scrapes as zero.
+
+- `rbgp policy check --coverage-min` rejects nonfinite and out-of-range
+  percentages instead of allowing `NaN` or negative values to bypass the
+  evaluated-coverage gate. Valid thresholds retain their existing behavior.
+
+- Reject explicitly incompatible EVPN encapsulations before local VXLAN
+  forwarding, mobility, and gateway or alias/backup resolution. Absent
+  encapsulation uses the configured VXLAN fallback; advertised sets containing
+  VXLAN remain eligible. Global retention and reflection are unchanged.
 
 - Preserve fresh routes and live peer state when GR or LLGR retention expires
   while a re-established peer's initial outbound registration is deferred.
@@ -783,6 +792,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Existing higher local sequences never decrease. Withdrawn, quarantined, or
   drained routes stay suppressed until normal local replay permits origination.
   A host learned only from the ES peer is still not originated locally.
+
+- **Coverage thresholds require finite percentages from 0 through 100:**
+  invalid `--coverage-min` values now exit 2 before loading the policy file.
+  Previously, `NaN` and negative values could pass, while values above 100
+  and positive infinity forced a coverage failure (exit 3). Valid percentages,
+  including fractional and scientific notation, retain their existing results
+  and diagnostic/test-failure precedence.
+
+- **EVPN VXLAN import:** Type 2, Type 5, and EAD-per-EVI advertisements with
+  explicit encapsulation sets lacking VXLAN no longer contribute local state.
+  Check remote Encapsulation communities before upgrading; absent communities
+  continue to use the configured VXLAN profile. See
+  [encapsulation compatibility](docs/how-to/evpn-vtep-setup.md#vxlan-encapsulation-compatibility).
 
 - **EVPN RPCs apply the configuration MAC and ESI grammar:** `AddEvpnRoute`,
   `DeleteEvpnRoute`, and `ClearDuplicateMacQuarantine` now parse `mac` and

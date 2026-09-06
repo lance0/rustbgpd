@@ -747,11 +747,11 @@ enum PolicyAction {
         /// by itself
         #[arg(long)]
         coverage: bool,
-        /// Minimum acceptable exercised-term percentage (implies
-        /// --coverage): exit 3 when coverage falls below PCT (CI
-        /// gate). Diagnostics (1) and test failures (2) take
+        /// Minimum acceptable exercised-term percentage, from 0 through
+        /// 100 (implies --coverage): exit 3 when coverage falls below
+        /// PCT (CI gate). Diagnostics (1) and test failures (2) take
         /// precedence
-        #[arg(long, value_name = "PCT")]
+        #[arg(long, value_name = "PCT", value_parser = parse_coverage_percentage)]
         coverage_min: Option<f64>,
         /// Minimum acceptable matched-term percentage, from 0 through
         /// 100 (implies --coverage): exit 3 when fewer source terms
