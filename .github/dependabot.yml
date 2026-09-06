@@ -1,9 +1,10 @@
 # Dependabot config — keeps Cargo dependencies and GitHub Actions
-# pinned versions current. The single workspace-root Cargo entry
-# covers the daemon and every workspace crate, including the
+# pinned versions current. The primary workspace-root Cargo entry
+# covers the daemon and its workspace crates, including the
 # published ones, through the shared Cargo.lock. Member manifests
 # inherit workspace fields, so a per-crate directory entry cannot
-# resolve them and must not be added.
+# replace the workspace entry. The independent scale workspace has
+# its own entry and lockfile; its path dependencies share root fields.
 #
 # Cadence: weekly. The Cargo ecosystem tends to produce a steady
 # trickle of patch releases (tonic, prost, tokio); weekly avoids
@@ -23,6 +24,13 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 10
+    # Keep direct updates and admit the HTTP stack's lock-only dependencies.
+    allow:
+      - dependency-type: "direct"
+      - dependency-name: "hyper*"
+        dependency-type: "indirect"
+      - dependency-name: "h2"
+        dependency-type: "indirect"
     groups:
       netlink-stack:
         patterns:
@@ -64,6 +72,15 @@ updates:
         update-types: ["version-update:semver-major"]
       # Workspace-internal crates are path deps; updates land via the
       # release process, not Dependabot.
+      - dependency-name: "rustbgpd-*"
+
+  # Independent scale workspace, including profiling and load harnesses.
+  - package-ecosystem: "cargo"
+    directory: "/bench/scale"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    ignore:
       - dependency-name: "rustbgpd-*"
 
   # GitHub Actions versions in workflows/. Catches deprecation
