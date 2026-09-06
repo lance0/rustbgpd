@@ -13,6 +13,11 @@ document them in `--help`; those codes apply after parsing.
 
 ## Commands
 
+Root help groups commands by task: Inspect, Routes, Policy, Configuration,
+Diagnostics, and Reference. `rbgp man` uses the same groups in its command
+index. Existing command paths and aliases are unchanged; use
+`rbgp <command> --help` for each command's flags and subcommands.
+
 ### Runtime Snapshot
 
 ```bash

@@ -296,6 +296,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   wraps long lines (`less -FRX` in auto mode, `less -RX` in always mode);
   explicit `RBGP_PAGER` and `PAGER` arguments remain unchanged.
 
+- Root `rbgp` help and the man-page command index group commands by task,
+  preserving command paths, aliases, and subcommand help.
+
 - The three example programs (`event-bridge`, `peer-loop`, `birdwatcher-adapter`)
   now build under the same lint policy as the workspace crates
   (`deny(unsafe_code)`, `deny(clippy::all)`, `warn(clippy::pedantic)`).
