@@ -40,7 +40,7 @@ class EmbeddingVersionContractTests(unittest.TestCase):
 
     def test_each_wire_snippet_is_guarded(self) -> None:
         """Fails if any wire dependency example drifts to 0.15.0."""
-        old = 'rustbgpd-wire = "0.19.0"'
+        old = 'rustbgpd-wire = "0.20.0"'
         for occurrence in (0, 1, 2):
             with self.subTest(occurrence=occurrence):
                 self.assert_fails(
@@ -51,26 +51,26 @@ class EmbeddingVersionContractTests(unittest.TestCase):
     def test_fsm_snippet_is_guarded(self) -> None:
         """Fails if the FSM dependency example drifts to 0.3.1."""
         self.assert_fails(
-            self.replace_nth('rustbgpd-fsm = "0.6.0"', 'rustbgpd-fsm = "0.3.1"'),
+            self.replace_nth('rustbgpd-fsm = "0.7.0"', 'rustbgpd-fsm = "0.3.1"'),
             "fsm-snippet-version",
         )
 
     def test_rpki_snippet_is_guarded(self) -> None:
         """Fails if the RPKI dependency example drifts from the published release."""
         self.assert_fails(
-            self.replace_nth('rustbgpd-rpki = "0.1.0"', 'rustbgpd-rpki = "0.0.1"'),
+            self.replace_nth('rustbgpd-rpki = "0.2.0"', 'rustbgpd-rpki = "0.0.1"'),
             "rpki-snippet-version",
         )
 
     def test_rpki_path_snippet_is_rejected(self) -> None:
         """Fails if the published RPKI release is demoted back to a path dependency."""
         for replacement in (
-            'rustbgpd-rpki = { version = "0.1.0", path = "../rustbgpd/crates/rpki" }',
-            'rustbgpd-rpki = { version = "0.1.0" }',
+            'rustbgpd-rpki = { version = "0.2.0", path = "../rustbgpd/crates/rpki" }',
+            'rustbgpd-rpki = { version = "0.2.0" }',
         ):
             with self.subTest(replacement=replacement):
                 self.assert_fails(
-                    self.replace_nth('rustbgpd-rpki = "0.1.0"', replacement),
+                    self.replace_nth('rustbgpd-rpki = "0.2.0"', replacement),
                     "rpki-snippet-version",
                 )
 
@@ -87,9 +87,9 @@ class EmbeddingVersionContractTests(unittest.TestCase):
     def test_publish_statuses_are_guarded(self) -> None:
         """Fails if any numbered publish heading names an old version."""
         published_mutations = (
-            ("wire", "0.19.0", "0.17.2"),
-            ("fsm", "0.6.0", "0.4.1"),
-            ("rpki", "0.1.0", "0.0.1"),
+            ("wire", "0.20.0", "0.17.2"),
+            ("fsm", "0.7.0", "0.4.1"),
+            ("rpki", "0.2.0", "0.0.1"),
         )
         for package, current, old in published_mutations:
             with self.subTest(package=package):
@@ -100,7 +100,7 @@ class EmbeddingVersionContractTests(unittest.TestCase):
 
     def test_current_boundary_is_guarded(self) -> None:
         """Fails if §7 loses any authoritative registry-version slot."""
-        for package, version in (("wire", "0.19.0"), ("fsm", "0.6.0"), ("rpki", "0.1.0")):
+        for package, version in (("wire", "0.20.0"), ("fsm", "0.7.0"), ("rpki", "0.2.0")):
             with self.subTest(package=package):
                 self.assert_fails(
                     self.replace_nth(
@@ -113,13 +113,13 @@ class EmbeddingVersionContractTests(unittest.TestCase):
     def test_prepared_boundary_is_guarded(self) -> None:
         """Fails if §7 loses any authoritative prepared-version slot.
 
-        All three crates are staged ahead of the registry, so each prepared
-        version has its own authoritative slot.
+        Published and prepared coincide right after a release, so both
+        boundaries name the same string and the prepared slot is the second.
         """
         for package, version, occurrence in (
-            ("wire", "0.20.0", 0),
-            ("fsm", "0.7.0", 0),
-            ("rpki", "0.2.0", 0),
+            ("wire", "0.20.0", 1),
+            ("fsm", "0.7.0", 1),
+            ("rpki", "0.2.0", 1),
         ):
             with self.subTest(package=package):
                 self.assert_fails(
@@ -134,7 +134,7 @@ class EmbeddingVersionContractTests(unittest.TestCase):
     def test_coordinated_published_version_drift_is_rejected(self) -> None:
         """Published prose and snippets cannot drift together from the known release."""
         self.assert_fails(
-            DOCUMENT.replace("0.19.0", "9.9.9"),
+            DOCUMENT.replace("0.20.0", "9.9.9"),
             "current-boundary-version",
         )
 
@@ -147,9 +147,17 @@ class EmbeddingVersionContractTests(unittest.TestCase):
 
     def test_prepared_clause_expresses_a_tree_ahead_of_the_registry(self) -> None:
         """A subsequent prepared patch keeps the published boundary unchanged."""
-        changed = DOCUMENT.replace("`0.20.0` prepared", "`0.20.1` prepared", 1)
+        # Published and prepared coincide, so stage wire ahead first: add the
+        # clause to its status entry and move the second (prepared) boundary.
+        changed = DOCUMENT.replace(
+            "**`rustbgpd-wire` (published as `0.20.0`).**",
+            "**`rustbgpd-wire` (published as `0.20.0`; `0.20.1` prepared).**",
+            1,
+        )
         self.assertNotEqual(changed, DOCUMENT)
-        changed = changed.replace("`rustbgpd-wire 0.20.0`", "`rustbgpd-wire 0.20.1`", 1)
+        head, sep, tail = changed.rpartition("`rustbgpd-wire 0.20.0`")
+        self.assertTrue(sep)
+        changed = head + "`rustbgpd-wire 0.20.1`" + tail
         self.assertEqual(
             check(changed, {"wire": "0.20.1", "fsm": "0.7.0", "rpki": "0.2.0"}),
             [],
@@ -157,22 +165,22 @@ class EmbeddingVersionContractTests(unittest.TestCase):
 
     def test_a_staged_version_cannot_hide_by_omitting_the_prepared_clause(self) -> None:
         """Every absent clause falsely claims that the tree equals the registry."""
-        versions = {"wire": "0.20.0", "fsm": "0.7.0", "rpki": "0.2.0"}
-        for version in versions.values():
-            with self.subTest(version=version):
-                changed = DOCUMENT.replace(f"; `{version}` prepared", "", 1)
-                self.assertNotEqual(changed, DOCUMENT)
-                self.assertIn("publish-status-version", check(changed, versions))
-        errors = check(DOCUMENT, {**versions, "wire": "0.20.1"})
-        self.assertIn("publish-status-version", errors)
-        self.assertIn("prepared-boundary-version", errors)
+        published = {"wire": "0.20.0", "fsm": "0.7.0", "rpki": "0.2.0"}
+        staged = {"wire": "0.21.0", "fsm": "0.8.0", "rpki": "0.3.0"}
+        for package, ahead in staged.items():
+            with self.subTest(package=package):
+                # The document omits the clause, which claims tree == registry.
+                # A manifest running ahead must therefore fail on both guards.
+                errors = check(DOCUMENT, {**published, package: ahead})
+                self.assertIn("publish-status-version", errors)
+                self.assertIn("prepared-boundary-version", errors)
 
     def test_rpki_wire_pair_is_guarded(self) -> None:
-        """The first RPKI line cannot silently pair back to wire 0.18."""
+        """The RPKI line cannot silently pair back to an older wire."""
         self.assert_fails(
             self.replace_nth(
-                "first `0.1.0` release starts directly on wire `0.19.0`",
-                "first `0.1.0` release starts directly on wire `0.18.0`",
+                "The RPKI `0.2.0` line pairs with wire `0.20.0`",
+                "The RPKI `0.2.0` line pairs with wire `0.19.0`",
             ),
             "rpki-wire-pair",
         )
@@ -181,8 +189,8 @@ class EmbeddingVersionContractTests(unittest.TestCase):
         """The published FSM line cannot silently pair back to wire 0.18."""
         self.assert_fails(
             self.replace_nth(
-                "The `0.6.0` line pairs with wire `0.19.0`",
-                "The `0.6.0` line pairs with wire `0.18.0`",
+                "The `0.7.0` line pairs with wire `0.20.0`",
+                "The `0.7.0` line pairs with wire `0.18.0`",
             ),
             "fsm-wire-pair",
         )
@@ -191,8 +199,8 @@ class EmbeddingVersionContractTests(unittest.TestCase):
         """Fails if the published RPKI release is relabeled as merely prepared."""
         self.assert_fails(
             self.replace_nth(
-                "3. **`rustbgpd-rpki` (published as `0.1.0`; `0.2.0` prepared).**",
-                "3. **`rustbgpd-rpki` (first publish prepared as `0.1.0`).**",
+                "3. **`rustbgpd-rpki` (published as `0.2.0`).**",
+                "3. **`rustbgpd-rpki` (publish prepared as `0.2.0`).**",
             ),
             "publish-status-version",
         )
@@ -223,8 +231,8 @@ class EmbeddingVersionContractTests(unittest.TestCase):
     def test_duplicate_truthful_dependency_assignments_are_allowed(self) -> None:
         """A second equivalent example does not make the version contract ambiguous."""
         assignments = (
-            'rustbgpd-wire = "0.19.0"',
-            'rustbgpd-rpki = "0.1.0"',
+            'rustbgpd-wire = "0.20.0"',
+            'rustbgpd-rpki = "0.2.0"',
         )
         for assignment in assignments:
             with self.subTest(assignment=assignment):
@@ -241,15 +249,15 @@ class EmbeddingVersionContractTests(unittest.TestCase):
             (root / "Cargo.toml").write_text(
                 "[workspace]\n"
                 "[workspace.dependencies]\n"
-                'rustbgpd-wire = { version = "0.19.0", path = "crates/wire" }\n'
-                'rustbgpd-fsm = { version = "0.6.0", path = "crates/fsm" }\n'
-                'rustbgpd-rpki = { version = "0.1.0", path = "crates/rpki" }\n',
+                'rustbgpd-wire = { version = "0.20.0", path = "crates/wire" }\n'
+                'rustbgpd-fsm = { version = "0.7.0", path = "crates/fsm" }\n'
+                'rustbgpd-rpki = { version = "0.2.0", path = "crates/rpki" }\n',
                 encoding="utf-8",
             )
             for path, package, version in (
-                ("crates/wire/Cargo.toml", "rustbgpd-wire", "0.19.0"),
-                ("crates/fsm/Cargo.toml", "rustbgpd-fsm", "0.6.0"),
-                ("crates/rpki/Cargo.toml", "rustbgpd-rpki", "0.1.0"),
+                ("crates/wire/Cargo.toml", "rustbgpd-wire", "0.20.0"),
+                ("crates/fsm/Cargo.toml", "rustbgpd-fsm", "0.7.0"),
+                ("crates/rpki/Cargo.toml", "rustbgpd-rpki", "0.2.0"),
             ):
                 (root / path).write_text(
                     f'[package]\nname = "{package}"\nversion = "{version}"\n',
@@ -257,13 +265,13 @@ class EmbeddingVersionContractTests(unittest.TestCase):
                 )
             self.assertEqual(
                 manifest_versions(root),
-                {"wire": "0.19.0", "fsm": "0.6.0", "rpki": "0.1.0"},
+                {"wire": "0.20.0", "fsm": "0.7.0", "rpki": "0.2.0"},
             )
 
             root_manifest = (root / "Cargo.toml").read_text(encoding="utf-8")
             (root / "Cargo.toml").write_text(
                 root_manifest.replace(
-                    'rustbgpd-wire = { version = "0.19.0"',
+                    'rustbgpd-wire = { version = "0.20.0"',
                     'rustbgpd-wire = { version = "9.9.9"',
                 ),
                 encoding="utf-8",

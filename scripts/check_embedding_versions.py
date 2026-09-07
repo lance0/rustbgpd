@@ -7,7 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGES = ("wire", "fsm", "rpki")
-PUBLISHED_VERSIONS = {"wire": "0.19.0", "fsm": "0.6.0", "rpki": "0.1.0"}
+PUBLISHED_VERSIONS = {"wire": "0.20.0", "fsm": "0.7.0", "rpki": "0.2.0"}
 MANIFESTS = {
     "wire": ("rustbgpd-wire", Path("crates/wire/Cargo.toml"), "crates/wire"),
     "fsm": ("rustbgpd-fsm", Path("crates/fsm/Cargo.toml"), "crates/fsm"),
@@ -153,7 +153,7 @@ def check(document: str, prepared_versions: dict[str, str] | None = None) -> lis
         errors.append("publish-status-version")
 
     rpki_pair = re.findall(
-        r"first `([^`]+)` release starts directly on wire `([^`]+)`",
+        r"The RPKI `([^`]+)` line pairs with wire `([^`]+)`",
         sections["publish"],
     )
     if rpki_pair != [(PUBLISHED_VERSIONS["rpki"], PUBLISHED_VERSIONS["wire"])]:

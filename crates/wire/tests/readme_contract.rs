@@ -342,7 +342,7 @@ fn usage_matches_the_published_wire_contract() {
     let usage = section(README, "## Usage");
     // The prepared package can be ahead of crates.io; the ordinary registry
     // example must retain the published release until publication.
-    assert!(usage.contains(&expected_dependency_block("0.19.0")));
+    assert!(usage.contains(&expected_dependency_block("0.20.0")));
     assert!(usage.contains(&format!(
         "rustbgpd-wire = {{ version = \"{}\", path = \"../rustbgpd/crates/wire\" }}",
         env!("CARGO_PKG_VERSION")

@@ -18,7 +18,7 @@ Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 
 ### 0.20.0 compatibility note
 
-`rustbgpd-wire` 0.20.0 is prepared for release. The new public inspection
+`rustbgpd-wire` 0.20.0 is released. The new public inspection
 helper and types use a new pre-1.0 compatibility line. Existing items and
 signatures remain available, but consumers sharing wire types with FSM or
 RPKI must move together to FSM 0.7 and RPKI 0.2. Consumers should account for
@@ -299,12 +299,12 @@ Add the published codec and its buffer type as direct dependencies:
 
 ```toml
 [dependencies]
-rustbgpd-wire = "0.19.0"
+rustbgpd-wire = "0.20.0"
 bytes = "1"
 ```
 
-Prepared `0.20.0`, including `decode_prefix_sid_services`, is not yet on
-crates.io. To use it from a source checkout, use the matching versioned path:
+To use the crate from a source checkout instead, use the matching versioned
+path:
 
 ```toml
 [dependencies]

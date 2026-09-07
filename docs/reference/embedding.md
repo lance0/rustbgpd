@@ -167,7 +167,7 @@ This is the "MRT reader / monitor / analyzer" consumer. Links only
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-wire = "0.19.0"
+rustbgpd-wire = "0.20.0"
 bytes = "1"
 ```
 
@@ -227,8 +227,8 @@ intentional split (ADR-0002: inherent methods, no I/O in the FSM).
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-wire = "0.19.0"
-rustbgpd-fsm = "0.6.0"
+rustbgpd-wire = "0.20.0"
+rustbgpd-fsm = "0.7.0"
 bytes = "1"
 tokio = { version = "1", features = ["net", "io-util", "time", "rt"] }
 ```
@@ -292,8 +292,8 @@ available, so this example resolves entirely from crates.io.
 ```toml
 # Cargo.toml
 [dependencies]
-rustbgpd-rpki = "0.1.0"
-rustbgpd-wire = "0.19.0"
+rustbgpd-rpki = "0.2.0"
+rustbgpd-wire = "0.20.0"
 ```
 
 ```rust
@@ -370,7 +370,7 @@ registry dependency (§3.4); its published pairing with wire is recorded in §7.
 current paired boundary, `rpki` on its first release. `rib`, `bmp`, `mrt`, and
 `policy` remain demand-gated.**
 
-1. **`rustbgpd-wire` (published as `0.19.0`; `0.20.0` prepared).** This is the foundation —
+1. **`rustbgpd-wire` (published as `0.20.0`).** This is the foundation —
    dependent crate versions cannot publish before their wire dependency exists
    on crates.io. `0.15.0` brought `Capability::PathsLimit`
    with its `PathsLimitFamily` entry type (experimental capability code 76),
@@ -459,7 +459,7 @@ current paired boundary, `rpki` on its first release. `rib`, `bmp`, `mrt`, and
    Valid nested unknown/reserved values remain opaque; see the
    [framing contract](path-attribute-registry.md#srv6-service-framing-within-prefix-sid).
 
-2. **`rustbgpd-fsm` (published as `0.6.0`; `0.7.0` prepared).** The `0.4.0` release makes no
+2. **`rustbgpd-fsm` (published as `0.7.0`).** The `0.4.0` release makes no
    FSM API changes of its own — it exists because the FSM's public surface
    re-exports `rustbgpd-wire` types (`Action` carries wire messages), so the
    wire `0.16.2 → 0.17.0` breaking transition changes the identity of those
@@ -501,12 +501,12 @@ current paired boundary, `rpki` on its first release. `rib`, `bmp`, `mrt`, and
      is `#[non_exhaustive]` or gets a constructor/default path. The published
      crate already has the forward-compat boundary: `PeerConfig`,
      `NegotiatedSession`, `Event`, and `Action` are `#[non_exhaustive]`.
-   The `0.6.0` line pairs with wire `0.19.0`, which changes the identity of
+   The `0.7.0` line pairs with wire `0.20.0`, which changes the identity of
    wire types exposed through the FSM, so an embedder still on `0.5.0` moves
    both crates in one step. It also adds `Event::AdministrativeReset` to the
    non-exhaustive event enum.
 
-3. **`rustbgpd-rpki` (published as `0.1.0`; `0.2.0` prepared).** This is the crate's first
+3. **`rustbgpd-rpki` (published as `0.2.0`).** This is the crate's first
    registry release. Why it is independent:
    - Its direct dependencies are `rustbgpd-wire`, `tokio`, `tracing`,
      `smallvec`, `thiserror`, and `rustc-hash`; it has no `rib`/`policy` edge.
@@ -517,7 +517,8 @@ current paired boundary, `rpki` on its first release. `rib`, `bmp`, `mrt`, and
      public module path, including the raw RTR PDU codec. That first publish
      froze those paths: breaking Rust API or an incompatible public wire-type
      move now requires `0.2.0`. There was no earlier public RPKI line to bump
-     away from, so the first `0.1.0` release starts directly on wire `0.19.0`.
+     away from, so the first release, `0.1.0`, started directly on wire
+     `0.19.0`. The RPKI `0.2.0` line pairs with wire `0.20.0`.
 
 4. **Later: `rib`, `bmp`, `mrt`, `policy`.** These pull in heavier deps
    (`prefix-trie`, `ipnet`, `flate2`, `chrono`) and have more churn. Publish
@@ -588,8 +589,8 @@ To be the de facto Rust BGP codec, the concrete gaps:
 
 ## 7. Published-crate release boundary
 
-Registry-visible releases are `rustbgpd-wire 0.19.0`,
-`rustbgpd-fsm 0.6.0`, and `rustbgpd-rpki 0.1.0`. The registry
+Registry-visible releases are `rustbgpd-wire 0.20.0`,
+`rustbgpd-fsm 0.7.0`, and `rustbgpd-rpki 0.2.0`. The registry
 dependency examples in §3 name only those published versions.
 
 The prepared package boundary is `rustbgpd-wire 0.20.0`,
