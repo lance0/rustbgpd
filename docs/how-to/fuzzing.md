@@ -51,21 +51,35 @@ reachable input space: decode → encode → decode must reproduce the value.
 
 ## Running locally
 
-Requires the reviewed nightly and cargo-fuzz release
-(`cargo install cargo-fuzz --version 0.13.2 --locked`).
+Requires the reviewed nightly in `fuzz/rust-nightly.txt` and cargo-fuzz 0.13.2
+(`cargo install cargo-fuzz --version 0.13.2 --locked`). From the repository root:
 
 ```sh
-cd crates/wire
-cargo +nightly fuzz list
-cargo +nightly fuzz run encode_update fuzz/corpus/encode_update fuzz/seeds/encode_update -- -max_total_time=300 -max_len=4096
+rustup toolchain install "$(cat fuzz/rust-nightly.txt)"
+just fuzz-list
+just fuzz wire encode_update fuzz/corpus/encode_update fuzz/seeds/encode_update -- -max_total_time=300 -max_len=4096
 ```
 
-Run the same `list`/`run` flow from `crates/bfd`, `crates/policy`,
-`crates/evpn`, `crates/mrt`, or `crates/rpki`, choosing a target and length
-bound for that crate.
+The recipe selects the pinned toolchain and changes to the target's owning
+crate. Corpus and artifact paths are relative to that crate. Choose another
+crate and target from `just fuzz-list`, with its appropriate input bound.
 
-A crash writes a reproducer under `fuzz/artifacts/<target>/`; replay it with
-`cargo +nightly fuzz run <target> fuzz/artifacts/<target>/<file>`.
+Without just, select the same toolchain before changing directories:
+
+```sh
+export RUSTUP_TOOLCHAIN="$(cat fuzz/rust-nightly.txt)"
+cd crates/wire
+cargo fuzz list
+cargo fuzz run encode_update fuzz/corpus/encode_update fuzz/seeds/encode_update -- -max_total_time=300 -max_len=4096
+```
+
+A crash writes a reproducer under `fuzz/artifacts/<target>/`. From the owning
+crate with the pinned toolchain selected, replay and minimize it:
+
+```sh
+cargo fuzz run <target> fuzz/artifacts/<target>/<file>
+cargo fuzz tmin <target> fuzz/artifacts/<target>/<file>
+```
 
 ## Corpus layout
 

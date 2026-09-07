@@ -16,6 +16,11 @@ lab name phase:
 
 # Run the broad local correctness baseline in diagnostic order.
 gate:
+    bash scripts/build-lock.sh just _gate
+
+# The gate body. `gate` runs it under the build lock so a concurrent commit or
+# push waits instead of compiling the same workspace at the same time.
+_gate:
     just links
     just check-devtools
     just check-fast
@@ -23,6 +28,16 @@ gate:
     just check-clippy
     cargo test --locked --workspace
     just docs
+
+# prek's shim also runs `.git/hooks/<hook>.legacy`, so a hook script left by an
+# earlier setup keeps running alongside the configured hooks forever. This
+# repository's leftover was an older `cargo fmt --check` plus `cargo clippy`
+# script — the two checks .pre-commit-config.yaml already runs — so every commit
+# paid for them twice. `--overwrite` removes it.
+
+# Install the prek commit and push hooks, clearing any superseded legacy hook.
+hooks:
+    prek install --overwrite
 
 # Check the pinned developer tooling versions.
 check-devtools:
@@ -32,6 +47,7 @@ check-devtools:
 # Check formatting and the cheap repository contracts (seconds, no compilation).
 check-fast:
     cargo fmt --all -- --check
+    python3 -m unittest -v scripts/test_build_lock.py
     python3 -m unittest -v scripts/test_check_clippy_reasons.py
     python3 scripts/check-clippy-reasons.py
     python3 scripts/check-v1-stable-surface.py
@@ -149,3 +165,32 @@ test-ignored:
 # Run the privileged network-namespace tests in Docker; selectors are listed in crates/evpn-linux/tests/docker/run-netns-tests.sh.
 netns selector='all':
     bash crates/evpn-linux/tests/docker/run-netns-tests.sh "{{selector}}"
+
+# Fuzz targets are built and run from the crate that owns their
+# `fuzz/Cargo.toml`; cargo-fuzz finds no targets from the repository root.
+# `scripts/check_fuzz_target_inventory.py` is the fail-closed inventory, so
+# both recipes read the crate/target pairs from it instead of keeping a
+# second list that can drift.
+
+# List every cargo-fuzz crate and target as '<crate> <target>' rows.
+fuzz-list:
+    python3 scripts/check_fuzz_target_inventory.py --print-targets
+
+# Run one cargo-fuzz target from its owning crate; extra arguments reach libFuzzer.
+[positional-arguments]
+fuzz crate target *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    crate="crates/${1#crates/}"
+    target="$2"
+    shift 2
+    if ! python3 scripts/check_fuzz_target_inventory.py --print-targets \
+        | grep -qxF "${crate} ${target}"; then
+        echo "unknown fuzz target: ${crate} ${target}" >&2
+        echo "run 'just fuzz-list' for the inventory" >&2
+        exit 2
+    fi
+    RUSTUP_TOOLCHAIN="$(cat fuzz/rust-nightly.txt)"
+    export RUSTUP_TOOLCHAIN
+    cd "${crate}"
+    exec cargo fuzz run "${target}" "$@"

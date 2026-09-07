@@ -11,7 +11,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `just fuzz-list` and `just fuzz <crate> <target>` run the cargo-fuzz
+  inventory from the crate that owns each `fuzz/Cargo.toml`, which is the only
+  directory cargo-fuzz can resolve a target from. Both recipes read the target
+  list from the existing inventory check and select the reviewed nightly from
+  `fuzz/rust-nightly.txt`. `just hooks` installs the commit and push hooks.
+
 ### Changed
+
+- Local checks that compile now serialize on one lock in the target directory,
+  so `just gate` and a concurrent commit or push wait for each other instead of
+  building the same workspace twice at once. Separate worktrees with separate
+  target directories are unaffected.
 
 - The container image now pins its account to uid/gid 999 and declares a
   numeric `USER`, so a base-image rebuild cannot shift the uid that
