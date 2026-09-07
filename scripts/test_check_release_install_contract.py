@@ -438,8 +438,26 @@ MUTATIONS = (
     ),
     (
         "Dockerfile",
-        "USER rustbgpd",
+        "USER 999:999",
         "USER root",
+        "container image contract",
+    ),
+    (
+        "Dockerfile",
+        "USER 999:999",
+        "USER rustbgpd",
+        "container image contract",
+    ),
+    (
+        "Dockerfile",
+        "--uid 999 --gid 999",
+        "--user-group",
+        "container image contract",
+    ),
+    (
+        "Dockerfile",
+        "CMD rbgp health",
+        "CMD rbgp --json health | grep -q '\"healthy\": true' || exit 1",
         "container image contract",
     ),
     (
