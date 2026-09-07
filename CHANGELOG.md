@@ -32,9 +32,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Successful client handshakes log observed leaf expiry. The restart-required
   `tls_expiry_warning_seconds` setting defaults to `0` (warnings off); a
   positive window adds startup, reload, client-handshake, and config-check
-  warnings. Plain `--check` retains exit 0 for warnings and `--strict` returns
-  1. Bundle dates are metadata, not effective handshake cutoffs, and expiry
-  visibility does not introduce date-based startup rejection.
+  warnings. Plain `--check` retains exit 0 for warnings and `--strict`
+  returns 1. Bundle dates are metadata, not effective handshake cutoffs, and
+  expiry visibility does not introduce date-based startup rejection.
 
 - VPN and EVPN route views now expose optional Prefix-SID raw bytes and flags,
   advertised SRv6 SID values, numeric endpoint behavior, and SID Structure
