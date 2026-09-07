@@ -653,7 +653,10 @@ For your own deployment:
   `v`**: use `ghcr.io/lance0/rustbgpd:0.68.0`, not
   `ghcr.io/lance0/rustbgpd:v0.68.0`. That existing `:0.68.0` image is
   amd64-only; it is not backfilled when a later release publishes multiple
-  platforms. The production image runs as uid/gid 999, and its
+  platforms. The production image runs as uid/gid 999 — pinned in the
+  `Dockerfile` runtime stage (`useradd --uid 999 --gid 999` and
+  `USER 999:999`), not allocated by the base image, and asserted against
+  the built image by the container workflow — and its
   default command is exactly `rustbgpd /etc/rustbgpd/config.toml`. If the config
   is mounted under another container filename, pass that filename explicitly
   after the image, for example `rustbgpd /etc/rustbgpd/router.toml`.
@@ -830,7 +833,7 @@ sudo systemctl enable --now rustbgpd-container
 ```
 
 The image's declared healthcheck remains active under systemd supervision and
-runs `rbgp --json health` against the default state-directory UDS. An
+runs `rbgp health` against the default state-directory UDS. An
 `unhealthy` result remains observable with
 `docker inspect --format '{{.State.Health.Status}}' rustbgpd`, but Docker health
 status does not terminate the attached process and therefore does not drive
@@ -865,13 +868,17 @@ systemd's `Restart=on-failure`. If the config moves the socket, set
   seconds later. This standalone command has no restart policy; use bounded
   supervisor retries and inspect durable config authority before recovery.
 
-- **Health**: the image declares a `HEALTHCHECK` that runs `rbgp
-  --json health` against the daemon's local gRPC socket and requires a
-  self-reported healthy status — `docker ps` / orchestrators see the
-  container flip `healthy` once the daemon answers. It probes rbgp's
-  default endpoint (`unix:///var/lib/rustbgpd/grpc.sock`, the daemon
-  default); if your config moves the socket, set `RUSTBGPD_ADDR` on
-  the container to match.
+- **Health**: the image declares a `HEALTHCHECK` that runs `rbgp health`
+  against the daemon's local gRPC socket and uses that command's exit
+  status — `rbgp` exits non-zero when the Health RPC is unreachable, is
+  refused, or does not complete its readiness probe. `docker ps` /
+  orchestrators see the container flip `healthy` once the daemon answers.
+  The probe deliberately does not match on response text: the response's
+  `healthy` field is a constant, so grepping it added no signal the exit
+  status did not already carry, while tying liveness to the JSON
+  formatter's whitespace. It probes rbgp's default endpoint
+  (`unix:///var/lib/rustbgpd/grpc.sock`, the daemon default); if your
+  config moves the socket, set `RUSTBGPD_ADDR` on the container to match.
 
 - **Logs**: `[global.telemetry] log_format = "json"` is required and emits
   structured JSON; pipe it to your log aggregator.

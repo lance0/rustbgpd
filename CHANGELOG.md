@@ -13,6 +13,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The container image now pins its account to uid/gid 999 and declares a
+  numeric `USER`, so a base-image rebuild cannot shift the uid that
+  deployment docs tell operators to chown host bind mounts to, and
+  Kubernetes `runAsNonRoot` verifies the image without the pod spec
+  repeating `runAsUser`. The container workflow asserts the built image's
+  uid and gid.
+
+- The image healthcheck now uses `rbgp health`'s exit status instead of
+  matching pretty-printed JSON text. The previous probe required a space
+  after the colon in `"healthy": true`, so a change of JSON writer would
+  have reported every healthy daemon unhealthy. The container workflow
+  now exercises the declared healthcheck in both the reachable and
+  unreachable directions.
+
 - Published-crate documentation now refreshes with one command after registry
   verification. Preparation and CI use an offline version record; release
   updates no longer require editing contract tests.

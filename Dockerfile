@@ -137,7 +137,12 @@ FROM debian:bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --user-group --home-dir /var/lib/rustbgpd \
+    # uid/gid pinned, not allocated. docs/how-to/deployment.md tells
+    # operators to chown host bind mounts to 999; an unpinned system
+    # account shifts whenever the base image adds an earlier one, and
+    # every pre-chown'd directory silently becomes EACCES.
+    && groupadd --system --gid 999 rustbgpd \
+    && useradd --system --uid 999 --gid 999 --home-dir /var/lib/rustbgpd \
        --shell /usr/sbin/nologin rustbgpd \
     && mkdir -p /var/lib/rustbgpd \
     && chown rustbgpd:rustbgpd /var/lib/rustbgpd
@@ -151,16 +156,23 @@ COPY --from=builder-release /out/birdwatcher-adapter /usr/local/bin/birdwatcher-
 COPY --from=builder-release /out/rbgp.bash-completion /usr/share/bash-completion/completions/rbgp
 COPY LICENSE-MIT LICENSE-APACHE /
 
-USER rustbgpd
+# Numeric, not the account name: Kubernetes `runAsNonRoot: true` cannot
+# resolve a name-form USER and fails the container at admission unless
+# the pod spec repeats `runAsUser`.
+USER 999:999
 
 EXPOSE 179 9179
 
-# Liveness via the local gRPC control socket: `rbgp health` succeeds
-# only when the daemon answers the Health RPC; the grep additionally
-# requires the daemon to self-report healthy. rbgp's default address is
-# the default UDS (`unix:///var/lib/rustbgpd/grpc.sock`); configs that
-# move the socket set RUSTBGPD_ADDR on the container to match.
+# Liveness via the local gRPC control socket. `rbgp health` exits
+# non-zero unless the daemon answers the Health RPC, which it does only
+# after the peer-manager and RIB readiness probe returns; that exit
+# status is the whole signal. The former `grep '"healthy": true'` added
+# nothing — the response field is a constant — while making the probe
+# depend on serde_json's pretty-printer emitting a space after the
+# colon. rbgp's default address is the default UDS
+# (`unix:///var/lib/rustbgpd/grpc.sock`); configs that move the socket
+# set RUSTBGPD_ADDR on the container to match.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD rbgp --json health | grep -q '"healthy": true' || exit 1
+  CMD rbgp health
 
 CMD ["rustbgpd", "/etc/rustbgpd/config.toml"]
