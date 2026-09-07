@@ -974,3 +974,193 @@ fn v2_history_survives_restart_and_restores_after_source_verification() {
     assert!(!lab.locator_path.exists());
     daemon.assert_still_running();
 }
+
+/// `rbgp doctor --pre-upgrade CONFIG` against the real binary: a pending
+/// confirmed transaction turns the upgrade check red with the exact next
+/// action and resolves nothing on the operator's behalf; a staged posture
+/// change is red without any rewrite; after explicit settlement the same
+/// command is green, and the documented sequence continues with the
+/// coordinated stop, the inactive check, and the candidate check on the
+/// stopped daemon's file. Every green result is dated and never claims a
+/// fence.
+#[test]
+fn doctor_pre_upgrade_stops_on_pending_confirmation_and_passes_after_settlement() {
+    let temp = tempfile::tempdir().expect("failed to create temp dir");
+    let lab = lab(temp.path());
+    // Doctor probes the BGP listen port of a reachable daemon, so the lab
+    // config must bind a real port rather than `listen_port = 0`.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind an ephemeral port")
+        .local_addr()
+        .expect("local addr")
+        .port();
+    for path in [&lab.config_path, &lab.candidate_path] {
+        let text = std::fs::read_to_string(path).expect("read lab config");
+        let rewritten = text.replace("listen_port = 0", &format!("listen_port = {port}"));
+        assert_ne!(rewritten, text, "lab config must declare listen_port = 0");
+        std::fs::write(path, rewritten).expect("write lab config");
+    }
+    let mut daemon = lab.spawn("doctor-pre-upgrade.log");
+    wait_until_serving(&lab.grpc_addr, &mut daemon);
+    let config = lab.config_path.to_str().expect("utf-8 config path");
+    let doctor = |bundle: &str| {
+        let output = rbgp(
+            &lab.grpc_addr,
+            &[
+                "--json",
+                "doctor",
+                "--pre-upgrade",
+                config,
+                "--output",
+                &temp.path().join(bundle).display().to_string(),
+            ],
+        );
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|e| panic!("doctor output must be JSON: {e}\n{output:?}"));
+        (output.status.code(), report)
+    };
+    let check = |report: &serde_json::Value, name: &str| -> (String, String) {
+        let check = report["checks"]
+            .as_array()
+            .expect("checks array")
+            .iter()
+            .find(|check| check["name"] == name)
+            .unwrap_or_else(|| panic!("missing check {name}: {report}"));
+        (
+            check["status"].as_str().expect("status").to_string(),
+            check["detail"].as_str().expect("detail").to_string(),
+        )
+    };
+
+    // Green observation before any transaction exists.
+    let (code, report) = doctor("pre-upgrade-1.tar.gz");
+    assert_eq!(code, Some(0), "green pre-upgrade run: {report}");
+    assert_eq!(report["pre_upgrade"]["ok"], true, "{report}");
+    assert!(
+        report["pre_upgrade"]["observed_at_unix_seconds"].is_u64(),
+        "{report}"
+    );
+    for name in [
+        "upgrade.transaction",
+        "upgrade.settlement",
+        "upgrade.posture",
+    ] {
+        let (status, detail) = check(&report, name);
+        assert_eq!(status, "ok", "{name}: {detail}");
+        assert!(
+            detail.contains("as of unix"),
+            "{name} must be dated: {detail}"
+        );
+    }
+
+    // A transaction that starts after that observation makes the same
+    // command red with the exact next action; doctor resolves nothing.
+    lab.apply_confirmed(&daemon, "upgrade-window", "600");
+    let on_disk_before = std::fs::read(&lab.config_path).expect("read config");
+    let (code, report) = doctor("pre-upgrade-2.tar.gz");
+    assert_eq!(code, Some(2), "pending confirmation is red: {report}");
+    assert_eq!(report["pre_upgrade"]["ok"], false, "{report}");
+    let (status, detail) = check(&report, "upgrade.transaction");
+    assert_eq!(status, "fail", "{detail}");
+    for fragment in [
+        "upgrade-window is pending until unix",
+        "rbgp config confirm upgrade-window",
+        "rbgp config abort upgrade-window",
+        "before the coordinated stop",
+    ] {
+        assert!(detail.contains(fragment), "missing {fragment:?}: {detail}");
+    }
+    let status = rbgp_json(&lab.grpc_addr, &["--json", "config", "status"]);
+    assert_eq!(
+        status["confirmation"]["status"], "pending",
+        "doctor must not confirm or abort: {status}"
+    );
+    assert_eq!(
+        std::fs::read(&lab.config_path).expect("read config"),
+        on_disk_before,
+        "doctor must not rewrite the config"
+    );
+
+    // Explicit settlement, then the same command is green again.
+    let confirmed = rbgp_json(
+        &lab.grpc_addr,
+        &["--json", "config", "confirm", "upgrade-window"],
+    );
+    assert_eq!(
+        confirmed["confirmation"]["status"], "confirmed",
+        "{confirmed}"
+    );
+    let (code, report) = doctor("pre-upgrade-3.tar.gz");
+    assert_eq!(code, Some(0), "settled transaction is green: {report}");
+    let (status, detail) = check(&report, "upgrade.transaction");
+    assert_eq!(status, "ok", "{detail}");
+    assert!(
+        detail.contains("terminal (confirmed)") && detail.contains("not a fence"),
+        "{detail}"
+    );
+
+    // A staged epoch-2 file against the live epoch-1 daemon is red and
+    // names the offline migration without performing it.
+    let staged = temp.path().join("staged-epoch2.toml");
+    // The confirmed apply materialized the live posture into the file
+    // (`config_epoch = 1` plus explicit `false`); stage epoch 2 on top of it.
+    let live_file = std::fs::read_to_string(&lab.config_path).expect("read config");
+    let staged_text = if live_file.contains("config_epoch = 1") {
+        live_file.replace("config_epoch = 1", "config_epoch = 2")
+    } else {
+        format!("config_epoch = 2\n{live_file}")
+    };
+    std::fs::write(&staged, staged_text).expect("write staged");
+    let staged_bytes = std::fs::read(&staged).expect("read staged");
+    let output = rbgp(
+        &lab.grpc_addr,
+        &[
+            "--json",
+            "doctor",
+            "--pre-upgrade",
+            staged.to_str().expect("utf-8"),
+            "--output",
+            &temp
+                .path()
+                .join("pre-upgrade-4.tar.gz")
+                .display()
+                .to_string(),
+        ],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("doctor output must be JSON");
+    let (status, detail) = check(&report, "upgrade.posture");
+    assert_eq!(status, "fail", "{detail}");
+    assert!(
+        detail.contains("changes the RFC 8212 posture")
+            && detail.contains("--migrate-config pin-legacy|prepare-secure --offline"),
+        "{detail}"
+    );
+    assert_eq!(std::fs::read(&staged).expect("read staged"), staged_bytes);
+
+    // The documented sequence continues outside doctor: coordinated stop,
+    // verify inactive, then the candidate check on the stopped daemon's file.
+    let sigterm = Command::new("kill")
+        .args(["-TERM", &daemon.child.id().to_string()])
+        .status()
+        .expect("send SIGTERM");
+    assert!(sigterm.success(), "kill -TERM failed: {sigterm}");
+    let exit = daemon.child.wait().expect("reap rustbgpd");
+    assert!(exit.success(), "coordinated stop must exit 0: {exit}");
+    assert!(
+        matches!(daemon.child.try_wait(), Ok(Some(_))),
+        "daemon must be inactive before the candidate check"
+    );
+    let candidate_check = Command::new(env!("CARGO_BIN_EXE_rustbgpd"))
+        .args(["--check", config])
+        .output()
+        .expect("run candidate --check");
+    assert!(
+        candidate_check.status.success(),
+        "candidate check on the stopped daemon's file failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&candidate_check.stdout),
+        String::from_utf8_lossy(&candidate_check.stderr)
+    );
+    drop(daemon);
+}

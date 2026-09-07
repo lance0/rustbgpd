@@ -729,6 +729,20 @@ config-adjacent commit-confirm authority. If retired authority remains or is
 inaccessible, recover it with exactly rustbgpd v0.64.0. Delete it only after
 proving the transaction is terminal and the current config is intended.
 
+`rbgp doctor --pre-upgrade /etc/rustbgpd/config.toml` gathers that live
+evidence in one read-only run: it is red, with the next action, while a
+confirmed transaction is pending, applying, rollback-failed, or ambiguous;
+while a runtime-config settlement owner (a transaction, neighbor or FIB
+change, or SIGHUP reload) is still settling; when the named file resolves to
+a different RFC 8212 epoch/posture than the live daemon runs; and whenever
+the evidence is unavailable, denied, or unimplemented. It never confirms,
+aborts, rewrites, or stops anything, and a green result is dated
+(`observed at unix <t>`): it is an observation at one instant, not a fence —
+a transaction can start after it. Continue with the coordinated stop,
+verify the service is inactive, then repeat the candidate `--check --strict`
+and any offline authority checks before installing. See
+[the check reference](#pre-upgrade-checks).
+
 Moving a config between RFC 8212 epochs is a separate, offline step:
 `rustbgpd --migrate-config pin-legacy|prepare-secure|downgrade-v0.64 --offline
 [--dry-run] CONFIG_PATH` rewrites the posture representation in place. Stop or
@@ -2122,6 +2136,26 @@ Probe targets come from the daemon's effective config when it is up; when
 it is down, from the local config file (the path a local daemon process
 was started with, else `/etc/rustbgpd/config.toml`) — parsed for
 addresses only, never copied into the bundle.
+
+<a id="pre-upgrade-checks"></a>
+### Pre-upgrade checks (`--pre-upgrade CONFIG`)
+
+`rbgp doctor --pre-upgrade CONFIG` adds three read-only checks against
+`CONFIG`, the file the upgraded daemon will boot, under the same 0/1/2 exit
+contract. Green is an observation at one instant, never a maintenance fence;
+missing evidence is red, never green. The mode resolves nothing on the
+operator's behalf.
+
+| Check | Evidence | Red when |
+|-------|----------|----------|
+| `upgrade.transaction` | `GetConfigTransactionStatus`, the same RPC as `rbgp config status` | a confirmed transaction is pending or applying (confirm or abort it: `rbgp config confirm <id>` / `rbgp config abort <id>`), rollback-failed (retry abort, confirm, or restart to boot-revert), or ambiguous (restart to boot-revert); the RPC is denied, unimplemented, or fails. Green only for an empty "none" record or a terminal `confirmed` / `aborted` / `auto_reverted` outcome |
+| `upgrade.settlement` | `bgp_runtime_config_settlement_active` from the metrics doctor already collects; the daemon emits it only while an owner is live or recovery-fenced | any series is `1` (wait for the transaction, neighbor or FIB change, or SIGHUP reload to settle; a `fence_reason` other than `none` means an exit-70 restart is coming); the metrics RPC failed |
+| `upgrade.posture` | `CONFIG` and the daemon's effective config, both resolved with the `config_epoch` omitted-versus-explicit rules | the effective epoch/posture pair differs (restarting on the file changes RFC 8212 behavior: keep it only with explicit policy on every eBGP direction, or restore the live posture after the stop with `rustbgpd --migrate-config pin-legacy\|prepare-secure --offline CONFIG`); `CONFIG` is unreadable or invalid; the effective config is unavailable |
+
+`--json` output gains a `pre_upgrade` object (`candidate_config`,
+`observed_at_unix_seconds`, `ok`) and the manifest a `pre_upgrade` section;
+human output ends with the dated observation and the next step. Nothing else
+in the doctor output changes outside the mode.
 
 ```
 rustbgpd-doctor-<ts>/

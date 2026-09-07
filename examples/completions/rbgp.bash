@@ -2403,7 +2403,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__doctor)
-            opts="-s -j -h --output --log-file --addr --token-file --json --json-lines --no-color --pager --help"
+            opts="-s -j -h --output --log-file --pre-upgrade --addr --token-file --json --json-lines --no-color --pager --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2414,6 +2414,10 @@ _rbgp() {
                     return 0
                     ;;
                 --log-file)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --pre-upgrade)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
