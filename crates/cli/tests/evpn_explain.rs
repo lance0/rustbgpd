@@ -136,6 +136,8 @@ async fn explain_distinguishes_fresh_selection_retained_source_and_committed_exp
         mac: "aa:bb:cc:dd:ee:ff".into(),
         peer_address: peer.into(),
         next_hop: peer.into(),
+        communities: vec![(65000 << 16) | 100, rustbgpd_wire::COMMUNITY_NO_EXPORT],
+        extended_communities: vec![0x0002_fde8_0000_0064, u64::MAX],
         prefix_sid: Some(Box::new(test_support::mock_prefix_sid())),
         ..Default::default()
     };
@@ -215,6 +217,14 @@ async fn explain_distinguishes_fresh_selection_retained_source_and_committed_exp
         &value["compared"],
         &value["export"]["advertised"],
     ] {
+        assert_eq!(
+            row["communities"],
+            serde_json::json!(["65000:100", "NO_EXPORT"])
+        );
+        assert_eq!(
+            row["extended_communities"],
+            serde_json::json!([0x0002_fde8_0000_0064_u64, u64::MAX])
+        );
         assert_eq!(row["prefix_sid"]["raw_value"], "deadbeef");
         assert_eq!(
             row["prefix_sid"]["services"][0]["sids"][0]["endpoint_behavior"],

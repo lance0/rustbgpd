@@ -29,6 +29,8 @@ async fn peer_evpn_output_and_rpc_errors() {
             rd: "65000:100".into(),
             next_hop: "192.0.2.1".into(),
             peer_address: "192.0.2.1".into(),
+            communities: vec![(65000 << 16) | 100, rustbgpd_wire::COMMUNITY_NO_EXPORT],
+            extended_communities: vec![0x0002_fde8_0000_0064, u64::MAX],
             ..Default::default()
         }],
         next_page_token: "opaque-next-page".into(),
@@ -53,18 +55,29 @@ async fn peer_evpn_output_and_rpc_errors() {
         )
     );
     server.state.list_peer_evpn_response.lock().await.routes[0].peer_address = "fe80::2".into();
-    let output = run(
-        &server.addr,
-        &["--json", "evpn", "received", "fe80::2%eth0"],
-    );
-    assert!(output.status.success(), "{output:?}");
-    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["view"], "received");
-    assert_eq!(value["neighbor"], "fe80::2%eth0");
-    assert_eq!(value["routes"][0]["peer"], "fe80::2%eth0");
-    assert_eq!(value["total_count"], 2);
-    assert_eq!(value["next_page_token"], "opaque-next-page");
-    assert_eq!(value["page_version"]["generation"], 2);
+    for (view, neighbor, source) in [
+        ("received", "fe80::2%eth0", "fe80::2%eth0"),
+        ("advertised", "192.0.2.2", "fe80::2"),
+    ] {
+        let output = run(&server.addr, &["--json", "evpn", view, neighbor]);
+        assert!(output.status.success(), "{output:?}");
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["view"], view);
+        assert_eq!(value["neighbor"], neighbor);
+        assert_eq!(value["routes"][0]["peer"], source);
+        assert_eq!(
+            value["routes"][0]["communities"],
+            serde_json::json!(["65000:100", "NO_EXPORT"])
+        );
+        assert_eq!(
+            value["routes"][0]["extended_communities"],
+            serde_json::json!([0x0002_fde8_0000_0064_u64, u64::MAX])
+        );
+        assert_eq!(value["total_count"], 2);
+        assert_eq!(value["next_page_token"], "opaque-next-page");
+        assert_eq!(value["page_version"]["epoch"], 1);
+        assert_eq!(value["page_version"]["generation"], 2);
+    }
     assert_eq!(
         server
             .state
