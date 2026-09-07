@@ -362,12 +362,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   now build under the same lint policy as the workspace crates
   (`deny(unsafe_code)`, `deny(clippy::all)`, `warn(clippy::pedantic)`).
 
-- `rustbgpd-wire` 0.19.0 → 0.19.1 (additive): a new `mrt` module adds
-  `decode_table_dump_v2_mp_reach_next_hop`, the RFC 6396 §4.3.4 `TABLE_DUMP_V2`
-  RIB-entry `MP_REACH_NLRI` next-hop decoder now shared by the daemon's
-  warm-checkpoint reader and `rbgp diff snapshot from-mrt`. `rustbgpd-fsm`
-  stays at 0.6.0 and `rustbgpd-rpki` at 0.1.0; their wire requirement follows
-  the workspace pin to `^0.19.1`, which the patch satisfies.
+- `rustbgpd-wire` 0.19.0 → prepared 0.20.0 compatibility line. Its additive
+  `mrt` API adds `decode_table_dump_v2_mp_reach_next_hop`, the RFC 6396 §4.3.4
+  `TABLE_DUMP_V2` RIB-entry `MP_REACH_NLRI` next-hop decoder, now shared by
+  the daemon's warm-checkpoint reader and `rbgp diff snapshot from-mrt`.
+  `rustbgpd-fsm` is prepared at 0.7.0 and `rustbgpd-rpki` at 0.2.0; their
+  public signatures expose wire types, so the wire requirement follows the
+  prepared workspace pin to `^0.20.0`.
 
 - **Operator-visible:** the EVPN MAC and ESI text forms are parsed by one
   grammar shared by the configuration loader and the gRPC services: exactly
@@ -917,7 +918,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the session when NLRI can be recovered. Unusable NLRI retains session reset;
   malformed snapshot entries fail admission. Generic Prefix-SID errors retain
   attribute-discard, and valid opaque reflection is unchanged. Embedders using
-  prepared wire `0.19.1` can receive `DecodeError::MalformedSrv6ServiceTlv`.
+  prepared wire `0.20.0` can receive `DecodeError::MalformedSrv6ServiceTlv`.
 
 - **EVPN IP ownership sequence:** a newly learned local MAC/IP binding can
   now carry a higher MAC Mobility sequence when another eligible remote MAC
