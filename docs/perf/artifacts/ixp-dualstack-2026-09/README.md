@@ -118,13 +118,10 @@ it may run on a busy host and its timings are not quoted. Rung 3
 (700) is the receipt rung: it runs only through
 `bench/scale/matrix/run-matrix.sh` under the full gate, as two fresh
 runs of each policy shape in one quiet window on a pinned
-implementation. Rung 2 (200) is a scale-validation rung ahead of the
-receipt rung: it runs behind the host lock with no compiler or daemon
-competitors, but the session that ran it could not set the CPU
-governor (the host was on `powersave` throughout), so its timings are
-published as indicative shape validation, not as receipt-grade
-numbers; the gated driver command for a receipt-grade rerun is in the
-receipt.
+implementation. Rung 2 (200) has not run. It is the required
+scale-validation rung before 700, using the gated driver commands in
+the receipt. Both policy cells must be checked, including the daemon's
+dirty-for-resync warnings and recovery, before the full-shape campaign.
 
 **Out of scope.** Comparison with BIRD or OpenBGPD (the cross-daemon
 generators are IPv4-only; a comparison needs the identical dual-stack
