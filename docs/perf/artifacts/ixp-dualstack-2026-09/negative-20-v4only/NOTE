@@ -1,0 +1,4 @@
+Empty-family negative: the daemon is configured with ipv4_unicast only (no ipv6_unicast in scenario/config.toml)
+while the stubs run in dual-stack mode. Expected and observed outcome: rc=1 at establishment,
+"peer OPEN did not negotiate Ipv6/Unicast (empty family)". No route or reload evidence exists for this cell,
+which is the point: an un-negotiated family can never be reported as delivered.

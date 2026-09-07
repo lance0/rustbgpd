@@ -1,0 +1,3 @@
+# reloadstall peers=20 changed_peers=16 stable_peers=4 prefixes=5720 per_peer=286 pid=765877
+# dualstack total_prefixes=11440 per_family=5720 per_peer_per_family=286 filter_count=0
+stub 0 failed: peer OPEN did not negotiate Ipv6/Unicast (empty family)

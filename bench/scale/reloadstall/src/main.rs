@@ -92,13 +92,43 @@
 //!   re-sent Adj-RIB-Out. Fail-closed throughout (any session drop or
 //!   parse error during the hold aborts). Requires
 //!   `RELOADSTALL_IBGP_RR_ASN`.
+//!
+//! Dual-stack extensions (dual-stack policy-reload operating proof) —
+//! additive env vars; absent, the frozen IPv4-only contract is untouched:
+//! - `RELOADSTALL_DUALSTACK=1`: every stub negotiates IPv4 unicast AND
+//!   IPv6 unicast on one session (the daemon's OPEN must carry both MP
+//!   capabilities or establishment fails: an un-negotiated family can
+//!   never be reported as delivered). `<total_prefixes>` is then the
+//!   TOTAL across both families, split evenly: each stub announces
+//!   `total / (2 * n_peers)` IPv4 /24s (body NLRI, `20.x.y.0/24`) plus the
+//!   same count of IPv6 /48s (`MP_REACH_NLRI`, `3001:HHHH:LLLL::/48`);
+//!   churners flap one 16-prefix block per family. Every observer keeps
+//!   an independent per-family unique-prefix bitmap: initial convergence,
+//!   reload completion, and stable-marker evidence each require BOTH
+//!   families to complete at every observer, so IPv4 packet totals cannot
+//!   stand in for IPv6 delivery (or vice versa). Per-family completion,
+//!   leading-stall, and gap percentiles are published in an additional
+//!   `reloadstall_dualstack_csv` row after the historical row. Requires
+//!   the reload mode: no flapstorm, trips, iBGP-RR, overlap, received
+//!   view, or convergence-only.
+//! - `RELOADSTALL_FILTER_COUNT=K`: filtering policy shape (pairs with the
+//!   generator's `GEN_FILTER_COUNT=K`). Generation B rejects the named
+//!   base indexes `0..K` of every family (the head of member 0's slice) at
+//!   the changed observers; generation A permits everything again.
+//!   Completion of a filtering generation requires every bystander prefix
+//!   with the marker AND a withdrawal of every named prefix; a named
+//!   prefix delivered WITH the marker (`filtered_leaked`), a withdrawal of
+//!   any other base prefix at a changed observer (`bystander_withdrawn`),
+//!   or any base withdrawal at a stable observer (`stable_withdrawn`)
+//!   fails the reload. Duplicate named withdrawals are counted and
+//!   published, not failed. Works with or without dual-stack.
 
 // Event.other and Ctx.n_peers are recorded for the observation/context
 // model but not read by the percentile analysis; keep them so the
 // recorded data shape matches what produced the receipt.
 #![allow(dead_code)]
 
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -109,10 +139,12 @@ use rustbgpd_wire::capability::{Afi, Capability, Safi};
 use rustbgpd_wire::constants::{AS_TRANS, HEADER_LEN, MAX_MESSAGE_LEN};
 use rustbgpd_wire::header::peek_message_length;
 use rustbgpd_wire::message::{decode_message, encode_message, Message};
+use rustbgpd_wire::nlri::{NlriEntry, Prefix};
 use rustbgpd_wire::open::OpenMessage;
-use rustbgpd_wire::update::{Ipv4UnicastMode, UpdateMessage};
+use rustbgpd_wire::update::{Ipv4UnicastMode, ParsedUpdate, UpdateMessage};
 use rustbgpd_wire::{
-    AsPath, AsPathSegment, Ipv4NlriEntry, Ipv4Prefix, Origin, PathAttribute, RouteRefreshMessage,
+    AsPath, AsPathSegment, Ipv4NlriEntry, Ipv4Prefix, Ipv6Prefix, MpReachNlri, MpUnreachNlri,
+    Origin, PathAttribute, RouteRefreshMessage,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpSocket, TcpStream};
@@ -122,6 +154,9 @@ const CHURNERS: u32 = 8;
 const CHURN_BLOCK: u32 = 16;
 const CHURN_MS: u64 = 125;
 const NLRI_PER_MSG: usize = 900;
+/// IPv6 /48 NLRI per MP_REACH UPDATE: 7 bytes each, so 500 keeps the
+/// message under the 4096-byte maximum with headroom for attributes.
+const NLRI6_PER_MSG: usize = 500;
 const HOLD_TIME: u16 = 180;
 // Marker admin 65400 — deliberately NOT the route server's ASN (65500):
 // rs_control_communities defaults on for rs-clients, and RS-administered
@@ -333,6 +368,19 @@ fn ibgp_rr_mode(value: u64) -> Result<Option<u16>, String> {
     }
 }
 
+/// Dual-stack mode (`RELOADSTALL_DUALSTACK=1`): off = the frozen IPv4-only
+/// contract. Set exactly once in `main` before the runtime starts.
+static DUALSTACK: AtomicBool = AtomicBool::new(false);
+
+fn dualstack() -> bool {
+    DUALSTACK.load(Ordering::Relaxed)
+}
+
+/// Event family bits: which unicast families an UPDATE carried (announce
+/// or withdraw). An UPDATE carrying neither (End-of-RIB) has no bit set.
+const FAMILY_V4: u8 = 1;
+const FAMILY_V6: u8 = 2;
+
 /// What the shared per-observer bitmap is armed to track (flapstorm mode).
 const FLAP_OFF: u32 = 0;
 const FLAP_TRACK_WITHDRAWS: u32 = 1;
@@ -346,6 +394,8 @@ struct Event {
     base_ann: u32,
     /// everything else delivered in this UPDATE (churn announces + withdraws)
     other: u32,
+    /// `FAMILY_V4` / `FAMILY_V6` bits carried by this UPDATE.
+    families: u8,
 }
 
 struct Obs {
@@ -367,6 +417,40 @@ struct Obs {
     /// prefixes into `generation` (which the reload path leaves idle in
     /// flapstorm mode — `expected_community` stays 0).
     flap_mode: AtomicU32,
+    /// IPv6 unicast counterpart of `generation` (dual-stack only; idle and
+    /// never consulted otherwise). Armed together with `generation` by the
+    /// same `expected_community` / `flap_mode` flags, tracked independently.
+    generation6: Mutex<GenerationProgress>,
+    /// IPv6 counterpart of `stable_marker_seen_at_us`.
+    stable_marker6_seen_at_us: AtomicU64,
+    /// One outstanding IPv6 ROUTE-REFRESH reply at a time.
+    refresh6_pending: AtomicBool,
+    /// Cumulative base-space withdrawals received, per family: the
+    /// bystander accounting for observers without an armed generation
+    /// (stable observers) is a before/after delta of these.
+    base_withdrawn: AtomicU64,
+    base_withdrawn6: AtomicU64,
+}
+
+impl Obs {
+    fn new() -> Self {
+        Self {
+            events: Mutex::new(Vec::with_capacity(1 << 14)),
+            base_ann_total: AtomicU64::new(0),
+            established: AtomicBool::new(false),
+            last_comms: Mutex::new(Vec::new()),
+            stable_marker_seen_at_us: AtomicU64::new(0),
+            expected_community: AtomicU32::new(0),
+            generation: Mutex::new(GenerationProgress::default()),
+            refresh_pending: AtomicBool::new(false),
+            flap_mode: AtomicU32::new(FLAP_OFF),
+            generation6: Mutex::new(GenerationProgress::default()),
+            stable_marker6_seen_at_us: AtomicU64::new(0),
+            refresh6_pending: AtomicBool::new(false),
+            base_withdrawn: AtomicU64::new(0),
+            base_withdrawn6: AtomicU64::new(0),
+        }
+    }
 }
 
 /// A live stub session: its outbound channel plus the reader/writer task
@@ -396,6 +480,22 @@ struct GenerationProgress {
     excluded_extra: Vec<usize>,
     completed_at_us: Option<u64>,
     first_marker_base_at_us: Option<u64>,
+    /// Filtering shape: sorted base indices the active generation must
+    /// WITHDRAW at this observer (never counted toward `unique`). Empty in
+    /// every permit-set-preserving generation and in flap/convergence arms.
+    filtered: Vec<usize>,
+    /// Bitmap over `filtered` positions of the withdrawals seen so far.
+    filtered_seen: Vec<u64>,
+    filtered_withdrawn: u64,
+    /// Named prefixes delivered WITH the generation marker: the filter did
+    /// not apply. Fails the reload.
+    filtered_leaked: u64,
+    /// Withdrawals of base prefixes outside the named set while armed:
+    /// bystander damage. Fails the reload.
+    bystander_withdrawn: u64,
+    /// Repeated withdrawals of an already-withdrawn named prefix: wasteful,
+    /// published, not failed.
+    duplicate_withdrawn: u64,
 }
 
 impl GenerationProgress {
@@ -412,6 +512,65 @@ impl GenerationProgress {
         self.excluded_extra.clear();
         self.completed_at_us = None;
         self.first_marker_base_at_us = None;
+        self.filtered.clear();
+        self.filtered_seen.clear();
+        self.filtered_withdrawn = 0;
+        self.filtered_leaked = 0;
+        self.bystander_withdrawn = 0;
+        self.duplicate_withdrawn = 0;
+    }
+
+    fn is_excluded(&self, prefix_index: usize) -> bool {
+        (self.excluded_start..self.excluded_end).contains(&prefix_index)
+            || self.excluded_extra.binary_search(&prefix_index).is_ok()
+    }
+
+    /// Filtering shape: the named base indices this generation must
+    /// withdraw here. Own-announced indices are dropped (the daemon never
+    /// advertised them to their announcer) and the marker target shrinks to
+    /// the bystanders. Call after `reset` and `exclude_extra`.
+    fn set_filtered(&mut self, filtered: &[u32]) {
+        self.filtered = filtered
+            .iter()
+            .map(|&idx| idx as usize)
+            .filter(|&idx| !self.is_excluded(idx))
+            .collect();
+        self.filtered.sort_unstable();
+        self.filtered.dedup();
+        self.filtered_seen = vec![0; self.filtered.len().div_ceil(64)];
+        self.target = self.target.saturating_sub(self.filtered.len() as u64);
+    }
+
+    /// Completion needs every bystander with the marker AND every named
+    /// prefix withdrawn; the first instant both hold is the completion.
+    fn maybe_complete(&mut self, t_us: u64) {
+        if self.unique >= self.target
+            && self.filtered_withdrawn >= self.filtered.len() as u64
+            && self.completed_at_us.is_none()
+        {
+            self.completed_at_us = Some(t_us);
+        }
+    }
+
+    /// A base-space withdrawal while armed: a named prefix advances the
+    /// filtering completion (once); anything else is bystander damage.
+    fn observe_withdrawn(&mut self, prefix_index: usize, t_us: u64) {
+        if self.is_excluded(prefix_index) {
+            return;
+        }
+        let Ok(position) = self.filtered.binary_search(&prefix_index) else {
+            self.bystander_withdrawn += 1;
+            return;
+        };
+        let slot = &mut self.filtered_seen[position / 64];
+        let bit = 1u64 << (position % 64);
+        if *slot & bit != 0 {
+            self.duplicate_withdrawn += 1;
+            return;
+        }
+        *slot |= bit;
+        self.filtered_withdrawn += 1;
+        self.maybe_complete(t_us);
     }
 
     /// Exclude the observer's extra own-announced prefixes (overlap second-
@@ -428,9 +587,13 @@ impl GenerationProgress {
         if let Some(slot) = self.received.get_mut(prefix_index / 64) {
             *slot |= 1u64 << (prefix_index % 64);
         }
-        if (self.excluded_start..self.excluded_end).contains(&prefix_index)
-            || self.excluded_extra.binary_search(&prefix_index).is_ok()
-        {
+        if self.is_excluded(prefix_index) {
+            return;
+        }
+        if self.filtered.binary_search(&prefix_index).is_ok() {
+            // A named prefix carrying the marker means the filter did not
+            // apply; it never advances completion.
+            self.filtered_leaked += 1;
             return;
         }
         let word = prefix_index / 64;
@@ -446,9 +609,7 @@ impl GenerationProgress {
         }
         *slot |= bit;
         self.unique += 1;
-        if self.unique >= self.target && self.completed_at_us.is_none() {
-            self.completed_at_us = Some(t_us);
-        }
+        self.maybe_complete(t_us);
     }
 }
 
@@ -562,6 +723,212 @@ fn churn_prefix(churner: u32, j: u32) -> Ipv4Prefix {
         ),
         24,
     )
+}
+
+/// IPv6 base-table /48 for global route index: `3001:HHHH:LLLL::/48`
+/// (hi = idx >> 16, lo = idx & 0xffff), the dual-stack mirror of
+/// [`base_prefix`]'s one-first-octet-per-65536 scheme.
+fn base_prefix6(idx: u32) -> Ipv6Prefix {
+    let hi = u16::try_from(idx >> 16).expect("prefix space exhausted");
+    let lo = u16::try_from(idx & 0xffff).unwrap();
+    Ipv6Prefix::new(Ipv6Addr::new(0x3001, hi, lo, 0, 0, 0, 0, 0), 48)
+}
+
+fn base_prefix6_index(prefix: Ipv6Prefix, total_prefixes: u32) -> Option<usize> {
+    if prefix.len != 48 {
+        return None;
+    }
+    let s = prefix.addr.segments();
+    if s[0] != 0x3001 || s[3..] != [0, 0, 0, 0, 0] {
+        return None;
+    }
+    let index = (u32::from(s[1]) << 16) | u32::from(s[2]);
+    (index < total_prefixes).then(|| usize::try_from(index).unwrap())
+}
+
+/// IPv6 churn block: `3002:<churner>:<j>::/48`, outside the base space.
+fn churn_prefix6(churner: u32, j: u32) -> Ipv6Prefix {
+    Ipv6Prefix::new(
+        Ipv6Addr::new(
+            0x3002,
+            u16::try_from(churner).unwrap(),
+            u16::try_from(j).unwrap(),
+            0,
+            0,
+            0,
+            0,
+            0,
+        ),
+        48,
+    )
+}
+
+/// Synthetic IPv6 next hop for stub `i`: the ULA mirror of the IPv4
+/// `10.9.x.y` next hop. Never resolved by anyone.
+fn stub_next_hop6(i: u32) -> Ipv6Addr {
+    Ipv6Addr::new(
+        0xfd09,
+        0,
+        0,
+        0,
+        0,
+        0,
+        u16::try_from(i / 200).unwrap(),
+        u16::try_from(i % 200 + 1).unwrap(),
+    )
+}
+
+/// The IPv6 announcement attributes: [`base_attrs`] minus the IPv4-only
+/// NEXT_HOP, plus the MP_REACH carrying the IPv6 next hop and NLRI.
+fn announce6_msgs(i: u32, prefixes: &[Ipv6Prefix]) -> Vec<Message> {
+    let common: Vec<PathAttribute> = base_attrs(i)
+        .into_iter()
+        .filter(|attribute| !matches!(attribute, PathAttribute::NextHop(_)))
+        .collect();
+    prefixes
+        .chunks(NLRI6_PER_MSG)
+        .map(|chunk| {
+            let mut attrs = common.clone();
+            attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
+                afi: Afi::Ipv6,
+                safi: Safi::Unicast,
+                next_hop: IpAddr::V6(stub_next_hop6(i)),
+                link_local_next_hop: None,
+                announced: chunk
+                    .iter()
+                    .map(|p| NlriEntry {
+                        path_id: 0,
+                        prefix: Prefix::V6(*p),
+                    })
+                    .collect(),
+                flowspec_announced: vec![],
+                evpn_announced: vec![],
+                bgpls_announced: vec![],
+                labeled_announced: vec![],
+                vpn_announced: vec![],
+                rtc_announced: vec![],
+            }));
+            Message::Update(UpdateMessage::build(
+                &[],
+                &[],
+                &attrs,
+                true,
+                false,
+                Ipv4UnicastMode::Body,
+            ))
+        })
+        .collect()
+}
+
+fn withdraw6_msg(prefixes: &[Ipv6Prefix]) -> Message {
+    let attrs = [PathAttribute::MpUnreachNlri(MpUnreachNlri {
+        afi: Afi::Ipv6,
+        safi: Safi::Unicast,
+        withdrawn: prefixes
+            .iter()
+            .map(|p| NlriEntry {
+                path_id: 0,
+                prefix: Prefix::V6(*p),
+            })
+            .collect(),
+        flowspec_withdrawn: vec![],
+        evpn_withdrawn: vec![],
+        bgpls_withdrawn: vec![],
+        labeled_withdrawn: vec![],
+        vpn_withdrawn: vec![],
+        rtc_withdrawn: vec![],
+    })];
+    Message::Update(UpdateMessage::build(
+        &[],
+        &[],
+        &attrs,
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    ))
+}
+
+/// The unicast NLRI of one decoded UPDATE split by family: body NLRI and
+/// MP_REACH/MP_UNREACH IPv4 unicast (RFC 8950 form) both count as IPv4;
+/// MP IPv6 unicast counts as IPv6. Other families are ignored.
+#[derive(Default)]
+struct UnicastNlri {
+    v4_ann: Vec<Ipv4Prefix>,
+    v4_wd: Vec<Ipv4Prefix>,
+    v6_ann: Vec<Ipv6Prefix>,
+    v6_wd: Vec<Ipv6Prefix>,
+}
+
+impl UnicastNlri {
+    fn families(&self) -> u8 {
+        let v4 = !self.v4_ann.is_empty() || !self.v4_wd.is_empty();
+        let v6 = !self.v6_ann.is_empty() || !self.v6_wd.is_empty();
+        (u8::from(v4) * FAMILY_V4) | (u8::from(v6) * FAMILY_V6)
+    }
+}
+
+fn split_unicast_families(parsed: &ParsedUpdate) -> UnicastNlri {
+    let mut nlri = UnicastNlri {
+        v4_ann: parsed.announced.iter().map(|entry| entry.prefix).collect(),
+        v4_wd: parsed.withdrawn.iter().map(|entry| entry.prefix).collect(),
+        ..UnicastNlri::default()
+    };
+    for attribute in &parsed.attributes {
+        match attribute {
+            PathAttribute::MpReachNlri(mp) if mp.safi == Safi::Unicast => {
+                for entry in &mp.announced {
+                    match entry.prefix {
+                        Prefix::V4(prefix) => nlri.v4_ann.push(prefix),
+                        Prefix::V6(prefix) => nlri.v6_ann.push(prefix),
+                    }
+                }
+            }
+            PathAttribute::MpUnreachNlri(mp) if mp.safi == Safi::Unicast => {
+                for entry in &mp.withdrawn {
+                    match entry.prefix {
+                        Prefix::V4(prefix) => nlri.v4_wd.push(prefix),
+                        Prefix::V6(prefix) => nlri.v6_wd.push(prefix),
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    nlri
+}
+
+/// The per-family "one outstanding ROUTE-REFRESH reply" latch.
+fn refresh_pending(observer: &Obs, ipv6: bool) -> &AtomicBool {
+    if ipv6 {
+        &observer.refresh6_pending
+    } else {
+        &observer.refresh_pending
+    }
+}
+
+fn observe_generation6(
+    progress: &mut GenerationProgress,
+    expected_community: u32,
+    communities: &[u32],
+    announced: &[Ipv6Prefix],
+    total_prefixes: u32,
+    t_us: u64,
+) {
+    if expected_community == 0 || !communities.contains(&expected_community) {
+        return;
+    }
+    for prefix in announced {
+        if let Some(index) = base_prefix6_index(*prefix, total_prefixes) {
+            progress.observe(index, t_us);
+        }
+    }
+}
+
+/// IPv6 slice of the base table owned by stub `i` (dual-stack; no overlap
+/// dimension, so this is everything the stub announces in that family).
+fn own_slice6(ctx: &Ctx, i: u32) -> Vec<Ipv6Prefix> {
+    let lo = i * ctx.per_peer;
+    (lo..lo + ctx.per_peer).map(base_prefix6).collect()
 }
 
 fn base_attrs(i: u32) -> Vec<PathAttribute> {
@@ -736,11 +1103,32 @@ enum StubOpenError {
     Fatal(String),
 }
 
+/// Multiprotocol capabilities the daemon's OPEN must carry for a session
+/// to count: both unicast families in dual-stack mode, else none checked
+/// (the frozen IPv4-only contract never inspected the peer OPEN).
+fn required_families(dualstack: bool) -> &'static [(Afi, Safi)] {
+    if dualstack {
+        &[(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)]
+    } else {
+        &[]
+    }
+}
+
+/// The first configured family the peer OPEN failed to negotiate, if any.
+fn missing_family(open: &OpenMessage, required: &[(Afi, Safi)]) -> Option<(Afi, Safi)> {
+    required.iter().copied().find(|&(afi, safi)| {
+        !open
+            .capabilities
+            .contains(&Capability::MultiProtocol { afi, safi })
+    })
+}
+
 async fn open_stub_stream(
     daemon: SocketAddr,
     local: Ipv4Addr,
     open: &[u8],
     keepalive: &[u8],
+    required: &[(Afi, Safi)],
 ) -> Result<TcpStream, StubOpenError> {
     let sock = TcpSocket::new_v4().map_err(|e| StubOpenError::Fatal(format!("socket: {e}")))?;
     sock.bind(SocketAddr::new(local.into(), 0))
@@ -764,7 +1152,17 @@ async fn open_stub_stream(
             Ok(Some(total)) if buf.len() >= usize::from(total) => {
                 let mut b = buf.split_to(usize::from(total)).freeze();
                 match decode_message(&mut b, MAX_MESSAGE_LEN) {
-                    Ok(Message::Open(_)) => break,
+                    Ok(Message::Open(peer_open)) => {
+                        // An un-negotiated family is fatal, not retryable:
+                        // its delivery could never be observed, so the run
+                        // must not pretend the session counts.
+                        if let Some((afi, safi)) = missing_family(&peer_open, required) {
+                            return Err(StubOpenError::Fatal(format!(
+                                "peer OPEN did not negotiate {afi:?}/{safi:?} (empty family)"
+                            )));
+                        }
+                        break;
+                    }
                     Ok(Message::Notification(n)) => {
                         return Err(StubOpenError::Fatal(format!(
                             "NOTIFICATION during open: {:?}/{}",
@@ -807,6 +1205,7 @@ async fn establish_stream_with_retry(
     open: &[u8],
     keepalive: &[u8],
     window: Duration,
+    required: &[(Afi, Safi)],
 ) -> Result<(TcpStream, u32), String> {
     let deadline = Instant::now() + window;
     let mut retries = 0;
@@ -818,8 +1217,11 @@ async fn establish_stream_with_retry(
                 window.as_secs()
             ));
         }
-        match tokio::time::timeout(remaining, open_stub_stream(daemon, local, open, keepalive))
-            .await
+        match tokio::time::timeout(
+            remaining,
+            open_stub_stream(daemon, local, open, keepalive, required),
+        )
+        .await
         {
             Ok(Ok(stream)) => return Ok((stream, retries)),
             Ok(Err(StubOpenError::Fatal(error))) => return Err(error),
@@ -841,7 +1243,7 @@ async fn establish_stream_with_retry(
     }
 }
 
-fn stub_open(i: u32, open_asn: u32) -> OpenMessage {
+fn stub_open(i: u32, open_asn: u32, dualstack: bool) -> OpenMessage {
     OpenMessage {
         version: 4,
         // RFC 6793: the legacy two-octet field carries AS_TRANS when the
@@ -854,14 +1256,21 @@ fn stub_open(i: u32, open_asn: u32) -> OpenMessage {
             u8::try_from(i / 200).unwrap(),
             u8::try_from(i % 200 + 1).unwrap(),
         ),
-        capabilities: vec![
-            Capability::MultiProtocol {
+        capabilities: {
+            let mut capabilities = vec![Capability::MultiProtocol {
                 afi: Afi::Ipv4,
                 safi: Safi::Unicast,
-            },
-            Capability::FourOctetAs { asn: open_asn },
-            Capability::RouteRefresh,
-        ],
+            }];
+            if dualstack {
+                capabilities.push(Capability::MultiProtocol {
+                    afi: Afi::Ipv6,
+                    safi: Safi::Unicast,
+                });
+            }
+            capabilities.push(Capability::FourOctetAs { asn: open_asn });
+            capabilities.push(Capability::RouteRefresh);
+            capabilities
+        },
     }
 }
 
@@ -874,11 +1283,18 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<(Stub, u32), String> {
         0 => stub_asn(i),
         shared => shared,
     };
-    let open = stub_open(i, open_asn);
+    let open = stub_open(i, open_asn, dualstack());
     let bytes = encode_message(&Message::Open(open)).map_err(|e| format!("open encode: {e}"))?;
     let ka = encode_message(&Message::Keepalive).unwrap();
-    let (stream, retries) =
-        establish_stream_with_retry(ctx.daemon, local, &bytes, &ka, CONNECT_WINDOW).await?;
+    let (stream, retries) = establish_stream_with_retry(
+        ctx.daemon,
+        local,
+        &bytes,
+        &ka,
+        CONNECT_WINDOW,
+        required_families(dualstack()),
+    )
+    .await?;
     ctx.obs[i as usize]
         .established
         .store(true, Ordering::Relaxed);
@@ -976,14 +1392,25 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<(Stub, u32), String> {
                                 continue;
                             }
                         };
+                        // Per-family total: in dual-stack mode `per_peer` is
+                        // per family, so this is one family's base space.
                         let total_prefixes = rctx.n_peers * rctx.per_peer;
+                        let nlri = split_unicast_families(&parsed);
                         let mut base = 0u32;
-                        let mut other = u32::try_from(parsed.withdrawn.len()).unwrap_or(0);
-                        for e in &parsed.announced {
+                        let mut other =
+                            u32::try_from(nlri.v4_wd.len() + nlri.v6_wd.len()).unwrap_or(0);
+                        for prefix in &nlri.v4_ann {
                             // Same predicate as generation tracking: a second,
                             // divergent octet-range check here is what capped
                             // base_ann_total at 655360 and hung convergence.
-                            if base_prefix_index(e.prefix, total_prefixes).is_some() {
+                            if base_prefix_index(*prefix, total_prefixes).is_some() {
+                                base += 1;
+                            } else {
+                                other += 1;
+                            }
+                        }
+                        for prefix in &nlri.v6_ann {
+                            if base_prefix6_index(*prefix, total_prefixes).is_some() {
                                 base += 1;
                             } else {
                                 other += 1;
@@ -991,44 +1418,113 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<(Stub, u32), String> {
                         }
                         let ob = &rctx.obs[i as usize];
                         let t_us = now_us(&rctx);
-                        if !parsed.announced.is_empty() {
+                        if !nlri.v4_ann.is_empty() || !nlri.v6_ann.is_empty() {
                             // Borrow the communities out of the single parse;
                             // clone once only to store the last-seen sample.
                             let communities = observed_communities(&parsed.attributes);
                             *ob.last_comms.lock().unwrap() = communities.to_vec();
                             if communities.contains(&COMMUNITY_STABLE) {
-                                ob.stable_marker_seen_at_us.store(t_us, Ordering::Release);
+                                if !nlri.v4_ann.is_empty() {
+                                    ob.stable_marker_seen_at_us.store(t_us, Ordering::Release);
+                                }
+                                if !nlri.v6_ann.is_empty() {
+                                    ob.stable_marker6_seen_at_us.store(t_us, Ordering::Release);
+                                }
                             }
 
                             let expected = ob.expected_community.load(Ordering::Acquire);
                             if base > 0 && expected != 0 {
-                                let mut generation = ob.generation.lock().unwrap();
-                                if ob.expected_community.load(Ordering::Acquire) == expected {
-                                    observe_generation(
-                                        &mut generation,
-                                        expected,
-                                        communities,
-                                        parsed.announced.iter().map(|entry| entry.prefix),
-                                        total_prefixes,
-                                        t_us,
-                                    );
+                                {
+                                    let mut generation = ob.generation.lock().unwrap();
+                                    if ob.expected_community.load(Ordering::Acquire) == expected {
+                                        observe_generation(
+                                            &mut generation,
+                                            expected,
+                                            communities,
+                                            nlri.v4_ann.iter().copied(),
+                                            total_prefixes,
+                                            t_us,
+                                        );
+                                    }
+                                }
+                                if dualstack() && !nlri.v6_ann.is_empty() {
+                                    let mut generation6 = ob.generation6.lock().unwrap();
+                                    if ob.expected_community.load(Ordering::Acquire) == expected {
+                                        observe_generation6(
+                                            &mut generation6,
+                                            expected,
+                                            communities,
+                                            &nlri.v6_ann,
+                                            total_prefixes,
+                                            t_us,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        // Base-space withdrawals: cumulative per family for the
+                        // stable-observer bystander delta, plus the armed
+                        // generation's named/bystander/duplicate split.
+                        if !nlri.v4_wd.is_empty() || !nlri.v6_wd.is_empty() {
+                            let withdrawn4: Vec<usize> = nlri
+                                .v4_wd
+                                .iter()
+                                .filter_map(|p| base_prefix_index(*p, total_prefixes))
+                                .collect();
+                            let withdrawn6: Vec<usize> = nlri
+                                .v6_wd
+                                .iter()
+                                .filter_map(|p| base_prefix6_index(*p, total_prefixes))
+                                .collect();
+                            ob.base_withdrawn
+                                .fetch_add(withdrawn4.len() as u64, Ordering::Relaxed);
+                            ob.base_withdrawn6
+                                .fetch_add(withdrawn6.len() as u64, Ordering::Relaxed);
+                            let expected = ob.expected_community.load(Ordering::Acquire);
+                            if expected != 0 {
+                                if !withdrawn4.is_empty() {
+                                    let mut generation = ob.generation.lock().unwrap();
+                                    if ob.expected_community.load(Ordering::Acquire) == expected {
+                                        for index in withdrawn4 {
+                                            generation.observe_withdrawn(index, t_us);
+                                        }
+                                    }
+                                }
+                                if dualstack() && !withdrawn6.is_empty() {
+                                    let mut generation6 = ob.generation6.lock().unwrap();
+                                    if ob.expected_community.load(Ordering::Acquire) == expected {
+                                        for index in withdrawn6 {
+                                            generation6.observe_withdrawn(index, t_us);
+                                        }
+                                    }
                                 }
                             }
                         }
                         // Feed the armed direction into the shared bitmap, including withdrawals.
                         let flap_mode = ob.flap_mode.load(Ordering::Acquire);
                         if flap_mode != FLAP_OFF {
-                            let tracked = if flap_mode == FLAP_TRACK_WITHDRAWS {
-                                &parsed.withdrawn
+                            let (tracked, tracked6) = if flap_mode == FLAP_TRACK_WITHDRAWS {
+                                (&nlri.v4_wd, &nlri.v6_wd)
                             } else {
-                                &parsed.announced
+                                (&nlri.v4_ann, &nlri.v6_ann)
                             };
                             let mut generation = ob.generation.lock().unwrap();
                             if ob.flap_mode.load(Ordering::Acquire) == flap_mode {
-                                for e in tracked {
-                                    if let Some(index) = base_prefix_index(e.prefix, total_prefixes)
+                                for prefix in tracked {
+                                    if let Some(index) = base_prefix_index(*prefix, total_prefixes)
                                     {
                                         generation.observe(index, t_us);
+                                    }
+                                }
+                                drop(generation);
+                                if dualstack() {
+                                    let mut generation6 = ob.generation6.lock().unwrap();
+                                    for prefix in tracked6 {
+                                        if let Some(index) =
+                                            base_prefix6_index(*prefix, total_prefixes)
+                                        {
+                                            generation6.observe(index, t_us);
+                                        }
                                     }
                                 }
                             }
@@ -1040,32 +1536,35 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<(Stub, u32), String> {
                                 t_us,
                                 base_ann: base,
                                 other,
+                                families: nlri.families(),
                             });
                         }
                     }
-                    Message::RouteRefresh(_) => {
+                    Message::RouteRefresh(refresh) => {
                         // Answer off-thread so the reader never blocks on a full
                         // writer channel while the daemon floods us. Bound it to
-                        // one outstanding response per peer: a refresh storm must
-                        // not spawn overlapping full-slice floods that duplicate
-                        // announcements and skew the measurement.
-                        if rctx.obs[i as usize]
-                            .refresh_pending
-                            .swap(true, Ordering::AcqRel)
+                        // one outstanding response per peer and family: a refresh
+                        // storm must not spawn overlapping full-slice floods that
+                        // duplicate announcements and skew the measurement.
+                        let ipv6 = dualstack() && refresh.afi_raw == Afi::Ipv6 as u16;
+                        if refresh_pending(&rctx.obs[i as usize], ipv6).swap(true, Ordering::AcqRel)
                         {
                             continue;
                         }
                         let tx = tx_for_reader.clone();
                         let rc = Arc::clone(&rctx);
                         tokio::spawn(async move {
-                            let slice = announced_prefixes(&rc, i);
-                            for m in announce_msgs(i, &slice) {
+                            let messages = if ipv6 {
+                                announce6_msgs(i, &own_slice6(&rc, i))
+                            } else {
+                                announce_msgs(i, &announced_prefixes(&rc, i))
+                            };
+                            for m in messages {
                                 if tx.send(m).await.is_err() {
                                     break;
                                 }
                             }
-                            rc.obs[i as usize]
-                                .refresh_pending
+                            refresh_pending(&rc.obs[i as usize], ipv6)
                                 .store(false, Ordering::Release);
                         });
                     }
@@ -1099,6 +1598,19 @@ fn pct(sorted: &[f64], p: f64) -> f64 {
 /// trailing gap to e_us when `trailing` is set (control windows and the
 /// full-fleet reload window, whose stable observers have no completion event).
 fn max_gap_ms(ctx: &Ctx, i: usize, s_us: u64, e_us: u64, trailing: bool) -> f64 {
+    max_gap_ms_family(ctx, i, s_us, e_us, trailing, None)
+}
+
+/// [`max_gap_ms`] restricted to UPDATEs carrying `family` (`FAMILY_V4` /
+/// `FAMILY_V6`); `None` counts every UPDATE, the historical instrument.
+fn max_gap_ms_family(
+    ctx: &Ctx,
+    i: usize,
+    s_us: u64,
+    e_us: u64,
+    trailing: bool,
+    family: Option<u8>,
+) -> f64 {
     let ev = ctx.obs[i].events.lock().unwrap();
     let mut last = s_us;
     let mut max_gap = 0u64;
@@ -1108,6 +1620,9 @@ fn max_gap_ms(ctx: &Ctx, i: usize, s_us: u64, e_us: u64, trailing: bool) -> f64 
         }
         if e.t_us > e_us {
             break;
+        }
+        if family.is_some_and(|bit| e.families & bit == 0) {
+            continue;
         }
         max_gap = max_gap.max(e.t_us - last);
         last = e.t_us;
@@ -1121,7 +1636,21 @@ fn max_gap_ms(ctx: &Ctx, i: usize, s_us: u64, e_us: u64, trailing: bool) -> f64 
 /// First event time at which every expected unique base prefix was observed
 /// with the active policy-generation community marker.
 fn completion_us(ctx: &Ctx, i: usize) -> Option<u64> {
-    ctx.obs[i].generation.lock().unwrap().completed_at_us
+    let ipv4 = family_completion_us(ctx, i, false);
+    if !dualstack() {
+        return ipv4;
+    }
+    // Dual-stack: the observer completes when its LAST family completes;
+    // one family can never stand in for the other.
+    Some(ipv4?.max(family_completion_us(ctx, i, true)?))
+}
+
+fn family_completion_us(ctx: &Ctx, i: usize, ipv6: bool) -> Option<u64> {
+    if ipv6 {
+        ctx.obs[i].generation6.lock().unwrap().completed_at_us
+    } else {
+        ctx.obs[i].generation.lock().unwrap().completed_at_us
+    }
 }
 
 /// Per-cycle events drain (end of every reload cycle, after its CSV row).
@@ -1141,6 +1670,8 @@ fn stable_marker_is_fresh(seen_at_us: u64, since_us: u64) -> bool {
     seen_at_us != 0 && seen_at_us >= since_us
 }
 
+/// Stable observers with fresh stable-marker evidence in every negotiated
+/// family (IPv4 only historically; both families in dual-stack mode).
 fn stable_marker_peers_since(ctx: &Ctx, changed_peers: u32, since_us: u64) -> usize {
     ctx.obs
         .iter()
@@ -1149,7 +1680,31 @@ fn stable_marker_peers_since(ctx: &Ctx, changed_peers: u32, since_us: u64) -> us
             stable_marker_is_fresh(
                 observer.stable_marker_seen_at_us.load(Ordering::Acquire),
                 since_us,
-            )
+            ) && (!dualstack()
+                || stable_marker_is_fresh(
+                    observer.stable_marker6_seen_at_us.load(Ordering::Acquire),
+                    since_us,
+                ))
+        })
+        .count()
+}
+
+fn stable_marker_peers_since_family(
+    ctx: &Ctx,
+    changed_peers: u32,
+    since_us: u64,
+    ipv6: bool,
+) -> usize {
+    ctx.obs
+        .iter()
+        .skip(changed_peers as usize)
+        .filter(|observer| {
+            let seen = if ipv6 {
+                &observer.stable_marker6_seen_at_us
+            } else {
+                &observer.stable_marker_seen_at_us
+            };
+            stable_marker_is_fresh(seen.load(Ordering::Acquire), since_us)
         })
         .count()
 }
@@ -1900,7 +2455,7 @@ fn main() {
         std::process::exit(2);
     }
     let n_peers: u32 = a[1].parse().unwrap();
-    let total: u32 = a[2].parse().unwrap();
+    let total_all: u32 = a[2].parse().unwrap();
     let port: u16 = a[3].parse().unwrap();
     let pid: i32 = a[4].parse().unwrap();
     let policy_live = a[5].clone();
@@ -1945,6 +2500,12 @@ fn main() {
     if let Some(shared_as) = ibgp_rr {
         IBGP_RR_ASN.store(u32::from(shared_as), Ordering::Relaxed);
     }
+    // Dual-stack / filtering knobs; both absent reproduces the frozen contract.
+    let dualstack_enabled = env_u64("RELOADSTALL_DUALSTACK", 0) != 0;
+    let filter_count = u32::try_from(env_u64("RELOADSTALL_FILTER_COUNT", 0)).unwrap();
+    if dualstack_enabled {
+        DUALSTACK.store(true, Ordering::Relaxed);
+    }
     assert!(n_peers >= CHURNERS, "n_peers must be at least {CHURNERS}");
     assert!(
         (1..=n_peers).contains(&changed_peers),
@@ -1982,8 +2543,48 @@ fn main() {
             n_peers - CHURNERS
         );
     }
+    if dualstack_enabled {
+        assert!(
+            flapstorm.is_none()
+                && !convergence_only
+                && trip_every == 0
+                && ibgp_rr.is_none()
+                && overlap_file.is_none()
+                && received_view_file.is_none(),
+            "RELOADSTALL_DUALSTACK requires the reload mode without flapstorm, trips, \
+             iBGP-RR, overlap, received-view, or --convergence-only"
+        );
+        assert_eq!(
+            total_all % 2,
+            0,
+            "dual-stack total_prefixes is the TOTAL across both families and must be even"
+        );
+    }
+    // Per-family base-table size: dual-stack splits the positional total
+    // evenly (400,400 total = 200,200 per family), never per family.
+    let total = if dualstack_enabled {
+        total_all / 2
+    } else {
+        total_all
+    };
     let per_peer = total / n_peers;
     assert_eq!(total % n_peers, 0, "total must divide evenly");
+    if filter_count > 0 {
+        assert!(
+            reloads > 0
+                && flapstorm.is_none()
+                && !convergence_only
+                && ibgp_rr.is_none()
+                && trip_every == 0
+                && overlap_file.is_none(),
+            "RELOADSTALL_FILTER_COUNT requires the reload mode without flapstorm, trips, \
+             iBGP-RR, overlap, or --convergence-only"
+        );
+        assert!(
+            filter_count <= per_peer,
+            "RELOADSTALL_FILTER_COUNT must fit member 0's per-family slice ({per_peer})"
+        );
+    }
     if trip_every > 0 {
         assert!(
             reloads > 0 && flapstorm.is_none() && !convergence_only && reload_cmd.is_none(),
@@ -2084,19 +2685,7 @@ fn main() {
             n_peers,
             per_peer,
             daemon: SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), port),
-            obs: (0..n_peers)
-                .map(|_| Obs {
-                    events: Mutex::new(Vec::with_capacity(1 << 14)),
-                    base_ann_total: AtomicU64::new(0),
-                    established: AtomicBool::new(false),
-                    last_comms: Mutex::new(Vec::new()),
-                    stable_marker_seen_at_us: AtomicU64::new(0),
-                    expected_community: AtomicU32::new(0),
-                    generation: Mutex::new(GenerationProgress::default()),
-                    refresh_pending: AtomicBool::new(false),
-                    flap_mode: AtomicU32::new(FLAP_OFF),
-                })
-                .collect(),
+            obs: (0..n_peers).map(|_| Obs::new()).collect(),
             extras,
             parse_errors: AtomicU64::new(0),
             churn_cycles: AtomicU64::new(0),
@@ -2107,6 +2696,12 @@ fn main() {
              stable_peers={} prefixes={total} per_peer={per_peer} pid={pid}",
             n_peers - changed_peers
         );
+        if dualstack() {
+            println!(
+                "# dualstack total_prefixes={total_all} per_family={total} \
+                 per_peer_per_family={per_peer} filter_count={filter_count}"
+            );
+        }
 
         // --- Establish all sessions (waves of 64). ---
         let mut stubs: Vec<Stub> = Vec::with_capacity(n_peers as usize);
@@ -2156,12 +2751,19 @@ fn main() {
         // The iBGP-RR soak gates its initial convergence on the same
         // exact bitmap (its terminal verification re-arms it later).
         let exact_initial = exact_initial || ibgp_rr.is_some();
+        // Dual-stack always gates on the exact per-family bitmaps: a
+        // combined announcement count could be met by one family alone.
+        let exact_initial = exact_initial || dualstack();
         if exact_initial {
             for (i, observer) in ctx.obs.iter().enumerate() {
                 let own_start = u32::try_from(i).unwrap() * per_peer;
                 let mut generation = observer.generation.lock().unwrap();
                 generation.reset(total, expected, own_start, per_peer);
                 generation.exclude_extra(&ctx.extras[i]);
+                if dualstack() {
+                    let mut generation6 = observer.generation6.lock().unwrap();
+                    generation6.reset(total, expected, own_start, per_peer);
+                }
                 let mode = &observer.flap_mode;
                 mode.store(FLAP_TRACK_ANNOUNCES, Ordering::Release);
             }
@@ -2171,6 +2773,11 @@ fn main() {
             let slice = announced_prefixes(&ctx, i);
             for m in announce_msgs(i, &slice) {
                 stubs[i as usize].tx.send(m).await.unwrap();
+            }
+            if dualstack() {
+                for m in announce6_msgs(i, &own_slice6(&ctx, i)) {
+                    stubs[i as usize].tx.send(m).await.unwrap();
+                }
             }
         }
         // Require every observer's table-minus-own-slice; abort stalls (LAN-449).
@@ -2189,14 +2796,28 @@ fn main() {
                     }
                 })
                 .collect();
+            // Dual-stack: the IPv6 bitmap must ALSO reach its own target at
+            // every observer (same per-family target; no overlap dimension).
+            let counts6: Vec<u64> = if dualstack() {
+                ctx.obs
+                    .iter()
+                    .map(|observer| observer.generation6.lock().unwrap().unique)
+                    .collect()
+            } else {
+                Vec::new()
+            };
             if counts
                 .iter()
                 .zip(&targets)
                 .all(|(count, target)| count >= target)
+                && counts6
+                    .iter()
+                    .zip(&targets)
+                    .all(|(count, target)| count >= target)
             {
-                break counts;
+                break (counts, counts6);
             }
-            let sum: u64 = counts.iter().sum();
+            let sum: u64 = counts.iter().sum::<u64>() + counts6.iter().sum::<u64>();
             // Before the first observed announcement, allow the larger
             // FIRST_OUTPUT_WINDOW: large-policy imports compute for
             // minutes before anything reaches the wire.
@@ -2215,6 +2836,12 @@ fn main() {
                     .filter(|&(i, &c)| c < targets[i])
                     .map(|(i, &c)| (i, c))
                     .collect();
+                let below6: Vec<(usize, u64)> = counts6
+                    .iter()
+                    .enumerate()
+                    .filter(|&(i, &c)| c < targets[i])
+                    .map(|(i, &c)| (i, c))
+                    .collect();
                 eprintln!(
                     "FAIL: base-table convergence stalled for {}s: expected >= {expected} \
                      base prefixes per observer, {} of {n_peers} observers below; \
@@ -2223,9 +2850,18 @@ fn main() {
                     below.len(),
                     &below[..below.len().min(10)]
                 );
+                if dualstack() {
+                    eprintln!(
+                        "FAIL: ipv6 convergence: {} of {n_peers} observers below; \
+                         first stalled (observer, observed): {:?}",
+                        below6.len(),
+                        &below6[..below6.len().min(10)]
+                    );
+                }
                 std::process::exit(1);
             }
         };
+        let (unique, unique6) = unique;
         if exact_initial {
             if !convergence_only {
                 for observer in &ctx.obs {
@@ -2252,6 +2888,18 @@ fn main() {
                 unique.iter().min().unwrap(),
                 unique.iter().max().unwrap()
             );
+            if dualstack() {
+                println!(
+                    "first_exact_bitmap6,mode=reload,peers={n_peers},total={total},per_peer={per_peer},expected={expected},completed={},min_unique={},max_unique={}",
+                    unique6
+                        .iter()
+                        .zip(&targets)
+                        .filter(|(count, target)| count >= target)
+                        .count(),
+                    unique6.iter().min().unwrap(),
+                    unique6.iter().max().unwrap()
+                );
+            }
         }
         println!(
             "converged (>= {expected}/observer) at {:.1}s rss_mib={}",
@@ -2310,6 +2958,7 @@ fn main() {
             let i = n_peers - CHURNERS + c;
             let tx = stubs[i as usize].tx.clone();
             let block: Vec<Ipv4Prefix> = (0..CHURN_BLOCK).map(|j| churn_prefix(c, j)).collect();
+            let block6: Vec<Ipv6Prefix> = (0..CHURN_BLOCK).map(|j| churn_prefix6(c, j)).collect();
             let cctx = Arc::clone(&ctx);
             tokio::spawn(async move {
                 // Stagger churners across the interval.
@@ -2324,9 +2973,23 @@ fn main() {
                     } else {
                         announce_msgs(i, &block).pop().unwrap()
                     };
+                    // Dual-stack: flap the IPv6 block in lockstep so both
+                    // families carry steady churn (and stable-marker proof).
+                    let msg6 = dualstack().then(|| {
+                        if announced {
+                            withdraw6_msg(&block6)
+                        } else {
+                            announce6_msgs(i, &block6).pop().unwrap()
+                        }
+                    });
                     announced = !announced;
                     if tx.send(msg).await.is_err() {
                         return;
+                    }
+                    if let Some(msg6) = msg6 {
+                        if tx.send(msg6).await.is_err() {
+                            return;
+                        }
                     }
                     cctx.churn_cycles.fetch_add(1, Ordering::Relaxed);
                     tokio::time::sleep(Duration::from_millis(CHURN_MS)).await;
@@ -2344,6 +3007,14 @@ fn main() {
             .map(|i| max_gap_ms(&ctx, i, cs, ce, true))
             .collect();
         stats_line("control_maxgap_ms", gaps);
+        if dualstack() {
+            for (label, family) in [("v4", FAMILY_V4), ("v6", FAMILY_V6)] {
+                let gaps: Vec<f64> = (0..n_peers as usize)
+                    .map(|i| max_gap_ms_family(&ctx, i, cs, ce, true, Some(family)))
+                    .collect();
+                stats_line(&format!("control_maxgap_{label}_ms"), gaps);
+            }
+        }
         println!("control_rss_mib {}", rss_mib(pid));
 
         // --- Flapstorm mode: an alternative to the reload loop. ---
@@ -2402,6 +3073,24 @@ fn main() {
             );
         }
 
+        if dualstack() {
+            println!(
+                "reloadstall_dualstack_csv_header,reload,peers_total,peers_changed,\
+                 prefixes_total,prefixes_per_family,generation,filter_count,\
+                 v4_completion_p50_s,v4_completion_p95_s,v4_completion_max_s,\
+                 v6_completion_p50_s,v6_completion_p95_s,v6_completion_max_s,\
+                 v4_maxgap_p50_ms,v4_maxgap_p95_ms,v4_maxgap_max_ms,\
+                 v6_maxgap_p50_ms,v6_maxgap_p95_ms,v6_maxgap_max_ms,\
+                 v4_first_generation_update_p50_ms,v4_first_generation_update_p95_ms,\
+                 v4_first_generation_update_max_ms,v6_first_generation_update_p50_ms,\
+                 v6_first_generation_update_p95_ms,v6_first_generation_update_max_ms,\
+                 v4_filtered_withdrawn,v4_filtered_expected,v6_filtered_withdrawn,\
+                 v6_filtered_expected,filtered_leaked,bystander_withdrawn,stable_withdrawn,\
+                 duplicate_withdrawn,stable_marker_peers_v4,stable_marker_peers_v6,\
+                 sessions_up,parse_errors"
+            );
+        }
+
         // --- Reload loop. ---
         for r in 1..=reloads {
             let next = if r % 2 == 1 { &policy_b } else { &policy_a };
@@ -2409,6 +3098,13 @@ fn main() {
                 COMMUNITY_GEN_B
             } else {
                 COMMUNITY_GEN_A
+            };
+            // Filtering shape: generation B rejects the named base indexes
+            // 0..filter_count of every family; generation A permits them again.
+            let filtered: Vec<u32> = if r % 2 == 1 {
+                (0..filter_count).collect()
+            } else {
+                Vec::new()
             };
             std::fs::copy(next, &policy_live).unwrap();
             if let Some(cmd) = &stage_cmd {
@@ -2424,6 +3120,18 @@ fn main() {
                 }
             }
             let rss_before = rss_mib(pid);
+            // Cumulative base-withdrawal snapshot: any growth at a STABLE
+            // observer during this cycle is bystander damage.
+            let withdrawn_before: Vec<(u64, u64)> = ctx
+                .obs
+                .iter()
+                .map(|observer| {
+                    (
+                        observer.base_withdrawn.load(Ordering::Relaxed),
+                        observer.base_withdrawn6.load(Ordering::Relaxed),
+                    )
+                })
+                .collect();
             for (i, observer) in ctx
                 .obs
                 .iter()
@@ -2431,9 +3139,17 @@ fn main() {
                 .enumerate()
             {
                 observer.expected_community.store(0, Ordering::Release);
+                let own_start = u32::try_from(i).unwrap() * per_peer;
                 let mut generation = observer.generation.lock().unwrap();
-                generation.reset(total, expected, u32::try_from(i).unwrap() * per_peer, per_peer);
+                generation.reset(total, expected, own_start, per_peer);
                 generation.exclude_extra(&ctx.extras[i]);
+                generation.set_filtered(&filtered);
+                drop(generation);
+                if dualstack() {
+                    let mut generation6 = observer.generation6.lock().unwrap();
+                    generation6.reset(total, expected, own_start, per_peer);
+                    generation6.set_filtered(&filtered);
+                }
             }
             // The tracker stays disarmed until its trigger timestamp exists,
             // so a delayed UPDATE from an older A/B generation cannot become
@@ -2479,7 +3195,16 @@ fn main() {
             // makes generation progress for STALL_WINDOW.
             let unique_sum = |ctx: &Ctx| -> u64 {
                 (0..changed_peers as usize)
-                    .map(|i| ctx.obs[i].generation.lock().unwrap().unique)
+                    .map(|i| {
+                        let generation = ctx.obs[i].generation.lock().unwrap();
+                        let mut progress = generation.unique + generation.filtered_withdrawn;
+                        drop(generation);
+                        if dualstack() {
+                            let generation6 = ctx.obs[i].generation6.lock().unwrap();
+                            progress += generation6.unique + generation6.filtered_withdrawn;
+                        }
+                        progress
+                    })
                     .sum()
             };
             let mut last_unique = 0u64;
@@ -2531,9 +3256,23 @@ fn main() {
                     {
                         let g = ctx.obs[i].generation.lock().unwrap();
                         eprintln!(
-                            "reload {r} observer {i} incomplete: unique={}/{}",
-                            g.unique, g.target
+                            "reload {r} observer {i} incomplete: unique={}/{} filtered_withdrawn={}/{}",
+                            g.unique,
+                            g.target,
+                            g.filtered_withdrawn,
+                            g.filtered.len()
                         );
+                        drop(g);
+                        if dualstack() {
+                            let g6 = ctx.obs[i].generation6.lock().unwrap();
+                            eprintln!(
+                                "reload {r} observer {i} ipv6 incomplete: unique={}/{} filtered_withdrawn={}/{}",
+                                g6.unique,
+                                g6.target,
+                                g6.filtered_withdrawn,
+                                g6.filtered.len()
+                            );
+                        }
                     }
                     std::process::exit(1);
                 }
@@ -2628,6 +3367,44 @@ fn main() {
                 "reload {r} stable_marker_peers {stable_marker_peers}/{expected_stable}"
             );
             let parse_errors = ctx.parse_errors.load(Ordering::Relaxed);
+            // Named-churn and bystander accounting for this cycle.
+            let mut filtered_withdrawn = [0u64; 2];
+            let mut filtered_expected = [0u64; 2];
+            let mut filtered_leaked = 0u64;
+            let mut bystander_withdrawn = 0u64;
+            let mut duplicate_withdrawn = 0u64;
+            for i in 0..changed_peers as usize {
+                let trackers = [
+                    Some(ctx.obs[i].generation.lock().unwrap()),
+                    dualstack().then(|| ctx.obs[i].generation6.lock().unwrap()),
+                ];
+                for (family, tracker) in trackers.into_iter().enumerate() {
+                    let Some(g) = tracker else { continue };
+                    filtered_withdrawn[family] += g.filtered_withdrawn;
+                    filtered_expected[family] += g.filtered.len() as u64;
+                    filtered_leaked += g.filtered_leaked;
+                    bystander_withdrawn += g.bystander_withdrawn;
+                    duplicate_withdrawn += g.duplicate_withdrawn;
+                }
+            }
+            let stable_withdrawn: u64 = ctx
+                .obs
+                .iter()
+                .zip(&withdrawn_before)
+                .skip(changed_peers as usize)
+                .map(|(observer, &(before4, before6))| {
+                    (observer.base_withdrawn.load(Ordering::Relaxed) - before4)
+                        + (observer.base_withdrawn6.load(Ordering::Relaxed) - before6)
+                })
+                .sum();
+            println!(
+                "reload {r} withdrawals: v4 named {}/{} v6 named {}/{} leaked={filtered_leaked} \
+                 bystander={bystander_withdrawn} stable={stable_withdrawn} duplicate={duplicate_withdrawn}",
+                filtered_withdrawn[0],
+                filtered_expected[0],
+                filtered_withdrawn[1],
+                filtered_expected[1]
+            );
             if stable_marker_peers != expected_stable
                 || up != n_peers as usize
                 || parse_errors != 0
@@ -2637,8 +3414,15 @@ fn main() {
                 );
                 std::process::exit(1);
             }
+            if filtered_leaked != 0 || bystander_withdrawn != 0 || stable_withdrawn != 0 {
+                eprintln!(
+                    "FAIL: reload {r} policy-change integrity failed: filtered_leaked={filtered_leaked}, \
+                     bystander_withdrawn={bystander_withdrawn}, stable_withdrawn={stable_withdrawn}"
+                );
+                std::process::exit(1);
+            }
             println!(
-                "reloadstall_csv,{r},{n_peers},{changed_peers},{},{total},\
+                "reloadstall_csv,{r},{n_peers},{changed_peers},{},{total_all},\
                  {:.6},{:.6},{:.6},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},\
                  {:.3},{:.3},{:.3},{rss_before},{rss_after},{stable_marker_peers},{up},{parse_errors}",
                 n_peers - changed_peers,
@@ -2655,6 +3439,73 @@ fn main() {
                 first_generation_update.p95,
                 first_generation_update.max,
             );
+            if dualstack() {
+                // Per-family completion, leading stall, and delivery gap over
+                // the changed observers, each family judged on its own bitmap.
+                let mut family_stats = Vec::new();
+                for (label, ipv6, family) in [("v4", false, FAMILY_V4), ("v6", true, FAMILY_V6)] {
+                    let mut comp = Vec::new();
+                    let mut gaps = Vec::new();
+                    let mut firsts = Vec::new();
+                    for i in 0..changed_peers as usize {
+                        let Some(tc) = family_completion_us(&ctx, i, ipv6) else {
+                            continue;
+                        };
+                        comp.push((tc - t_hup) as f64 / 1e6);
+                        gaps.push(max_gap_ms_family(&ctx, i, t_hup, tc, false, Some(family)));
+                        let first = if ipv6 {
+                            ctx.obs[i].generation6.lock().unwrap().first_marker_base_at_us
+                        } else {
+                            ctx.obs[i].generation.lock().unwrap().first_marker_base_at_us
+                        };
+                        if let Some(first) = first {
+                            firsts.push(first.saturating_sub(t_hup) as f64 / 1000.0);
+                        }
+                    }
+                    family_stats.push((
+                        stats_line(&format!("reload {r} {label}_completion_s"), comp),
+                        stats_line(&format!("reload {r} {label}_maxgap_ms"), gaps),
+                        stats_line(
+                            &format!("reload {r} {label}_first_generation_update_ms"),
+                            firsts,
+                        ),
+                    ));
+                }
+                let (v4, v6) = (&family_stats[0], &family_stats[1]);
+                let stable_v4 =
+                    stable_marker_peers_since_family(&ctx, changed_peers, marker_since_us, false);
+                let stable_v6 =
+                    stable_marker_peers_since_family(&ctx, changed_peers, marker_since_us, true);
+                println!(
+                    "reloadstall_dualstack_csv,{r},{n_peers},{changed_peers},{total_all},{total},{},{filter_count},\
+                     {:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},\
+                     {:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{},{},{},{},{filtered_leaked},{bystander_withdrawn},\
+                     {stable_withdrawn},{duplicate_withdrawn},{stable_v4},{stable_v6},{up},{parse_errors}",
+                    if r % 2 == 1 { "b" } else { "a" },
+                    v4.0.p50,
+                    v4.0.p95,
+                    v4.0.max,
+                    v6.0.p50,
+                    v6.0.p95,
+                    v6.0.max,
+                    v4.1.p50,
+                    v4.1.p95,
+                    v4.1.max,
+                    v6.1.p50,
+                    v6.1.p95,
+                    v6.1.max,
+                    v4.2.p50,
+                    v4.2.p95,
+                    v4.2.max,
+                    v6.2.p50,
+                    v6.2.p95,
+                    v6.2.max,
+                    filtered_withdrawn[0],
+                    filtered_expected[0],
+                    filtered_withdrawn[1],
+                    filtered_expected[1],
+                );
+            }
             drain_cycle_events(&ctx.obs);
             // Quiesce between cycles (soak mode overrides the historical 20 s
             // to self-pace the whole window).
@@ -2740,7 +3591,7 @@ mod tests {
         for (peer, true_asn, expected_my_as) in [(1023, 65_535, u16::MAX), (1024, 65_536, AS_TRANS)]
         {
             assert_eq!(stub_asn(peer), true_asn);
-            let open = stub_open(peer, true_asn);
+            let open = stub_open(peer, true_asn, false);
             assert_eq!(open.my_as, expected_my_as);
             assert_eq!(open.four_byte_as(), true_asn);
 
@@ -2785,6 +3636,7 @@ mod tests {
             &client_open,
             &keepalive,
             Duration::from_secs(2),
+            &[],
         )
         .await
         .unwrap();
@@ -2815,6 +3667,7 @@ mod tests {
             &client_open,
             &keepalive,
             Duration::from_secs(2),
+            &[],
         )
         .await
         .err()
@@ -3280,24 +4133,17 @@ mod tests {
 
     #[test]
     fn reload_cycle_drain_keeps_observer_events_bounded() {
-        let observer = || Obs {
-            events: Mutex::new(
-                (0..1000)
-                    .map(|t_us| Event {
-                        t_us,
-                        base_ann: 1,
-                        other: 0,
-                    })
-                    .collect(),
-            ),
-            base_ann_total: AtomicU64::new(0),
-            established: AtomicBool::new(true),
-            last_comms: Mutex::new(Vec::new()),
-            stable_marker_seen_at_us: AtomicU64::new(0),
-            expected_community: AtomicU32::new(0),
-            generation: Mutex::new(GenerationProgress::default()),
-            refresh_pending: AtomicBool::new(false),
-            flap_mode: AtomicU32::new(FLAP_OFF),
+        let observer = || {
+            let observer = Obs::new();
+            *observer.events.lock().unwrap() = (0..1000)
+                .map(|t_us| Event {
+                    t_us,
+                    base_ann: 1,
+                    other: 0,
+                    families: FAMILY_V4,
+                })
+                .collect();
+            observer
         };
         let obs = vec![observer(), observer()];
         let capacity_before = obs[0].events.lock().unwrap().capacity();
@@ -3452,6 +4298,309 @@ mod tests {
         assert_eq!(
             base_prefix_index(Ipv4Prefix::new(Ipv4Addr::new(172, 16, 0, 0), 24), 1_000_000),
             None
+        );
+    }
+
+    // ---- dual-stack negative cases: packet totals never masquerade as delivery ----
+
+    #[test]
+    fn base_prefix6_index_round_trips_and_rejects_non_base_routes() {
+        for index in [0, 1, 65_535, 65_536, 200_199] {
+            assert_eq!(
+                base_prefix6_index(base_prefix6(index), 200_200),
+                Some(index as usize)
+            );
+        }
+        // Past the per-family total, the churn space, a wrong length, and a
+        // foreign first segment are all rejected.
+        assert_eq!(base_prefix6_index(base_prefix6(200_200), 200_200), None);
+        assert_eq!(base_prefix6_index(churn_prefix6(0, 0), 200_200), None);
+        assert_eq!(
+            base_prefix6_index(Ipv6Prefix::new(base_prefix6(7).addr, 64), 200_200),
+            None
+        );
+        let mut segments = base_prefix6(7).addr.segments();
+        segments[0] = 0x3000;
+        assert_eq!(
+            base_prefix6_index(Ipv6Prefix::new(Ipv6Addr::from(segments), 48), 200_200),
+            None
+        );
+    }
+
+    #[test]
+    fn dualstack_announce_and_withdraw_round_trip_through_mp_attributes() {
+        let prefixes = [base_prefix6(3), base_prefix6(200_199)];
+        let messages = announce6_msgs(7, &prefixes);
+        assert_eq!(messages.len(), 1);
+        let bytes = encode_message(&messages[0]).expect("IPv6 UPDATE encodes");
+        let mut buf = bytes::Bytes::copy_from_slice(&bytes);
+        let Message::Update(update) = decode_message(&mut buf, MAX_MESSAGE_LEN).unwrap() else {
+            panic!("expected an UPDATE");
+        };
+        let parsed = update.parse(true, false, &[]).unwrap();
+        let nlri = split_unicast_families(&parsed);
+        assert!(nlri.v4_ann.is_empty() && nlri.v4_wd.is_empty() && nlri.v6_wd.is_empty());
+        assert_eq!(nlri.v6_ann, prefixes);
+        assert_eq!(nlri.families(), FAMILY_V6);
+        let mp = parsed
+            .attributes
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::MpReachNlri(mp) => Some(mp),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(mp.next_hop, IpAddr::V6(stub_next_hop6(7)));
+        assert!(rustbgpd_wire::is_valid_ipv6_nexthop(&stub_next_hop6(7)));
+        assert!(!parsed
+            .attributes
+            .iter()
+            .any(|a| matches!(a, PathAttribute::NextHop(_))));
+
+        let bytes = encode_message(&withdraw6_msg(&prefixes)).unwrap();
+        let mut buf = bytes::Bytes::copy_from_slice(&bytes);
+        let Message::Update(update) = decode_message(&mut buf, MAX_MESSAGE_LEN).unwrap() else {
+            panic!("expected an UPDATE");
+        };
+        let nlri = split_unicast_families(&update.parse(true, false, &[]).unwrap());
+        assert_eq!(nlri.v6_wd, prefixes);
+        assert!(nlri.v6_ann.is_empty() && nlri.v4_wd.is_empty());
+
+        // A full per-peer IPv6 slice at the 700-member shape (286 /48s)
+        // fits one message; the chunking cap is what keeps larger slices
+        // under the 4096-byte maximum.
+        let slice: Vec<Ipv6Prefix> = (0..286).map(base_prefix6).collect();
+        assert_eq!(announce6_msgs(0, &slice).len(), 1);
+        let big: Vec<Ipv6Prefix> = (0..NLRI6_PER_MSG as u32 + 1).map(base_prefix6).collect();
+        for message in announce6_msgs(0, &big) {
+            assert!(encode_message(&message).unwrap().len() <= usize::from(MAX_MESSAGE_LEN));
+        }
+    }
+
+    #[test]
+    fn dualstack_completion_is_independent_per_family() {
+        // 4 peers x 2 prefixes per family; observer 1 excludes its own [2, 4).
+        let mut v4 = GenerationProgress::default();
+        let mut v6 = GenerationProgress::default();
+        v4.reset(8, 6, 2, 2);
+        v6.reset(8, 6, 2, 2);
+        let both = |v4: &GenerationProgress, v6: &GenerationProgress| {
+            Some(v4.completed_at_us?.max(v6.completed_at_us?))
+        };
+
+        // Empty family: every IPv4 prefix twice over is still no IPv6 delivery.
+        for round in 0..2u64 {
+            for idx in [0, 1, 4, 5, 6, 7] {
+                v4.observe(idx, 10 + round);
+            }
+        }
+        assert_eq!(v4.unique, 6);
+        assert_eq!(v4.completed_at_us, Some(10));
+        assert_eq!(v6.unique, 0);
+        assert_eq!(both(&v4, &v6), None, "IPv4 totals must not complete IPv6");
+
+        // Missing prefix: five of six IPv6 prefixes is not completion, and
+        // duplicates of a delivered prefix never fill the hole.
+        for idx in [0, 1, 4, 5, 6] {
+            v6.observe(idx, 20);
+        }
+        for _ in 0..10 {
+            v6.observe(6, 21);
+        }
+        assert_eq!(v6.unique, 5);
+        assert_eq!(
+            both(&v4, &v6),
+            None,
+            "a missing IPv6 prefix blocks completion"
+        );
+
+        // Own-slice IPv6 indexes never count either (out-of-range prefixes
+        // are rejected earlier, by `base_prefix6_index`).
+        v6.observe(2, 22);
+        v6.observe(3, 22);
+        assert_eq!(v6.unique, 5);
+
+        v6.observe(7, 30);
+        assert_eq!(v6.completed_at_us, Some(30));
+        assert_eq!(
+            both(&v4, &v6),
+            Some(30),
+            "completion is the LAST family's completion"
+        );
+    }
+
+    #[test]
+    fn filtering_generation_requires_named_withdrawals_and_rejects_leaks() {
+        // Observer 1 of 4 (own slice [2, 4)); named set = base indexes 0..3,
+        // of which 2 is own-announced and therefore not expected here.
+        let mut progress = GenerationProgress::default();
+        progress.reset(8, 6, 2, 2);
+        progress.set_filtered(&[0, 1, 2]);
+        assert_eq!(progress.filtered, vec![0, 1]);
+        assert_eq!(
+            progress.target, 4,
+            "bystander target excludes the named set"
+        );
+
+        // Every bystander carries the marker: not complete without withdrawals.
+        for idx in [4, 5, 6, 7] {
+            progress.observe(idx, 10);
+        }
+        assert_eq!(progress.unique, 4);
+        assert_eq!(progress.completed_at_us, None);
+
+        // One named withdrawal is not all of them; a bystander withdrawal is
+        // damage; an own-slice withdrawal is ignored.
+        progress.observe_withdrawn(0, 20);
+        assert_eq!(progress.completed_at_us, None);
+        progress.observe_withdrawn(5, 21);
+        assert_eq!(progress.bystander_withdrawn, 1);
+        progress.observe_withdrawn(3, 21);
+        assert_eq!(progress.bystander_withdrawn, 1);
+
+        progress.observe_withdrawn(1, 30);
+        assert_eq!(progress.filtered_withdrawn, 2);
+        assert_eq!(progress.completed_at_us, Some(30));
+
+        // A named prefix delivered WITH the marker is a leak, never progress;
+        // a repeated named withdrawal is counted separately.
+        progress.observe(0, 40);
+        assert_eq!(progress.filtered_leaked, 1);
+        assert_eq!(progress.unique, 4);
+        progress.observe_withdrawn(0, 41);
+        assert_eq!(progress.duplicate_withdrawn, 1);
+        assert_eq!(progress.filtered_withdrawn, 2);
+
+        // Withdrawals first, then the last bystander marker, also completes.
+        let mut reversed = GenerationProgress::default();
+        reversed.reset(8, 6, 2, 2);
+        reversed.set_filtered(&[0, 1]);
+        reversed.observe_withdrawn(0, 5);
+        reversed.observe_withdrawn(1, 6);
+        for idx in [4, 5, 6] {
+            reversed.observe(idx, 7);
+        }
+        assert_eq!(reversed.completed_at_us, None);
+        reversed.observe(7, 8);
+        assert_eq!(reversed.completed_at_us, Some(8));
+
+        // A permit-set-preserving generation (no named set) treats every
+        // base withdrawal as bystander damage, and reset clears the set.
+        reversed.reset(8, 6, 2, 2);
+        assert!(reversed.filtered.is_empty());
+        reversed.observe_withdrawn(0, 9);
+        assert_eq!(reversed.bystander_withdrawn, 1);
+    }
+
+    #[test]
+    fn dualstack_stub_open_carries_both_families_and_ipv4_only_is_untouched() {
+        let ipv4 = stub_open(7, stub_asn(7), false);
+        assert_eq!(
+            ipv4.capabilities,
+            vec![
+                Capability::MultiProtocol {
+                    afi: Afi::Ipv4,
+                    safi: Safi::Unicast
+                },
+                Capability::FourOctetAs { asn: stub_asn(7) },
+                Capability::RouteRefresh,
+            ],
+            "IPv4-only OPEN is a frozen contract"
+        );
+        let dual = stub_open(7, stub_asn(7), true);
+        assert!(missing_family(&dual, required_families(true)).is_none());
+        assert_eq!(
+            missing_family(&ipv4, required_families(true)),
+            Some((Afi::Ipv6, Safi::Unicast))
+        );
+        assert!(required_families(false).is_empty());
+    }
+
+    #[tokio::test]
+    async fn dualstack_establishment_fails_closed_on_an_unnegotiated_family() {
+        // Empty-family negative: a peer whose OPEN carries only IPv4 unicast
+        // must fail establishment in dual-stack mode (fatal, not retried),
+        // and pass once IPv6 unicast is negotiated too.
+        let ipv4_only = encode_message(&Message::Open(stub_open(0, 65_500, false)))
+            .unwrap()
+            .to_vec();
+        let dual = encode_message(&Message::Open(stub_open(0, 65_500, true)))
+            .unwrap()
+            .to_vec();
+        for (server_open, expect_ok) in [(ipv4_only, false), (dual, true)] {
+            let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .unwrap();
+            let daemon = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut client_open = [0u8; 4096];
+                assert!(stream.read(&mut client_open).await.unwrap() > 0);
+                stream.write_all(&server_open).await.unwrap();
+                let mut tail = [0u8; 19];
+                let _ = stream.read(&mut tail).await;
+            });
+            let client_open =
+                encode_message(&Message::Open(stub_open(1, stub_asn(1), true))).unwrap();
+            let keepalive = encode_message(&Message::Keepalive).unwrap();
+            let result = establish_stream_with_retry(
+                daemon,
+                Ipv4Addr::new(127, 0, 0, 2),
+                &client_open,
+                &keepalive,
+                Duration::from_secs(2),
+                required_families(true),
+            )
+            .await;
+            match result {
+                Ok((stream, retries)) => {
+                    assert!(expect_ok, "IPv4-only OPEN must not establish");
+                    assert_eq!(retries, 0);
+                    drop(stream);
+                }
+                Err(error) => {
+                    assert!(!expect_ok, "dual-stack OPEN must establish: {error}");
+                    assert!(error.contains("did not negotiate Ipv6/Unicast"), "{error}");
+                }
+            }
+            server.await.unwrap();
+        }
+    }
+
+    #[test]
+    fn family_gap_only_counts_that_family() {
+        let ctx = Ctx {
+            t0: Instant::now(),
+            n_peers: 1,
+            per_peer: 1,
+            daemon: SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1),
+            obs: vec![Obs::new()],
+            extras: vec![Vec::new()],
+            parse_errors: AtomicU64::new(0),
+            churn_cycles: AtomicU64::new(0),
+            record_events: AtomicBool::new(true),
+        };
+        let push = |t_us, families| {
+            ctx.obs[0].events.lock().unwrap().push(Event {
+                t_us,
+                base_ann: 1,
+                other: 0,
+                families,
+            });
+        };
+        push(100, FAMILY_V4);
+        push(200, FAMILY_V6);
+        push(300, FAMILY_V4);
+        push(1000, FAMILY_V4 | FAMILY_V6);
+        // Any-family: 700 (300 -> 1000); IPv4 only: 700; IPv6 only: 800.
+        assert_eq!(max_gap_ms(&ctx, 0, 0, 1000, false), 0.7);
+        assert_eq!(
+            max_gap_ms_family(&ctx, 0, 0, 1000, false, Some(FAMILY_V4)),
+            0.7
+        );
+        assert_eq!(
+            max_gap_ms_family(&ctx, 0, 0, 1000, false, Some(FAMILY_V6)),
+            0.8
         );
     }
 }

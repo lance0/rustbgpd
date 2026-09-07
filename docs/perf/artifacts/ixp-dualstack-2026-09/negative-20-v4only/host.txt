@@ -1,0 +1,7 @@
+start_epoch_s=1788815618
+load1=2.35
+governor_cpu0=powersave
+competitors_at_start=none
+end_epoch_s=1788815622
+load1_end=2.35
+competitors_at_end=
