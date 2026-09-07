@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Bounded management-plane load for the route-server flagship soak.
 
-Four independent workers exercise the shipped HTTP and ``rbgp`` surfaces.
+Five independent workers exercise the shipped HTTP and ``rbgp`` surfaces.
 Only timing, disposition, byte count, and a payload digest are retained; the
 potentially large response bodies never enter the JSONL evidence.
 """
@@ -25,7 +25,18 @@ from dataclasses import dataclass
 from typing import BinaryIO, Callable, Optional
 
 
-OPERATIONS = ("metrics", "neighbor", "policy_stats", "rib_prefix")
+OPERATIONS = ("metrics", "neighbor", "policy_stats", "rib_prefix", "doctor")
+
+# `rbgp doctor` exits 2 when it wrote a bundle but at least one check is red;
+# that is a report, not a CLI failure, so its JSON is still validated.
+DOCTOR_REPORT_EXIT = 2
+
+# Per-peer session/flap checks are excluded from the soak assertion: the
+# scenario deliberately trips the designated member, and the run already gates
+# session count, flap budget, and the whole trip evidence chain far more
+# exactly than doctor's fleet-wide heuristics can. What doctor uniquely adds
+# is the host/daemon configuration verdict (rlimits, disk, listener, caches).
+DOCTOR_PEER_CHECK_PREFIX = "peer."
 MAX_PAYLOAD_BYTES = 16 * 1024 * 1024
 MAX_RECORD_BYTES = 4096
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
@@ -93,7 +104,32 @@ def validate_cli_json(
         if len(value) != 1 or not isinstance(value[0], dict):
             return "route"
         return "ok" if value[0].get("prefix") == route_prefix else "route"
+    if operation == "doctor":
+        return validate_doctor(value)
     raise ValueError(f"unsupported CLI operation: {operation}")
+
+
+def validate_doctor(value: object) -> str:
+    """Configuration verdict from one `rbgp doctor --json` report."""
+    if not isinstance(value, dict) or not isinstance(value.get("bundle"), str):
+        return "schema"
+    checks = value.get("checks")
+    if not isinstance(checks, list) or not checks:
+        return "schema"
+    for check in checks:
+        if not isinstance(check, dict) or not isinstance(check.get("name"), str):
+            return "schema"
+        if check.get("status") not in ("ok", "warn", "fail"):
+            return "schema"
+    if not isinstance(value.get("ok"), bool):
+        return "schema"
+    failed = [
+        check["name"]
+        for check in checks
+        if check["status"] == "fail"
+        and not check["name"].startswith(DOCTOR_PEER_CHECK_PREFIX)
+    ]
+    return "doctor_check_failed" if failed else "ok"
 
 
 def probe_metrics(
@@ -144,18 +180,24 @@ def run_cli_command(
             return ProbeResult(None, "timeout", byte_count, digest)
         stdout.seek(0)
         payload, byte_count, digest = _payload_fingerprint(stdout)
-    if completed.returncode != 0:
+    reported = operation == "doctor" and completed.returncode == DOCTOR_REPORT_EXIT
+    if completed.returncode != 0 and not reported:
         return ProbeResult(completed.returncode, "cli_exit", byte_count, digest)
     result = validate_cli_json(operation, payload, peer_count, route_prefix)
     return ProbeResult(completed.returncode, result, byte_count, digest)
 
 
-def cli_commands(rbgp: str, uds: str, route_prefix: str) -> dict[str, list[str]]:
+def cli_commands(
+    rbgp: str, uds: str, route_prefix: str, doctor_bundle: str
+) -> dict[str, list[str]]:
     base = [rbgp, "-s", uds, "--json"]
     return {
         "neighbor": [*base, "neighbor"],
         "policy_stats": [*base, "policy", "stats", "--direction", "both"],
         "rib_prefix": [*base, "rib", "--prefix", route_prefix],
+        # One fixed bundle path, rewritten in place: a defaulted output name
+        # is timestamped and would accumulate a tarball per attempt.
+        "doctor": [*base, "doctor", "--output", doctor_bundle],
     }
 
 
@@ -201,8 +243,10 @@ class ManagementPlaneLoad:
         uds: str,
         peer_count: int,
         route_prefix: str,
+        doctor_bundle: str,
         metrics_interval_seconds: float,
         cli_interval_seconds: float,
+        doctor_interval_seconds: float,
         timeout_seconds: float,
     ) -> None:
         self.sink = JsonlSink(output)
@@ -215,8 +259,9 @@ class ManagementPlaneLoad:
             "neighbor": cli_interval_seconds,
             "policy_stats": cli_interval_seconds,
             "rib_prefix": cli_interval_seconds,
+            "doctor": doctor_interval_seconds,
         }
-        self.commands = cli_commands(rbgp, uds, route_prefix)
+        self.commands = cli_commands(rbgp, uds, route_prefix, doctor_bundle)
         self.stop = threading.Event()
         self.counter_lock = threading.Lock()
         self.counts = {
@@ -381,8 +426,10 @@ def main() -> int:
     parser.add_argument("--socket", required=True)
     parser.add_argument("--peers", required=True, type=positive_int)
     parser.add_argument("--route-prefix", default="20.0.0.0/24")
+    parser.add_argument("--doctor-bundle", required=True)
     parser.add_argument("--metrics-interval", type=positive_float, default=1.0)
     parser.add_argument("--cli-interval", type=positive_float, default=5.0)
+    parser.add_argument("--doctor-interval", type=positive_float, default=600.0)
     parser.add_argument("--timeout", type=positive_float, default=5.0)
     args = parser.parse_args()
 
@@ -393,8 +440,10 @@ def main() -> int:
         uds=args.socket,
         peer_count=args.peers,
         route_prefix=args.route_prefix,
+        doctor_bundle=args.doctor_bundle,
         metrics_interval_seconds=args.metrics_interval,
         cli_interval_seconds=args.cli_interval,
+        doctor_interval_seconds=args.doctor_interval,
         timeout_seconds=args.timeout,
     )
 
