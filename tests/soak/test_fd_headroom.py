@@ -44,6 +44,13 @@ class FdHeadroomContracts(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "65536")
 
+    def test_guard_preserves_the_inherited_hard_limit(self):
+        result = run_guard(
+            'before=$(ulimit -Hn); require_fd_headroom >/dev/null; '
+            'test "$(ulimit -Hn)" = "$before"', hard_limit=131072
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_guard_fails_closed_when_the_hard_limit_is_too_low(self):
         result = run_guard('require_fd_headroom', hard_limit=512)
         self.assertEqual(result.returncode, 2)

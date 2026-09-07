@@ -46,7 +46,7 @@ require_fd_headroom() {
     hard=$(ulimit -Hn)
     # `ulimit` failing here is not fatal on its own; the achieved-limit
     # check below is what decides, so one message covers both causes.
-    ulimit -n "$target" 2>/dev/null || true
+    ulimit -Sn "$target" 2>/dev/null || true
     achieved=$(ulimit -n)
     if [[ $achieved != unlimited ]] && ((achieved < target)); then
         echo "error: file-descriptor headroom too low: soft limit is ${achieved}," >&2

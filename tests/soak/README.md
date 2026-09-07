@@ -991,11 +991,12 @@ on purpose, and the session-floor, flap-budget, and trip-evidence gates measure
 peer health far more exactly than `doctor`'s fleet-wide heuristics can.
 
 `doctor`'s rlimit check reports every `rustbgpd` process on the host, not only
-the one under measurement, so a second daemon started during the window turns
-the assertion red. That is intended: a competing daemon corrupts every reading
-in the run, which is why `preflight.sh` fails on any live `rustbgpd` and the
-host mutex exists. Treat a red `daemon.rlimit.nofile.<pid>` naming an unknown
-pid as what it is — the soak was not alone on its host.
+the one under measurement. A second daemon with a low descriptor limit turns
+the assertion red; a second daemon with adequate limits does not. This check
+does not replace host isolation: `preflight.sh` refuses a live `rustbgpd`, and
+the host mutex coordinates cooperating workloads. A red
+`daemon.rlimit.nofile.<pid>` naming an unknown pid means another daemon on the
+host has insufficient descriptor headroom.
 
 ```bash
 # Full 24 h flagship run (defaults):

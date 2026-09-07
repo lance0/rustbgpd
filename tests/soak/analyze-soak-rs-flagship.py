@@ -188,7 +188,9 @@ def analyze_management_load(raw: bytes, meta: dict) -> dict:
                     "result": "invalid_http_success",
                     "exit": record.get("exit"),
                 })
-            elif operation != "metrics" and record.get("exit") != 0:
+            elif operation != "metrics" and record.get("exit") not in (
+                (0, 2) if operation == "doctor" else (0,)
+            ):
                 failures.append({
                     "operation": operation,
                     "result": "invalid_cli_success",

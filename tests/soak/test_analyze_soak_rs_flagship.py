@@ -6,12 +6,16 @@ import hashlib
 import importlib.util
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 HERE = Path(__file__).parent
+sys.path.insert(0, str(HERE))
+import management_plane_load as load  # noqa: E402
+
 ANALYZER = HERE / "analyze-soak-rs-flagship.py"
 ANALYZER_SPEC = importlib.util.spec_from_file_location("rs_soak_analyzer", ANALYZER)
 if ANALYZER_SPEC is None or ANALYZER_SPEC.loader is None:
@@ -371,6 +375,57 @@ class RsFlagshipAnalyzerContracts(unittest.TestCase):
             {"operation": "doctor", "result": "doctor_check_failed", "exit": 0},
         )
         self.assertFalse(payload["gates"]["management_failures"]["pass"])
+
+    def test_doctor_producer_results_survive_receipt_analysis(self):
+        for exit_code, name, status, accepted in (
+            (0, "daemon.healthy", "ok", True),
+            (2, "peer.127.1.0.1.flaps", "fail", True),
+            (2, "daemon.rlimit.nofile.7", "fail", False),
+            (0, "daemon.rlimit.nofile.7", "fail", False),
+            (2, "daemon.healthy", "invalid", False),
+            (1, "daemon.healthy", "ok", False),
+        ):
+            with self.subTest(exit=exit_code, name=name, status=status):
+                report = json.dumps({
+                    "bundle": "/run/doctor.tar.gz", "ok": status == "ok",
+                    "checks": [{"name": name, "status": status}],
+                })
+                probe = load.run_cli_command(
+                    [sys.executable, "-c",
+                     f"print({report!r}); raise SystemExit({exit_code})"],
+                    "doctor", 5, 1, "20.0.0.0/24",
+                )
+                meta = smoke_meta()
+                records = [json.loads(line) for line in management_jsonl(meta).splitlines()]
+                for record in records:
+                    if record.get("record") == "operation" and record["operation"] == "doctor":
+                        record.update({
+                            "exit": probe.exit_code, "result": probe.result,
+                            "bytes": probe.byte_count, "sha256": probe.sha256,
+                        })
+                evidence = b"\n".join(json.dumps(record).encode() for record in records) + b"\n"
+                result, payload = run_analyzer(
+                    smoke_rows(), smoke_cycles(), meta, management=evidence
+                )
+                self.assertEqual(result.returncode, 0 if accepted else 1)
+                self.assertEqual(payload["gates"]["management_doctor"]["pass"], accepted)
+
+    def test_doctor_exit_exception_does_not_allow_other_cli_or_empty_success(self):
+        for operation, exit_code, byte_count in (
+            ("neighbor", 2, 2), ("doctor", 1, 2), ("doctor", 2, 0),
+        ):
+            with self.subTest(operation=operation, exit=exit_code, bytes=byte_count):
+                meta = smoke_meta()
+                records = [json.loads(line) for line in management_jsonl(meta).splitlines()]
+                for record in records:
+                    if record.get("record") == "operation" and record["operation"] == operation:
+                        record.update({"exit": exit_code, "bytes": byte_count})
+                evidence = b"\n".join(json.dumps(record).encode() for record in records) + b"\n"
+                result, payload = run_analyzer(
+                    smoke_rows(), smoke_cycles(), meta, management=evidence
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertFalse(payload["gates"]["management_failures"]["pass"])
 
     def test_missing_doctor_attempts_fail_the_doctor_gate(self):
         meta = smoke_meta()
