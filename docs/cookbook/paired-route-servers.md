@@ -89,19 +89,43 @@ address = "192.0.2.100:11019"          # your capture/collector host
 monitor = ["rib_out_post"]
 ```
 
-Then, on the capture host:
+The capture has to contain each member's initial Adj-RIB-Out dump,
+and RS2 sends that dump only when the member's session establishes. A
+collector that connects later gets the Peer Ups and live updates only
+(`rib_out_post` has no reconnect dump), and `from-bmp` refuses such a
+capture (exit 2, `End-of-RIB not seen`) rather than emit an incomplete
+peer. Nothing run from RS2 fills that gap: `rbgp neighbor <member>
+refresh-out` reports the refresh as scheduled and re-sends the routes
+without an End-of-RIB, and a member's own ROUTE-REFRESH is answered
+with an End-of-RIB-Refresh marker instead when the member negotiated
+enhanced route refresh (FRR 10.7.1 does) — a ROUTE-REFRESH message,
+which BMP route monitoring never carries. So start the listener before
+RS2's member sessions establish — before RS2 starts (in practice its
+maintenance-window restart) or before its member sessions are cleared —
+and leave it running: the live updates fold into the same capture, and
+a dropped BMP connection ends its usefulness until the next
+establishment.
 
 ```bash
-# Capture from BMP session start (Peer Ups carry the negotiated OPENs),
-# stop after every peer's dump completes, then convert and compare:
+# On the capture host, listening before RS2's member sessions come up.
+# Once the members have converged (each Peer Up followed by that peer's
+# End-of-RIB), convert and compare; the capture can keep running:
 nc -l 11019 > rs2-adjout.bmp
 rbgp diff snapshot from-bmp rs2-adjout.bmp > rs2.ndjson
-rbgp diff advertised --against rs2.ndjson    # pointed at RS1's gRPC socket
+rbgp diff advertised --against rs2.ndjson --ignore-attribute unknown  # RS1's gRPC socket
 echo $?   # 0 in sync, 1 divergent (listed), 2 comparison refused
 ```
 
+`--ignore-attribute unknown` is needed with RFC 9234 roles configured:
+a route server attaches OTC on the wire, so the capture carries it and
+gRPC does not expose it; without the flag every route reports as
+attribute-changed. A refused conversion names the first peer and family
+whose End-of-RIB is missing and writes no snapshot; `--peer` narrows the
+snapshot to the members that did complete.
+
 Run it after every staggered rollout completes, and on a schedule
-between rollouts; archive the `--json` report. Expected divergence,
+between rollouts from the still-running capture; archive the `--json`
+report. Expected divergence,
 not a finding: a member session down on exactly one instance makes
 that member's routes one-sided everywhere. Anything else is drift —
 diff the two hosts' render receipts and reload timestamps first.
