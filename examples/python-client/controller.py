@@ -2,7 +2,7 @@
 """Drive a running rustbgpd the way a containerized controller would.
 
 Checks health, watches the live event stream while injecting and withdrawing
-one route, and prints the events that mutation produced. GetHealth and
+one route, and prints observed events. GetHealth and
 WatchEvents are `sensitive_read`; AddPath and DeletePath are `operator_only`,
 so this script needs a principal mapped to the Operator role.
 
@@ -55,10 +55,9 @@ def run(channel: grpc.Channel, args: argparse.Namespace) -> None:
     watcher = threading.Thread(target=watch, args=(channel, args.watch_seconds, events))
     watcher.start()
 
-    # No try/finally around the pair: a failed AddPath leaves nothing to clean
-    # up, and wrapping it would report the cleanup call's status instead of the
-    # one that actually failed. A failed DeletePath must surface as itself,
-    # because it means the route is still originated.
+    # Preserve the original RPC error without automatic cleanup or retries.
+    # A deadline or transport failure can lose a reply after either mutation
+    # was applied; inspect the route state before deciding how to recover.
     injection = rustbgpd_pb2_grpc.InjectionServiceStub(channel)
     injection.AddPath(
         rustbgpd_pb2.AddPathRequest(

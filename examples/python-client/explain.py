@@ -65,6 +65,11 @@ def connect(args: argparse.Namespace) -> grpc.Channel:
     requires either mTLS or the local-connection credentials used for
     loopback and Unix sockets.
     """
+    if bool(args.tls_cert) != bool(args.tls_key):
+        raise ValueError("--tls-cert and --tls-key must be supplied together")
+    if (args.tls_cert or args.tls_key) and not args.tls_ca:
+        raise ValueError("--tls-cert and --tls-key require --tls-ca")
+
     unix_socket = args.target.startswith("unix:")
     # Over a Unix socket gRPC defaults `:authority` to the socket path, which
     # the daemon's HTTP/2 stack rejects as a malformed authority. Any valid

@@ -126,6 +126,20 @@ requires mTLS (or, on loopback and Unix sockets,
 `controller.py` reuses `add_connection_arguments`, `connect`, and
 `parse_prefix` from `explain.py` rather than restating them.
 
+Supply `--tls-cert` and `--tls-key` together with `--tls-ca`; incomplete
+combinations fail before credentials are read or a channel is created.
+`--tls-ca` alone enables server-authenticated TLS without a client certificate.
+
+The controller preserves the first unary RPC error and exits nonzero, without
+automatic cleanup or retries. A deadline or transport failure can occur after
+the daemon has applied an injection or withdrawal: inspect the route state
+before deciding how to recover. Exit 0 means the unary calls succeeded; the
+watcher starts concurrently and may miss immediate events, and stream errors
+are printed without changing that exit status.
+
+After installing the dependencies and generating the stubs, run the connection
+checks from this directory with `python -m unittest -v test_connect`.
+
 ## The UDS trap
 
 Both scripts also accept a `unix:///var/lib/rustbgpd/grpc.sock` target. With
