@@ -1,0 +1,166 @@
+# IXP import hygiene (rpol policy language, ADR-0096).
+#
+# Referenced from config.toml via `[policy] rpol_files` and the import
+# chain; edits hot-apply via SIGHUP. Run the in-language tests below
+# with `rbgp policy check hygiene.rpol`.
+
+# Dated starter snapshot of the IANA IPv4 and IPv6 Special-Purpose Address
+# Registries (both updated 2025-10-09; reviewed here 2026-07-15). The reject
+# set contains the two default routes plus active rows whose "Globally
+# Reachable" value is False. It is deliberately not a complete bogon feed:
+# terminated rows, unallocated space, multicast, and True/N/A rows outside a
+# rejected parent are omitted. Active True/N/A children of a rejected parent
+# must stay in this first set so the policy accepts them before the broad deny.
+prefix-set special-purpose-parent-exceptions {
+    192.0.0.9/32,
+    192.0.0.10/32,
+    2001::/32 le 128,
+    2001:1::1/128,
+    2001:1::2/128,
+    2001:1::3/128,
+    2001:3::/32 le 128,
+    2001:4:112::/48 le 128,
+    2001:20::/28 le 128,
+    2001:30::/28 le 128,
+}
+
+prefix-set non-global-special-purpose {
+    0.0.0.0/0,
+    0.0.0.0/8 le 32,
+    10.0.0.0/8 le 32,
+    100.64.0.0/10 le 32,
+    127.0.0.0/8 le 32,
+    169.254.0.0/16 le 32,
+    172.16.0.0/12 le 32,
+    192.0.0.0/24 le 32,
+    192.0.2.0/24 le 32,
+    192.88.99.2/32,
+    192.168.0.0/16 le 32,
+    198.18.0.0/15 le 32,
+    198.51.100.0/24 le 32,
+    203.0.113.0/24 le 32,
+    240.0.0.0/4 le 32,
+    ::/0,
+    ::/128,
+    ::1/128,
+    ::ffff:0:0/96 le 128,
+    64:ff9b:1::/48 le 128,
+    100::/64 le 128,
+    100:0:0:1::/64 le 128,
+    2001::/23 le 128,
+    2001:db8::/32 le 128,
+    3fff::/20 le 128,
+    5f00::/16 le 128,
+    fc00::/7 le 128,
+    fe80::/10 le 128,
+}
+
+policy reject-special-purpose {
+    term preserve-active-parent-exception {
+        if route.prefix in special-purpose-parent-exceptions { accept }
+    }
+    term reject-non-global { if route.prefix in non-global-special-purpose { reject } }
+}
+
+policy ixp-hygiene {
+    # Reject routes carrying an AS_SET (deprecated by RFC 9774; common
+    # IXP hygiene, arouteserver rejects them too). AS_PATHs render
+    # AS_SETs in braces — "65001 {65002 65003}" — so a literal `{`
+    # (escaped for the regex) matches any AS_SET segment.
+    term reject-as-set { if route.as-path matches "\\{" { reject } }
+    # Reject ASPA-invalid AS paths (draft-ietf-sidrops-aspa-verification).
+    # Inert (state = unknown) until ASPA objects are loaded from the
+    # RPKI cache; activates automatically once they are.
+    term reject-aspa-invalid { if route.aspa == invalid { reject } }
+    # Tag the RPKI origin-validation outcome as an RFC 8097 extended
+    # community (non-transitive opaque, type 0x43) so route-server
+    # clients can act on it without running their own validator.
+    # OV_INVALID never reaches clients here — the TOML import chain
+    # drops rpki-invalid routes — but tagging is harmless and keeps
+    # the terms uniform if that drop is ever relaxed.
+    term tag-ov-valid { if route.rpki == valid { add ext-community OV_VALID } }
+    term tag-ov-not-found { if route.rpki == not-found { add ext-community OV_NOT_FOUND } }
+    term tag-ov-invalid { if route.rpki == invalid { add ext-community OV_INVALID } }
+}
+
+test as-set-is-rejected {
+    route { prefix 203.0.113.0/24; as-path "64501 {64502 64503}" }
+    expect ixp-hygiene == reject
+}
+
+test aspa-invalid-is-rejected {
+    route { prefix 203.0.113.0/24; as-path "64501"; aspa invalid }
+    expect ixp-hygiene == reject
+}
+
+test clean-route-falls-through {
+    route { prefix 203.0.113.0/24; as-path "64501 64510" }
+    expect ixp-hygiene == accept
+}
+
+test rpki-valid-is-tagged-ov-valid {
+    route { prefix 203.0.113.0/24; as-path "64501"; rpki valid }
+    expect ixp-hygiene == accept with ext-community OV_VALID
+}
+
+test rpki-not-found-is-tagged-ov-not-found {
+    route { prefix 203.0.113.0/24; as-path "64501" }
+    expect ixp-hygiene == accept with ext-community OV_NOT_FOUND
+}
+
+test rpki-invalid-is-tagged-ov-invalid {
+    route { prefix 203.0.113.0/24; as-path "64501"; rpki invalid }
+    expect ixp-hygiene == accept with ext-community OV_INVALID
+}
+
+test ipv4-default-is-rejected {
+    route { prefix 0.0.0.0/0 }
+    expect reject-special-purpose == reject
+}
+
+test ipv6-default-is-rejected {
+    route { prefix ::/0 }
+    expect reject-special-purpose == reject
+}
+
+test shared-address-more-specific-is-rejected {
+    route { prefix 100.65.0.0/24 }
+    expect reject-special-purpose == reject
+}
+
+test unique-local-more-specific-is-rejected {
+    route { prefix fd00:1::/48 }
+    expect reject-special-purpose == reject
+}
+
+test pcp-parent-exception-is-preserved {
+    route { prefix 192.0.0.9/32 }
+    expect reject-special-purpose == accept
+}
+
+test teredo-parent-exception-is-preserved {
+    route { prefix 2001:0:1234::/48 }
+    expect reject-special-purpose == accept
+}
+
+test as112-parent-exception-is-preserved {
+    route { prefix 2001:4:112::/48 }
+    expect reject-special-purpose == accept
+}
+
+test ordinary-global-ipv4-falls-through {
+    route { prefix 8.8.8.0/24 }
+    expect reject-special-purpose == accept
+}
+
+test ordinary-global-ipv6-falls-through {
+    route { prefix 2001:4860::/32 }
+    expect reject-special-purpose == accept
+}
+
+# This policy only classifies the dated special-purpose snapshot. The later
+# reject-long-prefixes chain member remains responsible for prefix-length caps.
+test too-long-parent-exception-falls-through {
+    route { prefix 2001:4:112::1/128 }
+    expect reject-special-purpose == accept
+}
