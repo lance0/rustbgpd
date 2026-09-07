@@ -16,13 +16,26 @@ Requires Rust 1.95 or newer.
 
 Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 
-### 0.19.1 compatibility note
+### 0.20.0 compatibility note
 
-`rustbgpd-wire` 0.19.1 is **additive**. No public item is removed and no
-existing signature is changed; code that builds against 0.19.0 builds
-unchanged against 0.19.1. Consumers should account for these additions and
-decode-behavior refinements when upgrading:
+`rustbgpd-wire` 0.20.0 is prepared for release. The new public inspection
+helper and types use a new pre-1.0 compatibility line. Existing items and
+signatures remain available, but consumers sharing wire types with FSM or
+RPKI must move together to FSM 0.7 and RPKI 0.2. Consumers should account for
+these additions and decode-behavior refinements when upgrading:
 
+- `decode_prefix_sid_services` inspects the complete raw Prefix-SID value and
+  returns the first L3/L2 services, advertised SID values, numeric endpoint
+  behavior codes, flags and all SID Structure fields. Unknown or reserved data
+  stays in the raw attribute. The helper performs structural validation; it
+  does not reconstruct transposed SIDs or decide forwarding eligibility.
+
+- Prefix-SID SRv6 L3/L2 Service TLVs now validate nested framing under
+  RFC 9252 §7. Recognized service malformation returns the additive
+  `DecodeError::MalformedSrv6ServiceTlv` and uses treat-as-withdraw in revised
+  decoding; generic Prefix-SID length errors keep attribute-discard. Valid
+  opaque values and unknown/reserved fields remain unchanged. This adds no
+  SID interpretation, service eligibility, origination, or forwarding.
 - The new `mrt` module adds `decode_table_dump_v2_mp_reach_next_hop`, the
   next-hop decoder for the `MP_REACH_NLRI` inside an RFC 6396 `TABLE_DUMP_V2`
   RIB entry. It accepts both the §4.3.4 reduced form (next-hop length, next
@@ -282,11 +295,20 @@ later registry additions land without a breaking release.
 
 ## Usage
 
-Add the codec and its buffer type as direct dependencies:
+Add the published codec and its buffer type as direct dependencies:
 
 ```toml
 [dependencies]
-rustbgpd-wire = "0.19.1"
+rustbgpd-wire = "0.19.0"
+bytes = "1"
+```
+
+Prepared `0.20.0`, including `decode_prefix_sid_services`, is not yet on
+crates.io. To use it from a source checkout, use the matching versioned path:
+
+```toml
+[dependencies]
+rustbgpd-wire = { version = "0.20.0", path = "../rustbgpd/crates/wire" }
 bytes = "1"
 ```
 

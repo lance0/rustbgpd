@@ -20,9 +20,9 @@
 //!   `<term>.<n>` (1-based); a single IR term keeps the plain term
 //!   name. Explain surfaces (PR-4) render these names.
 //!
-//! End of policy without a verdict is `default_action: Permit` — the
-//! policy raises no objection and chain evaluation continues, matching
-//! `GoBGP` chain semantics (an empty chain permits).
+//! End of policy uses its declared `default-action`, or `Permit` when
+//! omitted. Permit raises no objection and chain evaluation continues;
+//! Deny stops the chain and discards staged modifications.
 //!
 //! ## Parameters
 //!
@@ -549,7 +549,10 @@ impl<'a> Lowerer<'a> {
         CompiledPolicy {
             name: Some(Arc::from(def.name.node.clone())),
             terms,
-            default_action: PolicyAction::Permit,
+            default_action: def
+                .default_action
+                .as_ref()
+                .map_or(PolicyAction::Permit, |action| action.node),
             source: PolicySource::Rpol,
         }
     }

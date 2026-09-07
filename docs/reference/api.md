@@ -89,9 +89,24 @@ daemon presents the server certificate, requires every client to
 present a certificate signed by `tls_client_ca_file`, and rejects
 unverified clients at the TLS layer before any gRPC handler runs.
 
-PEM material is pre-flight-validated at config load and `--check`
-time, so a successful `--check` rules out cert-rotation surprises
-at startup. Valid credential bytes behind unchanged TLS paths rotate on SIGHUP.
+Config loading checks file readability and PEM framing. Both `--check` and
+`--check --strict` also run startup credential staging: they parse the server
+certificate, private key, and client CA bundle and check the cert/key match
+without binding listeners. After staging replacement files at the configured
+paths, run `rustbgpd --check --strict /etc/rustbgpd/config.toml` before SIGHUP
+or restart. This checks the files at that moment; it does not prove client
+trust or hostname matching, or cover subsequent file changes. A positive
+`tls_expiry_warning_seconds` adds expiry warnings from that staged generation;
+the default `0` disables those warnings. See
+[native gRPC certificate expiry](operations.md#native-grpc-certificate-expiry)
+for metrics, successful-client metadata logs, and bundle-date limits.
+
+Native mTLS accepts TLS 1.2 and TLS 1.3 using the rustls/ring default cipher
+suites; protocol versions and cipher suites have no configuration overrides.
+A client whose certificate is trusted can complete TLS without a mapped
+principal, but its RPCs receive `PERMISSION_DENIED` from role authorization.
+
+Valid credential bytes behind unchanged TLS paths rotate on SIGHUP.
 Adding or removing TLS, changing a configured TLS path, or changing TLS/auth
 mode remains **restart-required**; runtime config pins that drift to the live
 values until the daemon is restarted.
@@ -171,8 +186,13 @@ adds only expected-token and confirm-handle presence — never candidate bytes, 
 plan token, path, or spool name. Transaction apply comments are not logged verbatim, and
 `SetPeerGroup` logs MD5 state without the MD5 value.
 Operators declare `[security.grpc.roles]` and set explicit listener
-`principal` labels for bearer-token TCP and UDS listeners; those labels are
-the principal strings looked up in `[security.grpc.roles]`.
+`principal` labels for bearer-token TCP and explicitly named UDS listeners;
+those labels are the principal strings looked up in `[security.grpc.roles]`.
+An owner-only UDS without a principal retains its implicit `local-operator`
+role even when a bearer token is required. Token-protected UDS listeners use
+`authn="bearer_token"`; permissions-only UDS listeners use `uds` for an explicit
+principal or `uds_owner` for the implicit identity. Their parent directories
+must meet the [UDS path requirements](security.md#unix-socket-path-integrity).
 Native mTLS listeners derive the audit principal from the client certificate
 using ADR-0064 precedence: `rustbgpd:` URI SAN, then email SAN, then Subject
 CN. Extracted principal values must fit the bounded
@@ -1322,6 +1342,35 @@ The three unicast route-listing RPCs return raw ordered
 retains the zero receive-time sentinel. The same native route serializer is
 used by best, received, advertised, and embedded `ExplainBestPath` routes.
 
+### Prefix-SID inspection on VPN and EVPN routes
+
+`VpnRouteEntry.prefix_sid` (field 14) and `EvpnRouteEntry.prefix_sid`
+(field 17) are optional views of the retained Prefix-SID path attribute.
+VPN Loc-RIB listings and all EVPN route views, explain snapshots, and current
+or previous event snapshots use the same conversion. An absent attribute
+leaves the field absent; older daemons and stored event records decode with
+no view.
+
+The view carries the complete attribute value in `raw_value` and the original
+path-attribute `flags`. `services` contains the first L3 (type 5) and first
+L2 (type 6) Service TLV, preserving service, SID Information, and SID Structure
+order. Each SID exposes its advertised IPv6 `sid_value`, numeric
+`endpoint_behavior` (including unknown codes), separate SID `flags`, and all
+six structure fields: locator block, locator node, function, argument,
+transposition length, and transposition offset. Reserved bytes, unknown TLVs,
+and ignored duplicate services remain available in `raw_value`.
+
+`rbgp --json rib vpn`, EVPN route lists and explain output, and EVPN event
+JSON expose an optional `prefix_sid` object with lowercase hex `raw_value`.
+Text output adds an advertised SID summary; `structure` lists the six fields
+in the order above. JSON includes a nonempty `decode_error` and no decoded
+services if stored raw data fails structural inspection; the raw bytes remain
+available. Routes without Prefix-SID keep their existing JSON shape.
+
+This is attribute inspection. It does not reconstruct a SID using NLRI label
+bits, validate endpoint behavior against the route family, select a service,
+originate SRv6 routes, or program forwarding. EVPN remains alpha.
+
 ### Runtime observability surfaces
 
 Runtime visibility is intentionally split by access pattern rather than forced
@@ -1426,6 +1475,17 @@ peer config. Empty `peer_address` returns the v0.7.0 global Loc-RIB view
 unchanged. Unknown `peer_address` → `NOT_FOUND`. Import explain is available via
 `PolicyService.ExplainImportPolicy` (ADR-0073), including structured
 statement/term traces for matched policies.
+
+SRv6 semantic ineligibility is distinct from an import-policy rejection.
+`ExplainBestPath` retains these candidates with `vs_best_reason =
+"srv6_sid_invalid"`, `multipath = "none"`, and `advertised_path_id = 0`.
+If no eligible candidate remains, the RPC succeeds with an absent `best_route`
+and empty `best_reason`; the CLI prints the retained candidates. A prefix with
+no retained candidates still returns `NOT_FOUND`. `only_path` means one
+eligible candidate, even if other retained candidates are ineligible. EVPN
+received views and exact explain likewise retain the received route and its
+eligibility reason. `ListVpnRoutes` exposes selected VPN routes only; no
+received-VPN query is available.
 
 ### Longest-prefix lookup in the global Loc-RIB
 

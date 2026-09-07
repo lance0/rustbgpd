@@ -3201,12 +3201,12 @@ fn validate_grpc_tier_enforcement(config: &Config) -> Result<(), ConfigError> {
                 cfg.mode
             ));
             listener_fixes.push(
-                "# add to your [global.telemetry.grpc_uds] table \
-                 (or set mode = 0o600 to keep it owner-only):\n\
-                 principal = \"local-admin\""
+                "# replace mode in your [global.telemetry.grpc_uds] table:\n\
+                 mode = 0o600\n\
+                 # Deliberate shared access instead requires an explicit principal\n\
+                 # and a matching role for every client allowed by the socket mode."
                     .to_string(),
             );
-            role_fixes.push("\"local-admin\" = \"operator\"".to_string());
         }
         // Owner-only UDS with no declared principal authorizes as the
         // implicit `local-operator` identity — nothing to require. The
@@ -3319,16 +3319,9 @@ enum PemKind {
 
 /// Validate a PEM-encoded TLS file at config-load / `--check` time.
 ///
-/// Catches the surprises that would otherwise only surface at daemon
-/// startup: missing path, unreadable file, empty file, file with no
-/// PEM markers, file with PEM blocks of the wrong kind (e.g., cert
-/// path pointed at a private key). Tonic's `Identity::from_pem` and
-/// `Certificate::from_pem` only hold the bytes; the actual parser
-/// runs deep inside `ServerTlsConfig::tls_config` at server build
-/// time, well past `--check`. This is a structural pre-flight, not a
-/// full key/cert match — a mismatched cert+key pair will still fail
-/// at server build, but missing-file / wrong-kind errors are caught
-/// before the daemon ever starts.
+/// Checks readability and PEM framing/block kind. Startup and both `--check`
+/// modes additionally resolve the gRPC listeners through credential staging,
+/// which parses the TLS material and checks the certificate/private-key match.
 fn validate_grpc_pem_file(path: &str, field_name: &str, kind: PemKind) -> Result<(), ConfigError> {
     if path.trim().is_empty() {
         return Err(ConfigError::InvalidGrpcConfig {

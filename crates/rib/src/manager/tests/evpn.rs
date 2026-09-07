@@ -1,5 +1,156 @@
 use super::*;
 
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one lifecycle compares retained, selected, advertised, and dataplane consumer views"
+)]
+fn srv6_evpn_eligibility_filters_selection_exports_and_consumer_queries() {
+    use crate::srv6::tests::service_attribute;
+
+    let (_tx, rx) = mpsc::channel(16);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let target: IpAddr = "192.0.2.30".parse().unwrap();
+    let (outbound_tx, mut out) = mpsc::channel(16);
+    manager.handle_update(RibUpdate::PeerUp {
+        per_client_best: false,
+        interpret_rfc1997: true,
+        session_id: 0,
+        peer: target,
+        peer_asn: 65100,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx,
+        export_policy: None,
+        sendable_families: evpn_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        orr_vantage: None,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+        negotiated_orf_recv: vec![],
+        negotiated_llgr_families: vec![],
+    });
+    while out.try_recv().is_ok() {}
+    let sid = "2001:db8:111:1::".parse().unwrap();
+    let valid = service_attribute(6, sid, 23, Some([40, 24, 16, 0, 0, 0]));
+    let mut fallback = make_evpn_macip(
+        Ipv4Addr::new(192, 0, 2, 10),
+        [0, 1, 2, 3, 4, 5],
+        Some(1),
+        false,
+    );
+    fallback.next_hop = "2001:db8::10".parse().unwrap();
+    Arc::make_mut(&mut fallback.attributes).push(valid.clone());
+    let mut invalid = make_evpn_macip(
+        Ipv4Addr::new(192, 0, 2, 11),
+        [0, 1, 2, 3, 4, 5],
+        Some(100),
+        true,
+    );
+    invalid.next_hop = "2001:db8::11".parse().unwrap();
+    Arc::make_mut(&mut invalid.attributes).push(service_attribute(
+        6,
+        sid,
+        23,
+        Some([100, 24, 16, 0, 0, 0]),
+    ));
+    let announce = |manager: &mut RibManager, route: &EvpnRibRoute| {
+        manager.enqueue_routes_received(
+            route.peer,
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![route.clone()],
+            vec![],
+        );
+        drain_route_chunks(manager);
+    };
+    let query = |manager: &mut RibManager, expected: Option<IpAddr>| {
+        let (reply, mut response) = oneshot::channel();
+        manager.handle_update(RibUpdate::QueryEvpnRoutes {
+            filter: None,
+            reply,
+        });
+        let routes = response.try_recv().unwrap();
+        assert_eq!(
+            routes.iter().map(|r| r.peer).collect::<Vec<_>>(),
+            expected.into_iter().collect::<Vec<_>>()
+        );
+        let (reply, mut response) = oneshot::channel();
+        manager.handle_update(RibUpdate::QueryEvpnDataplaneRoutes {
+            known_generation: None,
+            reply,
+        });
+        let routes = response.try_recv().unwrap().routes.unwrap();
+        assert_eq!(
+            routes.iter().map(|r| r.peer).collect::<Vec<_>>(),
+            expected.into_iter().collect::<Vec<_>>()
+        );
+    };
+    announce(&mut manager, &fallback);
+    while out.try_recv().is_ok() {}
+    announce(&mut manager, &invalid);
+    assert_eq!(
+        manager.loc_rib.get_evpn(&fallback.key()).unwrap().peer,
+        fallback.peer
+    );
+    query(&mut manager, Some(fallback.peer));
+    assert_eq!(
+        manager.ribs[&invalid.peer]
+            .get_evpn(&invalid.key())
+            .unwrap()
+            .attributes,
+        invalid.attributes
+    );
+    let explain = manager.explain_evpn_route(invalid.key(), Some(invalid.peer), Some(target));
+    assert_eq!(explain.reason, Some(crate::BestPathReason::Srv6SidInvalid));
+    assert_eq!(explain.received.unwrap().attributes, invalid.attributes);
+    assert_eq!(explain.selection_best.unwrap().peer, fallback.peer);
+    while let Ok(update) = out.try_recv() {
+        assert!(update.evpn_announce.is_empty());
+        assert!(update.evpn_withdraw.is_empty());
+    }
+    manager.enqueue_routes_received(
+        fallback.peer,
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+        vec![fallback.key()],
+    );
+    drain_route_chunks(&mut manager);
+    query(&mut manager, None);
+    let mut withdrawn = Vec::new();
+    while let Ok(update) = out.try_recv() {
+        assert!(update.evpn_announce.is_empty());
+        withdrawn.extend(update.evpn_withdraw);
+    }
+    assert_eq!(withdrawn, vec![fallback.key()]);
+    let explain = manager.explain_evpn_route(invalid.key(), None, Some(target));
+    assert!(explain.best.is_none());
+    assert_eq!(explain.candidate_count, 1);
+    assert_eq!(explain.reason, Some(crate::BestPathReason::Srv6SidInvalid));
+    assert!(
+        explain
+            .export
+            .unwrap()
+            .gates
+            .iter()
+            .any(|gate| gate.code == "srv6_sid_invalid")
+    );
+    *Arc::make_mut(&mut invalid.attributes).last_mut().unwrap() = valid;
+    announce(&mut manager, &invalid);
+    query(&mut manager, Some(invalid.peer));
+    let mut announced = Vec::new();
+    while let Ok(update) = out.try_recv() {
+        announced.extend(update.evpn_announce);
+    }
+    assert_eq!(announced.len(), 1);
+    assert_eq!(announced[0].attributes, invalid.attributes);
+}
+
 fn with_evpn_community(mut route: EvpnRibRoute, community: u32) -> EvpnRibRoute {
     Arc::make_mut(&mut route.attributes).push(PathAttribute::Communities(vec![community]));
     route

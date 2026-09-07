@@ -91,6 +91,17 @@ pub enum DecodeError {
         detail: String,
     },
 
+    /// A recognized `SRv6` L3/L2 Service TLV in Prefix-SID is structurally
+    /// malformed. Revised UPDATE decoding uses treat-as-withdraw (RFC 9252 §7),
+    /// unlike generic Prefix-SID framing errors (RFC 8669 §6).
+    #[error("UPDATE malformed SRv6 Service TLV: {detail}")]
+    MalformedSrv6ServiceTlv {
+        /// Raw Prefix-SID attribute bytes for the NOTIFICATION data field.
+        data: Vec<u8>,
+        /// Human-readable description of the framing error.
+        detail: String,
+    },
+
     /// NLRI prefix encoding is invalid (RFC 4271 §4.3).
     #[error("UPDATE invalid network field: {detail}")]
     InvalidNetworkField {
@@ -182,6 +193,11 @@ impl DecodeError {
             Self::UpdateAttributeError { subcode, data, .. } => (
                 NotificationCode::UpdateMessage,
                 *subcode,
+                Bytes::from(data.clone()),
+            ),
+            Self::MalformedSrv6ServiceTlv { data, .. } => (
+                NotificationCode::UpdateMessage,
+                5, // Attribute Length Error (strict decoding)
                 Bytes::from(data.clone()),
             ),
             Self::InvalidNetworkField { data, .. } => (

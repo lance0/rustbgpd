@@ -1,10 +1,148 @@
 //! Structural framing checks for assigned attributes retained opaquely.
 
+use std::net::Ipv6Addr;
+
+use crate::DecodeError;
 use crate::constants::{attr_flags, attr_type};
+
+/// Decoded first instance of an RFC 9252 L3 or L2 Service TLV.
+///
+/// The original Prefix-SID value remains authoritative for reserved bytes,
+/// unknown extensions and ignored duplicate Service TLVs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Srv6Service {
+    /// Prefix-SID TLV type: 5 for L3 service, 6 for L2 service.
+    pub tlv_type: u8,
+    /// SID Information entries in their advertised order; no SID is selected.
+    pub sids: Vec<Srv6SidInformation>,
+}
+
+/// Advertised RFC 9252 SID Information, without forwarding interpretation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Srv6SidInformation {
+    /// The advertised 16-byte SID value, before any NLRI label transposition.
+    pub sid_value: Ipv6Addr,
+    /// Endpoint behavior codepoint, including unknown and opaque values.
+    pub endpoint_behavior: u16,
+    /// Service SID flags, distinct from the enclosing path-attribute flags.
+    pub flags: u8,
+    /// SID Structure entries in their advertised order, including duplicates.
+    pub structures: Vec<Srv6SidStructure>,
+}
+
+/// Six advertised RFC 9252 SID Structure fields, measured in bits.
+///
+/// Values are not checked for semantic validity or family-specific eligibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Srv6SidStructure {
+    /// Locator block length.
+    pub locator_block_length: u8,
+    /// Locator node length.
+    pub locator_node_length: u8,
+    /// Function length.
+    pub function_length: u8,
+    /// Argument length.
+    pub argument_length: u8,
+    /// Number of SID bits carried in the NLRI label field.
+    pub transposition_length: u8,
+    /// Offset of those bits in the SID value.
+    pub transposition_offset: u8,
+}
+
+/// Inspect the raw value of a Prefix-SID path attribute (type 40).
+///
+/// Only the first L3 and first L2 Service TLV are decoded, matching RFC 9252
+/// section 7. SID Information and Structure entries retain their wire order.
+/// Unknown types, reserved bytes and ignored duplicates remain in the caller's
+/// raw value; this view neither rewrites it nor reconstructs transposed SIDs.
+///
+/// The complete value is validated before any result is returned, using the
+/// same framing checks as UPDATE decoding. UPDATE validation itself remains
+/// allocation-free and does not call this inspection helper.
+///
+/// # Errors
+///
+/// Returns `DecodeError::MalformedField` for invalid Prefix-SID framing. This
+/// inspection error is not an UPDATE error-disposition decision.
+pub fn decode_prefix_sid_services(value: &[u8]) -> Result<Vec<Srv6Service>, DecodeError> {
+    prefix_sid(value).map_err(|error| match error {
+        FramingError::Generic(detail) | FramingError::Srv6Service(detail) => {
+            prefix_sid_inspection_error(detail)
+        }
+    })?;
+    let mut remaining = value;
+    let mut seen = [false; 2];
+    let mut services = Vec::new();
+    while !remaining.is_empty() {
+        let (kind, body, rest) = tlv_u8_u16(remaining).map_err(prefix_sid_inspection_error)?;
+        if matches!(kind, 5 | 6) && !std::mem::replace(&mut seen[usize::from(kind - 5)], true) {
+            services.push(Srv6Service {
+                tlv_type: kind,
+                sids: decode_srv6_sid_information(body)?,
+            });
+        }
+        remaining = rest;
+    }
+    Ok(services)
+}
+
+fn prefix_sid_inspection_error(detail: &'static str) -> DecodeError {
+    DecodeError::MalformedField {
+        message_type: "Prefix-SID",
+        detail: detail.to_string(),
+    }
+}
+
+fn decode_srv6_sid_information(service: &[u8]) -> Result<Vec<Srv6SidInformation>, DecodeError> {
+    // The shared validator checked the reserved octet and every known field.
+    let mut subtlvs = &service[1..];
+    let mut sids = Vec::new();
+    while !subtlvs.is_empty() {
+        let (kind, body, rest) = tlv_u8_u16(subtlvs).map_err(prefix_sid_inspection_error)?;
+        if kind == 1 {
+            let mut data = &body[21..];
+            let mut structures = Vec::new();
+            while !data.is_empty() {
+                let (kind, body, rest) = tlv_u8_u16(data).map_err(prefix_sid_inspection_error)?;
+                if kind == 1 {
+                    structures.push(Srv6SidStructure {
+                        locator_block_length: body[0],
+                        locator_node_length: body[1],
+                        function_length: body[2],
+                        argument_length: body[3],
+                        transposition_length: body[4],
+                        transposition_offset: body[5],
+                    });
+                }
+                data = rest;
+            }
+            sids.push(Srv6SidInformation {
+                sid_value: Ipv6Addr::from(
+                    <[u8; 16]>::try_from(&body[1..17]).expect("validated SID length"),
+                ),
+                endpoint_behavior: u16::from_be_bytes([body[18], body[19]]),
+                flags: body[17],
+                structures,
+            });
+        }
+        subtlvs = rest;
+    }
+    Ok(sids)
+}
+
+/// `SRv6` Service framing has a stronger disposition than generic Prefix-SID
+/// framing (RFC 9252 §7 versus RFC 8669 §6).
+pub(crate) enum FramingError {
+    Generic(&'static str),
+    Srv6Service(&'static str),
+}
 
 /// Called unconditionally from attribute decode; type codes without a
 /// framing check here fall through to `Ok(())`.
-pub(crate) fn validate(type_code: u8, value: &[u8]) -> Result<(), &'static str> {
+pub(crate) fn validate(type_code: u8, value: &[u8]) -> Result<(), FramingError> {
     match type_code {
         attr_type::TUNNEL_ENCAPSULATION => tunnel_encapsulation(value),
         attr_type::COMMUNITY_CONTAINER => community_container(value),
@@ -15,11 +153,12 @@ pub(crate) fn validate(type_code: u8, value: &[u8]) -> Result<(), &'static str> 
         attr_type::SFP => sfp(value),
         attr_type::BFD_DISCRIMINATOR => bfd_discriminator(value),
         attr_type::NHC => nhc(value),
-        attr_type::PREFIX_SID => prefix_sid(value),
+        attr_type::PREFIX_SID => return prefix_sid(value),
         attr_type::BIER => bier(value),
         attr_type::ATTR_SET => attr_set(value),
         _ => Ok(()),
     }
+    .map_err(FramingError::Generic)
 }
 
 fn tunnel_encapsulation(mut value: &[u8]) -> Result<(), &'static str> {
@@ -284,21 +423,68 @@ fn nhc(value: &[u8]) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn prefix_sid(mut value: &[u8]) -> Result<(), &'static str> {
-    if value.len() < 3 {
-        return Err("Prefix-SID attribute is shorter than one TLV header");
+fn prefix_sid(mut value: &[u8]) -> Result<(), FramingError> {
+    if value.is_empty() {
+        return Err(FramingError::Generic(
+            "Prefix-SID attribute is shorter than one TLV header",
+        ));
     }
+    let mut generic_error = None;
+    let mut seen_service = [false; 2];
     while !value.is_empty() {
-        let (kind, body, rest) = tlv_u8_u16(value)?;
+        // A visible Service type identifies the stronger error even when its
+        // own length field is truncated or runs beyond the Prefix-SID value.
+        let (kind, body, rest) = tlv_u8_u16(value).map_err(|detail| {
+            if matches!(value[0], 5 | 6) {
+                FramingError::Srv6Service(detail)
+            } else {
+                FramingError::Generic(detail)
+            }
+        })?;
         match kind {
-            1 if body.len() != 7 => return Err("Prefix-SID Label-Index TLV length is not 7"),
+            1 if body.len() != 7 => {
+                generic_error.get_or_insert("Prefix-SID Label-Index TLV length is not 7");
+            }
             3 if body.len() < 8 || (body.len() - 2) % 6 != 0 => {
-                return Err("Prefix-SID Originator SRGB TLV length is invalid");
+                generic_error.get_or_insert("Prefix-SID Originator SRGB TLV length is invalid");
+            }
+            // RFC 9252 §7 ignores all but the first instance of each
+            // Service TLV. Still frame ignored instances above so the
+            // next TLV can be located; never rewrite the raw attribute.
+            5 | 6 if !std::mem::replace(&mut seen_service[usize::from(kind - 5)], true) => {
+                srv6_service(body).map_err(FramingError::Srv6Service)?;
             }
             _ => {}
         }
+        // A safely framed generic failure cannot hide a later, identifiable
+        // SRv6 Service failure with treat-as-withdraw disposition.
         value = rest;
     }
+    generic_error.map_or(Ok(()), |detail| Err(FramingError::Generic(detail)))
+}
+
+fn srv6_service(value: &[u8]) -> Result<(), &'static str> {
+    let Some(mut subtlvs) = value.get(1..) else {
+        return Err("SRv6 Service TLV lacks its reserved octet");
+    };
+    while !subtlvs.is_empty() {
+        let (kind, body, rest) = tlv_u8_u16(subtlvs)?;
+        if kind == 1 {
+            let Some(mut data) = body.get(21..) else {
+                return Err("SRv6 SID Information Sub-TLV is shorter than 21 octets");
+            };
+            while !data.is_empty() {
+                let (kind, body, rest) = tlv_u8_u16(data)?;
+                if kind == 1 && body.len() != 6 {
+                    return Err("SRv6 SID Structure Sub-Sub-TLV length is not 6");
+                }
+                data = rest;
+            }
+        }
+        subtlvs = rest;
+    }
+    // Reserved bytes, unknown types/behaviors and SID/transposition semantics
+    // are not structural malformations (RFC 9252 §§2, 3 and 7).
     Ok(())
 }
 

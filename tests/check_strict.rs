@@ -429,3 +429,212 @@ fn help_documents_the_exit_codes() {
         "help does not document exit status:\n{help}"
     );
 }
+
+// Public test-only credentials; no production trust or identity. The self-signed
+// certificate also supplies the parsable trust anchor for credential staging.
+const CHECK_CERT: &str = r#"-----BEGIN CERTIFICATE-----
+MIIBkDCCATegAwIBAgIUWBew9zSvvaMDf6NTvWkDQhnqZMowCgYIKoZIzj0EAwIw
+HTEbMBkGA1UEAwwSY2hlY2stb25seS5pbnZhbGlkMCAXDTI2MDkwNjIwNDczMVoY
+DzIxMjYwODEzMjA0NzMxWjAdMRswGQYDVQQDDBJjaGVjay1vbmx5LmludmFsaWQw
+WTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAAQXpxOPohjjciNp9QoIOBbMOcfcvfG8
+HSDVxnJSAh7pMGExMb0MC8eZFIGxIzruHB5P4ngSmaL12b53Ulf8LzP2o1MwUTAd
+BgNVHQ4EFgQUs8OQThYHP98r+3/s2vLfUNDj1TEwHwYDVR0jBBgwFoAUs8OQThYH
+P98r+3/s2vLfUNDj1TEwDwYDVR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAgNHADBE
+AiBArx1qm8xKbxXK30JD2jdvMVo+XFwWGNDNzwYCRfb60QIgH3Q55VHUZXHwgysl
+YBFeoacrRlcf4t7VyeI4yAEG1q0=
+-----END CERTIFICATE-----
+"#;
+
+const CHECK_KEY: &str = r#"-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgkjGF+oW40C122VHs
+dnnXYQmOuXKiyn5YqHW6HXuPO82hRANCAAQXpxOPohjjciNp9QoIOBbMOcfcvfG8
+HSDVxnJSAh7pMGExMb0MC8eZFIGxIzruHB5P4ngSmaL12b53Ulf8LzP2
+-----END PRIVATE KEY-----
+"#;
+
+const CHECK_OTHER_KEY: &str = r#"-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgjeO14atCpqcNqPEa
+Rtlb9nDn67rfual7vOqr+TE+LTOhRANCAARnMjqr0ixHq1wJFlwSaI8/WaZSWjWe
+FWGU7BfKJXFHDCCB80GJVXFyqzevL7nVMaEClgzXRnChIMvy8A6Uzeui
+-----END PRIVATE KEY-----
+"#;
+// These envelopes decode to bytes that are not an X.509 certificate or key.
+const INVALID_CERT_DER: &str =
+    "-----BEGIN CERTIFICATE-----\nbm90LWEtdGxzLWNlcnRpZmljYXRl\n-----END CERTIFICATE-----\n";
+const INVALID_KEY_DER: &str =
+    "-----BEGIN PRIVATE KEY-----\nbm90LWEtdGxzLXByaXZhdGUta2V5\n-----END PRIVATE KEY-----\n";
+
+fn check_tls_material(cert: &str, key: &str, ca: &str, expected_error: Option<&str>) {
+    let dir = tempfile::tempdir().unwrap();
+    let cert_file = dir.path().join("server.pem");
+    let key_file = dir.path().join("server.key");
+    let ca_file = dir.path().join("client-ca.pem");
+    std::fs::write(&cert_file, cert).unwrap();
+    std::fs::write(&key_file, key).unwrap();
+    std::fs::write(&ca_file, ca).unwrap();
+    // A valid check must succeed even when its configured port is occupied,
+    // and must not create the UDS parent or runtime state directory.
+    let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let runtime_dir = dir.path().join("not-created");
+    let config = format!(
+        "{}\n[global.telemetry.grpc_tcp]\naddress = {:?}\n\
+         tls_cert_file = {cert_file:?}\ntls_key_file = {key_file:?}\n\
+         tls_client_ca_file = {ca_file:?}\n",
+        CLEAN.replace("/tmp/rustbgpd-check-strict", runtime_dir.to_str().unwrap()),
+        occupied.local_addr().unwrap().to_string(),
+    );
+    for args in [&["--check"][..], &["--check", "--strict"][..]] {
+        let (code, stdout, stderr) = run(&config, args);
+        if let Some(expected) = expected_error {
+            assert_eq!(
+                code,
+                Some(1),
+                "{args:?}: stdout:\n{stdout}\nstderr:\n{stderr}"
+            );
+            assert!(stdout.is_empty(), "{stdout}");
+            assert!(stderr.contains(expected), "{stderr}");
+            // Neither a parsed credential nor rejected PEM/DER is diagnostic text.
+            for material in [cert, key, ca] {
+                for line in material.lines().filter(|line| !line.starts_with("-----")) {
+                    assert!(!stderr.contains(line), "credential content in stderr");
+                }
+            }
+        } else {
+            assert_eq!(
+                code,
+                Some(0),
+                "{args:?}: stdout:\n{stdout}\nstderr:\n{stderr}"
+            );
+            assert!(stdout.contains("config OK"), "{stdout}");
+            assert!(stderr.is_empty(), "{stderr}");
+        }
+        assert!(
+            !runtime_dir.exists(),
+            "check created runtime or listener state"
+        );
+    }
+}
+
+#[test]
+fn check_tls_accepts_valid_material_without_binding() {
+    check_tls_material(CHECK_CERT, CHECK_KEY, CHECK_CERT, None);
+}
+
+#[test]
+fn check_tls_rejects_mismatched_certificate_and_key() {
+    check_tls_material(
+        CHECK_CERT,
+        CHECK_OTHER_KEY,
+        CHECK_CERT,
+        Some("certificate/private-key"),
+    );
+}
+
+#[test]
+fn check_tls_rejects_invalid_certificate_der() {
+    check_tls_material(
+        INVALID_CERT_DER,
+        CHECK_KEY,
+        CHECK_CERT,
+        Some("certificate/private-key"),
+    );
+}
+
+#[test]
+fn check_tls_rejects_invalid_key_der() {
+    check_tls_material(
+        CHECK_CERT,
+        INVALID_KEY_DER,
+        CHECK_CERT,
+        Some("certificate/private-key"),
+    );
+}
+
+#[test]
+fn check_tls_rejects_invalid_pem_payload() {
+    check_tls_material(
+        "-----BEGIN CERTIFICATE-----\nnot-valid-base64!\n-----END CERTIFICATE-----\n",
+        CHECK_KEY,
+        CHECK_CERT,
+        Some("certificate PEM"),
+    );
+}
+
+#[test]
+fn check_tls_rejects_invalid_client_ca_der() {
+    for ca in [
+        INVALID_CERT_DER.to_string(),
+        format!("{CHECK_CERT}{INVALID_CERT_DER}"),
+    ] {
+        check_tls_material(CHECK_CERT, CHECK_KEY, &ca, Some("client-CA"));
+    }
+}
+
+// Public expired certificate signed by CHECK_KEY; no production trust or identity.
+const EXPIRED_CHECK_CERT: &str = r#"-----BEGIN CERTIFICATE-----
+MIIBfTCCASKgAwIBAgIBATAKBggqhkjOPQQDAjAdMRswGQYDVQQDDBJjaGVjay1v
+bmx5LmludmFsaWQwHhcNOTAwMTAxMDAwMDAwWhcNMDAwMTAxMDAwMDAwWjAdMRsw
+GQYDVQQDDBJjaGVjay1vbmx5LmludmFsaWQwWTATBgcqhkjOPQIBBggqhkjOPQMB
+BwNCAAQXpxOPohjjciNp9QoIOBbMOcfcvfG8HSDVxnJSAh7pMGExMb0MC8eZFIGx
+IzruHB5P4ngSmaL12b53Ulf8LzP2o1MwUTAdBgNVHQ4EFgQUs8OQThYHP98r+3/s
+2vLfUNDj1TEwHwYDVR0jBBgwFoAUs8OQThYHP98r+3/s2vLfUNDj1TEwDwYDVR0T
+AQH/BAUwAwEB/zAKBggqhkjOPQQDAgNJADBGAiEAitu0Kk47oqMvy0h5yJRWN2sq
+mLQpzHQWk5jofogVaVsCIQCwIyGG8Dbh5p+RnM0ktM/TtxbZ+EDqy3UnaIrJYRsp
+wQ==
+-----END CERTIFICATE-----
+"#;
+
+#[test]
+fn check_tls_expiry_warnings_are_opt_in_and_strict_sensitive() {
+    for (cert, window, expected_warning) in [
+        (CHECK_CERT, Some(1), false),
+        (CHECK_CERT, Some(u32::MAX), true),
+        (EXPIRED_CHECK_CERT, None, false),
+        (EXPIRED_CHECK_CERT, Some(0), false),
+        (EXPIRED_CHECK_CERT, Some(1), true),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let cert_file = dir.path().join("server.pem");
+        let key_file = dir.path().join("server.key");
+        let ca_file = dir.path().join("client-ca.pem");
+        std::fs::write(&cert_file, cert).unwrap();
+        std::fs::write(&key_file, CHECK_KEY).unwrap();
+        std::fs::write(&ca_file, cert).unwrap();
+        let window_config = window.map_or_else(String::new, |seconds| {
+            format!("tls_expiry_warning_seconds = {seconds}\n")
+        });
+        let runtime_dir = dir.path().join("not-created");
+        let config = format!(
+            "{}\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\n\
+             tls_cert_file = {cert_file:?}\ntls_key_file = {key_file:?}\n\
+             tls_client_ca_file = {ca_file:?}\n{window_config}",
+            CLEAN.replace("/tmp/rustbgpd-check-strict", runtime_dir.to_str().unwrap()),
+        );
+        for args in [&["--check"][..], &["--check", "--strict"][..]] {
+            let (code, stdout, stderr) = run(&config, args);
+            let expected_code = i32::from(expected_warning && args.contains(&"--strict"));
+            assert_eq!(
+                code,
+                Some(expected_code),
+                "window={window:?} {args:?}: {stdout}\n{stderr}"
+            );
+            if expected_warning {
+                assert!(stdout.contains("config VALID, 3 WARNINGS"), "{stdout}");
+                for kind in ["server_leaf", "server_bundle_min", "client_ca_bundle_min"] {
+                    assert!(
+                        stderr.contains(&format!("gRPC TLS {kind} notAfter")),
+                        "{stderr}"
+                    );
+                }
+                assert!(
+                    stderr.contains("not effective peer path cutoffs"),
+                    "{stderr}"
+                );
+            } else {
+                assert!(stdout.contains("config OK"), "{stdout}");
+                assert!(stderr.is_empty(), "{stderr}");
+            }
+            assert!(!runtime_dir.exists(), "check created runtime state");
+        }
+    }
+}

@@ -1,5 +1,5 @@
 //! Canonical reason-label vocabulary for UPDATE-path route rejection,
-//! session teardown, and inbound connection admission drops.
+//! session teardown, inbound connection admission, and management TLS failures.
 //!
 //! Single source of truth for the `reason` strings that ingress (and
 //! the OTC egress sibling) route-rejection mechanisms report across
@@ -30,6 +30,56 @@
 //! `reason` label, but the log line emitted alongside it
 //! distinguishes the two RFC 4456 §8 loop signals via
 //! [`RrLoopReason`].
+
+/// Bounded reasons for a failed inbound management-plane TLS handshake.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GrpcTlsHandshakeFailureReason {
+    /// The peer did not present a required client certificate.
+    MissingCertificate,
+    /// A certificate has expired.
+    CertificateExpired,
+    /// A certificate is not valid yet.
+    CertificateNotYetValid,
+    /// The client certificate's issuer is not trusted.
+    UnknownIssuer,
+    /// Another certificate validation error.
+    InvalidCertificate,
+    /// Another TLS protocol error.
+    TlsError,
+    /// A transport error without a typed TLS error.
+    IoError,
+    /// The handshake exceeded the listener's deadline.
+    Timeout,
+}
+
+impl GrpcTlsHandshakeFailureReason {
+    /// Every stable Prometheus label value.
+    pub const ALL: [Self; 8] = [
+        Self::MissingCertificate,
+        Self::CertificateExpired,
+        Self::CertificateNotYetValid,
+        Self::UnknownIssuer,
+        Self::InvalidCertificate,
+        Self::TlsError,
+        Self::IoError,
+        Self::Timeout,
+    ];
+
+    /// The canonical bounded label string.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MissingCertificate => "missing_certificate",
+            Self::CertificateExpired => "certificate_expired",
+            Self::CertificateNotYetValid => "certificate_not_yet_valid",
+            Self::UnknownIssuer => "unknown_issuer",
+            Self::InvalidCertificate => "invalid_certificate",
+            Self::TlsError => "tls_error",
+            Self::IoError => "io_error",
+            Self::Timeout => "timeout",
+        }
+    }
+}
 
 /// Active-primary Established-session teardown reasons.
 ///

@@ -1521,6 +1521,12 @@ fn resolve_grpc_listeners(config: &Config) -> Result<Vec<GrpcListenerConfig>, St
                     roles: Arc::clone(&roles),
                     credential_store: credential_store.clone(),
                     credential_index,
+                    tls_expiry_warning_seconds: config
+                        .global
+                        .telemetry
+                        .grpc_tcp
+                        .as_ref()
+                        .map_or(0, |tcp| tcp.tls_expiry_warning_seconds),
                     principal,
                 })
             }
@@ -1538,10 +1544,53 @@ fn resolve_grpc_listeners(config: &Config) -> Result<Vec<GrpcListenerConfig>, St
                 roles: Arc::clone(&roles),
                 credential_store: credential_store.clone(),
                 credential_index,
+                tls_expiry_warning_seconds: 0,
                 principal,
             }),
         })
         .collect()
+}
+
+fn check_tls_expiry_warnings(listeners: &[GrpcListenerConfig]) -> usize {
+    let mut warnings = 0;
+    for listener in listeners {
+        let generation = listener.credential_store.load();
+        if let Some(expiry) = generation.tls_expiry(listener.credential_index) {
+            for (kind, not_after) in expiry.warnings(listener.tls_expiry_warning_seconds) {
+                print_framed_warning(
+                    &format!("gRPC TLS {kind} notAfter is within the configured warning window"),
+                    &format!(
+                        "Certificate notAfter: {not_after} Unix seconds. Warning window: {} seconds, including past dates.\n\
+                         Rotate the relevant certificate material and reload credentials with SIGHUP.\n\
+                         Bundle minima describe supplied certificates, not effective peer path cutoffs.",
+                        listener.tls_expiry_warning_seconds,
+                    ),
+                );
+                warnings += 1;
+            }
+        }
+    }
+    warnings
+}
+
+fn warn_grpc_tls_expiry(
+    credentials: &rustbgpd_api::credentials::CredentialStore,
+    index: usize,
+    warning_seconds: u32,
+) {
+    let generation = credentials.load();
+    if let Some(expiry) = generation.tls_expiry(index) {
+        for (kind, not_after) in expiry.warnings(warning_seconds) {
+            warn!(
+                event = "grpc_tls_certificate_expiry",
+                generation = generation.sequence(),
+                kind,
+                certificate_not_after_seconds = not_after,
+                tls_expiry_warning_seconds = warning_seconds,
+                "gRPC TLS certificate notAfter is within the configured warning window, including past dates; bundle minima are supplied metadata, not effective path cutoffs"
+            );
+        }
+    }
 }
 
 const fn warm_bundle_family_v1(afi: Afi, safi: Safi) -> Option<WarmBundleFamilyV1> {
@@ -1938,8 +1987,8 @@ fn family_partitioned_listener_mss(
 /// set on purpose: it reports what this release has not finished building,
 /// not a defect in the operator's config, so gating on it would make a
 /// correct deployment unshippable.
-fn check_warnings(config: &Config) -> usize {
-    let mut warnings = warn_unpoliced_ebgp(config);
+fn check_warnings(config: &Config, listeners: &[GrpcListenerConfig]) -> usize {
+    let mut warnings = warn_unpoliced_ebgp(config) + check_tls_expiry_warnings(listeners);
     for advisory in config.advisories() {
         print_framed_warning(advisory.headline, advisory.detail);
         warnings += 1;
@@ -2743,12 +2792,21 @@ fn main() -> ExitCode {
     let config = accepted.config();
 
     if check_only {
+        // Retain the exact staged generation used for credential preflight so
+        // expiry warnings describe those bytes without reading the files again.
+        let grpc_listeners = match resolve_grpc_listeners(&config) {
+            Ok(listeners) => listeners,
+            Err(error) => {
+                eprintln!("error: invalid gRPC listener configuration: {error}");
+                return ExitCode::FAILURE;
+            }
+        };
         // The summary line is the only thing some operators read. When
         // anything was flagged it must not be able to pass for a clean
         // result, so `OK` is spent only on a check with nothing to report
         // and otherwise gives way to the count. Without `--strict` the exit
         // code stays 0 either way — these are warnings, not failures.
-        let warnings = check_warnings(&config);
+        let warnings = check_warnings(&config, &grpc_listeners);
         let output = write_stdout(|writer| {
             if warnings == 0 {
                 writeln!(writer, "config OK: {config_path}")
@@ -3686,6 +3744,20 @@ async fn run<T>(
     let grpc_credentials = grpc_listeners
         .first()
         .map(GrpcListenerConfig::credential_store);
+    let grpc_tls_expiry_warning = grpc_listeners.iter().find_map(|listener| {
+        matches!(listener.endpoint, ListenerEndpoint::Tcp(_)).then_some((
+            listener.credential_index,
+            listener.tls_expiry_warning_seconds,
+        ))
+    });
+    if let (Some(credentials), Some((index, warning_seconds))) =
+        (&grpc_credentials, grpc_tls_expiry_warning)
+    {
+        credentials
+            .register_tls_expiry_metrics(metrics.registry(), index)
+            .expect("gRPC TLS expiry metric registered once at startup");
+        warn_grpc_tls_expiry(credentials, index, warning_seconds);
+    }
 
     // Startup banner — human-friendly topology summary on stderr.
     print_startup_banner(&config, &grpc_listeners);
@@ -5920,6 +5992,9 @@ async fn run<T>(
                                 accepted_effect = true;
                                 reload_metrics.record_grpc_credential_reload("success");
                                 info!(generation, "gRPC credential generation reloaded");
+                                if let Some((index, warning_seconds)) = grpc_tls_expiry_warning {
+                                    warn_grpc_tls_expiry(&credentials, index, warning_seconds);
+                                }
                             }
                             Err(error) => {
                                 reload_metrics.record_grpc_credential_reload("failure");

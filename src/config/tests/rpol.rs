@@ -1,6 +1,69 @@
 use super::*;
 
 #[test]
+fn rpol_default_action_survives_imported_parameterized_chain_splicing() {
+    use rustbgpd_policy::{PolicyAction, RouteContext};
+
+    let imported = "policy customer-in(lp: u32) {
+        default-action reject
+        term shape { set med 23 }
+        term authorized { if route.local-pref == lp { accept } }
+    }
+    policy deny-tail { default-action reject }";
+    for (references, accepted_action) in [
+        (
+            r#""continue-default", "customer-in(200)", "toml-pass""#,
+            PolicyAction::Permit,
+        ),
+        (
+            r#""continue-default", "customer-in(200)", "deny-tail""#,
+            PolicyAction::Deny,
+        ),
+    ] {
+        let dir = rpol_config_dir(
+            "import \"defaults.rpol\"\npolicy continue-default { default-action accept }",
+            references,
+        );
+        fs::write(dir.path().join("policies/defaults.rpol"), imported).unwrap();
+        let config = load_dir(&dir).expect("imported default declarations load");
+        let (chain, _) = config
+            .effective_policy_chains_for_neighbor(&config.neighbors[0])
+            .expect("parameterized defaults resolve");
+        let chain = chain.expect("configured chain");
+        assert_eq!(
+            chain.compiled().policies[1].default_action,
+            PolicyAction::Deny
+        );
+        let ctx = RouteContext {
+            local_pref: Some(200),
+            ..route_server_test_context(
+                route_server_test_prefix("192.0.2.0/24"),
+                rustbgpd_wire::RpkiValidation::NotFound,
+                rustbgpd_wire::AspaValidation::Unknown,
+            )
+        };
+        let accepted = chain.evaluate(&ctx);
+        assert_eq!(accepted.action, accepted_action);
+        assert_eq!(
+            accepted.modifications.set_med,
+            (accepted_action == PolicyAction::Permit).then_some(23)
+        );
+        let unmatched = RouteContext {
+            local_pref: Some(100),
+            ..ctx
+        };
+        let (denied, attribution) =
+            rustbgpd_policy::evaluate_chain_with_attribution(Some(&chain), &unmatched);
+        assert_eq!(denied.action, PolicyAction::Deny);
+        assert!(denied.modifications.is_empty());
+        assert_eq!(
+            attribution.matched_policy.as_deref(),
+            Some("customer-in(200)")
+        );
+    }
+}
+
+#[test]
 fn rpol_files_load_resolve_and_evaluate_in_chains() {
     let dir = rpol_config_dir(
         RPOL_SOURCE,
@@ -761,10 +824,7 @@ fn chain_node_budget_named_mixed_unused_and_implicit_tails() {
         .push("toml-pass".to_string());
     let error = config.validate().unwrap_err();
     assert!(error.to_string().contains("MAX_CHAIN_NODES"), "{error}");
-    assert!(matches!(
-        crate::policy_admin::catalog_config_error(error),
-        rustbgpd_api::peer_types::CatalogMutationError::Invalid(_)
-    ));
+    assert!(matches!(error, ConfigError::PolicyChainTooLarge { .. }));
     let path = dir.path().join("config.toml");
     let text = fs::read_to_string(&path).unwrap();
     let refs = serde_json::to_string(&config.neighbors[0].import_policy_chain).unwrap();

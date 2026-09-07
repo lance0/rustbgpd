@@ -51,8 +51,14 @@ resolved.
   also reads each PEM file at config load / `--check` time and
   rejects missing, unreadable, empty, non-PEM, or wrong-kind files
   (e.g., a key path swapped with a cert path) before the daemon
-  starts — a successful `--check` proves the listed TLS material
-  is at least structurally usable. UDS listeners stay
+  starts. Both `--check` modes also run startup credential staging, rejecting
+  invalid certificate/key content, mismatched cert/key pairs, and client CA
+  bundles rejected by rustls without binding listeners. This checks the files
+  at that moment; it does not prove client trust or hostname matching. A
+  positive `tls_expiry_warning_seconds` adds expiry warnings; the default `0`
+  disables warnings. [Expiry visibility](operations.md#native-grpc-certificate-expiry)
+  does not add date-based startup rejection or imply an effective bundle cutoff.
+  UDS listeners stay
   file-system-permission-authenticated, unchanged.
 
 - **BMP drop / replay Prometheus counters (resolved).** Four new

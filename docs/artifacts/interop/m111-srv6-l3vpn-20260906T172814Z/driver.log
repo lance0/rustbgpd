@@ -1,0 +1,35 @@
+config OK: /etc/rustbgpd/config.toml
+{"Topic":"Config","level":"info","msg":"Finished reading the config file","time":"2026-09-06T17:28:13Z"}
+Starting watchfrr with command: '  /usr/lib/frr/watchfrr  -d   mgmtd zebra bgpd staticd'
+2026/09/06 17:28:14 WATCHFRR: [NFX3B-68SEX] FD Limit set: 1048576 is too large.  Is this intentional?  Consider using --limit-fds. Limiting size to 100000
+2026/09/06 17:28:14 MGMTD: [NFX3B-68SEX] FD Limit set: 1048576 is too large.  Is this intentional?  Consider using --limit-fds. Limiting size to 100000
+2026/09/06 17:28:14 ZEBRA: [NFX3B-68SEX] FD Limit set: 1048576 is too large.  Is this intentional?  Consider using --limit-fds. Limiting size to 100000
+2026/09/06 17:28:14 ZEBRA: [SAPXX-HP5B5][EC 4043309108] Extended Error: failed to retrieve link settings
+2026/09/06 17:28:14 ZEBRA: [WVJCK-PPMGD][EC 4043309093] generic-netlink-cmd (NS 0) error: Not supported, type=(23), seq=3, pid=113
+2026/09/06 17:28:14 ZEBRA: [SAPXX-HP5B5][EC 4043309108] Extended Error: failed to retrieve link settings
+2026/09/06 17:28:14 ZEBRA: [WVJCK-PPMGD][EC 4043309093] generic-netlink-cmd (NS 0) error: Not supported, type=(23), seq=5, pid=113
+2026/09/06 17:28:14 ZEBRA: [SAPXX-HP5B5][EC 4043309108] Extended Error: failed to retrieve link settings
+2026/09/06 17:28:14 ZEBRA: [WVJCK-PPMGD][EC 4043309093] generic-netlink-cmd (NS 0) error: Not supported, type=(23), seq=6, pid=113
+2026/09/06 17:28:14 ZEBRA: [QBKSZ-0KHCW][EC 4043309138] Disabling MPLS support (no kernel support)
+2026/09/06 17:28:14 BGP: [NFX3B-68SEX] FD Limit set: 1048576 is too large.  Is this intentional?  Consider using --limit-fds. Limiting size to 100000
+2026/09/06 17:28:14 STATIC: [NFX3B-68SEX] FD Limit set: 1048576 is too large.  Is this intentional?  Consider using --limit-fds. Limiting size to 100000
+[129|mgmtd] sending configuration
+[130|zebra] sending configuration
+[136|bgpd] sending configuration
+[130|zebra] done
+[129|mgmtd] done
+2026/09/06 17:28:14 BGP: [GNTN9-G7K6J] BGP-LS: Module initialized for instance VRF default
+2026/09/06 17:28:14 BGP: [J9K4Q-T8STY][EC 33554466] 2001:db8:111:10::1 [FSM] Failure handling event BGP_Start in state Idle, prior events BGP_Stop, (null), fd -1, last reset: Passive config change
+[145|staticd] sending configuration
+2026/09/06 17:28:14 BGP: [M95PE-ZW8F6] VRF default(0): bgp_zebra_process_srv6_locator_internal, Received SRv6 locator srv6-proof 2001:db8:111:1::/64, loc-block-len=40, loc-node-len=24 func-len=16, arg-len=0
+Waiting for children to finish applying config...
+[150|watchfrr] sending configuration
+2026/09/06 17:28:14 BGP: [VTVCM-Y2NW3] Configuration Read in Took: 00:00:00
+[136|bgpd] done
+2026/09/06 17:28:14 STATIC: [VTVCM-Y2NW3] Configuration Read in Took: 00:00:00
+[145|staticd] done
+[150|watchfrr] done
+Started watchfrr
+2026/09/06 17:28:15 ZEBRA: [V98V0-MTWPF] client 55 says hello and bids fair to announce only bgp routes vrf=0
+PASS: dual-family SRv6 L3VPN wire preservation and independent withdrawals
+[13:28:21 TEST] [cleanup] containerlab destroy -t <repo>/tests/interop/scripts/../m111-srv6-l3vpn-reflection.clab.yml

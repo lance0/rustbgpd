@@ -627,7 +627,7 @@ pub enum ExactExportErrorCode {
     Encoding,
     /// No usable IPv6 next-hop exists for this session and route.
     MissingIpv6NextHop,
-    /// A scoped link-local session cannot send IPv4 without RFC 8950.
+    /// IPv4 unicast or `VPNv4` export requires peer RFC 8950 receive support.
     Ipv4RequiresExtendedNextHop,
     /// The one-route UPDATE exceeds the negotiated message ceiling.
     MessageTooLong,

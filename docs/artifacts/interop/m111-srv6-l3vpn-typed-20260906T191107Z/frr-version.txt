@@ -1,0 +1,4 @@
+bgpd version 10.7.1_git
+Copyright 1996-2005 Kunihiro Ishiguro, et al.
+configured with:
+	'--prefix=/usr' '--sysconfdir=/etc' '--localstatedir=/var' '--sbindir=/usr/lib/frr' '--libdir=/usr/lib' '--enable-rpki' '--enable-vtysh' '--enable-multipath=64' '--enable-vty-group=frrvty' '--enable-user=frr' '--enable-group=frr' '--enable-pcre2posix' '--enable-scripting' 'CC=cc' 'CXX=c++'

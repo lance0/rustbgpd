@@ -68,7 +68,7 @@ fn routes_to_json(routes: &[crate::proto::EvpnRouteEntry]) -> Vec<serde_json::Va
     routes
         .iter()
         .map(|r| {
-            serde_json::json!({
+            let mut row = serde_json::json!({
                 "route_type": r.route_type,
                 "route_type_name": route_type_label(r.route_type),
                 "rd": r.rd,
@@ -84,7 +84,11 @@ fn routes_to_json(routes: &[crate::proto::EvpnRouteEntry]) -> Vec<serde_json::Va
                 "next_hop": r.next_hop,
                 "peer": r.peer_address,
                 "as_path": r.as_path,
-            })
+            });
+            if let Some(view) = &r.prefix_sid {
+                row["prefix_sid"] = output::prefix_sid_json(view);
+            }
+            row
         })
         .collect()
 }
@@ -142,6 +146,9 @@ fn print_routes(routes: &[crate::proto::EvpnRouteEntry], json: bool) -> Result<(
                 r.next_hop,
                 r.peer_address,
             )?;
+            if let Some(view) = &r.prefix_sid {
+                outln!("  {}", output::prefix_sid_summary(view))?;
+            }
         }
     }
     Ok(())

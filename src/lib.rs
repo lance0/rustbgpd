@@ -1,3 +1,4 @@
+#![deny(unsafe_code)]
 #![cfg_attr(
     feature = "bench-internals",
     allow(dead_code, unfulfilled_lint_expectations, unused_imports)

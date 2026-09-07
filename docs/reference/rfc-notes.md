@@ -588,13 +588,15 @@ retained opaquely regardless of how its flags and framing were encoded.
   requires a Hop TLV and walks its sub-TLVs; BFD Discriminator (38) requires
   a Source IP TLV of length 4 or 16; NHC (39) walks the next hop and requires
   at least one characteristic; BGP Prefix-SID (40) length-checks the
-  Label-Index and Originator SRGB TLVs; and BIER (41) must carry at least one
-  TLV and walks its sub-TLV nesting. Values that pass stay opaque bytes.
+  Label-Index and Originator SRGB TLVs and validates RFC 9252 Service
+  nesting; and BIER (41) must carry at least one TLV and walks its sub-TLV
+  nesting. Values that pass stay opaque bytes.
 - **Framing dispositions split by type.** A framing failure in BFD
-  Discriminator (38), NHC (39), BGP Prefix-SID (40), or BIER (41) is
+  Discriminator (38), NHC (39), generic BGP Prefix-SID (40), or BIER (41) is
   attribute-discard: the malformed value cannot affect route selection, so
-  the UPDATE's routes survive without it. A framing failure in IPv6 Address
-  Specific Extended Community (25), Community Container (34), D-PATH (36), or
+  the UPDATE's routes survive without it. Recognized SRv6 L3/L2 Service TLV
+  malformation instead follows RFC 9252 §7 treat-as-withdraw. A framing failure
+  in IPv6 Address Specific Extended Community (25), Community Container (34), D-PATH (36), or
   SFP (37) is treat-as-withdraw. A *class* conflict on any of the eight is
   treat-as-withdraw regardless — §3 (h) takes the stronger of the two
   actions. Zero-length BIER is the case that changed disposition in v0.67.0:
@@ -1090,12 +1092,19 @@ carries inactive (absent), unlimited (zero), or finite.
 
 ## RFC 8950 — Extended Next Hop
 
-- Capability code 5. Advertised automatically when both `ipv4_unicast` and
-  `ipv6_unicast` are configured.
+- Capability code 5. IPv4-unicast IPv6-next-hop receive support is advertised
+  automatically when both `ipv4_unicast` and `ipv6_unicast` are configured.
+  VPNv4 IPv6-next-hop receive support (tuple 1/128/2) is advertised whenever
+  `l3vpn_ipv4_unicast` is configured, independently of those unicast families.
 - Negotiation: exact 6-byte tuple matching (NLRI AFI, NLRI SAFI, NH AFI).
 - When negotiated, IPv4 unicast uses `MP_REACH_NLRI` / `MP_UNREACH_NLRI`
   with IPv6 next hop instead of body NLRI.
-- See ADR-0037.
+- VPNv4 reflection preserves the 24- or 48-octet next-hop encoding (§3/§5)
+  and requires the recipient's VPNv4 IPv6-next-hop receive capability. A
+  rejected replacement withdraws any previously advertised route; ordinary
+  IPv4-next-hop VPNv4 routes and VPN withdrawals remain eligible without it.
+  The peer's receive capability is not an inbound admission requirement.
+- See ADR-0037 for the IPv4-unicast behavior.
 
 ---
 
@@ -1759,7 +1768,7 @@ implemented service procedures.
 | RFC | Status | Relevance |
 |-----|--------|-----------|
 | [RFC 9014](https://www.rfc-editor.org/rfc/rfc9014.html) | Not implemented | EVPN overlay interconnect gateway procedures, including overlay-to-MPLS interworking and Interconnect Ethernet Segments, are not implemented. Reflecting supported EVPN routes does not provide a DCI gateway. |
-| [RFC 9252](https://www.rfc-editor.org/rfc/rfc9252.html) | Partial: opaque attribute preservation | On supported EVPN route types, the BGP Prefix-SID attribute (type 40), including SRv6 L2/L3 Service TLV payloads, survives receive and export with its value bytes intact. The [transport preservation test](../../crates/transport/src/session/tests/outbound_attrs.rs) covers a Type 2 route over iBGP and eBGP. Outer Prefix-SID TLV framing is validated; SRv6 nested TLV validation, SID interpretation, origination, and forwarding are not implemented. This is not full RFC 9252 service support. |
+| [RFC 9252](https://www.rfc-editor.org/rfc/rfc9252.html) | Partial: service-aware reflection | Recognized malformed L3/L2 Service framing follows §7 treat-as-withdraw; see the [framing contract](path-attribute-registry.md#srv6-service-framing-within-prefix-sid). Structurally valid routes with no semantically valid applicable SID remain retained but are excluded from selection, Add-Path, ORR, and ECMP; see the [service eligibility contract](path-attribute-registry.md#srv6-service-eligibility). Unchanged-next-hop reflection preserves eligible raw attributes; [transport regressions](../../crates/transport/src/session/tests/outbound_attrs.rs) cover raw receive/export. PE import, service origination, SID reconstruction, next-hop rewriting, and SRv6 forwarding are not implemented. This is not full RFC 9252 service support. |
 | [RFC 9251](https://www.rfc-editor.org/rfc/rfc9251.html#section-9) | Not implemented, including reflection | Route Types 6–8 (SMET, Multicast Membership Report Synch, Multicast Leave Synch) are unrecognized and discarded on receive; they do not enter the RIB or propagate to other VTEPs. This follows [RFC 7606 §5.4](https://www.rfc-editor.org/rfc/rfc7606.html#section-5.4) typed-NLRI handling. There is no opaque route-type reflection or IGMP/MLD proxy implementation. |
 | RFC 9746 (Mar 2025; updates RFC 7432, RFC 8365) | Not implemented | Split Horizon Type (SHT) bits in the ESI Label extended community. §2.2: an egress NVE MUST NOT use an SHT other than 00 with VXLAN (tunnel type 8), so local bias is the only multi-homing split-horizon mechanism for VXLAN. This is the normative backing for the Linux softswitch local-bias limitation in [docs/reference/limitations.md](limitations.md); the ESI Label decoder reads only the single-active flag. |
 | RFC 9785 (Jun 2025; updates RFC 8584) | Partial | Highest-/Lowest-Preference DF election is implemented (`df_algorithm`), under the same unanimous-or-default negotiation restated in §4.1. The Don't-Preempt (DP) bit is originated (`df_dont_preempt`) and parsed but is not an election input, so stateful non-revertive election is not implemented. |

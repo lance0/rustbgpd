@@ -643,15 +643,51 @@ local operation. Group/world-accessible modes still require an explicit
 `principal` plus a matching role entry, and `local-operator` itself is
 reserved (rejected in roles and listener `principal` fields).
 
+Keep the socket owner-only unless shared access is intentional. A configured
+`token_file` requires its bearer token in addition to filesystem access and
+sets the audit label to `authn = "bearer_token"`. It does not change the
+listener's principal or role: an owner-only socket without a principal still
+uses `local-operator`. Without a token, that implicit identity uses
+`authn = "uds_owner"`; an explicit UDS principal uses `authn = "uds"`.
+
 | Field        | Type   | Required | Default | Description |
 |--------------|--------|----------|---------|-------------|
 | `enabled`    | bool   | no       | `true`  | Enable this listener when the table is present |
-| `path`       | string | no       | `<runtime_state_dir>/grpc.sock` | Absolute Unix socket path |
-| `mode`       | u32    | no       | `0o600` | Filesystem mode applied to the socket after bind |
+| `path`       | string | no       | `<runtime_state_dir>/grpc.sock` | Absolute Unix socket path without symlinks or `..` components |
+| `mode`       | u32    | no       | `0o600` | Filesystem socket mode; creation never grants wider access |
 | `access_mode` | string | no      | `"read_write"` | Listener authorization mode: `"read_write"` or `"read_only"` |
 | `max_tier`   | string | no       | implied by `access_mode` | ADR-0064 per-method listener cap: `read`, `sensitive_read`, `mutating`, or `operator_only` |
 | `token_file` | string | no       | --      | Optional bearer token file for listener auth |
 | `principal`  | string | no       | --      | Stable ADR-0064 audit principal label for this UDS listener |
+
+At bind time the daemon verifies the parent directory and its ancestors;
+unsafe paths fail gRPC startup. Missing directories are created owner-only.
+The immediate parent must belong to the daemon's effective UID, allow it
+read/write/search access, and have no group/world write bits. Ancestors must
+be root- or effective-UID-owned, with group/world write allowed only for
+sticky directories whose next path component has a trusted owner. Use a
+private child such as `/tmp/rustbgpd/grpc.sock`, rather than a socket directly
+in `/tmp`. See [Unix socket path integrity](security.md#unix-socket-path-integrity).
+
+Mode `0o660` alone cannot admit group clients through an auto-created `0700`
+directory. For deliberate sharing, pre-create a daemon-owned parent with
+search access for the intended group and no group write. For example, with
+daemon account `rustbgpd` and an existing `bgp-operators` group:
+
+```bash
+sudo install -d -o rustbgpd -g bgp-operators -m 2750 /run/rustbgpd-api
+```
+
+The setgid directory makes a socket at `/run/rustbgpd-api/grpc.sock` inherit
+`bgp-operators`; configure socket mode `0o660` and the intended principal/role.
+All ancestors must also permit those clients to search the path. Without a
+setgid parent, the socket uses the daemon's effective group instead.
+
+Secure binding requires Linux with `/proc/self/fd` available. Both the
+configured path and `/proc/self/fd/<descriptor>/<socket-filename>` must fit
+Linux's 107-byte pathname limit. A live or uncertain existing socket is
+retained; concurrent startup in the same parent directory fails instead of
+removing another listener's endpoint.
 
 ### `[global.telemetry.grpc_tcp]`
 
@@ -669,6 +705,7 @@ container/network exposure.
 | `tls_cert_file` | string | no   | --      | PEM-encoded server certificate (mTLS — requires the two siblings below) |
 | `tls_key_file`  | string | no   | --      | PEM-encoded server private key |
 | `tls_client_ca_file` | string | no | --   | PEM-encoded CA bundle that must sign every client certificate |
+| `tls_expiry_warning_seconds` | integer (`u32`) | no | `0` | Opt-in certificate expiry warning window in seconds, including past dates; `0` disables warnings only. Restart-required. |
 
 **Native gRPC mTLS.** Setting any of `tls_cert_file` / `tls_key_file` /
 `tls_client_ca_file` requires *all three* together; a partial config is
@@ -676,12 +713,23 @@ rejected at `Config::load`. There is no "TLS-without-mTLS" half-mode by
 design. When enabled, the daemon presents the server certificate, requires
 every client to present a certificate signed by `tls_client_ca_file`, and
 rejects unverified clients at the TLS layer before any gRPC handler runs.
-PEM material is pre-flight-validated at config load and `--check` time. SIGHUP
+Config loading checks file readability and PEM framing. Both `--check` modes
+also run startup credential staging to parse the TLS material and check the
+cert/key match without binding listeners. SIGHUP
 re-reads the bytes behind the three unchanged paths, validates the complete
 server identity and client CA for every listener, then atomically publishes one
 process-wide credential generation. A malformed or partial rotation leaves the
 last-known-good generation active. Changing a path or TLS/auth mode remains
 **restart-required** and stays visible as drift until restart.
+
+Expiry metrics and successful-client metadata logs are available independently
+of `tls_expiry_warning_seconds`. A positive window adds warnings at startup,
+after successful credential reload, during `--check`, and for observed client
+leaves after successful TLS handshakes. Plain `--check` keeps exit 0 for these
+warnings; `--check --strict` returns 1. No new date-based startup rejection is
+introduced. Bundle minima describe supplied certificate metadata, not an
+effective path or trust-anchor cutoff. See
+[native gRPC certificate expiry](operations.md#native-grpc-certificate-expiry).
 
 Native gNMI / OpenConfig telemetry (`gnmi.gNMI`) is registered on TCP only when
 this native mTLS config is present. Plaintext or bearer-token-only TCP listeners
@@ -834,8 +882,9 @@ log_format = "json"
 # requires an explicit principal with a matching role entry below. An
 # owner-only socket (default 0o600) with no principal would instead ride the
 # implicit local-operator identity and need neither.
+# Pre-create the group-searchable setgid parent as shown in the UDS section.
 [global.telemetry.grpc_uds]
-path = "/var/lib/rustbgpd/grpc.sock"
+path = "/run/rustbgpd-api/grpc.sock"
 mode = 0o660
 access_mode = "read_write"
 principal = "local-admin"
@@ -1549,6 +1598,15 @@ routes may be exchanged via `MP_REACH_NLRI` / `MP_UNREACH_NLRI` using an
 IPv6 next hop. For eBGP exports, `local_ipv6_nexthop` (if configured) is
 used as the IPv6 self next-hop; otherwise the local IPv6 socket address is
 used when available.
+
+Configuring `"l3vpn_ipv4_unicast"` also advertises IPv6 next-hop receive
+support for VPNv4 (AFI 1, SAFI 128, next-hop AFI 2), independently of the
+unicast families and `"l3vpn_ipv6_unicast"`. Reflected VPNv4 routes retain
+their original next hop, including the IPv6 link-local companion when present.
+An IPv6 next-hop VPNv4 announcement is exported only to a peer advertising
+that exact receive capability; IPv4 next-hop VPNv4 routes and VPN withdrawals
+do not require it. This remains route reflection, with no next-hop rewrite,
+VRF import, or forwarding behavior.
 
 ---
 

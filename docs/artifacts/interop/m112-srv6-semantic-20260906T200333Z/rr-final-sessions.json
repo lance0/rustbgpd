@@ -1,0 +1,32 @@
+[
+  {
+    "address": "2001:db8:112:10::2",
+    "remote_asn": 65001,
+    "state": "Established",
+    "uptime_seconds": 10,
+    "prefixes_received": 0,
+    "prefixes_sent": 0,
+    "messages_received": 10,
+    "messages_sent": 3,
+    "flap_count": 0,
+    "last_error": "",
+    "is_dynamic": false,
+    "route_reflector_client": true,
+    "description": "srv6-l2-controlled-source"
+  },
+  {
+    "address": "2001:db8:112:20::2",
+    "remote_asn": 65001,
+    "state": "Established",
+    "uptime_seconds": 10,
+    "prefixes_received": 0,
+    "prefixes_sent": 0,
+    "messages_received": 2,
+    "messages_sent": 11,
+    "flap_count": 0,
+    "last_error": "",
+    "is_dynamic": false,
+    "route_reflector_client": true,
+    "description": "srv6-l2-gobgp-observer"
+  }
+]

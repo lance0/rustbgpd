@@ -1,4 +1,7 @@
 # Raw measurement artifacts are byte-exact evidence: exempt from
 # whitespace checks and collapsed as generated in forge diffs.
 docs/perf/artifacts/** -whitespace linguist-generated=true
+docs/artifacts/interop/m111-srv6-l3vpn-20260906T172814Z/** -whitespace linguist-generated=true
+docs/artifacts/interop/m111-srv6-l3vpn-typed-20260906T191107Z/** -whitespace linguist-generated=true
+docs/artifacts/interop/m112-srv6-l2-20260906T192025Z/** -whitespace linguist-generated=true
 bench/scale/matrix/artifacts-*/** -whitespace linguist-generated=true

@@ -63,7 +63,9 @@ before forwarding to the RIB — the FSM sees only payloadless events.
   Peer Down, and Route Monitoring
 - **Extended messages** (RFC 8654) — dynamic buffer sizing up to 65535 bytes
 - **Add-Path** (RFC 7911) — per-family path ID encode/decode
-- **Extended next hop** (RFC 8950) — IPv4 NLRI over IPv6 next hop
+- **Extended next hop** (RFC 8950) — IPv4 unicast and VPNv4 NLRI over
+  IPv6 next hops; VPNv4 reflection preserves the received encoding and gates
+  export on the recipient's VPNv4 receive capability
 - **Graceful Restart + LLGR** (RFC 4724, RFC 9494) — stale-route retention
   across peer restart, with long-lived retention via `llgr_stale_time`
 - **BGP Roles + Only-to-Customer** (RFC 9234) — OPEN-time role-mismatch

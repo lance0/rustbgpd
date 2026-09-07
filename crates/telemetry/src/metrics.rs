@@ -489,6 +489,7 @@ struct BgpMetricsInner {
     session_event_source_dropped: IntCounterVec,
     grpc_authz_decisions: IntCounterVec,
     grpc_credential_reloads: IntCounterVec,
+    grpc_tls_handshake_failures: IntCounterVec,
     sighup_reload_outcomes: IntCounterVec,
     config_transaction_lifecycle: IntCounterVec,
 
@@ -1155,6 +1156,17 @@ impl BgpMetrics {
             &["tier", "result", "authn", "access_mode"],
         )
         .expect("valid metric definition");
+        let grpc_tls_handshake_failures = IntCounterVec::new(
+            Opts::new(
+                "bgp_grpc_tls_handshake_failures_total",
+                "Rejected inbound gRPC TLS handshakes by bounded reason, before request authorization.",
+            ),
+            &["reason"],
+        )
+        .expect("valid metric definition");
+        for reason in crate::reason_labels::GrpcTlsHandshakeFailureReason::ALL {
+            grpc_tls_handshake_failures.with_label_values(&[reason.as_str()]);
+        }
         let grpc_credential_reloads = IntCounterVec::new(
             Opts::new(
                 "bgp_grpc_credential_reloads_total",
@@ -2643,6 +2655,9 @@ impl BgpMetrics {
             .register(Box::new(grpc_authz_decisions.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(grpc_tls_handshake_failures.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(grpc_credential_reloads.clone()))
             .expect("metric not already registered");
         registry
@@ -3154,6 +3169,7 @@ impl BgpMetrics {
             session_event_source_dropped,
             grpc_authz_decisions,
             grpc_credential_reloads,
+            grpc_tls_handshake_failures,
             sighup_reload_outcomes,
             config_transaction_lifecycle,
             max_prefix_usage,
@@ -4180,6 +4196,18 @@ impl BgpMetrics {
         self.0
             .grpc_authz_decisions
             .with_label_values(&[tier, result, authn, access_mode])
+            .inc();
+    }
+
+    /// Record one rejected inbound TLS handshake, before request authorization.
+    /// Certificate contents, principals, and listener/peer addresses are never labels.
+    pub fn record_grpc_tls_handshake_failure(
+        &self,
+        reason: crate::reason_labels::GrpcTlsHandshakeFailureReason,
+    ) {
+        self.0
+            .grpc_tls_handshake_failures
+            .with_label_values(&[reason.as_str()])
             .inc();
     }
 
@@ -6889,6 +6917,31 @@ mod tests {
                 .get(),
             0
         );
+    }
+
+    #[test]
+    fn grpc_tls_handshake_failures_have_only_fixed_reason_labels() {
+        use crate::reason_labels::GrpcTlsHandshakeFailureReason;
+        let metrics = BgpMetrics::new();
+        for reason in GrpcTlsHandshakeFailureReason::ALL {
+            let counter = metrics
+                .0
+                .grpc_tls_handshake_failures
+                .with_label_values(&[reason.as_str()]);
+            assert_eq!(counter.get(), 0);
+            metrics.record_grpc_tls_handshake_failure(reason);
+            assert_eq!(counter.get(), 1);
+        }
+        let families = metrics.registry().gather();
+        let family = families
+            .iter()
+            .find(|family| family.name() == "bgp_grpc_tls_handshake_failures_total")
+            .unwrap();
+        assert_eq!(family.get_metric().len(), 8);
+        for metric in family.get_metric() {
+            assert_eq!(metric.get_label().len(), 1);
+            assert_eq!(metric.get_label()[0].name(), "reason");
+        }
     }
 
     #[test]

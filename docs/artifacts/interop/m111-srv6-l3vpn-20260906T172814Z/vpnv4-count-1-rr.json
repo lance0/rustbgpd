@@ -1,0 +1,18 @@
+[
+  {
+    "afi_safi": "l3vpn_ipv4_unicast",
+    "route_distinguisher": "65001:111",
+    "route_distinguisher_bytes": "0000fde90000006f",
+    "prefix": "198.51.111.0/24",
+    "labels": [
+      16
+    ],
+    "next_hop": "2001:db8:111:10::2",
+    "peer_address": "2001:db8:111:10::2",
+    "as_path": [],
+    "communities": [],
+    "extended_communities": [
+      "RT:65001:111"
+    ]
+  }
+]

@@ -139,6 +139,7 @@ pub(crate) struct MockState {
     pub(crate) refresh_outbound_declined: AtomicBool,
     pub(crate) last_explain_advertised: Mutex<Option<server_proto::ExplainAdvertisedRouteRequest>>,
     pub(crate) last_explain_best_path: Mutex<Option<server_proto::ExplainBestPathRequest>>,
+    pub(crate) explain_best_path_response: Mutex<Option<server_proto::ExplainBestPathResponse>>,
     pub(crate) last_lookup_best_path: Mutex<Option<server_proto::LookupBestPathRequest>>,
     pub(crate) lookup_best_path_calls: AtomicUsize,
     pub(crate) lookup_best_path_error: Mutex<Option<(Code, String)>>,
@@ -174,6 +175,7 @@ pub(crate) struct MockState {
     // decode-ceiling tests can push multi-MiB listings through loopback.
     pub(crate) list_bgpls_response: Mutex<Option<server_proto::ListBgpLsResponse>>,
     pub(crate) last_list_vpn: Mutex<Option<server_proto::ListVpnRoutesRequest>>,
+    pub(crate) list_vpn_response: Mutex<Option<server_proto::ListVpnRoutesResponse>>,
     pub(crate) last_list_labeled: Mutex<Option<server_proto::ListLabeledRoutesRequest>>,
     pub(crate) last_list_rtc: Mutex<Option<server_proto::ListRtcRoutesRequest>>,
     pub(crate) last_list_evpn: Mutex<Option<server_proto::ListEvpnRequest>>,
@@ -1858,6 +1860,9 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
     ) -> Result<Response<server_proto::ExplainBestPathResponse>, Status> {
         let req = request.into_inner();
         *self.state.last_explain_best_path.lock().await = Some(req.clone());
+        if let Some(response) = self.state.explain_best_path_response.lock().await.clone() {
+            return Ok(Response::new(response));
+        }
         let response_peer = canonical_ip_or_original(&req.peer_address);
         Ok(Response::new(server_proto::ExplainBestPathResponse {
             prefix: "203.0.113.0".to_string(),
@@ -2098,6 +2103,9 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
     ) -> Result<Response<server_proto::ListVpnRoutesResponse>, Status> {
         let request = request.into_inner();
         *self.state.last_list_vpn.lock().await = Some(request.clone());
+        if let Some(response) = self.state.list_vpn_response.lock().await.clone() {
+            return Ok(Response::new(response));
+        }
         Ok(Response::new(server_proto::ListVpnRoutesResponse {
             routes: vec![server_proto::VpnRouteEntry {
                 afi_safi: "l3vpn_ipv4_unicast".to_string(),
@@ -2117,6 +2125,7 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
                 stale: false,
                 llgr_stale: false,
                 path_id: 0,
+                prefix_sid: None,
             }],
         }))
     }
@@ -2412,6 +2421,7 @@ fn mock_evpn_route(route_type: u32) -> server_proto::EvpnRouteEntry {
         communities: vec![],
         extended_communities: vec![],
         tunnel_type: 8,
+        prefix_sid: None,
     }
 }
 
@@ -2898,5 +2908,30 @@ impl rustbgpd_api::proto::peer_group_service_server::PeerGroupService for MockPe
         Ok(Response::new(
             server_proto::ClearNeighborPeerGroupResponse {},
         ))
+    }
+}
+
+/// Representative advertised SID with FRR-style label transposition fields.
+pub(crate) fn mock_prefix_sid() -> server_proto::PrefixSidView {
+    server_proto::PrefixSidView {
+        raw_value: vec![0xde, 0xad, 0xbe, 0xef],
+        flags: 0xe0,
+        services: vec![server_proto::Srv6Service {
+            tlv_type: 5,
+            sids: vec![server_proto::Srv6SidInformation {
+                sid_value: "fc00:0:1::".into(),
+                endpoint_behavior: 65535,
+                flags: 0x80,
+                structures: vec![server_proto::Srv6SidStructure {
+                    locator_block_length: 40,
+                    locator_node_length: 24,
+                    function_length: 16,
+                    argument_length: 0,
+                    transposition_length: 16,
+                    transposition_offset: 64,
+                }],
+            }],
+        }],
+        decode_error: String::new(),
     }
 }

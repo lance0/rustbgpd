@@ -25,7 +25,7 @@ WORKFLOWS = tuple(
                  "release-install-contract", "release", "update-group-fault")
 )
 EXPECTED_ROOT_COMMANDS = {
-    WORKFLOWS[0]: Counter(build=1, check=6, clippy=2, doc=4, test=7),
+    WORKFLOWS[0]: Counter(build=1, check=7, clippy=2, doc=4, test=7),
     WORKFLOWS[1]: Counter(test=1),
     WORKFLOWS[2]: Counter(test=6),
     WORKFLOWS[3]: Counter(build=1, test=2),

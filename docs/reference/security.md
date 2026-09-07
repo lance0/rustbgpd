@@ -33,6 +33,43 @@ Preferred posture:
 - For occasional remote administration, tunnel to the local listener or socket
   rather than exposing raw management TCP on a routed interface.
 
+### Unix socket path integrity
+
+UDS startup fails if the socket's immediate parent is not owned by the daemon's
+effective UID or has group/world write bits. That directory must also allow
+the daemon read/write/search access for locking and socket creation. Missing
+parents are created owner-only. The configured path must be absolute, end in
+a filename, contain no `..`, and traverse no symlinks, including ancestor
+symlinks such as `/var/run` on systems where it points to `/run`.
+
+Each ancestor must be owned by root or the daemon's effective UID. Group/world
+write is allowed on an ancestor only when it is sticky and the next path
+component is root- or daemon-owned. This permits root-owned `/tmp` followed by
+a private daemon-owned directory, but rejects `/tmp/grpc.sock` and writable
+non-sticky ancestors that would let another UID replace the socket's subtree.
+Root, the daemon UID, and privileged mount-namespace administrators remain
+trusted; use a local filesystem that enforces Linux permissions and sticky
+directory semantics.
+
+Binding, permission changes, stale-socket removal, and cleanup stay relative
+to pinned directory or inode descriptors. Linux creates the socket with no
+permissions wider than the configured mode, including before its final chmod.
+An existing socket is removed only after a nonblocking probe establishes
+connection refusal; live or uncertain sockets are retained. A directory lock
+serializes cooperating starts through bind and listen, so another daemon's
+startup interval cannot be mistaken for a stale socket. Secure binding needs
+`/proc/self/fd`; see the [UDS configuration](configuration.md#globaltelemetrygrpc_uds)
+for pathname limits.
+
+Keep mode `0o600` for ordinary local administration. Deliberately sharing a
+socket requires an explicit principal and role mapping, but does not require
+a bearer token: every client admitted by filesystem permissions receives that
+listener-wide role. Optional bearer authentication is an additional check;
+it does not introduce per-UID roles. Auto-created parents are `0700`, so
+deliberate group sharing also needs a pre-created group-searchable parent
+without group write and the correct socket group. A setgid parent can supply
+that group; see the [UDS configuration example](configuration.md#globaltelemetrygrpc_uds).
+
 ### Remote administration
 
 Preferred posture:
@@ -44,9 +81,19 @@ Preferred posture:
   the server certificate, requires every client to present a
   certificate signed by `tls_client_ca_file`, and rejects unverified
   clients at the TLS layer before any gRPC handler runs. There is
-  no "TLS-without-mTLS" half-mode by design. PEM material is
-  pre-flight-validated at load and `--check` time so a successful
-  `--check` rules out cert-rotation surprises at startup.
+  no "TLS-without-mTLS" half-mode by design. Config loading checks file
+  readability and PEM framing. After staging replacement files at the
+  configured paths, run `rustbgpd --check --strict /etc/rustbgpd/config.toml`
+  before SIGHUP or restart: both `--check`
+  modes also run startup credential staging, parsing the certificates,
+  private key, and client CA bundle and checking the cert/key match without
+  binding listeners. This validates the files at check time; it does not prove
+  client trust or hostname matching, or cover subsequent file changes.
+  A positive `tls_expiry_warning_seconds` adds expiry warnings from the same
+  staged bytes; the default `0` disables those warnings.
+- Native mTLS accepts TLS 1.2 and TLS 1.3 with the rustls/ring default cipher
+  suites. There is no configuration setting for a different protocol-version
+  floor or cipher list.
 - For multi-host fan-out, off-host TLS termination, or richer
   authorization fan-out, an Envoy / nginx mTLS sidecar in front of
   the daemon is still a valid pattern; see
@@ -74,6 +121,11 @@ Preferred posture:
   Legacy migration mode (roles as audit context only) was removed in v0.63.0;
   v0.65 accepts only `tier` in the typed schema and gives the exact retired
   value an actionable load diagnostic.
+  A trusted client certificate can complete TLS even when its principal has
+  no role mapping; each RPC then receives `PERMISSION_DENIED`. The
+  handshake-time rejection described in the historical
+  [ADR-0064 role-mapping decision](../adr/0064-grpc-authorization.md) does not
+  describe this per-request authorization boundary.
 - Listener `max_tier` caps are enforced now and should be used to bound remote
   TCP listeners to the smallest required method tier. `access_mode =
   "read_only"` remains a compatibility ceiling equivalent to
@@ -532,7 +584,9 @@ the roadmap:
   sockets still require an explicit `principal` plus a matching role entry,
   and `local-operator` is reserved (rejected in roles and listener
   `principal` fields, like `mtls-unresolved`). Audit records label the
-  implicit path distinctly (`authn = "uds_owner"`).
+  implicit permissions-only path distinctly (`authn = "uds_owner"`). A UDS
+  listener with `token_file` instead reports `authn = "bearer_token"`, while
+  preserving the same principal and role ceiling.
 - Per-principal request-rate and stream-count budgets are not implemented in
   the daemon. Use listener tier caps, role enforcement, management-network
   controls, client deadlines, and the documented `grpc_authz` / stream metrics
@@ -551,3 +605,6 @@ the roadmap:
   all-listener generation. Alert on
   `bgp_grpc_credential_reloads_total{outcome="failure"}`; failures retain the
   last-known-good generation and logs never include secret bytes.
+  [Native gRPC expiry visibility](operations.md#native-grpc-certificate-expiry)
+  exposes active certificate dates and opt-in warning windows. Supplied bundle
+  minima are metadata, not effective peer-path cutoffs or client leaf inventories.

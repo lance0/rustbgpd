@@ -1778,6 +1778,46 @@ mod tests {
     }
 
     #[test]
+    fn validate_open_vpnv4_extended_nexthop_requires_peer_tuple_and_mp_family() {
+        let family = (Afi::Ipv4, Safi::MplsVpn);
+        let mut cfg = test_config();
+        cfg.families = vec![family, (Afi::Ipv6, Safi::Unicast)];
+        for peer_mp in [false, true] {
+            for peer_capability in [None, Some(Safi::Unicast), Some(Safi::MplsVpn)] {
+                let mut open = peer_open();
+                open.capabilities
+                    .retain(|cap| !matches!(cap, Capability::MultiProtocol { .. }));
+                open.capabilities.push(Capability::MultiProtocol {
+                    afi: Afi::Ipv6,
+                    safi: Safi::Unicast,
+                });
+                if peer_mp {
+                    open.capabilities.push(Capability::MultiProtocol {
+                        afi: family.0,
+                        safi: family.1,
+                    });
+                }
+                if let Some(safi) = peer_capability {
+                    open.capabilities.push(Capability::ExtendedNextHop(vec![
+                        ExtendedNextHopFamily {
+                            nlri_afi: Afi::Ipv4,
+                            nlri_safi: safi,
+                            next_hop_afi: Afi::Ipv6,
+                        },
+                    ]));
+                }
+                let negotiated = validate_open(&open, &cfg).unwrap();
+                assert_eq!(
+                    negotiated.extended_nexthop_families.get(&family),
+                    (peer_mp && peer_capability == Some(Safi::MplsVpn)).then_some(&Afi::Ipv6),
+                    "peer MP={peer_mp}, receive capability={peer_capability:?}"
+                );
+                assert_eq!(negotiated.negotiated_families.contains(&family), peer_mp);
+            }
+        }
+    }
+
+    #[test]
     fn negotiate_extended_nexthop_requires_exact_tuple_match() {
         let ours = vec![ExtendedNextHopFamily {
             nlri_afi: Afi::Ipv4,

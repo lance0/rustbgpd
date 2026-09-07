@@ -36,15 +36,15 @@ categories = ["network-programming"]
 
 [workspace.dependencies]
 # Internal crates
-rustbgpd-wire = { path = "crates/wire", version = "0.19.1" }
+rustbgpd-wire = { path = "crates/wire", version = "0.20.0" }
 rustbgpd-bfd = { path = "crates/bfd", version = "0.68.0" }
-rustbgpd-fsm = { path = "crates/fsm", version = "0.6.0" }
+rustbgpd-fsm = { path = "crates/fsm", version = "0.7.0" }
 rustbgpd-transport = { path = "crates/transport", version = "0.68.0" }
 rustbgpd-rib = { path = "crates/rib", version = "0.68.0" }
 rustbgpd-policy = { path = "crates/policy", version = "0.68.0" }
 rustbgpd-api = { path = "crates/api", version = "0.68.0" }
 rustbgpd-telemetry = { path = "crates/telemetry", version = "0.68.0" }
-rustbgpd-rpki = { path = "crates/rpki", version = "0.1.0" }
+rustbgpd-rpki = { path = "crates/rpki", version = "0.2.0" }
 rustbgpd-bmp = { path = "crates/bmp", version = "0.68.0" }
 rustbgpd-mrt = { path = "crates/mrt", version = "0.68.0" }
 rustbgpd-evpn = { path = "crates/evpn", version = "0.68.0" }
@@ -119,7 +119,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # Daemon boot ID stamping for restart detection (ADR-0072).
 uuid = { version = "1", features = ["v4"] }
 zeroize = "1"
-ureq = { version = "=3.4.0", default-features = false, features = ["rustls", "platform-verifier"] }
+ureq = { version = "3.4.1", default-features = false, features = ["rustls", "platform-verifier"] }
 
 [package]
 name = "rustbgpd"

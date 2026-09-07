@@ -174,6 +174,51 @@ jobs:
           bash tests/interop/scripts/test-test-operator-auth-helper.sh
           bash tests/interop/scripts/test-test-vtep-route-oracles.sh
           python3 tests/interop/scripts/test_evpn_peer_sync_oracle.py
+          bash -n tests/interop/scripts/test-m111-srv6-l3vpn-reflection.sh
+          shellcheck tests/interop/scripts/test-m111-srv6-l3vpn-reflection.sh
+          python3 tests/interop/scripts/test_m111_capture_oracle.py
+          python3 tests/interop/scripts/test_m99_open_oracle.py
+      - name: Check SRv6 reflection proof helpers
+        run: |
+          python3 tests/interop/scripts/test_m112_capture_oracle.py
+          python3 tests/interop/scripts/test_m111_typed_visibility.py
+          bash -n tests/interop/scripts/test-m112-srv6-l2-reflection.sh
+          shellcheck -x tests/interop/scripts/test-m112-srv6-l2-reflection.sh
+      - name: Replay committed SRv6 reflection receipts
+        run: |
+          set -euo pipefail
+          m111=docs/artifacts/interop/m111-srv6-l3vpn-typed-20260906T191107Z
+          python3 tests/interop/scripts/m111_capture_oracle.py "$m111/payloads.tsv" | cmp - "$m111/wire.json"
+          python3 tests/interop/scripts/m111_typed_visibility.py "$m111" | cmp - "$m111/typed-visibility.json"
+          m112=docs/artifacts/interop/m112-srv6-l2-20260906T192025Z
+          python3 tests/interop/scripts/m112_capture_oracle.py wire "$m112/payloads.tsv" | cmp - "$m112/wire.json"
+          for phase in baseline malformed recovery withdraw cleanup; do
+            python3 tests/interop/scripts/m112_capture_oracle.py rr "$m112/$phase-rr.json" \
+              --phase "$phase" --require-typed | cmp - "$m112/$phase-rr-check.json"
+            python3 tests/interop/scripts/m112_capture_oracle.py observer "$m112/$phase-observer.json" \
+              --phase "$phase" | cmp - "$m112/$phase-observer-check.json"
+          done
+      - name: Replay SRv6 semantic eligibility receipts
+        run: |
+          set -euo pipefail
+          m111=docs/artifacts/interop/m111-srv6-eligibility-20260906T200426Z
+          python3 tests/interop/scripts/m111_capture_oracle.py "$m111/payloads.tsv" | cmp - "$m111/wire.json"
+          python3 tests/interop/scripts/m111_typed_visibility.py "$m111" | cmp - "$m111/typed-visibility.json"
+          m112=docs/artifacts/interop/m112-srv6-semantic-20260906T200333Z
+          python3 tests/interop/scripts/m112_capture_oracle.py wire "$m112/payloads.tsv" \
+            --semantic-control | cmp - "$m112/wire.json"
+          for phase in baseline malformed recovery semantic_invalid semantic_recovery withdraw cleanup; do
+            python3 tests/interop/scripts/m112_capture_oracle.py rr "$m112/$phase-rr.json" \
+              --phase "$phase" --require-typed | cmp - "$m112/$phase-rr-check.json"
+            python3 tests/interop/scripts/m112_capture_oracle.py observer "$m112/$phase-observer.json" \
+              --phase "$phase" | cmp - "$m112/$phase-observer-check.json"
+          done
+          for phase in semantic_invalid semantic_recovery; do
+            for view in received explain; do
+              python3 tests/interop/scripts/m112_capture_oracle.py "$view" "$m112/$phase-$view.json" \
+                --phase "$phase" | cmp - "$m112/$phase-$view-check.json"
+            done
+          done
       - run: python3 scripts/check-v1-stable-surface.py
       - run: python3 scripts/reflow-release-notes.py --selftest
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
@@ -213,6 +258,9 @@ jobs:
       # LAN-198: `config` referenced binary-only modules, so the lib
       # failed to build under `--all-features` while the bin stayed green.
       - run: cargo check --locked -p rustbgpd --all-features --lib
+      # Bench targets also compile config's tests; keep their binary-module
+      # boundary checked in addition to the production library surface.
+      - run: cargo check --locked -p rustbgpd --features bench-internals --benches
       # The root `Config` API is exported only by `bench-internals`, so the
       # normal workspace test cannot compile this cheap allocation gate.
       - name: Gate eager policy-set sharing allocation shape

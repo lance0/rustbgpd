@@ -42,6 +42,153 @@ fn drain_vpn_delta(
     (announced, withdrawn)
 }
 
+/// RFC 9252 section 7 distinguishes semantic SID ineligibility from malformed
+/// UPDATE handling: keep the received route, but select only usable candidates.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one decoded fixture follows fallback, withdrawal, and recovery across three VPN export modes"
+)]
+fn vpn_srv6_invalid_sid_structure_uses_fallback_withdraws_and_recovers() {
+    for (add_path, orr) in [(0, false), (2, false), (0, true)] {
+        let (_tx, rx) = mpsc::channel(16);
+        let mut manager = RibManager::new(
+            rx,
+            dummy_query_rx(),
+            None,
+            Some(Ipv4Addr::new(192, 0, 2, 254)),
+            BgpMetrics::new(),
+        );
+        if orr {
+            let topology_peer = Ipv4Addr::new(10, 9, 9, 9);
+            manager.handle_update(RibUpdate::BgpLsRoutesReceived {
+                session_id: 0,
+                peer: topology_peer.into(),
+                announced: crate::orr::fixtures::square_topology(topology_peer),
+                withdrawn: vec![],
+            });
+        }
+        let target: IpAddr = "192.0.2.30".parse().unwrap();
+        let (out_tx, mut out_rx) = mpsc::channel(16);
+        manager.handle_update(RibUpdate::PeerUp {
+            per_client_best: false,
+            interpret_rfc1997: true,
+            session_id: 0,
+            peer: target,
+            peer_asn: 65100,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            outbound_tx: out_tx,
+            export_policy: None,
+            sendable_families: vpn_sendable(),
+            is_ebgp: !orr,
+            route_reflector_client: orr,
+            orr_vantage: orr.then(vantage_at_node_a),
+            add_path_send_families: if add_path > 0 { vpn_sendable() } else { vec![] },
+            add_path_send_max: add_path,
+            negotiated_orf_recv: Vec::new(),
+            negotiated_llgr_families: Vec::new(),
+        });
+        drain_vpn_delta(&mut out_rx);
+        if orr {
+            assert!(manager.orr.spf.contains_key(&vantage_at_node_a()));
+        }
+
+        let service = |block_length| {
+            // L3 Service, SID Information, End.DT4, and six-byte SID Structure.
+            // The full SID uses an implicit-null NLRI label and no transposition.
+            let mut value = vec![5, 0, 34, 0, 1, 0, 30, 0];
+            value.extend("2001:db8:111:1:1::".parse::<Ipv6Addr>().unwrap().octets());
+            value.extend([0, 0, 19, 0, 1, 0, 6, block_length, 24, 16, 0, 0, 0]);
+            let attribute = PathAttribute::Unknown(rustbgpd_wire::RawAttribute {
+                flags: 0xe0,
+                type_code: 40,
+                data: value.into(),
+            });
+            let mut encoded = Vec::new();
+            rustbgpd_wire::attribute::encode_path_attributes(
+                std::slice::from_ref(&attribute),
+                &mut encoded,
+                true,
+                false,
+            )
+            .unwrap();
+            assert_eq!(
+                rustbgpd_wire::attribute::decode_path_attributes(&encoded, true, &[]).unwrap(),
+                vec![attribute.clone()],
+                "both fixtures must pass structural UPDATE decoding unchanged"
+            );
+            attribute
+        };
+        let mut fallback = make_vpn_rib_route(Ipv4Addr::new(192, 0, 2, 10), 42, 3, 100);
+        fallback.next_hop = "2001:db8::10".parse().unwrap();
+        Arc::make_mut(&mut fallback.attributes).push(service(40)); // Sum = 80.
+        let mut invalid = make_vpn_rib_route(Ipv4Addr::new(192, 0, 2, 11), 42, 3, 200);
+        invalid.next_hop = "2001:db8::11".parse().unwrap();
+        Arc::make_mut(&mut invalid.attributes).push(service(100)); // Sum = 140 > 128.
+        let key = fallback.nlri.key();
+
+        manager.handle_vpn_routes_received(fallback.peer, vec![fallback.clone()], vec![]);
+        let (announced, withdrawn) = drain_vpn_delta(&mut out_rx);
+        assert_eq!(announced.len(), 1);
+        assert_eq!(announced[0].peer, fallback.peer);
+        assert!(withdrawn.is_empty());
+
+        manager.handle_vpn_routes_received(invalid.peer, vec![invalid.clone()], vec![]);
+        assert_eq!(
+            manager.ribs[&invalid.peer]
+                .iter_vpn_for_nlri(&key)
+                .next()
+                .unwrap()
+                .attributes,
+            invalid.attributes,
+            "semantic ineligibility must preserve received attributes for inspection"
+        );
+        assert_eq!(
+            manager.loc_rib.get_vpn(&key).unwrap().peer,
+            fallback.peer,
+            "a higher LOCAL_PREF cannot make a SID structure exceeding 128 bits eligible"
+        );
+        let (announced, withdrawn) = drain_vpn_delta(&mut out_rx);
+        assert!(
+            announced.is_empty(),
+            "the valid fallback remains advertised"
+        );
+        assert!(withdrawn.is_empty());
+
+        manager.handle_vpn_routes_received(fallback.peer, vec![], vec![fallback.key()]);
+        assert!(manager.loc_rib.get_vpn(&key).is_none());
+        let (announced, withdrawn) = drain_vpn_delta(&mut out_rx);
+        assert!(announced.is_empty());
+        assert_eq!(withdrawn.len(), 1);
+        assert_eq!(withdrawn[0].nlri_key, fallback.nlri.key());
+        assert_eq!(withdrawn[0].path_id, u32::from(add_path > 0));
+        assert_eq!(
+            manager.ribs[&invalid.peer].iter_vpn_for_nlri(&key).count(),
+            1
+        );
+
+        let mut recovered = invalid.clone();
+        *Arc::make_mut(&mut recovered.attributes).last_mut().unwrap() = service(40);
+        manager.handle_vpn_routes_received(recovered.peer, vec![recovered.clone()], vec![]);
+        assert_eq!(manager.loc_rib.get_vpn(&key).unwrap().peer, recovered.peer);
+        let (announced, withdrawn) = drain_vpn_delta(&mut out_rx);
+        assert_eq!(announced.len(), 1);
+        assert_eq!(announced[0].attributes, recovered.attributes);
+        assert!(withdrawn.is_empty());
+
+        manager.handle_vpn_routes_received(invalid.peer, vec![invalid.clone()], vec![]);
+        assert!(manager.loc_rib.get_vpn(&key).is_none());
+        assert_eq!(
+            manager.ribs[&invalid.peer].iter_vpn_for_nlri(&key).count(),
+            1
+        );
+        let (announced, withdrawn) = drain_vpn_delta(&mut out_rx);
+        assert!(announced.is_empty());
+        assert_eq!(withdrawn.len(), 1);
+        assert_eq!(withdrawn[0].nlri_key, key);
+    }
+}
+
 async fn query_vpn_group_label(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> String {
     let (reply, response) = oneshot::channel();
     tx.send(RibUpdate::QueryPeerUpdateGroup { peer, reply })

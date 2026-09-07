@@ -13,6 +13,26 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Native gRPC TLS expiry visibility through
+  `bgp_grpc_tls_certificate_not_after_seconds{kind}` for the active server leaf,
+  supplied server bundle minimum, and supplied client CA bundle minimum.
+  Successful client handshakes log observed leaf expiry. The restart-required
+  `tls_expiry_warning_seconds` setting defaults to `0` (warnings off); a
+  positive window adds startup, reload, client-handshake, and config-check
+  warnings. Plain `--check` retains exit 0 for warnings and `--strict` returns
+  1. Bundle dates are metadata, not effective handshake cutoffs, and expiry
+  visibility does not introduce date-based startup rejection.
+
+- VPN and EVPN route views now expose optional Prefix-SID raw bytes and flags,
+  advertised SRv6 SID values, numeric endpoint behavior, and SID Structure
+  fields. EVPN explain and current/previous event snapshots retain the same
+  view. CLI text summarizes advertised values; JSON retains complete raw
+  attribute hex and reports malformed stored data without partial decoding.
+  This adds inspection only, with no SID reconstruction or forwarding.
+- Prepared wire `0.20.0`, FSM `0.7.0`, and RPKI `0.2.0` compatibility lines
+  for the new public Prefix-SID inspection API and shared wire types. Registry
+  dependency examples continue to name the currently published versions.
+
 - Python gRPC client example under `examples/python-client/`: an export-gate
   explain script and a controller script that checks health, watches the live
   event stream, and injects then withdraws a route. Both call only v1-stable
@@ -309,7 +329,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   valid `--coverage-min` semantics remain unchanged. Matched coverage does not
   guarantee branch coverage or detect every widened guard.
 
+- Opt-in `.rpol` policy fallbacks with `default-action accept|reject`,
+  declared before terms. Omission keeps accept-and-continue behavior;
+  a rejecting fallback stops the chain and discards staged changes.
+  Defaults also apply to parameterized policies and `apply` predicates.
+
 ### Changed
+
+- Refreshed the transitive HTTP/gRPC stack: `hyper` 1.8.1 → 1.11.1 and `h2`
+  0.4.16 → 0.4.19. This lockfile-only update applies upstream HTTP/2 trailer
+  handling and frame-budget hardening to the tonic gRPC and gNMI listeners.
+
+- Refreshed internal TLS dependencies to tokio-rustls 0.26.5, rustls 0.23.43,
+  rustls-webpki 0.103.15, and rustls-pki-types 1.15.1. tokio-rustls can return
+  more data from a stream read; provider selection and TLS configuration remain
+  unchanged.
 
 - `rbgp rib add` uses `--next-hop` as the canonical flag, retaining
   `--nexthop` as a visible compatibility alias. The default RIB pager now
@@ -496,6 +530,37 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   redundant explicit link target.
 
 ### Fixed
+
+- IXP Manager lifecycle requests now abort slow control-response bodies when
+  the global request budget expires. Uncertain update-lock acquisition stays
+  in manual recovery instead of continuing the lifecycle.
+
+- VPNv4 sessions now advertise RFC 8950 IPv6 next-hop receive support,
+  including VPN-only configurations. Reflection preserves the IPv6 next hop
+  and exports it only to recipients advertising the matching capability.
+  An ineligible replacement withdraws the old advertisement; IPv4 next-hop
+  VPNv4 routes and VPN withdrawals retain their existing behavior.
+
+- SRv6 service routes with no semantically valid applicable SID now remain
+  retained but cannot win selection, Add-Path, ORR, or ECMP. Invalid-only
+  input withdraws existing advertisements; a corrected replacement recovers
+  normally. Unicast and EVPN explain identify `srv6_sid_invalid`, including
+  successful unicast API/CLI explanations with candidates and no best route.
+
+- gRPC Unix sockets now reject unsafe parent directories and ancestor paths,
+  bind without a permission window, and preserve existing live or uncertain
+  sockets. Descriptor-relative operations and cooperative startup locking
+  protect endpoint creation and cleanup. UDS authorization diagnostics now
+  recommend owner-only access, and token-protected UDS listeners report
+  `authn = "bearer_token"` without changing their principal or role.
+
+- Prefix-SID SRv6 L3/L2 Service TLVs now validate nested framing under
+  RFC 9252 §7. Recognized service malformation returns the additive
+  `DecodeError::MalformedSrv6ServiceTlv` and uses treat-as-withdraw in revised
+  decoding; generic Prefix-SID length errors keep attribute-discard. Valid
+  opaque values and unknown/reserved fields remain unchanged. These framing
+  checks are separate from RIB service eligibility and do not originate or
+  forward SRv6 services.
 
 - EVPN local MAC/IP activation now advertises above the effective sequence of
   a different imported remote MAC holding the same IPv4 or IPv6 address
@@ -772,6 +837,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   GSHUT/BLACKHOLE tails. Reject oversized candidates before installation;
   `compile_rpol` enforces the same cap when composing zero-parameter policies.
 
+- `rustbgpd --check` and `--check --strict` validate TLS credential content
+  through the same staging path as startup, rejecting invalid certificates,
+  keys, client CA bundles, and mismatched cert/key pairs before reporting
+  success. Neither mode binds listeners.
+
+- Rejected native gRPC TLS handshakes now increment
+  `bgp_grpc_tls_handshake_failures_total{reason}`, including handshake timeouts.
+  Fixed reason labels distinguish missing, expired, not-yet-valid, untrusted,
+  and other invalid client certificates from other TLS or transport failures.
+  Request authorization counters continue to count RPC decisions only.
+
 ### Documentation
 
 - Publish a descriptive raw bridge event-skew receipt across six pinned Jammy
@@ -807,6 +883,31 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   semantics without renaming existing commands.
 
 ### Upgrade notes
+
+- **VPNv4 IPv6 next hops:** VPNv4 peers advertise the additional receive
+  capability on the next OPEN exchange, with no new configuration setting.
+  A recipient without RFC 8950 tuple 1/128/2 no longer receives VPNv4 IPv6
+  next-hop announcements; exact-export rejection also removes an older
+  advertisement when an IPv4 next hop is replaced by an IPv6 next hop.
+
+- **gRPC Unix socket paths:** the immediate parent must be effective-UID-owned,
+  readable/searchable and writable by the daemon, and not group/world-writable.
+  Paths must be absolute, have no symlink or `..` components, and use trusted
+  root/effective-UID ancestors. Sticky ancestors such as `/tmp` are allowed
+  only above a protected child directory; move `/tmp/name.sock` to a private
+  directory. Linux `/proc/self/fd` must be available. Both the configured and
+  descriptor-relative socket paths must fit the Unix socket pathname limit.
+  Existing live listeners now cause startup failure instead of losing their
+  socket. Token-protected UDS audit labels change from `uds`/`uds_owner` to
+  `bearer_token`; permissions-only labels and supported group-sharing roles
+  remain unchanged. See the [UDS path requirements](docs/reference/security.md#unix-socket-path-integrity).
+
+- **SRv6 Prefix-SID structural validation:** malformed recognized L3/L2
+  Service TLVs now withdraw the UPDATE's reachable routes while preserving
+  the session when NLRI can be recovered. Unusable NLRI retains session reset;
+  malformed snapshot entries fail admission. Generic Prefix-SID errors retain
+  attribute-discard, and valid opaque reflection is unchanged. Embedders using
+  prepared wire `0.19.1` can receive `DecodeError::MalformedSrv6ServiceTlv`.
 
 - **EVPN IP ownership sequence:** a newly learned local MAC/IP binding can
   now carry a higher MAC Mobility sequence when another eligible remote MAC
@@ -1034,6 +1135,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fit: shorten chains in a separate reload before loading larger definitions
   when that intermediate combination would exceed the cap.
   See [policy bounds](docs/reference/rpol-language.md#loops--for).
+
+- **Policy language:** `default-action` is optional; existing `.rpol` files
+  retain their behavior. Upgrade readers before adding the new declaration,
+  since older releases reject its syntax. `default-action accept` continues
+  the policy chain; `reject` affects only fallthrough and does not diagnose
+  widened guards. Keep negative route assertions when adopting it.
 
 ## [0.68.0] — 2026-08-30
 

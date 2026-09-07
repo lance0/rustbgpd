@@ -641,9 +641,9 @@ dependencies = [
 
 [[package]]
 name = "lru"
-version = "0.18.2"
+version = "0.18.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d2f2f9b4ba7e6b24d95e7e899329d35be83bcded72c8540cdd5368932d1d90a"
+checksum = "ff9840bcc50b71349309900da0ce7279aa336ae71d73250b07998932c7d97c25"
 dependencies = [
  "hashbrown",
 ]
@@ -789,9 +789,9 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pprof"
-version = "0.14.1"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "afad4d4df7b31280028245f152d5a575083e2abb822d05736f5e47653e77689f"
+checksum = "38a01da47675efa7673b032bf8efd8214f1917d89685e07e395ab125ea42b187"
 dependencies = [
  "aligned-vec",
  "backtrace",
@@ -806,7 +806,7 @@ dependencies = [
  "spin",
  "symbolic-demangle",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -1035,7 +1035,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-fsm"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "bytes",
  "rustbgpd-wire",
@@ -1078,7 +1078,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-rpki"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rustbgpd-wire",
  "rustc-hash",
@@ -1124,7 +1124,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-wire"
-version = "0.19.1"
+version = "0.20.0"
 dependencies = [
  "bytes",
  "thiserror 2.0.20",
@@ -1267,9 +1267,9 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "smallvec"
-version = "1.15.2"
+version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
+checksum = "b9be42f50aa861c555654aa3a37f52f4b1074bacf4e48fe0ef7fa584e80f1f0f"
 
 [[package]]
 name = "socket2"
@@ -1599,9 +1599,9 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "uuid"
-version = "1.24.0"
+version = "1.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf3923a6f5c4c6382e0b653c4117f48d631ea17f38ed86e2a828e6f7412f5239"
+checksum = "b5772d71c9be8a8a6ac2117d949c5b224c1b72241bb611d9a3012edcf8af7812"
 dependencies = [
  "js-sys",
  "wasm-bindgen",

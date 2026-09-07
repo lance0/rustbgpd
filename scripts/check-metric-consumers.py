@@ -17,6 +17,7 @@ from types import ModuleType
 ROOT = Path(__file__).resolve().parents[1]
 TELEMETRY = "crates/telemetry/src/metrics.rs"
 SETTLEMENT = "crates/api/src/runtime_config_settlement.rs"
+CREDENTIALS = "crates/api/src/credentials.rs"
 DASHBOARD = ROOT / "docs/grafana/rustbgpd-overview.json"
 ALERT_RULES = ROOT / "examples/prometheus/rustbgpd-alerts.yml"
 CARGO_LOCK = ROOT / "Cargo.lock"
@@ -42,13 +43,14 @@ HISTORICAL_DOCUMENT_PREFIXES = (
     "docs/soaks/",
 )
 
-EMITTER_FILES = frozenset({TELEMETRY, SETTLEMENT})
+EMITTER_FILES = frozenset({TELEMETRY, SETTLEMENT, CREDENTIALS})
 CUSTOM_COLLECTORS = frozenset(
     {
         (TELEMETRY, "JemallocCollector"),
         (TELEMETRY, "SessionNotificationDepthCollector"),
         (TELEMETRY, "EventOutboxQueueDepthCollector"),
         (SETTLEMENT, "RuntimeConfigSettlementCollector"),
+        (CREDENTIALS, "TlsExpiryCollector"),
     }
 )
 CUSTOM_COLLECTOR_PREFIXES = {
@@ -56,8 +58,10 @@ CUSTOM_COLLECTOR_PREFIXES = {
     (TELEMETRY, "SessionNotificationDepthCollector"): "bgp_session_notification_",
     (TELEMETRY, "EventOutboxQueueDepthCollector"): "bgp_event_outbox_queue_depth",
     (SETTLEMENT, "RuntimeConfigSettlementCollector"): "bgp_runtime_config_settlement_",
+    (CREDENTIALS, "TlsExpiryCollector"): "bgp_grpc_tls_certificate_not_after_seconds",
 }
 SPECIAL_REGISTRATIONS = {
+    CREDENTIALS: ("TlsExpiryCollector::new(self.clone(),listener)?",),
     TELEMETRY: (
         "prometheus::process_collector::ProcessCollector::for_self()",
         "jemalloc_stats::JemallocCollector::new()",
@@ -409,25 +413,25 @@ def session_notification_depth_inventory(source: str) -> tuple[dict[str, str], s
     return {name: kind for name, kind in emitted.values()}, set(emitted)
 
 
-def event_outbox_queue_depth_inventory(
-    source: str,
+def local_gauge_vector_inventory(
+    source: str, collector: str, expected_name: str, label: str,
 ) -> tuple[dict[str, str], set[str]]:
-    """Validate the local gauge vector emitted by the queue-depth collector."""
+    """Validate one scrape-time local gauge vector and its named label."""
     source = production_source(source)
     syntax, strings = DASHBOARD_CHECK.rust_lex(source)
     collector_impl = braced_body(
         syntax,
-        r"\bimpl\s+Collector\s+for\s+EventOutboxQueueDepthCollector\s*\{",
-        "Collector impl for EventOutboxQueueDepthCollector",
+        rf"\bimpl\s+Collector\s+for\s+{re.escape(collector)}\s*\{{",
+        f"Collector impl for {collector}",
     )
     collect_body = braced_body(
         collector_impl,
         r"\bfn\s+collect\s*\(\s*&self\s*\)\s*->\s*Vec\s*<\s*MetricFamily\s*>\s*\{",
-        "collect method for EventOutboxQueueDepthCollector",
+        f"collect method for {collector}",
     )
     if "MetricFamily" in collect_body:
         raise ValueError(
-            "EventOutboxQueueDepthCollector constructs MetricFamily values directly"
+            f"{collector} constructs MetricFamily values directly"
         )
     unexpected_returns = [
         expression
@@ -436,9 +440,8 @@ def event_outbox_queue_depth_inventory(
     ]
     if unexpected_returns:
         raise ValueError(
-            "EventOutboxQueueDepthCollector returns families outside its local gauge vector"
+            f"{collector} returns families outside its local gauge vector"
         )
-    expected_name = CUSTOM_COLLECTOR_PREFIXES[(TELEMETRY, "EventOutboxQueueDepthCollector")]
     constructors = re.findall(
         r"\blet\s+(\w+)\s*=\s*IntGaugeVec::new\(\s*"
         r"Opts::new\(\s*__RUST_STRING_(\d+)__\s*,\s*"
@@ -448,7 +451,7 @@ def event_outbox_queue_depth_inventory(
     )
     if len(constructors) != 1:
         raise ValueError(
-            "EventOutboxQueueDepthCollector must construct exactly one local IntGaugeVec"
+            f"{collector} must construct exactly one local IntGaugeVec"
         )
     variable, name_index, label_index = constructors[0]
     definitions = static_metric_definitions(source)
@@ -458,28 +461,48 @@ def event_outbox_queue_depth_inventory(
         or definitions.get(variable) != expected_definition
     ):
         raise ValueError(
-            "EventOutboxQueueDepthCollector must construct exactly one uniquely "
+            f"{collector} must construct exactly one uniquely "
             f"named local gauge vector for {expected_name}"
         )
-    if strings[int(label_index)] != "category":
+    if strings[int(label_index)] != label:
         raise ValueError(
-            "EventOutboxQueueDepthCollector must construct its local IntGaugeVec "
-            "with the category label"
+            f"{collector} must construct its local IntGaugeVec "
+            f"with the {label} label"
         )
 
     compact = re.sub(r"\s+", "", collect_body)
-    population = f"{variable}.with_label_values(&[category]).set("
+    population = f"{variable}.with_label_values(&[{label}]).set("
     if compact.count(population) != 1:
         raise ValueError(
-            "EventOutboxQueueDepthCollector must populate its local gauge vector "
-            "through the category label exactly once"
+            f"{collector} must populate its local gauge vector "
+            f"through the {label} label exactly once"
         )
     collect_calls = re.findall(r"\b(\w+)\.collect\(\)", compact)
     if collect_calls != [variable] or not compact.endswith(f"{variable}.collect()"):
         raise ValueError(
-            "EventOutboxQueueDepthCollector must return its local gauge vector exactly once"
+            f"{collector} must return its local gauge vector exactly once"
         )
     return {expected_name: "ordinary"}, {variable}
+
+
+def event_outbox_queue_depth_inventory(source: str) -> tuple[dict[str, str], set[str]]:
+    return local_gauge_vector_inventory(
+        source, "EventOutboxQueueDepthCollector",
+        CUSTOM_COLLECTOR_PREFIXES[(TELEMETRY, "EventOutboxQueueDepthCollector")],
+        "category",
+    )
+
+
+def tls_expiry_metric_inventory(source: str) -> dict[str, str]:
+    definitions = static_metric_definitions(source)
+    registered = registered_metric_variables(CREDENTIALS, source, definitions)
+    emitted, variables = local_gauge_vector_inventory(
+        source, "TlsExpiryCollector",
+        CUSTOM_COLLECTOR_PREFIXES[(CREDENTIALS, "TlsExpiryCollector")], "kind",
+    )
+    if registered or set(definitions) != variables:
+        raise ValueError("TLS expiry definitions must match its sole collector")
+    return emitted
 
 
 def candidate_emitter_sources(root: Path = ROOT) -> dict[str, str]:
@@ -629,19 +652,20 @@ def workspace_metric_inventory(
     telemetry.update(event_outbox_depth)
 
     settlement = settlement_metric_inventory(sources[SETTLEMENT])
-    overlap = sorted(set(telemetry) & set(settlement))
+    expiry = tls_expiry_metric_inventory(sources[CREDENTIALS])
+    overlap = sorted((set(telemetry) & set(settlement)) | ((set(telemetry) | set(settlement)) & set(expiry)))
     if overlap:
         raise ValueError(f"duplicate workspace metric families: {overlap}")
 
     process_dependency_version(lock_text or CARGO_LOCK.read_text(encoding="utf-8"))
 
-    inventory = {**telemetry, **settlement}
+    inventory = {**telemetry, **settlement, **expiry}
     for name in PROCESS_FAMILIES:
         if name in inventory:
             raise ValueError(f"process family duplicates workspace family {name}")
         inventory[name] = "ordinary"
-    if len(inventory) != 211:
-        raise ValueError(f"emitted metric roster changed: expected 211, got {len(inventory)}")
+    if len(inventory) != 213:
+        raise ValueError(f"emitted metric roster changed: expected 213, got {len(inventory)}")
     return dict(sorted(inventory.items()))
 
 

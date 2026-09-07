@@ -109,3 +109,51 @@ fn invalid_peer_view_arguments_fail_before_connecting() {
         );
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn srv6_prefix_sid_survives_vpn_and_evpn_rpc_output() {
+    let server = test_support::spawn_mock_server(None).await;
+    let view = test_support::mock_prefix_sid();
+    *server.state.list_vpn_response.lock().await = Some(proto::ListVpnRoutesResponse {
+        routes: vec![proto::VpnRouteEntry {
+            prefix_sid: Some(Box::new(view.clone())),
+            ..Default::default()
+        }],
+    });
+    *server.state.list_peer_evpn_response.lock().await = proto::ListPeerEvpnRoutesResponse {
+        routes: vec![proto::EvpnRouteEntry {
+            prefix_sid: Some(Box::new(view)),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    for args in [
+        vec!["rib", "vpn"],
+        vec!["evpn", "received", "192.0.2.1"],
+        vec!["evpn", "advertised", "192.0.2.1"],
+    ] {
+        let mut json_args = vec!["--json"];
+        json_args.extend(&args);
+        let output = run(&server.addr, &json_args);
+        assert!(output.status.success(), "{args:?}: {output:?}");
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let row = if value.is_array() {
+            &value[0]
+        } else {
+            &value["routes"][0]
+        };
+        assert_eq!(row["prefix_sid"]["raw_value"], "deadbeef");
+        assert_eq!(
+            row["prefix_sid"]["services"][0]["sids"][0]["endpoint_behavior"],
+            65535
+        );
+        let output = run(&server.addr, &args);
+        assert!(output.status.success(), "{args:?}: {output:?}");
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            text.contains("sid-value=fc00:0:1:: behavior=65535"),
+            "{text}"
+        );
+        assert!(text.contains("structure=40/24/16/0/16/64"), "{text}");
+    }
+}
