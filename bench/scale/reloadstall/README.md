@@ -192,6 +192,52 @@ outside RFC 8212's default-deny and the RR soak runs zero reloads; the
 contract). Mutually exclusive with the `GEN_TRIP_*` knobs; absent, the
 emitted config is byte-for-byte the historical one.
 
+### Dual-stack and filtering extensions (env vars, all additive)
+
+Both knobs absent reproduces the frozen IPv4-only contract and the
+generator's historical output byte for byte.
+
+- `RELOADSTALL_DUALSTACK=1` — every stub negotiates `ipv4_unicast` **and**
+  `ipv6_unicast` on its one IPv4-transport session. The daemon's OPEN must
+  carry both multiprotocol capabilities, or establishment fails (an
+  un-negotiated family is never reported as delivered). `<total_prefixes>`
+  becomes the **total across both families**, split evenly: each stub
+  announces `total / (2 * n_peers)` IPv4 /24s in the body NLRI plus the same
+  count of IPv6 /48s (`3001:HHHH:LLLL::/48`) in `MP_REACH_NLRI` with a
+  synthetic `fd09::x:y` next hop; churners flap one 16-prefix block per
+  family (`3002:c:j::/48` for IPv6). Every observer keeps an independent
+  per-family unique-prefix bitmap: initial convergence, reload completion,
+  and post-completion stable-marker evidence each require **both** families
+  at every observer, and the historical `completion` of an observer is its
+  slower family. A second `first_exact_bitmap6` receipt and a
+  `reloadstall_dualstack_csv` row per reload (per-family completion,
+  leading stall, family-restricted max-gap, withdrawal accounting, and
+  per-family stable-marker counts) are printed after the historical lines,
+  which keep their format (`prefixes` is the total). Requires the reload
+  mode: no flapstorm, trips, iBGP-RR, overlap, received-view, or
+  `--convergence-only`.
+- `RELOADSTALL_FILTER_COUNT=K` — filtering policy shape, paired with the
+  generator's `GEN_FILTER_COUNT=K`. Generation B rejects base indexes
+  `0..K` of every family (the head of member 0's slice) at the changed
+  observers; generation A permits them again. Completion of a B reload
+  additionally requires a withdrawal of every named prefix at every changed
+  observer other than member 0. A named prefix delivered **with** the marker
+  (`filtered_leaked`), a withdrawal of any other base prefix at a changed
+  observer (`bystander_withdrawn`), or any base withdrawal at a stable
+  observer (`stable_withdrawn`) fails the reload; duplicate named
+  withdrawals are counted and published. Works with or without dual-stack.
+
+`gen-scenario.py` grows the matching pair: `GEN_DUALSTACK=1` emits
+`families = ["ipv4_unicast", "ipv6_unicast"]` on every neighbor, and
+`GEN_FILTER_COUNT=K` gives generation B a `prefix-set filtered` (base indexes
+`0..K` of each emitted family) rejected by `member-out` before tagging.
+`bench/scale/matrix/run-matrix.sh` passes both env pairs through unchanged
+and adds `CHANGED_PEERS` (the mixed export-only cohort for the rustbgpd cell)
+and `PROBE_PREFIXES` (a 50 ms `rbgp health` loop plus a 250 ms
+`rbgp rib --prefix` loop over the listed prefixes, logged per call). The
+pinned dual-stack shape lives in
+[`docs/perf/artifacts/ixp-dualstack-2026-09/README.md`](../../../docs/perf/artifacts/ixp-dualstack-2026-09/README.md).
+
 Cross-daemon cells generate their route-server configs with
 `gen-bird-scenario.py` / `gen-obgpd-scenario.py` (same addressing contract)
 and are sequenced by `bench/scale/matrix/run-matrix.sh`. The runner defaults
