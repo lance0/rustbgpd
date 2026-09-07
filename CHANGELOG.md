@@ -46,6 +46,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `rbgp policy stats` now allows backend waits up to one shared 2-second
+  deadline, increased from 500 ms. This lets reads wait through longer
+  `.rpol` reload transitions that temporarily queue RIB queries. Reloads or
+  congested backends that exceed the budget still return `DEADLINE_EXCEEDED`
+  with no partial rows.
+
 - The paired route-server cookbook now starts the RFC 8671 post-policy BMP
   capture before RS2's member sessions establish: the `rib_out_post` stream
   sends no dump to a collector that connects later, and

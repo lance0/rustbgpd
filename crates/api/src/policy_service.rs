@@ -32,7 +32,15 @@ use crate::server::{
 };
 
 const OWNED_POLICY_ACTOR_TIMEOUT: Duration = Duration::from_mins(10);
-const POLICY_STATS_AGGREGATE_TIMEOUT: Duration = Duration::from_millis(500);
+/// Absolute budget shared by every backend wait of one `GetPolicyStats`.
+///
+/// Matches the daemon's other operator-read bounds (`PEER_MANAGER_READ_TIMEOUT`,
+/// the neighbor service's `RIB_SNAPSHOT_TIMEOUT`). A shorter budget cannot
+/// distinguish a wedged backend from a `.rpol` reload: an atomic export-policy
+/// transition deliberately fences general RIB queries for the length of the
+/// swap, so a sub-second bound turns normal bounded reload work into a hard
+/// `DEADLINE_EXCEEDED` for an operator polling live counters.
+const POLICY_STATS_AGGREGATE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Run one policy-stats backend send and reply within the RPC's shared
 /// absolute deadline. A saturated bounded channel is part of the same budget
@@ -3856,12 +3864,64 @@ policy customer-in(peer_lp: u32) {
         assert_eq!(directions, ["export", "import"]);
     }
 
+    /// A `.rpol` reload hands the RIB actor an atomic export-policy
+    /// transition, and general RIB queries — including this RPC's export
+    /// term-hit read — stay queued for its whole length. That ownership is
+    /// normal bounded work, so a stats poll that lands inside the window must
+    /// still answer instead of failing the operator's read with
+    /// `DEADLINE_EXCEEDED` and no output.
+    #[tokio::test(start_paused = true)]
+    async fn get_policy_stats_rides_out_a_fenced_rib_policy_transition() {
+        // Longer than a sub-second budget, shorter than the operator-read
+        // budget the daemon uses everywhere else.
+        const FENCED_TRANSITION: Duration = Duration::from_millis(1_100);
+
+        let (peer_tx, mut peer_rx) = mpsc::channel::<PeerManagerCommand>(4);
+        tokio::spawn(async move {
+            while let Some(command) = peer_rx.recv().await {
+                match command {
+                    PeerManagerCommand::QueryImportPolicyTermHits { reply, .. } => {
+                        let _ = reply.send(SessionQueryOutcome::Reply(Vec::new()));
+                    }
+                    PeerManagerCommand::QueryPolicyDatasets { reply } => {
+                        let _ = reply.send(Vec::new());
+                    }
+                    _ => panic!("unexpected peer-manager command"),
+                }
+            }
+        });
+        let (rib_tx, mut rib_rx) = mpsc::channel::<rustbgpd_rib::RibUpdate>(1);
+        tokio::spawn(async move {
+            while let Some(update) = rib_rx.recv().await {
+                // The actor owns the transition before it reaches this query.
+                tokio::time::sleep(FENCED_TRANSITION).await;
+                let rustbgpd_rib::RibUpdate::QueryExportPolicyTermHits { reply, .. } = update
+                else {
+                    panic!("unexpected RIB query");
+                };
+                let _ = reply.send(Vec::new());
+            }
+        });
+        let svc =
+            PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None).with_rib_query(rib_tx);
+
+        PolicyServiceRpc::get_policy_stats(
+            &svc,
+            Request::new(proto::GetPolicyStatsRequest {
+                peer_address: String::new(),
+                direction: "both".to_string(),
+            }),
+        )
+        .await
+        .expect("a fenced export-policy transition must not fail an operator stats read");
+    }
+
     /// LAN-661: explicit-peer validation, export, import, and dataset reads
-    /// are sequential but spend one 500 ms RPC budget rather than receiving
+    /// are sequential but spend one shared RPC budget rather than receiving
     /// independent timeouts.
     #[tokio::test(start_paused = true)]
     async fn get_policy_stats_sequential_stages_share_one_budget() {
-        const STAGE_DELAY: Duration = Duration::from_millis(150);
+        const STAGE_DELAY: Duration = Duration::from_millis(700);
 
         let (peer_tx, mut peer_rx) = mpsc::channel::<PeerManagerCommand>(4);
         tokio::spawn(async move {
@@ -3904,7 +3964,7 @@ policy customer-in(peer_lp: u32) {
             }),
         )
         .await
-        .expect_err("four 150 ms stages must not receive four fresh budgets");
+        .expect_err("four 700 ms stages must not receive four fresh budgets");
 
         assert_eq!(error.code(), tonic::Code::DeadlineExceeded);
         assert_eq!(
