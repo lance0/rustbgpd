@@ -2973,6 +2973,75 @@ impl Config {
     }
 }
 
+/// Inbound TCP MD5 listener key for a static neighbor: the resolved
+/// (peer-group-inherited) password, keyed to the exact host address.
+pub(crate) fn md5_listener_key_for_neighbor(
+    neighbor: &ResolvedNeighbor,
+) -> Option<rustbgpd_transport::Md5ListenerKey> {
+    let password = neighbor.transport_config.md5_password.as_ref()?;
+    let peer = neighbor.transport_config.remote_addr.ip();
+    Some(rustbgpd_transport::Md5ListenerKey {
+        peer,
+        prefix_len: if peer.is_ipv4() { 32 } else { 128 },
+        password: password.clone(),
+    })
+}
+
+/// Inbound TCP MD5 listener key for a dynamic range: the referenced peer
+/// group's password, keyed to the whole prefix. Dynamic members are
+/// passive-only, so the listener key is the only socket this password can
+/// ever reach.
+pub(crate) fn md5_listener_key_for_dynamic_range(
+    range: &DynamicNeighborConfig,
+    peer_groups: &HashMap<String, PeerGroupConfig>,
+) -> Option<rustbgpd_transport::Md5ListenerKey> {
+    // A range with direct TCP-AO never inherits group authentication
+    // (validated at config load).
+    if range.tcp_ao.is_some() {
+        return None;
+    }
+    let password = peer_groups.get(&range.peer_group)?.md5_password.as_ref()?;
+    let (peer, prefix_len) = effective_prefix_str(&range.prefix)?;
+    Some(rustbgpd_transport::Md5ListenerKey {
+        peer,
+        prefix_len,
+        password: password.as_str().into(),
+    })
+}
+
+/// GTSM selector for a static neighbor. Entries are emitted for every
+/// neighbor — including `hops: None` — so a non-GTSM static neighbor
+/// inside an enforcing dynamic range keeps its own policy at accept time.
+pub(crate) fn ttl_security_listener_policy_for_neighbor(
+    neighbor: &ResolvedNeighbor,
+) -> rustbgpd_transport::TtlSecurityListenerPolicy {
+    let peer = neighbor.transport_config.remote_addr.ip();
+    rustbgpd_transport::TtlSecurityListenerPolicy {
+        owner: rustbgpd_transport::TcpAoListenerOwnerKind::Static,
+        peer,
+        prefix_len: if peer.is_ipv4() { 32 } else { 128 },
+        hops: neighbor.transport_config.ttl_security_hops,
+    }
+}
+
+/// GTSM selector for a dynamic range, resolved from its peer group.
+pub(crate) fn ttl_security_listener_policy_for_dynamic_range(
+    range: &DynamicNeighborConfig,
+    peer_groups: &HashMap<String, PeerGroupConfig>,
+) -> Option<rustbgpd_transport::TtlSecurityListenerPolicy> {
+    let group = peer_groups.get(&range.peer_group)?;
+    let (peer, prefix_len) = effective_prefix_str(&range.prefix)?;
+    Some(rustbgpd_transport::TtlSecurityListenerPolicy {
+        owner: rustbgpd_transport::TcpAoListenerOwnerKind::Dynamic,
+        peer,
+        prefix_len,
+        hops: group
+            .ttl_security
+            .unwrap_or(false)
+            .then(|| group.ttl_security_hops.unwrap_or(std::num::NonZeroU8::MIN)),
+    })
+}
+
 /// The listener's inbound MD5 keys and GTSM selectors.
 pub(crate) type ListenerInboundInventory = (
     Vec<rustbgpd_transport::Md5ListenerKey>,
@@ -2991,16 +3060,19 @@ pub(crate) fn listener_inbound_auth_inventory(
         .map_err(|error| error.to_string())?;
     let md5_keys = resolved
         .iter()
-        .filter_map(crate::md5_listener_key_for_neighbor)
-        .chain(config.dynamic_neighbors.iter().filter_map(|range| {
-            crate::md5_listener_key_for_dynamic_range(range, &config.peer_groups)
-        }))
+        .filter_map(md5_listener_key_for_neighbor)
+        .chain(
+            config
+                .dynamic_neighbors
+                .iter()
+                .filter_map(|range| md5_listener_key_for_dynamic_range(range, &config.peer_groups)),
+        )
         .collect();
     let ttl_security = resolved
         .iter()
-        .map(crate::ttl_security_listener_policy_for_neighbor)
+        .map(ttl_security_listener_policy_for_neighbor)
         .chain(config.dynamic_neighbors.iter().filter_map(|range| {
-            crate::ttl_security_listener_policy_for_dynamic_range(range, &config.peer_groups)
+            ttl_security_listener_policy_for_dynamic_range(range, &config.peer_groups)
         }))
         .collect();
     Ok((md5_keys, ttl_security))

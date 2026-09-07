@@ -69,9 +69,8 @@ use rustbgpd_rib::{RibManager, RibUpdate, WarmMrtSnapshotBudget, WarmMrtSnapshot
 use rustbgpd_telemetry::metrics::SighupReloadOutcome as SighupReloadMetricOutcome;
 use rustbgpd_telemetry::{BgpMetrics, init_logging};
 use rustbgpd_transport::{
-    BgpListener, ListenerSocketOptions, Md5ListenerKey, TcpAoAlgorithm,
-    TcpAoConfig as TransportTcpAoConfig, TcpAoKeyring, TcpAoListenerKey, TcpAoListenerOwnerKind,
-    TtlSecurityListenerPolicy,
+    BgpListener, ListenerSocketOptions, TcpAoAlgorithm, TcpAoConfig as TransportTcpAoConfig,
+    TcpAoKeyring, TcpAoListenerKey, TcpAoListenerOwnerKind,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -82,6 +81,10 @@ use tracing::{error, info, warn};
 use crate::config::{
     AcceptedConfigSnapshot, Config, GrpcAccessMode, GrpcListener, GrpcMaxTier, GrpcRoleConfig,
     UnpolicedEbgpBoundary,
+};
+use crate::config::{
+    md5_listener_key_for_dynamic_range, md5_listener_key_for_neighbor,
+    ttl_security_listener_policy_for_dynamic_range, ttl_security_listener_policy_for_neighbor,
 };
 use crate::config_persister::{ConfigMutation, ConfigPersister};
 use crate::peer_manager::PeerManager;
@@ -1878,73 +1881,6 @@ fn tcp_ao_listener_key_for_dynamic_range(
                 })
                 .collect(),
         ),
-    })
-}
-
-/// Inbound TCP MD5 listener key for a static neighbor: the resolved
-/// (peer-group-inherited) password, keyed to the exact host address.
-fn md5_listener_key_for_neighbor(neighbor: &config::ResolvedNeighbor) -> Option<Md5ListenerKey> {
-    let password = neighbor.transport_config.md5_password.as_ref()?;
-    let peer = neighbor.transport_config.remote_addr.ip();
-    Some(Md5ListenerKey {
-        peer,
-        prefix_len: if peer.is_ipv4() { 32 } else { 128 },
-        password: password.clone(),
-    })
-}
-
-/// Inbound TCP MD5 listener key for a dynamic range: the referenced peer
-/// group's password, keyed to the whole prefix. Dynamic members are
-/// passive-only, so the listener key is the only socket this password can
-/// ever reach.
-fn md5_listener_key_for_dynamic_range(
-    range: &config::DynamicNeighborConfig,
-    peer_groups: &std::collections::HashMap<String, config::PeerGroupConfig>,
-) -> Option<Md5ListenerKey> {
-    // A range with direct TCP-AO never inherits group authentication
-    // (validated at config load).
-    if range.tcp_ao.is_some() {
-        return None;
-    }
-    let password = peer_groups.get(&range.peer_group)?.md5_password.as_ref()?;
-    let (peer, prefix_len) = config::effective_prefix_str(&range.prefix)?;
-    Some(Md5ListenerKey {
-        peer,
-        prefix_len,
-        password: password.as_str().into(),
-    })
-}
-
-/// GTSM selector for a static neighbor. Entries are emitted for every
-/// neighbor — including `hops: None` — so a non-GTSM static neighbor
-/// inside an enforcing dynamic range keeps its own policy at accept time.
-fn ttl_security_listener_policy_for_neighbor(
-    neighbor: &config::ResolvedNeighbor,
-) -> TtlSecurityListenerPolicy {
-    let peer = neighbor.transport_config.remote_addr.ip();
-    TtlSecurityListenerPolicy {
-        owner: TcpAoListenerOwnerKind::Static,
-        peer,
-        prefix_len: if peer.is_ipv4() { 32 } else { 128 },
-        hops: neighbor.transport_config.ttl_security_hops,
-    }
-}
-
-/// GTSM selector for a dynamic range, resolved from its peer group.
-fn ttl_security_listener_policy_for_dynamic_range(
-    range: &config::DynamicNeighborConfig,
-    peer_groups: &std::collections::HashMap<String, config::PeerGroupConfig>,
-) -> Option<TtlSecurityListenerPolicy> {
-    let group = peer_groups.get(&range.peer_group)?;
-    let (peer, prefix_len) = config::effective_prefix_str(&range.prefix)?;
-    Some(TtlSecurityListenerPolicy {
-        owner: TcpAoListenerOwnerKind::Dynamic,
-        peer,
-        prefix_len,
-        hops: group
-            .ttl_security
-            .unwrap_or(false)
-            .then(|| group.ttl_security_hops.unwrap_or(std::num::NonZeroU8::MIN)),
     })
 }
 
