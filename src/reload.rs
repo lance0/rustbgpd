@@ -3851,6 +3851,18 @@ pub(crate) async fn reload_config_with_tcp_ao(
     )
 }
 
+/// A generation-route step rejected the candidate with the prior generation
+/// retained: the structured `bucket` line the sequential path logs for a
+/// stopped step, then a clean rejection whose error the owner logs once.
+fn generation_step_rejected(bucket: &'static str, error: String) -> SighupReloadOutcome {
+    error!(
+        bucket,
+        target = "",
+        "config reload stopped at this step; the prior runtime generation is retained"
+    );
+    clean_reload_failure(bucket, error)
+}
+
 /// Restore the live outbound prefix maxima after the generation they were
 /// activated for did not settle.
 async fn restore_outbound_prefix_limits(
@@ -3895,7 +3907,7 @@ impl GenerationSideEffects<'_> {
             failures.push(format!("outbound prefix maxima: {restore_error}"));
         }
         if failures.is_empty() {
-            return clean_reload_failure(bucket, error);
+            return generation_step_rejected(bucket, error);
         }
         error!(
             failures = %failures.join("; "),
@@ -3942,9 +3954,9 @@ async fn reload_generation_route(
     actions: Vec<config::ReloadPeerAction>,
 ) -> SighupReloadOutcome {
     let Some(peer_mgr_internal_tx) = peer_mgr_internal_tx else {
-        return clean_reload_failure(
+        return generation_step_rejected(
             "generation.dispatch",
-            "peer manager generation executor unavailable",
+            "peer manager generation executor unavailable".to_string(),
         );
     };
     let mut effects = GenerationSideEffects {
@@ -3960,7 +3972,7 @@ async fn reload_generation_route(
         let txn = next_outbound_prefix_limit_txn();
         if let Err(error) = prepare_outbound_prefix_limits(rib_tx, txn, &new_config).await {
             let _ = finish_outbound_prefix_limits(rib_tx, txn, false).await;
-            return clean_reload_failure("prefix_limit.prepare", error);
+            return generation_step_rejected("prefix_limit.prepare", error);
         }
         let activation = dispatch_rib_mutation_step(rib_tx, progress, |reply| {
             rustbgpd_rib::RibUpdate::ApplyOutboundPrefixLimits {
@@ -3973,7 +3985,7 @@ async fn reload_generation_route(
         match activation {
             ReloadDispatch::Replied(Ok(())) => progress.mark_accepted_effect(),
             ReloadDispatch::Replied(Err(error)) | ReloadDispatch::NotAccepted(error) => {
-                return clean_reload_failure("prefix_limit.activate", error);
+                return generation_step_rejected("prefix_limit.activate", error);
             }
             ReloadDispatch::AcknowledgementLost => {
                 return fenced_reload_failure(
