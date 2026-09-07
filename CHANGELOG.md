@@ -13,6 +13,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Config diff impact reasons now name directly changed `.rpol` policy terms
+  for static neighbors and dynamic ranges. Text and JSON preserve the existing
+  reasons and reload classifications; ambiguous structural changes retain
+  broader attribution.
+
 - Native gRPC TLS expiry visibility through
   `bgp_grpc_tls_certificate_not_after_seconds{kind}` for the active server leaf,
   supplied server bundle minimum, and supplied client CA bundle minimum.

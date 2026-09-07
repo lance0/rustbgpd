@@ -4946,6 +4946,23 @@ fn compute_effective_neighbor_impact(
             );
         }
 
+        if import_moved {
+            attribute_rpol_term_changes(
+                &mut reasons,
+                "import",
+                old_resolved.import_policy.as_ref(),
+                new_resolved.import_policy.as_ref(),
+            );
+        }
+        if export_moved {
+            attribute_rpol_term_changes(
+                &mut reasons,
+                "export",
+                old_resolved.export_policy.as_ref(),
+                new_resolved.export_policy.as_ref(),
+            );
+        }
+
         if !reasons.is_empty() {
             let kind =
                 if (import_moved || export_moved) && !transport_changed && !peer_group_reassigned {
@@ -4966,6 +4983,74 @@ fn compute_effective_neighbor_impact(
 
     out.sort_by(|a, b| a.address.cmp(&b.address));
     out
+}
+
+/// Name direct compiled term edits in a changed resolved chain only when its
+/// configured calls and indexed match data still align. Structural changes
+/// retain the coarse reason.
+fn attribute_rpol_term_changes(
+    reasons: &mut Vec<String>,
+    direction: &str,
+    old: Option<&PolicyChain>,
+    new: Option<&PolicyChain>,
+) {
+    let (Some(old), Some(new)) = (old, new) else {
+        return;
+    };
+    if !old
+        .policies
+        .iter()
+        .map(|p| &p.name)
+        .eq(new.policies.iter().map(|p| &p.name))
+    {
+        return;
+    }
+    let mut seen = HashSet::new();
+    for (old, new) in old.policies.iter().zip(&new.policies) {
+        let (Some(name), Some(old), Some(new)) =
+            (&new.name, old.rpol.as_deref(), new.rpol.as_deref())
+        else {
+            continue;
+        };
+        // IDs in a term index these tables. A changed table can alter behavior
+        // without changing the term, or renumber otherwise unchanged operands.
+        if old.prefix_sets != new.prefix_sets
+            || old.community_sets != new.community_sets
+            || old.asn_sets != new.asn_sets
+            || old.as_path_regexes != new.as_path_regexes
+            || old.prefix_set_names != new.prefix_set_names
+            || old.community_set_names != new.community_set_names
+            || old.asn_set_names != new.asn_set_names
+            || old.datasets != new.datasets
+            || old.local_asn != new.local_asn
+        {
+            continue;
+        }
+        let ([old], [new]) = (old.policies.as_slice(), new.policies.as_slice()) else {
+            continue;
+        };
+        if old.name != new.name
+            || old.source != new.source
+            || old.default_action != new.default_action
+            || !old
+                .terms
+                .iter()
+                .map(|t| &t.name)
+                .eq(new.terms.iter().map(|t| &t.name))
+        {
+            continue;
+        }
+        for (old, new) in old.terms.iter().zip(&new.terms) {
+            if old != new
+                && let Some(term) = &new.name
+                && seen.insert((name.as_str(), term.as_str()))
+            {
+                reasons.push(format!(
+                    "{direction} rpol policy {name:?} term {term:?} changed"
+                ));
+            }
+        }
+    }
 }
 
 /// Surface `[[dynamic_neighbors]]` ranges whose resolved effective policy moves
@@ -5066,6 +5151,23 @@ fn dynamic_range_effective_impact(
         if pg_changed.contains(old_range.peer_group.as_str()) {
             reasons.push(format!("peer_group {:?} changed", old_range.peer_group));
         }
+        if import_moved {
+            attribute_rpol_term_changes(
+                &mut reasons,
+                "import",
+                old_resolved.import_policy.as_ref(),
+                new_resolved.import_policy.as_ref(),
+            );
+        }
+        if export_moved {
+            attribute_rpol_term_changes(
+                &mut reasons,
+                "export",
+                old_resolved.export_policy.as_ref(),
+                new_resolved.export_policy.as_ref(),
+            );
+        }
+
         if !reasons.is_empty() {
             let kind =
                 if (import_moved || export_moved) && !transport_changed && !peer_group_reassigned {

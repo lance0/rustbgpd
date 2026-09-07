@@ -504,6 +504,14 @@ effective-impact view:
   policy definition edit picked up via the global `import_chain`
   (chain list itself unchanged) or via a peer-group's chain
   (peer-group record unchanged) still flags every affected member.
+  Direct `.rpol` term edits also append reasons such as
+  `import rpol policy "customer-in(200)" term "customer-routes" changed`
+  for static neighbors and dynamic ranges, in both text and JSON output.
+  These name changed compiled terms when policy calls, ordered term names,
+  defaults, and shared match tables still align. Compiler-generated `.1` /
+  `.2` term suffixes are preserved. Changed sets, call arguments, term order,
+  or other ambiguous structural edits retain the broader reasons; this is
+  structural attribution, not a proof of changed route outcomes.
 
 Exit codes: 0 = no actionable changes, 1 = actionable changes found,
 2 = error (bad config, missing file).
