@@ -3,8 +3,6 @@
 This changelog covers the independently published `rustbgpd-wire` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
-## Unreleased
-
 ## 0.20.0 - Unreleased
 
 - Added `decode_prefix_sid_services` and the `Srv6Service`,

@@ -1283,6 +1283,10 @@ gobmp/pmacct already terminate it into Kafka), and BGPsec.
   service encapsulation (including RFC 9252 SRv6 BGP overlay services), EVPN
   VPWS / E-Tree service models, and BGP Add-Path (RFC 7911) for L2VPN EVPN.
   Service-provider EVPN use cases.
+  RFC 9252 reflection with an unchanged next hop and scoped
+  [framing](../reference/path-attribute-registry.md#srv6-service-framing-within-prefix-sid)
+  and [eligibility](../reference/path-attribute-registry.md#srv6-service-eligibility)
+  checks is implemented; service encapsulation and forwarding remain deferred.
 - **Evaluate buffa for protobuf codegen.** Anthropic's
   [buffa](https://github.com/anthropics/buffa) is a pure-Rust protobuf
   implementation with editions-first design, zero-copy views, and `no_std`
