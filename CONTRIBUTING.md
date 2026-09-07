@@ -235,9 +235,9 @@ remain responsible for shell scripts.
 
 ### Pre-commit hooks
 
-We ship a `.pre-commit-config.yaml` that runs `cargo fmt` and
-`cargo clippy --locked --workspace --all-targets -- -D warnings` on every
-commit and `cargo test --locked --workspace --lib` on every push. The
+We ship a `.pre-commit-config.yaml` that runs `cargo fmt --all` and
+`cargo clippy --locked --workspace --all-targets -- -D warnings` on relevant
+commits, workspace library tests on relevant pushes, and rustdoc on every push. The
 hooks are a fast local subset, not an exact CI mirror or a guarantee that a
 pull request is ready. `cargo test` is gated to pre-push (not pre-commit) so
 commits stay fast.
@@ -251,13 +251,18 @@ cargo install --locked prek
 # Or via standalone installer (no Rust toolchain needed)
 curl -LsSf https://github.com/j178/prek/releases/latest/download/prek-installer.sh | sh
 
-# Both prek installation methods use the configured hook types
-prek install
+# Install both configured hook types and replace superseded legacy hooks
+just hooks  # equivalent to prek install --overwrite
 
 # Or with the original Python pre-commit
 pipx install pre-commit
 pre-commit install --hook-type pre-commit --hook-type pre-push
 ```
+
+Before installing, preserve any custom Git hooks you still need. Without
+`--overwrite`, prek retains older hooks as `<hook>.legacy` and runs them before
+the configured hooks, which can duplicate fmt and Clippy. `just hooks` removes
+those legacy hooks; it keeps the checks in `.pre-commit-config.yaml`.
 
 After install, hooks run automatically. To run them manually
 against staged files: `prek run` (or `pre-commit run`).

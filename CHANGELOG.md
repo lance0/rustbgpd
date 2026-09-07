@@ -11,7 +11,34 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `just fuzz-list` and `just fuzz <crate> <target>` run the cargo-fuzz
+  inventory from the crate that owns each `fuzz/Cargo.toml`, which is the only
+  directory cargo-fuzz can resolve a target from. Both recipes read the target
+  list from the existing inventory check and select the reviewed nightly from
+  `fuzz/rust-nightly.txt`. `just hooks` installs the commit and push hooks.
+
 ### Changed
+
+- Local checks that compile now serialize on one lock in the target directory,
+  so `just gate` and a concurrent commit or push wait for each other instead of
+  building the same workspace twice at once. Separate worktrees with separate
+  target directories are unaffected.
+
+- The container image now pins its account to uid/gid 999 and declares a
+  numeric `USER`, so a base-image rebuild cannot shift the uid that
+  deployment docs tell operators to chown host bind mounts to, and
+  Kubernetes `runAsNonRoot` verifies the image without the pod spec
+  repeating `runAsUser`. The container workflow asserts the built image's
+  uid and gid.
+
+- The image healthcheck now uses `rbgp health`'s exit status instead of
+  matching pretty-printed JSON text. The previous probe required a space
+  after the colon in `"healthy": true`, so a change of JSON writer would
+  have reported every healthy daemon unhealthy. The container workflow
+  now exercises the declared healthcheck in both the reachable and
+  unreachable directions.
 
 - Published-crate documentation now refreshes with one command after registry
   verification. Preparation and CI use an offline version record; release
@@ -32,9 +59,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Successful client handshakes log observed leaf expiry. The restart-required
   `tls_expiry_warning_seconds` setting defaults to `0` (warnings off); a
   positive window adds startup, reload, client-handshake, and config-check
-  warnings. Plain `--check` retains exit 0 for warnings and `--strict` returns
-  1. Bundle dates are metadata, not effective handshake cutoffs, and expiry
-  visibility does not introduce date-based startup rejection.
+  warnings. Plain `--check` retains exit 0 for warnings and `--strict`
+  returns 1. Bundle dates are metadata, not effective handshake cutoffs, and
+  expiry visibility does not introduce date-based startup rejection.
 
 - VPN and EVPN route views now expose optional Prefix-SID raw bytes and flags,
   advertised SRv6 SID values, numeric endpoint behavior, and SID Structure

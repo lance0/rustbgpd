@@ -402,9 +402,17 @@ def check_container_deployment_docs(
         errors.append("container image contract: production runtime stage missing")
         return
     for statement in (
+        # The uid/gid the deployment docs tell operators to chown host
+        # bind mounts to, pinned rather than allocated by the base image.
+        "--gid 999 rustbgpd",
+        "--uid 999 --gid 999",
         "chown rustbgpd:rustbgpd /var/lib/rustbgpd",
-        "USER rustbgpd",
-        "CMD rbgp --json health | grep -q '\"healthy\": true' || exit 1",
+        # Numeric so Kubernetes `runAsNonRoot` can verify it without the
+        # pod spec repeating `runAsUser`.
+        "USER 999:999",
+        # Exit status, not stdout text: the probe must not depend on the
+        # JSON formatter's whitespace.
+        "CMD rbgp health",
         'CMD ["rustbgpd", "/etc/rustbgpd/config.toml"]',
     ):
         if statement not in runtime:

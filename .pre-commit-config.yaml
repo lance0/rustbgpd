@@ -14,7 +14,16 @@
 # manual `cargo doc` runs, so each flavor invalidated the other's doc
 # cache and pushes paid a full workspace re-doc.
 #
-# Setup: see CONTRIBUTING.md "Pre-commit hooks".
+# Every hook that compiles runs under `scripts/build-lock.sh`, so a commit or
+# push waits for a concurrent `just gate` instead of compiling the same
+# workspace at the same time. `cargo fmt` is exempt: it never builds.
+#
+# These hooks are the only local fmt/clippy pass. prek's shim also runs
+# `.git/hooks/<hook>.legacy` when one exists, and an older setup left a
+# `cargo fmt --check` plus `cargo clippy` script there, so every commit ran
+# both checks twice. `just hooks` installs the shim and clears the leftover.
+#
+# Setup: see CONTRIBUTING.md "Pre-commit hooks", or run `just hooks`.
 default_install_hook_types: [pre-commit, pre-push]
 
 repos:
@@ -29,7 +38,7 @@ repos:
 
       - id: cargo-clippy
         name: cargo clippy
-        entry: cargo clippy --locked --workspace --all-targets -- -D warnings
+        entry: bash scripts/build-lock.sh cargo clippy --locked --workspace --all-targets -- -D warnings
         language: system
         files: '(^|/)([^/]+\.rs|Cargo\.toml|Cargo\.lock)$'
         types: [file]
@@ -37,7 +46,7 @@ repos:
 
       - id: cargo-test
         name: cargo test
-        entry: cargo test --locked --workspace --lib
+        entry: bash scripts/build-lock.sh cargo test --locked --workspace --lib
         language: system
         files: '(^|/)([^/]+\.rs|Cargo\.toml|Cargo\.lock)$'
         types: [file]
@@ -46,7 +55,7 @@ repos:
 
       - id: cargo-doc
         name: cargo doc
-        entry: cargo doc --locked --workspace --lib --no-deps --document-private-items
+        entry: bash scripts/build-lock.sh cargo doc --locked --workspace --lib --no-deps --document-private-items
         language: system
         always_run: true
         pass_filenames: false
@@ -54,7 +63,7 @@ repos:
 
       - id: cargo-doc-rustbgpd-bin
         name: cargo doc (rustbgpd binary)
-        entry: cargo doc --locked -p rustbgpd --bin rustbgpd --no-deps
+        entry: bash scripts/build-lock.sh cargo doc --locked -p rustbgpd --bin rustbgpd --no-deps
         language: system
         always_run: true
         pass_filenames: false
@@ -62,7 +71,7 @@ repos:
 
       - id: cargo-doc-rbgp-bin
         name: cargo doc (rbgp binary)
-        entry: cargo doc --locked -p rustbgpctl --bin rbgp --no-deps
+        entry: bash scripts/build-lock.sh cargo doc --locked -p rustbgpctl --bin rbgp --no-deps
         language: system
         always_run: true
         pass_filenames: false
