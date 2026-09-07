@@ -60,9 +60,12 @@ surfaces; it does not promote the rest of the project out of alpha.
 ## EVPN
 
 EVPN remains alpha. Its local VTEP and dataplane support are Linux/VXLAN-only.
-The reflector also implements scoped
-[SRv6 service framing and eligibility](path-attribute-registry.md#srv6-service-eligibility)
-without SRv6 service origination or forwarding.
+The reflector implements scoped
+[SRv6 service framing](path-attribute-registry.md#srv6-service-framing-within-prefix-sid)
+and [eligibility](path-attribute-registry.md#srv6-service-eligibility) checks,
+with unchanged-next-hop reflection of eligible raw attributes. SRv6 PE import,
+service origination, SID reconstruction, next-hop rewriting, and forwarding
+remain unimplemented.
 
 Shipped and interop-tested:
 

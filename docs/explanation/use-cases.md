@@ -710,7 +710,7 @@ than reflected; see the
   overlay-index Type 5 origination, single-active (M71) / all-active
   (M72) ESI overlay-index Type 5 receive. Supported decomposable runtime edits
   commit live; L3VNI/device/table IP-VRF identity changes remain restart-required. See the
-  [runtime convergence contract](../project/evpn-enablement.md#p15--evpn-vtep-mode-validation-depth)
+  [runtime convergence contract](../project/evpn-enablement.md#gate-7b--kernel-reconciliation--origination)
   for dependency-cycle rejection and mid-sequence fail-stop behavior.
   Remaining EVPN work includes Linux softswitch local-bias and
   service-provider route families.
