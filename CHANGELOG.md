@@ -44,6 +44,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   verification. Preparation and CI use an offline version record; release
   updates no longer require editing contract tests.
 
+### Fixed
+
+- `rbgp policy stats` no longer fails with `DEADLINE_EXCEEDED` and no output
+  while a `.rpol` reload is applying. Applying a policy reload hands the RIB an
+  atomic export-policy transition that deliberately queues general RIB queries
+  until the swap commits, and the stats read's shared backend budget was
+  shorter than that normal, bounded work, so a large route server returned exit
+  1 for every stats poll that landed in a reload window. Every direction was
+  affected, including the default `export`. The budget now matches the other
+  operator reads in the daemon; a genuinely wedged backend still fails closed
+  with no partial rows.
+
 ## [0.69.0] — 2026-09-07
 
 ### Added
