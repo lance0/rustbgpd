@@ -806,6 +806,197 @@ fn rpol_edit_classifies_policy_chain_impact_for_referencing_peers_only() {
 }
 
 #[test]
+fn rpol_term_diff_names_direct_action_and_guard_edits_in_both_formats() {
+    let source = "policy customer-in(lp: u32) {
+        term customer-routes { if route.med == 10 { set local-pref lp; accept } }
+        term other { if route.med == 20 { reject } }
+    }";
+    // Repeated calls still produce each term reason only once, in first-seen order.
+    let dir = rpol_config_dir(source, r#""customer-in(200)", "customer-in(200)""#);
+    let old = load_dir(&dir).unwrap();
+    for edited in [
+        source.replace("set local-pref lp", "set local-pref 300"),
+        source.replace("route.med == 10", "route.med == 11"),
+    ] {
+        fs::write(dir.path().join("policies/core.rpol"), edited).unwrap();
+        let diff = diff_config(&old, &load_dir(&dir).unwrap());
+        assert_eq!(diff.effective_neighbor_impact.len(), 1);
+        let impact = &diff.effective_neighbor_impact[0];
+        let reason = "import rpol policy \"customer-in(200)\" term \"customer-routes\" changed";
+        assert_eq!(impact.address, "192.0.2.1");
+        assert!(impact.kind.is_policy_chain());
+        assert_eq!(
+            impact.reasons,
+            vec![
+                "import policy resolved differently",
+                "rpol policy file changed",
+                reason,
+            ]
+        );
+        assert!(format_config_diff(&diff).contains(reason));
+        let json = config_diff_json_value(&diff);
+        assert_eq!(
+            json["reload_applied"]["effective_neighbor_impact"][0]["reasons"][2],
+            reason
+        );
+        assert_eq!(
+            json["reload_applied"]["effective_neighbor_impact"][0]["kind"],
+            "policy_chain"
+        );
+        assert!(!classify_config_transaction_v1(&diff).is_committable());
+    }
+}
+
+#[test]
+fn rpol_term_diff_keeps_coarse_reasons_for_ambiguous_changes() {
+    let source = "prefix-set customers { 10.10.0.0/16 ge 24 le 28 }
+    policy customer-in(lp: u32) {
+        default-action accept
+        term customer-routes { if route.prefix in customers { set local-pref lp; accept } }
+        term other { if route.med == 20 { reject } }
+    }";
+    let dir = rpol_config_dir(source, r#""customer-in(200)""#);
+    let old = load_dir(&dir).unwrap();
+    for edited in [
+        source.replace("ge 24 le 28", "ge 24 le 32"),
+        source.replace("default-action accept", "default-action reject"),
+        source.replace("term customer-routes", "term renamed"),
+        source.replace("term other { if route.med == 20 { reject } }", ""),
+        source.replace(
+            "term other",
+            "term added { if route.med == 30 { reject } } term other",
+        ),
+        source.replace(
+            "term customer-routes { if route.prefix in customers { set local-pref lp; accept } }
+        term other { if route.med == 20 { reject } }",
+            "term other { if route.med == 20 { reject } }
+        term customer-routes { if route.prefix in customers { set local-pref lp; accept } }",
+        ),
+    ] {
+        fs::write(dir.path().join("policies/core.rpol"), edited).unwrap();
+        let diff = diff_config(&old, &load_dir(&dir).unwrap());
+        assert_eq!(diff.effective_neighbor_impact.len(), 1, "{diff:?}");
+        assert_eq!(
+            diff.effective_neighbor_impact[0].reasons,
+            vec![
+                "import policy resolved differently",
+                "rpol policy file changed",
+            ]
+        );
+    }
+    // A changed call argument changes compiled terms but is not a source term edit.
+    fs::write(dir.path().join("policies/core.rpol"), source).unwrap();
+    let mut new = load_dir(&dir).unwrap();
+    new.neighbors[0].import_policy_chain = vec!["customer-in(300)".into()];
+    let diff = diff_config(&old, &new);
+    assert_eq!(
+        diff.effective_neighbor_impact[0].reasons,
+        vec!["import policy resolved differently"]
+    );
+}
+
+#[test]
+fn rpol_term_diff_preserves_generated_names_and_requires_the_same_expansion() {
+    let source = "policy shape {
+        term edits { set med 10; if route.local-pref >= 500 { add community 65000:1 } }
+        term decide { accept }
+    }";
+    let dir = rpol_config_dir(source, r#""shape""#);
+    let old = load_dir(&dir).unwrap();
+    for (before, after, term) in [
+        ("set med 10", "set med 11", "edits.1"),
+        ("local-pref >= 500", "local-pref >= 501", "edits.2"),
+    ] {
+        fs::write(
+            dir.path().join("policies/core.rpol"),
+            source.replace(before, after),
+        )
+        .unwrap();
+        let diff = diff_config(&old, &load_dir(&dir).unwrap());
+        assert_eq!(
+            diff.effective_neighbor_impact[0].reasons.last().unwrap(),
+            &format!("import rpol policy \"shape\" term {term:?} changed")
+        );
+    }
+    fs::write(
+        dir.path().join("policies/core.rpol"),
+        source.replace("set med 10;", ""),
+    )
+    .unwrap();
+    let diff = diff_config(&old, &load_dir(&dir).unwrap());
+    assert_eq!(diff.effective_neighbor_impact[0].reasons.len(), 2);
+}
+
+#[test]
+fn rpol_term_diff_names_export_edits_for_static_and_dynamic_peers() {
+    let source = "policy outbound { term export-routes { if route.med == 10 { accept } } }";
+    let dir = rpol_config_dir(source, r#""toml-pass""#);
+    let path = dir.path().join("config.toml");
+    let config = fs::read_to_string(&path).unwrap().replace(
+        "remote_asn = 65002",
+        "remote_asn = 65002\nexport_policy_chain = [\"outbound\"]",
+    );
+    fs::write(
+        &path,
+        format!(
+            "{config}
+[peer_groups.dynamic]
+import_policy_chain = [\"outbound\"]
+export_policy_chain = [\"outbound\"]
+[[dynamic_neighbors]]
+prefix = \"10.30.0.0/16\"
+peer_group = \"dynamic\"
+remote_asn = 65030
+"
+        ),
+    )
+    .unwrap();
+    let old = load_dir(&dir).unwrap();
+    fs::write(
+        dir.path().join("policies/core.rpol"),
+        source.replace("== 10", "== 11"),
+    )
+    .unwrap();
+    let diff = diff_config(&old, &load_dir(&dir).unwrap());
+    assert_eq!(diff.effective_neighbor_impact.len(), 2);
+    for impact in &diff.effective_neighbor_impact {
+        assert!(impact.kind.is_policy_chain());
+        assert_eq!(
+            impact.reasons.last().unwrap(),
+            "export rpol policy \"outbound\" term \"export-routes\" changed"
+        );
+    }
+    assert_eq!(diff.effective_neighbor_impact[0].address, "10.30.0.0/16");
+    assert!(diff.effective_neighbor_impact[0].is_dynamic_range);
+    assert_eq!(
+        diff.effective_neighbor_impact[0].reasons[0],
+        "dynamic-range import policy resolved differently"
+    );
+    assert!(
+        diff.effective_neighbor_impact[0].reasons.contains(
+            &"import rpol policy \"outbound\" term \"export-routes\" changed".to_string()
+        )
+    );
+    assert!(!diff.effective_neighbor_impact[1].is_dynamic_range);
+
+    // Diagnostics do not turn a combined session/policy edit into a live-policy refresh.
+    let mut new = load_dir(&dir).unwrap();
+    new.peer_groups.get_mut("dynamic").unwrap().hold_time = Some(45);
+    let diff = diff_config(&old, &new);
+    assert_eq!(
+        diff.effective_neighbor_impact[0].kind,
+        EffectiveNeighborImpactKind::SessionReshape
+    );
+    assert!(
+        diff.effective_neighbor_impact[0]
+            .reasons
+            .last()
+            .unwrap()
+            .contains("term \"export-routes\" changed")
+    );
+}
+
+#[test]
 fn chain_node_budget_named_mixed_unused_and_implicit_tails() {
     use std::fmt::Write as _;
     let mut source = String::from("policy bulk(x: u32) {\n");
