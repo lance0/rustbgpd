@@ -3385,18 +3385,21 @@ Two complementary origination paths exist:
   Type 2 routes will trip the same Cease/MAX_PREFIXES that a peer
   flooding unicast prefixes would. The cap is the union of unicast
   unique prefixes + FlowSpec rules + EVPN keys.
-- **GR / LLGR works for EVPN.** When a VTEP restarts, its reflected
-  EVPN routes are marked stale and ranked below fresh alternatives
-  (RFC 4724 §4.2 / RFC 9494 §4.7) — no fabric-wide flap.
+- **GR / LLGR stale handling is implemented for EVPN.** When negotiated
+  for the family, restart handling marks retained EVPN routes stale and
+  ranks them below fresh alternatives (RFC 4724 §4.2 / RFC 9494 §4.7).
+  Unit and integration tests cover the transitions; the
+  [live FRR VTEP restart evidence](../interop.md#p15--evpn-route-reflector-validation-depth)
+  remains pending.
 - **Late-joining peer.** A VTEP that connects to a converged RR
   receives the existing EVPN routes in its initial dump before the
   EoR marker. (This was not always the case — see commit history for
   the regression test.)
-- **MAC mobility correctness.** A MAC that moves between VTEPs
-  produces a strictly-increasing MAC Mobility sequence number; the
-  RR forwards the highest-sequence advertisement and downstream
-  VTEPs flip their best path accordingly. Sticky MACs (RFC 7432
-  §7.7) are not displaced by non-sticky ones.
+- **MAC mobility selection.** Local MAC moves increment the advertised
+  MAC Mobility sequence, saturating at `u32::MAX`. Same-segment peer
+  synchronization can adopt a higher sequence without incrementing it.
+  EVPN selection also considers freshness, sticky status, and the remaining
+  tie-breaks; a higher sequence alone does not guarantee a path change.
 
 For the full enablement story, gate ladder, and known limitations,
 see [docs/project/evpn-enablement.md](../project/evpn-enablement.md). For a step-by-step

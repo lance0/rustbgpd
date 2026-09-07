@@ -1686,7 +1686,7 @@ carries inactive (absent), unlimited (zero), or finite.
   (ADR-0087), single-active ESI overlay-index Type 5 receive, and
   all-active ESI overlay-index Type 5 receive with route-level ECMP plus
   L3VXLAN FDB-NHG programming. Remaining EVPN work is outside the core
-  overlay-index shape: runtime mixed-edit tails, Linux softswitch local-bias
+  overlay-index shape: Linux softswitch local-bias
   limits, true shared-VNI / non-zero Ethernet Tag service, managed netdev
   ergonomics, and service-provider route families.
 

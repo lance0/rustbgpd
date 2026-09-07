@@ -708,8 +708,11 @@ than reflected; see the
   nexthop groups (M40 FRR-validated). Shipped since: receive-side
   RFC 9135 overlay-index Type 5 recursion, native GW-IP + ESI
   overlay-index Type 5 origination, single-active (M71) / all-active
-  (M72) ESI overlay-index Type 5 receive; remaining EVPN work is the
-  ADR-0063 runtime mixed-edit tail, Linux softswitch local-bias, and
+  (M72) ESI overlay-index Type 5 receive. Supported decomposable runtime edits
+  commit live; L3VNI/device/table IP-VRF identity changes remain restart-required. See the
+  [runtime convergence contract](../project/evpn-enablement.md#p15--evpn-vtep-mode-validation-depth)
+  for dependency-cycle rejection and mid-sequence fail-stop behavior.
+  Remaining EVPN work includes Linux softswitch local-bias and
   service-provider route families.
 
 **Why the API-first shape matters for DC fabric:**
@@ -784,8 +787,8 @@ measurement path.
   groups (M40 FRR-validated). Shipped since: receive-side RFC 9135
   overlay-index Type 5 recursion, native GW-IP + ESI overlay-index
   Type 5 origination, single-active (M71) / all-active (M72) ESI
-  overlay-index Type 5 receive; remaining EVPN work is the ADR-0063
-  runtime mixed-edit tail, Linux softswitch local-bias, and
+  overlay-index Type 5 receive; remaining EVPN work includes
+  Linux softswitch local-bias and
   service-provider route families. See
   [docs/project/evpn-enablement.md](../project/evpn-enablement.md)
   for the full enablement ladder and
@@ -903,8 +906,7 @@ Be honest about where rustbgpd isn't the right tool:
 	  receive with M72 GoBGP proof, duplicate-MAC remote suppression +
 	  manual clear, and production-default DF/non-DF BUM suppression
 	  have also shipped. **Still missing for full VTEP parity:**
-	  Linux softswitch local-bias split-horizon, the remaining ADR-0063
-	  runtime mixed-edit tail,
+	  Linux softswitch local-bias split-horizon,
 	  optional import-side ES-Import RT filtering, EVPN over MPLS/PBB,
 	  and EVPN route types 6-11. For a single-homed L2VNI fabric without
 	  MPLS/PBB or service-provider EVPN requirements, rustbgpd is a fit today.
