@@ -4213,7 +4213,10 @@ impl PeerManager {
             targets.push(Self::peer_manager_config_from_resolved(resolved, false));
         }
 
-        let priors = match self.apply_peer_reshape_snapshot_classified(targets).await {
+        let priors = match self
+            .apply_peer_reshape_snapshot_classified(targets, None)
+            .await
+        {
             PeerReshapeSnapshotOutcome::Success(priors) => priors,
             PeerReshapeSnapshotOutcome::RejectedNoEffect(error) => {
                 return OwnedCatalogMutationOutcome::RejectedNoEffect(error.into());

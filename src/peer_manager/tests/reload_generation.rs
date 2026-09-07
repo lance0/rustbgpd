@@ -56,15 +56,21 @@ fn generation_session(addr: IpAddr) -> (PeerHandle, Arc<GenerationSessionCounter
 
 /// A RIB stub that acknowledges every export-policy transition shape the
 /// policy snapshot and its rollback can issue.
-fn spawn_generation_rib() -> (mpsc::Sender<RibUpdate>, tokio::task::JoinHandle<()>) {
+fn spawn_generation_rib(
+    drop_refresh_reply: bool,
+) -> (mpsc::Sender<RibUpdate>, tokio::task::JoinHandle<()>) {
     let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(256);
     let drainer = tokio::spawn(async move {
         while let Some(update) = rib_rx.recv().await {
             match update {
                 RibUpdate::ReplacePeerExportPolicy { reply, .. }
-                | RibUpdate::ReplacePeerExportPoliciesAuthoritatively { reply, .. }
-                | RibUpdate::RefreshPeerOutbound { reply, .. } => {
+                | RibUpdate::ReplacePeerExportPoliciesAuthoritatively { reply, .. } => {
                     let _ = reply.send(Ok(()));
+                }
+                RibUpdate::RefreshPeerOutbound { reply, .. } => {
+                    if !drop_refresh_reply {
+                        let _ = reply.send(Ok(()));
+                    }
                 }
                 RibUpdate::ReplacePeerExportPolicies { reply, .. } => {
                     let _ = reply.send(Ok(rustbgpd_rib::ExportPolicyCohortOutcome::Committed));
@@ -100,7 +106,7 @@ fn spawn_generation_rib() -> (mpsc::Sender<RibUpdate>, tokio::task::JoinHandle<(
 struct GenerationHarness {
     mgr: PeerManager,
     counters: BTreeMap<IpAddr, Arc<GenerationSessionCounters>>,
-    _rib: tokio::task::JoinHandle<()>,
+    rib: tokio::task::JoinHandle<()>,
 }
 
 impl GenerationHarness {
@@ -109,7 +115,7 @@ impl GenerationHarness {
     /// planner compares against.
     fn new(config: &Config) -> Self {
         let (_tx, rx) = mpsc::channel(16);
-        let (rib_tx, rib) = spawn_generation_rib();
+        let (rib_tx, rib) = spawn_generation_rib(false);
         let mut mgr = PeerManager::new_with_config(
             rx,
             mpsc::channel(1).1,
@@ -160,11 +166,7 @@ impl GenerationHarness {
             mgr.register_session(session_id, &peer_key);
             mgr.next_session_id = session_id + 1;
         }
-        Self {
-            mgr,
-            counters,
-            _rib: rib,
-        }
+        Self { mgr, counters, rib }
     }
 
     fn session_id(&self, address: &str) -> u64 {
@@ -508,7 +510,7 @@ async fn late_reshape_failure_restores_prior_policy_generation() {
 }
 
 #[tokio::test]
-async fn hot_update_failure_unwinds_policy_snapshot_and_config() {
+async fn hot_update_failure_fences_after_policy_effects() {
     let fixture = RsFixture::new();
     let prior = fixture.load();
     let mut harness = GenerationHarness::new(&prior);
@@ -519,42 +521,106 @@ async fn hot_update_failure_unwinds_policy_snapshot_and_config() {
             .replace("max_prefixes = 1000", "max_prefixes = 2000"),
     );
     let candidate = fixture.load();
-    let sessions_before = harness.mgr.next_session_id;
-    // The second member's in-place knob update fails after the first
-    // member's landed and after both export chains moved.
     harness
         .mgr
         .inject_hot_update_failures
         .insert(key("2001:db8::3".parse().unwrap()), 0);
-
     let outcome = harness.apply(&candidate).await;
-    let ReloadGenerationOutcome::FullyCompensated(error) = outcome else {
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::CompensationAmbiguous(_)),
+        "{outcome:?}"
+    );
+    // A failed hot primitive does not prove no effect: retain the candidate
+    // and let the owner fence, rather than claiming the prior is restored.
+    assert_eq!(harness.mgr.current_config, candidate);
+    assert_eq!(harness.export_med("10.0.0.2"), Some(20));
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn hot_update_refresh_ack_loss_after_knob_ack_never_claims_restoration() {
+    let fixture = RsFixture::new();
+    let prior = fixture.load();
+    let mut harness = GenerationHarness::new(&prior);
+    let (rib_tx, rib) = spawn_generation_rib(true);
+    harness.mgr.rib_tx = rib_tx;
+    harness.rib.abort();
+    harness.rib = rib;
+    let mut candidate = prior.clone();
+    candidate
+        .peer_groups
+        .get_mut("members")
+        .unwrap()
+        .remove_private_as = Some("all".to_string());
+    let outcome = harness.apply(&candidate).await;
+    let ReloadGenerationOutcome::CompensationAmbiguous(error) = outcome else {
         panic!("{outcome:?}");
     };
-    assert!(error.contains("hot update"), "{error}");
-    assert_eq!(harness.mgr.current_config, prior);
-    assert_eq!(
-        harness.mgr.next_session_id, sessions_before,
-        "no session was touched"
-    );
-    for address in ["10.0.0.2", "2001:db8::3"] {
-        let managed = &harness.mgr.peers[&key(address.parse().unwrap())];
-        assert_eq!(
-            managed.transport_config.max_prefixes,
-            Some(1000),
-            "{address}"
-        );
-        assert_eq!(harness.export_med(address), Some(10), "{address}");
-    }
-    // Forward install plus restoring install on the members whose chains moved.
-    assert_eq!(harness.export_installs("10.0.0.2"), 2);
-    assert_eq!(harness.export_installs("2001:db8::3"), 2);
+    assert!(error.contains("RIB dropped reply"), "{error}");
     assert_eq!(
         harness.runtime_config_updates("10.0.0.2"),
-        2,
-        "knobs applied then restored"
+        1,
+        "session acknowledged candidate knobs before reply loss"
+    );
+    assert_eq!(
+        harness.mgr.peers[&key("10.0.0.2".parse().unwrap())]
+            .transport_config
+            .remove_private_as,
+        rustbgpd_transport::RemovePrivateAs::Disabled,
+        "manager bookkeeping still holds prior knobs"
     );
     harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn failed_generation_rebuilds_with_prior_diagnostic_settings() {
+    // With the bystander removed, outer compensation re-adds it. In both
+    // cases the reshape helper first restores the already-replaced member.
+    for remove_bystander in [false, true] {
+        let fixture = RsFixture::new();
+        let prior = fixture.load();
+        let mut harness = GenerationHarness::new(&prior);
+        let mut candidate = fixture.compound_candidate();
+        candidate.policy.explain.enabled = !prior.policy.explain.enabled;
+        candidate.policy.explain.cache_size += 1;
+        candidate.policy.reject_retention.enabled = !prior.policy.reject_retention.enabled;
+        candidate.policy.reject_retention.capacity += 1;
+        if remove_bystander {
+            candidate
+                .neighbors
+                .retain(|peer| peer.address != "10.0.0.9");
+        }
+        harness
+            .mgr
+            .inject_reconfigure_failures
+            .insert(key("2001:db8::3".parse().unwrap()), 0);
+        let outcome = harness.apply(&candidate).await;
+        assert!(
+            matches!(outcome, ReloadGenerationOutcome::FullyCompensated(_)),
+            "{outcome:?}"
+        );
+        assert_eq!(harness.mgr.current_config, prior);
+        for address in ["10.0.0.2", "10.0.0.9"] {
+            let transport = &harness.mgr.peers[&key(address.parse().unwrap())].transport_config;
+            assert_eq!(
+                transport.explain_enabled, prior.policy.explain.enabled,
+                "{address}"
+            );
+            assert_eq!(
+                transport.explain_cache_size, prior.policy.explain.cache_size,
+                "{address}"
+            );
+            assert_eq!(
+                transport.reject_retention_enabled, prior.policy.reject_retention.enabled,
+                "{address}"
+            );
+            assert_eq!(
+                transport.reject_retention_capacity, prior.policy.reject_retention.capacity,
+                "{address}"
+            );
+        }
+        harness.shutdown().await;
+    }
 }
 
 #[tokio::test]

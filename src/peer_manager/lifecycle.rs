@@ -904,13 +904,15 @@ impl PeerManager {
         config: PeerManagerNeighborConfig,
     ) -> Result<PeerManagerNeighborConfig, PeerLifecycleError> {
         let mut effect = ReconfigurePeerFailureEffect::NoEffect;
-        self.reconfigure_peer_classified(config, &mut effect).await
+        self.reconfigure_peer_classified(config, &mut effect, None)
+            .await
     }
 
     async fn reconfigure_peer_classified(
         &mut self,
         config: PeerManagerNeighborConfig,
         effect: &mut ReconfigurePeerFailureEffect,
+        rollback_config: Option<&crate::config::Config>,
     ) -> Result<PeerManagerNeighborConfig, PeerLifecycleError> {
         let peer = PeerKey::new(config.address, config.interface.clone());
         #[cfg(test)]
@@ -948,6 +950,7 @@ impl PeerManager {
                     previous.clone(),
                     was_enabled,
                     graceful_shutdown,
+                    rollback_config,
                 )
                 .await
             {
@@ -976,6 +979,7 @@ impl PeerManager {
                     previous.clone(),
                     was_enabled,
                     graceful_shutdown,
+                    rollback_config,
                 )
                 .await
             {
@@ -1111,11 +1115,9 @@ impl PeerManager {
             )
         };
 
-        // Policy first: the live-policy seam has its own rollback, so a
-        // failure here leaves the peer fully on its prior config. A
-        // later knob failure leaves policies advanced — safe, because
-        // reload halts, keeps the OLD neighbor in its snapshot, and the
-        // next SIGHUP re-detects and re-applies both (idempotent).
+        // Policy first: the live-policy seam compensates its own failures.
+        // A later knob or refresh failure can leave session effects applied
+        // before bookkeeping. Owned callers must classify that as divergence.
         if policies_changed {
             self.update_runtime_policies_fatal(
                 peer.clone(),
@@ -1161,10 +1163,10 @@ impl PeerManager {
         // `MissingIpv6NextHop`) are only re-probed, and already-advertised
         // AS_PATHs only re-encoded, on an outbound event. Without this the
         // remediation stays off the wire until unrelated churn or a session
-        // bounce. Runs BEFORE the bookkeeping below: a hard refresh failure
-        // returns Err while the stored transport config still holds the old
-        // values, so the next SIGHUP re-detects the diff and retries
-        // (idempotent — the session-side knob re-apply is a no-op).
+        // bounce. Runs BEFORE bookkeeping: a hard refresh failure returns
+        // Err with live knobs changed but stored transport config still old.
+        // Applying the stored prior through normal change detection cannot
+        // prove restoration; owned callers must fence this uncertainty.
         if export_knobs_changed {
             let addr = peer.address;
             let (reply_tx, reply_rx) = oneshot::channel();
@@ -1244,7 +1246,10 @@ impl PeerManager {
         &mut self,
         targets: Vec<PeerManagerNeighborConfig>,
     ) -> Result<Vec<PeerManagerNeighborConfig>, PeerLifecycleError> {
-        match self.apply_peer_reshape_snapshot_classified(targets).await {
+        match self
+            .apply_peer_reshape_snapshot_classified(targets, None)
+            .await
+        {
             PeerReshapeSnapshotOutcome::Success(priors) => Ok(priors),
             PeerReshapeSnapshotOutcome::RejectedNoEffect(error)
             | PeerReshapeSnapshotOutcome::FullyCompensated(error)
@@ -1255,6 +1260,7 @@ impl PeerManager {
     pub(super) async fn apply_peer_reshape_snapshot_classified(
         &mut self,
         targets: Vec<PeerManagerNeighborConfig>,
+        rollback_config: Option<&crate::config::Config>,
     ) -> PeerReshapeSnapshotOutcome {
         let mut seen = BTreeSet::new();
         for target in &targets {
@@ -1311,11 +1317,16 @@ impl PeerManager {
         for target in targets {
             let peer = PeerKey::new(target.address, target.interface.clone());
             let mut effect = ReconfigurePeerFailureEffect::NoEffect;
-            match self.reconfigure_peer_classified(target, &mut effect).await {
+            match self
+                .reconfigure_peer_classified(target, &mut effect, rollback_config)
+                .await
+            {
                 Ok(previous) => priors.push(previous),
                 Err(error) => {
                     let had_prior_effects = !priors.is_empty();
-                    let restore = self.restore_peer_reshape_priors(priors).await;
+                    let restore = self
+                        .restore_peer_reshape_priors(priors, rollback_config)
+                        .await;
                     let restore_failed = restore.is_err();
                     let composed = match restore {
                         Ok(()) => PeerLifecycleError::Internal(format!(
@@ -1345,7 +1356,12 @@ impl PeerManager {
     pub(super) async fn restore_peer_reshape_priors(
         &mut self,
         priors: Vec<PeerManagerNeighborConfig>,
+        rollback_config: Option<&crate::config::Config>,
     ) -> Result<(), PeerLifecycleError> {
+        // Internal cohort compensation must build from the accepted generation,
+        // even while the enclosing reload still owns the candidate snapshot.
+        let candidate = rollback_config
+            .map(|prior| Box::new(std::mem::replace(&mut self.current_config, prior.clone())));
         // Replays the captured prior configs in reverse of the apply order.
         // `reconfigure_peer` re-reads the live enabled / graceful-shutdown state
         // and re-applies it, so rollback preserves the peer's current admin and
@@ -1363,6 +1379,9 @@ impl PeerManager {
             if let Err(error) = self.reconfigure_peer(prior).await {
                 failures.push(format!("{peer}: {error}"));
             }
+        }
+        if let Some(candidate) = candidate {
+            self.current_config = *candidate;
         }
         if failures.is_empty() {
             return Ok(());
@@ -1528,21 +1547,31 @@ impl PeerManager {
         previous: PeerManagerNeighborConfig,
         was_enabled: bool,
         graceful_shutdown: bool,
+        rollback_config: Option<&crate::config::Config>,
     ) -> Result<(), PeerLifecycleError> {
-        if self.peers.contains_key(&peer) {
-            self.delete_peer_checked(
-                peer.clone(),
-                false,
-                previous.tcp_ao.as_ref(),
-                false,
-                Some(&previous.discard_path_attributes),
-            )
-            .await?;
+        let candidate = rollback_config
+            .map(|prior| Box::new(std::mem::replace(&mut self.current_config, prior.clone())));
+        let restored = async {
+            if self.peers.contains_key(&peer) {
+                self.delete_peer_checked(
+                    peer.clone(),
+                    false,
+                    previous.tcp_ao.as_ref(),
+                    false,
+                    Some(&previous.discard_path_attributes),
+                )
+                .await?;
+            }
+            self.add_peer_with_admin_state(previous, false, was_enabled)
+                .await?;
+            self.apply_reconfigured_peer_state(peer, graceful_shutdown)
+                .await
         }
-        self.add_peer_with_admin_state(previous, false, was_enabled)
-            .await?;
-        self.apply_reconfigured_peer_state(peer, graceful_shutdown)
-            .await
+        .await;
+        if let Some(candidate) = candidate {
+            self.current_config = *candidate;
+        }
+        restored
     }
 
     async fn apply_reconfigured_peer_state(

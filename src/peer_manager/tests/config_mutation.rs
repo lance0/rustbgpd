@@ -807,9 +807,23 @@ async fn reconfigure_peer_restores_previous_peer_when_replacement_add_fails() {
     let mut replacement = make_config(addr, 65002);
     replacement.interface = Some(interface.to_string());
     replacement.description = "should not survive failed add".to_string();
-    let Err(error) = mgr.reconfigure_peer(replacement).await else {
+    let prior_config = mgr.current_config.clone();
+    let mut candidate = prior_config.clone();
+    candidate.policy.explain.enabled = !prior_config.policy.explain.enabled;
+    candidate.policy.reject_retention.capacity += 1;
+    mgr.current_config = candidate.clone();
+    let outcome = mgr
+        .apply_peer_reshape_snapshot_classified(vec![replacement], Some(&prior_config))
+        .await;
+    let crate::peer_manager::lifecycle::PeerReshapeSnapshotOutcome::FullyCompensated(error) =
+        outcome
+    else {
         panic!("invalid replacement should fail after internal restore");
     };
+    assert_eq!(
+        mgr.current_config, candidate,
+        "inner restore returns ownership to the enclosing generation"
+    );
 
     assert!(
         error.to_string().contains("previous peer restored"),
@@ -823,6 +837,14 @@ async fn reconfigure_peer_restores_previous_peer_when_replacement_add_fails() {
     assert_eq!(managed.remote_asn, 65002);
     assert_eq!(managed.hold_time, Some(90));
     assert!(!managed.enabled);
+    assert_eq!(
+        managed.transport_config.explain_enabled,
+        prior_config.policy.explain.enabled
+    );
+    assert_eq!(
+        managed.transport_config.reject_retention_capacity,
+        prior_config.policy.reject_retention.capacity
+    );
 }
 
 #[tokio::test]

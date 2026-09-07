@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 
 use rustbgpd_api::peer_types::{
-    ConfigEvent, PeerKey, PeerManagerNeighborConfig, ResolvedPeerPolicy,
+    ConfigEvent, OwnedHotUpdatePeerOutcome, PeerKey, PeerManagerNeighborConfig, ResolvedPeerPolicy,
 };
 use tracing::{info, warn};
 
@@ -154,12 +154,27 @@ impl PeerManager {
         // 3. Hot updates in place: knobs only, policies already match.
         for (next, prior) in resolved.hot {
             let peer = PeerKey::new(next.address, next.interface.clone());
-            if let Err(error) = self.hot_update_peer_in_place(next).await {
-                return self
-                    .fail_reload_generation(applied, format!("hot update {peer}: {error}"), false)
-                    .await;
+            match self.hot_update_peer_owned(next).await {
+                OwnedHotUpdatePeerOutcome::Success => applied.hot_priors.push(prior),
+                OwnedHotUpdatePeerOutcome::RejectedNoEffect(error) => {
+                    return self
+                        .fail_reload_generation(
+                            applied,
+                            format!("hot update {peer}: {error}"),
+                            false,
+                        )
+                        .await;
+                }
+                OwnedHotUpdatePeerOutcome::KnownDivergence(error) => {
+                    return self
+                        .fail_reload_generation(
+                            applied,
+                            format!("hot update {peer}: {error}"),
+                            true,
+                        )
+                        .await;
+                }
             }
-            applied.hot_priors.push(prior);
         }
 
         // 4. Removals first, each captured with its admin and gshut state,
@@ -196,7 +211,10 @@ impl PeerManager {
         //    The primitive restores its own already-reshaped members.
         if !resolved.replace.is_empty() {
             match self
-                .apply_peer_reshape_snapshot_classified(resolved.replace)
+                .apply_peer_reshape_snapshot_classified(
+                    resolved.replace,
+                    applied.prior_config.as_ref(),
+                )
                 .await
             {
                 PeerReshapeSnapshotOutcome::Success(priors) => {
@@ -421,6 +439,11 @@ impl PeerManager {
     /// Restore retained priors in reverse application order. Every step is
     /// attempted; the aggregated error names each one that failed.
     async fn unwind_reload_generation(&mut self, applied: AppliedEffects) -> Result<(), String> {
+        // Rebuilt peers resolve global transport settings from this snapshot.
+        // Restore it before any re-add, including diagnostic retention knobs.
+        if let Some(prior_config) = applied.prior_config {
+            self.current_config = prior_config;
+        }
         let mut failures = Vec::new();
         for peer in applied.added.into_iter().rev() {
             if let Err(error) = self.delete_peer(peer.clone(), false).await {
@@ -443,7 +466,7 @@ impl PeerManager {
             }
         }
         if let Some(priors) = applied.reshape_priors
-            && let Err(error) = self.restore_peer_reshape_priors(priors).await
+            && let Err(error) = self.restore_peer_reshape_priors(priors, None).await
         {
             failures.push(error.to_string());
         }
@@ -452,9 +475,6 @@ impl PeerManager {
             if let Err(error) = self.hot_update_peer_in_place(prior).await {
                 failures.push(format!("restore hot update {peer}: {error}"));
             }
-        }
-        if let Some(prior_config) = applied.prior_config {
-            self.current_config = prior_config;
         }
         if let Some(priors) = applied.policy_priors
             && let Err(error) = self.apply_resolved_policy_snapshot(priors).await
