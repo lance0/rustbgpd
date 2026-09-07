@@ -120,14 +120,15 @@ into the channel credentials via `grpc.composite_channel_credentials`, never
 as per-call `metadata=`. The credential then lives on the channel, so no call
 site can forget it and no traceback or log line carries it. gRPC only ships
 call credentials over a channel with transport security, which is why a token
-requires mTLS (or, on loopback and Unix sockets,
+requires TLS (or, on loopback and Unix sockets,
 `grpc.local_channel_credentials`).
 
 `controller.py` reuses `add_connection_arguments`, `connect`, and
 `parse_prefix` from `explain.py` rather than restating them.
 
 Supply `--tls-cert` and `--tls-key` together with `--tls-ca`; incomplete
-combinations fail before credentials are read or a channel is created.
+combinations and empty credential paths fail before credentials are read or a
+channel is created.
 `--tls-ca` alone enables server-authenticated TLS without a client certificate.
 
 The controller preserves the first unary RPC error and exits nonzero, without

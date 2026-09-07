@@ -62,9 +62,11 @@ def connect(args: argparse.Namespace) -> grpc.Channel:
     credentials, so every RPC on this channel is authenticated without any
     caller remembering to pass metadata. gRPC only ships call credentials
     over a channel with transport security, which is why a bearer token
-    requires either mTLS or the local-connection credentials used for
+    requires either TLS or the local-connection credentials used for
     loopback and Unix sockets.
     """
+    if "" in (args.tls_ca, args.tls_cert, args.tls_key, args.token_file):
+        raise ValueError("credential file paths must not be empty")
     if bool(args.tls_cert) != bool(args.tls_key):
         raise ValueError("--tls-cert and --tls-key must be supplied together")
     if (args.tls_cert or args.tls_key) and not args.tls_ca:

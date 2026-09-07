@@ -9,14 +9,18 @@ import explain
 
 class ConnectTests(unittest.TestCase):
     def test_invalid_tls_options_fail_before_credentials_or_channels(self):
-        for ca, cert, key in (
-            (None, "client.pem", None),
-            (None, None, "client.key"),
-            (None, "client.pem", "client.key"),
-            ("ca.pem", "client.pem", None),
-            ("ca.pem", None, "client.key"),
+        for ca, cert, key, token in (
+            (None, "client.pem", None, "token"),
+            (None, None, "client.key", "token"),
+            (None, "client.pem", "client.key", "token"),
+            ("ca.pem", "client.pem", None, "token"),
+            ("ca.pem", None, "client.key", "token"),
+            ("", None, None, None),
+            (None, "", None, None),
+            (None, None, "", None),
+            (None, None, None, ""),
         ):
-            with self.subTest(ca=ca, cert=cert, key=key), patch.multiple(
+            with self.subTest(ca=ca, cert=cert, key=key, token=token), patch.multiple(
                 explain.Path, read_text=DEFAULT, read_bytes=DEFAULT
             ) as files, patch.multiple(
                 explain.grpc,
@@ -29,7 +33,7 @@ class ConnectTests(unittest.TestCase):
             ) as grpc_calls:
                 args = argparse.Namespace(
                     target="localhost:50051", tls_ca=ca, tls_cert=cert,
-                    tls_key=key, token_file="token",
+                    tls_key=key, token_file=token,
                 )
                 with self.assertRaises(ValueError):
                     explain.connect(args)
