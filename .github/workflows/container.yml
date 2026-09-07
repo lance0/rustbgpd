@@ -102,6 +102,49 @@ jobs:
           docker run --rm --entrypoint rustbgpd rustbgpd:verify --version
           docker run --rm --entrypoint rbgp rustbgpd:verify --version
           docker run --rm --entrypoint birdwatcher-adapter rustbgpd:verify --help
+          # docs/how-to/deployment.md tells operators to chown host bind
+          # mounts to 999, so the built image must actually run as 999.
+          test "$(docker run --rm --entrypoint id rustbgpd:verify -u)" = "999"
+          test "$(docker run --rm --entrypoint id rustbgpd:verify -g)" = "999"
+      - name: Verify declared healthcheck reports both states
+        run: |
+          set -euo pipefail
+          await_health() {
+            name="$1"
+            want="$2"
+            deadline=$((SECONDS + 120))
+            while [ "$SECONDS" -lt "$deadline" ]; do
+              observed="$(docker inspect --format '{{.State.Health.Status}}' "$name")"
+              if [ "$observed" = "$want" ]; then
+                return 0
+              fi
+              if [ "$observed" != starting ]; then
+                break
+              fi
+              sleep 2
+            done
+            echo "::error::$name reported '$observed', expected '$want'"
+            docker inspect --format '{{json .State.Health}}' "$name"
+            return 1
+          }
+          # Unhealthy: no daemon behind the control socket. The probe must
+          # fail on the CLI's exit status alone.
+          docker run -d --name health-down \
+            --health-interval=2s --health-retries=1 --health-start-period=0s \
+            --entrypoint sleep rustbgpd:verify infinity
+          await_health health-down unhealthy
+          # Healthy: the image's own default command against the image's
+          # own container-shaped starter config.
+          docker run --rm --entrypoint rustbgpd rustbgpd:verify --init-config edge > "$RUNNER_TEMP/config.toml"
+          chmod 0644 "$RUNNER_TEMP/config.toml"
+          docker run -d --name health-up \
+            --health-interval=2s --health-retries=3 --health-start-period=60s \
+            -v "$RUNNER_TEMP/config.toml:/etc/rustbgpd/config.toml:ro" \
+            rustbgpd:verify
+          await_health health-up healthy
+      - name: Remove healthcheck containers
+        if: always()
+        run: docker rm -f health-down health-up 2>/dev/null || true
       - name: Log in to GitHub Container Registry
         if: github.event_name == 'push'
         uses: docker/login-action@v4
