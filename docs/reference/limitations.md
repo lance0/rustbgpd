@@ -59,7 +59,13 @@ surfaces; it does not promote the rest of the project out of alpha.
 
 ## EVPN
 
-EVPN is Linux / VXLAN-only and remains alpha.
+EVPN remains alpha. Its local VTEP and dataplane support are Linux/VXLAN-only.
+The reflector implements scoped
+[SRv6 service framing](path-attribute-registry.md#srv6-service-framing-within-prefix-sid)
+and [eligibility](path-attribute-registry.md#srv6-service-eligibility) checks,
+with unchanged-next-hop reflection of eligible raw attributes. SRv6 PE import,
+service origination, SID reconstruction, next-hop rewriting, and forwarding
+remain unimplemented.
 
 Shipped and interop-tested:
 
@@ -86,7 +92,7 @@ Shipped and interop-tested:
 Known EVPN gaps:
 
 - L3VNI/device/table IP-VRF identity changes remain restart-required by design.
-  Other decomposable EVPN runtime edits commit live in ordered primitive steps;
+  Supported decomposable EVPN runtime edits commit live in ordered primitive steps;
   unsupported dependency cycles fail closed before commit, and residual
   mid-sequence convergence failures fail-stop on the last committed generation.
 - True RFC VLAN-aware bundle VTEP origination and dataplane for non-zero

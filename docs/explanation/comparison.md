@@ -74,7 +74,8 @@ IPv4/IPv6 `Prefix` routes.
 [^mpls-rr]: RR/controller-feed only. No VRF import, MPLS label forwarding,
     CE-facing attachment, or MPLS FIB programming.
 
-[^evpn]: rustbgpd EVPN is **alpha** and Linux/VXLAN-only. Shipped and
+[^evpn]: rustbgpd EVPN is **alpha**; its local VTEP and dataplane support are
+    Linux/VXLAN-only. Shipped and
     FRR-interop-tested: the Route Reflector role (Types 1-5 reflection);
     a bidirectional single-homed VTEP (Type 2 local-MAC / MAC+IP
     origination from kernel FDB / neighbor events, Type 3 IMET per
@@ -96,13 +97,16 @@ IPv4/IPv6 `Prefix` routes.
     agree: an IPv4 tenant prefix under an IPv6 VTEP is refused at
     origination and dropped at import. Both IPv6 receipts are single-homed;
     a multi-homed IPv6 underlay is untested here. Still ahead: Linux
-    softswitch local-bias split-horizon, the remaining ADR-0063 runtime
-    mixed-edit tail, true shared-VNI / non-zero Ethernet Tag service,
+    softswitch local-bias split-horizon, true shared-VNI / non-zero Ethernet
+    Tag service,
     managed netdev ergonomics, and demand-shaped route types 6-11, PBB-EVPN,
     multicast EVPN, MPLS/SRv6 service
     encapsulation, and VPWS/E-Tree remain demand-shaped service-provider
     breadth, not part of the current VXLAN/Linux alpha lane. See
     [evpn-enablement.md](../project/evpn-enablement.md) for the full gate ladder.
+    Supported decomposable runtime edits commit live; L3VNI/device/table IP-VRF identity
+    changes remain restart-required, dependency cycles fail closed, and
+    residual mid-sequence failures fail-stop at the last committed generation.
     Route types 6–11 are not reflected: unsupported typed NLRIs are
     discarded before the RIB under RFC 7606 §5.4. The
     [per-type discard counter and warnings](../reference/operations.md)
