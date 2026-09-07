@@ -177,21 +177,10 @@ to a later release line, keep the chain contiguous, and end at the workspace
 anchor. An unannotated gap remains an error, and the annotation is rejected on
 an exercise that is actually between consecutive release lines.
 
-The v0.51.0 route-server example is staged byte-for-byte under
-`tests/fixtures/v1-stable/v0.51.0/` and exercised by the current parser. The
-v0.60.0 release records that fixture as the accepted v0.51.0-to-v0.60.0
-milestone-jump upgrade exercise, extending the inventory's accepted release
-chain to the v0.60.0 anchor. The v0.60.0 route-server example is likewise
-archived under `tests/fixtures/v1-stable/v0.60.0/`; the v0.61.0 release records
-it as the accepted consecutive v0.60.0-to-v0.61.0 exercise and proves it with
-the current parser. The v0.61.0 route-server example continues the chain under
-`tests/fixtures/v1-stable/v0.61.0/` as the accepted consecutive
-v0.61.0-to-v0.62.0 exercise, proven the same way. The v0.62.0 route-server
-example continues the chain under `tests/fixtures/v1-stable/v0.62.0/` as the
-accepted consecutive v0.62.0-to-v0.63.0 exercise, proven the same way. The
-v0.63.0 route-server example continues the chain under
-`tests/fixtures/v1-stable/v0.63.0/` as the accepted consecutive
-v0.63.0-to-v0.64.0 exercise, proven the same way.
+The accepted source/target pairs and archived fixture paths are listed in
+[`v1-stable-surface.json`](v1-stable-surface.json). Run the fixture parser tests
+below as a set. Staging a future source fixture alone does not advance the
+accepted release chain; the workspace version and inventory move together.
 
 ## Release gate
 
@@ -200,12 +189,7 @@ Run:
 ```bash
 python3 scripts/check-v1-stable-surface.py
 cargo test -p rustbgpctl v1_stable_cli_command_inventory_matches_clap_tree
-cargo test -p rustbgpd v1_stable_v0_50_route_server_fixture_parses
-cargo test -p rustbgpd v1_stable_v0_51_route_server_fixture_parses
-cargo test -p rustbgpd v1_stable_v0_60_route_server_fixture_parses
-cargo test -p rustbgpd v1_stable_v0_61_route_server_fixture_parses
-cargo test -p rustbgpd v1_stable_v0_62_route_server_fixture_parses
-cargo test -p rustbgpd v1_stable_v0_63_route_server_fixture_parses
+cargo test -p rustbgpd route_server_fixture_parses
 cargo test -p rustbgpd v1_stable_effective_defaults_match_runtime_resolution
 ```
 
