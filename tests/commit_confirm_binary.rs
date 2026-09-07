@@ -998,6 +998,14 @@ fn doctor_pre_upgrade_stops_on_pending_confirmation_and_passes_after_settlement(
         let text = std::fs::read_to_string(path).expect("read lab config");
         let rewritten = text.replace("listen_port = 0", &format!("listen_port = {port}"));
         assert_ne!(rewritten, text, "lab config must declare listen_port = 0");
+        // The post-stop strict check requires explicit policy on the dynamic
+        // range added by the transaction, even for intentional permit-all.
+        let rewritten = rewritten.replace(
+            "[peer_groups.ix-members]",
+            "[peer_groups.ix-members]\nimport_policy_chain = [\"permit-all\"]\nexport_policy_chain = [\"permit-all\"]",
+        );
+        let rewritten =
+            format!("{rewritten}\n[policy.definitions.permit-all]\ndefault_action = \"permit\"\n");
         std::fs::write(path, rewritten).expect("write lab config");
     }
     let mut daemon = lab.spawn("doctor-pre-upgrade.log");
@@ -1134,13 +1142,14 @@ fn doctor_pre_upgrade_stops_on_pending_confirmation_and_passes_after_settlement(
     assert_eq!(status, "fail", "{detail}");
     assert!(
         detail.contains("changes the RFC 8212 posture")
-            && detail.contains("--migrate-config pin-legacy|prepare-secure --offline"),
+            && detail.contains("--migrate-config pin-legacy --offline"),
         "{detail}"
     );
     assert_eq!(std::fs::read(&staged).expect("read staged"), staged_bytes);
 
     // The documented sequence continues outside doctor: coordinated stop,
-    // verify inactive, then the candidate check on the stopped daemon's file.
+    // verify inactive and authority, correct the staged posture, then check
+    // the final candidate bytes with the candidate binary.
     let sigterm = Command::new("kill")
         .args(["-TERM", &daemon.child.id().to_string()])
         .status()
@@ -1152,8 +1161,22 @@ fn doctor_pre_upgrade_stops_on_pending_confirmation_and_passes_after_settlement(
         matches!(daemon.child.try_wait(), Ok(Some(_))),
         "daemon must be inactive before the candidate check"
     );
+    lab.assert_no_v3_authority("post-stop pre-upgrade check");
+    let migration = Command::new(env!("CARGO_BIN_EXE_rustbgpd"))
+        .args(["--migrate-config", "pin-legacy", "--offline"])
+        .arg(&staged)
+        .output()
+        .expect("restore the staged file's live posture offline");
+    assert!(
+        migration.status.success(),
+        "offline migration failed: {migration:?}"
+    );
+    let migrated = std::fs::read_to_string(&staged).expect("read migrated candidate");
+    assert!(migrated.contains("config_epoch = 1"));
+    assert!(migrated.contains("ebgp_requires_policy = false"));
     let candidate_check = Command::new(env!("CARGO_BIN_EXE_rustbgpd"))
-        .args(["--check", config])
+        .args(["--check", "--strict"])
+        .arg(&staged)
         .output()
         .expect("run candidate --check");
     assert!(

@@ -1252,7 +1252,7 @@ therefore own the graceful stop and the verification that follows it.
    diagnostic against the file the new binary will boot:
 
    ```sh
-   sudo -u rustbgpd rbgp doctor --pre-upgrade /etc/rustbgpd/config.toml
+   sudo -u rustbgpd "$candidate_root/usr/bin/rbgp" doctor --pre-upgrade /etc/rustbgpd/config.toml
    ```
 
    It is red, with the next action, while a confirmed transaction is pending,
@@ -1264,7 +1264,7 @@ therefore own the graceful stop and the verification that follows it.
    rewrites, or stops anything. A green result is an observation at one
    instant (`observed at unix <t>`), not a fence: a transaction can still
    start after it, which is why the stop in step 3 and the repeated checks in
-   step 4 stay in the procedure. See
+   step 3 stay in the procedure. See
    [the check reference](../reference/operations.md#pre-upgrade-checks).
 
    When the installed release is v0.64.0 or earlier, also clear retired
@@ -1288,11 +1288,11 @@ therefore own the graceful stop and the verification that follows it.
    continuity matters.
 
    With the daemon inactive, repeat the checks that only a stopped daemon can
-   make authoritative: the candidate `--check --strict` from step 2 against
-   the file as it is now, any `--migrate-config ... --offline` the posture
-   check called for, and the absence of a config-adjacent
-   `*.commit-confirm-locator.json`. The live diagnostic observed an earlier
-   instant; these post-stop checks are the ones that hold.
+   make authoritative: verify the absence of a config-adjacent
+   `*.commit-confirm-locator.json`, make any explicit offline posture correction
+   the check called for, then repeat the candidate `--check --strict` from
+   step 2 against the final file after every rewrite. The live diagnostic
+   observed an earlier instant; these post-stop checks are the ones that hold.
 4. Install the already-checked package:
 
    ```sh

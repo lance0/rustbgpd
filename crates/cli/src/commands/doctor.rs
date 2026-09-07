@@ -123,6 +123,20 @@ struct Check {
     detail: String,
 }
 
+impl Check {
+    fn human_text(&self) -> String {
+        use owo_colors::{OwoColorize, Stream::Stdout};
+        let marker = match self.status {
+            CheckStatus::Ok => format!("  {}", "ok".if_supports_color(Stdout, |s| s.green())),
+            CheckStatus::Warn => {
+                format!("{}", "warn".if_supports_color(Stdout, |s| s.yellow()))
+            }
+            CheckStatus::Fail => format!("{}", "FAIL".if_supports_color(Stdout, |s| s.red())),
+        };
+        format!("{marker}  {}", self.detail)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionHistoryEvidence {
     /// The history RPC failed, so even the bounded recent window is unknown.
@@ -162,15 +176,7 @@ impl Reporter {
             detail: detail.into(),
         };
         if !self.json {
-            use owo_colors::{OwoColorize, Stream::Stdout};
-            let marker = match check.status {
-                CheckStatus::Ok => format!("  {}", "ok".if_supports_color(Stdout, |s| s.green())),
-                CheckStatus::Warn => {
-                    format!("{}", "warn".if_supports_color(Stdout, |s| s.yellow()))
-                }
-                CheckStatus::Fail => format!("{}", "FAIL".if_supports_color(Stdout, |s| s.red())),
-            };
-            outln!("{marker}  {}", check.detail)?;
+            outln!("{}", check.human_text())?;
         }
         self.checks.push(check);
         Ok(())
@@ -1957,7 +1963,7 @@ fn rfc8212_posture(document: &toml::Value) -> Result<Rfc8212Posture, String> {
         None => (1, "omitted"),
         Some(toml::Value::Integer(1)) => (1, "explicit"),
         Some(toml::Value::Integer(2)) => (2, "explicit"),
-        Some(other) => return Err(format!("config_epoch must be 1 or 2, found {other}")),
+        Some(_) => return Err("config_epoch must be 1 or 2".to_string()),
     };
     let raw = document
         .get("global")
@@ -1966,10 +1972,8 @@ fn rfc8212_posture(document: &toml::Value) -> Result<Rfc8212Posture, String> {
         None if epoch == 2 => (true, "epoch_2_default"),
         None => (false, "legacy_omission"),
         Some(toml::Value::Boolean(value)) => (*value, "explicit"),
-        Some(other) => {
-            return Err(format!(
-                "[global] ebgp_requires_policy must be a boolean, found {other}"
-            ));
+        Some(_) => {
+            return Err("[global] ebgp_requires_policy must be a boolean".to_string());
         }
     };
     Ok(Rfc8212Posture {
@@ -2212,7 +2216,7 @@ fn upgrade_posture_check(
     };
     let parse = |text: &str| {
         toml::from_str::<toml::Value>(text)
-            .map_err(|error| error.to_string())
+            .map_err(|_| "invalid TOML; source text omitted".to_string())
             .and_then(|document| rfc8212_posture(&document))
     };
     let live = match effective_toml {
@@ -2260,14 +2264,21 @@ fn upgrade_posture_check(
             ),
         }
     } else {
+        let restore = match live.effective() {
+            (1, false) => format!("run `rustbgpd --migrate-config pin-legacy --offline {path}`"),
+            (2, true) => format!("run `rustbgpd --migrate-config prepare-secure --offline {path}`"),
+            (epoch, policy) => format!(
+                "set top-level `config_epoch = {epoch}` and `[global] ebgp_requires_policy = {policy}` explicitly in {path}"
+            ),
+        };
         fail(format!(
             "candidate {path} resolves to {candidate} but the live daemon runs {live} — \
              restarting on this file changes the RFC 8212 posture. Decide before the \
              coordinated stop: keep the change only if every eBGP direction has explicit \
              policy (the candidate `rustbgpd --check --strict {path}` names unpoliced \
-             directions), or restore the live posture in the file after the stop with \
-             `rustbgpd --migrate-config pin-legacy|prepare-secure --offline {path}`; this \
-             check rewrote nothing"
+             directions), or restore the live posture in the file after the stop: \
+             {restore}; repeat the candidate `rustbgpd --check --strict {path}` after \
+             any rewrite. This check rewrote nothing"
         ))
     }
 }
@@ -6431,7 +6442,7 @@ paths = ["x"]
                 "changes the RFC 8212 posture",
                 &format!("rustbgpd --check --strict {}", candidate.display()),
                 &format!(
-                    "--migrate-config pin-legacy|prepare-secure --offline {}",
+                    "--migrate-config pin-legacy --offline {}",
                     candidate.display()
                 ),
                 "rewrote nothing",
@@ -6494,6 +6505,77 @@ paths = ["x"]
         let check = upgrade_posture_check(&candidate, Ok(live_legacy), 1700);
         assert_eq!(check.status, CheckStatus::Fail);
         assert_detail_mentions(&check, &["must be 1 or 2", "rustbgpd --check --strict"]);
+    }
+
+    #[test]
+    fn pre_upgrade_mismatch_restores_every_supported_live_tuple() {
+        let dir = tempfile::tempdir().unwrap();
+        let candidate = dir.path().join("config.toml");
+        for (epoch, policy) in [(1, false), (1, true), (2, false), (2, true)] {
+            fs::write(
+                &candidate,
+                format!(
+                    "config_epoch = {epoch}\n[global]\nebgp_requires_policy = {}\n",
+                    !policy
+                ),
+            )
+            .unwrap();
+            let live =
+                format!("config_epoch = {epoch}\n[global]\nebgp_requires_policy = {policy}\n");
+            let check = upgrade_posture_check(&candidate, Ok(&live), 1700);
+            assert_eq!(check.status, CheckStatus::Fail);
+            match (epoch, policy) {
+                (1, false) => assert!(
+                    check
+                        .detail
+                        .contains("--migrate-config pin-legacy --offline")
+                ),
+                (2, true) => assert!(
+                    check
+                        .detail
+                        .contains("--migrate-config prepare-secure --offline")
+                ),
+                _ => {
+                    assert!(!check.detail.contains("--migrate-config"));
+                    assert!(check.detail.contains(&format!("config_epoch = {epoch}` and `[global] ebgp_requires_policy = {policy}` explicitly")));
+                }
+            }
+            assert!(check.detail.contains("after any rewrite"));
+        }
+    }
+
+    #[tokio::test]
+    async fn pre_upgrade_candidate_errors_redact_source_from_every_report() {
+        let (server, dir, candidate) = green_pre_upgrade_lab().await;
+        let secret = "dummy-secret-do-not-report";
+        let documents = [
+            format!("[global]\nmd5_password = \"{secret}\\q\"\n"),
+            format!("config_epoch = \"{secret}\"\n"),
+            format!("[global]\nebgp_requires_policy = {{ secret = \"{secret}\" }}\n"),
+        ];
+        for (index, document) in documents.iter().enumerate() {
+            fs::write(&candidate, document).unwrap();
+            let bundle_path = dir.path().join(format!("redacted-{index}.tar.gz"));
+            let (code, manifest) = run_doctor(&server.addr, &bundle_path, Some(&candidate)).await;
+            assert_eq!(code, 2);
+            let reported = manifest_check(&manifest, "upgrade.posture");
+            assert_eq!(reported["status"], "fail");
+            let check = Check {
+                name: "upgrade.posture".to_string(),
+                status: CheckStatus::Fail,
+                detail: reported["detail"].as_str().unwrap().to_string(),
+            };
+            let human = check.human_text();
+            assert!(human.contains("FAIL"));
+            assert!(!human.contains(secret));
+            let json = json_report(&bundle_path, true, &[check], &BTreeMap::new(), None).unwrap();
+            assert_eq!(json["ok"], false);
+            assert!(!json.to_string().contains(secret));
+            for (path, contents) in extract_bundle(&bundle_path) {
+                assert!(!contents.contains(secret), "secret leaked into {path}");
+            }
+            assert_eq!(fs::read_to_string(&candidate).unwrap(), *document);
+        }
     }
 
     #[test]
