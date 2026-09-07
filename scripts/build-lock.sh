@@ -18,13 +18,12 @@
 #     runs, where a concurrent workload corrupts the reading and failing fast
 #     is correct. Here the second caller wants its checks to run, so the wait
 #     is unbounded and announced once on stderr.
-#   - A crashed holder cannot wedge the repository. `flock` is a property of
-#     the open file description, so the kernel drops it when the holder exits
-#     for any reason. There is no stale lock file to clean up, and the file
-#     itself is disposable.
-#   - The fd is allocated to the caller's shell (`exec {fd}>...`), so the lock
-#     lives for the rest of the caller's process and is released on exit. The
-#     caller does not unlock explicitly.
+#   - The kernel releases the lock when the last inherited descriptor closes,
+#     including descriptors held by child builds after the parent exits. No
+#     stale lock needs reaping. Never unlink the file while builds are active:
+#     a new file would create a separate lock and defeat serialization.
+#   - The fd is allocated to the caller's shell (`exec {fd}>...`), so sourced
+#     callers hold it for their lifetime without an explicit unlock.
 #
 # Source it to hold the lock across several commands:
 #

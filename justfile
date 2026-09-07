@@ -47,6 +47,7 @@ check-devtools:
 # Check formatting and the cheap repository contracts (seconds, no compilation).
 check-fast:
     cargo fmt --all -- --check
+    python3 -m unittest -v scripts/test_build_lock.py
     python3 -m unittest -v scripts/test_check_clippy_reasons.py
     python3 scripts/check-clippy-reasons.py
     python3 scripts/check-v1-stable-surface.py
