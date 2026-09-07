@@ -1,0 +1,7 @@
+start_epoch_s=1788815320
+load1=10.38
+governor_cpu0=powersave
+competitors_at_start=337373:cargo,346250:cargo,352059:rustc,354615:rustc,354781:rustc,355081:rustc
+end_epoch_s=1788815438
+load1_end=5.83
+competitors_at_end=337373:cargo,506881:cargo,507185:rustc,517318:cargo

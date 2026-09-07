@@ -1,0 +1,8 @@
+git_commit=d472a6d7dbe640e802fcf825dc0906c190266a8d
+git_tree=855797397f454a4c349f2faed62d87eb835218cc
+git_dirty=true
+rustbgpd_sha256=cf796bb9f71b66003246759b5ee1771d518ccf19562e6bcfc95a57e94f34d225
+reloadstall_sha256=343771384c7d300d25342fd288d2afeefc6698809e8ef2529ebebd0b470918d2
+toolchain=rustc 1.98.0 (88d9e12ae 2026-08-18)
+host=Linux 7.0.0-30-generic x86_64
+shape=F n_peers=20 total_prefixes=11440 changed_peers=16 reloads=4 control_secs=30
