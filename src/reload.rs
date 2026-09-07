@@ -4024,7 +4024,9 @@ async fn reload_generation_route(
         actions,
         reply: reply_tx,
     });
-    if sighup_ack_fault("generation") {
+    // The session-table acknowledgement fault keeps its `reconcile` name on
+    // this route so the real-daemon fail-stop proof covers both executors.
+    if sighup_ack_fault("generation") || sighup_ack_fault("reconcile") {
         drop(reply_rx);
         return fenced_reload_failure(
             progress,
