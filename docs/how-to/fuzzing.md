@@ -52,12 +52,14 @@ reachable input space: decode → encode → decode must reproduce the value.
 ## Running locally
 
 Requires the reviewed nightly and cargo-fuzz release
-(`cargo install cargo-fuzz --version 0.13.2 --locked`).
+(`cargo install cargo-fuzz --version 0.13.2 --locked`). Install the toolchain
+named by `fuzz/rust-nightly.txt` before running these commands.
 
 ```sh
+export RUSTUP_TOOLCHAIN="$(cat fuzz/rust-nightly.txt)"
 cd crates/wire
-cargo +nightly fuzz list
-cargo +nightly fuzz run encode_update fuzz/corpus/encode_update fuzz/seeds/encode_update -- -max_total_time=300 -max_len=4096
+cargo fuzz list
+cargo fuzz run encode_update fuzz/corpus/encode_update fuzz/seeds/encode_update -- -max_total_time=300 -max_len=4096
 ```
 
 Run the same `list`/`run` flow from `crates/bfd`, `crates/policy`,
@@ -65,7 +67,8 @@ Run the same `list`/`run` flow from `crates/bfd`, `crates/policy`,
 bound for that crate.
 
 A crash writes a reproducer under `fuzz/artifacts/<target>/`; replay it with
-`cargo +nightly fuzz run <target> fuzz/artifacts/<target>/<file>`.
+`cargo fuzz run <target> fuzz/artifacts/<target>/<file>` with the pinned
+toolchain still selected.
 
 ## Corpus layout
 
@@ -164,10 +167,13 @@ stopped:
 
 - `panicked at fuzz_targets/<target>.rs:<line>` followed by
   `ERROR: libFuzzer: deadly signal` — a crash, with a reproducer.
-- `ERROR: libFuzzer: out-of-memory` or `ERROR: libFuzzer: timeout` — also a
-  real finding: a decoder that allocates or loops on attacker-chosen bytes.
-- No `Running fuzz/target/...` line at all — nothing was fuzzed, so the failure
-  is in the build or the environment rather than in a codec.
+- `ERROR: libFuzzer: out-of-memory` or `ERROR: libFuzzer: timeout` — investigate
+  the reproducer, target bounds, and runner load. These can reveal excessive
+  resource use in the library or harness; they do not by themselves establish
+  a network-reachable defect.
+- Build or launch errors — inspect the compiler diagnostics, command exit, and
+  libFuzzer startup output. A missing `Running fuzz/target/...` line alone does
+  not prove no target ran: output can differ or a target can fail early.
 
 A crash prints its input twice: as `Test unit written to
 fuzz/artifacts/<target>/crash-<sha1>` and as a `Base64:` line. The run's
@@ -177,21 +183,23 @@ fuzz/artifacts/<target>/crash-<sha1>` and as a `Base64:` line. The run's
 
 `fuzz/rust-nightly.txt` pins the toolchain, so an upstream compiler regression
 cannot reach the campaign on its own — it arrives only with a deliberate pin
-bump. When the job breaks with no change on our side, suspect the runner image,
-the `cargo install cargo-fuzz` step, or the cache service before suspecting a
-codec; those failures stop before any target runs and leave no artifact behind.
+bump. Unchanged source can still fail on newly generated inputs. Use the failing
+step and build/launch evidence to distinguish a finding from a runner, install,
+or cache failure; do not infer the cause from the absence of a code change.
 A corpus cache miss or cache-service outage is not a failure at all: the
 campaign reports it and falls back to tracked seeds by design.
 
 ### Reproduce it locally
 
-Recovering the input from the log is faster than downloading the artifact:
+Recover the input from the log or download the artifact. Starting at the
+repository root, replay it in the owning crate (wire in this example):
 
 ```sh
 printf '%s' '<the Base64: value>' | base64 -d > /tmp/crash-input
+export RUSTUP_TOOLCHAIN="$(cat fuzz/rust-nightly.txt)"
 cd crates/wire
-cargo +nightly fuzz run <target> /tmp/crash-input
-cargo +nightly fuzz tmin <target> /tmp/crash-input   # minimize before pinning
+cargo fuzz run <target> /tmp/crash-input
+cargo fuzz tmin <target> /tmp/crash-input   # minimize before pinning
 ```
 
 `just fuzz-list` enumerates every target across the fuzz crates, and
@@ -202,14 +210,15 @@ near a finding instead of replaying a single input.
 
 Read the panic text, not just the target name.
 
-- **The message is one of the harness's own `expect` or `assert` strings.** The
-  harness built a value the library correctly refused, so fix the harness's
-  generator to stay inside the domain the library accepts. Production behavior
-  is already right. This is the common case for the `encode_*` constructor
-  targets, which synthesize structured values rather than decode bytes.
+- **The message is one of the harness's own `expect` or `assert` strings.**
+  Trace the input and the asserted contract. The generator may have built an
+  invalid value, or the assertion may expose an encoder/decoder contract bug.
+  Fix the generator only after confirming the library correctly rejects the
+  value; preserve assertions that catch valid-input failures.
 - **The panic comes from library code** — an index out of bounds, an `unwrap`
-  on `None`, a slice range, an arithmetic overflow. That is a defect on a
-  surface fed by untrusted input, so fix the library.
+  on `None`, a slice range, an arithmetic overflow. Trace the library contract
+  and fix the defect there when the input is admitted. Establish network
+  reachability separately: constructor targets also exercise structured values.
 
 Either way, check every sibling site that shares the constraint before closing
 it. In September 2026 the `encode_update` harness generated AS 0, which the
@@ -223,7 +232,9 @@ night was avoidable.
 Add the minimized reproducer to `fuzz/seeds/<target>/` so every later campaign
 starts from it, and add an ordinary Rust regression test beside the code for a
 library bug. The seed proves the input no longer crashes; the test states the
-behavior now expected.
+behavior now expected. For wire seeds, also update the existing path and byte/hash
+inventory in `scripts/check_fuzz_target_inventory.py`, then run that checker and
+its companion `scripts/test_check_fuzz_target_inventory.py` tests.
 
 ### File, or note and move on
 
