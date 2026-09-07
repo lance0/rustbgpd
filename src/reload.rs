@@ -671,35 +671,6 @@ fn config_keyring_is_deletion(
 /// Complete listener inbound-auth inventory (TCP MD5 keys + GTSM selectors)
 /// for one config snapshot, built from the same per-neighbor / per-range
 /// builders the startup bind path uses.
-fn listener_inbound_auth_inventory(
-    config: &Config,
-) -> Result<
-    (
-        Vec<rustbgpd_transport::Md5ListenerKey>,
-        Vec<rustbgpd_transport::TtlSecurityListenerPolicy>,
-    ),
-    String,
-> {
-    let resolved = config
-        .resolved_neighbors()
-        .map_err(|error| error.to_string())?;
-    let md5_keys = resolved
-        .iter()
-        .filter_map(crate::md5_listener_key_for_neighbor)
-        .chain(config.dynamic_neighbors.iter().filter_map(|range| {
-            crate::md5_listener_key_for_dynamic_range(range, &config.peer_groups)
-        }))
-        .collect();
-    let ttl_security = resolved
-        .iter()
-        .map(crate::ttl_security_listener_policy_for_neighbor)
-        .chain(config.dynamic_neighbors.iter().filter_map(|range| {
-            crate::ttl_security_listener_policy_for_dynamic_range(range, &config.peer_groups)
-        }))
-        .collect();
-    Ok((md5_keys, ttl_security))
-}
-
 #[expect(
     clippy::too_many_lines,
     reason = "the compiler must validate static and dynamic owner inventories together before issuing one immutable generation plan"
@@ -2268,14 +2239,14 @@ pub(crate) async fn reload_config_with_tcp_ao(
     // sessions reconcile so a bounced peer's inbound reconnect already meets
     // the new inventory.
     if let Some(listener) = tcp_ao_listener {
-        let current_inventory = match listener_inbound_auth_inventory(current) {
+        let current_inventory = match config::listener_inbound_auth_inventory(current) {
             Ok(inventory) => inventory,
             Err(error) => {
                 error!(%error, "failed to compute the live listener inbound-auth inventory");
                 return clean_reload_failure("listener_auth.plan", error);
             }
         };
-        let desired_inventory = match listener_inbound_auth_inventory(&new_config) {
+        let desired_inventory = match config::listener_inbound_auth_inventory(&new_config) {
             Ok(inventory) => inventory,
             Err(error) => {
                 error!(%error, "failed to compute the desired listener inbound-auth inventory");
@@ -8100,7 +8071,7 @@ ttl_security = true
 "#,
             "inbound-auth-v6-probe",
         );
-        let (md5_keys, ttl_security) = listener_inbound_auth_inventory(&config).unwrap();
+        let (md5_keys, ttl_security) = config::listener_inbound_auth_inventory(&config).unwrap();
         assert!(
             md5_keys
                 .iter()
@@ -8144,13 +8115,13 @@ peer_group = "members"
             "inbound-auth-new",
         );
 
-        let current_inventory = listener_inbound_auth_inventory(&current).unwrap();
+        let current_inventory = config::listener_inbound_auth_inventory(&current).unwrap();
         // Identical config → identical inventory: no spurious replacement.
         assert_eq!(
             current_inventory,
-            listener_inbound_auth_inventory(&current).unwrap()
+            config::listener_inbound_auth_inventory(&current).unwrap()
         );
-        let desired_inventory = listener_inbound_auth_inventory(&desired).unwrap();
+        let desired_inventory = config::listener_inbound_auth_inventory(&desired).unwrap();
         assert_ne!(current_inventory, desired_inventory);
 
         // The desired inventory carries the static host key, the group's

@@ -2177,6 +2177,14 @@ pub struct ConfigDiff {
     /// that specific shape through the EVPN runtime coordinator or must
     /// leave it restart-required.
     pub evpn_runtime_change_class: EvpnRuntimeChangeClass,
+    /// The listener's inbound MD5/GTSM inventory (static neighbors and
+    /// dynamic ranges) differs. SIGHUP replaces that inventory on the
+    /// listener as a converging step outside the compensated generation.
+    pub listener_inbound_auth_changed: bool,
+    /// The executor a SIGHUP of this candidate reaches after preflight, from
+    /// the families visible in a diff. Dataset content and the compiled
+    /// TCP-AO rotation shape are known only at reload time.
+    pub sighup_route: SighupReloadRoute,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
@@ -2965,6 +2973,201 @@ impl Config {
     }
 }
 
+/// Listener inbound MD5 keys and GTSM selectors derived from a config: the
+/// inventory startup installs and SIGHUP replaces on the BGP listener.
+pub(crate) fn listener_inbound_auth_inventory(
+    config: &Config,
+) -> Result<
+    (
+        Vec<rustbgpd_transport::Md5ListenerKey>,
+        Vec<rustbgpd_transport::TtlSecurityListenerPolicy>,
+    ),
+    String,
+> {
+    let resolved = config
+        .resolved_neighbors()
+        .map_err(|error| error.to_string())?;
+    let md5_keys = resolved
+        .iter()
+        .filter_map(crate::md5_listener_key_for_neighbor)
+        .chain(config.dynamic_neighbors.iter().filter_map(|range| {
+            crate::md5_listener_key_for_dynamic_range(range, &config.peer_groups)
+        }))
+        .collect();
+    let ttl_security = resolved
+        .iter()
+        .map(crate::ttl_security_listener_policy_for_neighbor)
+        .chain(config.dynamic_neighbors.iter().filter_map(|range| {
+            crate::ttl_security_listener_policy_for_dynamic_range(range, &config.peer_groups)
+        }))
+        .collect();
+    Ok((md5_keys, ttl_security))
+}
+
+/// The change families a SIGHUP candidate touches, as the reload coordinator
+/// sees them after restart-required pinning.
+///
+/// [`SighupReloadFamilies::from_diff`] fills every family a [`ConfigDiff`]
+/// can see. Two facts exist only at reload time and are completed by the
+/// coordinator: staged dataset *content* (a diff sees only the binding
+/// roster) and whether a TCP-AO edit compiles to a live rotation generation
+/// (a diff reports the edit; pinned edits have no runtime effect).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each family is an independent reload dimension the route classifier combines"
+)]
+pub struct SighupReloadFamilies {
+    /// Static `[[neighbors]]`, `[peer_groups]`, inline policy definitions,
+    /// neighbor sets, global chains, or compiled `.rpol` content.
+    pub generation: bool,
+    /// `[policy.datasets]` bindings or staged dataset content/error state.
+    pub datasets: bool,
+    /// `[[dynamic_neighbors]]` ranges.
+    pub dynamic_ranges: bool,
+    /// `[[evpn_instances]]` / `[[evpn_ip_vrfs]]` / `[[ethernet_segments]]`.
+    pub evpn_runtime: bool,
+    /// `[[fib_tables]]`.
+    pub fib_tables: bool,
+    /// `[global] honor_graceful_shutdown` / `honor_blackhole`.
+    pub honor_knobs: bool,
+    /// A TCP-AO keyring edit (an ordered live rotation at reload time).
+    pub tcp_ao: bool,
+    /// Listener inbound MD5/GTSM inventory.
+    pub listener_auth: bool,
+}
+
+impl SighupReloadFamilies {
+    /// Every family a config diff can see. See the type docs for the two
+    /// runtime-only completions.
+    #[must_use]
+    pub fn from_diff(diff: &ConfigDiff) -> Self {
+        let neighbors = &diff.neighbors;
+        let generation = !neighbors.added.is_empty()
+            || !neighbors.removed.is_empty()
+            || !neighbors.changed.is_empty()
+            || !diff.peer_groups.added.is_empty()
+            || !diff.peer_groups.removed.is_empty()
+            || !diff.peer_groups.changed.is_empty()
+            || !diff.policy.definitions_added.is_empty()
+            || !diff.policy.definitions_removed.is_empty()
+            || !diff.policy.definitions_changed.is_empty()
+            || !diff.policy.neighbor_sets_added.is_empty()
+            || !diff.policy.neighbor_sets_removed.is_empty()
+            || !diff.policy.neighbor_sets_changed.is_empty()
+            || diff.policy.import_chain_changed
+            || diff.policy.export_chain_changed
+            || diff.policy.rpol_changed;
+        Self {
+            generation,
+            datasets: diff.policy.datasets_changed,
+            dynamic_ranges: diff.dynamic_neighbors_reload_applied_changed,
+            evpn_runtime: diff.evpn_instances_changed
+                || diff.evpn_ip_vrfs_changed
+                || diff.ethernet_segments_changed,
+            fib_tables: diff.fib_tables_changed,
+            honor_knobs: diff.honor_graceful_shutdown_changed || diff.honor_blackhole_changed,
+            tcp_ao: diff.neighbor_tcp_ao_changed || diff.dynamic_neighbor_tcp_ao_changed,
+            listener_auth: diff.listener_inbound_auth_changed,
+        }
+    }
+}
+
+/// Which executor a SIGHUP candidate reaches after preflight.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "route", rename_all = "snake_case")]
+pub enum SighupReloadRoute {
+    /// One owned runtime generation: the peer manager settles every static
+    /// neighbor, peer-group, and policy effect from one resolved candidate
+    /// or restores the retained prior generation.
+    Generation,
+    /// The sequential per-subsystem path. Each reason names the family that
+    /// keeps the candidate off the compensated generation executor; an empty
+    /// list means the candidate has no generation-class change at all.
+    Sequential { reasons: Vec<String> },
+    /// Rejected before any runtime, credential, or catalog effect. Each
+    /// reason names a family that must be reloaded on its own.
+    Rejected { reasons: Vec<String> },
+}
+
+impl SighupReloadRoute {
+    /// One-line operator explanation, shared by `--diff`, the runtime
+    /// config-diff API, and the reload log.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Generation => "generation (one owned runtime generation; a late failure \
+                                 restores the prior generation)"
+                .to_string(),
+            Self::Sequential { reasons } if reasons.is_empty() => {
+                "sequential (no static-neighbor, peer-group, or policy change)".to_string()
+            }
+            Self::Sequential { reasons } => format!(
+                "sequential without generation compensation ({})",
+                reasons.join("; ")
+            ),
+            Self::Rejected { reasons } => format!(
+                "rejected before any effect; reload these families on their own: {}",
+                reasons.join("; ")
+            ),
+        }
+    }
+}
+
+/// Route a SIGHUP candidate by the families it touches.
+///
+/// A candidate with no generation-class change keeps the sequential path
+/// every isolated capability already has. A generation-class change combined
+/// with dataset content, dynamic ranges, EVPN runtime, FIB tables, or the
+/// honor knobs is rejected: none of those families retains and restores
+/// priors, so their partial effects could not be compensated. A
+/// generation-class change combined with a TCP-AO rotation or a listener
+/// inbound-auth change stays sequential: the rotation is its own ordered
+/// protocol and the listener inventory is a converging replacement, and the
+/// session reshape primitive refuses authentication changes, so neither can
+/// be folded into the generation.
+#[must_use]
+pub fn classify_sighup_reload(families: SighupReloadFamilies) -> SighupReloadRoute {
+    if !families.generation {
+        return SighupReloadRoute::Sequential {
+            reasons: Vec::new(),
+        };
+    }
+    let mut rejected = Vec::new();
+    if families.datasets {
+        rejected.push("[policy.datasets] content or bindings".to_string());
+    }
+    if families.dynamic_ranges {
+        rejected.push("[[dynamic_neighbors]]".to_string());
+    }
+    if families.evpn_runtime {
+        rejected.push("EVPN runtime tables".to_string());
+    }
+    if families.fib_tables {
+        rejected.push("[[fib_tables]]".to_string());
+    }
+    if families.honor_knobs {
+        rejected.push("[global] honor_graceful_shutdown / honor_blackhole".to_string());
+    }
+    if !rejected.is_empty() {
+        return SighupReloadRoute::Rejected { reasons: rejected };
+    }
+    let mut sequential = Vec::new();
+    if families.tcp_ao {
+        sequential.push("TCP-AO keyring rotation".to_string());
+    }
+    if families.listener_auth {
+        sequential.push("listener inbound MD5/GTSM inventory".to_string());
+    }
+    if sequential.is_empty() {
+        SighupReloadRoute::Generation
+    } else {
+        SighupReloadRoute::Sequential {
+            reasons: sequential,
+        }
+    }
+}
+
 /// Classify a validated config diff for the v1 config transaction model.
 ///
 /// This deliberately does not mirror all SIGHUP reload-applied sections. The
@@ -3442,6 +3645,8 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "policy_explain_changed": diff.policy_explain_changed,
             "policy_reject_retention_changed": diff.policy_reject_retention_changed,
         },
+        "sighup_reload": serde_json::to_value(&diff.sighup_route)
+            .unwrap_or(serde_json::Value::Null),
         "informational": serde_json::Value::Object(serde_json::Map::new()),
     })
 }
@@ -3763,6 +3968,13 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
         out.push('\n');
     }
 
+    if diff.has_reload_applied_changes() {
+        let _ = writeln!(
+            out,
+            "SIGHUP reload route: {}\n",
+            diff.sighup_route.describe()
+        );
+    }
     if diff.has_any_changes() {
         let _ = writeln!(out, "{}", plan_summary_line(diff));
     } else {
@@ -3950,7 +4162,14 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
             && old.global.honor_blackhole != new.global.honor_blackhole);
     let evpn_runtime_change_class = classify_evpn_runtime_change(old, new);
 
-    ConfigDiff {
+    let listener_inbound_auth_changed = match (
+        listener_inbound_auth_inventory(old),
+        listener_inbound_auth_inventory(new),
+    ) {
+        (Ok(old_inventory), Ok(new_inventory)) => old_inventory != new_inventory,
+        _ => false,
+    };
+    let mut diff = ConfigDiff {
         neighbors,
         effective_neighbor_impact,
         peer_groups,
@@ -3989,7 +4208,11 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         policy_explain_changed: old.policy.explain != new.policy.explain,
         policy_reject_retention_changed: old.policy.reject_retention != new.policy.reject_retention,
         evpn_runtime_change_class,
-    }
+        listener_inbound_auth_changed,
+        sighup_route: SighupReloadRoute::Generation,
+    };
+    diff.sighup_route = classify_sighup_reload(SighupReloadFamilies::from_diff(&diff));
+    diff
 }
 
 fn evpn_runtime_config_changed(old: &Config, new: &Config) -> bool {
