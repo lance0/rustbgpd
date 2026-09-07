@@ -975,6 +975,29 @@ fields—not the potentially large responses. The load must outlive the complete
 measured window and finish with its atomic SIGTERM summary before analysis
 begins.
 
+A fifth schedule runs `rbgp doctor` every `MANAGEMENT_DOCTOR_INTERVAL_SEC`
+(default 600 s). This one is an assertion, not load: `doctor` is the shipped
+surface that reads the live daemon's own run context — descriptor limits,
+state-directory writability and free space, listener reachability, crash
+reports, authorization posture — and a soak that measures a misconfigured host
+should say so at minute one rather than publish a degraded receipt as green.
+It runs with an explicit `--output` so the support bundle is rewritten in place
+(`doctor-bundle.tar.gz`) instead of leaving one timestamped tarball per
+attempt, and the run keeps the last one. The driver validates the report and
+discards it like every other response; only the verdict is retained. A red
+check outside the `peer.` namespace fails the run. Per-peer session and flap
+checks are deliberately excluded: the scenario tears the designated member down
+on purpose, and the session-floor, flap-budget, and trip-evidence gates measure
+peer health far more exactly than `doctor`'s fleet-wide heuristics can.
+
+`doctor`'s rlimit check reports every `rustbgpd` process on the host, not only
+the one under measurement. A second daemon with a low descriptor limit turns
+the assertion red; a second daemon with adequate limits does not. This check
+does not replace host isolation: `preflight.sh` refuses a live `rustbgpd`, and
+the host mutex coordinates cooperating workloads. A red
+`daemon.rlimit.nofile.<pid>` naming an unknown pid means another daemon on the
+host has insufficient descriptor headroom.
+
 ```bash
 # Full 24 h flagship run (defaults):
 bash tests/soak/run-soak-rs-flagship.sh
@@ -987,16 +1010,19 @@ bash tests/soak/run-soak-rs-flagship.sh
 ```
 
 Smokes may lengthen the probe schedules with
-`MANAGEMENT_METRICS_INTERVAL_SEC` and `MANAGEMENT_CLI_INTERVAL_SEC`, or change
-the per-attempt `MANAGEMENT_TIMEOUT_SEC`; the runner records the exact values
+`MANAGEMENT_METRICS_INTERVAL_SEC`, `MANAGEMENT_CLI_INTERVAL_SEC`, and
+`MANAGEMENT_DOCTOR_INTERVAL_SEC`, or change the per-attempt
+`MANAGEMENT_TIMEOUT_SEC`; the runner records the exact values
 in `run.json` and the terminal summary, and the analyzer requires them to
 match. The management-plane load itself is not optional.
 
 Requires host ports 1790 (BGP) and 9179 (metrics) free — the runner
-refuses to start otherwise and never kills unknown processes. Output
+refuses to start otherwise and never kills unknown processes — and
+file-descriptor headroom (see below). Output
 lands in `tests/soak/runs/soak-rs-flagship-<UTC>/` (`samples.csv`,
 `cycles.log`, `reloadstall.log`, `rustbgpd.log`,
-`management-plane-load.jsonl`, `management-plane-load.log`, `run.json`,
+`management-plane-load.jsonl`, `management-plane-load.log`,
+`doctor-bundle.tar.gz`, `run.json`,
 `verdict.json`); the analyzer is `analyze-soak-rs-flagship.py` and the
 precommitted gates are scenario 10 in
 `docs/soaks/soak-acceptance-gates.md`. Note the short scenario
@@ -1036,10 +1062,35 @@ bash tests/soak/run-soak-rr-flagship.sh
 ```
 
 Requires host ports 1790 (BGP) and 9179 (metrics) free — the runner
-refuses to start otherwise and never kills unknown processes. Output
+refuses to start otherwise and never kills unknown processes — and
+file-descriptor headroom (see below). Output
 lands in `tests/soak/runs/soak-rr-flagship-<UTC>/` (`samples.csv`,
 `cycles.log`, `reloadstall.log`, `rustbgpd.log`, `run.json`,
 `verdict.json`); the analyzer is `analyze-soak-rr-flagship.py` and the
 precommitted gates are scenario 11 in
 `docs/soaks/soak-acceptance-gates.md`. The same short-`/tmp`-scenario
 and fresh-per-run rules as the route-server flagship soak apply.
+
+---
+
+# File-descriptor headroom (both bare-host flagship soaks)
+
+Both flagship runners launch the daemon from the invoking shell, so it
+inherits that shell's `RLIMIT_NOFILE` soft limit. At the 1000-peer shape a
+stock 1024 limit is exhausted by peer sockets alone: the sessions establish,
+but every later `accept()` on the metrics listener fails with EMFILE. Nothing
+client-side notices — the scrapes that do get served still return 200, sessions
+stay up, `/readyz` stays green — so the whole gate battery passes while the run
+measures a crippled daemon. The only evidence is in the daemon's own log.
+
+`fd-headroom.sh` closes that. Both runners raise the soft limit to
+`SOAK_NOFILE_SOFT` (default 65536, the same value the shipped systemd and
+container units pin) before any daemon starts, and abort with exit 2 if the
+inherited hard limit will not allow it — a soak that cannot get descriptor
+headroom must not run. The achieved limit is recorded as `nofile_soft` in
+`run.json`, so the receipt states the configuration it measured. On the
+route-server flagship the periodic `rbgp doctor` assertion re-checks the same
+condition against the live daemon for the whole window.
+
+Raise a too-low hard limit at the login session (a `LimitNOFILE=` drop-in, or
+`/etc/security/limits.d`) and re-run.

@@ -58,8 +58,10 @@ is your rollback while the first proves the change. Per update:
    candidate config on both hosts (exit 0 or stop), and check the
    [reload matrix](../reference/reload-matrix.md) for whether any touched field
    is restart-required.
-2. **Reload RS1 only** (SIGHUP; parse-then-swap — a rejected candidate
-   leaves the running config untouched).
+2. **Reload RS1 only** (SIGHUP). Parse/validation rejection leaves runtime
+   untouched; a later reconcile failure can leave known partial changes.
+   Inspect the reload result and effective configuration before proceeding
+   ([current SIGHUP boundary](../reference/known-issues.md)).
 3. **Verify RS1:** sessions established (`rbgp summary`), spot-check a
    member's view (`rbgp rib sent <member>`), no alert movement.
 4. **Soak** for an operator-chosen window (long enough for a full
@@ -89,19 +91,56 @@ address = "192.0.2.100:11019"          # your capture/collector host
 monitor = ["rib_out_post"]
 ```
 
-Then, on the capture host:
+The capture has to contain each member's initial Adj-RIB-Out dump,
+and RS2 sends that dump only when the member's session establishes. A
+collector that connects later gets the Peer Ups and live updates only
+(`rib_out_post` has no reconnect dump), and `from-bmp` refuses such a
+capture (exit 2, `End-of-RIB not seen`) rather than emit an incomplete
+peer. Nothing run from RS2 fills that gap: `rbgp neighbor <member> refresh-out` reports the refresh as scheduled and re-sends the routes
+without an End-of-RIB, and a member's own ROUTE-REFRESH is answered
+with an End-of-RIB-Refresh marker instead when the member negotiated
+enhanced route refresh (FRR 10.7.1 does) — a ROUTE-REFRESH message,
+which BMP route monitoring never carries. So start the listener before
+RS2's member sessions establish — before RS2 starts (in practice its
+maintenance-window restart) or before its member sessions are cleared —
+and leave it running: the live updates fold into the same capture, and
+a dropped BMP connection ends its usefulness until the next
+establishment.
 
 ```bash
-# Capture from BMP session start (Peer Ups carry the negotiated OPENs),
-# stop after every peer's dump completes, then convert and compare:
+# Terminal 1: start before RS2's member sessions come up; leave running.
 nc -l 11019 > rs2-adjout.bmp
-rbgp diff snapshot from-bmp rs2-adjout.bmp > rs2.ndjson
-rbgp diff advertised --against rs2.ndjson    # pointed at RS1's gRPC socket
-echo $?   # 0 in sync, 1 divergent (listed), 2 comparison refused
 ```
 
+Once the members have converged, take a fixed copy in another terminal.
+A copy can end inside a BMP message while the listener appends; if conversion
+refuses it, take a new copy and retry. Compare only after successful conversion:
+
+```bash
+# Terminal 2: keep the previous snapshot intact if this capture is refused.
+if cp rs2-adjout.bmp rs2-adjout-copy.bmp &&
+   rbgp diff snapshot from-bmp rs2-adjout-copy.bmp > rs2.ndjson.tmp; then
+    mv rs2.ndjson.tmp rs2.ndjson &&
+        rbgp diff advertised --against rs2.ndjson --ignore-attribute unknown
+    echo $?   # 0 in sync, 1 divergent, 2 comparison refused (RS1's gRPC socket)
+else
+    rm -f rs2.ndjson.tmp
+    echo "Capture copy refused; no comparison performed" >&2
+fi
+```
+
+`--ignore-attribute unknown` is needed with RFC 9234 roles configured:
+a route server attaches OTC on the wire, so the capture carries it and
+gRPC does not expose it; without the flag every route reports as
+attribute-changed. This flag excludes **all** unknown/opaque attributes, not
+just OTC: the verdict covers the remaining attributes and is not full wire
+attribute equivalence. A refused conversion names the first peer and family
+whose End-of-RIB is missing and writes no snapshot; `--peer` narrows the
+snapshot to the members that did complete.
+
 Run it after every staggered rollout completes, and on a schedule
-between rollouts; archive the `--json` report. Expected divergence,
+between rollouts from the still-running capture; archive the `--json`
+report. Expected divergence,
 not a finding: a member session down on exactly one instance makes
 that member's routes one-sided everywhere. Anything else is drift —
 diff the two hosts' render receipts and reload timestamps first.

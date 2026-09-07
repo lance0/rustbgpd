@@ -202,8 +202,100 @@ class ManagementPlaneLoadContracts(unittest.TestCase):
         self.assertIsNone(result.exit_code)
         self.assertLess(time.monotonic() - started, 1.0)
 
+    def test_doctor_green_report_is_ok(self):
+        report = json.dumps({
+            "bundle": "/run/bundle.tar.gz",
+            "ok": True,
+            "checks": [
+                {"name": "daemon.rlimit.nofile.7", "status": "ok", "detail": "d"},
+                {"name": "rpki.invalid_route_policy", "status": "warn", "detail": "d"},
+            ],
+        }).encode()
+        self.assertEqual(load.validate_cli_json("doctor", report, 1, "p"), "ok")
+
+    def test_doctor_red_configuration_check_fails_the_soak(self):
+        # The exact defect: the daemon inherited a 1024 soft nofile limit and
+        # its metrics listener was returning EMFILE while every client-side
+        # gate stayed green.
+        report = json.dumps({
+            "bundle": "/run/bundle.tar.gz",
+            "ok": False,
+            "checks": [
+                {
+                    "name": "daemon.rlimit.nofile.7",
+                    "status": "fail",
+                    "detail": "daemon pid 7 rlimit nofile soft 1024 hard 1024: low",
+                },
+            ],
+        }).encode()
+        self.assertEqual(
+            load.validate_cli_json("doctor", report, 1, "p"), "doctor_check_failed"
+        )
+
+    def test_doctor_ignores_peer_reds_the_soak_gates_itself(self):
+        # The scenario trips the designated member on purpose; the run's own
+        # session, flap, and trip-evidence gates measure peer health exactly.
+        report = json.dumps({
+            "bundle": "/run/bundle.tar.gz",
+            "ok": False,
+            "checks": [
+                {"name": "peer.127.1.0.1.flaps", "status": "fail", "detail": "d"},
+                {"name": "peer.127.1.0.1.session", "status": "fail", "detail": "d"},
+                {"name": "daemon.healthy", "status": "ok", "detail": "d"},
+            ],
+        }).encode()
+        self.assertEqual(load.validate_cli_json("doctor", report, 1, "p"), "ok")
+
+    def test_doctor_report_exit_two_is_validated_not_a_cli_failure(self):
+        red = json.dumps({
+            "bundle": "/run/bundle.tar.gz", "ok": False,
+            "checks": [{"name": "state_dir.disk", "status": "fail", "detail": "d"}],
+        })
+        result = load.run_cli_command(
+            [sys.executable, "-c",
+             f"import sys; sys.stdout.write({red!r}); raise SystemExit(2)"],
+            "doctor", 5, 1, "20.0.0.0/24",
+        )
+        self.assertEqual(result.exit_code, 2)
+        self.assertEqual(result.result, "doctor_check_failed")
+
+    def test_doctor_hard_error_exit_stays_a_cli_failure(self):
+        # Exit 1 means doctor could not produce a bundle at all.
+        result = load.run_cli_command(
+            [sys.executable, "-c", "raise SystemExit(1)"],
+            "doctor", 5, 1, "20.0.0.0/24",
+        )
+        self.assertEqual(result.result, "cli_exit")
+
+    def test_doctor_malformed_report_is_rejected(self):
+        for bad in (
+            {"ok": True, "checks": [{"name": "a", "status": "ok"}]},
+            {"bundle": "/b", "ok": True, "checks": []},
+            {"bundle": "/b", "ok": True, "checks": [{"name": "a", "status": "??"}]},
+            {"bundle": "/b", "checks": [{"name": "a", "status": "ok"}]},
+            {"bundle": "/b", "ok": True, "checks": {"a": "ok"}},
+        ):
+            with self.subTest(bad=bad):
+                self.assertEqual(
+                    load.validate_cli_json("doctor", json.dumps(bad).encode(), 1, "p"),
+                    "schema",
+                )
+
+    def test_doctor_runs_far_slower_than_the_cli_cadence(self):
+        runner = (HERE / "run-soak-rs-flagship.sh").read_text()
+        self.assertIn(
+            'MANAGEMENT_DOCTOR_INTERVAL_SEC="${MANAGEMENT_DOCTOR_INTERVAL_SEC:-600}"',
+            runner,
+        )
+        self.assertIn('--doctor-interval "$MANAGEMENT_DOCTOR_INTERVAL_SEC"', runner)
+        self.assertIn('--doctor-bundle "$DOCTOR_BUNDLE"', runner)
+        self.assertIn('DOCTOR_BUNDLE="$RUN_DIR/doctor-bundle.tar.gz"', runner)
+        self.assertIn('"management_doctor_interval_sec": %s', runner)
+
     def test_commands_are_the_shipped_json_uds_surfaces(self):
-        commands = load.cli_commands("/bin/rbgp", "unix:///tmp/grpc.sock", "20.0.0.0/24")
+        commands = load.cli_commands(
+            "/bin/rbgp", "unix:///tmp/grpc.sock", "20.0.0.0/24", "/run/bundle.tar.gz"
+        )
         self.assertEqual(
             commands["neighbor"],
             ["/bin/rbgp", "-s", "unix:///tmp/grpc.sock", "--json", "neighbor"],
@@ -222,6 +314,15 @@ class ManagementPlaneLoadContracts(unittest.TestCase):
                 "rib", "--prefix", "20.0.0.0/24",
             ],
         )
+        # A fixed --output keeps one bundle; the default name is timestamped
+        # and would leave one tarball per attempt behind.
+        self.assertEqual(
+            commands["doctor"],
+            [
+                "/bin/rbgp", "-s", "unix:///tmp/grpc.sock", "--json",
+                "doctor", "--output", "/run/bundle.tar.gz",
+            ],
+        )
 
     def test_clean_stop_writes_one_terminal_summary_as_last_record(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -233,8 +334,10 @@ class ManagementPlaneLoadContracts(unittest.TestCase):
                 uds="unix:///tmp/grpc.sock",
                 peer_count=1,
                 route_prefix="20.0.0.0/24",
+                doctor_bundle=str(Path(tmp) / "doctor-bundle.tar.gz"),
                 metrics_interval_seconds=60,
                 cli_interval_seconds=60,
+                doctor_interval_seconds=60,
                 timeout_seconds=0.05,
             )
             engine._probe = lambda _operation: load.ProbeResult(0, "ok", 2, "a" * 64)
@@ -344,8 +447,10 @@ class ManagementPlaneLoadContracts(unittest.TestCase):
                 uds="unix:///tmp/grpc.sock",
                 peer_count=1,
                 route_prefix="20.0.0.0/24",
+                doctor_bundle=str(Path(tmp) / "doctor-bundle.tar.gz"),
                 metrics_interval_seconds=60,
                 cli_interval_seconds=60,
+                doctor_interval_seconds=60,
                 timeout_seconds=0.01,
             )
             sink_fd = engine.sink._fd
