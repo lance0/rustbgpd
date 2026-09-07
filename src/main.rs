@@ -97,7 +97,7 @@ use rustbgpd_api::peer_types::{
 };
 use rustbgpd_api::runtime_config_settlement::{
     OwnedRuntimeConfigOutcome, OwnedRuntimeConfigRequestContext, RuntimeConfigOperationKind,
-    RuntimeConfigSettlementWatchdog,
+    RuntimeConfigSettlementPhase, RuntimeConfigSettlementWatchdog,
 };
 use rustbgpd_api::server::{
     AccessMode as GrpcServerAccessMode, ConfigMutationGateFn, ListenerConfig as GrpcListenerConfig,
@@ -6013,6 +6013,10 @@ async fn run<T>(
                             if let Some(credentials) = grpc_credentials {
                                 match credentials.reload() {
                                     Ok(generation) => {
+                                        // A config-unchanged SIGHUP reaches here without
+                                        // any earlier mutation; the atomic credential
+                                        // publication is one.
+                                        operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
                                         operation.mark_sighup_accepted_effect();
                                         reload_metrics.record_grpc_credential_reload("success");
                                         info!(generation, "gRPC credential generation reloaded");

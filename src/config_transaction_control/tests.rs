@@ -571,11 +571,21 @@ fn runtime_config_coordinator_inventory_is_complete_and_closed() {
         .find("operation.advance_phase(RuntimeConfigSettlementPhase::Mutating)")
         .unwrap();
     let credential_effect = main[credential_reload..]
-        .find("accepted_effect = true")
+        .find("operation.mark_sighup_accepted_effect()")
         .unwrap();
     assert!(
         credential_success < credential_mutating && credential_mutating < credential_effect,
         "SIGHUP credential reload enters Mutating only after atomic publication"
+    );
+    let reload_dispatch = main
+        .find("let outcome = reload_config_with_tcp_ao(")
+        .unwrap();
+    let acknowledged_arm = main
+        .find("SighupReloadOutcome::Acknowledged(authority) => {")
+        .unwrap();
+    assert!(
+        reload_dispatch < acknowledged_arm && acknowledged_arm < credential_reload,
+        "SIGHUP credential rotation runs only for an acknowledged runtime generation"
     );
     for kind in [
         "NeighborAdd",
