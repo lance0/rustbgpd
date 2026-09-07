@@ -587,6 +587,27 @@ fn runtime_config_coordinator_inventory_is_complete_and_closed() {
         reload_dispatch < acknowledged_arm && acknowledged_arm < credential_reload,
         "SIGHUP credential rotation runs only for an acknowledged runtime generation"
     );
+    let clean_arm = main
+        .find("SighupReloadOutcome::CleanNoEffect(error) =>")
+        .unwrap();
+    let fenced_arm = main
+        .find("SighupReloadOutcome::RecoveryFenced { error, reason } =>")
+        .unwrap();
+    assert_eq!(
+        main.matches("finalize_sighup_authority(").count(),
+        1,
+        "exactly one SIGHUP finalization call site"
+    );
+    let finalize_call = main.find("finalize_sighup_authority(").unwrap();
+    assert!(
+        reload_dispatch < clean_arm
+            && clean_arm < acknowledged_arm
+            && fenced_arm < acknowledged_arm
+            && acknowledged_arm < finalize_call,
+        "finalize_sighup_authority adopts only an acknowledged SIGHUP generation: the call \
+         site must follow the Acknowledged arm and never sit between the CleanNoEffect or \
+         RecoveryFenced arms and it"
+    );
     for kind in [
         "NeighborAdd",
         "NeighborDelete",
