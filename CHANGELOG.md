@@ -44,6 +44,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   verification. Preparation and CI use an offline version record; release
   updates no longer require editing contract tests.
 
+### Fixed
+
+- The paired route-server cookbook now starts the RFC 8671 post-policy BMP
+  capture before RS2's member sessions establish: the `rib_out_post` stream
+  sends no dump to a collector that connects later, and
+  `rbgp diff snapshot from-bmp` refuses a capture missing a peer's End-of-RIB.
+  Neither `rbgp neighbor <peer> refresh-out` nor a member's ROUTE-REFRESH
+  completes a late capture. The comparison step now passes
+  `--ignore-attribute unknown` for the OTC attribute a route server attaches
+  on the wire.
+
 ## [0.69.0] — 2026-09-07
 
 ### Added
