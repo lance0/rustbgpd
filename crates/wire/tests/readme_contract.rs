@@ -338,11 +338,16 @@ fn source_public_error_roster() -> BTreeMap<String, bool> {
 }
 
 #[test]
-fn usage_matches_the_published_wire_contract() {
+fn usage_matches_the_crate_local_contract() {
     let usage = section(README, "## Usage");
-    // The prepared package can be ahead of crates.io; the ordinary registry
-    // example must retain the published release until publication.
-    assert!(usage.contains(&expected_dependency_block("0.20.0")));
+    // The repository's embedding checker owns registry-version equality.
+    // This packaged test keeps the example's shape and crate-local API contract.
+    let registry_version = usage
+        .lines()
+        .find_map(|line| line.strip_prefix("rustbgpd-wire = \"")?.strip_suffix('"'))
+        .filter(|version| !version.is_empty())
+        .expect("Usage must contain a registry dependency example");
+    assert!(usage.contains(&expected_dependency_block(registry_version)));
     assert!(usage.contains(&format!(
         "rustbgpd-wire = {{ version = \"{}\", path = \"../rustbgpd/crates/wire\" }}",
         env!("CARGO_PKG_VERSION")
