@@ -331,6 +331,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   0.4.16 → 0.4.19. This lockfile-only update applies upstream HTTP/2 trailer
   handling and frame-budget hardening to the tonic gRPC and gNMI listeners.
 
+- Refreshed internal TLS dependencies to tokio-rustls 0.26.5, rustls 0.23.43,
+  rustls-webpki 0.103.15, and rustls-pki-types 1.15.1. tokio-rustls can return
+  more data from a stream read; provider selection and TLS configuration remain
+  unchanged.
+
 - `rbgp rib add` uses `--next-hop` as the canonical flag, retaining
   `--nexthop` as a visible compatibility alias. The default RIB pager now
   wraps long lines (`less -FRX` in auto mode, `less -RX` in always mode);
