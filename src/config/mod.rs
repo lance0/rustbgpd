@@ -4946,18 +4946,22 @@ fn compute_effective_neighbor_impact(
             );
         }
 
-        attribute_rpol_term_changes(
-            &mut reasons,
-            "import",
-            old_resolved.import_policy.as_ref(),
-            new_resolved.import_policy.as_ref(),
-        );
-        attribute_rpol_term_changes(
-            &mut reasons,
-            "export",
-            old_resolved.export_policy.as_ref(),
-            new_resolved.export_policy.as_ref(),
-        );
+        if import_moved {
+            attribute_rpol_term_changes(
+                &mut reasons,
+                "import",
+                old_resolved.import_policy.as_ref(),
+                new_resolved.import_policy.as_ref(),
+            );
+        }
+        if export_moved {
+            attribute_rpol_term_changes(
+                &mut reasons,
+                "export",
+                old_resolved.export_policy.as_ref(),
+                new_resolved.export_policy.as_ref(),
+            );
+        }
 
         if !reasons.is_empty() {
             let kind =
@@ -4981,8 +4985,9 @@ fn compute_effective_neighbor_impact(
     out
 }
 
-/// Name direct compiled term edits only when the configured calls and their
-/// indexed match data still align. Structural changes retain the coarse reason.
+/// Name direct compiled term edits in a changed resolved chain only when its
+/// configured calls and indexed match data still align. Structural changes
+/// retain the coarse reason.
 fn attribute_rpol_term_changes(
     reasons: &mut Vec<String>,
     direction: &str,
@@ -4992,9 +4997,6 @@ fn attribute_rpol_term_changes(
     let (Some(old), Some(new)) = (old, new) else {
         return;
     };
-    if old == new {
-        return;
-    }
     if !old
         .policies
         .iter()
@@ -5149,18 +5151,22 @@ fn dynamic_range_effective_impact(
         if pg_changed.contains(old_range.peer_group.as_str()) {
             reasons.push(format!("peer_group {:?} changed", old_range.peer_group));
         }
-        attribute_rpol_term_changes(
-            &mut reasons,
-            "import",
-            old_resolved.import_policy.as_ref(),
-            new_resolved.import_policy.as_ref(),
-        );
-        attribute_rpol_term_changes(
-            &mut reasons,
-            "export",
-            old_resolved.export_policy.as_ref(),
-            new_resolved.export_policy.as_ref(),
-        );
+        if import_moved {
+            attribute_rpol_term_changes(
+                &mut reasons,
+                "import",
+                old_resolved.import_policy.as_ref(),
+                new_resolved.import_policy.as_ref(),
+            );
+        }
+        if export_moved {
+            attribute_rpol_term_changes(
+                &mut reasons,
+                "export",
+                old_resolved.export_policy.as_ref(),
+                new_resolved.export_policy.as_ref(),
+            );
+        }
 
         if !reasons.is_empty() {
             let kind =
