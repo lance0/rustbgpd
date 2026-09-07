@@ -138,6 +138,8 @@ PROM_TMP="$RUN_DIR/.metrics.prom"
 
 # shellcheck source=tests/soak/host-lock.sh
 source "$SOAK_SCRIPT_DIR/host-lock.sh"
+# shellcheck source=tests/soak/fd-headroom.sh
+source "$SOAK_SCRIPT_DIR/fd-headroom.sh"
 
 log() {
     printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
@@ -513,6 +515,7 @@ write_run_json() {
         printf '  "management_route_prefix": "%s",\n' "$MANAGEMENT_ROUTE_PREFIX"
         printf '  "measured_start_monotonic": %s,\n' "$measured_start"
         printf '  "measured_end_monotonic": %s,\n' "$measured_end"
+        printf '  "nofile_soft": %s,\n' "$RUSTBGPD_NOFILE_SOFT_JSON"
         printf '  "designated_member": "%s"\n' "$DESIGNATED_ADDR"
         echo "}"
     } >"$tmp"
@@ -529,6 +532,8 @@ main() {
     for tool in cargo curl awk python3 ss flock git ps df mktemp timeout; do
         require_tool "$tool"
     done
+    # Before any daemon launch: the daemon inherits this shell's soft limit.
+    require_fd_headroom || exit $?
     if ! validate_management_timing; then
         log "ERROR: management-plane intervals and timeout must be finite positive numbers"
         exit 2
