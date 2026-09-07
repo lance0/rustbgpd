@@ -41,6 +41,7 @@ mod admission;
 mod bfd;
 mod dynamic;
 mod events;
+pub(crate) mod generation;
 mod inbound;
 mod lifecycle;
 mod notifications;
@@ -158,7 +159,15 @@ pub(crate) struct PlannedTransactionConfig {
     pub(crate) candidate: Box<Config>,
 }
 
+pub(crate) use generation::ReloadGenerationOutcome;
+
 pub(crate) enum InternalCommand {
+    /// Apply one complete SIGHUP candidate as an owned runtime generation.
+    ApplyReloadGeneration {
+        candidate: Box<Config>,
+        actions: Vec<crate::config::ReloadPeerAction>,
+        reply: oneshot::Sender<ReloadGenerationOutcome>,
+    },
     ReplaceConfigSnapshot {
         config: Box<Config>,
         /// Optional acknowledgement, sent after `current_config` is assigned.
@@ -1840,6 +1849,16 @@ impl PeerManager {
                 }
                 internal = Self::receive_internal_command(&mut self.internal_rx) => {
                     match internal {
+                        Some(InternalCommand::ApplyReloadGeneration { candidate, actions, reply }) => {
+                            let policy_routes_prior =
+                                self.installed_policy_routes_reachability();
+                            let outcome =
+                                Box::pin(self.apply_reload_generation(*candidate, actions)).await;
+                            if matches!(outcome, ReloadGenerationOutcome::Applied(_)) {
+                                self.reap_retired_policy_routes(&policy_routes_prior);
+                            }
+                            let _ = reply.send(outcome);
+                        }
                         Some(InternalCommand::ReplaceConfigSnapshot { config, ack }) => {
                             self.current_config = *config;
                             self.config_snapshot_staged = false;

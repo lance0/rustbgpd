@@ -35,7 +35,7 @@ use crate::config::{self, AcceptedConfigSnapshot, Config};
 use crate::config_persister::ConfigMutation;
 use crate::evpn_runtime_converger::{EvpnRuntimeReloadApply, EvpnRuntimeReloadTerminal};
 use crate::fib_runtime::{FibRuntimeCommand, OwnedFibReplaceOutcome};
-use crate::peer_manager::InternalCommand;
+use crate::peer_manager::{InternalCommand, ReloadGenerationOutcome};
 use crate::policy_admin::{self, apply_config_event, catalog_config_error};
 
 #[cfg(debug_assertions)]
@@ -302,7 +302,6 @@ impl std::fmt::Display for ReloadStepError {
 pub(crate) struct SighupReloadPlan {
     pub(crate) baseline_runtime: Config,
     pub(crate) desired: Arc<AcceptedConfigSnapshot>,
-    pub(crate) accepted_effect: bool,
 }
 
 #[derive(Clone)]
@@ -401,6 +400,21 @@ impl<'a> SighupMutationProgress<'a> {
     fn record_recovery_step(&self, reload_step: &'static str) {
         if let Some(operation) = self.operation {
             operation.record_sighup_recovery_step(reload_step);
+        }
+    }
+}
+
+#[cfg(test)]
+impl std::fmt::Debug for SighupReloadOutcome {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CleanNoEffect(error) => write!(formatter, "CleanNoEffect({error})"),
+            Self::Acknowledged(authority) => {
+                write!(formatter, "Acknowledged({:?})", authority.completion)
+            }
+            Self::RecoveryFenced { error, reason } => {
+                write!(formatter, "RecoveryFenced({error}, {reason:?})")
+            }
         }
     }
 }
@@ -1865,11 +1879,11 @@ pub(crate) async fn reload_config(
         SighupReloadPlan {
             baseline_runtime: current.clone(),
             desired,
-            accepted_effect: false,
         },
         live_grpc_tcp,
         live_grpc_uds,
         peer_mgr_tx,
+        None,
         None,
         fib_cmd_tx,
         evpn_runtime_apply,
@@ -1889,6 +1903,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
     live_grpc_tcp: Option<&config::GrpcTcpListenerConfig>,
     live_grpc_uds: Option<&config::GrpcUdsListenerConfig>,
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    peer_mgr_internal_tx: Option<&mpsc::Sender<InternalCommand>>,
     rib_tx: Option<&mpsc::Sender<rustbgpd_rib::RibUpdate>>,
     fib_cmd_tx: Option<&mpsc::Sender<FibRuntimeCommand>>,
     evpn_runtime_apply: Option<&EvpnRuntimeReloadApply>,
@@ -1897,7 +1912,7 @@ pub(crate) async fn reload_config_with_tcp_ao(
 ) -> SighupReloadOutcome {
     let current = &plan.baseline_runtime;
     let desired_snapshot = plan.desired;
-    let mut progress = SighupMutationProgress::new(operation, plan.accepted_effect);
+    let mut progress = SighupMutationProgress::new(operation, false);
     // LAN-305: parse dataset contents against the running binding schema, but
     // stage changed data and refresh errors on detached candidate handles.
     // Shared live handles are committed only after the complete no-side-effect
@@ -2065,6 +2080,244 @@ pub(crate) async fn reload_config_with_tcp_ao(
         Ok(targets) => targets,
         Err(error) => return clean_reload_failure("gnmi_dialout.plan", error),
     };
+
+    let dataset_commit = desired_config.prepare_staged_datasets(&current.policy.dataset_bindings);
+    let dataset_commit_pending = !dataset_commit.is_empty();
+    new_config.policy.dataset_bindings = desired_config.policy.dataset_bindings.clone();
+    new_config.policy.dataset_events = desired_config.policy.dataset_events.clone();
+
+    if new_config.apply_bum_enforcement != current.apply_bum_enforcement {
+        error!(
+            "apply_bum_enforcement differs from the live config: the \
+             EVPN dataplane reconciler read this startup-only setting \
+             when it was spawned. Restart rustbgpd to apply the Gate 8b \
+             kernel-enforcement opt-in."
+        );
+        new_config.apply_bum_enforcement = current.apply_bum_enforcement;
+    }
+    // Restart-required sections resolved once at startup: without an
+    // explicit pin, a SIGHUP would silently advance the in-memory
+    // snapshot to the new declared state while the running subsystem
+    // keeps the startup values — the next reload then stops warning
+    // even though nothing was applied. Pin each back to the live
+    // startup snapshot (the operator's edit survives in the desired
+    // on-disk config for the next restart).
+    if new_config.security != current.security {
+        error!(
+            "[security.grpc] changed — gRPC authorization enforcement and roles \
+             are resolved once at startup when listeners are built. Restart \
+             rustbgpd to apply; the live listeners keep their startup \
+             authorization until then."
+        );
+        new_config.security = current.security.clone();
+    }
+    if new_config.event_history != current.event_history {
+        error!(
+            "[event_history] changed — the ADR-0072 durable event outbox is \
+             configured once at startup. Restart rustbgpd to apply; the running \
+             outbox keeps its startup configuration until then."
+        );
+        new_config.event_history = current.event_history.clone();
+    }
+    if new_config.inbound_admission != current.inbound_admission {
+        error!(
+            "[inbound_admission] changed — the ADR-0120 accept-path limiter is \
+             built once at startup. Restart rustbgpd to apply; inbound admission \
+             keeps its startup configuration until then."
+        );
+        new_config.inbound_admission = current.inbound_admission.clone();
+    }
+    if new_config.managed_netdevs != current.managed_netdevs {
+        error!(
+            "[managed_netdevs] changed — the ADR-0091 managed-netdev lifecycle \
+             reads this table once at startup. Restart rustbgpd to apply; the \
+             dataplane keeps reconciling the startup netdev set until then."
+        );
+        new_config.managed_netdevs = current.managed_netdevs.clone();
+    }
+    // `[[fib_tables]]` is hot-applied to the running FIB reconciler below
+    // (after the honor knobs), ack-gated on the actor accepting the new set —
+    // see the FIB hot-apply step.
+    if new_config.global.install_blackhole_discard != current.global.install_blackhole_discard
+        || new_config.global.allow_blackhole_broad_prefixes
+            != current.global.allow_blackhole_broad_prefixes
+        || new_config.global.blackhole_discard_max_active
+            != current.global.blackhole_discard_max_active
+        || new_config.global.blackhole_discard_install_rate_per_minute
+            != current.global.blackhole_discard_install_rate_per_minute
+        || new_config.global.blackhole_discard_install_burst
+            != current.global.blackhole_discard_install_burst
+    {
+        error!(
+            "[global] BLACKHOLE FIB discard settings differ from the live config: \
+             the RFC 7999 kernel-discard reconciler is spawned only at startup. \
+             Restart rustbgpd to apply install_blackhole_discard, \
+             allow_blackhole_broad_prefixes, blackhole_discard_max_active, \
+             blackhole_discard_install_rate_per_minute, or \
+             blackhole_discard_install_burst edits."
+        );
+        new_config.global.install_blackhole_discard = current.global.install_blackhole_discard;
+        new_config.global.allow_blackhole_broad_prefixes =
+            current.global.allow_blackhole_broad_prefixes;
+        new_config.global.blackhole_discard_max_active =
+            current.global.blackhole_discard_max_active;
+        new_config.global.blackhole_discard_install_rate_per_minute =
+            current.global.blackhole_discard_install_rate_per_minute;
+        new_config.global.blackhole_discard_install_burst =
+            current.global.blackhole_discard_install_burst;
+    }
+    if blackhole_fib_reload_touches_spawn_gate && honor_blackhole_changed {
+        error!(
+            "[global] honor_blackhole differs from the live config while \
+             BLACKHOLE FIB discard is configured: the RFC 7999 \
+             kernel-discard reconciler is spawned only at startup from \
+             honor_blackhole && install_blackhole_discard. Restart \
+             rustbgpd to apply this edit."
+        );
+        new_config.global.honor_blackhole = current.global.honor_blackhole;
+        honor_blackhole_changed = false;
+    }
+    if new_config.global.dynamic_neighbor_limit != current.global.dynamic_neighbor_limit {
+        error!(
+            "[global].dynamic_neighbor_limit differs from the live config: dynamic-neighbor \
+             admission capacity is allocated once at startup. Restart rustbgpd to change it. \
+             The runtime snapshot keeps the startup limit for this reload."
+        );
+        new_config.global.dynamic_neighbor_limit = current.global.dynamic_neighbor_limit;
+    }
+    if config::pin_rfc8212_posture_startup_only(&mut new_config, current) {
+        error!(
+            "config_epoch or [global].ebgp_requires_policy differs from the live config: \
+             the ADR-0112/0119 RFC 8212 posture is read once at startup. Restart rustbgpd \
+             to change it. The complete running epoch/policy tuple is kept at its startup \
+             value for this reload."
+        );
+    }
+    if config::pin_bfd_startup_only_runtime(&mut new_config, current) {
+        error!(
+            "BFD config differs from the live session set: the ADR-0067 BFD actor \
+             resolves [[bfd_profiles]] and neighbor/peer-group bfd once at startup. \
+             Restart rustbgpd to add, remove, or retune BFD sessions. The profiles \
+             and per-neighbor/peer-group bfd fields are kept at their live startup \
+             values for this reload."
+        );
+    }
+
+    let policy_diff = config::diff_policy(&current.policy, &new_config.policy);
+    let peer_group_diff = config::diff_peer_groups(&current.peer_groups, &new_config.peer_groups);
+    let diff = config::diff_neighbors(&current.neighbors, &new_config.neighbors);
+
+    let neighbors_unchanged =
+        diff.added.is_empty() && diff.removed.is_empty() && diff.changed.is_empty();
+    let peer_groups_unchanged = peer_group_diff.added.is_empty()
+        && peer_group_diff.removed.is_empty()
+        && peer_group_diff.changed.is_empty();
+    // ADR-0073: `[policy.explain]` (enabled / cache_size) is read when a
+    // session is constructed (`build_transport_config`), so a reload of
+    // those fields is restart-required per peer — the new snapshot is
+    // adopted (new sessions honour it) but live sessions keep their
+    // current behaviour until they re-establish. The diff machinery
+    // tracks neighbors / policy chains / peer-groups, not this
+    // diagnostic-retention knob, so detect it explicitly rather than
+    // letting an explain-only reload report "no changes detected".
+    let explain_changed = current.policy.explain != new_config.policy.explain
+        || current.policy.reject_retention != new_config.policy.reject_retention;
+    let fib_tables_changed = new_config.fib_tables != current.fib_tables;
+    let dynamic_neighbors_changed = new_config.dynamic_neighbors != current.dynamic_neighbors;
+    let evpn_runtime_pending = evpn_runtime_changed(&new_config, current);
+    // The listener inbound-auth inventory is config-derived, so the family
+    // is known even where no listener handle is attached; only the
+    // replacement itself needs the handle.
+    let current_inventory = match config::listener_inbound_auth_inventory(current) {
+        Ok(inventory) => inventory,
+        Err(error) => {
+            error!(%error, "failed to compute the live listener inbound-auth inventory");
+            return clean_reload_failure("listener_auth.plan", error);
+        }
+    };
+    let desired_inventory = match config::listener_inbound_auth_inventory(&new_config) {
+        Ok(inventory) => inventory,
+        Err(error) => {
+            error!(%error, "failed to compute the desired listener inbound-auth inventory");
+            return clean_reload_failure("listener_auth.plan", error);
+        }
+    };
+    let listener_inventory_changed = current_inventory != desired_inventory;
+    let listener_auth_changed = config::listener_inbound_auth_bearing(&current_inventory)
+        != config::listener_inbound_auth_bearing(&desired_inventory);
+    let listener_replacement = (listener_inventory_changed && tcp_ao_listener.is_some())
+        .then_some((desired_inventory, current_inventory));
+    let policy_generation_changed = !policy_diff.definitions_added.is_empty()
+        || !policy_diff.definitions_removed.is_empty()
+        || !policy_diff.definitions_changed.is_empty()
+        || !policy_diff.neighbor_sets_added.is_empty()
+        || !policy_diff.neighbor_sets_removed.is_empty()
+        || !policy_diff.neighbor_sets_changed.is_empty()
+        || policy_diff.import_chain_changed
+        || policy_diff.export_chain_changed
+        || policy_diff.rpol_changed;
+    let dataset_events_pending = !new_config.policy.dataset_events.swapped.is_empty()
+        || !new_config.policy.dataset_events.failed.is_empty();
+
+    // One shared classification decides the executor before the first
+    // credential, listener, session, or catalog effect.
+    let route = config::classify_sighup_reload(config::SighupReloadFamilies {
+        generation: !neighbors_unchanged || !peer_groups_unchanged || policy_generation_changed,
+        datasets: dataset_commit_pending || policy_diff.datasets_changed || dataset_events_pending,
+        dynamic_ranges: dynamic_neighbors_changed,
+        evpn_runtime: evpn_runtime_pending,
+        fib_tables: fib_tables_changed,
+        honor_knobs: honor_graceful_shutdown_changed || honor_blackhole_changed,
+        tcp_ao: tcp_ao_rotation_candidate,
+        listener_auth: listener_auth_changed,
+    });
+    info!(route = %route.describe(), "reload route classified");
+    match route {
+        config::SighupReloadRoute::Rejected { reasons } => {
+            error!(
+                reasons = %reasons.join("; "),
+                "reload rejected before any effect: static-neighbor, peer-group, or policy \
+                 changes cannot share one reload with these families; apply them in a \
+                 separate reload (the candidate file is unchanged and the running \
+                 generation is retained)"
+            );
+            return clean_reload_failure(
+                "reload.preflight",
+                format!(
+                    "unsupported compound candidate; reload these families on their own: {}",
+                    reasons.join("; ")
+                ),
+            );
+        }
+        config::SighupReloadRoute::Generation => {
+            let actions = match config::plan_reload_peer_actions(current, &new_config) {
+                Ok(actions) => actions,
+                Err(error) => return clean_reload_failure("generation.plan", error.to_string()),
+            };
+            drop(dataset_commit);
+            return reload_generation_route(
+                &mut progress,
+                current,
+                new_config,
+                desired_snapshot,
+                dialout_targets,
+                peer_mgr_internal_tx,
+                rib_tx,
+                tcp_ao_listener.zip(listener_replacement),
+                actions,
+            )
+            .await;
+        }
+        config::SighupReloadRoute::Sequential { reasons } if !reasons.is_empty() => {
+            warn!(
+                reasons = %reasons.join("; "),
+                "static-neighbor, peer-group, or policy changes run on the sequential \
+                 reload path without generation compensation because the candidate \
+                 also changes these families"
+            );
+        }
+        config::SighupReloadRoute::Sequential { .. } => {}
+    }
 
     // TCP-AO rotation is the first fallible external apply. The
     // complete pinned candidate is valid now; preflight every managed session,
@@ -2238,22 +2491,9 @@ pub(crate) async fn reload_config_with_tcp_ao(
     // multi-generation rotation to preserve. The listener is updated before
     // sessions reconcile so a bounced peer's inbound reconnect already meets
     // the new inventory.
-    if let Some(listener) = tcp_ao_listener {
-        let current_inventory = match config::listener_inbound_auth_inventory(current) {
-            Ok(inventory) => inventory,
-            Err(error) => {
-                error!(%error, "failed to compute the live listener inbound-auth inventory");
-                return clean_reload_failure("listener_auth.plan", error);
-            }
-        };
-        let desired_inventory = match config::listener_inbound_auth_inventory(&new_config) {
-            Ok(inventory) => inventory,
-            Err(error) => {
-                error!(%error, "failed to compute the desired listener inbound-auth inventory");
-                return clean_reload_failure("listener_auth.plan", error);
-            }
-        };
-        if current_inventory != desired_inventory {
+    if let (Some(listener), Some((desired_inventory, _))) = (tcp_ao_listener, listener_replacement)
+    {
+        {
             let (md5_keys, ttl_security) = desired_inventory;
             if let Err(error) = listener_mutation_step(
                 listener
@@ -2276,11 +2516,6 @@ pub(crate) async fn reload_config_with_tcp_ao(
             info!("listener inbound MD5/GTSM inventory replaced");
         }
     }
-
-    let dataset_commit = desired_config.prepare_staged_datasets(&current.policy.dataset_bindings);
-    let dataset_commit_pending = !dataset_commit.is_empty();
-    new_config.policy.dataset_bindings = desired_config.policy.dataset_bindings.clone();
-    new_config.policy.dataset_events = desired_config.policy.dataset_events.clone();
 
     if let Some(apply) = evpn_runtime_apply {
         let evpn_operation = operation.cloned();
@@ -2347,144 +2582,6 @@ pub(crate) async fn reload_config_with_tcp_ao(
         );
         copy_evpn_runtime_fields(&mut new_config, current);
     }
-    if new_config.apply_bum_enforcement != current.apply_bum_enforcement {
-        error!(
-            "apply_bum_enforcement differs from the live config: the \
-             EVPN dataplane reconciler read this startup-only setting \
-             when it was spawned. Restart rustbgpd to apply the Gate 8b \
-             kernel-enforcement opt-in."
-        );
-        new_config.apply_bum_enforcement = current.apply_bum_enforcement;
-    }
-    // Restart-required sections resolved once at startup: without an
-    // explicit pin, a SIGHUP would silently advance the in-memory
-    // snapshot to the new declared state while the running subsystem
-    // keeps the startup values — the next reload then stops warning
-    // even though nothing was applied. Pin each back to the live
-    // startup snapshot (the operator's edit survives in the desired
-    // on-disk config for the next restart).
-    if new_config.security != current.security {
-        error!(
-            "[security.grpc] changed — gRPC authorization enforcement and roles \
-             are resolved once at startup when listeners are built. Restart \
-             rustbgpd to apply; the live listeners keep their startup \
-             authorization until then."
-        );
-        new_config.security = current.security.clone();
-    }
-    if new_config.event_history != current.event_history {
-        error!(
-            "[event_history] changed — the ADR-0072 durable event outbox is \
-             configured once at startup. Restart rustbgpd to apply; the running \
-             outbox keeps its startup configuration until then."
-        );
-        new_config.event_history = current.event_history.clone();
-    }
-    if new_config.inbound_admission != current.inbound_admission {
-        error!(
-            "[inbound_admission] changed — the ADR-0120 accept-path limiter is \
-             built once at startup. Restart rustbgpd to apply; inbound admission \
-             keeps its startup configuration until then."
-        );
-        new_config.inbound_admission = current.inbound_admission.clone();
-    }
-    if new_config.managed_netdevs != current.managed_netdevs {
-        error!(
-            "[managed_netdevs] changed — the ADR-0091 managed-netdev lifecycle \
-             reads this table once at startup. Restart rustbgpd to apply; the \
-             dataplane keeps reconciling the startup netdev set until then."
-        );
-        new_config.managed_netdevs = current.managed_netdevs.clone();
-    }
-    // `[[fib_tables]]` is hot-applied to the running FIB reconciler below
-    // (after the honor knobs), ack-gated on the actor accepting the new set —
-    // see the FIB hot-apply step.
-    if new_config.global.install_blackhole_discard != current.global.install_blackhole_discard
-        || new_config.global.allow_blackhole_broad_prefixes
-            != current.global.allow_blackhole_broad_prefixes
-        || new_config.global.blackhole_discard_max_active
-            != current.global.blackhole_discard_max_active
-        || new_config.global.blackhole_discard_install_rate_per_minute
-            != current.global.blackhole_discard_install_rate_per_minute
-        || new_config.global.blackhole_discard_install_burst
-            != current.global.blackhole_discard_install_burst
-    {
-        error!(
-            "[global] BLACKHOLE FIB discard settings differ from the live config: \
-             the RFC 7999 kernel-discard reconciler is spawned only at startup. \
-             Restart rustbgpd to apply install_blackhole_discard, \
-             allow_blackhole_broad_prefixes, blackhole_discard_max_active, \
-             blackhole_discard_install_rate_per_minute, or \
-             blackhole_discard_install_burst edits."
-        );
-        new_config.global.install_blackhole_discard = current.global.install_blackhole_discard;
-        new_config.global.allow_blackhole_broad_prefixes =
-            current.global.allow_blackhole_broad_prefixes;
-        new_config.global.blackhole_discard_max_active =
-            current.global.blackhole_discard_max_active;
-        new_config.global.blackhole_discard_install_rate_per_minute =
-            current.global.blackhole_discard_install_rate_per_minute;
-        new_config.global.blackhole_discard_install_burst =
-            current.global.blackhole_discard_install_burst;
-    }
-    if blackhole_fib_reload_touches_spawn_gate && honor_blackhole_changed {
-        error!(
-            "[global] honor_blackhole differs from the live config while \
-             BLACKHOLE FIB discard is configured: the RFC 7999 \
-             kernel-discard reconciler is spawned only at startup from \
-             honor_blackhole && install_blackhole_discard. Restart \
-             rustbgpd to apply this edit."
-        );
-        new_config.global.honor_blackhole = current.global.honor_blackhole;
-        honor_blackhole_changed = false;
-    }
-    if new_config.global.dynamic_neighbor_limit != current.global.dynamic_neighbor_limit {
-        error!(
-            "[global].dynamic_neighbor_limit differs from the live config: dynamic-neighbor \
-             admission capacity is allocated once at startup. Restart rustbgpd to change it. \
-             The runtime snapshot keeps the startup limit for this reload."
-        );
-        new_config.global.dynamic_neighbor_limit = current.global.dynamic_neighbor_limit;
-    }
-    if config::pin_rfc8212_posture_startup_only(&mut new_config, current) {
-        error!(
-            "config_epoch or [global].ebgp_requires_policy differs from the live config: \
-             the ADR-0112/0119 RFC 8212 posture is read once at startup. Restart rustbgpd \
-             to change it. The complete running epoch/policy tuple is kept at its startup \
-             value for this reload."
-        );
-    }
-    if config::pin_bfd_startup_only_runtime(&mut new_config, current) {
-        error!(
-            "BFD config differs from the live session set: the ADR-0067 BFD actor \
-             resolves [[bfd_profiles]] and neighbor/peer-group bfd once at startup. \
-             Restart rustbgpd to add, remove, or retune BFD sessions. The profiles \
-             and per-neighbor/peer-group bfd fields are kept at their live startup \
-             values for this reload."
-        );
-    }
-
-    let policy_diff = config::diff_policy(&current.policy, &new_config.policy);
-    let peer_group_diff = config::diff_peer_groups(&current.peer_groups, &new_config.peer_groups);
-    let diff = config::diff_neighbors(&current.neighbors, &new_config.neighbors);
-
-    let neighbors_unchanged =
-        diff.added.is_empty() && diff.removed.is_empty() && diff.changed.is_empty();
-    let peer_groups_unchanged = peer_group_diff.added.is_empty()
-        && peer_group_diff.removed.is_empty()
-        && peer_group_diff.changed.is_empty();
-    // ADR-0073: `[policy.explain]` (enabled / cache_size) is read when a
-    // session is constructed (`build_transport_config`), so a reload of
-    // those fields is restart-required per peer — the new snapshot is
-    // adopted (new sessions honour it) but live sessions keep their
-    // current behaviour until they re-establish. The diff machinery
-    // tracks neighbors / policy chains / peer-groups, not this
-    // diagnostic-retention knob, so detect it explicitly rather than
-    // letting an explain-only reload report "no changes detected".
-    let explain_changed = current.policy.explain != new_config.policy.explain
-        || current.policy.reject_retention != new_config.policy.reject_retention;
-    let fib_tables_changed = new_config.fib_tables != current.fib_tables;
-    let dynamic_neighbors_changed = new_config.dynamic_neighbors != current.dynamic_neighbors;
     if !policy_diff.has_changes()
         && peer_groups_unchanged
         && neighbors_unchanged
@@ -3754,6 +3851,232 @@ pub(crate) async fn reload_config_with_tcp_ao(
     )
 }
 
+/// Restore the live outbound prefix maxima after the generation they were
+/// activated for did not settle.
+async fn restore_outbound_prefix_limits(
+    rib_tx: &mpsc::Sender<rustbgpd_rib::RibUpdate>,
+    current: &Config,
+) -> Result<(), String> {
+    let txn = next_outbound_prefix_limit_txn();
+    prepare_outbound_prefix_limits(rib_tx, txn, current).await?;
+    finish_outbound_prefix_limits(rib_tx, txn, true).await
+}
+
+/// The effects the generation route applies outside the peer manager, each
+/// restored from a retained live value when the manager does not settle.
+struct GenerationSideEffects<'a> {
+    limits_rib_tx: Option<&'a mpsc::Sender<rustbgpd_rib::RibUpdate>>,
+    listener_prior: Option<(&'a TcpAoListenerHandle, config::ListenerInboundInventory)>,
+}
+
+impl GenerationSideEffects<'_> {
+    /// Restore the listener inventory and the outbound maxima, then report
+    /// `error` as a clean rejection; a failed restore fences instead.
+    async fn restore_then_reject(
+        self,
+        progress: &SighupMutationProgress<'_>,
+        current: &Config,
+        bucket: &'static str,
+        error: String,
+    ) -> SighupReloadOutcome {
+        let mut failures = Vec::new();
+        if let Some((listener, (md5_keys, ttl_security))) = self.listener_prior
+            && let Err(restore_error) = listener_step(
+                listener
+                    .replace_inbound_auth(md5_keys, ttl_security, || {})
+                    .await,
+            )
+        {
+            failures.push(format!("listener inbound inventory: {restore_error}"));
+        }
+        if let Some(rib_tx) = self.limits_rib_tx
+            && let Err(restore_error) = restore_outbound_prefix_limits(rib_tx, current).await
+        {
+            failures.push(format!("outbound prefix maxima: {restore_error}"));
+        }
+        if failures.is_empty() {
+            return clean_reload_failure(bucket, error);
+        }
+        error!(
+            failures = %failures.join("; "),
+            "prior listener or RIB state could not be restored after the generation was rejected"
+        );
+        fenced_reload_failure(
+            progress,
+            "generation.restore",
+            ReloadStepError::Rejected(format!(
+                "{error}; restoring prior state failed: {}",
+                failures.join("; ")
+            )),
+            RuntimeConfigFenceReason::KnownDivergence,
+        )
+    }
+}
+
+/// The generation route: one resolved candidate, one owned peer-manager
+/// operation, one acknowledgement. The outbound prefix maxima and the
+/// listener inbound inventory are the only effects outside the peer manager;
+/// both converge first so the manager's own compensation is the last
+/// mutation, and both restore from retained live values if it does not
+/// settle.
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the generation route threads the same live handles as the sequential reload and keeps its two side effects, dispatch, and restore classification in one flow"
+)]
+async fn reload_generation_route(
+    progress: &mut SighupMutationProgress<'_>,
+    current: &Config,
+    new_config: Config,
+    desired_snapshot: Arc<AcceptedConfigSnapshot>,
+    dialout_targets: Vec<DialoutTarget>,
+    peer_mgr_internal_tx: Option<&mpsc::Sender<InternalCommand>>,
+    rib_tx: Option<&mpsc::Sender<rustbgpd_rib::RibUpdate>>,
+    listener_replacement: Option<(
+        &TcpAoListenerHandle,
+        (
+            config::ListenerInboundInventory,
+            config::ListenerInboundInventory,
+        ),
+    )>,
+    actions: Vec<config::ReloadPeerAction>,
+) -> SighupReloadOutcome {
+    let Some(peer_mgr_internal_tx) = peer_mgr_internal_tx else {
+        return clean_reload_failure(
+            "generation.dispatch",
+            "peer manager generation executor unavailable",
+        );
+    };
+    let mut effects = GenerationSideEffects {
+        limits_rib_tx: None,
+        listener_prior: None,
+    };
+
+    // Outbound maxima: ADR-0113 preflight rejects a lowering below current
+    // advertised usage before any session is touched.
+    let limits_rib_tx =
+        rib_tx.filter(|_| current.outbound_prefix_limits() != new_config.outbound_prefix_limits());
+    if let Some(rib_tx) = limits_rib_tx {
+        let txn = next_outbound_prefix_limit_txn();
+        if let Err(error) = prepare_outbound_prefix_limits(rib_tx, txn, &new_config).await {
+            let _ = finish_outbound_prefix_limits(rib_tx, txn, false).await;
+            return clean_reload_failure("prefix_limit.prepare", error);
+        }
+        let activation = dispatch_rib_mutation_step(rib_tx, progress, |reply| {
+            rustbgpd_rib::RibUpdate::ApplyOutboundPrefixLimits {
+                txn,
+                activate: true,
+                reply,
+            }
+        })
+        .await;
+        match activation {
+            ReloadDispatch::Replied(Ok(())) => progress.mark_accepted_effect(),
+            ReloadDispatch::Replied(Err(error)) | ReloadDispatch::NotAccepted(error) => {
+                return clean_reload_failure("prefix_limit.activate", error);
+            }
+            ReloadDispatch::AcknowledgementLost => {
+                return fenced_reload_failure(
+                    progress,
+                    "prefix_limit.activate",
+                    ReloadStepError::AcknowledgementLost,
+                    RuntimeConfigFenceReason::AcknowledgementLost,
+                );
+            }
+        }
+        effects.limits_rib_tx = Some(rib_tx);
+    }
+
+    // Listener inbound inventory: the per-neighbor selectors of the final
+    // roster converge before sessions are touched, exactly as on the
+    // sequential path, so an added peer's inbound connection meets its
+    // selector. Authentication-bearing changes never reach this route.
+    if let Some((listener, ((md5_keys, ttl_security), prior_inventory))) = listener_replacement {
+        if let Err(error) = listener_mutation_step(
+            listener
+                .replace_inbound_auth(md5_keys, ttl_security, || progress.begin_mutation())
+                .await,
+            progress,
+        ) {
+            error!(error = %error, "listener inbound inventory replacement failed before the generation");
+            let reason = if matches!(error, ReloadStepError::AcknowledgementLost) {
+                RuntimeConfigFenceReason::AcknowledgementLost
+            } else {
+                RuntimeConfigFenceReason::KnownDivergence
+            };
+            return fenced_reload_failure(progress, "listener_auth.apply", error, reason);
+        }
+        effects.listener_prior = Some((listener, prior_inventory));
+    }
+
+    let (reply_tx, reply_rx) = oneshot::channel();
+    let permit = match peer_mgr_internal_tx.reserve().await {
+        Ok(permit) => permit,
+        Err(error) => {
+            return effects
+                .restore_then_reject(progress, current, "generation.dispatch", error.to_string())
+                .await;
+        }
+    };
+    progress.begin_mutation();
+    permit.send(InternalCommand::ApplyReloadGeneration {
+        candidate: Box::new(new_config.clone()),
+        actions,
+        reply: reply_tx,
+    });
+    if sighup_ack_fault("generation") {
+        drop(reply_rx);
+        return fenced_reload_failure(
+            progress,
+            "generation.apply",
+            ReloadStepError::AcknowledgementLost,
+            RuntimeConfigFenceReason::AcknowledgementLost,
+        );
+    }
+    match reply_rx.await {
+        Ok(ReloadGenerationOutcome::Applied(receipt)) => {
+            progress.mark_accepted_effect();
+            info!(%receipt, "config reload complete (one runtime generation)");
+            acknowledged_reload(
+                new_config,
+                desired_snapshot,
+                dialout_targets,
+                SighupCompletion::Complete,
+            )
+        }
+        Ok(ReloadGenerationOutcome::RejectedNoEffect(error)) => {
+            error!(%error, "reload generation rejected before any peer effect");
+            effects
+                .restore_then_reject(progress, current, "generation.apply", error)
+                .await
+        }
+        Ok(ReloadGenerationOutcome::FullyCompensated(error)) => {
+            error!(
+                %error,
+                "reload generation failed; the peer manager restored the prior generation and the candidate file is left for correction"
+            );
+            effects
+                .restore_then_reject(progress, current, "generation.apply", error)
+                .await
+        }
+        Ok(ReloadGenerationOutcome::CompensationAmbiguous(error)) => {
+            error!(%error, "reload generation left runtime state uncertain; fencing");
+            fenced_reload_failure(
+                progress,
+                "generation.apply",
+                ReloadStepError::Rejected(error),
+                RuntimeConfigFenceReason::KnownDivergence,
+            )
+        }
+        Err(_) => fenced_reload_failure(
+            progress,
+            "generation.apply",
+            ReloadStepError::AcknowledgementLost,
+            RuntimeConfigFenceReason::AcknowledgementLost,
+        ),
+    }
+}
+
 /// Record the first known SIGHUP step failure and return its explicit
 /// known-partial authority. Composite finalization must acknowledge the same
 /// peer-manager snapshot, bridge/persister snapshot, tracing projection, and
@@ -3841,12 +4164,12 @@ mod tests {
         let legacy_toml = concat!("enforcement = \"", "legacy\"");
         let legacy_variant = concat!("GrpcEnforcementConfig::", "Legacy");
         let expected_seams = [
-            (concat!("explicit_tier", "_test_toml("), 3),
-            (concat!("write_tier", "_test_config("), 12),
+            (concat!("explicit_tier", "_test_toml("), 4),
+            (concat!("write_tier", "_test_config("), 22),
             (concat!("load_tier", "_test_config("), 29),
             (concat!("load_tier", "_test_toml("), 9),
-            (concat!("tier_authorized_uds", "_test_config("), 2),
-            (concat!("assert_tier_authorized", "_test_config("), 15),
+            (concat!("tier_authorized_uds", "_test_config("), 3),
+            (concat!("assert_tier_authorized", "_test_config("), 13),
         ];
 
         assert!(!source.contains(legacy_toml));
@@ -5713,11 +6036,11 @@ hold_time = 90
             SighupReloadPlan {
                 baseline_runtime: current,
                 desired: AcceptedConfigSnapshot::from_config_for_test(desired),
-                accepted_effect: false,
             },
             None,
             None,
             &peer_mgr_tx,
+            None,
             None,
             None,
             None,
@@ -5841,110 +6164,6 @@ metric = 200
             2,
             "peer-manager snapshot is refreshed before reload continues"
         );
-        std::fs::remove_file(&path).ok();
-    }
-
-    #[tokio::test]
-    async fn reload_syncs_fib_snapshot_before_peer_group_delete() {
-        let initial_toml = r#"
-[global]
-asn = 65001
-router_id = "10.0.0.1"
-listen_port = 179
-
-[global.telemetry]
-log_format = "json"
-
-[peer_groups.fabric]
-hold_time = 90
-
-[[fib_tables]]
-name = "edge"
-table_id = 100
-metric = 200
-allowed_peer_groups = ["fabric"]
-"#;
-        let next_toml = r#"
-[global]
-asn = 65001
-router_id = "10.0.0.1"
-listen_port = 179
-
-[global.telemetry]
-log_format = "json"
-
-[[fib_tables]]
-name = "edge"
-table_id = 100
-metric = 200
-"#;
-        let path = unique_temp_path("reload-fib-before-pg-delete");
-        std::fs::write(&path, initial_toml).unwrap();
-        let initial = load_tier_test_config(&path);
-        let tcp = initial.global.telemetry.grpc_tcp.clone();
-        let uds = initial.global.telemetry.grpc_uds.clone();
-        std::fs::write(&path, next_toml).unwrap();
-
-        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(8);
-        let peer_mgr = tokio::spawn(async move {
-            let mut tags = Vec::new();
-            for _ in 0..2 {
-                let Some(cmd) = peer_mgr_rx.recv().await else {
-                    break;
-                };
-                tags.push(cmd_tag(&cmd));
-                match cmd {
-                    PeerManagerCommand::SetFibTablesSnapshot { reply, .. } => {
-                        let _ = reply.send(());
-                    }
-                    PeerManagerCommand::OwnedCatalogMutation { reply, .. } => {
-                        let _ = reply.send(OwnedCatalogMutationOutcome::Success);
-                    }
-                    _ => panic!("unexpected peer manager command"),
-                }
-            }
-            tags
-        });
-        let (fib_tx, mut fib_rx) = mpsc::channel(8);
-        let actor = tokio::spawn(async move {
-            match fib_rx.recv().await {
-                Some(FibRuntimeCommand::OwnedReplaceTables { tables, reply }) => {
-                    assert!(tables[0].allowed_peer_groups.is_empty());
-                    let _ = reply.send(OwnedFibReplaceOutcome::Applied);
-                }
-                _ => panic!("expected OwnedReplaceTables"),
-            }
-        });
-
-        let returned = reload_config(
-            path.to_str().unwrap(),
-            &initial,
-            tcp.as_ref(),
-            uds.as_ref(),
-            &peer_mgr_tx,
-            Some(&fib_tx),
-            None,
-        )
-        .await
-        .expect("reload should remove the FIB reference and then delete the peer group");
-
-        assert!(
-            !returned.peer_groups.contains_key("fabric"),
-            "peer group should be removed in the returned runtime snapshot"
-        );
-        assert!(
-            returned.fib_tables[0].allowed_peer_groups.is_empty(),
-            "FIB allow-list removal should be reflected in the returned runtime snapshot"
-        );
-        assert_eq!(
-            peer_mgr.await.unwrap(),
-            vec![
-                "SetFibTablesSnapshot(1)".to_string(),
-                "DeletePeerGroup(fabric)".to_string(),
-            ],
-            "peer manager must see the FIB reference removed before peer-group deletion"
-        );
-        actor.await.unwrap();
         std::fs::remove_file(&path).ok();
     }
 
@@ -6535,6 +6754,929 @@ hold_time = 90
     /// Drive sequential reloads against the given initial+next TOML and return
     /// the outcomes plus commands the mock peer manager observed, in order.
     /// Replies `Ok(())` to every command that carries a reply channel.
+    /// Tag for an internal-channel command, mirroring `cmd_tag`.
+    fn internal_tag(command: &InternalCommand) -> String {
+        match command {
+            InternalCommand::ApplyReloadGeneration { actions, .. } => {
+                let count = |kind: config::ReloadPeerActionKind| {
+                    actions.iter().filter(|action| action.kind == kind).count()
+                };
+                format!(
+                    "ApplyReloadGeneration(hot={},replace={},add={},remove={})",
+                    count(config::ReloadPeerActionKind::HotUpdate),
+                    count(config::ReloadPeerActionKind::Replace),
+                    count(config::ReloadPeerActionKind::Add),
+                    count(config::ReloadPeerActionKind::Remove),
+                )
+            }
+            InternalCommand::ReplaceConfigSnapshot { .. } => "ReplaceConfigSnapshot".to_string(),
+            _ => "InternalCommand".to_string(),
+        }
+    }
+
+    /// Scripted reply for one `ApplyReloadGeneration`.
+    #[derive(Clone, Copy)]
+    enum GenerationReply {
+        Applied,
+        RejectedNoEffect(&'static str),
+        FullyCompensated(&'static str),
+        CompensationAmbiguous(&'static str),
+        DropReply,
+    }
+
+    struct GenerationCall {
+        candidate: Config,
+        actions: Vec<config::ReloadPeerAction>,
+    }
+
+    /// Spawn an internal-channel mock: records each generation command and
+    /// answers with the next scripted reply (`Applied` once the script runs
+    /// out). The receipt counts follow the actions it received.
+    fn spawn_generation_mock(
+        script: Vec<GenerationReply>,
+        tags: Option<std::sync::Arc<std::sync::Mutex<Vec<String>>>>,
+    ) -> (
+        mpsc::Sender<InternalCommand>,
+        tokio::task::JoinHandle<Vec<GenerationCall>>,
+    ) {
+        use crate::peer_manager::generation::ReloadGenerationReceipt;
+
+        let (tx, mut rx) = mpsc::channel::<InternalCommand>(8);
+        let handle = tokio::spawn(async move {
+            let mut script = std::collections::VecDeque::from(script);
+            let mut calls = Vec::new();
+            while let Some(command) = rx.recv().await {
+                if let Some(tags) = &tags {
+                    tags.lock().unwrap().push(internal_tag(&command));
+                }
+                let InternalCommand::ApplyReloadGeneration {
+                    candidate,
+                    actions,
+                    reply,
+                } = command
+                else {
+                    continue;
+                };
+                let count = |kind: config::ReloadPeerActionKind| {
+                    actions.iter().filter(|action| action.kind == kind).count()
+                };
+                let outcome = match script.pop_front().unwrap_or(GenerationReply::Applied) {
+                    GenerationReply::Applied => {
+                        Some(ReloadGenerationOutcome::Applied(ReloadGenerationReceipt {
+                            policy_updated: 0,
+                            hot_updated: count(config::ReloadPeerActionKind::HotUpdate),
+                            replaced: count(config::ReloadPeerActionKind::Replace),
+                            added: count(config::ReloadPeerActionKind::Add),
+                            removed: count(config::ReloadPeerActionKind::Remove),
+                        }))
+                    }
+                    GenerationReply::RejectedNoEffect(error) => {
+                        Some(ReloadGenerationOutcome::RejectedNoEffect(error.to_string()))
+                    }
+                    GenerationReply::FullyCompensated(error) => {
+                        Some(ReloadGenerationOutcome::FullyCompensated(error.to_string()))
+                    }
+                    GenerationReply::CompensationAmbiguous(error) => Some(
+                        ReloadGenerationOutcome::CompensationAmbiguous(error.to_string()),
+                    ),
+                    GenerationReply::DropReply => None,
+                };
+                calls.push(GenerationCall {
+                    candidate: *candidate,
+                    actions,
+                });
+                match outcome {
+                    Some(outcome) => {
+                        let _ = reply.send(outcome);
+                    }
+                    None => drop(reply),
+                }
+            }
+            calls
+        });
+        (tx, handle)
+    }
+
+    /// `reload_config` with a generation executor and optional RIB attached.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "test driver mirrors the production reload handle set"
+    )]
+    async fn reload_config_generation(
+        config_path: &str,
+        current: &Config,
+        live_grpc_tcp: Option<&config::GrpcTcpListenerConfig>,
+        live_grpc_uds: Option<&config::GrpcUdsListenerConfig>,
+        peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+        peer_mgr_internal_tx: &mpsc::Sender<InternalCommand>,
+        rib_tx: Option<&mpsc::Sender<rustbgpd_rib::RibUpdate>>,
+        fib_cmd_tx: Option<&mpsc::Sender<FibRuntimeCommand>>,
+    ) -> SighupReloadOutcome {
+        let config_path = std::path::Path::new(config_path);
+        let source = std::fs::read_to_string(config_path).unwrap();
+        // The driver never writes an already tier-authorized file, so a
+        // read-only config directory exercises the production path.
+        if explicit_tier_test_toml(&source) != source {
+            write_tier_test_config(config_path, &source);
+        }
+        let prior = AcceptedConfigSnapshot::from_config_for_test(current.clone());
+        let desired = Arc::new(
+            AcceptedConfigSnapshot::load_for_reload(
+                config_path,
+                &prior,
+                &current.policy.dataset_bindings,
+            )
+            .expect("test reload config must parse"),
+        );
+        reload_config_with_tcp_ao(
+            SighupReloadPlan {
+                baseline_runtime: current.clone(),
+                desired,
+            },
+            live_grpc_tcp,
+            live_grpc_uds,
+            peer_mgr_tx,
+            Some(peer_mgr_internal_tx),
+            rib_tx,
+            fib_cmd_tx,
+            None,
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// One generation reload of `new_toml` against a running `initial_toml`
+    /// through a generation mock scripted with `reply`: the outcome, the
+    /// peer-manager command tags (none for the generation route), and the
+    /// generation calls the executor saw.
+    async fn drive_generation(
+        initial_toml: &str,
+        new_toml: &str,
+        reply: GenerationReply,
+    ) -> (SighupReloadOutcome, Vec<String>, Vec<GenerationCall>) {
+        let path = unique_temp_path("reload-generation");
+        write_tier_test_config(&path, initial_toml);
+        let current = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let live_grpc_tcp = current.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = current.global.telemetry.grpc_uds.clone();
+        write_tier_test_config(&path, new_toml);
+        let tags = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
+        let mock_tags = tags.clone();
+        let mock = tokio::spawn(async move {
+            use rustbgpd_api::peer_types::PeerReconcileOutcome;
+            while let Some(cmd) = peer_mgr_rx.recv().await {
+                mock_tags.lock().unwrap().push(cmd_tag(&cmd));
+                // The sequential route's steps are acknowledged so a
+                // candidate that keeps that route completes.
+                match cmd {
+                    PeerManagerCommand::OwnedCatalogMutation { reply, .. } => {
+                        let _ = reply.send(OwnedCatalogMutationOutcome::Success);
+                    }
+                    PeerManagerCommand::ReconcilePeers {
+                        added,
+                        removed,
+                        changed,
+                        reply,
+                    } => {
+                        let effects = removed
+                            .into_iter()
+                            .map(PeerReconcileEffect::Removed)
+                            .chain(added.into_iter().map(|peer| {
+                                PeerReconcileEffect::Added(rustbgpd_api::peer_types::PeerKey::new(
+                                    peer.address,
+                                    peer.interface,
+                                ))
+                            }))
+                            .chain(changed.into_iter().map(|peer| {
+                                PeerReconcileEffect::Replaced(
+                                    rustbgpd_api::peer_types::PeerKey::new(
+                                        peer.address,
+                                        peer.interface,
+                                    ),
+                                )
+                            }))
+                            .collect();
+                        let _ = reply.send(PeerReconcileOutcome {
+                            effects,
+                            ..PeerReconcileOutcome::default()
+                        });
+                    }
+                    PeerManagerCommand::SyncExplainConfig { reply, .. } => {
+                        let _ = reply.send(());
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let (internal_tx, generation) = spawn_generation_mock(vec![reply], Some(tags.clone()));
+        let outcome = reload_config_generation(
+            path.to_str().unwrap(),
+            &current,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
+            &peer_mgr_tx,
+            &internal_tx,
+            None,
+            None,
+        )
+        .await;
+        drop(peer_mgr_tx);
+        drop(internal_tx);
+        mock.await.unwrap();
+        let calls = generation.await.unwrap();
+        std::fs::remove_file(&path).ok();
+        let tags = tags.lock().unwrap().clone();
+        (outcome, tags, calls)
+    }
+
+    /// A generation-class candidate combined with a family the generation
+    /// executor cannot compensate is rejected before any credential,
+    /// session, or catalog effect: no peer-manager command, no generation
+    /// command, and the candidate file stays for the operator.
+    #[tokio::test]
+    async fn reload_rejects_unsupported_compound_candidates_before_any_effect() {
+        let member_edit = baseline_toml().replace("hold_time = 90", "hold_time = 45");
+        for (family, extra, reason) in [
+            (
+                "dynamic ranges",
+                "\n[peer_groups.ranges]\nhold_time = 30\n[[dynamic_neighbors]]\nprefix = \"192.0.2.0/24\"\npeer_group = \"ranges\"\nremote_asn = 65100\n",
+                "[[dynamic_neighbors]]",
+            ),
+            (
+                "honor knobs",
+                "\n[global]\nhonor_graceful_shutdown = false\n",
+                "honor_graceful_shutdown",
+            ),
+            (
+                "evpn runtime",
+                "\n[[evpn_instances]]\nvni = 100\nrd = \"65000:100\"\nroute_targets = [\"65000:100\"]\nlocal_vtep_ip = \"10.0.0.1\"\n",
+                "EVPN runtime tables",
+            ),
+        ] {
+            let candidate = if family == "honor knobs" {
+                member_edit.replace("asn = 65001", "asn = 65001\nhonor_graceful_shutdown = true")
+            } else {
+                format!("{member_edit}{extra}")
+            };
+            let (outcome, tags, calls) =
+                drive_generation(baseline_toml(), &candidate, GenerationReply::Applied).await;
+            let SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(failure)) = &outcome
+            else {
+                panic!("{family}: expected a clean preflight rejection");
+            };
+            assert_eq!(failure.bucket, "reload.preflight", "{family}");
+            assert!(
+                failure.error.to_string().contains(reason),
+                "{family}: {}",
+                failure.error
+            );
+            assert!(
+                tags.is_empty(),
+                "{family}: no command may reach any actor: {tags:?}"
+            );
+            assert!(calls.is_empty(), "{family}");
+        }
+    }
+
+    #[tokio::test]
+    async fn reload_rejects_fib_table_and_peer_group_compound_before_any_effect() {
+        let initial_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[peer_groups.fabric]
+hold_time = 90
+
+[[fib_tables]]
+name = "edge"
+table_id = 100
+metric = 200
+allowed_peer_groups = ["fabric"]
+"#;
+        let next_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[fib_tables]]
+name = "edge"
+table_id = 100
+metric = 200
+"#;
+        let path = unique_temp_path("reload-fib-pg-compound");
+        std::fs::write(&path, initial_toml).unwrap();
+        let initial = load_tier_test_config(&path);
+        let tcp = initial.global.telemetry.grpc_tcp.clone();
+        let uds = initial.global.telemetry.grpc_uds.clone();
+        write_tier_test_config(&path, next_toml);
+
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(8);
+        let peer_mgr = tokio::spawn(async move {
+            let mut tags = Vec::new();
+            while let Some(cmd) = peer_mgr_rx.recv().await {
+                tags.push(cmd_tag(&cmd));
+            }
+            tags
+        });
+        let (fib_tx, mut fib_rx) = mpsc::channel(8);
+        let (internal_tx, generation) = spawn_generation_mock(Vec::new(), None);
+        let outcome = reload_config_generation(
+            path.to_str().unwrap(),
+            &initial,
+            tcp.as_ref(),
+            uds.as_ref(),
+            &peer_mgr_tx,
+            &internal_tx,
+            None,
+            Some(&fib_tx),
+        )
+        .await;
+        drop(peer_mgr_tx);
+        drop(internal_tx);
+        drop(fib_tx);
+        let SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(failure)) = &outcome
+        else {
+            panic!("expected a clean preflight rejection");
+        };
+        assert_eq!(failure.bucket, "reload.preflight");
+        assert!(
+            failure.error.to_string().contains("[[fib_tables]]"),
+            "{}",
+            failure.error
+        );
+        assert!(peer_mgr.await.unwrap().is_empty());
+        assert!(generation.await.unwrap().is_empty());
+        assert!(
+            fib_rx.recv().await.is_none(),
+            "the FIB actor must see nothing"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            tier_authorized_uds_test_config(next_toml),
+            "the desired file stays for the operator"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// The dataset seam: changed dataset content or bindings together with
+    /// a neighbor edit is rejected at preflight, and the staged dataset
+    /// content is dropped without touching the live handle.
+    #[tokio::test]
+    async fn reload_rejects_dataset_and_neighbor_compound_without_committing_staged_datasets() {
+        let initial_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+[policy]
+rpol_files = ["policies/core.rpol"]
+[policy.datasets.customers]
+path = "datasets/customers.list"
+[[neighbors]]
+address = "192.0.2.1"
+remote_asn = 65002
+import_policy_chain = ["origin-guard"]
+"#;
+        let dir = dataset_reload_dir(initial_toml, "64500\n");
+        let config_path = dir.path().join("config.toml");
+        let initial = Config::load_with_diagnostics(config_path.to_str().unwrap()).unwrap();
+        let live = std::sync::Arc::clone(initial.policy.dataset_bindings.get("customers").unwrap());
+        assert_eq!(live.pin().generation, 1);
+
+        let member_add = "\n[[neighbors]]\naddress = \"192.0.2.99\"\nremote_asn = 65099\n";
+        // Content change on the same binding, and a binding path change.
+        std::fs::write(dir.path().join("datasets/customers.list"), "64500\n64999\n").unwrap();
+        std::fs::write(
+            dir.path().join("datasets/customers-next.list"),
+            "64500\n64999\n",
+        )
+        .unwrap();
+        for (variant, desired_toml) in [
+            ("content", format!("{initial_toml}{member_add}")),
+            (
+                "binding",
+                format!(
+                    "{}{member_add}",
+                    initial_toml.replace("datasets/customers.list", "datasets/customers-next.list")
+                ),
+            ),
+        ] {
+            write_tier_test_config(&config_path, &desired_toml);
+            let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(8);
+            let mock = tokio::spawn(async move {
+                let mut tags = Vec::new();
+                while let Some(command) = peer_mgr_rx.recv().await {
+                    tags.push(cmd_tag(&command));
+                }
+                tags
+            });
+            let (internal_tx, generation) = spawn_generation_mock(Vec::new(), None);
+            let outcome = reload_config_generation(
+                config_path.to_str().unwrap(),
+                &initial,
+                initial.global.telemetry.grpc_tcp.as_ref(),
+                initial.global.telemetry.grpc_uds.as_ref(),
+                &peer_mgr_tx,
+                &internal_tx,
+                None,
+                None,
+            )
+            .await;
+            drop(peer_mgr_tx);
+            drop(internal_tx);
+            let SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(failure)) = &outcome
+            else {
+                panic!("{variant}: expected a clean preflight rejection");
+            };
+            assert_eq!(failure.bucket, "reload.preflight", "{variant}");
+            assert!(
+                failure.error.to_string().contains("[policy.datasets]"),
+                "{variant}: {}",
+                failure.error
+            );
+            assert!(mock.await.unwrap().is_empty(), "{variant}");
+            assert!(generation.await.unwrap().is_empty(), "{variant}");
+            assert_eq!(
+                live.pin().generation,
+                1,
+                "{variant}: staged content never committed"
+            );
+            assert_eq!(live.pin().data.records(), 1, "{variant}");
+        }
+    }
+
+    /// A dataset-only refresh keeps its sequential route with unchanged
+    /// datasets present, an `.rpol`-only edit with unchanged datasets
+    /// takes the generation route, and an `.rpol` edit with changed
+    /// dataset content is the rejected compound.
+    #[tokio::test]
+    async fn reload_routes_rpol_edits_by_dataset_content_identity() {
+        let initial_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+[policy]
+rpol_files = ["policies/core.rpol"]
+[policy.datasets.customers]
+path = "datasets/customers.list"
+[[neighbors]]
+address = "192.0.2.1"
+remote_asn = 65002
+import_policy_chain = ["origin-guard"]
+"#;
+        let dir = dataset_reload_dir(initial_toml, "64500\n");
+        let config_path = dir.path().join("config.toml");
+        let initial = Config::load_with_diagnostics(config_path.to_str().unwrap()).unwrap();
+        let rpol_path = dir.path().join("policies/core.rpol");
+        let edited_rpol = std::fs::read_to_string(&rpol_path)
+            .unwrap()
+            .replace("term rest { reject }", "term rest { set med 5; reject }");
+
+        let run = |initial: &Config| {
+            let config_path = config_path.clone();
+            let initial = initial.clone();
+            async move {
+                let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(8);
+                let mock = tokio::spawn(async move {
+                    let mut tags = Vec::new();
+                    while let Some(command) = peer_mgr_rx.recv().await {
+                        match command {
+                            PeerManagerCommand::RefreshDatasetDependents { reply, .. } => {
+                                tags.push("RefreshDatasetDependents".to_string());
+                                let _ = reply.send(Ok(()));
+                            }
+                            other => tags.push(cmd_tag(&other)),
+                        }
+                    }
+                    tags
+                });
+                let (internal_tx, generation) = spawn_generation_mock(Vec::new(), None);
+                let outcome = reload_config_generation(
+                    config_path.to_str().unwrap(),
+                    &initial,
+                    initial.global.telemetry.grpc_tcp.as_ref(),
+                    initial.global.telemetry.grpc_uds.as_ref(),
+                    &peer_mgr_tx,
+                    &internal_tx,
+                    None,
+                    None,
+                )
+                .await;
+                drop(peer_mgr_tx);
+                drop(internal_tx);
+                (outcome, mock.await.unwrap(), generation.await.unwrap())
+            }
+        };
+
+        // rpol-only with unchanged dataset content: generation.
+        std::fs::write(&rpol_path, &edited_rpol).unwrap();
+        let (outcome, tags, calls) = run(&initial).await;
+        let adopted = outcome.expect("rpol-only reload settles as a generation");
+        assert!(tags.is_empty(), "{tags:?}");
+        assert_eq!(calls.len(), 1);
+        assert!(
+            calls[0].actions.is_empty(),
+            "policy movement is not a session action"
+        );
+
+        // rpol plus dataset content: rejected compound.
+        std::fs::write(&rpol_path, edited_rpol.replace("med 5", "med 6")).unwrap();
+        std::fs::write(dir.path().join("datasets/customers.list"), "64500\n64999\n").unwrap();
+        let (outcome, tags, calls) = run(&adopted.runtime).await;
+        assert!(
+            matches!(
+                &outcome,
+                SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(failure))
+                    if failure.bucket == "reload.preflight"
+            ),
+            "{outcome:?}"
+        );
+        assert!(tags.is_empty() && calls.is_empty(), "{tags:?}");
+
+        // dataset-only: sequential, as before.
+        std::fs::write(&rpol_path, &edited_rpol).unwrap();
+        let (outcome, tags, calls) = run(&adopted.runtime).await;
+        outcome.expect("dataset-only refresh keeps its sequential route");
+        assert_eq!(tags, vec!["RefreshDatasetDependents".to_string()]);
+        assert!(calls.is_empty());
+    }
+
+    /// Listener inbound authentication rides on neighbor records, so a
+    /// candidate that changes it keeps the sequential path (with its
+    /// reconcile) instead of being rejected or sent to the generation.
+    #[tokio::test]
+    async fn reload_listener_auth_change_with_member_edit_stays_sequential() {
+        let candidate = format!(
+            "{}\n[[neighbors]]\naddress = \"10.0.0.3\"\nremote_asn = 65003\n",
+            baseline_toml().replace(
+                "hold_time = 90",
+                "hold_time = 90\nmd5_password = \"secret\""
+            )
+        );
+        let (outcome, tags, calls) =
+            drive_generation(baseline_toml(), &candidate, GenerationReply::Applied).await;
+        outcome.expect("sequential reload succeeds");
+        assert_eq!(tags, vec!["ReconcilePeers(+1,-0,~1)".to_string()]);
+        assert!(calls.is_empty());
+    }
+
+    /// The generation executor restored the prior generation: the reload is
+    /// a clean rejection, never a known-partial receipt, and an identical
+    /// retry re-derives the same plan.
+    #[tokio::test]
+    async fn reload_generation_failure_is_clean_and_retries_identically() {
+        let new_toml = format!(
+            "{baseline}\n[policy.definitions.block-private]\ndefault_action = \"deny\"\n\n[[neighbors]]\naddress = \"10.0.0.99\"\nremote_asn = 65099\nhold_time = 90\n",
+            baseline = baseline_toml()
+        );
+        let path = unique_temp_path("reload-generation-retry");
+        write_tier_test_config(&path, baseline_toml());
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        write_tier_test_config(&path, &new_toml);
+        let candidate_bytes = std::fs::read(&path).unwrap();
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(8);
+        let mock = tokio::spawn(async move {
+            let mut tags = Vec::new();
+            while let Some(cmd) = peer_mgr_rx.recv().await {
+                tags.push(cmd_tag(&cmd));
+            }
+            tags
+        });
+        let (internal_tx, generation) = spawn_generation_mock(
+            vec![
+                GenerationReply::FullyCompensated("add 10.0.0.99: injected"),
+                GenerationReply::Applied,
+            ],
+            None,
+        );
+
+        let rejected = reload_config_generation(
+            path.to_str().unwrap(),
+            &initial,
+            initial.global.telemetry.grpc_tcp.as_ref(),
+            initial.global.telemetry.grpc_uds.as_ref(),
+            &peer_mgr_tx,
+            &internal_tx,
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            matches!(
+                &rejected,
+                SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(failure))
+                    if failure.bucket == "generation.apply"
+                        && failure.error.to_string().contains("injected")
+            ),
+            "{rejected:?}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), candidate_bytes);
+
+        let adopted = reload_config_generation(
+            path.to_str().unwrap(),
+            &initial,
+            initial.global.telemetry.grpc_tcp.as_ref(),
+            initial.global.telemetry.grpc_uds.as_ref(),
+            &peer_mgr_tx,
+            &internal_tx,
+            None,
+            None,
+        )
+        .await
+        .expect("identical retry settles");
+        assert!(adopted.policy.definitions.contains_key("block-private"));
+        assert_eq!(adopted.neighbors.len(), 2);
+        assert!(matches!(adopted.completion, SighupCompletion::Complete));
+        drop(peer_mgr_tx);
+        drop(internal_tx);
+        assert!(mock.await.unwrap().is_empty());
+        let calls = generation.await.unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls[0].actions, calls[1].actions,
+            "the retry re-derives the same plan"
+        );
+        assert_eq!(calls[0].candidate, calls[1].candidate);
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Lost acknowledgement and failed compensation never claim restoration.
+    #[tokio::test]
+    async fn reload_generation_ack_loss_and_ambiguous_compensation_fence() {
+        let candidate = baseline_toml().replace("hold_time = 90", "hold_time = 45");
+        for (reply, reason) in [
+            (
+                GenerationReply::DropReply,
+                RuntimeConfigFenceReason::AcknowledgementLost,
+            ),
+            (
+                GenerationReply::CompensationAmbiguous("restore failed"),
+                RuntimeConfigFenceReason::KnownDivergence,
+            ),
+        ] {
+            let (outcome, _tags, calls) =
+                drive_generation(baseline_toml(), &candidate, reply).await;
+            assert_eq!(calls.len(), 1);
+            match outcome {
+                SighupReloadOutcome::RecoveryFenced {
+                    error: SighupReloadError::Failed(failure),
+                    reason: fenced,
+                } => {
+                    assert_eq!(failure.bucket, "generation.apply");
+                    assert_eq!(fenced, reason);
+                }
+                other => panic!("expected a fence: {other:?}"),
+            }
+        }
+    }
+
+    /// Outbound prefix maxima are the only effect outside the peer manager
+    /// on the generation route: activated first, restored from the retained
+    /// live config when the generation is rejected, and a failed restore
+    /// fences.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one scenario drives the settled, rejected, and fenced restore outcomes end to end"
+    )]
+    #[tokio::test]
+    async fn reload_generation_restores_outbound_prefix_limits_after_rejection() {
+        let candidate = baseline_toml().replace(
+            "hold_time = 90",
+            "hold_time = 45\nmax_prefixes_out_ipv4 = 100",
+        );
+        for (reply, restore_ok) in [
+            (
+                GenerationReply::FullyCompensated("member replace: injected"),
+                true,
+            ),
+            (GenerationReply::RejectedNoEffect("rejected"), true),
+            (GenerationReply::Applied, true),
+            (
+                GenerationReply::FullyCompensated("member replace: injected"),
+                false,
+            ),
+        ] {
+            let path = unique_temp_path("reload-generation-limits");
+            write_tier_test_config(&path, baseline_toml());
+            let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+            write_tier_test_config(&path, &candidate);
+            let (rib_tx, mut rib_rx) = mpsc::channel::<rustbgpd_rib::RibUpdate>(8);
+            let rib = tokio::spawn(async move {
+                let mut seen = Vec::new();
+                while let Some(update) = rib_rx.recv().await {
+                    match update {
+                        rustbgpd_rib::RibUpdate::PrepareOutboundPrefixLimits {
+                            config,
+                            reply,
+                            ..
+                        } => {
+                            let limit = config
+                                .neighbors
+                                .get(&"10.0.0.2".parse::<IpAddr>().unwrap())
+                                .and_then(|pair| pair.ipv4);
+                            seen.push(format!("prepare({limit:?})"));
+                            let _ = reply.send(if restore_ok || seen.len() < 3 {
+                                Ok(())
+                            } else {
+                                Err(Vec::new())
+                            });
+                        }
+                        rustbgpd_rib::RibUpdate::ApplyOutboundPrefixLimits {
+                            activate,
+                            reply,
+                            ..
+                        } => {
+                            seen.push(format!("apply(activate={activate})"));
+                            let _ = reply.send(Ok(()));
+                        }
+                        _ => {}
+                    }
+                }
+                seen
+            });
+            let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(8);
+            let (internal_tx, generation) = spawn_generation_mock(vec![reply], None);
+            let outcome = reload_config_generation(
+                path.to_str().unwrap(),
+                &initial,
+                initial.global.telemetry.grpc_tcp.as_ref(),
+                initial.global.telemetry.grpc_uds.as_ref(),
+                &peer_mgr_tx,
+                &internal_tx,
+                Some(&rib_tx),
+                None,
+            )
+            .await;
+            drop(rib_tx);
+            drop(internal_tx);
+            let seen = rib.await.unwrap();
+            assert_eq!(generation.await.unwrap().len(), 1);
+            match (reply, restore_ok) {
+                (GenerationReply::Applied, _) => {
+                    outcome.expect("generation settles");
+                    assert_eq!(seen, vec!["prepare(Some(100))", "apply(activate=true)"]);
+                }
+                (_, true) => {
+                    assert!(
+                        matches!(
+                            &outcome,
+                            SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(failure))
+                                if failure.bucket == "generation.apply"
+                        ),
+                        "{outcome:?}"
+                    );
+                    assert_eq!(
+                        seen,
+                        vec![
+                            "prepare(Some(100))",
+                            "apply(activate=true)",
+                            "prepare(None)",
+                            "apply(activate=true)"
+                        ],
+                        "the prior maxima are restored from the retained live config"
+                    );
+                }
+                (_, false) => {
+                    assert!(
+                        matches!(
+                            &outcome,
+                            SighupReloadOutcome::RecoveryFenced {
+                                error: SighupReloadError::Failed(failure),
+                                reason: RuntimeConfigFenceReason::KnownDivergence,
+                            } if failure.bucket == "generation.restore"
+                        ),
+                        "{outcome:?}"
+                    );
+                }
+            }
+            std::fs::remove_file(&path).ok();
+        }
+    }
+
+    /// The generation route never writes: a read-only config directory
+    /// works for both a settled and a rejected generation, and every file
+    /// is byte-identical afterwards.
+    #[tokio::test]
+    async fn reload_generation_leaves_a_read_only_config_directory_byte_identical() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let rpol_path = dir.path().join("members.rpol");
+        std::fs::write(
+            &rpol_path,
+            "policy edge-in { term all { set local-pref 150; accept } }",
+        )
+        .unwrap();
+        let config_path = dir.path().join("config.toml");
+        let toml = format!(
+            "{}\n[policy]\nrpol_files = [{:?}]\nimport_chain = [\"edge-in\"]\n",
+            baseline_toml(),
+            rpol_path.to_str().unwrap(),
+        );
+        write_tier_test_config(&config_path, &toml);
+        let initial = Config::load_with_diagnostics(config_path.to_str().unwrap()).unwrap();
+        std::fs::write(
+            &rpol_path,
+            "policy edge-in { term all { set local-pref 250; accept } }",
+        )
+        .unwrap();
+        write_tier_test_config(
+            &config_path,
+            &toml.replace("hold_time = 90", "hold_time = 45"),
+        );
+        let before: Vec<(PathBuf, Vec<u8>)> = [&config_path, &rpol_path]
+            .into_iter()
+            .map(|path| (path.clone(), std::fs::read(path).unwrap()))
+            .collect();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        for path in [&config_path, &rpol_path] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        }
+
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(8);
+        let (internal_tx, generation) = spawn_generation_mock(
+            vec![
+                GenerationReply::FullyCompensated("injected"),
+                GenerationReply::Applied,
+            ],
+            None,
+        );
+        let mut outcomes = Vec::new();
+        for _ in 0..2 {
+            outcomes.push(
+                reload_config_generation(
+                    config_path.to_str().unwrap(),
+                    &initial,
+                    initial.global.telemetry.grpc_tcp.as_ref(),
+                    initial.global.telemetry.grpc_uds.as_ref(),
+                    &peer_mgr_tx,
+                    &internal_tx,
+                    None,
+                    None,
+                )
+                .await,
+            );
+        }
+        drop(internal_tx);
+        assert_eq!(generation.await.unwrap().len(), 2);
+        assert!(
+            outcomes[0].is_none(),
+            "first generation is rejected cleanly"
+        );
+        let adopted = outcomes.pop().unwrap().expect("second generation settles");
+        assert_eq!(adopted.neighbors[0].hold_time, Some(45));
+        let chain = adopted
+            .import_chain()
+            .expect("chain resolves")
+            .expect("chain configured");
+        let ctx = rustbgpd_policy::RouteContext {
+            prefix: None,
+            next_hop: None,
+            extended_communities: &[],
+            communities: &[],
+            large_communities: &[],
+            as_path_str: "",
+            as_path: None,
+            as_path_len: 0,
+            origin_asn: None,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            peer_address: None,
+            peer_asn: None,
+            peer_group: None,
+            route_type: None,
+            family: None,
+            evpn_route_type: None,
+            local_pref: None,
+            med: None,
+        };
+        assert_eq!(chain.evaluate(&ctx).modifications.set_local_pref, Some(250));
+        for (path, bytes) in &before {
+            assert_eq!(&std::fs::read(path).unwrap(), bytes, "{}", path.display());
+        }
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the driver acknowledges every sequential command and the generation command in one mock set"
+    )]
     async fn drive_reloads(
         initial_toml: &str,
         new_toml: &str,
@@ -6549,12 +7691,13 @@ hold_time = 90
 
         write_tier_test_config(&path, new_toml);
 
+        let tags = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
+        let mock_tags = tags.clone();
         let mock = tokio::spawn(async move {
             use rustbgpd_api::peer_types::PeerReconcileOutcome;
-            let mut tags = Vec::new();
             while let Some(cmd) = peer_mgr_rx.recv().await {
-                tags.push(cmd_tag(&cmd));
+                mock_tags.lock().unwrap().push(cmd_tag(&cmd));
                 // Respond Ok(()) to every command that has a reply
                 // channel so reload_config doesn't hang.
                 match cmd {
@@ -6616,17 +7759,18 @@ hold_time = 90
                     _ => {}
                 }
             }
-            tags
         });
+        let (internal_tx, generation) = spawn_generation_mock(Vec::new(), Some(tags.clone()));
 
         let mut outcomes = Vec::with_capacity(reloads);
         for _ in 0..reloads {
-            let returned = reload_config(
+            let returned = reload_config_generation(
                 path.to_str().unwrap(),
                 &current,
                 live_grpc_tcp.as_ref(),
                 live_grpc_uds.as_ref(),
                 &peer_mgr_tx,
+                &internal_tx,
                 None,
                 None,
             )
@@ -6639,8 +7783,11 @@ hold_time = 90
             outcomes.push(returned);
         }
         drop(peer_mgr_tx);
-        let tags = mock.await.unwrap();
+        drop(internal_tx);
+        mock.await.unwrap();
+        generation.await.unwrap();
         std::fs::remove_file(&path).ok();
+        let tags = tags.lock().unwrap().clone();
         (outcomes, tags)
     }
 
@@ -6680,10 +7827,11 @@ hold_time = 90
         assert!(error.contains("RIB manager unavailable"), "{error}");
     }
 
-    /// ADR-0096: an rpol-content-only reload sends `SyncRpolPolicies`
-    /// (which re-resolves live chains in the manager) and adopts the
-    /// new registry into the returned snapshot; the TOML itself is
-    /// byte-identical, so no other command fires.
+    /// ADR-0096: an rpol-content-only reload is one generation whose
+    /// candidate carries the new compiled registry (the executor re-resolves
+    /// live chains against it) and adopts that registry into the returned
+    /// snapshot; the TOML itself is byte-identical, so no session action
+    /// is derived.
     #[tokio::test]
     async fn reload_rpol_content_change_syncs_registry() {
         let rpol_path = unique_temp_path("reload-rpol-file");
@@ -6711,30 +7859,23 @@ hold_time = 90
         )
         .unwrap();
 
-        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
-        let mock = tokio::spawn(async move {
-            let mut tags = Vec::new();
-            while let Some(cmd) = peer_mgr_rx.recv().await {
-                tags.push(cmd_tag(&cmd));
-                if let PeerManagerCommand::OwnedCatalogMutation { reply, .. } = cmd {
-                    let _ = reply.send(OwnedCatalogMutationOutcome::Success);
-                }
-            }
-            tags
-        });
-        let returned = reload_config(
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
+        let (internal_tx, generation) = spawn_generation_mock(Vec::new(), None);
+        let returned = reload_config_generation(
             path.to_str().unwrap(),
             &initial,
             live_grpc_tcp.as_ref(),
             live_grpc_uds.as_ref(),
             &peer_mgr_tx,
+            &internal_tx,
             None,
             None,
         )
         .await;
-        drop(peer_mgr_tx);
-        let tags = mock.await.unwrap();
-        assert_eq!(tags, vec!["SyncRpolPolicies(1)".to_string()]);
+        drop(internal_tx);
+        let calls = generation.await.unwrap();
+        assert_eq!(calls.len(), 1, "an rpol-only edit is one generation");
+        assert!(calls[0].actions.is_empty());
 
         // The returned snapshot resolves chains against the NEW
         // compiled registry: the edited local-pref value evaluates.
@@ -6777,10 +7918,6 @@ hold_time = 90
     /// sends `SyncRpolPolicies` and the returned snapshot evaluates
     /// the new leaf content. Reloading again with nothing touched is
     /// content-equal: no command fires (the #775 skip's input).
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one scenario drives two full reload rounds (leaf edit, then no-op) end to end"
-    )]
     #[tokio::test]
     async fn reload_rpol_imported_leaf_edit_syncs_and_untouched_graph_is_a_noop() {
         let dir = tempfile::tempdir().unwrap();
@@ -6814,37 +7951,29 @@ hold_time = 90
             let live_grpc_uds = live_grpc_uds.clone();
             let path = path.clone();
             async move {
-                let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
-                let mock = tokio::spawn(async move {
-                    let mut tags = Vec::new();
-                    while let Some(cmd) = peer_mgr_rx.recv().await {
-                        tags.push(cmd_tag(&cmd));
-                        if let PeerManagerCommand::OwnedCatalogMutation { reply, .. } = cmd {
-                            let _ = reply.send(OwnedCatalogMutationOutcome::Success);
-                        }
-                    }
-                    tags
-                });
-                let returned = reload_config(
+                let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
+                let (internal_tx, generation) = spawn_generation_mock(Vec::new(), None);
+                let returned = reload_config_generation(
                     path.to_str().unwrap(),
                     &initial,
                     live_grpc_tcp.as_ref(),
                     live_grpc_uds.as_ref(),
                     &peer_mgr_tx,
+                    &internal_tx,
                     None,
                     None,
                 )
                 .await;
-                drop(peer_mgr_tx);
-                (returned, mock.await.unwrap())
+                drop(internal_tx);
+                let calls = generation.await.unwrap();
+                (returned, calls.len())
             }
         };
 
-        let (returned, tags) = run(initial).await;
+        let (returned, generations) = run(initial).await;
         assert_eq!(
-            tags,
-            vec!["SyncRpolPolicies(1)".to_string()],
-            "a leaf-module edit is an rpol content change"
+            generations, 1,
+            "a leaf-module edit is an rpol content change and one generation"
         );
         let reloaded = returned.expect("reload completes");
         let chain = reloaded
@@ -6888,12 +8017,9 @@ hold_time = 90
 
         // Round 2: nothing touched — the resolved graph is
         // content-equal, so no rpol sync (or any other command) fires.
-        let (returned, tags) = run(reloaded.runtime.clone()).await;
+        let (returned, generations) = run(reloaded.runtime.clone()).await;
         assert!(returned.is_some(), "no-op reload completes");
-        assert!(
-            tags.is_empty(),
-            "untouched module graph is a no-op: {tags:?}"
-        );
+        assert_eq!(generations, 0, "untouched module graph is a no-op");
     }
 
     /// LAN-284: a REJECTED rpol sync must not publish the candidate
@@ -6957,32 +8083,30 @@ hold_time = 90
 
         // Reload 1: the peer manager REJECTS the sync (its own two-phase
         // apply rolled back, so live sessions keep the old chains).
-        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
-        let mock = tokio::spawn(async move {
-            while let Some(cmd) = peer_mgr_rx.recv().await {
-                if let PeerManagerCommand::OwnedCatalogMutation { reply, .. } = cmd {
-                    let _ = reply.send(OwnedCatalogMutationOutcome::RejectedNoEffect(
-                        CatalogMutationError::internal("mid-apply chain resolution failed"),
-                    ));
-                }
-            }
-        });
-        let rejected = reload_config(
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
+        let (internal_tx, generation) = spawn_generation_mock(
+            vec![GenerationReply::RejectedNoEffect(
+                "mid-apply chain resolution failed",
+            )],
+            None,
+        );
+        let rejected = reload_config_generation(
             path.to_str().unwrap(),
             &initial,
             live_grpc_tcp.as_ref(),
             live_grpc_uds.as_ref(),
             &peer_mgr_tx,
+            &internal_tx,
             None,
             None,
         )
         .await;
-        drop(peer_mgr_tx);
-        mock.await.unwrap();
+        drop(internal_tx);
+        assert_eq!(generation.await.unwrap().len(), 1);
         assert!(matches!(
             rejected,
             SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(ReloadStepFailure {
-                bucket: "policy.rpol.sync",
+                bucket: "generation.apply",
                 error: ReloadStepError::Rejected(_),
                 ..
             }))
@@ -7000,33 +8124,25 @@ hold_time = 90
         // diff re-detects the on-disk candidate against the reverted
         // runtime snapshot and adopts it for everyone.
         let current = initial.clone();
-        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
-        let mock = tokio::spawn(async move {
-            let mut synced = 0_u32;
-            while let Some(cmd) = peer_mgr_rx.recv().await {
-                if let PeerManagerCommand::OwnedCatalogMutation { reply, .. } = cmd {
-                    synced += 1;
-                    let _ = reply.send(OwnedCatalogMutationOutcome::Success);
-                }
-            }
-            synced
-        });
-        let adopted = reload_config(
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
+        let (internal_tx, generation) = spawn_generation_mock(Vec::new(), None);
+        let adopted = reload_config_generation(
             path.to_str().unwrap(),
             &current,
             live_grpc_tcp.as_ref(),
             live_grpc_uds.as_ref(),
             &peer_mgr_tx,
+            &internal_tx,
             None,
             None,
         )
         .await
         .expect("retry reload completes");
-        drop(peer_mgr_tx);
+        drop(internal_tx);
         assert_eq!(
-            mock.await.unwrap(),
+            generation.await.unwrap().len(),
             1,
-            "retry must re-detect the rpol change and sync it"
+            "retry must re-detect the rpol change and apply it as one generation"
         );
         let chain = adopted
             .import_chain()
@@ -7583,8 +8699,8 @@ tcp_ao = [
 
         assert_eq!(
             tags,
-            vec!["ReconcilePeers(+0,-0,~1)"],
-            "the independently reloadable neighbor edit must still reconcile"
+            vec!["ApplyReloadGeneration(hot=0,replace=1,add=0,remove=0)"],
+            "the independently reloadable neighbor edit replaces the session once"
         );
         for returned in returned {
             let returned = returned.expect("mixed reload should return a config");
@@ -8496,101 +9612,6 @@ import_policy_chain = ["origin-guard"]
     }
 
     #[tokio::test]
-    async fn reload_neighbor_reconcile_failure_retains_committed_dataset_snapshot() {
-        use rustbgpd_api::peer_types::{
-            PeerReconcileAuthority, PeerReconcileOutcome, ReconcileFailure, ReconcileFailureKind,
-        };
-
-        let initial_toml = r#"
-[global]
-asn = 65001
-router_id = "10.0.0.1"
-listen_port = 179
-[global.telemetry]
-log_format = "json"
-[policy]
-rpol_files = ["policies/core.rpol"]
-[policy.datasets.customers]
-path = "datasets/customers.list"
-[[neighbors]]
-address = "192.0.2.1"
-remote_asn = 65002
-import_policy_chain = ["origin-guard"]
-"#;
-        let desired_toml = initial_toml
-            .replace("datasets/customers.list", "datasets/customers-next.list")
-            + r#"
-[[neighbors]]
-address = "192.0.2.99"
-remote_asn = 65099
-"#;
-        let dir = dataset_reload_dir(initial_toml, "64500\n");
-        std::fs::write(
-            dir.path().join("datasets/customers-next.list"),
-            "64500\n64999\n",
-        )
-        .unwrap();
-        let config_path = dir.path().join("config.toml");
-        let initial = Config::load_with_diagnostics(config_path.to_str().unwrap()).unwrap();
-        let live = std::sync::Arc::clone(initial.policy.dataset_bindings.get("customers").unwrap());
-        write_tier_test_config(&config_path, &desired_toml);
-        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(8);
-        let mock = tokio::spawn(async move {
-            while let Some(command) = peer_mgr_rx.recv().await {
-                match command {
-                    PeerManagerCommand::RefreshDatasetDependents { reply, .. } => {
-                        let _ = reply.send(Ok(()));
-                    }
-                    PeerManagerCommand::ReconcilePeers { reply, .. } => {
-                        let _ = reply.send(PeerReconcileOutcome {
-                            effects: Vec::new(),
-                            failures: vec![ReconcileFailure {
-                                kind: ReconcileFailureKind::Add,
-                                peer: rustbgpd_api::peer_types::PeerKey::new(
-                                    "192.0.2.99".parse().unwrap(),
-                                    None,
-                                ),
-                                error: "injected add failure".to_string(),
-                            }],
-                            authority: PeerReconcileAuthority::Known,
-                        });
-                    }
-                    other => panic!("unexpected command: {}", cmd_tag(&other)),
-                }
-            }
-        });
-
-        let returned = reload_config(
-            config_path.to_str().unwrap(),
-            &initial,
-            initial.global.telemetry.grpc_tcp.as_ref(),
-            initial.global.telemetry.grpc_uds.as_ref(),
-            &peer_mgr_tx,
-            None,
-            None,
-        )
-        .await
-        .expect("failed neighbor reconcile returns a partial snapshot");
-        assert_tier_authorized_test_config(&returned);
-        assert_tier_authorized_test_config(&returned.desired);
-        drop(peer_mgr_tx);
-        mock.await.unwrap();
-
-        assert_eq!(live.pin().generation, 2);
-        assert_eq!(live.pin().data.records(), 2);
-        assert!(std::sync::Arc::ptr_eq(
-            &live,
-            returned.policy.dataset_bindings.get("customers").unwrap()
-        ));
-        assert!(
-            returned.policy.datasets["customers"]
-                .path
-                .ends_with("datasets/customers-next.list")
-        );
-        assert_eq!(returned.neighbors, initial.neighbors);
-    }
-
-    #[tokio::test]
     async fn reload_rejects_tcp_ao_pin_conflict_without_committing_staged_datasets() {
         let initial_toml = r#"
 [global]
@@ -8825,11 +9846,13 @@ peer_group = "secure"
             baseline_toml()
         );
         let (returned, tags) = drive_reload(baseline_toml(), &new_toml).await;
-        assert!(returned.is_some(), "reload must succeed");
-        assert!(
-            tags.contains(&"SetPolicy(block-private)".to_string()),
-            "expected SetPolicy(block-private) — saw {tags:?}"
+        let returned = returned.expect("reload must succeed");
+        assert_eq!(
+            tags,
+            vec!["ApplyReloadGeneration(hot=0,replace=0,add=0,remove=0)".to_string()],
+            "a policy addition is one generation with no session action"
         );
+        assert!(returned.policy.definitions.contains_key("block-private"));
     }
 
     /// ADR-0073: an explain-only reload must adopt the new
@@ -8861,11 +9884,12 @@ peer_group = "secure"
         );
         let (returned, tags) = drive_reload(baseline_toml(), &new_toml).await;
         let reloaded = returned.expect("reload must succeed");
-        // The hot-applied policy addition still reconciled...
-        assert!(
-            tags.contains(&"SetPolicy(block-private)".to_string()),
-            "expected SetPolicy(block-private) — saw {tags:?}"
+        // The policy addition rode the generation...
+        assert_eq!(
+            tags,
+            vec!["ApplyReloadGeneration(hot=0,replace=0,add=0,remove=0)".to_string()]
         );
+        assert!(reloaded.policy.definitions.contains_key("block-private"));
         // ...and the restart-required explain block is in the snapshot.
         assert!(
             !reloaded.policy.explain.enabled,
@@ -8878,39 +9902,30 @@ peer_group = "secure"
     }
 
     /// ADR-0073 (mid-reload race): when explain changes alongside a
-    /// neighbor edit that re-adds the peer, the peer manager's explain
-    /// snapshot must be refreshed *before* the reconcile constructs the
-    /// session — otherwise the re-added peer reads stale explain via
-    /// `build_transport_config`. Proven by command ordering on the FIFO
-    /// channel: `SyncExplainConfig` must precede `ReconcilePeers`.
+    /// neighbor edit that rebuilds the peer, the peer manager must see the
+    /// new explain before it constructs the session. On the generation
+    /// route the single candidate carries the explain block and the
+    /// executor swaps its snapshot before any replacement, so the proof is
+    /// that one command carries both the replacement and the new explain.
     #[tokio::test]
-    async fn reload_syncs_explain_before_peer_reconcile() {
-        // Change the neighbor (hold_time) → ReconcilePeers(changed); and
-        // flip [policy.explain] in the same reload. Explain is opt-in,
-        // so the flip that differs from the baseline is off → on.
+    async fn reload_generation_carries_explain_with_the_session_replacement() {
         let new_toml = format!(
             "{}\n[policy.explain]\nenabled = true\n",
             baseline_toml().replace("hold_time = 90", "hold_time = 120")
         );
-        let (returned, tags) = drive_reload(baseline_toml(), &new_toml).await;
-        assert!(returned.is_some(), "reload must succeed");
-
-        let sync_idx = tags
-            .iter()
-            .position(|t| t.starts_with("SyncExplainConfig"))
-            .unwrap_or_else(|| panic!("expected SyncExplainConfig — saw {tags:?}"));
-        let reconcile_idx = tags
-            .iter()
-            .position(|t| t.starts_with("ReconcilePeers"))
-            .unwrap_or_else(|| panic!("expected ReconcilePeers — saw {tags:?}"));
-        assert!(
-            sync_idx < reconcile_idx,
-            "explain snapshot must sync before peer reconcile — saw {tags:?}"
+        let (outcome, tags, calls) =
+            drive_generation(baseline_toml(), &new_toml, GenerationReply::Applied).await;
+        let returned = outcome.expect("reload must succeed");
+        assert_eq!(
+            tags,
+            vec!["ApplyReloadGeneration(hot=0,replace=1,add=0,remove=0)".to_string()]
         );
-        assert!(
-            tags[sync_idx].contains("enabled=true"),
-            "sync must carry the new explain value — saw {tags:?}"
+        assert!(calls[0].candidate.policy.explain.enabled);
+        assert_eq!(
+            calls[0].actions[0].kind,
+            config::ReloadPeerActionKind::Replace
         );
+        assert!(returned.policy.explain.enabled);
     }
 
     /// Load-bearing peer-group reload proof: adding a definition must surface
@@ -8925,9 +9940,9 @@ peer_group = "secure"
         );
         let (returned, tags) = drive_reload(baseline_toml(), &new_toml).await;
         let returned = returned.expect("reload must succeed");
-        assert!(
-            tags.contains(&"SetPeerGroup(external)".to_string()),
-            "expected SetPeerGroup(external) — saw {tags:?}"
+        assert_eq!(
+            tags,
+            vec!["ApplyReloadGeneration(hot=0,replace=0,add=0,remove=0)".to_string()]
         );
         assert_eq!(
             returned.peer_groups["external"]
@@ -8951,135 +9966,66 @@ peer_group = "secure"
             baseline_toml()
         );
         let (returned, tags) = drive_reload(&initial, &new_toml).await;
-        assert!(returned.is_some(), "reload must succeed");
-        assert!(
-            tags.iter().any(|t| t.starts_with("SetGlobalImportChain")),
-            "expected SetGlobalImportChain — saw {tags:?}"
+        let returned = returned.expect("reload must succeed");
+        assert_eq!(
+            tags,
+            vec!["ApplyReloadGeneration(hot=0,replace=0,add=0,remove=0)".to_string()]
         );
+        assert_eq!(returned.policy.import_chain, vec!["foo".to_string()]);
     }
 
-    /// Removing a policy definition must surface as `DeletePolicy`
-    /// AFTER any neighbor reconciliation, so the still-referenced
-    /// rejection path doesn't fire transiently.
+    /// Removing a policy definition is part of the single candidate the
+    /// generation adopts; there is no separate delete step that could fire a
+    /// transient still-referenced rejection.
     #[tokio::test]
-    async fn reload_applies_policy_removal_after_neighbor_reconcile() {
+    async fn reload_applies_policy_removal_within_the_generation() {
         let initial = format!(
             "{}\n[policy.definitions.old]\ndefault_action = \"permit\"\n",
             baseline_toml()
         );
         let (returned, tags) = drive_reload(&initial, baseline_toml()).await;
-        assert!(returned.is_some(), "reload must succeed");
-        assert!(
-            tags.contains(&"DeletePolicy(old)".to_string()),
-            "expected DeletePolicy(old) — saw {tags:?}"
+        let returned = returned.expect("reload must succeed");
+        assert_eq!(
+            tags,
+            vec!["ApplyReloadGeneration(hot=0,replace=0,add=0,remove=0)".to_string()]
         );
+        assert!(!returned.policy.definitions.contains_key("old"));
     }
 
-    /// When a step early in the reload sequence succeeds and a later
-    /// step fails, reload returns a partial-state snapshot so the
-    /// daemon's in-memory config matches what the peer manager
-    /// actually applied — instead of the previous behaviour where it
-    /// returned `None` ("kept current") while the manager already had
-    /// half the new state in effect. `SetPolicy` lands, then
-    /// `ReconcilePeers` fails; the returned config must contain the
-    /// new policy but not the new neighbors.
+    /// A generation-class candidate whose executor restored the prior
+    /// generation is a clean rejection: nothing partial is adopted, the
+    /// returned authority is absent, and no catalog step fired separately.
     #[tokio::test]
-    async fn reload_halts_on_failure_with_honest_partial_snapshot() {
-        use rustbgpd_api::peer_types::{
-            PeerReconcileAuthority, PeerReconcileOutcome, ReconcileFailure, ReconcileFailureKind,
-        };
-
-        let initial_toml = baseline_toml().to_string();
+    async fn reload_generation_failure_is_clean_not_partial() {
         let new_toml = format!(
             "{baseline}\n[policy.definitions.block-private]\ndefault_action = \"deny\"\n\n[[neighbors]]\naddress = \"10.0.0.99\"\nremote_asn = 65099\nhold_time = 90\n",
             baseline = baseline_toml()
         );
-
-        let path = unique_temp_path("reload-halt-partial");
-        std::fs::write(&path, &initial_toml).unwrap();
-        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
-        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
-        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
-        std::fs::write(&path, &new_toml).unwrap();
-
-        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(32);
-        let mock = tokio::spawn(async move {
-            // Reply Ok to every non-reconcile command; reply with a
-            // reconcile failure to simulate a runtime rejection from
-            // the peer manager. Models a valid TOML that fails for
-            // an operational reason at the manager (port bind, TCP
-            // setup, MD5 key push, etc.). Track command tags so the
-            // test can assert which earlier steps successfully fired.
-            let mut tags: Vec<String> = Vec::new();
-            while let Some(cmd) = peer_mgr_rx.recv().await {
-                tags.push(cmd_tag(&cmd));
-                match cmd {
-                    PeerManagerCommand::OwnedCatalogMutation { reply, .. } => {
-                        let _ = reply.send(OwnedCatalogMutationOutcome::Success);
-                    }
-                    PeerManagerCommand::SetPolicy { reply, .. }
-                    | PeerManagerCommand::DeletePolicy { reply, .. }
-                    | PeerManagerCommand::SetNeighborSet { reply, .. }
-                    | PeerManagerCommand::DeleteNeighborSet { reply, .. }
-                    | PeerManagerCommand::SetPeerGroup { reply, .. }
-                    | PeerManagerCommand::DeletePeerGroup { reply, .. }
-                    | PeerManagerCommand::SetGlobalImportChain { reply, .. }
-                    | PeerManagerCommand::SetGlobalExportChain { reply, .. }
-                    | PeerManagerCommand::ClearGlobalImportChain { reply }
-                    | PeerManagerCommand::ClearGlobalExportChain { reply } => {
-                        let _ = reply.send(Ok(()));
-                    }
-                    PeerManagerCommand::ReconcilePeers { reply, .. } => {
-                        let result = PeerReconcileOutcome {
-                            effects: Vec::new(),
-                            failures: vec![ReconcileFailure {
-                                kind: ReconcileFailureKind::Add,
-                                peer: rustbgpd_api::peer_types::PeerKey::new(
-                                    "10.0.0.99".parse().unwrap(),
-                                    None,
-                                ),
-                                error: "simulated reconcile failure".to_string(),
-                            }],
-                            authority: PeerReconcileAuthority::Known,
-                        };
-                        let _ = reply.send(result);
-                    }
-                    PeerManagerCommand::SyncExplainConfig { reply, .. } => {
-                        let _ = reply.send(());
-                    }
-                    _ => {}
-                }
-            }
-            tags
-        });
-
-        let returned = reload_config(
-            path.to_str().unwrap(),
-            &initial,
-            live_grpc_tcp.as_ref(),
-            live_grpc_uds.as_ref(),
-            &peer_mgr_tx,
-            None,
-            None,
+        let (outcome, tags, calls) = drive_generation(
+            baseline_toml(),
+            &new_toml,
+            GenerationReply::FullyCompensated("add 10.0.0.99: simulated failure"),
         )
         .await;
-        drop(peer_mgr_tx);
-        let tags = mock.await.unwrap();
-        std::fs::remove_file(&path).ok();
-
-        // Live peers are ambiguous, so the partial snapshot keeps the prior
-        // neighbor set. Earlier steps are known to have landed and must remain
-        // represented; otherwise the next reload would retry them against a
-        // fictional all-old snapshot.
-        let returned = returned.expect("reconcile failure returns an honest partial snapshot");
         assert!(
-            returned.policy.definitions.contains_key("block-private"),
-            "the successfully applied policy must survive the partial snapshot"
+            matches!(
+                &outcome,
+                SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(failure))
+                    if failure.bucket == "generation.apply"
+            ),
+            "{outcome:?}"
         );
-        assert_eq!(returned.neighbors, initial.neighbors);
+        assert_eq!(
+            tags,
+            vec!["ApplyReloadGeneration(hot=0,replace=0,add=1,remove=0)".to_string()],
+            "the policy addition and the neighbor addition are one command"
+        );
         assert!(
-            tags.contains(&"SetPolicy(block-private)".to_string()),
-            "earlier reload steps must still have fired before the reconcile failure — saw {tags:?}"
+            calls[0]
+                .candidate
+                .policy
+                .definitions
+                .contains_key("block-private")
         );
     }
 

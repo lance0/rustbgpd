@@ -1342,7 +1342,7 @@ impl PeerManager {
         PeerReshapeSnapshotOutcome::Success(priors)
     }
 
-    async fn restore_peer_reshape_priors(
+    pub(super) async fn restore_peer_reshape_priors(
         &mut self,
         priors: Vec<PeerManagerNeighborConfig>,
     ) -> Result<(), PeerLifecycleError> {

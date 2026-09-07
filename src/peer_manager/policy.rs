@@ -188,7 +188,7 @@ impl std::fmt::Display for PolicyApplyFailure {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PolicySnapshotFailureKind {
+pub(super) enum PolicySnapshotFailureKind {
     RejectedNoEffect,
     FullyCompensated,
     CompensationAmbiguous,
@@ -226,10 +226,10 @@ impl PolicySnapshotRejectionClass {
 
 #[derive(Debug)]
 pub(super) struct PolicySnapshotFailure {
-    kind: PolicySnapshotFailureKind,
+    pub(super) kind: PolicySnapshotFailureKind,
     rejection_class: PolicySnapshotRejectionClass,
     pub(super) code: RuntimeConfigPolicyFailureCode,
-    message: String,
+    pub(super) message: String,
 }
 
 impl PolicySnapshotFailure {
@@ -4246,7 +4246,10 @@ impl PeerManager {
     /// group's ingress discard list changed. Any failed signal is surfaced:
     /// leaving a live session on the prior normalization contract is not a
     /// successful catalog replacement.
-    async fn purge_dynamic_group_inheritors(&mut self, group: &str) -> Result<usize, String> {
+    pub(super) async fn purge_dynamic_group_inheritors(
+        &mut self,
+        group: &str,
+    ) -> Result<usize, String> {
         let mut ranges = self
             .current_config
             .dynamic_neighbors

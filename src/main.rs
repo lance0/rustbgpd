@@ -97,7 +97,7 @@ use rustbgpd_api::peer_types::{
 };
 use rustbgpd_api::runtime_config_settlement::{
     OwnedRuntimeConfigOutcome, OwnedRuntimeConfigRequestContext, RuntimeConfigOperationKind,
-    RuntimeConfigSettlementPhase, RuntimeConfigSettlementWatchdog,
+    RuntimeConfigSettlementWatchdog,
 };
 use rustbgpd_api::server::{
     AccessMode as GrpcServerAccessMode, ConfigMutationGateFn, ListenerConfig as GrpcListenerConfig,
@@ -5984,33 +5984,15 @@ async fn run<T>(
                             ));
                         }
                     };
-                    let mut accepted_effect = false;
-                    if let Some(credentials) = grpc_credentials {
-                        match credentials.reload() {
-                            Ok(generation) => {
-                                operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
-                                accepted_effect = true;
-                                reload_metrics.record_grpc_credential_reload("success");
-                                info!(generation, "gRPC credential generation reloaded");
-                                if let Some((index, warning_seconds)) = grpc_tls_expiry_warning {
-                                    warn_grpc_tls_expiry(&credentials, index, warning_seconds);
-                                }
-                            }
-                            Err(error) => {
-                                reload_metrics.record_grpc_credential_reload("failure");
-                                error!(error = %error, "gRPC credential reload rejected; last-known-good generation remains active");
-                            }
-                        }
-                    }
                     let outcome = reload_config_with_tcp_ao(
                         SighupReloadPlan {
                             baseline_runtime: snapshot,
                             desired,
-                            accepted_effect,
                         },
                         live_tcp.as_ref(),
                         live_uds.as_ref(),
                         &pm_tx,
+                        Some(&pm_internal),
                         Some(&limits_rib_tx),
                         fib_cmd.as_ref(),
                         Some(&evpn_runtime_reload_apply),
@@ -6022,6 +6004,28 @@ async fn run<T>(
                         SighupReloadOutcome::CleanNoEffect(error) => OwnedRuntimeConfigOutcome::CleanNoEffect(Err(error)),
                         SighupReloadOutcome::RecoveryFenced { error, reason } => OwnedRuntimeConfigOutcome::Fenced { error, reason },
                         SighupReloadOutcome::Acknowledged(authority) => {
+                            // Credential files are operator authority independent of
+                            // the config generation: rotate them only once the runtime
+                            // generation is acknowledged, so a rejected or restored
+                            // candidate has no credential effect. A rotation failure
+                            // stays non-fatal with the last-known-good generation
+                            // active.
+                            if let Some(credentials) = grpc_credentials {
+                                match credentials.reload() {
+                                    Ok(generation) => {
+                                        operation.mark_sighup_accepted_effect();
+                                        reload_metrics.record_grpc_credential_reload("success");
+                                        info!(generation, "gRPC credential generation reloaded");
+                                        if let Some((index, warning_seconds)) = grpc_tls_expiry_warning {
+                                            warn_grpc_tls_expiry(&credentials, index, warning_seconds);
+                                        }
+                                    }
+                                    Err(error) => {
+                                        reload_metrics.record_grpc_credential_reload("failure");
+                                        error!(error = %error, "gRPC credential reload rejected; last-known-good generation remains active");
+                                    }
+                                }
+                            }
                             let Some(bridge_replace) = bridge_replace.as_ref() else {
                                 operation.record_sighup_recovery_step("config_bridge");
                                 return OwnedRuntimeConfigOutcome::Fenced {
