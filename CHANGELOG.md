@@ -527,6 +527,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- EVPN best, received, and advertised JSON route rows now retain standard and
+  extended communities returned by the daemon. Standard communities use the
+  existing display strings and extended communities retain raw unsigned
+  64-bit values, matching exact-explain JSON.
+
 - IXP Manager lifecycle requests now abort slow control-response bodies when
   the global request budget expires. Uncertain update-lock acquisition stays
   in manual recovery instead of continuing the lifecycle.

@@ -84,6 +84,12 @@ fn routes_to_json(routes: &[crate::proto::EvpnRouteEntry]) -> Vec<serde_json::Va
                 "next_hop": r.next_hop,
                 "peer": r.peer_address,
                 "as_path": r.as_path,
+                "communities": r
+                    .communities
+                    .iter()
+                    .map(|c| output::format_community(*c))
+                    .collect::<Vec<_>>(),
+                "extended_communities": r.extended_communities,
             });
             if let Some(view) = &r.prefix_sid {
                 row["prefix_sid"] = output::prefix_sid_json(view);
@@ -311,16 +317,7 @@ fn selector_to_json(key: &crate::proto::EvpnRouteSelector) -> serde_json::Value 
 
 fn explain_route_to_json(route: &crate::proto::EvpnRouteEntry) -> serde_json::Value {
     let mut rows = routes_to_json(std::slice::from_ref(route));
-    let mut row = rows.remove(0);
-    row["communities"] = serde_json::json!(
-        route
-            .communities
-            .iter()
-            .map(|c| output::format_community(*c))
-            .collect::<Vec<_>>()
-    );
-    row["extended_communities"] = serde_json::json!(route.extended_communities);
-    row
+    rows.remove(0)
 }
 
 fn export_decision(decision: i32) -> &'static str {
@@ -1627,6 +1624,32 @@ mod tests {
     use crate::proto::ListEvpnInstancesRequest;
     use crate::proto::evpn_service_client::EvpnServiceClient;
     use crate::test_support::spawn_mock_server;
+
+    #[test]
+    fn route_json_preserves_communities_and_empty_arrays() {
+        let routes = [
+            crate::proto::EvpnRouteEntry {
+                communities: vec![(65000 << 16) | 100, rustbgpd_wire::COMMUNITY_NO_EXPORT],
+                extended_communities: vec![0x0002_fde8_0000_0064, u64::MAX],
+                ..Default::default()
+            },
+            crate::proto::EvpnRouteEntry::default(),
+        ];
+        let rows = super::routes_to_json(&routes);
+        assert_eq!(
+            rows[0]["communities"],
+            serde_json::json!(["65000:100", "NO_EXPORT"])
+        );
+        assert_eq!(
+            rows[0]["extended_communities"],
+            serde_json::json!([0x0002_fde8_0000_0064_u64, u64::MAX])
+        );
+        assert_eq!(rows[1]["communities"], serde_json::json!([]));
+        assert_eq!(rows[1]["extended_communities"], serde_json::json!([]));
+        for (route, row) in routes.iter().zip(rows) {
+            assert_eq!(super::explain_route_to_json(route), row);
+        }
+    }
 
     /// Build a realistic `EvpnInstanceTable` covering the field surface
     /// operators actually use: minimal instance, instance with bridge,

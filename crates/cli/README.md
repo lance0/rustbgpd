@@ -401,6 +401,11 @@ destination neighbor; each row's `peer` remains its source. Older daemons
 report that the new views are unsupported. Plain `rbgp evpn` retains its
 existing best-route listing.
 
+Best, received, advertised, and exact-explain JSON route rows include
+`communities` as strings (`65000:100`, `NO_EXPORT`) and `extended_communities`
+as raw unsigned 64-bit integers, preserving route-target and other extended
+community values. Both fields are empty arrays when the route has none.
+
 `evpn explain` selects one exact `mac-ip`, `imet`, `es`, `ip-prefix`,
 `ead-per-es`, or `ead-per-evi` key. Omit Type 2 `--ip` for MAC-only;
 Type 3/4 require `--originator-ip`, and Type 1/4 require `--esi`.
