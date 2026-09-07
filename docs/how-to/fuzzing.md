@@ -145,6 +145,95 @@ wire seed path and byte inventory, dictionary bytes and target enrollment, and
 the cache's branch guard, staging, versioned keys, caps, manifest validation,
 step order, and outage behavior.
 
+## When the nightly goes red
+
+The nightly steps run in order — wire, policy, EVPN, MRT, BFD, RTR — and the
+first failing step ends the job. **Every later crate is skipped and the wire
+corpus is not sealed**, so a red night costs coverage well beyond the target
+that actually failed. Triage it rather than waiting to see whether it clears.
+
+### Read the run
+
+```sh
+gh run list --workflow fuzz.yml --limit 10
+gh run view <run-id> --log-failed
+```
+
+The failing step names the crate. Inside it, find the line that says what
+stopped:
+
+- `panicked at fuzz_targets/<target>.rs:<line>` followed by
+  `ERROR: libFuzzer: deadly signal` — a crash, with a reproducer.
+- `ERROR: libFuzzer: out-of-memory` or `ERROR: libFuzzer: timeout` — also a
+  real finding: a decoder that allocates or loops on attacker-chosen bytes.
+- No `Running fuzz/target/...` line at all — nothing was fuzzed, so the failure
+  is in the build or the environment rather than in a codec.
+
+A crash prints its input twice: as `Test unit written to
+fuzz/artifacts/<target>/crash-<sha1>` and as a `Base64:` line. The run's
+`fuzz-crashes` artifact holds the same files for 14 days.
+
+### Separate an environment failure from a finding
+
+`fuzz/rust-nightly.txt` pins the toolchain, so an upstream compiler regression
+cannot reach the campaign on its own — it arrives only with a deliberate pin
+bump. When the job breaks with no change on our side, suspect the runner image,
+the `cargo install cargo-fuzz` step, or the cache service before suspecting a
+codec; those failures stop before any target runs and leave no artifact behind.
+A corpus cache miss or cache-service outage is not a failure at all: the
+campaign reports it and falls back to tracked seeds by design.
+
+### Reproduce it locally
+
+Recovering the input from the log is faster than downloading the artifact:
+
+```sh
+printf '%s' '<the Base64: value>' | base64 -d > /tmp/crash-input
+cd crates/wire
+cargo +nightly fuzz run <target> /tmp/crash-input
+cargo +nightly fuzz tmin <target> /tmp/crash-input   # minimize before pinning
+```
+
+`just fuzz-list` enumerates every target across the fuzz crates, and
+`just fuzz <crate> <target>` runs one target's campaign when you want to search
+near a finding instead of replaying a single input.
+
+### Decide what kind of bug it is
+
+Read the panic text, not just the target name.
+
+- **The message is one of the harness's own `expect` or `assert` strings.** The
+  harness built a value the library correctly refused, so fix the harness's
+  generator to stay inside the domain the library accepts. Production behavior
+  is already right. This is the common case for the `encode_*` constructor
+  targets, which synthesize structured values rather than decode bytes.
+- **The panic comes from library code** — an index out of bounds, an `unwrap`
+  on `None`, a slice range, an arithmetic overflow. That is a defect on a
+  surface fed by untrusted input, so fix the library.
+
+Either way, check every sibling site that shares the constraint before closing
+it. In September 2026 the `encode_update` harness generated AS 0, which the
+encoder rejects under RFC 7607; one night surfaced the `AS_PATH` site and the
+next surfaced `AGGREGATOR` from the same root cause. One commit closed both
+([#2239](https://github.com/lance0/rustbgpd/pull/2239)), but the second red
+night was avoidable.
+
+### Land the fix
+
+Add the minimized reproducer to `fuzz/seeds/<target>/` so every later campaign
+starts from it, and add an ordinary Rust regression test beside the code for a
+library bug. The seed proves the input no longer crashes; the test states the
+behavior now expected.
+
+### File, or note and move on
+
+File an issue when the finding is in library code, when it is reachable from
+network bytes, or when the same failure returns after a fix. Note the run ID
+and the resolving commit and move on when the red was an infrastructure
+cancellation, a cache outage, or a failure that a commit already on `main`
+resolves. Record the outcome either way: an unrecorded red night looks
+identical to one nobody noticed, and it hides the crates that never ran.
+
 ## OSS-Fuzz eligibility outcome and shared build
 
 The standard OSS-Fuzz project files are staged in `fuzz/oss-fuzz/`
