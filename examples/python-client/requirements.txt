@@ -1,0 +1,4 @@
+# Pinned against PyPI; both distributions publish manylinux wheels for
+# CPython 3.9 through 3.14 at this version.
+grpcio==1.83.1
+grpcio-tools==1.83.1
