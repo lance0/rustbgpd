@@ -223,16 +223,34 @@ trip/timed-restart cycle every `TRIP_INTERVAL_SEC` (default 14 400 s →
 6/24 h) on the designated member (stub 0, `127.1.0.1`,
 `max_prefixes = routes + 50`, `max_prefix_restart_seconds = 120`).
 
+Both bare-host flagship runners raise their own `RLIMIT_NOFILE` soft limit to
+`SOAK_NOFILE_SOFT` (default 65536, the value the shipped systemd and container
+units pin) before the daemon is launched, and refuse to run if the inherited
+hard limit will not allow it. The daemon is forked from the runner's shell and
+inherits whatever it finds there: at the 1000-peer shape a stock 1024 limit is
+consumed by peer sockets, and the metrics listener then fails every `accept()`
+with EMFILE while the served scrapes still return 200, the sessions stay up,
+and `/readyz` stays green — a crippled daemon behind an entirely green
+client-side gate battery. The achieved limit is recorded as `nofile_soft` in
+`run.json`, so each receipt states the configuration it measured.
+
 The measured window also carries mandatory management-plane load, started
-after convergence and before sampling. Four independent monotonic schedules
+after convergence and before sampling. Five independent monotonic schedules
 exercise the shipped surfaces until the engine exits: HTTP `/metrics` every
 1 s, plus `rbgp --json neighbor`,
 `rbgp --json policy stats --direction both`, and
-an exact RIB lookup over the existing UDS every 5 s. The lookup is stub 1's
+an exact RIB lookup over the existing UDS every 5 s, and `rbgp --json doctor`
+every `MANAGEMENT_DOCTOR_INTERVAL_SEC` (default 600 s). The lookup is stub 1's
 first route, derived independently from `SOAK_ROUTES_PER_PEER` using the
 reloadstall base-prefix mapping (`20.1.144.0/24` at flagship scale); stub 0
-remains reserved for the intentional max-prefix trip. Each attempt has a 5 s
-timeout and no retry. Evidence is bounded JSONL: it
+remains reserved for the intentional max-prefix trip. The `doctor` schedule is an assertion, not load: it is the shipped surface that
+reads the live daemon's own run context (descriptor limits, state-directory
+writability and free space, listener reachability, crash reports, authorization
+posture), and its cadence is set so a misconfigured host fails the receipt at
+the start of the measured window instead of degrading it silently for 24 h. It
+runs with an explicit `--output`, rewriting one `doctor-bundle.tar.gz` in place
+rather than accumulating a timestamped tarball per attempt. Each attempt has a
+5 s timeout and no retry. Evidence is bounded JSONL: it
 retains schedule/start/completion time, operation, duration, exit/result,
 response bytes, and SHA-256 only, followed by one atomic clean-SIGTERM
 summary. Response payloads are never retained.
@@ -264,8 +282,9 @@ never as silent green.
 | Intern-table late-window slope | < 100 entries/h over the same window (the scenario's attribute universe is fixed; reload re-interning must return to plateau) | `bgp_rib_attr_intern_global_size` → CSV `intern_size` | Every reload re-interns per-chain attributes; GC reclaims after transition. |
 | Counter monotonicity (no restart) | `bgp_messages_sent_total` never decreases between samples | CSV `msgs_sent_total` | Advances with every keepalive/UPDATE across 1000 sessions; a decrease means a daemon restart (abort criterion). |
 | readyz availability | HTTP 200 within 250 ms on every sample (the route-server-1000 receipt enforces this bound during reloads at this exact shape) | CSV `readyz_code`, `readyz_ms` | Probed every sample, including mid-reload and mid-trip. |
-| Management-load lifetime and cadence | Load start ≤ measured-window start and load end ≥ measured-window end; all four operations present; each operation completes ≥ 90% of its scheduled attempts; zero missed cadence slots; terminal summary is the final complete JSONL record and its counts/configuration match independently observed records plus `run.json` | `management-plane-load.jsonl` start/operation/summary records + monotonic window bounds and exact intervals in `run.json` | The runner starts the load only after the engine convergence marker, aborts if it exits while the engine lives, then SIGTERMs and reaps it before analysis. Smoke interval knobs remain fail-closed because both evidence sources must agree. |
+| Management-load lifetime and cadence | Load start ≤ measured-window start and load end ≥ measured-window end; all five operations present; each operation completes ≥ 90% of its scheduled attempts; zero missed cadence slots; terminal summary is the final complete JSONL record and its counts/configuration match independently observed records plus `run.json` | `management-plane-load.jsonl` start/operation/summary records + monotonic window bounds and exact intervals in `run.json` | The runner starts the load only after the engine convergence marker, aborts if it exits while the engine lives, then SIGTERMs and reaps it before analysis. Smoke interval knobs remain fail-closed because both evidence sources must agree. |
 | Management-load correctness | Zero non-`ok` results and zero invalid `ok` results | Every bounded JSONL operation record must be schema-valid, non-empty, and report `ok`; metrics must report HTTP 200, CLI operations must exit 0, neighbor cardinality must equal configured peers, the policy root must contain a `chains` array, and the route array must contain exactly the independently recomputed stub 1 first prefix | Every attempt validates the live response before discarding its payload. There is no enable/skip switch and no retry that can hide a failed attempt. |
+| Doctor configuration assertion | Every `doctor` attempt reports `ok`, and at least one attempt exists. A red check is detected without retaining the report: the driver accepts `doctor`'s documented exit 2 ("bundle written, at least one check red") as a report rather than a CLI failure, parses the `--json` line, and records the verdict as the bounded `doctor_check_failed` result before discarding the payload. Per-peer session and flap checks are excluded from that verdict — the scenario tears the designated member down on purpose, and the session-floor, flap-budget, and trip-accounting gates above measure peer health exactly; what `doctor` uniquely contributes is the host/daemon configuration verdict. The rlimit check covers every `rustbgpd` process on the host, so a second daemon started during the window turns it red — intended, because a competing daemon corrupts every reading the run publishes | `management-plane-load.jsonl` `doctor` operation records + the retained `doctor-bundle.tar.gz` from the last attempt | Every attempt re-reads the live daemon's rlimits, state-directory space, listener reachability, and crash directory; the run's own fd-headroom guard sets the limit, and this re-asserts it from the daemon side for the whole window. |
 | Minimum sample count | ≥ 0.9 × (`SOAK_SECONDS` ÷ `SAMPLE_INTERVAL`) | CSV row count | One row per interval; scrape failures skip the row (and ≥ 5 consecutive failures abort). |
 | No abort record | zero `ABORT:` lines | `cycles.log` | The runner writes one before any fail-closed exit (daemon death, blind sampler, evidence deadline, disk floor, watchdog). |
 
@@ -277,7 +296,10 @@ route-reflector-client sessions × 100 routes each (100 k total, the
 driven by the `bench/scale/reloadstall` engine's iBGP-RR mode
 (`RELOADSTALL_IBGP_RR_ASN`) with its steady churn running throughout.
 No SIGHUP reloads and no max-prefix trips — scenario 10 covers those;
-this receipt's job is the flagship-RR shape + churn + stability. The
+this receipt's job is the flagship-RR shape + churn + stability. The same
+fail-closed file-descriptor headroom precondition as scenario 10 applies, with
+the achieved limit recorded as `nofile_soft` in `run.json`; this scenario
+carries no management-plane load, so the runner's guard is the whole assertion. The
 24 h window is the engine's `RELOADSTALL_IBGP_RR_HOLD_SECS` hold (one
 fail-closed status line per minute), closed by the terminal
 reflected-delivery verification: every observer re-requests the
