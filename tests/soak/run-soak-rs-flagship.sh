@@ -31,6 +31,7 @@
 #   - reloadstall.log  engine stdout/stderr (markers, csv records)
 #   - management-plane-load.jsonl  bounded HTTP/CLI load evidence
 #   - management-plane-load.log    load-driver stdout/stderr
+#   - doctor-bundle.tar.gz         latest `rbgp doctor` support bundle
 #   - run.json         run metadata (analyzer input)
 #   - verdict.json     analyzer verdict
 
@@ -62,6 +63,10 @@ readonly METRICS_PORT=9179
 DESIGNATED_ADDR="127.1.0.1" # stub_addr(0) — the engine's designated member
 MANAGEMENT_METRICS_INTERVAL_SEC="${MANAGEMENT_METRICS_INTERVAL_SEC:-1}"
 MANAGEMENT_CLI_INTERVAL_SEC="${MANAGEMENT_CLI_INTERVAL_SEC:-5}"
+# `rbgp doctor` is a whole-fleet triage sweep that also writes a support
+# bundle, so it runs on its own slow schedule: this is a periodic assertion
+# that the daemon's run context is still sane, not load.
+MANAGEMENT_DOCTOR_INTERVAL_SEC="${MANAGEMENT_DOCTOR_INTERVAL_SEC:-600}"
 MANAGEMENT_TIMEOUT_SEC="${MANAGEMENT_TIMEOUT_SEC:-5}"
 
 # Match reloadstall's base_prefix(idx) exactly for stub 1's first route:
@@ -134,6 +139,9 @@ RUSTBGPD_LOG="$RUN_DIR/rustbgpd.log"
 RELOADSTALL_LOG="$RUN_DIR/reloadstall.log"
 MANAGEMENT_LOAD_JSONL="$RUN_DIR/management-plane-load.jsonl"
 MANAGEMENT_LOAD_LOG="$RUN_DIR/management-plane-load.log"
+# One fixed path rewritten by every doctor attempt; a defaulted bundle name is
+# timestamped and would leave one tarball per attempt in the run directory.
+DOCTOR_BUNDLE="$RUN_DIR/doctor-bundle.tar.gz"
 PROM_TMP="$RUN_DIR/.metrics.prom"
 
 # shellcheck source=tests/soak/host-lock.sh
@@ -184,7 +192,8 @@ monotonic_now() {
 
 canonical_management_timing() {
     python3 - "$MANAGEMENT_METRICS_INTERVAL_SEC" \
-        "$MANAGEMENT_CLI_INTERVAL_SEC" "$MANAGEMENT_TIMEOUT_SEC" <<'PY'
+        "$MANAGEMENT_CLI_INTERVAL_SEC" "$MANAGEMENT_DOCTOR_INTERVAL_SEC" \
+        "$MANAGEMENT_TIMEOUT_SEC" <<'PY'
 import json
 import math
 import sys
@@ -457,6 +466,8 @@ start_management_load() {
         --route-prefix "$MANAGEMENT_ROUTE_PREFIX" \
         --metrics-interval "$MANAGEMENT_METRICS_INTERVAL_SEC" \
         --cli-interval "$MANAGEMENT_CLI_INTERVAL_SEC" \
+        --doctor-interval "$MANAGEMENT_DOCTOR_INTERVAL_SEC" \
+        --doctor-bundle "$DOCTOR_BUNDLE" \
         --timeout "$MANAGEMENT_TIMEOUT_SEC" \
         >"$MANAGEMENT_LOAD_LOG" 2>&1 &
     MANAGEMENT_LOAD_PID=$!
@@ -477,12 +488,12 @@ start_management_load() {
 write_run_json() {
     local tmp="$RUN_JSON.tmp" measured_start=null measured_end=null
     local management_timing management_metrics_interval management_cli_interval
-    local management_timeout
+    local management_doctor_interval management_timeout
     if ! management_timing=$(canonical_management_timing); then
         abort "management-plane intervals and timeout are no longer valid"
     fi
     IFS=$'\t' read -r management_metrics_interval management_cli_interval \
-        management_timeout <<<"$management_timing"
+        management_doctor_interval management_timeout <<<"$management_timing"
     [[ -n $MEASURED_START_MONOTONIC ]] && measured_start=$MEASURED_START_MONOTONIC
     [[ -n $MEASURED_END_MONOTONIC ]] && measured_end=$MEASURED_END_MONOTONIC
     {
@@ -511,6 +522,7 @@ write_run_json() {
         printf '  "management_load_file": "management-plane-load.jsonl",\n'
         printf '  "management_metrics_interval_sec": %s,\n' "$management_metrics_interval"
         printf '  "management_cli_interval_sec": %s,\n' "$management_cli_interval"
+        printf '  "management_doctor_interval_sec": %s,\n' "$management_doctor_interval"
         printf '  "management_timeout_sec": %s,\n' "$management_timeout"
         printf '  "management_route_prefix": "%s",\n' "$MANAGEMENT_ROUTE_PREFIX"
         printf '  "measured_start_monotonic": %s,\n' "$measured_start"

@@ -44,6 +44,7 @@ def smoke_meta(**over):
         "management_load_file": "management-plane-load.jsonl",
         "management_metrics_interval_sec": 30,
         "management_cli_interval_sec": 60,
+        "management_doctor_interval_sec": 120,
         "management_timeout_sec": 5,
         "management_route_prefix": "20.0.50.0/24",
     }
@@ -108,6 +109,7 @@ def long_meta():
                       warmup_sec=300, planned_reloads=48, planned_trips=6,
                       trip_every=8, management_metrics_interval_sec=3600,
                       management_cli_interval_sec=7200,
+                      management_doctor_interval_sec=14400,
                       measured_end_monotonic=87400.1)
 
 
@@ -141,7 +143,7 @@ def long_rows(rss_of=None):
 def management_jsonl(meta, *, missing_operation=None, early=False,
                      missed=False, failure=None, terminal=True,
                      truncated=False, cadence_gap=False):
-    operations = ("metrics", "neighbor", "policy_stats", "rib_prefix")
+    operations = ("metrics", "neighbor", "policy_stats", "rib_prefix", "doctor")
     start = meta["measured_start_monotonic"] - 0.1
     end = (meta["measured_end_monotonic"] - 1.0 if early
            else meta["measured_end_monotonic"] + 0.1)
@@ -150,6 +152,7 @@ def management_jsonl(meta, *, missing_operation=None, early=False,
         "neighbor": meta["management_cli_interval_sec"],
         "policy_stats": meta["management_cli_interval_sec"],
         "rib_prefix": meta["management_cli_interval_sec"],
+        "doctor": meta["management_doctor_interval_sec"],
     }
     records = [{
         "record": "start", "started_monotonic": start,
@@ -349,6 +352,49 @@ class RsFlagshipAnalyzerContracts(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 1)
         self.assertFalse(payload["gates"]["management_operations"]["pass"])
+
+    def test_doctor_check_failure_fails_the_receipt(self):
+        # A red doctor check is the whole point: a misconfigured host must
+        # fail the receipt loudly instead of quietly degrading it.
+        meta = smoke_meta()
+        result, payload = run_analyzer(
+            smoke_rows(), smoke_cycles(), meta,
+            management=management_jsonl(
+                meta, failure=("doctor", "doctor_check_failed")
+            ),
+        )
+        self.assertEqual(result.returncode, 1)
+        gate = payload["gates"]["management_doctor"]
+        self.assertFalse(gate["pass"])
+        self.assertEqual(
+            gate["value"]["failures"][0],
+            {"operation": "doctor", "result": "doctor_check_failed", "exit": 0},
+        )
+        self.assertFalse(payload["gates"]["management_failures"]["pass"])
+
+    def test_missing_doctor_attempts_fail_the_doctor_gate(self):
+        meta = smoke_meta()
+        result, payload = run_analyzer(
+            smoke_rows(), smoke_cycles(), meta,
+            management=management_jsonl(meta, missing_operation="doctor"),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(payload["gates"]["management_doctor"]["pass"])
+        self.assertEqual(payload["gates"]["management_doctor"]["value"]["attempts"], 0)
+
+    def test_doctor_interval_must_come_from_run_metadata(self):
+        meta = smoke_meta()
+        evidence = management_jsonl(meta)
+        del meta["management_doctor_interval_sec"]
+        result, payload = run_analyzer(
+            smoke_rows(), smoke_cycles(), meta, management=evidence
+        )
+        self.assertEqual(result.returncode, 1)
+        gate = payload["gates"]["management_evidence"]
+        self.assertFalse(gate["pass"])
+        self.assertIn(
+            "run metadata has invalid doctor interval", gate["value"]["errors"]
+        )
 
     def test_management_load_rejects_old_stub_zero_and_mismatched_prefixes(self):
         for prefix in ("20.0.0.0/24", "20.0.51.0/24"):

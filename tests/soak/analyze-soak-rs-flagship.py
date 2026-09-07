@@ -54,7 +54,9 @@ RSS_LATE_SLOPE_LIMIT = 10.0     # MB/h over the late window
 INTERN_LATE_SLOPE_LIMIT = 100.0  # entries/h over the late window
 READYZ_MS_LIMIT = 250.0
 REESTABLISH_GRACE_SEC = 60
-MANAGEMENT_OPERATIONS = ("metrics", "neighbor", "policy_stats", "rib_prefix")
+MANAGEMENT_OPERATIONS = (
+    "metrics", "neighbor", "policy_stats", "rib_prefix", "doctor",
+)
 MANAGEMENT_RECORD_LIMIT = 4096
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -215,6 +217,7 @@ def analyze_management_load(raw: bytes, meta: dict) -> dict:
         "neighbor": meta.get("management_cli_interval_sec"),
         "policy_stats": meta.get("management_cli_interval_sec"),
         "rib_prefix": meta.get("management_cli_interval_sec"),
+        "doctor": meta.get("management_doctor_interval_sec"),
     }
     expected_timeout = meta.get("management_timeout_sec")
     expected_peers = meta.get("peers")
@@ -400,6 +403,28 @@ def analyze_management_load(raw: bytes, meta: dict) -> dict:
         "management_failures": {
             "value": {"count": len(failures), "first": failures[:20]},
             "pass": not failures,
+        },
+        # `rbgp doctor` is the only in-band assertion that the daemon's own
+        # run context stayed sane for the whole window. A red check reaches
+        # here as the driver's `doctor_check_failed` result: the driver runs
+        # `rbgp --json doctor`, accepts its documented exit 2 ("bundle
+        # written, at least one check red") as a report rather than a CLI
+        # failure, and classifies the parsed report before discarding it, so
+        # nothing but the verdict is retained. Per-peer session checks are
+        # excluded there — the scenario trips the designated member on
+        # purpose, and the session/flap/trip gates above measure peer health
+        # exactly. This gate is the configuration verdict.
+        "management_doctor": {
+            "value": {
+                "attempts": len(operations["doctor"]),
+                "failures": [
+                    failure for failure in failures
+                    if failure["operation"] == "doctor"
+                ][:20],
+            },
+            "pass": bool(operations["doctor"]) and not any(
+                failure["operation"] == "doctor" for failure in failures
+            ),
         },
     }
 
