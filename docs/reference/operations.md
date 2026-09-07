@@ -458,9 +458,11 @@ remains safe and committable because it stages only the FIB table set.
 
 For a static-neighbor edit, change the neighbor in the candidate file (for
 example `hold_time`, `max_prefixes`, policy-chain refs, or ORF receive), run
-`config plan`, then apply with the returned token. The transaction reconfigures
-that peer using the same delete/re-add semantics as SIGHUP and rolls back if
-apply or persistence fails.
+`config plan`, then apply with the returned token. The transaction stages the
+candidate on disk first, so a config directory the daemon cannot write refuses
+the change before the peer is touched; it then reconfigures that peer using the
+same delete/re-add semantics as SIGHUP and rolls back if apply or publication
+fails.
 
 The live API returns redacted text / JSON diff buckets and never exports the
 daemon's full config snapshot. Transaction apply is intentionally narrower than

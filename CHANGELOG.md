@@ -44,6 +44,28 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   verification. Preparation and CI use an offline version record; release
   updates no longer require editing contract tests.
 
+### Fixed
+
+- Config transactions now durably stage their candidate next to the config
+  file before touching any session, catalog, or policy state. An ordinary
+  disk failure — an unwritable or read-only config directory, a full
+  filesystem, or a candidate the daemon cannot derive from its accepted
+  config — is reported as `FAILED_PRECONDITION` while every live session
+  keeps its identity, uptime, and counters. Previously every transaction
+  family applied its runtime change first and compensated after the write
+  failed, so a peer-group or neighbor edit could rebuild sessions the
+  failure then rebuilt again. A rename that fails after the stage is still
+  compensated exactly as before; an ambiguous publication or a lost
+  acknowledgement still fences and exits 70.
+
+### Upgrade notes
+
+- A config transaction whose candidate cannot be staged on disk now fails
+  before any session is reset. Expect no session churn from such a failure;
+  the successful path, its response, and its history rows are unchanged.
+  File-driven SIGHUP reload is unaffected: an operator-managed or read-only
+  config file acquires no API write requirement.
+
 ## [0.69.0] — 2026-09-07
 
 ### Added

@@ -3,12 +3,14 @@ use crate::config::FibTableConfig;
 use crate::fib_runtime::{FibRuntimeCommand, OwnedFibReplaceOutcome};
 use crate::test_support::{assert_tier_authorized_test_config, tier_authorized_uds_test_config};
 use rustbgpd_api::peer_types::{
-    FibTableSnapshot, RuntimeConfigDiff, RuntimeConfigTransactionCandidate,
-    RuntimeConfigTransactionPlan, RuntimeConfigTransactionPlanError,
+    CatalogMutationError, ConfigPersistError, FibTableSnapshot, RuntimeConfigDiff,
+    RuntimeConfigTransactionCandidate, RuntimeConfigTransactionPlan,
+    RuntimeConfigTransactionPlanError,
 };
 use rustbgpd_api::rib_service::FibTableControlError;
 use rustbgpd_policy::PolicyAction;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::sync::atomic::AtomicUsize;
 use tokio::sync::Mutex;
 
 fn tier_transaction_test_config(source: &str) -> String {
@@ -370,11 +372,19 @@ fn owned_transaction_phase_boundaries_are_closed() {
         let owned = body(family_source, start, end);
         let reserve = owned.find("reserve_persist_permit(").unwrap();
         let mutation = owned.find("progress.begin_mutation()").unwrap();
+        let staged = owned.find("stage_candidate_config(").unwrap();
         let first_mutation = owned.find(first_mutation).unwrap();
         let settling = owned.find("progress.begin_settling()").unwrap();
-        let publication = owned.find("persist_candidate_config(").unwrap();
-        assert!(reserve < mutation && mutation < first_mutation, "{start}");
-        assert!(mutation < settling && settling < publication, "{start}");
+        let publication = owned.find("staged.commit()").unwrap();
+        // The durable disk stage is the first thing after the owned phase
+        // begins and precedes every runtime mutation; publication of that
+        // stage is the last step after settling begins.
+        assert!(reserve < mutation && mutation < staged, "{start}");
+        assert!(
+            staged < first_mutation && first_mutation < settling,
+            "{start}"
+        );
+        assert!(settling < publication, "{start}");
     }
 
     for (family_source, start, end, rollback, expected) in [
@@ -422,7 +432,7 @@ fn owned_transaction_phase_boundaries_are_closed() {
         ),
     ] {
         let owned = body(family_source, start, end);
-        let pre_persist = owned.split_once("persist_candidate_config(").unwrap().0;
+        let pre_persist = owned.split_once("staged.commit()").unwrap().0;
         assert_eq!(pre_persist.matches(rollback).count(), expected, "{start}");
         for prefix in pre_persist.split(rollback).take(expected) {
             let after_phase = prefix.rsplit_once("progress.begin_settling();").unwrap().1;
@@ -1525,6 +1535,8 @@ struct TypedTransactionFakeControl {
     stage_results: Arc<Mutex<VecDeque<Result<(), String>>>>,
     drop_stage_ack: Arc<AtomicBool>,
     drop_restore_ack: Arc<AtomicBool>,
+    /// `StageTransactionConfig` commands received, answered or not.
+    stage_calls: Arc<AtomicUsize>,
 }
 
 fn spawn_typed_transaction_manager_controlled(
@@ -1629,6 +1641,7 @@ async fn fake_typed_transaction_manager_actor(
                 scope,
                 reply,
             } => {
+                control.stage_calls.fetch_add(1, Ordering::Relaxed);
                 if let Some(Err(error)) = control.stage_results.lock().await.pop_front() {
                     let _ = reply.send(Err(error));
                     continue;
@@ -1705,6 +1718,30 @@ async fn fake_snapshot_peer_manager_recording_bounces(
         peers,
         bounce_calls,
         Arc::new(Mutex::new(Vec::new())),
+        Arc::new(Mutex::new(Vec::new())),
+    )
+    .await;
+}
+
+/// `fake_snapshot_peer_manager` with a recorder for every
+/// `ApplyPeerReshapeSnapshot` fan-out, in order. A committed reshape records
+/// one entry; a compensated one records the apply and then the restore; a
+/// transaction refused before runtime records nothing.
+async fn fake_snapshot_peer_manager_recording_reshapes(
+    rx: mpsc::Receiver<PeerManagerCommand>,
+    plan: RuntimeConfigTransactionPlan,
+    snapshot_toml: Arc<Mutex<String>>,
+    peers: Arc<Mutex<Vec<PeerManagerNeighborConfig>>>,
+    reshape_calls: Arc<Mutex<Vec<Vec<PeerManagerNeighborConfig>>>>,
+) {
+    fake_snapshot_peer_manager_recording_bounces_and_purges(
+        rx,
+        plan,
+        snapshot_toml,
+        peers,
+        Arc::new(Mutex::new(Vec::new())),
+        Arc::new(Mutex::new(Vec::new())),
+        reshape_calls,
     )
     .await;
 }
@@ -1716,6 +1753,7 @@ async fn fake_snapshot_peer_manager_recording_bounces_and_purges(
     peers: Arc<Mutex<Vec<PeerManagerNeighborConfig>>>,
     bounce_calls: Arc<Mutex<Vec<Vec<DynamicRangeTarget>>>>,
     purge_calls: Arc<Mutex<Vec<Vec<DynamicRangeTarget>>>>,
+    reshape_calls: Arc<Mutex<Vec<Vec<PeerManagerNeighborConfig>>>>,
 ) {
     while let Some(cmd) = rx.recv().await {
         match cmd {
@@ -1767,6 +1805,7 @@ async fn fake_snapshot_peer_manager_recording_bounces_and_purges(
                 let _ = reply.send(fake_replace_peer_config(&mut peers, config));
             }
             PeerManagerCommand::ApplyPeerReshapeSnapshot { targets, reply } => {
+                reshape_calls.lock().await.push(targets.clone());
                 let mut peers = peers.lock().await;
                 let _ = reply.send(fake_apply_peer_reshape_snapshot(&mut peers, targets));
             }
@@ -2557,11 +2596,93 @@ async fn reject_config_transaction_commits(mut config_rx: mpsc::Receiver<ConfigE
     }
 }
 
-/// Persister whose acknowledgement is lost (LAN-277 window (b)): the
-/// caller can never learn whether the write happened.
+/// Persister whose commit acknowledgement is lost (ambiguous window (b)):
+/// the stage is acknowledged, the executor applies and asks to publish, and
+/// the caller can never learn whether the write happened.
 async fn drop_config_transaction_commit_acks(mut config_rx: mpsc::Receiver<ConfigEvent>) {
     while let Some(ConfigEvent::ConfigTransactionCommitted { ack, .. }) = config_rx.recv().await {
-        drop(ack);
+        if let Some(ack) = ack {
+            lose_commit_ack(ack).await;
+        }
+    }
+}
+
+/// Persister that stages cleanly but reports a pre-rename publication
+/// failure: the config file was provably NOT replaced, after the executor
+/// already applied its runtime change.
+async fn reject_config_transaction_publishes(mut config_rx: mpsc::Receiver<ConfigEvent>) {
+    while let Some(ConfigEvent::ConfigTransactionCommitted { ack, .. }) = config_rx.recv().await {
+        if let Some(ack) = ack {
+            fail_publish(ack, "persist rejected by test").await;
+        }
+    }
+}
+
+/// Drive one staged handshake to a pre-rename publication failure:
+/// acknowledge the stage, wait for the executor's commit, and answer it
+/// `NotPublished(message)`.
+async fn fail_publish(ack: ConfigPersistAck, message: &str) {
+    let ConfigPersistAck::Staged { staged, commit } = ack else {
+        panic!("config transactions must stage before applying")
+    };
+    let _ = staged.send(Ok(()));
+    if let Ok(reply) = commit.await {
+        let _ = reply.send(ConfigPersistCommitOutcome::NotPublished(
+            message.to_string(),
+        ));
+    }
+}
+
+/// Drive one staged handshake to a lost commit acknowledgement: acknowledge
+/// the stage, wait for the executor's commit, then drop its reply channel.
+async fn lose_commit_ack(ack: ConfigPersistAck) {
+    let ConfigPersistAck::Staged { staged, commit } = ack else {
+        panic!("config transactions must stage before applying")
+    };
+    let _ = staged.send(Ok(()));
+    drop(commit.await);
+}
+
+/// What the config bridge observed from one staged transaction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StagedBridgeObservation {
+    /// The executor dropped its commit channel: the stage was discarded.
+    Discarded,
+    /// The executor asked the bridge to publish the stage.
+    Committed,
+}
+
+/// Fake config bridge for the staged transaction handshake. Answers the
+/// stage with `stage`; if the executor then commits, answers with `commit`
+/// (`None` drops the reply, losing the acknowledgement). Records what the
+/// executor did in `observed`, then returns.
+async fn staged_transaction_bridge(
+    mut config_rx: mpsc::Receiver<ConfigEvent>,
+    stage: Result<(), ConfigPersistError>,
+    commit: Option<ConfigPersistCommitOutcome>,
+    observed: Arc<Mutex<Option<StagedBridgeObservation>>>,
+) {
+    let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
+        config_rx.recv().await
+    else {
+        return;
+    };
+    let ConfigPersistAck::Staged {
+        staged,
+        commit: commit_rx,
+    } = ack
+    else {
+        panic!("config transactions must stage before applying")
+    };
+    let _ = staged.send(stage);
+    match commit_rx.await {
+        Err(_) => *observed.lock().await = Some(StagedBridgeObservation::Discarded),
+        Ok(reply) => {
+            *observed.lock().await = Some(StagedBridgeObservation::Committed);
+            if let Some(outcome) = commit {
+                let _ = reply.send(outcome);
+            }
+        }
     }
 }
 
@@ -4144,7 +4265,7 @@ async fn confirmed_apply_compound_rollback_failure_retains_journal_and_fences_mu
         peers,
     ));
     let (config_tx, config_rx) = mpsc::channel(8);
-    let ack_task = tokio::spawn(reject_config_transaction_commits(config_rx));
+    let ack_task = tokio::spawn(reject_config_transaction_publishes(config_rx));
     let controller = with_test_preloaded_plan_controlled(
         with_v3_test_authority(
             FibTableControlDeps {
@@ -4171,11 +4292,12 @@ async fn confirmed_apply_compound_rollback_failure_retains_journal_and_fences_mu
     ack_task.abort();
 }
 
-/// Counterpart to the ambiguous-window tests: a persist failure the
-/// persister itself reported, followed by a successful rollback, is a
-/// provably-clean failure — the journal is removed and the fence opens.
-#[tokio::test]
-async fn confirmed_apply_clean_persist_failure_removes_journal_and_opens_fence() {
+/// Counterpart to the ambiguous-window tests: a persistence failure the
+/// persister itself reported is a provably-clean failure — the journal is
+/// removed and the fence opens — whether it refused the stage before any
+/// runtime change or the publication after one, in which case the rollback
+/// restored the pre-transaction snapshot.
+async fn confirmed_clean_persist_failure_case(publish_phase: bool) {
     let dir = tempfile::tempdir().unwrap();
     let journal_path = dir.path().join("commit-confirm-journal.json");
     let previous_toml = base_toml("");
@@ -4192,7 +4314,11 @@ async fn confirmed_apply_clean_persist_failure_removes_journal_and_opens_fence()
         peers,
     ));
     let (config_tx, config_rx) = mpsc::channel(8);
-    let ack_task = tokio::spawn(reject_config_transaction_commits(config_rx));
+    let ack_task = if publish_phase {
+        tokio::spawn(reject_config_transaction_publishes(config_rx))
+    } else {
+        tokio::spawn(reject_config_transaction_commits(config_rx))
+    };
     let controller = with_test_preloaded_plan(
         with_v3_test_authority(
             FibTableControlDeps {
@@ -4231,9 +4357,20 @@ async fn confirmed_apply_clean_persist_failure_removes_journal_and_opens_fence()
         .reject_if_pending("test mutation")
         .await
         .expect("a clean failure must not fence later mutations");
-    // The rollback restored the pre-transaction snapshot.
+    // Stage refusal never touched the snapshot; publication failure rolled
+    // it back. Either way it is the pre-transaction snapshot.
     assert_snapshot_matches_config(&snapshot_toml.lock().await, &previous_toml);
     ack_task.abort();
+}
+
+#[tokio::test]
+async fn confirmed_apply_clean_persist_failure_removes_journal_and_opens_fence() {
+    confirmed_clean_persist_failure_case(true).await;
+}
+
+#[tokio::test]
+async fn confirmed_apply_stage_refusal_removes_journal_and_opens_fence() {
+    confirmed_clean_persist_failure_case(false).await;
 }
 
 #[tokio::test]
@@ -5485,6 +5622,7 @@ async fn dynamic_discard_transaction_marks_the_range_for_purge_reset() {
         peers,
         bounce_calls.clone(),
         purge_calls.clone(),
+        Arc::new(Mutex::new(Vec::new())),
     ));
     let (config_tx, mut config_rx) = mpsc::channel(8);
     tokio::spawn(async move {
@@ -5745,7 +5883,7 @@ async fn dynamic_range_peer_group_reshape_persistence_failure_skips_bounce() {
         if let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
             config_rx.recv().await
         {
-            ack.fail_write("persist failed");
+            fail_publish(ack, "persist failed").await;
         }
     });
 
@@ -5796,7 +5934,7 @@ async fn peer_session_reshape_persistence_failure_rolls_back_live_and_snapshot()
         if let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
             config_rx.recv().await
         {
-            ack.fail_write("persist failed");
+            fail_publish(ack, "persist failed").await;
         }
     });
 
@@ -5823,6 +5961,538 @@ async fn peer_session_reshape_persistence_failure_rolls_back_live_and_snapshot()
     let peers = peers.lock().await;
     assert_eq!(peers.len(), 1);
     assert_eq!(peers[0].hold_time, Some(90));
+}
+
+fn reshape_request(candidate_toml: String) -> proto::ApplyConfigTransactionRequest {
+    proto::ApplyConfigTransactionRequest {
+        candidate_toml,
+        expected_runtime_snapshot_token: "kv1:old:1".to_string(),
+        client_request_id: String::new(),
+        comment: String::new(),
+        confirm_id: String::new(),
+        confirm_timeout_seconds: 0,
+    }
+}
+
+/// Everything a reshape failure-class regression asserts on: the error, the
+/// reshape fan-outs the peer manager saw in order, how many typed snapshot
+/// stages it was asked for, the final peers and snapshot, and what the bridge
+/// observed the executor do with its stage.
+struct ReshapeFailureRun {
+    err: ConfigTransactionApplyError,
+    reshape_calls: Vec<Vec<PeerManagerNeighborConfig>>,
+    stage_calls: usize,
+    peers: Vec<PeerManagerNeighborConfig>,
+    snapshot_toml: String,
+    observed: Option<StagedBridgeObservation>,
+}
+
+/// Drive a peer-group `hold_time` reshape (90 → 45) against a bridge that
+/// answers the stage with `stage` and, if committed, the commit with `commit`.
+async fn run_reshape_failure(
+    stage: Result<(), ConfigPersistError>,
+    commit: Option<ConfigPersistCommitOutcome>,
+) -> ReshapeFailureRun {
+    let previous_toml = peer_group_reshape_toml(90);
+    let candidate_toml = peer_group_reshape_toml(45);
+    let snapshot_toml = Arc::new(Mutex::new(previous_toml.clone()));
+    let control = TypedTransactionFakeControl::default();
+    let internal_tx = spawn_typed_transaction_manager_controlled(
+        snapshot_toml.clone(),
+        peer_session_reshape_plan(),
+        control.clone(),
+    );
+    let peers = Arc::new(Mutex::new(resolved_static_peer_configs(&previous_toml)));
+    let reshape_calls = Arc::new(Mutex::new(Vec::new()));
+    let (peer_tx, peer_rx) = mpsc::channel(8);
+    tokio::spawn(fake_snapshot_peer_manager_recording_reshapes(
+        peer_rx,
+        peer_session_reshape_plan(),
+        snapshot_toml.clone(),
+        peers.clone(),
+        reshape_calls.clone(),
+    ));
+    let observed = Arc::new(Mutex::new(None));
+    let (config_tx, config_rx) = mpsc::channel(1);
+    let bridge = tokio::spawn(staged_transaction_bridge(
+        config_rx,
+        stage,
+        commit,
+        observed.clone(),
+    ));
+
+    let err = apply_config_transaction_with_internal(
+        deps(None, peer_tx, Some(config_tx), Vec::new()),
+        reshape_request(candidate_toml),
+        internal_tx,
+    )
+    .await
+    .unwrap_err();
+    bridge.await.unwrap();
+    ReshapeFailureRun {
+        err,
+        reshape_calls: reshape_calls.lock().await.clone(),
+        stage_calls: control.stage_calls.load(Ordering::Relaxed),
+        peers: peers.lock().await.clone(),
+        snapshot_toml: snapshot_toml.lock().await.clone(),
+        observed: *observed.lock().await,
+    }
+}
+
+/// The point of staging first: a stage the persister refuses (an unwritable
+/// or read-only directory, a full filesystem) is reported while the peer
+/// manager has never been asked to reshape a session or stage the candidate
+/// snapshot. Under apply-then-persist the recorder held two fan-outs — the
+/// apply and its compensating restore — and one typed snapshot stage.
+#[tokio::test]
+async fn peer_session_reshape_stage_rejection_precedes_every_runtime_mutation() {
+    let run = run_reshape_failure(
+        Err(ConfigPersistError::Write(
+            "stage refused: permission denied".to_string(),
+        )),
+        None,
+    )
+    .await;
+    assert!(
+        matches!(run.err, ConfigTransactionApplyError::FailedPrecondition(ref m)
+            if m == "stage refused: permission denied"),
+        "{:?}",
+        run.err
+    );
+    assert!(
+        run.reshape_calls.is_empty(),
+        "a refused stage must never reach the peer manager"
+    );
+    assert_eq!(
+        run.stage_calls, 0,
+        "a refused stage must precede the typed snapshot stage"
+    );
+    assert_eq!(run.peers[0].hold_time, Some(90));
+    assert_snapshot_matches_config(&run.snapshot_toml, &peer_group_reshape_toml(90));
+    assert_eq!(run.observed, Some(StagedBridgeObservation::Discarded));
+}
+
+/// A candidate the bridge cannot derive from the accepted snapshot (its
+/// external roster or identity does not match) is the same clean refusal as
+/// an unwritable directory: reported before any runtime mutation.
+#[tokio::test]
+async fn peer_session_reshape_stage_identity_rejection_precedes_every_runtime_mutation() {
+    let run = run_reshape_failure(
+        Err(ConfigPersistError::Rejected(CatalogMutationError::invalid(
+            "invalid committed config transaction: external policy roster changed",
+        ))),
+        None,
+    )
+    .await;
+    assert!(
+        matches!(run.err, ConfigTransactionApplyError::FailedPrecondition(ref m)
+            if m.contains("external policy roster changed")),
+        "{:?}",
+        run.err
+    );
+    assert!(run.reshape_calls.is_empty());
+    assert_eq!(run.stage_calls, 0);
+    assert_eq!(run.peers[0].hold_time, Some(90));
+    assert_eq!(run.observed, Some(StagedBridgeObservation::Discarded));
+}
+
+/// A staging acknowledgement the bridge never sends: publication needs a
+/// commit the bridge can no longer relay, so nothing was published and,
+/// because staging precedes runtime, nothing was mutated. Clean and
+/// unfenced — unlike the same loss after commit.
+#[tokio::test]
+async fn peer_session_reshape_lost_stage_acknowledgement_is_clean_and_unapplied() {
+    let previous_toml = peer_group_reshape_toml(90);
+    let snapshot_toml = Arc::new(Mutex::new(previous_toml.clone()));
+    let control = TypedTransactionFakeControl::default();
+    let internal_tx = spawn_typed_transaction_manager_controlled(
+        snapshot_toml.clone(),
+        peer_session_reshape_plan(),
+        control.clone(),
+    );
+    let peers = Arc::new(Mutex::new(resolved_static_peer_configs(&previous_toml)));
+    let reshape_calls = Arc::new(Mutex::new(Vec::new()));
+    let (peer_tx, peer_rx) = mpsc::channel(8);
+    tokio::spawn(fake_snapshot_peer_manager_recording_reshapes(
+        peer_rx,
+        peer_session_reshape_plan(),
+        snapshot_toml.clone(),
+        peers.clone(),
+        reshape_calls.clone(),
+    ));
+    let (config_tx, mut config_rx) = mpsc::channel(1);
+    let bridge = tokio::spawn(async move {
+        let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
+            config_rx.recv().await
+        else {
+            panic!("the transaction must stage its candidate")
+        };
+        let ConfigPersistAck::Staged { staged, commit } = ack else {
+            panic!("config transactions must stage before applying")
+        };
+        drop(staged);
+        assert!(
+            commit.await.is_err(),
+            "a lost staging acknowledgement must discard the stage"
+        );
+    });
+
+    let err = apply_config_transaction_with_internal(
+        deps(None, peer_tx, Some(config_tx), Vec::new()),
+        reshape_request(peer_group_reshape_toml(45)),
+        internal_tx,
+    )
+    .await
+    .unwrap_err();
+    bridge.await.unwrap();
+    assert!(
+        matches!(err, ConfigTransactionApplyError::Unavailable(ref m)
+            if m.contains("staging acknowledgement")),
+        "{err:?}"
+    );
+    assert!(reshape_calls.lock().await.is_empty());
+    assert_eq!(control.stage_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(peers.lock().await[0].hold_time, Some(90));
+    assert_snapshot_matches_config(&snapshot_toml.lock().await, &previous_toml);
+}
+
+/// Pre-rename commit failure: the persister proves the candidate was not
+/// published, so the runtime change is determinate and compensated — the
+/// apply fan-out is followed by exactly one restoring fan-out, the prior
+/// peers and snapshot are back, and nothing is fenced.
+#[tokio::test]
+async fn peer_session_reshape_pre_rename_commit_failure_compensates_runtime() {
+    let run = run_reshape_failure(
+        Ok(()),
+        Some(ConfigPersistCommitOutcome::NotPublished(
+            "rename refused".to_string(),
+        )),
+    )
+    .await;
+    assert!(
+        matches!(run.err, ConfigTransactionApplyError::FailedPrecondition(ref m)
+            if m == "rename refused"),
+        "{:?}",
+        run.err
+    );
+    assert_eq!(
+        run.reshape_calls.len(),
+        2,
+        "the apply must be followed by exactly one compensating restore"
+    );
+    assert_eq!(run.reshape_calls[0][0].hold_time, Some(45));
+    assert_eq!(run.reshape_calls[1][0].hold_time, Some(90));
+    assert_eq!(run.stage_calls, 1);
+    assert_eq!(run.peers[0].hold_time, Some(90));
+    assert_snapshot_matches_config(&run.snapshot_toml, &peer_group_reshape_toml(90));
+    assert_eq!(run.observed, Some(StagedBridgeObservation::Committed));
+}
+
+/// Post-rename directory-sync failure: the candidate is visible but its
+/// durability is unproved. That is publication ambiguity, not a clean
+/// rollback — the runtime keeps the candidate, no compensation runs, and the
+/// failure carries the same `PublicationAmbiguous` fence the settlement
+/// watchdog exits 70 on.
+#[tokio::test]
+async fn peer_session_reshape_post_rename_sync_failure_fences_as_publication_ambiguous() {
+    let run = run_reshape_failure(
+        Ok(()),
+        Some(ConfigPersistCommitOutcome::PublicationAmbiguous(
+            "post-rename directory fsync failed".to_string(),
+        )),
+    )
+    .await;
+    assert!(
+        matches!(run.err, ConfigTransactionApplyError::RecoveryRequired {
+            reason: RuntimeConfigFenceReason::PublicationAmbiguous,
+            ref message,
+        } if message.contains("post-rename directory fsync failed")),
+        "{:?}",
+        run.err
+    );
+    assert_eq!(
+        run.reshape_calls.len(),
+        1,
+        "an ambiguous publication must never be compensated"
+    );
+    assert_eq!(run.peers[0].hold_time, Some(45));
+    assert_snapshot_matches_config(&run.snapshot_toml, &peer_group_reshape_toml(45));
+    assert_eq!(run.observed, Some(StagedBridgeObservation::Committed));
+}
+
+/// Lost commit acknowledgement: the executor asked to publish and never
+/// heard back, so the on-disk outcome is unknowable. The runtime keeps the
+/// candidate and the failure carries the `AcknowledgementLost` fence.
+#[tokio::test]
+async fn peer_session_reshape_lost_commit_acknowledgement_fences() {
+    let run = run_reshape_failure(Ok(()), None).await;
+    assert!(
+        matches!(run.err, ConfigTransactionApplyError::RecoveryRequired {
+            reason: RuntimeConfigFenceReason::AcknowledgementLost,
+            ref message,
+        } if message.contains("persistence acknowledgement")),
+        "{:?}",
+        run.err
+    );
+    assert_eq!(run.reshape_calls.len(), 1);
+    assert_eq!(run.peers[0].hold_time, Some(45));
+    assert_eq!(run.observed, Some(StagedBridgeObservation::Committed));
+}
+
+/// Peer-manager fake that answers planning but parks the reshape fan-out,
+/// holding its reply open, and reports once it has done so.
+async fn fake_peer_manager_parking_reshape(
+    mut rx: mpsc::Receiver<PeerManagerCommand>,
+    plan: RuntimeConfigTransactionPlan,
+    snapshot_toml: Arc<Mutex<String>>,
+    parked: oneshot::Sender<()>,
+) {
+    let mut parked = Some(parked);
+    let mut held = Vec::new();
+    while let Some(cmd) = rx.recv().await {
+        match cmd {
+            PeerManagerCommand::PlanConfigTransaction {
+                candidate_toml,
+                reply,
+                ..
+            } => {
+                let _ = reply.send(Ok(attach_committed_candidate(
+                    plan.clone(),
+                    &candidate_toml,
+                )));
+            }
+            PeerManagerCommand::RuntimeConfigSnapshot { reply } => {
+                let _ = reply.send(Ok(rustbgpd_api::peer_types::RuntimeConfigSnapshotReply {
+                    toml: snapshot_toml.lock().await.clone(),
+                    rpol_files: Vec::new(),
+                    rpol: rustbgpd_policy::rpol::RpolPolicySet::default(),
+                }));
+            }
+            PeerManagerCommand::ApplyPeerReshapeSnapshot { reply, .. } => {
+                held.push(reply);
+                if let Some(parked) = parked.take() {
+                    let _ = parked.send(());
+                }
+            }
+            _ => panic!("unexpected peer-manager command in parked reshape test"),
+        }
+    }
+}
+
+/// Caller cancellation between stage and commit: the executor future is
+/// dropped while its reshape fan-out is in flight. The stage it owned is
+/// discarded through the dropped commit channel — no stale authority is left
+/// behind for a later transaction to publish.
+#[tokio::test]
+async fn peer_session_reshape_executor_cancellation_discards_stage() {
+    let previous_toml = peer_group_reshape_toml(90);
+    let snapshot_toml = Arc::new(Mutex::new(previous_toml));
+    let internal_tx =
+        spawn_typed_transaction_manager(snapshot_toml.clone(), peer_session_reshape_plan());
+    let (peer_tx, peer_rx) = mpsc::channel(8);
+    let (parked_tx, parked_rx) = oneshot::channel();
+    tokio::spawn(fake_peer_manager_parking_reshape(
+        peer_rx,
+        peer_session_reshape_plan(),
+        snapshot_toml,
+        parked_tx,
+    ));
+    let observed = Arc::new(Mutex::new(None));
+    let (config_tx, config_rx) = mpsc::channel(1);
+    let bridge = tokio::spawn(staged_transaction_bridge(
+        config_rx,
+        Ok(()),
+        Some(ConfigPersistCommitOutcome::PublishedDurable),
+        observed.clone(),
+    ));
+    let deps = deps(None, peer_tx, Some(config_tx), Vec::new());
+    let request = reshape_request(peer_group_reshape_toml(45));
+    let executor = tokio::spawn(async move {
+        let _guard = deps.lock.acquire().await.expect("coordinator");
+        apply_config_transaction_locked(
+            &deps,
+            request,
+            Some(&internal_tx),
+            &RuntimeConfigMutationProgress::default(),
+            true,
+        )
+        .await
+        .map_err(ApplyFailure::into_apply_error)
+    });
+
+    parked_rx
+        .await
+        .expect("the reshape fan-out must be in flight");
+    executor.abort();
+    assert!(
+        executor
+            .await
+            .expect_err("the executor must have been cancelled")
+            .is_cancelled()
+    );
+    tokio::time::timeout(Duration::from_secs(5), bridge)
+        .await
+        .expect("the bridge must observe the dropped commit channel")
+        .unwrap();
+    assert_eq!(
+        *observed.lock().await,
+        Some(StagedBridgeObservation::Discarded)
+    );
+}
+
+/// The RPC-level cancellation shield is preserved under stage-first: an
+/// `ApplyConfigTransaction` future dropped while its stage is still
+/// outstanding does not abort the executor, which goes on to apply and
+/// publish exactly once.
+#[tokio::test]
+async fn peer_session_reshape_rpc_cancellation_after_stage_still_commits() {
+    let previous_toml = peer_group_reshape_toml(90);
+    let snapshot_toml = Arc::new(Mutex::new(previous_toml.clone()));
+    let internal_tx =
+        spawn_typed_transaction_manager(snapshot_toml.clone(), peer_session_reshape_plan());
+    let peers = Arc::new(Mutex::new(resolved_static_peer_configs(&previous_toml)));
+    let reshape_calls = Arc::new(Mutex::new(Vec::new()));
+    let (peer_tx, peer_rx) = mpsc::channel(8);
+    tokio::spawn(fake_snapshot_peer_manager_recording_reshapes(
+        peer_rx,
+        peer_session_reshape_plan(),
+        snapshot_toml.clone(),
+        peers.clone(),
+        reshape_calls.clone(),
+    ));
+    let (staged_seen_tx, staged_seen_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel::<()>();
+    let (config_tx, mut config_rx) = mpsc::channel(1);
+    let bridge = tokio::spawn(async move {
+        let Some(ConfigEvent::ConfigTransactionCommitted {
+            ack: Some(ConfigPersistAck::Staged { staged, commit }),
+            ..
+        }) = config_rx.recv().await
+        else {
+            panic!("config transactions must stage before applying")
+        };
+        let _ = staged_seen_tx.send(());
+        release_rx.await.expect("release");
+        let _ = staged.send(Ok(()));
+        let reply = commit
+            .await
+            .expect("the shielded executor must still commit");
+        let _ = reply.send(ConfigPersistCommitOutcome::PublishedDurable);
+    });
+
+    let apply = apply_config_transaction_with_internal(
+        deps(None, peer_tx, Some(config_tx), Vec::new()),
+        reshape_request(peer_group_reshape_toml(45)),
+        internal_tx,
+    );
+    tokio::select! {
+        biased;
+        _ = staged_seen_rx => {}
+        result = apply => panic!("apply must still be waiting on its stage: {result:?}"),
+    }
+    // The RPC future is gone; the shielded executor task is not.
+    release_tx
+        .send(())
+        .expect("the executor must survive its caller");
+    tokio::time::timeout(Duration::from_secs(5), bridge)
+        .await
+        .expect("the executor must publish after its caller left")
+        .unwrap();
+    assert_eq!(reshape_calls.lock().await.len(), 1);
+    assert_eq!(peers.lock().await[0].hold_time, Some(45));
+    assert_snapshot_matches_config(&snapshot_toml.lock().await, &peer_group_reshape_toml(45));
+}
+
+/// The real bridge and persister over a config directory the daemon cannot
+/// write: `EACCES` on the stage is reported as a clean precondition failure,
+/// the peer manager never sees the reshape, the config file bytes and the
+/// accepted authority are exactly what they were, and no stage file is left
+/// behind.
+#[cfg(unix)]
+#[tokio::test]
+async fn peer_session_reshape_unwritable_directory_refuses_before_runtime() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    if nix::unistd::geteuid().is_root() {
+        eprintln!("skipping: directory mode bits do not restrict root");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    let previous_toml = peer_group_reshape_toml(90);
+    std::fs::write(&config_path, &previous_toml).unwrap();
+    let initial = Arc::new(
+        crate::config::AcceptedConfigSnapshot::load(&config_path, None)
+            .expect("reshape test config must load"),
+    );
+    let before = std::fs::read(&config_path).unwrap();
+
+    let (event_tx, event_rx) = mpsc::channel(1);
+    let (_replace_tx, replace_rx) = mpsc::channel(1);
+    let (mutation_tx, mutation_rx) = mpsc::channel(4);
+    let (accepted_tx, accepted_rx) = watch::channel(Arc::clone(&initial));
+    tokio::spawn(
+        crate::config_persister::ConfigPersister::new_accepted(
+            mutation_rx,
+            config_path.clone(),
+            Arc::clone(&initial),
+            None,
+        )
+        .run(),
+    );
+    tokio::spawn(crate::reload::run_config_bridge_accepted(
+        event_rx,
+        replace_rx,
+        mutation_tx,
+        accepted_tx,
+    ));
+
+    let snapshot_toml = Arc::new(Mutex::new(previous_toml.clone()));
+    let control = TypedTransactionFakeControl::default();
+    let internal_tx = spawn_typed_transaction_manager_controlled(
+        snapshot_toml.clone(),
+        peer_session_reshape_plan(),
+        control.clone(),
+    );
+    let peers = Arc::new(Mutex::new(resolved_static_peer_configs(&previous_toml)));
+    let reshape_calls = Arc::new(Mutex::new(Vec::new()));
+    let (peer_tx, peer_rx) = mpsc::channel(8);
+    tokio::spawn(fake_snapshot_peer_manager_recording_reshapes(
+        peer_rx,
+        peer_session_reshape_plan(),
+        snapshot_toml.clone(),
+        peers.clone(),
+        reshape_calls.clone(),
+    ));
+
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+    let err = apply_config_transaction_with_internal(
+        deps(None, peer_tx, Some(event_tx), Vec::new()),
+        reshape_request(peer_group_reshape_toml(45)),
+        internal_tx,
+    )
+    .await
+    .unwrap_err();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert!(
+        matches!(err, ConfigTransactionApplyError::FailedPrecondition(ref m)
+            if m.contains("ermission denied")),
+        "{err:?}"
+    );
+    assert!(reshape_calls.lock().await.is_empty());
+    assert_eq!(control.stage_calls.load(Ordering::Relaxed), 0);
+    assert_eq!(peers.lock().await[0].hold_time, Some(90));
+    assert_eq!(std::fs::read(&config_path).unwrap(), before);
+    let entries: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(entries, vec![std::ffi::OsString::from("config.toml")]);
+    assert!(
+        Arc::ptr_eq(&accepted_rx.borrow(), &initial),
+        "a refused stage must not advance the accepted authority"
+    );
 }
 
 #[tokio::test]
@@ -5854,7 +6524,7 @@ async fn live_policy_impact_persistence_failure_rolls_back_live_and_snapshot() {
         if let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
             config_rx.recv().await
         {
-            ack.fail_write("persist failed");
+            fail_publish(ack, "persist failed").await;
         }
     });
 
@@ -5913,11 +6583,14 @@ async fn live_policy_impact_mid_fanout_failure_rolls_back_snapshot() {
         apply_calls.clone(),
         dynamic_calls,
     ));
-    let (config_tx, mut config_rx) = mpsc::channel(8);
-    tokio::spawn(async move {
-        // Persist should never be reached; drain the channel if it closes.
-        let _ = config_rx.recv().await;
-    });
+    let observed = Arc::new(Mutex::new(None));
+    let (config_tx, config_rx) = mpsc::channel(8);
+    let bridge = tokio::spawn(staged_transaction_bridge(
+        config_rx,
+        Ok(()),
+        Some(ConfigPersistCommitOutcome::PublishedDurable),
+        observed.clone(),
+    ));
 
     let err = apply_config_transaction_with_internal(
         deps(None, peer_tx, Some(config_tx), Vec::new()),
@@ -5941,6 +6614,12 @@ async fn live_policy_impact_mid_fanout_failure_rolls_back_snapshot() {
         calls.len(),
         1,
         "only the failed apply; no restore (command self-heals)"
+    );
+    // Publication must never be reached: the stage is discarded.
+    bridge.await.unwrap();
+    assert_eq!(
+        *observed.lock().await,
+        Some(StagedBridgeObservation::Discarded)
     );
 }
 
@@ -5976,7 +6655,7 @@ async fn live_policy_impact_compound_rollback_failure_reports_internal() {
         if let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
             config_rx.recv().await
         {
-            ack.fail_write("persist failed");
+            fail_publish(ack, "persist failed").await;
         }
     });
 
@@ -6040,7 +6719,7 @@ default_action = "permit"
         if let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
             config_rx.recv().await
         {
-            ack.fail_write("persist failed");
+            fail_publish(ack, "persist failed").await;
         }
     });
 
@@ -6102,7 +6781,7 @@ peer_group = "ix-members"
         if let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
             config_rx.recv().await
         {
-            ack.fail_write("persist failed");
+            fail_publish(ack, "persist failed").await;
         }
     });
 
@@ -6153,7 +6832,14 @@ async fn dropped_typed_stage_reply_fences_without_persisting() {
         snapshot_toml,
         Arc::new(Mutex::new(Vec::new())),
     ));
-    let (config_tx, mut config_rx) = mpsc::channel(1);
+    let observed = Arc::new(Mutex::new(None));
+    let (config_tx, config_rx) = mpsc::channel(1);
+    let bridge = tokio::spawn(staged_transaction_bridge(
+        config_rx,
+        Ok(()),
+        Some(ConfigPersistCommitOutcome::PublishedDurable),
+        observed.clone(),
+    ));
 
     let err = apply_config_transaction_with_internal(
         deps(None, peer_tx, Some(config_tx), Vec::new()),
@@ -6177,7 +6863,13 @@ async fn dropped_typed_stage_reply_fences_without_persisting() {
             ..
         }
     ));
-    assert!(config_rx.try_recv().is_err());
+    // The candidate was staged before the typed snapshot stage, so the fence
+    // must discard that stage rather than publish it.
+    bridge.await.unwrap();
+    assert_eq!(
+        *observed.lock().await,
+        Some(StagedBridgeObservation::Discarded)
+    );
 }
 
 #[tokio::test]
@@ -6219,7 +6911,7 @@ peer_group = "ix-members"
         if let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
             config_rx.recv().await
         {
-            ack.fail_write("persist failed");
+            fail_publish(ack, "persist failed").await;
         }
     });
 
@@ -6981,7 +7673,7 @@ async fn static_neighbor_modify_persistence_failure_rolls_back_peer_and_snapshot
         if let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
             config_rx.recv().await
         {
-            ack.fail_write("persist failed");
+            fail_publish(ack, "persist failed").await;
         }
     });
 
@@ -7047,7 +7739,14 @@ remote_asn = 65004
         snapshot_toml.clone(),
         peers.clone(),
     ));
-    let (config_tx, _config_rx) = mpsc::channel(8);
+    let observed = Arc::new(Mutex::new(None));
+    let (config_tx, config_rx) = mpsc::channel(8);
+    let bridge = tokio::spawn(staged_transaction_bridge(
+        config_rx,
+        Ok(()),
+        Some(ConfigPersistCommitOutcome::PublishedDurable),
+        observed.clone(),
+    ));
 
     let err = apply_config_transaction_with_internal(
         deps(None, peer_tx, Some(config_tx), Vec::new()),
@@ -7073,6 +7772,13 @@ remote_asn = 65004
     let peers = peers.lock().await;
     assert_eq!(peers.len(), 1);
     assert_eq!(peers[0].address.to_string(), "10.0.0.4");
+    // The candidate was staged before the batch began; the mid-batch
+    // failure must discard that stage along with the prior add.
+    bridge.await.unwrap();
+    assert_eq!(
+        *observed.lock().await,
+        Some(StagedBridgeObservation::Discarded)
+    );
 }
 
 #[tokio::test]
@@ -7186,7 +7892,7 @@ async fn persistence_rejection_rolls_back_fib_transaction() {
             ..
         }) = config_rx.recv().await
         {
-            ack.fail_write("persist failed");
+            fail_publish(ack, "persist failed").await;
         }
     });
 
@@ -7250,7 +7956,14 @@ async fn fib_stage_rejection_precedes_reconciler_and_persistence() {
         };
         reply.send(Err("stage rejected".to_string())).unwrap();
     });
-    let (config_tx, mut config_rx) = mpsc::channel(1);
+    let observed = Arc::new(Mutex::new(None));
+    let (config_tx, config_rx) = mpsc::channel(1);
+    let bridge = tokio::spawn(staged_transaction_bridge(
+        config_rx,
+        Ok(()),
+        Some(ConfigPersistCommitOutcome::PublishedDurable),
+        observed.clone(),
+    ));
     let deps = deps(
         Some(fib_tx),
         mpsc::channel(1).0,
@@ -7276,9 +7989,11 @@ async fn fib_stage_rejection_precedes_reconciler_and_persistence() {
     drop(deps);
     drop(config_tx);
     fib_task.await.unwrap();
-    assert!(
-        config_rx.try_recv().is_err(),
-        "rejected stage must not persist"
+    bridge.await.unwrap();
+    assert_eq!(
+        *observed.lock().await,
+        Some(StagedBridgeObservation::Discarded),
+        "a rejected typed stage must discard the staged candidate, never publish it"
     );
 }
 
@@ -7300,11 +8015,12 @@ async fn fib_ack_loss_is_ambiguous_but_restores_tables_and_raw_snapshot() {
     );
     let (config_tx, mut config_rx) = mpsc::channel(1);
     tokio::spawn(async move {
-        let Some(ConfigEvent::ConfigTransactionCommitted { ack, .. }) = config_rx.recv().await
+        let Some(ConfigEvent::ConfigTransactionCommitted { ack: Some(ack), .. }) =
+            config_rx.recv().await
         else {
             panic!("FIB transaction must use the full-config persistence seam")
         };
-        drop(ack);
+        lose_commit_ack(ack).await;
     });
     let deps = deps(
         Some(fib_tx),
