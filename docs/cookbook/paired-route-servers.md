@@ -58,8 +58,10 @@ is your rollback while the first proves the change. Per update:
    candidate config on both hosts (exit 0 or stop), and check the
    [reload matrix](../reference/reload-matrix.md) for whether any touched field
    is restart-required.
-2. **Reload RS1 only** (SIGHUP; parse-then-swap — a rejected candidate
-   leaves the running config untouched).
+2. **Reload RS1 only** (SIGHUP). Parse/validation rejection leaves runtime
+   untouched; a later reconcile failure can leave known partial changes.
+   Inspect the reload result and effective configuration before proceeding
+   ([current SIGHUP boundary](../reference/known-issues.md)).
 3. **Verify RS1:** sessions established (`rbgp summary`), spot-check a
    member's view (`rbgp rib sent <member>`), no alert movement.
 4. **Soak** for an operator-chosen window (long enough for a full
@@ -94,8 +96,7 @@ and RS2 sends that dump only when the member's session establishes. A
 collector that connects later gets the Peer Ups and live updates only
 (`rib_out_post` has no reconnect dump), and `from-bmp` refuses such a
 capture (exit 2, `End-of-RIB not seen`) rather than emit an incomplete
-peer. Nothing run from RS2 fills that gap: `rbgp neighbor <member>
-refresh-out` reports the refresh as scheduled and re-sends the routes
+peer. Nothing run from RS2 fills that gap: `rbgp neighbor <member> refresh-out` reports the refresh as scheduled and re-sends the routes
 without an End-of-RIB, and a member's own ROUTE-REFRESH is answered
 with an End-of-RIB-Refresh marker instead when the member negotiated
 enhanced route refresh (FRR 10.7.1 does) — a ROUTE-REFRESH message,
@@ -107,19 +108,33 @@ a dropped BMP connection ends its usefulness until the next
 establishment.
 
 ```bash
-# On the capture host, listening before RS2's member sessions come up.
-# Once the members have converged (each Peer Up followed by that peer's
-# End-of-RIB), convert and compare; the capture can keep running:
+# Terminal 1: start before RS2's member sessions come up; leave running.
 nc -l 11019 > rs2-adjout.bmp
-rbgp diff snapshot from-bmp rs2-adjout.bmp > rs2.ndjson
-rbgp diff advertised --against rs2.ndjson --ignore-attribute unknown  # RS1's gRPC socket
-echo $?   # 0 in sync, 1 divergent (listed), 2 comparison refused
+```
+
+Once the members have converged, take a fixed copy in another terminal.
+A copy can end inside a BMP message while the listener appends; if conversion
+refuses it, take a new copy and retry. Compare only after successful conversion:
+
+```bash
+# Terminal 2: keep the previous snapshot intact if this capture is refused.
+if cp rs2-adjout.bmp rs2-adjout-copy.bmp &&
+   rbgp diff snapshot from-bmp rs2-adjout-copy.bmp > rs2.ndjson.tmp; then
+    mv rs2.ndjson.tmp rs2.ndjson &&
+        rbgp diff advertised --against rs2.ndjson --ignore-attribute unknown
+    echo $?   # 0 in sync, 1 divergent, 2 comparison refused (RS1's gRPC socket)
+else
+    rm -f rs2.ndjson.tmp
+    echo "Capture copy refused; no comparison performed" >&2
+fi
 ```
 
 `--ignore-attribute unknown` is needed with RFC 9234 roles configured:
 a route server attaches OTC on the wire, so the capture carries it and
 gRPC does not expose it; without the flag every route reports as
-attribute-changed. A refused conversion names the first peer and family
+attribute-changed. This flag excludes **all** unknown/opaque attributes, not
+just OTC: the verdict covers the remaining attributes and is not full wire
+attribute equivalence. A refused conversion names the first peer and family
 whose End-of-RIB is missing and writes no snapshot; `--peer` narrows the
 snapshot to the members that did complete.
 
