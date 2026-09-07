@@ -62,6 +62,39 @@ The daemon derives the principal from the client certificate (URI SAN, then
 email SAN, then Subject CN) and looks it up in `[security.grpc.roles]`. A
 `rustbgpd://` URI SAN keeps the principal string explicit and greppable.
 
+Native mTLS accepts TLS 1.2 and TLS 1.3 with the rustls/ring default cipher
+suites; protocol versions and cipher suites have no configuration overrides.
+A trusted certificate can complete TLS even without a mapped principal, but
+its RPCs then receive `PERMISSION_DENIED` from role authorization.
+
+After staging replacement files at the configured paths, run on the daemon
+host before SIGHUP or restart:
+
+```bash
+rustbgpd --check --strict /etc/rustbgpd/config.toml
+```
+
+Both check modes parse the server certificate, private key, and client CA
+bundle and check the cert/key match through startup credential staging,
+without binding listeners. This checks the files at that moment; it does not
+prove client trust or hostname matching, or cover later file changes.
+
+Rejected TLS handshakes happen before RPC authorization. Monitor
+`bgp_grpc_tls_handshake_failures_total{reason}` for certificate rejections and
+handshake timeouts; these failures do not increment
+`bgp_grpc_authz_decisions_total`. The [operations reference](../../docs/reference/operations.md)
+lists the fixed reasons. TLS alert delivery to the client is best effort, so
+use the server metric when a client reports only a connection failure.
+
+For expiry warnings, set `tls_expiry_warning_seconds = 604800` on the daemon's
+TCP listener and restart it. The default `0` disables warnings; active
+certificate expiry metrics and successful-client leaf metadata logs remain
+available. `--check` reports configured warnings with exit 0, while
+`--check --strict` returns 1. Successful client-handshake logs describe observed
+clients only; the daemon does not maintain a client certificate inventory.
+See [native gRPC certificate expiry](../../docs/reference/operations.md#native-grpc-certificate-expiry)
+for the active-generation gauges and the limits of supplied bundle minima.
+
 ```bash
 python explain.py \
   --target rustbgpd.example.net:50051 \
@@ -95,21 +128,38 @@ requires mTLS (or, on loopback and Unix sockets,
 
 ## The UDS trap
 
-Both scripts also accept a `unix:///var/lib/rustbgpd/grpc.sock` target, and on
-a development box everything will work immediately with no credentials at all.
-That result is misleading, and it is the single easiest way to ship a
-controller that has never been authorization-tested.
+Both scripts also accept a `unix:///var/lib/rustbgpd/grpc.sock` target. With
+the daemon's default owner-only listener, a same-user client needs no
+credentials at all. That result is misleading, and it is the single easiest
+way to ship a controller that has never been authorization-tested.
 
 Under tier enforcement an owner-only UDS socket — no group or world mode bits,
-which is the default `0o600`, including the implicit default listener — is
-authenticated by its own filesystem permissions. Its clients are authorized as
-the reserved implicit `local-operator` principal **at operator tier**, with no
-`[security.grpc.roles]` entry required and none consulted. Audit records label
-that path `authn = "uds_owner"`. Group- or world-accessible sockets are
-different: they still require an explicit `principal` plus a matching role
-entry.
+which is the default `0o600`, including the implicit default listener — with
+no configured `principal` authorizes its clients as the reserved implicit
+`local-operator` principal **at operator tier**, with no
+`[security.grpc.roles]` entry required and none consulted. Without a
+`token_file`, audit records label this permissions-only path
+`authn = "uds_owner"`. A configured `token_file` requires its bearer token in
+addition to filesystem access and reports `authn = "bearer_token"`; the
+listener's principal and role ceiling stay the same. An explicit UDS principal
+without a token reports `authn = "uds"`.
 
-So a script run against a local socket exercises the full gRPC surface,
+Keep mode `0o600` for ordinary local access. Deliberately shared sockets still
+require an explicit `principal` plus a matching role entry: every client
+admitted by filesystem permissions receives that listener-wide role. A bearer
+token is optional and does not provide per-user roles.
+
+The socket path must be absolute and contain no symlinks or `..` components.
+The daemon validates its ancestors and requires an effective-UID-owned
+immediate parent with no group/world write bits, so a socket directly in
+`/tmp` is rejected — use a private daemon-owned directory beneath it. Missing
+parents are created with mode `0700`, so deliberate group access also needs a
+pre-created, group-searchable parent with the intended socket group. See
+[Unix socket path integrity](../../docs/reference/security.md#unix-socket-path-integrity)
+and the [setgid parent recipe](../../docs/reference/configuration.md#globaltelemetrygrpc_uds)
+for the complete path rules and shared-access setup.
+
+So a script run against that default local socket exercises the full gRPC surface,
 including every `operator_only` RPC, and proves nothing about whether the
 identity it will use in production is allowed to call them. Test the
 authorization tiers on the listener you will actually deploy against. See the
