@@ -228,7 +228,9 @@ fn sample_route() -> rustbgpd_policy::RouteContext<'static> {
 }
 
 /// A dual-stack route server: a source, two group members, and a bystander
-/// outside the group. The group export chain is a real `.rpol` policy.
+/// outside the group that references the same real `.rpol` export policy
+/// through its own chain, so an `.rpol` edit moves its policy without any
+/// session change.
 struct RsFixture {
     dir: tempfile::TempDir,
     config_path: PathBuf,
@@ -280,6 +282,7 @@ peer_group = "members"
 address = "10.0.0.9"
 remote_asn = 65009
 hold_time = 180
+export_policy_chain = ["members-out"]
 "#,
             rpol = self.dir.path().join("members.rpol").to_str().unwrap()
         )
@@ -295,7 +298,8 @@ hold_time = 180
 
     /// The candidate: `.rpol` export MED 10 -> 20, group `hold_time` 90 -> 60
     /// (a session reshape for both members), and member 10.0.0.2 also edits
-    /// its own session-bound `remote_asn`. The bystander is untouched.
+    /// its own session-bound `remote_asn`. The bystander's session is
+    /// untouched; only its export chain moves.
     fn compound_candidate(&self) -> Config {
         std::fs::write(self.dir.path().join("members.rpol"), RS_RPOL_MED_20).unwrap();
         self.write_toml(
@@ -340,8 +344,8 @@ async fn compound_reshape_and_member_edit_replace_each_peer_exactly_once() {
     };
     assert_eq!(receipt.replaced, 2);
     assert_eq!(
-        receipt.policy_updated, 0,
-        "replaced peers get final policies on re-add"
+        receipt.policy_updated, 1,
+        "replaced peers get final policies on re-add; only the bystander's chain is a policy target"
     );
     assert_eq!(receipt.hot_updated, 0);
 
@@ -355,7 +359,8 @@ async fn compound_reshape_and_member_edit_replace_each_peer_exactly_once() {
         bystander_session,
         "bystander keeps its session"
     );
-    assert_eq!(harness.export_installs("10.0.0.9"), 0);
+    assert_eq!(harness.export_installs("10.0.0.9"), 1);
+    assert_eq!(harness.export_med("10.0.0.9"), Some(20));
     assert_eq!(harness.mgr.current_config, candidate);
     assert_eq!(
         harness.mgr.peers[&key("10.0.0.2".parse().unwrap())].remote_asn,
@@ -397,8 +402,8 @@ async fn policy_only_and_hot_only_peers_keep_their_sessions() {
     assert_eq!(receipt.replaced, 0);
     assert_eq!(receipt.hot_updated, 2);
     assert_eq!(
-        receipt.policy_updated, 2,
-        "both members' export chains moved"
+        receipt.policy_updated, 3,
+        "both members' and the bystander's export chains moved"
     );
     assert_eq!(
         harness.mgr.next_session_id, sessions_before,
@@ -409,7 +414,7 @@ async fn policy_only_and_hot_only_peers_keep_their_sessions() {
     }
     assert_eq!(harness.export_installs("10.0.0.2"), 1);
     assert_eq!(harness.export_installs("2001:db8::3"), 1);
-    assert_eq!(harness.export_installs("10.0.0.9"), 0);
+    assert_eq!(harness.export_installs("10.0.0.9"), 1);
     assert_eq!(harness.runtime_config_updates("10.0.0.2"), 1);
     assert_eq!(harness.runtime_config_updates("10.0.0.9"), 0);
     assert_eq!(harness.export_med("10.0.0.2"), Some(20));
@@ -436,8 +441,9 @@ async fn late_reshape_failure_restores_prior_policy_generation() {
     let mut harness = GenerationHarness::new(&prior);
     let candidate = fixture.compound_candidate();
     let candidate_bytes = std::fs::read(&fixture.config_path).unwrap();
-    // Policy-only peer: the bystander joins the group export chain through
-    // its own explicit chain so its policy moves without a reshape.
+    // Policy-only peer: the bystander references the same `.rpol` export
+    // policy through its own chain, so the candidate moves its policy with
+    // no session action; the unwind must restore it from the policy priors.
     let bystander_session = harness.session_id("10.0.0.9");
     harness
         .mgr
@@ -467,7 +473,16 @@ async fn late_reshape_failure_restores_prior_policy_generation() {
         65002
     );
     assert_eq!(harness.session_id("10.0.0.9"), bystander_session);
-    assert_eq!(harness.export_installs("10.0.0.9"), 0);
+    assert_eq!(
+        harness.export_med("10.0.0.9"),
+        Some(10),
+        "policy-only bystander advertised result restored from the policy priors"
+    );
+    assert_eq!(
+        harness.export_installs("10.0.0.9"),
+        2,
+        "forward install plus restoring install"
+    );
     // The desired file is untouched; an identical retry re-derives the plan.
     assert_eq!(
         std::fs::read(&fixture.config_path).unwrap(),
@@ -488,6 +503,7 @@ async fn late_reshape_failure_restores_prior_policy_generation() {
     );
     assert_eq!(harness.mgr.current_config, candidate);
     assert_eq!(harness.export_med("2001:db8::3"), Some(20));
+    assert_eq!(harness.export_med("10.0.0.9"), Some(20));
     harness.shutdown().await;
 }
 
@@ -553,7 +569,7 @@ async fn replacement_failure_re_adds_removed_peers() {
             .base_toml()
             .replace("hold_time = 90", "hold_time = 60")
             .replace(
-                "[[neighbors]]\naddress = \"10.0.0.9\"\nremote_asn = 65009\nhold_time = 180\n",
+                "[[neighbors]]\naddress = \"10.0.0.9\"\nremote_asn = 65009\nhold_time = 180\nexport_policy_chain = [\"members-out\"]\n",
                 "",
             ),
     );
