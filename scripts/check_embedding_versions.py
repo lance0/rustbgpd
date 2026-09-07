@@ -1,13 +1,31 @@
 #!/usr/bin/env python3
+"""Check or refresh the published-crate examples without release-specific code."""
+
+import argparse
+import json
 import re
 import sys
 import tomllib
 from pathlib import Path
+from urllib.request import Request, urlopen
 
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGES = ("wire", "fsm", "rpki")
-PUBLISHED_VERSIONS = {"wire": "0.20.0", "fsm": "0.7.0", "rpki": "0.2.0"}
+PUBLISHED_RECORD = Path("docs/reference/published-crate-versions.json")
+EMBEDDING = Path("docs/reference/embedding.md")
+WIRE_README = Path("crates/wire/README.md")
+RPKI_README = Path("crates/rpki/README.md")
+START = "<!-- published-crate-versions:start -->"
+END = "<!-- published-crate-versions:end -->"
+SECTIONS = {
+    "boundary": (2, "Published-crate release boundary"),
+    "decode": (3, "Decode an UPDATE (codec-only — the canonical embedder)"),
+    "session": (3, 'Build a session (codec + FSM — the "minimal speaker" consumer)'),
+    "rpki": (3, "Validate an origin (RPKI table — the synchronous consumer)"),
+}
+EXAMPLES = {"decode": ("wire",), "session": ("wire", "fsm"), "rpki": ("wire", "rpki")}
+VERSION = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z")
 MANIFESTS = {
     "wire": ("rustbgpd-wire", Path("crates/wire/Cargo.toml"), "crates/wire"),
     "fsm": ("rustbgpd-fsm", Path("crates/fsm/Cargo.toml"), "crates/fsm"),
@@ -55,126 +73,233 @@ def manifest_versions(root: Path = ROOT) -> dict[str, str]:
     return versions
 
 
-def labeled_paragraph(body: str, label: str) -> tuple[str, str | None]:
-    paragraphs = [paragraph for paragraph in body.strip().split("\n\n") if paragraph]
-    matches = [paragraph for paragraph in paragraphs if paragraph.startswith(label)]
-    if len(matches) != 1:
-        return "", f"boundary-paragraph:{label}"
-    return matches[0], None
+def validate_versions(versions: object) -> dict[str, str]:
+    if not isinstance(versions, dict) or set(versions) != set(PACKAGES):
+        raise ValueError("published-version-record:package-set")
+    for package, version in versions.items():
+        if not isinstance(version, str) or not VERSION.fullmatch(version):
+            raise ValueError(f"published-version-record:version:{package}")
+    return versions
 
 
-def check(document: str, prepared_versions: dict[str, str] | None = None) -> list[str]:
+def unique_object(pairs: list[tuple[str, object]]) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate-json-key:{key}")
+        result[key] = value
+    return result
+
+
+def published_versions(root: Path = ROOT) -> dict[str, str]:
+    return validate_versions(
+        json.loads(
+            (root / PUBLISHED_RECORD).read_text(encoding="utf-8"), object_pairs_hook=unique_object
+        )
+    )
+
+
+def version_block(body: str) -> str:
+    if body.count(START) != 1 or body.count(END) != 1:
+        raise ValueError("published-version-table:markers")
+    start, end = body.index(START), body.index(END)
+    if start >= end:
+        raise ValueError("published-version-table:marker-order")
+    return body[start : end + len(END)]
+
+
+def assignment(package: str) -> re.Pattern:
+    return re.compile(rf'^rustbgpd-{package}[ \t]*=[ \t]*"([^"]+)"[ \t]*$', re.MULTILINE)
+
+
+def path_assignment(package: str) -> re.Pattern:
+    return re.compile(
+        rf'^rustbgpd-{package} = \{{ version = "([^"\n]+)", path = "\.\./rustbgpd/crates/{package}" \}}$',
+        re.MULTILINE,
+    )
+
+
+def render_readme(readme: str, packages: tuple, prepared: dict, published: dict) -> str:
+    for package in packages:
+        readme = replace_section(
+            readme,
+            2,
+            "Usage",
+            lambda body, p=package: path_assignment(p).sub(
+                f'rustbgpd-{p} = {{ version = "{prepared[p]}", path = "../rustbgpd/crates/{p}" }}',
+                assignment(p).sub(f'rustbgpd-{p} = "{published[p]}"', body),
+            ),
+        )
+    return readme
+
+
+def check(
+    document: str,
+    prepared_versions: dict[str, str] | None = None,
+    published: dict[str, str] | None = None,
+    wire_readme: str | None = None,
+    rpki_readme: str | None = None,
+) -> list[str]:
     errors: list[str] = []
-    requested = {
-        "map": (2, "Crate map and publish status"),
-        "boundary": (2, "Published-crate release boundary"),
-        "decode": (3, "Decode an UPDATE (codec-only — the canonical embedder)"),
-        "session": (3, 'Build a session (codec + FSM — the "minimal speaker" consumer)'),
-        "rpki": (3, "Validate an origin (RPKI table — the synchronous consumer)"),
-        "publish": (2, "Which crate to publish next, and why"),
-    }
     sections = {}
-    for name, (level, title) in requested.items():
+    for name, (level, title) in SECTIONS.items():
         sections[name], error = section(document, level, title)
         if error:
             errors.append(error)
     if errors:
         return errors
 
-    if prepared_versions is None:
-        try:
+    try:
+        if prepared_versions is None:
             prepared_versions = manifest_versions()
-        except (OSError, tomllib.TOMLDecodeError, ValueError) as error:
-            return [f"manifest-version-contract:{error}"]
-    if set(prepared_versions) != set(PACKAGES):
-        return ["manifest-version-contract:package-set"]
+        validate_versions(prepared_versions)
+        published = published_versions() if published is None else validate_versions(published)
+        if wire_readme is None:
+            wire_readme = (ROOT / WIRE_README).read_text(encoding="utf-8")
+        if rpki_readme is None:
+            rpki_readme = (ROOT / RPKI_README).read_text(encoding="utf-8")
+        block = version_block(sections["boundary"])
+    except (OSError, ValueError) as error:
+        return [str(error)]
 
-    map_status = re.sub(r"\s+", " ", sections["map"])
-    expected_map_status = (
-        "`rustbgpd-wire`, `rustbgpd-fsm`, and `rustbgpd-rpki` all have "
-        "registry-published releases; `rustbgpd-rpki` is on the registry from "
-        "its first release, `0.1.0`."
-    )
-    if expected_map_status not in map_status:
-        errors.append("publication-map-state")
-
-    registry_boundary, error = labeled_paragraph(
-        sections["boundary"], "Registry-visible releases are"
-    )
-    if error:
-        errors.append(error)
-    prepared_boundary, error = labeled_paragraph(
-        sections["boundary"], "The prepared package boundary is"
-    )
-    if error:
-        errors.append(error)
-    if errors:
-        return errors
-
-    package_pattern = "|".join(PACKAGES)
-    published = re.findall(rf"`rustbgpd-({package_pattern}) ([^`]+)`", registry_boundary)
-    if len(published) != len(PUBLISHED_VERSIONS) or dict(published) != PUBLISHED_VERSIONS:
-        errors.append("current-boundary-version")
-
-    prepared = re.findall(rf"`rustbgpd-({package_pattern}) ([^`]+)`", prepared_boundary)
-    if len(prepared) != len(PACKAGES) or dict(prepared) != prepared_versions:
-        errors.append("prepared-boundary-version")
-
-    examples = {
-        "wire": (sections["decode"], sections["session"], sections["rpki"]),
-        "fsm": (sections["session"],),
-        "rpki": (sections["rpki"],),
-    }
-    for package, bodies in examples.items():
-        assignment = re.compile(rf'^rustbgpd-{package} = "([^"]+)"$', re.MULTILINE)
-        found = [match for body in bodies for match in assignment.findall(body)]
-        if not found or any(version != PUBLISHED_VERSIONS[package] for version in found):
-            errors.append(f"{package}-snippet-version")
-
-    # An entry carries "; `X` prepared" only while the working tree runs ahead of
-    # the registry. Omitting the clause is itself a claim -- that the manifest
-    # version is the published one -- so it is compared against the manifest
-    # either way, and a staged version cannot hide by dropping the clause.
-    publish = re.findall(
-        rf"^\d+\. \*\*`rustbgpd-({package_pattern})` \(published as `([^`]+)`"
-        r"(?:; `([^`]+)` prepared)?\)\.\*\*",
-        sections["publish"],
+    rows = re.findall(
+        r"^\|[ \t]*`rustbgpd-([^`]+)`[ \t]*\|[ \t]*`([^`]+)`[ \t]*\|[ \t]*`([^`]+)`[ \t]*\|[ \t]*$",
+        block,
         re.MULTILINE,
     )
-    published_status = {package: version for package, version, _ in publish}
-    prepared_status = {
-        package: prepared or version for package, version, prepared in publish
-    }
-    if (
-        len(publish) != len(PUBLISHED_VERSIONS)
-        or published_status != PUBLISHED_VERSIONS
-        or prepared_status != prepared_versions
+    if len(rows) != len(PACKAGES) or {p: v for p, v, _ in rows} != published:
+        errors.append("current-boundary-version")
+    if len(rows) != len(PACKAGES) or {p: v for p, _, v in rows} != prepared_versions:
+        errors.append("prepared-boundary-version")
+    for name, packages in EXAMPLES.items():
+        for package in packages:
+            found = assignment(package).findall(sections[name])
+            if not found or any(version != published[package] for version in found):
+                errors.append(f"{package}-snippet-version:{name}")
+    for name, readme, packages in (
+        ("wire", wire_readme, ("wire",)),
+        ("rpki", rpki_readme, ("wire", "rpki")),
     ):
-        errors.append("publish-status-version")
-
-    rpki_pair = re.findall(
-        r"The RPKI `([^`]+)` line pairs with wire `([^`]+)`",
-        sections["publish"],
-    )
-    if rpki_pair != [(PUBLISHED_VERSIONS["rpki"], PUBLISHED_VERSIONS["wire"])]:
-        errors.append("rpki-wire-pair")
-
-    fsm_pair = re.findall(
-        r"The `([^`]+)` line pairs with wire `([^`]+)`",
-        sections["publish"],
-    )
-    if fsm_pair != [(PUBLISHED_VERSIONS["fsm"], PUBLISHED_VERSIONS["wire"])]:
-        errors.append("fsm-wire-pair")
-
+        usage, error = section(readme, 2, "Usage")
+        if error:
+            errors.append(f"{name}-readme:{error}")
+        for package in packages:
+            found = assignment(package).findall(usage)
+            if not found or any(version != published[package] for version in found):
+                errors.append(f"{name}-readme-registry-version:{package}")
+            if path_assignment(package).findall(usage) != [prepared_versions[package]]:
+                errors.append(f"{name}-readme-path-version:{package}")
     return errors
 
 
+def replace_section(document: str, level: int, title: str, transform) -> str:
+    body, error = section(document, level, title)
+    if error:
+        raise ValueError(error)
+    heading = next(match for match in HEADING.finditer(document) if match[2] == title)
+    return document[: heading.end()] + transform(body) + document[heading.end() + len(body) :]
+
+
+def render(document: str, wire_readme: str, prepared: dict, published: dict) -> tuple[str, str]:
+    table = "\n".join(
+        [
+            START,
+            "| Crate | Published examples | Working tree |",
+            "|---|---|---|",
+            *(f"| `rustbgpd-{p}` | `{published[p]}` | `{prepared[p]}` |" for p in PACKAGES),
+            END,
+        ]
+    )
+    document = replace_section(
+        document, *SECTIONS["boundary"], lambda body: body.replace(version_block(body), table, 1)
+    )
+    for name, packages in EXAMPLES.items():
+        for package in packages:
+            document = replace_section(
+                document,
+                *SECTIONS[name],
+                lambda body, p=package: assignment(p).sub(f'rustbgpd-{p} = "{published[p]}"', body),
+            )
+    wire_readme = render_readme(wire_readme, ("wire",), prepared, published)
+    return document, wire_readme
+
+
+def verify_registry(versions: dict[str, str]) -> None:
+    for package, version in versions.items():
+        name = f"rustbgpd-{package}"
+        request = Request(
+            f"https://crates.io/api/v1/crates/{name}/{version}",
+            headers={"User-Agent": "rustbgpd-release-docs (https://github.com/lance0/rustbgpd)"},
+        )
+        with urlopen(request, timeout=15) as response:
+            payload = json.load(response, object_pairs_hook=unique_object)
+        release = payload.get("version") if isinstance(payload, dict) else None
+        if not isinstance(release, dict) or (
+            release.get("crate") != name
+            or release.get("num") != version
+            or release.get("yanked") is not False
+        ):
+            raise ValueError(f"registry-version-unavailable:{name}:{version}")
+
+
+def update(root: Path = ROOT, *, refresh: bool = False) -> list[Path]:
+    prepared = manifest_versions(root)
+    published = published_versions(root)
+    if refresh:
+        published = validate_versions(prepared)
+    original = {
+        p: (root / p).read_text(encoding="utf-8")
+        for p in (EMBEDDING, WIRE_README, RPKI_README, PUBLISHED_RECORD)
+    }
+    document, readme = render(original[EMBEDDING], original[WIRE_README], prepared, published)
+    rpki_readme = render_readme(original[RPKI_README], ("wire", "rpki"), prepared, published)
+    errors = check(document, prepared, published, readme, rpki_readme)
+    if errors:
+        raise ValueError("\n".join(errors))
+    # Resolve every registry response before changing any local file. A partial
+    # publish leaves the previous coordinated examples intact.
+    if refresh:
+        verify_registry(published)
+    updated = {
+        EMBEDDING: document,
+        WIRE_README: readme,
+        RPKI_README: rpki_readme,
+        PUBLISHED_RECORD: json.dumps(published, indent=2) + "\n",
+    }
+    changed = [path for path, text in updated.items() if text != original[path]]
+    for path in changed:
+        (root / path).write_text(updated[path], encoding="utf-8")
+    return changed
+
+
 def main() -> int:
-    if len(sys.argv) > 2:
-        raise SystemExit(f"usage: {Path(sys.argv[0]).name} [EMBEDDING.md]")
-    default = ROOT / "docs" / "reference" / "embedding.md"
-    path = Path(sys.argv[1]) if len(sys.argv) == 2 else default
-    errors = check(path.read_text(encoding="utf-8"))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "document", nargs="?", type=Path, help="alternative embedding guide to check"
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--write", action="store_true", help="sync examples from the offline record and manifests"
+    )
+    mode.add_argument(
+        "--refresh",
+        action="store_true",
+        help="verify all manifest versions on crates.io, then sync",
+    )
+    args = parser.parse_args()
+    if args.document and (args.write or args.refresh):
+        parser.error("an alternative document is supported only in check mode")
+    try:
+        if args.write or args.refresh:
+            changed = update(refresh=args.refresh)
+            for path in changed:
+                print(f"updated {path}")
+            if not changed:
+                print("published-crate examples are up to date")
+            return 0
+        errors = check((args.document or ROOT / EMBEDDING).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        errors = [str(error)]
     if errors:
         print("\n".join(errors), file=sys.stderr)
     return int(bool(errors))

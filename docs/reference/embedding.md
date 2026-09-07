@@ -286,8 +286,8 @@ NOTIFICATION and hold-expiry exits.
 An analyzer or policy controller that already has validated ROA payloads can
 construct an immutable table and classify a route without starting Tokio or an
 RTR session. The prefix and validation-state types are part of the published
-wire boundary. The RPKI crate's first registry release, `0.1.0`, is now
-available, so this example resolves entirely from crates.io.
+wire boundary. This example resolves entirely from crates.io using the
+verified published versions in §7.
 
 ```toml
 # Cargo.toml
@@ -366,11 +366,10 @@ registry dependency (§3.4); its published pairing with wire is recorded in §7.
 
 ## 4. Which crate to publish next, and why
 
-**Status: `wire`, `fsm`, and `rpki` are published — the wire/FSM pair on its
-current paired boundary, `rpki` on its first release. `rib`, `bmp`, `mrt`, and
-`policy` remain demand-gated.**
+**`wire`, `fsm`, and `rpki` are published; see §7 for the verified version
+boundary. `rib`, `bmp`, `mrt`, and `policy` remain demand-gated.**
 
-1. **`rustbgpd-wire` (published as `0.20.0`).** This is the foundation —
+1. **`rustbgpd-wire`.** This is the foundation —
    dependent crate versions cannot publish before their wire dependency exists
    on crates.io. `0.15.0` brought `Capability::PathsLimit`
    with its `PathsLimitFamily` entry type (experimental capability code 76),
@@ -440,26 +439,26 @@ current paired boundary, `rpki` on its first release. `rib`, `bmp`, `mrt`, and
    with independent inbound and outbound RFC 8654 ceilings). A consumer that
    asserts on accepted bytes or on exact `PathAttribute` variants must diff
    the itemized list in `crates/wire/README.md` under "0.18.0 compatibility
-   note" before upgrading. `0.19.0` is the registry release consumers resolve
-   today. It remains API-additive but intentionally advances the 0.x boundary
+   note" before upgrading. The `0.19.0` compatibility line remains API-additive
+   but intentionally advances the 0.x boundary
    for new observation/framing APIs and decode-behavior refinements. Its
    compatibility note includes the exact role-sensitive disposition for
    Partial-bearing MED, ORIGINATOR_ID, and CLUSTER_LIST, while MP_REACH_NLRI
    and MP_UNREACH_NLRI retain session reset. Moving off `0.18.0` means moving
    `rustbgpd-fsm` to `0.6.0` in the same step.
 
-   Prepared `0.20.0` adds `decode_prefix_sid_services` and public SRv6
+   The `0.20.0` compatibility line adds `decode_prefix_sid_services` and public SRv6
    service/SID/structure inspection types. They preserve advertised values;
    raw Prefix-SID bytes retain unknown and reserved data. This requires the
-   coordinated prepared FSM `0.7.0` and RPKI `0.2.0` wire-type boundary.
+   coordinated FSM `0.7.0` and RPKI `0.2.0` wire-type boundary.
 
-   Prepared `0.20.0` also adds `DecodeError::MalformedSrv6ServiceTlv` for
+   That line also adds `DecodeError::MalformedSrv6ServiceTlv` for
    recognized RFC 9252 L3/L2 Service framing errors. Revised decoding uses
    treat-as-withdraw, while generic Prefix-SID errors retain attribute-discard.
    Valid nested unknown/reserved values remain opaque; see the
    [framing contract](path-attribute-registry.md#srv6-service-framing-within-prefix-sid).
 
-2. **`rustbgpd-fsm` (published as `0.7.0`).** The `0.4.0` release makes no
+2. **`rustbgpd-fsm`.** The `0.4.0` release makes no
    FSM API changes of its own — it exists because the FSM's public surface
    re-exports `rustbgpd-wire` types (`Action` carries wire messages), so the
    wire `0.16.2 → 0.17.0` breaking transition changes the identity of those
@@ -506,8 +505,8 @@ current paired boundary, `rpki` on its first release. `rib`, `bmp`, `mrt`, and
    both crates in one step. It also adds `Event::AdministrativeReset` to the
    non-exhaustive event enum.
 
-3. **`rustbgpd-rpki` (published as `0.2.0`).** This is the crate's first
-   registry release. Why it is independent:
+3. **`rustbgpd-rpki`.** Its first registry release was `0.1.0`.
+   Why it is independent:
    - Its direct dependencies are `rustbgpd-wire`, `tokio`, `tracing`,
      `smallvec`, `thiserror`, and `rustc-hash`; it has no `rib`/`policy` edge.
    - Synchronous `VrpTable` / `AspaTable` validation can be embedded without a
@@ -589,17 +588,28 @@ To be the de facto Rust BGP codec, the concrete gaps:
 
 ## 7. Published-crate release boundary
 
-Registry-visible releases are `rustbgpd-wire 0.20.0`,
-`rustbgpd-fsm 0.7.0`, and `rustbgpd-rpki 0.2.0`. The registry
-dependency examples in §3 name only those published versions.
+The dependency examples use the last verified coordinated set of published
+versions in [`published-crate-versions.json`](published-crate-versions.json).
+The working-tree column comes from the crate manifests and may run ahead
+during preparation or a partial publication. An unchanged published column
+does not mean no newer individual crate exists on the registry.
 
-The prepared package boundary is `rustbgpd-wire 0.20.0`,
-`rustbgpd-fsm 0.7.0`, and `rustbgpd-rpki 0.2.0` — the versions the working
-tree carries. Wire adds the Prefix-SID SRv6 inspection helper and public
-service/SID/structure types, alongside the earlier prepared decoder changes.
-FSM and RPKI expose wire types in public signatures, so all three move to
-matching compatibility lines. This is release preparation; the registry
-examples above keep the published versions.
+<!-- published-crate-versions:start -->
+| Crate | Published examples | Working tree |
+|---|---|---|
+| `rustbgpd-wire` | `0.20.0` | `0.20.0` |
+| `rustbgpd-fsm` | `0.7.0` | `0.7.0` |
+| `rustbgpd-rpki` | `0.2.0` | `0.2.0` |
+<!-- published-crate-versions:end -->
+
+After changing manifests, run `python3 scripts/check_embedding_versions.py --write`
+to sync this table and the examples offline. After all versions in the working
+tree are published, run `python3 scripts/check_embedding_versions.py --refresh`.
+It verifies each exact version is present and not yanked on crates.io before
+updating the record and examples. A missing version or failed registry lookup
+leaves every file unchanged; rerunning a successful refresh produces no diff.
+The checker without either flag is read-only and offline.
+
 The ordering rules that govern these publishes are:
 
 - Publish `rustbgpd-wire` first, then verify it is registry-visible. Only then

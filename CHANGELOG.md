@@ -11,6 +11,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Published-crate documentation now refreshes with one command after registry
+  verification. Preparation and CI use an offline version record; release
+  updates no longer require editing contract tests.
+
 ## [0.69.0] — 2026-09-07
 
 ### Added

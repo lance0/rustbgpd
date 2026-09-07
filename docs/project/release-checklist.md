@@ -792,6 +792,28 @@ Before rolling any versions:
     anyway, fix the CHANGELOG heading and either re-tag or edit the release
     body.
 
+### Published-crate documentation refresh
+
+After changing crate versions and their workspace pins, run
+`python3 scripts/check_embedding_versions.py --write`. This updates the prepared
+versions and wire/RPKI path examples from the manifests, keeping registry examples
+at the versions recorded in `docs/reference/published-crate-versions.json`.
+The command works offline; tests never need release-number edits.
+
+After completing the intended crate publishes, run
+`python3 scripts/check_embedding_versions.py --refresh` once. It verifies that
+all three manifest versions exist and are not yanked on crates.io before
+updating the published record, boundary table, and dependency examples. Publish
+wire before dependent crates. If a publish or registry check fails, retain the
+existing record and retry after resolving the failure.
+
+Review the generated changes and run the offline checks before committing:
+
+```bash
+python3 -m unittest -v scripts/test_check_embedding_versions.py
+python3 scripts/check_embedding_versions.py
+```
+
 ### rustbgpd-wire crate release
 
 The wire crate has its own version in `crates/wire/Cargo.toml`, decoupled
@@ -814,9 +836,8 @@ changed.
    package inventory and normalized manifest.
 6. `cargo publish --locked -p rustbgpd-wire --dry-run`
 7. `cargo publish --locked -p rustbgpd-wire`
-8. Verify the version is visible in the registry, update the declared current
-   boundary and dependency snippets in `docs/reference/embedding.md`, then run
-   `python3 scripts/check_embedding_versions.py`.
+8. After all intended crate publishes complete, run the
+   [published-crate documentation refresh](#published-crate-documentation-refresh).
 
 **Wire crate semver:**
 - **Patch**: bug fixes, stricter validation, docs/test improvements
@@ -856,24 +877,20 @@ do not force an FSM release for every daemon tag.
    to a new wire line, a resolver failure is expected until that wire version
    is registry-visible; do not weaken verification with `--no-verify`.
 7. `cargo publish --locked -p rustbgpd-fsm`
-8. Verify the version is visible in the registry, update the declared current
-   boundary and dependency snippets in `docs/reference/embedding.md`, then run
-   `python3 scripts/check_embedding_versions.py`.
+8. After all intended crate publishes complete, run the
+   [published-crate documentation refresh](#published-crate-documentation-refresh).
 
 ### rustbgpd-rpki crate release
 
 The RPKI crate has its own version in `crates/rpki/Cargo.toml`, decoupled from
 the daemon workspace version. Its synchronous table API and asynchronous RTR
-client will share one public compatibility boundary after the first publish.
+client share one public compatibility boundary.
 
 1. **Did `crates/rpki/` or its public examples/docs change since the last
    `rustbgpd-rpki` publish?**
    - If no: skip. Do not publish a no-op release.
    - If yes: continue.
 2. Decide semver bump:
-   - **First publish**: establish `0.1.0` directly on the intended compatible
-     wire line. With no registry baseline, there is no obsolete RPKI line to
-     bump away from.
    - **Patch**: backward-compatible fixes, docs/test improvements, or additive
      public API after the first release within the current `0.x`
      compatibility line.
@@ -889,19 +906,14 @@ client will share one public compatibility boundary after the first publish.
 5. Run `cargo package --locked -p rustbgpd-rpki --list`; inspect the exact
    package inventory and normalized manifest. Normal dependencies must resolve
    from crates.io with no path-only edge.
-6. Run `cargo publish --locked -p rustbgpd-rpki --dry-run`. For the initial
-   release prepared against a new wire line, a resolver failure is expected
-   until that wire version is registry-visible; do not weaken verification
-   with `--no-verify`.
-7. Publish `rustbgpd-rpki`, verify the version and ownership are visible in the
-   registry, then manually dispatch `semver-checks.yml` at the publish commit.
-   The checked package set must now include RPKI.
-8. Update the declared current boundary and dependency snippets in
-   `docs/reference/embedding.md`, then run `python3 scripts/check_embedding_versions.py`.
+6. Run `cargo publish --locked -p rustbgpd-rpki --dry-run`. When moving
+   to a new wire line, a resolver failure is expected until that wire version
+   is registry-visible; do not weaken verification with `--no-verify`.
+7. `cargo publish --locked -p rustbgpd-rpki`
+8. After all intended crate publishes complete, run the
+   [published-crate documentation refresh](#published-crate-documentation-refresh).
 
-For the initial `0.1.0` publish only, the semver workflow permits the exact
-`rustbgpd-rpki 0.1.0` package to have no baseline while crates.io returns 404
-for its name. Any other missing package/version, a claimed name without a
-normal release, or an ambiguous registry response fails closed. Recheck the
-name immediately before the real publish; the package is already
-publish-enabled in its manifest.
+The semver workflow retains a historical first-publish exception for exactly
+`rustbgpd-rpki 0.1.0` while crates.io returns 404 for its name. Published RPKI
+releases use the ordinary registry baseline; the exception does not apply to
+subsequent releases.

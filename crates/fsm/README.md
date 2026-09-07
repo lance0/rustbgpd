@@ -10,9 +10,8 @@ Requires Rust 1.95 or newer.
 
 Release-by-release crate changes are recorded in the [changelog](CHANGELOG.md).
 
-Prepared `0.7.0` uses wire `0.20.0`. Its public wire types belong to that
-compatibility line; upgrade dependencies that exchange those types together.
-The registry release remains `0.6.0` until publication.
+The `0.7.0` compatibility line uses wire `0.20.0`. Its public wire types
+belong to that compatibility line; upgrade dependencies that exchange those types together.
 
 ## Usage
 
