@@ -3,7 +3,7 @@
 This changelog covers the independently published `rustbgpd-wire` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
-## 0.20.0 - Unreleased
+## 0.20.0 - 2026-09-07
 
 - Added `decode_prefix_sid_services` and the `Srv6Service`,
   `Srv6SidInformation`, and `Srv6SidStructure` inspection types. The helper

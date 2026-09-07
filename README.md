@@ -21,7 +21,7 @@ them, and stream routing events to your own tools.
 
 **Stability:** inventoried IPv4/IPv6 unicast route-server and route-reflector
 surfaces have a [narrow v1 compatibility contract](docs/reference/v1-stable-contract.md),
-with baseline v0.68.0. The project remains alpha overall; unlisted surfaces,
+with baseline v0.69.0. The project remains alpha overall; unlisted surfaces,
 EVPN, and Linux dataplane features are outside that promise.
 [Stability and compatibility](docs/reference/stability.md) explains the boundaries.
 

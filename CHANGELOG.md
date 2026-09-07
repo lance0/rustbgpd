@@ -11,6 +11,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.69.0] — 2026-09-07
+
 ### Added
 
 - Config diff impact reasons now name directly changed `.rpol` policy terms
