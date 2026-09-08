@@ -246,8 +246,9 @@ impl RibManager {
     }
 
     /// Classify a prospective policy without changing the peer's installed
-    /// policy or runtime membership. Registry interning is append-only and
-    /// observational; no group table or wire state is touched here.
+    /// policy or runtime membership. Registry IDs are append-only; the
+    /// enclosing operation retains prospective IDs until it commits or
+    /// discards them. No group table or wire state is touched here.
     fn compute_update_group_membership_for_policy(
         &mut self,
         peer: IpAddr,

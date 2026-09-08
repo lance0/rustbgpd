@@ -505,6 +505,45 @@ impl PendingCleanPolicyTransition {
         self.replacements.len()
     }
 
+    /// IDs held while classification or a later transition phase is parked.
+    /// Classification may precede creation of the destination group table.
+    pub(super) fn registry_group_ids(&self) -> impl Iterator<Item = usize> {
+        let pair = match self.phase.as_ref() {
+            Some(CleanPolicyTransitionPhase::Classify { transition, .. }) => *transition,
+            Some(
+                CleanPolicyTransitionPhase::StageDestination {
+                    source,
+                    destination,
+                    ..
+                }
+                | CleanPolicyTransitionPhase::BuildInventory {
+                    source,
+                    destination,
+                    ..
+                }
+                | CleanPolicyTransitionPhase::ProbeAndPrepare {
+                    source,
+                    destination,
+                    ..
+                }
+                | CleanPolicyTransitionPhase::Validate {
+                    source,
+                    destination,
+                    ..
+                }
+                | CleanPolicyTransitionPhase::CommitMembers {
+                    source,
+                    destination,
+                    ..
+                },
+            ) => Some((*source, *destination)),
+            None => None,
+        };
+        pair.into_iter()
+            .flat_map(|(source, destination)| [source, destination])
+            .chain(self.created_destination)
+    }
+
     pub(super) fn take_slow_warning(
         &mut self,
         threshold: std::time::Duration,
@@ -559,14 +598,17 @@ impl PendingCleanPolicyTransition {
         manager: &mut RibManager,
     ) -> Result<(), String> {
         self.phase = None;
-        if let Some(destination) = self.created_destination.take()
+        let result = if let Some(destination) = self.created_destination.take()
             && !manager.discard_uncommitted_policy_transition_group(destination)
         {
-            return Err(format!(
+            Err(format!(
                 "uncommitted policy-transition destination {destination} unexpectedly gained members"
-            ));
-        }
-        Ok(())
+            ))
+        } else {
+            Ok(())
+        };
+        manager.reclaim_unused_update_group_policies();
+        result
     }
 }
 
@@ -3202,8 +3244,12 @@ impl RibManager {
         r.dirty_before = self.dirty_peers.len();
         r.pending_before = self.pending_regroup_baseline.len();
         r.groups_before = self.group_ribs.len();
+        let previous_deferral =
+            std::mem::replace(&mut self.update_groups.reclamation_deferred, true);
         let result =
             self.apply_export_policy_replacements_synchronously_inner(replacements, &mut r);
+        self.update_groups.reclamation_deferred = previous_deferral;
+        self.reclaim_unused_update_group_policies();
         r.total_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
         let phases = [
             r.precondition_us,
@@ -3942,6 +3988,7 @@ impl RibManager {
         }
         let Some((_, destination)) = self.clean_policy_transition_destination(peer, export_policy)
         else {
+            self.reclaim_unused_update_group_policies();
             let _ = reply.send(Err(
                 "peer/policy pair does not classify as a clean grouped transition".to_string(),
             ));
@@ -3971,6 +4018,7 @@ impl RibManager {
                 });
             }
         }
+        self.reclaim_unused_update_group_policies();
     }
 
     /// Discard a mid-walk destination prestage that a membership event is
@@ -4060,6 +4108,7 @@ impl RibManager {
         if let Some(prepared) = self.prepared_destination.take() {
             let _ = self.discard_uncommitted_policy_transition_group(prepared);
         }
+        self.reclaim_unused_update_group_policies();
     }
 
     /// Force re-emission of all currently-advertised routes to a peer

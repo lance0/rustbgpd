@@ -2315,13 +2315,18 @@ path-id correction is unsound without per-member state).
 fallback reason on its `Update Group` line. Metrics:
 `bgp_update_groups`, `bgp_update_group_members{group}`,
 `bgp_update_group_regroups_total`, `bgp_update_group_fallback_peers`,
-`bgp_update_group_interned_chains` and `bgp_update_group_keys`
-(registry growth — append-only for the process lifetime),
+`bgp_update_group_interned_chains` (currently retained policy contents),
+`bgp_update_group_keys` (historical key slots, append-only for the process lifetime),
 `bgp_update_group_residue_entries` (withdrawal residue held while a
 member is dirty; returns to zero when its resync completes), and
 `bgp_update_group_runner_up_entries` (staged per-client-best runner-up
 lane entries across groups, ADR-0126 — grows with announcement
 overlap, never with member count).
+
+The registry releases compiled policy contents after their final live group
+and transition disappear. Small chain-ID slots and group keys remain as
+historical identity metadata; IDs are never reassigned. A content-equal reload
+keeps a live group's ID, but reinstalling a fully retired policy gets a new ID.
 
 To compare two configured peers without depending on process-local `group:N`
 identifiers, query their live memberships directly:
