@@ -1648,6 +1648,7 @@ mod policy_apply;
 mod policy_failures;
 mod policy_stats;
 mod queries;
+mod reload_generation;
 mod rfc8212;
 mod snapshots;
 mod transport_config;

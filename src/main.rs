@@ -69,9 +69,8 @@ use rustbgpd_rib::{RibManager, RibUpdate, WarmMrtSnapshotBudget, WarmMrtSnapshot
 use rustbgpd_telemetry::metrics::SighupReloadOutcome as SighupReloadMetricOutcome;
 use rustbgpd_telemetry::{BgpMetrics, init_logging};
 use rustbgpd_transport::{
-    BgpListener, ListenerSocketOptions, Md5ListenerKey, TcpAoAlgorithm,
-    TcpAoConfig as TransportTcpAoConfig, TcpAoKeyring, TcpAoListenerKey, TcpAoListenerOwnerKind,
-    TtlSecurityListenerPolicy,
+    BgpListener, ListenerSocketOptions, TcpAoAlgorithm, TcpAoConfig as TransportTcpAoConfig,
+    TcpAoKeyring, TcpAoListenerKey, TcpAoListenerOwnerKind,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -82,6 +81,10 @@ use tracing::{error, info, warn};
 use crate::config::{
     AcceptedConfigSnapshot, Config, GrpcAccessMode, GrpcListener, GrpcMaxTier, GrpcRoleConfig,
     UnpolicedEbgpBoundary,
+};
+use crate::config::{
+    md5_listener_key_for_dynamic_range, md5_listener_key_for_neighbor,
+    ttl_security_listener_policy_for_dynamic_range, ttl_security_listener_policy_for_neighbor,
 };
 use crate::config_persister::{ConfigMutation, ConfigPersister};
 use crate::peer_manager::PeerManager;
@@ -1878,73 +1881,6 @@ fn tcp_ao_listener_key_for_dynamic_range(
                 })
                 .collect(),
         ),
-    })
-}
-
-/// Inbound TCP MD5 listener key for a static neighbor: the resolved
-/// (peer-group-inherited) password, keyed to the exact host address.
-fn md5_listener_key_for_neighbor(neighbor: &config::ResolvedNeighbor) -> Option<Md5ListenerKey> {
-    let password = neighbor.transport_config.md5_password.as_ref()?;
-    let peer = neighbor.transport_config.remote_addr.ip();
-    Some(Md5ListenerKey {
-        peer,
-        prefix_len: if peer.is_ipv4() { 32 } else { 128 },
-        password: password.clone(),
-    })
-}
-
-/// Inbound TCP MD5 listener key for a dynamic range: the referenced peer
-/// group's password, keyed to the whole prefix. Dynamic members are
-/// passive-only, so the listener key is the only socket this password can
-/// ever reach.
-fn md5_listener_key_for_dynamic_range(
-    range: &config::DynamicNeighborConfig,
-    peer_groups: &std::collections::HashMap<String, config::PeerGroupConfig>,
-) -> Option<Md5ListenerKey> {
-    // A range with direct TCP-AO never inherits group authentication
-    // (validated at config load).
-    if range.tcp_ao.is_some() {
-        return None;
-    }
-    let password = peer_groups.get(&range.peer_group)?.md5_password.as_ref()?;
-    let (peer, prefix_len) = config::effective_prefix_str(&range.prefix)?;
-    Some(Md5ListenerKey {
-        peer,
-        prefix_len,
-        password: password.as_str().into(),
-    })
-}
-
-/// GTSM selector for a static neighbor. Entries are emitted for every
-/// neighbor — including `hops: None` — so a non-GTSM static neighbor
-/// inside an enforcing dynamic range keeps its own policy at accept time.
-fn ttl_security_listener_policy_for_neighbor(
-    neighbor: &config::ResolvedNeighbor,
-) -> TtlSecurityListenerPolicy {
-    let peer = neighbor.transport_config.remote_addr.ip();
-    TtlSecurityListenerPolicy {
-        owner: TcpAoListenerOwnerKind::Static,
-        peer,
-        prefix_len: if peer.is_ipv4() { 32 } else { 128 },
-        hops: neighbor.transport_config.ttl_security_hops,
-    }
-}
-
-/// GTSM selector for a dynamic range, resolved from its peer group.
-fn ttl_security_listener_policy_for_dynamic_range(
-    range: &config::DynamicNeighborConfig,
-    peer_groups: &std::collections::HashMap<String, config::PeerGroupConfig>,
-) -> Option<TtlSecurityListenerPolicy> {
-    let group = peer_groups.get(&range.peer_group)?;
-    let (peer, prefix_len) = config::effective_prefix_str(&range.prefix)?;
-    Some(TtlSecurityListenerPolicy {
-        owner: TcpAoListenerOwnerKind::Dynamic,
-        peer,
-        prefix_len,
-        hops: group
-            .ttl_security
-            .unwrap_or(false)
-            .then(|| group.ttl_security_hops.unwrap_or(std::num::NonZeroU8::MIN)),
     })
 }
 
@@ -5984,33 +5920,15 @@ async fn run<T>(
                             ));
                         }
                     };
-                    let mut accepted_effect = false;
-                    if let Some(credentials) = grpc_credentials {
-                        match credentials.reload() {
-                            Ok(generation) => {
-                                operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
-                                accepted_effect = true;
-                                reload_metrics.record_grpc_credential_reload("success");
-                                info!(generation, "gRPC credential generation reloaded");
-                                if let Some((index, warning_seconds)) = grpc_tls_expiry_warning {
-                                    warn_grpc_tls_expiry(&credentials, index, warning_seconds);
-                                }
-                            }
-                            Err(error) => {
-                                reload_metrics.record_grpc_credential_reload("failure");
-                                error!(error = %error, "gRPC credential reload rejected; last-known-good generation remains active");
-                            }
-                        }
-                    }
                     let outcome = reload_config_with_tcp_ao(
                         SighupReloadPlan {
                             baseline_runtime: snapshot,
                             desired,
-                            accepted_effect,
                         },
                         live_tcp.as_ref(),
                         live_uds.as_ref(),
                         &pm_tx,
+                        Some(&pm_internal),
                         Some(&limits_rib_tx),
                         fib_cmd.as_ref(),
                         Some(&evpn_runtime_reload_apply),
@@ -6022,6 +5940,32 @@ async fn run<T>(
                         SighupReloadOutcome::CleanNoEffect(error) => OwnedRuntimeConfigOutcome::CleanNoEffect(Err(error)),
                         SighupReloadOutcome::RecoveryFenced { error, reason } => OwnedRuntimeConfigOutcome::Fenced { error, reason },
                         SighupReloadOutcome::Acknowledged(authority) => {
+                            // Credential files are operator authority independent of
+                            // the config generation: rotate them only once the runtime
+                            // generation is acknowledged, so a rejected or restored
+                            // candidate has no credential effect. A rotation failure
+                            // stays non-fatal with the last-known-good generation
+                            // active.
+                            if let Some(credentials) = grpc_credentials {
+                                match credentials.reload() {
+                                    Ok(generation) => {
+                                        // A config-unchanged SIGHUP reaches here without
+                                        // any earlier mutation; the atomic credential
+                                        // publication is one.
+                                        operation.advance_phase(RuntimeConfigSettlementPhase::Mutating);
+                                        operation.mark_sighup_accepted_effect();
+                                        reload_metrics.record_grpc_credential_reload("success");
+                                        info!(generation, "gRPC credential generation reloaded");
+                                        if let Some((index, warning_seconds)) = grpc_tls_expiry_warning {
+                                            warn_grpc_tls_expiry(&credentials, index, warning_seconds);
+                                        }
+                                    }
+                                    Err(error) => {
+                                        reload_metrics.record_grpc_credential_reload("failure");
+                                        error!(error = %error, "gRPC credential reload rejected; last-known-good generation remains active");
+                                    }
+                                }
+                            }
                             let Some(bridge_replace) = bridge_replace.as_ref() else {
                                 operation.record_sighup_recovery_step("config_bridge");
                                 return OwnedRuntimeConfigOutcome::Fenced {
