@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use rustbgpd_api::peer_types::{
     ConfigEvent, OwnedHotUpdatePeerOutcome, PeerKey, PeerManagerNeighborConfig, ResolvedPeerPolicy,
 };
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::config::{Config, ReloadPeerAction, ReloadPeerActionKind};
 use crate::policy_admin;
@@ -132,6 +132,11 @@ impl PeerManager {
         {
             Ok(priors) => applied.policy_priors = Some(priors),
             Err(failure) => {
+                error!(
+                    error = failure.code.as_str(),
+                    reason = %failure.message,
+                    "reload generation policy snapshot failed"
+                );
                 let message = format!("policy snapshot: {}", failure.message);
                 return match failure.kind {
                     PolicySnapshotFailureKind::RejectedNoEffect => {

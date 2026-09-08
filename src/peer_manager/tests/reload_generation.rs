@@ -747,3 +747,73 @@ fn sample_route_is_permitted_by_the_fixture_export_rule() {
     }]);
     assert_eq!(chain.evaluate(&sample_route()).action, PolicyAction::Permit);
 }
+
+#[tokio::test]
+async fn generation_policy_rejection_preserves_structured_error_codes() {
+    for (state, code) in [
+        (SessionState::Established, "policy_preflight_rejected"),
+        (SessionState::Idle, "policy_state_non_established"),
+    ] {
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let writer = log.reopen().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_writer(move || writer.try_clone().unwrap())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        tracing::callsite::rebuild_interest_cache();
+
+        let fixture = RsFixture::new();
+        let mut prior = fixture.load();
+        prior.global.ebgp_requires_policy = Some(true);
+        prior.neighbors.truncate(1);
+        let mut harness = GenerationHarness::new(&prior);
+        let addr = prior.neighbors[0].address.parse().unwrap();
+        let (session_tx, mut session_rx) = mpsc::channel(16);
+        let task = tokio::spawn(async move {
+            while let Some(command) = session_rx.recv().await {
+                match command {
+                    PeerCommand::QueryState { reply } => {
+                        let _ = reply.send(policy_test_peer_state(addr, state));
+                    }
+                    PeerCommand::Shutdown | PeerCommand::Stop { .. } => break,
+                    _ => panic!("rejected policy transition must not mutate the session"),
+                }
+            }
+            Ok(())
+        });
+        let managed = harness.mgr.peers.get_mut(&key(addr)).unwrap();
+        let previous = std::mem::replace(
+            &mut managed.handle,
+            PeerHandle::from_parts(session_tx, task),
+        );
+        previous.shutdown().await.unwrap().unwrap();
+        let (rib_tx, rib_rx) = mpsc::channel(256);
+        harness.mgr.rib_tx = rib_tx;
+        harness.rib.abort();
+        harness.rib = spawn_rfc8212_rib_stub(rib_rx, 3);
+
+        let mut candidate = prior.clone();
+        candidate.policy.import_chain = vec!["members-out".to_string()];
+        let outcome = harness.apply(&candidate).await;
+        assert!(
+            matches!(outcome, ReloadGenerationOutcome::RejectedNoEffect(_)),
+            "{outcome:?}"
+        );
+        assert_eq!(harness.mgr.current_config, prior);
+        let output = std::fs::read_to_string(log.path()).unwrap();
+        let event = output
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|event| event["fields"]["error"] == code)
+            .unwrap_or_else(|| panic!("missing structured {code}: {output}"));
+        assert_eq!(event["level"], "ERROR");
+        assert!(
+            event["fields"]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("no peer was modified")
+        );
+        harness.shutdown().await;
+    }
+}
