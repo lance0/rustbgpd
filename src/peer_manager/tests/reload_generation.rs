@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Weak;
 
-use crate::config::{ReloadPeerAction, ReloadPeerActionKind, plan_reload_peer_actions};
+use crate::config::{
+    PreparedDatasetGeneration, ReloadPeerAction, ReloadPeerActionKind, plan_reload_peer_actions,
+};
 use crate::peer_manager::generation::ReloadGenerationOutcome;
 use rustbgpd_policy::PolicyAction;
 
@@ -14,6 +16,12 @@ struct GenerationSessionCounters {
     import_installs: AtomicU32,
     export_installs: AtomicU32,
     runtime_config_updates: AtomicU32,
+    route_refreshes: AtomicU32,
+    refresh_failures: Mutex<std::collections::VecDeque<rustbgpd_transport::PeerCommandError>>,
+    states: Mutex<std::collections::VecDeque<SessionState>>,
+    no_route_refresh: AtomicBool,
+    state_queries: AtomicU32,
+    drop_state_after: AtomicU32,
     export_owners: Mutex<Vec<PolicyOwners>>,
 }
 
@@ -42,10 +50,34 @@ fn generation_session(addr: IpAddr) -> (PeerHandle, Arc<GenerationSessionCounter
                     let _ = reply.send(Ok(()));
                 }
                 PeerCommand::SendRouteRefresh { reply, .. } => {
-                    let _ = reply.send(Ok(()));
+                    in_task.route_refreshes.fetch_add(1, Ordering::SeqCst);
+                    let outcome = in_task
+                        .refresh_failures
+                        .lock()
+                        .unwrap()
+                        .pop_front()
+                        .map_or(Ok(()), Err);
+                    let _ = reply.send(outcome);
                 }
                 PeerCommand::QueryState { reply } => {
-                    let mut state = policy_test_peer_state(addr, SessionState::Established);
+                    let query = in_task.state_queries.fetch_add(1, Ordering::SeqCst) + 1;
+                    let drop_after = in_task.drop_state_after.load(Ordering::SeqCst);
+                    if drop_after != 0 && query >= drop_after {
+                        drop(reply);
+                        continue;
+                    }
+                    let fsm = {
+                        let mut states = in_task.states.lock().unwrap();
+                        if states.len() > 1 {
+                            states.pop_front().unwrap()
+                        } else {
+                            states.front().copied().unwrap_or(SessionState::Established)
+                        }
+                    };
+                    let mut state = policy_test_peer_state(addr, fsm);
+                    state.negotiated_session = Some(test_negotiated_session(
+                        !in_task.no_route_refresh.load(Ordering::SeqCst),
+                    ));
                     state.negotiated_hold_time = Some(90);
                     state.four_octet_as = Some(true);
                     let _ = reply.send(state);
@@ -72,7 +104,8 @@ fn spawn_generation_rib(
                 | RibUpdate::ReplacePeerExportPoliciesAuthoritatively { reply, .. } => {
                     let _ = reply.send(Ok(()));
                 }
-                RibUpdate::RefreshPeerOutbound { reply, .. } => {
+                RibUpdate::RefreshPeerOutbound { reply, .. }
+                | RibUpdate::ReevaluatePeerExportPolicies { reply, .. } => {
                     if !drop_refresh_reply {
                         let _ = reply.send(Ok(()));
                     }
@@ -200,7 +233,12 @@ impl GenerationHarness {
 
     async fn apply(&mut self, candidate: &Config) -> ReloadGenerationOutcome {
         let actions = plan_reload_peer_actions(&self.mgr.current_config, candidate).unwrap();
-        Box::pin(self.mgr.apply_reload_generation(candidate.clone(), actions)).await
+        Box::pin(self.mgr.apply_reload_generation(
+            candidate.clone(),
+            actions,
+            PreparedDatasetGeneration::default(),
+        ))
+        .await
     }
 
     async fn shutdown(mut self) {
@@ -682,11 +720,11 @@ async fn inconsistent_actions_reject_before_any_effect() {
         key: key("10.0.0.2".parse().unwrap()),
         kind: ReloadPeerActionKind::Add,
     }];
-    let outcome = Box::pin(
-        harness
-            .mgr
-            .apply_reload_generation(candidate.clone(), actions),
-    )
+    let outcome = Box::pin(harness.mgr.apply_reload_generation(
+        candidate.clone(),
+        actions,
+        PreparedDatasetGeneration::default(),
+    ))
     .await;
     assert!(
         matches!(outcome, ReloadGenerationOutcome::RejectedNoEffect(_)),
@@ -704,7 +742,12 @@ async fn inconsistent_actions_reject_before_any_effect() {
     orphaning
         .neighbors
         .retain(|neighbor| neighbor.address != "10.0.0.9");
-    let outcome = Box::pin(harness.mgr.apply_reload_generation(orphaning, actions)).await;
+    let outcome = Box::pin(harness.mgr.apply_reload_generation(
+        orphaning,
+        actions,
+        PreparedDatasetGeneration::default(),
+    ))
+    .await;
     assert!(
         matches!(outcome, ReloadGenerationOutcome::RejectedNoEffect(_)),
         "{outcome:?}"
@@ -1106,4 +1149,659 @@ async fn assert_owned_sighup_lifetimes(compensate: bool) {
     persister.await.unwrap();
     harness.rib.abort();
     let _ = harness.rib.await;
+}
+
+/// The same bound handle feeds import, export, and the retained rollback pin.
+fn dataset_generation_fixture() -> RsFixture {
+    let fixture = RsFixture::new();
+    std::fs::write(fixture.dir.path().join("members.list"), "64500\n").unwrap();
+    std::fs::write(
+        fixture.dir.path().join("members.rpol"),
+        r"
+dataset asn-set members
+policy members-out {
+    term allowed { if route.origin-as in members { accept } }
+    term rest { reject }
+}",
+    )
+    .unwrap();
+    fixture.write_toml(
+        &fixture
+            .base_toml()
+            .replace(
+                "[peer_groups.members]",
+                "[policy.datasets.members]\npath = \"members.list\"\n\n[peer_groups.members]",
+            )
+            .replace(
+                "max_prefixes = 1000",
+                "max_prefixes = 1000\nimport_policy_chain = [\"members-out\"]",
+            ),
+    );
+    fixture
+}
+
+fn prepare_dataset_candidate(
+    fixture: &RsFixture,
+    prior: &Config,
+) -> (Config, crate::config::PreparedDatasetGeneration) {
+    std::fs::write(fixture.dir.path().join("members.list"), "64500\n64999\n").unwrap();
+    let mut candidate = Config::load_with_diagnostics_and_staged_datasets(
+        fixture.config_path.to_str().unwrap(),
+        &prior.policy.dataset_bindings,
+    )
+    .unwrap();
+    let staged = candidate.prepare_staged_datasets(&prior.policy.dataset_bindings);
+    let prepared = staged.prepare_generation(prior, &candidate).unwrap();
+    (candidate, prepared)
+}
+
+#[tokio::test]
+async fn dataset_generation_refreshes_without_reinstalling_equal_chains() {
+    let fixture = dataset_generation_fixture();
+    let prior = fixture.load();
+    let live = Arc::clone(prior.policy.dataset_bindings.get("members").unwrap());
+    let old = live.pin();
+    let mut harness = GenerationHarness::new(&prior);
+    let (candidate, prepared) = prepare_dataset_candidate(&fixture, &prior);
+    let outcome = Box::pin(
+        harness
+            .mgr
+            .apply_reload_generation(candidate, Vec::new(), prepared),
+    )
+    .await;
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::Applied(_)),
+        "{outcome:?}"
+    );
+    assert_eq!(live.pin().generation, 2);
+    assert_eq!(live.pin().data.records(), 2);
+    assert_eq!(
+        Arc::strong_count(&old),
+        1,
+        "generation released its old snapshot pin"
+    );
+    for counters in harness.counters.values() {
+        assert_eq!(counters.import_installs.load(Ordering::SeqCst), 0);
+        assert_eq!(counters.export_installs.load(Ordering::SeqCst), 0);
+    }
+    assert!(
+        harness.counters[&"10.0.0.2".parse::<IpAddr>().unwrap()]
+            .route_refreshes
+            .load(Ordering::SeqCst)
+            > 0
+    );
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn dataset_generation_known_refresh_rejection_restores_contents_and_prior_error() {
+    let fixture = dataset_generation_fixture();
+    let prior = fixture.load();
+    let live = Arc::clone(prior.policy.dataset_bindings.get("members").unwrap());
+    live.record_error("prior loader failure".to_string());
+    let mut harness = GenerationHarness::new(&prior);
+    harness.counters[&"10.0.0.2".parse::<IpAddr>().unwrap()]
+        .refresh_failures
+        .lock()
+        .unwrap()
+        .push_back(rustbgpd_transport::PeerCommandError::SendFailed(
+            "injected writer rejection".to_string(),
+        ));
+    let (candidate, prepared) = prepare_dataset_candidate(&fixture, &prior);
+    std::fs::write(
+        fixture.dir.path().join("members.list"),
+        "invalid file after preparation",
+    )
+    .unwrap();
+    let outcome = Box::pin(
+        harness
+            .mgr
+            .apply_reload_generation(candidate, Vec::new(), prepared),
+    )
+    .await;
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::FullyCompensated(_)),
+        "{outcome:?}"
+    );
+    assert_eq!(live.pin().generation, 3);
+    assert_eq!(live.pin().data.records(), 1);
+    assert_eq!(
+        live.status().last_error.as_deref(),
+        Some("prior loader failure")
+    );
+    // The forward pass stopped at the first import failure. Compensation
+    // still refreshes the second peer from the complete captured union.
+    assert!(
+        harness.counters[&"2001:db8::3".parse::<IpAddr>().unwrap()]
+            .route_refreshes
+            .load(Ordering::SeqCst)
+            > 0
+    );
+    for managed in harness.mgr.peers.values() {
+        assert!(!managed.pending_refresh);
+        assert!(!managed.pending_export_apply);
+    }
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn dataset_generation_lost_import_ack_fences_with_required_debt() {
+    let fixture = dataset_generation_fixture();
+    let prior = fixture.load();
+    let live = Arc::clone(prior.policy.dataset_bindings.get("members").unwrap());
+    let reader = live.pin();
+    let old_snapshot = Arc::downgrade(&reader);
+    let mut harness = GenerationHarness::new(&prior);
+    let peer = key("10.0.0.2".parse().unwrap());
+    harness.counters[&peer.address]
+        .refresh_failures
+        .lock()
+        .unwrap()
+        .push_back(rustbgpd_transport::PeerCommandError::ReplyDropped);
+    let (candidate, prepared) = prepare_dataset_candidate(&fixture, &prior);
+    let outcome = Box::pin(
+        harness
+            .mgr
+            .apply_reload_generation(candidate, Vec::new(), prepared),
+    )
+    .await;
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::CompensationAmbiguous(_)),
+        "{outcome:?}"
+    );
+    assert_eq!(live.pin().generation, 2);
+    assert!(harness.mgr.peers[&peer].pending_refresh);
+    assert_eq!(reader.generation, 1);
+    assert_eq!(
+        reader.data.records(),
+        1,
+        "an evaluator keeps its own old view"
+    );
+    assert_eq!(
+        Arc::strong_count(&reader),
+        1,
+        "terminal recovery outcome releases the operation pin"
+    );
+    drop(reader);
+    assert!(
+        old_snapshot.upgrade().is_none(),
+        "no later compensation consumer retains the old snapshot"
+    );
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn dataset_generation_clean_down_peer_does_not_block_content_refresh() {
+    let fixture = dataset_generation_fixture();
+    let prior = fixture.load();
+    let mut harness = GenerationHarness::new(&prior);
+    let addr = "10.0.0.2".parse::<IpAddr>().unwrap();
+    harness.counters[&addr]
+        .states
+        .lock()
+        .unwrap()
+        .push_back(SessionState::Idle);
+    let (candidate, prepared) = prepare_dataset_candidate(&fixture, &prior);
+    let outcome = Box::pin(
+        harness
+            .mgr
+            .apply_reload_generation(candidate, Vec::new(), prepared),
+    )
+    .await;
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::Applied(_)),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        harness.counters[&addr]
+            .route_refreshes
+            .load(Ordering::SeqCst),
+        0
+    );
+    assert!(!harness.mgr.peers[&key(addr)].pending_refresh);
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn dataset_generation_down_to_established_race_requires_restoring_refresh() {
+    let fixture = dataset_generation_fixture();
+    let prior = fixture.load();
+    let live = Arc::clone(prior.policy.dataset_bindings.get("members").unwrap());
+    let mut harness = GenerationHarness::new(&prior);
+    let addr = "10.0.0.2".parse::<IpAddr>().unwrap();
+    harness.counters[&addr].states.lock().unwrap().extend([
+        SessionState::Idle,
+        SessionState::Idle,
+        SessionState::Established,
+    ]);
+    let (candidate, prepared) = prepare_dataset_candidate(&fixture, &prior);
+    let outcome = Box::pin(
+        harness
+            .mgr
+            .apply_reload_generation(candidate, Vec::new(), prepared),
+    )
+    .await;
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::FullyCompensated(_)),
+        "{outcome:?}"
+    );
+    assert_eq!(live.pin().generation, 3);
+    assert!(
+        harness.counters[&addr]
+            .route_refreshes
+            .load(Ordering::SeqCst)
+            > 0
+    );
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn dataset_generation_preflight_rejects_missing_capability_and_existing_debt() {
+    for no_capability in [true, false] {
+        let fixture = dataset_generation_fixture();
+        let prior = fixture.load();
+        let live = Arc::clone(prior.policy.dataset_bindings.get("members").unwrap());
+        let mut harness = GenerationHarness::new(&prior);
+        let peer = key("10.0.0.2".parse().unwrap());
+        if no_capability {
+            harness.counters[&peer.address]
+                .no_route_refresh
+                .store(true, Ordering::SeqCst);
+        } else {
+            harness.mgr.peers.get_mut(&peer).unwrap().pending_refresh = true;
+        }
+        let (candidate, prepared) = prepare_dataset_candidate(&fixture, &prior);
+        let outcome = Box::pin(harness.mgr.apply_reload_generation(
+            candidate,
+            Vec::new(),
+            prepared,
+        ))
+        .await;
+        assert!(
+            matches!(outcome, ReloadGenerationOutcome::RejectedNoEffect(_)),
+            "{outcome:?}"
+        );
+        assert_eq!(live.pin().generation, 1);
+        assert_eq!(
+            harness.counters[&peer.address]
+                .route_refreshes
+                .load(Ordering::SeqCst),
+            0
+        );
+        harness.shutdown().await;
+    }
+}
+
+type DatasetExportBatches = Arc<Mutex<Vec<Vec<IpAddr>>>>;
+
+/// Intercept only dataset commands; all policy-generation commands still use
+/// the existing generation RIB stub and its ownership receipts.
+fn intercept_dataset_rib(
+    harness: &mut GenerationHarness,
+    retained: usize,
+    missing: Option<IpAddr>,
+) -> (DatasetExportBatches, tokio::task::JoinHandle<()>) {
+    let (tx, mut rx) = mpsc::channel::<RibUpdate>(64);
+    let downstream = std::mem::replace(&mut harness.mgr.rib_tx, tx);
+    let exports = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&exports);
+    let task = tokio::spawn(async move {
+        while let Some(command) = rx.recv().await {
+            match command {
+                RibUpdate::QueryPeerRetainedStale { reply, .. } => {
+                    let _ = reply.send(retained);
+                }
+                RibUpdate::ReevaluatePeerExportPolicies { peers, reply } => {
+                    recorded.lock().unwrap().push(peers.clone());
+                    let outcome = if missing.is_some_and(|peer| peers.contains(&peer)) {
+                        Err(rustbgpd_rib::RibCommandError::not_found(
+                            "missing outbound registration",
+                        ))
+                    } else {
+                        Ok(())
+                    };
+                    let _ = reply.send(outcome);
+                }
+                other => {
+                    if downstream.send(other).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    (exports, task)
+}
+
+#[tokio::test]
+async fn dataset_generation_clean_down_missing_export_is_vacuous_only_for_that_peer() {
+    let fixture = dataset_generation_fixture();
+    let prior = fixture.load();
+    let mut harness = GenerationHarness::new(&prior);
+    let down = "10.0.0.2".parse::<IpAddr>().unwrap();
+    harness.counters[&down]
+        .states
+        .lock()
+        .unwrap()
+        .push_back(SessionState::Idle);
+    let (exports, relay) = intercept_dataset_rib(&mut harness, 0, Some(down));
+    let (candidate, prepared) = prepare_dataset_candidate(&fixture, &prior);
+    let outcome = Box::pin(
+        harness
+            .mgr
+            .apply_reload_generation(candidate, Vec::new(), prepared),
+    )
+    .await;
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::Applied(_)),
+        "{outcome:?}"
+    );
+    let calls = exports.lock().unwrap().clone();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0], vec![down]);
+    assert_eq!(calls[1].len(), 2, "Established dependents remain one batch");
+    assert!(!calls[1].contains(&down));
+    harness.shutdown().await;
+    relay.await.unwrap();
+}
+
+#[tokio::test]
+async fn dataset_generation_down_peer_with_gr_retention_rejects_before_publication() {
+    let fixture = dataset_generation_fixture();
+    let prior = fixture.load();
+    let live = Arc::clone(prior.policy.dataset_bindings.get("members").unwrap());
+    let mut harness = GenerationHarness::new(&prior);
+    let down = "10.0.0.2".parse::<IpAddr>().unwrap();
+    harness.counters[&down]
+        .states
+        .lock()
+        .unwrap()
+        .push_back(SessionState::Idle);
+    let (exports, relay) = intercept_dataset_rib(&mut harness, 3, None);
+    let (candidate, prepared) = prepare_dataset_candidate(&fixture, &prior);
+    let outcome = Box::pin(
+        harness
+            .mgr
+            .apply_reload_generation(candidate, Vec::new(), prepared),
+    )
+    .await;
+    let ReloadGenerationOutcome::RejectedNoEffect(error) = outcome else {
+        panic!("{outcome:?}")
+    };
+    assert!(error.contains("retains 3 stale routes"), "{error}");
+    assert_eq!(live.pin().generation, 1);
+    assert!(exports.lock().unwrap().is_empty());
+    harness.shutdown().await;
+    relay.await.unwrap();
+}
+
+#[tokio::test]
+async fn dataset_generation_lost_export_ack_fences_before_import_refresh() {
+    let fixture = dataset_generation_fixture();
+    let prior = fixture.load();
+    let mut harness = GenerationHarness::new(&prior);
+    let (tx, rib) = spawn_generation_rib(true);
+    harness.mgr.rib_tx = tx;
+    harness.rib.abort();
+    harness.rib = rib;
+    let (candidate, prepared) = prepare_dataset_candidate(&fixture, &prior);
+    let outcome = Box::pin(
+        harness
+            .mgr
+            .apply_reload_generation(candidate, Vec::new(), prepared),
+    )
+    .await;
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::CompensationAmbiguous(_)),
+        "{outcome:?}"
+    );
+    for counters in harness.counters.values() {
+        assert_eq!(counters.route_refreshes.load(Ordering::SeqCst), 0);
+    }
+    assert!(
+        harness
+            .mgr
+            .peers
+            .values()
+            .all(|managed| managed.pending_export_apply)
+    );
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn dataset_generation_late_reshape_compensates_fresh_clean_down_session() {
+    let fixture = dataset_generation_fixture();
+    let prior = fixture.load();
+    let live = Arc::clone(prior.policy.dataset_bindings.get("members").unwrap());
+    let mut harness = GenerationHarness::new(&prior);
+    let prior_session = harness.session_id("10.0.0.2");
+    harness.mgr.dataset_generations_at_peer_construction = Some(Vec::new());
+    let (mut candidate, prepared) = prepare_dataset_candidate(&fixture, &prior);
+    candidate.peer_groups.get_mut("members").unwrap().hold_time = Some(60);
+    harness
+        .mgr
+        .inject_reconfigure_failures
+        .insert(key("2001:db8::3".parse().unwrap()), 0);
+    let actions = plan_reload_peer_actions(&prior, &candidate).unwrap();
+    let outcome = Box::pin(
+        harness
+            .mgr
+            .apply_reload_generation(candidate, actions, prepared),
+    )
+    .await;
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::FullyCompensated(_)),
+        "{outcome:?}"
+    );
+    assert_eq!(live.pin().generation, 3);
+    assert_eq!(
+        harness
+            .mgr
+            .dataset_generations_at_peer_construction
+            .as_ref()
+            .unwrap(),
+        &vec![
+            (key("10.0.0.2".parse().unwrap()), "members".to_string(), 2),
+            (key("10.0.0.2".parse().unwrap()), "members".to_string(), 3),
+        ],
+        "the inner prior-session construction must see restored contents"
+    );
+    assert_eq!(live.pin().data.records(), 1);
+    assert_ne!(
+        harness.session_id("10.0.0.2"),
+        prior_session,
+        "compensation recreated the first member"
+    );
+    assert_eq!(harness.mgr.current_config, prior);
+    assert!(!harness.mgr.peers[&key("10.0.0.2".parse().unwrap())].pending_refresh);
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn dataset_generation_unknown_state_rejects_before_publish_and_fences_after() {
+    for drop_after in [1, 2] {
+        let fixture = dataset_generation_fixture();
+        let prior = fixture.load();
+        let live = Arc::clone(prior.policy.dataset_bindings.get("members").unwrap());
+        let mut harness = GenerationHarness::new(&prior);
+        let addr = "10.0.0.2".parse::<IpAddr>().unwrap();
+        harness.counters[&addr]
+            .drop_state_after
+            .store(drop_after, Ordering::SeqCst);
+        let (candidate, prepared) = prepare_dataset_candidate(&fixture, &prior);
+        let outcome = Box::pin(harness.mgr.apply_reload_generation(
+            candidate,
+            Vec::new(),
+            prepared,
+        ))
+        .await;
+        if drop_after == 1 {
+            assert!(
+                matches!(outcome, ReloadGenerationOutcome::RejectedNoEffect(_)),
+                "{outcome:?}"
+            );
+            assert_eq!(live.pin().generation, 1);
+        } else {
+            assert!(
+                matches!(outcome, ReloadGenerationOutcome::CompensationAmbiguous(_)),
+                "{outcome:?}"
+            );
+            assert_eq!(live.pin().generation, 2);
+            assert!(harness.mgr.peers[&key(addr)].pending_refresh);
+            assert!(harness.mgr.peers[&key(addr)].pending_export_apply);
+        }
+        assert_eq!(
+            harness.counters[&addr]
+                .route_refreshes
+                .load(Ordering::SeqCst),
+            0
+        );
+        harness.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn dataset_generation_restores_old_only_dependency_after_chain_change() {
+    let fixture = dataset_generation_fixture();
+    let prior = fixture.load();
+    let live = Arc::clone(prior.policy.dataset_bindings.get("members").unwrap());
+    let mut harness = GenerationHarness::new(&prior);
+    let (exports, relay) = intercept_dataset_rib(&mut harness, 0, None);
+    // The declaration and binding stay, but no candidate chain references it.
+    std::fs::write(
+        fixture.dir.path().join("members.rpol"),
+        "dataset asn-set members\npolicy members-out { term all { accept } }",
+    )
+    .unwrap();
+    let (mut candidate, prepared) = prepare_dataset_candidate(&fixture, &prior);
+    candidate.peer_groups.get_mut("members").unwrap().hold_time = Some(60);
+    harness
+        .mgr
+        .inject_reconfigure_failures
+        .insert(key("2001:db8::3".parse().unwrap()), 0);
+    let actions = plan_reload_peer_actions(&prior, &candidate).unwrap();
+    let outcome = Box::pin(
+        harness
+            .mgr
+            .apply_reload_generation(candidate, actions, prepared),
+    )
+    .await;
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::FullyCompensated(_)),
+        "{outcome:?}"
+    );
+    assert_eq!(live.pin().generation, 3);
+    let bystander = "10.0.0.9".parse::<IpAddr>().unwrap();
+    assert_eq!(
+        exports
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|peers| peers.contains(&bystander))
+            .count(),
+        2,
+        "the old-only export dependency is refreshed both forward and during restoration"
+    );
+    assert!(
+        harness.mgr.peers[&key(bystander)]
+            .export_policy
+            .as_ref()
+            .unwrap()
+            .references_dataset("members")
+    );
+    harness.shutdown().await;
+    relay.await.unwrap();
+}
+
+#[tokio::test]
+async fn dataset_generation_refreshes_candidate_only_dependencies() {
+    let fixture = dataset_generation_fixture();
+    let rpol_path = fixture.dir.path().join("members.rpol");
+    let referencing_policy = std::fs::read_to_string(&rpol_path).unwrap();
+    std::fs::write(
+        &rpol_path,
+        "dataset asn-set members\npolicy members-out { term all { accept } }",
+    )
+    .unwrap();
+    let prior = fixture.load();
+    let mut harness = GenerationHarness::new(&prior);
+    let (exports, relay) = intercept_dataset_rib(&mut harness, 0, None);
+    std::fs::write(&rpol_path, referencing_policy).unwrap();
+    let (candidate, prepared) = prepare_dataset_candidate(&fixture, &prior);
+    let outcome = Box::pin(
+        harness
+            .mgr
+            .apply_reload_generation(candidate, Vec::new(), prepared),
+    )
+    .await;
+    assert!(
+        matches!(outcome, ReloadGenerationOutcome::Applied(_)),
+        "{outcome:?}"
+    );
+    let calls = exports.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].len(),
+        3,
+        "all candidate-only export dependencies are recomputed"
+    );
+    for managed in harness.mgr.peers.values() {
+        assert!(!managed.pending_refresh);
+        assert!(!managed.pending_export_apply);
+    }
+    harness.shutdown().await;
+    relay.await.unwrap();
+}
+
+#[tokio::test]
+async fn dataset_generation_single_replacement_failure_restores_data_before_construction() {
+    let fixture = dataset_generation_fixture();
+    let prior = fixture.load();
+    let live = Arc::clone(prior.policy.dataset_bindings.get("members").unwrap());
+    let mut harness = GenerationHarness::new(&prior);
+    let addr: IpAddr = "fe80::1".parse().unwrap();
+    let interface = "rustbgpd-test-missing0";
+    let peer = scoped_key(addr, interface);
+    let mut original = make_config(addr, 65002);
+    original.interface = Some(interface.to_string());
+    original.scope_id = Some(42);
+    original.import_policy = harness.mgr.peers[&key("10.0.0.2".parse().unwrap())]
+        .import_policy
+        .clone();
+    harness.mgr.add_peer(original, false).await.unwrap();
+    harness.mgr.disable_peer(peer.clone(), None).await.unwrap();
+    let (candidate, prepared) = prepare_dataset_candidate(&fixture, &prior);
+    let mut dataset_prior = Some(prepared.publish());
+    harness.mgr.current_config = candidate;
+    harness.mgr.dataset_generations_at_peer_construction = Some(Vec::new());
+    let mut replacement = make_config(addr, 65002);
+    replacement.interface = Some(interface.to_string());
+    // Omitting the saved scope ID makes add fail after the old peer was
+    // deleted: this synthetic interface cannot resolve through the OS.
+    let outcome = harness
+        .mgr
+        .apply_peer_reshape_snapshot_classified(vec![replacement], Some(&prior), &mut dataset_prior)
+        .await;
+    assert!(
+        matches!(
+            outcome,
+            crate::peer_manager::lifecycle::PeerReshapeSnapshotOutcome::FullyCompensated(_)
+        ),
+        "replacement add failure must restore the prior peer"
+    );
+    assert!(
+        dataset_prior.is_none(),
+        "inner recovery consumed the receipt exactly once"
+    );
+    assert_eq!(live.pin().generation, 3);
+    assert_eq!(
+        harness
+            .mgr
+            .dataset_generations_at_peer_construction
+            .as_ref()
+            .unwrap(),
+        &vec![(peer, "members".to_string(), 3)],
+        "the restoring session is constructed only after old data is published"
+    );
+    harness.shutdown().await;
 }

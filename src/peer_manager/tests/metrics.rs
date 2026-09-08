@@ -1555,7 +1555,7 @@ fn policy_route_retirement_actor_fences_are_definitive_and_staged() {
     assert!(replace.contains("self.staged_policy_routes_prior = None"));
     assert!(!replace.contains("reap_retired_policy_routes"));
     let generation = arm(
-        "Some(InternalCommand::ApplyReloadGeneration { candidate, actions, reply }) => {",
+        "Some(InternalCommand::ApplyReloadGeneration { candidate, actions, datasets, reply }) => {",
         "Some(InternalCommand::ReplaceConfigSnapshot",
     );
     assert!(generation.contains("ReloadGenerationOutcome::Applied(_)"));

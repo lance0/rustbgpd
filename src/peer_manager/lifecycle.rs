@@ -694,6 +694,16 @@ impl PeerManager {
         let max_prefixes = transport.max_prefixes;
 
         let session_id = self.allocate_session_id();
+        #[cfg(test)]
+        if let Some(observations) = &mut self.dataset_generations_at_peer_construction {
+            for handle in self.current_config.policy.dataset_bindings.handles() {
+                observations.push((
+                    peer_key.clone(),
+                    handle.name().to_string(),
+                    handle.pin().generation,
+                ));
+            }
+        }
         let handle = PeerHandle::spawn_at_tcp_ao_generation(
             transport.clone(),
             self.metrics.clone(),
@@ -904,7 +914,7 @@ impl PeerManager {
         config: PeerManagerNeighborConfig,
     ) -> Result<PeerManagerNeighborConfig, PeerLifecycleError> {
         let mut effect = ReconfigurePeerFailureEffect::NoEffect;
-        self.reconfigure_peer_classified(config, &mut effect, None)
+        self.reconfigure_peer_classified(config, &mut effect, None, &mut None)
             .await
     }
 
@@ -913,11 +923,18 @@ impl PeerManager {
         config: PeerManagerNeighborConfig,
         effect: &mut ReconfigurePeerFailureEffect,
         rollback_config: Option<&crate::config::Config>,
+        dataset_prior: &mut Option<crate::config::DatasetRollback>,
     ) -> Result<PeerManagerNeighborConfig, PeerLifecycleError> {
         let peer = PeerKey::new(config.address, config.interface.clone());
-        #[cfg(test)]
-        if let Some(remaining) = self.inject_reconfigure_failures.get_mut(&peer) {
+        #[cfg(any(test, debug_assertions))]
+        if (cfg!(test) || rollback_config.is_some())
+            && let Some(remaining) = self.inject_reconfigure_failures.get_mut(&peer)
+        {
             if *remaining == 0 {
+                // Unit tests retain their existing counter semantics. The
+                // debug daemon consumes its selected failure exactly once.
+                #[cfg(not(test))]
+                self.inject_reconfigure_failures.remove(&peer);
                 return Err(PeerLifecycleError::Internal(format!(
                     "injected reconfigure failure for {peer}"
                 )));
@@ -944,6 +961,9 @@ impl PeerManager {
             .add_peer_with_admin_state(config, false, was_enabled)
             .await
         {
+            if let Some(prior) = dataset_prior.take() {
+                prior.restore();
+            }
             return match self
                 .restore_reconfigured_peer(
                     peer.clone(),
@@ -973,6 +993,9 @@ impl PeerManager {
             .apply_reconfigured_peer_state(peer.clone(), graceful_shutdown)
             .await
         {
+            if let Some(prior) = dataset_prior.take() {
+                prior.restore();
+            }
             return match self
                 .restore_reconfigured_peer(
                     peer.clone(),
@@ -1247,7 +1270,7 @@ impl PeerManager {
         targets: Vec<PeerManagerNeighborConfig>,
     ) -> Result<Vec<PeerManagerNeighborConfig>, PeerLifecycleError> {
         match self
-            .apply_peer_reshape_snapshot_classified(targets, None)
+            .apply_peer_reshape_snapshot_classified(targets, None, &mut None)
             .await
         {
             PeerReshapeSnapshotOutcome::Success(priors) => Ok(priors),
@@ -1261,6 +1284,7 @@ impl PeerManager {
         &mut self,
         targets: Vec<PeerManagerNeighborConfig>,
         rollback_config: Option<&crate::config::Config>,
+        dataset_prior: &mut Option<crate::config::DatasetRollback>,
     ) -> PeerReshapeSnapshotOutcome {
         let mut seen = BTreeSet::new();
         for target in &targets {
@@ -1318,12 +1342,17 @@ impl PeerManager {
             let peer = PeerKey::new(target.address, target.interface.clone());
             let mut effect = ReconfigurePeerFailureEffect::NoEffect;
             match self
-                .reconfigure_peer_classified(target, &mut effect, rollback_config)
+                .reconfigure_peer_classified(target, &mut effect, rollback_config, dataset_prior)
                 .await
             {
                 Ok(previous) => priors.push(previous),
                 Err(error) => {
                     let had_prior_effects = !priors.is_empty();
+                    // Prior session construction must observe prior dataset
+                    // contents, including recovery owned by this inner batch.
+                    if let Some(prior) = dataset_prior.take() {
+                        prior.restore();
+                    }
                     let restore = self
                         .restore_peer_reshape_priors(priors, rollback_config)
                         .await;
@@ -2180,6 +2209,7 @@ impl PeerManager {
         let managed = self.peers.get(&peer).ok_or_else(|| SoftResetFailure {
             error: PeerLifecycleError::NotFound(peer.clone()),
             delivery_began: false,
+            acknowledgement_lost: false,
         })?;
 
         // An empty request means "everything this peer can be asked for".
@@ -2214,16 +2244,17 @@ impl PeerManager {
                     // definite session-side rejection on the very first family
                     // (no capability, not Established, the writer refused to
                     // queue) proves nothing was asked for.
-                    let delivery_began = !refreshed.is_empty()
-                        || matches!(
-                            e,
-                            PeerCommandError::TimedOut { .. } | PeerCommandError::ReplyDropped
-                        );
+                    let acknowledgement_lost = matches!(
+                        e,
+                        PeerCommandError::TimedOut { .. } | PeerCommandError::ReplyDropped
+                    );
+                    let delivery_began = !refreshed.is_empty() || acknowledgement_lost;
                     return Err(SoftResetFailure {
                         error: PeerLifecycleError::Internal(format!(
                             "send failed: route refresh to {address}: {e}"
                         )),
                         delivery_began,
+                        acknowledgement_lost,
                     });
                 }
             }
@@ -2242,4 +2273,7 @@ pub(super) struct SoftResetFailure {
     /// failing reply was ambiguous (timeout, dropped reply) and therefore
     /// cannot prove the request did not reach the peer.
     pub(super) delivery_began: bool,
+    /// A command may have been accepted without an authoritative reply. Keep
+    /// this distinct from a definite rejection after earlier family delivery.
+    pub(super) acknowledgement_lost: bool,
 }

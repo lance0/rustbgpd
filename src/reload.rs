@@ -2263,7 +2263,9 @@ pub(crate) async fn reload_config_with_tcp_ao(
     // credential, listener, session, or catalog effect.
     let route = config::classify_sighup_reload(config::SighupReloadFamilies {
         generation: !neighbors_unchanged || !peer_groups_unchanged || policy_generation_changed,
-        datasets: dataset_commit_pending || policy_diff.datasets_changed || dataset_events_pending,
+        datasets: dataset_commit_pending || dataset_events_pending,
+        dataset_bindings: policy_diff.datasets_changed
+            || current.policy.dataset_bindings != new_config.policy.dataset_bindings,
         dynamic_ranges: dynamic_neighbors_changed,
         evpn_runtime: evpn_runtime_pending,
         fib_tables: fib_tables_changed,
@@ -2294,8 +2296,11 @@ pub(crate) async fn reload_config_with_tcp_ao(
                 Ok(actions) => actions,
                 Err(error) => return clean_reload_failure("generation.plan", error.to_string()),
             };
-            drop(dataset_commit);
-            return reload_generation_route(
+            let datasets = match dataset_commit.prepare_generation(current, &new_config) {
+                Ok(datasets) => datasets,
+                Err(error) => return clean_reload_failure("generation.datasets", error),
+            };
+            return Box::pin(reload_generation_route(
                 &mut progress,
                 current,
                 new_config,
@@ -2305,7 +2310,8 @@ pub(crate) async fn reload_config_with_tcp_ao(
                 rib_tx,
                 tcp_ao_listener.zip(listener_replacement),
                 actions,
-            )
+                datasets,
+            ))
             .await;
         }
         config::SighupReloadRoute::Sequential { reasons } if !reasons.is_empty() => {
@@ -3952,6 +3958,7 @@ async fn reload_generation_route(
         ),
     )>,
     actions: Vec<config::ReloadPeerAction>,
+    datasets: config::PreparedDatasetGeneration,
 ) -> SighupReloadOutcome {
     let Some(peer_mgr_internal_tx) = peer_mgr_internal_tx else {
         return generation_step_rejected(
@@ -4034,6 +4041,7 @@ async fn reload_generation_route(
     permit.send(InternalCommand::ApplyReloadGeneration {
         candidate: Box::new(new_config.clone()),
         actions,
+        datasets,
         reply: reply_tx,
     });
     // The session-table acknowledgement fault keeps its `reconcile` name on
@@ -6826,6 +6834,7 @@ hold_time = 90
                 let InternalCommand::ApplyReloadGeneration {
                     candidate,
                     actions,
+                    datasets,
                     reply,
                 } = command
                 else {
@@ -6836,6 +6845,7 @@ hold_time = 90
                 };
                 let outcome = match script.pop_front().unwrap_or(GenerationReply::Applied) {
                     GenerationReply::Applied => {
+                        drop(datasets.publish());
                         Some(ReloadGenerationOutcome::Applied(ReloadGenerationReceipt {
                             policy_updated: 0,
                             hot_updated: count(config::ReloadPeerActionKind::HotUpdate),
@@ -7143,11 +7153,14 @@ metric = 200
         std::fs::remove_file(&path).ok();
     }
 
-    /// The dataset seam: changed dataset content or bindings together with
-    /// a neighbor edit is rejected at preflight, and the staged dataset
-    /// content is dropped without touching the live handle.
+    /// Content and neighbor changes share a generation; binding changes and
+    /// malformed inputs reject before touching the live dataset handle.
     #[tokio::test]
-    async fn reload_rejects_dataset_and_neighbor_compound_without_committing_staged_datasets() {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one file-backed fixture compares content, binding, and invalid-input candidates through the same reload caller"
+    )]
+    async fn reload_dataset_neighbor_generation_rejects_only_binding_changes() {
         let initial_toml = r#"
 [global]
 asn = 65001
@@ -7164,31 +7177,35 @@ address = "192.0.2.1"
 remote_asn = 65002
 import_policy_chain = ["origin-guard"]
 "#;
-        let dir = dataset_reload_dir(initial_toml, "64500\n");
-        let config_path = dir.path().join("config.toml");
-        let initial = Config::load_with_diagnostics(config_path.to_str().unwrap()).unwrap();
-        let live = std::sync::Arc::clone(initial.policy.dataset_bindings.get("customers").unwrap());
-        assert_eq!(live.pin().generation, 1);
-
-        let member_add = "\n[[neighbors]]\naddress = \"192.0.2.99\"\nremote_asn = 65099\n";
-        // Content change on the same binding, and a binding path change.
-        std::fs::write(dir.path().join("datasets/customers.list"), "64500\n64999\n").unwrap();
-        std::fs::write(
-            dir.path().join("datasets/customers-next.list"),
-            "64500\n64999\n",
-        )
-        .unwrap();
-        for (variant, desired_toml) in [
-            ("content", format!("{initial_toml}{member_add}")),
-            (
-                "binding",
-                format!(
-                    "{}{member_add}",
-                    initial_toml.replace("datasets/customers.list", "datasets/customers-next.list")
-                ),
-            ),
-        ] {
-            write_tier_test_config(&config_path, &desired_toml);
+        for variant in ["content", "binding", "malformed"] {
+            let dir = dataset_reload_dir(initial_toml, "64500\n");
+            let config_path = dir.path().join("config.toml");
+            let initial = Config::load_with_diagnostics(config_path.to_str().unwrap()).unwrap();
+            let live =
+                std::sync::Arc::clone(initial.policy.dataset_bindings.get("customers").unwrap());
+            let accepted = AcceptedConfigSnapshot::load(&config_path, None).unwrap();
+            std::fs::write(dir.path().join("datasets/customers.list"), "64500\n64999\n").unwrap();
+            std::fs::write(
+                dir.path().join("datasets/customers-next.list"),
+                "64500\n64999\n",
+            )
+            .unwrap();
+            if variant == "malformed" {
+                std::fs::write(
+                    dir.path().join("datasets/customers.list"),
+                    "invalid ASN input",
+                )
+                .unwrap();
+            }
+            let source = if variant == "binding" {
+                initial_toml.replace("datasets/customers.list", "datasets/customers-next.list")
+            } else {
+                initial_toml.to_string()
+            };
+            write_tier_test_config(
+                &config_path,
+                &format!("{source}\n[[neighbors]]\naddress = \"192.0.2.99\"\nremote_asn = 65099\n"),
+            );
             let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(8);
             let mock = tokio::spawn(async move {
                 let mut tags = Vec::new();
@@ -7198,44 +7215,68 @@ import_policy_chain = ["origin-guard"]
                 tags
             });
             let (internal_tx, generation) = spawn_generation_mock(Vec::new(), None);
-            let outcome = reload_config_generation(
-                config_path.to_str().unwrap(),
-                &initial,
+            let desired = Arc::new(
+                AcceptedConfigSnapshot::load_for_reload(
+                    &config_path,
+                    &accepted,
+                    &initial.policy.dataset_bindings,
+                )
+                .unwrap(),
+            );
+            let outcome = reload_config_with_tcp_ao(
+                SighupReloadPlan {
+                    baseline_runtime: initial.clone(),
+                    desired,
+                },
                 initial.global.telemetry.grpc_tcp.as_ref(),
                 initial.global.telemetry.grpc_uds.as_ref(),
                 &peer_mgr_tx,
-                &internal_tx,
+                Some(&internal_tx),
+                None,
+                None,
+                None,
                 None,
                 None,
             )
             .await;
             drop(peer_mgr_tx);
             drop(internal_tx);
-            let SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(failure)) = &outcome
-            else {
-                panic!("{variant}: expected a clean preflight rejection");
-            };
-            assert_eq!(failure.bucket, "reload.preflight", "{variant}");
-            assert!(
-                failure.error.to_string().contains("[policy.datasets]"),
-                "{variant}: {}",
-                failure.error
-            );
-            assert!(mock.await.unwrap().is_empty(), "{variant}");
-            assert!(generation.await.unwrap().is_empty(), "{variant}");
-            assert_eq!(
-                live.pin().generation,
-                1,
-                "{variant}: staged content never committed"
-            );
-            assert_eq!(live.pin().data.records(), 1, "{variant}");
+            assert!(mock.await.unwrap().is_empty());
+            let calls = generation.await.unwrap();
+            if variant == "content" {
+                outcome.expect("content plus neighbor changes use the generation");
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].actions.len(), 1);
+                assert_eq!(calls[0].actions[0].kind, config::ReloadPeerActionKind::Add);
+                assert_eq!(live.pin().generation, 2);
+                assert_eq!(live.pin().data.records(), 2);
+            } else {
+                let SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(failure)) =
+                    &outcome
+                else {
+                    panic!("expected clean binding rejection: {outcome:?}")
+                };
+                let expected_bucket = if variant == "binding" {
+                    "reload.preflight"
+                } else {
+                    "generation.datasets"
+                };
+                assert_eq!(failure.bucket, expected_bucket);
+                assert_eq!(
+                    live.status().last_error,
+                    None,
+                    "preflight rejection preserves live status"
+                );
+                assert!(calls.is_empty());
+                assert_eq!(live.pin().generation, 1);
+                assert_eq!(live.pin().data.records(), 1);
+            }
         }
     }
 
-    /// A dataset-only refresh keeps its sequential route with unchanged
-    /// datasets present, an `.rpol`-only edit with unchanged datasets
-    /// takes the generation route, and an `.rpol` edit with changed
-    /// dataset content is the rejected compound.
+    /// Dataset content changes, `.rpol` edits, and their combination use the
+    /// generation route. Binding changes and invalid datasets are rejected
+    /// separately before live effects.
     #[tokio::test]
     async fn reload_routes_rpol_edits_by_dataset_content_identity() {
         let initial_toml = r#"
@@ -7309,26 +7350,33 @@ import_policy_chain = ["origin-guard"]
             "policy movement is not a session action"
         );
 
-        // rpol plus dataset content: rejected compound.
-        std::fs::write(&rpol_path, edited_rpol.replace("med 5", "med 6")).unwrap();
+        // rpol plus dataset content also uses the generation.
+        let compound_rpol = edited_rpol.replace("med 5", "med 6");
+        std::fs::write(&rpol_path, &compound_rpol).unwrap();
         std::fs::write(dir.path().join("datasets/customers.list"), "64500\n64999\n").unwrap();
         let (outcome, tags, calls) = run(&adopted.runtime).await;
-        assert!(
-            matches!(
-                &outcome,
-                SighupReloadOutcome::CleanNoEffect(SighupReloadError::Failed(failure))
-                    if failure.bucket == "reload.preflight"
-            ),
-            "{outcome:?}"
-        );
-        assert!(tags.is_empty() && calls.is_empty(), "{tags:?}");
+        let compound = outcome.expect("rpol and dataset contents settle together");
+        assert!(tags.is_empty());
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].actions.is_empty());
 
-        // dataset-only: sequential, as before.
-        std::fs::write(&rpol_path, &edited_rpol).unwrap();
-        let (outcome, tags, calls) = run(&adopted.runtime).await;
-        outcome.expect("dataset-only refresh keeps its sequential route");
-        assert_eq!(tags, vec!["RefreshDatasetDependents".to_string()]);
-        assert!(calls.is_empty());
+        // Dataset-only changes keep the same owned publication route.
+        std::fs::write(dir.path().join("datasets/customers.list"), "64500\n65000\n").unwrap();
+        let (outcome, tags, calls) = run(&compound.runtime).await;
+        let dataset = outcome.expect("dataset-only refresh uses the generation route");
+        assert!(tags.is_empty());
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].actions.is_empty());
+        assert_eq!(
+            dataset
+                .policy
+                .dataset_bindings
+                .get("customers")
+                .unwrap()
+                .pin()
+                .generation,
+            3
+        );
     }
 
     /// Listener inbound authentication rides on neighbor records, so a
@@ -9510,7 +9558,7 @@ local_vtep_ip = "10.0.0.1"
     }
 
     #[tokio::test]
-    async fn reload_content_only_dataset_swap_refreshes_dependents_before_return() {
+    async fn reload_content_only_dataset_swap_dispatches_owned_generation() {
         let config_toml = r#"
 [global]
 asn = 65001
@@ -9532,29 +9580,16 @@ import_policy_chain = ["origin-guard"]
         let initial = Config::load_with_diagnostics(config_path.to_str().unwrap()).unwrap();
         let live = std::sync::Arc::clone(initial.policy.dataset_bindings.get("customers").unwrap());
         std::fs::write(dir.path().join("datasets/customers.list"), "64500\n64999\n").unwrap();
-        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(4);
-        let refresh = tokio::spawn(async move {
-            let command = peer_mgr_rx.recv().await.expect("dataset refresh command");
-            match command {
-                PeerManagerCommand::RefreshDatasetDependents {
-                    swapped,
-                    failed,
-                    reply,
-                } => {
-                    assert_eq!(swapped, vec!["customers"]);
-                    assert!(failed.is_empty());
-                    let _ = reply.send(Ok(()));
-                }
-                other => panic!("expected dataset refresh, got {}", cmd_tag(&other)),
-            }
-        });
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(4);
+        let (internal_tx, generation) = spawn_generation_mock(Vec::new(), None);
 
-        let returned = reload_config(
+        let returned = reload_config_generation(
             config_path.to_str().unwrap(),
             &initial,
             initial.global.telemetry.grpc_tcp.as_ref(),
             initial.global.telemetry.grpc_uds.as_ref(),
             &peer_mgr_tx,
+            &internal_tx,
             None,
             None,
         )
@@ -9562,7 +9597,10 @@ import_policy_chain = ["origin-guard"]
         .expect("content-only dataset reload succeeds");
         assert_tier_authorized_test_config(&returned);
         assert_tier_authorized_test_config(&returned.desired);
-        refresh.await.unwrap();
+        drop(internal_tx);
+        let calls = generation.await.unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].actions.is_empty());
 
         assert_eq!(live.pin().generation, 2);
         assert_eq!(live.pin().data.records(), 2);

@@ -39,6 +39,27 @@ use super::{
 /// lines instead of either silence or one line per peer.
 const COHORT_SETUP_PROGRESS_INTERVAL: usize = 64;
 
+/// The union is retained even if a candidate chain stops referencing a dataset.
+/// Compensation must refresh everyone who could have evaluated either view.
+pub(super) struct DatasetDependent {
+    peer: PeerKey,
+    import: bool,
+    export: bool,
+}
+
+pub(super) enum DatasetRefreshFailure {
+    Rejected(String),
+    Ambiguous(String),
+}
+
+impl std::fmt::Display for DatasetRefreshFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rejected(message) | Self::Ambiguous(message) => formatter.write_str(message),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct InstalledPolicyRoutesReachability {
     scopes: BTreeMap<(String, String), InstalledPolicyRoutesScope>,
@@ -2746,6 +2767,285 @@ impl PeerManager {
         }
     }
 
+    /// Resolve and qualify all potentially affected peers before publication.
+    /// A positively down session owes no import replay only when the RIB
+    /// confirms it retains no stale routes. Unknown state cannot prove that.
+    pub(super) async fn prepare_dataset_dependents(
+        &mut self,
+        candidate: &Config,
+        changed: &[String],
+    ) -> Result<Vec<DatasetDependent>, String> {
+        if changed.is_empty() {
+            return Ok(Vec::new());
+        }
+        let references = |chain: &Option<PolicyChain>| {
+            chain
+                .as_ref()
+                .is_some_and(|chain| changed.iter().any(|name| chain.references_dataset(name)))
+        };
+        let mut dependents = Vec::new();
+        for (peer, managed) in &self.peers {
+            let mut import = references(&managed.import_policy);
+            let mut export = references(&managed.export_policy);
+            let neighbor = candidate
+                .neighbors
+                .iter()
+                .find(|neighbor| {
+                    neighbor.address == peer.address.to_string()
+                        && neighbor.interface == peer.interface
+                })
+                .cloned()
+                .or_else(|| {
+                    managed
+                        .is_dynamic
+                        .then(|| Self::policy_resolution_neighbor(candidate, peer.address, managed))
+                });
+            if let Some(neighbor) = neighbor {
+                match candidate.effective_policy_for_neighbor(&neighbor, managed.rfc8212_external) {
+                    Ok(chains) => {
+                        import |= references(&chains.import);
+                        export |= references(&chains.export);
+                    }
+                    // Generation resolution already rejected oversized chains.
+                    // Other unresolved dynamic chains stay at their prior
+                    // value, so the old references above are the full union.
+                    Err(_) if managed.is_dynamic => {}
+                    Err(error) => return Err(format!("dataset dependent {peer}: {error}")),
+                }
+            }
+            if import || export {
+                if (import && managed.pending_refresh) || (export && managed.pending_export_apply) {
+                    return Err(format!(
+                        "dataset dependent {peer} has unsettled policy refresh work"
+                    ));
+                }
+                dependents.push(DatasetDependent {
+                    peer: peer.clone(),
+                    import,
+                    export,
+                });
+            }
+        }
+        dependents.sort_by(|left, right| left.peer.cmp(&right.peer));
+        let mut window = CleanStateQueryWindow::default();
+        for dependent in &dependents {
+            self.qualify_dataset_dependent(dependent, &mut window)
+                .await?;
+        }
+        Ok(dependents)
+    }
+
+    /// Returns whether the current session owes Established refresh work.
+    async fn qualify_dataset_dependent(
+        &mut self,
+        dependent: &DatasetDependent,
+        window: &mut CleanStateQueryWindow,
+    ) -> Result<bool, String> {
+        let peer = &dependent.peer;
+        let commands = self
+            .peers
+            .get(peer)
+            .ok_or_else(|| format!("dataset dependent {peer} is no longer managed"))?
+            .handle
+            .commands_sender();
+        match self.query_clean_session_state(commands, window).await {
+            StateQueryOutcome::State(state) if state.fsm_state == SessionState::Established => {
+                if dependent.import
+                    && !state
+                        .negotiated_session
+                        .is_some_and(|negotiated| negotiated.peer_route_refresh)
+                {
+                    return Err(format!(
+                        "dataset dependent {peer} has no Route Refresh capability"
+                    ));
+                }
+                Ok(true)
+            }
+            StateQueryOutcome::State(_) => {
+                // The existing RFC 8212 presence-change preflight uses the
+                // same RIB proof: actor-local emptiness alone misses GR/LLGR.
+                let retained = tokio::time::timeout(
+                    RIB_REPLY_TIMEOUT,
+                    self.query_peer_retained_stale(peer.address),
+                )
+                .await
+                .map_err(|_| format!("dataset dependent {peer} retained-route query timed out"))?
+                .map_err(|error| error.message)?;
+                if retained != 0 {
+                    return Err(format!(
+                        "dataset dependent {peer} retains {retained} stale routes"
+                    ));
+                }
+                Ok(false)
+            }
+            StateQueryOutcome::SessionGone => {
+                Err(format!("dataset dependent {peer} session is gone"))
+            }
+            StateQueryOutcome::TimedOut => {
+                Err(format!("dataset dependent {peer} state is unknown"))
+            }
+        }
+    }
+
+    /// The down-peer exception is only used for a singleton batch, so typed
+    /// `NotFound` proves that exact peer has no old outbound object to retain.
+    async fn reevaluate_dataset_exports(
+        &mut self,
+        peers: Vec<IpAddr>,
+        known_down: bool,
+    ) -> Result<(), DatasetRefreshFailure> {
+        if peers.is_empty() {
+            return Ok(());
+        }
+        let rib_tx = self.rib_tx.clone();
+        let permit = match tokio::time::timeout(RIB_REPLY_TIMEOUT, rib_tx.reserve()).await {
+            Ok(Ok(permit)) => permit,
+            Ok(Err(_)) => {
+                return Err(DatasetRefreshFailure::Rejected(
+                    "dataset export RIB unavailable before dispatch".to_string(),
+                ));
+            }
+            Err(_) => {
+                return Err(DatasetRefreshFailure::Rejected(
+                    "dataset export RIB capacity deadline before dispatch".to_string(),
+                ));
+            }
+        };
+        let (reply, response) = oneshot::channel();
+        permit.send(RibUpdate::ReevaluatePeerExportPolicies { peers, reply });
+        match self
+            .await_with_readiness_budget(response, RIB_REPLY_TIMEOUT)
+            .await
+        {
+            Some(Ok(Ok(()))) => Ok(()),
+            Some(Ok(Err(RibCommandError::NotFound(_)))) if known_down => Ok(()),
+            Some(Ok(Err(error @ RibCommandError::NotFound(_)))) => Err(
+                DatasetRefreshFailure::Rejected(format!("dataset export re-evaluation: {error}")),
+            ),
+            Some(Ok(Err(error @ RibCommandError::Internal(_)))) => Err(
+                DatasetRefreshFailure::Ambiguous(format!("dataset export re-evaluation: {error}")),
+            ),
+            Some(Err(_)) => Err(DatasetRefreshFailure::Ambiguous(
+                "dataset export RIB dropped acknowledgement".to_string(),
+            )),
+            None => Err(DatasetRefreshFailure::Ambiguous(
+                "dataset export RIB acknowledgement timed out".to_string(),
+            )),
+        }
+    }
+
+    /// Local command settlement only: import acknowledgements do not prove
+    /// remote replay completion, and export acknowledgement is not wire receipt.
+    /// Required pending markers remain armed on any uncertain outcome.
+    pub(super) async fn refresh_dataset_generation_dependents(
+        &mut self,
+        dependents: &[DatasetDependent],
+    ) -> Result<(), DatasetRefreshFailure> {
+        // Publication (or restoration) has already happened. Record the
+        // refresh now owed before a state query itself can become ambiguous.
+        // The generation captured and rejected prior required debt first.
+        for dependent in dependents {
+            let managed = self.peers.get_mut(&dependent.peer).ok_or_else(|| {
+                DatasetRefreshFailure::Ambiguous(format!(
+                    "dataset dependent {} is no longer managed",
+                    dependent.peer
+                ))
+            })?;
+            managed.pending_refresh |= dependent.import;
+            managed.pending_export_apply |= dependent.export;
+        }
+        let mut window = CleanStateQueryWindow::default();
+        let mut established = Vec::with_capacity(dependents.len());
+        for dependent in dependents {
+            established.push(
+                self.qualify_dataset_dependent(dependent, &mut window)
+                    .await
+                    .map_err(DatasetRefreshFailure::Ambiguous)?,
+            );
+        }
+        let mut exports = Vec::new();
+        for (dependent, is_established) in dependents.iter().zip(&established) {
+            if dependent.export {
+                if *is_established {
+                    exports.push(dependent.peer.address);
+                } else {
+                    self.reevaluate_dataset_exports(vec![dependent.peer.address], true)
+                        .await?;
+                    // A missing outbound registration is safe only while this
+                    // exact managed session still positively reports down.
+                    if self
+                        .qualify_dataset_dependent(dependent, &mut window)
+                        .await
+                        .map_err(DatasetRefreshFailure::Ambiguous)?
+                    {
+                        return Err(DatasetRefreshFailure::Rejected(format!(
+                            "dataset dependent {} established during down-peer export settlement",
+                            dependent.peer
+                        )));
+                    }
+                }
+            }
+        }
+        self.reevaluate_dataset_exports(exports, false).await?;
+        for (dependent, is_established) in dependents.iter().zip(&established) {
+            if dependent.import
+                && *is_established
+                && let Err(failure) = self
+                    .soft_reset_in_reporting_delivery(dependent.peer.clone(), Vec::new())
+                    .await
+            {
+                let message = format!(
+                    "dataset import refresh {}: {}",
+                    dependent.peer, failure.error
+                );
+                return Err(if failure.acknowledgement_lost {
+                    DatasetRefreshFailure::Ambiguous(message)
+                } else {
+                    DatasetRefreshFailure::Rejected(message)
+                });
+            }
+        }
+        for (dependent, was_established) in dependents.iter().zip(&established) {
+            let now_established = self
+                .qualify_dataset_dependent(dependent, &mut window)
+                .await
+                .map_err(DatasetRefreshFailure::Ambiguous)?;
+            if !was_established && now_established {
+                return Err(DatasetRefreshFailure::Rejected(format!(
+                    "dataset dependent {} established during refresh settlement",
+                    dependent.peer
+                )));
+            }
+            let managed = self
+                .peers
+                .get_mut(&dependent.peer)
+                .expect("generation retains managed peer");
+            // Preflight proved these required directions carried no old debt.
+            // Clear them only after both local legs and final state settled.
+            if dependent.import {
+                managed.pending_refresh = false;
+            }
+            if dependent.export {
+                managed.pending_export_apply = false;
+            }
+        }
+        if !dependents.is_empty() {
+            let refreshed = established
+                .iter()
+                .filter(|established| **established)
+                .count();
+            info!(
+                eligible = dependents.len(),
+                refreshed,
+                skipped_not_established = dependents.len() - refreshed,
+                skipped_state_unknown = 0,
+                failures = 0,
+                "processed dataset-swap dependency-scoped refresh"
+            );
+        }
+        Ok(())
+    }
+
     /// Apply one peer's resolved chains, then re-read the ADR-0112 gauges off
     /// whatever ended up installed.
     ///
@@ -4222,7 +4522,7 @@ impl PeerManager {
         }
 
         let priors = match self
-            .apply_peer_reshape_snapshot_classified(targets, None)
+            .apply_peer_reshape_snapshot_classified(targets, None, &mut None)
             .await
         {
             PeerReshapeSnapshotOutcome::Success(priors) => priors,
