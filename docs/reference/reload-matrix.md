@@ -30,6 +30,20 @@ bug — file an issue.
 | **unsupported** | Field is accepted at parse time but currently has no runtime effect. Documented so operators don't mistake it for live. Future PRs may promote unsupported fields to live; the matrix tracks the current daemon. |
 | **validation-only** | Field is validated at parse time (typically as a cross-field constraint marker) and has no runtime effect of its own. |
 
+## SIGHUP reload routes
+
+The classes above say what happens to one field. `classify_sighup_reload()`
+in `src/config/mod.rs` says how a whole candidate is executed, and
+`rustbgpd --diff` prints its answer as `SIGHUP reload route`:
+
+| Route | Candidate | Guarantee |
+|---|---|---|
+| **generation** | Only static `[[neighbors]]`, `[peer_groups]`, inline policy / neighbor sets / global chains, `.rpol` content, `[policy.explain]`, or outbound prefix maxima changed | One owned runtime generation: one action per static neighbor from one resolved candidate; a later failure restores the retained prior generation and rejects cleanly |
+| **sequential** | No generation-class change, or a generation-class change together with a TCP-AO rotation or a listener MD5/GTSM authentication change | The existing per-subsystem steps; a failure halts with a known-partial receipt |
+| **rejected** | A generation-class change together with dataset content or bindings, `[[dynamic_neighbors]]`, EVPN runtime tables, `[[fib_tables]]`, or `honor_graceful_shutdown` / `honor_blackhole` | No effect; reload those families on their own |
+
+Restart-required fields are pinned on every route.
+
 ## Session-establishment caveat
 
 Several **live** fields bind at session establishment (OPEN negotiation
