@@ -1957,6 +1957,17 @@ pub enum RibUpdate {
         /// The new slow-flag value.
         slow: bool,
     },
+    /// Record the export policy accepted by one live transport session for
+    /// collision promotion. This does not commit an outbound policy change.
+    SetPeerSessionExportPolicy {
+        /// Peer whose session accepted the policy.
+        peer: IpAddr,
+        /// Identity of the accepting transport session, including a survivor
+        /// temporarily displaced by a newer outbound registration.
+        session_id: u64,
+        /// Effective policy to replay; `None` explicitly means permit-all.
+        export_policy: Option<PolicyChain>,
+    },
     /// Update per-peer policy identity metadata used during export policy evaluation.
     SetPeerPolicyContext {
         /// Peer whose policy identity is being updated.

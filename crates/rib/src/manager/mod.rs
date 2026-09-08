@@ -2377,6 +2377,19 @@ impl RibManager {
                     self.handle_peer_slow_state(peer, slow);
                 }
             }
+            RibUpdate::SetPeerSessionExportPolicy {
+                peer,
+                session_id,
+                export_policy,
+            } => {
+                if let Some(record) = self.live_sessions.get_mut(&peer).and_then(|sessions| {
+                    sessions
+                        .iter_mut()
+                        .find(|record| record.session_id == session_id)
+                }) {
+                    record.export_policy = export_policy;
+                }
+            }
             RibUpdate::SetPeerPolicyContext {
                 peer,
                 session_id,

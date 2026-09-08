@@ -1530,8 +1530,21 @@ impl PeerSession {
                 ControlFlow::Continue(())
             }
             PeerCommand::UpdateExportPolicy { policy, reply } => {
+                // Queue the accepting session's replay state before acknowledging
+                // the command. The peer manager still owns the outbound commit.
+                let Ok(permit) = self.rib_tx.reserve().await else {
+                    let _ = reply.send(Err(PeerCommandError::CommandFailed(
+                        "RIB channel closed while updating export policy".to_string(),
+                    )));
+                    return ControlFlow::Continue(());
+                };
                 let policy = policy.map(|policy| *policy);
                 self.export_policy = policy;
+                permit.send(RibUpdate::SetPeerSessionExportPolicy {
+                    peer: self.peer_ip,
+                    session_id: self.session_identity.id,
+                    export_policy: self.export_policy.clone(),
+                });
                 let _ = reply.send(Ok(()));
                 ControlFlow::Continue(())
             }
