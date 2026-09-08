@@ -550,13 +550,16 @@ What happens:
 1. The daemon re-reads the TOML config file and its `.rpol` and dataset
    files from disk, pins restart-required fields to the live values, and
    classifies the candidate before any credential, listener, session, or
-   catalog effect. `rustbgpd --diff` and `rbgp config diff` print the same
-   classification as `SIGHUP reload route`.
+   catalog effect. `rustbgpd --diff` and `rbgp config diff` print the route
+   for changes visible to the config diff as `SIGHUP reload route`. The diff
+   reports dataset bindings; SIGHUP also checks staged dataset contents and
+   loader errors when choosing the actual route.
 2. **Generation route** — a candidate whose reload-applied changes are
    static `[[neighbors]]`, `[peer_groups]`, inline policy definitions,
    neighbor sets, global chains, changed `.rpol` content (imports included),
-   `[policy.explain]`, or outbound prefix maxima settles as one owned
-   runtime generation. The daemon resolves the complete candidate once and
+   dataset contents with unchanged bindings, `[policy.explain]`, or outbound
+   prefix maxima settles as one owned runtime generation. The daemon resolves
+   the complete candidate once and
    derives one action per static neighbor — unchanged, hot update in place,
    replace (one delete/re-add with the final policies), add, or remove —
    while the peer manager resolves every live peer's final chains against
@@ -565,31 +568,52 @@ What happens:
    of one member therefore rebuilds that session exactly once; policy-only
    and bystander sessions keep their identity. Removed definitions are
    simply absent from the adopted candidate. The prior config, compiled
-   `.rpol` registry, resolved chains, and captured session configs are
-   retained through the operation: a later failure restores them from
-   memory, the reload reports a clean rejection, the candidate file stays on
+   `.rpol` registry, resolved chains, dataset snapshots and loader errors,
+   and captured session configs are retained through the operation: a later
+   failure restores them from memory, the reload reports a clean rejection,
+   the candidate file stays on
    disk for correction, and an identical retry re-derives the same plan.
 3. **Sequential route** — a candidate with no generation-class change
-   (dataset content refresh, `[[dynamic_neighbors]]`, EVPN runtime tables,
-   `[[fib_tables]]`, the honor knobs, TCP-AO rotation, listener MD5/GTSM
-   inventory, explain-only, `[gnmi_dialout]`) runs the existing
+   (`[[dynamic_neighbors]]`, EVPN runtime tables, `[[fib_tables]]`, the honor
+   knobs, TCP-AO rotation, listener MD5/GTSM inventory, explain-only,
+   `[gnmi_dialout]`) runs the existing
    per-subsystem steps. A generation-class change combined with a TCP-AO
    rotation or a listener MD5/GTSM authentication change also stays on
-   this path, logged as running without generation compensation: the
-   rotation is its own ordered protocol and the session reshape primitive
-   refuses authentication changes.
-4. **Rejected compound** — a generation-class change combined with dataset
-   content or bindings, `[[dynamic_neighbors]]`, EVPN runtime tables,
-   `[[fib_tables]]`, or `honor_graceful_shutdown` / `honor_blackhole` is
-   rejected before any effect, naming each family to reload on its own.
-   None of those families retains and restores priors, so their partial
-   effects could not be compensated.
+   this path when dataset contents are unchanged, logged as running without
+   generation compensation: the rotation is its own ordered protocol and
+   the session reshape primitive refuses authentication changes.
+4. **Rejected changes** — dataset names, kinds, file mappings, and live
+   handles must stay unchanged. Dataset content changes combined with TCP-AO
+   rotation or listener MD5/GTSM authentication changes reject before any
+   effect. A generation-class change combined with `[[dynamic_neighbors]]`,
+   EVPN runtime tables, `[[fib_tables]]`, or
+   `honor_graceful_shutdown` / `honor_blackhole` also rejects: those families
+   do not retain and restore priors. Apply independently reloadable families
+   in separate reloads; dataset binding changes require a restart.
 5. **Automatic Route Refresh on import-policy hot-apply** — when a
    peer's effective import chain changes (whether triggered by a
    SIGHUP reload or a gRPC mutation), the peer manager issues
    `soft_reset_in` (gated on Established) so routes already in
    `AdjRibIn` get re-evaluated against the new policy. Operators no
    longer need to run `softreset` manually after a chain swap.
+
+For a dataset content generation, every file must load successfully before
+publication. The daemon retains prior snapshots and loader errors, reserves
+generation numbers for both publication and compensation, settles policy
+changes, then publishes the prepared batch without yielding. A changed dataset
+advances from `g` to `g + 1`; compensation restores its prior contents as
+`g + 2`, so generations never move backward. Content-equal reloads do not
+advance the dataset generation. Evaluation still pins each dataset separately;
+this does not provide an atomic snapshot across multiple datasets.
+
+The generation refreshes the union of peers whose old or candidate chains
+reference changed datasets, including dynamic peers. Export recomputation
+preserves installed chain instances and counters. Established import dependents
+must support Route Refresh. A positively down peer needs no import replay when
+the RIB confirms it retains no GR/LLGR routes; any remaining export registration
+is still recomputed. Unknown session state, lost acknowledgement, or unresolved
+required refresh work cannot produce a successful settlement. Import refresh
+acknowledgements prove local dispatch, not completion of the remote peer's replay.
 
 gRPC credentials rotate only after the runtime generation is acknowledged,
 so a rejected or restored candidate has no credential effect. The generation

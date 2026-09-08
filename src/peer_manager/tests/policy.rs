@@ -2,6 +2,60 @@ use super::*;
 
 use rustbgpd_api::runtime_config_settlement::RuntimeConfigPolicyFailureCode;
 
+#[tokio::test]
+async fn dataset_refresh_distinguishes_partial_delivery_from_lost_acknowledgement() {
+    for (accepted_first, drop_reply, report_timeout) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (false, false, true),
+    ] {
+        let mut manager = test_peer_manager();
+        let peer: IpAddr = "10.0.0.9".parse().unwrap();
+        let (commands, mut receiver) = mpsc::channel(8);
+        let session = tokio::spawn(async move {
+            let mut calls = 0;
+            while let Some(command) = receiver.recv().await {
+                if let PeerCommand::SendRouteRefresh { reply, .. } = command {
+                    calls += 1;
+                    if accepted_first && calls == 1 {
+                        let _ = reply.send(Ok(()));
+                    } else if !drop_reply {
+                        let error = if report_timeout {
+                            rustbgpd_transport::PeerCommandError::TimedOut {
+                                operation: "route refresh",
+                                deadline: Duration::from_millis(1),
+                            }
+                        } else {
+                            rustbgpd_transport::PeerCommandError::RouteRefreshUnsupported
+                        };
+                        let _ = reply.send(Err(error));
+                    }
+                }
+            }
+            Ok(())
+        });
+        insert_test_managed_peer(
+            &mut manager,
+            peer,
+            PeerHandle::from_parts(commands, session),
+            false,
+        );
+        let failure = manager
+            .soft_reset_in_reporting_delivery(
+                key(peer),
+                vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)],
+            )
+            .await
+            .expect_err("scripted refresh failure");
+        assert_eq!(failure.acknowledgement_lost, drop_reply || report_timeout);
+        assert_eq!(
+            failure.delivery_began,
+            accepted_first || drop_reply || report_timeout
+        );
+    }
+}
+
 async fn subscribe_policy_events(
     tx: &mpsc::Sender<PeerManagerCommand>,
 ) -> broadcast::Receiver<Arc<PolicyEvent>> {

@@ -13,13 +13,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- SIGHUP reloads of static neighbors, peer groups, inline policy, and changed
-  `.rpol` content now settle as one owned runtime generation. The daemon
+- SIGHUP reloads of static neighbors, peer groups, inline policy, changed
+  `.rpol` content, and dataset contents with unchanged bindings now settle as one owned
+  runtime generation. The daemon
   resolves the complete candidate once and derives one session action per
   peer, so a peer-group reshape and an explicit edit of one of its members
   rebuild that session exactly once and a replacement receives its final
   policies directly. The prior config, compiled `.rpol` registry, resolved
-  chains, and captured session configs are retained through the whole
+  chains, dataset snapshots and loader errors, and captured session configs
+  are retained through the whole
   operation: a later step failure restores them from memory and reports a
   clean rejection with the candidate file left in place, instead of adopting
   a partial result. Lost acknowledgement or a failed restore still fences the
@@ -138,16 +140,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   post-stop checks explicit.
 
 - A SIGHUP candidate that changes static neighbors, peer groups, inline
-  policy, or `.rpol` content **together with** dataset content or bindings,
+  policy, `.rpol` content, or dataset contents **together with**
   `[[dynamic_neighbors]]`, EVPN runtime tables, `[[fib_tables]]`, or
-  `honor_graceful_shutdown` / `honor_blackhole` is now rejected before any
-  effect; previously it ran step by step and adopted the steps that
-  succeeded. The rejection names each family; apply those families in their
-  own reload (for example refresh dataset files with an unchanged config
-  first, then reload the config change). Every family on its own keeps its
-  existing reload behavior, and a candidate that also changes listener
-  MD5/GTSM authentication or rotates TCP-AO keys keeps the sequential path,
-  which offers no restoration of earlier steps.
+  `honor_graceful_shutdown` / `honor_blackhole` is rejected before any effect.
+  Dataset content generations require unchanged names, kinds, file mappings,
+  and handles; binding changes require a restart. Dataset changes combined
+  with listener MD5/GTSM authentication or TCP-AO rotation also reject.
+  Without dataset changes, authentication-bearing candidates retain the
+  sequential path, which offers no restoration of earlier steps.
+- Dataset content generations reject malformed input before publication and
+  require local dependent-refresh settlement. Established import dependents
+  need Route Refresh; offline peers remain eligible when their state is known
+  and no GR/LLGR routes are retained. A failed generation restores dataset
+  contents at a new monotonically increasing generation, then refreshes every
+  potentially affected peer. Lost acknowledgements or unknown state fence the
+  daemon. This does not promise remote replay completion or atomic visibility
+  across datasets or BGP sessions.
 - Generation-class reload failures no longer produce a known-partial
   runtime receipt; the sequential path keeps its known-partial semantics.
 
