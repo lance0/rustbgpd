@@ -1,0 +1,44 @@
+[15:51:33 TEST] Provisioning PE1 kernel topology (IPv6 tunnel source fd00:110::1)
+[15:51:33 TEST] gRPC endpoint: 172.20.20.2:50051
+[15:51:33 TEST] Starting rustbgpd daemon...
+[15:51:33 TEST] rustbgpd is running (after 1s)
+[15:51:33 TEST] Waiting for gRPC to become available...
+  [15:51:33] PASS gRPC endpoint ready (attempt 1)
+[15:51:33 TEST] [1] underlay premise: eth1 holds no IPv4 address on either side
+  [15:51:33] PASS clab-m110-evpn-ipv6-underlay-irb-pe1 eth1 has no IPv4 address
+  [15:51:33] PASS clab-m110-evpn-ipv6-underlay-irb-pe2 eth1 has no IPv4 address
+[15:51:33 TEST] [1b] both L3VXLAN devices use an IPv6 tunnel source
+  [15:51:33] PASS clab-m110-evpn-ipv6-underlay-irb-pe1 l3vxlan110 has local fd00:110::1
+  [15:51:33] PASS clab-m110-evpn-ipv6-underlay-irb-pe2 vxlan110 has local fd00:110::2
+[15:51:33 TEST] [2] L2VPN/EVPN session Established over the IPv6 transport
+[15:51:33 TEST] Waiting for PE1↔PE2 L2VPN/EVPN over IPv6 session to reach Established...
+  [15:51:33] PASS PE1↔PE2 L2VPN/EVPN over IPv6 session established (attempt 1)
+[15:51:33 TEST] [3] FRR sees PE1's Type 5 for 2001:db8:110:1::/64
+  [15:51:33] PASS FRR received rustbgpd's Type 5 — next hop 'fd00:110::1 ipv6'
+[15:51:33 TEST] [3b] rustbgpd sees PE2's Type 5 for 2001:db8:110:2::/64
+  [15:51:35] PASS rustbgpd received FRR's Type 5 — next hop fd00:110::2
+[15:51:35 TEST] [4] PE1 kernel installs 2001:db8:110:2::/64 in table 110
+  [15:51:35] PASS kernel route: 2001:db8:110:2::/64 via fd00:110::2 dev l3vxlan110 proto bgp metric 1024 onlink pref medium
+[15:51:35 TEST] [5] PE1 L3 neighbor row maps fd00:110::2 → PE2's router MAC
+  [15:51:35] PASS neighbor row: fd00:110::2 lladdr 26:36:61:ae:ed:6d extern_learn PERMANENT proto bgp
+[15:51:35 TEST] [6] PE1 L3VXLAN FDB row maps PE2's router MAC → dst fd00:110::2
+  [15:51:35] PASS FDB row: 26:36:61:ae:ed:6d dst fd00:110::2 self extern_learn permanent
+[15:51:35 TEST] [7] gRPC IpVrfState.installed_routes_count == 1 for vrf1
+  [15:51:35] PASS installed_routes_count=1 on vrf1
+[15:51:35 TEST] [8] ping 2001:db8:110:2::1 from PE1 vrf1 (PE1 → PE2 over the IPv6 underlay)
+  [15:51:37] PASS tenant ping PE1 → PE2 succeeded
+[15:51:37 TEST] [8b] ping 2001:db8:110:1::1 from PE2 vrf1 (PE2 → PE1 over the IPv6 underlay)
+  [15:51:39] PASS tenant ping PE2 → PE1 succeeded
+[15:51:39 TEST] [9] withdraw: remove 2001:db8:110:1::1/64 on PE1, expect FRR to drop the Type 5
+  [15:51:41] PASS FRR dropped PE1's Type 5 for 2001:db8:110:1::/64 (and still holds its own)
+[15:51:41 TEST] [10] reverse withdraw: remove 2001:db8:110:2::1/64 on PE2, expect PE1 dataplane cleanup
+[15:51:41 TEST] [11] PE1 kernel removes 2001:db8:110:2::/64 from vrf1's table
+  [15:51:42] PASS kernel route absent from table 110 (table still readable)
+[15:51:42 TEST] [12] PE1 L3 neighbor row for fd00:110::2 cleared
+  [15:51:42] PASS neighbor row for fd00:110::2 gone
+[15:51:42 TEST] [12b] PE1 L3VXLAN FDB row for dst fd00:110::2 cleared
+  [15:51:42] PASS FDB row for dst fd00:110::2 gone
+[15:51:42 TEST] [13] gRPC IpVrfState.installed_routes_count drops back to 0 for vrf1
+  [15:51:42] PASS installed_routes_count converged to 0 on vrf1
+
+[15:51:42 TEST] Results: 19 passed, 0 failed

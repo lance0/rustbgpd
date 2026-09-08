@@ -39,23 +39,21 @@
 # Subnets are non-overlapping so the L3VNI carries every PE1↔PE2
 # packet.
 #
-# **Manual leg, not wired into hosted CI.** FRR 10.7.1's per-VRF
-# `advertise ipv6 unicast` Type 5 origination has a startup race on an
-# IPv6 underlay: if the EVPN session establishes before zebra has
-# published the L3VNI's IPv6 tunnel source to bgpd, bgpd latches the BGP
-# instance's IPv4 `bgp router-id` into the 16-octet IPv6 next-hop field,
-# zero-padded, and advertises that. FRR's own `advertised-routes` view
-# reports the wrong value, so the defect is on the originating side;
-# rustbgpd decodes and programs what it receives, which is what a
-# receiver is supposed to do. Resetting the BGP session does not
-# re-derive the next hop, a VXLAN link event does, and it does not
-# self-heal within the life of a test run. Observed once in four driver
-# runs. Raw capture:
-# `docs/artifacts/interop/m110-frr-ipv6-l3vni-next-hop-20260905T114909Z/`.
+# FRR PIP is explicitly disabled for this standalone, non-anycast lab.
+# With the default enabled, FRR 10.7.1 can select its IPv4 system IP
+# as a 16-octet IPv6 next hop when system and router MACs differ.
+# The 2026-09-08 capture found this even with VNI 110 Up and the
+# originator IP already fd00:110::2, refining the earlier startup
+# explanation. `no advertise-pip` selects the IPv6 originator IP and
+# router MAC directly; no startup delay is added.
 #
-# The assertions are deliberately not relaxed to absorb this. A red here
-# means the received next hop was not the peer's IPv6 VTEP address, and
-# that is worth reading rather than tolerating.
+# Baseline failure and peer-configuration proof:
+# `docs/artifacts/interop/m110-frr-ipv6-l3vni-next-hop-20260908T194637Z/`
+# `docs/artifacts/interop/m110-ipv6-underlay-no-pip-20260908T195135Z/`.
+# The earlier capture remains historical evidence:
+# `docs/artifacts/interop/m110-frr-ipv6-l3vni-next-hop-20260905T114909Z/`.
+# All 19 assertions remain unchanged. The hosted kernel-dataplane job
+# uses one fresh deployment; first main qualification is pending.
 #
 # Requires the `vrf` and `vxlan` kernel modules.
 #
@@ -100,9 +98,9 @@ topology:
         - ip -6 addr add fd00:110::2/64 dev eth1 nodad
         - ip link set eth1 up
         # Kernel topology (VRF + L3VXLAN + bridge + SVI + tenant
-        # loopback) BEFORE FRR boots — zebra reads the bridge's VRF
-        # membership when the VXLAN device comes up. The start script
-        # takes the tunnel source and the tenant prefix as arguments and
+        # loopback). The image starts FRR before these exec commands;
+        # the script creates the VRF/bridge before VXLAN comes up.
+        # The start script takes the tunnel source and tenant prefix and
         # is family-agnostic, so it is reused unchanged from M39.
         - /usr/local/bin/start-frr-vtep-l3.sh fd00:110::2 110 vrf1 2001:db8:110:2::1/64
       env:

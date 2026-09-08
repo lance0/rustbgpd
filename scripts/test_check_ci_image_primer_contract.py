@@ -93,6 +93,12 @@ PR_FILES = {
 
 
 class PrimerContractTests(unittest.TestCase):
+    def test_m110_cannot_retry_a_failed_startup(self):
+        relative = ".github/workflows/kernel-dataplane.yml"
+        original = '          max_attempts: "1"\n'
+        self.mutate(relative, original)
+        self.mutate(relative, original, '          max_attempts: "2"\n')
+
     def copy_bird_dockerfiles(self, root):
         interop = root / "tests" / "interop"
         interop.mkdir(parents=True, exist_ok=True)
