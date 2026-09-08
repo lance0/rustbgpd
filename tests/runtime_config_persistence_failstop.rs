@@ -435,10 +435,13 @@ fn exercise_sighup_ack_loss(fault: &str) {
         .expect("daemon exceeded the five-second fail-stop grace plus test jitter before wait");
     let status = daemon.wait_for_exit(remaining_grace);
     assert_eq!(status.code(), Some(70), "log:\n{}", daemon.log());
+    // A static-neighbor addition is one owned runtime generation; the lost
+    // session-table acknowledgement fences at that step with the listener
+    // inbound inventory already replaced (the accepted effect).
     assert_one_redacted_diagnostic(
         &daemon,
         if fault == "reconcile" {
-            "neighbors.reconcile"
+            "generation.apply"
         } else {
             "config_bridge"
         },
@@ -446,15 +449,15 @@ fn exercise_sighup_ack_loss(fault: &str) {
     );
     if fault == "reconcile" {
         let log = daemon.log();
-        let credential_reload = log
-            .find("gRPC credential generation reloaded")
-            .expect("SIGHUP credential generation refresh precedes reconciliation");
-        let fail_stop = log
-            .find("runtime config settlement fail-stop armed")
-            .expect("fail-stop diagnostic exists");
         assert!(
-            credential_reload < fail_stop,
-            "credential refresh must precede the reconciler fence:\n{log}"
+            log.contains("runtime config settlement fail-stop armed"),
+            "fail-stop diagnostic exists:\n{log}"
+        );
+        // Credentials rotate only after the runtime generation is
+        // acknowledged, so a fenced reload never rotates them.
+        assert!(
+            !log.contains("gRPC credential generation reloaded"),
+            "a fenced generation must not rotate credentials:\n{log}"
         );
     }
 

@@ -13,6 +13,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- SIGHUP reloads of static neighbors, peer groups, inline policy, and changed
+  `.rpol` content now settle as one owned runtime generation. The daemon
+  resolves the complete candidate once and derives one session action per
+  peer, so a peer-group reshape and an explicit edit of one of its members
+  rebuild that session exactly once and a replacement receives its final
+  policies directly. The prior config, compiled `.rpol` registry, resolved
+  chains, and captured session configs are retained through the whole
+  operation: a later step failure restores them from memory and reports a
+  clean rejection with the candidate file left in place, instead of adopting
+  a partial result. Lost acknowledgement or a failed restore still fences the
+  daemon. `rustbgpd --diff` and the runtime config-diff API report the
+  `SIGHUP reload route` the candidate would take (`sighup_reload` in JSON).
+
 - `rbgp doctor --pre-upgrade CONFIG` adds read-only pre-upgrade checks to the
   existing doctor run, against the config file the upgraded daemon will boot:
   `upgrade.transaction` (the same evidence as `rbgp config status`),
@@ -33,17 +46,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   list from the existing inventory check and select the reviewed nightly from
   `fuzz/rust-nightly.txt`. `just hooks` installs the commit and push hooks.
 
-### Upgrade notes
-
-- A green `rbgp doctor --pre-upgrade` result is an observation at one instant,
-  not a maintenance fence: a config transaction can start after it. The
-  race-free package upgrade procedure remains preflight, coordinated stop,
-  verify the service is inactive, repeat the candidate `rustbgpd --check
-  --strict` and any offline authority checks, then install and start; the
-  runbook now names the diagnostic as its preflight step and keeps the
-  post-stop checks explicit.
-
 ### Changed
+
+- gRPC credential rotation on SIGHUP now runs after the runtime generation is
+  acknowledged, so a candidate rejected at preflight or restored after a
+  failure has no credential effect. Rotation failure remains non-fatal with
+  the last-known-good generation active.
 
 - Local checks that compile now serialize on one lock in the target directory,
   so `just gate` and a concurrent commit or push wait for each other instead of
@@ -84,6 +92,30 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   completes a late capture. The comparison step now passes
   `--ignore-attribute unknown` for the OTC attribute a route server attaches
   on the wire.
+
+### Upgrade notes
+
+- A green `rbgp doctor --pre-upgrade` result is an observation at one instant,
+  not a maintenance fence: a config transaction can start after it. The
+  race-free package upgrade procedure remains preflight, coordinated stop,
+  verify the service is inactive, repeat the candidate `rustbgpd --check
+  --strict` and any offline authority checks, then install and start; the
+  runbook now names the diagnostic as its preflight step and keeps the
+  post-stop checks explicit.
+
+- A SIGHUP candidate that changes static neighbors, peer groups, inline
+  policy, or `.rpol` content **together with** dataset content or bindings,
+  `[[dynamic_neighbors]]`, EVPN runtime tables, `[[fib_tables]]`, or
+  `honor_graceful_shutdown` / `honor_blackhole` is now rejected before any
+  effect; previously it ran step by step and adopted the steps that
+  succeeded. The rejection names each family; apply those families in their
+  own reload (for example refresh dataset files with an unchanged config
+  first, then reload the config change). Every family on its own keeps its
+  existing reload behavior, and a candidate that also changes listener
+  MD5/GTSM authentication or rotates TCP-AO keys keeps the sequential path,
+  which offers no restoration of earlier steps.
+- Generation-class reload failures no longer produce a known-partial
+  runtime receipt; the sequential path keeps its known-partial semantics.
 
 ## [0.69.0] — 2026-09-07
 

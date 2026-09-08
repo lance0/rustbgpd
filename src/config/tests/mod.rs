@@ -2617,6 +2617,7 @@ mod gshut_blackhole;
 mod neighbor_validation;
 mod persistence;
 mod policy_parsing;
+mod reload_route;
 mod rfc8212;
 mod route_server;
 mod rpki;
