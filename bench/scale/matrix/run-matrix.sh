@@ -28,7 +28,8 @@
 #                when set, a 50 ms `rbgp health` loop and a 250 ms
 #                `rbgp rib --prefix` loop over the listed prefixes run against
 #                the cell's gRPC UDS for the whole harness run, logging
-#                latency and exit code to probes.csv / queries.csv)
+#                latency and exit code to probes.csv / queries.csv; health
+#                stderr is retained with start timestamps in probes.csv.stderr.log)
 #              GEN_* / RELOADSTALL_* pass through to the generator and the
 #                harness unchanged (dual-stack: GEN_DUALSTACK=1 +
 #                RELOADSTALL_DUALSTACK=1; filtering: GEN_FILTER_COUNT=K +
@@ -261,10 +262,12 @@ recheck_cell_provenance() {
 probe_health_loop() {
     local addr=$1 out=$2
     echo "epoch_s,latency_ms,exit" >"$out"
+    : >"$out.stderr.log"
     while :; do
         local t0 t1 rc
         t0=$(date +%s.%N)
-        "$RBGP" --addr "$addr" health >/dev/null 2>&1
+        printf "probe_start epoch_s=%s\n" "$t0" >>"$out.stderr.log"
+        "$RBGP" --addr "$addr" health >/dev/null 2>>"$out.stderr.log"
         rc=$?
         t1=$(date +%s.%N)
         awk -v a="$t0" -v b="$t1" -v rc="$rc" \

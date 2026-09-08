@@ -86,6 +86,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The IXP matrix retains timestamped health-probe errors alongside its latency
+  CSV, so failed operator checks identify the daemon error in the receipt.
+
 - Export policy changes now update the accepting session’s collision-recovery
   record. Promoting a surviving session preserves its accepted policy, including
   explicit permit-all and rollback. Superseded session records release their
