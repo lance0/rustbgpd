@@ -9,8 +9,9 @@ use rustbgpd_api::peer_types::{
     ConfigEvent, DynamicNeighborInfo, OwnedCatalogMutation, OwnedCatalogMutationOutcome,
     OwnedHotUpdatePeerOutcome, OwnedNeighborMutation, OwnedNeighborMutationError,
     OwnedNeighborMutationOutcome, PeerKey, PeerManagerCommand, PeerManagerNeighborConfig,
-    PeerManagerReadinessQuery, PeerReconcileAuthority, PolicyDatasetStatusRow, PolicyEvent,
-    RuntimeConfigTransactionPlanError, SessionEvent, SessionLifecycleEvent,
+    PeerManagerOperatorQuery, PeerManagerReadinessQuery, PeerReconcileAuthority,
+    PolicyDatasetStatusRow, PolicyEvent, RuntimeConfigTransactionPlanError, SessionEvent,
+    SessionLifecycleEvent,
 };
 use rustbgpd_bmp::BmpEvent;
 use rustbgpd_fsm::PeerConfig;
@@ -389,6 +390,9 @@ pub struct PeerManager {
     /// commands remain on `rx` and therefore stay ordered behind a policy
     /// transaction until it either commits or rolls back.
     readiness_rx: Option<mpsc::Receiver<PeerManagerReadinessQuery>>,
+    /// Operator snapshots are admitted only outside mutations or before a forward
+    /// reload has applied any session policy or published its candidate datasets.
+    operator_rx: Option<mpsc::Receiver<PeerManagerOperatorQuery>>,
     internal_rx: Option<mpsc::Receiver<InternalCommand>>,
     local_asn: u32,
     router_id: Ipv4Addr,
@@ -612,6 +616,162 @@ impl PeerManager {
         self
     }
 
+    /// Install the bounded operator snapshot lane.
+    #[must_use]
+    pub fn with_operator_queries(
+        mut self,
+        operator_rx: mpsc::Receiver<PeerManagerOperatorQuery>,
+    ) -> Self {
+        self.operator_rx = Some(operator_rx);
+        self
+    }
+
+    async fn handle_operator_query(
+        &mut self,
+        query: PeerManagerOperatorQuery,
+        during_prestage: bool,
+    ) {
+        match query {
+            PeerManagerOperatorQuery::ListPeers { reply } => self.answer_list_peers(reply).await,
+            PeerManagerOperatorQuery::GetPeerState { peer, reply } => {
+                if !reply.is_closed() {
+                    let _ = reply.send(self.get_peer_info(&peer).await);
+                }
+            }
+            PeerManagerOperatorQuery::HasPeerAddress { address, reply } => {
+                let _ = reply.send(self.unique_peer_key_for_address(address).is_some());
+            }
+            PeerManagerOperatorQuery::QueryImportPolicyTermHits {
+                peer,
+                deadline,
+                reply,
+            } => {
+                // Finish the admitted snapshot before a prestage ACK can let
+                // the reload advance any session's installed policy.
+                if let Some(task) = self.dispatch_import_policy_term_hits(peer, deadline, reply)
+                    && during_prestage
+                {
+                    let _ = self.await_with_readiness(task).await;
+                }
+            }
+            PeerManagerOperatorQuery::QueryPolicyDatasets { reply } => {
+                if !reply.is_closed() {
+                    let _ = reply.send(self.policy_dataset_status_rows());
+                }
+            }
+        }
+    }
+
+    fn dispatch_import_policy_term_hits(
+        &self,
+        peer: Option<IpAddr>,
+        deadline: tokio::time::Instant,
+        mut reply: oneshot::Sender<
+            SessionQueryOutcome<Vec<(IpAddr, rustbgpd_transport::ImportPolicyTermHits)>>,
+        >,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        // Import chains and counters live in sessions. Normal reads detach
+        // this collector; prestage reads finish it before session application,
+        // while continuing to service readiness. Every send and reply shares
+        // the RPC deadline, and any failed session fails the complete snapshot.
+        if deadline <= tokio::time::Instant::now() {
+            let _ = reply.send(SessionQueryOutcome::TimedOut);
+            return None;
+        }
+        // Do not clone a fleet of session senders for an
+        // RPC that was cancelled while its command waited
+        // in the manager queue.
+        if reply.is_closed() {
+            return None;
+        }
+        let targets: Vec<_> = if let Some(address) = peer {
+            let Some(key) = self.unique_peer_key_for_address(address) else {
+                let _ = reply.send(SessionQueryOutcome::SessionGone);
+                return None;
+            };
+            let Some(managed) = self.peers.get(&key) else {
+                let _ = reply.send(SessionQueryOutcome::SessionGone);
+                return None;
+            };
+            vec![(key.address, managed.handle.commands_sender())]
+        } else {
+            self.peers
+                .iter()
+                .map(|(key, managed)| (key.address, managed.handle.commands_sender()))
+                .collect()
+        };
+        Some(tokio::spawn(async move {
+            let collection = async move {
+                let mut out = Vec::new();
+                let queries = stream::iter(targets)
+                    .map(|(address, commands)| async move {
+                        let outcome = PeerHandle::query_import_policy_term_hits_with_deadline(
+                            commands, deadline,
+                        )
+                        .await;
+                        (address, outcome)
+                    })
+                    .buffer_unordered(IMPORT_POLICY_QUERY_CONCURRENCY);
+                tokio::pin!(queries);
+                while let Some((address, outcome)) = queries.next().await {
+                    match outcome {
+                        SessionQueryOutcome::Reply(Some(snapshot)) => {
+                            out.push((address, snapshot));
+                        }
+                        SessionQueryOutcome::Reply(None) => {}
+                        SessionQueryOutcome::TimedOut => {
+                            return SessionQueryOutcome::TimedOut;
+                        }
+                        SessionQueryOutcome::SessionGone => {
+                            return SessionQueryOutcome::SessionGone;
+                        }
+                    }
+                }
+                out.sort_unstable_by_key(|(address, _)| *address);
+                SessionQueryOutcome::Reply(out)
+            };
+            let result = tokio::select! {
+                biased;
+                // Dropping `collection` releases every
+                // target sender and in-flight reply future.
+                () = reply.closed() => return,
+                result = collection => result,
+            };
+            let _ = reply.send(result);
+        }))
+    }
+
+    fn policy_dataset_status_rows(&self) -> Vec<PolicyDatasetStatusRow> {
+        let mut rows: Vec<_> = self
+            .current_config
+            .policy
+            .dataset_bindings
+            .handles()
+            .map(|handle| {
+                let status = handle.status();
+                let path = self
+                    .current_config
+                    .policy
+                    .datasets
+                    .get(&status.name)
+                    .map(|entry| entry.path.clone())
+                    .unwrap_or_default();
+                PolicyDatasetStatusRow { status, path }
+            })
+            .collect();
+        rows.sort_by(|a, b| a.status.name.cmp(&b.status.name));
+        rows
+    }
+
+    async fn receive_operator_query(
+        operator_rx: &mut Option<mpsc::Receiver<PeerManagerOperatorQuery>>,
+    ) -> Option<PeerManagerOperatorQuery> {
+        match operator_rx {
+            Some(rx) => rx.recv().await,
+            None => std::future::pending().await,
+        }
+    }
+
     /// Service a bounded number of live readiness snapshots at a transaction
     /// seam. `try_recv` is deliberate: when no probe is waiting this does not
     /// introduce an async suspension point or let ordinary commands bypass the
@@ -685,23 +845,45 @@ impl PeerManager {
     where
         F: Future,
     {
+        self.await_with_readiness_and_operator_budget(future, budget, false)
+            .await
+    }
+
+    /// Only a forward reload's initial destination prestage may admit operator
+    /// snapshots. All other transaction waits keep this lane fenced.
+    async fn await_with_readiness_and_operator_budget<F>(
+        &mut self,
+        future: F,
+        budget: Duration,
+        allow_operator_reads: bool,
+    ) -> Option<F::Output>
+    where
+        F: Future,
+    {
         tokio::pin!(future);
         let mut remaining = budget;
         loop {
-            let Some(readiness_rx) = self.readiness_rx.as_mut() else {
-                return tokio::time::timeout(remaining, future).await.ok();
-            };
             let attended = tokio::time::Instant::now();
             tokio::select! {
                 biased;
                 result = tokio::time::timeout(remaining, &mut future) => return result.ok(),
-                query = readiness_rx.recv() => {
+                query = Self::receive_readiness_query(&mut self.readiness_rx) => {
                     // Time until the query arrived was genuine waiting on the
                     // step; the servicing below is not, so stop the clock.
                     remaining = remaining.saturating_sub(attended.elapsed());
                     match query {
                         Some(query) => self.handle_readiness_query(query).await,
                         None => self.readiness_rx = None,
+                    }
+                    if remaining.is_zero() {
+                        return None;
+                    }
+                }
+                query = Self::receive_operator_query(&mut self.operator_rx), if allow_operator_reads => {
+                    remaining = remaining.saturating_sub(attended.elapsed());
+                    match query {
+                        Some(query) => self.handle_operator_query(query, true).await,
+                        None => self.operator_rx = None,
                     }
                     if remaining.is_zero() {
                         return None;
@@ -775,6 +957,7 @@ impl PeerManager {
             session_index: HashMap::new(),
             rx,
             readiness_rx: None,
+            operator_rx: None,
             internal_rx: Some(internal_rx),
             local_asn,
             router_id,
@@ -1049,6 +1232,12 @@ impl PeerManager {
                     match query {
                         Some(query) => self.handle_readiness_query(query).await,
                         None => self.readiness_rx = None,
+                    }
+                }
+                query = Self::receive_operator_query(&mut self.operator_rx) => {
+                    match query {
+                        Some(query) => self.handle_operator_query(query, false).await,
+                        None => self.operator_rx = None,
                     }
                 }
                 cmd = self.rx.recv() => {
@@ -1485,27 +1674,7 @@ impl PeerManager {
                             let _ = reply.send(result);
                         }
                         PeerManagerCommand::QueryPolicyDatasets { reply } => {
-                            // LAN-305: status straight off the shared
-                            // handles; sorted for deterministic output.
-                            let mut rows: Vec<PolicyDatasetStatusRow> = self
-                                .current_config
-                                .policy
-                                .dataset_bindings
-                                .handles()
-                                .map(|handle| {
-                                    let status = handle.status();
-                                    let path = self
-                                        .current_config
-                                        .policy
-                                        .datasets
-                                        .get(&status.name)
-                                        .map(|entry| entry.path.clone())
-                                        .unwrap_or_default();
-                                    PolicyDatasetStatusRow { status, path }
-                                })
-                                .collect();
-                            rows.sort_by(|a, b| a.status.name.cmp(&b.status.name));
-                            let _ = reply.send(rows);
+                            let _ = reply.send(self.policy_dataset_status_rows());
                         }
                         PeerManagerCommand::ListPolicies { reply } => {
                             let _ = reply.send(named_policies_from_config(&self.current_config));
@@ -1556,88 +1725,8 @@ impl PeerManager {
                             };
                             let _ = reply.send(result);
                         }
-                        PeerManagerCommand::QueryImportPolicyTermHits {
-                            peer,
-                            deadline,
-                            mut reply,
-                        } => {
-                            // Read-only snapshot forwarded to each session
-                            // task (the import chain and its counters live
-                            // there). Snapshot owned command senders and move
-                            // collection out of the actor immediately: the
-                            // actor does not await a wedged fleet. All sends
-                            // and replies share the RPC's absolute deadline,
-                            // and any failed session fails the complete
-                            // snapshot atomically.
-                            if deadline <= tokio::time::Instant::now() {
-                                let _ = reply.send(SessionQueryOutcome::TimedOut);
-                                continue;
-                            }
-                            // Do not clone a fleet of session senders for an
-                            // RPC that was cancelled while its command waited
-                            // in the manager queue.
-                            if reply.is_closed() {
-                                continue;
-                            }
-                            let targets: Vec<_> = if let Some(address) = peer {
-                                let Some(key) = self.unique_peer_key_for_address(address) else {
-                                    let _ = reply.send(SessionQueryOutcome::SessionGone);
-                                    continue;
-                                };
-                                let Some(managed) = self.peers.get(&key) else {
-                                    let _ = reply.send(SessionQueryOutcome::SessionGone);
-                                    continue;
-                                };
-                                vec![(key.address, managed.handle.commands_sender())]
-                            } else {
-                                self
-                                    .peers
-                                    .iter()
-                                    .map(|(key, managed)| {
-                                        (key.address, managed.handle.commands_sender())
-                                    })
-                                    .collect()
-                            };
-                            tokio::spawn(async move {
-                                let collection = async move {
-                                    let mut out = Vec::new();
-                                    let queries = stream::iter(targets)
-                                        .map(|(address, commands)| async move {
-                                            let outcome =
-                                                PeerHandle::query_import_policy_term_hits_with_deadline(
-                                                    commands, deadline,
-                                                )
-                                                .await;
-                                            (address, outcome)
-                                        })
-                                        .buffer_unordered(IMPORT_POLICY_QUERY_CONCURRENCY);
-                                    tokio::pin!(queries);
-                                    while let Some((address, outcome)) = queries.next().await {
-                                        match outcome {
-                                            SessionQueryOutcome::Reply(Some(snapshot)) => {
-                                                out.push((address, snapshot));
-                                            }
-                                            SessionQueryOutcome::Reply(None) => {}
-                                            SessionQueryOutcome::TimedOut => {
-                                                return SessionQueryOutcome::TimedOut;
-                                            }
-                                            SessionQueryOutcome::SessionGone => {
-                                                return SessionQueryOutcome::SessionGone;
-                                            }
-                                        }
-                                    }
-                                    out.sort_unstable_by_key(|(address, _)| *address);
-                                    SessionQueryOutcome::Reply(out)
-                                };
-                                let result = tokio::select! {
-                                    biased;
-                                    // Dropping `collection` releases every
-                                    // target sender and in-flight reply future.
-                                    () = reply.closed() => return,
-                                    result = collection => result,
-                                };
-                                let _ = reply.send(result);
-                            });
+                        PeerManagerCommand::QueryImportPolicyTermHits { peer, deadline, reply } => {
+                            self.dispatch_import_policy_term_hits(peer, deadline, reply);
                         }
                         PeerManagerCommand::GetPolicy { name, reply } => {
                             let _ = reply.send(named_policy_from_config(&self.current_config, &name));

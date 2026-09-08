@@ -45,7 +45,8 @@ use crate::neighbor_service::NeighborService;
 use crate::peer_group_service::PeerGroupService;
 use crate::peer_types::{
     CatalogMutationError, ConfigEvent, ConfigPersistAck, OwnedCatalogMutation,
-    OwnedCatalogMutationOutcome, PeerManagerCommand, PeerManagerReadinessQuery,
+    OwnedCatalogMutationOutcome, PeerManagerCommand, PeerManagerOperatorQuery,
+    PeerManagerReadinessQuery,
 };
 use crate::policy_service::PolicyService;
 use crate::proto::bfd_service_server::BfdServiceServer;
@@ -1098,6 +1099,8 @@ pub struct ServeConfig {
     pub start_time: tokio::time::Instant,
     /// Dedicated read-only peer-manager lane used only by core readiness.
     pub peer_mgr_readiness_tx: mpsc::Sender<PeerManagerReadinessQuery>,
+    /// Operator queries admitted before session policy application.
+    pub peer_mgr_operator_tx: mpsc::Sender<PeerManagerOperatorQuery>,
     /// Dedicated type-narrow RIB lane used only by core readiness.
     pub rib_readiness_tx: mpsc::Sender<RibReadinessQuery>,
     /// Narrow synchronous reader for the latest authoritative VRP table.
@@ -1692,6 +1695,7 @@ async fn run_listener(
     let metrics = config.metrics;
     let start_time = config.start_time;
     let peer_mgr_readiness_tx = config.peer_mgr_readiness_tx;
+    let peer_mgr_operator_tx = config.peer_mgr_operator_tx;
     let rib_readiness_tx = config.rib_readiness_tx;
     let vrp_snapshot = config.vrp_snapshot;
     let rpki_cache_queries = config.rpki_cache_queries;
@@ -1759,6 +1763,7 @@ async fn run_listener(
                 rpki_cache_queries.clone(),
                 peer_mgr_tx,
                 peer_mgr_readiness_tx,
+                peer_mgr_operator_tx,
                 asn,
                 router_id,
                 listen_port,
@@ -1825,6 +1830,7 @@ async fn run_listener(
                 rpki_cache_queries,
                 peer_mgr_tx,
                 peer_mgr_readiness_tx,
+                peer_mgr_operator_tx,
                 asn,
                 router_id,
                 listen_port,
@@ -1898,6 +1904,7 @@ async fn run_tcp_listener(
     rpki_cache_queries: Option<CacheQueryHandle>,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     peer_mgr_readiness_tx: mpsc::Sender<PeerManagerReadinessQuery>,
+    peer_mgr_operator_tx: mpsc::Sender<PeerManagerOperatorQuery>,
     asn: u32,
     router_id: String,
     listen_port: u32,
@@ -2047,6 +2054,7 @@ async fn run_tcp_listener(
             runtime_config_lock.clone(),
             config_mutation_gate.clone(),
         )
+        .with_operator_queries(peer_mgr_operator_tx.clone())
         .with_runtime_config_settlement(runtime_config_settlement.clone(), daemon_gate.clone()),
         interceptor.clone(),
     ));
@@ -2070,6 +2078,7 @@ async fn run_tcp_listener(
             runtime_config_lock,
         )
         .with_runtime_config_settlement(runtime_config_settlement, daemon_gate)
+        .with_operator_queries(peer_mgr_operator_tx.clone())
         .with_rib_query(rib_query_tx.clone()),
         interceptor.clone(),
     ));
@@ -2166,6 +2175,7 @@ async fn run_uds_listener(
     rpki_cache_queries: Option<CacheQueryHandle>,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     peer_mgr_readiness_tx: mpsc::Sender<PeerManagerReadinessQuery>,
+    peer_mgr_operator_tx: mpsc::Sender<PeerManagerOperatorQuery>,
     asn: u32,
     router_id: String,
     listen_port: u32,
@@ -2291,6 +2301,7 @@ async fn run_uds_listener(
             runtime_config_lock.clone(),
             config_mutation_gate.clone(),
         )
+        .with_operator_queries(peer_mgr_operator_tx.clone())
         .with_runtime_config_settlement(runtime_config_settlement.clone(), daemon_gate.clone()),
         interceptor.clone(),
     ));
@@ -2314,6 +2325,7 @@ async fn run_uds_listener(
             runtime_config_lock,
         )
         .with_runtime_config_settlement(runtime_config_settlement, daemon_gate)
+        .with_operator_queries(peer_mgr_operator_tx.clone())
         .with_rib_query(rib_query_tx.clone()),
         interceptor.clone(),
     ));

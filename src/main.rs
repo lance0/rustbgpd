@@ -96,7 +96,8 @@ use crate::reload::{
 use rustbgpd_api::health_probe::DaemonGate;
 use rustbgpd_api::peer_types::{
     ImportValidationDependency, PeerManagerCommand, PeerManagerNeighborConfig,
-    PeerManagerReadinessQuery, WarmCheckpointCapture, WarmCheckpointSession,
+    PeerManagerOperatorQuery, PeerManagerReadinessQuery, WarmCheckpointCapture,
+    WarmCheckpointSession,
 };
 use rustbgpd_api::runtime_config_settlement::{
     OwnedRuntimeConfigOutcome, OwnedRuntimeConfigRequestContext, RuntimeConfigOperationKind,
@@ -4157,6 +4158,8 @@ async fn run<T>(
     let (peer_mgr_tx, peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
     let (peer_mgr_readiness_tx, peer_mgr_readiness_rx) =
         mpsc::channel::<PeerManagerReadinessQuery>(64);
+    let (peer_mgr_operator_tx, peer_mgr_operator_rx) =
+        mpsc::channel::<PeerManagerOperatorQuery>(64);
     let (peer_mgr_internal_tx, peer_mgr_internal_rx) = mpsc::channel(1);
 
     let mut rpki_cache_queries = None;
@@ -4410,6 +4413,7 @@ async fn run<T>(
         config.clone(),
     )
     .with_readiness_queries(peer_mgr_readiness_rx)
+    .with_operator_queries(peer_mgr_operator_rx)
     .with_event_history(event_history_handle.clone())
     .with_transport_event_sink(event_history_handle.clone().map(|handle| {
         rustbgpd_api::event_history_sinks::make_transport_event_sink(handle, metrics.clone())
@@ -5225,6 +5229,7 @@ async fn run<T>(
         metrics: metrics.clone(),
         start_time,
         peer_mgr_readiness_tx: peer_mgr_readiness_tx.clone(),
+        peer_mgr_operator_tx: peer_mgr_operator_tx.clone(),
         rib_readiness_tx: rib_readiness_tx.clone(),
         vrp_snapshot: {
             let rx = validation_watch_rx.clone();

@@ -9,13 +9,13 @@ use rustbgpd_wire::{Afi, BgpRole, CONFIGURED_FAMILIES, Safi, family_label, parse
 use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};
 
-use crate::actor_read::{peer_manager_read, rib_manager_read};
+use crate::actor_read::{peer_manager_operator_read, peer_manager_read, rib_manager_read};
 use crate::health_probe::DaemonGate;
 use crate::peer_types::{
     ConfigEvent, DynamicRangeError, NeighborCreateAddPath, OutboundRefreshError,
     OwnedNeighborMutation, OwnedNeighborMutationError, OwnedNeighborMutationOutcome, PeerInfo,
-    PeerKey, PeerLifecycleError, PeerManagerCommand, PresenceAwareNeighborCreate,
-    Rfc8212PolicyStatus,
+    PeerKey, PeerLifecycleError, PeerManagerCommand, PeerManagerOperatorQuery,
+    PresenceAwareNeighborCreate, Rfc8212PolicyStatus,
 };
 use crate::proto;
 use crate::runtime_config_settlement::{
@@ -92,6 +92,7 @@ pub(crate) fn parse_families_proto(families: &[String]) -> Result<Vec<(Afi, Safi
 pub struct NeighborService {
     access_mode: AccessMode,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
+    operator_tx: Option<mpsc::Sender<PeerManagerOperatorQuery>>,
     rib_tx: mpsc::Sender<RibUpdate>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
     runtime_config_lock: RuntimeConfigCoordinator,
@@ -139,6 +140,7 @@ impl NeighborService {
         Self {
             access_mode,
             peer_mgr_tx,
+            operator_tx: None,
             rib_tx,
             config_tx,
             runtime_config_lock,
@@ -146,6 +148,13 @@ impl NeighborService {
             settlement: None,
             owned_actor_timeout: OWNED_NEIGHBOR_ACTOR_TIMEOUT,
         }
+    }
+
+    /// Attach the operator query lane serviced before session policy application.
+    #[must_use]
+    pub fn with_operator_queries(mut self, tx: mpsc::Sender<PeerManagerOperatorQuery>) -> Self {
+        self.operator_tx = Some(tx);
+        self
     }
 
     /// Arm Neighbor4 CRUD with the process-wide fail-stop settlement owner.
@@ -1232,10 +1241,11 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         &self,
         _request: Request<proto::ListNeighborsRequest>,
     ) -> Result<Response<proto::ListNeighborsResponse>, Status> {
-        let mut infos = peer_manager_read(&self.peer_mgr_tx, |reply| {
-            PeerManagerCommand::ListPeers { reply }
-        })
-        .await?;
+        let mut infos =
+            peer_manager_operator_read(&self.peer_mgr_tx, self.operator_tx.as_ref(), |reply| {
+                PeerManagerOperatorQuery::ListPeers { reply }
+            })
+            .await?;
         infos.sort_by(|left, right| {
             left.address
                 .cmp(&right.address)
@@ -1288,18 +1298,19 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             Some(compare_peer)
         };
 
-        let info = peer_manager_read(&self.peer_mgr_tx, |reply| {
-            PeerManagerCommand::GetPeerState {
-                peer: peer.clone(),
-                reply,
-            }
-        })
-        .await?
-        .ok_or_else(|| Status::not_found(format!("peer {peer} not found")))?;
+        let info =
+            peer_manager_operator_read(&self.peer_mgr_tx, self.operator_tx.as_ref(), |reply| {
+                PeerManagerOperatorQuery::GetPeerState {
+                    peer: peer.clone(),
+                    reply,
+                }
+            })
+            .await?
+            .ok_or_else(|| Status::not_found(format!("peer {peer} not found")))?;
 
         if let Some(compare_peer) = &compare_peer {
-            peer_manager_read(&self.peer_mgr_tx, |reply| {
-                PeerManagerCommand::GetPeerState {
+            peer_manager_operator_read(&self.peer_mgr_tx, self.operator_tx.as_ref(), |reply| {
+                PeerManagerOperatorQuery::GetPeerState {
                     peer: compare_peer.clone(),
                     reply,
                 }
@@ -1644,6 +1655,68 @@ mod tests {
             NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None),
             rib_rx,
         )
+    }
+
+    #[tokio::test]
+    async fn neighbor_reads_use_operator_lane_including_comparison() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (operator_tx, mut operator_rx) = mpsc::channel(1);
+        let (svc, mut rib_rx) = read_service(peer_tx);
+        let svc = svc.with_operator_queries(operator_tx);
+        let actor = tokio::spawn(async move {
+            let PeerManagerOperatorQuery::ListPeers { reply } = operator_rx.recv().await.unwrap()
+            else {
+                panic!("expected operator peer list");
+            };
+            reply.send(Vec::new()).unwrap();
+            for address in ["192.0.2.1", "192.0.2.2"] {
+                let PeerManagerOperatorQuery::GetPeerState { peer, reply } =
+                    operator_rx.recv().await.unwrap()
+                else {
+                    panic!("expected operator peer state");
+                };
+                assert_eq!(peer.address, address.parse::<IpAddr>().unwrap());
+                // A missing comparison peer ends the RPC before its RIB query.
+                reply
+                    .send((address == "192.0.2.1").then(|| peer_info(peer.address)))
+                    .unwrap();
+            }
+        });
+        let rib = tokio::spawn(async move {
+            let RibUpdate::QueryNeighborRibSnapshots { reply, .. } = rib_rx.recv().await.unwrap()
+            else {
+                panic!("expected RIB snapshots");
+            };
+            reply
+                .send(NeighborRibSnapshotResponse {
+                    snapshots: Vec::new(),
+                    comparison: None,
+                })
+                .unwrap();
+        });
+        assert!(
+            svc.list_neighbors(Request::new(proto::ListNeighborsRequest {}))
+                .await
+                .unwrap()
+                .into_inner()
+                .neighbors
+                .is_empty()
+        );
+        let error = svc
+            .get_neighbor_state(Request::new(proto::GetNeighborStateRequest {
+                address: "192.0.2.1".into(),
+                compare_address: "192.0.2.2".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::NotFound);
+        actor.await.unwrap();
+        rib.await.unwrap();
+        assert!(matches!(
+            peer_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
     }
 
     fn empty_outbound_state() -> rustbgpd_rib::PeerOutboundState {

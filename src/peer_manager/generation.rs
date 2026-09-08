@@ -275,7 +275,7 @@ impl PeerManager {
         // 1. Policy chains through the rollback-capable snapshot. No session
         //    identity is at stake yet, so a failure here costs nothing.
         match self
-            .apply_resolved_policy_snapshot_classified(resolved.policy_targets, true)
+            .apply_resolved_policy_snapshot_with_prestage_reads(resolved.policy_targets, true, true)
             .await
         {
             Ok(priors) => applied.policy_priors = Some(priors),

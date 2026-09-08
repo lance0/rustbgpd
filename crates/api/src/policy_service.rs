@@ -11,12 +11,12 @@ use rustbgpd_wire::{Afi, Ipv4Prefix, Ipv6Prefix, Prefix, Safi};
 use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};
 
-use crate::actor_read::{peer_manager_read, rib_manager_read};
+use crate::actor_read::{peer_manager_operator_read, peer_manager_read, rib_manager_read};
 use crate::health_probe::DaemonGate;
 use crate::peer_types::{
     ConfigEvent, NamedPolicyDefinition, OwnedCatalogMutation, OwnedCatalogMutationOutcome,
-    PeerManagerCommand, PolicyStatementDefinition, ValidationPolicyDimensionSnapshot,
-    ValidationPolicyDisposition, ValidationPolicyScopeSnapshot,
+    PeerManagerCommand, PeerManagerOperatorQuery, PolicyStatementDefinition,
+    ValidationPolicyDimensionSnapshot, ValidationPolicyDisposition, ValidationPolicyScopeSnapshot,
 };
 use crate::policy_helpers::{proto_statement_to_input, validate_policy_action};
 use crate::proto;
@@ -295,6 +295,7 @@ fn input_definition_to_proto(definition: &NamedPolicyDefinition) -> proto::Polic
 pub struct PolicyService {
     access_mode: AccessMode,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
+    operator_tx: Option<mpsc::Sender<PeerManagerOperatorQuery>>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
     runtime_config_lock: RuntimeConfigCoordinator,
     config_mutation_gate: Option<ConfigMutationGateFn>,
@@ -338,6 +339,7 @@ impl PolicyService {
         Self {
             access_mode,
             peer_mgr_tx,
+            operator_tx: None,
             config_tx,
             runtime_config_lock,
             config_mutation_gate,
@@ -345,6 +347,13 @@ impl PolicyService {
             settlement: None,
             owned_actor_timeout: OWNED_POLICY_ACTOR_TIMEOUT,
         }
+    }
+
+    /// Attach the operator query lane serviced before session policy application.
+    #[must_use]
+    pub fn with_operator_queries(mut self, tx: mpsc::Sender<PeerManagerOperatorQuery>) -> Self {
+        self.operator_tx = Some(tx);
+        self
     }
 
     /// Arm policy catalog mutations with the process-wide fail-stop owner.
@@ -517,14 +526,14 @@ async fn owned_policy_mutation_body(
 /// though they do not have a `[[neighbors]]` row.
 async fn require_managed_peer_address(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+    operator_tx: Option<&mpsc::Sender<PeerManagerOperatorQuery>>,
     address: IpAddr,
     deadline: tokio::time::Instant,
 ) -> Result<(), Status> {
     policy_stats_request(
         deadline,
-        peer_manager_read(peer_mgr_tx, |reply| PeerManagerCommand::HasPeerAddress {
-            address,
-            reply,
+        peer_manager_operator_read(peer_mgr_tx, operator_tx, |reply| {
+            PeerManagerOperatorQuery::HasPeerAddress { address, reply }
         }),
     )
     .await?
@@ -1372,7 +1381,13 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             })?)
         };
         if let Some(peer) = peer {
-            require_managed_peer_address(&self.peer_mgr_tx, peer, deadline).await?;
+            require_managed_peer_address(
+                &self.peer_mgr_tx,
+                self.operator_tx.as_ref(),
+                peer,
+                deadline,
+            )
+            .await?;
         }
         let term_stats = |terms: Vec<rustbgpd_policy::TermHitRow>| -> Vec<proto::PolicyTermStat> {
             terms
@@ -1421,8 +1436,8 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         if want_import {
             let chains = policy_stats_request(
                 deadline,
-                peer_manager_read(&self.peer_mgr_tx, |reply| {
-                    PeerManagerCommand::QueryImportPolicyTermHits {
+                peer_manager_operator_read(&self.peer_mgr_tx, self.operator_tx.as_ref(), |reply| {
+                    PeerManagerOperatorQuery::QueryImportPolicyTermHits {
                         peer,
                         deadline,
                         reply,
@@ -1463,8 +1478,8 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         // snapshot" (name, kind, generation, records, last error).
         let datasets = policy_stats_request(
             deadline,
-            peer_manager_read(&self.peer_mgr_tx, |reply| {
-                PeerManagerCommand::QueryPolicyDatasets { reply }
+            peer_manager_operator_read(&self.peer_mgr_tx, self.operator_tx.as_ref(), |reply| {
+                PeerManagerOperatorQuery::QueryPolicyDatasets { reply }
             }),
         )
         .await?
@@ -2343,6 +2358,65 @@ mod tests {
         .await
         .expect("listing succeeds");
         assert_eq!(response.evictions_since_reset, Some(0));
+    }
+
+    #[tokio::test]
+    async fn policy_stats_use_operator_lane_for_peer_import_and_datasets() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let (operator_tx, mut operator_rx) = mpsc::channel(1);
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
+            .with_operator_queries(operator_tx)
+            .with_rib_query(rib_tx);
+        let actor = tokio::spawn(async move {
+            let PeerManagerOperatorQuery::HasPeerAddress { address, reply } =
+                operator_rx.recv().await.unwrap()
+            else {
+                panic!("expected managed peer query");
+            };
+            assert_eq!(address, "192.0.2.1".parse::<IpAddr>().unwrap());
+            reply.send(true).unwrap();
+            let PeerManagerOperatorQuery::QueryImportPolicyTermHits {
+                peer,
+                deadline,
+                reply,
+            } = operator_rx.recv().await.unwrap()
+            else {
+                panic!("expected import counters");
+            };
+            assert_eq!(peer, Some("192.0.2.1".parse::<IpAddr>().unwrap()));
+            assert!(deadline > tokio::time::Instant::now());
+            reply.send(SessionQueryOutcome::Reply(Vec::new())).unwrap();
+            let PeerManagerOperatorQuery::QueryPolicyDatasets { reply } =
+                operator_rx.recv().await.unwrap()
+            else {
+                panic!("expected dataset query");
+            };
+            reply.send(Vec::new()).unwrap();
+        });
+        let rib = tokio::spawn(async move {
+            let rustbgpd_rib::RibUpdate::QueryExportPolicyTermHits { reply, .. } =
+                rib_rx.recv().await.unwrap()
+            else {
+                panic!("expected export counters");
+            };
+            reply.send(Vec::new()).unwrap();
+        });
+        PolicyServiceRpc::get_policy_stats(
+            &svc,
+            Request::new(proto::GetPolicyStatsRequest {
+                peer_address: "192.0.2.1".into(),
+                direction: "both".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        actor.await.unwrap();
+        rib.await.unwrap();
+        assert!(matches!(
+            peer_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
     }
 
     /// LAN-661 red proof: mapping a stalled live session back onto either

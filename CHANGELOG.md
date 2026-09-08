@@ -174,6 +174,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Local failed binds remain red; default wildcard probes tolerate one unavailable
   address family, and remote listener probes identify their CLI vantage.
 
+- Neighbor and policy-statistics reads can complete during a forward SIGHUP
+  generation's export-destination prestaging, before installed policies or
+  datasets change. Later policy application, rollback, and standalone mutations
+  remain fenced; existing read deadlines and complete-result requirements remain.
+
 ### Upgrade notes
 
 - Consumers of `GetPolicyStats` or `rbgp policy stats` should use the installed

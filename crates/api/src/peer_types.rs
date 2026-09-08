@@ -1571,6 +1571,61 @@ pub enum OwnedHotUpdatePeerOutcome {
     KnownDivergence(PeerLifecycleError),
 }
 
+/// Operator reads that can be serviced before a policy reload starts applying
+/// session changes. Mutations remain on [`PeerManagerCommand`].
+pub enum PeerManagerOperatorQuery {
+    /// Return all peer snapshots.
+    ListPeers {
+        reply: oneshot::Sender<Vec<PeerInfo>>,
+    },
+    /// Return one peer snapshot, if present.
+    GetPeerState {
+        peer: PeerKey,
+        reply: oneshot::Sender<Option<PeerInfo>>,
+    },
+    /// Resolve one unique managed peer address, including dynamic peers.
+    HasPeerAddress {
+        address: IpAddr,
+        reply: oneshot::Sender<bool>,
+    },
+    /// Query session import counters with the RPC's aggregate deadline.
+    QueryImportPolicyTermHits {
+        peer: Option<IpAddr>,
+        deadline: tokio::time::Instant,
+        reply: oneshot::Sender<SessionQueryOutcome<Vec<(IpAddr, ImportPolicyTermHits)>>>,
+    },
+    /// Return the currently published policy dataset status.
+    QueryPolicyDatasets {
+        reply: oneshot::Sender<Vec<PolicyDatasetStatusRow>>,
+    },
+}
+
+impl From<PeerManagerOperatorQuery> for PeerManagerCommand {
+    fn from(query: PeerManagerOperatorQuery) -> Self {
+        match query {
+            PeerManagerOperatorQuery::ListPeers { reply } => Self::ListPeers { reply },
+            PeerManagerOperatorQuery::GetPeerState { peer, reply } => {
+                Self::GetPeerState { peer, reply }
+            }
+            PeerManagerOperatorQuery::HasPeerAddress { address, reply } => {
+                Self::HasPeerAddress { address, reply }
+            }
+            PeerManagerOperatorQuery::QueryImportPolicyTermHits {
+                peer,
+                deadline,
+                reply,
+            } => Self::QueryImportPolicyTermHits {
+                peer,
+                deadline,
+                reply,
+            },
+            PeerManagerOperatorQuery::QueryPolicyDatasets { reply } => {
+                Self::QueryPolicyDatasets { reply }
+            }
+        }
+    }
+}
+
 /// Read-only peer-manager queries admitted between bounded policy-transaction
 /// steps. This separate lane is intentionally narrow: mutation commands remain
 /// ordered on [`PeerManagerCommand`] and cannot observe or alter a partially
