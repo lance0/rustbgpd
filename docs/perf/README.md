@@ -125,6 +125,7 @@ records.
 | [`irr-reload-v0680-2026-08.md`][irr-reload-v0680-2026-08.md] | 2026-08-30 | 320 IPv4 members, 183,040 prefixes, three overlap levels | All 12 roots and 96 verifier rows passed exact route-count gates | IPv6, larger fleets, or other policy distributions |
 | [`irr-transactional-apply-2026-08.md`][irr-transactional-apply-2026-08.md] | 2026-08 | 320-member, 183,040-route, 295.6 MB streamed candidate | Eight full transactional reload cycles completed and were confirmed | A memory optimization claim |
 | [`ixp-matrix-2026-07.md`][ixp-matrix-2026-07.md] | Initial campaign 2026-07; latest refresh 2026-08-30 | 700-session route-server matrix for reload, churn, convergence, and memory | Dated same-host observations for rustbgpd, BIRD, and OpenBGPD | A universal memory win or cross-host ranking |
+| [`ixp-dualstack-2026-09.md`][ixp-dualstack-2026-09.md] | 2026-09 (in progress) | Dual-stack route-server reload harness: 286 IPv4 + 286 IPv6 routes per member, permit-set-preserving and filtering policy changes, 20-member correctness rung run | Independent per-family completion with empty-family, missing, duplicate, leak, and bystander negative cases | Any 200- or 700-member result, a comparison with the IPv4-only matrix, or an IPv6 performance claim |
 | [`known-path-accounting-2026-07.md`][known-path-accounting-2026-07.md] | July 2026 | Two BIRD peers, 100k prefixes each, one GoBGP monitor | Compact plain-unicast accounting reduced the measured common-case memory | An Add-Path memory win |
 | [`lean-daemon-build-flavors-2026-07.md`][lean-daemon-build-flavors-2026-07.md] | July 2026 | Four release build flavors and their dependency inventories | Dependency and binary-size observations for the disclosed builds | Shipped prototype features or every production config ingress |
 | [`memory-attribution-2026-08.md`][memory-attribution-2026-08.md] | 2026-08 | 100 peers × 1,000 routes, three fresh-build arms, five runs each | Attribution of the July memory step across the measured arms | Portable process-RSS or cross-host conclusions |
@@ -185,6 +186,7 @@ records.
 [irr-reload-realistic-mix-2026-08.md]: irr-reload-realistic-mix-2026-08.md
 [irr-reload-v0680-2026-08.md]: irr-reload-v0680-2026-08.md
 [irr-transactional-apply-2026-08.md]: irr-transactional-apply-2026-08.md
+[ixp-dualstack-2026-09.md]: ixp-dualstack-2026-09.md
 [ixp-matrix-2026-07.md]: ixp-matrix-2026-07.md
 [known-path-accounting-2026-07.md]: known-path-accounting-2026-07.md
 [lean-daemon-build-flavors-2026-07.md]: lean-daemon-build-flavors-2026-07.md
@@ -255,6 +257,7 @@ from that file; a directory name does not fill a missing date.
 | [`artifacts/irr-reload-v0680-2026-08/README.md`](artifacts/irr-reload-v0680-2026-08/README.md) | 2026-08-30 | Twenty-four comparison and eight grouped-control rows per overlap point | Every verifier-approved row and derived RSS peak | An exact-tag run |
 | [`artifacts/irr-transactional-apply-2026-08/README.md`](artifacts/irr-transactional-apply-2026-08/README.md) | 2026-08 | Two verified sealed transactional-apply roots | Verifier output, transaction lifecycle, and identity digests | Unstated |
 | [`artifacts/ixp-exact-export-cohorts-2026-07/README.md`](artifacts/ixp-exact-export-cohorts-2026-07/README.md) | Unstated | IXP exact-export cohort summaries and production state-machine counters | Aggregate estimates and first-invocation counters | Raw samples |
+| [`artifacts/ixp-dualstack-2026-09/README.md`](artifacts/ixp-dualstack-2026-09/README.md) | 2026-09 | Pinned dual-stack shape (400,400 total = 200,200 per family at 700 members) and the 20-member correctness cells | The shape definition committed before measurement and the rung-1 raw cells | A 700-member result |
 | [`artifacts/ixp-matrix-2026-07/README.md`](artifacts/ixp-matrix-2026-07/README.md) | 2026-07 | Seven hundred peers and 400,400 prefixes across three daemons | Raw data behind the linked route-server matrix | Unstated |
 | [`artifacts/known-path-accounting-2026-07/README.md`](artifacts/known-path-accounting-2026-07/README.md) | July 2026 | Eight admitted bgperf2 rows with sixteen BIRD logs | The manifest, route-count rows, and zero `RMT` log scan | Independent timeout evidence from bgperf2's structural field |
 | [`artifacts/memory-attribution-2026-08/README.md`](artifacts/memory-attribution-2026-08/README.md) | 2026-08 | Seven sealed coarse-to-single-commit campaigns | Preregistered manifests, result tables, verdicts, and identity seals | Unstated |

@@ -2177,6 +2177,14 @@ pub struct ConfigDiff {
     /// that specific shape through the EVPN runtime coordinator or must
     /// leave it restart-required.
     pub evpn_runtime_change_class: EvpnRuntimeChangeClass,
+    /// The listener's authentication-bearing inbound inventory (MD5 keys or
+    /// enforcing GTSM selectors for static neighbors and dynamic ranges)
+    /// differs. Such a change keeps a reload on the sequential path.
+    pub listener_inbound_auth_changed: bool,
+    /// The executor a SIGHUP of this candidate reaches after preflight, from
+    /// the families visible in a diff. Dataset content and the compiled
+    /// TCP-AO rotation shape are known only at reload time.
+    pub sighup_route: SighupReloadRoute,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
@@ -2965,6 +2973,418 @@ impl Config {
     }
 }
 
+/// Inbound TCP MD5 listener key for a static neighbor: the resolved
+/// (peer-group-inherited) password, keyed to the exact host address.
+pub(crate) fn md5_listener_key_for_neighbor(
+    neighbor: &ResolvedNeighbor,
+) -> Option<rustbgpd_transport::Md5ListenerKey> {
+    let password = neighbor.transport_config.md5_password.as_ref()?;
+    let peer = neighbor.transport_config.remote_addr.ip();
+    Some(rustbgpd_transport::Md5ListenerKey {
+        peer,
+        prefix_len: if peer.is_ipv4() { 32 } else { 128 },
+        password: password.clone(),
+    })
+}
+
+/// Inbound TCP MD5 listener key for a dynamic range: the referenced peer
+/// group's password, keyed to the whole prefix. Dynamic members are
+/// passive-only, so the listener key is the only socket this password can
+/// ever reach.
+pub(crate) fn md5_listener_key_for_dynamic_range(
+    range: &DynamicNeighborConfig,
+    peer_groups: &HashMap<String, PeerGroupConfig>,
+) -> Option<rustbgpd_transport::Md5ListenerKey> {
+    // A range with direct TCP-AO never inherits group authentication
+    // (validated at config load).
+    if range.tcp_ao.is_some() {
+        return None;
+    }
+    let password = peer_groups.get(&range.peer_group)?.md5_password.as_ref()?;
+    let (peer, prefix_len) = effective_prefix_str(&range.prefix)?;
+    Some(rustbgpd_transport::Md5ListenerKey {
+        peer,
+        prefix_len,
+        password: password.as_str().into(),
+    })
+}
+
+/// GTSM selector for a static neighbor. Entries are emitted for every
+/// neighbor — including `hops: None` — so a non-GTSM static neighbor
+/// inside an enforcing dynamic range keeps its own policy at accept time.
+pub(crate) fn ttl_security_listener_policy_for_neighbor(
+    neighbor: &ResolvedNeighbor,
+) -> rustbgpd_transport::TtlSecurityListenerPolicy {
+    let peer = neighbor.transport_config.remote_addr.ip();
+    rustbgpd_transport::TtlSecurityListenerPolicy {
+        owner: rustbgpd_transport::TcpAoListenerOwnerKind::Static,
+        peer,
+        prefix_len: if peer.is_ipv4() { 32 } else { 128 },
+        hops: neighbor.transport_config.ttl_security_hops,
+    }
+}
+
+/// GTSM selector for a dynamic range, resolved from its peer group.
+pub(crate) fn ttl_security_listener_policy_for_dynamic_range(
+    range: &DynamicNeighborConfig,
+    peer_groups: &HashMap<String, PeerGroupConfig>,
+) -> Option<rustbgpd_transport::TtlSecurityListenerPolicy> {
+    let group = peer_groups.get(&range.peer_group)?;
+    let (peer, prefix_len) = effective_prefix_str(&range.prefix)?;
+    Some(rustbgpd_transport::TtlSecurityListenerPolicy {
+        owner: rustbgpd_transport::TcpAoListenerOwnerKind::Dynamic,
+        peer,
+        prefix_len,
+        hops: group
+            .ttl_security
+            .unwrap_or(false)
+            .then(|| group.ttl_security_hops.unwrap_or(std::num::NonZeroU8::MIN)),
+    })
+}
+
+/// The listener's inbound MD5 keys and GTSM selectors.
+pub(crate) type ListenerInboundInventory = (
+    Vec<rustbgpd_transport::Md5ListenerKey>,
+    Vec<rustbgpd_transport::TtlSecurityListenerPolicy>,
+);
+
+/// Listener inbound MD5 keys and GTSM selectors derived from a config: the
+/// inventory startup installs and SIGHUP replaces on the BGP listener. Every
+/// static neighbor contributes a selector (with `hops: None` when GTSM is
+/// off), so a roster change alone changes this inventory.
+pub(crate) fn listener_inbound_auth_inventory(
+    config: &Config,
+) -> Result<ListenerInboundInventory, String> {
+    let resolved = config
+        .resolved_neighbors()
+        .map_err(|error| error.to_string())?;
+    let md5_keys = resolved
+        .iter()
+        .filter_map(md5_listener_key_for_neighbor)
+        .chain(
+            config
+                .dynamic_neighbors
+                .iter()
+                .filter_map(|range| md5_listener_key_for_dynamic_range(range, &config.peer_groups)),
+        )
+        .collect();
+    let ttl_security = resolved
+        .iter()
+        .map(ttl_security_listener_policy_for_neighbor)
+        .chain(config.dynamic_neighbors.iter().filter_map(|range| {
+            ttl_security_listener_policy_for_dynamic_range(range, &config.peer_groups)
+        }))
+        .collect();
+    Ok((md5_keys, ttl_security))
+}
+
+/// The authentication-bearing part of a listener inventory, order-free: MD5
+/// keys and enforcing GTSM selectors. A neighbor added or removed without
+/// either changes the inventory but not this projection.
+pub(crate) fn listener_inbound_auth_bearing(
+    inventory: &ListenerInboundInventory,
+) -> ListenerInboundInventory {
+    let mut md5_keys = inventory.0.clone();
+    md5_keys.sort_by_key(|key| (key.peer, key.prefix_len));
+    let mut ttl_security: Vec<_> = inventory
+        .1
+        .iter()
+        .filter(|policy| policy.hops.is_some())
+        .cloned()
+        .collect();
+    ttl_security.sort_by_key(|policy| (policy.peer, policy.prefix_len));
+    (md5_keys, ttl_security)
+}
+
+/// The change families a SIGHUP candidate touches, as the reload coordinator
+/// sees them after restart-required pinning.
+///
+/// [`SighupReloadFamilies::from_diff`] fills every family a [`ConfigDiff`]
+/// can see. Two facts exist only at reload time and are completed by the
+/// coordinator: staged dataset *content* (a diff sees only the binding
+/// roster) and whether a TCP-AO edit compiles to a live rotation generation
+/// (a diff reports the edit; pinned edits have no runtime effect).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each family is an independent reload dimension the route classifier combines"
+)]
+pub struct SighupReloadFamilies {
+    /// Static `[[neighbors]]`, `[peer_groups]`, inline policy definitions,
+    /// neighbor sets, global chains, or compiled `.rpol` content.
+    pub generation: bool,
+    /// `[policy.datasets]` bindings or staged dataset content/error state.
+    pub datasets: bool,
+    /// `[[dynamic_neighbors]]` ranges.
+    pub dynamic_ranges: bool,
+    /// `[[evpn_instances]]` / `[[evpn_ip_vrfs]]` / `[[ethernet_segments]]`.
+    pub evpn_runtime: bool,
+    /// `[[fib_tables]]`.
+    pub fib_tables: bool,
+    /// `[global] honor_graceful_shutdown` / `honor_blackhole`.
+    pub honor_knobs: bool,
+    /// A TCP-AO keyring edit (an ordered live rotation at reload time).
+    pub tcp_ao: bool,
+    /// Listener inbound MD5/GTSM inventory.
+    pub listener_auth: bool,
+}
+
+impl SighupReloadFamilies {
+    /// Every family a config diff can see. See the type docs for the two
+    /// runtime-only completions.
+    #[must_use]
+    pub fn from_diff(diff: &ConfigDiff) -> Self {
+        let neighbors = &diff.neighbors;
+        let generation = !neighbors.added.is_empty()
+            || !neighbors.removed.is_empty()
+            || !neighbors.changed.is_empty()
+            || !diff.peer_groups.added.is_empty()
+            || !diff.peer_groups.removed.is_empty()
+            || !diff.peer_groups.changed.is_empty()
+            || !diff.policy.definitions_added.is_empty()
+            || !diff.policy.definitions_removed.is_empty()
+            || !diff.policy.definitions_changed.is_empty()
+            || !diff.policy.neighbor_sets_added.is_empty()
+            || !diff.policy.neighbor_sets_removed.is_empty()
+            || !diff.policy.neighbor_sets_changed.is_empty()
+            || diff.policy.import_chain_changed
+            || diff.policy.export_chain_changed
+            || diff.policy.rpol_changed;
+        Self {
+            generation,
+            datasets: diff.policy.datasets_changed,
+            dynamic_ranges: diff.dynamic_neighbors_reload_applied_changed,
+            evpn_runtime: diff.evpn_instances_changed
+                || diff.evpn_ip_vrfs_changed
+                || diff.ethernet_segments_changed,
+            fib_tables: diff.fib_tables_changed,
+            honor_knobs: diff.honor_graceful_shutdown_changed || diff.honor_blackhole_changed,
+            tcp_ao: diff.neighbor_tcp_ao_changed || diff.dynamic_neighbor_tcp_ao_changed,
+            listener_auth: diff.listener_inbound_auth_changed,
+        }
+    }
+}
+
+/// Which executor a SIGHUP candidate reaches after preflight.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "route", rename_all = "snake_case")]
+pub enum SighupReloadRoute {
+    /// One owned runtime generation: the peer manager settles every static
+    /// neighbor, peer-group, and policy effect from one resolved candidate
+    /// or restores the retained prior generation.
+    Generation,
+    /// The sequential per-subsystem path. Each reason names the family that
+    /// keeps the candidate off the compensated generation executor; an empty
+    /// list means the candidate has no generation-class change at all.
+    Sequential { reasons: Vec<String> },
+    /// Rejected before any runtime, credential, or catalog effect. Each
+    /// reason names a family that must be reloaded on its own.
+    Rejected { reasons: Vec<String> },
+}
+
+impl SighupReloadRoute {
+    /// One-line operator explanation, shared by `--diff`, the runtime
+    /// config-diff API, and the reload log.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Generation => "generation (one owned runtime generation; a late failure \
+                                 restores the prior generation)"
+                .to_string(),
+            Self::Sequential { reasons } if reasons.is_empty() => {
+                "sequential (no static-neighbor, peer-group, or policy change)".to_string()
+            }
+            Self::Sequential { reasons } => format!(
+                "sequential without generation compensation ({})",
+                reasons.join("; ")
+            ),
+            Self::Rejected { reasons } => format!(
+                "rejected before any effect; reload these families on their own: {}",
+                reasons.join("; ")
+            ),
+        }
+    }
+}
+
+/// Route a SIGHUP candidate by the families it touches.
+///
+/// A candidate with no generation-class change keeps the sequential path
+/// every isolated capability already has. A generation-class change combined
+/// with dataset content, dynamic ranges, EVPN runtime, FIB tables, or the
+/// honor knobs is rejected: none of those families retains and restores
+/// priors, so their partial effects could not be compensated. A
+/// generation-class change combined with a TCP-AO rotation or a listener
+/// inbound-auth change stays sequential: the rotation is its own ordered
+/// protocol and the listener inventory is a converging replacement, and the
+/// session reshape primitive refuses authentication changes, so neither can
+/// be folded into the generation.
+#[must_use]
+pub fn classify_sighup_reload(families: SighupReloadFamilies) -> SighupReloadRoute {
+    if !families.generation {
+        return SighupReloadRoute::Sequential {
+            reasons: Vec::new(),
+        };
+    }
+    let mut rejected = Vec::new();
+    if families.datasets {
+        rejected.push("[policy.datasets] content or bindings".to_string());
+    }
+    if families.dynamic_ranges {
+        rejected.push("[[dynamic_neighbors]]".to_string());
+    }
+    if families.evpn_runtime {
+        rejected.push("EVPN runtime tables".to_string());
+    }
+    if families.fib_tables {
+        rejected.push("[[fib_tables]]".to_string());
+    }
+    if families.honor_knobs {
+        rejected.push("[global] honor_graceful_shutdown / honor_blackhole".to_string());
+    }
+    if !rejected.is_empty() {
+        return SighupReloadRoute::Rejected { reasons: rejected };
+    }
+    let mut sequential = Vec::new();
+    if families.tcp_ao {
+        sequential.push("TCP-AO keyring rotation".to_string());
+    }
+    if families.listener_auth {
+        sequential.push("listener inbound MD5/GTSM inventory".to_string());
+    }
+    if sequential.is_empty() {
+        SighupReloadRoute::Generation
+    } else {
+        SighupReloadRoute::Sequential {
+            reasons: sequential,
+        }
+    }
+}
+
+/// The session action one static neighbor takes in a reload generation.
+///
+/// Policy-only movement is deliberately absent: the peer manager resolves
+/// the final chains of every live peer, static and dynamic, against the
+/// candidate and applies the changed ones through the rollback-capable
+/// resolved-policy snapshot. These kinds cover the session table only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReloadPeerActionKind {
+    /// New static neighbor.
+    Add,
+    /// Static neighbor no longer configured.
+    Remove,
+    /// The resolved session config moved on a session-bound field or the
+    /// peer-group membership changed: one delete/re-add with final policies.
+    Replace,
+    /// Only hot-applied fields moved: applied in place, no session reset.
+    HotUpdate,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReloadPeerAction {
+    pub(crate) key: rustbgpd_api::peer_types::PeerKey,
+    pub(crate) kind: ReloadPeerActionKind,
+}
+
+/// The session action one resolved neighbor takes between two resolutions,
+/// or `None` when only its policy chains (or nothing) moved.
+///
+/// The `[policy.explain]` / `[policy.reject_retention]` knobs ride in the
+/// transport config but are restart-required per peer: sessions read them
+/// when constructed, so they are neither a reshape nor a hot update. The
+/// hot-applied set is what the peer manager updates in place: the max-prefix
+/// family, the GR stale/restart timers, `local_ipv6_nexthop`,
+/// `remove_private_as`, the description, and the max-prefix restart
+/// hold-down. A peer-group reassignment is a reshape even when the resolved
+/// transport config is unchanged.
+fn resolved_session_change(
+    old: &ResolvedNeighbor,
+    new: &ResolvedNeighbor,
+) -> Option<ReloadPeerActionKind> {
+    if old.peer_group != new.peer_group {
+        return Some(ReloadPeerActionKind::Replace);
+    }
+    let next = &new.transport_config;
+    let mut probe = old.transport_config.clone();
+    probe.explain_enabled = next.explain_enabled;
+    probe.explain_cache_size = next.explain_cache_size;
+    probe.reject_retention_enabled = next.reject_retention_enabled;
+    probe.reject_retention_capacity = next.reject_retention_capacity;
+    let knobs_unchanged = probe == *next;
+    probe.max_prefixes = next.max_prefixes;
+    probe.max_prefixes_ipv4 = next.max_prefixes_ipv4;
+    probe.max_prefixes_ipv6 = next.max_prefixes_ipv6;
+    probe.max_prefixes_received_ipv4 = next.max_prefixes_received_ipv4;
+    probe.max_prefixes_received_ipv6 = next.max_prefixes_received_ipv6;
+    probe.max_prefix_action = next.max_prefix_action;
+    probe.max_prefix_warning_percent = next.max_prefix_warning_percent;
+    probe.gr_stale_routes_time = next.gr_stale_routes_time;
+    probe.gr_peer_restart_time_max = next.gr_peer_restart_time_max;
+    probe.local_ipv6_nexthop = next.local_ipv6_nexthop;
+    probe.remove_private_as = next.remove_private_as;
+    if probe != *next {
+        return Some(ReloadPeerActionKind::Replace);
+    }
+    let hot_moved = !knobs_unchanged
+        || old.label != new.label
+        || old.max_prefix_restart_seconds != new.max_prefix_restart_seconds;
+    hot_moved.then_some(ReloadPeerActionKind::HotUpdate)
+}
+
+/// Derive one session action per static neighbor from the complete prior and
+/// candidate configs. Both configs resolve every neighbor through its final
+/// peer group, so a group reshape and an explicit member edit on the same
+/// peer collapse into one `Replace` instead of two rebuilds. Neighbors whose
+/// resolved session config is unchanged get no action even when their
+/// policy chains moved.
+pub(crate) fn plan_reload_peer_actions(
+    prior: &Config,
+    candidate: &Config,
+) -> Result<Vec<ReloadPeerAction>, ConfigError> {
+    use rustbgpd_api::peer_types::PeerKey;
+
+    let key = |neighbor: &Neighbor| {
+        PeerKey::new(
+            neighbor
+                .address
+                .parse()
+                .expect("validated neighbor address"),
+            neighbor.interface.clone(),
+        )
+    };
+    let prior_by_key: BTreeMap<PeerKey, &Neighbor> =
+        prior.neighbors.iter().map(|n| (key(n), n)).collect();
+    let candidate_by_key: BTreeMap<PeerKey, &Neighbor> =
+        candidate.neighbors.iter().map(|n| (key(n), n)).collect();
+
+    let mut actions = Vec::new();
+    for (peer, old) in &prior_by_key {
+        let Some(new) = candidate_by_key.get(peer) else {
+            actions.push(ReloadPeerAction {
+                key: peer.clone(),
+                kind: ReloadPeerActionKind::Remove,
+            });
+            continue;
+        };
+        let old_resolved = prior.resolve_neighbor(old)?;
+        let new_resolved = candidate.resolve_neighbor(new)?;
+        if let Some(kind) = resolved_session_change(&old_resolved, &new_resolved) {
+            actions.push(ReloadPeerAction {
+                key: peer.clone(),
+                kind,
+            });
+        }
+    }
+    for peer in candidate_by_key.keys() {
+        if !prior_by_key.contains_key(peer) {
+            actions.push(ReloadPeerAction {
+                key: peer.clone(),
+                kind: ReloadPeerActionKind::Add,
+            });
+        }
+    }
+    Ok(actions)
+}
+
 /// Classify a validated config diff for the v1 config transaction model.
 ///
 /// This deliberately does not mirror all SIGHUP reload-applied sections. The
@@ -3442,6 +3862,8 @@ pub fn config_diff_json_value(diff: &ConfigDiff) -> serde_json::Value {
             "policy_explain_changed": diff.policy_explain_changed,
             "policy_reject_retention_changed": diff.policy_reject_retention_changed,
         },
+        "sighup_reload": serde_json::to_value(&diff.sighup_route)
+            .unwrap_or(serde_json::Value::Null),
         "informational": serde_json::Value::Object(serde_json::Map::new()),
     })
 }
@@ -3763,6 +4185,13 @@ pub fn format_config_diff_with_style(diff: &ConfigDiff, style: &ConfigDiffTextSt
         out.push('\n');
     }
 
+    if diff.has_reload_applied_changes() {
+        let _ = writeln!(
+            out,
+            "SIGHUP reload route: {}\n",
+            diff.sighup_route.describe()
+        );
+    }
     if diff.has_any_changes() {
         let _ = writeln!(out, "{}", plan_summary_line(diff));
     } else {
@@ -3950,7 +4379,17 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
             && old.global.honor_blackhole != new.global.honor_blackhole);
     let evpn_runtime_change_class = classify_evpn_runtime_change(old, new);
 
-    ConfigDiff {
+    let listener_inbound_auth_changed = match (
+        listener_inbound_auth_inventory(old),
+        listener_inbound_auth_inventory(new),
+    ) {
+        (Ok(old_inventory), Ok(new_inventory)) => {
+            listener_inbound_auth_bearing(&old_inventory)
+                != listener_inbound_auth_bearing(&new_inventory)
+        }
+        _ => false,
+    };
+    let mut diff = ConfigDiff {
         neighbors,
         effective_neighbor_impact,
         peer_groups,
@@ -3989,7 +4428,11 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         policy_explain_changed: old.policy.explain != new.policy.explain,
         policy_reject_retention_changed: old.policy.reject_retention != new.policy.reject_retention,
         evpn_runtime_change_class,
-    }
+        listener_inbound_auth_changed,
+        sighup_route: SighupReloadRoute::Generation,
+    };
+    diff.sighup_route = classify_sighup_reload(SighupReloadFamilies::from_diff(&diff));
+    diff
 }
 
 fn evpn_runtime_config_changed(old: &Config, new: &Config) -> bool {

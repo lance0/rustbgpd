@@ -15,6 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
+use crate::commands::config::confirmation_status_label;
 use crate::commands::watch::bgp_event_json_value;
 use crate::connection::{
     Connection, EFFECTIVE_CONFIG_RPC_TIMEOUT, READ_RPC_TIMEOUT, rpc_with_timeout,
@@ -22,17 +23,19 @@ use crate::connection::{
 use crate::error::CliError;
 use crate::output::{self, JsonNeighbor, outln};
 use crate::proto::bfd_service_client::BfdServiceClient;
+use crate::proto::config_service_client::ConfigServiceClient;
 use crate::proto::control_service_client::ControlServiceClient;
 use crate::proto::event_service_client::EventServiceClient;
 use crate::proto::global_service_client::GlobalServiceClient;
 use crate::proto::neighbor_service_client::NeighborServiceClient;
 use crate::proto::policy_service_client::PolicyServiceClient;
 use crate::proto::{
-    BfdSession, BfdSessionState, GetBfdSessionsRequest, GetEffectiveConfigRequest,
-    GetGlobalRequest, GetValidationPolicyPostureRequest, GetValidationPolicyPostureResponse,
-    HealthRequest, ListDynamicNeighborsRequest, ListNeighborsRequest, ListPolicyEventsRequest,
-    ListSessionEventsRequest, MetricsRequest, ValidationPolicyDimensionPosture,
-    ValidationPolicyDisposition,
+    BfdSession, BfdSessionState, ConfigTransactionConfirmationStatus,
+    ConfigTransactionStatusResponse, GetBfdSessionsRequest, GetConfigTransactionStatusRequest,
+    GetEffectiveConfigRequest, GetGlobalRequest, GetValidationPolicyPostureRequest,
+    GetValidationPolicyPostureResponse, HealthRequest, ListDynamicNeighborsRequest,
+    ListNeighborsRequest, ListPolicyEventsRequest, ListSessionEventsRequest, MetricsRequest,
+    ValidationPolicyDimensionPosture, ValidationPolicyDisposition,
 };
 
 /// Bounded recent slice pulled from each event history for triage. The
@@ -99,6 +102,10 @@ pub(crate) struct DoctorOptions<'a> {
     pub daemon_address: &'a str,
     pub token_file_configured: bool,
     pub json: bool,
+    /// `--pre-upgrade CONFIG`: add the read-only pre-upgrade checks against
+    /// the config file the upgraded daemon will boot. `None` keeps doctor's
+    /// ordinary check and RPC set unchanged.
+    pub pre_upgrade: Option<&'a Path>,
 }
 
 #[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
@@ -114,6 +121,20 @@ struct Check {
     name: String,
     status: CheckStatus,
     detail: String,
+}
+
+impl Check {
+    fn human_text(&self) -> String {
+        use owo_colors::{OwoColorize, Stream::Stdout};
+        let marker = match self.status {
+            CheckStatus::Ok => format!("  {}", "ok".if_supports_color(Stdout, |s| s.green())),
+            CheckStatus::Warn => {
+                format!("{}", "warn".if_supports_color(Stdout, |s| s.yellow()))
+            }
+            CheckStatus::Fail => format!("{}", "FAIL".if_supports_color(Stdout, |s| s.red())),
+        };
+        format!("{marker}  {}", self.detail)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,15 +176,7 @@ impl Reporter {
             detail: detail.into(),
         };
         if !self.json {
-            use owo_colors::{OwoColorize, Stream::Stdout};
-            let marker = match check.status {
-                CheckStatus::Ok => format!("  {}", "ok".if_supports_color(Stdout, |s| s.green())),
-                CheckStatus::Warn => {
-                    format!("{}", "warn".if_supports_color(Stdout, |s| s.yellow()))
-                }
-                CheckStatus::Fail => format!("{}", "FAIL".if_supports_color(Stdout, |s| s.red())),
-            };
-            outln!("{marker}  {}", check.detail)?;
+            outln!("{}", check.human_text())?;
         }
         self.checks.push(check);
         Ok(())
@@ -1916,6 +1929,411 @@ fn authz_enforcement_check(effective_toml: &str) -> Option<Check> {
     })
 }
 
+/// RFC 8212 posture resolved from one TOML document with the documented
+/// omitted-versus-explicit rules: an omitted `config_epoch` is epoch 1; an
+/// omitted `[global] ebgp_requires_policy` resolves to `false` at epoch 1
+/// and `true` at epoch 2; an explicit boolean keeps its stated value in every
+/// epoch. Resolution only reads; nothing here rewrites a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Rfc8212Posture {
+    epoch: u8,
+    epoch_source: &'static str,
+    policy: bool,
+    policy_source: &'static str,
+}
+
+impl Rfc8212Posture {
+    const fn effective(self) -> (u8, bool) {
+        (self.epoch, self.policy)
+    }
+}
+
+impl std::fmt::Display for Rfc8212Posture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "config_epoch = {} ({}), ebgp_requires_policy = {} ({})",
+            self.epoch, self.epoch_source, self.policy, self.policy_source
+        )
+    }
+}
+
+fn rfc8212_posture(document: &toml::Value) -> Result<Rfc8212Posture, String> {
+    let (epoch, epoch_source) = match document.get("config_epoch") {
+        None => (1, "omitted"),
+        Some(toml::Value::Integer(1)) => (1, "explicit"),
+        Some(toml::Value::Integer(2)) => (2, "explicit"),
+        Some(_) => return Err("config_epoch must be 1 or 2".to_string()),
+    };
+    let raw = document
+        .get("global")
+        .and_then(|global| global.get("ebgp_requires_policy"));
+    let (policy, policy_source) = match raw {
+        None if epoch == 2 => (true, "epoch_2_default"),
+        None => (false, "legacy_omission"),
+        Some(toml::Value::Boolean(value)) => (*value, "explicit"),
+        Some(_) => {
+            return Err("[global] ebgp_requires_policy must be a boolean".to_string());
+        }
+    };
+    Ok(Rfc8212Posture {
+        epoch,
+        epoch_source,
+        policy,
+        policy_source,
+    })
+}
+
+/// Evidence gathered for `--pre-upgrade`. Missing evidence fails closed; the
+/// checks never confirm, abort, rewrite, or stop anything.
+struct PreUpgradeEvidence<'a> {
+    /// `None` when the daemon was unreachable; `Some(Err)` when the status
+    /// RPC itself failed (denied, unimplemented, timed out, ...).
+    transaction: Option<&'a Result<ConfigTransactionStatusResponse, tonic::Status>>,
+    /// The daemon's effective config, or the reason it is unavailable.
+    effective_toml: Result<&'a str, &'a str>,
+    /// The daemon's metrics scrape, or the reason it is unavailable.
+    metrics: Result<&'a str, &'a str>,
+}
+
+/// Wording every green pre-upgrade check carries: a live observation is not
+/// quiescence and grants no permission to mutate later.
+const PRE_UPGRADE_NOT_A_FENCE: &str =
+    "this is an observation at one instant, not a fence: a transaction can start after it";
+const INCOMPLETE_EVIDENCE: &str = "evidence incomplete, never a green upgrade verdict";
+const SETTLEMENT_ACTIVE_METRIC: &str = "bgp_runtime_config_settlement_active";
+
+fn pre_upgrade_checks(
+    candidate_path: &Path,
+    evidence: &PreUpgradeEvidence<'_>,
+    observed_at: u64,
+) -> Vec<Check> {
+    vec![
+        upgrade_transaction_check(evidence.transaction, observed_at),
+        upgrade_settlement_check(evidence.metrics, observed_at),
+        upgrade_posture_check(candidate_path, evidence.effective_toml, observed_at),
+    ]
+}
+
+/// `upgrade.transaction`: the same RPC as `rbgp config status`. Only an
+/// empty "none" record or a terminal outcome is green; pending, applying,
+/// rollback-failed, ambiguous, unrecognized, and unavailable states are red
+/// with the confirm/abort/wait action spelled out.
+fn upgrade_transaction_check(
+    status: Option<&Result<ConfigTransactionStatusResponse, tonic::Status>>,
+    observed_at: u64,
+) -> Check {
+    let name = "upgrade.transaction";
+    let fail = |detail: String| Check {
+        name: name.to_string(),
+        status: CheckStatus::Fail,
+        detail,
+    };
+    let response = match status {
+        None => {
+            return fail(format!(
+                "config transaction status unavailable: daemon unreachable — {INCOMPLETE_EVIDENCE}"
+            ));
+        }
+        Some(Err(error)) => {
+            return fail(match error.code() {
+                tonic::Code::PermissionDenied => format!(
+                    "daemon denied GetConfigTransactionStatus (sensitive_read): {} — \
+                     {INCOMPLETE_EVIDENCE}; rerun with a principal permitted to read \
+                     transaction status",
+                    error.message()
+                ),
+                tonic::Code::Unauthenticated => format!(
+                    "daemon rejected this connection's credentials on \
+                     GetConfigTransactionStatus: {} — {INCOMPLETE_EVIDENCE}; rerun with valid \
+                     credentials",
+                    error.message()
+                ),
+                tonic::Code::Unimplemented => format!(
+                    "daemon does not implement GetConfigTransactionStatus — \
+                     {INCOMPLETE_EVIDENCE}; that release predates transaction status, so \
+                     follow its own documented upgrade procedure"
+                ),
+                _ => format!(
+                    "GetConfigTransactionStatus failed: {error} — {INCOMPLETE_EVIDENCE}; rerun \
+                     once the daemon answers"
+                ),
+            });
+        }
+        Some(Ok(response)) => response,
+    };
+    let Some(confirmation) = response.confirmation.as_ref() else {
+        return fail(format!(
+            "daemon returned no confirmation record — {INCOMPLETE_EVIDENCE}"
+        ));
+    };
+    let id = confirmation.confirm_id.as_str();
+    let label = confirmation_status_label(confirmation.status);
+    let human = confirmation.human_text.trim();
+    let never_mutates = "this check never confirms, aborts, or rewrites anything";
+    use ConfigTransactionConfirmationStatus as Confirmation;
+    let (status, detail) = match Confirmation::try_from(confirmation.status)
+        .unwrap_or(Confirmation::Unspecified)
+    {
+        Confirmation::None if id.is_empty() => (
+            CheckStatus::Ok,
+            format!(
+                "no confirmed config transaction is pending as of unix {observed_at}; \
+                 {PRE_UPGRADE_NOT_A_FENCE}"
+            ),
+        ),
+        Confirmation::None => (
+            CheckStatus::Fail,
+            format!(
+                "confirmed transaction {id} has an ambiguous outcome and config mutations are \
+                 fenced: {human} Restart rustbgpd to boot-revert, then rerun this check"
+            ),
+        ),
+        Confirmation::Pending if confirmation.deadline_unix_seconds == 0 => (
+            CheckStatus::Fail,
+            format!(
+                "confirmed transaction {id} is still applying: {human} Wait for the apply to \
+                 finish, then confirm it (`rbgp config confirm {id}`) or abort it (`rbgp \
+                 config abort {id}`) before the coordinated stop; {never_mutates}"
+            ),
+        ),
+        Confirmation::Pending => (
+            CheckStatus::Fail,
+            format!(
+                "confirmed transaction {id} is pending until unix {}: confirm it (`rbgp config \
+                 confirm {id}`) or abort it (`rbgp config abort {id}`) before the coordinated \
+                 stop; {never_mutates}",
+                confirmation.deadline_unix_seconds
+            ),
+        ),
+        Confirmation::AbortFailed | Confirmation::AutoRevertFailed => (
+            CheckStatus::Fail,
+            format!(
+                "confirmed transaction {id} is {label}: {human} Retry `rbgp config abort {id}`, \
+                 confirm with `rbgp config confirm {id}`, or restart rustbgpd to boot-revert, \
+                 then rerun this check"
+            ),
+        ),
+        Confirmation::Confirmed | Confirmation::Aborted | Confirmation::AutoReverted => (
+            CheckStatus::Ok,
+            format!(
+                "last confirmed transaction {id} is terminal ({label}); nothing is pending as \
+                 of unix {observed_at}; {PRE_UPGRADE_NOT_A_FENCE}"
+            ),
+        ),
+        Confirmation::Unspecified => (
+            CheckStatus::Fail,
+            format!(
+                "unrecognized confirmation status {} — evidence ambiguous, never a green \
+                 upgrade verdict",
+                confirmation.status
+            ),
+        ),
+    };
+    Check {
+        name: name.to_string(),
+        status,
+        detail,
+    }
+}
+
+/// `upgrade.settlement`: the settlement watchdog's gauge from the metrics
+/// scrape doctor already collects. The daemon emits the gauge only while an
+/// owner is live or recovery-fenced, so an absent series on a successful
+/// scrape is the idle state; a failed scrape is missing evidence.
+fn upgrade_settlement_check(metrics: Result<&str, &str>, observed_at: u64) -> Check {
+    let name = "upgrade.settlement".to_string();
+    let text = match metrics {
+        Ok(text) => text,
+        Err(reason) => {
+            return Check {
+                name,
+                status: CheckStatus::Fail,
+                detail: format!(
+                    "runtime-config settlement evidence unavailable: {reason} — \
+                     {INCOMPLETE_EVIDENCE}"
+                ),
+            };
+        }
+    };
+    let active = text.lines().find_map(|line| {
+        let rest = line.strip_prefix(SETTLEMENT_ACTIVE_METRIC)?;
+        let (labels, value) = match rest.strip_prefix('{').and_then(|rest| rest.split_once('}')) {
+            Some((labels, value)) => (parse_metric_labels(labels).unwrap_or_default(), value),
+            None => (HashMap::new(), rest.strip_prefix(' ')?),
+        };
+        let value: f64 = value.split_whitespace().next()?.parse().ok()?;
+        (value != 0.0).then_some(labels)
+    });
+    let (status, detail) = match active {
+        Some(labels) => {
+            let label = |key: &str| labels.get(key).map_or("unknown", String::as_str);
+            (
+                CheckStatus::Fail,
+                format!(
+                    "a runtime-config settlement owner is active as of unix {observed_at} \
+                     (kind={}, phase={}, fence_reason={}): a config transaction, neighbor or \
+                     FIB change, or SIGHUP reload has not settled; wait until \
+                     {SETTLEMENT_ACTIVE_METRIC} clears and rerun this check — a fence_reason \
+                     other than none means the daemon is fencing and will exit 70 for a \
+                     supervised restart",
+                    label("kind"),
+                    label("phase"),
+                    label("fence_reason")
+                ),
+            )
+        }
+        None => (
+            CheckStatus::Ok,
+            format!(
+                "no runtime-config settlement owner is active as of unix {observed_at} (the \
+                 daemon emits {SETTLEMENT_ACTIVE_METRIC} only while an owner is live or \
+                 fenced); {PRE_UPGRADE_NOT_A_FENCE}"
+            ),
+        ),
+    };
+    Check {
+        name,
+        status,
+        detail,
+    }
+}
+
+/// `upgrade.posture`: the candidate file's resolved RFC 8212 posture against
+/// the live effective posture. A mismatch means the restart changes
+/// behavior; the check names the offline migration but performs none.
+fn upgrade_posture_check(
+    candidate_path: &Path,
+    effective_toml: Result<&str, &str>,
+    observed_at: u64,
+) -> Check {
+    let name = "upgrade.posture".to_string();
+    let path = candidate_path.display();
+    let fail = |detail: String| Check {
+        name: name.clone(),
+        status: CheckStatus::Fail,
+        detail,
+    };
+    let parse = |text: &str| {
+        toml::from_str::<toml::Value>(text)
+            .map_err(|_| "invalid TOML; source text omitted".to_string())
+            .and_then(|document| rfc8212_posture(&document))
+    };
+    let live = match effective_toml {
+        Ok(text) => text,
+        Err(reason) => {
+            return fail(format!(
+                "live RFC 8212 posture unavailable: {reason} — {INCOMPLETE_EVIDENCE}"
+            ));
+        }
+    };
+    let live = match parse(live) {
+        Ok(posture) => posture,
+        Err(error) => {
+            return fail(format!(
+                "live effective config posture unreadable: {error} — {INCOMPLETE_EVIDENCE}"
+            ));
+        }
+    };
+    let candidate = match fs::read_to_string(candidate_path) {
+        Ok(text) => text,
+        Err(error) => {
+            return fail(format!(
+                "cannot read candidate config {path}: {error} — {INCOMPLETE_EVIDENCE}; pass \
+                 the file the upgraded daemon will boot to --pre-upgrade and run as a user \
+                 that can read it"
+            ));
+        }
+    };
+    let candidate = match parse(&candidate) {
+        Ok(posture) => posture,
+        Err(error) => {
+            return fail(format!(
+                "candidate config {path} posture unreadable: {error}; fix the file, then \
+                 repeat the candidate `rustbgpd --check --strict {path}`"
+            ));
+        }
+    };
+    if candidate.effective() == live.effective() {
+        Check {
+            name,
+            status: CheckStatus::Ok,
+            detail: format!(
+                "candidate {path} resolves to {candidate}; the live daemon runs {live} — \
+                 effective posture matches as of unix {observed_at}; nothing was rewritten"
+            ),
+        }
+    } else {
+        let restore = match live.effective() {
+            (1, false) => format!("run `rustbgpd --migrate-config pin-legacy --offline {path}`"),
+            (2, true) => format!("run `rustbgpd --migrate-config prepare-secure --offline {path}`"),
+            (epoch, policy) => format!(
+                "set top-level `config_epoch = {epoch}` and `[global] ebgp_requires_policy = {policy}` explicitly in {path}"
+            ),
+        };
+        fail(format!(
+            "candidate {path} resolves to {candidate} but the live daemon runs {live} — \
+             restarting on this file changes the RFC 8212 posture. Decide before the \
+             coordinated stop: keep the change only if every eBGP direction has explicit \
+             policy (the candidate `rustbgpd --check --strict {path}` names unpoliced \
+             directions), or restore the live posture in the file after the stop: \
+             {restore}; repeat the candidate `rustbgpd --check --strict {path}` after \
+             any rewrite. This check rewrote nothing"
+        ))
+    }
+}
+
+/// Machine-readable tail of a `--pre-upgrade` run: the instant the
+/// observation was taken and the verdict for that instant.
+#[derive(Serialize)]
+struct PreUpgradeSummary {
+    candidate_config: String,
+    observed_at_unix_seconds: u64,
+    ok: bool,
+}
+
+impl PreUpgradeSummary {
+    fn human_text(&self) -> String {
+        let next = if self.ok {
+            format!(
+                "next: coordinated stop, verify the service is inactive, then repeat the \
+                 candidate `rustbgpd --check --strict {}` and any offline authority checks \
+                 before install",
+                self.candidate_config
+            )
+        } else {
+            format!(
+                "next: resolve the FAIL checks above, then rerun `rbgp doctor --pre-upgrade {}`",
+                self.candidate_config
+            )
+        };
+        format!(
+            "Pre-upgrade observation as of unix {}: {}; {PRE_UPGRADE_NOT_A_FENCE}.\n  {next}",
+            self.observed_at_unix_seconds,
+            if self.ok { "no red checks" } else { "FAIL" }
+        )
+    }
+}
+
+fn json_report(
+    bundle_path: &Path,
+    failed: bool,
+    checks: &[Check],
+    sections: &BTreeMap<&'static str, String>,
+    pre_upgrade: Option<&PreUpgradeSummary>,
+) -> Result<serde_json::Value, CliError> {
+    let mut report = serde_json::json!({
+        "bundle": bundle_path.display().to_string(),
+        "ok": !failed,
+        "checks": serde_json::to_value(checks)?,
+        "sections": serde_json::to_value(sections)?,
+    });
+    if let Some(summary) = pre_upgrade {
+        report["pre_upgrade"] = serde_json::to_value(summary)?;
+    }
+    Ok(report)
+}
+
 pub(crate) async fn run(
     connection: Result<Connection, CliError>,
     opts: &DoctorOptions<'_>,
@@ -1946,6 +2364,10 @@ async fn run_with_deadlines(
     let mut state_dir: Option<String> = None;
     let mut effective_toml: Option<String> = None;
     let mut metrics_text: Option<String> = None;
+    let mut metrics_error: Option<String> = None;
+    let mut effective_config_error: Option<String> = None;
+    let mut transaction_status: Option<Result<ConfigTransactionStatusResponse, tonic::Status>> =
+        None;
     let mut tcp_ao_support = crate::proto::TcpAoSupport::Unspecified.into();
     let daemon_reachable = connection.is_ok();
 
@@ -2094,6 +2516,7 @@ async fn run_with_deadlines(
                 }
                 Err(e) => {
                     sections.insert("system", format!("partial: metrics RPC failed: {e}"));
+                    metrics_error = Some(format!("metrics RPC failed: {e}"));
                 }
             }
 
@@ -2132,7 +2555,26 @@ async fn run_with_deadlines(
                         "config",
                         format!("unavailable: effective-config RPC failed: {e}"),
                     );
+                    effective_config_error = Some(format!("effective-config RPC failed: {e}"));
                 }
+            }
+
+            // --pre-upgrade only: the same RPC as `rbgp config status`, so
+            // plain doctor keeps its RPC set unchanged.
+            if opts.pre_upgrade.is_some() {
+                let mut config = ConfigServiceClient::with_interceptor(
+                    connection.channel(),
+                    connection.interceptor(),
+                );
+                transaction_status = Some(
+                    rpc_with_timeout(
+                        "GetConfigTransactionStatus",
+                        read_budget,
+                        config.get_config_transaction_status(GetConfigTransactionStatusRequest {}),
+                    )
+                    .await
+                    .map(|response| response.into_inner()),
+                );
             }
 
             // peers/bfd.json: presence-aware BFD cause snapshot plus per-peer
@@ -2550,6 +2992,30 @@ async fn run_with_deadlines(
         }
     }
 
+    // ---- pre-upgrade diagnostics (opt-in, read-only) --------------------
+    let mut pre_upgrade_observed_at = None;
+    if let Some(candidate) = opts.pre_upgrade {
+        let observed_at = now_unix_seconds();
+        let unreachable = "daemon unreachable";
+        let evidence = PreUpgradeEvidence {
+            transaction: transaction_status.as_ref(),
+            effective_toml: effective_toml
+                .as_deref()
+                .ok_or(effective_config_error.as_deref().unwrap_or(unreachable)),
+            metrics: metrics_text
+                .as_deref()
+                .ok_or(metrics_error.as_deref().unwrap_or(unreachable)),
+        };
+        for check in pre_upgrade_checks(candidate, &evidence, observed_at) {
+            reporter.record(check.name, check.status, check.detail)?;
+        }
+        sections.insert(
+            "pre_upgrade",
+            format!("collected (observed at unix {observed_at}; an observation, not a fence)"),
+        );
+        pre_upgrade_observed_at = Some(observed_at);
+    }
+
     // Checks and probes above only borrow the potentially large document;
     // transfer its allocation directly into the bundle after the last read.
     if let Some(toml_text) = effective_toml.take() {
@@ -2684,15 +3150,27 @@ async fn run_with_deadlines(
     bundle.write_tar_gz(&bundle_path, &root)?;
 
     let failed = reporter.any_fail();
+    let pre_upgrade =
+        opts.pre_upgrade
+            .zip(pre_upgrade_observed_at)
+            .map(|(candidate, observed_at)| PreUpgradeSummary {
+                candidate_config: candidate.display().to_string(),
+                observed_at_unix_seconds: observed_at,
+                ok: !failed,
+            });
     if opts.json {
-        output::print_json_line(&serde_json::json!({
-            "bundle": bundle_path.display().to_string(),
-            "ok": !failed,
-            "checks": serde_json::to_value(&reporter.checks)?,
-            "sections": serde_json::to_value(&sections_summary)?,
-        }))?;
+        output::print_json_line(&json_report(
+            &bundle_path,
+            failed,
+            &reporter.checks,
+            &sections_summary,
+            pre_upgrade.as_ref(),
+        )?)?;
     } else {
         outln!("Support bundle written: {}", bundle_path.display())?;
+        if let Some(summary) = &pre_upgrade {
+            outln!("{}", summary.human_text())?;
+        }
     }
     Ok(if failed { 2 } else { 0 })
 }
@@ -4469,6 +4947,7 @@ paths = ["x"]
                 daemon_address: &server.addr,
                 token_file_configured: false,
                 json: true,
+                pre_upgrade: None,
             },
             Duration::from_millis(250),
             Duration::from_secs(2),
@@ -4537,6 +5016,7 @@ paths = ["x"]
                 daemon_address: &server.addr,
                 token_file_configured: false,
                 json: true,
+                pre_upgrade: None,
             },
             Duration::from_secs(1),
             Duration::from_millis(20),
@@ -4580,6 +5060,7 @@ paths = ["x"]
                 daemon_address: &server.addr,
                 token_file_configured: false,
                 json: true,
+                pre_upgrade: None,
             },
         )
         .await
@@ -4659,6 +5140,7 @@ paths = ["x"]
                 daemon_address: &server.addr,
                 token_file_configured: false,
                 json: true,
+                pre_upgrade: None,
             },
         )
         .await
@@ -4834,6 +5316,7 @@ paths = ["x"]
                 daemon_address: &server.addr,
                 token_file_configured: false,
                 json: true,
+                pre_upgrade: None,
             },
         )
         .await
@@ -4903,6 +5386,7 @@ paths = ["x"]
                 daemon_address: &server.addr,
                 token_file_configured: false,
                 json: true,
+                pre_upgrade: None,
             },
         )
         .await
@@ -4956,6 +5440,7 @@ paths = ["x"]
                 daemon_address: &server.addr,
                 token_file_configured: false,
                 json: true,
+                pre_upgrade: None,
             },
         )
         .await
@@ -5005,6 +5490,7 @@ paths = ["x"]
                 daemon_address: &server.addr,
                 token_file_configured: false,
                 json: true,
+                pre_upgrade: None,
             },
         )
         .await
@@ -5054,6 +5540,7 @@ paths = ["x"]
                 daemon_address: &server.addr,
                 token_file_configured: false,
                 json: true,
+                pre_upgrade: None,
             },
         )
         .await
@@ -5127,6 +5614,7 @@ paths = ["x"]
                 daemon_address: &server.addr,
                 token_file_configured: false,
                 json: true,
+                pre_upgrade: None,
             },
         )
         .await
@@ -5186,6 +5674,7 @@ paths = ["x"]
                 daemon_address: &server.addr,
                 token_file_configured: false,
                 json: true,
+                pre_upgrade: None,
             },
         )
         .await
@@ -5252,6 +5741,7 @@ paths = ["x"]
                 daemon_address: &server.addr,
                 token_file_configured: false,
                 json: true,
+                pre_upgrade: None,
             },
         )
         .await
@@ -5331,6 +5821,7 @@ paths = ["x"]
                 daemon_address: "http://198.51.100.9:50051",
                 token_file_configured: false,
                 json: true,
+                pre_upgrade: None,
             },
         )
         .await
@@ -5461,6 +5952,7 @@ paths = ["x"]
                 daemon_address: &server.addr,
                 token_file_configured: false,
                 json: true,
+                pre_upgrade: None,
             },
         )
         .await
@@ -5556,6 +6048,7 @@ paths = ["x"]
                 daemon_address: &server.addr,
                 token_file_configured: true,
                 json: true,
+                pre_upgrade: None,
             },
         )
         .await
@@ -5595,6 +6088,7 @@ paths = ["x"]
                 daemon_address: &addr,
                 token_file_configured: false,
                 json: true,
+                pre_upgrade: None,
             },
         )
         .await
@@ -5629,5 +6123,871 @@ paths = ["x"]
         // No daemon-backed files sneak in.
         assert!(!files.iter().any(|(p, _)| p == "config/effective.toml"));
         assert!(!files.iter().any(|(p, _)| p == "peers/neighbors.json"));
+    }
+
+    // ---- pre-upgrade mode ---------------------------------------------
+
+    fn mock_confirmation(
+        status: rustbgpd_api::proto::ConfigTransactionConfirmationStatus,
+        confirm_id: &str,
+        deadline_unix_seconds: u64,
+        human_text: &str,
+    ) -> rustbgpd_api::proto::ConfigTransactionConfirmation {
+        rustbgpd_api::proto::ConfigTransactionConfirmation {
+            status: status as i32,
+            confirm_id: confirm_id.to_string(),
+            timeout_seconds: 0,
+            deadline_unix_seconds,
+            committed_sections: Vec::new(),
+            runtime_snapshot_token: String::new(),
+            human_text: human_text.to_string(),
+        }
+    }
+
+    fn status_response(
+        status: ConfigTransactionConfirmationStatus,
+        confirm_id: &str,
+        deadline_unix_seconds: u64,
+        human_text: &str,
+    ) -> Result<ConfigTransactionStatusResponse, tonic::Status> {
+        Ok(ConfigTransactionStatusResponse {
+            confirmation: Some(crate::proto::ConfigTransactionConfirmation {
+                status: status as i32,
+                confirm_id: confirm_id.to_string(),
+                timeout_seconds: 0,
+                deadline_unix_seconds,
+                committed_sections: Vec::new(),
+                runtime_snapshot_token: String::new(),
+                human_text: human_text.to_string(),
+            }),
+            human_text: format!("{human_text}\n"),
+        })
+    }
+
+    fn assert_detail_mentions(check: &Check, fragments: &[&str]) {
+        for fragment in fragments {
+            assert!(
+                check.detail.contains(fragment),
+                "{} detail lacks {fragment:?}: {}",
+                check.name,
+                check.detail
+            );
+        }
+    }
+
+    #[test]
+    fn pre_upgrade_transaction_check_fails_closed_on_every_nonterminal_or_unavailable_state() {
+        use ConfigTransactionConfirmationStatus as S;
+        let quiet = "No confirmed config transaction is pending.";
+        // Green: an empty "none" record or a terminal outcome, always dated
+        // and never claiming quiescence.
+        for (response, fragment) in [
+            (
+                status_response(S::None, "", 0, quiet),
+                "no confirmed config transaction is pending as of unix 1700",
+            ),
+            (
+                status_response(S::Confirmed, "deploy-1", 0, "confirmed"),
+                "terminal (confirmed)",
+            ),
+            (
+                status_response(S::Aborted, "deploy-1", 0, "aborted"),
+                "terminal (aborted)",
+            ),
+            (
+                status_response(S::AutoReverted, "deploy-1", 0, "reverted"),
+                "terminal (auto_reverted)",
+            ),
+        ] {
+            let check = upgrade_transaction_check(Some(&response), 1700);
+            assert_eq!(check.status, CheckStatus::Ok, "{}", check.detail);
+            assert_detail_mentions(&check, &[fragment, "not a fence"]);
+        }
+        // Red: every nonterminal state names the exact operator action.
+        let cases: [(Result<_, tonic::Status>, &[&str]); 6] = [
+            (
+                status_response(S::Pending, "deploy-1", 1800, "awaiting confirmation"),
+                &[
+                    "pending until unix 1800",
+                    "rbgp config confirm deploy-1",
+                    "rbgp config abort deploy-1",
+                    "never confirms, aborts, or rewrites",
+                ],
+            ),
+            (
+                status_response(
+                    S::Pending,
+                    "deploy-1",
+                    0,
+                    "Confirmed config transaction is applying.",
+                ),
+                &[
+                    "still applying",
+                    "rbgp config confirm deploy-1",
+                    "rbgp config abort deploy-1",
+                ],
+            ),
+            (
+                status_response(
+                    S::AbortFailed,
+                    "deploy-1",
+                    1800,
+                    "Abort rollback failed; the transaction is still pending",
+                ),
+                &[
+                    "abort_failed",
+                    "Abort rollback failed",
+                    "rbgp config abort deploy-1",
+                    "boot-revert",
+                ],
+            ),
+            (
+                status_response(
+                    S::AutoRevertFailed,
+                    "deploy-1",
+                    1800,
+                    "Automatic rollback failed",
+                ),
+                &[
+                    "auto_revert_failed",
+                    "rbgp config confirm deploy-1",
+                    "boot-revert",
+                ],
+            ),
+            (
+                status_response(
+                    S::None,
+                    "deploy-1",
+                    0,
+                    "failed with an ambiguous outcome; config mutations are blocked",
+                ),
+                &[
+                    "ambiguous outcome",
+                    "config mutations are blocked",
+                    "Restart rustbgpd to boot-revert",
+                ],
+            ),
+            (
+                status_response(S::Unspecified, "", 0, ""),
+                &["unrecognized confirmation status 0", "never a green"],
+            ),
+        ];
+        for (response, fragments) in &cases {
+            let check = upgrade_transaction_check(Some(response), 1700);
+            assert_eq!(check.status, CheckStatus::Fail, "{}", check.detail);
+            assert_detail_mentions(&check, fragments);
+        }
+        // Red: missing evidence is incomplete, never green.
+        let unreachable = upgrade_transaction_check(None, 1700);
+        assert_eq!(unreachable.status, CheckStatus::Fail);
+        assert_detail_mentions(&unreachable, &["daemon unreachable", "never a green"]);
+        let empty: Result<_, tonic::Status> = Ok(ConfigTransactionStatusResponse::default());
+        let no_record = upgrade_transaction_check(Some(&empty), 1700);
+        assert_eq!(no_record.status, CheckStatus::Fail);
+        assert_detail_mentions(&no_record, &["no confirmation record", "never a green"]);
+        for (error, fragments) in [
+            (
+                tonic::Status::permission_denied("principal reader lacks sensitive_read"),
+                vec![
+                    "denied GetConfigTransactionStatus",
+                    "principal reader lacks sensitive_read",
+                    "never a green",
+                ],
+            ),
+            (
+                tonic::Status::unauthenticated("bad token"),
+                vec!["rejected this connection's credentials", "bad token"],
+            ),
+            (
+                tonic::Status::unimplemented("no such method"),
+                vec!["does not implement GetConfigTransactionStatus", "predates"],
+            ),
+            (
+                tonic::Status::deadline_exceeded(
+                    "GetConfigTransactionStatus response timed out after 30s",
+                ),
+                vec!["timed out after 30s", "never a green"],
+            ),
+        ] {
+            let failed: Result<ConfigTransactionStatusResponse, _> = Err(error);
+            let check = upgrade_transaction_check(Some(&failed), 1700);
+            assert_eq!(check.status, CheckStatus::Fail, "{}", check.detail);
+            assert_detail_mentions(&check, &fragments);
+        }
+    }
+
+    #[test]
+    fn pre_upgrade_settlement_check_reads_the_watchdog_gauge() {
+        let idle = "# HELP bgp_peers_total peers\nbgp_peers_total 3\n";
+        let check = upgrade_settlement_check(Ok(idle), 1700);
+        assert_eq!(check.status, CheckStatus::Ok, "{}", check.detail);
+        assert_detail_mentions(
+            &check,
+            &[
+                "no runtime-config settlement owner is active as of unix 1700",
+                "not a fence",
+            ],
+        );
+
+        let zero = "bgp_runtime_config_settlement_active{fence_reason=\"none\",kind=\"apply\",phase=\"settled\",response_attached=\"attached\"} 0\n";
+        assert_eq!(
+            upgrade_settlement_check(Ok(zero), 1700).status,
+            CheckStatus::Ok
+        );
+
+        let reload = "bgp_runtime_config_settlement_active{fence_reason=\"none\",kind=\"sighup_reload\",phase=\"mutating\",response_attached=\"detached\"} 1\n";
+        let check = upgrade_settlement_check(Ok(reload), 1700);
+        assert_eq!(check.status, CheckStatus::Fail, "{}", check.detail);
+        assert_detail_mentions(
+            &check,
+            &[
+                "kind=sighup_reload",
+                "phase=mutating",
+                "fence_reason=none",
+                "wait until bgp_runtime_config_settlement_active clears",
+            ],
+        );
+
+        let fenced = "bgp_runtime_config_settlement_active{fence_reason=\"known_divergence\",kind=\"apply\",phase=\"mutating\",response_attached=\"attached\"} 1\nbgp_runtime_config_settlement_fail_stops_total{fence_reason=\"known_divergence\",kind=\"apply\",phase=\"mutating\",response_attached=\"attached\"} 1\n";
+        let check = upgrade_settlement_check(Ok(fenced), 1700);
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert_detail_mentions(&check, &["fence_reason=known_divergence", "exit 70"]);
+
+        // A different series sharing the prefix is not the gauge.
+        let lookalike = "bgp_runtime_config_settlement_active_total 1\n";
+        assert_eq!(
+            upgrade_settlement_check(Ok(lookalike), 1700).status,
+            CheckStatus::Ok
+        );
+
+        let check = upgrade_settlement_check(Err("metrics RPC failed: status: Unavailable"), 1700);
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert_detail_mentions(&check, &["metrics RPC failed", "never a green"]);
+    }
+
+    #[test]
+    fn rfc8212_posture_resolves_omitted_and_explicit_pairs() {
+        let resolve = |text: &str| rfc8212_posture(&toml::from_str(text).unwrap());
+        assert_eq!(
+            resolve("[global]\nasn = 1\n").unwrap(),
+            Rfc8212Posture {
+                epoch: 1,
+                epoch_source: "omitted",
+                policy: false,
+                policy_source: "legacy_omission"
+            }
+        );
+        assert_eq!(
+            resolve("config_epoch = 2\n[global]\nasn = 1\n").unwrap(),
+            Rfc8212Posture {
+                epoch: 2,
+                epoch_source: "explicit",
+                policy: true,
+                policy_source: "epoch_2_default"
+            }
+        );
+        assert_eq!(
+            resolve("config_epoch = 2\n[global]\nebgp_requires_policy = false\n").unwrap(),
+            Rfc8212Posture {
+                epoch: 2,
+                epoch_source: "explicit",
+                policy: false,
+                policy_source: "explicit"
+            }
+        );
+        assert_eq!(
+            resolve("[global]\nebgp_requires_policy = true\n").unwrap(),
+            Rfc8212Posture {
+                epoch: 1,
+                epoch_source: "omitted",
+                policy: true,
+                policy_source: "explicit"
+            }
+        );
+        assert!(
+            resolve("config_epoch = 3\n")
+                .unwrap_err()
+                .contains("must be 1 or 2")
+        );
+        assert!(
+            resolve("[global]\nebgp_requires_policy = \"yes\"\n")
+                .unwrap_err()
+                .contains("must be a boolean")
+        );
+        assert_eq!(
+            resolve("config_epoch = 2\n").unwrap().to_string(),
+            "config_epoch = 2 (explicit), ebgp_requires_policy = true (epoch_2_default)"
+        );
+    }
+
+    #[test]
+    fn pre_upgrade_posture_check_reports_mismatch_without_rewriting() {
+        let dir = tempfile::tempdir().unwrap();
+        let candidate = dir.path().join("config.toml");
+        let live_legacy =
+            "config_epoch = 1\n\n[global]\nasn = 65000\nebgp_requires_policy = false\n";
+
+        // Staged epoch-2 file against a legacy daemon: the restart would
+        // activate the secure default, so the check is red and names both
+        // the policy route and the offline pin, and the file is untouched.
+        let staged = "config_epoch = 2\n\n[global]\nasn = 65000\n";
+        fs::write(&candidate, staged).unwrap();
+        let check = upgrade_posture_check(&candidate, Ok(live_legacy), 1700);
+        assert_eq!(check.status, CheckStatus::Fail, "{}", check.detail);
+        assert_detail_mentions(
+            &check,
+            &[
+                "ebgp_requires_policy = true (epoch_2_default)",
+                "ebgp_requires_policy = false (explicit)",
+                "changes the RFC 8212 posture",
+                &format!("rustbgpd --check --strict {}", candidate.display()),
+                &format!(
+                    "--migrate-config pin-legacy --offline {}",
+                    candidate.display()
+                ),
+                "rewrote nothing",
+            ],
+        );
+        assert_eq!(
+            fs::read_to_string(&candidate).unwrap(),
+            staged,
+            "the check must not rewrite"
+        );
+
+        // Legacy omission on disk matches a materialized epoch-1 daemon.
+        fs::write(&candidate, "[global]\nasn = 65000\n").unwrap();
+        let check = upgrade_posture_check(&candidate, Ok(live_legacy), 1700);
+        assert_eq!(check.status, CheckStatus::Ok, "{}", check.detail);
+        assert_detail_mentions(
+            &check,
+            &[
+                "legacy_omission",
+                "matches as of unix 1700",
+                "nothing was rewritten",
+            ],
+        );
+
+        // An explicit epoch-2 opt-out keeps its stated meaning.
+        fs::write(
+            &candidate,
+            "config_epoch = 2\n\n[global]\nebgp_requires_policy = false\n",
+        )
+        .unwrap();
+        let live_optout =
+            "config_epoch = 2\n\n[global]\nasn = 65000\nebgp_requires_policy = false\n";
+        assert_eq!(
+            upgrade_posture_check(&candidate, Ok(live_optout), 1700).status,
+            CheckStatus::Ok
+        );
+
+        // Missing or unreadable evidence is red, never green.
+        let check =
+            upgrade_posture_check(&candidate, Err("effective-config RPC failed: denied"), 1700);
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert_detail_mentions(
+            &check,
+            &["effective-config RPC failed: denied", "never a green"],
+        );
+        let check = upgrade_posture_check(&candidate, Ok("not = = toml"), 1700);
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert_detail_mentions(&check, &["live effective config posture unreadable"]);
+        let check = upgrade_posture_check(&dir.path().join("absent.toml"), Ok(live_legacy), 1700);
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert_detail_mentions(
+            &check,
+            &[
+                "cannot read candidate config",
+                "--pre-upgrade",
+                "never a green",
+            ],
+        );
+        fs::write(&candidate, "config_epoch = 3\n").unwrap();
+        let check = upgrade_posture_check(&candidate, Ok(live_legacy), 1700);
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert_detail_mentions(&check, &["must be 1 or 2", "rustbgpd --check --strict"]);
+    }
+
+    #[test]
+    fn pre_upgrade_mismatch_restores_every_supported_live_tuple() {
+        let dir = tempfile::tempdir().unwrap();
+        let candidate = dir.path().join("config.toml");
+        for (epoch, policy) in [(1, false), (1, true), (2, false), (2, true)] {
+            fs::write(
+                &candidate,
+                format!(
+                    "config_epoch = {epoch}\n[global]\nebgp_requires_policy = {}\n",
+                    !policy
+                ),
+            )
+            .unwrap();
+            let live =
+                format!("config_epoch = {epoch}\n[global]\nebgp_requires_policy = {policy}\n");
+            let check = upgrade_posture_check(&candidate, Ok(&live), 1700);
+            assert_eq!(check.status, CheckStatus::Fail);
+            match (epoch, policy) {
+                (1, false) => assert!(
+                    check
+                        .detail
+                        .contains("--migrate-config pin-legacy --offline")
+                ),
+                (2, true) => assert!(
+                    check
+                        .detail
+                        .contains("--migrate-config prepare-secure --offline")
+                ),
+                _ => {
+                    assert!(!check.detail.contains("--migrate-config"));
+                    assert!(check.detail.contains(&format!("config_epoch = {epoch}` and `[global] ebgp_requires_policy = {policy}` explicitly")));
+                }
+            }
+            assert!(check.detail.contains("after any rewrite"));
+        }
+    }
+
+    #[tokio::test]
+    async fn pre_upgrade_candidate_errors_redact_source_from_every_report() {
+        let (server, dir, candidate) = green_pre_upgrade_lab().await;
+        let secret = "dummy-secret-do-not-report";
+        let documents = [
+            format!("[global]\nmd5_password = \"{secret}\\q\"\n"),
+            format!("config_epoch = \"{secret}\"\n"),
+            format!("[global]\nebgp_requires_policy = {{ secret = \"{secret}\" }}\n"),
+        ];
+        for (index, document) in documents.iter().enumerate() {
+            fs::write(&candidate, document).unwrap();
+            let bundle_path = dir.path().join(format!("redacted-{index}.tar.gz"));
+            let (code, manifest) = run_doctor(&server.addr, &bundle_path, Some(&candidate)).await;
+            assert_eq!(code, 2);
+            let reported = manifest_check(&manifest, "upgrade.posture");
+            assert_eq!(reported["status"], "fail");
+            let check = Check {
+                name: "upgrade.posture".to_string(),
+                status: CheckStatus::Fail,
+                detail: reported["detail"].as_str().unwrap().to_string(),
+            };
+            let human = check.human_text();
+            assert!(human.contains("FAIL"));
+            assert!(!human.contains(secret));
+            let json = json_report(&bundle_path, true, &[check], &BTreeMap::new(), None).unwrap();
+            assert_eq!(json["ok"], false);
+            assert!(!json.to_string().contains(secret));
+            for (path, contents) in extract_bundle(&bundle_path) {
+                assert!(!contents.contains(secret), "secret leaked into {path}");
+            }
+            assert_eq!(fs::read_to_string(&candidate).unwrap(), *document);
+        }
+    }
+
+    #[test]
+    fn json_report_adds_pre_upgrade_only_in_that_mode() {
+        let bundle = Path::new("/tmp/bundle.tar.gz");
+        let checks = vec![Check {
+            name: "daemon.reachable".to_string(),
+            status: CheckStatus::Ok,
+            detail: "ok".to_string(),
+        }];
+        let sections = BTreeMap::from([("config", "collected".to_string())]);
+        let plain = json_report(bundle, false, &checks, &sections, None).unwrap();
+        let mut keys: Vec<_> = plain.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            ["bundle", "checks", "ok", "sections"],
+            "plain doctor JSON is unchanged"
+        );
+
+        let summary = PreUpgradeSummary {
+            candidate_config: "/etc/rustbgpd/config.toml".to_string(),
+            observed_at_unix_seconds: 1700,
+            ok: true,
+        };
+        let report = json_report(bundle, false, &checks, &sections, Some(&summary)).unwrap();
+        assert_eq!(report["pre_upgrade"]["observed_at_unix_seconds"], 1700);
+        assert_eq!(
+            report["pre_upgrade"]["candidate_config"],
+            "/etc/rustbgpd/config.toml"
+        );
+        assert_eq!(report["pre_upgrade"]["ok"], true);
+        let text = summary.human_text();
+        assert!(text.contains("as of unix 1700"), "{text}");
+        assert!(text.contains("not a fence"), "{text}");
+        assert!(text.contains("coordinated stop"), "{text}");
+        assert!(!text.to_lowercase().contains("safe to upgrade"), "{text}");
+        let red = PreUpgradeSummary {
+            ok: false,
+            ..summary
+        }
+        .human_text();
+        assert!(
+            red.contains("FAIL") && red.contains("rerun `rbgp doctor --pre-upgrade"),
+            "{red}"
+        );
+    }
+
+    /// A mock daemon whose ordinary doctor checks are green, so the exit
+    /// codes below are decided by the pre-upgrade checks alone. Mirrors the
+    /// disabled-peer seeding of the plain green bundle test.
+    async fn green_pre_upgrade_lab() -> (
+        crate::test_support::MockServerHandle,
+        tempfile::TempDir,
+        PathBuf,
+    ) {
+        let server = spawn_mock_server(None).await;
+        let dir = tempfile::tempdir().unwrap();
+        *server.state.config_effective_toml.lock().await = Some(format!(
+            "config_epoch = 1\n\n[global]\nasn = 65000\nebgp_requires_policy = false\nruntime_state_dir = \"{}\"\n",
+            dir.path().display()
+        ));
+        let mut disabled = neighbor(
+            "fe80::1",
+            rustbgpd_api::proto::SessionState::Idle as i32,
+            0,
+            "intentionally disabled",
+        );
+        disabled.config.as_mut().unwrap().interface = "eth0".to_string();
+        *server.state.list_neighbors_response.lock().await = vec![disabled];
+        *server.state.session_events.lock().await = vec![rustbgpd_api::proto::BgpEvent {
+            timestamp: "1".to_string(),
+            peer_address: "fe80::1%eth0".to_string(),
+            event_type: rustbgpd_api::proto::BgpEventType::PeerDisabled as i32,
+            summary: "peer disabled".to_string(),
+            ..Default::default()
+        }];
+        let candidate = dir.path().join("config.toml");
+        fs::write(
+            &candidate,
+            "[global]\nasn = 65000\nrouter_id = \"192.0.2.1\"\n",
+        )
+        .unwrap();
+        (server, dir, candidate)
+    }
+
+    async fn run_doctor(
+        addr: &str,
+        bundle_path: &Path,
+        pre_upgrade: Option<&Path>,
+    ) -> (i32, serde_json::Value) {
+        let code = run(
+            connect(addr, None).await,
+            &DoctorOptions {
+                output: Some(bundle_path),
+                log_file: None,
+                daemon_address: addr,
+                token_file_configured: false,
+                json: true,
+                pre_upgrade,
+            },
+        )
+        .await
+        .unwrap();
+        let files = extract_bundle(bundle_path);
+        let manifest = serde_json::from_str(find(&files, "manifest.json")).unwrap();
+        (code, manifest)
+    }
+
+    fn upgrade_checks(manifest: &serde_json::Value) -> Vec<(String, String, String)> {
+        manifest["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|check| check["name"].as_str().unwrap().starts_with("upgrade."))
+            .map(|check| {
+                (
+                    check["name"].as_str().unwrap().to_string(),
+                    check["status"].as_str().unwrap().to_string(),
+                    check["detail"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    fn assert_upgrade_check(
+        manifest: &serde_json::Value,
+        name: &str,
+        status: &str,
+        fragments: &[&str],
+    ) {
+        let check = manifest_check(manifest, name);
+        assert_eq!(check["status"], status, "{name}: {}", check["detail"]);
+        let detail = check["detail"].as_str().unwrap();
+        for fragment in fragments {
+            assert!(
+                detail.contains(fragment),
+                "{name} detail lacks {fragment:?}: {detail}"
+            );
+        }
+        assert!(
+            !detail.to_lowercase().contains("safe to upgrade")
+                && !detail.to_lowercase().contains("quiescen"),
+            "{name} must never claim quiescence: {detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_upgrade_pending_confirmation_exits_red_with_confirm_abort_guidance() {
+        use rustbgpd_api::proto::ConfigTransactionConfirmationStatus as S;
+        let (server, dir, candidate) = green_pre_upgrade_lab().await;
+        *server.state.config_status_confirmation.lock().await = Some(mock_confirmation(
+            S::Pending,
+            "deploy-20260907-1",
+            now_unix_seconds() + 600,
+            "Confirmed config transaction is awaiting confirmation.",
+        ));
+        let before = fs::read(&candidate).unwrap();
+        let bundle_path = dir.path().join("bundle.tar.gz");
+
+        let (code, manifest) = run_doctor(&server.addr, &bundle_path, Some(&candidate)).await;
+
+        assert_eq!(
+            code, 2,
+            "a pending confirmation is a red pre-upgrade verdict"
+        );
+        assert_upgrade_check(
+            &manifest,
+            "upgrade.transaction",
+            "fail",
+            &[
+                "deploy-20260907-1 is pending until unix",
+                "rbgp config confirm deploy-20260907-1",
+                "rbgp config abort deploy-20260907-1",
+                "before the coordinated stop",
+            ],
+        );
+        assert_upgrade_check(&manifest, "upgrade.settlement", "ok", &["as of unix"]);
+        assert_upgrade_check(
+            &manifest,
+            "upgrade.posture",
+            "ok",
+            &["legacy_omission", "matches"],
+        );
+        // Nothing was resolved on the operator's behalf.
+        assert_eq!(server.state.config_confirm_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(server.state.config_abort_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(fs::read(&candidate).unwrap(), before, "no file rewrite");
+        assert!(
+            manifest["sections"]["pre_upgrade"]
+                .as_str()
+                .unwrap()
+                .contains("an observation, not a fence")
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_upgrade_unavailable_evidence_is_red() {
+        let (server, dir, candidate) = green_pre_upgrade_lab().await;
+        *server.state.config_status_error.lock().await =
+            Some((Code::Unimplemented, "unknown method".to_string()));
+        server
+            .state
+            .metrics_failures_remaining
+            .store(1, Ordering::SeqCst);
+        *server.state.config_effective_error.lock().await = Some((
+            Code::Unavailable,
+            "effective config export busy".to_string(),
+        ));
+        let bundle_path = dir.path().join("bundle.tar.gz");
+
+        let (code, manifest) = run_doctor(&server.addr, &bundle_path, Some(&candidate)).await;
+
+        assert_eq!(code, 2);
+        assert_upgrade_check(
+            &manifest,
+            "upgrade.transaction",
+            "fail",
+            &[
+                "does not implement GetConfigTransactionStatus",
+                "never a green",
+            ],
+        );
+        assert_upgrade_check(
+            &manifest,
+            "upgrade.settlement",
+            "fail",
+            &["metrics RPC failed", "never a green"],
+        );
+        assert_upgrade_check(
+            &manifest,
+            "upgrade.posture",
+            "fail",
+            &[
+                "effective-config RPC failed",
+                "effective config export busy",
+                "never a green",
+            ],
+        );
+        assert!(
+            upgrade_checks(&manifest)
+                .iter()
+                .all(|(_, status, _)| status == "fail"),
+            "missing evidence never yields a green upgrade check"
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_upgrade_permission_denied_is_red() {
+        let (server, dir, candidate) = green_pre_upgrade_lab().await;
+        *server.state.config_status_error.lock().await = Some((
+            Code::PermissionDenied,
+            "principal reader lacks sensitive_read".to_string(),
+        ));
+        *server.state.config_effective_error.lock().await = Some((
+            Code::PermissionDenied,
+            "principal reader lacks sensitive_read".to_string(),
+        ));
+        let bundle_path = dir.path().join("bundle.tar.gz");
+
+        let (code, manifest) = run_doctor(&server.addr, &bundle_path, Some(&candidate)).await;
+
+        assert_eq!(code, 2);
+        assert_upgrade_check(
+            &manifest,
+            "upgrade.transaction",
+            "fail",
+            &[
+                "denied GetConfigTransactionStatus (sensitive_read)",
+                "principal reader lacks sensitive_read",
+                "rerun with a principal permitted",
+            ],
+        );
+        assert_upgrade_check(
+            &manifest,
+            "upgrade.posture",
+            "fail",
+            &[
+                "does not have permission",
+                "principal reader lacks sensitive_read",
+                "never a green",
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_upgrade_rejected_credentials_are_red() {
+        let server = spawn_mock_server(Some("expected-token")).await;
+        let dir = tempfile::tempdir().unwrap();
+        let candidate = dir.path().join("config.toml");
+        fs::write(&candidate, "[global]\nasn = 65000\n").unwrap();
+        let bundle_path = dir.path().join("bundle.tar.gz");
+
+        // No token: every RPC is Unauthenticated, so every upgrade check is red.
+        let (code, manifest) = run_doctor(&server.addr, &bundle_path, Some(&candidate)).await;
+
+        assert_eq!(code, 2);
+        let checks = upgrade_checks(&manifest);
+        assert_eq!(checks.len(), 3, "{checks:?}");
+        assert!(
+            checks.iter().all(|(_, status, _)| status == "fail"),
+            "{checks:?}"
+        );
+        assert_upgrade_check(
+            &manifest,
+            "upgrade.transaction",
+            "fail",
+            &["rejected this connection's credentials", "never a green"],
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_upgrade_refused_connection_is_red() {
+        let dir = tempfile::tempdir().unwrap();
+        let candidate = dir.path().join("config.toml");
+        fs::write(&candidate, "[global]\nasn = 65000\n").unwrap();
+        let bundle_path = dir.path().join("bundle.tar.gz");
+        let addr = format!("unix://{}", dir.path().join("nobody-home.sock").display());
+
+        let (code, manifest) = run_doctor(&addr, &bundle_path, Some(&candidate)).await;
+
+        assert_eq!(code, 2);
+        for name in [
+            "upgrade.transaction",
+            "upgrade.settlement",
+            "upgrade.posture",
+        ] {
+            assert_upgrade_check(
+                &manifest,
+                name,
+                "fail",
+                &["daemon unreachable", "never a green"],
+            );
+        }
+        assert!(manifest["sections"]["pre_upgrade"].is_string());
+    }
+
+    #[tokio::test]
+    async fn pre_upgrade_observation_is_stale_once_a_transaction_starts() {
+        use rustbgpd_api::proto::ConfigTransactionConfirmationStatus as S;
+        let (server, dir, candidate) = green_pre_upgrade_lab().await;
+        let first = dir.path().join("first.tar.gz");
+        let second = dir.path().join("second.tar.gz");
+
+        // A green observation at one instant...
+        let (code, manifest) = run_doctor(&server.addr, &first, Some(&candidate)).await;
+        assert_eq!(code, 0, "{:?}", manifest["checks"]);
+        assert_upgrade_check(
+            &manifest,
+            "upgrade.transaction",
+            "ok",
+            &[
+                "no confirmed config transaction is pending as of unix",
+                "not a fence",
+            ],
+        );
+        assert_upgrade_check(&manifest, "upgrade.settlement", "ok", &["not a fence"]);
+        assert_upgrade_check(&manifest, "upgrade.posture", "ok", &["matches as of unix"]);
+
+        // ...grants nothing: a transaction that starts afterwards makes the
+        // same command red, so the earlier observation is stale.
+        *server.state.config_status_confirmation.lock().await = Some(mock_confirmation(
+            S::Pending,
+            "late-window",
+            now_unix_seconds() + 600,
+            "Confirmed config transaction is awaiting confirmation.",
+        ));
+        let (code, manifest) = run_doctor(&server.addr, &second, Some(&candidate)).await;
+        assert_eq!(
+            code, 2,
+            "a transaction starting after the observation invalidates it"
+        );
+        assert_upgrade_check(
+            &manifest,
+            "upgrade.transaction",
+            "fail",
+            &[
+                "late-window is pending",
+                "rbgp config confirm late-window",
+                "rbgp config abort late-window",
+            ],
+        );
+        assert_eq!(server.state.config_status_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn plain_doctor_ignores_a_healthy_pending_confirmation_window() {
+        use rustbgpd_api::proto::ConfigTransactionConfirmationStatus as S;
+        let (server, dir, _candidate) = green_pre_upgrade_lab().await;
+        *server.state.config_status_confirmation.lock().await = Some(mock_confirmation(
+            S::Pending,
+            "deploy-20260907-1",
+            now_unix_seconds() + 600,
+            "Confirmed config transaction is awaiting confirmation.",
+        ));
+        let bundle_path = dir.path().join("bundle.tar.gz");
+
+        let (code, manifest) = run_doctor(&server.addr, &bundle_path, None).await;
+
+        assert_eq!(
+            code, 0,
+            "a healthy pending-confirm window is not a plain doctor failure"
+        );
+        assert!(
+            upgrade_checks(&manifest).is_empty(),
+            "no upgrade checks outside the mode"
+        );
+        assert!(manifest["sections"].get("pre_upgrade").is_none());
+        assert_eq!(
+            server.state.config_status_calls.load(Ordering::SeqCst),
+            0,
+            "plain doctor issues no transaction status RPC"
+        );
     }
 }

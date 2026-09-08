@@ -525,27 +525,57 @@ sudo systemctl reload rustbgpd
 # or: kill -HUP $(pidof rustbgpd)
 ```
 
-What happens (in dependency order):
+What happens:
 
-1. The daemon re-reads the TOML config file from disk and diffs it
-   against the running snapshot, bucket by bucket.
-2. **Definitions land first** — neighbor sets, named policies, peer
-   groups, and global import / export chains. Each bucket fires a
-   single-shot command at the peer manager that goes through the same
-   `apply_policy_change` / `apply_peer_group_change` paths the gRPC API
-   uses; effect matches a sequence of `SetPolicy` / `SetPeerGroup` /
-   `SetGlobalImportChain` mutations. Hot-applied policy chains land at
-   every affected peer's session task without tearing the BGP session.
-3. **`[[neighbors]]` reconcile** — `diff_neighbors()` computes per-peer
-   add/remove/change deltas; `ReconcilePeers` applies them.
-4. **Deletes of obsolete definitions** in reverse-dependency order so
-   transient `still referenced` rejections don't fire.
+1. The daemon re-reads the TOML config file and its `.rpol` and dataset
+   files from disk, pins restart-required fields to the live values, and
+   classifies the candidate before any credential, listener, session, or
+   catalog effect. `rustbgpd --diff` and `rbgp config diff` print the same
+   classification as `SIGHUP reload route`.
+2. **Generation route** — a candidate whose reload-applied changes are
+   static `[[neighbors]]`, `[peer_groups]`, inline policy definitions,
+   neighbor sets, global chains, changed `.rpol` content (imports included),
+   `[policy.explain]`, or outbound prefix maxima settles as one owned
+   runtime generation. The daemon resolves the complete candidate once and
+   derives one action per static neighbor — unchanged, hot update in place,
+   replace (one delete/re-add with the final policies), add, or remove —
+   while the peer manager resolves every live peer's final chains against
+   the same candidate and applies the changed ones through the
+   rollback-capable policy snapshot. A group reshape plus an explicit edit
+   of one member therefore rebuilds that session exactly once; policy-only
+   and bystander sessions keep their identity. Removed definitions are
+   simply absent from the adopted candidate. The prior config, compiled
+   `.rpol` registry, resolved chains, and captured session configs are
+   retained through the operation: a later failure restores them from
+   memory, the reload reports a clean rejection, the candidate file stays on
+   disk for correction, and an identical retry re-derives the same plan.
+3. **Sequential route** — a candidate with no generation-class change
+   (dataset content refresh, `[[dynamic_neighbors]]`, EVPN runtime tables,
+   `[[fib_tables]]`, the honor knobs, TCP-AO rotation, listener MD5/GTSM
+   inventory, explain-only, `[gnmi_dialout]`) runs the existing
+   per-subsystem steps. A generation-class change combined with a TCP-AO
+   rotation or a listener MD5/GTSM authentication change also stays on
+   this path, logged as running without generation compensation: the
+   rotation is its own ordered protocol and the session reshape primitive
+   refuses authentication changes.
+4. **Rejected compound** — a generation-class change combined with dataset
+   content or bindings, `[[dynamic_neighbors]]`, EVPN runtime tables,
+   `[[fib_tables]]`, or `honor_graceful_shutdown` / `honor_blackhole` is
+   rejected before any effect, naming each family to reload on its own.
+   None of those families retains and restores priors, so their partial
+   effects could not be compensated.
 5. **Automatic Route Refresh on import-policy hot-apply** — when a
    peer's effective import chain changes (whether triggered by a
    SIGHUP reload or a gRPC mutation), the peer manager issues
    `soft_reset_in` (gated on Established) so routes already in
    `AdjRibIn` get re-evaluated against the new policy. Operators no
    longer need to run `softreset` manually after a chain swap.
+
+gRPC credentials rotate only after the runtime generation is acknowledged,
+so a rejected or restored candidate has no credential effect. The generation
+route claims neither atomic wire visibility nor zero session resets: a
+replaced session is reset once, and restoration after a late failure
+re-applies the prior session configs through the same primitives.
 
 Where settlement-owned policy work reaches a clean-session-state fence, the
 state is a fail-closed proof rather than a best-effort hint. The ordinary query
@@ -558,11 +588,13 @@ two-minute batch-reply bound. A local timeout does not cancel the queued repair:
 the late receiver remains daemon-owned and retry flags stay armed until a later
 operation proves convergence.
 
-Reload halts at the first step failure. A typed authoritative receipt records
-the exact successful peer effects, and the peer-manager snapshot, config
-bridge/persister, tracing projection, and gNMI dial-out targets all adopt that
-same complete or known-partial runtime state before the owner settles. The
-operator can then fix the failing TOML and reload again to converge. A command
+On the sequential route, reload halts at the first step failure. A typed
+authoritative receipt records the exact successful peer effects, and the
+peer-manager snapshot, config bridge/persister, tracing projection, and gNMI
+dial-out targets all adopt that same complete or known-partial runtime state
+before the owner settles. The operator can then fix the failing TOML and
+reload again to converge. The generation route never produces a known-partial
+receipt: it settles the candidate or restores the prior generation. A command
 that was definitely not accepted before any prior effect is a clean rejection;
 an accepted reply loss or non-authoritative reconcile instead recovery-fences
 the daemon, makes `/readyz` fail, rejects another persisted mutation, and exits
@@ -730,6 +762,20 @@ validates the config only; it cannot inspect `runtime_state_dir` or
 config-adjacent commit-confirm authority. If retired authority remains or is
 inaccessible, recover it with exactly rustbgpd v0.64.0. Delete it only after
 proving the transaction is terminal and the current config is intended.
+
+`rbgp doctor --pre-upgrade /etc/rustbgpd/config.toml` gathers that live
+evidence in one read-only run: it is red, with the next action, while a
+confirmed transaction is pending, applying, rollback-failed, or ambiguous;
+while a runtime-config settlement owner (a transaction, neighbor or FIB
+change, or SIGHUP reload) is still settling; when the named file resolves to
+a different RFC 8212 epoch/posture than the live daemon runs; and whenever
+the evidence is unavailable, denied, or unimplemented. It never confirms,
+aborts, rewrites, or stops anything, and a green result is dated
+(`observed at unix <t>`): it is an observation at one instant, not a fence —
+a transaction can start after it. Continue with the coordinated stop,
+verify the service is inactive, then repeat the candidate `--check --strict`
+and any offline authority checks before installing. See
+[the check reference](#pre-upgrade-checks).
 
 Moving a config between RFC 8212 epochs is a separate, offline step:
 `rustbgpd --migrate-config pin-legacy|prepare-secure|downgrade-v0.64 --offline
@@ -986,6 +1032,22 @@ configured, because rejected identities are not tracked otherwise. All
 capacity families are
 removed when the session goes down and republished from fresh actor state on
 reconnect; GR-retained RIB rows therefore never appear as live session usage.
+
+### SRv6 service route is visible but cannot be selected
+
+An accepted route with a semantically unusable applicable SRv6 Service TLV
+remains in Adj-RIB-In, but is excluded from best-path selection and export.
+For unicast, `rbgp rib --prefix <cidr> --explain` reports
+`srv6_sid_invalid`; an exact EVPN selector uses
+`rbgp evpn explain ip-prefix --rd <rd> --prefix <cidr>`. This is distinct from
+an import-policy rejection. VPN has no received-route query.
+
+This is not malformed-attribute handling. A malformed recognized Service TLV
+is treated as withdrawn; a malformed generic Prefix-SID attribute is discarded
+while the route remains. See [SRv6 Service framing](path-attribute-registry.md#srv6-service-framing-within-prefix-sid)
+and [service eligibility](path-attribute-registry.md#srv6-service-eligibility)
+for the canonical rules. These reflection checks do not add SRv6 PE import,
+service origination, SID reconstruction, next-hop rewriting, or forwarding.
 
 ---
 
@@ -2124,6 +2186,26 @@ Probe targets come from the daemon's effective config when it is up; when
 it is down, from the local config file (the path a local daemon process
 was started with, else `/etc/rustbgpd/config.toml`) — parsed for
 addresses only, never copied into the bundle.
+
+<a id="pre-upgrade-checks"></a>
+### Pre-upgrade checks (`--pre-upgrade CONFIG`)
+
+`rbgp doctor --pre-upgrade CONFIG` adds three read-only checks against
+`CONFIG`, the file the upgraded daemon will boot, under the same 0/1/2 exit
+contract. Green is an observation at one instant, never a maintenance fence;
+missing evidence is red, never green. The mode resolves nothing on the
+operator's behalf.
+
+| Check | Evidence | Red when |
+|-------|----------|----------|
+| `upgrade.transaction` | `GetConfigTransactionStatus`, the same RPC as `rbgp config status` | a confirmed transaction is pending or applying (confirm or abort it: `rbgp config confirm <id>` / `rbgp config abort <id>`), rollback-failed (retry abort, confirm, or restart to boot-revert), or ambiguous (restart to boot-revert); the RPC is denied, unimplemented, or fails. Green only for an empty "none" record or a terminal `confirmed` / `aborted` / `auto_reverted` outcome |
+| `upgrade.settlement` | `bgp_runtime_config_settlement_active` from the metrics doctor already collects; the daemon emits it only while an owner is live or recovery-fenced | any series is `1` (wait for the transaction, neighbor or FIB change, or SIGHUP reload to settle; a `fence_reason` other than `none` means an exit-70 restart is coming); the metrics RPC failed |
+| `upgrade.posture` | `CONFIG` and the daemon's effective config, both resolved with the `config_epoch` omitted-versus-explicit rules | the effective epoch/posture pair differs (restarting on the file changes RFC 8212 behavior: keep it only with explicit policy on every eBGP direction, or restore the live tuple after the stop: `pin-legacy` writes `(1, false)`, `prepare-secure` writes `(2, true)`; other tuples require setting `config_epoch` and `[global] ebgp_requires_policy` explicitly. Repeat candidate `--check --strict` after any rewrite); `CONFIG` is unreadable or invalid; the effective config is unavailable |
+
+`--json` output gains a `pre_upgrade` object (`candidate_config`,
+`observed_at_unix_seconds`, `ok`) and the manifest a `pre_upgrade` section;
+human output ends with the dated observation and the next step. Nothing else
+in the doctor output changes outside the mode.
 
 ```
 rustbgpd-doctor-<ts>/
