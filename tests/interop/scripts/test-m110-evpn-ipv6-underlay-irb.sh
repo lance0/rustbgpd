@@ -33,14 +33,17 @@
 # and dropped at import — see `docs/reference/limitations.md`. This leg exercises
 # the supported same-family combination.
 #
-# Manual leg. FRR 10.7.1 has a startup race in its per-VRF
-# `advertise ipv6 unicast` Type 5 origination on an IPv6 underlay: it can
-# advertise its IPv4 `bgp router-id` zero-padded into the 16-octet IPv6
-# next-hop field instead of the L3VNI's tunnel source. That makes
-# assertions 3b through 8b red, correctly — rustbgpd programmed what it
-# was sent. The assertions are not relaxed to absorb it. See
-# `docs/artifacts/interop/m110-frr-ipv6-l3vni-next-hop-20260905T114909Z/`
-# and the topology header.
+# FRR PIP is explicitly disabled for this standalone, non-anycast lab.
+# The 2026-09-08 broken-state capture showed the correct IPv6 originator
+# alongside an IPv4 system PIP and differing system/router MACs. FRR's
+# enabled-PIP path can then encode that IPv4 value as the IPv6 next hop.
+# This refines the earlier startup explanation; no startup delay or
+# assertion relaxation is needed. See the baseline and candidate receipts:
+# `docs/artifacts/interop/m110-frr-ipv6-l3vni-next-hop-20260908T194637Z/`
+# `docs/artifacts/interop/m110-ipv6-underlay-no-pip-20260908T195135Z/`.
+# The earlier 2026-09-05 capture is preserved as historical evidence.
+# The hosted kernel-dataplane job runs once, without retry; first main
+# qualification is pending.
 #
 # Prerequisites: containerlab, grpcurl, jq, and the `vrf` kernel module.
 #

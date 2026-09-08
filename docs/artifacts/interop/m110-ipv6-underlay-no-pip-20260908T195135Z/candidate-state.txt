@@ -1,0 +1,254 @@
+COMMAND: show bgp l2vpn evpn summary json
+START: 2026-09-08T19:51:35.070395836Z
+END: 2026-09-08T19:51:35.120050306Z
+EXIT: 0
+STDOUT:
+{
+  "routerId":"10.110.0.2",
+  "as":65000,
+  "vrfId":0,
+  "vrfName":"default",
+  "tableVersion":0,
+  "ribCount":1,
+  "ribMemory":160,
+  "peerCount":1,
+  "peerMemory":23528,
+  "peers":{
+    "fd00:110::1":{
+      "softwareVersion":"n/a",
+      "remoteAs":65000,
+      "localAs":65000,
+      "version":4,
+      "msgRcvd":4,
+      "msgSent":4,
+      "tableVersion":2,
+      "outq":0,
+      "inq":0,
+      "peerUptime":"00:00:02",
+      "peerUptimeMsec":2000,
+      "peerUptimeEstablishedEpoch":1788897093,
+      "pfxRcd":1,
+      "pfxSnt":1,
+      "state":"Established",
+      "peerState":"OK",
+      "connectionsEstablished":1,
+      "connectionsDropped":0,
+      "desc":"rustbgpd-m110-pe1",
+      "idType":"ipv6"
+    }
+  },
+  "failedPeers":0,
+  "displayedPeers":1,
+  "totalPeers":1,
+  "dynamicPeers":0,
+  "bestPath":{
+    "multiPathRelax":"false"
+  }
+}
+
+STDERR:
+% Can't open configuration file /etc/frr/vtysh.conf due to 'No such file or directory'.
+Configuration file[/etc/frr/frr.conf] processing failure: 11
+
+
+COMMAND: show bgp l2vpn evpn vni 110
+START: 2026-09-08T19:51:35.121097545Z
+END: 2026-09-08T19:51:35.174996046Z
+EXIT: 0
+STDOUT:
+VNI: 110 (known to the kernel)
+  Type: L3
+  Tenant VRF: vrf1
+  RD: 65000:110
+  Originator IP: fd00:110::2
+  MAC-VRF Site-of-Origin:
+  Advertise-gw-macip : n/a
+  Advertise-svi-macip : n/a
+  Advertise-pip: No
+  System-IP: 10.110.0.2
+  System-MAC: 26:36:61:ae:ed:6d
+  Router-MAC: 26:36:61:ae:ed:6d
+  Import Route Target:
+    65000:110
+  Export Route Target:
+    65000:110
+
+STDERR:
+% Can't open configuration file /etc/frr/vtysh.conf due to 'No such file or directory'.
+Configuration file[/etc/frr/frr.conf] processing failure: 11
+
+
+COMMAND: show bgp l2vpn evpn route type prefix
+START: 2026-09-08T19:51:35.176070225Z
+END: 2026-09-08T19:51:35.227446887Z
+EXIT: 0
+STDOUT:
+BGP table version is 2, local router ID is 10.110.0.2
+Status codes:  s suppressed, d damped, h history, u unsorted, * valid, > best, = multipath,
+               i internal, r RIB-failure, S Stale, R Removed
+Origin codes:  i - IGP, e - EGP, ? - incomplete
+EVPN type-1 prefix: [1]:[EthTag]:[ESI]:[IPlen]:[VTEP-IP]:[Frag-id]
+EVPN type-2 prefix: [2]:[EthTag]:[MAClen]:[MAC]:[IPlen]:[IP]
+EVPN type-3 prefix: [3]:[EthTag]:[IPlen]:[OrigIP]
+EVPN type-4 prefix: [4]:[ESI]:[IPlen]:[OrigIP]
+EVPN type-5 prefix: [5]:[EthTag]:[IPlen]:[IP]
+
+   Network          Next Hop            Metric LocPrf Weight Path
+                    Extended Community
+Route Distinguisher: 65000:110
+ *>i [5]:[0]:[64]:[2001:db8:110:1::] RD 65000:110
+                    fd00:110::1                   100      0 i
+                    RT:65000:110 ET:8 Rmac:02:00:00:00:01:10
+ *>  [5]:[0]:[64]:[2001:db8:110:2::] RD 65000:110
+                    fd00:110::2              0         32768 ?
+                    ET:8 RT:65000:110 Rmac:26:36:61:ae:ed:6d
+
+Displayed 2 prefixes (2 paths) (of requested type)
+
+STDERR:
+% Can't open configuration file /etc/frr/vtysh.conf due to 'No such file or directory'.
+Configuration file[/etc/frr/frr.conf] processing failure: 11
+
+
+COMMAND: show bgp l2vpn evpn route type prefix json
+START: 2026-09-08T19:51:35.228453365Z
+END: 2026-09-08T19:51:35.274564997Z
+EXIT: 0
+STDOUT:
+{
+"65000:110":{"rd":"65000:110","[5]:[0]:[64]:[2001:db8:110:1::]":{"prefix":"[5]:[0]:[64]:[2001:db8:110:1::]","prefixLen":352,"pathCount":1,"multiPathCount":1,"paths":[[{"valid":true,"bestpath":true,"selectionReason":"First path received","pathFrom":"internal","routeType":5,"ethTag":0,"ipLen":64,"ip":"2001:db8:110:1::","locPrf":100,"weight":0,"peerId":"fd00:110::1","path":"","origin":"IGP","extendedCommunity":{"string":"RT:65000:110 ET:8 Rmac:02:00:00:00:01:10"},"nexthops":[{"ip":"fd00:110::1","afi":"ipv6","used":true}]}]],"flags":{"bestPathExists":true}},"[5]:[0]:[64]:[2001:db8:110:2::]":{"prefix":"[5]:[0]:[64]:[2001:db8:110:2::]","prefixLen":352,"pathCount":1,"multiPathCount":1,"paths":[[{"valid":true,"bestpath":true,"selectionReason":"First path received","pathFrom":"external","routeType":5,"ethTag":0,"ipLen":64,"ip":"2001:db8:110:2::","metric":0,"weight":32768,"peerId":"(unspec)","path":"","origin":"incomplete","extendedCommunity":{"string":"ET:8 RT:65000:110 Rmac:26:36:61:ae:ed:6d"},"nexthops":[{"ip":"fd00:110::2","hostname":"pe2","afi":"ipv6","used":true}]}]],"flags":{"bestPathExists":true}},"numRoutes":2}
+,"numPrefix":2,"numPaths":2}
+
+STDERR:
+% Can't open configuration file /etc/frr/vtysh.conf due to 'No such file or directory'.
+Configuration file[/etc/frr/frr.conf] processing failure: 11
+
+
+COMMAND: show bgp l2vpn evpn neighbors fd00:110::1 advertised-routes
+START: 2026-09-08T19:51:35.275543403Z
+END: 2026-09-08T19:51:35.325263532Z
+EXIT: 0
+STDOUT:
+BGP table version is 0, local router ID is 10.110.0.2
+Default local pref 100, local AS 65000
+Status codes:  s suppressed, d damped, h history, u unsorted, * valid, > best, = multipath,
+               i internal, r RIB-failure, S Stale, R Removed
+Origin codes:  i - IGP, e - EGP, ? - incomplete
+   Network          Next Hop            Metric LocPrf Weight Path
+Route Distinguisher: 65000:110
+ *> [5]:[0]:[64]:[2001:db8:110:2::]
+                    fd00:110::2              0    100      0 ?
+
+Total number of prefixes 1
+
+STDERR:
+% Can't open configuration file /etc/frr/vtysh.conf due to 'No such file or directory'.
+Configuration file[/etc/frr/frr.conf] processing failure: 11
+
+
+COMMAND: show evpn vni 110
+START: 2026-09-08T19:51:35.326260716Z
+END: 2026-09-08T19:51:35.382223229Z
+EXIT: 0
+STDOUT:
+VNI: 110
+  Type: L3
+  Tenant VRF: vrf1
+  Vlan: 1
+  Bridge: br110
+  Local Vtep Ip: fd00:110::2
+  Vxlan-Intf: vxlan110
+  SVI-If: br110
+  State: Up
+  VNI Filter: none
+  System MAC: 26:36:61:ae:ed:6d
+  Router MAC: 26:36:61:ae:ed:6d
+  Number of MACs (local and remote) known for this VNI: 1
+  Number of ARPs (IPv4 and IPv6, local and remote) known for this VNI: 1
+  L2 VNIs:
+
+STDERR:
+% Can't open configuration file /etc/frr/vtysh.conf due to 'No such file or directory'.
+Configuration file[/etc/frr/frr.conf] processing failure: 11
+
+
+COMMAND: show evpn vni detail
+START: 2026-09-08T19:51:35.383266392Z
+END: 2026-09-08T19:51:35.426480322Z
+EXIT: 0
+STDOUT:
+VNI: 110
+  Type: L3
+  Tenant VRF: vrf1
+  Vlan: 1
+  Bridge: br110
+  Local Vtep Ip: fd00:110::2
+  Vxlan-Intf: vxlan110
+  SVI-If: br110
+  State: Up
+  VNI Filter: none
+  System MAC: 26:36:61:ae:ed:6d
+  Router MAC: 26:36:61:ae:ed:6d
+  Number of MACs (local and remote) known for this VNI: 1
+  Number of ARPs (IPv4 and IPv6, local and remote) known for this VNI: 1
+  L2 VNIs:
+
+
+STDERR:
+% Can't open configuration file /etc/frr/vtysh.conf due to 'No such file or directory'.
+Configuration file[/etc/frr/frr.conf] processing failure: 11
+
+
+COMMAND: show running-config
+START: 2026-09-08T19:51:35.427485759Z
+END: 2026-09-08T19:51:35.476081444Z
+EXIT: 0
+STDOUT:
+Building configuration...
+
+Current configuration:
+!
+frr version 10.7.1_git
+frr defaults traditional
+hostname pe2
+log stdout
+!
+vrf vrf1
+ vni 110
+exit-vrf
+!
+router bgp 65000
+ bgp router-id 10.110.0.2
+ bgp log-neighbor-changes
+ no bgp default ipv4-unicast
+ neighbor fd00:110::1 remote-as 65000
+ neighbor fd00:110::1 description rustbgpd-m110-pe1
+ neighbor fd00:110::1 timers 10 30
+ !
+ address-family l2vpn evpn
+  neighbor fd00:110::1 activate
+  advertise-all-vni
+ exit-address-family
+exit
+!
+router bgp 65000 vrf vrf1
+ bgp router-id 10.110.0.2
+ !
+ address-family ipv6 unicast
+  redistribute connected
+ exit-address-family
+ !
+ address-family l2vpn evpn
+  advertise ipv6 unicast
+  no advertise-pip
+  rd 65000:110
+  route-target import 65000:110
+  route-target export 65000:110
+ exit-address-family
+exit
+!
+end
+
+STDERR:
+% Can't open configuration file /etc/frr/vtysh.conf due to 'No such file or directory'.
+Configuration file[/etc/frr/frr.conf] processing failure: 11

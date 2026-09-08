@@ -1,0 +1,51 @@
+{
+  "daemon_source": "cdedcd5212cb9adacc1295e8e0cc405cf573eb34",
+  "daemon_image_id": "sha256:7e3e05871ef5b637defa14676a1f4cdd12a010164c4ae34869a4239849875daa",
+  "frr_image_id": "sha256:e995beaa50fdc9edb35eadcfefa29b7f062cc06f2b812613789b68fa541554d2",
+  "original_driver_sha256": "b15f88f3fc8d38115b364da3ec406573b388a3931071c169dcc256358f699b4e",
+  "baseline_config_sha256": "9379cd4a77edbc920565dcaa6260a4c4e2ee87ef59f355ce231bbc12cb09a184",
+  "candidate_config_sha256": "528136b2e926d543d6457e87ecc8dee7a49fd9f2808ec3860b19cbbdd2fb693c",
+  "candidate_runs": [
+    {
+      "run": 1,
+      "post_next_hop_capture": true,
+      "deploy_exit": 0,
+      "driver_exit": 0,
+      "destroy_exit": 0,
+      "passed": 19,
+      "failed": 0
+    },
+    {
+      "run": 2,
+      "post_next_hop_capture": false,
+      "deploy_exit": 0,
+      "driver_exit": 0,
+      "destroy_exit": 0,
+      "passed": 19,
+      "failed": 0
+    },
+    {
+      "run": 3,
+      "post_next_hop_capture": false,
+      "deploy_exit": 0,
+      "driver_exit": 0,
+      "destroy_exit": 0,
+      "passed": 19,
+      "failed": 0
+    }
+  ],
+  "capture": {
+    "frr_command_exits": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "decoded_rpc_exit": 0,
+    "decoded_exact_route_check_exit": 0
+  }
+}
