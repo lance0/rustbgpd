@@ -122,6 +122,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   compensated exactly as before; an ambiguous publication or a lost
   acknowledgement still fences and exits 70.
 
+- The update-group registry now releases unused compiled policy contents
+  after regrouping or discarded preparation. Across repeated distinct
+  reloads, the registry retains only live group and transition payloads;
+  historical ID slots remain so retired IDs cannot alias another policy.
+
 ### Upgrade notes
 
 - A config transaction whose candidate cannot be staged on disk now fails
@@ -155,6 +160,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   complete history directory aside before starting an older writer that
   ignores v3. Metadata rows cannot restore oversized configs; keep deployment
   sources independently. Commit-confirm v3 recovery remains a separate lifecycle.
+
+- `bgp_update_group_interned_chains` now counts currently retained registry
+  payloads, rather than all contents seen since startup. The
+  `bgp_update_group_keys` gauge still counts historical key slots. Group IDs
+  remain stable while their policy contents are live and across no-op
+  reloads; reinstalling a fully retired policy creates a new ID.
 
 ## [0.69.0] — 2026-09-07
 

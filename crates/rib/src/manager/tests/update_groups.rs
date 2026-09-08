@@ -2091,12 +2091,10 @@ async fn content_identical_policy_replace_is_key_stable() {
 
     assert_eq!(query_update_group(&tx, peer).await, "group:1");
     assert_metric(regroups_total(&metrics), 1.0, "regroups_total");
-    // Registry growth is append-only: the new content and key ADD to
-    // the registry (LAN-311 growth observability; slot 0 is retained
-    // for key-stable reuse, not evicted).
+    // Retired payloads are released; only historical ID metadata grows.
     assert_metric(
         gauge_metric_value(&metrics, "bgp_update_group_interned_chains", &[]),
-        2.0,
+        1.0,
         "bgp_update_group_interned_chains after a content change",
     );
     assert_metric(
@@ -3452,8 +3450,10 @@ async fn clean_policy_transition_falls_back_wholesale_on_member_ceiling_rejectio
             "rollback must reconcile every member's prior wire view"
         );
     }
+    let rollback_group = query_update_group(&tx, peers[0]).await;
+    assert_ne!(rollback_group, "group:0", "retired IDs are not reused");
     for &peer in &peers {
-        assert_eq!(query_update_group(&tx, peer).await, "group:0");
+        assert_eq!(query_update_group(&tx, peer).await, rollback_group);
         assert_eq!(
             query_first_export_term_hits(&tx, peer).await,
             (2, 2),
@@ -6778,6 +6778,311 @@ fn detached_rpol_replacements(
     batch_replacements(members, &policy)
 }
 
+#[test]
+fn authoritative_replacement_releases_unused_compiled_policy() {
+    let a = rpol_community_chain(0xFDE8_0001);
+    let old = Arc::downgrade(a.policies[0].rpol.as_ref().unwrap());
+    // Startup global and PeerUp collision records are independent policy
+    // owners. Install A after registration to isolate registry ownership.
+    let mut fleet = batched_pcb_fleet_n(None, 2);
+    fleet
+        .manager
+        .apply_export_policy_replacements_synchronously(batch_replacements(&fleet.members, &a))
+        .unwrap();
+    for receiver in &mut fleet.receivers {
+        while receiver.try_recv().is_ok() {}
+    }
+    let source = fleet.manager.grouped_member_of(fleet.members[0]).unwrap();
+    drop(a);
+    assert!(
+        old.upgrade().is_some(),
+        "the active group must own its policy"
+    );
+
+    let b = rpol_community_chain(0xFDE8_0002);
+    fleet
+        .manager
+        .apply_export_policy_replacements_synchronously(batch_replacements(&fleet.members, &b))
+        .unwrap();
+    for receiver in &mut fleet.receivers {
+        while receiver.try_recv().is_ok() {}
+    }
+    let receipt = fleet
+        .manager
+        .authoritative_transition_receipts
+        .last()
+        .unwrap();
+    assert_eq!(receipt.outcome, "committed");
+    assert_eq!((receipt.dirty_after, receipt.pending_after), (0, 0));
+    assert!(!fleet.manager.group_ribs.contains_key(&source));
+    assert!(
+        old.upgrade().is_none(),
+        "replaced compiled policy survived its final live group"
+    );
+}
+
+#[test]
+fn distinct_authoritative_replacements_bound_compiled_policy_ownership() {
+    let mut fleet = batched_pcb_fleet_n(None, 2);
+    let mut prior = None;
+    let mut prior_group = 0;
+    for generation in 1..=16 {
+        let policy = rpol_community_chain(0xFDE8_0000 + generation);
+        let current = Arc::downgrade(policy.policies[0].rpol.as_ref().unwrap());
+        fleet
+            .manager
+            .apply_export_policy_replacements_synchronously(batch_replacements(
+                &fleet.members,
+                &policy,
+            ))
+            .unwrap();
+        for receiver in &mut fleet.receivers {
+            while receiver.try_recv().is_ok() {}
+        }
+        let group = fleet.manager.grouped_member_of(fleet.members[0]).unwrap();
+        assert!(
+            group > prior_group,
+            "retired IDs must never alias a new policy"
+        );
+        assert_metric(
+            gauge_metric_value(
+                &fleet.manager.metrics,
+                "bgp_update_group_interned_chains",
+                &[],
+            ),
+            1.0,
+            "one current registry payload per generation",
+        );
+        if let Some(prior) = prior {
+            let prior: std::sync::Weak<rustbgpd_policy::ir::CompiledChain> = prior;
+            assert!(prior.upgrade().is_none(), "generation {generation}");
+        }
+        // A fresh, content-equal copy must preserve the active ID.
+        fleet
+            .manager
+            .replace_peer_export_policy_synchronously(
+                fleet.members[0],
+                Some(rpol_community_chain(0xFDE8_0000 + generation)),
+            )
+            .unwrap();
+        assert_eq!(
+            fleet.manager.grouped_member_of(fleet.members[0]),
+            Some(group)
+        );
+        drop(policy);
+        assert!(current.upgrade().is_some());
+        prior = Some(current);
+        prior_group = group;
+    }
+}
+
+#[test]
+fn policy_reclamation_preserves_other_groups_sharing_the_chain() {
+    let mut fleet = batched_pcb_fleet_n(None, 2);
+    // Distinct staging profiles share the same interned chain content.
+    fleet
+        .manager
+        .peer_is_rr_client
+        .insert(fleet.members[0], true);
+    fleet.manager.recompute_update_group(fleet.members[0]);
+    let a = rpol_community_chain(0xFDE8_0001);
+    let old = Arc::downgrade(a.policies[0].rpol.as_ref().unwrap());
+    fleet
+        .manager
+        .apply_export_policy_replacements_synchronously(batch_replacements(&fleet.members, &a))
+        .unwrap();
+    drop(a);
+    for receiver in &mut fleet.receivers {
+        while receiver.try_recv().is_ok() {}
+    }
+    let remaining_group = fleet.manager.grouped_member_of(fleet.members[1]).unwrap();
+    assert_ne!(
+        fleet.manager.grouped_member_of(fleet.members[0]),
+        Some(remaining_group)
+    );
+    let b = rpol_community_chain(0xFDE8_0002);
+    fleet
+        .manager
+        .replace_peer_export_policy_synchronously(fleet.members[0], Some(b.clone()))
+        .unwrap();
+    assert!(old.upgrade().is_some(), "another live group still uses A");
+    assert_eq!(
+        fleet.manager.grouped_member_of(fleet.members[1]),
+        Some(remaining_group)
+    );
+    fleet
+        .manager
+        .replace_peer_export_policy_synchronously(fleet.members[1], Some(b))
+        .unwrap();
+    assert!(old.upgrade().is_none(), "the final A group was removed");
+}
+
+#[test]
+fn authoritative_reclamation_keeps_later_preclassified_destinations() {
+    let mut fleet = batched_pcb_fleet_n(None, 4);
+    let policies = [
+        rpol_community_chain(0xFDE8_0001),
+        rpol_community_chain(0xFDE8_0002),
+    ];
+    for (members, policy) in fleet.members.chunks(2).zip(&policies) {
+        fleet
+            .manager
+            .apply_export_policy_replacements_synchronously(batch_replacements(members, policy))
+            .unwrap();
+    }
+    for receiver in &mut fleet.receivers {
+        while receiver.try_recv().is_ok() {}
+    }
+    let next = [
+        rpol_community_chain(0xFDE8_0003),
+        rpol_community_chain(0xFDE8_0004),
+    ];
+    let replacements = fleet
+        .members
+        .chunks(2)
+        .zip(&next)
+        .flat_map(|(members, policy)| batch_replacements(members, policy))
+        .collect();
+    fleet
+        .manager
+        .apply_export_policy_replacements_synchronously(replacements)
+        .unwrap();
+    let receipt = fleet
+        .manager
+        .authoritative_transition_receipts
+        .last()
+        .unwrap();
+    assert_eq!((receipt.shared_cohorts, receipt.shared_members), (2, 4));
+    for (index, &peer) in fleet.members.iter().enumerate() {
+        let group = fleet.manager.grouped_member_of(peer).unwrap();
+        // The first cohort's finalization must not retire the second cohort's
+        // prospective chain before its group table has been created.
+        fleet.manager.recompute_update_group(peer);
+        assert_eq!(fleet.manager.grouped_member_of(peer), Some(group));
+        let updates: Vec<_> =
+            std::iter::from_fn(|| fleet.receivers[index].try_recv().ok()).collect();
+        assert!(updates.iter().any(|update| !update.announce.is_empty()));
+        assert!(
+            updates
+                .iter()
+                .flat_map(|update| update.announce.iter())
+                .all(|route| {
+                    route.attributes.iter().any(|attribute| {
+                        matches!(attribute, PathAttribute::Communities(values)
+                    if values.contains(&(0xFDE8_0003 + u32::try_from(index / 2).unwrap())))
+                    })
+                })
+        );
+        assert!(!updates.is_empty());
+    }
+    assert_metric(
+        gauge_metric_value(
+            &fleet.manager.metrics,
+            "bgp_update_group_interned_chains",
+            &[],
+        ),
+        2.0,
+        "both authoritative destination payloads remain live",
+    );
+}
+
+#[test]
+fn parked_classification_preserves_policy_id_until_terminal_discard() {
+    let (mut manager, peers, _receivers) = direct_clean_transition_manager(2, 2, None);
+    let policy = rpol_community_chain(0xFDE8_0001);
+    let weak = Arc::downgrade(policy.policies[0].rpol.as_ref().unwrap());
+    let _response = start_clean_transition(&mut manager, &peers, &policy);
+    assert_eq!(step_parked_transition(&mut manager).1, "continue");
+    let destination = manager
+        .pending_clean_policy_transition
+        .as_ref()
+        .unwrap()
+        .registry_group_ids()
+        .find(|id| !manager.group_ribs.contains_key(id))
+        .unwrap();
+    assert!(
+        manager
+            .apply_export_policy_replacements_synchronously(Vec::new())
+            .is_err()
+    );
+    manager.reclaim_unused_update_group_policies();
+    assert_eq!(
+        manager
+            .clean_policy_transition_destination(peers[0], Some(&policy))
+            .unwrap()
+            .1,
+        destination,
+        "a parked destination must retain its ID before its group exists"
+    );
+    let mut canceled = manager.pending_clean_policy_transition.take().unwrap();
+    canceled
+        .discard_uncommitted_transition(&mut manager)
+        .unwrap();
+    drop(canceled);
+    drop(policy);
+    assert!(
+        weak.upgrade().is_none(),
+        "discard must release uncommitted contents"
+    );
+}
+
+#[test]
+fn prepared_policy_contents_release_after_discard_or_rejection() {
+    for complete in [false, true] {
+        let (mut manager, peers, _receivers) = direct_clean_transition_manager(2, 2, None);
+        let policy = rpol_community_chain(0xFDE8_0001);
+        let weak = Arc::downgrade(policy.policies[0].rpol.as_ref().unwrap());
+        let (reply, _response) = oneshot::channel();
+        manager.begin_destination_prestage(peers[0], Some(&policy), reply);
+        let destination = manager
+            .pending_destination_prestage
+            .as_ref()
+            .unwrap()
+            .destination;
+        if complete {
+            while manager.pending_destination_prestage.is_some() {
+                manager.advance_destination_prestage();
+            }
+            assert_eq!(manager.prepared_destination, Some(destination));
+        }
+        manager.reclaim_unused_update_group_policies();
+        assert_eq!(
+            manager
+                .clean_policy_transition_destination(peers[0], Some(&policy))
+                .unwrap()
+                .1,
+            destination
+        );
+        drop(policy);
+        assert!(
+            weak.upgrade().is_some(),
+            "preparation still owns its policy"
+        );
+        manager.discard_prepared_export_destination();
+        assert!(weak.upgrade().is_none());
+        assert!(!manager.group_ribs.contains_key(&destination));
+    }
+
+    // The late unicast-only preflight rejects after interning the candidate.
+    let (mut manager, peers, _receivers) = direct_clean_transition_manager(2, 0, None);
+    manager
+        .peer_sendable_families
+        .get_mut(&peers[0])
+        .unwrap()
+        .push((Afi::Ipv4, Safi::MplsVpn));
+    manager.recompute_update_group(peers[0]);
+    let policy = rpol_community_chain(0xFDE8_0002);
+    let weak = Arc::downgrade(policy.policies[0].rpol.as_ref().unwrap());
+    let (reply, mut response) = oneshot::channel();
+    manager.begin_destination_prestage(peers[0], Some(&policy), reply);
+    assert!(response.try_recv().unwrap().is_err());
+    drop(policy);
+    assert!(
+        weak.upgrade().is_none(),
+        "rejected preflight must not retain contents"
+    );
+}
+
 fn authoritative_receipt_closes(r: &AuthoritativeTransitionReceipt) -> bool {
     r.registration_membership_us
         == r.registered_peer_source_membership_scan_us
@@ -6907,9 +7212,8 @@ fn batched_authoritative_four_generations_emit_exact_terminal_receipts() {
         assert_eq!(
             (r.intern_candidates, r.intern_hits, r.intern_misses),
             match generation {
-                0 => (639, 319, 1),
-                3 => (320, 320, 0),
-                _ => (640, 320, 0),
+                0 | 3 => (639, 319, 1),
+                _ => (320, 320, 0),
             }
         );
         assert_eq!(
