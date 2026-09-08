@@ -2566,6 +2566,8 @@ fn m104_current_arouteserver_differential_is_exact_and_keeps_m90_immutable() {
 fn m83_eor_order_rejects_same_frame_reversal() {
     // Destructive red proof: replacing tuple order with frame-only order makes
     // the script's reversed same-frame fixture pass and this test fail.
+    // Capture growth also rejects an older valid OPEN and incomplete snapshots;
+    // removing the bounce timestamp fence makes readiness pass too early.
     let script = interop_path("scripts/test-m83-routeserver-multistack.sh");
     let output = Command::new("bash")
         .arg(&script)
@@ -2672,6 +2674,18 @@ fn m83_capture_and_reload_receipts_cannot_become_no_ops() {
             script.display()
         );
     }
+    let main = source.split_once("main() {").expect("M83 main").1;
+    let bounce = main.find("bounce_bird_session").expect("final bounce");
+    let complete = main
+        .find("wait_final_capture_complete")
+        .expect("capture completeness wait");
+    let stop = main.find("stop_capture").expect("closed capture proof");
+    let wire = main.find("assert_wire").expect("final wire assertions");
+    assert!(
+        bounce < complete && complete < stop && stop < wire,
+        "M83 must capture the latest bounce before stopping and checking the file"
+    );
+
     let stop_capture = source
         .split_once("stop_capture() {")
         .and_then(|(_, remainder)| remainder.split_once("start_bird() {").map(|(body, _)| body))

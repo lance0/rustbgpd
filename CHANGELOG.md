@@ -86,6 +86,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- M83 waits for the latest BIRD session's captured OPEN, exact initial route
+  inventory, and End-of-RIB before stopping packet capture. Incomplete capture
+  snapshots remain pending within a bounded wait, and timeout retains diagnostics;
+  the final closed-file and wire-attribute checks remain mandatory.
+
 - SIGHUP generations no longer reinstall unchanged RPOL chains solely because
   an unreferenced literal set changed in the same source file. The runtime keeps
   installed counters while adopting the candidate policy catalog; pending
