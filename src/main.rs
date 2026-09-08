@@ -5917,6 +5917,12 @@ async fn run<T>(
                             ));
                         }
                     };
+                    // Dataset load failures reject before the runtime
+                    // generation command, so record their existing counter
+                    // here without changing any live dataset status.
+                    for (name, _) in &desired.config_ref().policy.dataset_events.failed {
+                        reload_metrics.record_policy_dataset_refresh_error(name);
+                    }
                     let outcome = reload_config_with_tcp_ao(
                         SighupReloadPlan {
                             baseline_runtime: snapshot,
