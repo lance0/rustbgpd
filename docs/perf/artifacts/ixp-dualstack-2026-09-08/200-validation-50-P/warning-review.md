@@ -1,0 +1,11 @@
+# Writer warning review: 200-peer 50/50 P cell
+
+GO for root acceptance under an explicit teardown-warning exception. The original gate failure remains valid as a classifier outcome and is preserved: all 102 errors are the unrecognized `writer: write/flush failed` warning. There are 102 warnings from 102 distinct peers, all with `error_kind=BrokenPipe` and `Broken pipe (os error 32)`.
+
+All 102 warnings occur after their own peer's `session down` event, after global session teardown began, and after the full configured 20-second final-cycle quiesce. The first session-down event is 16:34:28.539091 UTC; the writer warnings occupy 16:34:28.541793–16:34:28.545663 UTC, a 3.870 ms burst. All 200 peers have down events by 16:34:28.671223 UTC. This is harness/session teardown; the outer runner requests daemon shutdown later, and the daemon logs exit at 16:34:32.838597 UTC.
+
+The fourth SIGHUP was at 16:34:08.124227 UTC. Its harness completion was 286.554 ms after its trigger, mapping to approximately 16:34:08.410781 UTC. This mapping uses the recorded wall trigger plus the monotonic completion delta, rather than claiming a separately timestamped completion event. The first writer warning is 20.131012 seconds after that completion. Source and provenance establish a 20-second cycle quiesce after the CSV evidence, including the last cycle. The harness prints its final `done` line and exits successfully.
+
+All four dual-stack rows show 200 sessions, zero parse errors and 30 stable-marker peers per family. The existing evidence records complete route/withdrawal/bystander invariants, observed churn overlap, and passing query/probe checks; the only errors are these 102 writer warning classifications. The matrix's cell status is `pass`, driver exit is 0, and the enclosing gate failed on the preserved warning rule. No gate, original evidence, daemon log or harness output was changed, and no rerun was launched.
+
+`warning-review.json` contains every full writer event, its line number, matching full peer-down event, timing deltas and hashes of raw logs, provenance, statuses and original gate evidence. This supports accepting this cell's measured results with a specifically recorded teardown exception. It does not support broadly ignoring writer warnings during active measurement or claiming runtime recovery from these closed-socket writes.

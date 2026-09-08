@@ -1,0 +1,118 @@
+{
+  "commit": "f2e14e675d096e3fd79d81ece3e7885c6f3855e4",
+  "source_clean_before_after": true,
+  "artifacts": [
+    {
+      "reason": "compiler-artifact",
+      "package_id": "path+file:///tmp/dualstack-build-source/crates/cli#rustbgpctl@0.69.0",
+      "manifest_path": "/tmp/dualstack-build-source/crates/cli/Cargo.toml",
+      "target": {
+        "kind": [
+          "bin"
+        ],
+        "crate_types": [
+          "bin"
+        ],
+        "name": "rbgp",
+        "src_path": "/tmp/dualstack-build-source/crates/cli/src/main.rs",
+        "edition": "2024",
+        "doc": true,
+        "doctest": false,
+        "test": true
+      },
+      "profile": {
+        "opt_level": "3",
+        "debuginfo": 0,
+        "debug_assertions": false,
+        "overflow_checks": false,
+        "test": false
+      },
+      "features": [],
+      "filenames": [
+        "/tmp/dualstack-build-output/target/release/rbgp"
+      ],
+      "executable": "/tmp/dualstack-build-output/target/release/rbgp",
+      "fresh": true,
+      "executable_sha256": "ffdbe11f9ffa8e13baaddc9f2dd5774cdc2f4db30cab289e9292091b1e3343b8",
+      "immutable_executable": "/tmp/dualstack-release-build/bin/rbgp",
+      "campaign_regular_copy": "/tmp/dualstack-source/target/release/rbgp",
+      "campaign_regular_copy_mode": "0o555"
+    },
+    {
+      "reason": "compiler-artifact",
+      "package_id": "path+file:///tmp/dualstack-build-source#rustbgpd@0.69.0",
+      "manifest_path": "/tmp/dualstack-build-source/Cargo.toml",
+      "target": {
+        "kind": [
+          "bin"
+        ],
+        "crate_types": [
+          "bin"
+        ],
+        "name": "rustbgpd",
+        "src_path": "/tmp/dualstack-build-source/src/main.rs",
+        "edition": "2024",
+        "doc": true,
+        "doctest": false,
+        "test": true
+      },
+      "profile": {
+        "opt_level": "3",
+        "debuginfo": 0,
+        "debug_assertions": false,
+        "overflow_checks": false,
+        "test": false
+      },
+      "features": [
+        "default",
+        "jemalloc",
+        "tikv-jemallocator"
+      ],
+      "filenames": [
+        "/tmp/dualstack-build-output/target/release/rustbgpd"
+      ],
+      "executable": "/tmp/dualstack-build-output/target/release/rustbgpd",
+      "fresh": false,
+      "executable_sha256": "59bce0e62933912da5d2632bacbfdea051ea77f7172190c8e671c10e737ab4ec",
+      "immutable_executable": "/tmp/dualstack-release-build/bin/rustbgpd",
+      "campaign_regular_copy": "/tmp/dualstack-source/target/release/rustbgpd",
+      "campaign_regular_copy_mode": "0o555"
+    },
+    {
+      "reason": "compiler-artifact",
+      "package_id": "path+file:///tmp/dualstack-build-source/bench/scale/reloadstall#0.1.0",
+      "manifest_path": "/tmp/dualstack-build-source/bench/scale/reloadstall/Cargo.toml",
+      "target": {
+        "kind": [
+          "bin"
+        ],
+        "crate_types": [
+          "bin"
+        ],
+        "name": "reloadstall",
+        "src_path": "/tmp/dualstack-build-source/bench/scale/reloadstall/src/main.rs",
+        "edition": "2021",
+        "doc": true,
+        "doctest": false,
+        "test": true
+      },
+      "profile": {
+        "opt_level": "3",
+        "debuginfo": 1,
+        "debug_assertions": false,
+        "overflow_checks": false,
+        "test": false
+      },
+      "features": [],
+      "filenames": [
+        "/tmp/dualstack-build-output/target/release/reloadstall"
+      ],
+      "executable": "/tmp/dualstack-build-output/target/release/reloadstall",
+      "fresh": false,
+      "executable_sha256": "ba3bde324986c1e27a1cc5273d331f159f698cfa8844f31349f1b8327025c56d",
+      "immutable_executable": "/tmp/dualstack-release-build/bin/reloadstall",
+      "campaign_regular_copy": "/tmp/dualstack-source/bench/scale/target/release/reloadstall",
+      "campaign_regular_copy_mode": "0o555"
+    }
+  ]
+}

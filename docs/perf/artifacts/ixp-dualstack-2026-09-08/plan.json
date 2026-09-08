@@ -1,0 +1,110 @@
+[
+  {
+    "cell": "200-validation-90-P",
+    "N_PEERS": 200,
+    "TOTAL_PREFIXES": 114400,
+    "RELOADSTALL_IPV4_PREFIXES": 102960,
+    "ipv6": 11440,
+    "CHANGED_PEERS": 170,
+    "filter": 0
+  },
+  {
+    "cell": "200-validation-90-F",
+    "N_PEERS": 200,
+    "TOTAL_PREFIXES": 114400,
+    "RELOADSTALL_IPV4_PREFIXES": 102960,
+    "ipv6": 11440,
+    "CHANGED_PEERS": 170,
+    "filter": 32
+  },
+  {
+    "cell": "200-validation-50-P",
+    "N_PEERS": 200,
+    "TOTAL_PREFIXES": 114400,
+    "RELOADSTALL_IPV4_PREFIXES": 57200,
+    "ipv6": 57200,
+    "CHANGED_PEERS": 170,
+    "filter": 0
+  },
+  {
+    "cell": "200-validation-50-F",
+    "N_PEERS": 200,
+    "TOTAL_PREFIXES": 114400,
+    "RELOADSTALL_IPV4_PREFIXES": 57200,
+    "ipv6": 57200,
+    "CHANGED_PEERS": 170,
+    "filter": 32
+  },
+  {
+    "cell": "700-A-90-P",
+    "N_PEERS": 700,
+    "TOTAL_PREFIXES": 400400,
+    "RELOADSTALL_IPV4_PREFIXES": 360360,
+    "ipv6": 40040,
+    "CHANGED_PEERS": 600,
+    "filter": 0
+  },
+  {
+    "cell": "700-A-90-F",
+    "N_PEERS": 700,
+    "TOTAL_PREFIXES": 400400,
+    "RELOADSTALL_IPV4_PREFIXES": 360360,
+    "ipv6": 40040,
+    "CHANGED_PEERS": 600,
+    "filter": 32
+  },
+  {
+    "cell": "700-A-50-P",
+    "N_PEERS": 700,
+    "TOTAL_PREFIXES": 400400,
+    "RELOADSTALL_IPV4_PREFIXES": 200200,
+    "ipv6": 200200,
+    "CHANGED_PEERS": 600,
+    "filter": 0
+  },
+  {
+    "cell": "700-A-50-F",
+    "N_PEERS": 700,
+    "TOTAL_PREFIXES": 400400,
+    "RELOADSTALL_IPV4_PREFIXES": 200200,
+    "ipv6": 200200,
+    "CHANGED_PEERS": 600,
+    "filter": 32
+  },
+  {
+    "cell": "700-B-90-P",
+    "N_PEERS": 700,
+    "TOTAL_PREFIXES": 400400,
+    "RELOADSTALL_IPV4_PREFIXES": 360360,
+    "ipv6": 40040,
+    "CHANGED_PEERS": 600,
+    "filter": 0
+  },
+  {
+    "cell": "700-B-90-F",
+    "N_PEERS": 700,
+    "TOTAL_PREFIXES": 400400,
+    "RELOADSTALL_IPV4_PREFIXES": 360360,
+    "ipv6": 40040,
+    "CHANGED_PEERS": 600,
+    "filter": 32
+  },
+  {
+    "cell": "700-B-50-P",
+    "N_PEERS": 700,
+    "TOTAL_PREFIXES": 400400,
+    "RELOADSTALL_IPV4_PREFIXES": 200200,
+    "ipv6": 200200,
+    "CHANGED_PEERS": 600,
+    "filter": 0
+  },
+  {
+    "cell": "700-B-50-F",
+    "N_PEERS": 700,
+    "TOTAL_PREFIXES": 400400,
+    "RELOADSTALL_IPV4_PREFIXES": 200200,
+    "ipv6": 200200,
+    "CHANGED_PEERS": 600,
+    "filter": 32
+  }
+]

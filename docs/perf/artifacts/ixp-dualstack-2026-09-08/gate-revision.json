@@ -1,0 +1,18 @@
+{
+  "changed_at_unix": 1788885874.0425773,
+  "scope": "post-run warning classification only; no binary, source, workload, timing or daemon-log changes",
+  "reason": "102 BrokenPipe warnings followed each respective peer-down and final completion by more than 20 seconds; original classifier did not recognize teardown writer warnings",
+  "old_gate_sha256": "8e654d10794fd50dc01a25b03103f0545b904070802e2808b5d8c8682b063021",
+  "new_gate_sha256": "9ec25e91d1a2ed9a2a8c55d7a251cff4b3e31214e7e753a4ebf3940dcee16543",
+  "independent_warning_review_sha256": "3c3dc7fc07391657b0e74a5ceea01569359833838d29fa879f4cda145b0eab63",
+  "regression_results": {
+    "original_gate_errors": 102,
+    "candidate_actual_cell_pass": true,
+    "active_broken_pipe_rejected": true,
+    "other_teardown_writer_error_rejected": true,
+    "peer_without_down_event_rejected": true
+  },
+  "original_third_wrapper_exit": "1",
+  "original_evidence_preserved": "each cell/evidence-v1.json",
+  "reviewed_evidence": "each cell/evidence-v2.json; evidence.json is the current reviewed result"
+}

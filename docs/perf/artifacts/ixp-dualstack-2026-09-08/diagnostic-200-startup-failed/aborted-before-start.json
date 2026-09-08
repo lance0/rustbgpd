@@ -1,0 +1,8 @@
+{
+  "pids": [
+    3484119
+  ],
+  "reason": "inherited umask002; daemon startup failed before harness launch because group-writable runtime directory was rejected; driver terminated during cooldown for corrected preparation",
+  "driver_log_sha256": "cddc21789f4c4c26774a84db249f726caf01977a88e4822f31ac45540532cea3",
+  "no_harness_launch": true
+}
