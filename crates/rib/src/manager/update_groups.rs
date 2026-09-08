@@ -342,12 +342,18 @@ pub(super) struct UpdateGroupRegistry {
     /// Interned export-chain contents; a [`GroupKey::chain`] indexes
     /// here. Content-equality (`PolicyChain: PartialEq` on `policies`)
     /// is what keeps a no-op reload key-stable.
-    // ponytail: linear content-eq scan and no eviction — distinct chain
-    // contents per fleet are few; intern-with-refcount if that changes.
-    chains: Vec<PolicyChain>,
-    /// Group id = index. Ids stay stable for a process lifetime; an
-    /// emptied group's slot is kept and reused when its key recurs.
+    // Retired payloads leave empty slots: IDs are never reassigned, including
+    // when a previously retired policy is installed again.
+    // ponytail: historical slots and scans still grow with retired contents;
+    // compact with generation-tagged IDs only if measured metadata cost warrants it.
+    chains: Vec<Option<PolicyChain>>,
+    /// Group id = index. Slots remain as historical identity metadata.
+    /// A key can recur while its chain remains live; after chain retirement,
+    /// reinstalling that content creates a new chain and group ID.
     groups: Vec<GroupKey>,
+    /// A synchronous authoritative batch preclassifies destinations before
+    /// creating their group tables. Its local IDs stay pinned until return.
+    pub(in crate::manager) reclamation_deferred: bool,
     /// Membership (group id or ungrouped reason) per registered peer.
     pub(super) members: HashMap<IpAddr, GroupMembership>,
 }
@@ -360,6 +366,9 @@ impl UpdateGroupRegistry {
         mut receipt: Option<&mut super::AuthoritativeTransitionReceipt>,
     ) -> usize {
         for (idx, candidate) in self.chains.iter().enumerate() {
+            let Some(candidate) = candidate else {
+                continue;
+            };
             if let Some(r) = receipt.as_deref_mut() {
                 r.intern_candidates += 1;
             }
@@ -373,7 +382,7 @@ impl UpdateGroupRegistry {
         if let Some(r) = receipt {
             r.intern_misses += 1;
         }
-        self.chains.push(chain.clone());
+        self.chains.push(Some(chain.clone()));
         self.chains.len() - 1
     }
 
@@ -393,6 +402,10 @@ impl UpdateGroupRegistry {
 
     fn group_key(&self, id: usize) -> Option<&GroupKey> {
         self.groups.get(id)
+    }
+
+    fn retained_chain_count(&self) -> usize {
+        self.chains.iter().filter(|chain| chain.is_some()).count()
     }
 }
 
@@ -1930,7 +1943,8 @@ impl RibManager {
     /// Registered peers are at most low-thousands and this runs only on
     /// lifecycle/config events, so a full recount beats incremental
     /// bookkeeping.
-    fn refresh_update_group_gauges(&self) {
+    fn refresh_update_group_gauges(&mut self) {
+        self.reclaim_unused_update_group_policies();
         let mut member_counts: HashMap<usize, i64> = HashMap::new();
         let mut fallback = 0i64;
         // Recomputed for every member on each call, so the per-peer group
@@ -1951,18 +1965,6 @@ impl RibManager {
         self.metrics
             .set_update_groups(i64::try_from(member_counts.len()).unwrap_or(i64::MAX));
         self.metrics.set_update_group_fallback_peers(fallback);
-        // Registry growth (LAN-311 observability, no eviction): both
-        // vecs are append-only for the process lifetime, so the gauges
-        // read as "distinct contents / keys ever seen" — the signal a
-        // policy-content-churn deployment watches before the growth
-        // costs memory. Every intern happens inside a membership
-        // recompute, and every recompute/removal ends here.
-        self.metrics.set_update_group_interned_chains(
-            i64::try_from(self.update_groups.chains.len()).unwrap_or(i64::MAX),
-        );
-        self.metrics.set_update_group_keys(
-            i64::try_from(self.update_groups.groups.len()).unwrap_or(i64::MAX),
-        );
         for id in 0..self.update_groups.groups.len() {
             match member_counts.get(&id) {
                 Some(count) => self
@@ -1975,6 +1977,46 @@ impl RibManager {
         // it) mutates lane state too, so the membership seams refresh
         // the lane gauge alongside the staging seam.
         self.refresh_lane_gauge();
+    }
+
+    /// Release only registry ownership. Installed policies and prepared
+    /// transition work keep their own strong references until they finish.
+    pub(in crate::manager) fn reclaim_unused_update_group_policies(&mut self) {
+        if self.update_groups.reclamation_deferred {
+            return;
+        }
+        let mut groups: HashSet<usize> = self.group_ribs.keys().copied().collect();
+        groups.extend(self.update_groups.members.values().filter_map(|member| {
+            if let GroupMembership::Grouped(id) = member {
+                Some(*id)
+            } else {
+                None
+            }
+        }));
+        if let Some(pending) = &self.pending_clean_policy_transition {
+            groups.extend(pending.registry_group_ids());
+        }
+        if let Some(prestage) = &self.pending_destination_prestage {
+            groups.insert(prestage.destination);
+        }
+        groups.extend(self.prepared_destination);
+        let chains: HashSet<usize> = groups
+            .into_iter()
+            .filter_map(|id| self.update_groups.group_key(id).and_then(|key| key.chain))
+            .collect();
+        for (id, chain) in self.update_groups.chains.iter_mut().enumerate() {
+            if !chains.contains(&id) {
+                *chain = None;
+            }
+        }
+        // Heavy payloads reflect current ownership; small key slots remain
+        // historical metadata, including rejected or discarded preparation.
+        self.metrics.set_update_group_interned_chains(
+            i64::try_from(self.update_groups.retained_chain_count()).unwrap_or(i64::MAX),
+        );
+        self.metrics.set_update_group_keys(
+            i64::try_from(self.update_groups.groups.len()).unwrap_or(i64::MAX),
+        );
     }
 
     /// Re-derive the ADR-0126 exception-lane gauge: total runner-up
