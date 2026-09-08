@@ -46,6 +46,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   list from the existing inventory check and select the reviewed nightly from
   `fuzz/rust-nightly.txt`. `just hooks` installs the commit and push hooks.
 
+- Accepted normalized configs larger than 10 MiB now record bounded,
+  metadata-only config-history rows with hashes, byte count, and a redacted
+  summary. They share the twenty-row chronology with rollback-capable v2
+  entries, and API/CLI listings explicitly mark them rollback-ineligible.
+  History listing rejects an over-cap directory before decoding any final.
+
 ### Changed
 
 - gRPC credential rotation on SIGHUP now runs after the runtime generation is
@@ -138,6 +144,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   which offers no restoration of earlier steps.
 - Generation-class reload failures no longer produce a known-partial
   runtime receipt; the sequential path keeps its known-partial semantics.
+
+- After config-history v3 publication, stop the daemon and preserve/move the
+  complete history directory aside before starting an older writer that
+  ignores v3. Metadata rows cannot restore oversized configs; keep deployment
+  sources independently. Commit-confirm v3 recovery remains a separate lifecycle.
 
 ## [0.69.0] — 2026-09-07
 

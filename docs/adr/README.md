@@ -145,7 +145,7 @@ states that the whole decision is Superseded.
 | [0121](0121-config-history-external-policy-provenance.md) | Config-history external-policy provenance | Accepted — v2 history restore and provenance-bearing commit-confirm v2 shipped | 2026-08-01 | Active |
 | [0122](0122-compatibility-debt-inventory.md) | Compatibility-debt inventory and removal schedule | Accepted | 2026-08-03 | Active |
 | [0123](0123-aspa-v27-mitigation-and-retention.md) | ASPA draft-v27 mitigation requires lossless retention | Proposed (behavior activation NO-GO until retention gates pass) | 2026-08-03 | Unstated |
-| [0124](0124-bounded-config-history-retention.md) | Bounded config-history retention for oversized snapshots | Proposed (owner decisions recorded; implementation pending) | 2026-08-04 | Unstated |
+| [0124](0124-bounded-config-history-retention.md) | Bounded config-history retention for oversized snapshots | Implemented | 2026-08-04 | Unstated |
 | [0125](0125-v1-stability-contract.md) | v1.0 stability contract | Accepted (tagging remains evidence-gated; no tag is scheduled) | 2026-08-04 | Active |
 | [0126](0126-shared-group-per-client-best.md) | Shared-group per-client best-path — path-hiding mitigation inside update groups | Accepted | 2026-08-05 | Active |
 | [0127](0127-config-transaction-settlement-watchdog.md) | Persisted runtime-config settlement watchdog | Accepted | 2026-08-11 | Active |

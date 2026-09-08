@@ -814,6 +814,8 @@ impl rustbgpd_api::proto::config_service_server::ConfigService for MockConfigSer
                     sha256: "aa".repeat(32),
                     summary: "asn 65001, router-id 10.0.0.1, 2 neighbor(s)".to_string(),
                     source_sha256: String::new(),
+                    normalized_toml_bytes: 0,
+                    metadata_only_reason: String::new(),
                     provenance_status: server_proto::ConfigHistoryProvenanceStatus::LegacyTomlOnly
                         .into(),
                 },
@@ -823,6 +825,8 @@ impl rustbgpd_api::proto::config_service_server::ConfigService for MockConfigSer
                     sha256: "bb".repeat(32),
                     summary: "asn 65001, router-id 10.0.0.1, 1 neighbor(s)".to_string(),
                     source_sha256: String::new(),
+                    normalized_toml_bytes: 0,
+                    metadata_only_reason: String::new(),
                     provenance_status: server_proto::ConfigHistoryProvenanceStatus::LegacyTomlOnly
                         .into(),
                 },

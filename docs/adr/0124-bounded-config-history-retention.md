@@ -1,6 +1,6 @@
 # ADR-0124: Bounded config-history retention for oversized snapshots
 
-**Status:** Proposed (owner decisions recorded; implementation pending)
+**Status:** Implemented
 **Date:** 2026-08-04
 
 ## Context
@@ -310,12 +310,63 @@ Rejected as a category error despite the shared generation number.
 
 ## Current validation gate
 
+The following paragraph records the proposal-stage gate from 2026-08-04.
+Implementation evidence follows it.
+
 Executable red proof is N/A for this docs-only Proposed ADR. The current gate
 is source-path verification of every shipped and numeric claim above, ADR index
 and Markdown-link integrity, `cargo fmt --check`, warning-denied `cargo doc`,
 and a diff proving that only this ADR and the ADR index changed. The phased
 implementation must supply the mutation-proven red proofs before status can
 change to implemented.
+
+## Implementation and proof
+
+Config-history v3 is implemented in `src/config_history/v3.rs`, with the
+shared descriptor-relative writer and bounded mixed scan in
+`src/config_history/v2.rs`. The decision-base context and tables above describe
+the pre-implementation system. V2 payload/envelope/manifest limits are unchanged;
+there is no backfill, oversized payload archive, or commit-confirm adoption.
+
+The executable store tests cover the exact 10 MiB boundary and +1 byte,
+canonical metadata and redacted summary grammar, mixed ordering and newest-only
+deduplication, accepted external-source changes without reopening source files,
+eviction, unsafe/corrupt rows, duplicate sequences, pinned identities, and
+publication failures. A twenty-first final fails with zero payload opens. A
+separate frozen-roster test swaps a selected name before opening and publishes
+new finals after collection; decoding remains confined to the captured roster.
+
+The controller regression checks the exact metadata-only refusal, empty
+planner/runtime/persister channels, unchanged files and history, plain and
+confirmed requests, and index-zero precedence with a metadata newest row.
+It also freezes the different list/rollback error categories for an over-cap
+roster. API tests preserve the existing protobuf fields and enum discriminants
+while adding status 4 and fields 7/8; CLI tests assert metadata-only rendering
+and explicit JSON rollback ineligibility even when both hashes are populated.
+
+The isolated allocation receipt uses the existing `dhat-heap` feature. With
+accepted oversized inputs constructed before measurement, recording/evicting
+and listing a twenty-v3-row ring must stay below 256 KiB peak and 512 KiB total
+requested heap allocation. Its fixture has no external-source roster; the
+receipt is not a measurement of arbitrary damaged-directory name rosters,
+large manifests, or daemon RSS. The v3 recording branch separately avoids
+constructing a stored manifest.
+
+```sh
+cargo test --locked -p rustbgpd --bin rustbgpd history
+cargo test --locked -p rustbgpd-api --lib history_wire
+cargo test --locked -p rustbgpctl --bin rbgp commands::config::tests::history
+cargo test --locked -p rustbgpd --bin rustbgpd --no-default-features \
+  --features dhat-heap metadata_history_allocation -- \
+  --ignored --test-threads=1 --nocapture
+```
+
+During implementation, temporary mutations of the strict size boundary,
+pre-decode count guard, API rollback guard, redacted-summary validation, and
+borrowed accepted-config access each made its corresponding regression fail.
+The allocation mutation cloned the oversized Config inside recording and
+exceeded the receipt's peak bound. The mutations were removed; the production
+path borrows the accepted Config and retains only audit metadata.
 
 ## References
 

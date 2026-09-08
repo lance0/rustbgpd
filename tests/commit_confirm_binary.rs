@@ -494,6 +494,31 @@ impl Lab {
     }
 }
 
+fn metadata_history(lab: &Lab, expected_rows: usize) -> Vec<serde_json::Value> {
+    let history = rbgp_json(&lab.grpc_addr, &["--json", "config", "history"]);
+    let entries = history["entries"].as_array().expect("history entries");
+    assert_eq!(entries.len(), expected_rows, "{history}");
+    for (index, entry) in entries.iter().enumerate() {
+        assert_eq!(entry["index"], index);
+        assert_eq!(entry["provenance_status"], "metadata_only");
+        assert_eq!(entry["rollback_eligible"], false);
+        assert_eq!(
+            entry["metadata_only_reason"],
+            "normalized_toml_exceeds_v2_payload_limit"
+        );
+        assert!(entry["normalized_toml_bytes"].as_u64().unwrap() > 10 * 1024 * 1024);
+        assert_eq!(entry["source_sha256"].as_str().unwrap().len(), 64);
+    }
+    entries.clone()
+}
+
+fn assert_metadata_matches(entry: &serde_json::Value, accepted: &[u8]) {
+    use sha2::Digest as _;
+
+    assert_eq!(entry["normalized_toml_bytes"], accepted.len());
+    assert_eq!(entry["sha256"], hex(&sha2::Sha256::digest(accepted)));
+}
+
 #[test]
 fn streamed_confirmed_apply_above_eight_mib_aborts_to_previous_config() {
     let temp = tempfile::tempdir().expect("failed to create temp dir");
@@ -507,13 +532,7 @@ fn streamed_confirmed_apply_above_eight_mib_aborts_to_previous_config() {
     );
 
     let mut daemon = lab.spawn("daemon.stderr.log");
-    assert_eq!(
-        rbgp_json(&lab.grpc_addr, &["--json", "config", "history"])["entries"]
-            .as_array()
-            .map(Vec::len),
-        Some(0),
-        "oversize boot snapshot must explicitly leave bounded history empty"
-    );
+    let boot_history = metadata_history(&lab, 1);
     let human_plan = rbgp(
         &lab.grpc_addr,
         &["config", "plan", lab.candidate_path.to_str().unwrap()],
@@ -530,19 +549,34 @@ fn streamed_confirmed_apply_above_eight_mib_aborts_to_previous_config() {
         std::fs::metadata(&lab.raw_path).unwrap().len() > 10 * 1024 * 1024,
         "real-binary writer must publish a genuinely normalized prior above 10 MiB"
     );
+    // Boot preserves the operator file, so its normalized identity comes from
+    // the independently persisted commit-confirm prior, not the raw input.
+    assert_metadata_matches(&boot_history[0], &std::fs::read(&lab.raw_path).unwrap());
+    let candidate_history = metadata_history(&lab, 2);
+    assert_metadata_matches(
+        &candidate_history[0],
+        &std::fs::read(&lab.config_path).unwrap(),
+    );
+    assert_ne!(candidate_history[0]["sha256"], boot_history[0]["sha256"]);
+    let mut retained_boot = boot_history[0].clone();
+    retained_boot["index"] = 1.into();
+    assert_eq!(candidate_history[1], retained_boot);
     let abort = rbgp_json(
         &lab.grpc_addr,
         &["--json", "config", "abort", "stream-abort"],
     );
     assert_eq!(abort["confirmation"]["status"], "aborted", "{abort}");
-    assert_eq!(
-        rbgp_json(&lab.grpc_addr, &["--json", "config", "history"])["entries"]
-            .as_array()
-            .map(Vec::len),
-        Some(0),
-        "oversize candidate and rollback must leave history unchanged"
-    );
     let persisted = std::fs::read_to_string(&lab.config_path).unwrap();
+    let restored_history = metadata_history(&lab, 3);
+    assert_metadata_matches(&restored_history[0], persisted.as_bytes());
+    for field in ["sha256", "source_sha256", "normalized_toml_bytes"] {
+        assert_eq!(restored_history[0][field], boot_history[0][field]);
+    }
+    for (index, entry) in candidate_history.iter().enumerate() {
+        let mut retained = entry.clone();
+        retained["index"] = (index + 1).into();
+        assert_eq!(restored_history[index + 1], retained);
+    }
     assert!(
         !persisted.contains("192.0.2.0/24"),
         "abort must restore the pre-transaction config"

@@ -368,7 +368,7 @@ explicit use of that Plan's UUID-v4 single-use token, pending commit-confirm,
 the canonical config-adjacent v3 locator plus fixed owner-only raw/metadata
 files, full locator→metadata→raw path/digest/device/inode linkage, raw size in
 `(10 MiB, 384 MiB]`, legacy-journal absence, and confirmed terminal cleanup.
-Schema-2 transaction evidence records the authority's informational
+Schema-2 and schema-3 transaction evidence record the authority's informational
 pre-apply deadline separately from the Apply/Status deadline that starts after
 commit, and requires the former to predate the latter. The authority deadline
 need not remain unexpired when a slow Apply returns: boot recovery is
@@ -382,11 +382,18 @@ hashes. Expiry of the advertised public deadline starts rollback; terminal
 rollback completion has a separate 600-second ceiling measured from that
 deadline. A final streamed Plan of A must be tokenless `NOOP`.
 
-Because config-history's `SkippedOversize` outcome is internal, the retained
-proof binds the public empty history entries and on-disk history roster before
-and after every persist to the daemon's exact oversize warning (including a
-byte count above 10 MiB). The verifier requires nine such warnings: boot, four
-measured applies, abort apply/restore, and timeout apply/restore.
+Current schema-3 transaction evidence binds the API's metadata-only,
+rollback-ineligible history entries to canonical owner-only v3 history rows.
+Each row is at most 64 KiB and records the accepted normalized TOML size and
+hash, inline source hash, and redacted summary without retaining a config
+payload. The verifier requires one boot row, one new row for each measured
+apply, no additional row on confirmation, and one row for each abort/timeout
+apply and restore: nine rows total. Apply and restore rows must match the
+accepted config on disk. The boot row must match that independently persisted
+normalized A identity, since boot does not rewrite the operator file. No obsolete
+oversize-history warnings may occur.
+Historical schema-2 receipts remain verifiable with their original empty-history
+and nine `SkippedOversize` warning contract; historical measurements are unchanged.
 Offline verification requires the exact clean commit/tree record, canonical
 full-workload knobs, matching repeat environments, and the semantic evidence
 for each reported claim. It does not claim artifact authenticity.

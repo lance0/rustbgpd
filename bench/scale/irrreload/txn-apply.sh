@@ -34,40 +34,9 @@ runtime_token_valid() { [[ $1 =~ ^kv2:[0-9a-f]{16}:8$ ]]; }
 active_confirm_id=
 cleanup_pending() { [ -z "$active_confirm_id" ] || "$rbgp" --addr "$addr" --json config abort "$active_confirm_id" >/dev/null 2>&1 || true; }
 trap cleanup_pending EXIT
-history_count() {
-    "$rbgp" --addr "$addr" --json config history |
-        jq -er '.entries | select(type == "array") | length'
-}
 history_json() {
-    local entries files history_dir="$runtime_dir/config-history"
-    entries=$("$rbgp" --addr "$addr" --json config history | jq -ecS '.entries') || return 1
-    files=$(
-        if [ -d "$history_dir" ]; then
-            find "$history_dir" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort |
-                while IFS= read -r name; do
-                    jq -cn --arg name "$name" --arg sha256 "$(sha "$history_dir/$name")" \
-                        --argjson bytes "$(wc -c <"$history_dir/$name")" \
-                        '{name:$name,bytes:$bytes,sha256:$sha256}'
-                done
-        fi | jq -scS '.'
-    ) || return 1
-    jq -cn --argjson entries "$entries" --argjson files "$files" '{entries:$entries,files:$files}'
-}
-warning_count() { grep -Fc 'applied config exceeds the bounded history entry size; history was left unchanged' "$daemon_log" 2>/dev/null || true; }
-warning_json() {
-    local before=$1 count line bytes deadline=$((SECONDS + 10))
-    while :; do
-        count=$(warning_count)
-        [ "$count" -gt "$before" ] && break
-        [ "$SECONDS" -lt "$deadline" ] || return 1
-        sleep 0.1
-    done
-    [ "$count" -eq $((before + 1)) ] || return 1
-    line=$(grep -F 'applied config exceeds the bounded history entry size; history was left unchanged' "$daemon_log" | tail -n1) || return 1
-    bytes=$(printf '%s\n' "$line" | jq -er '.fields.bytes | select(type == "number")') || return 1
-    [ "$bytes" -gt "$min_raw" ] || return 1
-    jq -cn --argjson count_before "$before" --argjson count_after "$count" \
-        --argjson bytes "$bytes" '{count_before:$count_before,count_after:$count_after,bytes:$bytes}'
+    "$rbgp" --addr "$addr" --json config history |
+        "$verify" inspect-history --history-dir "$runtime_dir/config-history"
 }
 process_json() {
     local start vmrss vmhwm
@@ -104,16 +73,16 @@ pending_json() {
     raw_bytes=$(printf '%s' "$authority" | jq -er '.raw.bytes') || return 1
     [ "$raw_bytes" -gt "$min_raw" ] && [ "$raw_bytes" -le "$max_raw" ] || return 1
     [ ! -e "$legacy" ] || return 1
-    history=$(history_count) || return 1
-    [ "$history" -eq 0 ] || return 1
+    history=$(history_json) || return 1
+    [ "$(printf '%s' "$history" | jq -er '.entries | length')" -gt 0 ] || return 1
     process=$(process_json) || return 1
     runtime=$(effective_json) || return 1
     config_state=$(config_json) || return 1
-    jq -cn --argjson authority "$authority" --argjson history_entries "$history" \
+    jq -cn --argjson authority "$authority" --argjson history "$history" \
         --argjson process "$process" --argjson runtime "$runtime" \
         --argjson config "$config_state" \
         '{authority:$authority,legacy_absent:true,
-          history_entries:$history_entries,history_outcome:"skipped_oversize",
+          history:$history,history_entries:($history.entries | length),history_outcome:"metadata_only",
           process:$process,config:$config,runtime:$runtime}'
 }
 terminal_json() {
@@ -121,15 +90,15 @@ terminal_json() {
     [ ! -e "$locator" ] && [ ! -e "$locator.tmp" ] &&
         [ ! -e "$raw" ] && [ ! -e "$raw.tmp" ] &&
         [ ! -e "$metadata" ] && [ ! -e "$metadata.tmp" ] && [ ! -e "$legacy" ] || return 1
-    history=$(history_count) || return 1
-    [ "$history" -eq 0 ] || return 1
+    history=$(history_json) || return 1
+    [ "$(printf '%s' "$history" | jq -er '.entries | length')" -gt 0 ] || return 1
     process=$(process_json) || return 1
     runtime=$(effective_json) || return 1
     config_state=$(config_json) || return 1
-    jq -cn --argjson history_entries "$history" --argjson process "$process" \
+    jq -cn --argjson history "$history" --argjson process "$process" \
         --argjson runtime "$runtime" --argjson config "$config_state" \
-        '{v3_absent:true,legacy_absent:true,history_entries:$history_entries,
-          history_outcome:"skipped_oversize",process:$process,config:$config,runtime:$runtime}'
+        '{v3_absent:true,legacy_absent:true,history:$history,history_entries:($history.entries | length),
+          history_outcome:"metadata_only",process:$process,config:$config,runtime:$runtime}'
 }
 
 cycles="$evidence/cycles.jsonl"
@@ -169,8 +138,7 @@ if [ -n "${TXN_SMOKE:-}" ]; then
     exit 0
 fi
 history_before=$(history_json) || die "cannot capture history before apply"
-[ "$(printf '%s' "$history_before" | jq -er '.entries | length')" -eq 0 ] || die "history was not empty before apply"
-warning_before=$(warning_count)
+[ "$(printf '%s' "$history_before" | jq -er '.entries | length')" -gt 0 ] || die "metadata history was empty before apply"
 confirm_id="irrreload-measured-$cycle"
 active_confirm_id=$confirm_id
 apply_json=$("$rbgp" --addr "$addr" --json config apply "$candidate" \
@@ -196,7 +164,6 @@ printf '%s' "$status_json" | jq -e --arg id "$confirm_id" --arg runtime "$apply_
 pending=$(pending_json "$confirm_id") || die "pending v3/history/process evidence failed"
 authority_deadline=$(printf '%s' "$pending" | jq -er '.authority.deadline_unix_seconds') || die "v3 authority deadline missing"
 [ "$authority_deadline" -lt "$apply_deadline" ] || die "v3 authority deadline did not predate the live deadline"
-warning=$(warning_json "$warning_before") || die "missing oversize-history warning"
 
 confirm_json=$("$rbgp" --addr "$addr" --json config confirm "$confirm_id") || die "confirm failed"
 printf '%s' "$confirm_json" | jq -e --arg id "$confirm_id" --arg runtime "$apply_runtime" \
@@ -213,8 +180,8 @@ printf '%s' "$confirmed_status" | jq -e --arg id "$confirm_id" --arg runtime "$a
 active_confirm_id=
 terminal=$(terminal_json) || die "confirmed cleanup/history/process evidence failed"
 history_after=$(history_json) || die "cannot capture history after confirm"
-[ "$(printf '%s' "$history_before" | jq -cS .)" = "$(printf '%s' "$history_after" | jq -cS .)" ] ||
-    die "bounded history changed across oversize transaction"
+[ "$(printf '%s' "$pending" | jq -cS .history)" = "$(printf '%s' "$history_after" | jq -cS .)" ] ||
+    die "history changed during confirmation"
 [ "$(printf '%s' "$pending" | jq -r '.process.pid,.process.starttime')" = \
   "$(printf '%s' "$terminal" | jq -r '.process.pid,.process.starttime')" ] || die "daemon identity changed"
 
@@ -223,14 +190,13 @@ row=$(jq -cn --argjson cycle "$cycle" --arg candidate_sha256 "$candidate_sha" \
     --argjson apply_deadline "$apply_deadline" \
     --argjson pending "$pending" --argjson terminal "$terminal" \
     --argjson history_before "$history_before" --argjson history_after "$history_after" \
-    --argjson warning "$warning" \
-    '{schema:2,cycle:$cycle,candidate:{sha256:$candidate_sha256,bytes:$candidate_bytes,marker:$candidate_marker},
+    '{schema:3,cycle:$cycle,candidate:{sha256:$candidate_sha256,bytes:$candidate_bytes,marker:$candidate_marker},
       plan:{transport:"streamed",status:"committable",plan_token_present:true,
             runtime_snapshot_token_present:true},
       apply:{transport:"streamed",explicit_plan_token:true,status:"committable",
              confirmation_status:"pending",confirm_id:$confirm_id,timeout_seconds:600,
              deadline_unix_seconds:$apply_deadline,
              runtime_token_coherent:true},
-      history:{before:$history_before,after:$history_after,outcome:"skipped_oversize",warning:$warning},
+      history:{before:$history_before,after:$history_after,outcome:"metadata_only"},
       pending:$pending,confirmed:({status:"confirmed",status_view_verified:true} + $terminal)}') || die "cannot encode evidence"
 printf '%s\n' "$row" >>"$cycles" || die "cannot retain cycle evidence"

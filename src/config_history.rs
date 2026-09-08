@@ -6,11 +6,13 @@
 //! TOML plus an integrity manifest for the accepted external-source roster;
 //! they hash but do not archive referenced `.rpol` or dataset bytes.
 //!
-//! V2 is active; retired TOML is ignored and retained.
+//! V2 payloads and bounded metadata-only v3 rows share one chronology.
+//! Retired TOML is ignored and retained.
 
 #![deny(unsafe_code)]
 
 pub(crate) mod v2;
+pub(crate) mod v3;
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -20,6 +22,7 @@ use crate::config::AcceptedConfigSnapshot;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HistoryStatus {
     Recorded,
+    MetadataOnly,
     Unreadable,
 }
 
@@ -31,25 +34,23 @@ pub struct MixedHistoryEntry {
     pub source_sha256: Option<String>,
     pub status: HistoryStatus,
     pub summary: String,
+    pub normalized_toml_bytes: Option<u64>,
+    pub metadata_only_reason: Option<String>,
     row: v2::StoredRow,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RecordOutcome {
-    Recorded,
-    Deduplicated,
-    SkippedOversize,
+    Recorded { evicted: usize },
+    Deduplicated { evicted: usize },
 }
 
 pub fn record_accepted(dir: &Path, snapshot: &AcceptedConfigSnapshot) -> io::Result<RecordOutcome> {
-    if snapshot.normalized_toml().len() > v2::MAX_TOML {
-        return Ok(RecordOutcome::SkippedOversize);
-    }
-    v2::record_v2(dir, snapshot.normalized_toml(), stored_manifest(snapshot)).map(|recorded| {
+    v2::record_snapshot(dir, snapshot).map(|(recorded, evicted)| {
         if recorded {
-            RecordOutcome::Recorded
+            RecordOutcome::Recorded { evicted }
         } else {
-            RecordOutcome::Deduplicated
+            RecordOutcome::Deduplicated { evicted }
         }
     })
 }
@@ -108,8 +109,11 @@ pub fn list_mixed(dir: &Path) -> io::Result<Vec<MixedHistoryEntry>> {
                     .map(|digest| v2::encode_hex(&digest)),
                 status: match row.status {
                     v2::StoredStatus::Recorded => HistoryStatus::Recorded,
+                    v2::StoredStatus::MetadataOnly => HistoryStatus::MetadataOnly,
                     v2::StoredStatus::Unreadable => HistoryStatus::Unreadable,
                 },
+                normalized_toml_bytes: row.normalized_toml_bytes,
+                metadata_only_reason: row.metadata_only_reason.clone(),
                 summary: row
                     .redacted_summary
                     .clone()
@@ -135,12 +139,22 @@ pub(crate) fn read_mixed_rollback(
     dir: &Path,
     entry: &MixedHistoryEntry,
 ) -> io::Result<RollbackPayload> {
+    if entry.status == HistoryStatus::MetadataOnly {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "metadata-only history has no rollback payload",
+        ));
+    }
     match v2::read_mixed(dir, &entry.row)? {
         v2::StoredPayload::V2(envelope) => Ok(RollbackPayload::V2 {
             normalized_toml: envelope.normalized_toml,
             manifest: envelope.manifest,
             source_sha256: envelope.source_sha256,
         }),
+        v2::StoredPayload::V3(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "metadata-only history has no rollback payload",
+        )),
     }
 }
 
@@ -288,7 +302,9 @@ path = "customers.txt"
 
         record_accepted(&history, &snapshot).unwrap();
         let row = v2::scan_mixed(&history).unwrap().remove(0);
-        let v2::StoredPayload::V2(envelope) = v2::read_mixed(&history, &row).unwrap();
+        let v2::StoredPayload::V2(envelope) = v2::read_mixed(&history, &row).unwrap() else {
+            panic!("expected v2")
+        };
 
         assert_eq!(envelope.normalized_toml, snapshot.normalized_toml());
         assert_eq!(envelope.source_sha256, snapshot.source_sha256());
@@ -301,10 +317,9 @@ path = "customers.txt"
     }
 
     #[test]
-    fn record_outcome_is_explicit_and_oversize_never_mutates_history() {
-        // Destructive proof: routing oversize through `record_v2`, reporting
-        // it as deduplicated, or evicting before the size check changes either
-        // the explicit result or the byte-identical retained roster.
+    fn record_outcome_is_explicit_and_oversize_records_metadata() {
+        // An oversized accepted snapshot adds one metadata row and identical
+        // subsequent acceptance deduplicates without retaining its payload.
         let dir = tempfile::tempdir().unwrap();
         let small_toml = crate::test_support::tier_authorized_uds_test_config(
             r#"
@@ -324,11 +339,11 @@ remote_asn = 65002
         );
         assert_eq!(
             record_accepted(dir.path(), &small).unwrap(),
-            RecordOutcome::Recorded
+            RecordOutcome::Recorded { evicted: 0 }
         );
         assert_eq!(
             record_accepted(dir.path(), &small).unwrap(),
-            RecordOutcome::Deduplicated
+            RecordOutcome::Deduplicated { evicted: 0 }
         );
         let roster = || {
             let mut entries = fs::read_dir(dir.path())
@@ -357,10 +372,17 @@ remote_asn = 65002
         assert!(large.normalized_toml().len() > v2::MAX_TOML);
         assert_eq!(
             record_accepted(dir.path(), &large).unwrap(),
-            RecordOutcome::SkippedOversize
+            RecordOutcome::Recorded { evicted: 0 }
         );
         let roster_after = roster();
-        assert_eq!(roster_after, roster_before);
+        assert_eq!(roster_after.len(), roster_before.len() + 1);
+        let entries = list_mixed(dir.path()).unwrap();
+        assert_eq!(entries[0].status, HistoryStatus::MetadataOnly);
+        assert!(entries[0].summary.len() <= v3::MAX_SUMMARY);
+        assert_eq!(
+            record_accepted(dir.path(), &large).unwrap(),
+            RecordOutcome::Deduplicated { evicted: 0 }
+        );
     }
 
     /// Red proof: removing any of the three exact equality checks in
@@ -454,5 +476,142 @@ listen_port = 179
         let toml_str = "[global]\nasn = 65001\nrouter_id = \"10.0.0.1\"\nlisten_port = 179\n\n[[neighbors]]\naddress = \"10.0.0.2\"\nremote_asn = 65002\nmd5_password = \"super-secret\"\n";
         let summary = summarize(toml_str);
         assert!(!summary.contains("super-secret"), "{summary}");
+    }
+    #[test]
+    fn normalized_exact_ten_mib_remains_v2_and_plus_one_is_metadata_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml = crate::test_support::tier_authorized_uds_test_config(
+            &(config_toml(65001) + "\n[global.telemetry]\nlog_format = \"json\"\n"),
+        );
+        let mut config =
+            crate::config::Config::load_toml_with_diagnostics(&toml, "boundary").unwrap();
+        config.neighbors[0].description = Some(String::new());
+        let base = AcceptedConfigSnapshot::from_config_for_test(config.clone())
+            .normalized_toml()
+            .len();
+        config.neighbors[0].description = Some("x".repeat(v2::MAX_TOML - base));
+        let exact = AcceptedConfigSnapshot::from_config_for_test(config.clone());
+        assert_eq!(exact.normalized_toml().len(), v2::MAX_TOML);
+        record_accepted(dir.path(), &exact).unwrap();
+        config.neighbors[0].description.as_mut().unwrap().push('x');
+        let large = AcceptedConfigSnapshot::from_config_for_test(config);
+        assert_eq!(large.normalized_toml().len(), v2::MAX_TOML + 1);
+        record_accepted(dir.path(), &large).unwrap();
+        let entries = list_mixed(dir.path()).unwrap();
+        assert_eq!(entries[0].status, HistoryStatus::MetadataOnly);
+        assert_eq!(
+            entries[0].normalized_toml_bytes,
+            Some((v2::MAX_TOML + 1) as u64)
+        );
+        assert_eq!(
+            entries[0].sha256.as_deref(),
+            Some(v2::encode_hex(&large.source_manifest().toml_sha256).as_str())
+        );
+        assert_eq!(
+            entries[0].source_sha256.as_deref(),
+            Some(v2::encode_hex(&large.source_sha256()).as_str())
+        );
+        assert_eq!(entries[0].summary, summarize(exact.normalized_toml()));
+        assert!(read_mixed_rollback(dir.path(), &entries[0]).is_err());
+        assert_eq!(entries[1].status, HistoryStatus::Recorded);
+        assert!(read_mixed_rollback(dir.path(), &entries[1]).is_ok());
+        let bytes = fs::read(&entries[0].row.path).unwrap();
+        assert!(bytes.len() <= v3::MAX_ENVELOPE);
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(json.get("normalized_toml").is_none() && json.get("manifest").is_none());
+        assert!(!entries[0].summary.contains("xxxx"));
+    }
+    #[test]
+    fn oversized_metadata_captures_source_identity_without_reopening_sources() {
+        use std::fmt::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = external_source_fixture(dir.path());
+        let mut text = fs::read_to_string(&path).unwrap();
+        write!(
+            text,
+            "\n[[neighbors]]\naddress = \"192.0.2.2\"\nremote_asn = 65002\ndescription = {:?}\n",
+            "x".repeat(v2::MAX_TOML)
+        )
+        .unwrap();
+        fs::write(&path, text).unwrap();
+        let previous = AcceptedConfigSnapshot::load(&path, None).unwrap();
+        fs::write(dir.path().join("customers.txt"), "64500\n64501\n").unwrap();
+        let current = AcceptedConfigSnapshot::load(&path, None).unwrap();
+        assert_eq!(previous.normalized_toml(), current.normalized_toml());
+        assert_ne!(previous.source_sha256(), current.source_sha256());
+        for name in [
+            "policy.rpol",
+            "lib.rpol",
+            "a-child.rpol",
+            "a-unit.rpol",
+            "customers.txt",
+        ] {
+            fs::remove_file(dir.path().join(name)).unwrap();
+        }
+        let history = dir.path().join("history");
+        record_accepted(&history, &previous).unwrap();
+        assert_eq!(
+            record_accepted(&history, &current).unwrap(),
+            RecordOutcome::Recorded { evicted: 0 }
+        );
+        let entries = list_mixed(&history).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(
+            entries
+                .iter()
+                .all(|row| row.status == HistoryStatus::MetadataOnly)
+        );
+        assert_eq!(
+            entries[0].source_sha256,
+            Some(v2::encode_hex(&current.source_sha256()))
+        );
+        assert_eq!(
+            entries[1].source_sha256,
+            Some(v2::encode_hex(&previous.source_sha256()))
+        );
+        assert_eq!(entries[0].sha256, entries[1].sha256);
+        assert_eq!(entries[0].summary, entries[1].summary);
+    }
+
+    /// Run this allocator receipt alone, after constructing accepted snapshots:
+    /// ```console
+    /// cargo test -p rustbgpd --bin rustbgpd --no-default-features --features dhat-heap metadata_history_allocation -- --ignored --test-threads=1
+    /// ```
+    #[cfg(feature = "dhat-heap")]
+    #[test]
+    #[ignore = "isolated dhat allocation receipt; requires --features dhat-heap and --test-threads=1"]
+    fn metadata_history_allocation_is_independent_of_oversized_payloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml = crate::test_support::tier_authorized_uds_test_config(
+            &(config_toml(65001) + "\n[global.telemetry]\nlog_format = \"json\"\n"),
+        );
+        let mut config =
+            crate::config::Config::load_toml_with_diagnostics(&toml, "allocation").unwrap();
+        config.neighbors[0].description = Some("x".repeat(v2::MAX_TOML));
+        let first = AcceptedConfigSnapshot::from_config_for_test(config.clone());
+        config.neighbors[0].description.as_mut().unwrap().push('x');
+        let second = AcceptedConfigSnapshot::from_config_for_test(config);
+        for n in 0..20 {
+            record_accepted(dir.path(), if n % 2 == 0 { &first } else { &second }).unwrap();
+        }
+        let _profiler = dhat::Profiler::builder()
+            .testing()
+            .trim_backtraces(Some(0))
+            .build();
+        assert_eq!(
+            record_accepted(dir.path(), &first).unwrap(),
+            RecordOutcome::Recorded { evicted: 1 }
+        );
+        let rows = list_mixed(dir.path()).unwrap();
+        assert_eq!(rows.len(), 20);
+        let stats = dhat::HeapStats::get();
+        // Includes twenty-row scans, revalidation, summary strings, encoding,
+        // and publication. A Config/TOML/manifest clone or reparse exceeds it.
+        dhat::assert!(stats.max_bytes < 256 * 1024);
+        dhat::assert!(stats.total_bytes < 512 * 1024);
+        eprintln!(
+            "metadata history allocation: peak={} total={}",
+            stats.max_bytes, stats.total_bytes
+        );
     }
 }

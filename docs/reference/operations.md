@@ -389,9 +389,10 @@ For operators coming from Junos, the four verbs map directly:
 | `rollback N` | `rbgp config rollback N` |
 
 The daemon retains a bounded, best-effort history of up to 20 recognized rows
-under `<runtime_state_dir>/config-history/`. A new valid v2 row is suppressed
-when TOML/manifest match the newest v2; unreadable/duplicates count, while old
-TOML is ignored/retained. Transactions and gRPC CRUD record after writes. Boot and
+under `<runtime_state_dir>/config-history/`. Payload-bearing v2 rows and
+metadata-only v3 rows share that count and sequence. A new v2 row deduplicates
+only when the newest mixed-history row is verified v2 with matching TOML and
+manifest. Unreadable/duplicate rows count; retired TOML is ignored and retained. Transactions and gRPC CRUD record after writes. Boot and
 successful SIGHUP reload also record the canonical validated snapshot on a
 best-effort basis; SIGHUP does not rewrite the operator's file. History
 survives restarts:
@@ -413,8 +414,27 @@ rbgp config confirm undo-1
 `config history` lists index, timestamp, normalized-TOML content hash,
 provenance status, and—when recorded—a config-source hash over that TOML digest
 plus the canonical accepted rpol/dataset source roster. It also shows a one-line
-summary per entry, never config document contents. Valid v2 rows are `recorded`;
+summary per entry, never config document contents. The listing also exposes
+normalized byte count and a metadata-only reason. Valid v2 rows are `recorded`;
 corrupt or duplicate-sequence rows are `unreadable` with both digests withheld.
+Accepted normalized TOML strictly above 10 MiB produces a `metadata_only` v3
+row, explicitly marked metadata-only and rollback-ineligible in human output
+and with `rollback_eligible: false` in JSON. Exactly 10 MiB remains v2. A v3
+row contains only hashes, byte count, recording identity, and a redacted summary;
+it never retains normalized TOML or the external-source roster. It is capped
+at 64 KiB, with a 4 KiB summary limit. Only an identical verified newest v3
+row deduplicates a new metadata record, comparing both hashes and byte count.
+An intervening v2 or unreadable row prevents that deduplication. New large rows
+can evict old rollback-capable rows; successful eviction counts appear in the
+daemon log. Recording failure warns and leaves the accepted config authoritative.
+A directory containing over twenty recognized finals fails listing before any
+payload decode; a subsequent successful writer can repair the old roster.
+
+Metadata-only rows always refuse rollback before payload or external-source
+access, planning, confirmed-commit authority, or mutation. Their hashes cannot
+restore omitted bytes from live files or commit-confirm cleanup residue. Keep
+an independent deployment copy of large configurations and their source data.
+
 Index 0 means the newest config-history row, not
 necessarily the running or currently persisted config. `config rollback N`
 accepts v2 only when one load reproduces TOML/manifest/source digests;
