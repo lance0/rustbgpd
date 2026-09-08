@@ -122,7 +122,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   compensated exactly as before; an ambiguous publication or a lost
   acknowledgement still fences and exits 70.
 
+- Removing the global export chain through SIGHUP now remains effective when
+  a peer reconnects. The daemon previously restored its startup fallback
+  chain when the peer's current effective chain was empty. Export policy
+  statistics now report installed peer chains without a separate `global`
+  fallback row; this row was not an aggregate of peer counters.
+
 ### Upgrade notes
+
+- Consumers of `GetPolicyStats` or `rbgp policy stats` should use the installed
+  peer rows. The daemon no longer reports a `global` export fallback row.
 
 - A config transaction whose candidate cannot be staged on disk now fails
   before any session is reset. Expect no session churn from such a failure;
