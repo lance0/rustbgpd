@@ -201,9 +201,13 @@ generator's historical output byte for byte.
   `ipv6_unicast` on its one IPv4-transport session. The daemon's OPEN must
   carry both multiprotocol capabilities, or establishment fails (an
   un-negotiated family is never reported as delivered). `<total_prefixes>`
-  becomes the **total across both families**, split evenly: each stub
-  announces `total / (2 * n_peers)` IPv4 /24s in the body NLRI plus the same
-  count of IPv6 /48s (`3001:HHHH:LLLL::/48`) in `MP_REACH_NLRI` with a
+  becomes the **total across both families**, split evenly by default. Set
+  `RELOADSTALL_IPV4_PREFIXES=N` for an exact IPv4 inventory; IPv6 receives
+  `total - N`. Each family is divided into contiguous slices: every member
+  receives `family_total / n_peers` prefixes, and the first
+  `family_total % n_peers` members receive one extra. Every member must have
+  at least one prefix in each family. IPv4 /24s use body NLRI and IPv6 /48s
+  (`3001:HHHH:LLLL::/48`) use `MP_REACH_NLRI` with a
   synthetic `fd09::x:y` next hop; churners flap one 16-prefix block per
   family (`3002:c:j::/48` for IPv6). Every observer keeps an independent
   per-family unique-prefix bitmap: initial convergence, reload completion,
@@ -212,7 +216,7 @@ generator's historical output byte for byte.
   slower family. A second `first_exact_bitmap6` receipt and a
   `reloadstall_dualstack_csv` row per reload (per-family completion,
   leading stall, family-restricted max-gap, withdrawal accounting, and
-  per-family stable-marker counts) are printed after the historical lines,
+  per-family stable-marker counts, explicit IPv4/IPv6 totals) are printed after the historical lines,
   which keep their format (`prefixes` is the total). Requires the reload
   mode: no flapstorm, trips, iBGP-RR, overlap, received-view, or
   `--convergence-only`.
@@ -226,6 +230,34 @@ generator's historical output byte for byte.
   observer (`bystander_withdrawn`), or any base withdrawal at a stable
   observer (`stable_withdrawn`) fails the reload; duplicate named
   withdrawals are counted and published. Works with or without dual-stack.
+
+For 700 members and 400,400 total routes, `RELOADSTALL_IPV4_PREFIXES=360360`
+selects exactly 90/10: 360,360 IPv4 and 40,040 IPv6. Members 0–559 own
+515 IPv4 prefixes and the rest own 514; members 0–139 own 58 IPv6 prefixes
+and the rest own 57. The filtering count must fit member 0 in **both**
+families (at most 58 for this shape; the historical equal-family count of
+64 does not fit). Omitting the count selects 50/50, or specify
+`RELOADSTALL_IPV4_PREFIXES=200200` explicitly. Odd totals require an explicit
+IPv4 count. The IPv4 count knob is rejected without dual-stack mode.
+Use a fresh `ARTIFACTS_DIR` for each mix and policy shape. The matrix runner
+compares effective workload inputs before resuming a passing cell; changed or
+missing input identity fails closed. Historical receipts remain verifiable
+offline, but cannot be resumed without that identity.
+
+Churn tasks start before the control window and remain active throughout
+all reloads. Each dual-stack reload prints `reloadstall_churn_overlap`:
+per-family successful socket-write counts and first/last monotonic timestamps
+inside the trigger-to-last-changed-observer-completion window. Only the dedicated
+churn blocks count; base announcements, refresh replies, channel enqueues,
+and writes after completion do not. `overlap_observed=false` reports a window
+with no write in one or both families; it does not change route-correctness
+acceptance or extend completion. A concurrent-churn campaign must require
+`overlap_observed=true` for each reload as a separate proof gate. Socket writes
+show sender progress; receiver inventory and stable-marker checks remain the
+independent delivery proof.
+
+The existing 20-member 50/50 receipt is historical. These inventory options
+and overlap rows do not establish asymmetric or 700-member scale proof.
 
 `gen-scenario.py` grows the matching pair: `GEN_DUALSTACK=1` emits
 `families = ["ipv4_unicast", "ipv6_unicast"]` on every neighbor, and

@@ -34,6 +34,12 @@ def value(cell="rustbgpd", generation="historical"):
     generator = {"rustbgpd":"bench/scale/reloadstall/gen-scenario.py", "bird":"bench/scale/reloadstall/gen-bird-scenario.py", "openbgpd":"bench/scale/reloadstall/gen-obgpd-scenario.py"}[cell]
     workload = {"binary":"target/release/rustbgpd", "sha256":h} if cell == "rustbgpd" else {"image_ref":refs[generation][cell], "image_id":"sha256:"+h}
     return {"schema":1,"cell":cell,"git":{"commit":"b"*40,"tree":"c"*40,"dirty":False},"toolchain":"rustc","host":"host","sources":{"common":common,"generator":{generator:h},"reloadstall":{"path":"bench/scale/target/release/reloadstall","sha256":h}},"workload":workload}
+inputs = {
+    "N_PEERS":"700", "TOTAL_PREFIXES":"400400", "PORT":"1790", "RELOADS":"4",
+    "CONTROL_SECS":"30", "CHANGED_PEERS":"", "FLAPSTORM":"", "BIRD_THREADS":"8",
+    "PROBE_PREFIXES":"",
+}
+(tmp / "inputs.json").write_text(json.dumps(inputs))
 verify = root / "bench/scale/matrix/verify-provenance.py"
 def accepted(name, data, want, expected=None, generation=None):
     path=tmp/(name+".json"); path.write_text(json.dumps(data))
@@ -43,6 +49,13 @@ def accepted(name, data, want, expected=None, generation=None):
     got=subprocess.run(command, capture_output=True).returncode == 0
     assert got == want, (name, got)
 accepted("valid", value(), True)
+v=value(); v["workload"]=list(v["workload"].items()); accepted("malformed-workload-object",v,False)
+v=value(); v["workload"]["inputs"]=inputs.copy(); accepted("with-inputs",v,True)
+v=value(); v["workload"]["inputs"]={}; accepted("missing-input-fields",v,False)
+v=value(); v["workload"]["inputs"]={**inputs,"GEN_DUALSTACK":"1","RELOADSTALL_IPV4_PREFIXES":"360360"}; accepted("asymmetric-inputs",v,True)
+v=value(); v["workload"]["inputs"]={**inputs,"RELOADSTALL_IPV4_PREFIXES":360360}; accepted("malformed-input-value",v,False)
+v=value(); v["workload"]["inputs"]={**inputs,"UNTRACKED":"value"}; accepted("unknown-input-key",v,False)
+
 accepted("historical-bird-default", value("bird"), True)
 accepted("historical-open-explicit", value("openbgpd"), True, generation="historical")
 accepted("current-bird", value("bird", "current"), True, generation="current")
@@ -191,8 +204,8 @@ fixture_image_id="sha256:$(printf '%064d' 0)"
 changed_image_id="sha256:$(printf '%064d' 1)"
 write_source_identity() {
   jq -n --arg commit "$1" --arg tree "$2" --argjson dirty "$3" \
-    --arg image_ref "$4" --arg image_id "$5" \
-    '{git:{commit:$commit,tree:$tree,dirty:$dirty},workload:{image_ref:$image_ref,image_id:$image_id}}' \
+    --arg image_ref "$4" --arg image_id "$5" --slurpfile inputs "$tmp/inputs.json" \
+    '{git:{commit:$commit,tree:$tree,dirty:$dirty},workload:{image_ref:$image_ref,image_id:$image_id,inputs:$inputs[0]}}' \
     >"$status.provenance"
 }
 resume_generation=historical
@@ -205,6 +218,12 @@ run_resume_check() {
       "$trace" bird "$status" >/dev/null
 }
 
+reject_resume() {
+  local rejected_rc=0
+  run_resume_check || rejected_rc=$?
+  [[ $rejected_rc == 1 ]]
+}
+
 write_source_identity "$source_commit" "$source_tree" false bird:3.3.1 "$fixture_image_id"
 resume_rc=0
 run_resume_check || resume_rc=$?
@@ -212,15 +231,15 @@ run_resume_check || resume_rc=$?
 [[ $(tail -n2 "$trace") == $'bird:resume-verify\nbird:live-verify' ]]
 
 resume_generation=current
-if run_resume_check; then exit 1; fi
+reject_resume
 resume_generation=historical
 
 write_source_identity "$source_commit" "$source_tree" false openbgpd/openbgpd:9.1 "$fixture_image_id"
-if run_resume_check; then exit 1; fi
+reject_resume
 
 write_source_identity "$source_commit" "$source_tree" false bird:3.3.1 "$fixture_image_id"
 resume_image_id=$changed_image_id
-if run_resume_check; then exit 1; fi
+reject_resume
 resume_image_id=$fixture_image_id
 
 resume_generation=current
@@ -232,18 +251,38 @@ resume_generation=historical
 write_source_identity "$source_commit" "$source_tree" false bird:3.3.1 "$fixture_image_id"
 
 git -C "$source_repo" commit --allow-empty -qm changed-head
-if run_resume_check; then exit 1; fi
+reject_resume
 git -C "$source_repo" reset -q --hard "$source_commit"
 
 write_source_identity "$source_commit" "$(printf 'f%.0s' {1..40})" false bird:3.3.1 "$fixture_image_id"
-if run_resume_check; then exit 1; fi
+reject_resume
 
 write_source_identity "$source_commit" "$source_tree" false bird:3.3.1 "$fixture_image_id"
 printf 'dirty\n' >>"$source_repo/input"
-if run_resume_check; then exit 1; fi
+reject_resume
 git -C "$source_repo" restore input
 
 resume_rc=0
 run_resume_check || resume_rc=$?
 [[ $resume_rc == 10 ]]
+# Effective defaults and explicit equivalent values identify the same workload.
+resume_rc=0
+N_PEERS=700 TOTAL_PREFIXES=400400 run_resume_check || resume_rc=$?
+[[ $resume_rc == 10 ]]
+for override in N_PEERS=20 TOTAL_PREFIXES=11440 GEN_DUALSTACK=1 \
+    GEN_FILTER_COUNT=32 RELOADSTALL_FILTER_COUNT=32 RELOADSTALL_IPV4_PREFIXES=360360; do
+  (export "${override?}"; reject_resume)
+done
+cp "$status.provenance" "$tmp/with-inputs.json"
+for expression in 'del(.workload.inputs)' '.workload.inputs = null' \
+    '.workload.inputs.N_PEERS = 700'; do
+  jq "$expression" "$tmp/with-inputs.json" >"$status.provenance"
+  reject_resume
+done
+jq '.workload.inputs.RELOADSTALL_IPV4_PREFIXES = "200200"' \
+  "$tmp/with-inputs.json" >"$status.provenance"
+resume_rc=0
+RELOADSTALL_IPV4_PREFIXES=200200 run_resume_check || resume_rc=$?
+[[ $resume_rc == 10 ]]
+RELOADSTALL_IPV4_PREFIXES=360360 reject_resume
 echo "scale provenance tests pass"

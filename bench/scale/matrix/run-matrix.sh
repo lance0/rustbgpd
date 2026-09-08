@@ -32,7 +32,8 @@
 #              GEN_* / RELOADSTALL_* pass through to the generator and the
 #                harness unchanged (dual-stack: GEN_DUALSTACK=1 +
 #                RELOADSTALL_DUALSTACK=1; filtering: GEN_FILTER_COUNT=K +
-#                RELOADSTALL_FILTER_COUNT=K).
+#                RELOADSTALL_FILTER_COUNT=K). RELOADSTALL_IPV4_PREFIXES selects
+#                an exact IPv4 inventory in dual-stack mode; IPv6 gets the rest.
 set -u
 
 REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
@@ -94,6 +95,26 @@ resolve_competitor_image() {
     }
 }
 
+matrix_workload_inputs() {
+    jq -cn --arg peers "$N_PEERS" --arg total "$TOTAL" --arg port "$PORT" \
+        --arg reloads "$RELOADS" --arg control "$CONTROL_SECS" \
+        --arg changed "$CHANGED_PEERS" --arg flapstorm "$FLAPSTORM" \
+        --arg threads "$BIRD_THREADS" --arg probes "$PROBE_PREFIXES" \
+        '{N_PEERS:$peers,TOTAL_PREFIXES:$total,PORT:$port,RELOADS:$reloads,
+          CONTROL_SECS:$control,CHANGED_PEERS:$changed,FLAPSTORM:$flapstorm,
+          BIRD_THREADS:$threads,PROBE_PREFIXES:$probes}
+         + (env | with_entries(select(.key | test("^(GEN_|RELOADSTALL_)"))))'
+}
+
+recheck_workload_inputs() {
+    local current
+    current=$(matrix_workload_inputs) || return 1
+    if ! jq -e --argjson current "$current" '.workload.inputs == $current' "$1" >/dev/null; then
+        echo "workload inputs changed or are missing; use a fresh ARTIFACTS_DIR" >&2
+        return 1
+    fi
+}
+
 matrix_prepare_event() { :; }
 recheck_source_git_identity() {
     local repo=$1 provenance_file=$2 stored current_commit current_tree current_dirty=false status
@@ -147,7 +168,8 @@ if [ "${1:-}" = --self-test-prepare-order ]; then
         matrix_prepare_event "$1:live-verify"
         verify_live_competitor_identity "$1" "$status.provenance" &&
             [ -n "${MATRIX_SELF_TEST_REPO:-}" ] &&
-            recheck_source_git_identity "$MATRIX_SELF_TEST_REPO" "$status.provenance"
+            recheck_source_git_identity "$MATRIX_SELF_TEST_REPO" "$status.provenance" &&
+            recheck_workload_inputs "$status.provenance"
     }
     inspect_competitor_image() {
         [ -z "${MATRIX_SELF_TEST_IMAGE_TRACE:-}" ] || printf '%s\n' "$1" >>"$MATRIX_SELF_TEST_IMAGE_TRACE"
@@ -196,7 +218,8 @@ write_cell_provenance() {
     for relative in "${COMMON_SOURCES[@]}"; do
         common=$(jq -c --arg key "$relative" --arg value "${SOURCE_HASHES[$relative]}" '. + {($key):$value}' <<<"$common") || return 1
     done
-    local workload
+    local workload inputs
+    inputs=$(matrix_workload_inputs) || return 1
     if [ "$workload_kind" = binary ]; then
         workload=$(jq -cn --arg binary "$workload_name" --arg sha256 "$workload_hash" '{binary:$binary,sha256:$sha256}') || return 1
     else
@@ -208,8 +231,8 @@ write_cell_provenance() {
         --argjson common "$common" --arg generator_path "$generator" \
         --arg generator_hash "${SOURCE_HASHES[$generator]}" \
         --arg reloadstall_hash "${SOURCE_HASHES[bench/scale/target/release/reloadstall]}" \
-        --argjson workload "$workload" \
-        '{schema:1,cell:$cell,git:{commit:$commit,tree:$tree,dirty:$dirty},toolchain:$toolchain,host:$host,sources:{common:$common,generator:{($generator_path):$generator_hash},reloadstall:{path:"bench/scale/target/release/reloadstall",sha256:$reloadstall_hash}},workload:$workload}' \
+        --argjson workload "$workload" --argjson inputs "$inputs" \
+        '{schema:1,cell:$cell,git:{commit:$commit,tree:$tree,dirty:$dirty},toolchain:$toolchain,host:$host,sources:{common:$common,generator:{($generator_path):$generator_hash},reloadstall:{path:"bench/scale/target/release/reloadstall",sha256:$reloadstall_hash}},workload:($workload + {inputs:$inputs})}' \
         >"$ART/$cell/provenance.json" || return 1
     python3 "$REPO/bench/scale/matrix/verify-provenance.py" \
         "$ART/$cell/provenance.json" "$cell" "$COMPETITOR_GENERATION"
@@ -228,7 +251,7 @@ recheck_cell_provenance() {
     else
         verify_live_competitor_identity "$cell" "$file" || return 1
     fi
-    recheck_source_git_identity "$REPO" "$file"
+    recheck_source_git_identity "$REPO" "$file" && recheck_workload_inputs "$file"
 }
 
 # Operator-query probes (rustbgpd cell): one `rbgp health` timing loop and
