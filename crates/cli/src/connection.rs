@@ -7,6 +7,7 @@
 use std::fs;
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use hyper_util::rt::TokioIo;
@@ -84,11 +85,55 @@ pub(crate) const EFFECTIVE_CONFIG_MAX_DECODE_BYTES: usize =
 pub(crate) struct Connection {
     channel: Channel,
     token: Option<AsciiMetadataValue>,
+    local_process: Arc<Mutex<Option<LocalProcess>>>,
+}
+
+/// Identity observed on the actual UDS transport, including Linux PID reuse evidence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LocalProcess {
+    pub(crate) pid: u32,
+    start_ticks: u64,
+}
+
+pub(crate) fn proc_start_ticks(stat: &str) -> Option<u64> {
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()
+}
+
+impl LocalProcess {
+    fn capture(pid: u32) -> Option<Self> {
+        if pid == 0 {
+            return None;
+        }
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        Some(Self {
+            pid,
+            start_ticks: proc_start_ticks(&stat)?,
+        })
+    }
+
+    /// Read only while the same process still occupies the observed PID.
+    pub(crate) fn read_file(self, name: &str) -> Option<String> {
+        String::from_utf8(self.read_bytes(name)?).ok()
+    }
+
+    pub(crate) fn read_bytes(self, name: &str) -> Option<Vec<u8>> {
+        if Self::capture(self.pid)? != self {
+            return None;
+        }
+        let bytes = fs::read(format!("/proc/{}/{name}", self.pid)).ok()?;
+        (Self::capture(self.pid)? == self).then_some(bytes)
+    }
 }
 
 impl Connection {
-    pub(crate) const fn new(channel: Channel, token: Option<AsciiMetadataValue>) -> Self {
-        Self { channel, token }
+    pub(crate) fn local_process(&self) -> Option<LocalProcess> {
+        let process = (*self.local_process.lock().ok()?)?;
+        (LocalProcess::capture(process.pid)? == process).then_some(process)
     }
 
     pub(crate) fn channel(&self) -> Channel {
@@ -164,11 +209,16 @@ enum EndpointTarget {
 
 pub(crate) async fn connect(addr: &str, token_file: Option<&str>) -> Result<Connection, CliError> {
     let token = load_bearer_token(token_file)?;
+    let local_process = Arc::default();
     let channel = match parse_endpoint_target(addr)? {
         EndpointTarget::Tcp(uri) => connect_tcp(&uri, addr).await?,
-        EndpointTarget::Uds(path) => connect_uds(&path, addr).await?,
+        EndpointTarget::Uds(path) => connect_uds(&path, addr, Arc::clone(&local_process)).await?,
     };
-    Ok(Connection::new(channel, token))
+    Ok(Connection {
+        channel,
+        token,
+        local_process,
+    })
 }
 
 /// Map a connect-time transport error to a short human failure class,
@@ -267,15 +317,34 @@ async fn connect_tcp(uri: &str, display_addr: &str) -> Result<Channel, CliError>
         .map_err(|e| connect_error(display_addr, &e))
 }
 
-async fn connect_uds(path: &Path, display_addr: &str) -> Result<Channel, CliError> {
+async fn connect_uds(
+    path: &Path,
+    display_addr: &str,
+    local_process: Arc<Mutex<Option<LocalProcess>>>,
+) -> Result<Channel, CliError> {
     let endpoint = Endpoint::try_from("http://[::]:50051")
         .map_err(|e| CliError::Argument(format!("invalid UDS endpoint: {e}")))?
         .connect_timeout(CONNECT_TIMEOUT);
     let path = path.to_path_buf();
     let connect = endpoint.connect_with_connector(service_fn(move |_: Uri| {
         let path = path.clone();
+        let local_process = Arc::clone(&local_process);
         async move {
+            // Reconnect attempts invalidate the previous transport's identity,
+            // including attempts that fail before a replacement is available.
+            if let Ok(mut identity) = local_process.lock() {
+                *identity = None;
+            }
             let stream = UnixStream::connect(path).await?;
+            let process = stream
+                .peer_cred()
+                .ok()
+                .and_then(|cred| cred.pid())
+                .and_then(|pid| u32::try_from(pid).ok())
+                .and_then(LocalProcess::capture);
+            if let Ok(mut identity) = local_process.lock() {
+                *identity = process;
+            }
             Ok::<_, std::io::Error>(TokioIo::new(stream))
         }
     }));
@@ -296,6 +365,98 @@ mod tests {
     use tonic::metadata::MetadataValue;
 
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn uds_identity_comes_from_the_connected_stream_and_rejects_pid_reuse() {
+        let dir = tempfile::tempdir().unwrap();
+        let server =
+            crate::test_support::spawn_mock_uds_server(&dir.path().join("grpc.sock"), None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+        let process = connection.local_process().unwrap();
+        assert_eq!(process.pid, std::process::id());
+        assert_eq!(
+            process.read_file("limits").unwrap(),
+            fs::read_to_string("/proc/self/limits").unwrap()
+        );
+        let reused_pid = LocalProcess {
+            start_ticks: process.start_ticks + 1,
+            ..process
+        };
+        assert!(reused_pid.read_file("limits").is_none());
+        *connection.local_process.lock().unwrap() = Some(reused_pid);
+        assert!(connection.local_process().is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proc_bytes_preserve_non_utf8_cmdline_and_check_process_identity() {
+        use std::os::unix::{ffi::OsStringExt, process::CommandExt};
+
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        fs::write(&config, "[global]\nasn = 65001\n").unwrap();
+        // cat reads the config and then waits on its owned stdin pipe. Its
+        // argv0 need not be UTF-8, unlike the Rust test harness's arguments.
+        let child = Child(
+            std::process::Command::new("cat")
+                .arg0(std::ffi::OsString::from_vec(b"rustbgpd\xff".to_vec()))
+                .arg(&config)
+                .arg("-")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let process = LocalProcess::capture(child.0.id()).unwrap();
+        let cmdline = process.read_bytes("cmdline").unwrap();
+        let mut args = cmdline.split(|byte| *byte == 0);
+        assert_eq!(args.next().unwrap(), b"rustbgpd\xff");
+        assert_eq!(args.next().unwrap(), config.as_os_str().as_encoded_bytes());
+        assert!(process.read_file("cmdline").is_none());
+        let reused_pid = LocalProcess {
+            start_ticks: process.start_ticks + 1,
+            ..process
+        };
+        assert!(reused_pid.read_bytes("cmdline").is_none());
+    }
+
+    #[tokio::test]
+    async fn tcp_identity_is_unavailable_even_with_a_local_server() {
+        let server = crate::test_support::spawn_mock_server(None).await;
+        assert!(
+            connect(&server.addr, None)
+                .await
+                .unwrap()
+                .local_process()
+                .is_none()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn failed_uds_reconnect_clears_previous_process_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = Arc::new(Mutex::new(LocalProcess::capture(std::process::id())));
+        assert!(
+            connect_uds(
+                &dir.path().join("missing.sock"),
+                "missing",
+                Arc::clone(&identity)
+            )
+            .await
+            .is_err()
+        );
+        assert!(identity.lock().unwrap().is_none());
+    }
 
     #[tokio::test]
     async fn read_deadline_cancels_pending_response_and_names_method_and_budget() {
