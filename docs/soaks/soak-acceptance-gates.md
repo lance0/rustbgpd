@@ -234,6 +234,17 @@ and `/readyz` stays green — a crippled daemon behind an entirely green
 client-side gate battery. The achieved limit is recorded as `nofile_soft` in
 `run.json`, so each receipt states the configuration it measured.
 
+Both flagship analyzers (scenarios 10 and 11) also require `rustbgpd.log`.
+The `daemon_log` gate streams the complete captured log and rejects missing,
+empty, malformed, or unterminated evidence and unexpected non-JSON output.
+Only blank lines and one complete startup banner matching the flagship
+configuration shape are accepted outside JSON. Every `ERROR` fails, including
+EMFILE, decoder failures, and errors during deliberate trips or terminal
+teardown: no scenario-justified ERROR exceptions are currently established.
+The verdict reports `WARN` counts by message without failing on warnings.
+All existing client-side gates still apply. These added requirements apply to
+new receipts; historical receipts retain their original acceptance contract.
+
 The measured window also carries mandatory management-plane load, started
 after convergence and before sampling. Five independent monotonic schedules
 exercise the shipped surfaces until the engine exits: HTTP `/metrics` every

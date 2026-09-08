@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Post-hoc analyzer for the route-server flagship soak.
 
-Reads samples.csv + cycles.log + run.json + management-plane-load.jsonl emitted by
+Reads samples.csv + cycles.log + run.json + rustbgpd.log and
+management-plane-load.jsonl emitted by
 run-soak-rs-flagship.sh and emits a JSON verdict against the
 precommitted gates in docs/soaks/soak-acceptance-gates.md (scenario 10):
 
@@ -23,6 +24,7 @@ precommitted gates in docs/soaks/soak-acceptance-gates.md (scenario 10):
   - RSS peak ceiling; late-window RSS/intern slope (evaluated only when
     the late window spans >= --min-slope-seconds)
   - no ABORT record in cycles.log
+  - complete daemon JSON log, no ERROR records; WARN counts reported
 
 Stdlib only. Exit code 0 on pass, 1 on any gate failure, 2 on
 harness/input error.
@@ -38,6 +40,8 @@ import re
 import sys
 from datetime import datetime, timezone
 from typing import Optional
+
+from flagship_daemon_log import analyze_daemon_log
 
 REQUIRED = {
     "timestamp", "elapsed_sec", "rss_mb", "intern_size", "established",
@@ -707,7 +711,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Analyze the route-server flagship soak")
     parser.add_argument("run_dir",
-                        help="Run directory (samples.csv, cycles.log, run.json)")
+                        help="Run directory (samples.csv, cycles.log, run.json, rustbgpd.log)")
     parser.add_argument("--output", help="Write verdict JSON to this path")
     parser.add_argument("--min-slope-seconds", type=float, default=3600.0,
                         help="Minimum late-window span before the slope gates "
@@ -772,6 +776,7 @@ def main() -> int:
     cycles = parse_cycles(cycle_lines)
     result = analyze(rows, cycles, meta, args.min_slope_seconds)
     result["gates"].update(analyze_management_load(management_raw, meta))
+    result["gates"]["daemon_log"] = analyze_daemon_log(args.run_dir)
     result["verdict"] = (
         "pass" if all(gate["pass"] for gate in result["gates"].values())
         else "fail"
