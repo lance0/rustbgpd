@@ -18,7 +18,8 @@ use serde::Serialize;
 use crate::commands::config::confirmation_status_label;
 use crate::commands::watch::bgp_event_json_value;
 use crate::connection::{
-    Connection, EFFECTIVE_CONFIG_RPC_TIMEOUT, READ_RPC_TIMEOUT, rpc_with_timeout,
+    Connection, EFFECTIVE_CONFIG_RPC_TIMEOUT, LocalProcess, READ_RPC_TIMEOUT, proc_start_ticks,
+    rpc_with_timeout,
 };
 use crate::error::CliError;
 use crate::output::{self, JsonNeighbor, outln};
@@ -687,32 +688,13 @@ fn parse_max_open_files(limits: &str) -> Option<(u64, u64)> {
     Some((soft, hard))
 }
 
-/// Local rustbgpd processes found by `/proc/<pid>/comm`, with their
-/// rlimit dumps. Empty on non-Linux hosts, remote daemons, or when the
-/// daemon runs in another namespace — the manifest records that.
-fn local_daemon_limits() -> Vec<(u32, String)> {
-    let mut found = Vec::new();
-    let Ok(entries) = fs::read_dir("/proc") else {
-        return found;
-    };
-    for entry in entries.flatten() {
-        let Some(pid) = entry
-            .file_name()
-            .to_str()
-            .and_then(|s| s.parse::<u32>().ok())
-        else {
-            continue;
-        };
-        let comm = fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
-        if comm.trim_end() != "rustbgpd" {
-            continue;
-        }
-        if let Ok(limits) = fs::read_to_string(format!("/proc/{pid}/limits")) {
-            found.push((pid, limits));
-        }
-    }
-    found.sort_by_key(|(pid, _)| *pid);
-    found
+/// Limits belong only to the process observed on this connection's UDS stream.
+/// TCP, inaccessible procfs, and changed process identities provide no local evidence.
+fn local_daemon_limits(connection: Option<&Connection>) -> Option<(u32, String)> {
+    let connection = connection?;
+    let process = connection.local_process()?;
+    let limits = process.read_file("limits")?;
+    (connection.local_process() == Some(process)).then_some((process.pid, limits))
 }
 
 /// Pure rlimit check: red when the soft `nofile` limit is below
@@ -1803,20 +1785,42 @@ fn parse_cmdline_config_path(cmdline: &[u8]) -> Option<String> {
         .find(|arg| !arg.starts_with('-'))
 }
 
-fn proc_cmdline_config_path(pid: u32) -> Option<PathBuf> {
-    let bytes = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-    Some(
-        parse_cmdline_config_path(&bytes)
-            .map_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH), PathBuf::from),
-    )
+fn proc_cmdline_config_path(process: LocalProcess) -> Option<PathBuf> {
+    let bytes = process.read_file("cmdline")?;
+    let path = parse_cmdline_config_path(bytes.as_bytes())
+        .map_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH), PathBuf::from);
+    Some(process_config_path(process.pid, &path))
+}
+
+/// Traverse the peer's procfs magic links directly: resolving them into host
+/// paths first would lose the peer's mount namespace.
+fn process_config_path(pid: u32, path: &Path) -> PathBuf {
+    if let Ok(relative) = path.strip_prefix("/") {
+        PathBuf::from(format!("/proc/{pid}/root")).join(relative)
+    } else {
+        PathBuf::from(format!("/proc/{pid}/cwd")).join(path)
+    }
+}
+
+/// A connected UDS peer may identify its config; an unreachable local UDS
+/// may use the packaged file only as first-deploy input. TCP has no local source.
+fn local_config_path(connection: Option<&Connection>, daemon_address: &str) -> Option<PathBuf> {
+    if !daemon_address.starts_with("unix://") {
+        return None;
+    }
+    let Some(connection) = connection else {
+        return Some(PathBuf::from(DEFAULT_CONFIG_PATH));
+    };
+    let process = connection.local_process()?;
+    let path = proc_cmdline_config_path(process)?;
+    (connection.local_process() == Some(process)).then_some(path)
 }
 
 /// Process start time (unix seconds) from `/proc/<pid>/stat` field 22
 /// plus the boot time; `stat` is the raw file contents.
 fn parse_proc_start_unix(stat: &str, btime: u64, clk_tck: u64) -> Option<u64> {
     // The comm field (2) may contain spaces; fields 3+ follow the last ')'.
-    let after_comm = stat.rsplit_once(')')?.1;
-    let starttime: u64 = after_comm.split_whitespace().nth(19)?.parse().ok()?;
+    let starttime = proc_start_ticks(stat)?;
     Some(btime + starttime / clk_tck.max(1))
 }
 
@@ -2446,6 +2450,7 @@ async fn run_with_deadlines(
         None;
     let mut tcp_ao_support = crate::proto::TcpAoSupport::Unspecified.into();
     let daemon_reachable = connection.is_ok();
+    let local_connection = connection.as_ref().ok().cloned();
 
     // ---- daemon-backed sections -------------------------------------
     match connection {
@@ -3006,46 +3011,45 @@ async fn run_with_deadlines(
     )?;
 
     // ---- daemon rlimits (local processes only) ------------------------
-    let daemon_limits = local_daemon_limits();
-    if daemon_limits.is_empty() {
+    if let Some((pid, limits)) = local_daemon_limits(local_connection.as_ref()) {
+        match parse_max_open_files(&limits) {
+            Some((soft, hard)) => {
+                let check = nofile_check(pid, soft, hard, run_context);
+                reporter.record(check.name, check.status, check.detail)?;
+            }
+            None => reporter.record(
+                format!("daemon.rlimit.nofile.{pid}"),
+                CheckStatus::Warn,
+                format!("daemon pid {pid}: could not parse Max open files from /proc limits"),
+            )?,
+        }
+        bundle.add(
+            &format!("system/daemon-limits-{pid}.txt"),
+            limits.into_bytes(),
+        );
+        sections.insert("rlimits", "collected".to_string());
+    } else {
         sections.insert(
             "rlimits",
-            "unavailable: no local rustbgpd process found".to_string(),
+            "unavailable: connected daemon has no verified local UDS process limits".to_string(),
         );
-    } else {
-        for (pid, limits) in &daemon_limits {
-            match parse_max_open_files(limits) {
-                Some((soft, hard)) => {
-                    let check = nofile_check(*pid, soft, hard, run_context);
-                    reporter.record(check.name, check.status, check.detail)?;
-                }
-                None => reporter.record(
-                    format!("daemon.rlimit.nofile.{pid}"),
-                    CheckStatus::Warn,
-                    format!("daemon pid {pid}: could not parse Max open files from /proc limits"),
-                )?,
-            }
-            bundle.add(
-                &format!("system/daemon-limits-{pid}.txt"),
-                limits.clone().into_bytes(),
-            );
-        }
-        sections.insert("rlimits", "collected".to_string());
     }
 
     // ---- first-deploy probes (LAN-482) --------------------------------
-    // Target source: the daemon's effective config when it is up;
-    // otherwise the local config file (the path a local daemon process
-    // was started with, else the packaged default). The local file is
-    // only parsed for probe targets — it is never copied into the bundle.
+    // Effective config is authoritative. Local fallback files are used only
+    // for a verified UDS peer, or first-deploy input when that UDS is down.
     let local_config_source: Option<(String, String)> = if effective_toml.is_none() {
-        let path = daemon_limits
-            .first()
-            .and_then(|(pid, _)| proc_cmdline_config_path(*pid))
-            .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH));
-        fs::read_to_string(&path)
-            .ok()
-            .map(|text| (text, path.display().to_string()))
+        let process = local_connection
+            .as_ref()
+            .and_then(Connection::local_process);
+        local_config_path(local_connection.as_ref(), opts.daemon_address).and_then(|path| {
+            let text = fs::read_to_string(&path).ok()?;
+            (local_connection
+                .as_ref()
+                .and_then(Connection::local_process)
+                == process)
+                .then(|| (text, path.display().to_string()))
+        })
     } else {
         None
     };
@@ -3135,18 +3139,24 @@ async fn run_with_deadlines(
 
     // ---- config freshness (local daemon processes only) ---------------
     let freshness_state_dir = PathBuf::from(state_dir.as_deref().unwrap_or(DEFAULT_STATE_DIR));
-    for (pid, _) in &daemon_limits {
-        let Some(config_path) = proc_cmdline_config_path(*pid) else {
-            continue;
-        };
-        let (Some(mtime), Some(reference)) = (
+    if let Some(connection) = local_connection.as_ref()
+        && let Some(process) = connection.local_process()
+        && let Some(config_path) = proc_cmdline_config_path(process)
+        && let (Some(mtime), Some(reference)) = (
             mtime_unix(&config_path),
-            config_freshness_reference(&freshness_state_dir, *pid),
-        ) else {
-            continue;
-        };
-        let check =
-            config_freshness_check(*pid, &config_path.display().to_string(), mtime, reference);
+            config_freshness_reference(
+                &process_config_path(process.pid, &freshness_state_dir),
+                process.pid,
+            ),
+        )
+        && connection.local_process() == Some(process)
+    {
+        let check = config_freshness_check(
+            process.pid,
+            &config_path.display().to_string(),
+            mtime,
+            reference,
+        );
         reporter.record(check.name, check.status, check.detail)?;
     }
 
@@ -4198,6 +4208,146 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
         let container = nofile_check(42, 1024, 524_288, "container");
         assert!(container.detail.contains("ulimit"), "{}", container.detail);
         assert!(nofile_check(42, 4096, 524_288, "unknown").status == CheckStatus::Ok);
+    }
+
+    /// Subprocess fixture: two independently limited UDS peers, deliberately
+    /// named rustbgpd so the former host-wide discovery would select both.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn local_identity_fixture() {
+        let Some(socket) = std::env::var_os("RUSTBGPD_DOCTOR_IDENTITY_SOCKET") else {
+            return;
+        };
+        fs::write("/proc/self/comm", "rustbgpd").unwrap();
+        let path = PathBuf::from(socket);
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let _server = crate::test_support::spawn_mock_uds_server(&path, None).await;
+                fs::write(path.with_extension("ready"), "ready").unwrap();
+                std::future::pending::<()>().await;
+            });
+    }
+
+    #[cfg(target_os = "linux")]
+    struct IdentityFixture(std::process::Child);
+
+    #[cfg(target_os = "linux")]
+    impl Drop for IdentityFixture {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn spawn_identity_fixture(path: &Path, nofile: u64) -> IdentityFixture {
+        let _ = fs::remove_file(path.with_extension("ready"));
+        let child = std::process::Command::new("sh")
+            .args(["-c", "ulimit -n \"$1\"; exec \"$2\" --exact commands::doctor::tests::local_identity_fixture --nocapture", "doctor-identity-fixture"])
+            .arg(nofile.to_string())
+            .arg(std::env::current_exe().unwrap())
+            .env("RUSTBGPD_DOCTOR_IDENTITY_SOCKET", path)
+            .stdout(std::process::Stdio::null())
+            .spawn().unwrap();
+        let mut fixture = IdentityFixture(child);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !path.with_extension("ready").exists() {
+                assert!(
+                    fixture.0.try_wait().unwrap().is_none(),
+                    "identity fixture exited before binding"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        fixture
+    }
+
+    #[test]
+    fn process_config_paths_stay_in_the_connected_process_filesystem() {
+        assert_eq!(
+            process_config_path(42, Path::new("/etc/rustbgpd/config.toml")),
+            PathBuf::from("/proc/42/root/etc/rustbgpd/config.toml"),
+        );
+        assert_eq!(
+            process_config_path(42, Path::new("configs/router.toml")),
+            PathBuf::from("/proc/42/cwd/configs/router.toml"),
+        );
+    }
+
+    #[tokio::test]
+    async fn local_config_fallback_requires_a_local_down_endpoint_or_verified_process() {
+        assert_eq!(
+            local_config_path(None, "unix:///missing.sock"),
+            Some(PathBuf::from(DEFAULT_CONFIG_PATH))
+        );
+        assert!(local_config_path(None, "http://192.0.2.1:50051").is_none());
+        let server = crate::test_support::spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+        assert!(local_config_path(Some(&connection), &server.addr).is_none());
+        // Even an address presented as UDS cannot turn unavailable transport
+        // identity into evidence that the packaged file belongs to its daemon.
+        assert!(local_config_path(Some(&connection), "unix:///unknown.sock").is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn connected_process_limits_ignore_other_daemons_and_follow_reconnect() {
+        let dir = tempfile::tempdir().unwrap();
+        let selected_path = dir.path().join("selected.sock");
+        let good = spawn_identity_fixture(&selected_path, 4096).await;
+        let bad_path = dir.path().join("other.sock");
+        let bad = spawn_identity_fixture(&bad_path, 1024).await;
+        let connection = connect(&format!("unix://{}", selected_path.display()), None)
+            .await
+            .unwrap();
+        let (pid, limits) = local_daemon_limits(Some(&connection)).unwrap();
+        assert_eq!(pid, good.0.id());
+        let (soft, hard) = parse_max_open_files(&limits).unwrap();
+        assert_eq!(soft, 4096);
+        assert!(nofile_check(pid, soft, hard, "unknown").status == CheckStatus::Ok);
+
+        let other = connect(&format!("unix://{}", bad_path.display()), None)
+            .await
+            .unwrap();
+        let (pid, limits) = local_daemon_limits(Some(&other)).unwrap();
+        assert_eq!(pid, bad.0.id());
+        let (soft, hard) = parse_max_open_files(&limits).unwrap();
+        assert_eq!(soft, 1024);
+        assert!(nofile_check(pid, soft, hard, "unknown").status == CheckStatus::Fail);
+        let tcp = crate::test_support::spawn_mock_server(None).await;
+        let tcp_connection = connect(&tcp.addr, None).await.unwrap();
+        assert!(local_daemon_limits(Some(&tcp_connection)).is_none());
+        assert!(local_daemon_limits(None).is_none());
+
+        drop(good);
+        assert!(local_daemon_limits(Some(&connection)).is_none());
+        let replacement = spawn_identity_fixture(&selected_path, 1024).await;
+        let mut client =
+            GlobalServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let _ = client.get_global(crate::proto::GetGlobalRequest {}).await;
+                if connection
+                    .local_process()
+                    .is_some_and(|process| process.pid == replacement.0.id())
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let (pid, limits) = local_daemon_limits(Some(&connection)).unwrap();
+        assert_eq!(pid, replacement.0.id());
+        let (soft, hard) = parse_max_open_files(&limits).unwrap();
+        assert_eq!(soft, 1024);
+        assert!(nofile_check(pid, soft, hard, "unknown").status == CheckStatus::Fail);
     }
 
     #[test]
