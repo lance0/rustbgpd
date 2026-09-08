@@ -18,8 +18,7 @@ demotes to LLGR_STALE (RFC 9494) if `llgr_stale_time > 0`. Check the
 peer-group template carries what you think it does:
 
 ```toml
-[[peer_groups]]
-name = "rr-clients"
+[peer_groups.rr-clients]
 graceful_restart = true
 gr_stale_routes_time = 120
 llgr_stale_time = 300

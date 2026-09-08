@@ -216,7 +216,7 @@ mtimes can lie about what the daemon actually accepted.
 ```bash
 rbgp summary                          # members Established
 rbgp rib received 198.51.100.2        # a member's accepted routes
-rbgp policy stats                     # hygiene/client terms firing
+rbgp policy stats --direction import  # hygiene/client terms firing
 rbgp policy explain --neighbor 198.51.100.2 --prefix 203.0.113.0/24
 ```
 
