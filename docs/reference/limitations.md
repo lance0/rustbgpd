@@ -66,6 +66,8 @@ and [eligibility](path-attribute-registry.md#srv6-service-eligibility) checks,
 with unchanged-next-hop reflection of eligible raw attributes. SRv6 PE import,
 service origination, SID reconstruction, next-hop rewriting, and forwarding
 remain unimplemented.
+See [SRv6 route troubleshooting](operations.md#srv6-service-route-is-visible-but-cannot-be-selected)
+for the retained-but-ineligible route case.
 
 Shipped and interop-tested:
 

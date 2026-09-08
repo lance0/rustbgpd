@@ -827,7 +827,7 @@ fn status_label(status: i32) -> &'static str {
     }
 }
 
-fn confirmation_status_label(status: i32) -> &'static str {
+pub(crate) fn confirmation_status_label(status: i32) -> &'static str {
     match ConfigTransactionConfirmationStatus::try_from(status)
         .unwrap_or(ConfigTransactionConfirmationStatus::Unspecified)
     {

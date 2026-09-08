@@ -1,0 +1,3 @@
+Correctness rung (20 members, 11,440 total = 5,720 per family, 16 changed / 4 stable, filtering: generation B
+rejects base indexes 0..64 of each family). Run by the manual recipe under the shared host lock on a busy host
+(see host.txt). Timings are context only; the cell proves named-withdrawal, leak, and bystander behavior.

@@ -26,6 +26,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   daemon. `rustbgpd --diff` and the runtime config-diff API report the
   `SIGHUP reload route` the candidate would take (`sighup_reload` in JSON).
 
+- `rbgp doctor --pre-upgrade CONFIG` adds read-only pre-upgrade checks to the
+  existing doctor run, against the config file the upgraded daemon will boot:
+  `upgrade.transaction` (the same evidence as `rbgp config status`),
+  `upgrade.settlement` (the runtime-config settlement watchdog gauge), and
+  `upgrade.posture` (the candidate's resolved RFC 8212 epoch/posture against
+  the live effective posture, with the documented omitted-versus-explicit
+  rules). A pending, applying, rollback-failed, or ambiguous confirmed
+  transaction, an active settlement owner, a posture mismatch, and any
+  unavailable, denied, or unimplemented evidence are red with the operator
+  action to take; the mode never confirms, aborts, rewrites, or stops
+  anything. Plain `doctor` keeps its check set, RPC set, JSON shape, and exit
+  contract; the mode adds a `pre_upgrade` object with the observation instant
+  to `--json` output and a `pre_upgrade` section to the bundle manifest.
+
 - `just fuzz-list` and `just fuzz <crate> <target>` run the cargo-fuzz
   inventory from the crate that owns each `fuzz/Cargo.toml`, which is the only
   directory cargo-fuzz can resolve a target from. Both recipes read the target
@@ -80,6 +94,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   on the wire.
 
 ### Upgrade notes
+
+- A green `rbgp doctor --pre-upgrade` result is an observation at one instant,
+  not a maintenance fence: a config transaction can start after it. The
+  race-free package upgrade procedure remains preflight, coordinated stop,
+  verify the service is inactive, repeat the candidate `rustbgpd --check
+  --strict` and any offline authority checks, then install and start; the
+  runbook now names the diagnostic as its preflight step and keeps the
+  post-stop checks explicit.
 
 - A SIGHUP candidate that changes static neighbors, peer groups, inline
   policy, or `.rpol` content **together with** dataset content or bindings,

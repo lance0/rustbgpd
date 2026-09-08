@@ -21,6 +21,18 @@
 #              CONTROL_SECS=30 BIRD_THREADS=8 FLAPSTORM= (K, optional)
 #              COMPETITOR_GENERATION=historical|current
 #              ARTIFACTS_DIR=bench/scale/matrix/artifacts
+#              CHANGED_PEERS= (rustbgpd cell only: the mixed export-only
+#                shape; passed to gen-scenario.py and as the harness's
+#                10th positional arg)
+#              PROBE_PREFIXES= (rustbgpd cell only: space-separated prefixes;
+#                when set, a 50 ms `rbgp health` loop and a 250 ms
+#                `rbgp rib --prefix` loop over the listed prefixes run against
+#                the cell's gRPC UDS for the whole harness run, logging
+#                latency and exit code to probes.csv / queries.csv)
+#              GEN_* / RELOADSTALL_* pass through to the generator and the
+#                harness unchanged (dual-stack: GEN_DUALSTACK=1 +
+#                RELOADSTALL_DUALSTACK=1; filtering: GEN_FILTER_COUNT=K +
+#                RELOADSTALL_FILTER_COUNT=K).
 set -u
 
 REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
@@ -33,6 +45,7 @@ source "$REPO/bench/scale/provenance.sh"
 RSTALL="$REPO/bench/scale/reloadstall"
 HARNESS="$REPO/bench/scale/target/release/reloadstall"
 SAMPLER="$REPO/bench/scale/matrix/rss-sampler.sh"
+RBGP="$REPO/target/release/rbgp"
 
 N_PEERS="${N_PEERS:-700}"
 TOTAL="${TOTAL_PREFIXES:-400400}"
@@ -41,6 +54,8 @@ RELOADS="${RELOADS:-4}"
 CONTROL_SECS="${CONTROL_SECS:-30}"
 BIRD_THREADS="${BIRD_THREADS:-8}"
 FLAPSTORM="${FLAPSTORM:-}"
+CHANGED_PEERS="${CHANGED_PEERS:-}"
+PROBE_PREFIXES="${PROBE_PREFIXES:-}"
 ART="${ARTIFACTS_DIR:-$REPO/bench/scale/matrix/artifacts}"
 COMPETITOR_GENERATION="${COMPETITOR_GENERATION:-historical}"
 RSS_LIMIT_KIB=$((100 * 1024 * 1024)) # abort a cell past 100 GiB
@@ -216,6 +231,42 @@ recheck_cell_provenance() {
     recheck_source_git_identity "$REPO" "$file"
 }
 
+# Operator-query probes (rustbgpd cell): one `rbgp health` timing loop and
+# one `rbgp rib --prefix` loop over PROBE_PREFIXES, each row
+# `epoch_s,[prefix,]latency_ms,exit`. They measure responsiveness of the
+# management plane while the fleet reloads; they never gate the cell.
+probe_health_loop() {
+    local addr=$1 out=$2
+    echo "epoch_s,latency_ms,exit" >"$out"
+    while :; do
+        local t0 t1 rc
+        t0=$(date +%s.%N)
+        "$RBGP" --addr "$addr" health >/dev/null 2>&1
+        rc=$?
+        t1=$(date +%s.%N)
+        awk -v a="$t0" -v b="$t1" -v rc="$rc" \
+            'BEGIN {printf "%s,%.1f,%d\n", a, (b - a) * 1000, rc}' >>"$out"
+        sleep 0.05
+    done
+}
+probe_query_loop() {
+    local addr=$1 out=$2
+    shift 2
+    echo "epoch_s,prefix,latency_ms,exit" >"$out"
+    while :; do
+        local prefix t0 t1 rc
+        for prefix in "$@"; do
+            t0=$(date +%s.%N)
+            "$RBGP" --addr "$addr" rib --prefix "$prefix" >/dev/null 2>&1
+            rc=$?
+            t1=$(date +%s.%N)
+            awk -v a="$t0" -v p="$prefix" -v b="$t1" -v rc="$rc" \
+                'BEGIN {printf "%s,%s,%.1f,%d\n", a, p, (b - a) * 1000, rc}' >>"$out"
+        done
+        sleep 0.25
+    done
+}
+
 # run_cell <cell>: everything for one matrix cell. Nonzero return = cell
 # failed; the campaign moves on.
 run_cell() {
@@ -238,7 +289,12 @@ run_cell() {
         workload_hash=$(provenance_sha256_file "$REPO/target/release/rustbgpd") || return 1
         write_cell_provenance "$cell" "$generator" binary target/release/rustbgpd "$workload_hash" || return 1
         recheck_cell_provenance "$cell" || return 1
-        python3 "$RSTALL/gen-scenario.py" "$N_PEERS" "$run" "$PORT" || return 1
+        if [ -n "$PROBE_PREFIXES" ] && [ ! -x "$RBGP" ]; then
+            echo "PROBE_PREFIXES needs $RBGP (cargo build --release -p rustbgpctl)" >&2
+            return 1
+        fi
+        # shellcheck disable=SC2086 # CHANGED_PEERS is an optional single positional
+        python3 "$RSTALL/gen-scenario.py" "$N_PEERS" "$run" "$PORT" $CHANGED_PEERS || return 1
         recheck_cell_provenance "$cell" || return 1
         "$REPO/target/release/rustbgpd" "$run/config.toml" \
             >"$cdir/daemon.log" 2>&1 &
@@ -302,10 +358,19 @@ run_cell() {
 
     "$SAMPLER" "$daemon_pid" "$cdir/rss.csv" 5 &
     local sampler_pid=$!
+    local probe_pids=()
+    if [ "$cell" = rustbgpd ] && [ -n "$PROBE_PREFIXES" ]; then
+        probe_health_loop "unix://$run/grpc.sock" "$cdir/probes.csv" &
+        probe_pids+=($!)
+        # shellcheck disable=SC2086 # PROBE_PREFIXES is a space-separated list
+        probe_query_loop "unix://$run/grpc.sock" "$cdir/queries.csv" $PROBE_PREFIXES &
+        probe_pids+=($!)
+    fi
 
     local hargs=("$N_PEERS" "$TOTAL" "$PORT" "$pid_arg" "$live" "$a" "$b"
         "$RELOADS" "$CONTROL_SECS")
     [ -n "$reload_cmd" ] && hargs+=("$N_PEERS" "$reload_cmd")
+    [ -z "$reload_cmd" ] && [ -n "$CHANGED_PEERS" ] && hargs+=("$CHANGED_PEERS")
     [ -n "$FLAPSTORM" ] && hargs+=(--flapstorm "$FLAPSTORM")
 
     # Harness in the background so the RSS guard can abort the cell.
@@ -334,10 +399,16 @@ run_cell() {
 
     # Collect artifacts, then teardown.
     kill "$sampler_pid" 2>/dev/null
+    for p in "${probe_pids[@]}"; do
+        kill "$p" 2>/dev/null
+    done
     if [ -n "$container" ]; then
         docker logs "$container" >"$cdir/daemon.log" 2>&1
         docker rm -f "$container" >/dev/null 2>&1
     else
+        # Peak resident set over the whole cell, from the kernel's own
+        # high-water mark, before the daemon goes away.
+        grep -E '^(VmHWM|VmRSS):' "/proc/$daemon_pid/status" >"$cdir/vmhwm" 2>/dev/null
         kill "$daemon_pid" 2>/dev/null
     fi
     cp -r "$run" "$cdir/scenario"

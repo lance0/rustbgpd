@@ -108,6 +108,10 @@ pub(crate) struct MockState {
     pub(crate) config_confirm_error: Mutex<Option<(Code, String)>>,
     pub(crate) config_abort_error: Mutex<Option<(Code, String)>>,
     pub(crate) config_status_error: Mutex<Option<(Code, String)>>,
+    /// Doctor pre-upgrade override: serve this confirmation record instead of
+    /// the default "nothing pending" answer.
+    pub(crate) config_status_confirmation:
+        Mutex<Option<server_proto::ConfigTransactionConfirmation>>,
     pub(crate) config_diff_error: Mutex<Option<(Code, String)>>,
     // Serve a "candidate matches runtime" diff / noop plan so the CLI
     // detailed exit-code contract (0 = no changes) can be pinned.
@@ -767,6 +771,14 @@ impl rustbgpd_api::proto::config_service_server::ConfigService for MockConfigSer
         }
         if let Some((code, message)) = self.state.config_status_error.lock().await.clone() {
             return Err(Status::new(code, message));
+        }
+        if let Some(confirmation) = self.state.config_status_confirmation.lock().await.clone() {
+            return Ok(Response::new(
+                server_proto::ConfigTransactionStatusResponse {
+                    human_text: format!("{}\n", confirmation.human_text),
+                    confirmation: Some(confirmation),
+                },
+            ));
         }
         Ok(Response::new(
             server_proto::ConfigTransactionStatusResponse {
