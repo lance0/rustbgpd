@@ -462,7 +462,7 @@ impl RibManager {
 
     /// Build the shared old→new inventory for one batched authoritative
     /// cohort transition ([`crate::update::RibUpdate::ReplacePeerExportPoliciesAuthoritatively`]):
-    /// every batch member of `source` moves to the freshly staged
+    /// every batch member of `source` moves to the current staged
     /// `destination` (same staging profile except the chain — validated
     /// by the caller). Returns `None` when the delta carries an RFC 7947
     /// control-form community for one of the cohort's rs-control ASNs on

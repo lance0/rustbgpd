@@ -6585,15 +6585,6 @@ async fn converged_per_client_best_fleet_regroups_byte_empty() {
 /// Register one per-client-best route-server member directly on the
 /// manager, with an exact-export encoder (the batched shared payload is
 /// probe-gated like the clean transition's).
-fn register_direct_pcb_peer(
-    manager: &mut RibManager,
-    peer: IpAddr,
-    export_policy: Option<PolicyChain>,
-    encoder: Arc<dyn crate::update::ExactExportEncoder>,
-) -> mpsc::Receiver<OutboundRouteUpdate> {
-    register_direct_pcb_peer_capacity(manager, peer, export_policy, encoder, 32)
-}
-
 fn register_direct_pcb_peer_capacity(
     manager: &mut RibManager,
     peer: IpAddr,
@@ -7653,62 +7644,481 @@ fn batched_authoritative_apply_skips_unregistered_and_degrades_dead_channels() {
     }
 }
 
-/// An already-owned destination group disqualifies the shared cohort:
-/// the batch degrades to the ordinary per-member regroup machinery
-/// (baseline snapshot + dirty resync) — drained by ONE trailing
-/// distribution pass, not one pass per member.
+/// A policy rollback rejoins the prior group while one unchanged member
+/// still owns it. Its table and counter instance are already authoritative;
+/// only movers receive the shared old-to-new inventory.
 #[test]
-fn batched_authoritative_apply_degrades_to_one_pass_when_destination_is_owned() {
+#[expect(
+    clippy::too_many_lines,
+    reason = "the rollback regression pins exact inventories, incumbent isolation, and shared encoding together"
+)]
+fn batched_authoritative_rollback_shares_an_occupied_destination() {
+    let old_policy = rpol_community_chain(0xFDE8_0001);
+    let next_policy = rpol_community_chain(0xFDE8_0002);
+    let mut fleet = batched_pcb_fleet(Some(&old_policy));
+    let incumbent = fleet.members[3];
+    let movers = &fleet.members[..3];
+    let destination = fleet.manager.grouped_member_of(incumbent).unwrap();
+    let inventory = |routes: Vec<Route>| {
+        routes
+            .into_iter()
+            .map(|route| (route.prefix, (route.peer, route.next_hop, route.attributes)))
+            .collect::<HashMap<_, _>>()
+    };
+    let prior_views: Vec<_> = fleet
+        .members
+        .iter()
+        .map(|peer| inventory(fleet.manager.grouped_advertised_routes(*peer).unwrap()))
+        .collect();
+    assert!(prior_views.iter().all(|view| view.len() == 4));
+
+    fleet
+        .manager
+        .apply_export_policy_replacements_synchronously(batch_replacements(movers, &next_policy))
+        .unwrap();
+    assert_eq!(fleet.manager.group_ribs[&destination].members.len(), 1);
+    for receiver in &mut fleet.receivers[..3] {
+        assert!(receiver.try_recv().is_ok());
+        while receiver.try_recv().is_ok() {}
+    }
+    assert!(fleet.receivers[3].try_recv().is_err());
+    let incumbent_stats = fleet.manager.export_policy_stats[&incumbent];
+    let hits = Arc::clone(
+        fleet.manager.peer_export_policies[&incumbent]
+            .as_ref()
+            .unwrap()
+            .hit_counters(),
+    );
+    let prior_hits = (hits.evals(), hits.snapshot());
+    let prior_tombstones = fleet.manager.group_ribs[&destination].tombstones.clone();
+    let prior_dirty = fleet.manager.group_ribs[&destination].dirty_members.clone();
+    let passes_before = fleet.manager.adj_rib_out_commit_stats.metrics_handle_clones;
+    let shared_before = fleet
+        .manager
+        .policy_transition_stats
+        .batched_authoritative_shared_members;
+    let fallback_before = fleet
+        .manager
+        .policy_transition_stats
+        .batched_authoritative_fallback_members;
+
+    fleet
+        .manager
+        .apply_export_policy_replacements_synchronously(batch_replacements(movers, &old_policy))
+        .unwrap();
+
+    assert_eq!(
+        fleet
+            .manager
+            .policy_transition_stats
+            .batched_authoritative_shared_members
+            - shared_before,
+        3,
+        "returning to an occupied destination must share the movers' transition"
+    );
+    assert_eq!(
+        fleet
+            .manager
+            .policy_transition_stats
+            .batched_authoritative_fallback_members,
+        fallback_before
+    );
+    assert_eq!(
+        fleet.manager.adj_rib_out_commit_stats.metrics_handle_clones,
+        passes_before
+    );
+    let receipt = fleet
+        .manager
+        .authoritative_transition_receipts
+        .last()
+        .unwrap();
+    assert_eq!(
+        (
+            receipt.destination_ensures,
+            receipt.destination_builds,
+            receipt.destination_adoptions
+        ),
+        (0, 0, 1)
+    );
+    assert_eq!(fleet.manager.group_ribs.len(), 1);
+    assert_eq!(fleet.manager.group_ribs[&destination].members.len(), 4);
+    assert_eq!(
+        fleet.manager.group_ribs[&destination].tombstones,
+        prior_tombstones
+    );
+    assert_eq!(
+        fleet.manager.group_ribs[&destination].dirty_members,
+        prior_dirty
+    );
+    assert_eq!(
+        fleet.manager.export_policy_stats[&incumbent],
+        incumbent_stats
+    );
+    assert_eq!(
+        (hits.evals(), hits.snapshot()),
+        prior_hits,
+        "do not restage the occupied group"
+    );
+    assert_eq!(
+        inventory(fleet.manager.grouped_advertised_routes(incumbent).unwrap()),
+        prior_views[3]
+    );
+    assert!(
+        fleet.receivers[3].try_recv().is_err(),
+        "no incumbent emission"
+    );
+    let mut payloads = Vec::new();
+    let mut encodes = Vec::new();
+    for (index, peer) in movers.iter().enumerate() {
+        assert_eq!(fleet.manager.grouped_member_of(*peer), Some(destination));
+        assert!(Arc::ptr_eq(
+            fleet.manager.peer_export_policies[peer]
+                .as_ref()
+                .unwrap()
+                .hit_counters(),
+            &hits
+        ));
+        let updates: Vec<_> =
+            std::iter::from_fn(|| fleet.receivers[index].try_recv().ok()).collect();
+        let shared = updates
+            .first()
+            .expect("restored marker needs an announcement");
+        payloads.push(Arc::clone(&shared.announce));
+        encodes.push(Arc::clone(
+            shared
+                .shared_group_encode
+                .as_ref()
+                .expect("shared encoding"),
+        ));
+        let mut restored = HashMap::new();
+        for update in updates {
+            for (prefix, _) in update.withdraw {
+                restored.remove(&prefix);
+            }
+            for route in update.announce.iter() {
+                if update.announce_source_exclusion != Some(route.peer) {
+                    restored.insert(
+                        route.prefix,
+                        (route.peer, route.next_hop, Arc::clone(&route.attributes)),
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            restored, prior_views[index],
+            "exact restored member inventory"
+        );
+        assert_eq!(
+            inventory(fleet.manager.grouped_advertised_routes(*peer).unwrap()),
+            prior_views[index]
+        );
+    }
+    assert!(
+        payloads
+            .iter()
+            .all(|payload| Arc::ptr_eq(payload, &payloads[0]))
+    );
+    assert!(
+        encodes
+            .iter()
+            .all(|encode| Arc::ptr_eq(encode, &encodes[0]))
+    );
+    assert!(fleet.manager.pending_regroup_baseline.is_empty());
+    assert!(fleet.manager.pending_extra_withdraws.is_empty());
+    assert!(fleet.manager.dirty_peers.is_empty());
+}
+
+/// The batch keeps its global retry opportunity: an incumbent already owing
+/// a withdrawal may recover, or retain that debt if its channel stays full.
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the same real missed withdrawal verifies successful and blocked incumbent retry"
+)]
+fn batched_authoritative_occupied_destination_preserves_incumbent_retry() {
+    for blocked in [false, true] {
+        let old_policy = community_chain(0xFDE8_0001);
+        let next_policy = community_chain(0xFDE8_0002);
+        let mut fleet = batched_pcb_fleet(Some(&old_policy));
+        let incumbent = fleet.members[3];
+        let movers = &fleet.members[..3];
+        fleet
+            .manager
+            .apply_export_policy_replacements_synchronously(batch_replacements(
+                movers,
+                &next_policy,
+            ))
+            .unwrap();
+        for receiver in &mut fleet.receivers {
+            while receiver.try_recv().is_ok() {}
+        }
+        let destination = fleet.manager.grouped_member_of(incumbent).unwrap();
+        let sender = fleet.manager.outbound_peers[&incumbent].clone();
+        while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
+        let withdrawn = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 0, 0), 24));
+        fleet.manager.handle_update(RibUpdate::RoutesReceived {
+            peer: movers[0],
+            session_id: 0,
+            announced: vec![],
+            withdrawn: vec![(withdrawn, 0)],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        });
+        while fleet.manager.process_next_route_chunk() {}
+        assert!(fleet.manager.dirty_peers.contains(&incumbent));
+        assert!(
+            fleet.manager.group_ribs[&destination]
+                .tombstones
+                .contains(&(withdrawn, 0))
+        );
+        let tombstones = fleet.manager.group_ribs[&destination].tombstones.clone();
+        for receiver in &mut fleet.receivers[..3] {
+            while receiver.try_recv().is_ok() {}
+        }
+        if !blocked {
+            while fleet.receivers[3].try_recv().is_ok() {}
+        }
+        let queued = fleet.receivers[3].len();
+        let shared_before = fleet
+            .manager
+            .policy_transition_stats
+            .batched_authoritative_shared_members;
+        let fallback_before = fleet
+            .manager
+            .policy_transition_stats
+            .batched_authoritative_fallback_members;
+        fleet
+            .manager
+            .apply_export_policy_replacements_synchronously(batch_replacements(movers, &old_policy))
+            .unwrap();
+        assert_eq!(
+            fleet
+                .manager
+                .policy_transition_stats
+                .batched_authoritative_shared_members
+                - shared_before,
+            3
+        );
+        assert_eq!(
+            fleet
+                .manager
+                .policy_transition_stats
+                .batched_authoritative_fallback_members,
+            fallback_before
+        );
+        for receiver in &mut fleet.receivers[..3] {
+            let shared = receiver.try_recv().unwrap();
+            assert!(shared.shared_group_encode.is_some());
+        }
+        assert_eq!(fleet.manager.dirty_peers.contains(&incumbent), blocked);
+        assert_eq!(
+            fleet.manager.group_ribs[&destination]
+                .dirty_members
+                .contains(&incumbent),
+            blocked
+        );
+        if blocked {
+            assert_eq!(
+                fleet.receivers[3].len(),
+                queued,
+                "full incumbent channel stays untouched"
+            );
+            assert_eq!(
+                fleet.manager.group_ribs[&destination].tombstones,
+                tombstones
+            );
+        } else {
+            let retry = fleet.receivers[3]
+                .try_recv()
+                .expect("the existing debt still gets its retry");
+            assert!(retry.shared_group_encode.is_none());
+            assert!(retry.withdraw.contains(&(withdrawn, 0)));
+            assert!(fleet.receivers[3].try_recv().is_err());
+            assert!(fleet.manager.group_ribs[&destination].tombstones.is_empty());
+        }
+    }
+}
+
+/// Restored dataset handles can make an occupied table stale before the
+/// generation's explicit dependent re-evaluation. Do not share that view.
+#[test]
+fn batched_authoritative_occupied_dataset_transition_keeps_fallback() {
+    use rustbgpd_policy::datasets::{DatasetBindings, DatasetData, DatasetHandle, DatasetKind};
+    use rustbgpd_policy::rpol::RpolFile;
+    use rustbgpd_policy::sets::{PrefixSet, PrefixSetEntry, SetStore};
+
+    for dataset_destination in [true, false] {
+        let handle = Arc::new(DatasetHandle::new(
+            "allowed",
+            DatasetKind::Prefix,
+            DatasetData::Prefix(PrefixSet::new([PrefixSetEntry {
+                prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0)),
+                ge: None,
+                le: Some(32),
+            }])),
+        ));
+        let mut bindings = DatasetBindings::new();
+        bindings.insert(Arc::clone(&handle));
+        let compiled = RpolFile::parse(
+        "dataset prefix-set allowed\npolicy p { term t { if route.prefix in allowed { accept } reject } }",
+    ).unwrap().compile_policy_bound("p", &[], &mut SetStore::new(), &bindings).unwrap().unwrap();
+        let dataset_policy =
+            PolicyChain::from_named(vec![rustbgpd_policy::NamedPolicy::from_rpol(
+                "p".to_string(),
+                Arc::new(compiled),
+            )]);
+        let marker_policy = community_chain(0xFDE8_0002);
+        let (old_policy, next_policy) = if dataset_destination {
+            (dataset_policy, marker_policy)
+        } else {
+            (marker_policy, dataset_policy)
+        };
+        let mut fleet = batched_pcb_fleet(Some(&old_policy));
+        let incumbent = fleet.members[3];
+        let movers = &fleet.members[..3];
+        fleet
+            .manager
+            .apply_export_policy_replacements_synchronously(batch_replacements(
+                movers,
+                &next_policy,
+            ))
+            .unwrap();
+        for receiver in &mut fleet.receivers {
+            while receiver.try_recv().is_ok() {}
+        }
+        assert_eq!(
+            handle.refresh(DatasetData::Prefix(PrefixSet::new([]))),
+            Some(2)
+        );
+        let shared_before = fleet
+            .manager
+            .policy_transition_stats
+            .batched_authoritative_shared_members;
+        let fallback_before = fleet
+            .manager
+            .policy_transition_stats
+            .batched_authoritative_fallback_members;
+        fleet
+            .manager
+            .apply_export_policy_replacements_synchronously(batch_replacements(movers, &old_policy))
+            .unwrap();
+        assert_eq!(
+            fleet
+                .manager
+                .policy_transition_stats
+                .batched_authoritative_shared_members,
+            shared_before
+        );
+        assert_eq!(
+            fleet
+                .manager
+                .policy_transition_stats
+                .batched_authoritative_fallback_members
+                - fallback_before,
+            3
+        );
+        assert!(
+            fleet.receivers[3].try_recv().is_err(),
+            "no silent restage of the incumbent"
+        );
+        assert_eq!(fleet.manager.grouped_advertised_count(incumbent), Some(4));
+        if !dataset_destination {
+            continue;
+        }
+        // The generation's separate dependent refresh remains responsible for
+        // this mutable input, including withdrawals toward the incumbent.
+        let (reply, mut response) = oneshot::channel();
+        fleet
+            .manager
+            .handle_update(RibUpdate::ReevaluatePeerExportPolicies {
+                peers: fleet.members.clone(),
+                reply,
+            });
+        assert_eq!(response.try_recv().unwrap(), Ok(()));
+        for peer in &fleet.members {
+            assert_eq!(fleet.manager.grouped_advertised_count(*peer), Some(0));
+        }
+        assert!(fleet.receivers[3].try_recv().unwrap().withdraw.len() >= 4);
+    }
+}
+
+#[test]
+fn batched_authoritative_occupied_destination_resyncs_a_lagging_mover() {
     let old_policy = community_chain(0xFDE8_0001);
     let next_policy = community_chain(0xFDE8_0002);
     let mut fleet = batched_pcb_fleet(Some(&old_policy));
-    // A fifth member already runs the destination chain, so the
-    // destination group exists and is owned.
-    let incumbent = IpAddr::V4(Ipv4Addr::new(10, 40, 0, 9));
-    let probes = Arc::new(AtomicUsize::new(0));
-    let reuses = Arc::new(AtomicUsize::new(0));
-    let mut incumbent_rx = register_direct_pcb_peer(
-        &mut fleet.manager,
-        incumbent,
-        Some(next_policy.clone()),
-        Arc::new(CohortExactEncoder {
-            owner: 9,
-            profile: 23,
-            max_len: 4_096,
-            generation: AtomicUsize::new(0),
-            advance_generation: false,
-            probes,
-            reuses,
-        }),
-    );
-    while incumbent_rx.try_recv().is_ok() {}
-    let destination_gid = fleet.manager.grouped_member_of(incumbent).unwrap();
-    let passes_before = fleet.manager.adj_rib_out_commit_stats.metrics_handle_clones;
-
-    let (reply, mut response) = oneshot::channel();
+    let movers = &fleet.members[..3];
     fleet
         .manager
-        .handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
-            replacements: batch_replacements(&fleet.members, &next_policy),
-            reply,
-        });
-    assert_eq!(response.try_recv().unwrap(), Ok(()));
-
-    let stats = fleet.manager.policy_transition_stats;
-    assert_eq!(stats.batched_authoritative_batches, 1);
-    assert_eq!(stats.batched_authoritative_shared_members, 0);
-    assert_eq!(stats.batched_authoritative_fallback_members, 4);
-    assert_eq!(
-        fleet.manager.adj_rib_out_commit_stats.metrics_handle_clones,
-        passes_before + 1,
-        "the per-member fallback drains through exactly ONE distribution pass"
-    );
-    for peer in &fleet.members {
-        assert_eq!(
-            fleet.manager.grouped_member_of(*peer),
-            Some(destination_gid)
-        );
-        assert!(!fleet.manager.dirty_peers.contains(peer));
+        .apply_export_policy_replacements_synchronously(batch_replacements(movers, &next_policy))
+        .unwrap();
+    for receiver in &mut fleet.receivers {
+        while receiver.try_recv().is_ok() {}
     }
-    assert_eq!(fleet.manager.group_ribs[&destination_gid].members.len(), 5);
+    let lagging = movers[1];
+    let sender = fleet.manager.outbound_peers[&lagging].clone();
+    while sender.try_send(OutboundRouteUpdate::default()).is_ok() {}
+    let withdrawn = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 0, 0), 24));
+    fleet.manager.handle_update(RibUpdate::RoutesReceived {
+        peer: movers[0],
+        session_id: 0,
+        announced: vec![],
+        withdrawn: vec![(withdrawn, 0)],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    });
+    while fleet.manager.process_next_route_chunk() {}
+    assert!(fleet.manager.dirty_peers.contains(&lagging));
+    for receiver in &mut fleet.receivers {
+        while receiver.try_recv().is_ok() {}
+    }
+    fleet
+        .manager
+        .apply_export_policy_replacements_synchronously(batch_replacements(movers, &old_policy))
+        .unwrap();
+    let receipt = fleet
+        .manager
+        .authoritative_transition_receipts
+        .last()
+        .unwrap();
+    assert_eq!(
+        (
+            receipt.shared_members,
+            receipt.lagging_members,
+            receipt.emits_attempted
+        ),
+        (3, 1, 2)
+    );
+    let retry = fleet.receivers[1].try_recv().unwrap();
+    assert!(
+        retry.shared_group_encode.is_none(),
+        "lagging mover cannot consume only the shared delta"
+    );
+    assert!(
+        retry.withdraw.contains(&(withdrawn, 0)),
+        "missed source-group withdrawal must survive the move"
+    );
+    assert!(
+        retry
+            .announce
+            .iter()
+            .all(|route| route.communities().contains(&0xFDE8_0001))
+    );
+    assert!(fleet.receivers[1].try_recv().is_err());
+    for index in [0, 2] {
+        assert!(
+            fleet.receivers[index]
+                .try_recv()
+                .unwrap()
+                .shared_group_encode
+                .is_some()
+        );
+    }
+    assert!(fleet.receivers[3].try_recv().is_err());
+    assert!(!fleet.manager.dirty_peers.contains(&lagging));
+    assert!(!fleet.manager.pending_extra_withdraws.contains_key(&lagging));
 }

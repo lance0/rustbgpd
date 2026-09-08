@@ -3209,16 +3209,17 @@ impl RibManager {
     /// clean-transition fallback hands whole cohorts to (per-client-best
     /// groups always land here per ADR-0126 Decision 8).
     ///
-    /// A source group whose batched movers all target one fresh
+    /// A source group whose batched movers all target one compatible
     /// destination differing only in chain content takes the shared
-    /// transition ([`Self::apply_batched_group_transition`]): the
-    /// destination table is built once, the old→new wire delta is
+    /// transition ([`Self::apply_batched_group_transition`]): a new
+    /// destination is built once; an occupied destination keeps its staged
+    /// table and incumbent members untouched. The old→new wire delta is
     /// derived once from the source group's shared view plus the
     /// ADR-0126 Decision 4 per-member exceptions (split horizon via
     /// `announce_source_exclusion`, lane substitutions as member-scoped
     /// supplements), and the announce payload is encode-once shared
-    /// across the cohort. Everything else — partial-group moves,
-    /// already-owned destinations, ungrouped members, non-unicast
+    /// across the cohort. Everything else — mixed destinations,
+    /// occupied dataset-dependent groups, ungrouped members, non-unicast
     /// profiles, rs-tagged or OTC-bearing deltas — takes the ordinary
     /// per-member regroup machinery (baseline snapshot + dirty resync),
     /// drained together by the single trailing pass.
@@ -3479,7 +3480,7 @@ impl RibManager {
             }
             // Deterministic cohort order (source gid) so two source
             // groups converging on one destination resolve stably: the
-            // first claims the fresh destination, the second degrades.
+            // first builds it and later qualifying cohorts reuse its view.
             let mut sources: Vec<usize> = by_source.keys().copied().collect();
             sources.sort_unstable();
             for source in sources {
@@ -3583,7 +3584,7 @@ impl RibManager {
     }
 
     /// Commit one qualifying cohort through the shared batched
-    /// transition: build the destination table once, derive the shared
+    /// transition: reuse or build the destination table, derive the shared
     /// old→new delta plus ADR-0126 per-member exceptions once, move the
     /// memberships, and enqueue the encode-once shared payload per
     /// member. Returns `false` (nothing externally visible mutated
@@ -3612,13 +3613,29 @@ impl RibManager {
                 .saturating_add(u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX));
             return false;
         }
-        // The destination must be memberless: an owned destination's
-        // members must see nothing, which is the regroup baseline diff's
-        // job, not this transition's.
-        if self
+        // An occupied destination already owns its current staged view.
+        // Read it for the movers' delta without rebuilding it or replaying
+        // its incumbent members. In particular, a compensation cohort can
+        // return to the prior group while an unchanged member remains there.
+        // The batch entrypoint discarded any unfinished prestage before
+        // classification; only an unowned destination may need building.
+        let destination_owned = self
             .group_ribs
             .get(&destination)
-            .is_some_and(|group| !group.members.is_empty())
+            .is_some_and(|group| !group.members.is_empty());
+        // Dataset handles keep their identity when content is restored.
+        // Until dependent re-evaluation runs, either staged view can still
+        // describe the other generation. An occupied group cannot be rebuilt
+        // here without emitting its incumbents' deltas, so retain the
+        // authoritative per-member path for this mutable-input boundary.
+        if destination_owned
+            && [source, destination].iter().any(|gid| {
+                self.group_ribs.get(gid).is_some_and(|group| {
+                    group.export_chain.as_ref().is_some_and(|chain| {
+                        chain.compiled().referenced_datasets().next().is_some()
+                    })
+                })
+            })
         {
             receipt.cohort_precheck_us = receipt
                 .cohort_precheck_us
@@ -3642,12 +3659,16 @@ impl RibManager {
         receipt.cohort_precheck_us = receipt
             .cohort_precheck_us
             .saturating_add(u64::try_from(phase.elapsed().as_micros()).unwrap_or(u64::MAX));
-        // Build (or adopt) the destination table — the join-time build
-        // pass, run once for the whole cohort.
+        // The join-time build discards staging deltas, so it must never
+        // run against an occupied destination. Membership and emission below
+        // name only movers; incumbent counters and withdrawal residue stay
+        // with the existing group and its ordinary retry path.
         let phase = std::time::Instant::now();
         let destination_existed = self.group_ribs.contains_key(&destination);
-        self.ensure_group_table(destination, exemplar);
-        receipt.destination_ensures += 1;
+        if !destination_owned {
+            self.ensure_group_table(destination, exemplar);
+            receipt.destination_ensures += 1;
+        }
         if destination_existed {
             receipt.destination_adoptions += 1;
         } else {

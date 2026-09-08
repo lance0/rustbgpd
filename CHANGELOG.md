@@ -140,6 +140,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reloads, the registry retains only live group and transition payloads;
   historical ID slots remain so retired IDs cannot alias another policy.
 
+- Export-policy rollback into an occupied compatible update group now shares
+  the movers' policy delta and encoding without rebuilding the group or
+  replaying its unchanged members. Dataset-dependent policies and other
+  nonqualifying transitions retain the existing per-peer fallback; dirty
+  members keep their ordinary resync and withdrawal recovery.
+
 ### Upgrade notes
 
 - Consumers of `GetPolicyStats` or `rbgp policy stats` should use the installed
