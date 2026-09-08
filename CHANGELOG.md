@@ -85,6 +85,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `--ignore-attribute unknown` for the OTC attribute a route server attaches
   on the wire.
 
+- Dataset content refreshes now recompute shared export-policy results before
+  refreshing advertisements. Grouped peers previously replayed cached results,
+  leaving newly denied routes advertised and newly permitted routes absent.
+  Each affected group is recomputed once, including per-client-best groups;
+  unrelated groups and installed policy counters are preserved.
+
 ## [0.69.0] — 2026-09-07
 
 ### Added

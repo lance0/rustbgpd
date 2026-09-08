@@ -1823,6 +1823,7 @@ impl RibManager {
             | RibUpdate::ReplacePeerExportPoliciesAuthoritatively { .. }
             | RibUpdate::RestorePeerExportPoliciesAuthoritatively { .. }
             | RibUpdate::ApplyOutboundPrefixLimits { .. }
+            | RibUpdate::ReevaluatePeerExportPolicies { .. }
             | RibUpdate::RefreshPeerOutbound { .. } => self.advance_advertised_pages(),
             RibUpdate::PeerUp { .. }
             | RibUpdate::PeerDeleted { .. }
@@ -2688,6 +2689,9 @@ impl RibManager {
             }
             RibUpdate::RefreshPeerOutbound { peer, reply } => {
                 self.handle_refresh_peer_outbound(peer, reply);
+            }
+            RibUpdate::ReevaluatePeerExportPolicies { peers, reply } => {
+                self.handle_reevaluate_peer_export_policies(&peers, reply);
             }
             RibUpdate::EndOfRib {
                 peer,
