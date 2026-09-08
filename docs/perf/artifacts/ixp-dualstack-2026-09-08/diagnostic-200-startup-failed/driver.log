@@ -1,0 +1,7 @@
+acquired host lock: /tmp/dualstack-host.lock
+host quiet: retained two accepted samples in /tmp/dualstack-health-probe-200-50-F-1/rustbgpd/quiet.tsv
+=== cell rustbgpd start 2026-09-08T12:56:57-04:00 ===
+wrote /tmp/ixp-rustbgpd/config.toml (200 neighbors), member.rpol, gen-a.rpol, gen-b.rpol; listen_port=1790, changed_peers=170, stable_peers=30, grpc_uds=/tmp/ixp-rustbgpd/grpc.sock, dualstack(ipv4_unicast+ipv6_unicast), filter(gen-b rejects 64 named prefixes: base indexes 0..32 per family)
+cell rustbgpd: daemon died at start (see /tmp/dualstack-health-probe-200-50-F-1/rustbgpd/daemon.log)
+=== cell rustbgpd FAIL (campaign continues) ===
+cool-down 300s

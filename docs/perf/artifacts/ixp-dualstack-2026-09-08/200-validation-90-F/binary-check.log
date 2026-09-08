@@ -1,0 +1,6 @@
+/tmp/dualstack-source/target/release/rustbgpd: OK
+/tmp/dualstack-source/target/release/rbgp: OK
+/tmp/dualstack-source/bench/scale/target/release/reloadstall: OK
+/tmp/dualstack-source/target/release/rustbgpd: OK
+/tmp/dualstack-source/target/release/rbgp: OK
+/tmp/dualstack-source/bench/scale/target/release/reloadstall: OK

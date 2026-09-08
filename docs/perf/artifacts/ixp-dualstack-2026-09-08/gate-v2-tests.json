@@ -1,0 +1,7 @@
+{
+  "original_gate_errors": 102,
+  "candidate_actual_cell_pass": true,
+  "active_broken_pipe_rejected": true,
+  "other_teardown_writer_error_rejected": true,
+  "peer_without_down_event_rejected": true
+}

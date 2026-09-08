@@ -1,0 +1,4320 @@
+{
+  "decision": "GO for root acceptance under an explicit teardown-warning exception; original gate failure remains unchanged",
+  "gate_pass": false,
+  "gate_errors": 102,
+  "writer_warnings": 102,
+  "unique_writer_peers": 102,
+  "all_error_kind": "BrokenPipe",
+  "final_trigger_wall_us": 1788885248124227,
+  "final_completion_wall_us_derived": 1788885248410781,
+  "completion_mapping": "Final SIGHUP wall clock plus harness completion_us minus trigger_us; not an independently timestamped completion event.",
+  "configured_cycle_quiesce_seconds": 20,
+  "first_session_down": "2026-09-08T16:34:28.539091Z",
+  "last_session_down": "2026-09-08T16:34:28.671223Z",
+  "first_writer": "2026-09-08T16:34:28.541793Z",
+  "last_writer": "2026-09-08T16:34:28.545663Z",
+  "writer_burst_ms": 3.87,
+  "before_own_session_down": 0,
+  "after_own_session_down": 102,
+  "writers": [
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.541793Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.178",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6744
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.541531Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.178"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.178",
+          "peer_group": "",
+          "remote_asn": 64689,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.178",
+            "peer_group": "",
+            "remote_asn": 64689,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6731
+      },
+      "after_final_completion_ms": 20131.012,
+      "after_first_down_ms": 2.702,
+      "after_own_session_down_ms": 0.262,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.542076Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.164",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6761
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.541837Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.164"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.164",
+          "peer_group": "",
+          "remote_asn": 64675,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.164",
+            "peer_group": "",
+            "remote_asn": 64675,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6745
+      },
+      "after_final_completion_ms": 20131.295,
+      "after_first_down_ms": 2.985,
+      "after_own_session_down_ms": 0.239,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.543359Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.143",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6854
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.543156Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.143"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.143",
+          "peer_group": "",
+          "remote_asn": 64654,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.143",
+            "peer_group": "",
+            "remote_asn": 64654,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6836
+      },
+      "after_final_completion_ms": 20132.578,
+      "after_first_down_ms": 4.268,
+      "after_own_session_down_ms": 0.203,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.543391Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.36",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6859
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.543183Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.36"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.36",
+          "peer_group": "",
+          "remote_asn": 64547,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.36",
+            "peer_group": "",
+            "remote_asn": 64547,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6838
+      },
+      "after_final_completion_ms": 20132.61,
+      "after_first_down_ms": 4.3,
+      "after_own_session_down_ms": 0.208,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.543395Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.110",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6860
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.543290Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.110"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.110",
+          "peer_group": "",
+          "remote_asn": 64621,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.110",
+            "peer_group": "",
+            "remote_asn": 64621,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6847
+      },
+      "after_final_completion_ms": 20132.614,
+      "after_first_down_ms": 4.304,
+      "after_own_session_down_ms": 0.105,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.543633Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.43",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6873
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.543434Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.43"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.43",
+          "peer_group": "",
+          "remote_asn": 64554,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.43",
+            "peer_group": "",
+            "remote_asn": 64554,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6863
+      },
+      "after_final_completion_ms": 20132.852,
+      "after_first_down_ms": 4.542,
+      "after_own_session_down_ms": 0.199,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.543651Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.134",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6876
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.543396Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.134"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.134",
+          "peer_group": "",
+          "remote_asn": 64645,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.134",
+            "peer_group": "",
+            "remote_asn": 64645,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6862
+      },
+      "after_final_completion_ms": 20132.87,
+      "after_first_down_ms": 4.56,
+      "after_own_session_down_ms": 0.255,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.543641Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.92",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6877
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.543437Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.92"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.92",
+          "peer_group": "",
+          "remote_asn": 64603,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.92",
+            "peer_group": "",
+            "remote_asn": 64603,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6864
+      },
+      "after_final_completion_ms": 20132.86,
+      "after_first_down_ms": 4.55,
+      "after_own_session_down_ms": 0.204,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.543658Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.55",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6878
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.543485Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.55"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.55",
+          "peer_group": "",
+          "remote_asn": 64566,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.55",
+            "peer_group": "",
+            "remote_asn": 64566,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6866
+      },
+      "after_final_completion_ms": 20132.877,
+      "after_first_down_ms": 4.567,
+      "after_own_session_down_ms": 0.173,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.543689Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.48",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6885
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.543514Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.48"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.48",
+          "peer_group": "",
+          "remote_asn": 64559,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.48",
+            "peer_group": "",
+            "remote_asn": 64559,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6868
+      },
+      "after_final_completion_ms": 20132.908,
+      "after_first_down_ms": 4.598,
+      "after_own_session_down_ms": 0.175,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.543777Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.32",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6891
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.543668Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.32"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.32",
+          "peer_group": "",
+          "remote_asn": 64543,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.32",
+            "peer_group": "",
+            "remote_asn": 64543,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6879
+      },
+      "after_final_completion_ms": 20132.996,
+      "after_first_down_ms": 4.686,
+      "after_own_session_down_ms": 0.109,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.543833Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.68",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6897
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.543694Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.68"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.68",
+          "peer_group": "",
+          "remote_asn": 64579,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.68",
+            "peer_group": "",
+            "remote_asn": 64579,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6886
+      },
+      "after_final_completion_ms": 20133.052,
+      "after_first_down_ms": 4.742,
+      "after_own_session_down_ms": 0.139,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.543835Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.146",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6898
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.543683Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.146"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.146",
+          "peer_group": "",
+          "remote_asn": 64657,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.146",
+            "peer_group": "",
+            "remote_asn": 64657,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6884
+      },
+      "after_final_completion_ms": 20133.054,
+      "after_first_down_ms": 4.744,
+      "after_own_session_down_ms": 0.152,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.543968Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.96",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6907
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.543811Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.96"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.96",
+          "peer_group": "",
+          "remote_asn": 64607,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.96",
+            "peer_group": "",
+            "remote_asn": 64607,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6893
+      },
+      "after_final_completion_ms": 20133.187,
+      "after_first_down_ms": 4.877,
+      "after_own_session_down_ms": 0.157,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.543979Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.42",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6908
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.543808Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.42"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.42",
+          "peer_group": "",
+          "remote_asn": 64553,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.42",
+            "peer_group": "",
+            "remote_asn": 64553,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6892
+      },
+      "after_final_completion_ms": 20133.198,
+      "after_first_down_ms": 4.888,
+      "after_own_session_down_ms": 0.171,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544010Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.67",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6913
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.543869Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.67"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.67",
+          "peer_group": "",
+          "remote_asn": 64578,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.67",
+            "peer_group": "",
+            "remote_asn": 64578,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6900
+      },
+      "after_final_completion_ms": 20133.229,
+      "after_first_down_ms": 4.919,
+      "after_own_session_down_ms": 0.141,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544015Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.140",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6915
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.543875Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.140"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.140",
+          "peer_group": "",
+          "remote_asn": 64651,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.140",
+            "peer_group": "",
+            "remote_asn": 64651,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6901
+      },
+      "after_final_completion_ms": 20133.234,
+      "after_first_down_ms": 4.924,
+      "after_own_session_down_ms": 0.14,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544185Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.90",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6920
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544001Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.90"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.90",
+          "peer_group": "",
+          "remote_asn": 64601,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.90",
+            "peer_group": "",
+            "remote_asn": 64601,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6911
+      },
+      "after_final_completion_ms": 20133.404,
+      "after_first_down_ms": 5.094,
+      "after_own_session_down_ms": 0.184,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544189Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.31",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6921
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.543901Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.31"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.31",
+          "peer_group": "",
+          "remote_asn": 64542,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.31",
+            "peer_group": "",
+            "remote_asn": 64542,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6902
+      },
+      "after_final_completion_ms": 20133.408,
+      "after_first_down_ms": 5.098,
+      "after_own_session_down_ms": 0.288,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544233Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.8",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6926
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544011Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.8"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.8",
+          "peer_group": "",
+          "remote_asn": 64519,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.8",
+            "peer_group": "",
+            "remote_asn": 64519,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6914
+      },
+      "after_final_completion_ms": 20133.452,
+      "after_first_down_ms": 5.142,
+      "after_own_session_down_ms": 0.222,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544243Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.61",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6929
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544044Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.61"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.61",
+          "peer_group": "",
+          "remote_asn": 64572,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.61",
+            "peer_group": "",
+            "remote_asn": 64572,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6916
+      },
+      "after_final_completion_ms": 20133.462,
+      "after_first_down_ms": 5.152,
+      "after_own_session_down_ms": 0.199,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544252Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.63",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6931
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.543932Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.63"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.63",
+          "peer_group": "",
+          "remote_asn": 64574,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.63",
+            "peer_group": "",
+            "remote_asn": 64574,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6904
+      },
+      "after_final_completion_ms": 20133.471,
+      "after_first_down_ms": 5.161,
+      "after_own_session_down_ms": 0.32,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544257Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.136",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6932
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544046Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.136"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.136",
+          "peer_group": "",
+          "remote_asn": 64647,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.136",
+            "peer_group": "",
+            "remote_asn": 64647,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6917
+      },
+      "after_final_completion_ms": 20133.476,
+      "after_first_down_ms": 5.166,
+      "after_own_session_down_ms": 0.211,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544294Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.105",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6937
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544214Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.105"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.105",
+          "peer_group": "",
+          "remote_asn": 64616,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.105",
+            "peer_group": "",
+            "remote_asn": 64616,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6922
+      },
+      "after_final_completion_ms": 20133.513,
+      "after_first_down_ms": 5.203,
+      "after_own_session_down_ms": 0.08,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544305Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.25",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6940
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544220Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.25"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.25",
+          "peer_group": "",
+          "remote_asn": 64536,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.25",
+            "peer_group": "",
+            "remote_asn": 64536,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6924
+      },
+      "after_final_completion_ms": 20133.524,
+      "after_first_down_ms": 5.214,
+      "after_own_session_down_ms": 0.085,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544356Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.38",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6944
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544267Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.38"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.38",
+          "peer_group": "",
+          "remote_asn": 64549,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.38",
+            "peer_group": "",
+            "remote_asn": 64549,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6933
+      },
+      "after_final_completion_ms": 20133.575,
+      "after_first_down_ms": 5.265,
+      "after_own_session_down_ms": 0.089,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544414Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.41",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6948
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544276Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.41"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.41",
+          "peer_group": "",
+          "remote_asn": 64552,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.41",
+            "peer_group": "",
+            "remote_asn": 64552,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6934
+      },
+      "after_final_completion_ms": 20133.633,
+      "after_first_down_ms": 5.323,
+      "after_own_session_down_ms": 0.138,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544445Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.132",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6950
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544290Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.132"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.132",
+          "peer_group": "",
+          "remote_asn": 64643,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.132",
+            "peer_group": "",
+            "remote_asn": 64643,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6939
+      },
+      "after_final_completion_ms": 20133.664,
+      "after_first_down_ms": 5.354,
+      "after_own_session_down_ms": 0.155,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544498Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.107",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6954
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544322Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.107"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.107",
+          "peer_group": "",
+          "remote_asn": 64618,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.107",
+            "peer_group": "",
+            "remote_asn": 64618,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6941
+      },
+      "after_final_completion_ms": 20133.717,
+      "after_first_down_ms": 5.407,
+      "after_own_session_down_ms": 0.176,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544542Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.65",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6957
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544285Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.65"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.65",
+          "peer_group": "",
+          "remote_asn": 64576,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.65",
+            "peer_group": "",
+            "remote_asn": 64576,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6936
+      },
+      "after_final_completion_ms": 20133.761,
+      "after_first_down_ms": 5.451,
+      "after_own_session_down_ms": 0.257,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544584Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.124",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6960
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544374Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.124"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.124",
+          "peer_group": "",
+          "remote_asn": 64635,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.124",
+            "peer_group": "",
+            "remote_asn": 64635,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6945
+      },
+      "after_final_completion_ms": 20133.803,
+      "after_first_down_ms": 5.493,
+      "after_own_session_down_ms": 0.21,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544595Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.52",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6962
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544334Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.52"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.52",
+          "peer_group": "",
+          "remote_asn": 64563,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.52",
+            "peer_group": "",
+            "remote_asn": 64563,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6942
+      },
+      "after_final_completion_ms": 20133.814,
+      "after_first_down_ms": 5.504,
+      "after_own_session_down_ms": 0.261,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544629Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.29",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6967
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544385Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.29"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.29",
+          "peer_group": "",
+          "remote_asn": 64540,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.29",
+            "peer_group": "",
+            "remote_asn": 64540,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6946
+      },
+      "after_final_completion_ms": 20133.848,
+      "after_first_down_ms": 5.538,
+      "after_own_session_down_ms": 0.244,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544630Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.122",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6968
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544475Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.122"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.122",
+          "peer_group": "",
+          "remote_asn": 64633,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.122",
+            "peer_group": "",
+            "remote_asn": 64633,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6952
+      },
+      "after_final_completion_ms": 20133.849,
+      "after_first_down_ms": 5.539,
+      "after_own_session_down_ms": 0.155,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544654Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.37",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6972
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544445Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.37"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.37",
+          "peer_group": "",
+          "remote_asn": 64548,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.37",
+            "peer_group": "",
+            "remote_asn": 64548,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6951
+      },
+      "after_final_completion_ms": 20133.873,
+      "after_first_down_ms": 5.563,
+      "after_own_session_down_ms": 0.209,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544659Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.53",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6976
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544573Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.53"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.53",
+          "peer_group": "",
+          "remote_asn": 64564,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.53",
+            "peer_group": "",
+            "remote_asn": 64564,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6958
+      },
+      "after_final_completion_ms": 20133.878,
+      "after_first_down_ms": 5.568,
+      "after_own_session_down_ms": 0.086,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544664Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.94",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6977
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544526Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.94"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.94",
+          "peer_group": "",
+          "remote_asn": 64605,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.94",
+            "peer_group": "",
+            "remote_asn": 64605,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6955
+      },
+      "after_final_completion_ms": 20133.883,
+      "after_first_down_ms": 5.573,
+      "after_own_session_down_ms": 0.138,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544715Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.138",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6984
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544617Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.138"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.138",
+          "peer_group": "",
+          "remote_asn": 64649,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.138",
+            "peer_group": "",
+            "remote_asn": 64649,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6964
+      },
+      "after_final_completion_ms": 20133.934,
+      "after_first_down_ms": 5.624,
+      "after_own_session_down_ms": 0.098,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544742Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.50",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6987
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544633Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.50"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.50",
+          "peer_group": "",
+          "remote_asn": 64561,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.50",
+            "peer_group": "",
+            "remote_asn": 64561,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6969
+      },
+      "after_final_completion_ms": 20133.961,
+      "after_first_down_ms": 5.651,
+      "after_own_session_down_ms": 0.109,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544773Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.118",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6991
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544659Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.118"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.118",
+          "peer_group": "",
+          "remote_asn": 64629,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.118",
+            "peer_group": "",
+            "remote_asn": 64629,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6975
+      },
+      "after_final_completion_ms": 20133.992,
+      "after_first_down_ms": 5.682,
+      "after_own_session_down_ms": 0.114,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544798Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.59",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6994
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544685Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.59"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.59",
+          "peer_group": "",
+          "remote_asn": 64570,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.59",
+            "peer_group": "",
+            "remote_asn": 64570,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6979
+      },
+      "after_final_completion_ms": 20134.017,
+      "after_first_down_ms": 5.707,
+      "after_own_session_down_ms": 0.113,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544826Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.135",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 6998
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544745Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.135"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.135",
+          "peer_group": "",
+          "remote_asn": 64646,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.135",
+            "peer_group": "",
+            "remote_asn": 64646,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6988
+      },
+      "after_final_completion_ms": 20134.045,
+      "after_first_down_ms": 5.735,
+      "after_own_session_down_ms": 0.081,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544828Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.30",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7000
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544658Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.30"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.30",
+          "peer_group": "",
+          "remote_asn": 64541,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.30",
+            "peer_group": "",
+            "remote_asn": 64541,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6974
+      },
+      "after_final_completion_ms": 20134.047,
+      "after_first_down_ms": 5.737,
+      "after_own_session_down_ms": 0.17,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544851Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.49",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7005
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544771Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.49"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.49",
+          "peer_group": "",
+          "remote_asn": 64560,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.49",
+            "peer_group": "",
+            "remote_asn": 64560,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6990
+      },
+      "after_final_completion_ms": 20134.07,
+      "after_first_down_ms": 5.76,
+      "after_own_session_down_ms": 0.08,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544856Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.104",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7006
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544704Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.104"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.104",
+          "peer_group": "",
+          "remote_asn": 64615,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.104",
+            "peer_group": "",
+            "remote_asn": 64615,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6981
+      },
+      "after_final_completion_ms": 20134.075,
+      "after_first_down_ms": 5.765,
+      "after_own_session_down_ms": 0.152,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544878Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.120",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7013
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544814Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.120"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.120",
+          "peer_group": "",
+          "remote_asn": 64631,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.120",
+            "peer_group": "",
+            "remote_asn": 64631,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6995
+      },
+      "after_final_completion_ms": 20134.097,
+      "after_first_down_ms": 5.787,
+      "after_own_session_down_ms": 0.064,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544881Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.58",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7014
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544826Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.58"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.58",
+          "peer_group": "",
+          "remote_asn": 64569,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.58",
+            "peer_group": "",
+            "remote_asn": 64569,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6999
+      },
+      "after_final_completion_ms": 20134.1,
+      "after_first_down_ms": 5.79,
+      "after_own_session_down_ms": 0.055,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544965Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.133",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7025
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544856Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.133"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.133",
+          "peer_group": "",
+          "remote_asn": 64644,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.133",
+            "peer_group": "",
+            "remote_asn": 64644,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7007
+      },
+      "after_final_completion_ms": 20134.184,
+      "after_first_down_ms": 5.874,
+      "after_own_session_down_ms": 0.109,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544966Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.24",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7026
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544862Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.24"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.24",
+          "peer_group": "",
+          "remote_asn": 64535,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.24",
+            "peer_group": "",
+            "remote_asn": 64535,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7008
+      },
+      "after_final_completion_ms": 20134.185,
+      "after_first_down_ms": 5.875,
+      "after_own_session_down_ms": 0.104,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544969Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.64",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7027
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544873Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.64"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.64",
+          "peer_group": "",
+          "remote_asn": 64575,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.64",
+            "peer_group": "",
+            "remote_asn": 64575,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7012
+      },
+      "after_final_completion_ms": 20134.188,
+      "after_first_down_ms": 5.878,
+      "after_own_session_down_ms": 0.096,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544999Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.102",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7033
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544887Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.102"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.102",
+          "peer_group": "",
+          "remote_asn": 64613,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.102",
+            "peer_group": "",
+            "remote_asn": 64613,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7016
+      },
+      "after_final_completion_ms": 20134.218,
+      "after_first_down_ms": 5.908,
+      "after_own_session_down_ms": 0.112,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.544996Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.47",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7034
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544883Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.47"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.47",
+          "peer_group": "",
+          "remote_asn": 64558,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.47",
+            "peer_group": "",
+            "remote_asn": 64558,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7015
+      },
+      "after_final_completion_ms": 20134.215,
+      "after_first_down_ms": 5.905,
+      "after_own_session_down_ms": 0.113,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545006Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.45",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7035
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544915Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.45"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.45",
+          "peer_group": "",
+          "remote_asn": 64556,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.45",
+            "peer_group": "",
+            "remote_asn": 64556,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7019
+      },
+      "after_final_completion_ms": 20134.225,
+      "after_first_down_ms": 5.915,
+      "after_own_session_down_ms": 0.091,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545025Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.103",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7040
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.541888Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.103"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.103",
+          "peer_group": "",
+          "remote_asn": 64614,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.103",
+            "peer_group": "",
+            "remote_asn": 64614,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6754
+      },
+      "after_final_completion_ms": 20134.244,
+      "after_first_down_ms": 5.934,
+      "after_own_session_down_ms": 3.137,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545029Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.117",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7041
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544909Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.117"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.117",
+          "peer_group": "",
+          "remote_asn": 64628,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.117",
+            "peer_group": "",
+            "remote_asn": 64628,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7018
+      },
+      "after_final_completion_ms": 20134.248,
+      "after_first_down_ms": 5.938,
+      "after_own_session_down_ms": 0.12,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545042Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.73",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7043
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.542844Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.73"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.73",
+          "peer_group": "",
+          "remote_asn": 64584,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.73",
+            "peer_group": "",
+            "remote_asn": 64584,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6814
+      },
+      "after_final_completion_ms": 20134.261,
+      "after_first_down_ms": 5.951,
+      "after_own_session_down_ms": 2.198,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545061Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.75",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7048
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.543115Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.75"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.75",
+          "peer_group": "",
+          "remote_asn": 64586,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.75",
+            "peer_group": "",
+            "remote_asn": 64586,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6831
+      },
+      "after_final_completion_ms": 20134.28,
+      "after_first_down_ms": 5.97,
+      "after_own_session_down_ms": 1.946,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545061Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.130",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7049
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544996Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.130"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.130",
+          "peer_group": "",
+          "remote_asn": 64641,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.130",
+            "peer_group": "",
+            "remote_asn": 64641,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7032
+      },
+      "after_final_completion_ms": 20134.28,
+      "after_first_down_ms": 5.97,
+      "after_own_session_down_ms": 0.065,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545073Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.152",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7051
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.542628Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.152"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.152",
+          "peer_group": "",
+          "remote_asn": 64663,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.152",
+            "peer_group": "",
+            "remote_asn": 64663,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6795
+      },
+      "after_final_completion_ms": 20134.292,
+      "after_first_down_ms": 5.982,
+      "after_own_session_down_ms": 2.445,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545075Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.34",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7052
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544997Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.34"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.34",
+          "peer_group": "",
+          "remote_asn": 64545,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.34",
+            "peer_group": "",
+            "remote_asn": 64545,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7037
+      },
+      "after_final_completion_ms": 20134.294,
+      "after_first_down_ms": 5.984,
+      "after_own_session_down_ms": 0.078,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545089Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.148",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7056
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.542954Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.148"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.148",
+          "peer_group": "",
+          "remote_asn": 64659,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.148",
+            "peer_group": "",
+            "remote_asn": 64659,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6821
+      },
+      "after_final_completion_ms": 20134.308,
+      "after_first_down_ms": 5.998,
+      "after_own_session_down_ms": 2.135,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545091Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.62",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7057
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.544999Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.62"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.62",
+          "peer_group": "",
+          "remote_asn": 64573,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.62",
+            "peer_group": "",
+            "remote_asn": 64573,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7038
+      },
+      "after_final_completion_ms": 20134.31,
+      "after_first_down_ms": 6.0,
+      "after_own_session_down_ms": 0.092,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545094Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.99",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7058
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.545041Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.99"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.99",
+          "peer_group": "",
+          "remote_asn": 64610,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.99",
+            "peer_group": "",
+            "remote_asn": 64610,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7044
+      },
+      "after_final_completion_ms": 20134.313,
+      "after_first_down_ms": 6.003,
+      "after_own_session_down_ms": 0.053,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545117Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.114",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7063
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.545057Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.114"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.114",
+          "peer_group": "",
+          "remote_asn": 64625,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.114",
+            "peer_group": "",
+            "remote_asn": 64625,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7047
+      },
+      "after_final_completion_ms": 20134.336,
+      "after_first_down_ms": 6.026,
+      "after_own_session_down_ms": 0.06,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545200Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.19",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7078
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.545104Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.19"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.19",
+          "peer_group": "",
+          "remote_asn": 64530,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.19",
+            "peer_group": "",
+            "remote_asn": 64530,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7061
+      },
+      "after_final_completion_ms": 20134.419,
+      "after_first_down_ms": 6.109,
+      "after_own_session_down_ms": 0.096,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545203Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.84",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7080
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.545123Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.84"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.84",
+          "peer_group": "",
+          "remote_asn": 64595,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.84",
+            "peer_group": "",
+            "remote_asn": 64595,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7067
+      },
+      "after_final_completion_ms": 20134.422,
+      "after_first_down_ms": 6.112,
+      "after_own_session_down_ms": 0.08,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545204Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.116",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7081
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.545120Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.116"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.116",
+          "peer_group": "",
+          "remote_asn": 64627,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.116",
+            "peer_group": "",
+            "remote_asn": 64627,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7066
+      },
+      "after_final_completion_ms": 20134.423,
+      "after_first_down_ms": 6.113,
+      "after_own_session_down_ms": 0.084,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545238Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.128",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7088
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.545156Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.128"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.128",
+          "peer_group": "",
+          "remote_asn": 64639,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.128",
+            "peer_group": "",
+            "remote_asn": 64639,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7070
+      },
+      "after_final_completion_ms": 20134.457,
+      "after_first_down_ms": 6.147,
+      "after_own_session_down_ms": 0.082,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545242Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.127",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7089
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.545190Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.127"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.127",
+          "peer_group": "",
+          "remote_asn": 64638,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.127",
+            "peer_group": "",
+            "remote_asn": 64638,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7076
+      },
+      "after_final_completion_ms": 20134.461,
+      "after_first_down_ms": 6.151,
+      "after_own_session_down_ms": 0.052,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545234Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.115",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7092
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.545146Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.115"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.115",
+          "peer_group": "",
+          "remote_asn": 64626,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.115",
+            "peer_group": "",
+            "remote_asn": 64626,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7069
+      },
+      "after_final_completion_ms": 20134.453,
+      "after_first_down_ms": 6.143,
+      "after_own_session_down_ms": 0.088,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545376Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.129",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7111
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.545269Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.129"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.129",
+          "peer_group": "",
+          "remote_asn": 64640,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.129",
+            "peer_group": "",
+            "remote_asn": 64640,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7095
+      },
+      "after_final_completion_ms": 20134.595,
+      "after_first_down_ms": 6.285,
+      "after_own_session_down_ms": 0.107,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545440Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.131",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7131
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.545096Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.131"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.131",
+          "peer_group": "",
+          "remote_asn": 64642,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.131",
+            "peer_group": "",
+            "remote_asn": 64642,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7060
+      },
+      "after_final_completion_ms": 20134.659,
+      "after_first_down_ms": 6.349,
+      "after_own_session_down_ms": 0.344,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545457Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.3",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7133
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.545421Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.3"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.3",
+          "peer_group": "",
+          "remote_asn": 64514,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.3",
+            "peer_group": "",
+            "remote_asn": 64514,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7122
+      },
+      "after_final_completion_ms": 20134.676,
+      "after_first_down_ms": 6.366,
+      "after_own_session_down_ms": 0.036,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545459Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.125",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7134
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.545414Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.125"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.125",
+          "peer_group": "",
+          "remote_asn": 64636,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.125",
+            "peer_group": "",
+            "remote_asn": 64636,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7120
+      },
+      "after_final_completion_ms": 20134.678,
+      "after_first_down_ms": 6.368,
+      "after_own_session_down_ms": 0.045,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545477Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.106",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7140
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.545398Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.106"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.106",
+          "peer_group": "",
+          "remote_asn": 64617,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.106",
+            "peer_group": "",
+            "remote_asn": 64617,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7115
+      },
+      "after_final_completion_ms": 20134.696,
+      "after_first_down_ms": 6.386,
+      "after_own_session_down_ms": 0.079,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545512Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.15",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7151
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.545488Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.15"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.15",
+          "peer_group": "",
+          "remote_asn": 64526,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.15",
+            "peer_group": "",
+            "remote_asn": 64526,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7144
+      },
+      "after_final_completion_ms": 20134.731,
+      "after_first_down_ms": 6.421,
+      "after_own_session_down_ms": 0.024,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545532Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.46",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7158
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.541552Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.46"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.46",
+          "peer_group": "",
+          "remote_asn": 64557,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.46",
+            "peer_group": "",
+            "remote_asn": 64557,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6733
+      },
+      "after_final_completion_ms": 20134.751,
+      "after_first_down_ms": 6.441,
+      "after_own_session_down_ms": 3.98,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545548Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.113",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7164
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.542140Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.113"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.113",
+          "peer_group": "",
+          "remote_asn": 64624,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.113",
+            "peer_group": "",
+            "remote_asn": 64624,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6765
+      },
+      "after_final_completion_ms": 20134.767,
+      "after_first_down_ms": 6.457,
+      "after_own_session_down_ms": 3.408,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545557Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.82",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7169
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.545293Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.82"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.82",
+          "peer_group": "",
+          "remote_asn": 64593,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.82",
+            "peer_group": "",
+            "remote_asn": 64593,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7098
+      },
+      "after_final_completion_ms": 20134.776,
+      "after_first_down_ms": 6.466,
+      "after_own_session_down_ms": 0.264,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545569Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.44",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7170
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.542702Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.44"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.44",
+          "peer_group": "",
+          "remote_asn": 64555,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.44",
+            "peer_group": "",
+            "remote_asn": 64555,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6804
+      },
+      "after_final_completion_ms": 20134.788,
+      "after_first_down_ms": 6.478,
+      "after_own_session_down_ms": 2.867,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545567Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.109",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7172
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.542510Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.109"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.109",
+          "peer_group": "",
+          "remote_asn": 64620,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.109",
+            "peer_group": "",
+            "remote_asn": 64620,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6786
+      },
+      "after_final_completion_ms": 20134.786,
+      "after_first_down_ms": 6.476,
+      "after_own_session_down_ms": 3.057,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545575Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.6",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7173
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.545232Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.6"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.6",
+          "peer_group": "",
+          "remote_asn": 64517,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.6",
+            "peer_group": "",
+            "remote_asn": 64517,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7091
+      },
+      "after_final_completion_ms": 20134.794,
+      "after_first_down_ms": 6.484,
+      "after_own_session_down_ms": 0.343,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545583Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.93",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7178
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.545463Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.93"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.93",
+          "peer_group": "",
+          "remote_asn": 64604,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.93",
+            "peer_group": "",
+            "remote_asn": 64604,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7137
+      },
+      "after_final_completion_ms": 20134.802,
+      "after_first_down_ms": 6.492,
+      "after_own_session_down_ms": 0.12,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545593Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.26",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7179
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.545382Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.26"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.26",
+          "peer_group": "",
+          "remote_asn": 64537,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.26",
+            "peer_group": "",
+            "remote_asn": 64537,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7113
+      },
+      "after_final_completion_ms": 20134.812,
+      "after_first_down_ms": 6.502,
+      "after_own_session_down_ms": 0.211,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545596Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.20",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7180
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.545558Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.20"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.20",
+          "peer_group": "",
+          "remote_asn": 64531,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.20",
+            "peer_group": "",
+            "remote_asn": 64531,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7171
+      },
+      "after_final_completion_ms": 20134.815,
+      "after_first_down_ms": 6.505,
+      "after_own_session_down_ms": 0.038,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545597Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.21",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7181
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.545232Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.21"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.21",
+          "peer_group": "",
+          "remote_asn": 64532,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.21",
+            "peer_group": "",
+            "remote_asn": 64532,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7087
+      },
+      "after_final_completion_ms": 20134.816,
+      "after_first_down_ms": 6.506,
+      "after_own_session_down_ms": 0.365,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545606Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.18",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7182
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.545523Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.18"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.18",
+          "peer_group": "",
+          "remote_asn": 64529,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.18",
+            "peer_group": "",
+            "remote_asn": 64529,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7155
+      },
+      "after_final_completion_ms": 20134.825,
+      "after_first_down_ms": 6.515,
+      "after_own_session_down_ms": 0.083,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545609Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.91",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7183
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.545525Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.91"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.91",
+          "peer_group": "",
+          "remote_asn": 64602,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.91",
+            "peer_group": "",
+            "remote_asn": 64602,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7156
+      },
+      "after_final_completion_ms": 20134.828,
+      "after_first_down_ms": 6.518,
+      "after_own_session_down_ms": 0.084,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545607Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.16",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7184
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.545438Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.16"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.16",
+          "peer_group": "",
+          "remote_asn": 64527,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.16",
+            "peer_group": "",
+            "remote_asn": 64527,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7127
+      },
+      "after_final_completion_ms": 20134.826,
+      "after_first_down_ms": 6.516,
+      "after_own_session_down_ms": 0.169,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545613Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.12",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7185
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.545512Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.12"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.12",
+          "peer_group": "",
+          "remote_asn": 64523,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.12",
+            "peer_group": "",
+            "remote_asn": 64523,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7152
+      },
+      "after_final_completion_ms": 20134.832,
+      "after_first_down_ms": 6.522,
+      "after_own_session_down_ms": 0.101,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545590Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.111",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7188
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.542666Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.111"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.111",
+          "peer_group": "",
+          "remote_asn": 64622,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.111",
+            "peer_group": "",
+            "remote_asn": 64622,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6802
+      },
+      "after_final_completion_ms": 20134.809,
+      "after_first_down_ms": 6.499,
+      "after_own_session_down_ms": 2.924,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545625Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.7",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7189
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.545564Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.7"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.7",
+          "peer_group": "",
+          "remote_asn": 64518,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.7",
+            "peer_group": "",
+            "remote_asn": 64518,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7168
+      },
+      "after_final_completion_ms": 20134.844,
+      "after_first_down_ms": 6.534,
+      "after_own_session_down_ms": 0.061,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545627Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.71",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7190
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.545461Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.71"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.71",
+          "peer_group": "",
+          "remote_asn": 64582,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.71",
+            "peer_group": "",
+            "remote_asn": 64582,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7138
+      },
+      "after_final_completion_ms": 20134.846,
+      "after_first_down_ms": 6.536,
+      "after_own_session_down_ms": 0.166,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545628Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.1",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7191
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.545487Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.1"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.1",
+          "peer_group": "",
+          "remote_asn": 64512,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.1",
+            "peer_group": "",
+            "remote_asn": 64512,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7147
+      },
+      "after_final_completion_ms": 20134.847,
+      "after_first_down_ms": 6.537,
+      "after_own_session_down_ms": 0.141,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545631Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.85",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7192
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.545288Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.85"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.85",
+          "peer_group": "",
+          "remote_asn": 64596,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.85",
+            "peer_group": "",
+            "remote_asn": 64596,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7097
+      },
+      "after_final_completion_ms": 20134.85,
+      "after_first_down_ms": 6.54,
+      "after_own_session_down_ms": 0.343,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545637Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.72",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7193
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.542997Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.72"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.72",
+          "peer_group": "",
+          "remote_asn": 64583,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.72",
+            "peer_group": "",
+            "remote_asn": 64583,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 6825
+      },
+      "after_final_completion_ms": 20134.856,
+      "after_first_down_ms": 6.546,
+      "after_own_session_down_ms": 2.64,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545628Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.9",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7194
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.545542Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.9"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.9",
+          "peer_group": "",
+          "remote_asn": 64520,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.9",
+            "peer_group": "",
+            "remote_asn": 64520,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7162
+      },
+      "after_final_completion_ms": 20134.847,
+      "after_first_down_ms": 6.537,
+      "after_own_session_down_ms": 0.086,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545628Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.87",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7195
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.545516Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.87"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.87",
+          "peer_group": "",
+          "remote_asn": 64598,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.87",
+            "peer_group": "",
+            "remote_asn": 64598,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7159
+      },
+      "after_final_completion_ms": 20134.847,
+      "after_first_down_ms": 6.537,
+      "after_own_session_down_ms": 0.112,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545649Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.74",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7196
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.545588Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.74"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.74",
+          "peer_group": "",
+          "remote_asn": 64585,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.74",
+            "peer_group": "",
+            "remote_asn": 64585,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7177
+      },
+      "after_final_completion_ms": 20134.868,
+      "after_first_down_ms": 6.558,
+      "after_own_session_down_ms": 0.061,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545651Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.69",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7197
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.545444Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.69"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.69",
+          "peer_group": "",
+          "remote_asn": 64580,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.69",
+            "peer_group": "",
+            "remote_asn": 64580,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7128
+      },
+      "after_final_completion_ms": 20134.87,
+      "after_first_down_ms": 6.56,
+      "after_own_session_down_ms": 0.207,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545662Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.83",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7199
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.545484Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.83"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.83",
+          "peer_group": "",
+          "remote_asn": 64594,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.83",
+            "peer_group": "",
+            "remote_asn": 64594,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7143
+      },
+      "after_final_completion_ms": 20134.881,
+      "after_first_down_ms": 6.571,
+      "after_own_session_down_ms": 0.178,
+      "classification": "teardown"
+    },
+    {
+      "raw_event": {
+        "timestamp": "2026-09-08T16:34:28.545663Z",
+        "level": "WARN",
+        "fields": {
+          "message": "writer: write/flush failed",
+          "peer": "127.1.0.97",
+          "error": "Broken pipe (os error 32)",
+          "error_kind": "BrokenPipe"
+        },
+        "target": "rustbgpd_transport::session::writer",
+        "raw_line": 7200
+      },
+      "peer_session_down": {
+        "timestamp": "2026-09-08T16:34:28.545232Z",
+        "level": "INFO",
+        "fields": {
+          "message": "session down",
+          "peer": "127.1.0.97"
+        },
+        "target": "rustbgpd_transport::session::fsm",
+        "span": {
+          "peer_addr": "127.1.0.97",
+          "peer_group": "",
+          "remote_asn": 64608,
+          "name": "peer"
+        },
+        "spans": [
+          {
+            "peer_addr": "127.1.0.97",
+            "peer_group": "",
+            "remote_asn": 64608,
+            "name": "peer"
+          }
+        ],
+        "raw_line": 7090
+      },
+      "after_final_completion_ms": 20134.882,
+      "after_first_down_ms": 6.572,
+      "after_own_session_down_ms": 0.431,
+      "classification": "teardown"
+    }
+  ],
+  "evidence_sha256": {
+    "evidence.json": "25c9c020e2ece104ae43641cde7cea0add692baefb365cc485ade3716fe87075",
+    "driver.log": "8609af59ea4633b57305dc76b2c2bc375bc814a1b7527ba444e0bb7aa8c4fd86",
+    "driver.exit": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+    "gate.stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rustbgpd/daemon.log": "12873295d55ad51293ad4d2491271be06d86ecedeef212bf755a594ccf5c5a89",
+    "rustbgpd/reloadstall.log": "e77facb10e15c640c1d57458b5b33cbb2488838c64b3f21fe377c556a85981fb",
+    "rustbgpd/status": "9f56e761d79bfdb34304a012586cb04d16b435ef6130091a97702e559260a2f2",
+    "rustbgpd/provenance.json": "244469a1182629b07c7720a8616495dbf2762486b0917c3fbbd09acdd961a528"
+  },
+  "limitations": [
+    "102 writer warnings were not recognized by the original gate; its failure is preserved.",
+    "No runtime writer failure, measured route-delivery failure, or recovery proof inferred from teardown warnings.",
+    "Every writer warning follows its own peer session-down event as well as global teardown start."
+  ]
+}

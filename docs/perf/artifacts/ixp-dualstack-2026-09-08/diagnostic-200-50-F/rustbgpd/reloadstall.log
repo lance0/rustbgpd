@@ -1,0 +1,86 @@
+# reloadstall peers=200 changed_peers=170 stable_peers=30 prefixes=57200 per_peer=286 pid=3484955
+# dualstack total_prefixes=114400 ipv4_prefixes=57200 ipv6_prefixes=57200 distribution=quotient-remainder filter_count=32
+established 200 at 0.2s
+establishment transport_retries=0 recovered_peers=0
+first_exact_bitmap,mode=reload,peers=200,total=57200,per_peer_min=286,per_peer_max=286,expected_min=56914,expected_max=56914,completed=200,min_unique=56914,max_unique=56914
+first_exact_bitmap6,mode=reload,peers=200,total=57200,per_peer_min=286,per_peer_max=286,expected_min=56914,expected_max=56914,completed=200,min_unique=56914,max_unique=56914
+converged exact per-family observer inventories at 1.0s rss_mib=183
+control_maxgap_ms: p50=18.45 p95=18.60 max=42.00 (n=200)
+control_maxgap_v4_ms: p50=19.28 p95=19.42 max=42.01 (n=200)
+control_maxgap_v6_ms: p50=19.77 p95=19.84 max=77.38 (n=200)
+control_rss_mib 147
+reloadstall_csv_header,reload,peers_total,peers_changed,peers_stable,prefixes,completion_p50_s,completion_p95_s,completion_max_s,changed_maxgap_p50_ms,changed_maxgap_p95_ms,changed_maxgap_max_ms,all_observer_maxgap_p50_ms,all_observer_maxgap_p95_ms,all_observer_maxgap_max_ms,changed_first_generation_update_p50_ms,changed_first_generation_update_p95_ms,changed_first_generation_update_max_ms,rss_before_mib,rss_after_mib,stable_marker_peers,sessions_up,parse_errors
+reloadstall_dualstack_csv_header,reload,peers_total,peers_changed,prefixes_total,ipv4_prefixes,ipv6_prefixes,generation,filter_count,v4_completion_p50_s,v4_completion_p95_s,v4_completion_max_s,v6_completion_p50_s,v6_completion_p95_s,v6_completion_max_s,v4_maxgap_p50_ms,v4_maxgap_p95_ms,v4_maxgap_max_ms,v6_maxgap_p50_ms,v6_maxgap_p95_ms,v6_maxgap_max_ms,v4_first_generation_update_p50_ms,v4_first_generation_update_p95_ms,v4_first_generation_update_max_ms,v6_first_generation_update_p50_ms,v6_first_generation_update_p95_ms,v6_first_generation_update_max_ms,v4_filtered_withdrawn,v4_filtered_expected,v6_filtered_withdrawn,v6_filtered_expected,filtered_leaked,bystander_withdrawn,stable_withdrawn,duplicate_withdrawn,stable_marker_peers_v4,stable_marker_peers_v6,sessions_up,parse_errors
+reload 1 SIGHUP wall_us=1788886719116903 policy=/tmp/ixp-rustbgpd/gen-b.rpol
+reloadstall_churn_overlap,reload=1,trigger_us=34045542,completion_us=34486168,v4_writes=28,v4_first_us=Some(34057708),v4_last_us=Some(34479826),v6_writes=28,v6_first_us=Some(34057718),v6_last_us=Some(34479840),overlap_observed=true
+reload 1 completion_s: p50=0.41 p95=0.44 max=0.44 (n=170)
+reload 1 maxgap_ms: p50=217.05 p95=223.64 max=234.75 (n=170)
+reload 1 all_observer_maxgap_ms: p50=217.21 p95=229.20 max=246.52 (n=200)
+reload 1 changed_first_generation_update_ms: p50=341.89 p95=348.55 max=359.93 (n=170)
+reload 1 rss_mib before=147 after=228 comms_sample=[4286056400]
+reload 1 sessions_up 200/200
+reload 1 stable_marker_peers 30/30
+reload 1 withdrawals: v4 named 5408/5408 v6 named 5408/5408 leaked=0 bystander=0 stable=0 duplicate=0
+reloadstall_csv,1,200,170,30,114400,0.412378,0.438209,0.440626,217.047,223.636,234.752,217.205,229.203,246.523,341.888,348.550,359.928,147,228,30,200,0
+reload 1 v4_completion_s: p50=0.41 p95=0.44 max=0.44 (n=170)
+reload 1 v4_maxgap_ms: p50=218.20 p95=224.85 max=235.95 (n=170)
+reload 1 v4_first_generation_update_ms: p50=341.89 p95=348.55 max=359.93 (n=170)
+reload 1 v6_completion_s: p50=0.41 p95=0.44 max=0.44 (n=170)
+reload 1 v6_maxgap_ms: p50=217.05 p95=223.64 max=234.75 (n=170)
+reload 1 v6_first_generation_update_ms: p50=341.85 p95=348.54 max=359.85 (n=170)
+reloadstall_dualstack_csv,1,200,170,114400,57200,57200,b,32,0.412360,0.438182,0.440604,0.412378,0.438209,0.440626,218.198,224.849,235.947,217.047,223.636,234.752,341.888,348.550,359.928,341.846,348.544,359.846,5408,5408,5408,5408,0,0,0,0,30,30,200,0
+reload 2 SIGHUP wall_us=1788886739826729 policy=/tmp/ixp-rustbgpd/gen-a.rpol
+reloadstall_churn_overlap,reload=2,trigger_us=54755368,completion_us=55219552,v4_writes=29,v4_first_us=Some(54781731),v4_last_us=Some(55216091),v6_writes=29,v6_first_us=Some(54781739),v6_last_us=Some(55216100),overlap_observed=true
+reload 2 completion_s: p50=0.43 p95=0.46 max=0.46 (n=170)
+reload 2 maxgap_ms: p50=222.68 p95=296.55 max=316.22 (n=170)
+reload 2 all_observer_maxgap_ms: p50=222.32 p95=290.90 max=316.22 (n=200)
+reload 2 changed_first_generation_update_ms: p50=352.96 p95=426.60 max=446.89 (n=170)
+reload 2 rss_mib before=158 after=240 comms_sample=[4286055400]
+reload 2 sessions_up 200/200
+reload 2 stable_marker_peers 30/30
+reload 2 withdrawals: v4 named 0/0 v6 named 0/0 leaked=0 bystander=0 stable=0 duplicate=0
+reloadstall_csv,2,200,170,30,114400,0.426447,0.460053,0.464184,222.679,296.553,316.224,222.325,290.898,316.224,352.956,426.601,446.886,158,240,30,200,0
+reload 2 v4_completion_s: p50=0.43 p95=0.46 max=0.46 (n=170)
+reload 2 v4_maxgap_ms: p50=223.96 p95=297.84 max=317.34 (n=170)
+reload 2 v4_first_generation_update_ms: p50=352.96 p95=426.60 max=446.89 (n=170)
+reload 2 v6_completion_s: p50=0.43 p95=0.46 max=0.46 (n=170)
+reload 2 v6_maxgap_ms: p50=222.76 p95=296.56 max=316.24 (n=170)
+reload 2 v6_first_generation_update_ms: p50=352.98 p95=426.61 max=446.90 (n=170)
+reloadstall_dualstack_csv,2,200,170,114400,57200,57200,a,32,0.426447,0.460053,0.464184,0.426313,0.460027,0.464180,223.961,297.840,317.336,222.756,296.565,316.240,352.956,426.601,446.886,352.980,426.613,446.902,0,0,0,0,0,0,0,0,30,30,200,0
+reload 3 SIGHUP wall_us=1788886760650346 policy=/tmp/ixp-rustbgpd/gen-b.rpol
+reloadstall_churn_overlap,reload=3,trigger_us=75578985,completion_us=76022219,v4_writes=31,v4_first_us=Some(75598649),v4_last_us=Some(76016962),v6_writes=31,v6_first_us=Some(75598658),v6_last_us=Some(76016968),overlap_observed=true
+reload 3 completion_s: p50=0.41 p95=0.44 max=0.44 (n=170)
+reload 3 maxgap_ms: p50=256.65 p95=329.98 max=339.55 (n=170)
+reload 3 all_observer_maxgap_ms: p50=257.54 p95=339.59 max=368.15 (n=200)
+reload 3 changed_first_generation_update_ms: p50=332.95 p95=405.94 max=415.57 (n=170)
+reload 3 rss_mib before=159 after=247 comms_sample=[4286056400]
+reload 3 sessions_up 200/200
+reload 3 stable_marker_peers 30/30
+reload 3 withdrawals: v4 named 5408/5408 v6 named 5408/5408 leaked=0 bystander=0 stable=0 duplicate=0
+reloadstall_csv,3,200,170,30,114400,0.413028,0.439119,0.443234,256.649,329.983,339.552,257.536,339.589,368.153,332.947,405.942,415.568,159,247,30,200,0
+reload 3 v4_completion_s: p50=0.41 p95=0.44 max=0.44 (n=170)
+reload 3 v4_maxgap_ms: p50=257.62 p95=330.97 max=340.56 (n=170)
+reload 3 v4_first_generation_update_ms: p50=332.95 p95=405.94 max=415.57 (n=170)
+reload 3 v6_completion_s: p50=0.41 p95=0.44 max=0.44 (n=170)
+reload 3 v6_maxgap_ms: p50=256.65 p95=329.98 max=339.55 (n=170)
+reload 3 v6_first_generation_update_ms: p50=332.91 p95=405.94 max=415.53 (n=170)
+reloadstall_dualstack_csv,3,200,170,114400,57200,57200,b,32,0.413025,0.439103,0.443231,0.413028,0.439119,0.443234,257.618,330.973,340.563,256.649,329.983,339.552,332.947,405.942,415.568,332.908,405.936,415.531,5408,5408,5408,5408,0,0,0,0,30,30,200,0
+reload 4 SIGHUP wall_us=1788886781376679 policy=/tmp/ixp-rustbgpd/gen-a.rpol
+reloadstall_churn_overlap,reload=4,trigger_us=96305318,completion_us=96733755,v4_writes=25,v4_first_us=Some(96310587),v4_last_us=Some(96700375),v6_writes=25,v6_first_us=Some(96310593),v6_last_us=Some(96700408),overlap_observed=true
+reload 4 completion_s: p50=0.39 p95=0.42 max=0.43 (n=170)
+reload 4 maxgap_ms: p50=314.76 p95=376.22 max=395.13 (n=170)
+reload 4 all_observer_maxgap_ms: p50=317.28 p95=375.55 max=395.13 (n=200)
+reload 4 changed_first_generation_update_ms: p50=321.45 p95=383.00 max=401.63 (n=170)
+reload 4 rss_mib before=160 after=254 comms_sample=[4286055400]
+reload 4 sessions_up 200/200
+reload 4 stable_marker_peers 30/30
+reload 4 withdrawals: v4 named 0/0 v6 named 0/0 leaked=0 bystander=0 stable=0 duplicate=0
+reloadstall_csv,4,200,170,30,114400,0.389259,0.422746,0.428437,314.765,376.216,395.126,317.277,375.546,395.126,321.446,382.999,401.635,160,254,30,200,0
+reload 4 v4_completion_s: p50=0.39 p95=0.42 max=0.43 (n=170)
+reload 4 v4_maxgap_ms: p50=315.74 p95=377.08 max=395.97 (n=170)
+reload 4 v4_first_generation_update_ms: p50=321.45 p95=383.00 max=401.63 (n=170)
+reload 4 v6_completion_s: p50=0.39 p95=0.42 max=0.43 (n=170)
+reload 4 v6_maxgap_ms: p50=314.76 p95=376.22 max=395.13 (n=170)
+reload 4 v6_first_generation_update_ms: p50=321.37 p95=382.98 max=401.63 (n=170)
+reloadstall_dualstack_csv,4,200,170,114400,57200,57200,a,32,0.389259,0.422746,0.428437,0.389224,0.422729,0.428434,315.738,377.082,395.972,314.765,376.216,395.126,321.446,382.999,401.635,321.368,382.980,401.627,0,0,0,0,0,0,0,0,30,30,200,0
+done rss_mib=160

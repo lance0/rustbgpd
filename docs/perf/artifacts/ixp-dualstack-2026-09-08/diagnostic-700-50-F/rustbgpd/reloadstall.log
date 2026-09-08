@@ -1,0 +1,113 @@
+# reloadstall peers=700 changed_peers=600 stable_peers=100 prefixes=200200 per_peer=286 pid=3674845
+# dualstack total_prefixes=400400 ipv4_prefixes=200200 ipv6_prefixes=200200 distribution=quotient-remainder filter_count=32
+established 700 at 0.7s
+establishment transport_retries=0 recovered_peers=0
+first_exact_bitmap,mode=reload,peers=700,total=200200,per_peer_min=286,per_peer_max=286,expected_min=199914,expected_max=199914,completed=700,min_unique=199914,max_unique=199914
+first_exact_bitmap6,mode=reload,peers=700,total=200200,per_peer_min=286,per_peer_max=286,expected_min=199914,expected_max=199914,completed=700,min_unique=199914,max_unique=199914
+converged exact per-family observer inventories at 6.2s rss_mib=471
+control_maxgap_ms: p50=17.65 p95=17.95 max=42.02 (n=700)
+control_maxgap_v4_ms: p50=19.89 p95=20.45 max=42.02 (n=700)
+control_maxgap_v6_ms: p50=20.97 p95=21.36 max=76.28 (n=700)
+control_rss_mib 446
+reloadstall_csv_header,reload,peers_total,peers_changed,peers_stable,prefixes,completion_p50_s,completion_p95_s,completion_max_s,changed_maxgap_p50_ms,changed_maxgap_p95_ms,changed_maxgap_max_ms,all_observer_maxgap_p50_ms,all_observer_maxgap_p95_ms,all_observer_maxgap_max_ms,changed_first_generation_update_p50_ms,changed_first_generation_update_p95_ms,changed_first_generation_update_max_ms,rss_before_mib,rss_after_mib,stable_marker_peers,sessions_up,parse_errors
+reloadstall_dualstack_csv_header,reload,peers_total,peers_changed,prefixes_total,ipv4_prefixes,ipv6_prefixes,generation,filter_count,v4_completion_p50_s,v4_completion_p95_s,v4_completion_max_s,v6_completion_p50_s,v6_completion_p95_s,v6_completion_max_s,v4_maxgap_p50_ms,v4_maxgap_p95_ms,v4_maxgap_max_ms,v6_maxgap_p50_ms,v6_maxgap_p95_ms,v6_maxgap_max_ms,v4_first_generation_update_p50_ms,v4_first_generation_update_p95_ms,v4_first_generation_update_max_ms,v6_first_generation_update_p50_ms,v6_first_generation_update_p95_ms,v6_first_generation_update_max_ms,v4_filtered_withdrawn,v4_filtered_expected,v6_filtered_withdrawn,v6_filtered_expected,filtered_leaked,bystander_withdrawn,stable_withdrawn,duplicate_withdrawn,stable_marker_peers_v4,stable_marker_peers_v6,sessions_up,parse_errors
+reload 1 SIGHUP wall_us=1788887898966961 policy=/tmp/ixp-rustbgpd/gen-b.rpol
+reloadstall_churn_overlap,reload=1,trigger_us=39225376,completion_us=42142210,v4_writes=164,v4_first_us=Some(39225440),v4_last_us=Some(42121158),v6_writes=164,v6_first_us=Some(39225447),v6_last_us=Some(42121166),overlap_observed=true
+reload 1 completion_s: p50=2.58 p95=2.90 max=2.92 (n=600)
+reload 1 maxgap_ms: p50=905.77 p95=1258.38 max=1437.78 (n=600)
+reload 1 all_observer_maxgap_ms: p50=912.45 p95=1230.32 max=1437.78 (n=700)
+reload 1 changed_first_generation_update_ms: p50=1704.28 p95=2056.50 max=2236.26 (n=600)
+reload 1 rss_mib before=446 after=628 comms_sample=[4286056400]
+reload 1 sessions_up 700/700
+reload 1 stable_marker_peers 100/100
+reload 1 withdrawals: v4 named 19168/19168 v6 named 19168/19168 leaked=0 bystander=0 stable=0 duplicate=0
+reloadstall_csv,1,700,600,100,400400,2.582612,2.903348,2.916834,905.766,1258.384,1437.781,912.451,1230.321,1437.781,1704.281,2056.499,2236.258,446,628,100,700,0
+reload 1 v4_completion_s: p50=2.58 p95=2.90 max=2.92 (n=600)
+reload 1 v4_maxgap_ms: p50=908.79 p95=1261.50 max=1440.82 (n=600)
+reload 1 v4_first_generation_update_ms: p50=1704.28 p95=2056.50 max=2236.26 (n=600)
+reload 1 v6_completion_s: p50=2.58 p95=2.90 max=2.92 (n=600)
+reload 1 v6_maxgap_ms: p50=905.77 p95=1258.38 max=1437.78 (n=600)
+reload 1 v6_first_generation_update_ms: p50=1704.27 p95=2056.48 max=2236.20 (n=600)
+reloadstall_dualstack_csv,1,700,600,400400,200200,200200,b,32,2.582608,2.903337,2.916831,2.582612,2.903348,2.916834,908.786,1261.498,1440.823,905.766,1258.384,1437.781,1704.281,2056.499,2236.258,1704.273,2056.484,2236.201,19168,19168,19168,19168,0,0,0,0,100,100,700,0
+reload 2 SIGHUP wall_us=1788887922356420 policy=/tmp/ixp-rustbgpd/gen-a.rpol
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 progress: complete=0/600
+reload 2 STALLED: no re-advertisement progress for 600s
+reload 2 observers_complete 0/600
+reload 2 observer 0 incomplete: unique=0/199914 filtered_withdrawn=0/0
+reload 2 observer 0 ipv6 incomplete: unique=0/199914 filtered_withdrawn=0/0
+reload 2 observer 1 incomplete: unique=0/199914 filtered_withdrawn=0/0
+reload 2 observer 1 ipv6 incomplete: unique=0/199914 filtered_withdrawn=0/0
+reload 2 observer 2 incomplete: unique=0/199914 filtered_withdrawn=0/0
+reload 2 observer 2 ipv6 incomplete: unique=0/199914 filtered_withdrawn=0/0
+reload 2 observer 3 incomplete: unique=0/199914 filtered_withdrawn=0/0
+reload 2 observer 3 ipv6 incomplete: unique=0/199914 filtered_withdrawn=0/0
+reload 2 observer 4 incomplete: unique=0/199914 filtered_withdrawn=0/0
+reload 2 observer 4 ipv6 incomplete: unique=0/199914 filtered_withdrawn=0/0
+reload 2 observer 5 incomplete: unique=0/199914 filtered_withdrawn=0/0
+reload 2 observer 5 ipv6 incomplete: unique=0/199914 filtered_withdrawn=0/0
+reload 2 observer 6 incomplete: unique=0/199914 filtered_withdrawn=0/0
+reload 2 observer 6 ipv6 incomplete: unique=0/199914 filtered_withdrawn=0/0
+reload 2 observer 7 incomplete: unique=0/199914 filtered_withdrawn=0/0
+reload 2 observer 7 ipv6 incomplete: unique=0/199914 filtered_withdrawn=0/0
+reload 2 observer 8 incomplete: unique=0/199914 filtered_withdrawn=0/0
+reload 2 observer 8 ipv6 incomplete: unique=0/199914 filtered_withdrawn=0/0
+reload 2 observer 9 incomplete: unique=0/199914 filtered_withdrawn=0/0
+reload 2 observer 9 ipv6 incomplete: unique=0/199914 filtered_withdrawn=0/0

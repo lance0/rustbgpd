@@ -1,0 +1,20 @@
+[
+  {
+    "name": "rbgp",
+    "path": "/tmp/dualstack-diagnostic-source/target/release/rbgp",
+    "sha256": "ffdbe11f9ffa8e13baaddc9f2dd5774cdc2f4db30cab289e9292091b1e3343b8",
+    "source_revision": "f2e14e675d096e3fd79d81ece3e7885c6f3855e4"
+  },
+  {
+    "name": "rustbgpd",
+    "path": "/tmp/dualstack-diagnostic-source/target/release/rustbgpd",
+    "sha256": "59bce0e62933912da5d2632bacbfdea051ea77f7172190c8e671c10e737ab4ec",
+    "source_revision": "f2e14e675d096e3fd79d81ece3e7885c6f3855e4"
+  },
+  {
+    "name": "reloadstall",
+    "path": "/tmp/dualstack-diagnostic-source/bench/scale/target/release/reloadstall",
+    "sha256": "ba3bde324986c1e27a1cc5273d331f159f698cfa8844f31349f1b8327025c56d",
+    "source_revision": "f2e14e675d096e3fd79d81ece3e7885c6f3855e4"
+  }
+]

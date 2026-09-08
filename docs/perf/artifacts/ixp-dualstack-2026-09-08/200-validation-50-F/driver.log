@@ -1,0 +1,8 @@
+acquired host lock: /tmp/dualstack-host.lock
+host quiet: retained two accepted samples in /tmp/dualstack-campaign/200-validation-50-F/rustbgpd/quiet.tsv
+=== cell rustbgpd start 2026-09-08T12:45:27-04:00 ===
+wrote /tmp/ixp-rustbgpd/config.toml (200 neighbors), member.rpol, gen-a.rpol, gen-b.rpol; listen_port=1790, changed_peers=170, stable_peers=30, grpc_uds=/tmp/ixp-rustbgpd/grpc.sock, dualstack(ipv4_unicast+ipv6_unicast), filter(gen-b rejects 64 named prefixes: base indexes 0..32 per family)
+cell rustbgpd: harness rc=0 (artifacts: /tmp/dualstack-campaign/200-validation-50-F/rustbgpd)
+=== cell rustbgpd PASS 2026-09-08T12:47:31-04:00 ===
+cool-down 300s
+matrix done; per-cell status under /tmp/dualstack-campaign/200-validation-50-F/*/status

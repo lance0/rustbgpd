@@ -1,0 +1,14 @@
+diff --git a/bench/scale/matrix/run-matrix.sh b/bench/scale/matrix/run-matrix.sh
+index 50c7944de..a16c862eb 100755
+--- a/bench/scale/matrix/run-matrix.sh
++++ b/bench/scale/matrix/run-matrix.sh
+@@ -264,7 +264,8 @@ probe_health_loop() {
+     while :; do
+         local t0 t1 rc
+         t0=$(date +%s.%N)
+-        "$RBGP" --addr "$addr" health >/dev/null 2>&1
++        printf "probe_start epoch_s=%s\n" "$t0" >>"$out.stderr.log"
++        "$RBGP" --addr "$addr" health >/dev/null 2>>"$out.stderr.log"
+         rc=$?
+         t1=$(date +%s.%N)
+         awk -v a="$t0" -v b="$t1" -v rc="$rc" \
