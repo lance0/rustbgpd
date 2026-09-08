@@ -51,6 +51,8 @@ check-fast:
     python3 -m unittest -v scripts/test_check_clippy_reasons.py
     python3 scripts/check-clippy-reasons.py
     python3 scripts/check-v1-stable-surface.py
+    python3 -m unittest -v scripts/test_check_sighup_architecture.py
+    python3 scripts/check_sighup_architecture.py
     python3 scripts/reflow-release-notes.py --selftest
 
 # Check the slower repository contracts: public tracker ids, documentation paths, and metric consumers (minutes, no compilation).

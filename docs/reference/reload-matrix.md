@@ -38,11 +38,13 @@ in `src/config/mod.rs` says how a whole candidate is executed, and
 
 | Route | Candidate | Guarantee |
 |---|---|---|
-| **generation** | Only static `[[neighbors]]`, `[peer_groups]`, inline policy / neighbor sets / global chains, `.rpol` content, `[policy.explain]`, or outbound prefix maxima changed | One owned runtime generation: one action per static neighbor from one resolved candidate; a later failure restores the retained prior generation and rejects cleanly |
-| **sequential** | No generation-class change, or a generation-class change together with a TCP-AO rotation or a listener MD5/GTSM authentication change | The existing per-subsystem steps; a failure halts with a known-partial receipt |
-| **rejected** | A generation-class change together with dataset content or bindings, `[[dynamic_neighbors]]`, EVPN runtime tables, `[[fib_tables]]`, or `honor_graceful_shutdown` / `honor_blackhole` | No effect; reload those families on their own |
+| **generation** | Static `[[neighbors]]`, `[peer_groups]`, inline policy / neighbor sets / global chains, `.rpol` content, dataset contents with unchanged bindings, or outbound prefix maxima changed without an incompatible family | One owned runtime generation: one action per static neighbor from one resolved candidate; a later failure restores retained config, policy, dataset, and session state and rejects cleanly |
+| **sequential** | No generation-class or dataset change, or a generation-class change together with TCP-AO rotation or listener MD5/GTSM changes while dataset contents are unchanged | The existing per-subsystem steps; a failure halts with an authoritative known-partial receipt or recovery-fences if state is ambiguous |
+| **rejected** | Dataset bindings changed; dataset content combined with TCP-AO rotation or listener MD5/GTSM changes; or a generation-class/dataset-content change combined with `[[dynamic_neighbors]]`, EVPN runtime tables, `[[fib_tables]]`, or `honor_graceful_shutdown` / `honor_blackhole` | No effect; apply independently reloadable families separately. Dataset binding changes require a restart |
 
-Restart-required fields are pinned on every route.
+Daemon restart-required fields are pinned on every route.
+An explain-only change stays sequential; `[policy.explain]` is carried with the
+candidate when another change selects the generation route.
 
 ## Session-establishment caveat
 
@@ -336,7 +338,7 @@ chains all add/change/remove cleanly via reload.
 | `rpol_files` | live | SIGHUP recompiles the referenced `.rpol` files and hot-applies materially changed chains to exactly the affected peers (Route Refresh for changed import chains). Config transactions reject a candidate whose compiled `.rpol` registry changed as unsupported — the files live outside the candidate TOML (`src/config/mod.rs`, transaction classification) — so apply `.rpol` changes via SIGHUP. |
 | `rpol_roots` | live | Extra `import` resolution roots; a change takes effect through the same SIGHUP recompile path (it matters only when it changes the resolved module graph's content, which reloads as an rpol content change). |
 | `rpol_max_graph_bytes` | live | Read from the incoming config on every load (`load_rpol_files` consumes it before compiling each unit), so the value in the reloaded file governs that same SIGHUP's recompile — no restart, no second reload. A candidate/reloaded config whose units exceed its own budget is rejected whole; the running generation is untouched. |
-| `[policy.datasets]` | live | Snapshot files are re-read on every SIGHUP: content-equal re-reads are no-ops, changed content swaps atomically and refreshes only the referencing peers, and a file that fails to load keeps the prior snapshot (WARN + `bgp_policy_dataset_refresh_errors_total`). Introducing a dataset declaration (or a kind change) must load cleanly or the reload is rejected. |
+| `[policy.datasets]` | live contents / restart-required bindings | With unchanged names, kinds, file mappings, and handles, SIGHUP stages content for generation settlement and refreshes referencing peers. Content-equal re-reads are no-ops; malformed input rejects before publication. Compensation restores prior contents at a new generation. Binding changes reject SIGHUP and require a restart; see [dataset settlement](operations.md#configuration-reload-sighup). |
 | `[policy.explain] enabled` (ADR-0073) | restart-required (per peer) | Read by `build_transport_config` when a session is constructed, so the new value is adopted into the config snapshot (sessions established *after* the reload honor it) but live sessions keep their current import-explain write behavior until they re-establish. Logged as `WARN` during reload when changed. Diagnostic retention only — never affects which routes are accepted. |
 | `[policy.explain] cache_size` (ADR-0073) | restart-required (per peer) | Same — the per-session LRU is sized at session construction. A live session's cache is not resized in place; the new capacity applies on its next establishment. |
 | `[policy.reject_retention] enabled` | restart-required (per peer) | Same contract as `[policy.explain]`: read by `build_transport_config` at session construction. Live sessions keep their current rejected-route retention behavior until they re-establish. Diagnostic retention only — never affects which routes are accepted. |

@@ -557,7 +557,7 @@ What happens:
 2. **Generation route** — a candidate whose reload-applied changes are
    static `[[neighbors]]`, `[peer_groups]`, inline policy definitions,
    neighbor sets, global chains, changed `.rpol` content (imports included),
-   dataset contents with unchanged bindings, `[policy.explain]`, or outbound
+   dataset contents with unchanged bindings, or outbound
    prefix maxima settles as one owned runtime generation. The daemon resolves
    the complete candidate once and
    derives one action per static neighbor — unchanged, hot update in place,
@@ -573,6 +573,8 @@ What happens:
    failure restores them from memory, the reload reports a clean rejection,
    the candidate file stays on
    disk for correction, and an identical retry re-derives the same plan.
+   `[policy.explain]` is carried with such a candidate; an explain-only change
+   stays sequential.
 3. **Sequential route** — a candidate with no generation-class change
    (`[[dynamic_neighbors]]`, EVPN runtime tables, `[[fib_tables]]`, the honor
    knobs, TCP-AO rotation, listener MD5/GTSM inventory, explain-only,
