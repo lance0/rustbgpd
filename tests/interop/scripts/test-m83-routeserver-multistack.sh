@@ -97,7 +97,8 @@
 #   bash tests/interop/scripts/test-m83-routeserver-multistack.sh
 
 check_ipv4_eor_order() {
-    python3 - "${1:?}" "${2:?}" "${3:?}" <<'PY'
+    python3 - "${1:?}" "${2:?}" "${3:?}" "${4:-0}" <<'PY'
+from decimal import Decimal
 import ipaddress
 import sys
 import xml.etree.ElementTree as ET
@@ -105,6 +106,7 @@ import xml.etree.ElementTree as ET
 root = ET.parse(sys.argv[1]).getroot()
 expected_path = sys.argv[2]
 events_path = sys.argv[3]
+minimum_open_epoch = Decimal(sys.argv[4])
 
 with open(expected_path, encoding="utf-8") as handle:
     expected = [
@@ -192,6 +194,8 @@ for packet in root.findall("packet"):
     if stream_field is None or stream_field.get("show") is None:
         raise SystemExit(f"BGP packet in frame {frame} missing tcp.stream")
     stream = stream_field.get("show")
+    epoch_field = packet.find(".//field[@name='frame.time_epoch']")
+    epoch = epoch_field.get("show") if epoch_field is not None else None
     for index, bgp in enumerate(packet.findall(".//proto[@name='bgp']"), 1):
         bgp_type = bgp.find(".//field[@name='bgp.type']")
         if bgp_type is not None:
@@ -199,6 +203,7 @@ for packet in root.findall("packet"):
             events.append({
                 "key": (frame, index),
                 "stream": stream,
+                "epoch": epoch,
                 "type": bgp_type.get("show"),
                 "prefixes": prefixes,
                 "eor": is_ipv4_eor(bgp, prefixes),
@@ -208,6 +213,11 @@ opens = [event for event in events if event["type"] == "1"]
 if not opens:
     raise SystemExit("no RS-to-BIRD OPEN in capture")
 target_open = max(opens, key=lambda event: event["key"])
+if minimum_open_epoch:
+    if target_open["epoch"] is None:
+        raise SystemExit("final OPEN missing frame.time_epoch")
+    if Decimal(target_open["epoch"]) < minimum_open_epoch:
+        raise SystemExit("final OPEN predates the latest BIRD bounce")
 target_stream = target_open["stream"]
 stream_events = [
     event for event in events
@@ -271,6 +281,36 @@ print(
 PY
 }
 
+# Copy first: a live writer can leave the snapshot incomplete; retry the same
+# byte-level oracle until the latest bounce is present, before sending SIGINT.
+snapshot_final_capture() {
+    timeout 6s docker exec "$BIRD" timeout 5s sh -c '
+        cp /tmp/m83.pcap /tmp/m83-readiness.pcap &&
+        tshark -r /tmp/m83-readiness.pcap -Y "$1" -T pdml
+    ' sh "ip.src == ${RS_BIRD_ADDR} && ip.dst == ${BIRD_ADDR} && bgp"
+}
+
+wait_final_capture_complete() {
+    local deadline=$((SECONDS + 30))
+    local diagnostic="$M83_WORK_DIR/capture-readiness.log"
+    local pdml="$M83_WORK_DIR/capture-readiness.pdml"
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if snapshot_final_capture >"$pdml" 2>"$diagnostic" \
+            && check_ipv4_eor_order "$pdml" "$M83_EXPECTED_PREFIXES" \
+                "$M83_WORK_DIR/capture-readiness-events.txt" \
+                "${M83_BOUNCE_EPOCH:?}" >>"$diagnostic" 2>&1; then
+            return 0
+        fi
+        if [ ! -s "$diagnostic" ]; then
+            echo "capture snapshot export did not complete" >"$diagnostic"
+        fi
+        sleep 1
+    done
+    echo "ERROR: timed out waiting for the latest BIRD bounce in capture" >&2
+    cat "$diagnostic" >&2
+    return 1
+}
+
 self_test_ipv4_eor_order() {
     local expected valid expected_after missing unexpected
     expected=$(mktemp)
@@ -295,7 +335,8 @@ eor = """<proto name="bgp" size="23"><field name="bgp.type" show="2"/>
 <field name="bgp.update.path_attributes.length" show="0"/></proto>"""
 
 def packet(frame, stream, *messages):
-    return f"""<packet><proto name="frame"><field name="frame.number" show="{frame}"/></proto>
+    return f"""<packet><proto name="frame"><field name="frame.number" show="{frame}"/>
+<field name="frame.time_epoch" show="{frame}.000000000"/></proto>
 <proto name="tcp"><field name="tcp.stream" show="{stream}"/></proto>
 {''.join(messages)}</packet>"""
 
@@ -354,6 +395,39 @@ $expected_after missing=['100.67.0.0/24']
 $missing missing=['100.67.0.0/24']
 $unexpected unexpected=['203.0.113.0/24']
 EOF
+    # Replay capture growth through the real wait loop. The first snapshot is
+    # a valid older session, then missing inventory, then truncated PDML.
+    local scratch
+    scratch=$(mktemp -d)
+    local M83_WORK_DIR="$scratch" M83_EXPECTED_PREFIXES="$expected" M83_BOUNCE_EPOCH=2
+    local snapshots=0
+    snapshot_final_capture() {
+        snapshots=$((snapshots + 1))
+        case "$snapshots" in
+            1) sed 's/show="2.000000000"/show="1.000000000"/' "$valid" ;;
+            2) cat "$missing" ;;
+            3) printf '<pdml><packet>' ;;
+            *) cat "$valid" ;;
+        esac
+    }
+    sleep() { :; }
+    if ! wait_final_capture_complete || [ "$snapshots" -ne 4 ]; then
+        echo "ERROR: capture readiness accepted a stale/incomplete snapshot" >&2
+        rm -rf "$scratch"
+        return 1
+    fi
+    # Timeout must stay red and retain the last oracle diagnostic.
+    snapshot_final_capture() { cat "$missing"; }
+    sleep() { SECONDS=$((SECONDS + 30)); }
+    if wait_final_capture_complete 2>"$scratch/timeout.log" \
+        || ! grep -qF "missing=['100.67.0.0/24']" "$scratch/capture-readiness.log" \
+        || ! grep -qF "timed out" "$scratch/timeout.log"; then
+        echo "ERROR: capture readiness timeout lost its failure diagnostic" >&2
+        rm -rf "$scratch"
+        return 1
+    fi
+    unset -f snapshot_final_capture sleep
+    rm -rf "$scratch"
     rm -f "$expected" "$valid" "$expected_after" "$missing" "$unexpected" "$events"
     echo "M83 stream-scoped IPv4 EoR inventory self-test passed"
 }
@@ -549,11 +623,11 @@ EOF
 
 case "${1:-}" in
     --check-eor-order)
-        if [ "$#" -ne 4 ]; then
-            echo "usage: $0 --check-eor-order PDML EXPECTED_PREFIXES EVENTS" >&2
+        if [ "$#" -lt 4 ] || [ "$#" -gt 5 ]; then
+            echo "usage: $0 --check-eor-order PDML EXPECTED_PREFIXES EVENTS [MIN_OPEN_EPOCH]" >&2
             exit 2
         fi
-        check_ipv4_eor_order "$2" "$3" "$4"
+        check_ipv4_eor_order "$2" "$3" "$4" "${5:-0}"
         exit
         ;;
     --self-test-eor-order)
@@ -1396,7 +1470,7 @@ assert_wire() {
         && eor_order=$(check_ipv4_eor_order \
             "$M83_FINAL_PDML" \
             "$M83_EXPECTED_PREFIXES" \
-            "$M83_STREAM_EVENTS" 2>&1); then
+            "$M83_STREAM_EVENTS" "${M83_BOUNCE_EPOCH:?}" 2>&1); then
         ok "IPv4-unicast EoR follows the exact initial inventory on one TCP stream: $eor_order"
     else
         fail "EoR ordering check failed: ${eor_order:-PDML export failed}"
@@ -1463,6 +1537,10 @@ snapshot_bird_advertised_inventory() {
 # stream has a deterministic initial inventory followed by its EoR.
 bounce_bird_session() {
     log "Bouncing the BIRD session over the snapshotted RS table (EoR ordering probe)..."
+    # Container packet timestamps and this host marker share the kernel clock.
+    M83_BOUNCE_EPOCH=$(date +%s.%N)
+    log "BIRD bounce capture boundary: $M83_BOUNCE_EPOCH"
+    printf '%s\n' "$M83_BOUNCE_EPOCH" >"$M83_WORK_DIR/bounce-epoch.txt"
     docker exec "$BIRD" birdc restart routeserver >/dev/null 2>&1 || true
     wait_bird_established
     local prefix
@@ -1630,6 +1708,7 @@ main() {
     quiesce_bird_origination
     snapshot_bird_advertised_inventory
     bounce_bird_session
+    wait_final_capture_complete
     stop_capture
     assert_wire
 
