@@ -2508,7 +2508,7 @@ returns and survive a restart.
 The live mutation path is serialized with SIGHUP reload, so a reload cannot
 drop an accepted-but-not-yet-persisted range.
 
-When `rbgp neighbor list` has no live neighbor rows, human output queries the
+When `rbgp neighbor` has no live neighbor rows, human output queries the
 range inventory and distinguishes an unconfigured daemon from configured
 ranges that have not accepted a peer yet. JSON compatibility is unchanged:
 the same empty live-neighbor result is exactly `[]`, with no range lookup or
