@@ -86,6 +86,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `rbgp doctor` attributes local process limits and config freshness to the
+  connected Unix-socket peer, with process-start verification and reconnect
+  updates. Co-resident daemons no longer contribute unrelated low-limit
+  failures. TCP and unavailable local identities do not trigger process scans
+  or borrow another daemon's config; an unreachable local socket retains the
+  packaged-file first-deploy fallback.
+
 - M83 waits for the latest BIRD session's captured OPEN, exact initial route
   inventory, and End-of-RIB before stopping packet capture. Incomplete capture
   snapshots remain pending within a bounded wait, and timeout retains diagnostics;

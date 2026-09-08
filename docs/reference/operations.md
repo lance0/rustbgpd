@@ -2238,6 +2238,16 @@ failure cannot distinguish a failed bind from routing or filtering. Explicit
 daemon loopback addresses cannot be checked remotely. Run doctor on the
 daemon host to verify these binds, including for `--pre-upgrade` diagnostics.
 
+On Linux, local process limits and config freshness belong only to the peer
+identified by the connected Unix-domain socket. Doctor checks the process start
+time before using `/proc` evidence and refreshes identity on reconnect. Config
+paths and freshness markers are read through that process's filesystem view. Other
+`rustbgpd` instances on the host do not contribute these checks or limits files.
+TCP connections and unavailable local identity leave process limits unavailable.
+When effective config cannot be read, doctor uses the verified local peer's
+config path; an unreachable Unix socket can still use the packaged default file
+as local first-deploy input. TCP does not fall back to a CLI-host config file.
+
 First-deploy checks (network probes are bounded to a 2s timeout; all are read-only):
 
 | Check | What it probes | Red/yellow advice |
