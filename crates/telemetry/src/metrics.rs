@@ -1514,7 +1514,7 @@ impl BgpMetrics {
             Opts::new(
                 "bgp_update_group_members",
                 "Member peers per update group. The group label is the registry's \
-                 stable group id; a group's series is removed when its last member \
+                 live group id; a group's series is removed when its last member \
                  leaves.",
             ),
             &["group"],
@@ -1524,7 +1524,7 @@ impl BgpMetrics {
         let peer_update_group = IntGaugeVec::new(
             Opts::new(
                 "bgp_peer_update_group",
-                "The stable update-group id a peer currently belongs to \
+                "The live update-group id a peer currently belongs to \
                  (matches the `group` label of bgp_update_group_members). \
                  Grouped peers carry their group id (0, 1, 2, …); the sentinel \
                  -1 marks a private path (peer-context policy, Add-Path send, \
@@ -1574,18 +1574,17 @@ impl BgpMetrics {
 
         let update_group_interned_chains = IntGauge::new(
             "bgp_update_group_interned_chains",
-            "Distinct export-chain contents interned by the update-group \
-             registry since process start. Append-only for the process \
-             lifetime (no eviction): a deployment cycling generated policy \
-             contents shows unbounded growth here before it costs memory.",
+            "Export-chain contents currently retained by the update-group \
+             registry for live groups and policy transitions. Unused compiled \
+             policy payloads are released after their final group or transition.",
         )
         .expect("valid metric definition");
 
         let update_group_keys = IntGauge::new(
             "bgp_update_group_keys",
-            "Distinct update-group fingerprint keys created since process \
-             start. Append-only for the process lifetime: an emptied group \
-             keeps its slot so a recurring key reuses its stable id.",
+            "Update-group fingerprint key slots created since process start. \
+             Append-only identity metadata: retired IDs are never reassigned. \
+             Reinstalling a retired policy creates a new chain and group ID.",
         )
         .expect("valid metric definition");
 
@@ -4514,8 +4513,8 @@ impl BgpMetrics {
         self.0.update_group_runner_up_entries.set(count);
     }
 
-    /// Set the number of export-chain contents interned by the
-    /// update-group registry (append-only for the process lifetime).
+    /// Set the number of export-chain payloads currently retained by the
+    /// update-group registry for live groups and transitions.
     pub fn set_update_group_interned_chains(&self, count: i64) {
         self.0.update_group_interned_chains.set(count);
     }

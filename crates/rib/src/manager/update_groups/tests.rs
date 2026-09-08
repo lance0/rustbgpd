@@ -247,7 +247,7 @@ fn growth_snapshot(manager: &RibManager) -> GrowthSnapshot {
     let active_cells = manager.group_ribs.len();
     GrowthSnapshot {
         key_slots: manager.update_groups.groups.len(),
-        interned_chains: manager.update_groups.chains.len(),
+        interned_chains: manager.update_groups.retained_chain_count(),
         registered_members: manager.update_groups.members.len(),
         active_cells,
         active_cell_members: manager
@@ -331,9 +331,8 @@ fn repeated_regroup_delete_recreate_returns_to_bounded_state() {
     let permit = empty_policy(PolicyAction::Permit);
     let deny = empty_policy(PolicyAction::Deny);
 
-    // Warm the finite key set once. The registry deliberately retains one
-    // slot per distinct key/chain for process-stable group IDs; the live
-    // group cell and every member/transient entry must still be reaped.
+    // Historical key slots remain, but policy payloads and every live
+    // group/member/transient entry must be reaped on teardown.
     let receiver = register_growth_peer(&mut manager, peer, 1);
     replace_growth_policy(&mut manager, peer, Some(permit.clone()));
     replace_growth_policy(&mut manager, peer, Some(deny.clone()));
@@ -345,9 +344,9 @@ fn repeated_regroup_delete_recreate_returns_to_bounded_state() {
     manager.handle_update(crate::RibUpdate::PeerDeleted { peer });
     drop(receiver);
 
-    let active = GrowthSnapshot {
+    let mut active = GrowthSnapshot {
         key_slots: 3,
-        interned_chains: 2,
+        interned_chains: 0,
         registered_members: 1,
         active_cells: 1,
         active_cell_members: 1,
@@ -356,9 +355,9 @@ fn repeated_regroup_delete_recreate_returns_to_bounded_state() {
         regroup_baselines: 0,
         extra_withdraw_sets: 0,
     };
-    let quiescent = GrowthSnapshot {
+    let mut quiescent = GrowthSnapshot {
         key_slots: 3,
-        interned_chains: 2,
+        interned_chains: 0,
         registered_members: 0,
         active_cells: 0,
         active_cell_members: 0,
@@ -375,18 +374,24 @@ fn repeated_regroup_delete_recreate_returns_to_bounded_state() {
         assert_eq!(growth_snapshot(&manager), active, "cycle {cycle}: join");
 
         replace_growth_policy(&mut manager, peer, Some(permit.clone()));
+        active.key_slots += 1;
+        active.inactive_key_slots += 1;
+        active.interned_chains = 1;
         assert_eq!(
             growth_snapshot(&manager),
             active,
             "cycle {cycle}: first regroup"
         );
         replace_growth_policy(&mut manager, peer, Some(deny.clone()));
+        active.key_slots += 1;
+        active.inactive_key_slots += 1;
         assert_eq!(
             growth_snapshot(&manager),
             active,
             "cycle {cycle}: second regroup"
         );
         replace_growth_policy(&mut manager, peer, None);
+        active.interned_chains = 0;
         assert_eq!(
             growth_snapshot(&manager),
             active,
@@ -396,6 +401,8 @@ fn repeated_regroup_delete_recreate_returns_to_bounded_state() {
         manager.handle_update(crate::RibUpdate::PeerDown { peer, session_id });
         manager.handle_update(crate::RibUpdate::PeerDeleted { peer });
         drop(receiver);
+        quiescent.key_slots = active.key_slots;
+        quiescent.inactive_key_slots = active.key_slots;
         assert_eq!(
             growth_snapshot(&manager),
             quiescent,

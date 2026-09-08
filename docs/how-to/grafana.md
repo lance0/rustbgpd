@@ -228,9 +228,10 @@ inside the bounded window does.
 - Outbound queue depth is an absolute gauge of coalesced UPDATE frames, sampled
   at enqueue-batch and writer-drain boundaries. A short convergence spike is
   not itself a slow peer; `bgp_peer_slow` is the daemon's persistent 0/1 state.
-- The update-group table is discrete. Group IDs 0 and above are stable group
-  identities; `-1` legitimately means the peer is on the per-peer fallback
-  path.
+- The update-group table is discrete. Group IDs 0 and above identify live
+  groups and remain stable across content-equal reloads. Reinstalling a fully
+  retired policy creates a new ID; `-1` means the peer is on the per-peer
+  fallback path.
 - Policy-transition **in progress** is current state. **Last completed policy
   transition** is a retained terminal duration and does not count upward while
   another transition runs. Actor p99 uses a fixed 15-minute window and stays
