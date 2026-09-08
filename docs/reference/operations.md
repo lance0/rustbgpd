@@ -999,6 +999,22 @@ capacity families are
 removed when the session goes down and republished from fresh actor state on
 reconnect; GR-retained RIB rows therefore never appear as live session usage.
 
+### SRv6 service route is visible but cannot be selected
+
+An accepted route with a semantically unusable applicable SRv6 Service TLV
+remains in Adj-RIB-In, but is excluded from best-path selection and export.
+For unicast, `rbgp rib --prefix <cidr> --explain` reports
+`srv6_sid_invalid`; an exact EVPN selector uses
+`rbgp evpn explain ip-prefix --rd <rd> --prefix <cidr>`. This is distinct from
+an import-policy rejection. VPN has no received-route query.
+
+This is not malformed-attribute handling. A malformed recognized Service TLV
+is treated as withdrawn; a malformed generic Prefix-SID attribute is discarded
+while the route remains. See [SRv6 Service framing](path-attribute-registry.md#srv6-service-framing-within-prefix-sid)
+and [service eligibility](path-attribute-registry.md#srv6-service-eligibility)
+for the canonical rules. These reflection checks do not add SRv6 PE import,
+service origination, SID reconstruction, next-hop rewriting, or forwarding.
+
 ---
 
 ## Key metrics to watch

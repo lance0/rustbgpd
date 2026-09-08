@@ -39,6 +39,17 @@ For operators coming from FRR/BIRD, the
 [familiar command map](../../crates/cli/README.md#familiar-command-map)
 translates the usual show-commands into these.
 
+## SRv6 service candidates excluded from selection
+
+A route with a semantically unusable applicable SRv6 Service TLV remains in
+Adj-RIB-In but is excluded from selection and export. For unicast, run
+`rbgp rib --prefix <cidr> --explain`; for EVPN, use an exact selector such as
+`rbgp evpn explain ip-prefix --rd <rd> --prefix <cidr>`. Both report
+`srv6_sid_invalid`; this is not an import-policy rejection. VPN has no
+received-route query. See [the operator troubleshooting entry](../reference/operations.md#srv6-service-route-is-visible-but-cannot-be-selected)
+for the distinction from malformed Prefix-SID handling and the
+[canonical SRv6 contract](../reference/path-attribute-registry.md#srv6-service-eligibility).
+
 <a id="best-path-explain--decisive-comparison-attribution"></a>
 ## Best-path explain
 
