@@ -1,0 +1,16 @@
+# Run in an owned network namespace with this non-loopback address assigned.
+# The listener must pass doctor over the owner-only management Unix socket.
+config_epoch = 2
+
+[global]
+asn = 65000
+router_id = "192.0.2.10"
+listen_port = 10179
+listen_addresses = ["192.0.2.10"]
+runtime_state_dir = "/tmp/doctor-explicit-state"
+
+[global.telemetry]
+log_format = "json"
+
+[security.grpc]
+enforcement = "tier"
