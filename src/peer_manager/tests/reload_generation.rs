@@ -2,6 +2,7 @@ use super::*;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Weak;
 
 use crate::config::{ReloadPeerAction, ReloadPeerActionKind, plan_reload_peer_actions};
 use crate::peer_manager::generation::ReloadGenerationOutcome;
@@ -13,6 +14,7 @@ struct GenerationSessionCounters {
     import_installs: AtomicU32,
     export_installs: AtomicU32,
     runtime_config_updates: AtomicU32,
+    export_owners: Mutex<Vec<PolicyOwners>>,
 }
 
 fn generation_session(addr: IpAddr) -> (PeerHandle, Arc<GenerationSessionCounters>) {
@@ -26,7 +28,10 @@ fn generation_session(addr: IpAddr) -> (PeerHandle, Arc<GenerationSessionCounter
                     in_task.import_installs.fetch_add(1, Ordering::SeqCst);
                     let _ = reply.send(Ok(()));
                 }
-                PeerCommand::UpdateExportPolicy { reply, .. } => {
+                PeerCommand::UpdateExportPolicy { policy, reply } => {
+                    if let Some(owners) = policy.as_deref().and_then(PolicyOwners::observe) {
+                        in_task.export_owners.lock().unwrap().push(owners);
+                    }
                     in_task.export_installs.fetch_add(1, Ordering::SeqCst);
                     let _ = reply.send(Ok(()));
                 }
@@ -816,4 +821,289 @@ async fn generation_policy_rejection_preserves_structured_error_codes() {
         );
         harness.shutdown().await;
     }
+}
+
+/// Observe the installed compiled body and its interned prefix table separately:
+/// the parsed file caches tables, and resolved chains can keep them alive too.
+struct PolicyOwners {
+    body: Weak<rustbgpd_policy::ir::CompiledChain>,
+    prefix_sets: Vec<Weak<rustbgpd_policy::sets::PrefixSet>>,
+}
+
+impl PolicyOwners {
+    fn observe(chain: &PolicyChain) -> Option<Self> {
+        let body = chain
+            .policies
+            .iter()
+            .find_map(|policy| policy.rpol.as_ref())?;
+        Some(Self {
+            body: Arc::downgrade(body),
+            prefix_sets: body.prefix_sets.iter().map(Arc::downgrade).collect(),
+        })
+    }
+
+    fn assert_alive(&self, alive: bool) {
+        assert_eq!(self.body.upgrade().is_some(), alive, "compiled policy body");
+        assert!(
+            !self.prefix_sets.is_empty(),
+            "observe real interned prefix data"
+        );
+        for table in &self.prefix_sets {
+            assert_eq!(table.upgrade().is_some(), alive, "interned prefix table");
+        }
+    }
+}
+
+#[tokio::test]
+async fn owned_sighup_releases_prior_owners_after_success() {
+    assert_owned_sighup_lifetimes(false).await;
+}
+
+#[tokio::test]
+async fn owned_sighup_releases_candidate_owners_after_late_compensation() {
+    assert_owned_sighup_lifetimes(true).await;
+}
+
+// This proves generation/accepted-authority and manager-installed ownership.
+// Fake session/RIB acknowledgements do not inventory real transport/RIB caches
+// or measure peak allocation at an IRR-scale shape.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the lifetime proof keeps actor owners, owned settlement and release assertions in one lexical scope"
+)]
+async fn assert_owned_sighup_lifetimes(compensate: bool) {
+    use crate::config::AcceptedConfigSnapshot;
+    use crate::config_persister::ConfigPersister;
+    use crate::reload::{
+        SighupReloadOutcome, SighupReloadPlan, finalize_sighup_authority,
+        reload_config_with_tcp_ao, run_config_bridge_accepted,
+    };
+    use rustbgpd_api::gnmi_dialout::{DialoutManager, GnmiService};
+    use rustbgpd_api::health_probe::DaemonGate;
+    use rustbgpd_api::runtime_config_settlement::{
+        OwnedRuntimeConfigOutcome, OwnedRuntimeConfigRequestContext, RuntimeConfigOperationKind,
+        RuntimeConfigSettlementWatchdog,
+    };
+    use rustbgpd_api::server::{AccessMode, RuntimeConfigCoordinator};
+
+    let fixture = RsFixture::new();
+    let policy_source = |med| {
+        format!(
+            "prefix-set members {{ 192.0.{med}.0/24 }}\n\
+         policy members-out {{\n\
+           term prefix {{ if route.prefix in members {{ set med {med}; accept }} }}\n\
+           term all {{ set med {med}; accept }}\n\
+         }}"
+        )
+    };
+    let rpol_path = fixture.dir.path().join("members.rpol");
+    std::fs::write(&rpol_path, policy_source(10)).unwrap();
+    let prior = Arc::new(AcceptedConfigSnapshot::load(&fixture.config_path, None).unwrap());
+    let prior_snapshot = Arc::downgrade(&prior);
+    let prior_file = Arc::downgrade(&prior.config_ref().policy.rpol.policies["members-out"].file);
+    // This is the main loop's still-current Config, not a test observer clone.
+    let mut current = prior.config();
+    let mut harness = GenerationHarness::new(&current);
+    let bystander = key("10.0.0.9".parse().unwrap());
+    let prior_policy = PolicyOwners::observe(
+        harness.mgr.peers[&bystander]
+            .export_policy
+            .as_ref()
+            .unwrap(),
+    )
+    .expect("fixture installs a compiled rpol policy");
+    prior_policy.assert_alive(true);
+    let observations = harness.counters[&bystander.address].clone();
+    if compensate {
+        harness
+            .mgr
+            .inject_reconfigure_failures
+            .insert(key("2001:db8::3".parse().unwrap()), 0);
+    }
+    let (pm_tx, pm_rx) = mpsc::channel(16);
+    let (internal_tx, internal_rx) = mpsc::channel(16);
+    harness.mgr.rx = pm_rx;
+    harness.mgr.internal_rx = Some(internal_rx);
+    let manager = tokio::spawn(harness.mgr.run());
+    let (accepted_tx, accepted_rx) = tokio::sync::watch::channel(prior.clone());
+    let (events_tx, events_rx) = mpsc::channel(16);
+    let (bridge_tx, bridge_rx) = mpsc::channel(16);
+    let (mutation_tx, mutation_rx) = mpsc::channel(16);
+    let persister = tokio::spawn(
+        ConfigPersister::new_accepted(mutation_rx, fixture.config_path.clone(), prior, None).run(),
+    );
+    let bridge = tokio::spawn(run_config_bridge_accepted(
+        events_rx,
+        bridge_rx,
+        mutation_tx,
+        accepted_tx,
+    ));
+    let dialout = Arc::new(tokio::sync::Mutex::new(DialoutManager::new(
+        GnmiService::new(
+            65001,
+            "10.0.0.1".to_string(),
+            AccessMode::ReadWrite,
+            pm_tx.clone(),
+        ),
+        BgpMetrics::new(),
+    )));
+
+    // Change actual source bytes, including the material table, so accepted
+    // source reuse cannot make the two generations share an allocation.
+    drop(fixture.compound_candidate());
+    let candidate_rpol = policy_source(20);
+    std::fs::write(&rpol_path, &candidate_rpol).unwrap();
+    let candidate_bytes = std::fs::read(&fixture.config_path).unwrap();
+    let candidate = Arc::new(
+        AcceptedConfigSnapshot::load_for_reload(
+            &fixture.config_path,
+            &accepted_rx.borrow(),
+            &current.policy.dataset_bindings,
+        )
+        .unwrap(),
+    );
+    let candidate_snapshot = Arc::downgrade(&candidate);
+    let candidate_file =
+        Arc::downgrade(&candidate.config_ref().policy.rpol.policies["members-out"].file);
+    assert!(!Weak::ptr_eq(&prior_file, &candidate_file));
+    let plan = SighupReloadPlan {
+        baseline_runtime: current.clone(),
+        desired: candidate,
+    };
+    let live_uds = current.global.telemetry.grpc_uds.clone();
+    let operation_pm = pm_tx.clone();
+    let operation_internal = internal_tx.clone();
+    let operation_bridge = bridge_tx.clone();
+    let operation_accepted = accepted_rx.clone();
+    let watchdog = RuntimeConfigSettlementWatchdog::new();
+    let metrics = BgpMetrics::new();
+    watchdog.register_metrics(metrics.registry());
+    let outcome = watchdog
+        .execute_owned(
+            RuntimeConfigOperationKind::Sighup,
+            RuntimeConfigCoordinator::new(),
+            DaemonGate::new(),
+            OwnedRuntimeConfigRequestContext::detached().response_attached(),
+            move |operation| async move {
+                // main retains the accepted baseline throughout its owned body.
+                let _prior_accepted = operation_accepted.borrow().clone();
+                match reload_config_with_tcp_ao(
+                    plan,
+                    None,
+                    live_uds.as_ref(),
+                    &operation_pm,
+                    Some(&operation_internal),
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(&operation),
+                )
+                .await
+                {
+                    SighupReloadOutcome::CleanNoEffect(error) => {
+                        OwnedRuntimeConfigOutcome::CleanNoEffect(Err(error))
+                    }
+                    SighupReloadOutcome::RecoveryFenced { error, reason } => {
+                        panic!("unexpected fence: {error}, {reason:?}")
+                    }
+                    SighupReloadOutcome::Acknowledged(authority) => {
+                        finalize_sighup_authority(
+                            &operation,
+                            authority,
+                            &operation_internal,
+                            &operation_bridge,
+                            &dialout,
+                        )
+                        .await
+                    }
+                }
+            },
+        )
+        .await;
+
+    assert!(
+        metrics
+            .registry()
+            .gather()
+            .iter()
+            .all(|family| { !family.name().starts_with("bgp_runtime_config_settlement_") }),
+        "settlement registration is idle after the owned task returns"
+    );
+
+    // The watchdog's owned task has returned; runtime actors are still alive.
+    // Match main's authority handoff before testing the superseded Config.
+    if compensate {
+        let error = outcome.err().expect("late replacement failed").to_string();
+        assert!(error.contains("session replace"), "{error}");
+        assert!(error.contains("prior generation restored"), "{error}");
+    } else {
+        let authority = outcome.unwrap_or_else(|error| panic!("{error}"));
+        assert!(
+            prior_snapshot.upgrade().is_none(),
+            "old accepted authority released"
+        );
+        assert!(
+            prior_file.upgrade().is_some(),
+            "main still owns its old Config"
+        );
+        current = authority.runtime;
+    }
+    assert_eq!(
+        prior_snapshot.upgrade().is_some(),
+        compensate,
+        "prior accepted snapshot"
+    );
+    assert_eq!(
+        prior_file.upgrade().is_some(),
+        compensate,
+        "prior parsed file"
+    );
+    assert_eq!(
+        candidate_snapshot.upgrade().is_some(),
+        !compensate,
+        "candidate accepted snapshot"
+    );
+    assert_eq!(
+        candidate_file.upgrade().is_some(),
+        !compensate,
+        "candidate parsed file"
+    );
+    prior_policy.assert_alive(compensate);
+    {
+        let installed = observations.export_owners.lock().unwrap();
+        assert_eq!(
+            installed.len(),
+            if compensate { 2 } else { 1 },
+            "candidate install then optional restore"
+        );
+        assert!(!Weak::ptr_eq(&prior_policy.body, &installed[0].body));
+        assert!(!Weak::ptr_eq(
+            &prior_policy.prefix_sets[0],
+            &installed[0].prefix_sets[0]
+        ));
+        installed[0].assert_alive(!compensate);
+        if compensate {
+            assert!(
+                Weak::ptr_eq(&prior_policy.body, &installed[1].body),
+                "restore retained prior compiled body"
+            );
+            installed[1].assert_alive(true);
+        }
+    }
+    assert_eq!(current, accepted_rx.borrow().config());
+    assert_eq!(
+        std::fs::read(&fixture.config_path).unwrap(),
+        candidate_bytes
+    );
+    assert_eq!(std::fs::read_to_string(&rpol_path).unwrap(), candidate_rpol);
+
+    pm_tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+    manager.await.unwrap();
+    drop(events_tx);
+    drop(bridge_tx);
+    bridge.await.unwrap();
+    persister.await.unwrap();
+    harness.rib.abort();
+    let _ = harness.rib.await;
 }
