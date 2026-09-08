@@ -62,7 +62,8 @@ Dual-stack extension: setting `GEN_DUALSTACK=1` gives every neighbor
 `families = ["ipv4_unicast", "ipv6_unicast"]`, matching the harness's
 `RELOADSTALL_DUALSTACK=1` stubs (IPv6 base table `3001:HHHH:LLLL::/48`,
 `base_prefix6`). Absent, the emitted config is byte-for-byte the historical
-IPv4-only one.
+IPv4-only one. Inventory counts belong to the harness: its optional
+`RELOADSTALL_IPV4_PREFIXES` changes the mix without changing this config.
 
 Filtering extension: setting `GEN_FILTER_COUNT=K` (K >= 1) makes generation B
 a filtering change instead of a permit-set-preserving one: `member-out`

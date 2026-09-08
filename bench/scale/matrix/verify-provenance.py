@@ -30,6 +30,11 @@ COMPETITOR_GENERATIONS = {
     },
 }
 
+INPUT_KEYS = {
+    "N_PEERS", "TOTAL_PREFIXES", "PORT", "RELOADS", "CONTROL_SECS",
+    "CHANGED_PEERS", "FLAPSTORM", "BIRD_THREADS", "PROBE_PREFIXES",
+}
+
 def fail(message):
     raise ValueError(message)
 
@@ -62,7 +67,17 @@ def verify(path, expected_cell, competitor_generation="historical"):
     hashed_map(sources["generator"], {GENERATORS[cell]})
     if set(sources["reloadstall"]) != {"path", "sha256"} or sources["reloadstall"]["path"] != "bench/scale/target/release/reloadstall" or not HASH.fullmatch(sources["reloadstall"]["sha256"]):
         fail("malformed reloadstall identity")
-    workload = data["workload"]
+    if not isinstance(data["workload"], dict):
+        fail("malformed workload identity")
+    workload = data["workload"].copy()
+    # Historical receipts remain valid offline; live resume additionally requires
+    # exact equality with the runner's current effective workload inputs.
+    if "inputs" in workload:
+        inputs = workload.pop("inputs")
+        if not isinstance(inputs, dict) or not INPUT_KEYS <= inputs.keys():
+            fail("missing workload input fields")
+        if any(not isinstance(v, str) or (k not in INPUT_KEYS and not k.startswith(("GEN_", "RELOADSTALL_"))) for k, v in inputs.items()):
+            fail("malformed workload inputs")
     if cell == "rustbgpd":
         if set(workload) != {"binary", "sha256"} or workload["binary"] != "target/release/rustbgpd" or not HASH.fullmatch(workload["sha256"]):
             fail("malformed rustbgpd workload")
