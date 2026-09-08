@@ -91,7 +91,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   installed counters while adopting the candidate policy catalog; pending
   retries and dataset-dependent refreshes still run. Policies with local set
   bindings, loops, or collapsed set aliases, and mixed TOML/RPOL chains retain
-  their existing structural comparison.
+  their existing structural comparison. Exact-equal chains also retry pending
+  import refresh or export application instead of skipping that work.
 
 - The IXP matrix retains timestamped health-probe errors alongside its latency
   CSV, so failed operator checks identify the daemon error in the receipt.

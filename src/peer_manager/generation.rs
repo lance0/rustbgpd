@@ -129,7 +129,18 @@ fn retain_installed_policy(installed: Option<&PolicyChain>, candidate: &mut Opti
             named.rpol.as_ref().is_some_and(|rpol| {
                 rpol.policies.iter().all(|policy| {
                     policy.terms.iter().all(|term| {
-                        !matches!(term.action, TermAction::ForEach(_))
+                        let action_comparable = match &term.action {
+                            TermAction::ForEach(_) => false,
+                            TermAction::Permit(_)
+                            | TermAction::Deny
+                            | TermAction::Continue(_)
+                            | TermAction::Bind { .. }
+                            | TermAction::Break
+                            | TermAction::ContinueLoop
+                            | TermAction::CommunityVar { .. }
+                            | TermAction::RemoveLargeCommunityAdmin { .. } => true,
+                        };
+                        action_comparable
                             && !term.guard.any_node(&|guard| match guard {
                                 MatchExpr::LocalInAsnSet { .. }
                                 | MatchExpr::LocalInCommunitySet { .. } => true,
@@ -156,7 +167,38 @@ fn retain_installed_policy(installed: Option<&PolicyChain>, candidate: &mut Opti
                                         &compiled.asn_set_names,
                                     )
                                 }
-                                _ => false,
+                                MatchExpr::True
+                                | MatchExpr::PrefixEq { .. }
+                                | MatchExpr::PrefixNe { .. }
+                                | MatchExpr::CommunityContains(_)
+                                | MatchExpr::AsPathMatches(_)
+                                | MatchExpr::AsPathLen(_)
+                                | MatchExpr::OriginAsEq(_)
+                                | MatchExpr::OriginAsNe(_)
+                                | MatchExpr::LocalPref(_)
+                                | MatchExpr::Med(_)
+                                | MatchExpr::NextHopEq(_)
+                                | MatchExpr::NextHopEqPeer
+                                | MatchExpr::NextHopNe(_)
+                                | MatchExpr::NextHopNePeer
+                                | MatchExpr::NeighborIn(_)
+                                | MatchExpr::NeighborNe(_)
+                                | MatchExpr::RouteTypeIs(_)
+                                | MatchExpr::RouteTypeNe(_)
+                                | MatchExpr::EvpnRouteTypeIs(_)
+                                | MatchExpr::EvpnRouteTypeNe(_)
+                                | MatchExpr::FamilyIs(_)
+                                | MatchExpr::FamilyNe(_)
+                                | MatchExpr::RpkiIs(_)
+                                | MatchExpr::AspaIs(_)
+                                | MatchExpr::ValueCmp(_)
+                                // Dataset splicing retains name/kind identity;
+                                // contents are refreshed independently below.
+                                | MatchExpr::InDataset { .. }
+                                // any_node visits the boolean children.
+                                | MatchExpr::And(_)
+                                | MatchExpr::Or(_)
+                                | MatchExpr::Not(_) => false,
                             })
                     })
                 })
@@ -186,9 +228,13 @@ fn retains_set_name<T>(
     compiled_names: &[Option<String>],
 ) -> bool {
     let index = id.0 as usize;
-    compiled.iter().enumerate().any(|(slot, set)| {
-        Arc::ptr_eq(&source[index], set) && source_names.get(index) == compiled_names.get(slot)
-    })
+    let (Some(source), Some(name)) = (source.get(index), source_names.get(index)) else {
+        return false;
+    };
+    compiled
+        .iter()
+        .zip(compiled_names)
+        .any(|(set, compiled_name)| Arc::ptr_eq(source, set) && name == compiled_name)
 }
 
 impl PeerManager {
@@ -531,9 +577,6 @@ impl PeerManager {
                 }
                 Err(error) => return Err(error.to_string()),
             };
-            if managed.import_policy == chains.import && managed.export_policy == chains.export {
-                continue;
-            }
             retain_installed_policy(managed.import_policy.as_ref(), &mut chains.import);
             retain_installed_policy(managed.export_policy.as_ref(), &mut chains.export);
             if managed.import_policy == chains.import
@@ -726,5 +769,23 @@ impl PeerManager {
         for event in &events {
             self.publish_policy_config_event(event, affected_peers);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::retains_set_name;
+    use rustbgpd_policy::ir::SetId;
+    use std::sync::Arc;
+
+    #[test]
+    fn missing_set_or_name_entries_do_not_prove_name_retention() {
+        let sets = [Arc::new(())];
+        let names = [Some("selected".to_string())];
+        assert!(retains_set_name(SetId(0), &sets, &names, &sets, &names));
+        assert!(!retains_set_name(SetId(1), &sets, &names, &sets, &names));
+        assert!(!retains_set_name(SetId(0), &sets, &[], &sets, &names));
+        assert!(!retains_set_name(SetId(0), &sets, &names, &sets, &[]));
+        assert!(!retains_set_name(SetId(0), &sets, &[], &sets, &[]));
     }
 }

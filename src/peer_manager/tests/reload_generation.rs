@@ -583,6 +583,67 @@ async fn generated_filter_noop_keeps_pending_import_and_export_retry_work() {
 }
 
 #[tokio::test]
+async fn exact_equal_generation_retries_each_pending_direction() {
+    for (pending_refresh, pending_export_apply) in
+        [(false, false), (true, false), (false, true), (true, true)]
+    {
+        let fixture = generated_filter_fixture();
+        let prior = fixture.load();
+        let mut harness = GenerationHarness::new(&prior);
+        let (rib_commands, relay) = record_generation_policy_commands(&mut harness);
+        let stable: IpAddr = "127.1.0.4".parse().unwrap();
+        let managed = harness.mgr.peers.get_mut(&key(stable)).unwrap();
+        managed.pending_refresh = pending_refresh;
+        managed.pending_export_apply = pending_export_apply;
+        let resolved = prior.resolve_neighbor(&prior.neighbors[3]).unwrap();
+        assert_eq!(managed.import_policy, resolved.import_policy);
+        assert_eq!(managed.export_policy, resolved.export_policy);
+
+        let outcome = harness.apply(&prior).await;
+        let ReloadGenerationOutcome::Applied(receipt) = outcome else {
+            panic!("{outcome:?}")
+        };
+        assert_eq!(
+            receipt.policy_updated,
+            usize::from(pending_refresh || pending_export_apply)
+        );
+        for (address, counters) in &harness.counters {
+            assert_eq!(counters.import_installs.load(Ordering::SeqCst), 0);
+            assert_eq!(counters.export_installs.load(Ordering::SeqCst), 0);
+            let expected = if *address == stable && pending_refresh {
+                vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(*counters.refresh_families.lock().unwrap(), expected);
+        }
+        let commands = rib_commands.lock().unwrap().clone();
+        let replaced: Vec<_> = commands
+            .iter()
+            .filter(|(kind, _)| *kind == "replace")
+            .flat_map(|(_, peers)| peers.iter().copied())
+            .collect();
+        assert_eq!(
+            replaced,
+            if pending_export_apply {
+                vec![stable]
+            } else {
+                Vec::new()
+            }
+        );
+        assert!(
+            commands
+                .iter()
+                .all(|(_, peers)| peers.iter().all(|peer| *peer == stable))
+        );
+        assert!(!harness.mgr.peers[&key(stable)].pending_refresh);
+        assert!(!harness.mgr.peers[&key(stable)].pending_export_apply);
+        harness.shutdown().await;
+        relay.await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn generation_policy_normalization_preserves_referenced_sets_and_loop_fallback() {
     let prefix_policy = "prefix-set selected { 20.0.0.0/24 }\npolicy members-out { term selected { if route.prefix in selected { accept } } term rest { reject } }";
     let loop_policy = "community-set selected { 65000:1 }\npolicy members-out { term all { for c in route.communities { if c in selected { reject } } accept } }";
@@ -1733,6 +1794,78 @@ fn prepare_dataset_candidate(
     let staged = candidate.prepare_staged_datasets(&prior.policy.dataset_bindings);
     let prepared = staged.prepare_generation(prior, &candidate).unwrap();
     (candidate, prepared)
+}
+
+#[tokio::test]
+async fn generation_preserves_distinct_dataset_names_with_equal_contents() {
+    let fixture = RsFixture::new();
+    let path = fixture.dir.path().join("members.rpol");
+    let source = "dataset asn-set left\ndataset asn-set right\n\
+        policy members-out { term allowed { if route.origin-as in left { accept } } term rest { reject } }";
+    std::fs::write(&path, source).unwrap();
+    std::fs::write(fixture.dir.path().join("same.list"), "64500\n").unwrap();
+    fixture.write_toml(&format!(
+        "{}\n[policy.datasets.left]\npath = \"same.list\"\n\
+         [policy.datasets.right]\npath = \"same.list\"\n",
+        fixture.base_toml()
+    ));
+    let prior = fixture.load();
+    let left = prior.policy.dataset_bindings.get("left").unwrap();
+    let right = prior.policy.dataset_bindings.get("right").unwrap();
+    assert_eq!(left.pin().data, right.pin().data);
+    assert!(!Arc::ptr_eq(left, right));
+    let mut harness = GenerationHarness::new(&prior);
+    let (rib_commands, relay) = record_generation_policy_commands(&mut harness);
+    std::fs::write(&path, source.replace("in left", "in right")).unwrap();
+    let mut candidate = Config::load_with_diagnostics_and_staged_datasets(
+        fixture.config_path.to_str().unwrap(),
+        &prior.policy.dataset_bindings,
+    )
+    .unwrap();
+    let staged = candidate.prepare_staged_datasets(&prior.policy.dataset_bindings);
+    let prepared = staged.prepare_generation(&prior, &candidate).unwrap();
+    assert!(prepared.changed_names().is_empty());
+    let old = prior
+        .resolve_neighbor(&prior.neighbors[0])
+        .unwrap()
+        .export_policy
+        .unwrap();
+    let next = candidate
+        .resolve_neighbor(&candidate.neighbors[0])
+        .unwrap()
+        .export_policy
+        .unwrap();
+    assert_eq!(old.compiled().datasets[0].name.as_ref(), "left");
+    assert_eq!(next.compiled().datasets[0].name.as_ref(), "right");
+    assert_ne!(old.compiled(), next.compiled());
+    let actions = plan_reload_peer_actions(&prior, &candidate).unwrap();
+    let outcome = Box::pin(
+        harness
+            .mgr
+            .apply_reload_generation(candidate, actions, prepared),
+    )
+    .await;
+    let ReloadGenerationOutcome::Applied(receipt) = outcome else {
+        panic!("{outcome:?}")
+    };
+    assert_eq!(receipt.policy_updated, 3);
+    assert!(harness.counters.values().all(|counters| {
+        counters.export_installs.load(Ordering::SeqCst) == 1
+            && counters.import_installs.load(Ordering::SeqCst) == 0
+            && counters.route_refreshes.load(Ordering::SeqCst) == 0
+    }));
+    assert_eq!(
+        rib_commands
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(kind, _)| *kind == "replace")
+            .flat_map(|(_, peers)| peers)
+            .count(),
+        3
+    );
+    harness.shutdown().await;
+    relay.await.unwrap();
 }
 
 #[tokio::test]
