@@ -1349,6 +1349,76 @@ def validate_process_json(value, expected: tuple[int, int], context: str) -> Non
         fail(f"{context}: daemon process/RSS identity is invalid")
 
 
+HISTORY_REASON = "normalized_toml_exceeds_v2_payload_limit"
+HISTORY_FIELDS = ("version", "sequence", "timestamp_unix_seconds", "normalized_toml_bytes", "sha256", "source_sha256", "summary", "metadata_only_reason")
+
+
+def history_encoded(row):
+    return json.dumps({key: row[key] for key in HISTORY_FIELDS}, separators=(",", ":"), ensure_ascii=False).encode() + b"\n"
+
+
+def validate_metadata_history(value, context):
+    if set(value or {}) != {"entries", "files"} or not 1 <= len(value["entries"]) <= 20 or len(value["files"]) != len(value["entries"]):
+        fail(f"{context}: metadata history roster is invalid")
+    files = value["files"]
+    if [file["name"] for file in files] != sorted({file["name"] for file in files}, reverse=True):
+        fail(f"{context}: metadata history order is invalid")
+    for index, (entry, file) in enumerate(zip(value["entries"], files)):
+        row = file.get("row", {})
+        if set(row) != set(HISTORY_FIELDS) or row.get("version") != 3 or any(type(row.get(key)) is not int or row[key] <= 0 for key in ("sequence", "timestamp_unix_seconds", "normalized_toml_bytes")) or row["normalized_toml_bytes"] <= 10 * 1024 * 1024 or row.get("metadata_only_reason") != HISTORY_REASON:
+            fail(f"{context}: invalid metadata-only envelope")
+        for key in ("sha256", "source_sha256"):
+            if not isinstance(row[key], str) or not re.fullmatch("[0-9a-f]{64}", row[key]):
+                fail(f"{context}: invalid history digest")
+        if not re.fullmatch(r"asn [1-9][0-9]*, router-id [0-9.]+, [0-9]+ neighbor\(s\), [0-9]+ dynamic range\(s\), [0-9]+ fib table\(s\), [0-9]+ policy definition\(s\)", row["summary"]) or len(row["summary"].encode()) > 4096:
+            fail(f"{context}: history summary is not redacted")
+        name = f'v3-{row["sequence"]:020}-{row["timestamp_unix_seconds"]}-{row["source_sha256"]}.json'
+        identity = {key: val for key, val in file.items() if key != "row"}
+        validate_file_identity(identity, name, context)
+        encoded = history_encoded(row)
+        if len(encoded) > 65536 or file["bytes"] != len(encoded) or file["sha256"] != hashlib.sha256(encoded).hexdigest():
+            fail(f"{context}: history file identity does not bind its canonical row")
+        expected = {key: row[key] for key in ("timestamp_unix_seconds", "normalized_toml_bytes", "sha256", "source_sha256", "summary", "metadata_only_reason")}
+        expected.update(index=index, provenance_status="metadata_only", rollback_eligible=False,
+                        timestamp=datetime.fromtimestamp(row["timestamp_unix_seconds"], timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        # The presentation timestamp is checked against the CLI's UTC rendering.
+        if entry != expected:
+            fail(f"{context}: API history is not bound to its canonical metadata row")
+        raw_sha = row["sha256"]
+        if row["source_sha256"] != inline_manifest_source_sha256({"toml_sha256": raw_sha, "rpol_units": [], "datasets": []}, raw_sha):
+            fail(f"{context}: metadata source hash is not the inline generation identity")
+
+
+def inspect_history(directory, entries):
+    metadata = directory.lstat()
+    if not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o700 or metadata.st_uid != os.geteuid():
+        fail("metadata history directory type, mode, or owner is invalid")
+    paths = sorted(directory.iterdir(), reverse=True)
+    if not 1 <= len(paths) <= 20:
+        fail("metadata history directory roster is invalid")
+    files = []
+    for path in paths:
+        identity = secure_file_identity(path, 65536, "metadata history")
+        row, raw = canonical_json(path, 65536, "metadata history")
+        if raw != history_encoded(row):
+            fail("metadata history field order is not canonical")
+        files.append({**identity, "row": row})
+    result = {"entries": entries, "files": files}
+    validate_metadata_history(result, "live metadata history")
+    return result
+
+
+def validate_history_append(before, after, content, context):
+    validate_metadata_history(before, context)
+    validate_metadata_history(after, context)
+    old, new = before["files"], after["files"]
+    row = new[0]["row"]
+    if len(new) != len(old) + 1 or new[1:] != old or row["sequence"] <= old[0]["row"]["sequence"]:
+        fail(f"{context}: accepted change did not append exactly one metadata row")
+    if (row["sha256"], row["normalized_toml_bytes"]) != (content["sha256"], content["bytes"]):
+        fail(f"{context}: metadata row does not match accepted normalized config")
+
+
 def validate_history(value, context: str) -> None:
     if set(value or {}) != {"entries", "files"} or value.get("entries") != [] or value.get("files") != []:
         fail(f"{context}: oversize history was not exactly empty")
@@ -1415,17 +1485,22 @@ def validate_state(
     context: str,
     confirm_id: str = "",
     deadline: int = 0,
+    schema: int = 2,
 ) -> None:
     common = {"legacy_absent", "history_entries", "history_outcome", "process", "config", "runtime"}
+    if schema == 3:
+        common.add("history")
     expected_keys = common | ({"authority"} if pending else {"v3_absent"})
     if (
         set(value or {}) != expected_keys
         or value.get("legacy_absent") is not True
-        or value.get("history_entries") != 0
-        or value.get("history_outcome") != "skipped_oversize"
+        or value.get("history_entries") != (len(value.get("history", {}).get("entries", [])) if schema == 3 else 0)
+        or value.get("history_outcome") != ("metadata_only" if schema == 3 else "skipped_oversize")
         or (not pending and value.get("v3_absent") is not True)
     ):
         fail(f"{context}: lifecycle state shape/outcome is invalid")
+    if schema == 3:
+        validate_metadata_history(value["history"], context)
     validate_process_json(value["process"], expected_process, context)
     validate_content(value["config"], context)
     validate_content(value["runtime"], context)
@@ -1478,12 +1553,16 @@ def validate_transaction_evidence(cdir: Path, identity: tuple[int, int]) -> dict
         fail(f"{cdir}: invalid transaction cycle JSONL: {error}")
     if len(cycles) != 4:
         fail(f"{cdir}: expected exactly four transaction cycles")
+    schema = cycles[0].get("schema")
+    if schema not in (2, 3):
+        fail(f"{cdir}: unsupported transaction schema")
+    previous_history = None
     warning_edges = []
     candidate_ids = []
     actual_ids = []
     for number, cycle in enumerate(cycles, 1):
         reject_transaction_tokens(cycle)
-        if set(cycle) != {"schema", "cycle", "candidate", "plan", "apply", "history", "pending", "confirmed"} or cycle.get("schema") != 2 or cycle.get("cycle") != number:
+        if set(cycle) != {"schema", "cycle", "candidate", "plan", "apply", "history", "pending", "confirmed"} or cycle.get("schema") != schema or cycle.get("cycle") != number:
             fail(f"{cdir}: transaction cycle roster/order is invalid")
         validate_content(cycle["candidate"], f"cycle {number} candidate")
         if not 10 * 1024 * 1024 < cycle["candidate"]["bytes"] <= 384 * 1024 * 1024:
@@ -1498,13 +1577,26 @@ def validate_transaction_evidence(cdir: Path, identity: tuple[int, int]) -> dict
         confirm_id = f"irrreload-measured-{number}"
         deadline = validate_plan_apply(cycle, confirm_id, 600, f"cycle {number}")
         history = cycle.get("history", {})
-        if set(history) != {"before", "after", "outcome", "warning"} or history.get("outcome") != "skipped_oversize":
-            fail(f"{cdir}: cycle {number} history receipt is invalid")
-        validate_history(history["before"], f"cycle {number} history before")
-        validate_history(history["after"], f"cycle {number} history after")
-        if history["before"] != history["after"]:
-            fail(f"{cdir}: cycle {number} changed bounded history")
-        warning_edges.append(validate_warning(history["warning"], f"cycle {number}"))
+        if schema == 3:
+            if set(history) != {"before", "after", "outcome"} or history["outcome"] != "metadata_only":
+                fail(f"{cdir}: metadata history receipt is invalid")
+            if previous_history is None:
+                if len(history["before"].get("entries", [])) != 1:
+                    fail(f"{cdir}: expected one boot history row")
+            elif history["before"] != previous_history:
+                fail(f"{cdir}: metadata history cycle chain is discontinuous")
+            validate_history_append(history["before"], cycle["pending"]["history"], cycle["pending"]["config"], f"cycle {number}")
+            if history["after"] != cycle["pending"]["history"] or history["after"] != cycle["confirmed"]["history"]:
+                fail(f"{cdir}: confirmation changed metadata history")
+            previous_history = history["after"]
+        else:
+            if set(history) != {"before", "after", "outcome", "warning"} or history.get("outcome") != "skipped_oversize":
+                fail(f"{cdir}: cycle {number} history receipt is invalid")
+            validate_history(history["before"], f"cycle {number} history before")
+            validate_history(history["after"], f"cycle {number} history after")
+            if history["before"] != history["after"]:
+                fail(f"{cdir}: cycle {number} changed bounded history")
+            warning_edges.append(validate_warning(history["warning"], f"cycle {number}"))
         validate_state(
             cycle["pending"],
             identity,
@@ -1512,6 +1604,7 @@ def validate_transaction_evidence(cdir: Path, identity: tuple[int, int]) -> dict
             f"cycle {number} pending",
             confirm_id,
             deadline,
+            schema=schema,
         )
         confirmed = cycle["confirmed"]
         if confirmed.get("status") != "confirmed" or confirmed.get("status_view_verified") is not True:
@@ -1525,6 +1618,7 @@ def validate_transaction_evidence(cdir: Path, identity: tuple[int, int]) -> dict
             identity,
             False,
             f"cycle {number} confirmed",
+            schema=schema,
         )
         for field in ("config", "runtime"):
             if cycle["pending"][field] != confirmed[field]:
@@ -1558,9 +1652,16 @@ def validate_transaction_evidence(cdir: Path, identity: tuple[int, int]) -> dict
     ):
         fail(f"{cdir}: persisted config/runtime did not alternate B/A/B/A")
 
+    if schema == 3:
+        boot = cycles[0]["history"]["before"]["files"][0]["row"]
+        # Boot does not rewrite the operator file. Bind its normalized accepted
+        # identity to the independently persisted A generation from cycles 2/4.
+        if (boot["sha256"], boot["normalized_toml_bytes"]) != actual_ids[1][0][:2]:
+            fail(f"{cdir}: boot metadata is not accepted normalized generation A")
+
     lifecycle = read_json(cdir / "transactions/lifecycle.json")
     reject_transaction_tokens(lifecycle)
-    if set(lifecycle or {}) != {"schema", "generations", "baseline", "abort", "timeout", "restored_current_plan", "final_state"} or lifecycle.get("schema") != 2:
+    if set(lifecycle or {}) != {"schema", "generations", "baseline", "abort", "timeout", "restored_current_plan", "final_state"} or lifecycle.get("schema") != schema:
         fail(f"{cdir}: lifecycle roster is invalid")
     generations = lifecycle.get("generations", {})
     if set(generations) != {"current", "opposite"}:
@@ -1585,8 +1686,10 @@ def validate_transaction_evidence(cdir: Path, identity: tuple[int, int]) -> dict
     baseline = lifecycle["baseline"]
     final_state = lifecycle["final_state"]
     for state, label in ((baseline, "baseline"), (final_state, "final")):
-        if set(state or {}) != {"history_entries", "history_outcome", "process", "config", "runtime"} or state.get("history_entries") != 0 or state.get("history_outcome") != "skipped_oversize":
+        if set(state or {}) != ({"history_entries", "history_outcome", "process", "config", "runtime"} | ({"history"} if schema == 3 else set())) or state.get("history_entries") != (len(state.get("history", {}).get("entries", [])) if schema == 3 else 0) or state.get("history_outcome") != ("metadata_only" if schema == 3 else "skipped_oversize"):
             fail(f"{cdir}: {label} restored state is invalid")
+        if schema == 3:
+            validate_metadata_history(state["history"], label)
         validate_process_json(state["process"], identity, label)
         validate_content(state["config"], label); validate_content(state["runtime"], label)
     if any(baseline[field] != final_state[field] for field in ("config", "runtime")):
@@ -1597,18 +1700,27 @@ def validate_transaction_evidence(cdir: Path, identity: tuple[int, int]) -> dict
         for index, field in enumerate(("config", "runtime"))
     ):
         fail(f"{cdir}: lifecycle baseline is not measured generation A")
-    prior_after = warning_edges[-1][1]
+    if schema == 3 and baseline["history"] != previous_history:
+        fail(f"{cdir}: lifecycle history baseline is discontinuous")
+    prior_after = warning_edges[-1][1] if schema == 2 else 0
     for name, terminal_status in (("abort", "aborted"), ("timeout", "auto_reverted")):
         phase = lifecycle.get(name, {})
         expected_id = f"irrreload-{name}"
         required = {"candidate_role", "plan", "apply", "history_before", "apply_history_warning", "pending", "terminal"}
+        if schema == 3:
+            required.remove("apply_history_warning")
         if set(phase or {}) != required or phase.get("candidate_role") != "opposite":
             fail(f"{cdir}: {name} lifecycle roster is invalid")
         deadline = validate_plan_apply(phase, expected_id, 600 if name == "abort" else 10, name)
-        validate_history(phase["history_before"], f"{name} history before")
-        apply_edge = validate_warning(phase["apply_history_warning"], f"{name} apply")
+        if schema == 2:
+            validate_history(phase["history_before"], f"{name} history before")
+            apply_edge = validate_warning(phase["apply_history_warning"], f"{name} apply")
+        else:
+            if phase["history_before"] != previous_history:
+                fail(f"{cdir}: lifecycle history chain is discontinuous")
+            validate_history_append(previous_history, phase["pending"]["history"], phase["pending"]["config"], f"{name} apply")
         validate_state(
-            phase["pending"], identity, True, f"{name} pending", expected_id, deadline
+            phase["pending"], identity, True, f"{name} pending", expected_id, deadline, schema=schema
         )
         terminal = phase["terminal"]
         extra = {
@@ -1618,6 +1730,8 @@ def validate_transaction_evidence(cdir: Path, identity: tuple[int, int]) -> dict
             "history_warning",
             "history_after",
         }
+        if schema == 3:
+            extra.remove("history_warning")
         if (
             not extra.issubset(terminal)
             or terminal.get("status") != terminal_status
@@ -1625,14 +1739,20 @@ def validate_transaction_evidence(cdir: Path, identity: tuple[int, int]) -> dict
             or terminal.get("restored_exactly") is not True
         ):
             fail(f"{cdir}: {name} terminal outcome is invalid")
-        validate_state({key: value for key, value in terminal.items() if key not in extra}, identity, False, f"{name} terminal")
-        validate_history(terminal["history_after"], f"{name} history after")
-        if terminal["history_after"] != phase["history_before"]:
-            fail(f"{cdir}: {name} changed bounded history")
-        terminal_edge = validate_warning(terminal["history_warning"], f"{name} restore")
-        if apply_edge[0] != prior_after or terminal_edge[0] != apply_edge[1]:
-            fail(f"{cdir}: {name} history warning sequence is discontinuous")
-        prior_after = terminal_edge[1]
+        validate_state({key: value for key, value in terminal.items() if key not in extra}, identity, False, f"{name} terminal", schema=schema)
+        if schema == 3:
+            validate_history_append(phase["pending"]["history"], terminal["history"], terminal["config"], f"{name} restore")
+            if terminal["history_after"] != terminal["history"]:
+                fail(f"{cdir}: terminal history snapshots differ")
+            previous_history = terminal["history"]
+        else:
+            validate_history(terminal["history_after"], f"{name} history after")
+            if terminal["history_after"] != phase["history_before"]:
+                fail(f"{cdir}: {name} changed bounded history")
+            terminal_edge = validate_warning(terminal["history_warning"], f"{name} restore")
+            if apply_edge[0] != prior_after or terminal_edge[0] != apply_edge[1]:
+                fail(f"{cdir}: {name} history warning sequence is discontinuous")
+            prior_after = terminal_edge[1]
         for field in ("config", "runtime"):
             if terminal[field] != baseline[field]:
                 fail(f"{cdir}: {name} did not restore {field} exactly")
@@ -1644,7 +1764,7 @@ def validate_transaction_evidence(cdir: Path, identity: tuple[int, int]) -> dict
             )
             if pending_identity != actual_ids[2][index]:
                 fail(f"{cdir}: {name} pending state is not measured generation B")
-    if any(right[0] != left[1] for left, right in zip(warning_edges, warning_edges[1:])) or warning_edges[0][0] != 1 or prior_after != 9:
+    if schema == 2 and (any(right[0] != left[1] for left, right in zip(warning_edges, warning_edges[1:])) or warning_edges[0][0] != 1 or prior_after != 9):
         fail(f"{cdir}: oversize warning count is not exact across nine persists")
     if lifecycle.get("restored_current_plan") != {"transport": "streamed", "status": "noop", "plan_token_present": False}:
         fail(f"{cdir}: restored-current streamed Plan was not tokenless NOOP")
@@ -1652,24 +1772,28 @@ def validate_transaction_evidence(cdir: Path, identity: tuple[int, int]) -> dict
         line for line in (cdir / "daemon.log").read_text().splitlines()
         if "applied config exceeds the bounded history entry size; history was left unchanged" in line
     ]
-    if len(warning_lines) != 9:
-        fail(f"{cdir}: daemon log does not contain exactly nine oversize history warnings")
-    try:
-        warning_bytes = [json.loads(line)["fields"]["bytes"] for line in warning_lines]
-    except (json.JSONDecodeError, KeyError, TypeError):
-        fail(f"{cdir}: daemon oversize warning lines are malformed")
-    if any(not isinstance(size, int) or size <= 10 * 1024 * 1024 for size in warning_bytes):
-        fail(f"{cdir}: daemon oversize warning byte counts are invalid")
-    compact_warning_bytes = [cycle["history"]["warning"]["bytes"] for cycle in cycles]
-    for name in ("abort", "timeout"):
-        compact_warning_bytes.extend(
-            (
-                lifecycle[name]["apply_history_warning"]["bytes"],
-                lifecycle[name]["terminal"]["history_warning"]["bytes"],
+    if schema == 3:
+        if warning_lines or final_state["history"] != previous_history or len(previous_history["entries"]) != 9:
+            fail(f"{cdir}: final metadata history or oversize warning evidence is invalid")
+    else:
+        if len(warning_lines) != 9:
+            fail(f"{cdir}: daemon log does not contain exactly nine oversize history warnings")
+        try:
+            warning_bytes = [json.loads(line)["fields"]["bytes"] for line in warning_lines]
+        except (json.JSONDecodeError, KeyError, TypeError):
+            fail(f"{cdir}: daemon oversize warning lines are malformed")
+        if any(not isinstance(size, int) or size <= 10 * 1024 * 1024 for size in warning_bytes):
+            fail(f"{cdir}: daemon oversize warning byte counts are invalid")
+        compact_warning_bytes = [cycle["history"]["warning"]["bytes"] for cycle in cycles]
+        for name in ("abort", "timeout"):
+            compact_warning_bytes.extend(
+                (
+                    lifecycle[name]["apply_history_warning"]["bytes"],
+                    lifecycle[name]["terminal"]["history_warning"]["bytes"],
+                )
             )
-        )
-    if compact_warning_bytes != warning_bytes[1:]:
-        fail(f"{cdir}: compact history-warning evidence is not bound to daemon log order")
+        if compact_warning_bytes != warning_bytes[1:]:
+            fail(f"{cdir}: compact history-warning evidence is not bound to daemon log order")
     return {
         "inputs": {"a": candidate_ids[1], "b": candidate_ids[0]},
         "actual": {
@@ -2263,7 +2387,146 @@ def make_fixture(
     }))
 
 
+def self_test_metadata_history():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "transaction"
+        make_fixture(root, "transaction", 1, 7000)
+        cdir = root / TRANSACTION_CELL
+        cycle_path = cdir / "transactions/cycles.jsonl"
+        lifecycle_path = cdir / "transactions/lifecycle.json"
+        cycles = [json.loads(line) for line in cycle_path.read_text().splitlines()]
+        lifecycle = read_json(lifecycle_path)
+        retained = []
+
+        def snapshot(digest):
+            sequence = len(retained) + 1
+            raw_sha = digest * 64
+            source_sha = inline_manifest_source_sha256({"toml_sha256": raw_sha, "rpol_units": [], "datasets": []}, raw_sha)
+            row = dict(zip(HISTORY_FIELDS, (3, sequence, 1000 + sequence, 11 * 1024 * 1024, raw_sha, source_sha,
+                "asn 65000, router-id 192.0.2.1, 0 neighbor(s), 0 dynamic range(s), 0 fib table(s), 1 policy definition(s)", HISTORY_REASON)))
+            encoded = history_encoded(row)
+            retained.insert(0, {"name": f"v3-{sequence:020}-{1000 + sequence}-{source_sha}.json", "device": 1,
+                "inode": sequence, "bytes": len(encoded), "sha256": hashlib.sha256(encoded).hexdigest(),
+                "mode": "0600", "owner_current_uid": True, "row": row})
+            entries = []
+            for index, file in enumerate(retained):
+                r = file["row"]
+                entry = {key: r[key] for key in ("timestamp_unix_seconds", "normalized_toml_bytes", "sha256", "source_sha256", "summary", "metadata_only_reason")}
+                entry.update(index=index, timestamp=datetime.fromtimestamp(r["timestamp_unix_seconds"], timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), provenance_status="metadata_only", rollback_eligible=False)
+                entries.append(entry)
+            return json.loads(json.dumps({"entries": entries, "files": retained}))
+
+        def state(value, history):
+            value.update(history=history, history_entries=len(history["entries"]), history_outcome="metadata_only")
+
+        history = snapshot("a")
+        for number, cycle in enumerate(cycles, 1):
+            before = history
+            history = snapshot("b" if number % 2 else "a")
+            cycle["schema"] = 3
+            cycle["history"] = {"before": before, "after": history, "outcome": "metadata_only"}
+            state(cycle["pending"], history)
+            state(cycle["confirmed"], history)
+        lifecycle["schema"] = 3
+        state(lifecycle["baseline"], history)
+        for name in ("abort", "timeout"):
+            phase = lifecycle[name]
+            phase["history_before"] = history
+            del phase["apply_history_warning"]
+            history = snapshot("b")
+            state(phase["pending"], history)
+            history = snapshot("a")
+            state(phase["terminal"], history)
+            phase["terminal"]["history_after"] = history
+            del phase["terminal"]["history_warning"]
+        state(lifecycle["final_state"], history)
+        (cdir / "daemon.log").write_text("")
+
+        def write(cycles_value, lifecycle_value):
+            cycle_path.write_text("".join(json.dumps(row) + "\n" for row in cycles_value))
+            lifecycle_path.write_text(json.dumps(lifecycle_value))
+
+        write(cycles, lifecycle)
+        validate_transaction_evidence(cdir, (7000, 7100))
+        # Mutations target receipt trust boundaries and chronology, not encoder details.
+        def replace_boot_identity(c, l):
+            # Keep all redundant snapshots, canonical bytes, API fields and
+            # source digests coherent: only the independently accepted A
+            # binding can detect this forgery.
+            def walk(value):
+                if isinstance(value, dict):
+                    if set(value) == {"entries", "files"}:
+                        row = value["files"][-1]["row"]
+                        row["sha256"] = "f" * 64
+                        row["source_sha256"] = inline_manifest_source_sha256({"toml_sha256": row["sha256"], "rpol_units": [], "datasets": []}, row["sha256"])
+                        file = value["files"][-1]
+                        file["name"] = f'v3-{row["sequence"]:020}-{row["timestamp_unix_seconds"]}-{row["source_sha256"]}.json'
+                        file["sha256"] = hashlib.sha256(history_encoded(row)).hexdigest()
+                        value["entries"][-1].update(sha256=row["sha256"], source_sha256=row["source_sha256"])
+                    else:
+                        for child in value.values():
+                            walk(child)
+                elif isinstance(value, list):
+                    for child in value:
+                        walk(child)
+            walk(c)
+            walk(l)
+
+        mutations = (
+            replace_boot_identity,
+            lambda c, l: c[0]["pending"]["history"]["entries"][0].update(rollback_eligible=True),
+            lambda c, l: c[0]["pending"]["history"]["entries"][0].update(provenance_status="recorded"),
+            lambda c, l: c[0]["pending"]["history"]["files"][0]["row"].update(normalized_toml_bytes=10485760),
+            lambda c, l: c[0]["pending"]["history"]["files"][0]["row"].update(normalized_toml="secret payload"),
+            lambda c, l: c[0]["pending"]["history"]["files"][0].update(bytes=65537),
+            lambda c, l: c[0]["pending"]["history"]["files"][0].update(sha256="0" * 64),
+            lambda c, l: c[0]["pending"]["history"]["files"][0].update(mode="0644"),
+            lambda c, l: c[0]["confirmed"].update(history=c[0]["history"]["before"]),
+            lambda c, l: c[1]["history"].update(before=c[0]["history"]["before"]),
+            lambda c, l: c[0]["pending"]["config"].update(sha256="0" * 64),
+            lambda c, l: l["abort"]["terminal"].update(history=l["abort"]["pending"]["history"]),
+            lambda c, l: l["timeout"]["terminal"].update(history=l["timeout"]["pending"]["history"]),
+            lambda c, l: l["final_state"].update(history=l["baseline"]["history"]),
+            lambda c, l: l.update(schema=2),
+        )
+        for index, mutate in enumerate(mutations):
+            c, l = json.loads(json.dumps(cycles)), json.loads(json.dumps(lifecycle))
+            mutate(c, l)
+            write(c, l)
+            try:
+                validate_transaction_evidence(cdir, (7000, 7100))
+            except InvalidReceipt:
+                continue
+            fail(f"metadata history mutation {index} was accepted")
+        write(cycles, lifecycle)
+        (cdir / "daemon.log").write_text("applied config exceeds the bounded history entry size; history was left unchanged\n")
+        try:
+            validate_transaction_evidence(cdir, (7000, 7100))
+        except InvalidReceipt:
+            pass
+        else:
+            fail("metadata history accepted obsolete oversize warning")
+        # Exercise actual canonical row files and the live API/disk inspector too.
+        directory = Path(tmp) / "history"
+        directory.mkdir(mode=0o700)
+        for file in history["files"]:
+            path = directory / file["name"]
+            path.write_bytes(history_encoded(file["row"]))
+            path.chmod(0o600)
+        observed = inspect_history(directory, history["entries"])
+        assert observed["entries"] == history["entries"]
+        (directory / history["files"][0]["name"]).chmod(0o644)
+        try:
+            inspect_history(directory, history["entries"])
+        except InvalidReceipt:
+            pass
+        else:
+            fail("metadata history accepted a public row")
+
+
 def self_test() -> None:
+    self_test_metadata_history()
+    print("metadata-only history: green fixture and 17 rejection boundaries passed")
     with tempfile.TemporaryDirectory() as phase_tmp:
         root = Path(phase_tmp)
         reload_log = root / "reload.log"
@@ -3256,6 +3519,8 @@ def main() -> int:
     inspect.add_argument("--raw", required=True, type=Path)
     inspect.add_argument("--config", required=True, type=Path)
     inspect.add_argument("--confirm-id", required=True)
+    history = subparsers.add_parser("inspect-history")
+    history.add_argument("--history-dir", required=True, type=Path)
     marker = subparsers.add_parser("inspect-generation")
     marker.add_argument("config", type=Path)
     phases = subparsers.add_parser("reload-phases")
@@ -3304,6 +3569,8 @@ def main() -> int:
                     sort_keys=True,
                 )
             )
+        elif args.command == "inspect-history":
+            print(json.dumps(inspect_history(args.history_dir, json.load(sys.stdin)["entries"]), separators=(",", ":")))
         elif args.command == "inspect-generation":
             print(generation_marker(args.config))
         elif args.command == "reload-phases":

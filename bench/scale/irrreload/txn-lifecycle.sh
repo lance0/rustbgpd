@@ -26,35 +26,9 @@ active_confirm_id=; cleanup_pending() {
     fi
 }
 trap cleanup_pending EXIT
-history_count() { "$rbgp" --addr "$addr" --json config history | jq -er '.entries | select(type == "array") | length'; }
 history_json() {
-    local entries files history_dir="$runtime_dir/config-history"
-    entries=$("$rbgp" --addr "$addr" --json config history | jq -ecS '.entries') || return 1
-    files=$(
-        if [ -d "$history_dir" ]; then
-            find "$history_dir" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort |
-                while IFS= read -r name; do
-                    jq -cn --arg name "$name" --arg sha256 "$(sha "$history_dir/$name")" \
-                        --argjson bytes "$(wc -c <"$history_dir/$name")" \
-                        '{name:$name,bytes:$bytes,sha256:$sha256}'
-                done
-        fi | jq -scS '.'
-    ) || return 1
-    jq -cn --argjson entries "$entries" --argjson files "$files" '{entries:$entries,files:$files}'
-}
-warning_count() { grep -Fc 'applied config exceeds the bounded history entry size; history was left unchanged' "$daemon_log" 2>/dev/null || true; }
-warning_json() {
-    local before=$1 count line bytes deadline=$((SECONDS + 10))
-    while :; do
-        count=$(warning_count); [ "$count" -gt "$before" ] && break
-        [ "$SECONDS" -lt "$deadline" ] || return 1; sleep 0.1
-    done
-    [ "$count" -eq $((before + 1)) ] || return 1
-    line=$(grep -F 'applied config exceeds the bounded history entry size; history was left unchanged' "$daemon_log" | tail -n1) || return 1
-    bytes=$(printf '%s\n' "$line" | jq -er '.fields.bytes | select(type == "number")') || return 1
-    [ "$bytes" -gt "$min_raw" ] || return 1
-    jq -cn --argjson count_before "$before" --argjson count_after "$count" --argjson bytes "$bytes" \
-        '{count_before:$count_before,count_after:$count_after,bytes:$bytes}'
+    "$rbgp" --addr "$addr" --json config history |
+        "$verify" inspect-history --history-dir "$runtime_dir/config-history"
 }
 process_json() {
     local start vmrss vmhwm
@@ -81,12 +55,12 @@ effective_json() {
 }
 state_json() {
     local history process runtime disk
-    history=$(history_count) || return 1; [ "$history" -eq 0 ] || return 1
+    history=$(history_json) || return 1; [ "$(printf '%s' "$history" | jq -er '.entries | length')" -gt 0 ] || return 1
     process=$(process_json) || return 1; runtime=$(effective_json) || return 1
     disk=$(content_json "$config") || return 1
-    jq -cn --argjson history_entries "$history" --argjson process "$process" \
+    jq -cn --argjson history "$history" --argjson process "$process" \
         --argjson runtime "$runtime" --argjson disk "$disk" \
-        '{history_entries:$history_entries,history_outcome:"skipped_oversize",
+        '{history:$history,history_entries:($history.entries | length),history_outcome:"metadata_only",
           process:$process,config:$disk,runtime:$runtime}'
 }
 pending_json() {
@@ -96,13 +70,13 @@ pending_json() {
     raw_bytes=$(printf '%s' "$authority" | jq -er '.raw.bytes') || return 1
     [ "$raw_bytes" -gt "$min_raw" ] && [ "$raw_bytes" -le "$max_raw" ] || return 1
     [ ! -e "$legacy" ] || return 1
-    history=$(history_count) || return 1; [ "$history" -eq 0 ] || return 1
+    history=$(history_json) || return 1; [ "$(printf '%s' "$history" | jq -er '.entries | length')" -gt 0 ] || return 1
     process=$(process_json) || return 1; runtime=$(effective_json) || return 1
     disk=$(content_json "$config") || return 1
-    jq -cn --argjson authority "$authority" --argjson history_entries "$history" \
+    jq -cn --argjson authority "$authority" --argjson history "$history" \
         --argjson process "$process" --argjson runtime "$runtime" --argjson disk "$disk" \
         '{authority:$authority,legacy_absent:true,
-          history_entries:$history_entries,history_outcome:"skipped_oversize",
+          history:$history,history_entries:($history.entries | length),history_outcome:"metadata_only",
           process:$process,config:$disk,runtime:$runtime}'
 }
 terminal_json() {
@@ -114,10 +88,9 @@ terminal_json() {
     jq -cn --argjson state "$state" '{v3_absent:true,legacy_absent:true} + $state'
 }
 apply_pending() {
-    local id=$1 timeout=$2 plan_json plan_rc runtime_token plan_token apply_json apply_runtime status_json pending history_before warning_before warning now authority_deadline
+    local id=$1 timeout=$2 plan_json plan_rc runtime_token plan_token apply_json apply_runtime status_json pending history_before now authority_deadline
     history_before=$(history_json) || return 1
-    [ "$(printf '%s' "$history_before" | jq -er '.entries | length')" -eq 0 ] || return 1
-    warning_before=$(warning_count)
+    [ "$(printf '%s' "$history_before" | jq -er '.entries | length')" -gt 0 ] || return 1
     plan_json=$("$rbgp" --addr "$addr" --json config plan "$opposite"); plan_rc=$?
     [ "$plan_rc" -eq 2 ] || return 1
     [ "$(printf '%s' "$plan_json" | jq -er '.status')" = committable ] || return 1
@@ -148,17 +121,16 @@ apply_pending() {
     pending=$(pending_json "$id") || return 1
     authority_deadline=$(printf '%s' "$pending" | jq -er '.authority.deadline_unix_seconds') || return 1
     [ "$authority_deadline" -lt "$pending_deadline" ] || return 1
-    warning=$(warning_json "$warning_before") || return 1
     pending_runtime=$apply_runtime
     pending_prefix=$(jq -cn --arg id "$id" --argjson timeout_seconds "$timeout" \
         --argjson deadline_unix_seconds "$pending_deadline" --argjson pending "$pending" \
-        --argjson history_before "$history_before" --argjson warning "$warning" \
+        --argjson history_before "$history_before" \
         '{candidate_role:"opposite",plan:{transport:"streamed",status:"committable",
           plan_token_present:true,runtime_snapshot_token_present:true},
           apply:{transport:"streamed",explicit_plan_token:true,status:"committable",
           confirmation_status:"pending",confirm_id:$id,timeout_seconds:$timeout_seconds,
           deadline_unix_seconds:$deadline_unix_seconds,runtime_token_coherent:true},
-          history_before:$history_before,apply_history_warning:$warning,pending:$pending}'
+          history_before:$history_before,pending:$pending}'
     ) || return 1
 }
 [ ! -e "$output" ] || die "lifecycle evidence already exists"
@@ -170,7 +142,6 @@ opposite_input=$(content_json "$opposite") || die "cannot capture opposite candi
     die "current and opposite generations are identical"
 apply_pending irrreload-abort 600 || die "abort pending transaction failed"
 abort_prefix=$pending_prefix; abort_runtime=$pending_runtime; abort_deadline=$pending_deadline
-abort_warning_before=$(warning_count)
 abort_json=$("$rbgp" --addr "$addr" --json config abort irrreload-abort) || die "abort RPC failed"
 abort_rollback_runtime=$(printf '%s' "$abort_json" | jq -er '.confirmation.runtime_snapshot_token | select(type == "string")') || die "abort runtime token missing"
 runtime_token_valid "$abort_rollback_runtime" || die "abort runtime token was not canonical kv2"
@@ -187,20 +158,16 @@ printf '%s' "$abort_status" | jq -e --arg runtime "$abort_rollback_runtime" --ar
     die "abort terminal status view was incoherent"
 active_confirm_id=
 abort_terminal=$(terminal_json) || die "abort cleanup evidence failed"
-abort_warning=$(warning_json "$abort_warning_before") || die "missing abort restore history warning"
 abort_history_after=$(history_json) || die "cannot capture history after abort"
-[ "$(printf '%s' "$abort_prefix" | jq -cS '.history_before')" = "$(printf '%s' "$abort_history_after" | jq -cS .)" ] ||
-    die "bounded history changed across abort"
 [ "$(printf '%s' "$abort_terminal" | jq -cS '.config,.runtime,.process.pid,.process.starttime')" = \
   "$(printf '%s' "$current_state" | jq -cS '.config,.runtime,.process.pid,.process.starttime')" ] ||
     die "abort did not exactly restore disk/runtime/process identity"
 abort=$(jq -cn --argjson prefix "$abort_prefix" --argjson terminal "$abort_terminal" \
-    --argjson warning "$abort_warning" --argjson history_after "$abort_history_after" \
-    '$prefix + {terminal:({status:"aborted",status_view_verified:true,restored_exactly:true,history_warning:$warning,
+    --argjson history_after "$abort_history_after" \
+    '$prefix + {terminal:({status:"aborted",status_view_verified:true,restored_exactly:true,
       history_after:$history_after} + $terminal)}') || die "abort receipt failed"
 apply_pending irrreload-timeout "$CONFIRMATION_TIMEOUT_SECONDS" || die "timeout pending transaction failed"
 timeout_prefix=$pending_prefix; timeout_runtime=$pending_runtime; timeout_deadline=$pending_deadline
-timeout_warning_before=$(warning_count)
 terminal_completion_deadline=$((timeout_deadline + ROLLBACK_COMPLETION_CEILING_SECONDS))
 while :; do
     status_json=$("$rbgp" --addr "$addr" --json config status) || die "timeout status failed"
@@ -224,16 +191,13 @@ printf '%s' "$status_json" | jq -e --arg runtime "$timeout_rollback_runtime" --a
     die "timeout terminal status view was incoherent"
 active_confirm_id=
 timeout_terminal=$(terminal_json) || die "timeout cleanup evidence failed"
-timeout_warning=$(warning_json "$timeout_warning_before") || die "missing timeout restore history warning"
 timeout_history_after=$(history_json) || die "cannot capture history after timeout"
-[ "$(printf '%s' "$timeout_prefix" | jq -cS '.history_before')" = "$(printf '%s' "$timeout_history_after" | jq -cS .)" ] ||
-    die "bounded history changed across timeout"
 [ "$(printf '%s' "$timeout_terminal" | jq -cS '.config,.runtime,.process.pid,.process.starttime')" = \
   "$(printf '%s' "$current_state" | jq -cS '.config,.runtime,.process.pid,.process.starttime')" ] ||
     die "timeout did not exactly restore disk/runtime/process identity"
 timeout=$(jq -cn --argjson prefix "$timeout_prefix" --argjson terminal "$timeout_terminal" \
-    --argjson warning "$timeout_warning" --argjson history_after "$timeout_history_after" \
-    '$prefix + {terminal:({status:"auto_reverted",status_view_verified:true,restored_exactly:true,history_warning:$warning,
+    --argjson history_after "$timeout_history_after" \
+    '$prefix + {terminal:({status:"auto_reverted",status_view_verified:true,restored_exactly:true,
       history_after:$history_after} + $terminal)}') || die "timeout receipt failed"
 noop_json=$("$rbgp" --addr "$addr" --json config plan "$current"); noop_rc=$?
 [ "$noop_rc" -eq 0 ] || die "restored-current plan exit $noop_rc, expected NOOP exit 0"
@@ -247,7 +211,7 @@ tmp="$output.tmp"
 jq -n --argjson baseline "$current_state" --argjson current "$current_input" \
     --argjson opposite "$opposite_input" --argjson abort "$abort" --argjson timeout "$timeout" \
     --argjson final_state "$final_state" \
-    '{schema:2,generations:{current:$current,opposite:$opposite},baseline:$baseline,
+    '{schema:3,generations:{current:$current,opposite:$opposite},baseline:$baseline,
       abort:$abort,timeout:$timeout,restored_current_plan:{transport:"streamed",status:"noop",
       plan_token_present:false},final_state:$final_state}' >"$tmp" || die "cannot encode lifecycle evidence"
 mv "$tmp" "$output" || die "cannot publish lifecycle evidence"
