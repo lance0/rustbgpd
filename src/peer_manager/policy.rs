@@ -2584,7 +2584,7 @@ impl PeerManager {
     /// structurally reference a swapped dataset are touched — Route
     /// Refresh inbound where the *import* chain references one (the
     /// peer re-sends, routes re-evaluate against the new generation),
-    /// forced outbound re-emission (`RibUpdate::RefreshPeerOutbound`)
+    /// batched export re-evaluation (`RibUpdate::ReevaluatePeerExportPolicies`)
     /// where the *export* chain does. Chains are never replaced:
     /// they share the swapped handles, so counters, generations, and
     /// unrelated peers are untouched. `failed` datasets (prior
@@ -2632,6 +2632,7 @@ impl PeerManager {
             .collect();
 
         let mut failures = Vec::new();
+        let mut export_peers = Vec::new();
         let mut refreshed = 0usize;
         let mut skipped_not_established = 0usize;
         let mut skipped_state_unknown = 0usize;
@@ -2690,32 +2691,39 @@ impl PeerManager {
                 }
             }
             if *export {
-                let (reply_tx, reply_rx) = oneshot::channel();
-                let outcome = if self
-                    .rib_tx
-                    .send(RibUpdate::RefreshPeerOutbound {
-                        peer: peer_key.address,
-                        reply: reply_tx,
-                    })
-                    .await
-                    .is_err()
-                {
-                    Err("RIB manager unavailable".to_string())
-                } else {
-                    match tokio::time::timeout(super::RIB_REPLY_TIMEOUT, reply_rx).await {
-                        Ok(Ok(result)) => result.map_err(|error| error.to_string()),
-                        Ok(Err(_)) => Err("RIB manager dropped reply".to_string()),
-                        Err(_) => Err(format!(
-                            "RIB manager did not reply within {:?}",
-                            super::RIB_REPLY_TIMEOUT
-                        )),
-                    }
-                };
-                if let Err(error) = outcome {
-                    failures.push(format!("{peer_key} (export): {error}"));
-                }
+                export_peers.push(peer_key.address);
             }
             refreshed += 1;
+        }
+        if !export_peers.is_empty() {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            let outcome = if self
+                .rib_tx
+                .send(RibUpdate::ReevaluatePeerExportPolicies {
+                    peers: export_peers.clone(),
+                    reply: reply_tx,
+                })
+                .await
+                .is_err()
+            {
+                Err("RIB manager unavailable".to_string())
+            } else {
+                match tokio::time::timeout(super::RIB_REPLY_TIMEOUT, reply_rx).await {
+                    Ok(Ok(result)) => result.map_err(|error| error.to_string()),
+                    Ok(Err(_)) => Err("RIB manager dropped reply".to_string()),
+                    Err(_) => Err(format!(
+                        "RIB manager did not reply within {:?}",
+                        super::RIB_REPLY_TIMEOUT
+                    )),
+                }
+            };
+            if let Err(error) = outcome {
+                failures.extend(
+                    export_peers
+                        .iter()
+                        .map(|peer| format!("{peer} (export): {error}")),
+                );
+            }
         }
         info!(
             swapped = ?swapped,

@@ -1157,7 +1157,7 @@ pub enum PeerManagerCommand {
     /// LAN-305: one or more external dataset snapshots swapped content
     /// during a reload. Refresh exactly the peers whose chains
     /// reference a swapped dataset — Route Refresh inbound for import
-    /// chains, forced outbound re-emission for export chains — and
+    /// chains, batched export-policy re-evaluation for export chains — and
     /// count failed refreshes (prior snapshot retained) in metrics.
     /// Chains themselves are untouched: they share the swapped
     /// handles and pin the new generation at their next walk.

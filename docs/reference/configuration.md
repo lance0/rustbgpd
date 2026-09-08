@@ -2788,7 +2788,11 @@ path = "/var/lib/rustbgpd/datasets/customers.list"
   Enhanced Route Refresh can bracket the replay with BoRR/EoRR but does
   not delta-reduce it; recovery of previously rejected routes depends
   on negotiated Route Refresh and the peer's replay. Export-chain
-  references instead force outbound re-emission. A file that fails to
+  references instead re-evaluate export policy and refresh the resulting
+  advertisements. Shared update groups recompute once per affected group,
+  including per-client-best selection; changed verdicts withdraw denied
+  routes and announce newly permitted routes without reinstalling chains
+  or resetting their counters. A file that fails to
   load or parse **keeps the
   prior snapshot** with a WARN, a
   `bgp_policy_dataset_refresh_errors_total{dataset}` counter

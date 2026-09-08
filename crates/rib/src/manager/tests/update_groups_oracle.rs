@@ -1008,6 +1008,235 @@ const D: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 4);
 const E: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 5);
 const F: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 6);
 
+fn dataset_prefix_data(prefix: Prefix, permit: bool) -> rustbgpd_policy::datasets::DatasetData {
+    use rustbgpd_policy::datasets::DatasetData;
+    use rustbgpd_policy::sets::{PrefixSet, PrefixSetEntry};
+    DatasetData::Prefix(PrefixSet::new(permit.then_some(PrefixSetEntry {
+        prefix,
+        ge: None,
+        le: None,
+    })))
+}
+
+fn dataset_prefix_policy(
+    prefix: Prefix,
+    permit: bool,
+) -> (Arc<rustbgpd_policy::datasets::DatasetHandle>, PolicyChain) {
+    use rustbgpd_policy::datasets::{DatasetBindings, DatasetHandle, DatasetKind};
+    use rustbgpd_policy::rpol::RpolFile;
+    use rustbgpd_policy::sets::SetStore;
+    let handle = Arc::new(DatasetHandle::new(
+        "allowed",
+        DatasetKind::Prefix,
+        dataset_prefix_data(prefix, permit),
+    ));
+    let mut bindings = DatasetBindings::new();
+    bindings.insert(Arc::clone(&handle));
+    let compiled = RpolFile::parse(
+        "dataset prefix-set allowed\npolicy p { term t { if route.prefix in allowed { accept } reject } }",
+    )
+    .expect("dataset policy parses")
+    .compile_policy_bound("p", &[], &mut SetStore::new(), &bindings)
+    .expect("policy compiles")
+    .expect("dataset binding is complete");
+    let chain = PolicyChain::from_named(vec![rustbgpd_policy::NamedPolicy::from_rpol(
+        "p".to_string(),
+        Arc::new(compiled),
+    )]);
+    (handle, chain)
+}
+
+async fn check_dataset_export_refresh(per_client_best: bool) {
+    let prefix = Prefix::V4(pfx(1, 0));
+    for force_ungrouped in [true, false] {
+        for initially_permitted in [true, false] {
+            let (handle, chain) = dataset_prefix_policy(prefix, initially_permitted);
+            let mut oracle = Oracle::spawn(force_ungrouped, None);
+            oracle.peer_up(A, true, false, None, 64).await;
+            for peer in [B, C] {
+                oracle
+                    .peer_up_families_generation_with_features(
+                        peer,
+                        SESSION,
+                        true,
+                        false,
+                        Some(chain.clone()),
+                        64,
+                        ipv4_sendable(),
+                        OraclePeerFeatures {
+                            per_client_best,
+                            ..OraclePeerFeatures::default()
+                        },
+                    )
+                    .await;
+            }
+            oracle
+                .peer_up(
+                    D,
+                    true,
+                    false,
+                    Some(permit_all_with(RouteModifications::default())),
+                    64,
+                )
+                .await;
+            let group = oracle.group_label(B).await;
+            assert_eq!(group.starts_with("group:"), !force_ungrouped);
+            assert_eq!(group, oracle.group_label(C).await);
+            oracle
+                .routes(A, vec![ibgp_route(pfx(1, 0), A, 100, vec![])], vec![])
+                .await;
+            if per_client_best {
+                // B must receive A's runner-up while C receives B's best.
+                oracle
+                    .routes(B, vec![ibgp_route(pfx(1, 0), B, 200, vec![])], vec![])
+                    .await;
+            }
+            oracle.drain_available();
+            let initial = fold(&oracle.collected);
+            for peer in [B, C] {
+                assert_eq!(
+                    initial[&IpAddr::V4(peer)].contains_key(&(prefix, 0)),
+                    initially_permitted
+                );
+            }
+            let bystander = oracle.collected[&IpAddr::V4(D)].clone();
+            let bystander_evals = oracle.export_policy_evals_for(D).await;
+            let prior_evals = oracle.export_policy_evals_for(B).await;
+
+            assert_eq!(
+                handle.refresh(dataset_prefix_data(prefix, !initially_permitted)),
+                Some(2)
+            );
+            let (reply, result) = oneshot::channel();
+            oracle
+                .tx
+                .send(RibUpdate::ReevaluatePeerExportPolicies {
+                    peers: vec![IpAddr::V4(B), IpAddr::V4(C)],
+                    reply,
+                })
+                .await
+                .unwrap();
+            result.await.unwrap().unwrap();
+            let next_evals = oracle.export_policy_evals_for(B).await;
+            assert!(
+                next_evals > prior_evals,
+                "installed counter instance must keep advancing"
+            );
+            if !force_ungrouped {
+                assert_eq!(
+                    next_evals - prior_evals,
+                    if per_client_best { 2 } else { 1 },
+                    "shared group must be evaluated once, not once per member"
+                );
+            }
+            assert_eq!(oracle.export_policy_evals_for(D).await, bystander_evals);
+            let streams = oracle.finish().await;
+            assert_eq!(
+                streams[&IpAddr::V4(D)],
+                bystander,
+                "unrelated group was re-emitted"
+            );
+            let final_state = fold(&streams);
+            for peer in [B, C] {
+                let advertised = final_state[&IpAddr::V4(peer)].contains_key(&(prefix, 0));
+                assert_eq!(
+                    advertised, !initially_permitted,
+                    "stale dataset verdict: ungrouped={force_ungrouped} pcb={per_client_best} initial={initially_permitted} peer={peer}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn dataset_content_refresh_rechecks_grouped_export_verdicts() {
+    check_dataset_export_refresh(false).await;
+}
+
+#[tokio::test]
+async fn dataset_content_refresh_rechecks_per_client_best_export_verdicts() {
+    check_dataset_export_refresh(true).await;
+}
+
+#[tokio::test]
+async fn dataset_content_refresh_missing_target_has_no_effects() {
+    let prefix = Prefix::V4(pfx(1, 0));
+    let (handle, chain) = dataset_prefix_policy(prefix, true);
+    let mut oracle = Oracle::spawn(false, None);
+    oracle.peer_up(A, true, false, None, 64).await;
+    oracle.peer_up(B, true, false, Some(chain), 64).await;
+    oracle
+        .routes(A, vec![ibgp_route(pfx(1, 0), A, 100, vec![])], vec![])
+        .await;
+    oracle.drain_available();
+    let before = oracle.collected[&IpAddr::V4(B)].clone();
+    let evals = oracle.export_policy_evals_for(B).await;
+    handle.refresh(dataset_prefix_data(prefix, false)).unwrap();
+    let (reply, result) = oneshot::channel();
+    oracle
+        .tx
+        .send(RibUpdate::ReevaluatePeerExportPolicies {
+            peers: vec![IpAddr::V4(B), IpAddr::V4(F)],
+            reply,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        result.await.unwrap(),
+        Err(crate::update::RibCommandError::NotFound(_))
+    ));
+    assert_eq!(oracle.export_policy_evals_for(B).await, evals);
+    let streams = oracle.finish().await;
+    assert_eq!(streams[&IpAddr::V4(B)], before);
+}
+
+#[tokio::test]
+async fn dataset_content_refresh_rechecks_grouped_vpn_export_verdicts() {
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 210, 1, 0), 24));
+    for initially_permitted in [true, false] {
+        let (handle, chain) = dataset_prefix_policy(prefix, initially_permitted);
+        let mut oracle = Oracle::spawn(false, Some(Ipv4Addr::new(192, 0, 2, 1)));
+        oracle
+            .peer_up_families(A, false, true, None, 64, vpn_sendable())
+            .await;
+        for peer in [B, C] {
+            oracle
+                .peer_up_families(peer, false, true, Some(chain.clone()), 64, vpn_sendable())
+                .await;
+        }
+        assert!(oracle.group_label(B).await.starts_with("group:"));
+        assert_eq!(oracle.group_label(B).await, oracle.group_label(C).await);
+        oracle
+            .vpn_routes(A, vec![vpn_route(vpn_nlri(1, 100), A, 100, vec![])], vec![])
+            .await;
+        oracle.drain_available();
+        let initial = fold_vpn(&oracle.collected);
+        for peer in [B, C] {
+            assert_eq!(!initial[&IpAddr::V4(peer)].is_empty(), initially_permitted);
+        }
+        handle
+            .refresh(dataset_prefix_data(prefix, !initially_permitted))
+            .unwrap();
+        let (reply, result) = oneshot::channel();
+        oracle
+            .tx
+            .send(RibUpdate::ReevaluatePeerExportPolicies {
+                peers: vec![IpAddr::V4(B), IpAddr::V4(C)],
+                reply,
+            })
+            .await
+            .unwrap();
+        result.await.unwrap().unwrap();
+        let final_state = fold_vpn(&oracle.finish().await);
+        for peer in [B, C] {
+            assert_eq!(
+                final_state[&IpAddr::V4(peer)].is_empty(),
+                initially_permitted
+            );
+        }
+    }
+}
+
 async fn run_grouped_and_ungrouped<S>(
     cluster_id: Option<Ipv4Addr>,
     scenario: S,

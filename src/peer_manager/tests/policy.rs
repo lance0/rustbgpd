@@ -698,6 +698,67 @@ async fn dataset_state_timeout_arms_import_and_export_replay() {
     assert!(managed.pending_export_apply);
 }
 
+#[tokio::test]
+async fn dataset_export_refresh_batches_only_dependent_peers_for_reevaluation() {
+    use rustbgpd_policy::datasets::{DatasetBindings, DatasetData, DatasetHandle, DatasetKind};
+    use rustbgpd_policy::rpol::RpolFile;
+    use rustbgpd_policy::sets::{AsnSet, SetStore};
+
+    let dataset = Arc::new(DatasetHandle::new(
+        "customers",
+        DatasetKind::Asn,
+        DatasetData::Asn(AsnSet::new([64500])),
+    ));
+    let mut bindings = DatasetBindings::new();
+    bindings.insert(Arc::clone(&dataset));
+    let compiled = RpolFile::parse(
+        "dataset asn-set customers\npolicy p { term t { if route.origin-as in customers { accept } reject } }",
+    ).unwrap().compile_policy_bound("p", &[], &mut SetStore::new(), &bindings).unwrap().unwrap();
+    let chain = PolicyChain::from_named(vec![rustbgpd_policy::NamedPolicy::from_rpol(
+        "p".to_string(),
+        Arc::new(compiled),
+    )]);
+    let mut mgr = test_peer_manager();
+    let (rib_tx, mut rib_rx) = mpsc::channel(8);
+    mgr.rib_tx = rib_tx;
+    let rib = tokio::spawn(async move {
+        let mut batches = Vec::new();
+        while let Some(command) = rib_rx.recv().await {
+            let RibUpdate::ReevaluatePeerExportPolicies { mut peers, reply } = command else {
+                panic!(
+                    "dataset refresh must recompute export policy, not replay its cached output"
+                );
+            };
+            peers.sort();
+            batches.push(peers);
+            reply.send(Ok(())).unwrap();
+        }
+        batches
+    });
+    let peers: Vec<IpAddr> = (1..=3)
+        .map(|last| Ipv4Addr::new(10, 0, 0, last).into())
+        .collect();
+    for (index, peer) in peers.iter().enumerate() {
+        insert_test_managed_peer(
+            &mut mgr,
+            *peer,
+            acking_policy_handle(*peer, SessionState::Established),
+            false,
+        );
+        if index < 2 {
+            mgr.peers.get_mut(&key(*peer)).unwrap().export_policy = Some(chain.clone());
+        }
+    }
+    dataset
+        .refresh(DatasetData::Asn(AsnSet::new([64501])))
+        .unwrap();
+    mgr.refresh_dataset_dependents(&["customers".to_string()], &[])
+        .await
+        .unwrap();
+    drop(mgr);
+    assert_eq!(rib.await.unwrap(), vec![peers[..2].to_vec()]);
+}
+
 /// ADR-0110 reap discipline: a dataset removed from config on a
 /// successful rpol sync drops BOTH its per-dataset series (loaded
 /// timestamp and failure counter); a dataset introduced by the sync

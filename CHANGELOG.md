@@ -104,6 +104,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `--ignore-attribute unknown` for the OTC attribute a route server attaches
   on the wire.
 
+- Dataset content refreshes now recompute shared export-policy results before
+  refreshing advertisements. Grouped peers previously replayed cached results,
+  leaving newly denied routes advertised and newly permitted routes absent.
+  Each affected group is recomputed once, including per-client-best groups;
+  unrelated groups and installed policy counters are preserved.
+
 - Config transactions now durably stage their candidate next to the config
   file before touching any session, catalog, or policy state. An ordinary
   disk failure — an unwritable or read-only config directory, a full

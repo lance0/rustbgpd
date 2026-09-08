@@ -2531,6 +2531,17 @@ pub enum RibUpdate {
         /// The destination export chain passed to the matching prepare.
         export_policy: Option<PolicyChain>,
     },
+    /// Re-evaluate installed export policies after their shared dataset
+    /// contents change. Each affected group is staged once, then its members
+    /// receive the resulting view; ungrouped peers re-evaluate individually.
+    /// Chain instances and their counters are preserved. The reply acknowledges
+    /// recomputation and distribution responsibility, not remote receipt.
+    ReevaluatePeerExportPolicies {
+        /// Established peers whose export chains reference a changed dataset.
+        peers: Vec<IpAddr>,
+        /// Response channel for success/failure.
+        reply: oneshot::Sender<Result<(), RibCommandError>>,
+    },
     /// Force re-emission of all currently-advertised routes to a peer
     /// without changing policy. Used when an outbound *attribute*
     /// surface changes (e.g. RFC 8326 `GRACEFUL_SHUTDOWN` community

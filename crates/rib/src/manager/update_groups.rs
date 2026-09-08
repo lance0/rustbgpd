@@ -29,8 +29,8 @@
 //! `PolicyChain` `PartialEq`), never `Arc` identity — a SIGHUP / rpol
 //! overlay / ADR-0076 txn that reinstalls a content-identical chain
 //! keeps the key stable, does not count as a regroup, and (new in this
-//! slice) skips the resync entirely: the staged output is a pure
-//! function of the key.
+//! slice) skips the resync entirely. Mutable dataset contents are not part
+//! of that key; dataset swaps explicitly re-evaluate affected staged output.
 
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
@@ -64,15 +64,15 @@ pub(in crate::manager) use payload::{
 };
 use payload::{BatchedTransitionCounters, VpnDenialRecord, bump_counter_row};
 
-use super::helpers::{LOCAL_PEER, routes_equal, vpn_routes_equal};
+use super::helpers::{LOCAL_PEER, prefix_family, routes_equal, vpn_routes_equal};
 use super::{PolicyFilteredRouteKey, RibManager, RtcMembership};
 use crate::adj_rib_out::AdjRibOut;
 use crate::route::{Route, VpnRibRoute, VpnRibRouteKey};
 use crate::update::{
-    ExactExportKey, RouteQueryKey, UpdateGroupClassification, UpdateGroupClassifierInput,
-    UpdateGroupComparisonDifference, UpdateGroupComparisonMembership, UpdateGroupComparisonVerdict,
-    UpdateGroupPeerComparison, UpdateGroupPeerSnapshot, UpdateGroupSnapshot, classify_update_group,
-    route_query_key,
+    ExactExportKey, RibCommandError, RouteQueryKey, UpdateGroupClassification,
+    UpdateGroupClassifierInput, UpdateGroupComparisonDifference, UpdateGroupComparisonMembership,
+    UpdateGroupComparisonVerdict, UpdateGroupPeerComparison, UpdateGroupPeerSnapshot,
+    UpdateGroupSnapshot, classify_update_group, route_query_key,
 };
 
 fn send_update_group_snapshot(
@@ -1393,6 +1393,71 @@ impl RibManager {
         {
             group.dirty_members.remove(&peer);
         }
+    }
+
+    /// Dataset updates preserve policy identity, so refresh the shared staged
+    /// verdicts explicitly. Mark members dirty before staging: the existing
+    /// tombstone and source-flip residue then preserves every owed withdrawal.
+    pub(in crate::manager) fn handle_reevaluate_peer_export_policies(
+        &mut self,
+        peers: &[IpAddr],
+        reply: tokio::sync::oneshot::Sender<Result<(), RibCommandError>>,
+    ) {
+        if let Some(peer) = peers
+            .iter()
+            .find(|peer| !self.outbound_peers.contains_key(peer))
+        {
+            let _ = reply.send(Err(RibCommandError::not_found(format!(
+                "peer {peer} not registered for outbound updates"
+            ))));
+            return;
+        }
+        let groups: HashSet<usize> = peers
+            .iter()
+            .filter_map(|peer| self.grouped_member_of(*peer))
+            .collect();
+        let mut targets: HashSet<IpAddr> = peers.iter().copied().collect();
+        for gid in &groups {
+            if let Some(group) = self.group_ribs.get(gid) {
+                targets.extend(group.members.iter().copied());
+            }
+        }
+        for peer in targets {
+            self.mark_outbound_dirty(peer);
+        }
+        if !groups.is_empty() {
+            let mut prefixes: HashSet<Prefix> =
+                self.unicast_prefix_peers.prefixes.keys().copied().collect();
+            prefixes.extend(self.loc_rib.iter().map(|route| route.prefix));
+            let mut vpn_keys: HashSet<_> = self.loc_rib.iter_vpn().map(VpnRibRoute::key).collect();
+            for gid in &groups {
+                if let Some(group) = self.group_ribs.get(gid) {
+                    prefixes.extend(group.table.iter().map(|route| route.prefix));
+                    vpn_keys.extend(group.table.iter_vpn().map(VpnRibRoute::key));
+                }
+            }
+            self.record_deferred_unicast(&prefixes);
+            prefixes.retain(|prefix| !self.selection_deferred(prefix_family(prefix)));
+            self.record_deferred_vpn(&vpn_keys);
+            vpn_keys.retain(|key| !self.selection_deferred(key.afi_safi()));
+            let vpn_keys: HashSet<_> = vpn_keys.into_iter().map(|key| key.nlri_key).collect();
+            let mut memo = super::distribution::ExportMemo::default();
+            // Staging commits the tables and retains withdrawal residue for
+            // dirty members; their resync below consumes that committed state.
+            for gid in groups {
+                let _ = self.stage_group_prefixes(gid, &prefixes, &mut memo);
+                if self
+                    .group_ribs
+                    .get(&gid)
+                    .is_some_and(GroupRibOut::stages_vpn)
+                {
+                    let _ = self.stage_group_vpn_keys(gid, &vpn_keys);
+                }
+            }
+            self.refresh_lane_gauge();
+        }
+        self.distribute_changes(&HashSet::new(), &HashSet::new());
+        let _ = reply.send(Ok(()));
     }
 
     /// Mark a peer's outbound channel dirty for the resync timer, and —
