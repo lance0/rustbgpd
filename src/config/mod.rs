@@ -3288,8 +3288,8 @@ pub enum SighupReloadRoute {
     /// keeps the candidate off the compensated generation executor; an empty
     /// list means the candidate has no generation-class change at all.
     Sequential { reasons: Vec<String> },
-    /// Rejected before any runtime, credential, or catalog effect. Each
-    /// reason names a family that must be reloaded on its own.
+    /// Rejected before any runtime, credential, or catalog effect. Reasons
+    /// name incompatible families or dataset bindings requiring a restart.
     Rejected { reasons: Vec<String> },
 }
 
@@ -3319,16 +3319,16 @@ impl SighupReloadRoute {
 
 /// Route a SIGHUP candidate by the families it touches.
 ///
-/// A candidate with no generation-class change keeps the sequential path
-/// every isolated capability already has. A generation-class change combined
-/// with dataset content, dynamic ranges, EVPN runtime, FIB tables, or the
-/// honor knobs is rejected: none of those families retains and restores
-/// priors, so their partial effects could not be compensated. A
-/// generation-class change combined with a TCP-AO rotation or a listener
-/// inbound-auth change stays sequential: the rotation is its own ordered
-/// protocol and the listener inventory is a converging replacement, and the
-/// session reshape primitive refuses authentication changes, so neither can
-/// be folded into the generation.
+/// Dataset contents with unchanged bindings participate in generation
+/// compensation; dataset binding changes are rejected. A generation-class
+/// or dataset-content change combined with dynamic ranges, EVPN runtime,
+/// FIB tables, or the honor knobs is rejected because those families do not
+/// retain and restore priors. Dataset content combined with TCP-AO rotation
+/// or listener inbound-auth changes is also rejected. Without dataset
+/// changes, those authentication edits keep a generation-class candidate on
+/// the sequential path: they have separate ordered protocols and cannot be
+/// folded into the session reshape primitive. Candidates with no generation,
+/// dataset-content, or dataset-binding change keep the sequential path.
 #[must_use]
 pub fn classify_sighup_reload(families: SighupReloadFamilies) -> SighupReloadRoute {
     if !families.generation && !families.datasets && !families.dataset_bindings {

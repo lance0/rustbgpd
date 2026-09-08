@@ -299,40 +299,32 @@ of taking its default process action. The ordering is a contract, asserted by
 
 ### Config Reload (SIGHUP)
 
-1. Signal handler sets a reload flag in the main `select!` loop.
-2. `reload_config()` re-reads the TOML and diffs the new config against
-   the current snapshot bucket-by-bucket: neighbor sets, named policies,
-   peer groups, global import / export chains, and `[[neighbors]]` deltas.
-3. For each bucket (in dependency order — definitions first, then
-   `[[neighbors]]` reconcile, then deletes in reverse-dependency order
-   so transient `still referenced` rejections don't fire), the binary
-   sends a single-shot command to the peer manager that goes through
-   `apply_policy_change` / `apply_peer_group_change`. Runtime effect
-   matches the existing gRPC API path: hot-applied policy chains, peer
-   re-add for changed peer-group memberships.
-4. Reload halts at the first step failure and returns a partial-state
-   snapshot via `halt_partial`, so the daemon's in-memory config tracks
-   what the peer manager actually applied (operator fixes the failing
-   TOML and reloads again to converge against the half-applied state).
-   Exception: the neighbor-reconcile step returns `None` on partial
-   failure because live state is genuinely ambiguous after a
-   delete-then-readd partial; earlier reload steps still land at the
-   manager and remain in effect.
-5. When an effective import policy changes via SIGHUP (or any gRPC
-   `SetPolicy` / `SetPeerGroup` / chain mutation),
-   `PeerManager::update_runtime_policies` automatically issues a Route
-   Refresh (RFC 2918) to the affected Established peers so routes
-   already in `AdjRibIn` get re-evaluated against the new policy.
-   `pending_refresh` / `pending_export_apply` flags on `ManagedPeer`
-   carry unfired retry intent across calls (e.g. peer mid-reconnect at
-   refresh time, transient mpsc backpressure).
-6. Global config changes that are not hot-reloadable
-   (`[global]` ASN/router-id/families, `[rpki]`, `[bmp]`, `[mrt]`,
-   `[global.telemetry.grpc_*]` listener config)
-   are surfaced under "Restart-required" in `rustbgpd --diff` and logged
-   at reload time. The runtime listener config for `grpc_tcp` / `grpc_uds`
-   is pinned back to the live values so subsequent diffs keep flagging
-   the drift until an actual restart happens.
+The main signal loop starts a retained reload task under the runtime-config
+coordinator. It resolves the candidate TOML and staged file contents, then
+`classify_sighup_reload()` selects a `SighupReloadRoute` before runtime,
+credential, or catalog effects:
+
+| Route | Settlement |
+|---|---|
+| `Generation` | One resolved candidate produces one action per static neighbor and final policy chains for live peers. Prior config, policy, dataset, and session snapshots remain owned until the candidate settles or a later failure restores the prior generation. |
+| `Sequential` | Per-subsystem steps run in dependency order without generation compensation. A failure halts the sequence; an authoritative receipt can retain the known-partial runtime state for the next reload. |
+| `Rejected` | Preflight rejects an unsupported combination before any effect. The running configuration remains in place. |
+
+The [operations guide](../reference/operations.md#configuration-reload-sighup)
+describes the current family combinations, dataset compensation, and failure
+handling. The [reload matrix](../reference/reload-matrix.md#sighup-reload-routes)
+separates whole-candidate routing from individual field reload classes.
+Generation settlement never returns a known-partial receipt. Lost accepted
+acknowledgements or non-authoritative state instead recovery-fence the daemon;
+they are not reported as successful application or restoration.
+
+Effective import-chain changes request Route Refresh from affected Established
+peers. Retry intent survives reconnects and temporary backpressure, while a
+generation cannot report success with required refresh work unresolved. A local
+refresh acknowledgement proves dispatch, not completion of the peer's replay.
+
+Daemon restart-required fields stay pinned to their live values on every route.
+`rustbgpd --diff` and subsequent reloads keep reporting that drift until restart.
 
 ### Config Transactions
 
