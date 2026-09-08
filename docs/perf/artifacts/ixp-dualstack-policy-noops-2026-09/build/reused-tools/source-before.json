@@ -1,0 +1,13 @@
+{
+  "revision": "f2e14e675d096e3fd79d81ece3e7885c6f3855e4",
+  "tree": "bcdc87cb324ee0a07484606cdddb658cb6f21259",
+  "worktree": "/tmp/policy-noops-tools-source",
+  "status_porcelain_before": "",
+  "tracked_build_inputs": {
+    "Cargo.toml": "d94104b54e0a513177d9915bb34b779dbe40f44a1fbddc8bbea351b884cd2e22",
+    "Cargo.lock": "b8b34577214c46f523b085747a9e3b5a3ab452ab2016530b3c7100203c9cd43d",
+    "bench/scale/Cargo.toml": "6973e11f09d1ad6e5a643afefd3d72f95a0b5adb992d5817b9e248ab5e0a86a9",
+    "bench/scale/Cargo.lock": "9149275080a037d0cc1c4287c7144ba5dca565666407c5a378ca9287a3d52f47",
+    ".cargo/config.toml": "363d9c35088644454119ade2f7c66e6997fef48928075ea5fe99c2f09b15821a"
+  }
+}

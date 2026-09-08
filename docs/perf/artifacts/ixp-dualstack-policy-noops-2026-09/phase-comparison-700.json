@@ -1,0 +1,134 @@
+{
+  "baseline": {
+    "public_log": "../ixp-dualstack-2026-09-08/diagnostic-700-50-F/rustbgpd/daemon.log.gz",
+    "original_log_sha256": "22b7ae8e029fbb308435509286ac86c893d6f8d0e3fbdb56770d288c4e849c3f",
+    "generations": [
+      {
+        "timestamp": "2026-09-08T17:19:58.405964Z",
+        "level": "INFO",
+        "fields": {
+          "message": "reload generation phase timing",
+          "target": "reload_generation_phase",
+          "total_targets": 700,
+          "cohort_targets": 600,
+          "remainder_targets": 100,
+          "refresh_count": 600,
+          "outcome": "committed",
+          "authoritative_fallback": true,
+          "preflight_us": 116,
+          "cohort_selection_us": 4488,
+          "cohort_prestage_session_apply_us": 714711,
+          "cohort_rib_transition_us": 904462,
+          "authoritative_remainder_apply_us": 97618463,
+          "deferred_refresh_dispatch_us": 151727,
+          "convergence_check_us": 106,
+          "total_us": 99394569,
+          "unattributed_us": 496
+        },
+        "target": "rustbgpd::peer_manager::policy"
+      }
+    ]
+  },
+  "candidate": {
+    "public_log": "700-50-F/rustbgpd/daemon.log.gz",
+    "original_log_sha256": "78c56692303dc0f8b8c86b274d3bfc86100a51bbf2ed6e873959cb15aa880be0",
+    "generations": [
+      {
+        "timestamp": "2026-09-08T20:33:43.282401Z",
+        "level": "INFO",
+        "fields": {
+          "message": "reload generation phase timing",
+          "target": "reload_generation_phase",
+          "total_targets": 600,
+          "cohort_targets": 600,
+          "remainder_targets": 0,
+          "refresh_count": 0,
+          "outcome": "committed",
+          "authoritative_fallback": true,
+          "preflight_us": 43,
+          "cohort_selection_us": 4249,
+          "cohort_prestage_session_apply_us": 697062,
+          "cohort_rib_transition_us": 906064,
+          "authoritative_remainder_apply_us": 1,
+          "deferred_refresh_dispatch_us": 4,
+          "convergence_check_us": 54,
+          "total_us": 1608007,
+          "unattributed_us": 530
+        },
+        "target": "rustbgpd::peer_manager::policy"
+      },
+      {
+        "timestamp": "2026-09-08T20:34:06.270594Z",
+        "level": "INFO",
+        "fields": {
+          "message": "reload generation phase timing",
+          "target": "reload_generation_phase",
+          "total_targets": 600,
+          "cohort_targets": 600,
+          "remainder_targets": 0,
+          "refresh_count": 0,
+          "outcome": "committed",
+          "authoritative_fallback": true,
+          "preflight_us": 48,
+          "cohort_selection_us": 3316,
+          "cohort_prestage_session_apply_us": 987337,
+          "cohort_rib_transition_us": 900519,
+          "authoritative_remainder_apply_us": 1,
+          "deferred_refresh_dispatch_us": 4,
+          "convergence_check_us": 94,
+          "total_us": 1892259,
+          "unattributed_us": 940
+        },
+        "target": "rustbgpd::peer_manager::policy"
+      },
+      {
+        "timestamp": "2026-09-08T20:34:28.960636Z",
+        "level": "INFO",
+        "fields": {
+          "message": "reload generation phase timing",
+          "target": "reload_generation_phase",
+          "total_targets": 600,
+          "cohort_targets": 600,
+          "remainder_targets": 0,
+          "refresh_count": 0,
+          "outcome": "committed",
+          "authoritative_fallback": true,
+          "preflight_us": 98,
+          "cohort_selection_us": 3042,
+          "cohort_prestage_session_apply_us": 671471,
+          "cohort_rib_transition_us": 873185,
+          "authoritative_remainder_apply_us": 2,
+          "deferred_refresh_dispatch_us": 4,
+          "convergence_check_us": 94,
+          "total_us": 1548554,
+          "unattributed_us": 658
+        },
+        "target": "rustbgpd::peer_manager::policy"
+      },
+      {
+        "timestamp": "2026-09-08T20:34:51.898945Z",
+        "level": "INFO",
+        "fields": {
+          "message": "reload generation phase timing",
+          "target": "reload_generation_phase",
+          "total_targets": 600,
+          "cohort_targets": 600,
+          "remainder_targets": 0,
+          "refresh_count": 0,
+          "outcome": "committed",
+          "authoritative_fallback": true,
+          "preflight_us": 54,
+          "cohort_selection_us": 2725,
+          "cohort_prestage_session_apply_us": 893698,
+          "cohort_rib_transition_us": 909169,
+          "authoritative_remainder_apply_us": 1,
+          "deferred_refresh_dispatch_us": 5,
+          "convergence_check_us": 94,
+          "total_us": 1806765,
+          "unattributed_us": 1019
+        },
+        "target": "rustbgpd::peer_manager::policy"
+      }
+    ]
+  }
+}
