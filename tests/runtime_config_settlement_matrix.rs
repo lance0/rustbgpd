@@ -66,7 +66,12 @@ impl MatrixRow {
     const fn checkpoint(self) -> &'static str {
         match self {
             Self::Apply => "transaction_after_begin_mutation",
-            Self::AutoRevert => "replace_before_publish",
+            // Auto-revert re-applies the captured prior config through the
+            // transaction executor, which now durably stages the candidate
+            // and publishes it with a commit rather than a single-phase
+            // replace. Its persister checkpoint is therefore the staged
+            // commit, the same phase every other transaction family reaches.
+            Self::AutoRevert => "staged_commit_before_publish",
             Self::PeerGroup => "catalog_actor_command_accepted",
             Self::Policy => "staged_commit_before_publish",
         }
@@ -857,7 +862,15 @@ fn exercise_auto_revert(lab: &Lab, daemon: &mut Daemon) -> RowResult {
     wait_metrics(lab.metrics, MatrixRow::AutoRevert, "none", false, daemon);
     assert!(locator.is_file(), "hold must retain rollback authority");
     lab.assert_disk("auto-candidate", true);
-    assert!(!lab.stage_path().exists());
+    // Auto-revert now durably stages the reverted config before the held
+    // commit publishes it, so the stage file is present and already carries
+    // the reverted (pre-auto-candidate) config while the operator file on
+    // disk still holds the auto-candidate this commit has not yet replaced.
+    let staged = std::fs::read_to_string(lab.stage_path()).expect("auto-revert stage");
+    assert!(
+        !staged.contains("auto-candidate"),
+        "the staged revert must drop the auto-candidate"
+    );
     RowResult::None
 }
 
