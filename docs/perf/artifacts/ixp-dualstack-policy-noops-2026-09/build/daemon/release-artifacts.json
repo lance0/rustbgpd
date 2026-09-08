@@ -1,0 +1,40 @@
+[
+  {
+    "reason": "compiler-artifact",
+    "package_id": "path+file:///tmp/policy-noops-source#rustbgpd@0.69.0",
+    "manifest_path": "/tmp/policy-noops-source/Cargo.toml",
+    "target": {
+      "kind": [
+        "bin"
+      ],
+      "crate_types": [
+        "bin"
+      ],
+      "name": "rustbgpd",
+      "src_path": "/tmp/policy-noops-source/src/main.rs",
+      "edition": "2024",
+      "doc": true,
+      "doctest": false,
+      "test": true
+    },
+    "profile": {
+      "opt_level": "3",
+      "debuginfo": 0,
+      "debug_assertions": false,
+      "overflow_checks": false,
+      "test": false
+    },
+    "features": [
+      "default",
+      "jemalloc",
+      "tikv-jemallocator"
+    ],
+    "filenames": [
+      "/tmp/policy-noops-build-target/release/rustbgpd"
+    ],
+    "executable": "/tmp/policy-noops-build-target/release/rustbgpd",
+    "fresh": false,
+    "executable_sha256": "5f293bd925d451e3c6fe97ff4309f7f341c7e0e0dfdc8de7471f53cd3d019b9e",
+    "immutable_executable": "/tmp/policy-noops-daemon-build/bin/rustbgpd"
+  }
+]
