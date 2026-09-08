@@ -831,9 +831,16 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 
 The transaction executors share the same coordinator and persistence ordering
 as the targeted runtime CRUD paths: re-plan under the runtime snapshot token,
-stage the live config snapshot, apply the live runtime change, persist the
-exact accepted candidate with an acknowledgement, roll back on failure, and
-only then release the coordinator lock. FIB transactions still require the FIB
+durably stage the exact accepted candidate next to the config file, stage the
+live config snapshot, apply the live runtime change, publish the staged
+candidate with an acknowledgement, roll back on a publication failure, and
+only then release the coordinator lock. A stage the persister refuses — an
+unwritable or read-only config directory, a full filesystem, or a candidate
+the daemon cannot derive from its accepted config — fails the transaction with
+`FAILED_PRECONDITION` before any session, catalog, or policy state changes; a
+rename that fails after the stage is compensated, and an ambiguous publication
+or lost acknowledgement fences as described under `RecoveryRequired`. FIB
+transactions still require the FIB
 reconciler to already be running, so adding the first `[[fib_tables]]` entry to
 a daemon that started without any tables requires a restart.
 
@@ -851,9 +858,10 @@ TOML, but does not run `SetPolicy` / `SetPeerGroup` live mutation commands.
 Policy/neighbor-set/peer-group/global-chain transactions that move an existing
 static neighbor's or accepted dynamic peer's resolved import/export
 `PolicyChain` are also committable when the impact is purely a chain move. The
-executor stages the snapshot, re-applies the resolved chains to affected live
-sessions, captures prior chains for rollback, persists with an acknowledgement,
-and restores both live policy chains and the snapshot on failure. Dynamic peers
+executor stages the candidate on disk and the snapshot, re-applies the resolved
+chains to affected live sessions, captures prior chains for rollback, publishes
+the staged candidate with an acknowledgement, and restores both live policy
+chains and the snapshot on a publication failure. Dynamic peers
 are selected by the canonical `[[dynamic_neighbors]]` range that accepted them,
 not by a public API field. Re-evaluating already-received routes under a new
 import chain requires Route Refresh, so every impacted Established peer must
@@ -862,10 +870,11 @@ and rolled back without committing the candidate.
 
 Peer-group/session reshape transactions commit peer-group field edits or
 static-neighbor peer-group reassignments that rebuild existing sessions. The
-executor stages the snapshot, reconfigures affected static peers with the same
-delete/re-add semantics as SIGHUP, captures prior peer configs for rollback,
-persists with an acknowledgement, and restores both live peers and the snapshot
-on failure. Live dynamic sessions accepted by an affected
+executor stages the candidate on disk and the snapshot, reconfigures affected
+static peers with the same delete/re-add semantics as SIGHUP, captures prior
+peer configs for rollback, publishes the staged candidate with an
+acknowledgement, and restores both live peers and the snapshot on a publication
+failure. Live dynamic sessions accepted by an affected
 `[[dynamic_neighbors]]` range cannot be delete/re-added (they exist only
 because the remote dialed in), so after a successful persist the executor
 gracefully resets them with a Cease NOTIFICATION carrying an RFC 8203 shutdown

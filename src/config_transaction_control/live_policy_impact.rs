@@ -13,15 +13,16 @@ use crate::peer_manager::{
 
 use super::{
     ApplyFailure, RuntimeConfigMutationProgress, combine_rollback_errors,
-    commit_config_snapshot_stage, persist_candidate_config, reserve_persist_permit,
-    restore_preloaded_config_snapshot, rollback_snapshot_after_error,
-    stage_preloaded_config_snapshot,
+    commit_config_snapshot_stage, reserve_persist_permit, restore_preloaded_config_snapshot,
+    rollback_snapshot_after_error, stage_candidate_config, stage_preloaded_config_snapshot,
 };
 
-/// Commit a live-impact policy/peer-group/global-chain transaction: stage the
-/// candidate snapshot, re-apply the affected static neighbors' resolved chains
-/// to their live sessions (capturing priors), persist, and roll back live +
-/// snapshot on failure. Returns the number of live sessions re-evaluated.
+/// Commit a live-impact policy/peer-group/global-chain transaction: durably
+/// stage the candidate on disk, stage the candidate snapshot, re-apply the
+/// affected static neighbors' resolved chains to their live sessions
+/// (capturing priors), publish the staged candidate, and roll back live +
+/// snapshot on a publication failure. Returns the number of live sessions
+/// re-evaluated.
 pub(super) async fn commit_live_policy_impact_locked(
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
     peer_mgr_internal_tx: &mpsc::Sender<InternalCommand>,
@@ -32,6 +33,7 @@ pub(super) async fn commit_live_policy_impact_locked(
 ) -> Result<usize, ApplyFailure> {
     let permit = reserve_persist_permit(config_tx).await?;
     progress.begin_mutation();
+    let staged = stage_candidate_config(permit, candidate_toml).await?;
     let rollback = stage_preloaded_config_snapshot(
         peer_mgr_internal_tx,
         Box::new(candidate.clone()),
@@ -68,7 +70,7 @@ pub(super) async fn commit_live_policy_impact_locked(
     };
 
     progress.begin_settling();
-    if let Err(failure) = persist_candidate_config(permit, candidate_toml).await {
+    if let Err(failure) = staged.commit().await {
         if failure.fence_reason.is_some() {
             return Err(failure);
         }
