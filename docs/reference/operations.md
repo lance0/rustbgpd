@@ -2215,11 +2215,26 @@ intentionally withholding routes until capacity recovers. Merely configured,
 unlimited, and nonblocking family rows do not add checks. Link-local identities
 retain their `%interface` scope in both check names and details.
 
+Doctor parses the effective-config document once and reads probe targets from
+its documented key paths. With `global.listen_addresses`, a local check uses
+every configured address, including when management uses a Unix socket; it
+does not substitute loopback. With the default wildcard listeners, either
+IPv4 or IPv6 loopback reaching the listener is sufficient, matching the
+daemon's tolerance of an unavailable address family. Local checks identify
+management through a Unix socket, `localhost`, or a loopback IP. These probes
+assume that connection reaches a daemon in the CLI's network namespace;
+forwarded management sockets do not prove that shared vantage.
+
+From a remote CLI, listener connections are reachability observations; a
+failure cannot distinguish a failed bind from routing or filtering. Explicit
+daemon loopback addresses cannot be checked remotely. Run doctor on the
+daemon host to verify these binds, including for `--pre-upgrade` diagnostics.
+
 First-deploy checks (network probes are bounded to a 2s timeout; all are read-only):
 
 | Check | What it probes | Red/yellow advice |
 |-------|----------------|-------------------|
-| `bgp.listener` | Daemon up: TCP connect to the BGP listen port. Daemon down: test-bind the port and release it | `CAP_NET_BIND_SERVICE` for ports below 1024; port-in-use is yellow (an unreachable daemon may hold it) |
+| `bgp.listener` | Daemon up: TCP connect to the configured BGP addresses and listen port. Daemon down: test-bind the port and release it | A failed local explicit-address probe is red; remote CLI reachability failures are yellow. `CAP_NET_BIND_SERVICE` is needed for ports below 1024; port-in-use on a test-bind is yellow |
 | `rpki.vrp_table` | With configured caches and a reachable daemon, requires a nonzero complete IPv4 + IPv6 `bgp_rpki_vrp_count` snapshot and retained accepted complete End-of-Data readiness for every configured cache | yellow when the merged table is zero/missing/malformed/unavailable or a configured cache is not ready/missing from the readiness snapshot; this is retained readiness, not current RTR connectivity |
 | `rpki.cache.<addr>.reachable_from_cli` | TCP connect from the `rbgp` process to each `[rpki] cache_servers` entry | yellow on failure because this is CLI-network-vantage evidence, not daemon-side connectivity; use `rpki.vrp_table` for the daemon's VRP state |
 | `bmp.collector.<addr>.reachable_from_cli` | TCP connect from the `rbgp` process to each `[bmp] collectors` entry | yellow on failure because the daemon may have a different network vantage; inspect rustbgpd and collector logs for actual export state |

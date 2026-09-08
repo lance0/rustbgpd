@@ -157,6 +157,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   nonqualifying transitions retain the existing per-peer fallback; dirty
   members keep their ordinary resync and withdrawal recovery.
 
+- `rbgp doctor` now shares one parsed effective-config document across checks
+  and probes explicit BGP listener addresses instead of substituting loopback.
+  Local failed binds remain red; default wildcard probes tolerate one unavailable
+  address family, and remote listener probes identify their CLI vantage.
+
 ### Upgrade notes
 
 - Consumers of `GetPolicyStats` or `rbgp policy stats` should use the installed

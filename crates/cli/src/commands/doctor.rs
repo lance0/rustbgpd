@@ -602,8 +602,7 @@ fn tail_lines(text: &str, n: usize) -> String {
 }
 
 /// `[global] runtime_state_dir` from the daemon's effective-config TOML.
-fn parse_state_dir(effective_toml: &str) -> Option<String> {
-    let value: toml::Value = toml::from_str(effective_toml).ok()?;
+fn config_state_dir(value: &toml::Value) -> Option<String> {
     Some(
         value
             .get("global")?
@@ -624,10 +623,7 @@ fn deploy_config_source<'a>(
         })
 }
 
-fn tcp_ao_configured_targets(effective_toml: &str) -> Vec<String> {
-    let Ok(value) = toml::from_str::<toml::Value>(effective_toml) else {
-        return Vec::new();
-    };
+fn tcp_ao_configured_targets(value: &toml::Value) -> Vec<String> {
     let mut targets = Vec::new();
     for (table, identity) in [("neighbors", "address"), ("dynamic_neighbors", "prefix")] {
         if let Some(rows) = value.get(table).and_then(toml::Value::as_array) {
@@ -644,8 +640,8 @@ fn tcp_ao_configured_targets(effective_toml: &str) -> Vec<String> {
     targets
 }
 
-fn tcp_ao_capability_checks(effective_toml: &str, support: i32) -> Vec<Check> {
-    tcp_ao_configured_targets(effective_toml)
+fn tcp_ao_capability_checks(document: &toml::Value, support: i32) -> Vec<Check> {
+    tcp_ao_configured_targets(document)
         .into_iter()
         .map(|target| {
             let (status, verdict) = match crate::proto::TcpAoSupport::try_from(support) {
@@ -1004,8 +1000,7 @@ fn insert_unique(map: &mut HashMap<String, Option<u8>>, key: String, hops: u8) {
     }
 }
 
-fn gtsm_inventory(effective_toml: &str) -> Option<GtsmInventory> {
-    let value: toml::Value = toml::from_str(effective_toml).ok()?;
+fn gtsm_inventory(value: &toml::Value) -> GtsmInventory {
     let mut inventory = GtsmInventory::default();
     for row in value
         .get("neighbors")
@@ -1039,7 +1034,7 @@ fn gtsm_inventory(effective_toml: &str) -> Option<GtsmInventory> {
             insert_unique(&mut inventory.peer_groups, name.clone(), hops);
         }
     }
-    Some(inventory)
+    inventory
 }
 
 fn parse_metric_labels(input: &str) -> Option<HashMap<String, String>> {
@@ -1223,60 +1218,30 @@ fn sweep_crash_reports(crash_dir: &Path, bundle: &mut Bundle) -> Vec<String> {
 // test-bind that is immediately released, statvfs/access, and /proc
 // reads. Each network touch is bounded by [`PROBE_TIMEOUT_SECS`].
 
-/// Probe endpoints parsed from a config TOML document (the daemon's
-/// effective dump or, daemon-down, the local config file — same schema).
-#[derive(Default)]
-struct DeployTargets {
-    listen_port: Option<u16>,
-    /// `[rpki] cache_servers[].address` (`host:port`).
-    rpki_caches: Vec<String>,
-    /// `[bmp] collectors[].address` (`host:port`).
-    bmp_collectors: Vec<String>,
-    /// `[gnmi_dialout] targets[]` as `(name, address)`.
-    gnmi_collectors: Vec<(String, String)>,
+/// Read a documented key path without projecting the daemon's config schema.
+/// The effective document is parsed once and shared by all doctor checks.
+fn config_value<'a>(document: &'a toml::Value, path: &[&str]) -> Option<&'a toml::Value> {
+    path.iter().try_fold(document, |value, key| value.get(*key))
 }
 
-fn deploy_targets(toml_text: &str) -> DeployTargets {
-    let Ok(value) = toml::from_str::<toml::Value>(toml_text) else {
-        return DeployTargets::default();
-    };
-    let addresses = |section: &str, list: &str| -> Vec<String> {
-        value
-            .get(section)
-            .and_then(|s| s.get(list))
-            .and_then(toml::Value::as_array)
-            .map(|rows| {
-                rows.iter()
-                    .filter_map(|row| row.get("address").and_then(toml::Value::as_str))
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    DeployTargets {
-        listen_port: value
-            .get("global")
-            .and_then(|g| g.get("listen_port"))
-            .and_then(toml::Value::as_integer)
-            .and_then(|p| u16::try_from(p).ok()),
-        rpki_caches: addresses("rpki", "cache_servers"),
-        bmp_collectors: addresses("bmp", "collectors"),
-        gnmi_collectors: value
-            .get("gnmi_dialout")
-            .and_then(|g| g.get("targets"))
-            .and_then(toml::Value::as_array)
-            .map(|rows| {
-                rows.iter()
-                    .filter_map(|row| {
-                        Some((
-                            row.get("name")?.as_str()?.to_string(),
-                            row.get("address")?.as_str()?.to_string(),
-                        ))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
-    }
+fn config_rows<'a>(document: &'a toml::Value, path: &[&str]) -> &'a [toml::Value] {
+    config_value(document, path)
+        .and_then(toml::Value::as_array)
+        .map_or(&[], Vec::as_slice)
+}
+
+fn config_addresses(document: &toml::Value, path: &[&str]) -> Vec<String> {
+    config_rows(document, path)
+        .iter()
+        .filter_map(|row| row.get("address").and_then(toml::Value::as_str))
+        .map(str::to_string)
+        .collect()
+}
+
+fn config_listen_port(document: &toml::Value) -> Option<u16> {
+    config_value(document, &["global", "listen_port"])
+        .and_then(toml::Value::as_integer)
+        .and_then(|port| u16::try_from(port).ok())
 }
 
 fn rpki_vrp_table_check(configured_caches: &[String], metrics: Option<&str>) -> Option<Check> {
@@ -1433,40 +1398,151 @@ async fn run_probe(spec: ProbeSpec) -> Check {
     }
 }
 
-async fn collect_probe_tasks(tasks: Vec<ProbeTask>) -> Vec<Check> {
+async fn collect_probe_tasks(tasks: Vec<ProbeTask>) -> (Vec<Check>, bool) {
     let mut checks = Vec::with_capacity(tasks.len());
+    let mut task_failed = false;
     for task in tasks {
         match task.handle.await {
             Ok(check) => checks.push(check),
-            Err(error) => checks.push(Check {
-                name: task.identity.name,
-                status: CheckStatus::Fail,
-                detail: format!(
-                    "{} {} reachability probe task failed ({error}); \
-                     doctor could not determine reachability",
-                    task.identity.label, task.identity.addr
-                ),
-            }),
+            Err(error) => {
+                task_failed = true;
+                checks.push(Check {
+                    name: task.identity.name,
+                    status: CheckStatus::Fail,
+                    detail: format!(
+                        "{} {} reachability probe task failed ({error}); \
+                         doctor could not determine reachability",
+                        task.identity.label, task.identity.addr
+                    ),
+                });
+            }
         }
     }
-    checks
+    (checks, task_failed)
 }
 
-/// Host to probe for the daemon-up BGP listener check: the host doctor
-/// already reaches the daemon on. A unix-socket daemon is local.
-fn listener_probe_host(daemon_address: &str) -> String {
-    if daemon_address.starts_with("unix://") {
-        return "127.0.0.1".to_string();
-    }
-    let rest = daemon_address
-        .strip_prefix("http://")
-        .or_else(|| daemon_address.strip_prefix("https://"))
-        .unwrap_or(daemon_address);
-    let host = rest.rsplit_once(':').map_or(rest, |(h, _)| h);
-    if host.is_empty() {
-        "127.0.0.1".to_string()
+/// The management host is a fallback only for remote wildcard listeners.
+fn daemon_probe_host(daemon_address: &str) -> Option<String> {
+    let uri = if daemon_address.starts_with("http://") || daemon_address.starts_with("https://") {
+        daemon_address.to_string()
     } else {
-        host.to_string()
+        format!("http://{daemon_address}")
+    };
+    tonic::codegen::http::Uri::try_from(uri)
+        .ok()?
+        .host()
+        .map(|host| host.trim_matches(['[', ']']).to_string())
+}
+
+fn local_daemon(daemon_address: &str) -> bool {
+    daemon_address.starts_with("unix://")
+        || daemon_probe_host(daemon_address).is_some_and(|host| {
+            host == "localhost"
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        })
+}
+
+/// Explicit addresses come from `[global].listen_addresses`, including when
+/// management uses a Unix socket. Omitted addresses mean tolerant dual wildcard
+/// listeners: either family can serve if the other is unavailable.
+fn listener_probe_hosts(document: &toml::Value, daemon_address: &str) -> Vec<String> {
+    if config_value(document, &["global", "listen_addresses"]).is_some() {
+        return config_rows(document, &["global", "listen_addresses"])
+            .iter()
+            .filter_map(toml::Value::as_str)
+            .map(str::to_string)
+            .collect();
+    }
+    if local_daemon(daemon_address) {
+        vec!["127.0.0.1".to_string(), "::1".to_string()]
+    } else {
+        daemon_probe_host(daemon_address).into_iter().collect()
+    }
+}
+
+async fn listener_reachability_check(
+    document: &toml::Value,
+    daemon_address: &str,
+    port: u16,
+) -> Check {
+    let local = local_daemon(daemon_address);
+    let explicit = config_value(document, &["global", "listen_addresses"]).is_some();
+    let hosts = listener_probe_hosts(document, daemon_address);
+    let mut tasks = Vec::new();
+    let mut checks = Vec::new();
+    for host in hosts {
+        let ip = host.parse::<std::net::IpAddr>().ok();
+        let addr = ip.map_or_else(
+            || format!("{host}:{port}"),
+            |ip| std::net::SocketAddr::new(ip, port).to_string(),
+        );
+        if !local && ip.is_some_and(|ip| ip.is_loopback()) {
+            checks.push(Check {
+                name: "bgp.listener".to_string(),
+                status: CheckStatus::Warn,
+                detail: format!("BGP listener {addr} is daemon-local; a remote CLI cannot probe this bind — run doctor on the daemon host"),
+            });
+            continue;
+        }
+        let spec = ProbeSpec {
+            name: "bgp.listener".to_string(),
+            label: "BGP listener".to_string(),
+            addr,
+            advice: if local {
+                "check the daemon log for listener bind errors (a port below 1024 needs CAP_NET_BIND_SERVICE)"
+            } else {
+                "run doctor on the daemon host to verify listener binds; remote routing or filtering can prevent this CLI probe"
+            },
+            cli_vantage: !local,
+        };
+        tasks.push(ProbeTask {
+            identity: ProbeTaskIdentity {
+                name: spec.name.clone(),
+                label: spec.label.clone(),
+                addr: spec.addr.clone(),
+            },
+            handle: tokio::spawn(run_probe(spec)),
+        });
+    }
+    let (results, task_failed) = collect_probe_tasks(tasks).await;
+    checks.extend(results);
+    listener_probe_summary(checks, task_failed, explicit)
+}
+
+fn listener_probe_summary(checks: Vec<Check>, task_failed: bool, explicit: bool) -> Check {
+    let status = if checks.is_empty() || task_failed {
+        CheckStatus::Fail
+    } else if !explicit && checks.iter().any(|check| check.status == CheckStatus::Ok) {
+        CheckStatus::Ok
+    } else if checks.iter().any(|check| check.status == CheckStatus::Fail) {
+        CheckStatus::Fail
+    } else if checks.iter().any(|check| check.status == CheckStatus::Warn) {
+        CheckStatus::Warn
+    } else {
+        CheckStatus::Ok
+    };
+    let detail = if checks.is_empty() {
+        "BGP listener addresses unavailable in config; cannot verify a bind".to_string()
+    } else {
+        let details = checks
+            .into_iter()
+            .map(|check| check.detail)
+            .collect::<Vec<_>>()
+            .join("; ");
+        if !explicit && status == CheckStatus::Ok {
+            format!(
+                "{details}; default wildcard mode requires at least one reachable address family"
+            )
+        } else {
+            details
+        }
+    };
+    Check {
+        name: "bgp.listener".to_string(),
+        status,
+        detail,
     }
 }
 
@@ -1476,47 +1552,42 @@ fn listener_probe_host(daemon_address: &str) -> String {
 async fn reachability_checks(
     daemon_reachable: bool,
     daemon_address: &str,
-    targets: &DeployTargets,
+    document: &toml::Value,
 ) -> Vec<Check> {
     let mut specs = Vec::new();
-    if daemon_reachable && let Some(port) = targets.listen_port {
-        specs.push(ProbeSpec {
-            name: "bgp.listener".to_string(),
-            label: "BGP listener".to_string(),
-            addr: format!("{}:{port}", listener_probe_host(daemon_address)),
-            advice: "the daemon is up but nothing accepts on its BGP listen port; check the \
-                     daemon log for listener bind errors (a port below 1024 needs \
-                     CAP_NET_BIND_SERVICE)",
-            cli_vantage: false,
-        });
-    }
-    for addr in &targets.rpki_caches {
+    for addr in config_addresses(document, &["rpki", "cache_servers"]) {
         specs.push(ProbeSpec {
             name: format!("rpki.cache.{addr}.reachable_from_cli"),
             label: "RTR cache".to_string(),
-            addr: addr.clone(),
+            addr,
             advice: "inspect the daemon-side rpki.vrp_table check and RTR logs for actual \
                      cache state; troubleshoot the CLI path only when rbgp and rustbgpd are \
                      expected to share a network vantage",
             cli_vantage: true,
         });
     }
-    for addr in &targets.bmp_collectors {
+    for addr in config_addresses(document, &["bmp", "collectors"]) {
         specs.push(ProbeSpec {
             name: format!("bmp.collector.{addr}.reachable_from_cli"),
             label: "BMP collector".to_string(),
-            addr: addr.clone(),
+            addr,
             advice: "inspect rustbgpd and collector logs for actual export state; troubleshoot \
                      the CLI path only when rbgp and rustbgpd are expected to share a network \
                      vantage",
             cli_vantage: true,
         });
     }
-    for (name, addr) in &targets.gnmi_collectors {
+    for row in config_rows(document, &["gnmi_dialout", "targets"]) {
+        let (Some(name), Some(addr)) = (
+            row.get("name").and_then(toml::Value::as_str),
+            row.get("address").and_then(toml::Value::as_str),
+        ) else {
+            continue;
+        };
         specs.push(ProbeSpec {
             name: format!("gnmi_dialout.{name}.reachable_from_cli"),
             label: format!("gNMI dial-out collector {name}"),
-            addr: addr.clone(),
+            addr: addr.to_string(),
             advice: "inspect the daemon-side gnmi_dialout_connected metric and logs for actual \
                      dial-out state; troubleshoot the CLI path only when rbgp and rustbgpd are \
                      expected to share a network vantage",
@@ -1537,7 +1608,12 @@ async fn reachability_checks(
             }
         })
         .collect();
-    collect_probe_tasks(tasks).await
+    let mut checks = Vec::new();
+    if daemon_reachable && let Some(port) = config_listen_port(document) {
+        checks.push(listener_reachability_check(document, daemon_address, port).await);
+    }
+    checks.extend(collect_probe_tasks(tasks).await.0);
+    checks
 }
 
 /// Daemon-down listener check: test-bind the BGP listen port and release
@@ -1894,8 +1970,7 @@ fn authz_identity_check(daemon_address: &str, token_file_configured: bool) -> Ch
 /// `daemon.authz.enforcement`: enforcement mode as already exposed by the
 /// daemon's own redacted effective-config dump. An older daemon whose dump
 /// lacks `[security.grpc]` yields `None` (check skipped), never a FAIL.
-fn authz_enforcement_check(effective_toml: &str) -> Option<Check> {
-    let value: toml::Value = toml::from_str(effective_toml).ok()?;
+fn authz_enforcement_check(value: &toml::Value) -> Option<Check> {
     let grpc = value.get("security")?.get("grpc")?;
     let enforcement = grpc.get("enforcement")?.as_str()?;
     let mapped_roles = grpc
@@ -1991,7 +2066,7 @@ struct PreUpgradeEvidence<'a> {
     /// RPC itself failed (denied, unimplemented, timed out, ...).
     transaction: Option<&'a Result<ConfigTransactionStatusResponse, tonic::Status>>,
     /// The daemon's effective config, or the reason it is unavailable.
-    effective_toml: Result<&'a str, &'a str>,
+    effective_config: Result<&'a toml::Value, &'a str>,
     /// The daemon's metrics scrape, or the reason it is unavailable.
     metrics: Result<&'a str, &'a str>,
 }
@@ -2011,7 +2086,7 @@ fn pre_upgrade_checks(
     vec![
         upgrade_transaction_check(evidence.transaction, observed_at),
         upgrade_settlement_check(evidence.metrics, observed_at),
-        upgrade_posture_check(candidate_path, evidence.effective_toml, observed_at),
+        upgrade_posture_check(candidate_path, evidence.effective_config, observed_at),
     ]
 }
 
@@ -2204,7 +2279,7 @@ fn upgrade_settlement_check(metrics: Result<&str, &str>, observed_at: u64) -> Ch
 /// behavior; the check names the offline migration but performs none.
 fn upgrade_posture_check(
     candidate_path: &Path,
-    effective_toml: Result<&str, &str>,
+    effective_config: Result<&toml::Value, &str>,
     observed_at: u64,
 ) -> Check {
     let name = "upgrade.posture".to_string();
@@ -2219,7 +2294,7 @@ fn upgrade_posture_check(
             .map_err(|_| "invalid TOML; source text omitted".to_string())
             .and_then(|document| rfc8212_posture(&document))
     };
-    let live = match effective_toml {
+    let live = match effective_config {
         Ok(text) => text,
         Err(reason) => {
             return fail(format!(
@@ -2227,7 +2302,7 @@ fn upgrade_posture_check(
             ));
         }
     };
-    let live = match parse(live) {
+    let live = match rfc8212_posture(live) {
         Ok(posture) => posture,
         Err(error) => {
             return fail(format!(
@@ -2363,6 +2438,7 @@ async fn run_with_deadlines(
     let mut daemon_version: Option<String> = None;
     let mut state_dir: Option<String> = None;
     let mut effective_toml: Option<String> = None;
+    let mut effective_config: Option<toml::Value> = None;
     let mut metrics_text: Option<String> = None;
     let mut metrics_error: Option<String> = None;
     let mut effective_config_error: Option<String> = None;
@@ -2532,18 +2608,34 @@ async fn run_with_deadlines(
             {
                 Ok(resp) => {
                     let toml_text = resp.into_inner().toml;
-                    for check in tcp_ao_capability_checks(&toml_text, tcp_ao_support) {
-                        reporter.record(check.name, check.status, check.detail)?;
+                    match toml::from_str::<toml::Value>(&toml_text) {
+                        Ok(document) => {
+                            for check in tcp_ao_capability_checks(&document, tcp_ao_support) {
+                                reporter.record(check.name, check.status, check.detail)?;
+                            }
+                            let rpki_caches =
+                                config_addresses(&document, &["rpki", "cache_servers"]);
+                            if let Some(check) =
+                                rpki_vrp_table_check(&rpki_caches, metrics_text.as_deref())
+                            {
+                                reporter.record(check.name, check.status, check.detail)?;
+                            }
+                            if let Some(check) = authz_enforcement_check(&document) {
+                                reporter.record(check.name, check.status, check.detail)?;
+                            }
+                            state_dir = config_state_dir(&document);
+                            effective_config = Some(document);
+                        }
+                        Err(_) => {
+                            let reason = "invalid effective-config TOML; source text omitted";
+                            effective_config_error = Some(reason.to_string());
+                            reporter.record(
+                                "deploy.config_parse",
+                                CheckStatus::Fail,
+                                reason.to_string(),
+                            )?;
+                        }
                     }
-                    let rpki_caches = deploy_targets(&toml_text).rpki_caches;
-                    if let Some(check) = rpki_vrp_table_check(&rpki_caches, metrics_text.as_deref())
-                    {
-                        reporter.record(check.name, check.status, check.detail)?;
-                    }
-                    if let Some(check) = authz_enforcement_check(&toml_text) {
-                        reporter.record(check.name, check.status, check.detail)?;
-                    }
-                    state_dir = parse_state_dir(&toml_text);
                     effective_toml = Some(toml_text);
                     sections.insert(
                         "config",
@@ -2720,8 +2812,8 @@ async fn run_with_deadlines(
                     let admin_enabled = metrics_text.as_deref().and_then(admin_enabled_inventory);
                     let gtsm = admin_enabled
                         .as_ref()
-                        .and(effective_toml.as_deref())
-                        .and_then(gtsm_inventory);
+                        .and(effective_config.as_ref())
+                        .map(gtsm_inventory);
                     let transitions = last_transition_by_peer(&session_events);
                     let losses = last_loss_by_peer(&session_events);
                     let admin_states = latest_admin_state_by_peer(&session_events);
@@ -2959,25 +3051,44 @@ async fn run_with_deadlines(
     };
     let config_source =
         deploy_config_source(effective_toml.as_deref(), local_config_source.as_ref());
+    let local_document = local_config_source
+        .as_ref()
+        .map(|(text, _)| toml::from_str::<toml::Value>(text));
+    let document = effective_config.as_ref().or_else(|| {
+        local_document
+            .as_ref()
+            .and_then(|result| result.as_ref().ok())
+    });
     match config_source {
-        Some((toml_text, source)) => {
-            let targets = deploy_targets(toml_text);
-            if !daemon_reachable && let Some(port) = targets.listen_port {
-                let check = listener_bind_check(port);
-                reporter.record(check.name, check.status, check.detail)?;
+        Some((_, source)) => {
+            if let Some(document) = document {
+                if !daemon_reachable && let Some(port) = config_listen_port(document) {
+                    let check = listener_bind_check(port);
+                    reporter.record(check.name, check.status, check.detail)?;
+                }
+                for check in
+                    reachability_checks(daemon_reachable, opts.daemon_address, document).await
+                {
+                    reporter.record(check.name, check.status, check.detail)?;
+                }
+                if state_dir.is_none() {
+                    state_dir = config_state_dir(document);
+                }
+                let dir = PathBuf::from(state_dir.as_deref().unwrap_or(DEFAULT_STATE_DIR));
+                for check in state_dir_checks(&dir) {
+                    reporter.record(check.name, check.status, check.detail)?;
+                }
+                sections.insert("probes", format!("collected (targets from {source})"));
+            } else {
+                if local_document.is_some() {
+                    reporter.record(
+                        "deploy.config_parse",
+                        CheckStatus::Fail,
+                        "invalid local config TOML; source text omitted".to_string(),
+                    )?;
+                }
+                sections.insert("probes", "skipped: invalid config document".to_string());
             }
-            for check in reachability_checks(daemon_reachable, opts.daemon_address, &targets).await
-            {
-                reporter.record(check.name, check.status, check.detail)?;
-            }
-            if state_dir.is_none() {
-                state_dir = parse_state_dir(toml_text);
-            }
-            let dir = PathBuf::from(state_dir.as_deref().unwrap_or(DEFAULT_STATE_DIR));
-            for check in state_dir_checks(&dir) {
-                reporter.record(check.name, check.status, check.detail)?;
-            }
-            sections.insert("probes", format!("collected (targets from {source})"));
         }
         None => {
             reporter.record(
@@ -2999,8 +3110,8 @@ async fn run_with_deadlines(
         let unreachable = "daemon unreachable";
         let evidence = PreUpgradeEvidence {
             transaction: transaction_status.as_ref(),
-            effective_toml: effective_toml
-                .as_deref()
+            effective_config: effective_config
+                .as_ref()
                 .ok_or(effective_config_error.as_deref().unwrap_or(unreachable)),
             metrics: metrics_text
                 .as_deref()
@@ -3240,7 +3351,10 @@ ttl_security_hops = 3
         config: Option<&str>,
         metrics: Option<&str>,
     ) -> Option<Check> {
-        let inventory = config.and_then(gtsm_inventory);
+        let inventory = config
+            .and_then(|text| toml::from_str(text).ok())
+            .as_ref()
+            .map(gtsm_inventory);
         let admin_enabled = metrics.and_then(admin_enabled_inventory);
         gtsm_advisory_check(record, history, inventory.as_ref(), admin_enabled.as_ref())
     }
@@ -3283,7 +3397,7 @@ ttl_security_hops = 3
     #[test]
     fn gtsm_advisory_suppresses_ineligible_session_states() {
         let metric = admin_metric("192.0.2.1", "", 1);
-        let inventory = gtsm_inventory(gtsm_config()).unwrap();
+        let inventory = gtsm_inventory(&toml::from_str(gtsm_config()).unwrap());
         let history =
             retained_session_evidence_with_admin(None, None, Some(RetainedAdminState::Enabled));
         let eligible = gtsm_record("192.0.2.1", "");
@@ -3608,8 +3722,10 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
 prefix = "198.51.100.0/24"
 tcp_ao = { key = "<redacted>", send_id = 3, recv_id = 4, algorithm = "hmac(sha256)" }
 "#;
-        let checks =
-            tcp_ao_capability_checks(config, crate::proto::TcpAoSupport::Unsupported.into());
+        let checks = tcp_ao_capability_checks(
+            &toml::from_str(config).unwrap(),
+            crate::proto::TcpAoSupport::Unsupported.into(),
+        );
         assert_eq!(checks.len(), 2);
         assert!(checks.iter().all(|check| check.status == CheckStatus::Fail));
         assert_eq!(checks[0].name, "peer.192.0.2.1.tcp_ao_capability");
@@ -3622,11 +3738,15 @@ tcp_ao = { key = "<redacted>", send_id = 3, recv_id = 4, algorithm = "hmac(sha25
 address = "192.0.2.1"
 tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha256)" }
 "#;
-        let supported =
-            tcp_ao_capability_checks(config, crate::proto::TcpAoSupport::Supported.into());
+        let supported = tcp_ao_capability_checks(
+            &toml::from_str(config).unwrap(),
+            crate::proto::TcpAoSupport::Supported.into(),
+        );
         assert_eq!(supported[0].status, CheckStatus::Ok);
-        let unknown =
-            tcp_ao_capability_checks(config, crate::proto::TcpAoSupport::ProbeFailed.into());
+        let unknown = tcp_ao_capability_checks(
+            &toml::from_str(config).unwrap(),
+            crate::proto::TcpAoSupport::ProbeFailed.into(),
+        );
         assert_eq!(unknown[0].status, CheckStatus::Warn);
     }
 
@@ -4105,9 +4225,15 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
     #[test]
     fn parse_state_dir_reads_global_runtime_state_dir() {
         let toml = "[global]\nasn = 65000\nruntime_state_dir = \"/tmp/x\"\n";
-        assert_eq!(parse_state_dir(toml), Some("/tmp/x".to_string()));
-        assert_eq!(parse_state_dir("[global]\nasn = 65000\n"), None);
-        assert_eq!(parse_state_dir("not toml ["), None);
+        assert_eq!(
+            config_state_dir(&toml::from_str(toml).unwrap()),
+            Some("/tmp/x".to_string())
+        );
+        assert_eq!(
+            config_state_dir(&toml::from_str("[global]\nasn = 65000\n").unwrap()),
+            None
+        );
+        assert!(toml::from_str::<toml::Value>("not toml [").is_err());
     }
 
     #[test]
@@ -4154,19 +4280,21 @@ tcp_ao = { key = "<redacted>", send_id = 1, recv_id = 2, algorithm = "hmac(sha25
     fn authz_enforcement_reads_effective_config_and_skips_when_absent() {
         let tier = "[security.grpc]\nenforcement = \"tier\"\n\
                     [security.grpc.roles]\nadmin = \"operator\"\n";
-        let check = authz_enforcement_check(tier).unwrap();
+        let check = authz_enforcement_check(&toml::from_str(tier).unwrap()).unwrap();
         assert_eq!(check.name, "daemon.authz.enforcement");
         assert_eq!(check.status, CheckStatus::Ok);
         assert!(check.detail.contains("1 principal(s) mapped"));
 
         let legacy = "[security.grpc]\nenforcement = \"legacy\"\n";
-        let check = authz_enforcement_check(legacy).unwrap();
+        let check = authz_enforcement_check(&toml::from_str(legacy).unwrap()).unwrap();
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(check.detail.contains("audit-only"));
 
         // Older daemons without the section in the dump: skip, never FAIL.
-        assert!(authz_enforcement_check("[global]\nasn = 65000\n").is_none());
-        assert!(authz_enforcement_check("not toml [").is_none());
+        assert!(
+            authz_enforcement_check(&toml::from_str("[global]\nasn = 65000\n").unwrap()).is_none()
+        );
+        assert!(toml::from_str::<toml::Value>("not toml [").is_err());
     }
 
     #[test]
@@ -4272,23 +4400,30 @@ name = "central"
 address = "collector.example.net:57400"
 paths = ["x"]
 "#;
-        let targets = deploy_targets(config);
-        assert_eq!(targets.listen_port, Some(10179));
-        assert_eq!(targets.rpki_caches, vec!["rtr.example.net:8282"]);
-        assert_eq!(targets.bmp_collectors, vec!["127.0.0.1:11019"]);
+        let document = toml::from_str(config).unwrap();
+        assert_eq!(config_listen_port(&document), Some(10179));
         assert_eq!(
-            targets.gnmi_collectors,
-            vec![(
-                "central".to_string(),
-                "collector.example.net:57400".to_string()
-            )]
+            config_addresses(&document, &["rpki", "cache_servers"]),
+            vec!["rtr.example.net:8282"]
         );
-
-        let empty = deploy_targets("[global]\nasn = 65000\n");
-        assert_eq!(empty.listen_port, None);
-        assert!(empty.rpki_caches.is_empty());
-        assert!(empty.bmp_collectors.is_empty());
-        assert!(empty.gnmi_collectors.is_empty());
+        assert_eq!(
+            config_addresses(&document, &["bmp", "collectors"]),
+            vec!["127.0.0.1:11019"]
+        );
+        let collector = &config_rows(&document, &["gnmi_dialout", "targets"])[0];
+        assert_eq!(collector["name"].as_str(), Some("central"));
+        assert_eq!(
+            collector["address"].as_str(),
+            Some("collector.example.net:57400")
+        );
+        // Unknown future tables survive the generic document unchanged.
+        let future = toml::from_str("[future.probes]\naddress = '192.0.2.1:1234'\n").unwrap();
+        assert_eq!(
+            config_value(&future, &["future", "probes", "address"]).and_then(toml::Value::as_str),
+            Some("192.0.2.1:1234")
+        );
+        assert_eq!(config_listen_port(&future), None);
+        assert!(config_addresses(&future, &["rpki", "cache_servers"]).is_empty());
     }
 
     /// Red proofs: zero-as-OK and dropping the configured guard fail below.
@@ -4390,18 +4525,48 @@ paths = ["x"]
 
     #[tokio::test]
     async fn reachability_probe_distinguishes_listener_from_cli_vantage() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        // The ordinary suite uses an alternate loopback bind. The owned lab
+        // sets this to its non-loopback interface and runs the same assertions.
+        let bind_ip = doctor_listener_test_ip();
+        let listener = tokio::net::TcpListener::bind((bind_ip, 0)).await.unwrap();
         let live = listener.local_addr().unwrap();
         let dead_socket = tokio::net::TcpSocket::new_v4().unwrap();
-        dead_socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        dead_socket
+            .bind(std::net::SocketAddr::new(bind_ip, 0))
+            .unwrap();
         let dead = dead_socket.local_addr().unwrap();
-        let targets = DeployTargets {
-            listen_port: Some(dead.port()),
-            rpki_caches: vec![live.to_string()],
-            bmp_collectors: vec![dead.to_string()],
-            gnmi_collectors: vec![("central".to_string(), dead.to_string())],
-        };
-        let checks = reachability_checks(true, "http://127.0.0.1:50051", &targets).await;
+        let targets = toml::from_str(&format!(
+            "[global]\nlisten_port = {}\nlisten_addresses = ['{bind_ip}']\n\
+             [[rpki.cache_servers]]\naddress = '{live}'\n\
+             [[bmp.collectors]]\naddress = '{dead}'\n\
+             [[gnmi_dialout.targets]]\nname = 'central'\naddress = '{dead}'\n",
+            dead.port()
+        ))
+        .unwrap();
+        let checks = reachability_checks(true, "unix:///run/rustbgpd/grpc.sock", &targets).await;
+        let healthy = toml::from_str(&format!(
+            "[global]\nlisten_port = {}\nlisten_addresses = ['{bind_ip}']",
+            live.port()
+        ))
+        .unwrap();
+        let healthy_checks =
+            reachability_checks(true, "unix:///run/rustbgpd/grpc.sock", &healthy).await;
+        assert_eq!(
+            healthy_checks[0].status,
+            CheckStatus::Ok,
+            "{}",
+            healthy_checks[0].detail
+        );
+        assert!(healthy_checks[0].detail.contains(&live.to_string()));
+        assert!(!healthy_checks[0].detail.contains("127.0.0.1:"));
+        let non_loopback = toml::from_str(include_str!(
+            "../../tests/fixtures/doctor/explicit-listener.toml"
+        ))
+        .unwrap();
+        assert_eq!(
+            listener_probe_hosts(&non_loopback, "unix:///run/rustbgpd/grpc.sock"),
+            ["192.0.2.10"]
+        );
         assert_eq!(checks.len(), 4);
         // Load-bearing proof: weakening the authoritative daemon-listener
         // probe to the dependency warning semantics makes this red.
@@ -4478,7 +4643,8 @@ paths = ["x"]
                 cancelled,
             ),
         ])
-        .await;
+        .await
+        .0;
 
         assert_eq!(
             checks
@@ -4593,19 +4759,139 @@ paths = ["x"]
         }
     }
 
+    fn doctor_listener_test_ip() -> std::net::IpAddr {
+        std::env::var("RBGPD_DOCTOR_TEST_BIND_IP").map_or_else(
+            |_| "127.0.0.2".parse().unwrap(),
+            |ip| {
+                let ip: std::net::IpAddr = ip.parse().unwrap();
+                assert!(
+                    !ip.is_loopback() && !ip.is_unspecified(),
+                    "lab address must be non-loopback"
+                );
+                ip
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn listener_default_keeps_failed_probe_task_even_when_other_family_reachable() {
+        let task = ProbeTask {
+            identity: ProbeTaskIdentity {
+                name: "bgp.listener".to_string(),
+                label: "BGP listener".to_string(),
+                addr: "[::1]:179".to_string(),
+            },
+            handle: tokio::spawn(async { panic!("deliberately failed listener probe task") }),
+        };
+        let reachable = Check {
+            name: "bgp.listener".to_string(),
+            status: CheckStatus::Ok,
+            detail: "BGP listener 127.0.0.1:179 reachable".to_string(),
+        };
+        let (mut checks, task_failed) = collect_probe_tasks(vec![task]).await;
+        checks.push(reachable);
+        let check = listener_probe_summary(checks, task_failed, false);
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert!(check.detail.contains("probe task failed"));
+        assert!(check.detail.contains("127.0.0.1:179 reachable"));
+    }
+
+    #[test]
+    fn listener_default_accepts_either_family_but_explicit_requires_every_bind() {
+        let result = |status, detail: &str| Check {
+            name: "bgp.listener".to_string(),
+            status,
+            detail: detail.to_string(),
+        };
+        let one_family = || {
+            vec![
+                result(CheckStatus::Ok, "BGP listener 127.0.0.1:179 reachable"),
+                result(CheckStatus::Fail, "BGP listener [::1]:179 unreachable"),
+            ]
+        };
+        assert_eq!(
+            listener_probe_summary(one_family(), false, false).status,
+            CheckStatus::Ok
+        );
+        assert_eq!(
+            listener_probe_summary(one_family(), false, true).status,
+            CheckStatus::Fail
+        );
+        let neither_family = vec![
+            result(CheckStatus::Fail, "BGP listener 127.0.0.1:179 unreachable"),
+            result(CheckStatus::Fail, "BGP listener [::1]:179 unreachable"),
+        ];
+        assert_eq!(
+            listener_probe_summary(neither_family, false, false).status,
+            CheckStatus::Fail
+        );
+    }
+
+    #[tokio::test]
+    async fn listener_implicit_port_ipv6_management_keeps_missing_local_bind_red() {
+        let explicit = toml::from_str("[global]\nlisten_addresses = ['::1']").unwrap();
+        for endpoint in ["http://[::1]", "https://[::1]", "[::1]", "http://[::1]/"] {
+            assert!(local_daemon(endpoint), "{endpoint}");
+            assert_eq!(daemon_probe_host(endpoint).as_deref(), Some("::1"));
+            // Port zero has no listener; no IPv6 family support is required.
+            let check = listener_reachability_check(&explicit, endpoint, 0).await;
+            assert_eq!(
+                check.status,
+                CheckStatus::Fail,
+                "{endpoint}: {}",
+                check.detail
+            );
+            assert!(check.detail.contains("[::1]:0 unreachable"));
+        }
+    }
+
+    #[tokio::test]
+    async fn listener_ipv6_only_formats_endpoint_and_remote_loopback_is_not_cli_local() {
+        let Ok(listener) = tokio::net::TcpListener::bind("[::1]:0").await else {
+            return;
+        };
+        let port = listener.local_addr().unwrap().port();
+        let explicit = toml::from_str("[global]\nlisten_addresses = ['::1']").unwrap();
+        let check =
+            listener_reachability_check(&explicit, "unix:///run/rustbgpd/grpc.sock", port).await;
+        assert_eq!(check.status, CheckStatus::Ok, "{}", check.detail);
+        assert!(check.detail.contains(&format!("[::1]:{port}")));
+        let check = listener_reachability_check(&explicit, "https://192.0.2.10:50051", port).await;
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check.detail.contains("remote CLI cannot probe this bind"));
+    }
+
     #[test]
     fn listener_probe_host_follows_the_daemon_address() {
+        let explicit =
+            toml::from_str("[global]\nlisten_addresses = ['192.0.2.10', '2001:db8::10']").unwrap();
+        for endpoint in [
+            "unix:///run/rustbgpd/grpc.sock",
+            "http://10.0.0.5:50051",
+            "https://rr1.example.net:50051",
+        ] {
+            assert_eq!(
+                listener_probe_hosts(&explicit, endpoint),
+                ["192.0.2.10", "2001:db8::10"]
+            );
+        }
+        let wildcard = toml::from_str("[global]").unwrap();
         assert_eq!(
-            listener_probe_host("unix:///run/rustbgpd/grpc.sock"),
-            "127.0.0.1"
+            listener_probe_hosts(&wildcard, "unix:///run/rustbgpd/grpc.sock"),
+            ["127.0.0.1", "::1"]
         );
-        assert_eq!(listener_probe_host("http://10.0.0.5:50051"), "10.0.0.5");
         assert_eq!(
-            listener_probe_host("https://rr1.example.net:50051"),
-            "rr1.example.net"
+            listener_probe_hosts(&wildcard, "http://[::1]:50051"),
+            ["127.0.0.1", "::1"]
         );
-        assert_eq!(listener_probe_host("10.0.0.5:50051"), "10.0.0.5");
-        assert_eq!(listener_probe_host("http://[::1]:50051"), "[::1]");
+        assert_eq!(
+            listener_probe_hosts(&wildcard, "http://10.0.0.5:50051"),
+            ["10.0.0.5"]
+        );
+        assert_eq!(
+            listener_probe_hosts(&wildcard, "https://rr1.example.net:50051"),
+            ["rr1.example.net"]
+        );
     }
 
     #[test]
@@ -6432,7 +6718,8 @@ paths = ["x"]
         // the policy route and the offline pin, and the file is untouched.
         let staged = "config_epoch = 2\n\n[global]\nasn = 65000\n";
         fs::write(&candidate, staged).unwrap();
-        let check = upgrade_posture_check(&candidate, Ok(live_legacy), 1700);
+        let check =
+            upgrade_posture_check(&candidate, Ok(&toml::from_str(live_legacy).unwrap()), 1700);
         assert_eq!(check.status, CheckStatus::Fail, "{}", check.detail);
         assert_detail_mentions(
             &check,
@@ -6456,7 +6743,8 @@ paths = ["x"]
 
         // Legacy omission on disk matches a materialized epoch-1 daemon.
         fs::write(&candidate, "[global]\nasn = 65000\n").unwrap();
-        let check = upgrade_posture_check(&candidate, Ok(live_legacy), 1700);
+        let check =
+            upgrade_posture_check(&candidate, Ok(&toml::from_str(live_legacy).unwrap()), 1700);
         assert_eq!(check.status, CheckStatus::Ok, "{}", check.detail);
         assert_detail_mentions(
             &check,
@@ -6476,7 +6764,8 @@ paths = ["x"]
         let live_optout =
             "config_epoch = 2\n\n[global]\nasn = 65000\nebgp_requires_policy = false\n";
         assert_eq!(
-            upgrade_posture_check(&candidate, Ok(live_optout), 1700).status,
+            upgrade_posture_check(&candidate, Ok(&toml::from_str(live_optout).unwrap()), 1700)
+                .status,
             CheckStatus::Ok
         );
 
@@ -6488,10 +6777,18 @@ paths = ["x"]
             &check,
             &["effective-config RPC failed: denied", "never a green"],
         );
-        let check = upgrade_posture_check(&candidate, Ok("not = = toml"), 1700);
+        let check = upgrade_posture_check(
+            &candidate,
+            Err("invalid effective-config TOML; source text omitted"),
+            1700,
+        );
         assert_eq!(check.status, CheckStatus::Fail);
-        assert_detail_mentions(&check, &["live effective config posture unreadable"]);
-        let check = upgrade_posture_check(&dir.path().join("absent.toml"), Ok(live_legacy), 1700);
+        assert_detail_mentions(&check, &["invalid effective-config TOML"]);
+        let check = upgrade_posture_check(
+            &dir.path().join("absent.toml"),
+            Ok(&toml::from_str(live_legacy).unwrap()),
+            1700,
+        );
         assert_eq!(check.status, CheckStatus::Fail);
         assert_detail_mentions(
             &check,
@@ -6502,7 +6799,8 @@ paths = ["x"]
             ],
         );
         fs::write(&candidate, "config_epoch = 3\n").unwrap();
-        let check = upgrade_posture_check(&candidate, Ok(live_legacy), 1700);
+        let check =
+            upgrade_posture_check(&candidate, Ok(&toml::from_str(live_legacy).unwrap()), 1700);
         assert_eq!(check.status, CheckStatus::Fail);
         assert_detail_mentions(&check, &["must be 1 or 2", "rustbgpd --check --strict"]);
     }
@@ -6522,7 +6820,8 @@ paths = ["x"]
             .unwrap();
             let live =
                 format!("config_epoch = {epoch}\n[global]\nebgp_requires_policy = {policy}\n");
-            let check = upgrade_posture_check(&candidate, Ok(&live), 1700);
+            let check =
+                upgrade_posture_check(&candidate, Ok(&toml::from_str(&live).unwrap()), 1700);
             assert_eq!(check.status, CheckStatus::Fail);
             match (epoch, policy) {
                 (1, false) => assert!(
@@ -6660,6 +6959,92 @@ paths = ["x"]
         )
         .unwrap();
         (server, dir, candidate)
+    }
+
+    #[tokio::test]
+    async fn malformed_effective_document_keeps_bundle_but_cannot_pass_pre_upgrade() {
+        let (server, dir, candidate) = green_pre_upgrade_lab().await;
+        let malformed = "invalid = = TOML";
+        *server.state.config_effective_toml.lock().await = Some(malformed.to_string());
+        let bundle_path = dir.path().join("malformed.tar.gz");
+        let (code, manifest) = run_doctor(&server.addr, &bundle_path, Some(&candidate)).await;
+        assert_eq!(code, 2);
+        let check = manifest_check(&manifest, "deploy.config_parse");
+        assert_eq!(check["status"], "fail");
+        assert!(!check["detail"].as_str().unwrap().contains(malformed));
+        assert_eq!(
+            manifest_check(&manifest, "upgrade.posture")["status"],
+            "fail"
+        );
+        assert_eq!(
+            manifest["sections"]["probes"],
+            "skipped: invalid config document"
+        );
+        assert_eq!(
+            find(&extract_bundle(&bundle_path), "config/effective.toml"),
+            malformed
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_upgrade_explicit_listener_passes_and_failed_bind_stays_red() {
+        let (server, dir, candidate) = green_pre_upgrade_lab().await;
+        let bind_ip = doctor_listener_test_ip();
+        let listener = tokio::net::TcpListener::bind((bind_ip, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        // Reserve a distinct non-listening socket before either doctor run.
+        // Releasing and reacquiring the live port races other tests and TCP state.
+        let unbound = tokio::net::TcpSocket::new_v4().unwrap();
+        unbound.bind(std::net::SocketAddr::new(bind_ip, 0)).unwrap();
+        let dead = unbound.local_addr().unwrap();
+        server
+            .state
+            .config_effective_toml
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            .push_str(&format!(
+                "listen_port = {}\nlisten_addresses = ['{bind_ip}']\n",
+                address.port()
+            ));
+        let (code, manifest) = run_doctor(
+            &server.addr,
+            &dir.path().join("healthy.tar.gz"),
+            Some(&candidate),
+        )
+        .await;
+        assert_eq!(code, 0, "{manifest}");
+        let check = manifest_check(&manifest, "bgp.listener");
+        assert_eq!(check["status"], "ok", "{check}");
+        assert!(
+            check["detail"]
+                .as_str()
+                .unwrap()
+                .contains(&address.to_string())
+        );
+        assert!(!check["detail"].as_str().unwrap().contains("127.0.0.1:"));
+        {
+            let mut effective = server.state.config_effective_toml.lock().await;
+            let text = effective.as_mut().unwrap();
+            *text = text.replace(
+                &format!("listen_port = {}\n", address.port()),
+                &format!("listen_port = {}\n", dead.port()),
+            );
+        }
+        let (code, manifest) = run_doctor(
+            &server.addr,
+            &dir.path().join("failed.tar.gz"),
+            Some(&candidate),
+        )
+        .await;
+        assert_eq!(code, 2, "{manifest}");
+        assert_eq!(manifest_check(&manifest, "bgp.listener")["status"], "fail");
+        assert!(
+            upgrade_checks(&manifest)
+                .iter()
+                .all(|(_, status, _)| status == "ok")
+        );
     }
 
     async fn run_doctor(
