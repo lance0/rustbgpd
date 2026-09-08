@@ -118,11 +118,15 @@ impl LocalProcess {
 
     /// Read only while the same process still occupies the observed PID.
     pub(crate) fn read_file(self, name: &str) -> Option<String> {
+        String::from_utf8(self.read_bytes(name)?).ok()
+    }
+
+    pub(crate) fn read_bytes(self, name: &str) -> Option<Vec<u8>> {
         if Self::capture(self.pid)? != self {
             return None;
         }
-        let text = fs::read_to_string(format!("/proc/{}/{name}", self.pid)).ok()?;
-        (Self::capture(self.pid)? == self).then_some(text)
+        let bytes = fs::read(format!("/proc/{}/{name}", self.pid)).ok()?;
+        (Self::capture(self.pid)? == self).then_some(bytes)
     }
 }
 
@@ -382,6 +386,47 @@ mod tests {
         assert!(reused_pid.read_file("limits").is_none());
         *connection.local_process.lock().unwrap() = Some(reused_pid);
         assert!(connection.local_process().is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proc_bytes_preserve_non_utf8_cmdline_and_check_process_identity() {
+        use std::os::unix::{ffi::OsStringExt, process::CommandExt};
+
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        fs::write(&config, "[global]\nasn = 65001\n").unwrap();
+        // cat reads the config and then waits on its owned stdin pipe. Its
+        // argv0 need not be UTF-8, unlike the Rust test harness's arguments.
+        let child = Child(
+            std::process::Command::new("cat")
+                .arg0(std::ffi::OsString::from_vec(b"rustbgpd\xff".to_vec()))
+                .arg(&config)
+                .arg("-")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let process = LocalProcess::capture(child.0.id()).unwrap();
+        let cmdline = process.read_bytes("cmdline").unwrap();
+        let mut args = cmdline.split(|byte| *byte == 0);
+        assert_eq!(args.next().unwrap(), b"rustbgpd\xff");
+        assert_eq!(args.next().unwrap(), config.as_os_str().as_encoded_bytes());
+        assert!(process.read_file("cmdline").is_none());
+        let reused_pid = LocalProcess {
+            start_ticks: process.start_ticks + 1,
+            ..process
+        };
+        assert!(reused_pid.read_bytes("cmdline").is_none());
     }
 
     #[tokio::test]

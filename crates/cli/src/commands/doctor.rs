@@ -1786,8 +1786,8 @@ fn parse_cmdline_config_path(cmdline: &[u8]) -> Option<String> {
 }
 
 fn proc_cmdline_config_path(process: LocalProcess) -> Option<PathBuf> {
-    let bytes = process.read_file("cmdline")?;
-    let path = parse_cmdline_config_path(bytes.as_bytes())
+    let bytes = process.read_bytes("cmdline")?;
+    let path = parse_cmdline_config_path(&bytes)
         .map_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH), PathBuf::from);
     Some(process_config_path(process.pid, &path))
 }
@@ -5054,6 +5054,10 @@ paths = ["x"]
 
     #[test]
     fn cmdline_config_path_takes_first_non_flag_argument() {
+        assert_eq!(
+            parse_cmdline_config_path(b"rustbgpd\xff\0/etc/rustbgpd/prod.toml\0--label\0bad\xff\0"),
+            Some("/etc/rustbgpd/prod.toml".to_string()),
+        );
         assert_eq!(
             parse_cmdline_config_path(b"rustbgpd\0/etc/rustbgpd/prod.toml\0"),
             Some("/etc/rustbgpd/prod.toml".to_string())
