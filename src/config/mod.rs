@@ -80,8 +80,29 @@ struct DatasetLoadSummary {
     failed: usize,
 }
 
+#[derive(Default)]
 pub(crate) struct StagedDatasetCommit {
     updates: Vec<StagedDatasetUpdate>,
+}
+
+/// An unpublished content-only generation, with every rollback pin captured
+/// before the owner starts changing policy or runtime state.
+#[derive(Default)]
+pub(crate) struct PreparedDatasetGeneration {
+    commit: StagedDatasetCommit,
+    rollback: DatasetRollback,
+}
+
+#[derive(Default)]
+pub(crate) struct DatasetRollback {
+    priors: Vec<DatasetPrior>,
+}
+
+struct DatasetPrior {
+    handle: Arc<rustbgpd_policy::datasets::DatasetHandle>,
+    snapshot: Arc<rustbgpd_policy::datasets::DatasetSnapshot>,
+    error: Option<String>,
+    content_changed: bool,
 }
 
 enum StagedDatasetUpdate {
@@ -98,6 +119,47 @@ enum StagedDatasetUpdate {
 impl StagedDatasetCommit {
     pub(crate) fn is_empty(&self) -> bool {
         self.updates.is_empty()
+    }
+
+    pub(crate) fn prepare_generation(
+        self,
+        prior: &Config,
+        candidate: &Config,
+    ) -> Result<PreparedDatasetGeneration, String> {
+        if prior.policy.datasets != candidate.policy.datasets
+            || prior.policy.dataset_bindings != candidate.policy.dataset_bindings
+        {
+            return Err(
+                "dataset generations require unchanged names, kinds, file mappings, and handles"
+                    .to_string(),
+            );
+        }
+        let mut priors = Vec::with_capacity(self.updates.len());
+        for update in &self.updates {
+            let (handle, data) = match update {
+                StagedDatasetUpdate::Refresh { handle, data } => (handle, data),
+                StagedDatasetUpdate::Failure { handle, reason } => {
+                    return Err(format!(
+                        "dataset {} failed to load: {reason}",
+                        handle.name()
+                    ));
+                }
+            };
+            let snapshot = handle.pin();
+            let content_changed = snapshot.data != *data;
+            let prior = DatasetPrior {
+                handle: Arc::clone(handle),
+                snapshot,
+                error: handle.status().last_error,
+                content_changed,
+            };
+            prior.validate_generation_headroom()?;
+            priors.push(prior);
+        }
+        Ok(PreparedDatasetGeneration {
+            commit: self,
+            rollback: DatasetRollback { priors },
+        })
     }
 
     pub(crate) fn commit(self) {
@@ -120,6 +182,52 @@ impl StagedDatasetCommit {
                     );
                     handle.record_error(reason);
                 }
+            }
+        }
+    }
+}
+
+impl DatasetPrior {
+    fn validate_generation_headroom(&self) -> Result<(), String> {
+        if self.content_changed && self.snapshot.generation.checked_add(2).is_none() {
+            return Err(format!(
+                "dataset {} has no generation headroom for publication and compensation",
+                self.handle.name()
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl PreparedDatasetGeneration {
+    pub(crate) fn changed_names(&self) -> Vec<String> {
+        self.rollback
+            .priors
+            .iter()
+            .filter(|prior| prior.content_changed)
+            .map(|prior| prior.handle.name().to_string())
+            .collect()
+    }
+
+    /// Publish the complete prepared batch without yielding to another owner.
+    /// Evaluators still pin individual datasets; this is not a global reader
+    /// snapshot or a claim that every peer observes the change simultaneously.
+    pub(crate) fn publish(self) -> DatasetRollback {
+        self.commit.commit();
+        self.rollback
+    }
+}
+
+impl DatasetRollback {
+    /// Restore all content before any asynchronous runtime compensation.
+    /// Republish changed data at the next generation rather than rewinding it.
+    pub(crate) fn restore(self) {
+        for prior in self.priors {
+            if prior.content_changed {
+                let _ = prior.handle.refresh(prior.snapshot.data.clone());
+            }
+            if let Some(error) = prior.error {
+                prior.handle.record_error(error);
             }
         }
     }
@@ -3113,8 +3221,10 @@ pub struct SighupReloadFamilies {
     /// Static `[[neighbors]]`, `[peer_groups]`, inline policy definitions,
     /// neighbor sets, global chains, or compiled `.rpol` content.
     pub generation: bool,
-    /// `[policy.datasets]` bindings or staged dataset content/error state.
+    /// Staged dataset content/error state, through unchanged live handles.
     pub datasets: bool,
+    /// Dataset names, kinds, file mappings, or handle identities changed.
+    pub dataset_bindings: bool,
     /// `[[dynamic_neighbors]]` ranges.
     pub dynamic_ranges: bool,
     /// `[[evpn_instances]]` / `[[evpn_ip_vrfs]]` / `[[ethernet_segments]]`.
@@ -3152,7 +3262,8 @@ impl SighupReloadFamilies {
             || diff.policy.rpol_changed;
         Self {
             generation,
-            datasets: diff.policy.datasets_changed,
+            datasets: false,
+            dataset_bindings: diff.policy.datasets_changed,
             dynamic_ranges: diff.dynamic_neighbors_reload_applied_changed,
             evpn_runtime: diff.evpn_instances_changed
                 || diff.evpn_ip_vrfs_changed
@@ -3220,14 +3331,20 @@ impl SighupReloadRoute {
 /// be folded into the generation.
 #[must_use]
 pub fn classify_sighup_reload(families: SighupReloadFamilies) -> SighupReloadRoute {
-    if !families.generation {
+    if !families.generation && !families.datasets && !families.dataset_bindings {
         return SighupReloadRoute::Sequential {
             reasons: Vec::new(),
         };
     }
     let mut rejected = Vec::new();
-    if families.datasets {
-        rejected.push("[policy.datasets] content or bindings".to_string());
+    if families.dataset_bindings {
+        rejected.push("[policy.datasets] names, kinds, file mappings, or handles".to_string());
+    }
+    if families.datasets && families.tcp_ao {
+        rejected.push("dataset content with TCP-AO keyring rotation".to_string());
+    }
+    if families.datasets && families.listener_auth {
+        rejected.push("dataset content with listener MD5/GTSM changes".to_string());
     }
     if families.dynamic_ranges {
         rejected.push("[[dynamic_neighbors]]".to_string());

@@ -205,10 +205,10 @@ fn route_is_generation_for_pure_generation_class_changes() {
 fn route_rejects_generation_changes_combined_with_uncompensated_families() {
     for (name, families) in [
         (
-            "datasets",
+            "dataset bindings",
             SighupReloadFamilies {
                 generation: true,
-                datasets: true,
+                dataset_bindings: true,
                 ..SighupReloadFamilies::default()
             },
         ),
@@ -255,7 +255,7 @@ fn route_rejects_generation_changes_combined_with_uncompensated_families() {
     // sequential-only families.
     let route = classify_sighup_reload(SighupReloadFamilies {
         generation: true,
-        datasets: true,
+        dataset_bindings: true,
         fib_tables: true,
         listener_auth: true,
         ..SighupReloadFamilies::default()
@@ -264,6 +264,44 @@ fn route_rejects_generation_changes_combined_with_uncompensated_families() {
         panic!("{route:?}");
     };
     assert_eq!(reasons.len(), 2, "{reasons:?}");
+}
+
+#[test]
+fn route_compensates_dataset_content_and_rejects_binding_or_auth_changes() {
+    for generation in [false, true] {
+        assert_eq!(
+            classify_sighup_reload(SighupReloadFamilies {
+                generation,
+                datasets: true,
+                ..SighupReloadFamilies::default()
+            }),
+            SighupReloadRoute::Generation
+        );
+        for (dataset_bindings, tcp_ao, listener_auth) in [
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
+            assert!(matches!(
+                classify_sighup_reload(SighupReloadFamilies {
+                    generation,
+                    datasets: true,
+                    dataset_bindings,
+                    tcp_ao,
+                    listener_auth,
+                    ..SighupReloadFamilies::default()
+                }),
+                SighupReloadRoute::Rejected { .. }
+            ));
+        }
+    }
+    assert!(matches!(
+        classify_sighup_reload(SighupReloadFamilies {
+            dataset_bindings: true,
+            ..SighupReloadFamilies::default()
+        }),
+        SighupReloadRoute::Rejected { .. }
+    ));
 }
 
 #[test]

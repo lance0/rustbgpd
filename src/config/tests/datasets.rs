@@ -211,6 +211,156 @@ fn staged_dataset_reload_defers_live_handle_mutation_until_commit() {
 }
 
 #[test]
+fn dataset_generation_restores_content_and_error_through_stable_handle() {
+    let dir = dataset_config_dir("64500\n");
+    let path = dir.path().join("config.toml");
+    let path = path.to_str().unwrap();
+    let initial = Config::load_with_diagnostics(path).unwrap();
+    let live = Arc::clone(initial.policy.dataset_bindings.get("customers").unwrap());
+    live.record_error("prior source unavailable");
+    let prior = live.pin();
+    fs::write(dir.path().join("datasets/customers.list"), "64999\n").unwrap();
+    let mut candidate =
+        Config::load_with_diagnostics_and_staged_datasets(path, &initial.policy.dataset_bindings)
+            .unwrap();
+    let staged = candidate.prepare_staged_datasets(&initial.policy.dataset_bindings);
+    let prepared = staged.prepare_generation(&initial, &candidate).unwrap();
+    assert_eq!(prepared.changed_names(), ["customers"]);
+    assert!(Arc::ptr_eq(&prior, &live.pin()));
+    let rollback = prepared.publish();
+    assert_eq!(live.pin().generation, 2);
+    assert_ne!(live.pin().data, prior.data);
+    assert!(live.status().last_error.is_none());
+    // Compensation must use the retained data, not the now-overwritten file.
+    fs::write(dir.path().join("datasets/customers.list"), "invalid\n").unwrap();
+    rollback.restore();
+    assert_eq!(live.pin().generation, 3);
+    assert_eq!(live.pin().data, prior.data);
+    assert_eq!(
+        live.status().last_error.as_deref(),
+        Some("prior source unavailable")
+    );
+    assert!(Arc::ptr_eq(
+        &live,
+        candidate.policy.dataset_bindings.get("customers").unwrap()
+    ));
+    assert_eq!(Arc::strong_count(&prior), 1, "rollback pin released");
+}
+
+#[test]
+fn dataset_generation_equal_content_restores_error_without_advancing() {
+    let dir = dataset_config_dir("64500\n");
+    let path = dir.path().join("config.toml");
+    let path = path.to_str().unwrap();
+    let initial = Config::load_with_diagnostics(path).unwrap();
+    let live = Arc::clone(initial.policy.dataset_bindings.get("customers").unwrap());
+    live.record_error("prior error");
+    let prior = live.pin();
+    let mut candidate =
+        Config::load_with_diagnostics_and_staged_datasets(path, &initial.policy.dataset_bindings)
+            .unwrap();
+    let staged = candidate.prepare_staged_datasets(&initial.policy.dataset_bindings);
+    let prepared = staged.prepare_generation(&initial, &candidate).unwrap();
+    assert!(prepared.changed_names().is_empty());
+    let rollback = prepared.publish();
+    assert!(live.status().last_error.is_none());
+    assert!(Arc::ptr_eq(&prior, &live.pin()));
+    rollback.restore();
+    assert_eq!(live.status().last_error.as_deref(), Some("prior error"));
+    assert!(Arc::ptr_eq(&prior, &live.pin()));
+    assert_eq!(live.pin().generation, 1);
+}
+
+#[test]
+fn dataset_generation_rejects_invalid_batch_without_publishing_first_input() {
+    let dir = dataset_config_dir("64500\n");
+    let config_path = dir.path().join("config.toml");
+    let policy_path = dir.path().join("policies/core.rpol");
+    let config = fs::read_to_string(&config_path).unwrap();
+    fs::write(
+        &config_path,
+        format!("{config}\n[policy.datasets.suppliers]\npath = \"datasets/suppliers.list\"\n"),
+    )
+    .unwrap();
+    let policy = fs::read_to_string(&policy_path).unwrap();
+    fs::write(&policy_path, format!("dataset asn-set suppliers\n{policy}")).unwrap();
+    fs::write(dir.path().join("datasets/suppliers.list"), "64501\n").unwrap();
+    let initial = Config::load_with_diagnostics(config_path.to_str().unwrap()).unwrap();
+    fs::write(dir.path().join("datasets/customers.list"), "64999\n").unwrap();
+    fs::write(dir.path().join("datasets/suppliers.list"), "invalid\n").unwrap();
+    let mut candidate = Config::load_with_diagnostics_and_staged_datasets(
+        config_path.to_str().unwrap(),
+        &initial.policy.dataset_bindings,
+    )
+    .unwrap();
+    let staged = candidate.prepare_staged_datasets(&initial.policy.dataset_bindings);
+    assert!(staged.prepare_generation(&initial, &candidate).is_err());
+    for handle in initial.policy.dataset_bindings.handles() {
+        assert_eq!(handle.pin().generation, 1);
+        assert!(handle.status().last_error.is_none());
+    }
+}
+
+#[test]
+fn dataset_generation_rejects_changed_mapping_or_handle_identity() {
+    let dir = dataset_config_dir("64500\n");
+    let initial = load_dir(&dir).unwrap();
+    let mut candidate = initial.clone();
+    candidate
+        .policy
+        .datasets
+        .get_mut("customers")
+        .unwrap()
+        .path
+        .push_str(".next");
+    assert!(
+        StagedDatasetCommit {
+            updates: Vec::new()
+        }
+        .prepare_generation(&initial, &candidate)
+        .is_err()
+    );
+    candidate = initial.clone();
+    candidate.policy.dataset_bindings = initial.policy.dataset_bindings.detached_clone();
+    assert!(
+        StagedDatasetCommit {
+            updates: Vec::new()
+        }
+        .prepare_generation(&initial, &candidate)
+        .is_err()
+    );
+}
+
+#[test]
+fn dataset_generation_headroom_reserves_forward_and_compensation() {
+    use rustbgpd_policy::datasets::{DatasetData, DatasetHandle, DatasetKind, DatasetSnapshot};
+    use rustbgpd_policy::sets::AsnSet;
+    let data = DatasetData::Asn(AsnSet::new([64500]));
+    let handle = Arc::new(DatasetHandle::new(
+        "customers",
+        DatasetKind::Asn,
+        data.clone(),
+    ));
+    for (generation, changed, accepted) in [
+        (u64::MAX - 2, true, true),
+        (u64::MAX - 1, true, false),
+        (u64::MAX, true, false),
+        (u64::MAX, false, true),
+    ] {
+        let prior = DatasetPrior {
+            handle: Arc::clone(&handle),
+            snapshot: Arc::new(DatasetSnapshot {
+                generation,
+                data: data.clone(),
+            }),
+            error: None,
+            content_changed: changed,
+        };
+        assert_eq!(prior.validate_generation_headroom().is_ok(), accepted);
+    }
+}
+
+#[test]
 fn dataset_path_change_is_visible_and_transaction_unsupported() {
     let dir = dataset_config_dir("64500\n");
     let current = load_dir(&dir).expect("config with dataset input loads");

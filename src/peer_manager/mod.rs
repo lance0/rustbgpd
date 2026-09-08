@@ -161,11 +161,33 @@ pub(crate) struct PlannedTransactionConfig {
 
 pub(crate) use generation::ReloadGenerationOutcome;
 
+/// A debug-build-only, one-shot failure for a controlled SIGHUP regression.
+#[cfg(all(debug_assertions, not(test)))]
+fn debug_reconfigure_failures() -> std::collections::BTreeMap<PeerKey, u32> {
+    const VARIABLE: &str = "RUSTBGPD_TEST_SIGHUP_RECONFIGURE_FAILURE_PEER";
+    let value = match std::env::var(VARIABLE) {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return std::collections::BTreeMap::new(),
+        Err(error) => {
+            tracing::warn!(variable = VARIABLE, %error, "invalid debug-only reconfigure failure setting; injection disabled");
+            return std::collections::BTreeMap::new();
+        }
+    };
+    match value.parse::<IpAddr>() {
+        Ok(peer) => std::collections::BTreeMap::from([(PeerKey::new(peer, None), 0)]),
+        Err(error) => {
+            tracing::warn!(variable = VARIABLE, %error, "invalid debug-only reconfigure failure peer; injection disabled");
+            std::collections::BTreeMap::new()
+        }
+    }
+}
+
 pub(crate) enum InternalCommand {
     /// Apply one complete SIGHUP candidate as an owned runtime generation.
     ApplyReloadGeneration {
         candidate: Box<Config>,
         actions: Vec<crate::config::ReloadPeerAction>,
+        datasets: crate::config::PreparedDatasetGeneration,
         reply: oneshot::Sender<ReloadGenerationOutcome>,
     },
     ReplaceConfigSnapshot {
@@ -459,7 +481,7 @@ pub struct PeerManager {
     /// file, tests) keeps every candidate `Unverified`, i.e. the presence
     /// fence.
     accepted_rx: Option<watch::Receiver<Arc<crate::config::AcceptedConfigSnapshot>>>,
-    /// Test-only deterministic fault injection: `reconfigure_peer` against
+    /// Deterministic test/debug failure injection: `reconfigure_peer` against
     /// a mapped key fails up front, before the delete/re-add cycle, once the
     /// key's budget of remaining successful calls reaches zero (a value of 0
     /// fails the next call; a value of 1 lets one call succeed, then fails
@@ -468,8 +490,10 @@ pub struct PeerManager {
     /// the only mid-fanout failure class left, since config-shaped failures
     /// are all caught by validation, resolution, or the reshape preflight
     /// before any peer is touched.
-    #[cfg(test)]
+    #[cfg(any(test, debug_assertions))]
     inject_reconfigure_failures: std::collections::BTreeMap<PeerKey, u32>,
+    #[cfg(test)]
+    dataset_generations_at_peer_construction: Option<Vec<(PeerKey, String, u64)>>,
     /// The same deterministic fault injection for the in-place applier
     /// (`hot_update_peer_in_place`), so the peer-group hot path's
     /// mid-cohort failure and rollback contract can be exercised.
@@ -792,6 +816,10 @@ impl PeerManager {
             accepted_rx: None,
             #[cfg(test)]
             inject_reconfigure_failures: std::collections::BTreeMap::new(),
+            #[cfg(all(debug_assertions, not(test)))]
+            inject_reconfigure_failures: debug_reconfigure_failures(),
+            #[cfg(test)]
+            dataset_generations_at_peer_construction: None,
             #[cfg(test)]
             inject_hot_update_failures: std::collections::BTreeMap::new(),
         }
@@ -1849,11 +1877,11 @@ impl PeerManager {
                 }
                 internal = Self::receive_internal_command(&mut self.internal_rx) => {
                     match internal {
-                        Some(InternalCommand::ApplyReloadGeneration { candidate, actions, reply }) => {
+                        Some(InternalCommand::ApplyReloadGeneration { candidate, actions, datasets, reply }) => {
                             let policy_routes_prior =
                                 self.installed_policy_routes_reachability();
                             let outcome =
-                                Box::pin(self.apply_reload_generation(*candidate, actions)).await;
+                                Box::pin(self.apply_reload_generation(*candidate, actions, datasets)).await;
                             if matches!(outcome, ReloadGenerationOutcome::Applied(_)) {
                                 self.reap_retired_policy_routes(&policy_routes_prior);
                             }

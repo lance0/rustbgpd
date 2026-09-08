@@ -813,7 +813,7 @@ async fn reconfigure_peer_restores_previous_peer_when_replacement_add_fails() {
     candidate.policy.reject_retention.capacity += 1;
     mgr.current_config = candidate.clone();
     let outcome = mgr
-        .apply_peer_reshape_snapshot_classified(vec![replacement], Some(&prior_config))
+        .apply_peer_reshape_snapshot_classified(vec![replacement], Some(&prior_config), &mut None)
         .await;
     let crate::peer_manager::lifecycle::PeerReshapeSnapshotOutcome::FullyCompensated(error) =
         outcome

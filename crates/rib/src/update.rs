@@ -2537,7 +2537,7 @@ pub enum RibUpdate {
     /// Chain instances and their counters are preserved. The reply acknowledges
     /// recomputation and distribution responsibility, not remote receipt.
     ReevaluatePeerExportPolicies {
-        /// Established peers whose export chains reference a changed dataset.
+        /// Peers whose installed export policies must be re-evaluated.
         peers: Vec<IpAddr>,
         /// Response channel for success/failure.
         reply: oneshot::Sender<Result<(), RibCommandError>>,

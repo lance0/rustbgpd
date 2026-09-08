@@ -9,6 +9,9 @@
 //! what restores it, so a determinate failure unwinds from retained in-memory
 //! objects and never re-reads a file. A failed or unacknowledged unwind is
 //! reported as ambiguous so the owner fences instead of claiming restoration.
+//! The terminal outcome ends this manager operation and its recovery path;
+//! operation-owned dataset pins are then released, including after ambiguity.
+//! Concurrent evaluators keep their independently acquired snapshot pins.
 
 use std::collections::BTreeMap;
 
@@ -17,12 +20,14 @@ use rustbgpd_api::peer_types::{
 };
 use tracing::{error, info, warn};
 
-use crate::config::{Config, ReloadPeerAction, ReloadPeerActionKind};
+use crate::config::{
+    Config, DatasetRollback, PreparedDatasetGeneration, ReloadPeerAction, ReloadPeerActionKind,
+};
 use crate::policy_admin;
 
 use super::PeerManager;
 use super::lifecycle::PeerReshapeSnapshotOutcome;
-use super::policy::PolicySnapshotFailureKind;
+use super::policy::{DatasetDependent, DatasetRefreshFailure, PolicySnapshotFailureKind};
 
 /// Counts of the per-peer actions one generation applied.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -79,6 +84,8 @@ struct RemovedPeer {
 /// Forward effects applied so far, each with what restores it.
 #[derive(Default)]
 struct AppliedEffects {
+    dataset_prior: Option<DatasetRollback>,
+    dataset_dependents: Vec<DatasetDependent>,
     policy_priors: Option<Vec<ResolvedPeerPolicy>>,
     prior_config: Option<Config>,
     hot_priors: Vec<PeerManagerNeighborConfig>,
@@ -89,7 +96,8 @@ struct AppliedEffects {
 
 impl AppliedEffects {
     fn any(&self) -> bool {
-        self.policy_priors.is_some()
+        self.dataset_prior.is_some()
+            || self.policy_priors.is_some()
             || self.prior_config.is_some()
             || !self.hot_priors.is_empty()
             || self.reshape_priors.is_some()
@@ -109,9 +117,18 @@ impl PeerManager {
         &mut self,
         candidate: Config,
         actions: Vec<ReloadPeerAction>,
+        datasets: PreparedDatasetGeneration,
     ) -> ReloadGenerationOutcome {
         let resolved = match self.resolve_reload_generation(&candidate, &actions) {
             Ok(resolved) => resolved,
+            Err(error) => return ReloadGenerationOutcome::RejectedNoEffect(error),
+        };
+        let changed_datasets = datasets.changed_names();
+        let dependents = match self
+            .prepare_dataset_dependents(&candidate, &changed_datasets)
+            .await
+        {
+            Ok(dependents) => dependents,
             Err(error) => return ReloadGenerationOutcome::RejectedNoEffect(error),
         };
         let receipt = ReloadGenerationReceipt {
@@ -150,6 +167,21 @@ impl PeerManager {
                     }
                 };
             }
+        }
+
+        // The policy phase settled every prepared export destination before
+        // shared dataset handles advance. Publish the entire batch without
+        // yielding, then settle the union of old and candidate dependents.
+        applied.dataset_dependents = dependents;
+        applied.dataset_prior = Some(datasets.publish());
+        if let Err(error) = self
+            .refresh_dataset_generation_dependents(&applied.dataset_dependents)
+            .await
+        {
+            let ambiguous = matches!(error, DatasetRefreshFailure::Ambiguous(_));
+            return self
+                .fail_reload_generation(applied, error.to_string(), ambiguous)
+                .await;
         }
 
         // 2. The candidate becomes the snapshot every later session
@@ -219,6 +251,7 @@ impl PeerManager {
                 .apply_peer_reshape_snapshot_classified(
                     resolved.replace,
                     applied.prior_config.as_ref(),
+                    &mut applied.dataset_prior,
                 )
                 .await
             {
@@ -281,6 +314,9 @@ impl PeerManager {
             self.sync_dynamic_max_prefix_restart_for_group(name);
         }
         self.reconcile_stale_dynamic_max_prefix_restarts();
+        for name in &changed_datasets {
+            self.metrics.record_policy_dataset_loaded(name);
+        }
         self.metrics.record_policy_generation_loaded();
         self.publish_reload_generation_events(&prior_config, receipt.policy_updated);
         info!(%receipt, "reload generation applied");
@@ -444,6 +480,11 @@ impl PeerManager {
     /// Restore retained priors in reverse application order. Every step is
     /// attempted; the aggregated error names each one that failed.
     async fn unwind_reload_generation(&mut self, applied: AppliedEffects) -> Result<(), String> {
+        // Restore every content pin and error before any session or policy
+        // restoration can evaluate a chain against the prior generation.
+        if let Some(prior) = applied.dataset_prior {
+            prior.restore();
+        }
         // Rebuilt peers resolve global transport settings from this snapshot.
         // Restore it before any re-add, including diagnostic retention knobs.
         if let Some(prior_config) = applied.prior_config {
@@ -485,6 +526,12 @@ impl PeerManager {
             && let Err(error) = self.apply_resolved_policy_snapshot(priors).await
         {
             failures.push(format!("restore policy chains: {error}"));
+        }
+        if let Err(error) = self
+            .refresh_dataset_generation_dependents(&applied.dataset_dependents)
+            .await
+        {
+            failures.push(format!("restore dataset dependents: {error}"));
         }
         if failures.is_empty() {
             Ok(())
