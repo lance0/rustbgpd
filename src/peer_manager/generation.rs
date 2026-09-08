@@ -14,9 +14,14 @@
 //! Concurrent evaluators keep their independently acquired snapshot pins.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use rustbgpd_api::peer_types::{
     ConfigEvent, OwnedHotUpdatePeerOutcome, PeerKey, PeerManagerNeighborConfig, ResolvedPeerPolicy,
+};
+use rustbgpd_policy::{
+    PolicyChain,
+    ir::{MatchExpr, SetId, TermAction},
 };
 use tracing::{error, info, warn};
 
@@ -104,6 +109,86 @@ impl AppliedEffects {
             || !self.removed.is_empty()
             || !self.added.is_empty()
     }
+}
+
+/// Ignore unused RPOL source tables only at generation resolution. Keep the
+/// installed evaluation handle and counters; the candidate config still owns
+/// its complete source/catalog. Compiling mixed/TOML chains can discard source
+/// distinctions. Unremapped local/loop guards and collapsed set aliases also
+/// keep their existing structural comparison.
+fn retain_installed_policy(installed: Option<&PolicyChain>, candidate: &mut Option<PolicyChain>) {
+    let (Some(installed), Some(next)) = (installed, candidate.as_ref()) else {
+        return;
+    };
+    if installed == next {
+        return;
+    }
+    let comparable = |chain: &PolicyChain| {
+        let compiled = chain.compiled();
+        chain.policies.iter().all(|named| {
+            named.rpol.as_ref().is_some_and(|rpol| {
+                rpol.policies.iter().all(|policy| {
+                    policy.terms.iter().all(|term| {
+                        !matches!(term.action, TermAction::ForEach(_))
+                            && !term.guard.any_node(&|guard| match guard {
+                                MatchExpr::LocalInAsnSet { .. }
+                                | MatchExpr::LocalInCommunitySet { .. } => true,
+                                MatchExpr::PrefixInSet(id) => !retains_set_name(
+                                    *id,
+                                    &rpol.prefix_sets,
+                                    &rpol.prefix_set_names,
+                                    &compiled.prefix_sets,
+                                    &compiled.prefix_set_names,
+                                ),
+                                MatchExpr::CommunityInSet(id) => !retains_set_name(
+                                    *id,
+                                    &rpol.community_sets,
+                                    &rpol.community_set_names,
+                                    &compiled.community_sets,
+                                    &compiled.community_set_names,
+                                ),
+                                MatchExpr::OriginAsInSet(id) | MatchExpr::PeerAsInSet(id) => {
+                                    !retains_set_name(
+                                        *id,
+                                        &rpol.asn_sets,
+                                        &rpol.asn_set_names,
+                                        &compiled.asn_sets,
+                                        &compiled.asn_set_names,
+                                    )
+                                }
+                                _ => false,
+                            })
+                    })
+                })
+            })
+        })
+    };
+    if installed
+        .policies
+        .iter()
+        .map(|policy| &policy.name)
+        .eq(next.policies.iter().map(|policy| &policy.name))
+        && comparable(installed)
+        && comparable(next)
+        && installed.compiled() == next.compiled()
+    {
+        *candidate = Some(installed.share());
+    }
+}
+
+/// Splicing deduplicates donor Arcs and keeps the first source name. Require
+/// each referenced name to survive on that same Arc, including across files.
+fn retains_set_name<T>(
+    id: SetId,
+    source: &[Arc<T>],
+    source_names: &[Option<String>],
+    compiled: &[Arc<T>],
+    compiled_names: &[Option<String>],
+) -> bool {
+    let index = id.0 as usize;
+    compiled.iter().enumerate().any(|(slot, set)| {
+        Arc::ptr_eq(&source[index], set) && source_names.get(index) == compiled_names.get(slot)
+    })
 }
 
 impl PeerManager {
@@ -386,7 +471,15 @@ impl PeerManager {
                         ReloadPeerActionKind::Remove => resolved.remove.push((*peer).clone()),
                         ReloadPeerActionKind::Replace => resolved.replace.push(resolve(peer)?),
                         ReloadPeerActionKind::HotUpdate => {
-                            let next = resolve(peer)?;
+                            let mut next = resolve(peer)?;
+                            retain_installed_policy(
+                                managed.import_policy.as_ref(),
+                                &mut next.import_policy,
+                            );
+                            retain_installed_policy(
+                                managed.export_policy.as_ref(),
+                                &mut next.export_policy,
+                            );
                             let mut prior = Self::removed_peer_config(peer, managed);
                             prior.import_policy.clone_from(&next.import_policy);
                             prior.export_policy.clone_from(&next.export_policy);
@@ -421,7 +514,7 @@ impl PeerManager {
                     ));
                 }
             };
-            let chains = match candidate
+            let mut chains = match candidate
                 .effective_policy_for_neighbor(&neighbor, managed.rfc8212_external)
             {
                 Ok(chains) => chains,
@@ -439,6 +532,15 @@ impl PeerManager {
                 Err(error) => return Err(error.to_string()),
             };
             if managed.import_policy == chains.import && managed.export_policy == chains.export {
+                continue;
+            }
+            retain_installed_policy(managed.import_policy.as_ref(), &mut chains.import);
+            retain_installed_policy(managed.export_policy.as_ref(), &mut chains.export);
+            if managed.import_policy == chains.import
+                && managed.export_policy == chains.export
+                && !managed.pending_refresh
+                && !managed.pending_export_apply
+            {
                 continue;
             }
             resolved.policy_targets.push(ResolvedPeerPolicy {

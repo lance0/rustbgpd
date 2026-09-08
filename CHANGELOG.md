@@ -86,6 +86,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- SIGHUP generations no longer reinstall unchanged RPOL chains solely because
+  an unreferenced literal set changed in the same source file. The runtime keeps
+  installed counters while adopting the candidate policy catalog; pending
+  retries and dataset-dependent refreshes still run. Policies with local set
+  bindings, loops, or collapsed set aliases, and mixed TOML/RPOL chains retain
+  their existing structural comparison.
+
 - The IXP matrix retains timestamped health-probe errors alongside its latency
   CSV, so failed operator checks identify the daemon error in the receipt.
 
