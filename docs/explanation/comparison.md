@@ -92,7 +92,8 @@ IPv4/IPv6 `Prefix` routes.
     carries the L2 path end to end (M109 — IPv6 tunnel source, IPv6 BGP
     transport, 16-octet Type 2 and Type 3 next hops, remote-MAC FDB rows
     programmed with an IPv6 `dst`), and symmetric IRB works over an IPv6
-    underlay for IPv6 tenant prefixes (M110, manual). Interface-less IRB
+    underlay for IPv6 tenant prefixes (M110; hosted `kernel-dataplane` CI with
+    FRR `no advertise-pip`). Interface-less IRB
     does not implement `RTA_VIA`, so the prefix and next-hop families must
     agree: an IPv4 tenant prefix under an IPv6 VTEP is refused at
     origination and dropped at import. Both IPv6 receipts are single-homed;
