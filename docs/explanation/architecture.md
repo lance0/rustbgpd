@@ -75,8 +75,9 @@ PeerManager-backed validate-only path that reads the live runtime config
 snapshot and returns an optimistic snapshot token. `ApplyConfigTransaction` and
 the confirmed-commit controls run under the same coordinator lock used by
 SIGHUP and runtime CRUD, so mutation paths share one ordering point before they
-stage the runtime snapshot, apply live effects, wait for persistence
-acknowledgement, and release the lock. The API crate exposes the gRPC surface;
+stage the candidate on disk, stage the runtime snapshot, apply live effects,
+wait for the publication acknowledgement, and release the lock. The API crate
+exposes the gRPC surface;
 the binary owns the actual executors because rollback needs binary-only
 channels to the PeerManager, FIB reconciler, and config persistence bridge.
 
@@ -342,9 +343,11 @@ of taking its default process action. The ordering is a contract, asserted by
    transaction model.
 2. `ApplyConfigTransaction` is handled in the daemon binary. It takes the
    runtime-config coordinator lock shared with SIGHUP and runtime CRUD,
-   validates the optimistic snapshot token, stages the candidate snapshot in the
-   PeerManager, applies the one supported runtime family, waits for the config
-   persistence acknowledgement, and only then releases the lock.
+   validates the optimistic snapshot token, durably stages the candidate next
+   to the config file, stages the candidate snapshot in the PeerManager, applies
+   the one supported runtime family, waits for the publication acknowledgement,
+   and only then releases the lock. A stage the persister refuses fails the
+   transaction before any runtime state changes.
 3. Rollback is executor-specific and LIFO. FIB-table, dynamic-neighbor,
    static-neighbor, catalog-only, and live-policy-impact transactions restore
    their prior runtime state and previous PeerManager config snapshot on

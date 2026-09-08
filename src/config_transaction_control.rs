@@ -1045,7 +1045,7 @@ impl ConfigTransactionController {
                         // rename retains no authority and precedes every
                         // runtime mutation — a determinate clean no-effect
                         // refusal, same as the NotPublished persistence
-                        // mapping in persist_candidate_config, not an
+                        // mapping in StagedCandidateConfig::commit, not an
                         // internal invariant breach.
                         ConfigTransactionApplyError::FailedPrecondition(message)
                     });
@@ -2680,6 +2680,7 @@ async fn commit_fib_transaction(
     .unwrap_or_default();
     let staged_tables = candidate.fib_tables.clone();
     progress.begin_mutation();
+    let staged = stage_candidate_config(permit, candidate_toml).await?;
     let rollback = stage_preloaded_config_snapshot(
         peer_mgr_internal_tx,
         Box::new(candidate.clone()),
@@ -2712,7 +2713,7 @@ async fn commit_fib_transaction(
         }
     }
     progress.begin_settling();
-    if let Err(failure) = persist_candidate_config(permit, candidate_toml).await {
+    if let Err(failure) = staged.commit().await {
         if failure.fence_reason.is_some() {
             return Err(failure);
         }
@@ -2985,6 +2986,7 @@ async fn commit_candidate_snapshot_locked(
         rustbgpd_api::runtime_config_settlement::settlement_test_control::Checkpoint::TransactionAfterBeginMutation,
     )
     .await;
+    let staged = stage_candidate_config(permit, candidate_toml).await?;
     let rollback = stage_preloaded_config_snapshot(
         peer_mgr_internal_tx,
         Box::new(candidate.clone()),
@@ -2992,7 +2994,7 @@ async fn commit_candidate_snapshot_locked(
     )
     .await?;
     progress.begin_settling();
-    if let Err(failure) = persist_candidate_config(permit, candidate_toml).await {
+    if let Err(failure) = staged.commit().await {
         if failure.fence_reason.is_some() {
             return Err(failure);
         }
@@ -3021,6 +3023,7 @@ async fn commit_dynamic_neighbors_locked(
 ) -> Result<(), ApplyFailure> {
     let permit = reserve_persist_permit(config_tx).await?;
     progress.begin_mutation();
+    let staged = stage_candidate_config(permit, candidate_toml).await?;
     let rollback = stage_preloaded_config_snapshot(
         peer_mgr_internal_tx,
         Box::new(candidate.clone()),
@@ -3042,7 +3045,7 @@ async fn commit_dynamic_neighbors_locked(
         );
     }
     progress.begin_settling();
-    if let Err(failure) = persist_candidate_config(permit, candidate_toml).await {
+    if let Err(failure) = staged.commit().await {
         if failure.fence_reason.is_some() {
             return Err(failure);
         }
@@ -3069,6 +3072,7 @@ async fn commit_static_neighbors_locked(
 ) -> Result<(), ApplyFailure> {
     let permit = reserve_persist_permit(config_tx).await?;
     progress.begin_mutation();
+    let staged = stage_candidate_config(permit, candidate_toml).await?;
     let rollback = stage_preloaded_config_snapshot(
         peer_mgr_internal_tx,
         Box::new(candidate.clone()),
@@ -3177,7 +3181,7 @@ async fn commit_static_neighbors_locked(
     }
 
     progress.begin_settling();
-    if let Err(failure) = persist_candidate_config(permit, candidate_toml).await {
+    if let Err(failure) = staged.commit().await {
         if failure.fence_reason.is_some() {
             return Err(failure);
         }
@@ -3230,10 +3234,11 @@ fn peer_session_reshape_commit_message(commit: &PeerSessionReshapeCommit) -> Str
     message
 }
 
-/// Commit a peer-group/session reshape transaction: stage the candidate
-/// snapshot, reconfigure the affected concrete static peers (capturing prior
-/// configs), persist, and roll back live peers + snapshot on failure. After a
-/// successful persist, gracefully reset the live dynamic sessions accepted by
+/// Commit a peer-group/session reshape transaction: durably stage the
+/// candidate on disk, stage the candidate snapshot, reconfigure the affected
+/// concrete static peers (capturing prior configs), publish the staged
+/// candidate, and roll back live peers + snapshot on a publication failure.
+/// After a successful publish, gracefully reset the live dynamic sessions accepted by
 /// the affected ranges — they re-accept under the committed (already staged)
 /// config on reconnect. The dynamic reset is deliberately post-persist and
 /// best-effort: a failed transaction never flaps a dynamic peer, and a
@@ -3250,6 +3255,7 @@ async fn commit_peer_session_reshape_locked(
 ) -> Result<PeerSessionReshapeCommit, ApplyFailure> {
     let permit = reserve_persist_permit(config_tx).await?;
     progress.begin_mutation();
+    let staged = stage_candidate_config(permit, candidate_toml).await?;
     let rollback = stage_preloaded_config_snapshot(
         peer_mgr_internal_tx,
         Box::new(candidate.clone()),
@@ -3297,7 +3303,7 @@ async fn commit_peer_session_reshape_locked(
     };
 
     progress.begin_settling();
-    if let Err(failure) = persist_candidate_config(permit, candidate_toml).await {
+    if let Err(failure) = staged.commit().await {
         if failure.fence_reason.is_some() {
             return Err(failure);
         }
@@ -3724,40 +3730,100 @@ async fn reserve_persist_permit(
         })
 }
 
-async fn persist_candidate_config(
+/// A transaction candidate durably staged next to the config file but not
+/// yet published.
+///
+/// Staging is the first thing a family executor does after reserving its
+/// persistence slot, so an ordinary disk failure — an unwritable directory, a
+/// read-only mount, a full filesystem, or a candidate the bridge cannot derive
+/// from the accepted snapshot — is reported while every session, catalog, and
+/// policy is still untouched. Dropping the value without calling
+/// [`Self::commit`] discards the stage: the bridge sees its commit channel
+/// close and tells the persister to remove the staged write. Every early
+/// return in an executor therefore discards by construction, and no stage
+/// outlives the transaction that owns it.
+struct StagedCandidateConfig {
+    commit: oneshot::Sender<oneshot::Sender<ConfigPersistCommitOutcome>>,
+}
+
+/// Durably stage `candidate_toml` through the config bridge and wait for the
+/// staging acknowledgement. Every failure here is a clean, unfenced refusal:
+/// nothing was published and nothing has been mutated.
+async fn stage_candidate_config(
     permit: mpsc::OwnedPermit<ConfigEvent>,
     candidate_toml: String,
-) -> Result<(), ApplyFailure> {
-    let (ack_tx, ack_rx) = oneshot::channel();
-    // Single-phase on purpose: the ADR-0076 executor owns its own
-    // apply/rollback and ambiguous-outcome reporting, and ADR-0113 already
-    // inverted the one family whose apply is not undoable.
+) -> Result<StagedCandidateConfig, ApplyFailure> {
+    let (staged_tx, staged_rx) = oneshot::channel();
+    let (commit_tx, commit_rx) = oneshot::channel();
     permit.send(ConfigEvent::ConfigTransactionCommitted {
         candidate_toml,
-        ack: Some(ConfigPersistAck::immediate(ack_tx)),
+        ack: Some(ConfigPersistAck::Staged {
+            staged: staged_tx,
+            commit: commit_rx,
+        }),
     });
-    match ack_rx.await {
-        Ok(ConfigPersistCommitOutcome::PublishedDurable) => Ok(()),
-        // The persister reported failure: the atomic write did not replace the
-        // config file, so disk provably still holds the previous config.
-        Ok(ConfigPersistCommitOutcome::NotPublished(error)) => {
-            Err(ConfigTransactionApplyError::FailedPrecondition(error).into())
+    match staged_rx.await {
+        Ok(Ok(())) => Ok(StagedCandidateConfig { commit: commit_tx }),
+        // The persister could not stage the write, or the bridge could not
+        // derive the candidate from the accepted snapshot. Either way the
+        // config file provably still holds the accepted config.
+        Ok(Err(error)) => {
+            Err(ConfigTransactionApplyError::FailedPrecondition(error.to_string()).into())
         }
-        Ok(ConfigPersistCommitOutcome::PublicationAmbiguous(error)) => Err(ApplyFailure::fenced(
-            ConfigTransactionApplyError::Internal(format!(
-                "config candidate is visible but publication durability is unproved: {error}"
+        // The bridge went away without answering. Publication needs a commit
+        // the bridge can no longer relay, so the config file is untouched and
+        // no runtime mutation has started — unlike the same loss after
+        // commit, which fences.
+        Err(_) => Err(ConfigTransactionApplyError::Unavailable(
+            "config bridge dropped transaction staging acknowledgement".to_string(),
+        )
+        .into()),
+    }
+}
+
+impl StagedCandidateConfig {
+    /// Publish the staged candidate. The runtime change has already been
+    /// applied, so each outcome is classified by the exact protocol phase the
+    /// persister reported, never reconstructed from error text: a pre-rename
+    /// failure is determinate and the caller compensates it; an ambiguous
+    /// publication or a lost acknowledgement fences.
+    async fn commit(self) -> Result<(), ApplyFailure> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self.commit.send(reply_tx).is_err() {
+            // The bridge is gone before it could relay the commit, so the
+            // staged write can never land: disk provably still holds the
+            // previous config and the caller compensates its runtime change.
+            return Err(ConfigTransactionApplyError::Internal(
+                "config bridge rejected staged transaction commit before delivery".to_string(),
+            )
+            .into());
+        }
+        match reply_rx.await {
+            Ok(ConfigPersistCommitOutcome::PublishedDurable) => Ok(()),
+            // The persister reported failure: the atomic rename did not
+            // replace the config file, so disk provably still holds the
+            // previous config.
+            Ok(ConfigPersistCommitOutcome::NotPublished(error)) => {
+                Err(ConfigTransactionApplyError::FailedPrecondition(error).into())
+            }
+            Ok(ConfigPersistCommitOutcome::PublicationAmbiguous(error)) => {
+                Err(ApplyFailure::fenced(
+                    ConfigTransactionApplyError::Internal(format!(
+                        "config candidate is visible but publication durability is unproved: {error}"
+                    )),
+                    RuntimeConfigFenceReason::PublicationAmbiguous,
+                ))
+            }
+            // Ambiguous-persistence window (b): the acknowledgement was lost.
+            // The persister may or may not have published the candidate — the
+            // on-disk outcome is unknowable from here.
+            Err(_) => Err(ApplyFailure::fenced(
+                ConfigTransactionApplyError::Internal(
+                    "config bridge dropped transaction persistence acknowledgement".to_string(),
+                ),
+                RuntimeConfigFenceReason::AcknowledgementLost,
             )),
-            RuntimeConfigFenceReason::PublicationAmbiguous,
-        )),
-        // LAN-277 window (b): the acknowledgement was lost. The persister may
-        // or may not have written the candidate — the on-disk outcome is
-        // unknowable from here.
-        Err(_) => Err(ApplyFailure::fenced(
-            ConfigTransactionApplyError::Internal(
-                "config bridge dropped transaction persistence acknowledgement".to_string(),
-            ),
-            RuntimeConfigFenceReason::AcknowledgementLost,
-        )),
+        }
     }
 }
 
