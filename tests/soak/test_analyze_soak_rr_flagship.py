@@ -117,7 +117,23 @@ def long_rows(rss_of=None):
     return rows
 
 
-def run_analyzer(rows, cycles, meta, fields=FIELDS):
+def daemon_record(level="INFO", message="daemon ready", **fields):
+    return (json.dumps({
+        "timestamp": ts(120), "level": level, "target": "rustbgpd",
+        "fields": {"message": message, **fields},
+    }) + "\n").encode()
+
+
+CLEAN_DAEMON = daemon_record()
+DAEMON_BANNER = (
+    b"\n  rustbgpd 0.69.0 | AS 65000 | router-id 10.0.0.1\n"
+    b"  |- 12 peers (12 iBGP)\n"
+    b"  |- grpc: unix:///tmp/flagship/grpc.sock\n"
+    b"  |- metrics: http://127.0.0.1:9179/metrics\n\n"
+)
+
+
+def run_analyzer(rows, cycles, meta, fields=FIELDS, daemon=CLEAN_DAEMON):
     with tempfile.TemporaryDirectory() as tmp:
         run_dir = Path(tmp)
         with (run_dir / "samples.csv").open("w", newline="") as stream:
@@ -127,6 +143,8 @@ def run_analyzer(rows, cycles, meta, fields=FIELDS):
             writer.writerows(rows)
         (run_dir / "cycles.log").write_text("\n".join(cycles) + "\n")
         (run_dir / "run.json").write_text(json.dumps(meta))
+        if daemon is not None:
+            (run_dir / "rustbgpd.log").write_bytes(daemon)
         result = subprocess.run(
             ["python3", str(ANALYZER), str(run_dir)],
             text=True, capture_output=True, check=False,
@@ -136,6 +154,51 @@ def run_analyzer(rows, cycles, meta, fields=FIELDS):
 
 
 class RrFlagshipAnalyzerContracts(unittest.TestCase):
+    def test_daemon_evidence_fails_closed(self):
+        bad_logs = {
+            "missing": None, "empty": b"", "blank": b"\n",
+            "banner_only": DAEMON_BANNER,
+            "malformed": daemon_record() + b'{broken}\n',
+            "truncated_json": daemon_record() + b'{"level":',
+            "missing_newline": daemon_record().rstrip(b"\n"),
+            "panic": daemon_record() + b"thread 'main' panicked at bug.rs:1\n",
+            "invalid_utf8": daemon_record() + b"\xff\n",
+            "wrong_shape": b'[]\n',
+            "duplicate_level": daemon_record("ERROR").replace(
+                b'"level": "ERROR"', b'"level": "ERROR", "level": "INFO"'),
+            "non_json_nan": daemon_record(value=float("nan")),
+            "non_json_infinity": daemon_record(value=float("inf")),
+            "missing_fields": b'{"level":"INFO"}\n',
+            "fake_banner_line": daemon_record() + b"  |- ERROR hidden failure\n",
+            "banner_incomplete": DAEMON_BANNER.rstrip(b"\n") + b"\n",
+            "repeated_banner": DAEMON_BANNER + daemon_record() + DAEMON_BANNER,
+            "emfile": daemon_record("ERROR", "metrics server accept error",
+                                    error="Too many open files (os error 24)"),
+            "decode_error": daemon_record("ERROR", "decode error",
+                                               peer="127.1.0.1"),
+        }
+        for name, raw in bad_logs.items():
+            with self.subTest(name=name):
+                result, payload = run_analyzer(smoke_rows(), smoke_cycles(),
+                                               smoke_meta(), daemon=raw)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertFalse(payload["gates"]["daemon_log"]["pass"])
+                self.assertEqual(payload["verdict"], "fail")
+
+    def test_daemon_banner_and_warnings_are_reported_without_failure(self):
+        raw = (daemon_record() + DAEMON_BANNER
+               + daemon_record("WARN", "max prefix exceeded", peer="127.1.0.1")
+               + daemon_record("WARN", "peer lagged, requesting resync") * 2)
+        result, payload = run_analyzer(smoke_rows(), smoke_cycles(), smoke_meta(),
+                                       daemon=raw)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        gate = payload["gates"]["daemon_log"]
+        self.assertTrue(gate["pass"])
+        self.assertEqual(gate["value"]["records"], 4)
+        self.assertEqual(gate["value"]["warnings_by_message"], {
+            "max prefix exceeded": 1, "peer lagged, requesting resync": 2,
+        })
+
     def test_clean_smoke_run_passes_with_slope_gates_annotated(self):
         result, payload = run_analyzer(smoke_rows(), smoke_cycles(),
                                        smoke_meta())

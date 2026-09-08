@@ -70,6 +70,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The route-server and route-reflector flagship soak analyzers now require
+  valid daemon-log evidence and fail on every daemon `ERROR`, including
+  metrics listener failures that successful client probes can miss. Verdicts
+  also report `WARN` counts by message.
+
 - `rbgp policy stats` now allows backend waits up to one shared 2-second
   deadline, increased from 500 ms. This lets reads wait through longer
   `.rpol` reload transitions that temporarily queue RIB queries. Reloads or
