@@ -1248,8 +1248,24 @@ therefore own the graceful stop and the verification that follows it.
    This check validates candidate config bytes only: it does **not** inspect
    `runtime_state_dir` or config-adjacent commit-confirm authority.
 
-   Before any upgrade, use the still-running daemon to run
-   `rbgp config status` and confirm or abort every pending transaction.
+   Before any upgrade, use the still-running daemon to run the pre-upgrade
+   diagnostic against the file the new binary will boot:
+
+   ```sh
+   sudo -u rustbgpd "$candidate_root/usr/bin/rbgp" doctor --pre-upgrade /etc/rustbgpd/config.toml
+   ```
+
+   It is red, with the next action, while a confirmed transaction is pending,
+   applying, rollback-failed, or ambiguous (confirm or abort it with
+   `rbgp config confirm <id>` / `rbgp config abort <id>`), while a
+   runtime-config settlement owner is still settling, when the file resolves
+   to a different RFC 8212 epoch/posture than the live daemon runs, and
+   whenever the evidence is unavailable or denied. It never confirms, aborts,
+   rewrites, or stops anything. A green result is an observation at one
+   instant (`observed at unix <t>`), not a fence: a transaction can still
+   start after it, which is why the stop in step 3 and the repeated checks in
+   step 3 stay in the procedure. See
+   [the check reference](../reference/operations.md#pre-upgrade-checks).
 
    When the installed release is v0.64.0 or earlier, also clear retired
    commit-confirm authority first: a locator-free
@@ -1270,6 +1286,13 @@ therefore own the graceful stop and the verification that follows it.
    process can advertise `R=1` while sessions rebuild, but it advertises
    `forwarding_preserved = false`; use a drained route-server pair when traffic
    continuity matters.
+
+   With the daemon inactive, repeat the checks that only a stopped daemon can
+   make authoritative: verify the absence of a config-adjacent
+   `*.commit-confirm-locator.json`, make any explicit offline posture correction
+   the check called for, then repeat the candidate `--check --strict` from
+   step 2 against the final file after every rewrite. The live diagnostic
+   observed an earlier instant; these post-stop checks are the ones that hold.
 4. Install the already-checked package:
 
    ```sh
@@ -1312,7 +1335,8 @@ stopping the current daemon. If the old binary rejects the current config,
 restore a version-controlled config known to that release, preflight that exact
 file with the old binary, and install it only after the stop.
 
-Before downgrading, run `rbgp config status` and finish a pending confirmed
+Before downgrading, run `rbgp doctor --pre-upgrade` against the intended
+rollback config (or `rbgp config status`) and finish a pending confirmed
 transaction with `rbgp config confirm <id>` or `rbgp config abort <id>`. Do not
 delete a live locator to force the downgrade. Once the transaction is terminal,
 verify that the config-adjacent `*.commit-confirm-locator.json` and the retired

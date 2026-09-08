@@ -419,7 +419,8 @@ enum Command {
     /// logs/, crashes/, and system/. The raw daemon config file and
     /// bearer-token material are never collected. A bundle is still
     /// produced when the daemon is down; the manifest records which
-    /// sections are missing.
+    /// sections are missing. `--pre-upgrade CONFIG` adds the read-only
+    /// pre-upgrade checks (`upgrade.*`) under the same exit contract.
     #[command(after_help = "Exit codes:\n  \
         0  all checks green\n  \
         1  error (could not produce a bundle)\n  \
@@ -436,6 +437,16 @@ enum Command {
         /// stdout/journald.
         #[arg(long, value_name = "FILE")]
         log_file: Option<PathBuf>,
+
+        /// Add the pre-upgrade checks against CONFIG, the file the upgraded
+        /// daemon will boot. A pending or ambiguous confirmed transaction, an
+        /// active runtime-config settlement owner, unavailable or denied
+        /// evidence, and a candidate/live RFC 8212 posture mismatch are red
+        /// with the operator action to take. Read-only: nothing is confirmed,
+        /// aborted, rewritten, or stopped. A green result is an observation
+        /// at one instant, not a fence; follow it with the coordinated stop.
+        #[arg(long, value_name = "CONFIG")]
+        pre_upgrade: Option<PathBuf>,
     },
 
     /// Show Prometheus metrics
@@ -3207,7 +3218,12 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
     // `doctor` must produce a bundle even when the daemon is down, so it
     // handles the connect result itself instead of failing here; it also
     // owns a detailed 0/1/2 exit-code contract.
-    if let Command::Doctor { output, log_file } = &cli.command {
+    if let Command::Doctor {
+        output,
+        log_file,
+        pre_upgrade,
+    } = &cli.command
+    {
         let connection = connect(&cli.addr, cli.token_file.as_deref()).await;
         let result = commands::doctor::run(
             connection,
@@ -3217,6 +3233,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
                 daemon_address: &cli.addr,
                 token_file_configured: cli.token_file.is_some(),
                 json: cli.json,
+                pre_upgrade: pre_upgrade.as_deref(),
             },
         )
         .await;
@@ -5329,7 +5346,12 @@ printf '%s\n' "${COMPREPLY[@]}"
             "/var/log/rustbgpd.jsonl",
         ])
         .unwrap();
-        if let Command::Doctor { output, log_file } = cli.command {
+        if let Command::Doctor {
+            output,
+            log_file,
+            pre_upgrade,
+        } = cli.command
+        {
             assert_eq!(
                 output.as_deref(),
                 Some(std::path::Path::new("support.tar.gz"))
@@ -5338,9 +5360,29 @@ printf '%s\n' "${COMPREPLY[@]}"
                 log_file.as_deref(),
                 Some(std::path::Path::new("/var/log/rustbgpd.jsonl"))
             );
+            assert_eq!(pre_upgrade, None, "plain doctor has no pre-upgrade mode");
         } else {
             panic!("expected Doctor command");
         }
+
+        let cli = Cli::try_parse_from([
+            "rbgp",
+            "doctor",
+            "--pre-upgrade",
+            "/etc/rustbgpd/config.toml",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Doctor { pre_upgrade, .. } => assert_eq!(
+                pre_upgrade.as_deref(),
+                Some(std::path::Path::new("/etc/rustbgpd/config.toml"))
+            ),
+            _ => panic!("expected Doctor command"),
+        }
+        assert!(
+            Cli::try_parse_from(["rbgp", "doctor", "--pre-upgrade"]).is_err(),
+            "--pre-upgrade names the config the upgraded daemon will boot"
+        );
     }
 
     #[test]
