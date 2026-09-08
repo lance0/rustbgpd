@@ -722,3 +722,152 @@ async fn import_policy_stats_expired_deadline_precedes_resolution_and_selected_s
     tx.send(PeerManagerCommand::Shutdown).await.unwrap();
     manager_task.await.unwrap();
 }
+
+#[tokio::test(start_paused = true)]
+async fn prestage_import_snapshot_finishes_before_ready_ack_and_services_readiness() {
+    use rustbgpd_api::peer_types::{PeerManagerOperatorQuery, PeerManagerReadinessQuery};
+
+    // Completion, caller cancellation, and the unchanged aggregate deadline
+    // must all release the read without allowing its counters to cross apply.
+    for finish in ["reply", "cancel", "timeout"] {
+        let (_command_tx, command_rx) = mpsc::channel(4);
+        let (rib_tx, _rib_rx) = mpsc::channel(4);
+        let (operator_tx, operator_rx) = mpsc::channel(4);
+        let (readiness_tx, readiness_rx) = mpsc::channel(4);
+        let mut manager = PeerManager::new(
+            command_rx,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            BgpMetrics::new(),
+            rib_tx,
+            None,
+        )
+        .with_operator_queries(operator_rx)
+        .with_readiness_queries(readiness_rx);
+        let address = IpAddr::V4(Ipv4Addr::new(198, 18, 0, 1));
+        let (admitted_tx, mut admitted_rx) = mpsc::unbounded_channel();
+        insert_test_managed_peer(
+            &mut manager,
+            address,
+            controlled_policy_query_handle(address, admitted_tx),
+            false,
+        );
+        let (ack, ack_rx) = oneshot::channel();
+        let (finished, mut finished_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let outcome = manager
+                .await_with_readiness_and_operator_budget(ack_rx, Duration::from_secs(10), true)
+                .await;
+            let _ = finished.send(outcome);
+            manager
+        });
+        let (reply, response) = oneshot::channel();
+        operator_tx
+            .send(PeerManagerOperatorQuery::QueryImportPolicyTermHits {
+                peer: Some(address),
+                deadline: tokio::time::Instant::now() + Duration::from_secs(2),
+                reply,
+            })
+            .await
+            .unwrap();
+        let (_, session_reply) = admitted_rx.recv().await.unwrap();
+        ack.send(()).unwrap();
+        let (reply, ping) = oneshot::channel();
+        readiness_tx
+            .send(PeerManagerReadinessQuery::Ping { reply })
+            .await
+            .unwrap();
+        ping.await.unwrap();
+        assert!(
+            matches!(
+                finished_rx.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ),
+            "a ready prestage ACK must wait for the admitted import snapshot"
+        );
+        match finish {
+            "reply" => {
+                session_reply
+                    .send(Some(controlled_policy_snapshot(address)))
+                    .unwrap();
+                assert!(
+                    matches!(response.await.unwrap(), SessionQueryOutcome::Reply(rows)
+                    if rows.len() == 1 && rows[0].1.generation == 1)
+                );
+            }
+            "cancel" => {
+                drop(response);
+                tokio::task::yield_now().await;
+            }
+            "timeout" => {
+                tokio::time::advance(Duration::from_secs(2)).await;
+                assert!(matches!(
+                    response.await.unwrap(),
+                    SessionQueryOutcome::TimedOut
+                ));
+            }
+            _ => unreachable!(),
+        }
+        assert!(matches!(finished_rx.await.unwrap(), Some(Ok(()))));
+        let mut manager = task.await.unwrap();
+        for (_, managed) in manager.peers.drain() {
+            managed.handle.shutdown().await.unwrap().unwrap();
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn normal_operator_import_snapshot_does_not_block_other_operator_reads() {
+    use rustbgpd_api::peer_types::PeerManagerOperatorQuery;
+
+    let (_command_tx, command_rx) = mpsc::channel(4);
+    let (rib_tx, _rib_rx) = mpsc::channel(4);
+    let (operator_tx, operator_rx) = mpsc::channel(4);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    )
+    .with_operator_queries(operator_rx);
+    let address = IpAddr::V4(Ipv4Addr::new(198, 18, 0, 1));
+    let (admitted_tx, mut admitted_rx) = mpsc::unbounded_channel();
+    insert_test_managed_peer(
+        &mut manager,
+        address,
+        controlled_policy_query_handle(address, admitted_tx),
+        false,
+    );
+    let task = tokio::spawn(manager.run());
+    let (reply, response) = oneshot::channel();
+    operator_tx
+        .send(PeerManagerOperatorQuery::QueryImportPolicyTermHits {
+            peer: Some(address),
+            deadline: tokio::time::Instant::now() + Duration::from_secs(2),
+            reply,
+        })
+        .await
+        .unwrap();
+    let (_, session_reply) = admitted_rx.recv().await.unwrap();
+    let (reply, existence) = oneshot::channel();
+    operator_tx
+        .send(PeerManagerOperatorQuery::HasPeerAddress { address, reply })
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1), existence)
+            .await
+            .unwrap()
+            .unwrap()
+    );
+    session_reply.send(None).unwrap();
+    assert!(matches!(response.await.unwrap(), SessionQueryOutcome::Reply(rows) if rows.is_empty()));
+    task.abort();
+    let _ = task.await;
+}

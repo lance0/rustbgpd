@@ -958,6 +958,225 @@ export_policy_chain = ["members-out"]
     }
 }
 
+/// Hold real policy transaction messages while forwarding unrelated RIB work
+/// to the existing stub. The rollback hold starts only after forward commit.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the held forward and rollback acknowledgements share one complete generation fixture"
+)]
+async fn assert_generation_operator_read_boundaries(compensate: bool) {
+    let fixture = RsFixture::new();
+    let prior = fixture.load();
+    let mut harness = GenerationHarness::new(&prior);
+    let candidate = if compensate {
+        harness
+            .mgr
+            .inject_reconfigure_failures
+            .insert(key("10.0.0.2".parse().unwrap()), 0);
+        std::fs::write(fixture.dir.path().join("members.rpol"), RS_RPOL_MED_20).unwrap();
+        // Leave two policy-only members to exercise the cohort in both
+        // directions; the sole replacement fails before any socket work.
+        fixture.write_toml(
+            &fixture
+                .base_toml()
+                .replace("remote_asn = 65002", "remote_asn = 65012"),
+        );
+        fixture.load()
+    } else {
+        std::fs::write(fixture.dir.path().join("members.rpol"), RS_RPOL_MED_20).unwrap();
+        fixture.load()
+    };
+    let (command_tx, command_rx) = mpsc::channel(16);
+    harness.mgr.rx = command_rx;
+    let (internal_tx, internal_rx) = mpsc::channel(1);
+    harness.mgr.internal_rx = Some(internal_rx);
+    let (operator_tx, operator_rx) = mpsc::channel(16);
+    harness.mgr = harness.mgr.with_operator_queries(operator_rx);
+    let (readiness_tx, readiness_rx) = mpsc::channel(4);
+    harness.mgr = harness.mgr.with_readiness_queries(readiness_rx);
+    let rib_tx = harness.mgr.rib_tx.clone();
+    let (proxy_tx, mut proxy_rx) = mpsc::channel(16);
+    harness.mgr.rib_tx = proxy_tx;
+    let (held_tx, mut held_rx) = mpsc::channel(2);
+    let forwarding_tx = rib_tx.clone();
+    let proxy = tokio::spawn(async move {
+        let mut saw_replace = false;
+        let mut held_prepare = false;
+        let mut held_replace = false;
+        while let Some(update) = proxy_rx.recv().await {
+            let hold = match &update {
+                RibUpdate::PrepareExportPolicyDestination { .. }
+                    if !held_prepare && (!compensate || saw_replace) =>
+                {
+                    held_prepare = true;
+                    true
+                }
+                RibUpdate::ReplacePeerExportPolicies { .. } => {
+                    saw_replace = true;
+                    let hold = !compensate && !held_replace;
+                    held_replace = true;
+                    hold
+                }
+                _ => false,
+            };
+            if hold {
+                held_tx.send(update).await.unwrap();
+            } else {
+                forwarding_tx.send(update).await.unwrap();
+            }
+        }
+    });
+    let counters = harness.counters.clone();
+    let driver = async {
+        let prepare = held_rx.recv().await.expect("held destination prepare");
+        assert!(matches!(
+            prepare,
+            RibUpdate::PrepareExportPolicyDestination { .. }
+        ));
+        let mut prepare = Some(prepare);
+        let (mutation_reply, mut mutation_response) = oneshot::channel();
+        command_tx
+            .send(PeerManagerCommand::EnablePeer {
+                peer: key("10.0.0.2".parse().unwrap()),
+                reply: mutation_reply,
+            })
+            .await
+            .unwrap();
+        if !compensate {
+            let (reply, response) = oneshot::channel();
+            operator_tx
+                .send(PeerManagerOperatorQuery::ListPeers { reply })
+                .await
+                .unwrap();
+            assert_eq!(response.await.unwrap().len(), 3);
+            let (reply, response) = oneshot::channel();
+            operator_tx
+                .send(PeerManagerOperatorQuery::GetPeerState {
+                    peer: key("10.0.0.2".parse().unwrap()),
+                    reply,
+                })
+                .await
+                .unwrap();
+            assert!(response.await.unwrap().is_some());
+            let (reply, response) = oneshot::channel();
+            operator_tx
+                .send(PeerManagerOperatorQuery::HasPeerAddress {
+                    address: "10.0.0.2".parse().unwrap(),
+                    reply,
+                })
+                .await
+                .unwrap();
+            assert!(response.await.unwrap());
+            let (reply, response) = oneshot::channel();
+            operator_tx
+                .send(PeerManagerOperatorQuery::QueryPolicyDatasets { reply })
+                .await
+                .unwrap();
+            assert!(response.await.unwrap().is_empty());
+            assert!(matches!(
+                mutation_response.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+            assert!(
+                counters
+                    .values()
+                    .all(|counter| counter.export_installs.load(Ordering::SeqCst) == 0)
+            );
+            rib_tx.send(prepare.take().unwrap()).await.unwrap();
+        }
+        let held = if compensate {
+            prepare.take().unwrap()
+        } else {
+            let replace = held_rx.recv().await.expect("held cohort replacement");
+            assert!(matches!(
+                replace,
+                RibUpdate::ReplacePeerExportPolicies { .. }
+            ));
+            replace
+        };
+        assert_eq!(
+            counters
+                .values()
+                .filter(|counter| counter.export_installs.load(Ordering::SeqCst) >= 1)
+                .count(),
+            if compensate { 2 } else { 3 },
+        );
+        if compensate {
+            assert_eq!(
+                counters[&"10.0.0.2".parse::<IpAddr>().unwrap()]
+                    .export_installs
+                    .load(Ordering::SeqCst),
+                0
+            );
+        }
+        let (reply, mut response) = oneshot::channel();
+        operator_tx
+            .send(PeerManagerOperatorQuery::ListPeers { reply })
+            .await
+            .unwrap();
+        let (reply, ping) = oneshot::channel();
+        readiness_tx
+            .send(PeerManagerReadinessQuery::Ping { reply })
+            .await
+            .unwrap();
+        ping.await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut response)
+                .await
+                .is_err(),
+            "operator reads must stay fenced after session application and during rollback"
+        );
+        assert!(matches!(
+            mutation_response.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        rib_tx.send(held).await.unwrap();
+        (response, mutation_response)
+    };
+    let (outcome, (operator_response, mutation_response)) =
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(harness.apply(&candidate), driver)
+        })
+        .await
+        .expect("generation and held-stage driver must finish");
+    if compensate {
+        assert!(
+            matches!(outcome, ReloadGenerationOutcome::FullyCompensated(_)),
+            "{outcome:?}"
+        );
+        assert_eq!(harness.mgr.current_config, prior);
+    } else {
+        assert!(
+            matches!(outcome, ReloadGenerationOutcome::Applied(_)),
+            "{outcome:?}"
+        );
+        assert_eq!(harness.mgr.current_config, candidate);
+    }
+    let manager = tokio::spawn(harness.mgr.run());
+    tokio::time::timeout(Duration::from_secs(1), async {
+        assert_eq!(operator_response.await.unwrap().len(), 3);
+        let _ = mutation_response.await.unwrap();
+        command_tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+        manager.await.unwrap();
+    })
+    .await
+    .expect("normal actor loop must release queued work");
+    drop(internal_tx);
+    drop(rib_tx);
+    proxy.await.unwrap();
+    harness.rib.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn forward_generation_services_operator_reads_only_during_prestage() {
+    assert_generation_operator_read_boundaries(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn compensated_generation_fences_operator_reads_during_rollback_prestage() {
+    assert_generation_operator_read_boundaries(true).await;
+}
+
 #[tokio::test]
 async fn compound_reshape_and_member_edit_replace_each_peer_exactly_once() {
     let fixture = RsFixture::new();

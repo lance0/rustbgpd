@@ -801,6 +801,22 @@ impl PeerManager {
         targets: Vec<ResolvedPeerPolicy>,
         require_clean_convergence: bool,
     ) -> Result<Vec<ResolvedPeerPolicy>, PolicySnapshotFailure> {
+        self.apply_resolved_policy_snapshot_with_prestage_reads(
+            targets,
+            require_clean_convergence,
+            false,
+        )
+        .await
+    }
+
+    /// The forward reload owner may admit reads before the first policy effect.
+    /// Rollback and standalone policy operations use the fenced wrapper above.
+    pub(super) async fn apply_resolved_policy_snapshot_with_prestage_reads(
+        &mut self,
+        targets: Vec<ResolvedPeerPolicy>,
+        require_clean_convergence: bool,
+        allow_operator_reads: bool,
+    ) -> Result<Vec<ResolvedPeerPolicy>, PolicySnapshotFailure> {
         let snapshot_started = Instant::now();
         let mut phases = PolicySnapshotPhaseTimings {
             total_targets: targets.len(),
@@ -812,6 +828,7 @@ impl PeerManager {
                 targets,
                 require_clean_convergence,
                 &mut phases,
+                allow_operator_reads,
             )
             .await;
         let total_us = elapsed_us(snapshot_started);
@@ -858,6 +875,7 @@ impl PeerManager {
         targets: Vec<ResolvedPeerPolicy>,
         require_clean_convergence: bool,
         phases: &mut PolicySnapshotPhaseTimings,
+        allow_operator_reads: bool,
     ) -> Result<Vec<ResolvedPeerPolicy>, PolicySnapshotFailure> {
         // ADR-0112: qualify RFC 8212 import-presence transitions before
         // anything below can touch a peer, so one incapable peer rejects the
@@ -948,6 +966,7 @@ impl PeerManager {
                 &mut rollback_rib_budget,
                 require_clean_convergence,
                 phases,
+                allow_operator_reads,
             )
             .await
         else {
@@ -1381,6 +1400,7 @@ impl PeerManager {
         rollback_rib_budget: &mut PolicyRollbackRibBudget,
         require_clean_convergence: bool,
         phase_timings: &mut PolicySnapshotPhaseTimings,
+        allow_operator_reads: bool,
     ) -> Option<Result<Vec<CapturedResolvedPolicy>, PolicySnapshotFailure>> {
         if targets.len() < 2 {
             return None;
@@ -1448,9 +1468,13 @@ impl PeerManager {
                 }
                 matches!(reply_rx.await, Ok(Ok(())))
             };
-            self.await_with_readiness_budget(round_trip, RIB_REPLY_TIMEOUT)
-                .await
-                .unwrap_or(false)
+            self.await_with_readiness_and_operator_budget(
+                round_trip,
+                RIB_REPLY_TIMEOUT,
+                allow_operator_reads,
+            )
+            .await
+            .unwrap_or(false)
         };
         info!(
             cohort_targets = targets.len(),

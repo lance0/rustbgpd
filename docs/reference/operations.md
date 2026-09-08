@@ -599,6 +599,14 @@ What happens:
    `AdjRibIn` get re-evaluated against the new policy. Operators no
    longer need to run `softreset` manually after a chain swap.
 
+During a forward generation's export-destination prestaging, neighbor inventory
+and policy-statistics reads can inspect the installed generation while the RIB
+prepares the candidate destination. These reads retain their existing deadlines.
+Once session policy application starts, operator reads wait for settlement;
+rollback and standalone policy transactions keep the same fence. Readiness
+queries remain available at their existing transaction seams. A congested backend
+or a later transaction stage can still exhaust an operator read's deadline.
+
 For a dataset content generation, every file must load successfully before
 publication. The daemon retains prior snapshots and loader errors, reserves
 generation numbers for both publication and compensation, settles policy
