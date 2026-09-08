@@ -3766,7 +3766,7 @@ async fn run<T>(
     // Resolve every validated policy/EVPN startup derivation before the first
     // teardown-owned actor starts. A second failure after config validation is
     // a programming error, but remains daemon-fatal instead of dropping state.
-    let export_policy = config.export_chain().unwrap_or_else(|e| {
+    let _ = config.export_chain().unwrap_or_else(|e| {
         error!("invalid global export policy: {e}");
         process::exit(1);
     });
@@ -4104,14 +4104,11 @@ async fn run<T>(
         None
     };
 
-    let mut rib_manager = RibManager::new(
-        rib_rx,
-        rib_query_rx,
-        export_policy,
-        cluster_id,
-        metrics.clone(),
-    )
-    .with_readiness_queries(rib_readiness_rx);
+    // Sessions carry their complete current effective export chain, including
+    // global inheritance. A startup fallback here would restore an old chain
+    // when a peer reconnects after the global chain was removed.
+    let mut rib_manager = RibManager::new(rib_rx, rib_query_rx, None, cluster_id, metrics.clone())
+        .with_readiness_queries(rib_readiness_rx);
     #[cfg(target_os = "linux")]
     if (config.global.honor_blackhole && config.global.install_blackhole_discard)
         || !config.fib_tables.is_empty()
@@ -6595,7 +6592,7 @@ mod tests {
             .expect("startup ownership boundary must remain explicit");
 
         for preflight in [
-            "let export_policy = config.export_chain()",
+            "config.export_chain()",
             "config.resolve_evpn_instances()",
             "config.resolve_evpn_ip_vrfs()",
             "config.resolve_managed_netdevs()",

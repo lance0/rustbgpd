@@ -1141,6 +1141,13 @@ changes do not retroactively re-evaluate existing Adj-RIB-In state; use
 | `GetPolicyStats` | Read the live per-term hit counters of the installed policy chains (since chain install; direction `import`, `export`, or `both` — import chains also report their install generation). All backend waits across explicit-peer validation plus export, import, and dataset reads share one absolute 2 s deadline, matching the peer-manager read and neighbor-service RIB snapshot budgets. Reads can wait through policy reload transitions within that budget; longer transitions or congested backends still return `DEADLINE_EXCEEDED` with no partial rows. Fleet import reads use bounded per-RPC concurrency, do not park the peer-manager actor awaiting sessions, and cancel outstanding session queries when the caller disconnects. An explicit unknown peer returns `NOT_FOUND`; a selected session exit returns `UNAVAILABLE`; a session that answers with no import chain legitimately contributes no row. CLI: `rbgp policy stats`. `SensitiveRead` tier. |
 | `GetValidationPolicyPosture` | Conservatively classifies RPKI-invalid and ASPA-invalid routes as `ENFORCED`, `UNENFORCED`, or `UNKNOWN` for installed static/dynamic peers and one prospective row per accepted dynamic range. The bounded response reports `complete` and `omitted`; an incomplete aggregate is never `ENFORCED`. This proves policy disposition only, not validator readiness, connectivity, configured intent, FIB state, or runtime enforcement. `SensitiveRead` tier; outside the narrow v1-stable surface. |
 
+The daemon installs each peer's complete effective export chain, including
+global inheritance. `GetPolicyStats` and `rbgp policy stats` report those
+installed peer chains; they do not include a separate `global` export row.
+The protobuf's `global` owner denotes a RIB fallback chain instance, not an
+aggregate of peer counters. Embedders may still install that fallback through
+`RibManager::new`; the daemon does not retain a startup fallback.
+
 Policy statements support the same match surface as TOML config:
 `prefix`, `ge`, `le`, `match_community`, `match_as_path`,
 `match_neighbor_set`, `match_route_type`, `match_as_path_length_ge/le`,
