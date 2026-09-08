@@ -42,6 +42,7 @@ def main():
     parser.add_argument("--prepare-only", action="store_true")
     args = parser.parse_args()
     args.out.mkdir(mode=0o700, exist_ok=True)
+    args.out.chmod(0o700)
     (args.out / "state").mkdir(mode=0o700)
     with socket.socket() as bgp, socket.socket() as metrics:
         bgp.bind(("127.0.0.1", 0))
