@@ -391,6 +391,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn proc_bytes_preserve_non_utf8_cmdline_and_check_process_identity() {
+        use std::io::Read;
         use std::os::unix::{ffi::OsStringExt, process::CommandExt};
 
         struct Child(std::process::Child);
@@ -403,19 +404,30 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config.toml");
-        fs::write(&config, "[global]\nasn = 65001\n").unwrap();
+        let contents = b"[global]\nasn = 65001\n";
+        fs::write(&config, contents).unwrap();
         // cat reads the config and then waits on its owned stdin pipe. Its
         // argv0 need not be UTF-8, unlike the Rust test harness's arguments.
-        let child = Child(
+        let mut child = Child(
             std::process::Command::new("cat")
                 .arg0(std::ffi::OsString::from_vec(b"rustbgpd\xff".to_vec()))
                 .arg(&config)
                 .arg("-")
                 .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
                 .spawn()
                 .unwrap(),
         );
+        // Wait for cat to execute before inspecting its process arguments.
+        let mut output = vec![0; contents.len()];
+        child
+            .0
+            .stdout
+            .as_mut()
+            .unwrap()
+            .read_exact(&mut output)
+            .unwrap();
+        assert_eq!(output, contents);
         let process = LocalProcess::capture(child.0.id()).unwrap();
         let cmdline = process.read_bytes("cmdline").unwrap();
         let mut args = cmdline.split(|byte| *byte == 0);
