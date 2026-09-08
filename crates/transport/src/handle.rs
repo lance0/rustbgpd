@@ -507,7 +507,8 @@ pub enum PeerCommand {
         /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), PeerCommandError>>,
     },
-    /// Replace the export policy chain used on future `PeerUp` registration.
+    /// Replace the export policy chain used on future `PeerUp` registration
+    /// and by the accepting live session during collision recovery.
     UpdateExportPolicy {
         /// New effective export policy chain (`None` = permit-all).
         policy: Option<Box<PolicyChain>>,
@@ -1996,13 +1997,17 @@ impl PeerHandle {
 
     /// Replace the effective export policy chain for future `PeerUp` messages.
     ///
-    /// The new chain is used when the session next registers with the RIB.
+    /// The session's collision-recovery update is queued before acknowledgement.
+    /// The new chain is also used when the session next registers with the RIB.
+    /// The caller must separately commit the current outbound export policy
+    /// through the RIB.
     ///
     /// # Errors
     ///
     /// Returns [`PeerCommandError::SessionExited`] if the session task's
     /// command channel is closed, or [`PeerCommandError::ReplyDropped`] if the
     /// task accepted the command but dropped the reply before responding.
+    /// Returns [`PeerCommandError::CommandFailed`] if the RIB channel is closed.
     pub async fn update_export_policy(
         &self,
         policy: Option<PolicyChain>,
@@ -2071,6 +2076,7 @@ impl PeerHandle {
     /// Returns [`PeerCommandError::SessionExited`] if the session task's
     /// command channel is closed, or [`PeerCommandError::ReplyDropped`] if the
     /// task accepted the command but dropped the reply before responding.
+    /// Returns [`PeerCommandError::CommandFailed`] if the RIB channel is closed.
     pub async fn update_export_policy_via(
         commands: mpsc::Sender<PeerCommand>,
         policy: Option<PolicyChain>,

@@ -2061,6 +2061,7 @@ mod authenticated_dial;
 mod bmp;
 mod denied_replacements;
 mod exact_export;
+mod export_policy;
 mod import_policy;
 mod inbound_update;
 mod labeled;

@@ -1334,6 +1334,7 @@ mod rpki;
 mod rs_control;
 mod rtc;
 mod selection_deferral;
+mod session_export_policy;
 mod unicast;
 mod unicast_prefix_peers;
 mod update_groups;

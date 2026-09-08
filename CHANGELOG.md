@@ -86,6 +86,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Export policy changes now update the accepting session’s collision-recovery
+  record. Promoting a surviving session preserves its accepted policy, including
+  explicit permit-all and rollback. Superseded session records release their
+  compiled policy ownership; registry and other runtime owners remain separate.
+
 - The route-server and route-reflector flagship soak analyzers now require
   valid daemon-log evidence and fail on every daemon `ERROR`, including
   metrics listener failures that successful client probes can miss. Verdicts
