@@ -1,9 +1,4 @@
-//! Bounded ADR-0121 v2 history codec and descriptor-relative store.
-
-#![allow(
-    dead_code,
-    reason = "v2 storage is active while external-source restoration remains deferred"
-)]
+//! ADR-0121 v2 codec and shared descriptor-relative v2/v3 history store.
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
@@ -32,6 +27,8 @@ const MAX_DATASETS: usize = 65_536;
 const MAX_TEXT: usize = 64 * 1024;
 const SOURCE_DIGEST_DOMAIN: &[u8] = b"rustbgpd.config-source.v2\0";
 static WRITER_LOCK: Mutex<()> = Mutex::new(());
+#[cfg(test)]
+thread_local! { static DECODE_OPENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WriteStep {
@@ -46,21 +43,62 @@ enum WriteStep {
     FinalSync,
 }
 
-/// Record one accepted snapshot in the v2 store.
+/// Test entrypoint for the v2 store.
+#[cfg(test)]
 pub(crate) fn record_v2(dir: &Path, normalized_toml: &str, manifest: Manifest) -> io::Result<bool> {
     record_v2_with(dir, normalized_toml, manifest, |_| Ok(()))
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "the writer keeps one ordered crash-consistency transaction visible"
-)]
+#[cfg(test)]
 fn record_v2_with(
     dir: &Path,
     normalized_toml: &str,
-    mut manifest: Manifest,
-    mut step: impl FnMut(WriteStep) -> io::Result<()>,
+    manifest: Manifest,
+    step: impl FnMut(WriteStep) -> io::Result<()>,
 ) -> io::Result<bool> {
+    record_with(
+        dir,
+        Pending::V2 {
+            normalized_toml,
+            manifest,
+        },
+        step,
+    )
+    .map(|(recorded, _)| recorded)
+}
+
+enum Pending<'a> {
+    V2 {
+        normalized_toml: &'a str,
+        manifest: Manifest,
+    },
+    V3(super::v3::Envelope),
+}
+
+pub(super) fn record_snapshot(
+    dir: &Path,
+    snapshot: &crate::config::AcceptedConfigSnapshot,
+) -> io::Result<(bool, usize)> {
+    let pending = if snapshot.normalized_toml().len() > MAX_TOML {
+        Pending::V3(super::v3::from_snapshot(snapshot)?)
+    } else {
+        Pending::V2 {
+            normalized_toml: snapshot.normalized_toml(),
+            manifest: super::stored_manifest(snapshot),
+        }
+    };
+    record_with(dir, pending, |_| Ok(()))
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "one ordered crash-consistency transaction shared by both history formats"
+)]
+fn record_with(
+    dir: &Path,
+    pending: Pending<'_>,
+    mut step: impl FnMut(WriteStep) -> io::Result<()>,
+) -> io::Result<(bool, usize)> {
     use nix::fcntl::{OFlag, RenameFlags, openat, renameat2};
     use nix::sys::stat::{Mode, fchmod};
     use nix::unistd::{UnlinkatFlags, unlinkat};
@@ -69,15 +107,25 @@ fn record_v2_with(
         .lock()
         .map_err(|_| io::Error::other("config history writer lock is poisoned"))?;
 
-    // Validate every caller-controlled component before creating even a stage.
-    if normalized_toml.len() > MAX_TOML {
-        return Err(limit("normalized TOML", MAX_TOML));
+    // Bound and validate caller-controlled data before any history mutation.
+    match &pending {
+        Pending::V2 {
+            normalized_toml,
+            manifest,
+        } => {
+            if normalized_toml.len() > MAX_TOML {
+                return Err(limit("normalized TOML", MAX_TOML));
+            }
+            let digest: [u8; 32] = Sha256::digest(normalized_toml.as_bytes()).into();
+            if manifest.toml_sha256 != digest {
+                return Err(invalid("normalized TOML digest mismatch"));
+            }
+            validate_manifest(manifest)?;
+        }
+        Pending::V3(envelope) => {
+            super::v3::encode_envelope(envelope)?;
+        }
     }
-    let toml_sha256 = Sha256::digest(normalized_toml.as_bytes()).into();
-    if manifest.toml_sha256 != toml_sha256 {
-        return Err(invalid("normalized TOML digest mismatch"));
-    }
-    validate_manifest(&manifest)?;
 
     let directory = open_or_create_writer_directory(dir)?;
     step(WriteStep::Pinned)?;
@@ -86,7 +134,8 @@ fn record_v2_with(
     cleanup_result?;
     cleanup_sync_result?;
 
-    let mut rows = scan_pinned(&directory, dir)?;
+    let mut rows = collect_names(&directory, dir, None)?;
+    let original_count = rows.len();
     let sequence = rows
         .iter()
         .map(|row| row.sequence)
@@ -101,35 +150,67 @@ fn record_v2_with(
     if rows.len() > super::HISTORY_LIMIT {
         evict_to(&directory, &mut rows, super::HISTORY_LIMIT, &mut step)?;
     }
+    decode_rows(&directory, &mut rows);
     if let Some(newest) = rows.first()
-        && newest.status == StoredStatus::Recorded
-        && open_and_decode(&directory, newest, true).is_ok_and(|(payload, _)| {
-            matches!(payload, StoredPayload::V2(envelope)
-                if envelope.normalized_toml.as_bytes() == normalized_toml.as_bytes()
-                    && envelope.manifest == manifest)
+        && newest.status != StoredStatus::Unreadable
+        && open_and_decode(&directory, newest, true).is_ok_and(|(payload, identity)| {
+            newest.identity == Some(identity)
+                && match (&pending, payload) {
+                    (
+                        Pending::V2 {
+                            normalized_toml,
+                            manifest,
+                        },
+                        StoredPayload::V2(envelope),
+                    ) => {
+                        envelope.normalized_toml.as_bytes() == normalized_toml.as_bytes()
+                            && &envelope.manifest == manifest
+                    }
+                    (Pending::V3(candidate), StoredPayload::V3(envelope)) => {
+                        candidate.sha256 == envelope.sha256
+                            && candidate.source_sha256 == envelope.source_sha256
+                            && candidate.normalized_toml_bytes == envelope.normalized_toml_bytes
+                    }
+                    _ => false,
+                }
         })
     {
-        return Ok(false);
+        return Ok((false, original_count - rows.len()));
     }
 
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs());
-    manifest.toml_sha256 = toml_sha256;
-    let source_sha256 = manifest_source_sha256(&manifest);
-    let envelope = Envelope {
-        version: VERSION,
-        sequence,
-        timestamp_unix_seconds: timestamp,
-        sha256: toml_sha256,
-        source_sha256,
-        normalized_toml: normalized_toml.to_owned(),
-        manifest,
+    let (version, source_sha256, encoded) = match pending {
+        Pending::V2 {
+            normalized_toml,
+            manifest,
+        } => {
+            let source_sha256 = manifest_source_sha256(&manifest);
+            let envelope = Envelope {
+                version: VERSION,
+                sequence,
+                timestamp_unix_seconds: timestamp,
+                sha256: manifest.toml_sha256,
+                source_sha256,
+                normalized_toml: normalized_toml.to_owned(),
+                manifest,
+            };
+            (2, source_sha256, encode_envelope(&envelope)?)
+        }
+        Pending::V3(mut envelope) => {
+            envelope.sequence = sequence;
+            envelope.timestamp_unix_seconds = timestamp;
+            (
+                3,
+                envelope.source_sha256,
+                super::v3::encode_envelope(&envelope)?,
+            )
+        }
     };
-    let encoded = encode_envelope(&envelope)?;
     let digest = encode_hex(&source_sha256);
-    let final_name = format!("v2-{sequence:020}-{timestamp}-{digest}.json");
-    let stage_name = format!(".v2-{sequence:020}-{timestamp}-{digest}.json.tmp");
+    let final_name = format!("v{version}-{sequence:020}-{timestamp}-{digest}.json");
+    let stage_name = format!(".v{version}-{sequence:020}-{timestamp}-{digest}.json.tmp");
 
     let mut stage_exists = false;
     let mut stage_identity = None;
@@ -179,7 +260,7 @@ fn record_v2_with(
         }
         let _ = directory.sync_all();
     }
-    result.map(|()| true)
+    result.map(|()| (true, original_count - rows.len()))
 }
 
 fn open_or_create_writer_directory(path: &Path) -> io::Result<File> {
@@ -297,12 +378,13 @@ fn metadata_at(directory: &File, name: &OsStr) -> io::Result<AtMetadata> {
 fn parse_stage_name(name: &OsStr) -> Option<ParsedName> {
     let text = name.to_str()?;
     let final_name = text.strip_prefix('.')?.strip_suffix(".tmp")?;
-    parse_v2_name(OsStr::new(final_name))
+    parse_final_name(OsStr::new(final_name))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StoredStatus {
     Recorded,
+    MetadataOnly,
     Unreadable,
 }
 
@@ -317,6 +399,8 @@ pub(crate) struct StoredRow {
     pub(super) verified_sha256: Option<[u8; 32]>,
     pub(super) verified_source_sha256: Option<[u8; 32]>,
     pub(super) redacted_summary: Option<String>,
+    pub(super) normalized_toml_bytes: Option<u64>,
+    pub(super) metadata_only_reason: Option<String>,
     identity: Option<EntryIdentity>,
 }
 
@@ -325,15 +409,17 @@ type EntryIdentity = (u64, u64, u64, i64, i64);
 #[derive(Debug)]
 pub(crate) enum StoredPayload {
     V2(Envelope),
+    V3(super::v3::Envelope),
 }
 
 struct ParsedName {
+    version: u32,
     sequence: u64,
     timestamp: u64,
     digest: [u8; 32],
 }
 
-/// Scan active v2 entries. Retired TOML entries are foreign files: they are
+/// Scan active v2/v3 entries. Retired TOML entries are foreign files: they are
 /// ignored and retained rather than decoded, indexed, or evicted.
 pub(crate) fn scan_mixed(dir: &Path) -> io::Result<Vec<StoredRow>> {
     let directory = match open_directory(dir) {
@@ -345,42 +431,47 @@ pub(crate) fn scan_mixed(dir: &Path) -> io::Result<Vec<StoredRow>> {
 }
 
 fn scan_pinned(directory: &File, display_path: &Path) -> io::Result<Vec<StoredRow>> {
-    use nix::dir::Dir;
+    let mut rows = collect_names(directory, display_path, Some(super::HISTORY_LIMIT))?;
+    decode_rows(directory, &mut rows);
+    Ok(rows)
+}
 
+// Listing freezes its roster before any payload open. The writer uses the same
+// name-only pass to repair old over-cap stores before decoding the survivors.
+fn collect_names(
+    directory: &File,
+    display_path: &Path,
+    cap: Option<usize>,
+) -> io::Result<Vec<StoredRow>> {
+    use nix::dir::Dir;
     let owned: OwnedFd = directory.try_clone()?.into();
     let mut entries = Dir::from_fd(owned).map_err(errno)?;
     let mut rows = Vec::new();
     for item in entries.iter() {
         let item = item.map_err(errno)?;
         let filename = OsString::from_vec(item.file_name().to_bytes().to_vec());
-        let Some(parsed) = parse_v2_name(&filename) else {
+        let Some(parsed) = parse_final_name(&filename) else {
             continue;
         };
-        let path = display_path.join(&filename);
-        let mut row = StoredRow {
+        if cap.is_some_and(|cap| rows.len() == cap) {
+            return Err(invalid(
+                "config history exceeds twenty recognized final rows",
+            ));
+        }
+        rows.push(StoredRow {
             index: 0,
+            path: display_path.join(&filename),
             filename,
             sequence: parsed.sequence,
             timestamp_unix_seconds: parsed.timestamp,
-            path,
             status: StoredStatus::Unreadable,
             verified_sha256: None,
             verified_source_sha256: None,
             redacted_summary: None,
+            normalized_toml_bytes: None,
+            metadata_only_reason: None,
             identity: None,
-        };
-        if let Ok((payload, identity)) = open_and_decode(directory, &row, false) {
-            row.identity = Some(identity);
-            match payload {
-                StoredPayload::V2(envelope) => {
-                    row.status = StoredStatus::Recorded;
-                    row.verified_sha256 = Some(envelope.sha256);
-                    row.verified_source_sha256 = Some(envelope.source_sha256);
-                    row.redacted_summary = Some(super::summarize(&envelope.normalized_toml));
-                }
-            }
-        }
-        rows.push(row);
+        });
     }
     rows.sort_by(|left, right| {
         right
@@ -388,20 +479,40 @@ fn scan_pinned(directory: &File, display_path: &Path) -> io::Result<Vec<StoredRo
             .cmp(&left.sequence)
             .then_with(|| left.filename.as_bytes().cmp(right.filename.as_bytes()))
     });
+    Ok(rows)
+}
+
+fn decode_rows(directory: &File, rows: &mut [StoredRow]) {
     let mut counts = HashMap::new();
-    for row in &rows {
+    for row in rows.iter() {
         *counts.entry(row.sequence).or_insert(0usize) += 1;
     }
     for (index, row) in rows.iter_mut().enumerate() {
         row.index = index;
         if counts[&row.sequence] > 1 {
-            row.status = StoredStatus::Unreadable;
-            row.verified_sha256 = None;
-            row.verified_source_sha256 = None;
-            row.redacted_summary = None;
+            continue;
+        }
+        if let Ok((payload, identity)) = open_and_decode(directory, row, false) {
+            row.identity = Some(identity);
+            match payload {
+                StoredPayload::V2(envelope) => {
+                    row.status = StoredStatus::Recorded;
+                    row.verified_sha256 = Some(envelope.sha256);
+                    row.verified_source_sha256 = Some(envelope.source_sha256);
+                    row.normalized_toml_bytes = Some(envelope.normalized_toml.len() as u64);
+                    row.redacted_summary = Some(super::summarize(&envelope.normalized_toml));
+                }
+                StoredPayload::V3(envelope) => {
+                    row.status = StoredStatus::MetadataOnly;
+                    row.verified_sha256 = Some(envelope.sha256);
+                    row.verified_source_sha256 = Some(envelope.source_sha256);
+                    row.normalized_toml_bytes = Some(envelope.normalized_toml_bytes);
+                    row.metadata_only_reason = Some(envelope.metadata_only_reason);
+                    row.redacted_summary = Some(envelope.summary);
+                }
+            }
         }
     }
-    Ok(rows)
 }
 
 /// Reopen and revalidate the exact object observed by [`scan_mixed`].
@@ -466,6 +577,8 @@ fn open_and_decode(
     use nix::sys::stat::Mode;
     use nix::unistd::geteuid;
 
+    #[cfg(test)]
+    DECODE_OPENS.with(|count| count.set(count.get() + 1));
     let fd = openat(
         directory,
         Path::new(&row.filename),
@@ -488,20 +601,55 @@ fn open_and_decode(
         mode: metadata.mode(),
         len: metadata.len(),
     };
-    let bytes = read_bounded(file, checked, geteuid().as_raw(), MAX_ENVELOPE as u64)?;
-    let envelope = decode_envelope(&bytes)?;
-    let parsed = parse_v2_name(&row.filename)
-        .ok_or_else(|| invalid("v2 config history filename changed"))?;
-    if envelope.sequence != parsed.sequence
-        || envelope.timestamp_unix_seconds != parsed.timestamp
-        || envelope.source_sha256 != parsed.digest
+    let parsed = parse_final_name(&row.filename)
+        .ok_or_else(|| invalid("config history filename changed"))?;
+    let cap = if parsed.version == 3 {
+        super::v3::MAX_ENVELOPE
+    } else {
+        MAX_ENVELOPE
+    };
+    let bytes = read_bounded(file, checked, geteuid().as_raw(), cap as u64)?;
+    let (payload, sequence, timestamp, sha256, source_sha256) = if parsed.version == 3 {
+        let envelope = super::v3::decode_envelope(&bytes)?;
+        let fields = (
+            envelope.sequence,
+            envelope.timestamp_unix_seconds,
+            envelope.sha256,
+            envelope.source_sha256,
+        );
+        (
+            StoredPayload::V3(envelope),
+            fields.0,
+            fields.1,
+            fields.2,
+            fields.3,
+        )
+    } else {
+        let envelope = decode_envelope(&bytes)?;
+        let fields = (
+            envelope.sequence,
+            envelope.timestamp_unix_seconds,
+            envelope.sha256,
+            envelope.source_sha256,
+        );
+        (
+            StoredPayload::V2(envelope),
+            fields.0,
+            fields.1,
+            fields.2,
+            fields.3,
+        )
+    };
+    if sequence != parsed.sequence
+        || timestamp != parsed.timestamp
+        || source_sha256 != parsed.digest
         || require_digest
-            && (row.verified_sha256 != Some(envelope.sha256)
-                || row.verified_source_sha256 != Some(envelope.source_sha256))
+            && (row.verified_sha256 != Some(sha256)
+                || row.verified_source_sha256 != Some(source_sha256))
     {
-        return Err(invalid("v2 config history filename/envelope mismatch"));
+        return Err(invalid("config history filename/envelope mismatch"));
     }
-    Ok((StoredPayload::V2(envelope), identity))
+    Ok((payload, identity))
 }
 
 #[derive(Clone, Copy)]
@@ -533,9 +681,14 @@ fn read_bounded(
     Ok(bytes)
 }
 
-fn parse_v2_name(name: &OsStr) -> Option<ParsedName> {
+fn parse_final_name(name: &OsStr) -> Option<ParsedName> {
     let name = name.to_str()?;
-    let stem = name.strip_prefix("v2-")?.strip_suffix(".json")?;
+    let (version, stem) = if let Some(stem) = name.strip_prefix("v2-") {
+        (2, stem)
+    } else {
+        (3, name.strip_prefix("v3-")?)
+    };
+    let stem = stem.strip_suffix(".json")?;
     let mut parts = stem.split('-');
     let sequence_text = parts.next()?;
     let timestamp_text = parts.next()?;
@@ -549,6 +702,7 @@ fn parse_v2_name(name: &OsStr) -> Option<ParsedName> {
         return None;
     }
     Some(ParsedName {
+        version,
         sequence: sequence_text.parse().ok()?,
         timestamp: timestamp_text.parse().ok()?,
         digest: decode_digest(digest_text)?,
@@ -826,17 +980,17 @@ fn decode_hex(value: &str) -> Result<Vec<u8>, &'static str> {
         .collect()
 }
 
-mod hex_digest {
+pub(super) mod hex_digest {
     use serde::{Deserialize, Deserializer, Serializer};
 
-    pub(super) fn serialize<S: Serializer>(
+    pub(crate) fn serialize<S: Serializer>(
         digest: &[u8; 32],
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&super::encode_hex(digest))
     }
 
-    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<[u8; 32], D::Error> {
         let value = String::deserialize(deserializer)?;
@@ -2222,7 +2376,7 @@ mod tests {
         let unknown = root.path().join("unknown");
         record_v2(&unknown, toml, manifest_for(toml)).unwrap();
         let row = recorded_rows(&unknown).remove(0);
-        let parsed = parse_v2_name(&row.filename).unwrap();
+        let parsed = parse_final_name(&row.filename).unwrap();
         let manifest = manifest_for(toml);
         let aligned = Envelope {
             version: VERSION,
@@ -2289,7 +2443,7 @@ mod tests {
             .find(&["let _guard = WRITER_", "LOCK"].concat())
             .unwrap();
         let selection = source
-            .find(&["let mut rows = scan_", "pinned(&directory, dir)?;"].concat())
+            .find(&["let mut rows = collect_", "names(&directory, dir, None)?;"].concat())
             .unwrap();
         let publication = selection
             + source[selection..]
@@ -2320,5 +2474,289 @@ mod tests {
                 "stage open missing exact guard: {required}"
             );
         }
+    }
+    fn metadata(sequence: u64) -> super::super::v3::Envelope {
+        super::super::v3::Envelope {
+            version: 3, sequence, timestamp_unix_seconds: 9,
+            normalized_toml_bytes: MAX_TOML as u64 + 1,
+            sha256: [0x11; 32], source_sha256: [0x22; 32],
+            summary: "asn 65001, router-id 192.0.2.1, 0 neighbor(s), 0 dynamic range(s), 0 fib table(s), 0 policy definition(s)".into(),
+            metadata_only_reason: super::super::v3::REASON.into(),
+        }
+    }
+
+    fn write_v3(dir: &Path, envelope: &super::super::v3::Envelope) -> PathBuf {
+        let path = dir.join(format!(
+            "v3-{:020}-{}-{}.json",
+            envelope.sequence,
+            envelope.timestamp_unix_seconds,
+            encode_hex(&envelope.source_sha256)
+        ));
+        write_private(&path, &super::super::v3::encode_envelope(envelope).unwrap());
+        path
+    }
+
+    #[test]
+    fn twenty_one_mixed_final_names_fail_before_any_payload_open() {
+        let dir = tempfile::tempdir().unwrap();
+        for sequence in 1..=20 {
+            write_v3(dir.path(), &metadata(sequence));
+        }
+        let mut v2 = sample();
+        v2.sequence = 21;
+        write_v2(dir.path(), &v2);
+        DECODE_OPENS.with(|count| count.set(0));
+        assert_error(scan_mixed(dir.path()), "twenty recognized");
+        assert_eq!(DECODE_OPENS.with(std::cell::Cell::get), 0);
+        // An unreadable duplicate still counts as a recognized final.
+        fs::remove_file(dir.path().join(v2_name(&v2))).unwrap();
+        v2.sequence = 1;
+        write_private(&dir.path().join(v2_name(&v2)), b"bad");
+        assert_error(scan_mixed(dir.path()), "twenty recognized");
+        assert_eq!(DECODE_OPENS.with(std::cell::Cell::get), 0);
+        // Writer repairs by name before opening the bounded survivor roster.
+        assert!(
+            record_with(dir.path(), Pending::V3(metadata(0)), |_| Ok(()))
+                .unwrap()
+                .1
+                > 0
+        );
+        assert!(DECODE_OPENS.with(std::cell::Cell::get) <= 21);
+        assert_eq!(scan_mixed(dir.path()).unwrap().len(), 20);
+    }
+
+    #[test]
+    fn mixed_chronology_metadata_dedup_uses_only_verified_newest_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let row = metadata(0);
+        let record = |row| record_with(dir.path(), Pending::V3(row), |_| Ok(())).unwrap();
+        assert_eq!(record(row.clone()), (true, 0));
+        assert_eq!(record(row.clone()), (false, 0));
+        for field in 0..3 {
+            let mut changed = row.clone();
+            match field {
+                0 => changed.sha256[0] ^= 1,
+                1 => changed.source_sha256[0] ^= 1,
+                _ => changed.normalized_toml_bytes += 1,
+            }
+            assert_eq!(record(changed), (true, 0));
+            assert_eq!(record(row.clone()), (true, 0));
+        }
+        record_v2(dir.path(), "x=1", manifest_for("x=1")).unwrap();
+        assert_eq!(
+            record(row.clone()),
+            (true, 0),
+            "older matching v3 cannot deduplicate across v2"
+        );
+        let newest = scan_mixed(dir.path()).unwrap().remove(0);
+        write_private(&newest.path, b"corrupt");
+        assert_eq!(
+            record(row),
+            (true, 0),
+            "corrupt newest cannot deduplicate against older rows"
+        );
+        let rows = scan_mixed(dir.path()).unwrap();
+        assert_eq!(rows[0].status, StoredStatus::MetadataOnly);
+        assert_eq!(rows[1].status, StoredStatus::Unreadable);
+        assert_eq!(rows[2].status, StoredStatus::Recorded);
+        for (index, row) in rows.iter().enumerate() {
+            assert_eq!(row.index, index);
+        }
+    }
+
+    #[test]
+    fn metadata_ring_is_bounded_and_evicts_payload_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        record_v2(dir.path(), "x=1", manifest_for("x=1")).unwrap();
+        for n in 0..20 {
+            let mut row = metadata(0);
+            row.normalized_toml_bytes += n;
+            assert_eq!(
+                record_with(dir.path(), Pending::V3(row), |_| Ok(())).unwrap(),
+                (true, usize::from(n == 19))
+            );
+        }
+        let rows = scan_mixed(dir.path()).unwrap();
+        assert_eq!(rows.len(), 20);
+        assert!(
+            rows.iter()
+                .all(|row| row.status == StoredStatus::MetadataOnly)
+        );
+        assert_eq!(rows[0].sequence, 21);
+        let bytes: u64 = rows
+            .iter()
+            .map(|row| fs::metadata(&row.path).unwrap().len())
+            .sum();
+        assert_eq!(
+            super::super::v3::MAX_ENVELOPE * super::super::HISTORY_LIMIT,
+            1_310_720
+        );
+        assert!(bytes <= 1_310_720);
+        let cap = super::super::v3::MAX_ENVELOPE as u64;
+        let checked = CheckedMetadata {
+            regular: true,
+            uid: 9,
+            mode: 0o100_600,
+            len: cap + 1,
+        };
+        assert_error(read_bounded(PanicReader, checked, 9, cap), "unsafe");
+    }
+
+    #[test]
+    fn metadata_corruption_duplicates_symlinks_and_identity_swaps_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let row = metadata(1);
+        let path = write_v3(dir.path(), &row);
+        let recorded = scan_mixed(dir.path()).unwrap().remove(0);
+        let saved = dir.path().join("saved");
+        fs::rename(&path, &saved).unwrap();
+        write_v3(dir.path(), &row);
+        assert_error(read_mixed(dir.path(), &recorded), "replaced after listing");
+        for bytes in [
+            b"bad".to_vec(),
+            vec![b' '; super::super::v3::MAX_ENVELOPE + 1],
+            super::super::v3::encode_envelope(&metadata(2)).unwrap(),
+        ] {
+            write_private(&path, &bytes);
+            let listed = scan_mixed(dir.path()).unwrap().remove(0);
+            assert_eq!(listed.status, StoredStatus::Unreadable);
+            assert!(listed.verified_sha256.is_none() && listed.redacted_summary.is_none());
+        }
+        fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&saved, &path).unwrap();
+        assert_eq!(
+            scan_mixed(dir.path()).unwrap()[0].status,
+            StoredStatus::Unreadable
+        );
+        fs::remove_file(&path).unwrap();
+        write_v3(dir.path(), &row);
+        let mut v2 = sample();
+        v2.sequence = 1;
+        write_v2(dir.path(), &v2);
+        assert!(
+            scan_mixed(dir.path())
+                .unwrap()
+                .iter()
+                .all(|row| row.status == StoredStatus::Unreadable)
+        );
+    }
+
+    #[test]
+    fn metadata_publication_failures_preserve_only_complete_bounded_finals() {
+        for failure in [
+            WriteStep::StageCreate,
+            WriteStep::StageWrite,
+            WriteStep::StageSync,
+            WriteStep::EvictionUnlink,
+            WriteStep::EvictionSync,
+            WriteStep::Publish,
+            WriteStep::FinalSync,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            for sequence in 1..=20 {
+                write_v3(dir.path(), &metadata(sequence));
+            }
+            let mut next = metadata(0);
+            next.normalized_toml_bytes += 1;
+            assert!(
+                record_with(dir.path(), Pending::V3(next), |point| {
+                    if point == failure {
+                        Err(io::Error::other("injected metadata publication failure"))
+                    } else {
+                        Ok(())
+                    }
+                })
+                .is_err()
+            );
+            let rows = scan_mixed(dir.path()).unwrap();
+            assert!(rows.len() <= 20 && rows.len() >= 19);
+            assert!(
+                rows.iter()
+                    .all(|row| row.status == StoredStatus::MetadataOnly)
+            );
+            assert_eq!(rows[0].sequence == 21, failure == WriteStep::FinalSync);
+            if matches!(
+                failure,
+                WriteStep::StageCreate
+                    | WriteStep::StageWrite
+                    | WriteStep::StageSync
+                    | WriteStep::EvictionUnlink
+            ) {
+                assert_eq!(rows.len(), 20);
+            }
+            assert!(
+                fs::read_dir(dir.path()).unwrap().all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .as_bytes()
+                    .starts_with(b"."))
+            );
+        }
+    }
+    #[test]
+    fn invalid_metadata_precedes_mutation_and_crash_stages_are_ignored_and_cleaned() {
+        let dir = tempfile::tempdir().unwrap();
+        let row = metadata(1);
+        let final_path = write_v3(dir.path(), &row);
+        let bytes = fs::read(&final_path).unwrap();
+        let stage = dir.path().join(format!(
+            ".{}.tmp",
+            final_path.file_name().unwrap().to_str().unwrap()
+        ));
+        write_private(&stage, b"crash stage");
+        let mut invalid_row = row.clone();
+        invalid_row.summary = "x".repeat(super::super::v3::MAX_SUMMARY + 1);
+        assert!(
+            record_with(dir.path(), Pending::V3(invalid_row), |_| panic!(
+                "invalid metadata must not enter the writer"
+            ))
+            .is_err()
+        );
+        assert_eq!(fs::read(&final_path).unwrap(), bytes);
+        assert_eq!(fs::read(&stage).unwrap(), b"crash stage");
+        assert_eq!(scan_mixed(dir.path()).unwrap().len(), 1);
+        assert_eq!(
+            record_with(dir.path(), Pending::V3(row), |_| Ok(())).unwrap(),
+            (false, 0)
+        );
+        assert!(!stage.exists());
+        let mut next = metadata(0);
+        next.normalized_toml_bytes += 1;
+        let mut saw_stage = false;
+        record_with(dir.path(), Pending::V3(next), |point| {
+            if point == WriteStep::StageSync {
+                let stage = fs::read_dir(dir.path())
+                    .unwrap()
+                    .map(Result::unwrap)
+                    .find(|entry| entry.file_name().as_bytes().starts_with(b".v3-"))
+                    .unwrap();
+                assert!(stage.metadata().unwrap().len() <= super::super::v3::MAX_ENVELOPE as u64);
+                assert_eq!(stage.metadata().unwrap().mode() & 0o7777, 0o600);
+                saw_stage = true;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert!(saw_stage);
+    }
+    #[test]
+    fn frozen_metadata_roster_never_decodes_new_names_and_rejects_preopen_swaps() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_v3(dir.path(), &metadata(1));
+        let directory = open_directory(dir.path()).unwrap();
+        let mut rows =
+            collect_names(&directory, dir.path(), Some(super::super::HISTORY_LIMIT)).unwrap();
+        let old = dir.path().join("old");
+        fs::rename(&path, &old).unwrap();
+        std::os::unix::fs::symlink(&old, &path).unwrap();
+        for sequence in 2..=21 {
+            write_v3(dir.path(), &metadata(sequence));
+        }
+        DECODE_OPENS.with(|count| count.set(0));
+        decode_rows(&directory, &mut rows);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, StoredStatus::Unreadable);
+        assert_eq!(DECODE_OPENS.with(std::cell::Cell::get), 1);
+        assert_error(scan_mixed(dir.path()), "twenty recognized");
     }
 }

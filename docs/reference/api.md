@@ -556,8 +556,18 @@ retain tonic's 4 MiB decode default.
 | `AbortConfigTransaction` | Abort a pending confirmed transaction and roll back immediately |
 | `GetConfigTransactionStatus` | Return redacted confirmed-transaction lifecycle state |
 | `GetEffectiveConfig` | Return the effective running config as normalized TOML — defaults resolved, selected default-empty policy lists omitted, secrets redacted (`rbgp config effective`) |
-| `ListConfigHistory` | List bounded v2 config history — newest row at index 0, then older entries; per-entry timestamp, normalized-TOML SHA-256, config-source SHA-256 over that TOML digest plus the canonical accepted rpol/dataset source roster, provenance status, and one-line summary; never config documents (`rbgp config history`). Valid rows are `RECORDED`; corrupt or duplicate-sequence rows are `UNREADABLE` with both digests empty. Retired TOML files are ignored and retained. |
-| `RollbackConfigTransaction` | Restore a provenance-verified v2 row through the same transaction executor as apply — same plan/impact classification and receipts (`rbgp config rollback N`). Unreadable rows and provenance mismatches fail closed before planning or mutation. |
+| `ListConfigHistory` | List up to twenty mixed v2/v3 config history rows — newest row at index 0, then older entries; per-entry timestamp, normalized-TOML SHA-256, config-source SHA-256 over that TOML digest plus the canonical accepted rpol/dataset source roster, provenance status, and one-line summary; never config documents (`rbgp config history`). Payload-bearing v2 rows are `RECORDED`; accepted normalized TOML above 10 MiB produces a rollback-ineligible `METADATA_ONLY` v3 row with `normalized_toml_bytes` and `metadata_only_reason`. Corrupt or duplicate-sequence rows are `UNREADABLE` with both digests empty. Retired TOML files are ignored and retained. |
+| `RollbackConfigTransaction` | Restore a provenance-verified v2 row through the same transaction executor as apply — same plan/impact classification and receipts (`rbgp config rollback N`). Metadata-only rows return `FAILED_PRECONDITION` before payload/source access, planning, confirm authority, or mutation; index zero remains `INVALID_ARGUMENT`. Unreadable rows and provenance mismatches fail closed before planning or mutation. |
+
+History recording is best effort after an accepted durable config. Exactly
+10 MiB of normalized TOML remains v2; larger accepted snapshots retain only a
+canonical metadata envelope of at most 64 KiB, including a redacted summary of
+at most 4 KiB. Neither normalized TOML nor the external-source roster is retained
+in v3. Both formats share one newest-first, twenty-row sequence. Listing rejects
+a twenty-first recognized final before decoding any row (`INTERNAL`, storage
+unavailable or unsafe); rollback maps the same unsafe roster to
+`FAILED_PRECONDITION`. Hashes identify accepted history; they cannot recover
+omitted bytes or authorize use of commit-confirm cleanup residue.
 
 For a supported transaction with an independent mutation, the plan carries one canonical committed candidate
 through token, runtime stage, persistence, and accepted history. It may materialize omitted RFC 8212 presence

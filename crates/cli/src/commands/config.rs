@@ -584,7 +584,7 @@ pub async fn status(connection: Connection, json: bool) -> Result<(), CliError> 
     Ok(())
 }
 
-/// List bounded v2 config history: index, timestamp, content hash, provenance
+/// List bounded mixed config history: index, timestamp, content hash, provenance
 /// status, and a one-line summary per retained row (never document contents).
 /// Retired TOML rows are ignored and retained.
 pub async fn history(connection: Connection, json: bool) -> Result<(), CliError> {
@@ -673,6 +673,9 @@ fn history_to_json(resp: &ListConfigHistoryResponse) -> serde_json::Value {
             "summary": entry.summary,
             "source_sha256": entry.source_sha256,
             "provenance_status": history_provenance_label(entry.provenance_status),
+            "normalized_toml_bytes": entry.normalized_toml_bytes,
+            "metadata_only_reason": entry.metadata_only_reason,
+            "rollback_eligible": entry.index > 0 && entry.provenance_status == crate::proto::ConfigHistoryProvenanceStatus::Recorded as i32,
         })).collect::<Vec<_>>(),
         "human_text": resp.human_text,
     })
@@ -692,7 +695,7 @@ fn history_human_line(entry: &crate::proto::ConfigHistoryEntry) -> String {
     } else {
         entry.sha256.get(..12).unwrap_or(&entry.sha256)
     };
-    format!(
+    let mut line = format!(
         "{:>3}  {}  {}  {}{}  provenance={} source_sha256={}",
         entry.index,
         format_unix_utc(entry.timestamp_unix_seconds),
@@ -705,7 +708,16 @@ fn history_human_line(entry: &crate::proto::ConfigHistoryEntry) -> String {
         } else {
             &entry.source_sha256
         },
-    )
+    );
+    if entry.provenance_status == crate::proto::ConfigHistoryProvenanceStatus::MetadataOnly as i32 {
+        use std::fmt::Write as _;
+        let _ = write!(
+            line,
+            " metadata-only rollback-ineligible normalized_toml_bytes={} metadata_only_reason={}",
+            entry.normalized_toml_bytes, entry.metadata_only_reason
+        );
+    }
+    line
 }
 
 fn history_provenance_label(status: i32) -> &'static str {
@@ -713,6 +725,7 @@ fn history_provenance_label(status: i32) -> &'static str {
         Ok(crate::proto::ConfigHistoryProvenanceStatus::Recorded) => "recorded",
         Ok(crate::proto::ConfigHistoryProvenanceStatus::LegacyTomlOnly) => "legacy_toml_only",
         Ok(crate::proto::ConfigHistoryProvenanceStatus::Unreadable) => "unreadable",
+        Ok(crate::proto::ConfigHistoryProvenanceStatus::MetadataOnly) => "metadata_only",
         Ok(crate::proto::ConfigHistoryProvenanceStatus::Unspecified) | Err(_) => "unknown",
     }
 }
@@ -2409,6 +2422,8 @@ mod tests {
                     sha256: "ab".repeat(32),
                     summary: "asn 65001, router-id 10.0.0.1, 2 neighbor(s)".to_string(),
                     source_sha256: "cd".repeat(32),
+                    normalized_toml_bytes: 0,
+                    metadata_only_reason: String::new(),
                     provenance_status,
                 },
             )
@@ -2448,6 +2463,8 @@ mod tests {
             sha256: "ab".repeat(32),
             summary: "asn 65001".to_string(),
             source_sha256: "cd".repeat(32),
+            normalized_toml_bytes: 0,
+            metadata_only_reason: String::new(),
             provenance_status: crate::proto::ConfigHistoryProvenanceStatus::Recorded.into(),
         };
         assert_eq!(
@@ -2465,12 +2482,53 @@ mod tests {
             sha256: String::new(),
             summary: "(unreadable config history entry)".to_string(),
             source_sha256: String::new(),
+            normalized_toml_bytes: 0,
+            metadata_only_reason: String::new(),
             provenance_status: crate::proto::ConfigHistoryProvenanceStatus::Unreadable.into(),
         };
         assert_eq!(
             history_human_line(&unreadable),
             "  1  1970-01-01T00:00:00Z  -  (unreadable config history entry)  provenance=unreadable source_sha256=-"
         );
+    }
+
+    #[test]
+    fn history_metadata_is_explicitly_rollback_ineligible_in_human_and_json() {
+        let metadata = crate::proto::ConfigHistoryEntry {
+            index: 1,
+            sha256: "ab".repeat(32),
+            source_sha256: "cd".repeat(32),
+            provenance_status: crate::proto::ConfigHistoryProvenanceStatus::MetadataOnly as i32,
+            normalized_toml_bytes: 10 * 1024 * 1024 + 1,
+            metadata_only_reason: "normalized_toml_exceeds_v2_payload_limit".into(),
+            ..Default::default()
+        };
+        let human = history_human_line(&metadata);
+        assert!(human.contains("metadata-only rollback-ineligible"));
+        assert!(human.contains("normalized_toml_bytes=10485761"));
+        assert!(human.contains(&metadata.metadata_only_reason));
+        let mut eligible = metadata.clone();
+        eligible.provenance_status = crate::proto::ConfigHistoryProvenanceStatus::Recorded as i32;
+        let mut newest = eligible.clone();
+        newest.index = 0;
+        let mut unknown = metadata.clone();
+        unknown.provenance_status = 999;
+        let json = history_to_json(&ListConfigHistoryResponse {
+            entries: vec![metadata, eligible, newest, unknown],
+            ..Default::default()
+        });
+        assert_eq!(json["entries"][0]["provenance_status"], "metadata_only");
+        assert_eq!(
+            json["entries"][0]["normalized_toml_bytes"],
+            10 * 1024 * 1024 + 1
+        );
+        assert_eq!(
+            json["entries"][0]["metadata_only_reason"],
+            "normalized_toml_exceeds_v2_payload_limit"
+        );
+        for (index, expected) in [false, true, false, false].into_iter().enumerate() {
+            assert_eq!(json["entries"][index]["rollback_eligible"], expected);
+        }
     }
 
     #[test]

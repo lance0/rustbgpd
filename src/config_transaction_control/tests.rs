@@ -8470,7 +8470,7 @@ async fn history_lists_entries_newest_first_with_summaries() {
         "{}",
         response.entries[0].summary
     );
-    assert!(response.human_text.contains("2 v2 config history row(s)"));
+    assert!(response.human_text.contains("2 config history row(s)"));
     assert!(
         response.human_text.contains("index 0 is newest"),
         "{}",
@@ -8479,7 +8479,7 @@ async fn history_lists_entries_newest_first_with_summaries() {
     assert!(
         response
             .human_text
-            .contains("Provenance-verified rows can be restored"),
+            .contains("Recorded v2 rows can be restored"),
         "{}",
         response.human_text
     );
@@ -8643,4 +8643,170 @@ async fn confirmed_rollback_times_out_and_auto_reverts_the_rollback() {
     );
     assert!(!locator.exists(), "auto-revert must consume v3 authority");
     ack_task.abort();
+}
+
+/// Removing the metadata guard changes the exact refusal; reaching any actor
+/// hangs the unserviced channels or leaves an observable queued command.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one retained fixture proves rollback refusal and every untouched side-effect boundary"
+)]
+async fn metadata_history_rollback_refuses_before_payload_planning_or_confirm_authority() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let metadata = crate::config_history::v3::Envelope {
+        version: 3, sequence: 1, timestamp_unix_seconds: 9,
+        normalized_toml_bytes: 10 * 1024 * 1024 + 1,
+        sha256: [0x11; 32], source_sha256: [0x22; 32],
+        summary: "asn 65001, router-id 192.0.2.1, 0 neighbor(s), 0 dynamic range(s), 0 fib table(s), 0 policy definition(s)".into(),
+        metadata_only_reason: "normalized_toml_exceeds_v2_payload_limit".into(),
+    };
+    let metadata_path = dir
+        .path()
+        .join(format!("v3-{:020}-9-{}.json", 1, "22".repeat(32)));
+    let mut bytes = serde_json::to_vec(&metadata).unwrap();
+    bytes.push(b'\n');
+    std::fs::write(&metadata_path, bytes).unwrap();
+    std::fs::set_permissions(&metadata_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let current_toml = base_toml("");
+    let current = record_v2_history(dir.path(), &current_toml);
+    let runtime_path = dir.path().join("runtime.toml");
+    std::fs::write(&runtime_path, &current_toml).unwrap();
+    let journal_path = dir.path().join("confirm.json");
+    let (peer_tx, mut peer_rx) = mpsc::channel(8);
+    let (config_tx, mut config_rx) = mpsc::channel(8);
+    let (internal_tx, mut internal_rx) = mpsc::channel(8);
+    let (_accepted_tx, accepted_rx) = watch::channel(current);
+    let controller = ConfigTransactionController::new_accepted(
+        FibTableControlDeps {
+            confirm_journal_path: Some(journal_path.clone()),
+            config_history_dir: Some(dir.path().to_path_buf()),
+            ..deps_value(None, peer_tx, Some(config_tx), Vec::new())
+        },
+        BgpMetrics::new(),
+        accepted_rx,
+    )
+    .with_preloaded_planner(internal_tx)
+    .with_confirm_v3_launch(
+        crate::confirm_journal::v3::LaunchIdentity::resolve(&runtime_path).unwrap(),
+    );
+    let roster = || {
+        let mut rows = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (entry.file_name(), std::fs::read(entry.path()).unwrap())
+            })
+            .collect::<Vec<_>>();
+        rows.sort();
+        rows
+    };
+    let initial_roster = roster();
+    let list = controller.history().unwrap();
+    assert_eq!(
+        list.entries[1].provenance_status,
+        proto::ConfigHistoryProvenanceStatus::MetadataOnly as i32
+    );
+    assert_eq!(list.entries[1].normalized_toml_bytes, 10 * 1024 * 1024 + 1);
+    assert_eq!(
+        list.entries[1].metadata_only_reason,
+        metadata.metadata_only_reason
+    );
+    for (index, confirm_id) in [(1, ""), (1, "metadata-confirm"), (0, "metadata-confirm")] {
+        let err = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            controller
+                .clone()
+                .rollback(proto::RollbackConfigTransactionRequest {
+                    index,
+                    confirm_id: confirm_id.into(),
+                    confirm_timeout_seconds: if confirm_id.is_empty() { 0 } else { 60 },
+                    ..Default::default()
+                }),
+        )
+        .await
+        .expect("metadata refusal must not contact an actor")
+        .unwrap_err();
+        if index == 0 {
+            assert!(matches!(
+                err,
+                ConfigTransactionApplyError::InvalidArgument(_)
+            ));
+        } else {
+            assert!(
+                matches!(err, ConfigTransactionApplyError::FailedPrecondition(ref message)
+                if message == "cannot roll back: selected config-history row is metadata-only because its normalized TOML exceeded the history payload limit"),
+                "{err:?}"
+            );
+        }
+        assert!(matches!(
+            peer_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            config_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            internal_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(!journal_path.exists());
+        assert_eq!(
+            roster(),
+            initial_roster,
+            "metadata rollback must create no authority or change retained files"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&runtime_path).unwrap(),
+            current_toml
+        );
+        assert_eq!(controller.history().unwrap(), list);
+    }
+    // Repeat zero against an actual metadata newest row, not just a v2 newest.
+    for entry in std::fs::read_dir(dir.path()).unwrap().map(Result::unwrap) {
+        if entry.file_name().to_string_lossy().starts_with("v2-") {
+            std::fs::remove_file(entry.path()).unwrap();
+        }
+    }
+    assert_eq!(
+        controller.history().unwrap().entries[0].provenance_status,
+        proto::ConfigHistoryProvenanceStatus::MetadataOnly as i32
+    );
+    let err = controller
+        .clone()
+        .rollback(proto::RollbackConfigTransactionRequest {
+            index: 0,
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ConfigTransactionApplyError::InvalidArgument(_)
+    ));
+    for sequence in 2..=21 {
+        let path = dir
+            .path()
+            .join(format!("v3-{sequence:020}-9-{}.json", "22".repeat(32)));
+        std::fs::write(&path, b"unreadable but recognized").unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    assert!(matches!(
+        controller.history(),
+        Err(ConfigTransactionApplyError::Internal(_))
+    ));
+    let err = controller
+        .rollback(proto::RollbackConfigTransactionRequest {
+            index: 1,
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ConfigTransactionApplyError::FailedPrecondition(ref message)
+        if message == "cannot roll back: config history storage is unavailable or unsafe")
+    );
 }

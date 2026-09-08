@@ -33,6 +33,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   list from the existing inventory check and select the reviewed nightly from
   `fuzz/rust-nightly.txt`. `just hooks` installs the commit and push hooks.
 
+- Accepted normalized configs larger than 10 MiB now record bounded,
+  metadata-only config-history rows with hashes, byte count, and a redacted
+  summary. They share the twenty-row chronology with rollback-capable v2
+  entries, and API/CLI listings explicitly mark them rollback-ineligible.
+  History listing rejects an over-cap directory before decoding any final.
+
 ### Upgrade notes
 
 - A green `rbgp doctor --pre-upgrade` result is an observation at one instant,
@@ -42,6 +48,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   --strict` and any offline authority checks, then install and start; the
   runbook now names the diagnostic as its preflight step and keeps the
   post-stop checks explicit.
+
+- After config-history v3 publication, stop the daemon and preserve/move the
+  complete history directory aside before starting an older writer that
+  ignores v3. Metadata rows cannot restore oversized configs; keep deployment
+  sources independently. Commit-confirm v3 recovery remains a separate lifecycle.
 
 ### Changed
 

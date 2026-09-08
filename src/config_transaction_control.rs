@@ -1442,6 +1442,9 @@ impl ConfigTransactionController {
                 crate::config_history::HistoryStatus::Recorded => {
                     proto::ConfigHistoryProvenanceStatus::Recorded
                 }
+                crate::config_history::HistoryStatus::MetadataOnly => {
+                    proto::ConfigHistoryProvenanceStatus::MetadataOnly
+                }
                 crate::config_history::HistoryStatus::Unreadable => {
                     proto::ConfigHistoryProvenanceStatus::Unreadable
                 }
@@ -1453,13 +1456,15 @@ impl ConfigTransactionController {
                 summary: entry.summary.clone(),
                 source_sha256: entry.source_sha256.clone().unwrap_or_default(),
                 provenance_status: provenance_status.into(),
+                normalized_toml_bytes: entry.normalized_toml_bytes.unwrap_or_default(),
+                metadata_only_reason: entry.metadata_only_reason.clone().unwrap_or_default(),
             });
         }
         let human_text = if proto_entries.is_empty() {
             "No config snapshots recorded yet.\n".to_string()
         } else {
             format!(
-                "{} v2 config history row(s) retained; index 0 is newest. Provenance-verified rows can be restored with RollbackConfigTransaction (rbgp config rollback N); unreadable rows are refused.\n",
+                "{} config history row(s) retained; index 0 is newest. Recorded v2 rows can be restored with RollbackConfigTransaction (rbgp config rollback N); metadata-only and unreadable rows are rollback-ineligible.\n",
                 proto_entries.len()
             )
         };
@@ -1530,6 +1535,11 @@ impl ConfigTransactionController {
             if entry.status == crate::config_history::HistoryStatus::Unreadable {
                 return Err(ConfigTransactionApplyError::FailedPrecondition(
                     "cannot roll back an unreadable config history entry".to_string(),
+                ));
+            }
+            if entry.status == crate::config_history::HistoryStatus::MetadataOnly {
+                return Err(ConfigTransactionApplyError::FailedPrecondition(
+                    "cannot roll back: selected config-history row is metadata-only because its normalized TOML exceeded the history payload limit".to_string(),
                 ));
             }
             let payload = crate::config_history::read_mixed_rollback(dir, entry).map_err(|_| {

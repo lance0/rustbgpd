@@ -307,14 +307,14 @@ impl ConfigPersister {
         self.record_last_persist();
         if let Some(dir) = self.history_dir() {
             match crate::config_history::record_accepted(&dir, &self.current) {
-                Ok(crate::config_history::RecordOutcome::SkippedOversize) => warn!(
-                    bytes = self.current.normalized_toml().len(),
-                    "applied config exceeds the bounded history entry size; history was left unchanged"
-                ),
                 Ok(
-                    crate::config_history::RecordOutcome::Recorded
-                    | crate::config_history::RecordOutcome::Deduplicated,
-                ) => {}
+                    crate::config_history::RecordOutcome::Recorded { evicted }
+                    | crate::config_history::RecordOutcome::Deduplicated { evicted },
+                ) => {
+                    if evicted > 0 {
+                        tracing::info!(evicted, "config history evicted oldest retained rows");
+                    }
+                }
                 Err(error) => warn!(
                     error = %error,
                     "failed to record applied config in the config history"
@@ -520,7 +520,10 @@ log_format = "json"
         assert_eq!(entries.len(), 2);
         let read_v2 = |row: &crate::config_history::v2::StoredRow| {
             let crate::config_history::v2::StoredPayload::V2(envelope) =
-                crate::config_history::v2::read_mixed(&history, row).unwrap();
+                crate::config_history::v2::read_mixed(&history, row).unwrap()
+            else {
+                panic!("expected v2 history")
+            };
             envelope.normalized_toml
         };
         assert_eq!(
@@ -843,7 +846,10 @@ log_format = "json"
             crate::config_history::v2::StoredStatus::Recorded
         );
         let crate::config_history::v2::StoredPayload::V2(envelope) =
-            crate::config_history::v2::read_mixed(&history, recorded).unwrap();
+            crate::config_history::v2::read_mixed(&history, recorded).unwrap()
+        else {
+            panic!("expected v2 history")
+        };
         assert_eq!(envelope.normalized_toml.as_bytes(), exact);
     }
 

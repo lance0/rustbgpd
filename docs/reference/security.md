@@ -436,9 +436,10 @@ Exact binding consumption is role-agnostic.
 
 ## Recorded config history confidentiality
 
-V2 JSON history, ignored retained TOML, the v3 raw prior, and retired v1/v2
-`commit-confirm-journal.json` contain normalized TOML with credentials/keys;
-redacted history/status output does not make these files safe to publish. The
+V2 JSON history, ignored retained TOML, the commit-confirm v3 raw prior, and
+retired v1/v2 `commit-confirm-journal.json` contain normalized TOML with
+credentials/keys; redacted history/status output does not make these files
+safe to publish. The
 fixed `commit-confirm-v3-metadata.json` and config-adjacent
 `commit-confirm-locator.json` contain no raw TOML but remain confidential
 because they carry paths, digests, provenance, and file identities. All pending
@@ -454,7 +455,15 @@ Keep owner-controlled local storage as secret-bearing configuration, not telemet
 `ListConfigHistory` exposes explicit provenance status without inferring trust
 from a readable file or filename digest. Its additive config-source digest is
 defined over the normalized-TOML digest plus the canonical accepted rpol/dataset
-source roster. New rows are `RECORDED`; enum value `LEGACY_TOML_ONLY` is
+source roster. Payload-bearing v2 rows are `RECORDED`; oversized accepted
+snapshots produce `METADATA_ONLY` config-history v3 rows. These rows of at
+most 64 KiB retain no TOML, source paths, or source roster: only identity
+hashes, byte count, timestamp, reason, and a redacted identity/count summary
+of at most 4 KiB.
+They remain owner-private and disclose equality between accepted generations.
+They are permanently rollback-ineligible. Config-history v3 has no authority
+over the separate commit-confirm v3 raw prior or cleanup residue.
+The enum value `LEGACY_TOML_ONLY` is
 receive-only for an N-1 server and is never emitted by v0.65. Unreadable rows
 return `UNREADABLE`, empty TOML and source digests, and a constant summary so
 paths, filenames, raw errors, and unverified digest claims do not cross the API

@@ -589,6 +589,8 @@ mod tests {
             sha256: "cd".repeat(32),
             summary: "asn 65002".to_string(),
             source_sha256: "ef".repeat(32),
+            normalized_toml_bytes: 0,
+            metadata_only_reason: String::new(),
             provenance_status: proto::ConfigHistoryProvenanceStatus::Recorded.into(),
         };
         let decoded_by_legacy =
@@ -607,6 +609,39 @@ mod tests {
             frozen.provenance_status,
             proto::ConfigHistoryProvenanceStatus::Recorded as i32
         );
+    }
+
+    #[test]
+    fn metadata_history_wire_additions_preserve_old_fields_and_unknown_status() {
+        use prost::Message as _;
+        let entry = proto::ConfigHistoryEntry {
+            index: 1,
+            sha256: "ab".repeat(32),
+            source_sha256: "cd".repeat(32),
+            provenance_status: proto::ConfigHistoryProvenanceStatus::MetadataOnly as i32,
+            normalized_toml_bytes: 10 * 1024 * 1024 + 1,
+            metadata_only_reason: "normalized_toml_exceeds_v2_payload_limit".into(),
+            ..Default::default()
+        };
+        assert_eq!(entry.provenance_status, 4);
+        let bytes = entry.encode_to_vec();
+        assert_eq!(
+            proto::ConfigHistoryEntry::decode(bytes.as_slice()).unwrap(),
+            entry
+        );
+        let frozen = FrozenCurrentConfigHistoryEntry::decode(bytes.as_slice()).unwrap();
+        assert_eq!(frozen.index, 1);
+        assert_eq!(frozen.sha256, entry.sha256);
+        assert_eq!(frozen.source_sha256, entry.source_sha256);
+        assert_eq!(frozen.provenance_status, 4);
+        // Exact wire tags of the additive fields; the frozen v2 message above
+        // deliberately stays unchanged and ignores them.
+        assert!(
+            bytes
+                .windows(5)
+                .any(|window| window == [0x38, 0x81, 0x80, 0x80, 0x05])
+        );
+        assert!(bytes.windows(2).any(|window| window == [0x42, 0x28]));
     }
 
     #[test]
@@ -1199,6 +1234,8 @@ mod tests {
                             sha256: "ab".repeat(32),
                             summary: "asn 65001, 2 neighbor(s)".to_string(),
                             source_sha256: String::new(),
+                            normalized_toml_bytes: 0,
+                            metadata_only_reason: String::new(),
                             provenance_status: proto::ConfigHistoryProvenanceStatus::LegacyTomlOnly
                                 .into(),
                         }],

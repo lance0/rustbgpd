@@ -1343,15 +1343,21 @@ verify that the config-adjacent `*.commit-confirm-locator.json` and the retired
 locator-free `commit-confirm-journal.json` are absent. The fixed v3 raw prior
 and metadata may remain after a warning-only cleanup failure: once locator
 absence is verified they are non-authoritative, and rustbgpd v0.64.0 ignores
-those v3-only names. If the target predates v2 history, move the complete
-`config-history/` directory aside; do not let an old reader interpret a newer
-record layout.
+those commit-confirm v3-only names. If the target predates either retained
+history format, preserve and move the complete `config-history/` directory
+aside after stopping the daemon and before installing the older binary. In
+particular, writable downgrade after a config-history v3 row has been published
+is unsupported without moving the directory aside: the older writer ignores
+v3, can expose stale rows, and may reuse its sequence. There is no
+backfill or down-conversion. Re-upgrade fails closed on duplicate sequences or
+an over-cap roster; it cannot make an old writer's collisions trustworthy.
 
-Then stop cleanly and install the selected older package:
+Then stop cleanly, move history aside if required above, and install the selected older package:
 
 ```sh
 previous_pkg=/path/to/rustbgpd_W.X.Y_amd64.deb # or the .rpm
 sudo systemctl stop rustbgpd
+# Preserve and move config-history/ aside here if the target cannot read it.
 sudo apt-get install -y --allow-downgrades "$previous_pkg" # Debian / Ubuntu
 sudo dnf install -y "$previous_pkg"                       # RHEL / Rocky / Alma
 ```
@@ -1381,7 +1387,7 @@ processes is unsupported even when their configuration files differ.
 | `<runtime_state_dir>/commit-confirm-v3-prior.toml` | Fixed v3 raw accepted prior; secret-bearing normalized TOML. Published first. | Until terminal cleanup; safe residue may remain |
 | `<runtime_state_dir>/commit-confirm-v3-metadata.json` | Fixed confidential provenance, digest, and file-identity metadata; no raw TOML. Published after the raw prior. | Until terminal cleanup; safe residue may remain |
 | `<absolute lexical config path>.commit-confirm-locator.json` | Confidential paths/digests and sole v3 pending boot authority; no raw TOML. Published last and checked before candidate contents. | Until durable unlink and parent sync make the transaction terminal |
-| `config-history/*` | Last 20 owner-private, secret-bearing v2 JSON records for `rbgp config history`; newest is index 0. Retired TOML files are ignored and retained. V2 records hash but do not archive external sources and are rollback-eligible only when live sources exactly reproduce recorded provenance. | Yes |
+| `config-history/*` | Last 20 owner-private v2/v3 JSON rows for `rbgp config history`; newest is index 0. V2 retains secret-bearing TOML up to 10 MiB; larger accepted snapshots receive at-most-64-KiB metadata-only v3 rows without payloads or source rosters. V3 is permanently rollback-ineligible and independent of commit-confirm recovery. Retired TOML files are ignored and retained. V2 records hash but do not archive external sources and are rollback-eligible only when live sources exactly reproduce recorded provenance. | Yes |
 | `fib-owned.json` | FIB ownership receipt — which kernel routes the daemon installed (ADR-0061). Used to drain orphan installs on next start. | Yes |
 | `blackhole-owned.json` | Exact BLACKHOLE prefix authority. Mode `0600`; adoption and deletion require this receipt plus the kernel marker. | Yes |
 | `grpc.sock` | gRPC UDS endpoint (if `[global.telemetry.grpc_uds]` configured). | Recreated on start |
