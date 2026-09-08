@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "cell": "rustbgpd",
+  "git": {
+    "commit": "8264351811a80301e747ad217d751942056c0b3c",
+    "tree": "c3ece8372e7996b476d942cbec72500550f295eb",
+    "dirty": false
+  },
+  "toolchain": "rustc 1.98.0 (88d9e12ae 2026-08-18)\nbinary: rustc\ncommit-hash: 88d9e12ae178fab0fb5cc050a94da85685d449ea\ncommit-date: 2026-08-18\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.0\nLLVM version: 22.1.8",
+  "host": "Linux 7.0.0-30-generic #30~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Fri Aug  7 13:27:52 UTC 2 x86_64 GNU/Linux",
+  "sources": {
+    "common": {
+      "bench/scale/provenance.sh": "7db6727dc99ec42515359f674e56c749453bc29c9981b67f30568f0d6cce1991",
+      "bench/scale/matrix/run-matrix.sh": "72ddb375cc21f020f4d2ec6a41fd15a9962d835dba26dce86df0420644aa44eb",
+      "bench/scale/matrix/verify-provenance.py": "69cda11c70b27b45b7f4a828f648eeee7aef7a2598c59a582117f412f2281fe2",
+      "bench/scale/matrix/rss-sampler.sh": "cf00e09511d782bd40f60548ea60077b702e1bfe98c57eb391b94ce6aa202540",
+      "bench/scale/host-quiet.sh": "abb3391cd5e0879c29aabd0aa0c316ea33d5f7c72f6d2a7d111b30025de411fd",
+      "tests/soak/host-lock.sh": "392ce90dec77e51110ae43202275b0142c37da6a3f4ba12c78d913ab6329520e"
+    },
+    "generator": {
+      "bench/scale/reloadstall/gen-scenario.py": "4a25419fe0f462155d4b12e38116a131a436a1384cb0ac88a330448c1231891d"
+    },
+    "reloadstall": {
+      "path": "bench/scale/target/release/reloadstall",
+      "sha256": "ba3bde324986c1e27a1cc5273d331f159f698cfa8844f31349f1b8327025c56d"
+    }
+  },
+  "workload": {
+    "binary": "target/release/rustbgpd",
+    "sha256": "5f293bd925d451e3c6fe97ff4309f7f341c7e0e0dfdc8de7471f53cd3d019b9e",
+    "inputs": {
+      "N_PEERS": "700",
+      "TOTAL_PREFIXES": "400400",
+      "PORT": "1790",
+      "RELOADS": "4",
+      "CONTROL_SECS": "30",
+      "CHANGED_PEERS": "600",
+      "FLAPSTORM": "",
+      "BIRD_THREADS": "8",
+      "PROBE_PREFIXES": "20.0.0.0/24 3001::/48",
+      "RELOADSTALL_FILTER_COUNT": "32",
+      "RELOADSTALL_DUALSTACK": "1",
+      "RELOADSTALL_IPV4_PREFIXES": "200200",
+      "GEN_DUALSTACK": "1",
+      "GEN_FILTER_COUNT": "32",
+      "RELOADSTALL_CYCLE_QUIESCE_SECS": "20"
+    }
+  }
+}

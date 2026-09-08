@@ -13,6 +13,13 @@ also covers interop and archived soaks.
 
 Each result below links to its published, reproducible receipt:
 
+- **Dual-stack filtering reload after redundant-policy work removal**:
+  the 200-member cell passed with 170 changed targets and no stable-peer
+  remainder; median full-generation duration was 345.378 ms across four
+  reloads. The single 700-member cell removed the remainder work but failed
+  health and warning acceptance; the dated receipt preserves those limits —
+  [policy-reload receipt](ixp-dualstack-policy-noops-2026-09.md),
+  measured 2026-09-08
 - **Policy reload at IXP scale** (700 route-server clients × 400,400 routes,
   live churn, same harness / same host — the policy-file reload, not the IRR
   filter refresh below): new policy fully delivered to every member in

@@ -1,0 +1,36 @@
+[
+  {
+    "reason": "compiler-artifact",
+    "package_id": "path+file:///tmp/policy-noops-tools-source/bench/scale/reloadstall#0.1.0",
+    "manifest_path": "/tmp/policy-noops-tools-source/bench/scale/reloadstall/Cargo.toml",
+    "target": {
+      "kind": [
+        "bin"
+      ],
+      "crate_types": [
+        "bin"
+      ],
+      "name": "reloadstall",
+      "src_path": "/tmp/policy-noops-tools-source/bench/scale/reloadstall/src/main.rs",
+      "edition": "2021",
+      "doc": true,
+      "doctest": false,
+      "test": true
+    },
+    "profile": {
+      "opt_level": "3",
+      "debuginfo": 1,
+      "debug_assertions": false,
+      "overflow_checks": false,
+      "test": false
+    },
+    "features": [],
+    "filenames": [
+      "/tmp/policy-noops-build-target/release/reloadstall"
+    ],
+    "executable": "/tmp/policy-noops-build-target/release/reloadstall",
+    "fresh": false,
+    "executable_sha256": "ba3bde324986c1e27a1cc5273d331f159f698cfa8844f31349f1b8327025c56d",
+    "immutable_executable": "/tmp/policy-noops-tools-build/bin/reloadstall"
+  }
+]

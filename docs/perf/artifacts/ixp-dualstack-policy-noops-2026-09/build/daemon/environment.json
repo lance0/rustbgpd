@@ -1,0 +1,16 @@
+{
+  "explicit_and_inherited_build_environment": {
+    "CARGO_TARGET_DIR": "/tmp/policy-noops-build-target",
+    "CARGO_BUILD_JOBS": "4"
+  },
+  "nofile_before": {
+    "soft": 1024,
+    "hard": 1048576
+  },
+  "nofile_build": {
+    "soft": 65536,
+    "hard": 1048576
+  },
+  "features_policy": "normal default features; no --no-default-features or --features override",
+  "target_dir": "/tmp/policy-noops-build-target"
+}
