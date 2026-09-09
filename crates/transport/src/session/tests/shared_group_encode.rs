@@ -1,5 +1,400 @@
 use super::*;
 
+fn shared_query_update(
+    member: &PeerSession,
+    announce: &[Route],
+) -> (
+    Arc<super::shared_group::ProgressiveUnicastEncode>,
+    OutboundRouteUpdate,
+    Vec<super::shared_group::SharedUnicastChunk>,
+) {
+    let profile = (*member.publish_export_profile()).clone();
+    let typed = Arc::new(super::shared_group::ProgressiveUnicastEncode::test_new(
+        profile.clone(),
+    ));
+    let shared = Arc::new(rustbgpd_rib::SharedGroupEncode::default());
+    assert!(
+        shared
+            .cell
+            .set(Arc::clone(&typed) as Arc<dyn std::any::Any + Send + Sync>)
+            .is_ok()
+    );
+    let update = shared_group_envelope(member, &shared, Ipv4Addr::new(10, 43, 0, 254), announce);
+    let chunks = super::shared_group::encode_shared_unicast_slice(
+        &profile,
+        &mut super::export::PreparedAttrCache::default(),
+        announce,
+        &vec![None; announce.len()],
+        &(0..announce.len()).collect::<Vec<_>>(),
+    )
+    .expect("control inventory encodes");
+    (typed, update, chunks)
+}
+
+/// An admitted import snapshot must not spend its complete RPC budget waiting
+/// for an unrelated shared-output stream to reach its terminal.
+#[expect(
+    clippy::too_many_lines,
+    reason = "real actor proof keeps admission, held stream, deadline, positive control, and cleanup together"
+)]
+#[tokio::test(start_paused = true)]
+async fn shared_group_consumer_answers_import_query_before_stream_terminal() {
+    use super::shared_group::StreamTerminal;
+    use crate::{PeerHandle, SessionQueryOutcome};
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+
+    let (mut member, commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+    let (client, _wire) = connected_stream_pair().await;
+    member.test_install_stream(client);
+    member.config.route_server_client = true;
+    establish_test_session(&mut member, 65002).await;
+    member.install_import_policy(Some(PolicyChain::new(vec![Policy {
+        entries: vec![],
+        default_action: PolicyAction::Permit,
+    }])));
+    let generation = member.import_policy_generation;
+    let announce = [make_sourced_route(
+        Ipv4Addr::new(10, 43, 0, 1),
+        Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+        64_601,
+    )];
+    let (typed, update, chunks) = shared_query_update(&member, &announce);
+    let outbound = member.outbound_tx.clone();
+    outbound.try_send(update).unwrap();
+
+    let result = {
+        let actor = member.run();
+        tokio::pin!(actor);
+        assert!(
+            poll_fn(|cx| Poll::Ready(actor.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        assert_eq!(
+            outbound.capacity(),
+            outbound.max_capacity(),
+            "actor consumed the envelope"
+        );
+        assert_eq!(
+            typed.test_snapshot(),
+            (0, None),
+            "consumer awaits an unfinished stream"
+        );
+
+        // Neighbor polling shares this FIFO with import stats during reload.
+        let (state_reply, mut state_response) = oneshot::channel();
+        commands
+            .try_send(PeerCommand::QueryState { reply: state_reply })
+            .unwrap();
+        let started = tokio::time::Instant::now();
+        let deadline = started + Duration::from_secs(2);
+        let query =
+            PeerHandle::query_import_policy_term_hits_with_deadline(commands.clone(), deadline);
+        tokio::pin!(query);
+        assert!(
+            poll_fn(|cx| Poll::Ready(query.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        assert_eq!(
+            commands.capacity(),
+            commands.max_capacity() - 2,
+            "state and import queries admitted to session queue"
+        );
+        let result = tokio::select! {
+            result = &mut query => result,
+            stopped = &mut actor => panic!("session stopped before query reply: {stopped:?}"),
+        };
+        assert_eq!(
+            typed.test_snapshot(),
+            (0, None),
+            "observed query outcome before stream terminal"
+        );
+        assert_eq!(
+            state_response
+                .try_recv()
+                .expect("neighbor query replied")
+                .fsm_state,
+            SessionState::Established
+        );
+
+        // Canceled reads must not become barriers for the next live snapshot.
+        let (reply, response) = oneshot::channel();
+        drop(response);
+        commands
+            .try_send(PeerCommand::QueryState { reply })
+            .unwrap();
+        let (reply, response) = oneshot::channel();
+        drop(response);
+        commands
+            .try_send(PeerCommand::QueryImportPolicyTermHits { reply })
+            .unwrap();
+        let after_cancel = PeerHandle::query_import_policy_term_hits_with_deadline(
+            commands.clone(),
+            tokio::time::Instant::now() + Duration::from_secs(2),
+        );
+        let after_cancel = tokio::select! {
+            result = after_cancel => result,
+            stopped = &mut actor => panic!("session stopped after canceled query: {stopped:?}"),
+        };
+        assert!(matches!(after_cancel, SessionQueryOutcome::Reply(Some(_))));
+        assert_eq!(typed.test_snapshot(), (0, None));
+
+        // Positive control: releasing the same consumer permits a fresh query.
+        typed.test_publish(chunks);
+        typed.test_finish(StreamTerminal::Complete);
+        let control = PeerHandle::query_import_policy_term_hits_with_deadline(
+            commands.clone(),
+            tokio::time::Instant::now() + Duration::from_secs(2),
+        );
+        let control = tokio::select! {
+            result = control => result,
+            stopped = &mut actor => panic!("session stopped before control reply: {stopped:?}"),
+        };
+        match control {
+            SessionQueryOutcome::Reply(Some(snapshot)) => {
+                assert_eq!(snapshot.generation, generation);
+                assert_eq!(
+                    snapshot.evals, 0,
+                    "stats reads do not evaluate the import chain"
+                );
+            }
+            other => panic!("completed stream must release the import query: {other:?}"),
+        }
+        result
+    };
+    // Reap the fixture's writer before asserting the pre-terminal outcome.
+    let writer = member.writer_join.take().unwrap();
+    writer.abort();
+    let _ = writer.await;
+    assert!(
+        matches!(result, SessionQueryOutcome::Reply(Some(_))),
+        "admitted import-counter query must reply before the unfinished stream consumes its two-second deadline; got {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn shared_group_closed_command_channel_waits_without_self_waking() {
+    use std::future::Future;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Wake, Waker};
+
+    struct WakeCount(AtomicUsize);
+    impl Wake for WakeCount {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    // This fixture drops its command sender, so recv() immediately yields None.
+    let (mut member, _wire) = shared_group_member(65001).await;
+    assert!(member.commands.is_closed());
+    let (typed, update, chunks) = shared_query_update(&member, &[make_route(100)]);
+    {
+        let consumer = member.handle_outbound_route_update(update);
+        tokio::pin!(consumer);
+        let notifications = Arc::new(WakeCount(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&notifications));
+        assert!(
+            consumer
+                .as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        assert_eq!(
+            notifications.0.load(Ordering::SeqCst),
+            0,
+            "closed recv must not cause a cooperative busy loop"
+        );
+        assert_eq!(typed.test_snapshot(), (0, None));
+        typed.test_publish(chunks);
+        typed.test_finish(super::shared_group::StreamTerminal::Complete);
+        consumer.await;
+    }
+    assert_eq!(member.updates_sent, 1);
+    let writer = member.writer_join.take().unwrap();
+    writer.abort();
+    let _ = writer.await;
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "real actor test retains mutation FIFO, failed-stream fallback, and wire assertions together"
+)]
+#[tokio::test(start_paused = true)]
+async fn shared_group_failed_stream_keeps_mutation_before_later_query() {
+    use crate::{PeerHandle, SessionQueryOutcome};
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+
+    let (mut member, commands, _rib_rx) = make_test_session_with_channels(65001, 65002, 64);
+    let (client, mut wire) = connected_stream_pair().await;
+    member.test_install_stream(client);
+    member.config.route_server_client = true;
+    establish_test_session(&mut member, 65002).await;
+    read_single_bgp_message(&mut wire).await;
+    read_single_bgp_message(&mut wire).await;
+    let generation = member.import_policy_generation;
+    let prefix_a = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let prefix_b = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let announce = [
+        make_sourced_route(Ipv4Addr::new(10, 43, 0, 1), prefix_a, 64_601),
+        make_sourced_route(Ipv4Addr::new(10, 43, 0, 2), prefix_b, 64_602),
+    ];
+    let (typed, update, chunks) = shared_query_update(&member, &announce);
+    typed.test_publish(vec![chunks[0].clone()]);
+    let outbound = member.outbound_tx.clone();
+    outbound.try_send(update).unwrap();
+    {
+        let actor = member.run();
+        tokio::pin!(actor);
+        assert!(
+            poll_fn(|cx| Poll::Ready(actor.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        assert_eq!(outbound.capacity(), outbound.max_capacity());
+        let (reply, mut mutation) = oneshot::channel();
+        commands
+            .try_send(PeerCommand::UpdateImportPolicy {
+                policy: Some(Box::new(PolicyChain::new(vec![Policy {
+                    entries: vec![],
+                    default_action: PolicyAction::Deny,
+                }]))),
+                reply,
+            })
+            .unwrap();
+        let query = PeerHandle::query_import_policy_term_hits_with_deadline(
+            commands.clone(),
+            tokio::time::Instant::now() + Duration::from_secs(2),
+        );
+        tokio::pin!(query);
+        assert!(
+            poll_fn(|cx| Poll::Ready(query.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        assert!(
+            poll_fn(|cx| Poll::Ready(actor.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        assert_eq!(
+            commands.capacity(),
+            commands.max_capacity() - 1,
+            "only the barrier is taken; its successor stays queued"
+        );
+        assert!(matches!(
+            mutation.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(
+            poll_fn(|cx| Poll::Ready(query.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+
+        typed.test_finish(super::shared_group::StreamTerminal::Failed);
+        let result = tokio::select! {
+            result = &mut query => result,
+            stopped = &mut actor => panic!("session stopped before mutation/query: {stopped:?}"),
+        };
+        mutation
+            .try_recv()
+            .expect("deferred mutation acknowledged")
+            .expect("mutation succeeds");
+        let SessionQueryOutcome::Reply(Some(snapshot)) = result else {
+            panic!("query after mutation must see its installed chain: {result:?}");
+        };
+        assert_eq!(
+            snapshot.generation,
+            generation + 1,
+            "query cannot bypass the policy mutation"
+        );
+        assert_eq!(snapshot.evals, 0);
+    }
+    assert!(member.deferred_command.is_none());
+    let mut expected = vec![
+        Prefix::V4(prefix_a),
+        Prefix::V4(prefix_a),
+        Prefix::V4(prefix_b),
+    ];
+    expected.sort_unstable();
+    assert_eq!(
+        read_announced_prefixes(&mut wire, 3).await,
+        expected,
+        "failed stream repeats the head and preserves all fallback routes"
+    );
+    let writer = member.writer_join.take().unwrap();
+    writer.abort();
+    let _ = writer.await;
+}
+
+#[tokio::test]
+async fn shared_group_encoder_and_buffered_consumer_service_queued_reads() {
+    for elected_encoder in [true, false] {
+        let (mut member, _wire) = shared_group_member(65001).await;
+        let (commands, receiver) = mpsc::channel(8);
+        member.commands = receiver;
+        let (reply, mut state) = oneshot::channel();
+        commands
+            .try_send(PeerCommand::QueryState { reply })
+            .unwrap();
+        let (reply, mut counters) = oneshot::channel();
+        commands
+            .try_send(PeerCommand::QueryImportPolicyTermHits { reply })
+            .unwrap();
+        // Two producer slices and many consumer chunks, all within writer capacity.
+        let announce: Vec<_> = (0..2100_u32)
+            .map(|index| {
+                make_sourced_route(
+                    Ipv4Addr::new(10, 44, 0, 1),
+                    Ipv4Prefix::new(Ipv4Addr::from(0x0A40_0000 + index * 256), 24),
+                    64_601,
+                )
+            })
+            .collect();
+        let update = if elected_encoder {
+            shared_group_envelope(
+                &member,
+                &Arc::new(rustbgpd_rib::SharedGroupEncode::default()),
+                Ipv4Addr::new(10, 43, 0, 254),
+                &announce,
+            )
+        } else {
+            let (typed, update, chunks) = shared_query_update(&member, &announce);
+            assert!(
+                chunks.len() > 64,
+                "fixture spans multiple consumer checkpoints"
+            );
+            typed.test_publish(chunks);
+            typed.test_finish(super::shared_group::StreamTerminal::Complete);
+            update
+        };
+        // No outer command loop runs here: both replies must come from shared work.
+        member.handle_outbound_route_update(update).await;
+        assert_eq!(
+            state
+                .try_recv()
+                .expect("state answered inside shared work")
+                .updates_sent,
+            0
+        );
+        assert!(
+            counters
+                .try_recv()
+                .expect("stats answered inside shared work")
+                .is_none()
+        );
+        assert_eq!(commands.capacity(), commands.max_capacity());
+        assert_eq!(member.updates_sent, 2100);
+        let writer = member.writer_join.take().unwrap();
+        writer.abort();
+        let _ = writer.await;
+    }
+}
+
 #[tokio::test]
 async fn shared_transition_payload_excludes_only_the_target_source() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);

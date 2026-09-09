@@ -225,6 +225,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   datasets change. Later policy application, rollback, and standalone mutations
   remain fenced; existing read deadlines and complete-result requirements remain.
 
+- Session-state and import policy-statistics reads can proceed while grouped
+  unicast updates are encoded or streamed. Reads preserve command order across
+  queued policy changes and other mutations; the shared statistics deadline and
+  complete-result requirements are unchanged.
+
 ### Upgrade notes
 
 - Consumers of `GetPolicyStats` or `rbgp policy stats` should use the installed

@@ -418,6 +418,27 @@ pub(super) fn encode_shared_unicast_slice(
 }
 
 impl PeerSession {
+    /// Only small operator snapshots may interleave a shared envelope. Preserve
+    /// every other command and its FIFO successors until normal actor handling.
+    fn handle_shared_group_command(&mut self, command: crate::PeerCommand) {
+        match command {
+            crate::PeerCommand::QueryState { reply } => self.answer_state_query(reply),
+            crate::PeerCommand::QueryImportPolicyTermHits { reply } => {
+                self.answer_import_policy_term_hits(reply);
+            }
+            command => self.deferred_command = Some(command),
+        }
+    }
+
+    /// One command per checkpoint bounds work under a continuous read stream.
+    fn poll_shared_group_command(&mut self) {
+        if self.deferred_command.is_none()
+            && let Ok(command) = self.commands.try_recv()
+        {
+            self.handle_shared_group_command(command);
+        }
+    }
+
     /// Entry point for envelopes from the RIB manager: try the update-group
     /// encode-once path, fall back to the ordinary per-session encode.
     pub(super) async fn handle_outbound_route_update(&mut self, update: OutboundRouteUpdate) {
@@ -525,6 +546,9 @@ impl PeerSession {
         let mut sent: u64 = 0;
         let mut idx = 0;
         while idx < order.len() {
+            // Synchronous only: do not weaken the encoder election/guard
+            // liveness invariant to service a queued operator snapshot.
+            self.poll_shared_group_command();
             let end = (idx + PROGRESSIVE_SLICE_ROUTES).min(order.len());
             let Some(chunks) = encode_shared_unicast_slice(
                 export,
@@ -577,6 +601,7 @@ impl PeerSession {
         }
         let mut next = 0;
         let mut sent: u64 = 0;
+        let mut commands_open = true;
         loop {
             // Register for wakeups BEFORE snapshotting, so a publish that
             // lands between the snapshot and the await still wakes us.
@@ -585,7 +610,12 @@ impl PeerSession {
             notified.as_mut().enable();
             let (new_chunks, terminal) = encode.snapshot_from(next);
             next += new_chunks.len();
-            for chunk in new_chunks {
+            for (index, chunk) in new_chunks.into_iter().enumerate() {
+                // Already-published chunks need checkpoints too; they may
+                // drain without ever waiting for another encoder notification.
+                if index % 64 == 0 {
+                    self.poll_shared_group_command();
+                }
                 if !self.wants_shared_chunk(update, &chunk) {
                     continue;
                 }
@@ -617,7 +647,19 @@ impl PeerSession {
                     // full envelope from index 0.
                     return false;
                 }
-                None => notified.await,
+                None => {
+                    tokio::select! {
+                        biased;
+                        command = self.commands.recv(),
+                            if commands_open && self.deferred_command.is_none() => {
+                            match command {
+                                Some(command) => self.handle_shared_group_command(command),
+                                None => commands_open = false,
+                            }
+                        }
+                        () = notified => {}
+                    }
+                }
             }
         }
     }

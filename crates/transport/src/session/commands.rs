@@ -1071,6 +1071,197 @@ impl PeerSession {
         Ok(())
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "session state is one synchronous operator snapshot of existing fields"
+    )]
+    pub(super) fn answer_state_query(
+        &mut self,
+        reply: tokio::sync::oneshot::Sender<PeerSessionState>,
+    ) {
+        if reply.is_closed() {
+            return;
+        }
+        // TCP_AO_INFO is cumulative for this socket. Its in-actor
+        // getsockopt is a bounded, nonblocking kernel-memory read, so
+        // refresh at the query boundary for current operator health.
+        self.refresh_tcp_ao_info();
+        let uptime_secs = self.established_at.map_or(0, |t| t.elapsed().as_secs());
+        // Prefer FSM's negotiated (available at OpenConfirm) over
+        // self.negotiated (set later at SessionEstablished). This is
+        // critical for collision detection: handle_inbound() reads
+        // remote_router_id via QueryState when the session is in
+        // OpenConfirm.
+        let neg = self.fsm.negotiated().or(self.negotiated.as_deref());
+        let (messages_received, messages_sent) = self.metrics.peer_message_totals(&self.peer_label);
+        let prefix_count = self.known_prefix_count();
+        let prefix_count_ipv4 = self.known_unicast_v4;
+        let prefix_count_ipv6 = self.known_unicast_v6;
+        let negotiated_session = (self.fsm.state() == SessionState::Established)
+            .then(|| {
+                let negotiated = neg?;
+                let mut families = negotiated.negotiated_families.clone();
+                families.sort_by_key(|(afi, safi)| (*afi as u16, *safi as u8));
+                let mut add_path_receive_families = self.add_path_receive_families.clone();
+                add_path_receive_families.sort_by_key(|(afi, safi)| (*afi as u16, *safi as u8));
+                let graceful_restart = negotiated.peer_gr_capable.then(|| {
+                    let mut peer_families = negotiated
+                        .peer_gr_families
+                        .iter()
+                        .map(|family| (family.afi, family.safi))
+                        .collect::<Vec<_>>();
+                    peer_families.sort_by_key(|(afi, safi)| (*afi as u16, *safi as u8));
+                    crate::NegotiatedGracefulRestartState {
+                        peer_families,
+                        peer_restart_time: negotiated.peer_restart_time,
+                        effective_retention_time: self.config.peer.graceful_restart.then(|| {
+                            negotiated
+                                .peer_restart_time
+                                .min(self.config.gr_peer_restart_time_max)
+                        }),
+                    }
+                });
+                Some(crate::NegotiatedSessionState {
+                    local_address: self.export_encoder.snapshot().local_addr(),
+                    hold_time: negotiated.hold_time,
+                    keepalive_interval: negotiated.keepalive_interval,
+                    remote_router_id: negotiated.peer_router_id,
+                    four_octet_as: negotiated.four_octet_as,
+                    families,
+                    add_path_receive_families,
+                    peer_route_refresh: negotiated.peer_route_refresh,
+                    peer_enhanced_route_refresh: negotiated.peer_enhanced_route_refresh,
+                    peer_extended_message: negotiated.peer_extended_message,
+                    outbound_max_message_bytes: self.outbound_max_message_len(),
+                    graceful_restart,
+                })
+            })
+            .flatten();
+        let state = PeerSessionState {
+            fsm_state: self.fsm.state(),
+            peer_ip: self.peer_ip,
+            peer_asn: neg.map(|n| n.peer_asn),
+            prefix_count,
+            rejected_routes_retained: self.rejected_routes.len(),
+            policy_reject_counts: (self.reject_retention_enabled
+                && self.rejected_routes.evictions_since_reset() == 0)
+                .then(|| {
+                    let (ipv4_unicast, ipv6_unicast) = self.rejected_routes.policy_reject_counts();
+                    crate::PolicyRejectCounts {
+                        ipv4_unicast,
+                        ipv6_unicast,
+                    }
+                }),
+            max_prefix: MaxPrefixState {
+                scopes: MaxPrefixScope::ALL
+                    .into_iter()
+                    .filter_map(|scope| {
+                        let (usage, limit) = self.max_prefix_scope_usage(scope);
+                        let limit = limit?;
+                        Some(crate::handle::MaxPrefixScopeState {
+                            scope: scope.as_str(),
+                            usage,
+                            limit,
+                            headroom: limit
+                                .saturating_sub(u32::try_from(usage).unwrap_or(u32::MAX)),
+                            blocking: self.max_prefix_scope_blocking(scope),
+                        })
+                    })
+                    .collect(),
+                action: self.config.max_prefix_action,
+                prefix_count_ipv4,
+                prefix_count_ipv6,
+                max_prefixes: self.config.max_prefixes,
+                max_prefixes_ipv4: self.config.max_prefixes_ipv4,
+                max_prefixes_ipv6: self.config.max_prefixes_ipv6,
+                headroom: remaining_prefix_headroom(self.config.max_prefixes, prefix_count),
+                headroom_ipv4: remaining_prefix_headroom(
+                    self.config.max_prefixes_ipv4,
+                    prefix_count_ipv4,
+                ),
+                headroom_ipv6: remaining_prefix_headroom(
+                    self.config.max_prefixes_ipv6,
+                    prefix_count_ipv6,
+                ),
+            },
+            negotiated_hold_time: neg.map(|n| n.hold_time),
+            four_octet_as: neg.map(|n| n.four_octet_as),
+            remote_router_id: neg.map(|n| n.peer_router_id),
+            negotiated_session,
+            local_role: neg.and_then(|n| n.local_role),
+            remote_role: neg.and_then(|n| n.remote_role),
+            role_negotiated: neg.is_some_and(|n| n.role_negotiated),
+            peer_paths_limits: neg
+                .map(|n| {
+                    sorted_family_limits(
+                        n.peer_paths_limits
+                            .iter()
+                            .map(|(family, limit)| (*family, *limit)),
+                    )
+                })
+                .unwrap_or_default(),
+            effective_add_path_send_limits: neg
+                .map(|n| {
+                    sorted_family_limits(
+                        n.effective_add_path_send_limits
+                            .iter()
+                            .map(|(family, limit)| (*family, *limit)),
+                    )
+                })
+                .unwrap_or_default(),
+            updates_received: self.updates_received,
+            updates_sent: self.updates_sent,
+            notifications_received: self.notifications_received,
+            notifications_sent: self.notifications_sent,
+            messages_received,
+            messages_sent,
+            otc_routes_blocked: self.otc_routes_blocked,
+            import_policy_routes_permitted: self.import_policy_routes_permitted,
+            import_policy_routes_denied: self.import_policy_routes_denied,
+            flap_count: self.flap_count,
+            uptime_secs,
+            last_error: self.last_error.clone(),
+            tcp_ao_info: self.tcp_ao_info.clone().map(Box::new),
+            tcp_ao_protected: self.tcp_ao_protected,
+            slow_peer: self.slow_peer,
+            reconnect_in_secs: self.reconnect_timer.as_ref().map_or(0, |timer| {
+                let remaining = timer
+                    .deadline()
+                    .saturating_duration_since(tokio::time::Instant::now());
+                remaining
+                    .as_secs()
+                    .saturating_add(u64::from(remaining.subsec_nanos() > 0))
+            }),
+        };
+        let _ = reply.send(state);
+    }
+
+    pub(super) fn answer_import_policy_term_hits(
+        &self,
+        reply: tokio::sync::oneshot::Sender<Option<crate::handle::ImportPolicyTermHits>>,
+    ) {
+        if reply.is_closed() {
+            return;
+        }
+        // Read-only snapshot of the live counters (ADR-0096
+        // Decision 3.3). No counter moves; a session without an
+        // installed import chain has nothing to report.
+        let snapshot =
+            self.import_policy
+                .as_ref()
+                .map(|chain| crate::handle::ImportPolicyTermHits {
+                    generation: self.import_policy_generation,
+                    evals: chain.hit_counters().evals(),
+                    eval_errors: chain.hit_counters().eval_errors(),
+                    last_error: chain
+                        .hit_counters()
+                        .last_error()
+                        .map(|error| error.to_string()),
+                    terms: chain.term_hit_rows(),
+                });
+        let _ = reply.send(snapshot);
+    }
+
     fn refresh_tcp_ao_info(&mut self) {
         self.refresh_tcp_ao_info_with(crate::socket_opts::get_tcp_ao_info);
     }
@@ -1211,163 +1402,7 @@ impl PeerSession {
                 ControlFlow::Continue(())
             }
             PeerCommand::QueryState { reply } => {
-                // TCP_AO_INFO is cumulative for this socket. Its in-actor
-                // getsockopt is a bounded, nonblocking kernel-memory read, so
-                // refresh at the query boundary for current operator health.
-                self.refresh_tcp_ao_info();
-                let uptime_secs = self.established_at.map_or(0, |t| t.elapsed().as_secs());
-                // Prefer FSM's negotiated (available at OpenConfirm) over
-                // self.negotiated (set later at SessionEstablished). This is
-                // critical for collision detection: handle_inbound() reads
-                // remote_router_id via QueryState when the session is in
-                // OpenConfirm.
-                let neg = self.fsm.negotiated().or(self.negotiated.as_deref());
-                let (messages_received, messages_sent) =
-                    self.metrics.peer_message_totals(&self.peer_label);
-                let prefix_count = self.known_prefix_count();
-                let prefix_count_ipv4 = self.known_unicast_v4;
-                let prefix_count_ipv6 = self.known_unicast_v6;
-                let negotiated_session = (self.fsm.state() == SessionState::Established)
-                    .then(|| {
-                        let negotiated = neg?;
-                        let mut families = negotiated.negotiated_families.clone();
-                        families.sort_by_key(|(afi, safi)| (*afi as u16, *safi as u8));
-                        let mut add_path_receive_families = self.add_path_receive_families.clone();
-                        add_path_receive_families
-                            .sort_by_key(|(afi, safi)| (*afi as u16, *safi as u8));
-                        let graceful_restart = negotiated.peer_gr_capable.then(|| {
-                            let mut peer_families = negotiated
-                                .peer_gr_families
-                                .iter()
-                                .map(|family| (family.afi, family.safi))
-                                .collect::<Vec<_>>();
-                            peer_families.sort_by_key(|(afi, safi)| (*afi as u16, *safi as u8));
-                            crate::NegotiatedGracefulRestartState {
-                                peer_families,
-                                peer_restart_time: negotiated.peer_restart_time,
-                                effective_retention_time: self.config.peer.graceful_restart.then(
-                                    || {
-                                        negotiated
-                                            .peer_restart_time
-                                            .min(self.config.gr_peer_restart_time_max)
-                                    },
-                                ),
-                            }
-                        });
-                        Some(crate::NegotiatedSessionState {
-                            local_address: self.export_encoder.snapshot().local_addr(),
-                            hold_time: negotiated.hold_time,
-                            keepalive_interval: negotiated.keepalive_interval,
-                            remote_router_id: negotiated.peer_router_id,
-                            four_octet_as: negotiated.four_octet_as,
-                            families,
-                            add_path_receive_families,
-                            peer_route_refresh: negotiated.peer_route_refresh,
-                            peer_enhanced_route_refresh: negotiated.peer_enhanced_route_refresh,
-                            peer_extended_message: negotiated.peer_extended_message,
-                            outbound_max_message_bytes: self.outbound_max_message_len(),
-                            graceful_restart,
-                        })
-                    })
-                    .flatten();
-                let state = PeerSessionState {
-                    fsm_state: self.fsm.state(),
-                    peer_ip: self.peer_ip,
-                    peer_asn: neg.map(|n| n.peer_asn),
-                    prefix_count,
-                    rejected_routes_retained: self.rejected_routes.len(),
-                    policy_reject_counts: (self.reject_retention_enabled
-                        && self.rejected_routes.evictions_since_reset() == 0)
-                        .then(|| {
-                            let (ipv4_unicast, ipv6_unicast) =
-                                self.rejected_routes.policy_reject_counts();
-                            crate::PolicyRejectCounts {
-                                ipv4_unicast,
-                                ipv6_unicast,
-                            }
-                        }),
-                    max_prefix: MaxPrefixState {
-                        scopes: MaxPrefixScope::ALL
-                            .into_iter()
-                            .filter_map(|scope| {
-                                let (usage, limit) = self.max_prefix_scope_usage(scope);
-                                let limit = limit?;
-                                Some(crate::handle::MaxPrefixScopeState {
-                                    scope: scope.as_str(),
-                                    usage,
-                                    limit,
-                                    headroom: limit
-                                        .saturating_sub(u32::try_from(usage).unwrap_or(u32::MAX)),
-                                    blocking: self.max_prefix_scope_blocking(scope),
-                                })
-                            })
-                            .collect(),
-                        action: self.config.max_prefix_action,
-                        prefix_count_ipv4,
-                        prefix_count_ipv6,
-                        max_prefixes: self.config.max_prefixes,
-                        max_prefixes_ipv4: self.config.max_prefixes_ipv4,
-                        max_prefixes_ipv6: self.config.max_prefixes_ipv6,
-                        headroom: remaining_prefix_headroom(self.config.max_prefixes, prefix_count),
-                        headroom_ipv4: remaining_prefix_headroom(
-                            self.config.max_prefixes_ipv4,
-                            prefix_count_ipv4,
-                        ),
-                        headroom_ipv6: remaining_prefix_headroom(
-                            self.config.max_prefixes_ipv6,
-                            prefix_count_ipv6,
-                        ),
-                    },
-                    negotiated_hold_time: neg.map(|n| n.hold_time),
-                    four_octet_as: neg.map(|n| n.four_octet_as),
-                    remote_router_id: neg.map(|n| n.peer_router_id),
-                    negotiated_session,
-                    local_role: neg.and_then(|n| n.local_role),
-                    remote_role: neg.and_then(|n| n.remote_role),
-                    role_negotiated: neg.is_some_and(|n| n.role_negotiated),
-                    peer_paths_limits: neg
-                        .map(|n| {
-                            sorted_family_limits(
-                                n.peer_paths_limits
-                                    .iter()
-                                    .map(|(family, limit)| (*family, *limit)),
-                            )
-                        })
-                        .unwrap_or_default(),
-                    effective_add_path_send_limits: neg
-                        .map(|n| {
-                            sorted_family_limits(
-                                n.effective_add_path_send_limits
-                                    .iter()
-                                    .map(|(family, limit)| (*family, *limit)),
-                            )
-                        })
-                        .unwrap_or_default(),
-                    updates_received: self.updates_received,
-                    updates_sent: self.updates_sent,
-                    notifications_received: self.notifications_received,
-                    notifications_sent: self.notifications_sent,
-                    messages_received,
-                    messages_sent,
-                    otc_routes_blocked: self.otc_routes_blocked,
-                    import_policy_routes_permitted: self.import_policy_routes_permitted,
-                    import_policy_routes_denied: self.import_policy_routes_denied,
-                    flap_count: self.flap_count,
-                    uptime_secs,
-                    last_error: self.last_error.clone(),
-                    tcp_ao_info: self.tcp_ao_info.clone().map(Box::new),
-                    tcp_ao_protected: self.tcp_ao_protected,
-                    slow_peer: self.slow_peer,
-                    reconnect_in_secs: self.reconnect_timer.as_ref().map_or(0, |timer| {
-                        let remaining = timer
-                            .deadline()
-                            .saturating_duration_since(tokio::time::Instant::now());
-                        remaining
-                            .as_secs()
-                            .saturating_add(u64::from(remaining.subsec_nanos() > 0))
-                    }),
-                };
-                let _ = reply.send(state);
+                self.answer_state_query(reply);
                 ControlFlow::Continue(())
             }
             PeerCommand::QueryWarmCheckpointState { reply } => {
@@ -1514,23 +1549,7 @@ impl PeerSession {
                 ControlFlow::Continue(())
             }
             PeerCommand::QueryImportPolicyTermHits { reply } => {
-                // Read-only snapshot of the live counters (ADR-0096
-                // Decision 3.3). No counter moves; a session without an
-                // installed import chain has nothing to report.
-                let snapshot =
-                    self.import_policy
-                        .as_ref()
-                        .map(|chain| crate::handle::ImportPolicyTermHits {
-                            generation: self.import_policy_generation,
-                            evals: chain.hit_counters().evals(),
-                            eval_errors: chain.hit_counters().eval_errors(),
-                            last_error: chain
-                                .hit_counters()
-                                .last_error()
-                                .map(|error| error.to_string()),
-                            terms: chain.term_hit_rows(),
-                        });
-                let _ = reply.send(snapshot);
+                self.answer_import_policy_term_hits(reply);
                 ControlFlow::Continue(())
             }
             PeerCommand::UpdateExportPolicy { policy, reply } => {
