@@ -83,6 +83,7 @@ pub async fn list(connection: Connection, family: Option<i32>, json: bool) -> Re
                     "afi_safi": output::format_family(route.afi_safi),
                     "as_path": route.as_path,
                     "communities": route.communities.iter().map(|c| output::format_community(*c)).collect::<Vec<_>>(),
+                    "extended_communities": route.extended_communities,
                 })
             })
             .collect();

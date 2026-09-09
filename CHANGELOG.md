@@ -109,6 +109,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   action interpretation and construction, including byte-rate API views and
   injection; raw extended-community storage and reflection remain unchanged.
 
+- `rbgp --json flowspec` now includes raw `extended_communities` as numeric
+  values, preserving their order and duplicates alongside the curated actions.
+
 - `rbgp doctor` attributes local process limits and config freshness to the
   connected Unix-socket peer, with process-start verification and reconnect
   updates. Co-resident daemons no longer contribute unrelated low-limit

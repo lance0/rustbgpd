@@ -182,6 +182,7 @@ pub(crate) struct MockState {
     pub(crate) list_vpn_response: Mutex<Option<server_proto::ListVpnRoutesResponse>>,
     pub(crate) last_list_labeled: Mutex<Option<server_proto::ListLabeledRoutesRequest>>,
     pub(crate) last_list_rtc: Mutex<Option<server_proto::ListRtcRoutesRequest>>,
+    pub(crate) list_flowspec_response: Mutex<server_proto::ListFlowSpecResponse>,
     pub(crate) last_list_evpn: Mutex<Option<server_proto::ListEvpnRequest>>,
     pub(crate) last_list_received_evpn: Mutex<Option<server_proto::ListPeerEvpnRoutesRequest>>,
     pub(crate) last_list_advertised_evpn: Mutex<Option<server_proto::ListPeerEvpnRoutesRequest>>,
@@ -2289,9 +2290,9 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         &self,
         _request: Request<server_proto::ListFlowSpecRequest>,
     ) -> Result<Response<server_proto::ListFlowSpecResponse>, Status> {
-        Ok(Response::new(server_proto::ListFlowSpecResponse {
-            routes: vec![],
-        }))
+        Ok(Response::new(
+            self.state.list_flowspec_response.lock().await.clone(),
+        ))
     }
 
     async fn list_received_evpn_routes(
