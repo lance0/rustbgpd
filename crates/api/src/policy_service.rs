@@ -3990,6 +3990,92 @@ policy customer-in(peer_lp: u32) {
         .expect("a fenced export-policy transition must not fail an operator stats read");
     }
 
+    /// A dataset lookup can reach the operator lane after the export reply
+    /// has already spent part of the aggregate budget. Model that ordering
+    /// with held replies; the generation tests cover the actual actor fence.
+    #[tokio::test(start_paused = true)]
+    async fn get_policy_stats_completes_after_staged_export_and_dataset_replies() {
+        let (peer_tx, _peer_rx) = mpsc::channel(1);
+        let (operator_tx, mut operator_rx) = mpsc::channel(1);
+        let (rib_tx, mut rib_rx) = mpsc::channel(1);
+        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None)
+            .with_operator_queries(operator_tx)
+            .with_rib_query(rib_tx);
+        let started = tokio::time::Instant::now();
+        let read = tokio::spawn(async move {
+            PolicyServiceRpc::get_policy_stats(
+                &svc,
+                Request::new(policy_stats_rpc_request("", "export")),
+            )
+            .await
+        });
+        let Some(rustbgpd_rib::RibUpdate::QueryExportPolicyTermHits { peer, reply }) =
+            tokio::time::timeout(Duration::from_secs(3), rib_rx.recv())
+                .await
+                .expect("stats must request export counters first")
+        else {
+            panic!("expected export counters");
+        };
+        assert!(peer.is_none());
+        assert!(operator_rx.try_recv().is_err());
+        tokio::time::advance(Duration::from_millis(800)).await;
+        reply
+            .send(vec![rustbgpd_rib::update::ExportPolicyTermHits {
+                peer: Some("10.0.0.2".parse().unwrap()),
+                evals: 7,
+                eval_errors: 0,
+                last_error: None,
+                terms: Vec::new(),
+            }])
+            .unwrap();
+        let Some(PeerManagerOperatorQuery::QueryPolicyDatasets { reply }) =
+            tokio::time::timeout(Duration::from_secs(3), operator_rx.recv())
+                .await
+                .expect("dataset lookup must follow the export reply")
+        else {
+            panic!("expected dataset lookup on the operator lane");
+        };
+        assert_eq!(started.elapsed(), Duration::from_millis(800));
+        // The closed admission interval consumes 1100 of the remaining
+        // 1200 ms; it must not discard the already collected export rows.
+        tokio::time::advance(Duration::from_millis(1_100)).await;
+        assert!(!read.is_finished());
+        reply
+            .send(vec![crate::peer_types::PolicyDatasetStatusRow {
+                status: rustbgpd_policy::datasets::DatasetStatus {
+                    name: "customers".into(),
+                    kind: rustbgpd_policy::datasets::DatasetKind::Asn,
+                    generation: 7,
+                    records: 42,
+                    last_error: None,
+                },
+                path: "customers.list".into(),
+            }])
+            .unwrap();
+        let response = read.await.unwrap().unwrap().into_inner();
+        assert_eq!(started.elapsed(), Duration::from_millis(1_900));
+        assert_eq!(
+            response.chains,
+            vec![proto::PolicyChainStats {
+                peer_address: "10.0.0.2".into(),
+                direction: "export".into(),
+                routes_evaluated: 7,
+                ..Default::default()
+            }]
+        );
+        assert_eq!(
+            response.datasets,
+            vec![proto::PolicyDatasetStatus {
+                name: "customers".into(),
+                kind: "asn-set".into(),
+                generation: 7,
+                records: 42,
+                path: "customers.list".into(),
+                ..Default::default()
+            }]
+        );
+    }
+
     /// LAN-661: explicit-peer validation, export, import, and dataset reads
     /// are sequential but spend one shared RPC budget rather than receiving
     /// independent timeouts.

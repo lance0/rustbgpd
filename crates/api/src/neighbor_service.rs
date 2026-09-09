@@ -3458,6 +3458,78 @@ mod tests {
         );
     }
 
+    /// Inventory may arrive before a policy transition while its following
+    /// RIB snapshot waits for settlement. Each stage retains its own budget.
+    #[tokio::test(start_paused = true)]
+    async fn list_neighbors_completes_after_staged_operator_and_rib_replies() {
+        let (peer_tx, _peer_rx) = mpsc::channel(1);
+        let (operator_tx, mut operator_rx) = mpsc::channel(1);
+        let (svc, mut rib_rx) = read_service(peer_tx);
+        let svc = svc.with_operator_queries(operator_tx);
+        let first: IpAddr = "10.0.0.1".parse().unwrap();
+        let second: IpAddr = "10.0.0.2".parse().unwrap();
+        let started = tokio::time::Instant::now();
+        let read = tokio::spawn(async move {
+            svc.list_neighbors(Request::new(proto::ListNeighborsRequest {}))
+                .await
+        });
+        let Some(PeerManagerOperatorQuery::ListPeers { reply }) =
+            tokio::time::timeout(Duration::from_secs(3), operator_rx.recv())
+                .await
+                .expect("neighbor inventory must use the operator lane")
+        else {
+            panic!("expected peer inventory");
+        };
+        assert!(rib_rx.try_recv().is_err());
+        tokio::time::advance(Duration::from_millis(800)).await;
+        reply
+            .send(vec![peer_info(second), peer_info(first)])
+            .unwrap();
+        let Some(RibUpdate::QueryNeighborRibSnapshots {
+            peers,
+            comparison,
+            reply,
+        }) = tokio::time::timeout(Duration::from_secs(3), rib_rx.recv())
+            .await
+            .expect("RIB lookup must follow the inventory reply")
+        else {
+            panic!("expected aggregate neighbor snapshots");
+        };
+        assert_eq!(peers, vec![first, second]);
+        assert!(comparison.is_none());
+        assert_eq!(started.elapsed(), Duration::from_millis(800));
+        // Model the atomic transition holding the second reply. This is
+        // within the RIB stage's own 2 s budget, not a shared RPC deadline.
+        tokio::time::advance(Duration::from_millis(1_100)).await;
+        assert!(!read.is_finished());
+        reply
+            .send(NeighborRibSnapshotResponse {
+                snapshots: vec![
+                    NeighborRibSnapshot {
+                        peer: first,
+                        advertised_count: 7,
+                        policy_stats: rustbgpd_rib::NeighborPolicyStats::default(),
+                        outbound: empty_outbound_state(),
+                    },
+                    NeighborRibSnapshot {
+                        peer: second,
+                        advertised_count: 9,
+                        policy_stats: rustbgpd_rib::NeighborPolicyStats::default(),
+                        outbound: empty_outbound_state(),
+                    },
+                ],
+                comparison: None,
+            })
+            .unwrap();
+        let neighbors = read.await.unwrap().unwrap().into_inner().neighbors;
+        assert_eq!(started.elapsed(), Duration::from_millis(1_900));
+        assert_eq!(neighbors.len(), 2);
+        assert_eq!(neighbors[0].config.as_ref().unwrap().address, "10.0.0.1");
+        assert_eq!(neighbors[1].config.as_ref().unwrap().address, "10.0.0.2");
+        assert_eq!(neighbors[0].prefixes_sent, 7);
+        assert_eq!(neighbors[1].prefixes_sent, 9);
+    }
+
     /// Load-bearing: broadly reclassifying RIB snapshot contract failures as
     /// actor unavailability changes this status away from `INTERNAL`.
     #[tokio::test]
