@@ -1196,6 +1196,18 @@ changes do not retroactively re-evaluate existing Adj-RIB-In state; use
 | `GetPolicyStats` | Read the live per-term hit counters of the installed policy chains (since chain install; direction `import`, `export`, or `both` — import chains also report their install generation). All backend waits across explicit-peer validation plus export, import, and dataset reads share one absolute 2 s deadline, matching the peer-manager read and neighbor-service RIB snapshot budgets. Reads can wait through policy reload transitions within that budget; longer transitions or congested backends still return `DEADLINE_EXCEEDED` with no partial rows. Fleet import reads use bounded per-RPC concurrency, do not park normal peer-manager operation awaiting sessions, and cancel outstanding session queries when the caller disconnects. An explicit unknown peer returns `NOT_FOUND`; a selected session exit returns `UNAVAILABLE`; a session that answers with no import chain legitimately contributes no row. CLI: `rbgp policy stats`. `SensitiveRead` tier. |
 | `GetValidationPolicyPosture` | Conservatively classifies RPKI-invalid and ASPA-invalid routes as `ENFORCED`, `UNENFORCED`, or `UNKNOWN` for installed static/dynamic peers and one prospective row per accepted dynamic range. The bounded response reports `complete` and `omitted`; an incomplete aggregate is never `ENFORCED`. This proves policy disposition only, not validator readiness, connectivity, configured intent, FIB state, or runtime enforcement. `SensitiveRead` tier; outside the narrow v1-stable surface. |
 
+`GetPolicyStats` adds bounded stage timing to the existing `grpc_authz`
+`request_summary`: `peer_validation` (targeted requests only), `export`,
+`import`, and `datasets`, in execution order. Each completed stage records
+`elapsed_ms`, its remaining shared `budget_ms` at entry, cumulative
+`rpc_elapsed_ms`, and the gRPC `code`. A waiting stage records `state=waiting`
+so cancellation retains the active API stage. A failed stage is the
+last completed entry; no later stages run. These additive diagnostic fields
+do not change RPC responses or the two-second deadline. They identify the
+API wait, not its underlying actor or session cause. `RUST_LOG=info,policy_stats=debug`
+also emits structured stage-completion events; no per-peer records are emitted
+for a fleet request.
+
 The daemon installs each peer's complete effective export chain, including
 global inheritance. `GetPolicyStats` and `rbgp policy stats` report those
 installed peer chains; they do not include a separate `global` export row.

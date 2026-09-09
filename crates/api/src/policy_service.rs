@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};
 
 use crate::actor_read::{peer_manager_operator_read, peer_manager_read, rib_manager_read};
+use crate::audit::{GrpcAuditHandle, GrpcRequestSummary};
 use crate::health_probe::DaemonGate;
 use crate::peer_types::{
     ConfigEvent, NamedPolicyDefinition, OwnedCatalogMutation, OwnedCatalogMutationOutcome,
@@ -47,16 +48,52 @@ const POLICY_STATS_AGGREGATE_TIMEOUT: Duration = Duration::from_secs(2);
 /// as the reply wait; no sequential stage receives a fresh timeout.
 async fn policy_stats_request<T>(
     deadline: tokio::time::Instant,
+    stage: &'static str,
+    audit: Option<&GrpcAuditHandle>,
     request: impl std::future::Future<Output = Result<T, Status>>,
 ) -> Result<T, Status> {
-    if deadline <= tokio::time::Instant::now() {
-        return Err(Status::deadline_exceeded(
-            "policy stats aggregate deadline exceeded",
-        ));
+    let started = tokio::time::Instant::now();
+    let budget_ms = deadline.saturating_duration_since(started).as_millis();
+    let previous = audit.and_then(GrpcAuditHandle::summary);
+    let previous = previous.as_ref().map_or("", GrpcRequestSummary::as_str);
+    let separator = if previous.is_empty() { "" } else { "; " };
+    if let Some(audit) = audit {
+        audit.set_summary(GrpcRequestSummary::new(format!(
+            "{previous}{separator}stage={stage} budget_ms={budget_ms} state=waiting"
+        )));
     }
-    tokio::time::timeout_at(deadline, request)
-        .await
-        .map_err(|_| Status::deadline_exceeded("policy stats aggregate deadline exceeded"))?
+    let result = if deadline <= tokio::time::Instant::now() {
+        Err(Status::deadline_exceeded(
+            "policy stats aggregate deadline exceeded",
+        ))
+    } else {
+        tokio::time::timeout_at(deadline, request)
+            .await
+            .unwrap_or_else(|_| {
+                Err(Status::deadline_exceeded(
+                    "policy stats aggregate deadline exceeded",
+                ))
+            })
+    };
+    let finished = tokio::time::Instant::now();
+    let elapsed_ms = finished.duration_since(started).as_millis();
+    let rpc_elapsed_ms = finished
+        .saturating_duration_since(deadline - POLICY_STATS_AGGREGATE_TIMEOUT)
+        .as_millis();
+    let code = result.as_ref().err().map_or(tonic::Code::Ok, Status::code);
+    tracing::debug!(
+        target: "policy_stats",
+        stage, elapsed_ms, budget_ms, rpc_elapsed_ms, ?code, ?deadline,
+        "policy stats stage completed"
+    );
+    // Keep the bounded stage history in this request's existing audit record,
+    // including failures when debug tracing is disabled or requests overlap.
+    if let Some(audit) = audit {
+        audit.set_summary(GrpcRequestSummary::new(format!(
+            "{previous}{separator}stage={stage} elapsed_ms={elapsed_ms} budget_ms={budget_ms} rpc_elapsed_ms={rpc_elapsed_ms} code={code:?}"
+        )));
+    }
+    result
 }
 
 /// Map the v1-supported `AddressFamily` proto values to `(Afi, Safi)`.
@@ -529,16 +566,17 @@ async fn require_managed_peer_address(
     operator_tx: Option<&mpsc::Sender<PeerManagerOperatorQuery>>,
     address: IpAddr,
     deadline: tokio::time::Instant,
+    audit: Option<&GrpcAuditHandle>,
 ) -> Result<(), Status> {
-    policy_stats_request(
-        deadline,
+    policy_stats_request(deadline, "peer_validation", audit, async {
         peer_manager_operator_read(peer_mgr_tx, operator_tx, |reply| {
             PeerManagerOperatorQuery::HasPeerAddress { address, reply }
-        }),
-    )
-    .await?
-    .then_some(())
-    .ok_or_else(|| Status::not_found(format!("neighbor {address} not found")))
+        })
+        .await?
+        .then_some(())
+        .ok_or_else(|| Status::not_found(format!("neighbor {address} not found")))
+    })
+    .await
 }
 
 #[tonic::async_trait]
@@ -1362,6 +1400,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         use rustbgpd_rib::RibUpdate;
 
         let deadline = tokio::time::Instant::now() + POLICY_STATS_AGGREGATE_TIMEOUT;
+        let audit = request.extensions().get::<GrpcAuditHandle>().cloned();
         let req = request.into_inner();
         let (want_export, want_import) = match req.direction.as_str() {
             "" | "export" => (true, false),
@@ -1386,6 +1425,7 @@ impl proto::policy_service_server::PolicyService for PolicyService {
                 self.operator_tx.as_ref(),
                 peer,
                 deadline,
+                audit.as_ref(),
             )
             .await?;
         }
@@ -1411,6 +1451,8 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             })?;
             let chains = policy_stats_request(
                 deadline,
+                "export",
+                audit.as_ref(),
                 rib_manager_read(rib_tx, |reply| RibUpdate::QueryExportPolicyTermHits {
                     peer,
                     reply,
@@ -1434,30 +1476,28 @@ impl proto::policy_service_server::PolicyService for PolicyService {
             }));
         }
         if want_import {
-            let chains = policy_stats_request(
-                deadline,
-                peer_manager_operator_read(&self.peer_mgr_tx, self.operator_tx.as_ref(), |reply| {
-                    PeerManagerOperatorQuery::QueryImportPolicyTermHits {
+            let chains = policy_stats_request(deadline, "import", audit.as_ref(), async {
+                let chains = peer_manager_operator_read(
+                    &self.peer_mgr_tx,
+                    self.operator_tx.as_ref(),
+                    |reply| PeerManagerOperatorQuery::QueryImportPolicyTermHits {
                         peer,
                         deadline,
                         reply,
-                    }
-                }),
-            )
-            .await?;
-            let chains = match chains {
-                SessionQueryOutcome::Reply(chains) => chains,
-                SessionQueryOutcome::TimedOut => {
-                    return Err(Status::deadline_exceeded(
+                    },
+                )
+                .await?;
+                match chains {
+                    SessionQueryOutcome::Reply(chains) => Ok(chains),
+                    SessionQueryOutcome::TimedOut => Err(Status::deadline_exceeded(
                         "one or more peer sessions did not answer the import policy stats query in time",
-                    ));
-                }
-                SessionQueryOutcome::SessionGone => {
-                    return Err(Status::unavailable(
+                    )),
+                    SessionQueryOutcome::SessionGone => Err(Status::unavailable(
                         "one or more peer sessions exited during the import policy stats query",
-                    ));
+                    )),
                 }
-            };
+            })
+            .await?;
             out.extend(
                 chains
                     .into_iter()
@@ -1478,6 +1518,8 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         // snapshot" (name, kind, generation, records, last error).
         let datasets = policy_stats_request(
             deadline,
+            "datasets",
+            audit.as_ref(),
             peer_manager_operator_read(&self.peer_mgr_tx, self.operator_tx.as_ref(), |reply| {
                 PeerManagerOperatorQuery::QueryPolicyDatasets { reply }
             }),
@@ -3872,6 +3914,7 @@ policy customer-in(peer_lp: u32) {
 
     async fn import_stats_outcome(
         outcome: SessionQueryOutcome<Vec<(IpAddr, rustbgpd_transport::ImportPolicyTermHits)>>,
+        audit: GrpcAuditHandle,
     ) -> Result<Response<proto::GetPolicyStatsResponse>, Status> {
         let (peer_tx, mut peer_rx) = mpsc::channel::<PeerManagerCommand>(4);
         tokio::spawn(async move {
@@ -3889,14 +3932,9 @@ policy customer-in(peer_lp: u32) {
             }
         });
         let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None);
-        PolicyServiceRpc::get_policy_stats(
-            &svc,
-            Request::new(proto::GetPolicyStatsRequest {
-                peer_address: "10.0.0.2".to_string(),
-                direction: "import".to_string(),
-            }),
-        )
-        .await
+        let mut request = Request::new(policy_stats_rpc_request("10.0.0.2", "import"));
+        request.extensions_mut().insert(audit);
+        PolicyServiceRpc::get_policy_stats(&svc, request).await
     }
 
     /// LAN-661 red proof: treating timeout or task exit as a successful empty
@@ -3904,15 +3942,30 @@ policy customer-in(peer_lp: u32) {
     /// asserted status. This pins the RPC half of the typed manager outcome.
     #[tokio::test]
     async fn get_policy_stats_import_failures_are_not_empty_successes() {
-        let timeout = import_stats_outcome(SessionQueryOutcome::TimedOut)
-            .await
-            .expect_err("a stalled selected session must fail the RPC");
-        assert_eq!(timeout.code(), tonic::Code::DeadlineExceeded);
-
-        let gone = import_stats_outcome(SessionQueryOutcome::SessionGone)
-            .await
-            .expect_err("a selected session that exits must fail the RPC");
-        assert_eq!(gone.code(), tonic::Code::Unavailable);
+        for (outcome, code, message) in [
+            (
+                SessionQueryOutcome::TimedOut,
+                tonic::Code::DeadlineExceeded,
+                "one or more peer sessions did not answer the import policy stats query in time",
+            ),
+            (
+                SessionQueryOutcome::SessionGone,
+                tonic::Code::Unavailable,
+                "one or more peer sessions exited during the import policy stats query",
+            ),
+        ] {
+            let audit = GrpcAuditHandle::default();
+            let error = import_stats_outcome(outcome, audit.clone())
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), code);
+            assert_eq!(error.message(), message);
+            let summary = audit.summary().unwrap();
+            let import = summary.as_str().split("; ").last().unwrap();
+            assert!(import.starts_with("stage=import "), "{summary:?}");
+            assert!(import.ends_with(&format!("code={code:?}")), "{summary:?}");
+            assert!(!summary.as_str().contains("datasets"));
+        }
     }
 
     /// `direction = "both"` returns the export block first, then the
@@ -4002,13 +4055,11 @@ policy customer-in(peer_lp: u32) {
             .with_operator_queries(operator_tx)
             .with_rib_query(rib_tx);
         let started = tokio::time::Instant::now();
-        let read = tokio::spawn(async move {
-            PolicyServiceRpc::get_policy_stats(
-                &svc,
-                Request::new(policy_stats_rpc_request("", "export")),
-            )
-            .await
-        });
+        let audit = GrpcAuditHandle::default();
+        let mut request = Request::new(policy_stats_rpc_request("", "export"));
+        request.extensions_mut().insert(audit.clone());
+        let read =
+            tokio::spawn(async move { PolicyServiceRpc::get_policy_stats(&svc, request).await });
         let Some(rustbgpd_rib::RibUpdate::QueryExportPolicyTermHits { peer, reply }) =
             tokio::time::timeout(Duration::from_secs(3), rib_rx.recv())
                 .await
@@ -4054,6 +4105,13 @@ policy customer-in(peer_lp: u32) {
             .unwrap();
         let response = read.await.unwrap().unwrap().into_inner();
         assert_eq!(started.elapsed(), Duration::from_millis(1_900));
+        assert_eq!(
+            audit.summary().unwrap().as_str(),
+            concat!(
+                "stage=export elapsed_ms=800 budget_ms=2000 rpc_elapsed_ms=800 code=Ok; ",
+                "stage=datasets elapsed_ms=1100 budget_ms=1200 rpc_elapsed_ms=1900 code=Ok",
+            )
+        );
         assert_eq!(
             response.chains,
             vec![proto::PolicyChainStats {
@@ -4116,17 +4174,25 @@ policy customer-in(peer_lp: u32) {
             PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None).with_rib_query(rib_tx);
         let started = tokio::time::Instant::now();
 
-        let error = PolicyServiceRpc::get_policy_stats(
-            &svc,
-            Request::new(proto::GetPolicyStatsRequest {
-                peer_address: "10.0.0.2".to_string(),
-                direction: "both".to_string(),
-            }),
-        )
-        .await
-        .expect_err("four 700 ms stages must not receive four fresh budgets");
+        let audit = GrpcAuditHandle::default();
+        audit.set_summary(GrpcRequestSummary::new("existing=safe"));
+        let mut request = Request::new(policy_stats_rpc_request("10.0.0.2", "both"));
+        request.extensions_mut().insert(audit.clone());
+        let error = PolicyServiceRpc::get_policy_stats(&svc, request)
+            .await
+            .expect_err("four 700 ms stages must not receive four fresh budgets");
 
         assert_eq!(error.code(), tonic::Code::DeadlineExceeded);
+        assert_eq!(error.message(), "policy stats aggregate deadline exceeded");
+        assert_eq!(
+            audit.summary().unwrap().as_str(),
+            concat!(
+                "existing=safe; ",
+                "stage=peer_validation elapsed_ms=700 budget_ms=2000 rpc_elapsed_ms=700 code=Ok; ",
+                "stage=export elapsed_ms=700 budget_ms=1300 rpc_elapsed_ms=1400 code=Ok; ",
+                "stage=import elapsed_ms=600 budget_ms=600 rpc_elapsed_ms=2000 code=DeadlineExceeded",
+            )
+        );
         assert_eq!(
             tokio::time::Instant::now() - started,
             POLICY_STATS_AGGREGATE_TIMEOUT
@@ -4140,11 +4206,35 @@ policy customer-in(peer_lp: u32) {
     async fn policy_stats_expired_deadline_precedes_immediately_closed_backend() {
         let closed_backend =
             std::future::ready(Err::<(), _>(Status::unavailable("backend unavailable")));
-        let error = policy_stats_request(tokio::time::Instant::now(), closed_backend)
-            .await
-            .expect_err("already-expired request must fail");
+        let error =
+            policy_stats_request(tokio::time::Instant::now(), "export", None, closed_backend)
+                .await
+                .expect_err("already-expired request must fail");
 
         assert_eq!(error.code(), tonic::Code::DeadlineExceeded);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn get_policy_stats_cancellation_retains_waiting_stage_and_closes_reply() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(1);
+        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, None, None);
+        let audit = GrpcAuditHandle::default();
+        let mut request = Request::new(policy_stats_rpc_request("", "import"));
+        request.extensions_mut().insert(audit.clone());
+        let read =
+            tokio::spawn(async move { PolicyServiceRpc::get_policy_stats(&svc, request).await });
+        let PeerManagerCommand::QueryImportPolicyTermHits { mut reply, .. } =
+            peer_rx.recv().await.unwrap()
+        else {
+            panic!("expected import stats request");
+        };
+        read.abort();
+        assert!(read.await.unwrap_err().is_cancelled());
+        reply.closed().await;
+        assert_eq!(
+            audit.summary().unwrap().as_str(),
+            "stage=import budget_ms=2000 state=waiting"
+        );
     }
 
     async fn assert_policy_stats_deadline(
