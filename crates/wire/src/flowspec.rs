@@ -335,6 +335,12 @@ pub enum FlowSpecAction {
 
 impl crate::attribute::ExtendedCommunity {
     /// Try to decode this extended community as a `FlowSpec` action.
+    ///
+    /// Traffic-rate actions interpret negative rates as zero per RFC 8955
+    /// sections 7.1 and 7.2. NaN and negative zero are also canonicalized to
+    /// positive zero as a local choice. Positive rates, including positive
+    /// infinity, are preserved. This does not modify the raw community or
+    /// change raw extended-community attribute decoding and re-encoding.
     #[must_use]
     pub fn as_flowspec_action(&self) -> Option<FlowSpecAction> {
         let raw = self.as_u64();
@@ -346,7 +352,13 @@ impl crate::attribute::ExtendedCommunity {
             // Traffic-rate bytes (transitive): 0x80, 0x06
             (0x80, 0x06) => {
                 let asn = u16::from_be_bytes([bytes[2], bytes[3]]);
-                let rate = f32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+                let raw_rate = f32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+                // RFC 8955 §7.1: "On decoding, negative values MUST be treated as zero (discard all traffic)."
+                let rate = if raw_rate <= 0.0 || raw_rate.is_nan() {
+                    0.0
+                } else {
+                    raw_rate
+                };
                 Some(FlowSpecAction::TrafficRateBytes { asn, rate })
             }
             // Traffic-action: 0x80, 0x07
@@ -371,7 +383,13 @@ impl crate::attribute::ExtendedCommunity {
             // Traffic-rate packets: 0x80, 0x0c
             (0x80, 0x0c) => {
                 let asn = u16::from_be_bytes([bytes[2], bytes[3]]);
-                let rate = f32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+                let raw_rate = f32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+                // RFC 8955 §7.2: "On decoding, negative values MUST be treated as zero (discard all traffic)."
+                let rate = if raw_rate <= 0.0 || raw_rate.is_nan() {
+                    0.0
+                } else {
+                    raw_rate
+                };
                 Some(FlowSpecAction::TrafficRatePackets { asn, rate })
             }
             // Redirect IPv4: 0x81, 0x08
@@ -391,6 +409,12 @@ impl crate::attribute::ExtendedCommunity {
     }
 
     /// Create an extended community from a `FlowSpec` action.
+    ///
+    /// Traffic-rate actions encode negative rates as zero to satisfy RFC 8955
+    /// sections 7.1 and 7.2. NaN and negative zero are also canonicalized to
+    /// positive zero as a local choice. Positive rates, including positive
+    /// infinity, are preserved. This normalization applies to this typed
+    /// constructor, not raw extended-community attribute encoding.
     #[must_use]
     pub fn from_flowspec_action(action: &FlowSpecAction) -> Self {
         let mut bytes = [0u8; 8];
@@ -399,13 +423,25 @@ impl crate::attribute::ExtendedCommunity {
                 bytes[0] = 0x80;
                 bytes[1] = 0x06;
                 bytes[2..4].copy_from_slice(&asn.to_be_bytes());
-                bytes[4..8].copy_from_slice(&rate.to_be_bytes());
+                // RFC 8955 §7.1: "On encoding, the traffic-rate MUST NOT be negative."
+                let safe_rate = if *rate <= 0.0 || rate.is_nan() {
+                    0.0
+                } else {
+                    *rate
+                };
+                bytes[4..8].copy_from_slice(&safe_rate.to_be_bytes());
             }
             FlowSpecAction::TrafficRatePackets { asn, rate } => {
                 bytes[0] = 0x80;
                 bytes[1] = 0x0c;
                 bytes[2..4].copy_from_slice(&asn.to_be_bytes());
-                bytes[4..8].copy_from_slice(&rate.to_be_bytes());
+                // RFC 8955 §7.2: "On encoding, the traffic-rate-packets MUST NOT be negative."
+                let safe_rate = if *rate <= 0.0 || rate.is_nan() {
+                    0.0
+                } else {
+                    *rate
+                };
+                bytes[4..8].copy_from_slice(&safe_rate.to_be_bytes());
             }
             FlowSpecAction::TrafficAction { sample, terminal } => {
                 bytes[0] = 0x80;
@@ -1487,6 +1523,45 @@ mod tests {
                 assert!((rate - 0.0).abs() < f32::EPSILON);
             }
             _ => panic!("wrong action type"),
+        }
+    }
+
+    #[test]
+    fn traffic_rate_helpers_normalize_edge_values() {
+        let cases = [
+            (-100.0_f32, 0.0_f32),
+            (-0.0, 0.0),
+            (0.0, 0.0),
+            (f32::NAN, 0.0),
+            (f32::NEG_INFINITY, 0.0),
+            (1000.0, 1000.0),
+            (f32::INFINITY, f32::INFINITY),
+        ];
+        for subtype in [0x06, 0x0c] {
+            for (rate, expected) in cases {
+                let mut raw_bytes = [0x80, subtype, 0, 0, 0, 0, 0, 0];
+                raw_bytes[2..4].copy_from_slice(&65000u16.to_be_bytes());
+                raw_bytes[4..8].copy_from_slice(&rate.to_be_bytes());
+                let ec = crate::attribute::ExtendedCommunity::new(u64::from_be_bytes(raw_bytes));
+                let decoded = match ec.as_flowspec_action().unwrap() {
+                    FlowSpecAction::TrafficRateBytes { asn, rate } => (0x06, asn, rate.to_bits()),
+                    FlowSpecAction::TrafficRatePackets { asn, rate } => (0x0c, asn, rate.to_bits()),
+                    _ => panic!("wrong action type"),
+                };
+                assert_eq!(
+                    decoded,
+                    (subtype, 65000, expected.to_bits()),
+                    "decode {rate:?}"
+                );
+
+                let action = match subtype {
+                    0x06 => FlowSpecAction::TrafficRateBytes { asn: 65000, rate },
+                    _ => FlowSpecAction::TrafficRatePackets { asn: 65000, rate },
+                };
+                raw_bytes[4..8].copy_from_slice(&expected.to_be_bytes());
+                let encoded = crate::attribute::ExtendedCommunity::from_flowspec_action(&action);
+                assert_eq!(encoded.as_u64().to_be_bytes(), raw_bytes, "encode {rate:?}");
+            }
         }
     }
 
