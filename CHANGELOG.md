@@ -86,6 +86,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- FlowSpec byte/packet traffic-rate helpers now interpret and construct
+  negative rates as zero, following RFC 8955 sections 7.1 and 7.2. They also
+  canonicalize NaN and negative zero to positive zero as a local choice,
+  preserving positive rates including positive infinity. This affects typed
+  action interpretation and construction, including byte-rate API views and
+  injection; raw extended-community storage and reflection remain unchanged.
+
 - NOTIFICATION diagnostics now describe the maintained registered code/subcode
   table, including Connection Rejected and Other Configuration Change. Unknown
   pairs retain numeric values as `unassigned(code/subcode)` or

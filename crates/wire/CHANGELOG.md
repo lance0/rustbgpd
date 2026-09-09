@@ -5,6 +5,13 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 
 ## Unreleased
 
+- `ExtendedCommunity::as_flowspec_action` interprets negative byte/packet
+  traffic rates as zero per RFC 8955 sections 7.1 and 7.2, and
+  `from_flowspec_action` encodes them as zero. Both helpers also canonicalize
+  NaN and negative zero to positive zero as a local choice; positive rates,
+  including positive infinity, are preserved. Raw extended-community
+  attribute decoding and re-encoding remain unchanged.
+
 - Complete the registered NOTIFICATION descriptions, including deprecated
   allocations and FSM state-specific errors, and add Cease constants for
   Connection Rejected and Other Configuration Change. A documentation-driven
