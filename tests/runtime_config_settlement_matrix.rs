@@ -384,7 +384,6 @@ struct Lab {
     root: RetainOnPanic,
     config: PathBuf,
     grpc: String,
-    grpc_tcp: SocketAddr,
     metrics: SocketAddr,
     control: Control,
     base: String,
@@ -401,7 +400,8 @@ impl Lab {
         std::fs::create_dir(&runtime).unwrap();
         std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
         let metrics = unused_loopback_addr();
-        let grpc_tcp = unused_loopback_addr();
+        // Let the child own its gRPC port instead of reusing a released metrics port.
+        let grpc_tcp = "127.0.0.1:0".parse().unwrap();
         let token = root.path().join("grpc-token");
         atomic_write(root.path(), "grpc-token", format!("{TOKEN}\n").as_bytes());
         let base = config_text(&runtime, metrics, grpc_tcp, &token);
@@ -410,7 +410,6 @@ impl Lab {
         let control = Control::new(root.path(), ordinal);
         Self {
             grpc: format!("unix://{}", runtime.join("grpc.sock").display()),
-            grpc_tcp,
             root: RetainOnPanic::new(root),
             config,
             metrics,
@@ -507,6 +506,21 @@ fn unused_loopback_addr() -> SocketAddr {
         .unwrap()
 }
 
+fn bound_grpc_addr(log: &str) -> Option<SocketAddr> {
+    log.lines().find_map(|line| {
+        let entry: serde_json::Value = serde_json::from_str(line).ok()?;
+        let fields = &entry["fields"];
+        if fields["message"] != "starting gRPC TCP listener" {
+            return None;
+        }
+        fields["bound_addr"]
+            .as_str()?
+            .parse::<SocketAddr>()
+            .ok()
+            .filter(|addr| addr.port() != 0)
+    })
+}
+
 fn config_text(runtime: &Path, metrics: SocketAddr, grpc_tcp: SocketAddr, token: &Path) -> String {
     format!(
         r#"[security.grpc]
@@ -577,13 +591,18 @@ fn ready(addr: SocketAddr) -> Option<u16> {
 fn wait_ready_and_idle(addr: SocketAddr, daemon: &mut Daemon) {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        if ready(addr) == Some(200)
+        if let Some(grpc_addr) = bound_grpc_addr(&daemon.log())
+            && ready(addr) == Some(200)
             && metrics(addr).is_some_and(|text| {
                 !text
                     .lines()
                     .any(|line| line.starts_with("bgp_runtime_config_settlement_active{"))
             })
         {
+            assert_ne!(
+                grpc_addr, addr,
+                "gRPC and metrics must own distinct endpoints"
+            );
             return;
         }
         assert!(
@@ -717,9 +736,8 @@ struct QueuedMutation {
 }
 
 impl QueuedMutation {
-    fn spawn(lab: &Lab) -> Self {
+    fn spawn(address: SocketAddr) -> Self {
         let (send, result) = mpsc::channel();
-        let address = lab.grpc_tcp;
         let task = thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -800,7 +818,10 @@ fn exercise_apply(lab: &Lab, daemon: &mut Daemon) -> RowResult {
     assert!(!status.success());
     wait_metrics(lab.metrics, MatrixRow::Apply, "none", false, daemon);
 
-    let queued = QueuedMutation::spawn(lab);
+    let log = daemon.log();
+    let address = bound_grpc_addr(&log)
+        .unwrap_or_else(|| panic!("daemon did not report its gRPC endpoint\n{log}"));
+    let queued = QueuedMutation::spawn(address);
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
         let text = metrics(lab.metrics).unwrap();
@@ -1026,6 +1047,32 @@ fn finish_row(lab: &Lab, row: MatrixRow, daemon: &mut Daemon, result: RowResult)
             lab.restart_and_assert_absent("policy", &["--json", "policy", "get", "matrix-policy"]);
         }
     }
+}
+
+#[test]
+fn grpc_endpoint_requires_bound_nonzero_tcp_listener_evidence() {
+    for log in [
+        "",
+        "not JSON",
+        r#"{"fields":{"message":"starting gRPC TCP listener"}}"#,
+        r#"{"fields":{"message":"starting gRPC TCP listener","bound_addr":42}}"#,
+        r#"{"fields":{"message":"starting gRPC TCP listener","bound_addr":"invalid"}}"#,
+        r#"{"fields":{"message":"starting gRPC TCP listener","bound_addr":"127.0.0.1:0"}}"#,
+        r#"{"fields":{"message":"configured gRPC TCP listener","bound_addr":"127.0.0.1:12345"}}"#,
+    ] {
+        assert_eq!(bound_grpc_addr(log), None, "unexpected endpoint from {log}");
+    }
+    let log = concat!(
+        "startup banner\n",
+        r#"{"fields":{"message":"starting gRPC UDS listener","bound_addr":"127.0.0.1:54321"}}"#,
+        "\n",
+        r#"{"fields":{"message":"starting gRPC TCP listener","requested_addr":"127.0.0.1:0","bound_addr":"127.0.0.1:12345"}}"#,
+        "\n",
+    );
+    assert_eq!(
+        bound_grpc_addr(log),
+        Some("127.0.0.1:12345".parse().unwrap())
+    );
 }
 
 #[test]
