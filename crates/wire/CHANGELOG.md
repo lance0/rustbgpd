@@ -12,6 +12,12 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
 - Added typed `DecodeError::ProhibitedAsSet` and
   `DecodeError::TruncatedAttributeHeader` variants for bounded diagnostics.
   Their NOTIFICATION codes and data retain the existing behavior.
+- Complete the registered NOTIFICATION descriptions, including deprecated
+  allocations and FSM state-specific errors, and add Cease constants for
+  Connection Rejected and Other Configuration Change. A documentation-driven
+  registry test checks labels and fallback coverage. The `description()`
+  signature and numeric enum round trips are unchanged; reserved or unassigned
+  subcodes no longer inherit generic FSM/timer descriptions.
 
 ## 0.20.0 - 2026-09-07
 

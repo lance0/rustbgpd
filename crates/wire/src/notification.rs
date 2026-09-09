@@ -1,6 +1,6 @@
 /// RFC 4271 §4.5 — NOTIFICATION error codes.
 ///
-/// Known codes (1–6) have named variants. Unknown codes from the wire are
+/// Codes 1–6 and 8 have named variants. Unknown codes from the wire are
 /// preserved via `Unknown(u8)` so the original byte is never lost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -21,7 +21,7 @@ pub enum NotificationCode {
     /// BGP data to the peer within the `SendHoldTime` (code 8, RFC 9687 §5;
     /// subcode is always 0 per §6).
     SendHoldTimerExpired,
-    /// A code value not defined in RFC 4271. The raw byte is preserved
+    /// A code value without a named variant in this API. The raw byte is preserved
     /// for logging and re-encoding.
     Unknown(u8),
 }
@@ -137,6 +137,10 @@ pub mod cease_subcode {
     pub const PEER_DECONFIGURED: u8 = 3;
     /// Subcode 4: Administrative Reset (RFC 9003).
     pub const ADMINISTRATIVE_RESET: u8 = 4;
+    /// Subcode 5: Connection Rejected.
+    pub const CONNECTION_REJECTED: u8 = 5;
+    /// Subcode 6: Other Configuration Change.
+    pub const OTHER_CONFIGURATION_CHANGE: u8 = 6;
     /// Subcode 8: Out of Resources.
     pub const OUT_OF_RESOURCES: u8 = 8;
     /// RFC 4271 §6.8
@@ -280,51 +284,64 @@ pub fn extract_shutdown_communication(
 }
 
 /// Human-readable description for a NOTIFICATION code/subcode pair.
+///
+/// Describes registered values, including codes without named enum variants;
+/// this does not imply protocol support. Reserved/unassigned pairs return
+/// `"Unknown"` or `"Unknown Error Code"`; callers should retain the numeric pair.
+/// The repository's notification registry integration test checks these labels
+/// against `docs/reference/notification-registry.md`.
 #[must_use]
 pub fn description(code: NotificationCode, subcode: u8) -> &'static str {
-    match (code, subcode) {
-        // Message Header Error
-        (NotificationCode::MessageHeader, 1) => "Connection Not Synchronized",
-        (NotificationCode::MessageHeader, 2) => "Bad Message Length",
-        (NotificationCode::MessageHeader, 3) => "Bad Message Type",
-        // OPEN Message Error
-        (NotificationCode::OpenMessage, 1) => "Unsupported Version Number",
-        (NotificationCode::OpenMessage, 2) => "Bad Peer AS",
-        (NotificationCode::OpenMessage, 3) => "Bad BGP Identifier",
-        (NotificationCode::OpenMessage, 4) => "Unsupported Optional Parameter",
-        (NotificationCode::OpenMessage, 6) => "Unacceptable Hold Time",
-        (NotificationCode::OpenMessage, 7) => "Unsupported Capability",
-        (NotificationCode::OpenMessage, 11) => "Role Mismatch",
-        // UPDATE Message Error
-        (NotificationCode::UpdateMessage, 1) => "Malformed Attribute List",
-        (NotificationCode::UpdateMessage, 2) => "Unrecognized Well-known Attribute",
-        (NotificationCode::UpdateMessage, 3) => "Missing Well-known Attribute",
-        (NotificationCode::UpdateMessage, 4) => "Attribute Flags Error",
-        (NotificationCode::UpdateMessage, 5) => "Attribute Length Error",
-        (NotificationCode::UpdateMessage, 6) => "Invalid ORIGIN Attribute",
-        (NotificationCode::UpdateMessage, 8) => "Invalid NEXT_HOP Attribute",
-        (NotificationCode::UpdateMessage, 9) => "Optional Attribute Error",
-        (NotificationCode::UpdateMessage, 10) => "Invalid Network Field",
-        (NotificationCode::UpdateMessage, 11) => "Malformed AS_PATH",
-        // Hold Timer Expired
-        (NotificationCode::HoldTimerExpired, _) => "Hold Timer Expired",
-        // Send Hold Timer Expired (RFC 9687 §5/§6, subcode always 0)
-        (NotificationCode::SendHoldTimerExpired, _) => "Send Hold Timer Expired",
-        // FSM Error
-        (NotificationCode::FsmError, _) => "Finite State Machine Error",
-        // Cease
-        (NotificationCode::Cease, 1) => "Maximum Number of Prefixes Reached",
-        (NotificationCode::Cease, 2) => "Administrative Shutdown",
-        (NotificationCode::Cease, 3) => "Peer De-configured",
-        (NotificationCode::Cease, 4) => "Administrative Reset",
-        (NotificationCode::Cease, 8) => "Out of Resources",
-        (NotificationCode::Cease, 7) => "Connection Collision Resolution",
-        (NotificationCode::Cease, 9) => "Hard Reset",
-        (NotificationCode::Cease, 10) => "BFD Down",
-        // Unknown code
-        (NotificationCode::Unknown(_), _) => "Unknown Error Code",
-        // Fallback for known code with unknown subcode
-        (_, _) => "Unknown",
+    match (code.as_u8(), subcode) {
+        (1, 0) => "Message Header Error: Unspecific",
+        (1, 1) => "Connection Not Synchronized",
+        (1, 2) => "Bad Message Length",
+        (1, 3) => "Bad Message Type",
+        (2, 0) => "OPEN Message Error: Unspecific",
+        (2, 1) => "Unsupported Version Number",
+        (2, 2) => "Bad Peer AS",
+        (2, 3) => "Bad BGP Identifier",
+        (2, 4) => "Unsupported Optional Parameter",
+        (2, 5) => "Deprecated OPEN Message Error Subcode 5",
+        (2, 6) => "Unacceptable Hold Time",
+        (2, 7) => "Unsupported Capability",
+        (2, 8) => "Deprecated OPEN Message Error Subcode 8",
+        (2, 9) => "Deprecated OPEN Message Error Subcode 9",
+        (2, 10) => "Deprecated OPEN Message Error Subcode 10",
+        (2, 11) => "Role Mismatch",
+        (3, 0) => "UPDATE Message Error: Unspecific",
+        (3, 1) => "Malformed Attribute List",
+        (3, 2) => "Unrecognized Well-known Attribute",
+        (3, 3) => "Missing Well-known Attribute",
+        (3, 4) => "Attribute Flags Error",
+        (3, 5) => "Attribute Length Error",
+        (3, 6) => "Invalid ORIGIN Attribute",
+        (3, 7) => "Deprecated UPDATE Message Error Subcode 7",
+        (3, 8) => "Invalid NEXT_HOP Attribute",
+        (3, 9) => "Optional Attribute Error",
+        (3, 10) => "Invalid Network Field",
+        (3, 11) => "Malformed AS_PATH",
+        (4, 0) => "Hold Timer Expired",
+        (5, 0) => "Finite State Machine Error",
+        (5, 1) => "Receive Unexpected Message in OpenSent State",
+        (5, 2) => "Receive Unexpected Message in OpenConfirm State",
+        (5, 3) => "Receive Unexpected Message in Established State",
+        (6, 1) => "Maximum Number of Prefixes Reached",
+        (6, 2) => "Administrative Shutdown",
+        (6, 3) => "Peer De-configured",
+        (6, 4) => "Administrative Reset",
+        (6, 5) => "Connection Rejected",
+        (6, 6) => "Other Configuration Change",
+        (6, 7) => "Connection Collision Resolution",
+        (6, 8) => "Out of Resources",
+        (6, 9) => "Hard Reset",
+        (6, 10) => "BFD Down",
+        (7, 1) => "Invalid Message Length",
+        (8, 0) => "Send Hold Timer Expired",
+        (9, 0) => "Loss of LSDB Synchronization",
+        // Reserved and unassigned values keep the static API fallback.
+        (1..=9, _) => "Unknown",
+        (_, _) => "Unknown Error Code",
     }
 }
 
@@ -370,29 +387,6 @@ mod tests {
         assert_eq!(decoded.code, NotificationCode::Cease);
         assert_eq!(decoded.subcode, cease_subcode::BFD_DOWN);
         assert_eq!(description(decoded.code, decoded.subcode), "BFD Down");
-    }
-
-    #[test]
-    fn description_returns_nonempty_for_known_pairs() {
-        let pairs = [
-            (NotificationCode::MessageHeader, 1),
-            (NotificationCode::MessageHeader, 2),
-            (NotificationCode::MessageHeader, 3),
-            (NotificationCode::OpenMessage, 1),
-            (NotificationCode::OpenMessage, 6),
-            (NotificationCode::UpdateMessage, 1),
-            (NotificationCode::UpdateMessage, 11),
-            (NotificationCode::Cease, 2),
-            (NotificationCode::Cease, 4),
-        ];
-        for (code, subcode) in pairs {
-            let desc = description(code, subcode);
-            assert!(
-                !desc.is_empty(),
-                "empty description for ({code}, {subcode})"
-            );
-            assert_ne!(desc, "Unknown", "got Unknown for ({code}, {subcode})");
-        }
     }
 
     #[test]
