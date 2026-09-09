@@ -175,7 +175,6 @@ impl RibManager {
     /// for initial table dump and ROUTE-REFRESH responses.
     #[expect(
         clippy::too_many_arguments,
-        clippy::too_many_lines,
         reason = "FlowSpec staging keeps the family-local export ladder together"
     )]
     pub(in crate::manager) fn stage_flowspec_rules(
@@ -199,8 +198,60 @@ impl RibManager {
         fs_announce: &mut Vec<crate::route::FlowSpecRoute>,
         fs_withdraw: &mut Vec<FlowSpecKey>,
     ) {
+        Self::stage_flowspec_rules_with_checkpoint(
+            loc_rib,
+            rib_out,
+            peer_is_rr_client,
+            keys,
+            target_peer,
+            target_peer_asn,
+            target_peer_group,
+            target_is_ebgp,
+            interpret_rfc1997,
+            target_is_rr_client,
+            cluster_id,
+            sendable,
+            llgr,
+            export_pol,
+            metrics,
+            policy_stats,
+            target_peer_label,
+            fs_announce,
+            fs_withdraw,
+            &mut || {},
+        );
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "FlowSpec staging keeps the family-local export ladder together"
+    )]
+    pub(in crate::manager) fn stage_flowspec_rules_with_checkpoint(
+        loc_rib: &LocRib,
+        rib_out: &AdjRibOut,
+        peer_is_rr_client: &HashMap<IpAddr, bool>,
+        keys: &HashSet<FlowSpecKey>,
+        target_peer: IpAddr,
+        target_peer_asn: Option<u32>,
+        target_peer_group: Option<&str>,
+        target_is_ebgp: bool,
+        interpret_rfc1997: bool,
+        target_is_rr_client: bool,
+        cluster_id: Option<Ipv4Addr>,
+        sendable: Option<&Vec<(Afi, Safi)>>,
+        llgr: Option<&Vec<(Afi, Safi)>>,
+        export_pol: Option<&PolicyChain>,
+        metrics: &BgpMetrics,
+        policy_stats: &mut NeighborPolicyStats,
+        target_peer_label: &str,
+        fs_announce: &mut Vec<crate::route::FlowSpecRoute>,
+        fs_withdraw: &mut Vec<FlowSpecKey>,
+        checkpoint: &mut impl FnMut(),
+    ) {
         let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
         for key in keys {
+            checkpoint();
             if let Some(best) = loc_rib.get_flowspec(key) {
                 let fs_family = (best.afi, Safi::FlowSpec);
                 if !sendable.is_some_and(|f| f.contains(&fs_family)) {
@@ -317,8 +368,10 @@ impl RibManager {
                     local_pref: best.local_pref_attr(),
                     med: best.med_attr(),
                 };
+                checkpoint();
                 let (result, evaluation) =
                     rustbgpd_policy::evaluate_chain_with_attribution(export_pol, &ctx);
+                checkpoint();
                 record_export_policy_eval(metrics, policy_stats, target_peer_label, &evaluation);
                 if result.action == rustbgpd_policy::PolicyAction::Permit {
                     let mut modified = best.clone();
@@ -329,10 +382,12 @@ impl RibManager {
                         // otherwise insert a legacy NEXT_HOP path attribute.
                         modifications.set_next_hop = None;
                         if !modifications.is_empty() {
+                            checkpoint();
                             let next_hop = rustbgpd_policy::apply_modifications(
                                 &mut modified.attributes,
                                 &modifications,
                             );
+                            checkpoint();
                             debug_assert!(next_hop.is_none());
                         }
                     }
@@ -342,7 +397,9 @@ impl RibManager {
                         }
                         continue;
                     }
+                    checkpoint();
                     fs_announce.push(modified);
+                    checkpoint();
                 } else if rib_out.get_flowspec(key).is_some() {
                     fs_withdraw.push(key.clone());
                 }

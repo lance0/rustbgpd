@@ -51,12 +51,19 @@ impl RibManager {
         if !clean(old) || !clean(new) || old.table.len() != new.table.len() {
             return None;
         }
-        Some(
-            new.table
-                .iter()
-                .map(|route| (route.prefix, route.path_id))
-                .collect(),
-        )
+        self.replacement_checkpoint(true);
+        let mut keys = Vec::with_capacity(new.table.len());
+        self.replacement_checkpoint(true);
+        for route in new.table.iter() {
+            crate::manager::replacement_readiness_checkpoint_at(
+                &self.replacement_readiness,
+                "shared_inventory",
+                false,
+            );
+            keys.push((route.prefix, route.path_id));
+        }
+        self.replacement_checkpoint(true);
+        Some(keys)
     }
 
     /// Accumulate one bounded key chunk. A withdrawal, source flip, or table
@@ -70,6 +77,10 @@ impl RibManager {
     /// shared cohort at zero extra passes; a tagged inventory hands the
     /// whole cohort to the authoritative per-peer path, whose emit seams
     /// apply the per-target filter.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keep staging and its readiness-aware temporary retirement in one transaction"
+    )]
     pub(in crate::manager) fn extend_clean_policy_transition_inventory(
         &self,
         source: usize,
@@ -87,6 +98,7 @@ impl RibManager {
             inventory_degraded(source, destination, None, "destination group missing");
             return None;
         };
+        self.replacement_checkpoint(true);
         // Fold permit counts per chunk keyed by borrowed labels, then merge
         // into the owned builder maps once: the per-route path used to clone
         // the `Option<String>` label twice per route, which dominated this
@@ -101,6 +113,11 @@ impl RibManager {
         // touch the maps once per flip instead of twice per route.
         let mut run: Option<(IpAddr, Option<&str>, u64)> = None;
         for &(prefix, path_id) in keys {
+            crate::manager::replacement_readiness_checkpoint_at(
+                &self.replacement_readiness,
+                "shared_inventory",
+                false,
+            );
             let key = (prefix, path_id);
             let Some(route) = new.table.get(&prefix, path_id) else {
                 inventory_degraded(source, destination, Some(key), "destination table drift");
@@ -132,6 +149,13 @@ impl RibManager {
                         return None;
                     }
                 }
+                if inventory.announce.capacity() == 0 {
+                    self.replacement_checkpoint(true);
+                    inventory.announce.reserve_exact(new.table.len());
+                    self.replacement_checkpoint(true);
+                    inventory.next_hop_override.reserve_exact(new.table.len());
+                    self.replacement_checkpoint(true);
+                }
                 inventory.announce.push(route.clone());
                 inventory.next_hop_override.push(next_hop);
             }
@@ -162,17 +186,21 @@ impl RibManager {
                 .or_default() += count;
         }
         for (label, count) in chunk_totals {
+            self.replacement_checkpoint(false);
             *inventory
                 .permit_totals
                 .entry(label.map(str::to_owned))
                 .or_default() += count;
         }
         for (peer, counts) in chunk_by_source {
+            self.replacement_checkpoint(false);
             let by_source = inventory.permit_by_source.entry(peer).or_default();
             for (label, count) in counts {
+                self.replacement_checkpoint(false);
                 *by_source.entry(label.map(str::to_owned)).or_default() += count;
             }
         }
+        self.replacement_checkpoint(true);
         Some(())
     }
 
@@ -189,6 +217,7 @@ impl RibManager {
             .permit_totals
             .iter()
             .filter_map(|(label, total)| {
+                self.replacement_checkpoint(false);
                 let count = total.saturating_sub(
                     own.and_then(|counts| counts.get(label))
                         .copied()
@@ -366,6 +395,7 @@ impl RibManager {
         if self.group_ribs.contains_key(&gid) {
             return PolicyTransitionGroupStart::Maintained;
         }
+        self.replacement_checkpoint(true);
         let group = GroupRibOut::new(
             export_policy.map(PolicyChain::share),
             self.peer_is_ebgp.get(&peer).copied().unwrap_or(false),
@@ -390,15 +420,21 @@ impl RibManager {
                 .is_some_and(|key| key.per_client_best),
             self.loc_rib.len(),
         );
+        self.replacement_checkpoint(true);
         self.group_ribs.insert(gid, group);
-        PolicyTransitionGroupStart::Created(
-            self.loc_rib
-                .iter()
-                .map(|route| route.prefix)
-                .collect::<HashSet<_>>()
-                .into_iter()
-                .collect(),
-        )
+        let mut prefixes = HashSet::with_capacity(self.loc_rib.len());
+        self.replacement_checkpoint(true);
+        for route in self.loc_rib.iter() {
+            self.replacement_checkpoint(false);
+            prefixes.insert(route.prefix);
+        }
+        self.replacement_checkpoint(true);
+        let snapshot = prefixes
+            .into_iter()
+            .inspect(|_| self.replacement_checkpoint(false))
+            .collect();
+        self.replacement_checkpoint(true);
+        PolicyTransitionGroupStart::Created(snapshot)
     }
 
     /// Stage one bounded prefix chunk into an unowned destination group.
@@ -408,8 +444,20 @@ impl RibManager {
         prefixes: &[Prefix],
         memo: &mut crate::manager::distribution::ExportMemo,
     ) {
-        let prefixes = prefixes.iter().copied().collect::<HashSet<_>>();
-        let _ = self.stage_group_prefixes(gid, &prefixes, memo);
+        self.replacement_checkpoint(true);
+        let mut prefixes = prefixes
+            .iter()
+            .inspect(|_| self.replacement_checkpoint(false))
+            .copied()
+            .collect::<HashSet<_>>();
+        self.replacement_checkpoint(true);
+        let mut output = self.stage_group_prefixes(gid, &prefixes, memo);
+        output.retire_with(&mut |force| self.replacement_checkpoint(force));
+        crate::manager::retire_hash_set(&mut prefixes, &mut || self.replacement_checkpoint(false));
+        self.replacement_checkpoint(true);
+        drop(output);
+        drop(prefixes);
+        self.replacement_checkpoint(true);
     }
 
     /// Remove a partially or fully staged, still-unowned destination before
@@ -429,7 +477,7 @@ impl RibManager {
             .get(&gid)
             .is_none_or(|group| group.members.is_empty());
         if removable {
-            self.group_ribs.remove(&gid);
+            self.remove_group_with_readiness(gid);
         }
         removable
     }
@@ -492,6 +540,7 @@ impl RibManager {
         source: &GroupRibOut,
         destination: &GroupRibOut,
         rs_asns: &[u32],
+        checkpoint: &mut impl FnMut(bool),
     ) -> Option<BatchedTransitionInventory> {
         use crate::manager::distribution::rs_control::rs_control_route_tagged;
         // RFC 9234 OTC residue on either side means blocked staged
@@ -520,11 +569,17 @@ impl RibManager {
         let blocked = |route: &Route| {
             crate::manager::distribution::otc_egress_blocked(route, destination.local_role)
         };
-        let mut announce: Vec<Route> = Vec::new();
-        let mut next_hop_override: Vec<Option<NextHopAction>> = Vec::new();
+        checkpoint(true);
+        let mut announce: Vec<Route> = Vec::with_capacity(destination.table.len());
+        checkpoint(true);
+        let mut next_hop_override: Vec<Option<NextHopAction>> =
+            Vec::with_capacity(destination.table.len());
+        checkpoint(true);
         let mut supplements: FxHashMap<IpAddr, BatchedMemberSupplement> = FxHashMap::default();
         let mut counters = BatchedTransitionCounters::default();
-        for route in destination.table.iter() {
+        let mut rejected = false;
+        'destination: for route in destination.table.iter() {
+            checkpoint(false);
             let key = (route.prefix, route.path_id);
             let next_hop = destination.nh_override(key);
             let prior = source.table.get(&route.prefix, route.path_id);
@@ -541,7 +596,8 @@ impl RibManager {
                             || attrs_tagged(destination.source_control(key))
                             || attrs_tagged(source.source_control(key))))
                 {
-                    return None;
+                    rejected = true;
+                    break 'destination;
                 }
                 next_hop_override.push(next_hop);
                 announce.push(route.clone());
@@ -574,11 +630,20 @@ impl RibManager {
                                     attrs_tagged(source_control_input(prev.source_attrs.as_ref()))
                                 })))
                     {
-                        return None;
+                        rejected = true;
+                        break 'destination;
                     }
-                    supplements
-                        .entry(route.peer)
-                        .or_default()
+                    let supplement = supplements.entry(route.peer).or_default();
+                    if supplement.announce.capacity() == 0 {
+                        let source_count = destination
+                            .source_counts
+                            .get(&route.peer)
+                            .map_or(0, |counts| counts[0] + counts[1]);
+                        checkpoint(true);
+                        supplement.announce.reserve_exact(source_count);
+                        checkpoint(true);
+                    }
+                    supplement
                         .announce
                         .push((entry.route.clone(), entry.nh.clone()));
                 }
@@ -591,16 +656,43 @@ impl RibManager {
                 let had_wire =
                     prior.is_some() && (prior_source != Some(route.peer) || lane_old.is_some());
                 if had_wire {
-                    supplements
-                        .entry(route.peer)
-                        .or_default()
-                        .withdraw
-                        .push(key);
+                    let supplement = supplements.entry(route.peer).or_default();
+                    if supplement.withdraw.capacity() == 0 {
+                        let source_count = destination
+                            .source_counts
+                            .get(&route.peer)
+                            .map_or(0, |counts| counts[0] + counts[1]);
+                        checkpoint(true);
+                        supplement.withdraw.reserve_exact(source_count);
+                        checkpoint(true);
+                    }
+                    supplement.withdraw.push(key);
                 }
             }
         }
-        let mut withdraw: Vec<(Prefix, u32)> = Vec::new();
+        if rejected {
+            checkpoint(true);
+            crate::manager::retire_vec(&mut announce, &mut || checkpoint(false));
+            crate::manager::retire_vec(&mut next_hop_override, &mut || checkpoint(false));
+            for (_, mut supplement) in supplements.drain() {
+                checkpoint(false);
+                crate::manager::retire_vec(&mut supplement.announce, &mut || checkpoint(false));
+                crate::manager::retire_vec(&mut supplement.withdraw, &mut || checkpoint(false));
+            }
+            checkpoint(true);
+            drop(announce);
+            drop(next_hop_override);
+            drop(supplements);
+            counters.retire_with(checkpoint);
+            drop(counters);
+            checkpoint(true);
+            return None;
+        }
+        checkpoint(true);
+        let mut withdraw: Vec<(Prefix, u32)> = Vec::with_capacity(source.table.len());
+        checkpoint(true);
         for route in source.table.iter() {
+            checkpoint(false);
             if destination
                 .table
                 .get(&route.prefix, route.path_id)
@@ -610,16 +702,24 @@ impl RibManager {
             }
         }
         for entry in destination.runner_up.values() {
+            checkpoint(false);
             counters.record_lane(entry.winner_source, entry.policy_label.clone());
         }
         for denials in destination.policy_filtered.values() {
+            checkpoint(false);
             for (&(source_peer, _), label) in denials {
+                checkpoint(false);
                 counters.record_deny(source_peer, label.clone());
             }
         }
+        checkpoint(true);
+        let announce = announce.into();
+        checkpoint(true);
+        let next_hop_override = next_hop_override.into();
+        checkpoint(true);
         Some(BatchedTransitionInventory {
-            announce: announce.into(),
-            next_hop_override: next_hop_override.into(),
+            announce,
+            next_hop_override,
             withdraw,
             supplements,
             counters,
@@ -637,7 +737,9 @@ impl RibManager {
         peer: IpAddr,
         inventory: &BatchedTransitionInventory,
     ) {
-        let rows = inventory.counters.rows_for(peer);
+        let rows = inventory
+            .counters
+            .rows_for(peer, &mut || self.replacement_checkpoint(false));
         if !rows.is_empty() {
             self.bump_export_counters(peer, &rows);
         }

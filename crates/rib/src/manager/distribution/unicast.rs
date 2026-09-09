@@ -39,6 +39,223 @@ fn export_deny_attribution(
     }
 }
 
+impl RibManager {
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::fn_params_excessive_bools,
+        reason = "multipath export keeps peer, policy, and Adj-RIB-Out diff state together; the bools are independent per-target mode/state flags threaded from the caller's ladder"
+    )]
+    pub(in crate::manager) fn distribute_multipath_prefix(
+        ribs: &HashMap<IpAddr, AdjRibIn>,
+        prefix_peers: &UnicastPrefixPeers,
+        rib_out: &AdjRibOut,
+        peer_is_rr_client: &HashMap<IpAddr, bool>,
+        prefix: &Prefix,
+        target_peer: IpAddr,
+        target_peer_asn: Option<u32>,
+        target_peer_group: Option<&str>,
+        send_max: u32,
+        stage_path_id_zero: bool,
+        target_is_ebgp: bool,
+        interpret_rfc1997: bool,
+        rs_control_asn: Option<u32>,
+        target_is_rr_client: bool,
+        cluster_id: Option<Ipv4Addr>,
+        sendable: Option<&Vec<(Afi, Safi)>>,
+        llgr: Option<&Vec<(Afi, Safi)>>,
+        export_pol: Option<&PolicyChain>,
+        orf_filter: Option<&crate::orf::OrfFilterSet>,
+        orr: Option<(&crate::orr::OrrTopology, &crate::orr::SpfResult)>,
+        memo: &mut super::ExportMemo,
+        metrics: &BgpMetrics,
+        policy_stats: &mut NeighborPolicyStats,
+        target_peer_label: &str,
+        out: &mut UnicastDistributionResult,
+        force: bool,
+    ) {
+        Self::distribute_multipath_prefix_with_checkpoint(
+            ribs,
+            prefix_peers,
+            rib_out,
+            peer_is_rr_client,
+            prefix,
+            target_peer,
+            target_peer_asn,
+            target_peer_group,
+            send_max,
+            stage_path_id_zero,
+            target_is_ebgp,
+            interpret_rfc1997,
+            rs_control_asn,
+            target_is_rr_client,
+            cluster_id,
+            sendable,
+            llgr,
+            export_pol,
+            orf_filter,
+            orr,
+            memo,
+            metrics,
+            policy_stats,
+            target_peer_label,
+            out,
+            force,
+            &mut || {},
+        );
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "group per-client-best export keeps group, policy, and table diff state together"
+    )]
+    pub(in crate::manager) fn distribute_group_per_client_best_prefix(
+        ribs: &HashMap<IpAddr, AdjRibIn>,
+        prefix_peers: &UnicastPrefixPeers,
+        rib_out: &AdjRibOut,
+        peer_is_rr_client: &HashMap<IpAddr, bool>,
+        prefix: &Prefix,
+        group_is_ebgp: bool,
+        interpret_rfc1997: bool,
+        group_is_rr_client: bool,
+        group_local_role: Option<rustbgpd_wire::BgpRole>,
+        cluster_id: Option<Ipv4Addr>,
+        sendable: Option<&Vec<(Afi, Safi)>>,
+        llgr: Option<&Vec<(Afi, Safi)>>,
+        export_pol: Option<&PolicyChain>,
+        memo: &mut super::ExportMemo,
+        evals: &mut GroupEvalAccumulator,
+        out: &mut UnicastDistributionResult<(PolicyFilteredRouteKey, Option<PolicyLabel>)>,
+        otc_blocked: &mut Vec<crate::route::Route>,
+    ) -> PerClientBestPrefixStage {
+        Self::distribute_group_per_client_best_prefix_with_checkpoint(
+            ribs,
+            prefix_peers,
+            rib_out,
+            peer_is_rr_client,
+            prefix,
+            group_is_ebgp,
+            interpret_rfc1997,
+            group_is_rr_client,
+            group_local_role,
+            cluster_id,
+            sendable,
+            llgr,
+            export_pol,
+            memo,
+            evals,
+            out,
+            otc_blocked,
+            &mut || {},
+        )
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::fn_params_excessive_bools,
+        reason = "single-best export keeps target, policy, and Adj-RIB-Out diff state together"
+    )]
+    pub(in crate::manager) fn distribute_single_best_prefix(
+        loc_rib: &LocRib,
+        rib_out: &AdjRibOut,
+        peer_is_rr_client: &HashMap<IpAddr, bool>,
+        prefix: &Prefix,
+        target: &mut super::ExportTarget<'_>,
+        target_is_ebgp: bool,
+        interpret_rfc1997: bool,
+        rs_control_asn: Option<u32>,
+        target_is_rr_client: bool,
+        cluster_id: Option<Ipv4Addr>,
+        sendable: Option<&Vec<(Afi, Safi)>>,
+        llgr: Option<&Vec<(Afi, Safi)>>,
+        export_pol: Option<&PolicyChain>,
+        orf_filter: Option<&crate::orf::OrfFilterSet>,
+        memo: &mut super::ExportMemo,
+        result: &mut UnicastDistributionResult,
+        force: bool,
+    ) {
+        Self::distribute_single_best_prefix_with_checkpoint(
+            loc_rib,
+            rib_out,
+            peer_is_rr_client,
+            prefix,
+            target,
+            target_is_ebgp,
+            interpret_rfc1997,
+            rs_control_asn,
+            target_is_rr_client,
+            cluster_id,
+            sendable,
+            llgr,
+            export_pol,
+            orf_filter,
+            memo,
+            result,
+            force,
+            &mut || {},
+        );
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::fn_params_excessive_bools,
+        reason = "ORR export keeps peer, policy, and Adj-RIB-Out diff state together"
+    )]
+    pub(in crate::manager) fn distribute_orr_best_prefix(
+        ribs: &HashMap<IpAddr, AdjRibIn>,
+        prefix_peers: &UnicastPrefixPeers,
+        rib_out: &AdjRibOut,
+        peer_is_rr_client: &HashMap<IpAddr, bool>,
+        orr_topology: &crate::orr::OrrTopology,
+        orr_spf: &crate::orr::SpfResult,
+        prefix: &Prefix,
+        target_peer: IpAddr,
+        target_peer_asn: Option<u32>,
+        target_peer_group: Option<&str>,
+        target_is_ebgp: bool,
+        interpret_rfc1997: bool,
+        target_is_rr_client: bool,
+        cluster_id: Option<Ipv4Addr>,
+        sendable: Option<&Vec<(Afi, Safi)>>,
+        llgr: Option<&Vec<(Afi, Safi)>>,
+        export_pol: Option<&PolicyChain>,
+        orf_filter: Option<&crate::orf::OrfFilterSet>,
+        memo: &mut super::ExportMemo,
+        metrics: &BgpMetrics,
+        policy_stats: &mut NeighborPolicyStats,
+        target_peer_label: &str,
+        result: &mut UnicastDistributionResult,
+        force: bool,
+    ) {
+        Self::distribute_orr_best_prefix_with_checkpoint(
+            ribs,
+            prefix_peers,
+            rib_out,
+            peer_is_rr_client,
+            orr_topology,
+            orr_spf,
+            prefix,
+            target_peer,
+            target_peer_asn,
+            target_peer_group,
+            target_is_ebgp,
+            interpret_rfc1997,
+            target_is_rr_client,
+            cluster_id,
+            sendable,
+            llgr,
+            export_pol,
+            orf_filter,
+            memo,
+            metrics,
+            policy_stats,
+            target_peer_label,
+            result,
+            force,
+            &mut || {},
+        );
+    }
+}
+
 /// Candidate paths for `prefix` visible to `target_peer` under RFC 9107
 /// ORR: every eligible Adj-RIB-In entry that survives split horizon and the
 /// iBGP / RFC 4456 reflection rules. Shared by the ORR distribution and
@@ -156,6 +373,107 @@ fn multipath_candidates<'a>(
             llgr,
         )
     })
+}
+
+/// Checkpointed live counterpart to [`orr_candidates`]. Explain keeps the
+/// iterator form above; distribution collects the same candidates while
+/// polling every raw Adj-RIB-In visit, including rejected routes.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "candidate collection mirrors the per-target reflection filter inputs"
+)]
+fn orr_candidates_with_checkpoint<'a>(
+    ribs: &'a HashMap<IpAddr, AdjRibIn>,
+    prefix_peers: &'a UnicastPrefixPeers,
+    peer_is_rr_client: &'a HashMap<IpAddr, bool>,
+    prefix: &'a Prefix,
+    target_peer: Option<IpAddr>,
+    target_is_ebgp: bool,
+    target_is_rr_client: bool,
+    cluster_id: Option<Ipv4Addr>,
+    checkpoint: &mut impl FnMut(),
+) -> Vec<&'a crate::route::Route> {
+    let mut candidates = Vec::new();
+    for route in RibManager::unicast_candidates(ribs, prefix_peers, prefix) {
+        checkpoint();
+        if Some(route.peer) == target_peer
+            || should_suppress_ibgp_inner(
+                route,
+                target_is_ebgp,
+                target_is_rr_client,
+                cluster_id,
+                peer_is_rr_client,
+            )
+        {
+            continue;
+        }
+        candidates.push(route);
+        checkpoint();
+    }
+    candidates
+}
+
+/// Checkpointed live counterpart to [`multipath_candidates`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "candidate collection mirrors the per-target reflection filter inputs"
+)]
+fn multipath_candidates_with_checkpoint<'a>(
+    ribs: &'a HashMap<IpAddr, AdjRibIn>,
+    prefix_peers: &'a UnicastPrefixPeers,
+    peer_is_rr_client: &'a HashMap<IpAddr, bool>,
+    prefix: &'a Prefix,
+    target_peer: Option<IpAddr>,
+    target_is_ebgp: bool,
+    interpret_rfc1997: bool,
+    rs_control: Option<(u32, u32)>,
+    target_is_rr_client: bool,
+    cluster_id: Option<Ipv4Addr>,
+    family: (Afi, Safi),
+    llgr: Option<&'a Vec<(Afi, Safi)>>,
+    checkpoint: &mut impl FnMut(),
+) -> Vec<&'a crate::route::Route> {
+    let mut candidates = Vec::new();
+    for route in orr_candidates_with_checkpoint(
+        ribs,
+        prefix_peers,
+        peer_is_rr_client,
+        prefix,
+        target_peer,
+        target_is_ebgp,
+        target_is_rr_client,
+        cluster_id,
+        checkpoint,
+    ) {
+        checkpoint();
+        if super::no_advertise_export_suppressed(route.communities())
+            || super::no_export_export_suppressed(
+                route.communities(),
+                target_is_ebgp,
+                interpret_rfc1997,
+            )
+            || rs_control.is_some_and(|(rs_asn, peer_asn)| {
+                super::rs_control::rs_control_export_suppressed(
+                    route.communities(),
+                    route.large_communities(),
+                    rs_asn,
+                    peer_asn,
+                )
+            })
+            || super::llgr_stale_export_suppressed(
+                route.is_llgr_stale,
+                route.communities(),
+                family,
+                target_is_ebgp,
+                llgr,
+            )
+        {
+            continue;
+        }
+        candidates.push(route);
+        checkpoint();
+    }
+    candidates
 }
 
 impl RibManager {
@@ -1447,7 +1765,7 @@ impl RibManager {
         clippy::fn_params_excessive_bools,
         reason = "multipath export keeps peer, policy, and Adj-RIB-Out diff state together; the bools are independent per-target mode/state flags threaded from the caller's ladder"
     )]
-    pub(in crate::manager) fn distribute_multipath_prefix(
+    pub(in crate::manager) fn distribute_multipath_prefix_with_checkpoint(
         ribs: &HashMap<IpAddr, AdjRibIn>,
         prefix_peers: &UnicastPrefixPeers,
         rib_out: &AdjRibOut,
@@ -1474,6 +1792,7 @@ impl RibManager {
         target_peer_label: &str,
         out: &mut UnicastDistributionResult,
         force: bool,
+        checkpoint: &mut impl FnMut(),
     ) {
         use crate::best_path::{best_path_cmp, best_path_cmp_orr};
 
@@ -1485,6 +1804,7 @@ impl RibManager {
         if !sendable.is_some_and(|f| f.contains(&family)) {
             // Withdraw all previously advertised paths for this prefix
             for path_id in rib_out.path_ids_for_prefix(prefix) {
+                checkpoint();
                 out.withdraw.push((*prefix, path_id));
             }
             return;
@@ -1494,6 +1814,7 @@ impl RibManager {
         // path-ids — gate the whole prefix once, before collecting candidates.
         if orf_filter.is_some_and(|f| !f.permits(prefix)) {
             for path_id in rib_out.path_ids_for_prefix(prefix) {
+                checkpoint();
                 out.withdraw.push((*prefix, path_id));
             }
             return;
@@ -1503,7 +1824,8 @@ impl RibManager {
         // (reverse-index probe, not an all-peers scan) — the collector is
         // shared with the per-client-best explain arm so explain walks
         // exactly this set.
-        let mut candidates: Vec<&crate::route::Route> = multipath_candidates(
+        checkpoint();
+        let mut candidates = multipath_candidates_with_checkpoint(
             ribs,
             prefix_peers,
             peer_is_rr_client,
@@ -1516,8 +1838,9 @@ impl RibManager {
             cluster_id,
             family,
             llgr,
-        )
-        .collect();
+            checkpoint,
+        );
+        checkpoint();
         #[cfg(feature = "bench-internals")]
         if stage_path_id_zero {
             super::super::bench_support::bench_record_per_client_best_candidates(
@@ -1531,6 +1854,7 @@ impl RibManager {
         // each NEXT_HOP first (RFC 9107 §3.1) — comparator swap only.
         match orr {
             Some((topology, spf)) => candidates.sort_by(|a, b| {
+                checkpoint();
                 best_path_cmp_orr(
                     a,
                     b,
@@ -1538,7 +1862,10 @@ impl RibManager {
                     spf.cost_to(topology, b.next_hop),
                 )
             }),
-            None => candidates.sort_by(|a, b| best_path_cmp(a, b)),
+            None => candidates.sort_by(|a, b| {
+                checkpoint();
+                best_path_cmp(a, b)
+            }),
         }
 
         // Walk candidates, evaluate export policy, assign path_ids 1..N
@@ -1550,6 +1877,7 @@ impl RibManager {
             send_max as usize
         };
         for candidate in &candidates {
+            checkpoint();
             if (next_rank as usize) > limit {
                 break;
             }
@@ -1581,7 +1909,9 @@ impl RibManager {
                 local_pref: candidate.local_pref_attr(),
                 med: candidate.med_attr(),
             };
+            checkpoint();
             let (result, evaluation) = evaluate_chain_with_attribution(export_pol, &ctx);
+            checkpoint();
             record_export_policy_eval(metrics, policy_stats, target_peer_label, &evaluation);
             if result.action != PolicyAction::Permit {
                 out.policy_filtered.push(PolicyFilteredRouteKey {
@@ -1596,7 +1926,9 @@ impl RibManager {
             // Apply export modifications — the pass-scoped memo shares one
             // post-modification attribute Arc across every (route, peer)
             // with the same source attrs and equal modifications.
+            checkpoint();
             let (mut modified, nh_action) = memo.apply(candidate, &result.modifications);
+            checkpoint();
             if super::no_advertise_export_suppressed(modified.communities()) {
                 // Export policy added NO_ADVERTISE: the route is suppressed
                 // by policy, so surface it through the same policy-filtered
@@ -1631,6 +1963,7 @@ impl RibManager {
                     .get(prefix, modified.path_id)
                     .is_none_or(|existing| !routes_equal(existing, &modified));
             if changed {
+                checkpoint();
                 out.next_hop_override.push(nh_action);
                 out.announce.push(modified);
             }
@@ -1646,6 +1979,7 @@ impl RibManager {
             // withdraw+announce pair when the filtered best flips).
             let staged_winner = next_rank > 1;
             for path_id in rib_out.path_ids_for_prefix(prefix) {
+                checkpoint();
                 if path_id != 0 || !staged_winner {
                     out.withdraw.push((*prefix, path_id));
                 }
@@ -1653,6 +1987,7 @@ impl RibManager {
         } else {
             // Withdraw any previously advertised path_ids beyond the new set
             for path_id in rib_out.path_ids_for_prefix(prefix) {
+                checkpoint();
                 if path_id >= next_rank {
                     out.withdraw.push((*prefix, path_id));
                 }
@@ -1706,7 +2041,7 @@ impl RibManager {
         clippy::too_many_lines,
         reason = "group per-client-best export keeps group, policy, and table diff state together"
     )]
-    pub(in crate::manager) fn distribute_group_per_client_best_prefix(
+    pub(in crate::manager) fn distribute_group_per_client_best_prefix_with_checkpoint(
         ribs: &HashMap<IpAddr, AdjRibIn>,
         prefix_peers: &UnicastPrefixPeers,
         rib_out: &AdjRibOut,
@@ -1724,6 +2059,7 @@ impl RibManager {
         evals: &mut GroupEvalAccumulator,
         out: &mut UnicastDistributionResult<(PolicyFilteredRouteKey, Option<PolicyLabel>)>,
         otc_blocked: &mut Vec<crate::route::Route>,
+        checkpoint: &mut impl FnMut(),
     ) -> PerClientBestPrefixStage {
         use crate::best_path::best_path_cmp;
 
@@ -1734,12 +2070,14 @@ impl RibManager {
         };
         if !sendable.is_some_and(|f| f.contains(&family)) {
             for path_id in rib_out.path_ids_for_prefix(prefix) {
+                checkpoint();
                 out.withdraw.push((*prefix, path_id));
             }
             return stage;
         }
 
-        let mut candidates: Vec<&crate::route::Route> = multipath_candidates(
+        checkpoint();
+        let mut candidates = multipath_candidates_with_checkpoint(
             ribs,
             prefix_peers,
             peer_is_rr_client,
@@ -1753,13 +2091,18 @@ impl RibManager {
             cluster_id,
             family,
             llgr,
-        )
-        .collect();
-        candidates.sort_by(|a, b| best_path_cmp(a, b));
+            checkpoint,
+        );
+        checkpoint();
+        candidates.sort_by(|a, b| {
+            checkpoint();
+            best_path_cmp(a, b)
+        });
 
         let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
         let mut winner_source: Option<IpAddr> = None;
         for candidate in &candidates {
+            checkpoint();
             if winner_source == Some(candidate.peer) {
                 continue;
             }
@@ -1792,7 +2135,9 @@ impl RibManager {
                 local_pref: candidate.local_pref_attr(),
                 med: candidate.med_attr(),
             };
+            checkpoint();
             let (result, evaluation) = evaluate_chain_with_attribution(export_pol, &ctx);
+            checkpoint();
             evals.record(&evaluation, candidate.peer);
             let label = evaluation.matched_policy.clone();
             let filtered_key = PolicyFilteredRouteKey {
@@ -1806,7 +2151,9 @@ impl RibManager {
                 out.policy_filtered.push((filtered_key, label));
                 continue;
             }
+            checkpoint();
             let (mut modified, nh_action) = memo.apply(candidate, &result.modifications);
+            checkpoint();
             if super::no_advertise_export_suppressed(modified.communities()) {
                 // Policy-added NO_ADVERTISE is a policy suppression —
                 // same accounting as the deny arm, matching the
@@ -1840,12 +2187,14 @@ impl RibManager {
             // equality-suppressed: the caller's `record_otc_blocked`
             // refreshes this prefix's residue every pass.
             if super::otc_egress_blocked(&modified, group_local_role) {
+                checkpoint();
                 otc_blocked.push(modified.clone());
             }
             let changed = rib_out
                 .get(prefix, 0)
                 .is_none_or(|existing| !routes_equal(existing, &modified));
             if changed {
+                checkpoint();
                 out.next_hop_override.push(nh_action);
                 out.announce.push(modified);
             }
@@ -1857,6 +2206,7 @@ impl RibManager {
         // implicit replace otherwise.
         let staged_winner = winner_source.is_some();
         for path_id in rib_out.path_ids_for_prefix(prefix) {
+            checkpoint();
             if path_id != 0 || !staged_winner {
                 out.withdraw.push((*prefix, path_id));
             }
@@ -1876,7 +2226,7 @@ impl RibManager {
         clippy::fn_params_excessive_bools,
         reason = "single-best export keeps target, policy, and Adj-RIB-Out diff state together"
     )]
-    pub(in crate::manager) fn distribute_single_best_prefix(
+    pub(in crate::manager) fn distribute_single_best_prefix_with_checkpoint(
         loc_rib: &LocRib,
         rib_out: &AdjRibOut,
         peer_is_rr_client: &HashMap<IpAddr, bool>,
@@ -1894,16 +2244,19 @@ impl RibManager {
         memo: &mut super::ExportMemo,
         result: &mut UnicastDistributionResult,
         force: bool,
+        checkpoint: &mut impl FnMut(),
     ) {
         use crate::update::ExportGateVerdict::{NotApplicable, Pass, Stop};
 
         let existing_path_ids = rib_out.path_ids_for_prefix(prefix);
 
+        checkpoint();
         let Some(best) = loc_rib.get(prefix) else {
             target.gate("best_route", "no_best_route", Stop, || {
                 "no best route exists for this prefix".to_string()
             });
             for &path_id in &existing_path_ids {
+                checkpoint();
                 result.withdraw.push((*prefix, path_id));
             }
             return;
@@ -1932,6 +2285,7 @@ impl RibManager {
                     .to_string()
             });
             for &path_id in &existing_path_ids {
+                checkpoint();
                 result.withdraw.push((*prefix, path_id));
             }
             return;
@@ -1959,6 +2313,7 @@ impl RibManager {
                 trace.push("rr_reflection", code, Stop, detail.to_string());
             }
             for &path_id in &existing_path_ids {
+                checkpoint();
                 result.withdraw.push((*prefix, path_id));
             }
             return;
@@ -1974,6 +2329,7 @@ impl RibManager {
                 format!("peer cannot receive {} routes", family_label(family))
             });
             for &path_id in &existing_path_ids {
+                checkpoint();
                 result.withdraw.push((*prefix, path_id));
             }
             return;
@@ -1997,6 +2353,7 @@ impl RibManager {
                     .to_string()
             });
             for &path_id in &existing_path_ids {
+                checkpoint();
                 result.withdraw.push((*prefix, path_id));
             }
             return;
@@ -2025,6 +2382,7 @@ impl RibManager {
                         .to_string()
                 });
                 for &path_id in &existing_path_ids {
+                    checkpoint();
                     result.withdraw.push((*prefix, path_id));
                 }
                 return;
@@ -2048,6 +2406,7 @@ impl RibManager {
                     .to_string()
             });
             for &path_id in &existing_path_ids {
+                checkpoint();
                 result.withdraw.push((*prefix, path_id));
             }
             return;
@@ -2064,6 +2423,7 @@ impl RibManager {
                     .to_string()
             });
             for &path_id in &existing_path_ids {
+                checkpoint();
                 result.withdraw.push((*prefix, path_id));
             }
             return;
@@ -2090,6 +2450,7 @@ impl RibManager {
                     .to_string()
             });
             for &path_id in &existing_path_ids {
+                checkpoint();
                 result.withdraw.push((*prefix, path_id));
             }
             return;
@@ -2125,7 +2486,9 @@ impl RibManager {
             local_pref: best.local_pref_attr(),
             med: best.med_attr(),
         };
+        checkpoint();
         let (policy_result, evaluation) = target.evaluate_export_chain(export_pol, &ctx);
+        checkpoint();
         target.record_eval(&evaluation, best.peer);
         if let Some(trace) = target.trace() {
             // Keep Permit on the chain-default label. For Deny, enrich the
@@ -2160,6 +2523,7 @@ impl RibManager {
                 path_id: best.path_id,
             });
             for &path_id in &existing_path_ids {
+                checkpoint();
                 result.withdraw.push((*prefix, path_id));
             }
             return;
@@ -2191,7 +2555,9 @@ impl RibManager {
         // (route, peer) with the same source attribute set and equal
         // modifications; no-modification exports keep sharing the
         // source Arc as before.
+        checkpoint();
         let (mut modified, nh_action) = memo.apply(best, &policy_result.modifications);
+        checkpoint();
         modified.path_id = 0;
 
         // Export policy may add NO_ADVERTISE to an otherwise eligible
@@ -2218,6 +2584,7 @@ impl RibManager {
                 path_id: best.path_id,
             });
             for &path_id in &existing_path_ids {
+                checkpoint();
                 result.withdraw.push((*prefix, path_id));
             }
             return;
@@ -2251,6 +2618,7 @@ impl RibManager {
             });
             target.record_otc_blocked(modified);
             for &path_id in &existing_path_ids {
+                checkpoint();
                 result.withdraw.push((*prefix, path_id));
             }
             return;
@@ -2315,6 +2683,7 @@ impl RibManager {
             }
         }
         if changed {
+            checkpoint();
             result.next_hop_override.push(nh_action);
             result.announce.push(modified);
         }
@@ -2322,6 +2691,7 @@ impl RibManager {
         // Clean up any stale multi-path entries if this prefix was previously
         // advertised via Add-Path and is now single-best.
         for &path_id in &existing_path_ids {
+            checkpoint();
             if path_id != 0 {
                 result.withdraw.push((*prefix, path_id));
             }
@@ -2352,7 +2722,7 @@ impl RibManager {
         clippy::fn_params_excessive_bools,
         reason = "ORR export keeps peer, policy, and Adj-RIB-Out diff state together"
     )]
-    pub(in crate::manager) fn distribute_orr_best_prefix(
+    pub(in crate::manager) fn distribute_orr_best_prefix_with_checkpoint(
         ribs: &HashMap<IpAddr, AdjRibIn>,
         prefix_peers: &UnicastPrefixPeers,
         rib_out: &AdjRibOut,
@@ -2377,6 +2747,7 @@ impl RibManager {
         target_peer_label: &str,
         result: &mut UnicastDistributionResult,
         force: bool,
+        checkpoint: &mut impl FnMut(),
     ) {
         use crate::best_path::best_path_cmp_orr;
 
@@ -2386,6 +2757,7 @@ impl RibManager {
         let family = prefix_family(prefix);
         if !sendable.is_some_and(|f| f.contains(&family)) {
             for &path_id in &existing_path_ids {
+                checkpoint();
                 result.withdraw.push((*prefix, path_id));
             }
             return;
@@ -2395,6 +2767,7 @@ impl RibManager {
         // policy denial — see `distribute_single_best_prefix`.
         if orf_filter.is_some_and(|f| !f.permits(prefix)) {
             for &path_id in &existing_path_ids {
+                checkpoint();
                 result.withdraw.push((*prefix, path_id));
             }
             return;
@@ -2404,7 +2777,8 @@ impl RibManager {
         // verbatim the multipath collector's per-target filter set.
         // Shared with the ORR explain path (`explain_single_best_prefix`)
         // so explain ranks exactly what distribution ranks.
-        let candidates = orr_candidates(
+        checkpoint();
+        let candidates = orr_candidates_with_checkpoint(
             ribs,
             prefix_peers,
             peer_is_rr_client,
@@ -2413,11 +2787,13 @@ impl RibManager {
             target_is_ebgp,
             target_is_rr_client,
             cluster_id,
+            checkpoint,
         );
 
         // Per-vantage best (RFC 9107): the vantage's interior cost to
         // each NEXT_HOP breaks ties between step 5 and step 5.5.
-        let Some(best) = candidates.min_by(|a, b| {
+        let Some(best) = candidates.into_iter().min_by(|a, b| {
+            checkpoint();
             best_path_cmp_orr(
                 a,
                 b,
@@ -2426,6 +2802,7 @@ impl RibManager {
             )
         }) else {
             for &path_id in &existing_path_ids {
+                checkpoint();
                 result.withdraw.push((*prefix, path_id));
             }
             return;
@@ -2443,6 +2820,7 @@ impl RibManager {
             llgr,
         ) {
             for &path_id in &existing_path_ids {
+                checkpoint();
                 result.withdraw.push((*prefix, path_id));
             }
             return;
@@ -2453,6 +2831,7 @@ impl RibManager {
         // runner-up merely because the selected best is NO_ADVERTISE.
         if super::no_advertise_export_suppressed(best.communities()) {
             for &path_id in &existing_path_ids {
+                checkpoint();
                 result.withdraw.push((*prefix, path_id));
             }
             return;
@@ -2462,6 +2841,7 @@ impl RibManager {
         if super::no_export_export_suppressed(best.communities(), target_is_ebgp, interpret_rfc1997)
         {
             for &path_id in &existing_path_ids {
+                checkpoint();
                 result.withdraw.push((*prefix, path_id));
             }
             return;
@@ -2494,7 +2874,9 @@ impl RibManager {
             local_pref: best.local_pref_attr(),
             med: best.med_attr(),
         };
+        checkpoint();
         let (policy_result, evaluation) = evaluate_chain_with_attribution(export_pol, &ctx);
+        checkpoint();
         record_export_policy_eval(metrics, policy_stats, target_peer_label, &evaluation);
         if policy_result.action != PolicyAction::Permit {
             result.policy_filtered.push(PolicyFilteredRouteKey {
@@ -2504,6 +2886,7 @@ impl RibManager {
                 path_id: best.path_id,
             });
             for &path_id in &existing_path_ids {
+                checkpoint();
                 result.withdraw.push((*prefix, path_id));
             }
             return;
@@ -2516,7 +2899,9 @@ impl RibManager {
         // winner memo the doc comment above rejects — the key here is
         // (source attribute identity, modifications value), which is
         // independent of which candidate won.
+        checkpoint();
         let (mut modified, nh_action) = memo.apply(best, &policy_result.modifications);
+        checkpoint();
         modified.path_id = 0;
 
         if super::no_advertise_export_suppressed(modified.communities()) {
@@ -2530,6 +2915,7 @@ impl RibManager {
                 path_id: best.path_id,
             });
             for &path_id in &existing_path_ids {
+                checkpoint();
                 result.withdraw.push((*prefix, path_id));
             }
             return;
@@ -2541,6 +2927,7 @@ impl RibManager {
                 .get(prefix, 0)
                 .is_none_or(|existing| !routes_equal(existing, &modified));
         if changed {
+            checkpoint();
             result.next_hop_override.push(nh_action);
             result.announce.push(modified);
         }
@@ -2548,6 +2935,7 @@ impl RibManager {
         // Clean up any stale multi-path entries if this prefix was
         // previously advertised via Add-Path and is now single-best.
         for &path_id in &existing_path_ids {
+            checkpoint();
             if path_id != 0 {
                 result.withdraw.push((*prefix, path_id));
             }

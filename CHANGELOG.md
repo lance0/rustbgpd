@@ -241,6 +241,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   queued policy changes and other mutations; the shared statistics deadline and
   complete-result requirements are unchanged.
 
+- Service RIB readiness probes throughout synchronous export-policy
+  replacement and rollback, including construction, per-peer work, and
+  cleanup. Ordinary queries remain fenced, and readiness replies retain the
+  exact Loc-RIB count and the existing transition-age limit.
+
 ### Upgrade notes
 
 - Consumers of `GetPolicyStats` or `rbgp policy stats` should use the installed

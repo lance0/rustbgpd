@@ -75,10 +75,6 @@ impl RibManager {
     /// candidates per key are ranked — with the ORR vantage comparator when
     /// a vantage is resolved — and staged with outbound path IDs `1..=N`.
     /// Otherwise the single best is staged with `path_id = 0`.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "VPN staging mirrors unicast multipath/single-best distribution context for RR/export parity"
-    )]
     pub(in crate::manager) fn stage_vpn_routes(
         context: &crate::manager::VpnLabeledStagingContext<'_>,
         keys: &HashSet<VpnRouteKey>,
@@ -87,6 +83,31 @@ impl RibManager {
         vpn_announce: &mut Vec<VpnRibRoute>,
         vpn_withdraw: &mut Vec<VpnRibRouteKey>,
     ) {
+        Self::stage_vpn_routes_with_checkpoint(
+            context,
+            keys,
+            target,
+            rtc_filter,
+            vpn_announce,
+            vpn_withdraw,
+            &mut || {},
+        );
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "VPN staging mirrors unicast multipath/single-best distribution context for RR/export parity"
+    )]
+    pub(in crate::manager) fn stage_vpn_routes_with_checkpoint(
+        context: &crate::manager::VpnLabeledStagingContext<'_>,
+        keys: &HashSet<VpnRouteKey>,
+        target: &mut super::ExportTarget<'_>,
+        rtc_filter: Option<&crate::manager::RtcMembership>,
+        vpn_announce: &mut Vec<VpnRibRoute>,
+        vpn_withdraw: &mut Vec<VpnRibRouteKey>,
+        checkpoint: &mut impl FnMut(),
+    ) {
+        let checkpoint = std::cell::RefCell::new(checkpoint);
         let &crate::manager::VpnLabeledStagingContext {
             loc_rib,
             ribs,
@@ -110,12 +131,14 @@ impl RibManager {
         // at emit time by the VPN source-flip matrix.
         let split_horizon_peer = target.split_horizon_peer();
         for key in keys {
+            checkpoint.borrow_mut()();
             let family = vpn_afi_safi(key);
             // Path IDs currently advertised for this identity — the diff
             // baseline for every withdraw decision below.
             let existing_path_ids = rib_out.vpn_path_ids_for_key(key);
             let withdraw_existing = |vpn_withdraw: &mut Vec<VpnRibRouteKey>, existing: &[u32]| {
                 for &path_id in existing {
+                    checkpoint.borrow_mut()();
                     vpn_withdraw.push(VpnRibRouteKey {
                         nlri_key: *key,
                         path_id,
@@ -170,9 +193,16 @@ impl RibManager {
                 // rank it, and stage the top N with path IDs 1..=N.
                 let mut candidates: Vec<&VpnRibRoute> = ribs
                     .values()
-                    .flat_map(|rib| rib.iter_vpn_for_nlri(key))
-                    .filter(|route| crate::srv6::vpn_eligible(route))
+                    .flat_map(|rib| {
+                        checkpoint.borrow_mut()();
+                        rib.iter_vpn_for_nlri(key)
+                    })
+                    .filter(|route| {
+                        checkpoint.borrow_mut()();
+                        crate::srv6::vpn_eligible(route)
+                    })
                     .filter(|candidate| {
+                        checkpoint.borrow_mut()();
                         split_horizon_peer != Some(candidate.peer)
                             && !should_suppress_ibgp_inner(
                                 &vpn_suppression_probe(candidate),
@@ -188,6 +218,7 @@ impl RibManager {
                 // each candidate's next-hop (comparator swap only).
                 match orr_ctx {
                     Some((orr_topology, orr_spf)) => candidates.sort_by(|a, b| {
+                        checkpoint.borrow_mut()();
                         vpn_tiebreak_orr(
                             a,
                             b,
@@ -195,7 +226,10 @@ impl RibManager {
                             orr_spf.cost_to(orr_topology, b.next_hop),
                         )
                     }),
-                    None => candidates.sort_by(|a, b| crate::loc_rib::vpn_tiebreak(a, b)),
+                    None => candidates.sort_by(|a, b| {
+                        checkpoint.borrow_mut()();
+                        crate::loc_rib::vpn_tiebreak(a, b)
+                    }),
                 }
 
                 let mut next_rank: u32 = 1;
@@ -205,6 +239,7 @@ impl RibManager {
                     key_send_max as usize
                 };
                 for candidate in &candidates {
+                    checkpoint.borrow_mut()();
                     if (next_rank as usize) > limit {
                         break;
                     }
@@ -278,7 +313,9 @@ impl RibManager {
                         local_pref: candidate.local_pref_attr(),
                         med: candidate.med_attr(),
                     };
+                    checkpoint.borrow_mut()();
                     let (result, evaluation) = target.evaluate_export_chain(export_pol, &ctx);
+                    checkpoint.borrow_mut()();
                     target.record_eval(&evaluation, candidate.peer);
                     if result.action != rustbgpd_policy::PolicyAction::Permit {
                         continue;
@@ -286,6 +323,7 @@ impl RibManager {
 
                     let mut modified = (*candidate).clone();
                     if !result.modifications.is_empty() {
+                        checkpoint.borrow_mut()();
                         let nh = rustbgpd_policy::apply_modifications(
                             std::sync::Arc::make_mut(&mut modified.attributes),
                             &result.modifications,
@@ -293,6 +331,7 @@ impl RibManager {
                         if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = nh {
                             modified.next_hop = addr;
                         }
+                        checkpoint.borrow_mut()();
                     }
                     if super::no_advertise_export_suppressed(modified.communities()) {
                         continue;
@@ -308,6 +347,7 @@ impl RibManager {
                             .get_vpn(&out_key)
                             .is_none_or(|existing| !vpn_routes_equal(existing, &modified))
                     {
+                        checkpoint.borrow_mut()();
                         vpn_announce.push(modified);
                     }
                     next_rank += 1;
@@ -316,6 +356,7 @@ impl RibManager {
                 // Withdraw previously advertised path IDs outside the new
                 // 1..next_rank set (including a stale single-best 0 entry).
                 for &path_id in existing_path_ids {
+                    checkpoint.borrow_mut()();
                     if path_id == 0 || path_id >= next_rank {
                         vpn_withdraw.push(VpnRibRouteKey {
                             nlri_key: *key,
@@ -336,9 +377,16 @@ impl RibManager {
             let best = if let Some((orr_topology, orr_spf)) = orr_ctx {
                 let winner = ribs
                     .values()
-                    .flat_map(|rib| rib.iter_vpn_for_nlri(key))
-                    .filter(|route| crate::srv6::vpn_eligible(route))
+                    .flat_map(|rib| {
+                        checkpoint.borrow_mut()();
+                        rib.iter_vpn_for_nlri(key)
+                    })
+                    .filter(|route| {
+                        checkpoint.borrow_mut()();
+                        crate::srv6::vpn_eligible(route)
+                    })
                     .filter(|candidate| {
+                        checkpoint.borrow_mut()();
                         split_horizon_peer != Some(candidate.peer)
                             && !should_suppress_ibgp_inner(
                                 &vpn_suppression_probe(candidate),
@@ -349,6 +397,7 @@ impl RibManager {
                             )
                     })
                     .min_by(|a, b| {
+                        checkpoint.borrow_mut()();
                         vpn_tiebreak_orr(
                             a,
                             b,
@@ -606,7 +655,9 @@ impl RibManager {
                 local_pref: best.local_pref_attr(),
                 med: best.med_attr(),
             };
+            checkpoint.borrow_mut()();
             let (result, evaluation) = target.evaluate_export_chain(export_pol, &ctx);
+            checkpoint.borrow_mut()();
             target.record_eval(&evaluation, best.peer);
             if let Some(trace) = target.trace() {
                 trace.policy_label = export_pol.map(|chain| {
@@ -653,6 +704,7 @@ impl RibManager {
 
             let mut modified = best.clone();
             if !result.modifications.is_empty() {
+                checkpoint.borrow_mut()();
                 let nh = rustbgpd_policy::apply_modifications(
                     std::sync::Arc::make_mut(&mut modified.attributes),
                     &result.modifications,
@@ -660,6 +712,7 @@ impl RibManager {
                 if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = nh {
                     modified.next_hop = addr;
                 }
+                checkpoint.borrow_mut()();
             }
             if super::no_advertise_export_suppressed(modified.communities()) {
                 target.gate(
@@ -701,6 +754,7 @@ impl RibManager {
                         },
                     );
                 }
+                checkpoint.borrow_mut()();
                 vpn_announce.push(modified);
             } else if let Some(trace) = target.trace() {
                 trace.staged_next_hop = Some(modified.next_hop);
@@ -719,6 +773,7 @@ impl RibManager {
             // Clean up stale multi-path entries if this identity was
             // previously advertised via Add-Path and is now single-best.
             for &path_id in existing_path_ids {
+                checkpoint.borrow_mut()();
                 if path_id != 0 {
                     vpn_withdraw.push(VpnRibRouteKey {
                         nlri_key: *key,
@@ -746,6 +801,7 @@ impl RibManager {
         &mut self,
         affected: &HashSet<VpnRibRouteKey>,
     ) {
+        let readiness = self.replacement_readiness.clone();
         self.record_deferred_vpn(affected);
         let affected_nlri: HashSet<VpnRouteKey> = affected
             .iter()
@@ -850,13 +906,15 @@ impl RibManager {
                 let member_filter = self.member_rt_filter(peer);
                 let mut vpn_announce = Vec::new();
                 let mut vpn_withdraw = Vec::new();
-                let count_delta = crate::manager::update_groups::emit_vpn_group_deltas_for_member(
-                    &stage.deltas,
-                    peer,
-                    member_filter.as_ref(),
-                    &mut vpn_announce,
-                    &mut vpn_withdraw,
-                );
+                let count_delta =
+                    crate::manager::update_groups::emit_vpn_group_deltas_for_member_with_checkpoint(
+                        &stage.deltas,
+                        peer,
+                        member_filter.as_ref(),
+                        &mut vpn_announce,
+                        &mut vpn_withdraw,
+                        &mut || super::super::replacement_readiness_checkpoint(&readiness, false),
+                    );
                 if vpn_announce.is_empty() && vpn_withdraw.is_empty() {
                     continue;
                 }
@@ -916,7 +974,9 @@ impl RibManager {
                     // IN the table — invisible to tombstones. Ride the
                     // member's extra-withdraw residue instead.
                     let lost: Vec<VpnRouteKey> = stage
-                        .member_scoped_withdraws(peer, member_filter.as_ref())
+                        .member_scoped_withdraws(peer, member_filter.as_ref(), || {
+                            super::super::replacement_readiness_checkpoint(&readiness, false);
+                        })
                         .collect();
                     if !lost.is_empty() {
                         self.pending_extra_withdraws
@@ -1011,13 +1071,14 @@ impl RibManager {
                 policy_stats: &mut *policy_stats,
                 peer_label: &target_peer_label,
             };
-            Self::stage_vpn_routes(
+            Self::stage_vpn_routes_with_checkpoint(
                 &context,
                 staged_keys,
                 &mut target,
                 rtc_filter.as_ref(),
                 &mut vpn_announce,
                 &mut vpn_withdraw,
+                &mut || super::super::replacement_readiness_checkpoint(&readiness, false),
             );
 
             if (!vpn_announce.is_empty() || !vpn_withdraw.is_empty())

@@ -6,7 +6,7 @@
 //! owns ONE staged outbound table ([`GroupRibOut`]), the export tail
 //! runs once per (group, changed prefix) instead of once per (peer,
 //! prefix), and per-member updates are derived from the shared delta by
-//! the source-flip matrix ([`emit_group_deltas_for_member`]). Peers
+//! the source-flip matrix ([`emit_group_deltas_for_member_with_checkpoint`]). Peers
 //! hitting a v1 disqualifier keep today's per-peer path entirely — the
 //! fallback is structural, and the per-peer path remains the
 //! correctness oracle (design risk 1).
@@ -59,10 +59,18 @@ pub(in crate::manager) use payload::{
     CleanPolicyTransitionInventoryBuilder, GroupDelta, GroupEvalAccumulator, GroupStageOutput,
     LaneDelta, PerClientBestPrefixStage, PolicyTransitionGroupStart, RsTagTransition, RunnerUp,
     SharedUnicastPayload, VpnGroupDelta, VpnGroupStageOutput, capture_source_attrs,
-    emit_group_deltas_for_member, emit_lane_deltas_for_member, emit_rs_tag_transitions,
-    emit_vpn_group_deltas_for_member, rt_passes, source_control_input,
+    emit_group_deltas_for_member_with_checkpoint, emit_lane_deltas_for_member_with_checkpoint,
+    emit_rs_tag_transitions_with_checkpoint, emit_vpn_group_deltas_for_member_with_checkpoint,
+    rt_passes, source_control_input,
 };
-use payload::{BatchedTransitionCounters, VpnDenialRecord, bump_counter_row};
+use payload::{
+    BatchedTransitionCounters, VpnDenialRecord, bump_counter_row, bump_counter_row_with_checkpoint,
+};
+#[cfg(test)]
+use payload::{
+    emit_group_deltas_for_member, emit_lane_deltas_for_member, emit_rs_tag_transitions,
+    emit_vpn_group_deltas_for_member,
+};
 
 use super::helpers::{LOCAL_PEER, prefix_family, routes_equal, vpn_routes_equal};
 use super::{PolicyFilteredRouteKey, RibManager, RtcMembership};
@@ -404,6 +412,7 @@ impl UpdateGroupRegistry {
         self.groups.get(id)
     }
 
+    #[cfg(test)]
     fn retained_chain_count(&self) -> usize {
         self.chains.iter().filter(|chain| chain.is_some()).count()
     }
@@ -416,6 +425,63 @@ impl UpdateGroupRegistry {
 pub(in crate::manager) struct RegroupBaseline {
     pub(in crate::manager) unicast: FxHashMap<(Prefix, u32), Route>,
     pub(in crate::manager) vpn: FxHashMap<VpnRouteKey, VpnRibRoute>,
+}
+
+/// Preserve existing wire values on overlap without growing a populated bucket
+/// array. Both input maps remain owned by the actor throughout the move.
+pub(in crate::manager) fn ensure_map_capacity_with_checkpoint<
+    K: Eq + std::hash::Hash,
+    V,
+    S: std::hash::BuildHasher + Default,
+>(
+    base: &mut std::collections::HashMap<K, V, S>,
+    capacity: usize,
+    checkpoint: &mut impl FnMut(),
+) {
+    if capacity > base.capacity() {
+        checkpoint();
+        let mut replacement =
+            std::collections::HashMap::with_capacity_and_hasher(capacity, S::default());
+        let mut entries = std::mem::take(base).into_iter();
+        for (key, value) in entries.by_ref() {
+            checkpoint();
+            replacement.insert(key, value);
+            checkpoint();
+        }
+        checkpoint();
+        drop(entries);
+        checkpoint();
+        *base = replacement;
+    }
+}
+
+fn merge_owned_maps<K: Eq + std::hash::Hash, V, S: std::hash::BuildHasher + Default>(
+    base: &mut std::collections::HashMap<K, V, S>,
+    prior: std::collections::HashMap<K, V, S>,
+    checkpoint: &mut impl FnMut(),
+) {
+    ensure_map_capacity_with_checkpoint(base, base.len().saturating_add(prior.len()), checkpoint);
+    let mut entries = prior.into_iter();
+    for (key, value) in entries.by_ref() {
+        checkpoint();
+        drop(base.insert(key, value));
+        checkpoint();
+    }
+    checkpoint();
+    drop(entries);
+    checkpoint();
+}
+
+impl RegroupBaseline {
+    fn merge_prior(&mut self, prior: Self, checkpoint: &mut impl FnMut()) {
+        merge_owned_maps(&mut self.unicast, prior.unicast, checkpoint);
+        merge_owned_maps(&mut self.vpn, prior.vpn, checkpoint);
+    }
+
+    pub(in crate::manager) fn retire_with(&mut self, checkpoint: &mut impl FnMut()) {
+        crate::adj_rib_out::release_hash_map(&mut self.unicast, checkpoint);
+        crate::adj_rib_out::release_hash_map(&mut self.vpn, checkpoint);
+    }
 }
 
 /// Extra (over-)withdraw keys a member must emit on its next resync:
@@ -574,6 +640,44 @@ pub(in crate::manager) struct GroupRibOut {
 const GROUP_FILTERED_PLACEHOLDER: IpAddr = LOCAL_PEER;
 
 impl GroupRibOut {
+    #[cfg(feature = "bench-internals")]
+    pub(in crate::manager) fn bench_otc_storage_shape(&self) -> (usize, usize) {
+        (self.otc_blocked.len(), self.otc_blocked.capacity())
+    }
+
+    fn retire_with(&mut self, checkpoint: &mut impl FnMut()) {
+        use crate::adj_rib_out::release_hash_map;
+        self.table.retire_with(checkpoint);
+        release_hash_map(&mut self.nh_overrides, checkpoint);
+        release_hash_map(&mut self.source_attrs, checkpoint);
+        release_hash_map(&mut self.source_counts, checkpoint);
+        for (_, mut paths) in self.policy_filtered.drain() {
+            release_hash_map(&mut paths, checkpoint);
+        }
+        release_hash_map(&mut self.policy_filtered, checkpoint);
+        release_hash_map(&mut self.vpn_policy_denied, checkpoint);
+        release_hash_map(&mut self.otc_blocked, checkpoint);
+        release_hash_map(&mut self.otc_blocked_sources, checkpoint);
+        release_hash_map(&mut self.lane_otc_blocked_counts, checkpoint);
+        release_hash_map(&mut self.vpn_member_counts, checkpoint);
+        release_hash_map(&mut self.runner_up, checkpoint);
+        release_hash_map(&mut self.lane_counts, checkpoint);
+        for _ in self.tombstones.drain() {
+            checkpoint();
+        }
+        for _ in self.vpn_tombstones.drain() {
+            checkpoint();
+        }
+        for _ in self.members.drain() {
+            checkpoint();
+        }
+        for _ in self.dirty_members.drain() {
+            checkpoint();
+        }
+        checkpoint();
+        drop(self.export_chain.take());
+        checkpoint();
+    }
     #[expect(
         clippy::too_many_arguments,
         clippy::fn_params_excessive_bools,
@@ -648,15 +752,26 @@ impl GroupRibOut {
         self.sendable.contains(&(Afi::Ipv4, Safi::RtConstrain))
     }
 
-    fn record_otc_blocked(&mut self, prefixes: &HashSet<Prefix>, blocked: &[Route]) {
-        self.otc_blocked
-            .retain(|(prefix, _), _| !prefixes.contains(prefix));
-        self.otc_blocked.extend(
-            blocked
-                .iter()
-                .cloned()
-                .map(|route| ((route.prefix, route.path_id), route)),
-        );
+    fn record_otc_blocked(
+        &mut self,
+        prefixes: &HashSet<Prefix>,
+        blocked: &[Route],
+        checkpoint: &mut impl FnMut(),
+    ) {
+        self.otc_blocked.retain(|(prefix, _), _| {
+            checkpoint();
+            !prefixes.contains(prefix)
+        });
+        // Reserve a fresh table before moving entries: in-place growth
+        // rehashes the complete route map without an actor checkpoint.
+        let mut incoming =
+            FxHashMap::with_capacity_and_hasher(blocked.len(), rustc_hash::FxBuildHasher);
+        checkpoint();
+        for route in blocked {
+            checkpoint();
+            incoming.insert((route.prefix, route.path_id), route.clone());
+        }
+        merge_owned_maps(&mut self.otc_blocked, incoming, checkpoint);
         // Rebuild the count aggregates from the refreshed map — one
         // mutation seam keeps them exact, at O(blocked residue) per
         // pass (zero in the overwhelmingly common no-OTC case). Only
@@ -668,6 +783,7 @@ impl GroupRibOut {
         self.otc_blocked_sources.clear();
         if self.per_client_best {
             for route in self.otc_blocked.values() {
+                checkpoint();
                 let slot = Self::count_slot(&route.prefix);
                 self.otc_blocked_totals[slot] += 1;
                 self.otc_blocked_sources.entry(route.peer).or_default()[slot] += 1;
@@ -680,9 +796,19 @@ impl GroupRibOut {
         member: IpAddr,
         prefixes: Option<&HashSet<Prefix>>,
     ) -> Vec<Route> {
+        self.otc_blocked_for_member_with_checkpoint(member, prefixes, &mut || {})
+    }
+
+    pub(in crate::manager) fn otc_blocked_for_member_with_checkpoint(
+        &self,
+        member: IpAddr,
+        prefixes: Option<&HashSet<Prefix>>,
+        checkpoint: &mut impl FnMut(),
+    ) -> Vec<Route> {
         let mut blocked: Vec<Route> = self
             .otc_blocked
             .values()
+            .inspect(|_| checkpoint())
             .filter(|route| {
                 route.peer != member
                     && prefixes.is_none_or(|prefixes| prefixes.contains(&route.prefix))
@@ -712,6 +838,7 @@ impl GroupRibOut {
                 // at O(members × staged) rather than O(members × lane).
                 Some(prefixes) if prefixes.len() <= self.runner_up.len() => {
                     for prefix in prefixes {
+                        checkpoint();
                         #[cfg(any(test, feature = "bench-internals"))]
                         {
                             visits += 1;
@@ -729,6 +856,7 @@ impl GroupRibOut {
                 // reason.
                 _ => {
                     for (prefix, entry) in &self.runner_up {
+                        checkpoint();
                         #[cfg(any(test, feature = "bench-internals"))]
                         {
                             visits += 1;
@@ -975,12 +1103,17 @@ impl GroupRibOut {
 
     /// Commit a pass's tag-only transitions into the source-attribute
     /// residue (the delta-borne updates ride [`Self::apply_delta`]).
-    fn commit_rs_transitions(&mut self, transitions: &[RsTagTransition]) {
+    fn commit_rs_transitions(
+        &mut self,
+        transitions: &[RsTagTransition],
+        checkpoint: &mut impl FnMut(),
+    ) {
         if self.source_control_passthrough {
             debug_assert!(transitions.is_empty());
             return;
         }
         for transition in transitions {
+            checkpoint();
             let key = (transition.prefix, transition.path_id);
             match &transition.source_attrs {
                 Some(attrs) => {
@@ -1134,11 +1267,12 @@ impl GroupRibOut {
         &mut self,
         member: IpAddr,
         filter: Option<&RtcMembership>,
+        checkpoint: &mut impl FnMut(),
     ) {
         if !self.rtc_negotiated() {
             return;
         }
-        let counts = self.vpn_member_counts_from_table(member, filter);
+        let counts = self.vpn_member_counts_from_table(member, filter, checkpoint);
         self.vpn_member_counts.insert(member, counts);
     }
 
@@ -1148,9 +1282,11 @@ impl GroupRibOut {
         &self,
         member: IpAddr,
         filter: Option<&RtcMembership>,
+        checkpoint: &mut impl FnMut(),
     ) -> [i64; 2] {
         let mut counts = [0i64; 2];
         for route in self.table.iter_vpn() {
+            checkpoint();
             if route.peer != member && rt_passes(filter, route) {
                 counts[Self::vpn_count_slot(&route.nlri.key()) - 2] += 1;
             }
@@ -1221,58 +1357,89 @@ impl GroupRibOut {
     /// from the lane's captured source attributes, exactly how staged
     /// entries are recorded), or the destination-side diff would
     /// compare wire state to a route the member never received.
+    #[cfg(test)]
     fn member_view_snapshot(
         &self,
         member: IpAddr,
         rs_control: Option<(u32, u32)>,
         rejected: &HashSet<ExactExportKey>,
     ) -> FxHashMap<(Prefix, u32), Route> {
-        use super::distribution::rs_control::{rs_control_route_rewrite, rs_control_suppressed};
-        self.table
-            .iter()
-            .filter_map(|staged| {
-                let key = (staged.prefix, staged.path_id);
-                // The substitution shares the staged slot's key, so the
-                // member-local rejection overlay applies identically.
-                if rejected.contains(&ExactExportKey::Unicast(key.0, key.1)) {
-                    return None;
-                }
-                let entry = self.adv_entry(member, &staged.prefix, staged.path_id)?;
-                let (communities, large_communities) =
-                    self.source_control_for_route(entry.route, entry.source_attrs);
-                // LAN-474: a key whose SOURCE communities suppress it
-                // toward the member was never on its wire — the
-                // snapshot records true wire state, not the shared
-                // table.
-                if rs_control_suppressed(communities, large_communities, rs_control) {
-                    return None;
-                }
-                let mut route = entry.route.clone();
-                rs_control_route_rewrite(&mut route, large_communities, rs_control);
-                Some((key, route))
-            })
-            .collect()
+        self.member_view_snapshot_with_checkpoint(member, rs_control, rejected, &mut |_| {})
     }
 
-    /// VPN sibling of [`Self::member_view_snapshot`], filtered by the
+    fn member_view_snapshot_with_checkpoint(
+        &self,
+        member: IpAddr,
+        rs_control: Option<(u32, u32)>,
+        rejected: &HashSet<ExactExportKey>,
+        checkpoint: &mut impl FnMut(bool),
+    ) -> FxHashMap<(Prefix, u32), Route> {
+        use super::distribution::rs_control::{rs_control_route_rewrite, rs_control_suppressed};
+        checkpoint(true);
+        let mut snapshot =
+            FxHashMap::with_capacity_and_hasher(self.table.len(), rustc_hash::FxBuildHasher);
+        for entry in self.table.iter().filter_map(|staged| {
+            checkpoint(false);
+            let key = (staged.prefix, staged.path_id);
+            // The substitution shares the staged slot's key, so the
+            // member-local rejection overlay applies identically.
+            if rejected.contains(&ExactExportKey::Unicast(key.0, key.1)) {
+                return None;
+            }
+            let entry = self.adv_entry(member, &staged.prefix, staged.path_id)?;
+            let (communities, large_communities) =
+                self.source_control_for_route(entry.route, entry.source_attrs);
+            // LAN-474: a key whose SOURCE communities suppress it
+            // toward the member was never on its wire — the
+            // snapshot records true wire state, not the shared
+            // table.
+            if rs_control_suppressed(communities, large_communities, rs_control) {
+                return None;
+            }
+            let mut route = entry.route.clone();
+            rs_control_route_rewrite(&mut route, large_communities, rs_control);
+            Some((key, route))
+        }) {
+            snapshot.insert(entry.0, entry.1);
+        }
+        checkpoint(true);
+        snapshot
+    }
+
+    /// VPN sibling of [`Self::member_view_snapshot_with_checkpoint`], filtered by the
     /// member's Φ at snapshot time — the true advertised set (design
     /// §2.4). Empty when the group does not stage VPN (the substrate's
     /// VPN maps stay unused).
+    #[cfg(test)]
     fn member_vpn_view_snapshot(
         &self,
         member: IpAddr,
         filter: Option<&RtcMembership>,
         rejected: &HashSet<ExactExportKey>,
     ) -> FxHashMap<VpnRouteKey, VpnRibRoute> {
-        self.table
-            .iter_vpn()
-            .filter(|route| {
-                route.peer != member
-                    && rt_passes(filter, route)
-                    && !rejected.contains(&ExactExportKey::Vpn(route.key()))
-            })
-            .map(|route| (route.nlri.key(), route.clone()))
-            .collect()
+        self.member_vpn_view_snapshot_with_checkpoint(member, filter, rejected, &mut |_| {})
+    }
+
+    fn member_vpn_view_snapshot_with_checkpoint(
+        &self,
+        member: IpAddr,
+        filter: Option<&RtcMembership>,
+        rejected: &HashSet<ExactExportKey>,
+        checkpoint: &mut impl FnMut(bool),
+    ) -> FxHashMap<VpnRouteKey, VpnRibRoute> {
+        checkpoint(true);
+        let mut snapshot =
+            FxHashMap::with_capacity_and_hasher(self.table.vpn_len(), rustc_hash::FxBuildHasher);
+        for route in self.table.iter_vpn().filter(|route| {
+            checkpoint(false);
+            route.peer != member
+                && rt_passes(filter, route)
+                && !rejected.contains(&ExactExportKey::Vpn(route.key()))
+        }) {
+            snapshot.insert(route.nlri.key(), route.clone());
+        }
+        checkpoint(true);
+        snapshot
     }
 
     /// Refresh the persistent group-verdict denial set for one staging
@@ -1283,11 +1450,16 @@ impl GroupRibOut {
         &mut self,
         staged: &HashSet<Prefix>,
         current: &[(PolicyFilteredRouteKey, Option<PolicyLabel>)],
+        checkpoint: &mut impl FnMut(),
     ) {
         for prefix in staged {
-            self.policy_filtered.remove(prefix);
+            checkpoint();
+            if let Some(mut denials) = self.policy_filtered.remove(prefix) {
+                crate::adj_rib_out::release_hash_map(&mut denials, checkpoint);
+            }
         }
         for (key, label) in current {
+            checkpoint();
             self.policy_filtered
                 .entry(key.prefix)
                 .or_default()
@@ -1314,41 +1486,76 @@ impl GroupRibOut {
         member: IpAddr,
         prefixes: &HashSet<Prefix>,
     ) -> Vec<PolicyFilteredRouteKey> {
+        self.policy_filtered_for_member_with_checkpoint(member, prefixes, &mut || {})
+    }
+
+    pub(in crate::manager) fn policy_filtered_for_member_with_checkpoint(
+        &self,
+        member: IpAddr,
+        prefixes: &HashSet<Prefix>,
+        checkpoint: &mut impl FnMut(),
+    ) -> Vec<PolicyFilteredRouteKey> {
         #[cfg(any(test, feature = "bench-internals"))]
         let mut visits = 0_usize;
-        let mut restamped = Vec::new();
-        let mut collect =
-            |prefix: Prefix, denials: &FxHashMap<(IpAddr, u32), Option<PolicyLabel>>| {
-                restamped.extend(
-                    denials
-                        .keys()
-                        .filter(|(source_peer, _)| *source_peer != member)
-                        .map(|&(source_peer, path_id)| PolicyFilteredRouteKey {
-                            target_peer: member,
-                            source_peer,
-                            prefix,
-                            path_id,
-                        }),
-                );
-            };
+        let capacity = if prefixes.len() <= self.policy_filtered.len() {
+            prefixes
+                .iter()
+                .map(|prefix| {
+                    checkpoint();
+                    self.policy_filtered.get(prefix).map_or(0, FxHashMap::len)
+                })
+                .sum()
+        } else {
+            self.policy_filtered
+                .iter()
+                .map(|(prefix, denials)| {
+                    checkpoint();
+                    if prefixes.contains(prefix) {
+                        denials.len()
+                    } else {
+                        0
+                    }
+                })
+                .sum()
+        };
+        let mut restamped = Vec::with_capacity(capacity);
+        let mut collect = |prefix: Prefix,
+                           denials: &FxHashMap<(IpAddr, u32), Option<PolicyLabel>>,
+                           checkpoint: &mut dyn FnMut()| {
+            checkpoint();
+            restamped.extend(
+                denials
+                    .keys()
+                    .inspect(|_| checkpoint())
+                    .filter(|(source_peer, _)| *source_peer != member)
+                    .map(|&(source_peer, path_id)| PolicyFilteredRouteKey {
+                        target_peer: member,
+                        source_peer,
+                        prefix,
+                        path_id,
+                    }),
+            );
+        };
         if prefixes.len() <= self.policy_filtered.len() {
             for prefix in prefixes {
+                checkpoint();
                 #[cfg(any(test, feature = "bench-internals"))]
                 {
                     visits += 1;
                 }
                 if let Some(denials) = self.policy_filtered.get(prefix) {
-                    collect(*prefix, denials);
+                    collect(*prefix, denials, checkpoint);
                 }
             }
         } else {
             for (prefix, denials) in &self.policy_filtered {
+                checkpoint();
                 #[cfg(any(test, feature = "bench-internals"))]
                 {
                     visits += 1;
                 }
                 if prefixes.contains(prefix) {
-                    collect(*prefix, denials);
+                    collect(*prefix, denials, checkpoint);
                 }
             }
         }
@@ -1503,11 +1710,13 @@ impl RibManager {
         let residue = self
             .group_ribs
             .values()
+            .inspect(|_| self.replacement_checkpoint(false))
             .map(|group| group.tombstones.len() + group.vpn_tombstones.len())
             .sum::<usize>()
             + self
                 .pending_extra_withdraws
                 .values()
+                .inspect(|_| self.replacement_checkpoint(false))
                 .map(|extras| extras.unicast.len() + extras.vpn.len())
                 .sum::<usize>();
         self.metrics
@@ -1522,8 +1731,16 @@ impl RibManager {
     /// Callers must have emitted the pending extra withdraws (or shown
     /// them empty/retained) before calling: this drops them.
     pub(in crate::manager) fn clear_grouped_member_synced(&mut self, peer: IpAddr) {
-        self.pending_regroup_baseline.remove(&peer);
-        self.pending_extra_withdraws.remove(&peer);
+        let readiness = self.replacement_readiness.clone();
+        let mut checkpoint =
+            || super::replacement_readiness_checkpoint_at(&readiness, "retirement", false);
+        if let Some(mut baseline) = self.pending_regroup_baseline.remove(&peer) {
+            baseline.retire_with(&mut checkpoint);
+        }
+        if let Some(mut extras) = self.pending_extra_withdraws.remove(&peer) {
+            super::retire_hash_set(&mut extras.unicast, &mut checkpoint);
+            super::retire_hash_set(&mut extras.vpn, &mut checkpoint);
+        }
         // A completed resync leaves the member advertising exactly the
         // Φ-filtered table — the seam where the incremental per-member
         // VPN counters (which may have drifted across the dirty window)
@@ -1532,11 +1749,11 @@ impl RibManager {
         if let Some(gid) = self.grouped_member_of(peer)
             && let Some(group) = self.group_ribs.get_mut(&gid)
         {
-            group.recompute_vpn_member_counts(peer, filter.as_ref());
+            group.recompute_vpn_member_counts(peer, filter.as_ref(), &mut checkpoint);
             group.dirty_members.remove(&peer);
             if group.dirty_members.is_empty() {
-                group.tombstones.clear();
-                group.vpn_tombstones.clear();
+                super::retire_hash_set(&mut group.tombstones, &mut checkpoint);
+                super::retire_hash_set(&mut group.vpn_tombstones, &mut checkpoint);
             }
         }
         self.refresh_group_residue_gauge();
@@ -1587,6 +1804,8 @@ impl RibManager {
         old: &RtcMembership,
         new: &RtcMembership,
     ) {
+        let readiness = self.replacement_readiness.clone();
+        let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
         let mut vpn_announce: Vec<VpnRibRoute> = Vec::new();
         let mut vpn_withdraw: Vec<VpnRibRouteKey> = Vec::new();
         let mut count_delta = [0i64; 2];
@@ -1607,6 +1826,7 @@ impl RibManager {
                 return;
             };
             for route in group.table.iter_vpn() {
+                checkpoint();
                 if route.peer == peer {
                     continue;
                 }
@@ -1622,7 +1842,12 @@ impl RibManager {
                         let key = route.nlri.key();
                         count_delta[GroupRibOut::vpn_count_slot(&key) - 2] += 1;
                         let label = group.permit_policy_label.clone();
-                        bump_counter_row(&mut permit_rows, label.as_ref(), PolicyAction::Permit);
+                        bump_counter_row_with_checkpoint(
+                            &mut permit_rows,
+                            label.as_ref(),
+                            PolicyAction::Permit,
+                            &mut || checkpoint(),
+                        );
                         vpn_announce.push(route.clone());
                     }
                     (true, false) => {
@@ -1643,9 +1868,18 @@ impl RibManager {
                     .entry(peer)
                     .or_default()
                     .vpn
-                    .extend(vpn_withdraw.iter().map(|key| key.nlri_key));
+                    .extend(
+                        vpn_withdraw
+                            .iter()
+                            .inspect(|_| checkpoint())
+                            .map(|key| key.nlri_key),
+                    );
                 self.refresh_group_residue_gauge();
             }
+            super::retire_vec(&mut vpn_announce, &mut || checkpoint());
+            super::retire_vec(&mut vpn_withdraw, &mut || checkpoint());
+            super::retire_vec(&mut permit_rows, &mut || checkpoint());
+            self.replacement_checkpoint(true);
             return;
         }
         if vpn_announce.is_empty() && vpn_withdraw.is_empty() {
@@ -1656,7 +1890,11 @@ impl RibManager {
             // resync recompute restores exactness.
             group.apply_vpn_member_count_delta(peer, count_delta);
         }
-        let withdraw_keys: Vec<VpnRouteKey> = vpn_withdraw.iter().map(|key| key.nlri_key).collect();
+        let mut withdraw_keys: Vec<VpnRouteKey> = vpn_withdraw
+            .iter()
+            .inspect(|_| checkpoint())
+            .map(|key| key.nlri_key)
+            .collect();
         if self.try_send_and_commit_outbound_update(
             peer,
             OutboundCommitBatch {
@@ -1676,17 +1914,22 @@ impl RibManager {
                 .entry(peer)
                 .or_default()
                 .vpn
-                .extend(withdraw_keys);
+                .extend(withdraw_keys.drain(..).inspect(|_| checkpoint()));
             self.refresh_group_residue_gauge();
         }
+        super::retire_vec(&mut withdraw_keys, &mut || checkpoint());
+        super::retire_vec(&mut permit_rows, &mut || checkpoint());
+        self.replacement_checkpoint(true);
     }
 
     /// Apply aggregated export-policy verdict rows to a peer's counters
     /// (integer adds — no per-(prefix × peer) prometheus lookups).
     fn bump_export_counters(&mut self, peer: IpAddr, rows: &[(Option<String>, PolicyAction, u64)]) {
+        let readiness = self.replacement_readiness.clone();
         let stats = self.export_policy_stats.entry(peer).or_default();
         let peer_label = peer.to_string();
         for (policy, action, n) in rows {
+            super::replacement_readiness_checkpoint(&readiness, false);
             if *n == 0 {
                 continue;
             }
@@ -1718,6 +1961,8 @@ impl RibManager {
     }
 
     fn leave_group_without_gauge_refresh(&mut self, gid: usize, peer: IpAddr) {
+        let readiness = self.replacement_readiness.clone();
+        let checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
         let Some(group) = self.group_ribs.get_mut(&gid) else {
             return;
         };
@@ -1725,11 +1970,20 @@ impl RibManager {
         group.vpn_member_counts.remove(&peer);
         group.dirty_members.remove(&peer);
         if group.dirty_members.is_empty() {
-            group.tombstones.clear();
-            group.vpn_tombstones.clear();
+            super::retire_hash_set(&mut group.tombstones, &mut || checkpoint());
+            super::retire_hash_set(&mut group.vpn_tombstones, &mut || checkpoint());
         }
         if group.members.is_empty() {
-            self.group_ribs.remove(&gid);
+            self.remove_group_with_readiness(gid);
+        }
+    }
+
+    fn remove_group_with_readiness(&mut self, gid: usize) {
+        if let Some(mut group) = self.group_ribs.remove(&gid) {
+            group.retire_with(&mut || self.replacement_checkpoint_at("retirement", false));
+            self.replacement_checkpoint_at("retirement", true);
+            drop(group);
+            self.replacement_checkpoint_at("retirement", true);
         }
     }
 
@@ -1945,13 +2199,19 @@ impl RibManager {
     /// bookkeeping.
     fn refresh_update_group_gauges(&mut self) {
         self.reclaim_unused_update_group_policies();
-        let mut member_counts: HashMap<usize, i64> = HashMap::new();
+        let readiness = self.replacement_readiness.clone();
+        let mut checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
+        self.replacement_checkpoint(true);
+        let mut member_counts: HashMap<usize, i64> =
+            HashMap::with_capacity(self.update_groups.members.len());
+        self.replacement_checkpoint(true);
         let mut fallback = 0i64;
         // Recomputed for every member on each call, so the per-peer group
         // gauge is refreshed on every membership-change path (join, leave,
         // grouped↔grouped move, grouped↔fallback) — no guard. Peers that
         // left the map are dropped here and reaped on peer-down.
         for (peer, membership) in &self.update_groups.members {
+            checkpoint();
             let group_id = if let GroupMembership::Grouped(id) = membership {
                 *member_counts.entry(*id).or_default() += 1;
                 i64::try_from(*id).unwrap_or(i64::MAX)
@@ -1966,6 +2226,7 @@ impl RibManager {
             .set_update_groups(i64::try_from(member_counts.len()).unwrap_or(i64::MAX));
         self.metrics.set_update_group_fallback_peers(fallback);
         for id in 0..self.update_groups.groups.len() {
+            checkpoint();
             match member_counts.get(&id) {
                 Some(count) => self
                     .metrics
@@ -1973,6 +2234,9 @@ impl RibManager {
                 None => self.metrics.remove_update_group_members(&id.to_string()),
             }
         }
+        self.replacement_checkpoint(true);
+        crate::adj_rib_out::release_hash_map(&mut member_counts, &mut checkpoint);
+        self.replacement_checkpoint(true);
         // Group lifecycle (join builds a lane, the last leave drops
         // it) mutates lane state too, so the membership seams refresh
         // the lane gauge alongside the staging seam.
@@ -1985,8 +2249,19 @@ impl RibManager {
         if self.update_groups.reclamation_deferred {
             return;
         }
-        let mut groups: HashSet<usize> = self.group_ribs.keys().copied().collect();
+        let readiness = self.replacement_readiness.clone();
+        let mut checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
+        let group_bound = self
+            .group_ribs
+            .len()
+            .saturating_add(self.update_groups.members.len())
+            .saturating_add(5);
+        self.replacement_checkpoint(true);
+        let mut groups: HashSet<usize> = HashSet::with_capacity(group_bound);
+        self.replacement_checkpoint(true);
+        groups.extend(self.group_ribs.keys().inspect(|_| checkpoint()).copied());
         groups.extend(self.update_groups.members.values().filter_map(|member| {
+            checkpoint();
             if let GroupMembership::Grouped(id) = member {
                 Some(*id)
             } else {
@@ -2000,23 +2275,42 @@ impl RibManager {
             groups.insert(prestage.destination);
         }
         groups.extend(self.prepared_destination);
-        let chains: HashSet<usize> = groups
-            .into_iter()
-            .filter_map(|id| self.update_groups.group_key(id).and_then(|key| key.chain))
-            .collect();
+        self.replacement_checkpoint(true);
+        let mut chains: HashSet<usize> = HashSet::with_capacity(groups.len());
+        self.replacement_checkpoint(true);
+        chains.extend(groups.drain().filter_map(|id| {
+            checkpoint();
+            self.update_groups.group_key(id).and_then(|key| key.chain)
+        }));
+        self.replacement_checkpoint(true);
+        drop(groups);
+        self.replacement_checkpoint(true);
         for (id, chain) in self.update_groups.chains.iter_mut().enumerate() {
+            checkpoint();
             if !chains.contains(&id) {
                 *chain = None;
             }
+            checkpoint();
         }
         // Heavy payloads reflect current ownership; small key slots remain
         // historical metadata, including rejected or discarded preparation.
         self.metrics.set_update_group_interned_chains(
-            i64::try_from(self.update_groups.retained_chain_count()).unwrap_or(i64::MAX),
+            i64::try_from(
+                self.update_groups
+                    .chains
+                    .iter()
+                    .inspect(|_| checkpoint())
+                    .filter(|chain| chain.is_some())
+                    .count(),
+            )
+            .unwrap_or(i64::MAX),
         );
         self.metrics.set_update_group_keys(
             i64::try_from(self.update_groups.groups.len()).unwrap_or(i64::MAX),
         );
+        self.replacement_checkpoint(true);
+        super::retire_hash_set(&mut chains, &mut checkpoint);
+        self.replacement_checkpoint(true);
     }
 
     /// Re-derive the ADR-0126 exception-lane gauge: total runner-up
@@ -2029,6 +2323,7 @@ impl RibManager {
         let entries = self
             .group_ribs
             .values()
+            .inspect(|_| self.replacement_checkpoint(false))
             .map(|group| group.runner_up.len())
             .sum::<usize>();
         self.metrics
@@ -2065,7 +2360,7 @@ impl RibManager {
                             .get(&peer)
                             .copied()
                             .unwrap_or_default(),
-                        group.vpn_member_counts_from_table(peer, filter.as_ref()),
+                        group.vpn_member_counts_from_table(peer, filter.as_ref(), &mut || {}),
                         "per-member VPN counters drifted from the table for {peer}"
                     );
                 }

@@ -4855,7 +4855,15 @@ fn step_parked_transition(manager: &mut RibManager) -> (&'static str, &'static s
             manager.pending_clean_policy_transition = Some(next);
             (kind, "continue")
         }
-        CleanPolicyTransitionAdvance::Committed(_) => (kind, "committed"),
+        CleanPolicyTransitionAdvance::Committed(mut done) => {
+            manager.with_replacement_readiness_age(done.elapsed(), |manager| {
+                done.retire_inputs(manager);
+            });
+            if let Some(reply) = done.take_reply() {
+                let _ = reply.send(Ok(crate::update::ExportPolicyCohortOutcome::Committed));
+            }
+            (kind, "committed")
+        }
         CleanPolicyTransitionAdvance::Fallback(mut failed) => {
             failed
                 .discard_uncommitted_transition(manager)
@@ -6722,6 +6730,724 @@ fn batched_pcb_fleet_n(export_policy: Option<&PolicyChain>, member_count: u16) -
 
 fn batched_pcb_fleet(export_policy: Option<&PolicyChain>) -> BatchedPcbFleet {
     batched_pcb_fleet_n(export_policy, 4)
+}
+
+/// Four routes across both unicast families keep readiness counts distinct
+/// from either family's count without depending on scheduler timing.
+fn replacement_readiness_fleet(export_policy: &PolicyChain) -> BatchedPcbFleet {
+    let (_tx, rx) = mpsc::channel(1);
+    let mut manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    manager.flush_poll_budget = Duration::ZERO;
+    let probes = Arc::new(AtomicUsize::new(0));
+    let reuses = Arc::new(AtomicUsize::new(0));
+    let members: Vec<IpAddr> = (1..=4)
+        .map(|index| IpAddr::V4(Ipv4Addr::new(10, 54, 0, index)))
+        .collect();
+    let mut receivers = Vec::new();
+    for (index, &peer) in members.iter().enumerate() {
+        manager.handle_update(RibUpdate::SetPeerExportEncoder {
+            peer,
+            session_id: 0,
+            encoder: Arc::new(CohortExactEncoder {
+                owner: u64::try_from(index + 1).unwrap(),
+                profile: 54,
+                max_len: 4_096,
+                generation: AtomicUsize::new(0),
+                advance_generation: false,
+                probes: Arc::clone(&probes),
+                reuses: Arc::clone(&reuses),
+            }),
+        });
+        receivers.push(register_direct_peer_with_families(
+            &mut manager,
+            peer,
+            vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)],
+        ));
+    }
+    let source = Ipv4Addr::new(192, 0, 2, 54);
+    let shared_prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let mut announced = vec![
+        make_route(shared_prefix, source),
+        make_route(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24), source),
+    ];
+    for address in ["2001:db8:54::", "2001:db8:55::"] {
+        let mut route = make_v6_route(
+            Ipv6Prefix::new(address.parse().unwrap(), 48),
+            "2001:db8::54".parse().unwrap(),
+        );
+        route.peer = IpAddr::V4(source);
+        announced.push(route);
+    }
+    manager.handle_update(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(source),
+        session_id: 0,
+        announced,
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    });
+    while manager.process_next_route_chunk() {}
+    manager
+        .apply_export_policy_replacements_synchronously(batch_replacements(&members, export_policy))
+        .unwrap();
+    for receiver in &mut receivers {
+        while receiver.try_recv().is_ok() {}
+    }
+    assert_eq!(manager.loc_rib.len(), 4);
+    manager.replacement_readiness_receipts.clear();
+    BatchedPcbFleet {
+        manager,
+        members,
+        receivers,
+        shared_prefix,
+        probes,
+        reuses,
+    }
+}
+
+fn queue_replacement_readiness(
+    tx: &mpsc::Sender<crate::update::RibReadinessQuery>,
+) -> oneshot::Receiver<Result<usize, crate::update::RibReadinessError>> {
+    let (reply, response) = oneshot::channel();
+    tx.try_send(crate::update::RibReadinessQuery::LocRibCount { reply })
+        .unwrap();
+    response
+}
+
+#[test]
+fn replacement_readiness_nested_rollback_keeps_original_age_and_restores_receiver() {
+    let old = community_chain(0xFDE8_0001);
+    let next = community_chain(0xFDE8_0002);
+    let mut fleet = replacement_readiness_fleet(&old);
+    let (tx, rx) = mpsc::channel(8);
+    fleet.manager.readiness_rx = Some(rx);
+    fleet.manager.with_replacement_readiness_age(
+        super::super::MAX_HEALTHY_POLICY_TRANSITION_AGE,
+        |manager| {
+            let original = manager.replacement_readiness.clone().unwrap();
+            let mut response = queue_replacement_readiness(&tx);
+            manager.with_replacement_readiness_age(Duration::ZERO, |manager| {
+                assert!(Arc::ptr_eq(
+                    &original,
+                    manager.replacement_readiness.as_ref().unwrap()
+                ));
+                manager.replacement_checkpoint(true);
+                assert_eq!(
+                    response.try_recv().unwrap(),
+                    Err(crate::update::RibReadinessError::PolicyTransitionStalled)
+                );
+                manager
+                    .restore_export_policy_replacements_synchronously(batch_replacements(
+                        &fleet.members,
+                        &next,
+                    ))
+                    .unwrap();
+                assert!(manager.replacement_readiness_receipts.is_empty());
+                assert!(manager.readiness_rx.is_none());
+            });
+        },
+    );
+    assert!(fleet.manager.replacement_readiness.is_none());
+    assert!(fleet.manager.readiness_rx.is_some());
+    assert_eq!(fleet.manager.replacement_readiness_receipts.len(), 1);
+    let receipt = &fleet.manager.replacement_readiness_receipts[0];
+    assert_eq!((receipt.count, receipt.serviced), (4, 1));
+    assert!(receipt.elapsed >= super::super::MAX_HEALTHY_POLICY_TRANSITION_AGE);
+    assert!(receipt.max_gap <= receipt.elapsed);
+    let mut response = queue_replacement_readiness(&tx);
+    fleet
+        .manager
+        .with_replacement_readiness_age(Duration::ZERO, |_| {});
+    assert_eq!(response.try_recv().unwrap(), Ok(4));
+    assert_eq!(fleet.manager.replacement_readiness_receipts.len(), 2);
+    let mut response = queue_replacement_readiness(&tx);
+    fleet.manager.replacement_checkpoint(true);
+    assert!(matches!(
+        response.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+    fleet.manager.drain_readiness_queries(None);
+    assert_eq!(response.try_recv().unwrap(), Ok(4));
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the regression checks interior readiness, ordinary-channel isolation, and terminal acknowledgement in each production branch"
+)]
+fn replacement_readiness_services_production_interiors_before_ack_and_queued_mutation() {
+    for (stage, deny_all) in [
+        ("shared_inventory", false),
+        ("shared_inventory", true),
+        ("fallback_baseline", false),
+        ("family_commit", false),
+        ("outbound_limits", false),
+        ("retirement", false),
+        ("refresh", false),
+    ] {
+        let old = if stage == "outbound_limits" {
+            PolicyChain::new(vec![Policy {
+                entries: vec![],
+                default_action: PolicyAction::Deny,
+            }])
+        } else {
+            community_chain(0xFDE8_0001)
+        };
+        let next = if deny_all {
+            PolicyChain::new(vec![Policy {
+                entries: vec![],
+                default_action: PolicyAction::Deny,
+            }])
+        } else if matches!(
+            stage,
+            "fallback_baseline" | "family_commit" | "outbound_limits"
+        ) {
+            peer_context_chain()
+        } else {
+            community_chain(0xFDE8_0002)
+        };
+        let mut fleet = replacement_readiness_fleet(&old);
+        if stage == "outbound_limits" {
+            for &peer in &fleet.members {
+                let limits = fleet
+                    .manager
+                    .outbound_prefix_limits
+                    .entry(peer)
+                    .or_default();
+                for afi in [Afi::Ipv4, Afi::Ipv6] {
+                    limits.family_mut(afi).unwrap().limit = std::num::NonZeroU32::new(1);
+                }
+            }
+        }
+        let (readiness_tx, readiness_rx) = mpsc::channel(8);
+        fleet.manager.readiness_rx = Some(readiness_rx);
+        let (query_tx, query_rx) = mpsc::channel(1);
+        fleet.manager.query_rx = query_rx;
+        let (general_reply, general_response) = oneshot::channel();
+        query_tx
+            .try_send(RibUpdate::QueryLocRibCount {
+                reply: general_reply,
+            })
+            .unwrap();
+        let general_response = Arc::new(Mutex::new(general_response));
+        let (mutation_tx, mutation_rx) = mpsc::channel(1);
+        fleet.manager.rx = mutation_rx;
+        let source = Ipv4Addr::new(192, 0, 2, 54);
+        mutation_tx
+            .try_send(RibUpdate::RoutesReceived {
+                peer: IpAddr::V4(source),
+                session_id: 0,
+                announced: vec![make_route(
+                    Ipv4Prefix::new(Ipv4Addr::new(198, 18, 54, 0), 24),
+                    source,
+                )],
+                withdrawn: vec![],
+                flowspec_announced: vec![],
+                flowspec_withdrawn: vec![],
+                evpn_announced: vec![],
+                evpn_withdrawn: vec![],
+            })
+            .unwrap();
+        let (reply, response) = oneshot::channel();
+        let response = Arc::new(Mutex::new(response));
+        let visits = Arc::new(AtomicUsize::new(0));
+        let terminals = Arc::new(AtomicUsize::new(0));
+        let pending = Mutex::new(None);
+        fleet.manager.replacement_readiness_test_hook = Some(Arc::new({
+            let readiness_tx = readiness_tx.clone();
+            let general_response = Arc::clone(&general_response);
+            let response = Arc::clone(&response);
+            let visits = Arc::clone(&visits);
+            let terminals = Arc::clone(&terminals);
+            move |observed| {
+                if observed != stage && observed != "terminal_cleanup" {
+                    return;
+                }
+                assert!(
+                    matches!(
+                        response.lock().unwrap().try_recv(),
+                        Err(oneshot::error::TryRecvError::Empty)
+                    ),
+                    "{stage}: acknowledgement preceded cleanup"
+                );
+                assert!(
+                    matches!(
+                        general_response.lock().unwrap().try_recv(),
+                        Err(oneshot::error::TryRecvError::Empty)
+                    ),
+                    "{stage}: ordinary query crossed the replacement fence"
+                );
+                assert_eq!(mutation_tx.capacity(), 0, "{stage}: mutation was consumed");
+                if observed == "terminal_cleanup" {
+                    terminals.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+                match visits.fetch_add(1, Ordering::Relaxed) {
+                    0 => {
+                        *pending.lock().unwrap() = Some(queue_replacement_readiness(&readiness_tx));
+                    }
+                    1 => assert_eq!(
+                        pending
+                            .lock()
+                            .unwrap()
+                            .as_mut()
+                            .unwrap()
+                            .try_recv()
+                            .unwrap(),
+                        Ok(4),
+                        "{stage}: readiness must be serviced before the next interior observation"
+                    ),
+                    _ => {}
+                }
+            }
+        }));
+        if stage == "refresh" {
+            fleet
+                .manager
+                .with_replacement_readiness_age(Duration::ZERO, |manager| {
+                    manager.send_route_refresh_response(fleet.members[0], Afi::Ipv4, Safi::Unicast);
+                });
+            reply.send(Ok(())).unwrap();
+        } else {
+            // A pre-existing dirty member outside the replacement batch must
+            // also finish the forced repair before its command acknowledges.
+            let members = if stage == "family_commit" {
+                fleet.manager.mark_outbound_dirty(fleet.members[3]);
+                &fleet.members[..3]
+            } else {
+                &fleet.members
+            };
+            fleet
+                .manager
+                .handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+                    replacements: batch_replacements(members, &next),
+                    reply,
+                });
+        }
+        assert!(
+            visits.load(Ordering::Relaxed) >= 2,
+            "{stage}: interior hook was not exercised"
+        );
+        assert_eq!(
+            terminals.load(Ordering::Relaxed),
+            1,
+            "{stage}: nested scope finalized early"
+        );
+        assert_eq!(response.lock().unwrap().try_recv().unwrap(), Ok(()));
+        assert!(fleet.manager.replacement_readiness.is_none());
+        assert!(fleet.manager.pending_regroup_baseline.is_empty());
+        assert!(fleet.manager.dirty_peers.is_empty());
+        assert_eq!(fleet.manager.replacement_readiness_receipts.len(), 1);
+        assert_eq!(fleet.manager.replacement_readiness_receipts[0].serviced, 1);
+        assert_eq!(fleet.manager.loc_rib.len(), 4);
+        if stage == "outbound_limits" {
+            for peer in &fleet.members {
+                let rib_out = &fleet.manager.adj_ribs_out[peer];
+                assert_eq!(rib_out.len(), 2);
+                for afi in [Afi::Ipv4, Afi::Ipv6] {
+                    assert_eq!(
+                        rib_out
+                            .iter()
+                            .filter(|route| prefix_family(&route.prefix).0 == afi)
+                            .count(),
+                        1
+                    );
+                    let family = fleet.manager.outbound_prefix_limits[peer]
+                        .family(afi)
+                        .unwrap();
+                    assert_eq!(family.limit.unwrap().get(), 1);
+                    assert!(family.blocking);
+                }
+            }
+        }
+        fleet.manager.replacement_readiness_test_hook = None;
+        for receiver in &mut fleet.receivers {
+            while receiver.try_recv().is_ok() {}
+        }
+        let mutation = fleet.manager.rx.try_recv().unwrap();
+        fleet.manager.handle_update(mutation);
+        while fleet.manager.process_next_route_chunk() {}
+        assert_eq!(fleet.manager.loc_rib.len(), 5);
+        let mut readiness = queue_replacement_readiness(&readiness_tx);
+        fleet.manager.drain_readiness_queries(None);
+        assert_eq!(readiness.try_recv().unwrap(), Ok(5));
+        let query = fleet.manager.query_rx.try_recv().unwrap();
+        fleet.manager.handle_update(query);
+        assert_eq!(general_response.lock().unwrap().try_recv().unwrap(), 5);
+    }
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the terminal matrix keeps branch setup, last-cleanup observation, and receiver restoration together"
+)]
+fn replacement_readiness_terminal_paths_restore_service_before_ack() {
+    for case in [
+        "empty",
+        "missing",
+        "duplicate",
+        "rollback_duplicate",
+        "precondition",
+        "closed_outbound",
+        "exact_reject",
+    ] {
+        let old = community_chain(0xFDE8_0001);
+        let next = community_chain(0xFDE8_0002);
+        let mut fleet = replacement_readiness_fleet(&old);
+        let (readiness_tx, readiness_rx) = mpsc::channel(8);
+        fleet.manager.readiness_rx = Some(readiness_rx);
+        let mut replacements = batch_replacements(&fleet.members, &next);
+        match case {
+            "empty" => replacements.clear(),
+            "missing" => replacements[0].peer = "192.0.2.254".parse().unwrap(),
+            "duplicate" | "rollback_duplicate" => replacements.push(replacements[0].clone()),
+            "precondition" => {
+                fleet.manager.pending_clean_policy_transition = Some(
+                    super::distribution::PendingCleanPolicyTransition::new(Vec::new(), None),
+                );
+            }
+            "closed_outbound" => fleet.receivers[0].close(),
+            "exact_reject" => {
+                fleet.manager.peer_export_encoders.insert(
+                    fleet.members[0],
+                    Arc::new(CohortExactEncoder {
+                        owner: 1,
+                        profile: 54,
+                        max_len: 0,
+                        generation: AtomicUsize::new(0),
+                        advance_generation: false,
+                        probes: Arc::clone(&fleet.probes),
+                        reuses: Arc::clone(&fleet.reuses),
+                    }),
+                );
+            }
+            _ => unreachable!(),
+        }
+        let (reply, response) = oneshot::channel();
+        let response = Arc::new(Mutex::new(response));
+        let terminal_readiness = Arc::new(Mutex::new(None));
+        fleet.manager.replacement_readiness_test_hook = Some(Arc::new({
+            let response = Arc::clone(&response);
+            let terminal_readiness = Arc::clone(&terminal_readiness);
+            let readiness_tx = readiness_tx.clone();
+            move |stage| {
+                if stage == "terminal_cleanup" {
+                    assert!(
+                        matches!(
+                            response.lock().unwrap().try_recv(),
+                            Err(oneshot::error::TryRecvError::Empty)
+                        ),
+                        "{case}: acknowledgement preceded terminal cleanup"
+                    );
+                    let mut pending = terminal_readiness.lock().unwrap();
+                    assert!(pending.is_none(), "{case}: nested context finalized twice");
+                    *pending = Some(queue_replacement_readiness(&readiness_tx));
+                }
+            }
+        }));
+        if case == "rollback_duplicate" {
+            let result = fleet
+                .manager
+                .restore_export_policy_replacements_synchronously(replacements)
+                .map(|_| ());
+            reply.send(result).unwrap();
+        } else {
+            fleet
+                .manager
+                .handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+                    replacements,
+                    reply,
+                });
+        }
+        assert_eq!(
+            response.lock().unwrap().try_recv().unwrap().is_err(),
+            matches!(case, "rollback_duplicate" | "precondition"),
+            "{case}"
+        );
+        assert_eq!(
+            terminal_readiness
+                .lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .try_recv()
+                .unwrap(),
+            Ok(4),
+            "{case}: terminal request was left behind the restored receiver"
+        );
+        assert!(fleet.manager.replacement_readiness.is_none(), "{case}");
+        assert!(fleet.manager.readiness_rx.is_some(), "{case}");
+        assert_eq!(
+            fleet.manager.replacement_readiness_receipts.len(),
+            1,
+            "{case}"
+        );
+        if case == "closed_outbound" {
+            assert_eq!(
+                fleet.manager.peer_export_policies[&fleet.members[0]].as_ref(),
+                Some(&next),
+                "closed outbound emission must not undo the accepted policy replacement"
+            );
+        }
+        if case == "exact_reject" {
+            assert!(!fleet.manager.peer_unexportable[&fleet.members[0]].is_empty());
+        }
+        fleet.manager.replacement_readiness_test_hook = None;
+        fleet.manager.pending_clean_policy_transition = None;
+        let mut readiness = queue_replacement_readiness(&readiness_tx);
+        fleet.manager.drain_readiness_queries(None);
+        assert_eq!(readiness.try_recv().unwrap(), Ok(4), "{case}");
+    }
+}
+
+#[test]
+fn replacement_readiness_closed_forward_and_rollback_replies_keep_their_semantics() {
+    for case in [
+        "forward_closed_before",
+        "forward_closed_inside",
+        "rollback_closed_before",
+    ] {
+        let old = community_chain(0xFDE8_0001);
+        let next = community_chain(0xFDE8_0002);
+        let mut fleet = replacement_readiness_fleet(&old);
+        let (readiness_tx, readiness_rx) = mpsc::channel(8);
+        fleet.manager.readiness_rx = Some(readiness_rx);
+        let (reply, response) = oneshot::channel();
+        let response = Arc::new(Mutex::new(Some(response)));
+        if case == "forward_closed_before" {
+            drop(response.lock().unwrap().take());
+        }
+        let terminal_readiness = Arc::new(Mutex::new(None));
+        let closed_inside = Arc::new(AtomicBool::new(false));
+        fleet.manager.replacement_readiness_test_hook = Some(Arc::new({
+            let response = Arc::clone(&response);
+            let terminal_readiness = Arc::clone(&terminal_readiness);
+            let closed_inside = Arc::clone(&closed_inside);
+            move |stage| {
+                if case == "forward_closed_inside" && stage == "shared_inventory" {
+                    drop(response.lock().unwrap().take());
+                    closed_inside.store(true, Ordering::Relaxed);
+                }
+                if stage == "terminal_cleanup" {
+                    let mut pending = terminal_readiness.lock().unwrap();
+                    assert!(pending.is_none());
+                    *pending = Some(queue_replacement_readiness(&readiness_tx));
+                }
+            }
+        }));
+        let replacements = batch_replacements(&fleet.members, &next);
+        if case == "rollback_closed_before" {
+            let (rollback_reply, rollback_response) = oneshot::channel();
+            drop(rollback_response);
+            fleet
+                .manager
+                .handle_update(RibUpdate::RestorePeerExportPoliciesAuthoritatively {
+                    replacements,
+                    reply: rollback_reply,
+                });
+        } else {
+            fleet
+                .manager
+                .handle_update(RibUpdate::ReplacePeerExportPoliciesAuthoritatively {
+                    replacements,
+                    reply,
+                });
+        }
+        assert_eq!(
+            terminal_readiness
+                .lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .try_recv()
+                .unwrap(),
+            Ok(4),
+            "{case}"
+        );
+        let expected = if case == "forward_closed_before" {
+            &old
+        } else {
+            &next
+        };
+        for peer in &fleet.members {
+            assert_eq!(
+                fleet.manager.peer_export_policies[peer].as_ref(),
+                Some(expected),
+                "{case}"
+            );
+        }
+        if case == "forward_closed_inside" {
+            assert!(closed_inside.load(Ordering::Relaxed));
+        }
+        if case == "forward_closed_before" {
+            assert!(
+                fleet
+                    .receivers
+                    .iter_mut()
+                    .all(|receiver| receiver.try_recv().is_err())
+            );
+        }
+        assert!(fleet.manager.replacement_readiness.is_none());
+        assert!(fleet.manager.readiness_rx.is_some());
+        assert_eq!(fleet.manager.replacement_readiness_receipts.len(), 1);
+    }
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the regression supplies two identities per non-unicast family and checks both atomic announce and withdrawal commits"
+)]
+fn replacement_readiness_services_each_family_commit_without_changing_loc_rib_count() {
+    let mut fleet = replacement_readiness_fleet(&community_chain(0xFDE8_0001));
+    let peer = "10.54.0.9".parse().unwrap();
+    fleet
+        .manager
+        .handle_update(RibUpdate::SetPeerExportEncoder {
+            peer,
+            session_id: 0,
+            encoder: Arc::new(CohortExactEncoder {
+                owner: 9,
+                profile: 54,
+                max_len: 4_096,
+                generation: AtomicUsize::new(0),
+                advance_generation: false,
+                probes: Arc::clone(&fleet.probes),
+                reuses: Arc::clone(&fleet.reuses),
+            }),
+        });
+    let mut outbound = register_direct_peer_with_families(
+        &mut fleet.manager,
+        peer,
+        vec![
+            (Afi::Ipv4, Safi::Unicast),
+            (Afi::Ipv6, Safi::Unicast),
+            (Afi::Ipv4, Safi::FlowSpec),
+            (Afi::L2Vpn, Safi::Evpn),
+            (Afi::BgpLs, Safi::BgpLs),
+            (Afi::Ipv4, Safi::MplsVpn),
+            (Afi::Ipv4, Safi::LabeledUnicast),
+            (Afi::Ipv4, Safi::RtConstrain),
+        ],
+    );
+    fleet
+        .manager
+        .replace_peer_export_policy_synchronously(peer, Some(peer_context_chain()))
+        .unwrap();
+    while outbound.try_recv().is_ok() {}
+    assert!(fleet.manager.grouped_member_of(peer).is_none());
+    assert!(fleet.manager.vpn_grouped_member_of(peer).is_none());
+    // Registration may already advertise the locally originated default RTC
+    // route. Neither announcing nor withdrawing these identities may alter it.
+    let rib = &fleet.manager.adj_ribs_out[&peer];
+    let retained = [
+        rib.flowspec_len(),
+        rib.evpn_len(),
+        rib.bgpls_len(),
+        rib.vpn_len(),
+        rib.labeled_len(),
+        rib.rtc_len(),
+    ];
+    let (tx, rx) = mpsc::channel(8);
+    fleet.manager.readiness_rx = Some(rx);
+    for withdraw in [false, true] {
+        let source = Ipv4Addr::new(192, 0, 2, 54);
+        let mut flowspec: Vec<_> = (1..=2).map(|_| make_flowspec_route(source)).collect();
+        flowspec[1].rule.components[0] = rustbgpd_wire::FlowSpecComponent::DestinationPrefix(
+            rustbgpd_wire::FlowSpecPrefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 18, 54, 0), 24)),
+        );
+        let evpn: Vec<_> = (1..=2).map(|index| make_evpn_imet(source, index)).collect();
+        let bgpls: Vec<_> = (1..=2)
+            .map(|index| make_bgpls_route(source, index, 100))
+            .collect();
+        let vpn: Vec<_> = (1..=2)
+            .map(|index| make_vpn_rib_route(source, index, 100, 100))
+            .collect();
+        let labeled: Vec<_> = (1..=2)
+            .map(|index| make_labeled_rib_route(source, index, 100, 100))
+            .collect();
+        let rtc: Vec<_> = (1..=2)
+            .map(|index| make_rtc_rib_route(source, index, 100))
+            .collect();
+        let batch = if withdraw {
+            OutboundCommitBatch {
+                flowspec_withdraw: flowspec.iter().map(FlowSpecRoute::selection_key).collect(),
+                evpn_withdraw: evpn.iter().map(EvpnRibRoute::key).collect(),
+                bgpls_withdraw: bgpls.iter().map(BgpLsRibRoute::key).collect(),
+                vpn_withdraw: vpn.iter().map(VpnRibRoute::key).collect(),
+                labeled_withdraw: labeled
+                    .iter()
+                    .map(crate::route::LabeledRibRoute::key)
+                    .collect(),
+                rtc_withdraw: rtc.iter().map(crate::route::RtcRibRoute::key).collect(),
+                ..OutboundCommitBatch::default()
+            }
+        } else {
+            OutboundCommitBatch {
+                flowspec_announce: flowspec,
+                evpn_announce: evpn,
+                bgpls_announce: bgpls,
+                vpn_announce: vpn,
+                labeled_announce: labeled,
+                rtc_announce: rtc,
+                ..OutboundCommitBatch::default()
+            }
+        };
+        let visits = Arc::new(AtomicUsize::new(0));
+        let pending = Arc::new(Mutex::new(None::<oneshot::Receiver<_>>));
+        fleet.manager.replacement_readiness_test_hook = Some(Arc::new({
+            let tx = tx.clone();
+            let visits = Arc::clone(&visits);
+            let pending = Arc::clone(&pending);
+            move |stage| {
+                if stage == "family_commit" {
+                    let mut pending = pending.lock().unwrap();
+                    if let Some(response) = pending.as_mut() {
+                        assert_eq!(response.try_recv().unwrap(), Ok(4));
+                    }
+                    *pending = Some(queue_replacement_readiness(&tx));
+                    visits.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }));
+        fleet
+            .manager
+            .with_replacement_readiness_age(Duration::ZERO, |manager| {
+                assert!(manager.try_send_and_commit_outbound_update(peer, batch));
+            });
+        assert_eq!(visits.load(Ordering::Relaxed), 12);
+        assert_eq!(
+            pending
+                .lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .try_recv()
+                .unwrap(),
+            Ok(4)
+        );
+        let rib = &fleet.manager.adj_ribs_out[&peer];
+        assert_eq!(
+            [
+                rib.flowspec_len(),
+                rib.evpn_len(),
+                rib.bgpls_len(),
+                rib.vpn_len(),
+                rib.labeled_len(),
+                rib.rtc_len()
+            ],
+            retained.map(|count| count + if withdraw { 0 } else { 2 })
+        );
+        assert_eq!(fleet.manager.loc_rib.len(), 4);
+        assert!(outbound.try_recv().is_ok());
+        assert!(
+            outbound.try_recv().is_err(),
+            "all families must share one outbound envelope"
+        );
+    }
 }
 
 fn batch_replacements(

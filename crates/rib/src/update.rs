@@ -745,6 +745,22 @@ pub trait ExactExportSnapshot: Any + Send + Sync {
             .collect()
     }
 
+    /// Probe with synchronous actor checkpoints between individual candidates.
+    /// The default brackets the existing batch method, preserving custom batch
+    /// implementations. Implementations can override this method to checkpoint
+    /// each candidate while keeping whole-call caches and their cleanup.
+    /// The callback must not mutate or query the candidate tables.
+    fn probe_announcements_with_checkpoint(
+        &self,
+        candidates: &[ExactExportCandidate<'_>],
+        checkpoint: &mut dyn FnMut(),
+    ) -> Vec<Result<ExactExportResult, ExactExportError>> {
+        checkpoint();
+        let results = self.probe_announcements(candidates);
+        checkpoint();
+        results
+    }
+
     /// Reapply this target snapshot's ceiling and generation to successful
     /// exact probes produced by `source`.
     ///
@@ -764,6 +780,21 @@ pub trait ExactExportSnapshot: Any + Send + Sync {
     ) -> Option<Vec<Result<ExactExportResult, ExactExportError>>> {
         let _ = (source, encoded_lengths);
         None
+    }
+
+    /// Reuse successful probes with synchronous actor checkpoints. The default
+    /// preserves existing snapshot overrides; implementations may checkpoint
+    /// individual lengths while keeping their wire-equivalence proof intact.
+    fn reuse_successful_probes_with_checkpoint(
+        &self,
+        source: &dyn ExactExportSnapshot,
+        encoded_lengths: &[usize],
+        checkpoint: &mut dyn FnMut(),
+    ) -> Option<Vec<Result<ExactExportResult, ExactExportError>>> {
+        checkpoint();
+        let results = self.reuse_successful_probes(source, encoded_lengths);
+        checkpoint();
+        results
     }
 
     /// Concrete type hook used by the owning transport at the trust boundary.

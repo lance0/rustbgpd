@@ -1,3 +1,5 @@
+use crate::manager::{replacement_readiness_checkpoint, retire_vec};
+
 use super::{
     GroupDelta, GroupRibOut, GroupStageOutput, HashMap, HashSet, IpAddr, LaneDelta, PolicyAction,
     PolicyChain, PolicyFilteredRouteKey, PolicyLabel, Prefix, RibManager, RunnerUp,
@@ -11,12 +13,12 @@ impl RibManager {
     /// only thing that makes this lookup infallible; a future
     /// re-entrant (async) staging pass would break that exclusivity
     /// silently, so assert the invariant rather than only unwrap it.
-    fn staged_group_mut(&mut self, gid: usize) -> &mut GroupRibOut {
+    fn staged_group_mut(groups: &mut HashMap<usize, GroupRibOut>, gid: usize) -> &mut GroupRibOut {
         debug_assert!(
-            self.group_ribs.contains_key(&gid),
+            groups.contains_key(&gid),
             "staging exclusivity: group {gid} read at the top of the pass must still exist at commit"
         );
-        self.group_ribs
+        groups
             .get_mut(&gid)
             .expect("group staged above still exists")
     }
@@ -46,11 +48,33 @@ impl RibManager {
         if self.group_ribs.is_empty() || (best_changed.is_empty() && all_affected.is_empty()) {
             return staged;
         }
+        self.replacement_checkpoint(true);
         let widened: Option<HashSet<Prefix>> = (!all_affected.is_empty()
-            && self.group_ribs.values().any(|group| group.per_client_best))
-        .then(|| best_changed.union(all_affected).copied().collect());
-        let gids: Vec<usize> = self.group_ribs.keys().copied().collect();
+            && self.group_ribs.values().any(|group| {
+                self.replacement_checkpoint(false);
+                group.per_client_best
+            }))
+        .then(|| {
+            let mut widened = HashSet::with_capacity(best_changed.len() + all_affected.len());
+            self.replacement_checkpoint(true);
+            for prefix in best_changed.iter().chain(all_affected) {
+                self.replacement_checkpoint(false);
+                widened.insert(*prefix);
+            }
+            widened
+        });
+        self.replacement_checkpoint(true);
+        let gids: Vec<usize> = self
+            .group_ribs
+            .keys()
+            .map(|gid| {
+                self.replacement_checkpoint(false);
+                *gid
+            })
+            .collect();
+        self.replacement_checkpoint(true);
         for gid in gids {
+            self.replacement_checkpoint(false);
             let prefixes = match (&widened, self.group_ribs.get(&gid)) {
                 (Some(widened), Some(group)) if group.per_client_best => widened,
                 _ => best_changed,
@@ -61,12 +85,15 @@ impl RibManager {
             let mut out = self.stage_group_prefixes(gid, prefixes, memo);
             // Built here (the fanout path) and not inside the staging
             // pass: `join_group`'s table-build pass discards its output.
-            out.build_shared_emit();
+            out.build_shared_emit(&mut |force| self.replacement_checkpoint(force));
             staged.insert(gid, out);
         }
         // The staging commit is the one lane mutation site outside the
         // membership lifecycle (which refreshes via the gauge sweep).
         self.refresh_lane_gauge();
+        self.replacement_checkpoint(true);
+        drop(widened);
+        self.replacement_checkpoint(true);
         staged
     }
 
@@ -87,7 +114,10 @@ impl RibManager {
         prefixes: &HashSet<Prefix>,
         memo: &mut crate::manager::distribution::ExportMemo,
     ) -> GroupStageOutput {
+        self.replacement_checkpoint(true);
         let mut out = GroupStageOutput::default();
+        out.deltas.reserve_exact(prefixes.len());
+        self.replacement_checkpoint(true);
         let mut labeled_filtered: Vec<(PolicyFilteredRouteKey, Option<PolicyLabel>)> = Vec::new();
         let mut lane_updates: Vec<(Prefix, Option<RunnerUp>)> = Vec::new();
         let mut result = crate::manager::distribution::UnicastDistributionResult::default();
@@ -99,11 +129,17 @@ impl RibManager {
                 return out;
             };
             per_client_best = group.per_client_best;
+            if per_client_best {
+                self.replacement_checkpoint(true);
+                lane_updates.reserve_exact(prefixes.len());
+                self.replacement_checkpoint(true);
+            }
             // `share()`, not `clone()`: evaluations through the group
             // handle must land in the installed chain's ADR-0096 term
             // hit counters, exactly like the per-peer path's handle.
             let chain = group.export_chain.as_ref().map(PolicyChain::share);
             for prefix in prefixes {
+                self.replacement_checkpoint(false);
                 let old_source = group.table.get(prefix, 0).map(|r| r.peer);
                 if group.per_client_best {
                     // ADR-0126 Decision 2: first-permitted winner walk
@@ -171,6 +207,11 @@ impl RibManager {
                         && let Some(transition) =
                             group.rs_tag_transition(*prefix, stage.winner_source_attrs.as_ref())
                     {
+                        if out.rs_transitions.capacity() == 0 {
+                            self.replacement_checkpoint(true);
+                            out.rs_transitions.reserve_exact(prefixes.len());
+                            self.replacement_checkpoint(true);
+                        }
                         out.rs_transitions.push(transition);
                     }
                     // Lane transition (ADR-0126 Decision 5), equality-
@@ -231,6 +272,11 @@ impl RibManager {
                             }
                             None => true,
                         });
+                        if out.lane_deltas.capacity() == 0 {
+                            self.replacement_checkpoint(true);
+                            out.lane_deltas.reserve_exact(prefixes.len());
+                            self.replacement_checkpoint(true);
+                        }
                         out.lane_deltas.push(LaneDelta {
                             prefix: *prefix,
                             new: stage.runner_up.clone(),
@@ -312,7 +358,17 @@ impl RibManager {
                     && let Some(transition) =
                         group.rs_tag_transition(*prefix, source_attrs.as_ref())
                 {
+                    if out.rs_transitions.capacity() == 0 {
+                        self.replacement_checkpoint(true);
+                        out.rs_transitions.reserve_exact(prefixes.len());
+                        self.replacement_checkpoint(true);
+                    }
                     out.rs_transitions.push(transition);
+                }
+                if labeled_filtered.capacity() == 0 && !result.policy_filtered.is_empty() {
+                    self.replacement_checkpoint(true);
+                    labeled_filtered.reserve_exact(prefixes.len());
+                    self.replacement_checkpoint(true);
                 }
                 labeled_filtered.extend(
                     result
@@ -325,22 +381,31 @@ impl RibManager {
         if per_client_best {
             labeled_filtered = per_client_best_result.policy_filtered;
         }
-        let group = self.staged_group_mut(gid);
+        self.replacement_checkpoint(true);
+        let readiness = &self.replacement_readiness;
+        let mut checkpoint = || replacement_readiness_checkpoint(readiness, false);
+        let group = Self::staged_group_mut(&mut self.group_ribs, gid);
         for delta in &out.deltas {
+            checkpoint();
             group.apply_delta(delta);
         }
         // Lane commits live in this commit block ON PURPOSE: the
         // `join_group` table-build pass discards the returned output
         // but must still leave a fully populated lane behind.
         for (prefix, entry) in lane_updates {
+            checkpoint();
             group.apply_lane(prefix, entry);
         }
-        group.commit_rs_transitions(&out.rs_transitions);
-        group.record_otc_blocked(prefixes, &out.otc_blocked);
-        group.record_policy_filtered(prefixes, &labeled_filtered);
+        group.commit_rs_transitions(&out.rs_transitions, &mut checkpoint);
+        group.record_otc_blocked(prefixes, &out.otc_blocked, &mut checkpoint);
+        group.record_policy_filtered(prefixes, &labeled_filtered, &mut checkpoint);
         if !group.dirty_members.is_empty() {
-            let withdrawn: Vec<(Prefix, u32)> = out.withdrawn_keys().collect();
-            group.tombstones.extend(withdrawn);
+            for delta in &out.deltas {
+                checkpoint();
+                if delta.new.is_none() {
+                    group.tombstones.insert((delta.prefix, delta.path_id));
+                }
+            }
             // A member ALREADY dirty when a source flip stages onto it
             // never reaches the per-member matrix (its pass takes the
             // resync arm), so its member-scoped withdraw of the displaced
@@ -349,19 +414,37 @@ impl RibManager {
             // Record it as an extra (over-)withdraw at staging; the
             // resync's `member_retains` guard drops it if the source
             // flips back before the resync runs.
-            let dirty: Vec<IpAddr> = group.dirty_members.iter().copied().collect();
+            let dirty: Vec<IpAddr> = group
+                .dirty_members
+                .iter()
+                .map(|member| {
+                    checkpoint();
+                    *member
+                })
+                .collect();
+            replacement_readiness_checkpoint(readiness, true);
             for member in dirty {
-                let lost: Vec<(Prefix, u32)> = out.member_scoped_withdraws(member).collect();
+                checkpoint();
+                let lost: Vec<(Prefix, u32)> = out
+                    .member_scoped_withdraws(member, || {
+                        replacement_readiness_checkpoint(readiness, false);
+                    })
+                    .collect();
                 if !lost.is_empty() {
                     self.pending_extra_withdraws
                         .entry(member)
                         .or_default()
                         .unicast
-                        .extend(lost);
+                        .extend(lost.into_iter().inspect(|_| checkpoint()));
                 }
             }
             self.refresh_group_residue_gauge();
         }
+        self.replacement_checkpoint(true);
+        retire_vec(&mut labeled_filtered, &mut || {
+            self.replacement_checkpoint(false);
+        });
+        self.replacement_checkpoint(true);
         out
     }
 
@@ -381,10 +464,14 @@ impl RibManager {
         let gids: Vec<usize> = self
             .group_ribs
             .iter()
-            .filter(|(_, group)| group.stages_vpn())
+            .filter(|(_, group)| {
+                self.replacement_checkpoint(false);
+                group.stages_vpn()
+            })
             .map(|(gid, _)| *gid)
             .collect();
         for gid in gids {
+            self.replacement_checkpoint(false);
             staged.insert(gid, self.stage_group_vpn_keys(gid, changed));
         }
         staged
@@ -396,12 +483,21 @@ impl RibManager {
     /// diff baseline — the SAME body as the per-peer path, parameterized,
     /// never copied (design risk 1). Deltas are committed before
     /// returning; VPN tombstones extend when a member is already dirty.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keep staging and its readiness-aware temporary retirement in one transaction"
+    )]
     pub(super) fn stage_group_vpn_keys(
         &mut self,
         gid: usize,
         keys: &HashSet<VpnRouteKey>,
     ) -> VpnGroupStageOutput {
-        let mut out = VpnGroupStageOutput::default();
+        self.replacement_checkpoint(true);
+        let mut out = VpnGroupStageOutput {
+            deltas: Vec::with_capacity(keys.len()),
+            ..VpnGroupStageOutput::default()
+        };
+        self.replacement_checkpoint(true);
         let mut denials: Vec<(VpnRouteKey, VpnDenialRecord)> = Vec::new();
         {
             let Some(group) = self.group_ribs.get(&gid) else {
@@ -435,6 +531,7 @@ impl RibManager {
             // but the delta needs per-key `old` capture and eval labels.
             let mut key_set: HashSet<VpnRouteKey> = HashSet::with_capacity(1);
             for key in keys {
+                self.replacement_checkpoint(false);
                 key_set.clear();
                 key_set.insert(*key);
                 let mut target = crate::manager::distribution::ExportTarget::Group {
@@ -502,21 +599,41 @@ impl RibManager {
                     });
                 }
             }
+            retire_vec(&mut ignored_otc_blocked, &mut || {
+                self.replacement_checkpoint(false);
+            });
+            self.replacement_checkpoint(true);
         }
-        let group = self.staged_group_mut(gid);
+        self.replacement_checkpoint(true);
+        let readiness = &self.replacement_readiness;
+        let checkpoint = || replacement_readiness_checkpoint(readiness, false);
+        let group = Self::staged_group_mut(&mut self.group_ribs, gid);
         for delta in &out.deltas {
+            checkpoint();
             group.apply_vpn_delta(delta);
         }
         // Denial-residue transition scope: this pass's keys replace their
         // prior records (the `record_policy_filtered` shape).
-        group.vpn_policy_denied.retain(|key, _| !keys.contains(key));
-        group.vpn_policy_denied.extend(denials);
+        group.vpn_policy_denied.retain(|key, _| {
+            checkpoint();
+            !keys.contains(key)
+        });
+        group
+            .vpn_policy_denied
+            .extend(denials.into_iter().inspect(|_| checkpoint()));
         if !group.dirty_members.is_empty() {
-            group
-                .vpn_tombstones
-                .extend(out.deltas.iter().filter(|d| d.new.is_none()).map(|d| d.key));
+            group.vpn_tombstones.extend(
+                out.deltas
+                    .iter()
+                    .filter(|d| {
+                        checkpoint();
+                        d.new.is_none()
+                    })
+                    .map(|d| d.key),
+            );
             self.refresh_group_residue_gauge();
         }
+        self.replacement_checkpoint(true);
         out
     }
 }

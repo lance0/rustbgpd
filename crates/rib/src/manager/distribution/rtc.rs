@@ -36,7 +36,6 @@ impl RibManager {
     #[expect(
         clippy::fn_params_excessive_bools,
         clippy::too_many_arguments,
-        clippy::too_many_lines,
         reason = "RTC staging mirrors VPN/BGP-LS distribution context for RR/export parity"
     )]
     pub(in crate::manager) fn stage_rtc_routes(
@@ -61,10 +60,65 @@ impl RibManager {
         rtc_withdraw: &mut Vec<crate::route::RtcRibRouteKey>,
         force: bool,
     ) {
+        Self::stage_rtc_routes_with_checkpoint(
+            loc_rib,
+            rib_out,
+            peer_is_rr_client,
+            keys,
+            target_peer,
+            target_peer_asn,
+            target_peer_group,
+            target_is_ebgp,
+            interpret_rfc1997,
+            target_is_rr_client,
+            cluster_id,
+            sendable,
+            llgr,
+            export_pol,
+            metrics,
+            policy_stats,
+            target_peer_label,
+            rtc_announce,
+            rtc_withdraw,
+            force,
+            &mut || {},
+        );
+    }
+
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "RTC staging mirrors VPN/BGP-LS distribution context for RR/export parity"
+    )]
+    pub(in crate::manager) fn stage_rtc_routes_with_checkpoint(
+        loc_rib: &LocRib,
+        rib_out: &AdjRibOut,
+        peer_is_rr_client: &HashMap<IpAddr, bool>,
+        keys: &HashSet<crate::route::RtcRibRouteKey>,
+        target_peer: IpAddr,
+        target_peer_asn: Option<u32>,
+        target_peer_group: Option<&str>,
+        target_is_ebgp: bool,
+        interpret_rfc1997: bool,
+        target_is_rr_client: bool,
+        cluster_id: Option<Ipv4Addr>,
+        sendable: Option<&Vec<(Afi, Safi)>>,
+        llgr: Option<&Vec<(Afi, Safi)>>,
+        export_pol: Option<&PolicyChain>,
+        metrics: &BgpMetrics,
+        policy_stats: &mut NeighborPolicyStats,
+        target_peer_label: &str,
+        rtc_announce: &mut Vec<crate::route::RtcRibRoute>,
+        rtc_withdraw: &mut Vec<crate::route::RtcRibRouteKey>,
+        force: bool,
+        checkpoint: &mut impl FnMut(),
+    ) {
         let needs_as_path_string = export_pol.is_some_and(PolicyChain::requires_as_path_string);
         let family = crate::route::RtcRibRouteKey::afi_safi();
         let family_sendable = sendable.is_some_and(|f| f.contains(&family));
         for key in keys {
+            checkpoint();
             if !family_sendable {
                 if rib_out.get_rtc(key).is_some() {
                     rtc_withdraw.push(key.clone());
@@ -183,8 +237,10 @@ impl RibManager {
                 local_pref: best.local_pref_attr(),
                 med: best.med_attr(),
             };
+            checkpoint();
             let (result, evaluation) =
                 rustbgpd_policy::evaluate_chain_with_attribution(export_pol, &ctx);
+            checkpoint();
             record_export_policy_eval(metrics, policy_stats, target_peer_label, &evaluation);
             if result.action != rustbgpd_policy::PolicyAction::Permit {
                 if rib_out.get_rtc(key).is_some() {
@@ -195,10 +251,12 @@ impl RibManager {
 
             let mut modified = best.clone();
             if !result.modifications.is_empty() {
+                checkpoint();
                 let nh = rustbgpd_policy::apply_modifications(
                     std::sync::Arc::make_mut(&mut modified.attributes),
                     &result.modifications,
                 );
+                checkpoint();
                 if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = nh {
                     modified.next_hop = addr;
                 }
@@ -221,7 +279,9 @@ impl RibManager {
             {
                 continue;
             }
+            checkpoint();
             rtc_announce.push(modified);
+            checkpoint();
         }
     }
 

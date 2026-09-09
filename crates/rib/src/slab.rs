@@ -53,6 +53,34 @@ impl<T> RouteSlab<T> {
         }
     }
 
+    /// Ensure room for `additional` inserts without growing the slot Vec
+    /// during the subsequent commit. Rebuilding preserves every handle and
+    /// vacant slot while moving route ownership one slot at a time.
+    pub(crate) fn reserve_with(&mut self, additional: usize, checkpoint: &mut impl FnMut()) {
+        let new_slots = additional.saturating_sub(self.free.len());
+        let required = self
+            .slots
+            .len()
+            .checked_add(new_slots)
+            .expect("route slab exceeds addressable capacity");
+        if self.slots.capacity() >= required {
+            return;
+        }
+
+        let old_slots = std::mem::take(&mut self.slots);
+        let mut slots = Vec::with_capacity(required);
+        let mut entries = old_slots.into_iter();
+        for slot in entries.by_ref() {
+            checkpoint();
+            slots.push(slot);
+            checkpoint();
+        }
+        checkpoint();
+        drop(entries);
+        checkpoint();
+        self.slots = slots;
+    }
+
     /// Remove and return the value at `handle`, freeing the slot for reuse.
     pub(crate) fn remove(&mut self, handle: u32) -> Option<T> {
         let value = self.slots.get_mut(handle as usize)?.take();
@@ -95,7 +123,7 @@ impl<T> RouteSlab<T> {
 
     /// Total slots ever allocated (occupied + free). Test-only leak probe:
     /// steady-state churn must not grow this.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "bench-internals"))]
     pub(crate) fn slot_count(&self) -> usize {
         self.slots.len()
     }
@@ -104,6 +132,32 @@ impl<T> RouteSlab<T> {
     pub(crate) fn clear(&mut self) {
         self.slots.clear();
         self.free.clear();
+    }
+
+    /// Drop every slot, including vacancies, while retaining both backing
+    /// allocations for later reuse.
+    pub(crate) fn retire_with(&mut self, checkpoint: &mut impl FnMut()) {
+        self.free.clear();
+        while let Some(slot) = self.slots.pop() {
+            checkpoint();
+            drop(slot);
+            checkpoint();
+        }
+    }
+
+    /// Retire every slot, then release the empty backing allocations.
+    pub(crate) fn release_with(&mut self, checkpoint: &mut impl FnMut()) {
+        self.retire_with(checkpoint);
+
+        let slots = std::mem::take(&mut self.slots);
+        checkpoint();
+        drop(slots);
+        checkpoint();
+
+        let free = std::mem::take(&mut self.free);
+        checkpoint();
+        drop(free);
+        checkpoint();
     }
 
     /// Release only unused tail capacity while preserving logical slot
@@ -188,6 +242,49 @@ mod tests {
     }
 
     #[test]
+    fn reserve_rebuild_preserves_holes_handles_and_free_reuse() {
+        let mut slab = RouteSlab::with_capacity(3);
+        let first = slab.insert(10_u64);
+        let hole = slab.insert(20);
+        let last = slab.insert(30);
+        assert_eq!(slab.remove(hole), Some(20));
+        let free = slab.free.clone();
+        let old_capacity = slab.capacity();
+        let mut checkpoints = 0;
+
+        slab.reserve_with(4, &mut || checkpoints += 1);
+
+        assert!(slab.capacity() >= 6);
+        assert!(slab.capacity() > old_capacity);
+        assert_eq!(slab.slot_count(), 3);
+        assert_eq!(slab.free, free);
+        assert_eq!(slab.get(first), Some(&10));
+        assert_eq!(slab.get(hole), None);
+        assert_eq!(slab.get(last), Some(&30));
+        assert_eq!(
+            checkpoints, 8,
+            "each slot and the iterator tail is bracketed"
+        );
+        assert_eq!(slab.insert(40), hole, "the rebuilt free list stays LIFO");
+
+        assert_eq!(slab.remove(last), Some(30));
+        let slot_ptr = slab.slots.as_ptr();
+        let mut no_growth_checkpoints = 0;
+        slab.reserve_with(1, &mut || no_growth_checkpoints += 1);
+        assert_eq!(
+            slab.slots.as_ptr(),
+            slot_ptr,
+            "a free slot satisfies the batch"
+        );
+        assert_eq!(no_growth_checkpoints, 0);
+        assert_eq!(
+            slab.insert(50),
+            last,
+            "the existing free slot remains reusable"
+        );
+    }
+
+    #[test]
     fn set_replaces_in_place() {
         let mut slab: RouteSlab<u64> = RouteSlab::default();
         let h = slab.insert(1);
@@ -205,6 +302,27 @@ mod tests {
         assert_eq!(slab.get(h), None);
         // Fresh inserts after clear start from slot zero again.
         assert_eq!(slab.insert(8), 0);
+    }
+
+    #[test]
+    fn retire_visits_holes_and_preserves_capacity() {
+        let mut slab = RouteSlab::with_capacity(8);
+        let first = slab.insert(1_u64);
+        slab.insert(2);
+        slab.remove(first);
+        let capacity = slab.capacity();
+        let mut checkpoints = 0;
+
+        slab.retire_with(&mut || checkpoints += 1);
+
+        assert_eq!(
+            checkpoints, 4,
+            "both slots, including the hole, are bracketed"
+        );
+        assert!(slab.is_empty());
+        assert_eq!(slab.slot_count(), 0);
+        assert_eq!(slab.capacity(), capacity);
+        assert_eq!(slab.insert(3), 0);
     }
 
     /// The whole point of the slab is compactness: `Option<Route>` must not

@@ -1982,7 +1982,18 @@ impl ExactExportSnapshot for SessionExportProfile {
         &self,
         candidates: &[ExactExportCandidate<'_>],
     ) -> Vec<Result<ExactExportResult, ExactExportError>> {
+        self.probe_announcements_with_checkpoint(candidates, &mut || {})
+    }
+
+    fn probe_announcements_with_checkpoint(
+        &self,
+        candidates: &[ExactExportCandidate<'_>],
+        checkpoint: &mut dyn FnMut(),
+    ) -> Vec<Result<ExactExportResult, ExactExportError>> {
+        checkpoint();
         let mut prepared_attr_cache = PreparedAttrCache::default();
+        prepared_attr_cache.entries.reserve(candidates.len());
+        checkpoint();
         // Exact length-reuse cache for unicast probes. A probed message's
         // length is a pure function of the prepared attribute bytes
         // (identified by `Arc` pointer — the prepared-attr cache keeps every
@@ -1995,11 +2006,13 @@ impl ExactExportSnapshot for SessionExportProfile {
         // result. Errors are never cached: they are the rare aborting case
         // and stay on the fully built path.
         let mut length_cache: FxHashMap<UnicastProbeShapeKey, ExactExportResult> =
-            FxHashMap::default();
+            FxHashMap::with_capacity_and_hasher(candidates.len(), rustc_hash::FxBuildHasher);
+        checkpoint();
         let local_ipv4 = self.local_ipv4();
-        candidates
+        let results = candidates
             .iter()
             .copied()
+            .inspect(|_| checkpoint())
             .map(|candidate| match candidate {
                 ExactExportCandidate::Unicast {
                     route,
@@ -2022,7 +2035,21 @@ impl ExactExportSnapshot for SessionExportProfile {
                 }
                 _ => <Self as ExactExportSnapshot>::probe_announcement(self, candidate),
             })
-            .collect()
+            .collect();
+        checkpoint();
+        for entry in prepared_attr_cache.entries.drain() {
+            drop(entry);
+            checkpoint();
+        }
+        drop(prepared_attr_cache);
+        checkpoint();
+        for entry in length_cache.drain() {
+            let _ = entry;
+            checkpoint();
+        }
+        drop(length_cache);
+        checkpoint();
+        results
     }
 
     fn reuse_successful_probes(
@@ -2030,6 +2057,16 @@ impl ExactExportSnapshot for SessionExportProfile {
         source: &dyn ExactExportSnapshot,
         encoded_lengths: &[usize],
     ) -> Option<Vec<Result<ExactExportResult, ExactExportError>>> {
+        self.reuse_successful_probes_with_checkpoint(source, encoded_lengths, &mut || {})
+    }
+
+    fn reuse_successful_probes_with_checkpoint(
+        &self,
+        source: &dyn ExactExportSnapshot,
+        encoded_lengths: &[usize],
+        checkpoint: &mut dyn FnMut(),
+    ) -> Option<Vec<Result<ExactExportResult, ExactExportError>>> {
+        checkpoint();
         let source = source.as_any().downcast_ref::<Self>()?;
         if !self.has_same_wire_encoding(source) {
             return None;
@@ -2038,6 +2075,7 @@ impl ExactExportSnapshot for SessionExportProfile {
         let max_len = self.max_message_len();
         let mut results = Vec::with_capacity(encoded_lengths.len());
         for &encoded_len in encoded_lengths {
+            checkpoint();
             let result = if encoded_len > max_len {
                 Err(ExactExportError::new(
                     ExactExportErrorCode::MessageTooLong,
@@ -2054,6 +2092,7 @@ impl ExactExportSnapshot for SessionExportProfile {
             };
             results.push(result);
         }
+        checkpoint();
         Some(results)
     }
 

@@ -30,8 +30,8 @@ impl RibManager {
     /// baseline that records the key) — and announced entries are
     /// rewritten (prepend from the source, scrub post-policy) per
     /// target. Baselines snapshot through the same filter
-    /// ([`GroupRibOut::member_view_snapshot`]), so the regroup one-shot
-    /// diff compares wire state to wire state.
+    /// ([`GroupRibOut::member_view_snapshot_with_checkpoint`]), so the
+    /// regroup one-shot diff compares wire state to wire state.
     #[expect(
         clippy::too_many_arguments,
         reason = "the resync assembly takes the member's full pending-withdraw context"
@@ -245,6 +245,7 @@ impl RibManager {
         gid: usize,
         family: Option<(Afi, Safi)>,
     ) {
+        self.replacement_checkpoint(true);
         // The member's Φ: the per-peer path's RT gate precedes the policy
         // evaluation, so an RT-failed entry records NO eval — the replay
         // must count only Φ-passing permits and denials (design §2.4).
@@ -268,6 +269,7 @@ impl RibManager {
             // decision-attribution label is exactly what the walk recorded.
             // Nothing for an own-sourced slot with no substitution.
             for route in group.table.iter() {
+                self.replacement_checkpoint(false);
                 if !in_family(&route.prefix) {
                     continue;
                 }
@@ -277,10 +279,12 @@ impl RibManager {
                 bump(&adv.policy_label.cloned(), PolicyAction::Permit);
             }
             for (prefix, denials) in &group.policy_filtered {
+                self.replacement_checkpoint(false);
                 if !in_family(prefix) {
                     continue;
                 }
                 for (&(source_peer, _), label) in denials {
+                    self.replacement_checkpoint(false);
                     if source_peer == peer {
                         continue;
                     }
@@ -301,6 +305,7 @@ impl RibManager {
                 })
             };
             for route in group.table.iter_vpn() {
+                self.replacement_checkpoint(false);
                 if route.peer == peer
                     || !in_vpn_family(&route.nlri.key())
                     || !rt_passes(vpn_filter.as_ref(), route)
@@ -311,6 +316,7 @@ impl RibManager {
                 bump(&label, PolicyAction::Permit);
             }
             for (key, (source, label, rts)) in &group.vpn_policy_denied {
+                self.replacement_checkpoint(false);
                 if *source == peer
                     || !in_vpn_family(key)
                     || !vpn_filter.as_ref().is_none_or(|m| m.matches_any(rts))
@@ -320,7 +326,10 @@ impl RibManager {
                 bump(label, PolicyAction::Deny);
             }
         }
+        self.replacement_checkpoint(true);
         self.bump_export_counters(peer, &rows);
+        crate::manager::retire_vec(&mut rows, &mut || self.replacement_checkpoint(false));
+        self.replacement_checkpoint(true);
     }
 
     /// Borrowed synthesized advertised-route view for a grouped peer
@@ -336,18 +345,24 @@ impl RibManager {
         let group = self.group_ribs.get(&self.grouped_member_of(peer)?)?;
         let rejected = self.peer_unexportable.get(&peer);
         let limits = self.outbound_prefix_limits.get(&peer);
-        Some(group.table.iter().filter_map(move |staged| {
-            // The substitution sits at the same (prefix, path_id 0)
-            // slot, so the member-local overlays key identically for
-            // the staged entry and its lane replacement.
-            let route = group
-                .adv_entry_post_backstop(peer, &staged.prefix, staged.path_id)?
-                .route;
-            (!rejected.is_some_and(|keys| {
-                keys.contains(&ExactExportKey::Unicast(route.prefix, route.path_id))
-            }) && limits.is_none_or(|limits| limits.admits_grouped(&route.prefix)))
-            .then_some(route)
-        }))
+        Some(
+            group
+                .table
+                .iter()
+                .inspect(move |_| self.replacement_checkpoint(false))
+                .filter_map(move |staged| {
+                    // The substitution sits at the same (prefix, path_id 0)
+                    // slot, so the member-local overlays key identically for
+                    // the staged entry and its lane replacement.
+                    let route = group
+                        .adv_entry_post_backstop(peer, &staged.prefix, staged.path_id)?
+                        .route;
+                    (!rejected.is_some_and(|keys| {
+                        keys.contains(&ExactExportKey::Unicast(route.prefix, route.path_id))
+                    }) && limits.is_none_or(|limits| limits.admits_grouped(&route.prefix)))
+                    .then_some(route)
+                }),
+        )
     }
 
     /// Ordered sibling used by resumable route listings. The group table's
@@ -393,8 +408,18 @@ impl RibManager {
     /// Materialized sibling of [`Self::grouped_advertised_routes_iter`] for
     /// legacy full-snapshot and route-refresh callers.
     pub(in crate::manager) fn grouped_advertised_routes(&self, peer: IpAddr) -> Option<Vec<Route>> {
-        self.grouped_advertised_routes_iter(peer)
-            .map(|routes| routes.cloned().collect())
+        self.replacement_checkpoint(true);
+        let capacity = self
+            .group_ribs
+            .get(&self.grouped_member_of(peer)?)?
+            .table
+            .len();
+        let routes = self.grouped_advertised_routes_iter(peer)?;
+        let mut result = Vec::with_capacity(capacity);
+        self.replacement_checkpoint(true);
+        result.extend(routes.cloned());
+        self.replacement_checkpoint(true);
+        Some(result)
     }
 
     /// Synthesized advertised-route count for a grouped peer; `None`
@@ -417,6 +442,7 @@ impl RibManager {
         }
         let rejected = self.peer_unexportable.get(&peer).map_or(0, |keys| {
             keys.iter()
+                .inspect(|_| self.replacement_checkpoint(false))
                 .filter(|key| match key {
                     // A rejected key reduces the count only while the
                     // member's derived view holds a route at that slot
@@ -445,6 +471,7 @@ impl RibManager {
         let filter = self.rtc_vpn_filter(peer, self.peer_sendable_families.get(&peer));
         let rejected = self.peer_unexportable.get(&peer).map_or(0, |keys| {
             keys.iter()
+                .inspect(|_| self.replacement_checkpoint(false))
                 .filter(|key| match key {
                     ExactExportKey::Vpn(key) => group.table.get_vpn(key).is_some_and(|route| {
                         route.peer != peer && rt_passes(filter.as_ref(), route)
@@ -474,6 +501,7 @@ impl RibManager {
         let filter = self.rtc_vpn_filter(peer, self.peer_sendable_families.get(&peer));
         if let Some(rejected) = self.peer_unexportable.get(&peer) {
             for key in rejected {
+                self.replacement_checkpoint(false);
                 let family = match key {
                     // Subtract only while the member's derived view
                     // holds a backstop-delivered route at the rejected

@@ -2603,6 +2603,12 @@ dedicated read-only RIB lane stays healthy for bounded progress, then returns
 seconds; commit or cleaned-up fallback restores readiness immediately. It does
 not require peers or routes to exist.
 
+Authoritative export-policy replacement and rollback service this same RIB
+readiness lane between construction, per-peer work, and cleanup steps. These
+operations preserve Loc-RIB cardinality, so readiness replies report its exact
+count while ordinary route queries and mutations remain queued. Nested
+replacements retain the original command's 30-second transition-age limit.
+
 ### Get Prometheus metrics via gRPC
 
 ```bash

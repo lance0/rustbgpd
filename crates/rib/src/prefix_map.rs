@@ -106,6 +106,36 @@ impl<V> FamilyPrefixMap<V> {
         self.v6.clear();
     }
 
+    /// Remove prefixes one at a time so the trie prunes each retired branch.
+    pub(crate) fn retire_with(&mut self, checkpoint: &mut impl FnMut()) {
+        loop {
+            let next = self.iter_from(None).next().map(|(prefix, _)| prefix);
+            let Some(prefix) = next else {
+                break;
+            };
+            checkpoint();
+            let retired = self.remove(&prefix);
+            debug_assert!(retired.is_some(), "iterated prefix must still be present");
+            drop(retired);
+            checkpoint();
+        }
+    }
+
+    /// Retire every prefix, then release the empty trie roots.
+    pub(crate) fn release_with(&mut self, checkpoint: &mut impl FnMut()) {
+        self.retire_with(checkpoint);
+
+        let v4 = std::mem::replace(&mut self.v4, PrefixMap::new());
+        checkpoint();
+        drop(v4);
+        checkpoint();
+
+        let v6 = std::mem::replace(&mut self.v6, PrefixMap::new());
+        checkpoint();
+        drop(v6);
+        checkpoint();
+    }
+
     /// Iterate from `prefix` (inclusive) in [`Prefix`]'s derived order.
     ///
     /// Inclusive prefix traversal is intentional: a route-page cursor also
@@ -250,5 +280,23 @@ mod tests {
             map.iter_after(Some(prefixes[2])).next().is_none(),
             "the last prefix has no continuation"
         );
+    }
+
+    #[test]
+    fn retire_prunes_every_prefix_and_calls_back() {
+        let mut map = FamilyPrefixMap::<()>::default();
+        for prefix in [
+            Prefix::V4(Ipv4Prefix::new("10.0.0.0".parse().unwrap(), 8)),
+            Prefix::V4(Ipv4Prefix::new("10.0.1.0".parse().unwrap(), 24)),
+            Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32)),
+        ] {
+            map.entry_or_default(prefix);
+        }
+        let mut checkpoints = 0;
+
+        map.retire_with(&mut || checkpoints += 1);
+
+        assert_eq!(checkpoints, 6);
+        assert!(map.iter_from(None).next().is_none());
     }
 }

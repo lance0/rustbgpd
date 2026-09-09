@@ -150,6 +150,44 @@ impl OutboundPrefixLimits {
         }
     }
 
+    fn reserve_grouped_with_checkpoint(
+        &mut self,
+        afi: Afi,
+        additional: usize,
+        checkpoint: &mut impl FnMut(),
+    ) {
+        let capacity = self.grouped_len(afi).saturating_add(additional);
+        checkpoint();
+        let replacement = match afi {
+            Afi::Ipv4 if self.grouped_admitted_ipv4.capacity() < capacity => {
+                Some(TypedGroupedAdmitted::collect_with_capacity(
+                    afi,
+                    self.grouped_admitted_ipv4
+                        .drain()
+                        .inspect(|_| checkpoint())
+                        .map(Prefix::V4),
+                    capacity,
+                ))
+            }
+            Afi::Ipv6 if self.grouped_admitted_ipv6.capacity() < capacity => {
+                Some(TypedGroupedAdmitted::collect_with_capacity(
+                    afi,
+                    self.grouped_admitted_ipv6
+                        .drain()
+                        .inspect(|_| checkpoint())
+                        .map(Prefix::V6),
+                    capacity,
+                ))
+            }
+            _ => None,
+        };
+        checkpoint();
+        if let Some(replacement) = replacement {
+            self.replace_grouped_with_checkpoint(replacement, checkpoint);
+        }
+        checkpoint();
+    }
+
     /// Release retained grouped ownership for one family.
     pub(in crate::manager) fn grouped_clear(&mut self, afi: Afi) {
         match afi {
@@ -161,10 +199,24 @@ impl OutboundPrefixLimits {
 
     /// Install a directly collected family-typed materialization.
     fn replace_grouped(&mut self, admitted: TypedGroupedAdmitted) {
-        match admitted {
-            TypedGroupedAdmitted::Ipv4(prefixes) => self.grouped_admitted_ipv4 = prefixes,
-            TypedGroupedAdmitted::Ipv6(prefixes) => self.grouped_admitted_ipv6 = prefixes,
-        }
+        self.replace_grouped_with_checkpoint(admitted, &mut || {});
+    }
+
+    fn replace_grouped_with_checkpoint(
+        &mut self,
+        admitted: TypedGroupedAdmitted,
+        checkpoint: &mut impl FnMut(),
+    ) {
+        let mut retired =
+            match admitted {
+                TypedGroupedAdmitted::Ipv4(prefixes) => TypedGroupedAdmitted::Ipv4(
+                    std::mem::replace(&mut self.grouped_admitted_ipv4, prefixes),
+                ),
+                TypedGroupedAdmitted::Ipv6(prefixes) => TypedGroupedAdmitted::Ipv6(
+                    std::mem::replace(&mut self.grouped_admitted_ipv6, prefixes),
+                ),
+            };
+        retired.retire_with(checkpoint);
     }
 }
 
@@ -177,26 +229,39 @@ enum TypedGroupedAdmitted {
 
 impl TypedGroupedAdmitted {
     fn collect(afi: Afi, prefixes: impl IntoIterator<Item = Prefix>) -> Self {
+        Self::collect_with_capacity(afi, prefixes, 0)
+    }
+
+    fn collect_with_capacity(
+        afi: Afi,
+        prefixes: impl IntoIterator<Item = Prefix>,
+        capacity: usize,
+    ) -> Self {
         match afi {
-            Afi::Ipv4 => Self::Ipv4(
-                prefixes
-                    .into_iter()
-                    .filter_map(|prefix| match prefix {
-                        Prefix::V4(prefix) => Some(prefix),
-                        Prefix::V6(_) => None,
-                    })
-                    .collect(),
-            ),
-            Afi::Ipv6 => Self::Ipv6(
-                prefixes
-                    .into_iter()
-                    .filter_map(|prefix| match prefix {
-                        Prefix::V6(prefix) => Some(prefix),
-                        Prefix::V4(_) => None,
-                    })
-                    .collect(),
-            ),
+            Afi::Ipv4 => {
+                let mut admitted = HashSet::with_capacity(capacity);
+                admitted.extend(prefixes.into_iter().filter_map(|prefix| match prefix {
+                    Prefix::V4(prefix) => Some(prefix),
+                    Prefix::V6(_) => None,
+                }));
+                Self::Ipv4(admitted)
+            }
+            Afi::Ipv6 => {
+                let mut admitted = HashSet::with_capacity(capacity);
+                admitted.extend(prefixes.into_iter().filter_map(|prefix| match prefix {
+                    Prefix::V6(prefix) => Some(prefix),
+                    Prefix::V4(_) => None,
+                }));
+                Self::Ipv6(admitted)
+            }
             _ => unreachable!("only limited unicast families are materialized"),
+        }
+    }
+
+    fn retire_with(&mut self, checkpoint: &mut impl FnMut()) {
+        match self {
+            Self::Ipv4(prefixes) => super::retire_hash_set(prefixes, checkpoint),
+            Self::Ipv6(prefixes) => super::retire_hash_set(prefixes, checkpoint),
         }
     }
 
@@ -294,6 +359,7 @@ pub(in crate::manager) struct BatchAdmission {
 /// cap. An announcement for a prefix still admitted after the withdrawals
 /// always passes — an attribute change or an additional path identity for an
 /// admitted prefix is an update, not a new prefix.
+#[cfg(test)]
 pub(in crate::manager) fn admit_batch<'a>(
     limit: NonZeroU32,
     usage: usize,
@@ -301,9 +367,26 @@ pub(in crate::manager) fn admit_batch<'a>(
     announced: impl IntoIterator<Item = &'a Prefix>,
     is_admitted: impl Fn(&Prefix) -> bool,
 ) -> BatchAdmission {
+    admit_batch_into(
+        limit,
+        usage,
+        freed,
+        announced,
+        is_admitted,
+        BatchAdmission::default(),
+    )
+}
+
+fn admit_batch_into<'a>(
+    limit: NonZeroU32,
+    usage: usize,
+    freed: &HashSet<Prefix>,
+    announced: impl IntoIterator<Item = &'a Prefix>,
+    is_admitted: impl Fn(&Prefix) -> bool,
+    mut verdict: BatchAdmission,
+) -> BatchAdmission {
     let limit = usize::try_from(limit.get()).unwrap_or(usize::MAX);
     let mut usage = usage.saturating_sub(freed.len());
-    let mut verdict = BatchAdmission::default();
     for prefix in announced {
         if verdict.admitted.contains(prefix) || verdict.blocked.contains(prefix) {
             continue;
@@ -333,6 +416,14 @@ struct FamilyVerdict {
     verdict: BatchAdmission,
 }
 
+impl FamilyVerdict {
+    fn retire_with(&mut self, checkpoint: &mut impl FnMut()) {
+        super::retire_hash_set(&mut self.freed, checkpoint);
+        super::retire_hash_set(&mut self.verdict.admitted, checkpoint);
+        super::retire_hash_set(&mut self.verdict.blocked, checkpoint);
+    }
+}
+
 impl RibManager {
     /// Resolve one batch against every limited family of `peer`, reading the
     /// advertised state that decides admission but mutating nothing.
@@ -342,6 +433,10 @@ impl RibManager {
     /// path per prefix. An ungrouped peer reads its private Adj-RIB-Out,
     /// which does refcount path identities — there a prefix frees its slot
     /// only when its LAST advertised path leaves.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "family admission sizes its withdrawal and verdict inventories before checkpointed fill and cleanup"
+    )]
     fn outbound_limit_verdicts(
         &self,
         peer: IpAddr,
@@ -353,59 +448,113 @@ impl RibManager {
         let Some(limits) = self.outbound_prefix_limits.get(&peer) else {
             return Vec::new();
         };
+        self.replacement_checkpoint(true);
         let rib_out = self.adj_ribs_out.get(&peer);
         let mut verdicts = Vec::new();
         for afi in LIMITED_FAMILIES {
             let Some(limit) = limits.family(afi).and_then(|family| family.limit) else {
                 continue;
             };
-            let advertised_paths = |prefix: &Prefix| {
-                rib_out
-                    .map(|rib| rib.path_ids_for_prefix(prefix))
-                    .unwrap_or_default()
-            };
             let is_admitted = |prefix: &Prefix| {
                 if grouped {
                     limits.grouped_contains(prefix)
                 } else {
-                    !advertised_paths(prefix).is_empty()
+                    rib_out.is_some_and(|rib| rib.iter_prefix(prefix).next().is_some())
                 }
             };
-            let mut withdrawn: HashMap<Prefix, HashSet<u32>> = HashMap::new();
-            for (prefix, path_id) in withdraw {
+            self.replacement_checkpoint(true);
+            let mut withdrawn: HashMap<Prefix, (usize, HashSet<u32>)> =
+                HashMap::with_capacity(withdraw.len());
+            self.replacement_checkpoint(true);
+            for (prefix, _) in withdraw {
+                self.replacement_checkpoint(false);
                 if prefix_family(prefix).0 == afi {
-                    withdrawn.entry(*prefix).or_default().insert(*path_id);
+                    withdrawn.entry(*prefix).or_default().0 += 1;
                 }
             }
-            let freed: HashSet<Prefix> = withdrawn
-                .into_iter()
-                .filter(|(prefix, path_ids)| {
-                    if grouped {
-                        is_admitted(prefix)
-                    } else {
-                        let advertised = advertised_paths(prefix);
-                        !advertised.is_empty() && advertised.iter().all(|id| path_ids.contains(id))
-                    }
-                })
-                .map(|(prefix, _)| prefix)
-                .collect();
+            for (count, path_ids) in withdrawn.values_mut() {
+                self.replacement_checkpoint(true);
+                *path_ids = HashSet::with_capacity(*count);
+                self.replacement_checkpoint(true);
+            }
+            for (prefix, path_id) in withdraw {
+                self.replacement_checkpoint(false);
+                if let Some((_, path_ids)) = withdrawn.get_mut(prefix) {
+                    path_ids.insert(*path_id);
+                }
+            }
+            self.replacement_checkpoint(true);
+            let mut freed = HashSet::with_capacity(withdrawn.len());
+            self.replacement_checkpoint(true);
+            for (prefix, (_, mut path_ids)) in withdrawn.drain() {
+                self.replacement_checkpoint(false);
+                let frees_prefix = if grouped {
+                    is_admitted(&prefix)
+                } else {
+                    rib_out.is_some_and(|rib| {
+                        // Borrow each path so a large Add-Path inventory stays checkpointed.
+                        let mut advertised = rib.iter_prefix(&prefix).peekable();
+                        advertised.peek().is_some()
+                            && advertised.all(|route| {
+                                self.replacement_checkpoint(false);
+                                path_ids.contains(&route.path_id)
+                            })
+                    })
+                };
+                if frees_prefix {
+                    freed.insert(prefix);
+                }
+                self.replacement_checkpoint(true);
+                super::retire_hash_set(&mut path_ids, &mut || self.replacement_checkpoint(false));
+                self.replacement_checkpoint(true);
+            }
+            self.replacement_checkpoint(true);
+            drop(withdrawn);
+            self.replacement_checkpoint(true);
             let usage = if grouped {
                 limits.grouped_len(afi)
             } else {
                 rib_out.map_or(0, |rib| rib.unicast_prefix_count(afi))
             };
-            let verdict = admit_batch(
+            let headroom = usize::try_from(limit.get())
+                .unwrap_or(usize::MAX)
+                .saturating_sub(usage.saturating_sub(freed.len()));
+            self.replacement_checkpoint(true);
+            let admitted = HashSet::with_capacity(announce.len().min(headroom));
+            self.replacement_checkpoint(true);
+            let blocked = HashSet::with_capacity(announce.len().saturating_sub(headroom));
+            self.replacement_checkpoint(true);
+            let mut verdict = admit_batch_into(
                 limit,
                 usage,
                 &freed,
                 announce
                     .iter()
+                    .inspect(|_| {
+                        super::replacement_readiness_checkpoint_at(
+                            &self.replacement_readiness,
+                            "outbound_limits",
+                            false,
+                        );
+                    })
                     .filter(|route| announce_source_exclusion != Some(route.peer))
                     .map(|route| &route.prefix)
                     .filter(|prefix| prefix_family(prefix).0 == afi),
                 is_admitted,
+                BatchAdmission { blocked, admitted },
             );
             if freed.is_empty() && verdict.admitted.is_empty() && verdict.blocked.is_empty() {
+                self.replacement_checkpoint(true);
+                super::retire_hash_set(&mut freed, &mut || self.replacement_checkpoint(false));
+                self.replacement_checkpoint(true);
+                super::retire_hash_set(&mut verdict.admitted, &mut || {
+                    self.replacement_checkpoint(false);
+                });
+                self.replacement_checkpoint(true);
+                super::retire_hash_set(&mut verdict.blocked, &mut || {
+                    self.replacement_checkpoint(false);
+                });
+                self.replacement_checkpoint(true);
                 continue;
             }
             verdicts.push(FamilyVerdict {
@@ -416,6 +565,7 @@ impl RibManager {
                 freed,
             });
         }
+        self.replacement_checkpoint(true);
         verdicts
     }
 
@@ -435,6 +585,10 @@ impl RibManager {
     /// NOTIFICATION is sent.
     ///
     /// Returns immediately for a peer with no configured limit.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "prefix-limit commit keeps aligned filtering, admission ownership, and checkpointed cleanup together"
+    )]
     pub(super) fn enforce_outbound_prefix_limits(
         &mut self,
         peer: IpAddr,
@@ -444,7 +598,9 @@ impl RibManager {
         next_hop_override: &mut Arc<[Option<rustbgpd_policy::NextHopAction>]>,
         withdraw: &[(Prefix, u32)],
     ) -> bool {
-        let verdicts = self.outbound_limit_verdicts(
+        let readiness = self.replacement_readiness.clone();
+        let mut checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
+        let mut verdicts = self.outbound_limit_verdicts(
             peer,
             grouped,
             announce_source_exclusion,
@@ -455,35 +611,92 @@ impl RibManager {
             return false;
         }
 
-        let blocked: HashSet<Prefix> = verdicts
-            .iter()
-            .flat_map(|family| family.verdict.blocked.iter().copied())
-            .collect();
+        self.replacement_checkpoint(true);
+        let mut blocked = HashSet::with_capacity(
+            verdicts
+                .iter()
+                .map(|family| family.verdict.blocked.len())
+                .sum(),
+        );
+        self.replacement_checkpoint(true);
+        blocked.extend(verdicts.iter().flat_map(|family| {
+            family
+                .verdict
+                .blocked
+                .iter()
+                .inspect(|_| checkpoint())
+                .copied()
+        }));
         if !blocked.is_empty() {
-            let (kept_routes, kept_next_hops): (Vec<_>, Vec<_>) = announce
+            let keep = |route: &crate::route::Route| {
+                announce_source_exclusion == Some(route.peer) || !blocked.contains(&route.prefix)
+            };
+            let kept = announce
                 .iter()
                 .zip(next_hop_override.iter())
-                .filter(|(route, _)| {
-                    announce_source_exclusion == Some(route.peer)
-                        || !blocked.contains(&route.prefix)
-                })
-                .map(|(route, next_hop)| (route.clone(), next_hop.clone()))
-                .unzip();
-            *announce = kept_routes.into();
-            *next_hop_override = kept_next_hops.into();
+                .inspect(|_| checkpoint())
+                .filter(|(route, _)| keep(route))
+                .count();
+            self.replacement_checkpoint(true);
+            let mut kept_routes = Vec::with_capacity(kept);
+            self.replacement_checkpoint(true);
+            let mut kept_next_hops = Vec::with_capacity(kept);
+            self.replacement_checkpoint(true);
+            for (route, next_hop) in announce.iter().zip(next_hop_override.iter()) {
+                checkpoint();
+                if keep(route) {
+                    kept_routes.push(route.clone());
+                    kept_next_hops.push(next_hop.clone());
+                }
+            }
+            self.replacement_checkpoint(true);
+            let retired = std::mem::replace(announce, kept_routes.into());
+            self.replacement_checkpoint(true);
+            drop(retired);
+            self.replacement_checkpoint(true);
+            let retired = std::mem::replace(next_hop_override, kept_next_hops.into());
+            self.replacement_checkpoint(true);
+            drop(retired);
+            self.replacement_checkpoint(true);
         }
 
         // One record per family: (afi, prefixes blocked, episode transition).
         let mut episodes: Vec<(Afi, usize, Option<bool>)> = Vec::new();
         let Some(limits) = self.outbound_prefix_limits.get_mut(&peer) else {
+            for verdict in &mut verdicts {
+                self.replacement_checkpoint(true);
+                verdict.retire_with(&mut checkpoint);
+                self.replacement_checkpoint(true);
+            }
+            super::retire_vec(&mut verdicts, &mut checkpoint);
+            self.replacement_checkpoint(true);
+            super::retire_hash_set(&mut blocked, &mut checkpoint);
+            self.replacement_checkpoint(true);
             return false;
         };
-        for family_verdict in verdicts {
+        for family_verdict in &mut verdicts {
+            checkpoint();
             if grouped {
                 for prefix in &family_verdict.freed {
+                    checkpoint();
                     limits.grouped_remove(prefix);
                 }
-                limits.grouped_extend(family_verdict.afi, family_verdict.verdict.admitted);
+                super::replacement_readiness_checkpoint(&readiness, true);
+                limits.reserve_grouped_with_checkpoint(
+                    family_verdict.afi,
+                    family_verdict.verdict.admitted.len(),
+                    &mut checkpoint,
+                );
+                super::replacement_readiness_checkpoint(&readiness, true);
+                limits.grouped_extend(
+                    family_verdict.afi,
+                    family_verdict
+                        .verdict
+                        .admitted
+                        .iter()
+                        .inspect(|_| checkpoint())
+                        .copied(),
+                );
             }
             let Some(family) = limits.family_mut(family_verdict.afi) else {
                 continue;
@@ -504,6 +717,13 @@ impl RibManager {
             episodes.push((family_verdict.afi, blocked, transition));
         }
 
+        for verdict in &mut verdicts {
+            self.replacement_checkpoint(true);
+            verdict.retire_with(&mut checkpoint);
+            self.replacement_checkpoint(true);
+        }
+        super::retire_vec(&mut verdicts, &mut checkpoint);
+        self.replacement_checkpoint(true);
         let peer_label = peer.to_string();
         for (afi, blocked, transition) in episodes {
             let family = family_label(afi);
@@ -538,7 +758,11 @@ impl RibManager {
         // Adj-RIB-Out commit, so an ungrouped peer's usage would still read
         // the pre-batch count. The commit path refreshes them from the same
         // admitted truth the API reports, once that truth exists.
-        !blocked.is_empty()
+        let filtered = !blocked.is_empty();
+        self.replacement_checkpoint(true);
+        super::retire_hash_set(&mut blocked, &mut checkpoint);
+        self.replacement_checkpoint(true);
+        filtered
     }
 
     /// Distinct admitted prefixes for one limited family.
@@ -630,8 +854,10 @@ impl RibManager {
     /// API reports. A family that became unlimited drops its limit and
     /// headroom series instead of keeping a stale finite value.
     pub(in crate::manager) fn refresh_outbound_limit_gauges(&mut self, peer: IpAddr) {
+        self.replacement_checkpoint(true);
         let peer_label = peer.to_string();
         for row in self.outbound_prefix_limit_rows(peer) {
+            self.replacement_checkpoint(false);
             self.metrics.set_outbound_prefix_capacity(
                 &peer_label,
                 &row.family,
@@ -640,6 +866,7 @@ impl RibManager {
                 row.blocking,
             );
         }
+        self.replacement_checkpoint(true);
     }
 
     /// Install this registration's effective limits before its initial feed
@@ -1081,32 +1308,58 @@ impl RibManager {
         if !self.outbound_prefix_limits.contains_key(&peer) {
             return;
         }
-        let seeded: Vec<TypedGroupedAdmitted> = LIMITED_FAMILIES
+        self.replacement_checkpoint(true);
+        let readiness = self.replacement_readiness.clone();
+        let mut checkpoint = || super::replacement_readiness_checkpoint(&readiness, false);
+        let mut seeded: Vec<TypedGroupedAdmitted> = LIMITED_FAMILIES
             .into_iter()
             .map(|afi| {
-                if entering_group {
+                super::replacement_readiness_checkpoint(&readiness, true);
+                let admitted = if entering_group {
                     self.adj_ribs_out.get(&peer).map_or_else(
                         || TypedGroupedAdmitted::collect(afi, std::iter::empty()),
                         |rib| {
-                            TypedGroupedAdmitted::collect(afi, rib.iter().map(|route| route.prefix))
+                            TypedGroupedAdmitted::collect_with_capacity(
+                                afi,
+                                rib.iter()
+                                    .inspect(|_| checkpoint())
+                                    .map(|route| route.prefix),
+                                rib.unicast_prefix_count(afi),
+                            )
                         },
                     )
                 } else {
                     TypedGroupedAdmitted::collect(afi, std::iter::empty())
-                }
+                };
+                super::replacement_readiness_checkpoint(&readiness, true);
+                admitted
             })
             .collect();
+        self.replacement_checkpoint(true);
         let Some(entry) = self.outbound_prefix_limits.get_mut(&peer) else {
+            for admitted in &mut seeded {
+                admitted.retire_with(&mut checkpoint);
+            }
+            super::retire_vec(&mut seeded, &mut checkpoint);
+            self.replacement_checkpoint(true);
             return;
         };
-        for admitted in seeded {
+        for mut admitted in seeded.drain(..) {
+            checkpoint();
             let afi = admitted.afi();
             let limited = entry
                 .family(afi)
                 .is_some_and(|family| family.limit.is_some());
+            super::replacement_readiness_checkpoint(&readiness, true);
             if limited {
-                entry.replace_grouped(admitted);
+                entry.replace_grouped_with_checkpoint(admitted, &mut checkpoint);
+            } else {
+                admitted.retire_with(&mut checkpoint);
             }
+            super::replacement_readiness_checkpoint(&readiness, true);
         }
+        self.replacement_checkpoint(true);
+        drop(seeded);
+        self.replacement_checkpoint(true);
     }
 }

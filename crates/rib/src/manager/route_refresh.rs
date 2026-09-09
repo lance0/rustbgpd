@@ -706,6 +706,7 @@ impl RibManager {
         safi: Safi,
         replay_kind: FamilyReplayKind,
     ) -> FamilyReplayOutcome {
+        self.replacement_checkpoint(true);
         let family = (afi, safi);
         let (suppress_eor, deferred_eor) = match replay_kind {
             FamilyReplayKind::PeerRefresh { suppress_eor } => {
@@ -805,12 +806,23 @@ impl RibManager {
         let mut all_prefixes: HashSet<Prefix> = self
             .loc_rib
             .iter()
+            .inspect(|_| {
+                super::replacement_readiness_checkpoint_at(
+                    &self.replacement_readiness,
+                    "refresh",
+                    false,
+                );
+            })
             .map(|r| r.prefix)
             .filter(|p| prefix_family(p) == family)
             .collect();
         for rib in self.ribs.values() {
+            super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
             all_prefixes.extend(
                 rib.iter()
+                    .inspect(|_| {
+                        super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
+                    })
                     .map(|r| r.prefix)
                     .filter(|p| prefix_family(p) == family),
             );
@@ -819,6 +831,9 @@ impl RibManager {
             all_prefixes.extend(
                 blocked
                     .keys()
+                    .inspect(|_| {
+                        super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
+                    })
                     .filter(|prefix| prefix_family(prefix) == family)
                     .copied(),
             );
@@ -832,14 +847,17 @@ impl RibManager {
         let mut grouped_otc_blocked = Vec::new();
 
         if safi == Safi::FlowSpec {
-            let flow_rules: HashSet<FlowSpecKey> = self
+            let mut flow_rules: HashSet<FlowSpecKey> = self
                 .loc_rib
                 .iter_flowspec()
+                .inspect(|_| {
+                    super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
+                })
                 .filter(|route| route.afi == afi)
                 .map(FlowSpecRoute::selection_key)
                 .collect();
             if !flow_rules.is_empty() {
-                Self::stage_flowspec_rules(
+                Self::stage_flowspec_rules_with_checkpoint(
                     loc_rib,
                     &refresh_view,
                     &self.peer_is_rr_client,
@@ -859,16 +877,27 @@ impl RibManager {
                     &target_peer_label,
                     &mut fs_announce,
                     &mut fs_withdraw,
+                    &mut || {
+                        super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
+                    },
                 );
             }
+            super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
+            super::retire_hash_set(&mut flow_rules, &mut || {
+                super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
+            });
+            super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
         } else if (afi, safi) == (Afi::L2Vpn, Safi::Evpn) {
-            let evpn_keys: HashSet<EvpnRouteKey> = self
+            let mut evpn_keys: HashSet<EvpnRouteKey> = self
                 .loc_rib
                 .iter_evpn()
+                .inspect(|_| {
+                    super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
+                })
                 .map(crate::route::EvpnRibRoute::key)
                 .collect();
             if !evpn_keys.is_empty() {
-                Self::stage_evpn_routes(
+                Self::stage_evpn_routes_with_checkpoint(
                     loc_rib,
                     &refresh_view,
                     &self.peer_is_rr_client,
@@ -891,17 +920,28 @@ impl RibManager {
                     &mut evpn_announce,
                     &mut evpn_withdraw,
                     false, // route refresh re-emits via empty refresh_view
+                    &mut || {
+                        super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
+                    },
                 );
             }
+            super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
+            super::retire_hash_set(&mut evpn_keys, &mut || {
+                super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
+            });
+            super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
         } else if let Some(bgpls_family) = BgpLsFamily::from_afi_safi(afi, safi) {
-            let bgpls_keys: HashSet<crate::route::BgpLsRouteKey> = self
+            let mut bgpls_keys: HashSet<crate::route::BgpLsRouteKey> = self
                 .loc_rib
                 .iter_bgpls()
+                .inspect(|_| {
+                    super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
+                })
                 .filter(|route| route.family == bgpls_family)
                 .map(crate::route::BgpLsRibRoute::key)
                 .collect();
             if !bgpls_keys.is_empty() {
-                Self::stage_bgpls_routes(
+                Self::stage_bgpls_routes_with_checkpoint(
                     loc_rib,
                     &refresh_view,
                     &self.peer_is_rr_client,
@@ -922,8 +962,16 @@ impl RibManager {
                     &mut bgpls_announce,
                     &mut bgpls_withdraw,
                     false, // route refresh re-emits via empty refresh_view
+                    &mut || {
+                        super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
+                    },
                 );
             }
+            super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
+            super::retire_hash_set(&mut bgpls_keys, &mut || {
+                super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
+            });
+            super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
         } else if safi == Safi::MplsVpn {
             // A member of a VPN-staging group replays the refreshed
             // family from the group table — own-sourced excluded,
@@ -934,7 +982,9 @@ impl RibManager {
             // below).
             if let Some(gid) = vpn_member_of {
                 if let Some(group) = self.group_ribs.get(&gid) {
-                    for route in group.table.iter_vpn() {
+                    for route in group.table.iter_vpn().inspect(|_| {
+                        super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
+                    }) {
                         if route.peer == peer
                             || route.afi_safi() != family
                             || !super::update_groups::rt_passes(rtc_filter.as_ref(), route)
@@ -952,6 +1002,9 @@ impl RibManager {
                 let mut vpn_keys: HashSet<rustbgpd_wire::VpnRouteKey> = self
                     .loc_rib
                     .iter_vpn()
+                    .inspect(|_| {
+                        super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
+                    })
                     .filter(|route| route.afi_safi() == family)
                     .map(|route| route.nlri.key())
                     .collect();
@@ -960,11 +1013,24 @@ impl RibManager {
                 if peer_add_path_send_max > 0
                     && peer_add_path_send_families
                         .iter()
+                        .inspect(|_| {
+                            super::replacement_readiness_checkpoint(
+                                &self.replacement_readiness,
+                                false,
+                            );
+                        })
                         .any(|(_, safi)| *safi == Safi::MplsVpn)
                 {
                     for rib in self.ribs.values() {
+                        super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
                         vpn_keys.extend(
                             rib.iter_vpn()
+                                .inspect(|_| {
+                                    super::replacement_readiness_checkpoint(
+                                        &self.replacement_readiness,
+                                        false,
+                                    );
+                                })
                                 .filter(|route| route.afi_safi() == family)
                                 .map(|route| route.nlri.key()),
                         );
@@ -997,20 +1063,34 @@ impl RibManager {
                         policy_stats: &mut *policy_stats,
                         peer_label: &target_peer_label,
                     };
-                    Self::stage_vpn_routes(
+                    Self::stage_vpn_routes_with_checkpoint(
                         &context,
                         &vpn_keys,
                         &mut target,
                         rtc_filter.as_ref(),
                         &mut vpn_announce,
                         &mut vpn_withdraw,
+                        &mut || {
+                            super::replacement_readiness_checkpoint(
+                                &self.replacement_readiness,
+                                false,
+                            );
+                        },
                     );
                 }
+                super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
+                super::retire_hash_set(&mut vpn_keys, &mut || {
+                    super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
+                });
+                super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
             }
         } else if safi == Safi::LabeledUnicast {
             let mut labeled_keys: HashSet<Prefix> = self
                 .loc_rib
                 .iter_labeled()
+                .inspect(|_| {
+                    super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
+                })
                 .filter(|route| route.afi_safi() == family)
                 .map(|route| route.nlri.key())
                 .collect();
@@ -1019,11 +1099,21 @@ impl RibManager {
             if peer_add_path_send_max > 0
                 && peer_add_path_send_families
                     .iter()
+                    .inspect(|_| {
+                        super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
+                    })
                     .any(|(_, safi)| *safi == Safi::LabeledUnicast)
             {
                 for rib in self.ribs.values() {
+                    super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
                     labeled_keys.extend(
                         rib.iter_labeled()
+                            .inspect(|_| {
+                                super::replacement_readiness_checkpoint(
+                                    &self.replacement_readiness,
+                                    false,
+                                );
+                            })
                             .filter(|route| route.afi_safi() == family)
                             .map(|route| route.nlri.key()),
                     );
@@ -1056,22 +1146,33 @@ impl RibManager {
                     policy_stats: &mut *policy_stats,
                     peer_label: &target_peer_label,
                 };
-                Self::stage_labeled_routes(
+                Self::stage_labeled_routes_with_checkpoint(
                     &context,
                     &labeled_keys,
                     &mut target,
                     &mut labeled_announce,
                     &mut labeled_withdraw,
+                    &mut || {
+                        super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
+                    },
                 );
             }
+            super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
+            super::retire_hash_set(&mut labeled_keys, &mut || {
+                super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
+            });
+            super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
         } else if safi == Safi::RtConstrain {
-            let rtc_keys: HashSet<crate::route::RtcRibRouteKey> = self
+            let mut rtc_keys: HashSet<crate::route::RtcRibRouteKey> = self
                 .loc_rib
                 .iter_rtc()
+                .inspect(|_| {
+                    super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
+                })
                 .map(crate::route::RtcRibRoute::key)
                 .collect();
             if !rtc_keys.is_empty() {
-                Self::stage_rtc_routes(
+                Self::stage_rtc_routes_with_checkpoint(
                     loc_rib,
                     &refresh_view,
                     &self.peer_is_rr_client,
@@ -1092,8 +1193,16 @@ impl RibManager {
                     &mut rtc_announce,
                     &mut rtc_withdraw,
                     false, // route refresh re-emits via empty refresh_view
+                    &mut || {
+                        super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
+                    },
                 );
             }
+            super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
+            super::retire_hash_set(&mut rtc_keys, &mut || {
+                super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
+            });
+            super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
         } else if let Some(gid) = member_of {
             // A grouped member's refresh replay comes from the group
             // table — family-filtered, the member's derived view — with
@@ -1109,7 +1218,9 @@ impl RibManager {
                 // tagged entries rewritten per target (prepend from the
                 // captured source, scrub post-policy).
                 let rs_control = rs_control_asn.zip(target_peer_asn);
-                for staged in group.table.iter() {
+                for staged in group.table.iter().inspect(|_| {
+                    super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
+                }) {
                     if prefix_family(&staged.prefix) != family {
                         continue;
                     }
@@ -1140,9 +1251,25 @@ impl RibManager {
                     );
                     unicast.announce.push(route);
                 }
-                current_policy_filtered_routes
-                    .extend(group.policy_filtered_for_member(peer, &all_prefixes));
-                grouped_otc_blocked = group.otc_blocked_for_member(peer, Some(&all_prefixes));
+                let mut filtered = group
+                    .policy_filtered_for_member_with_checkpoint(peer, &all_prefixes, &mut || {
+                        super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
+                    })
+                    .into_iter();
+                for key in filtered.by_ref() {
+                    super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
+                    current_policy_filtered_routes.insert(key);
+                }
+                super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
+                drop(filtered);
+                super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
+                grouped_otc_blocked = group.otc_blocked_for_member_with_checkpoint(
+                    peer,
+                    Some(&all_prefixes),
+                    &mut || {
+                        super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
+                    },
+                );
             }
             // Export counters for the replayed family, from the group's
             // staged residue (per-peer refresh re-eval parity).
@@ -1153,6 +1280,7 @@ impl RibManager {
             // post-modification attributes and AS_PATH match string.
             let mut export_memo = super::distribution::ExportMemo::default();
             for prefix in &all_prefixes {
+                super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
                 let prefix_family = prefix_family(prefix);
                 let prefix_send_max = if peer_add_path_send_families.contains(&prefix_family) {
                     peer_add_path_send_limits
@@ -1163,7 +1291,7 @@ impl RibManager {
                     0
                 };
                 if prefix_send_max > 0 {
-                    Self::distribute_multipath_prefix(
+                    Self::distribute_multipath_prefix_with_checkpoint(
                         &self.ribs,
                         &self.unicast_prefix_peers,
                         &refresh_view,
@@ -1190,9 +1318,13 @@ impl RibManager {
                         &target_peer_label,
                         &mut unicast,
                         false, // route refresh re-emits all anyway via empty refresh_view
+                        &mut || {
+                            super::replacement_readiness_checkpoint(
+                                &self.replacement_readiness,
+                                false,
+                            );
+                        },
                     );
-                    current_policy_filtered_routes
-                        .extend(std::mem::take(&mut unicast.policy_filtered));
                 } else if per_client_best {
                     // RFC 7947 §2.3.2 per-client best-path: the refresh
                     // replay re-derives the same filtered best the live
@@ -1200,7 +1332,7 @@ impl RibManager {
                     // `send_initial_table` arm for the mode-precedence
                     // notes (Add-Path outranks; ORR cannot coexist).
                     debug_assert!(orr_ctx.is_none(), "ORR vantage on a per-client-best peer");
-                    Self::distribute_multipath_prefix(
+                    Self::distribute_multipath_prefix_with_checkpoint(
                         &self.ribs,
                         &self.unicast_prefix_peers,
                         &refresh_view,
@@ -1227,12 +1359,16 @@ impl RibManager {
                         &target_peer_label,
                         &mut unicast,
                         false, // route refresh re-emits all anyway via empty refresh_view
+                        &mut || {
+                            super::replacement_readiness_checkpoint(
+                                &self.replacement_readiness,
+                                false,
+                            );
+                        },
                     );
-                    current_policy_filtered_routes
-                        .extend(std::mem::take(&mut unicast.policy_filtered));
                 } else if let Some((orr_topology, orr_spf)) = orr_ctx {
                     // ORR peer with a resolved vantage: per-vantage best.
-                    Self::distribute_orr_best_prefix(
+                    Self::distribute_orr_best_prefix_with_checkpoint(
                         &self.ribs,
                         &self.unicast_prefix_peers,
                         &refresh_view,
@@ -1257,9 +1393,13 @@ impl RibManager {
                         &target_peer_label,
                         &mut unicast,
                         false,
+                        &mut || {
+                            super::replacement_readiness_checkpoint(
+                                &self.replacement_readiness,
+                                false,
+                            );
+                        },
                     );
-                    current_policy_filtered_routes
-                        .extend(std::mem::take(&mut unicast.policy_filtered));
                 } else {
                     let mut target = super::distribution::ExportTarget::Peer {
                         peer,
@@ -1269,7 +1409,7 @@ impl RibManager {
                         policy_stats: &mut *policy_stats,
                         peer_label: &target_peer_label,
                     };
-                    Self::distribute_single_best_prefix(
+                    Self::distribute_single_best_prefix_with_checkpoint(
                         loc_rib,
                         &refresh_view,
                         &self.peer_is_rr_client,
@@ -1287,10 +1427,17 @@ impl RibManager {
                         &mut export_memo,
                         &mut unicast,
                         false,
+                        &mut || {
+                            super::replacement_readiness_checkpoint(
+                                &self.replacement_readiness,
+                                false,
+                            );
+                        },
                     );
-                    current_policy_filtered_routes
-                        .extend(std::mem::take(&mut unicast.policy_filtered));
                 }
+                current_policy_filtered_routes.extend(unicast.policy_filtered.drain(..).inspect(
+                    |_| super::replacement_readiness_checkpoint(&self.replacement_readiness, false),
+                ));
             }
             // The refresh view is intentionally empty so permitted routes are
             // re-advertised for ROUTE-REFRESH. That empty view cannot discover
@@ -1302,42 +1449,115 @@ impl RibManager {
             {
                 for route in rib_out
                     .iter()
+                    .inspect(|_| {
+                        super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
+                    })
                     .filter(|r| prefix_family(&r.prefix) == family && !filter.permits(&r.prefix))
                 {
                     unicast.withdraw.push((route.prefix, route.path_id));
                 }
             }
+            super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
+            #[cfg(feature = "bench-internals")]
+            export_memo.record_replacement_capacities(self);
+            export_memo.retire_with(&mut || {
+                super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
+            });
+            super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
         }
 
+        self.replacement_checkpoint(true);
         if member_of.is_some() {
             self.reconcile_peer_otc_blocked(peer, &all_prefixes, grouped_otc_blocked);
         }
 
         if !self.outbound_peers.contains_key(&peer) {
+            self.replacement_checkpoint(true);
+            unicast.retire_with(&mut || self.replacement_checkpoint(false));
+            super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
+            super::retire_vec(&mut fs_announce, &mut || self.replacement_checkpoint(false));
+            super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
+            super::retire_vec(&mut fs_withdraw, &mut || self.replacement_checkpoint(false));
+            super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
+            super::retire_vec(&mut evpn_announce, &mut || {
+                self.replacement_checkpoint(false);
+            });
+            super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
+            super::retire_vec(&mut evpn_withdraw, &mut || {
+                self.replacement_checkpoint(false);
+            });
+            super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
+            super::retire_vec(&mut bgpls_announce, &mut || {
+                self.replacement_checkpoint(false);
+            });
+            super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
+            super::retire_vec(&mut bgpls_withdraw, &mut || {
+                self.replacement_checkpoint(false);
+            });
+            super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
+            super::retire_vec(&mut vpn_announce, &mut || {
+                self.replacement_checkpoint(false);
+            });
+            super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
+            super::retire_vec(&mut vpn_withdraw, &mut || {
+                self.replacement_checkpoint(false);
+            });
+            super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
+            super::retire_vec(&mut labeled_announce, &mut || {
+                self.replacement_checkpoint(false);
+            });
+            super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
+            super::retire_vec(&mut labeled_withdraw, &mut || {
+                self.replacement_checkpoint(false);
+            });
+            super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
+            super::retire_vec(&mut rtc_announce, &mut || {
+                self.replacement_checkpoint(false);
+            });
+            super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
+            super::retire_vec(&mut rtc_withdraw, &mut || {
+                self.replacement_checkpoint(false);
+            });
+            super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
+            super::retire_hash_set(&mut all_prefixes, &mut || {
+                self.replacement_checkpoint(false);
+            });
+            super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
+            super::retire_hash_set(&mut current_policy_filtered_routes, &mut || {
+                self.replacement_checkpoint(false);
+            });
+            self.replacement_checkpoint(true);
             return FamilyReplayOutcome::Failed;
         }
         let mut group_prior = HashSet::new();
         if member_of.is_some()
             && let Some(routes) = self.grouped_advertised_routes(peer)
         {
-            group_prior.extend(
-                routes.into_iter().map(|route| {
-                    crate::update::ExactExportKey::Unicast(route.prefix, route.path_id)
-                }),
-            );
+            group_prior.extend(routes.into_iter().map(|route| {
+                self.replacement_checkpoint(false);
+                crate::update::ExactExportKey::Unicast(route.prefix, route.path_id)
+            }));
         }
         if let Some(gid) = vpn_member_of
             && let Some(group) = self.group_ribs.get(&gid)
         {
             let filter = self.member_rt_filter(peer);
             let rejected = self.peer_unexportable.get(&peer);
-            group_prior.extend(group.table.iter_vpn().filter_map(|route| {
-                let key = crate::update::ExactExportKey::Vpn(route.key());
-                (route.peer != peer
-                    && crate::manager::update_groups::rt_passes(filter.as_ref(), route)
-                    && !rejected.is_some_and(|keys| keys.contains(&key)))
-                .then_some(key)
-            }));
+            group_prior.extend(
+                group
+                    .table
+                    .iter_vpn()
+                    .inspect(|_| {
+                        super::replacement_readiness_checkpoint(&self.replacement_readiness, false);
+                    })
+                    .filter_map(|route| {
+                        let key = crate::update::ExactExportKey::Vpn(route.key());
+                        (route.peer != peer
+                            && crate::manager::update_groups::rt_passes(filter.as_ref(), route)
+                            && !rejected.is_some_and(|keys| keys.contains(&key)))
+                        .then_some(key)
+                    }),
+            );
         }
         let prior_blocking =
             matches!(replay_kind, FamilyReplayKind::PrefixLimitRecovery).then(|| {
@@ -1361,6 +1581,15 @@ impl RibManager {
                 (vec![], vec![])
             }
         };
+        self.replacement_checkpoint(true);
+        let announce = unicast.announce.into();
+        self.replacement_checkpoint(true);
+        let next_hop_override = unicast.next_hop_override.into();
+        self.replacement_checkpoint(true);
+        super::retire_vec(&mut unicast.policy_filtered, &mut || {
+            self.replacement_checkpoint(false);
+        });
+        super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
         if !self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
             peer,
             OutboundCommitBatch {
@@ -1379,10 +1608,7 @@ impl RibManager {
                 labeled_withdraw,
                 rtc_announce,
                 rtc_withdraw,
-                ..OutboundCommitBatch::with_unicast(
-                    unicast.announce.into(),
-                    unicast.next_hop_override.into(),
-                )
+                ..OutboundCommitBatch::with_unicast(announce, next_hop_override)
             },
             group_prior,
             None,
@@ -1405,6 +1631,15 @@ impl RibManager {
                     warn!(%peer, ?family, "outbound channel full during explicit outbound replay");
                 }
             }
+            super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
+            super::retire_hash_set(&mut all_prefixes, &mut || {
+                self.replacement_checkpoint(false);
+            });
+            super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
+            super::retire_hash_set(&mut current_policy_filtered_routes, &mut || {
+                self.replacement_checkpoint(false);
+            });
+            self.replacement_checkpoint(true);
             return FamilyReplayOutcome::Failed;
         }
         self.update_policy_filtered_routes_for_prefixes(
@@ -1436,6 +1671,15 @@ impl RibManager {
                 }
             }
         }
+        super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
+        super::retire_hash_set(&mut all_prefixes, &mut || {
+            self.replacement_checkpoint(false);
+        });
+        super::replacement_readiness_checkpoint(&self.replacement_readiness, true);
+        super::retire_hash_set(&mut current_policy_filtered_routes, &mut || {
+            self.replacement_checkpoint(false);
+        });
+        self.replacement_checkpoint(true);
         FamilyReplayOutcome::Committed
     }
 
@@ -1472,11 +1716,14 @@ impl RibManager {
 
     /// Retry any deferred enhanced route refresh responses for a peer.
     pub(super) fn retry_pending_refresh(&mut self, peer: IpAddr) {
+        self.replacement_checkpoint(true);
         let Some(families) = self.pending_refresh.remove(&peer) else {
             return;
         };
         for (afi, safi) in families {
+            self.replacement_checkpoint(false);
             self.send_route_refresh_response(peer, afi, safi);
+            self.replacement_checkpoint(true);
         }
     }
 

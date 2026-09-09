@@ -1,6 +1,6 @@
 use super::{
-    AdjRibOut, FxHashMap, GroupMembership, GroupRibOut, HashSet, IpAddr, PolicyChain, Prefix,
-    RegroupBaseline, RibManager, VpnRouteKey,
+    AdjRibOut, FxHashMap, GroupMembership, GroupRibOut, HashSet, IpAddr, PolicyChain,
+    RegroupBaseline, RibManager,
 };
 
 impl RibManager {
@@ -20,6 +20,9 @@ impl RibManager {
         reason = "the membership lifecycle keeps every residue-carry rule at one seam"
     )]
     pub(in crate::manager) fn recompute_update_group(&mut self, peer: IpAddr) {
+        let readiness = self.replacement_readiness.clone();
+        let mut checkpoint = || crate::manager::replacement_readiness_checkpoint(&readiness, false);
+        checkpoint();
         let membership = self.compute_update_group_membership(peer);
         let previous = self.update_groups.members.get(&peer).cloned();
         if previous.as_ref() == Some(&membership) {
@@ -69,8 +72,30 @@ impl RibManager {
                 Some(gid) => {
                     let group = self.group_ribs.get(&gid);
                     let base = group.map(|g| RegroupBaseline {
-                        unicast: g.member_view_snapshot(peer, rs_control, &rejected),
-                        vpn: g.member_vpn_view_snapshot(peer, rt_filter.as_ref(), &rejected),
+                        unicast: g.member_view_snapshot_with_checkpoint(
+                            peer,
+                            rs_control,
+                            &rejected,
+                            &mut |force| {
+                                if force {
+                                    self.replacement_checkpoint(true);
+                                } else {
+                                    self.replacement_checkpoint_at("fallback_baseline", false);
+                                }
+                            },
+                        ),
+                        vpn: g.member_vpn_view_snapshot_with_checkpoint(
+                            peer,
+                            rt_filter.as_ref(),
+                            &rejected,
+                            &mut |force| {
+                                if force {
+                                    self.replacement_checkpoint(true);
+                                } else {
+                                    self.replacement_checkpoint_at("fallback_baseline", false);
+                                }
+                            },
+                        ),
                     });
                     // A member that leaves while dirty may have missed
                     // withdrawals; carry the group tombstones along as
@@ -80,35 +105,58 @@ impl RibManager {
                         && (!g.tombstones.is_empty() || !g.vpn_tombstones.is_empty())
                     {
                         let extras = self.pending_extra_withdraws.entry(peer).or_default();
-                        extras.unicast.extend(g.tombstones.iter().copied());
-                        extras.vpn.extend(g.vpn_tombstones.iter().copied());
+                        extras
+                            .unicast
+                            .extend(g.tombstones.iter().inspect(|_| checkpoint()).copied());
+                        extras
+                            .vpn
+                            .extend(g.vpn_tombstones.iter().inspect(|_| checkpoint()).copied());
                     }
                     base
                 }
                 None if previous.is_some() => Some(
                     self.adj_ribs_out
                         .get(&peer)
-                        .map(|rib_out| RegroupBaseline {
-                            unicast: rib_out
-                                .iter()
-                                .map(|route| ((route.prefix, route.path_id), route.clone()))
-                                .collect(),
-                            // VPN moves to group ownership only for a
-                            // VPN-groupable peer; an RTC peer's VPN state
-                            // stays per-peer and must not be captured.
-                            vpn: if vpn_groupable {
-                                rib_out
-                                    .iter_vpn()
-                                    .map(|route| (route.nlri.key(), route.clone()))
-                                    .collect()
-                            } else {
-                                FxHashMap::default()
-                            },
+                        .map(|rib_out| {
+                            let mut unicast = FxHashMap::with_capacity_and_hasher(
+                                rib_out.len(),
+                                rustc_hash::FxBuildHasher,
+                            );
+                            checkpoint();
+                            for route in rib_out.iter() {
+                                self.replacement_checkpoint_at("fallback_baseline", false);
+                                unicast.insert((route.prefix, route.path_id), route.clone());
+                            }
+                            let mut vpn = FxHashMap::default();
+                            if vpn_groupable {
+                                vpn = FxHashMap::with_capacity_and_hasher(
+                                    rib_out.vpn_len(),
+                                    rustc_hash::FxBuildHasher,
+                                );
+                                checkpoint();
+                                for route in rib_out.iter_vpn() {
+                                    self.replacement_checkpoint_at("fallback_baseline", false);
+                                    vpn.insert(route.nlri.key(), route.clone());
+                                }
+                            }
+                            RegroupBaseline { unicast, vpn }
                         })
                         .unwrap_or_default(),
                 ),
                 None => None,
             };
+            if let Some(base) = &baseline {
+                self.replacement_capacity(
+                    "transient_baseline_unicast",
+                    base.unicast.len(),
+                    base.unicast.capacity(),
+                );
+                self.replacement_capacity(
+                    "transient_baseline_vpn",
+                    base.vpn.len(),
+                    base.vpn.capacity(),
+                );
+            }
             if let Some(gid) = prev_gid {
                 self.leave_group(gid, peer);
             } else if previous.is_some() {
@@ -121,9 +169,12 @@ impl RibManager {
                 // ownership into the bounded member set first.
                 self.carry_outbound_admitted_across_regroup(peer, true);
                 if let Some(rib_out) = self.adj_ribs_out.get_mut(&peer) {
-                    rib_out.release_unicast();
+                    let readiness = &self.replacement_readiness;
+                    let mut checkpoint =
+                        || crate::manager::replacement_readiness_checkpoint(readiness, true);
+                    rib_out.release_unicast_with(&mut checkpoint);
                     if vpn_groupable {
-                        rib_out.release_vpn();
+                        rib_out.release_vpn_with(&mut checkpoint);
                     }
                 }
             }
@@ -154,13 +205,34 @@ impl RibManager {
                 // per-peer destinations: neither gets a baseline /
                 // seeded Adj-RIB-Out to suppress against.
                 (Some(base), _) if prev_gid.is_some() && self.dirty_peers.contains(&peer) => {
-                    let extras = self.pending_extra_withdraws.entry(peer).or_default();
-                    if let Some(prev) = self.pending_regroup_baseline.remove(&peer) {
-                        extras.unicast.extend(prev.unicast.into_keys());
-                        extras.vpn.extend(prev.vpn.into_keys());
+                    let previous = self.pending_regroup_baseline.remove(&peer);
+                    if let Some(prev) = &previous {
+                        self.replacement_capacity(
+                            "transient_baseline_unicast",
+                            prev.unicast.len(),
+                            prev.unicast.capacity(),
+                        );
+                        self.replacement_capacity(
+                            "transient_baseline_vpn",
+                            prev.vpn.len(),
+                            prev.vpn.capacity(),
+                        );
                     }
-                    extras.unicast.extend(base.unicast.into_keys());
-                    extras.vpn.extend(base.vpn.into_keys());
+                    let extras = self.pending_extra_withdraws.entry(peer).or_default();
+                    for baseline in previous.into_iter().chain(std::iter::once(base)) {
+                        let mut unicast = baseline.unicast.into_keys();
+                        extras
+                            .unicast
+                            .extend(unicast.by_ref().inspect(|_| checkpoint()));
+                        crate::manager::replacement_readiness_checkpoint(&readiness, true);
+                        drop(unicast);
+                        crate::manager::replacement_readiness_checkpoint(&readiness, true);
+                        let mut vpn = baseline.vpn.into_keys();
+                        extras.vpn.extend(vpn.by_ref().inspect(|_| checkpoint()));
+                        crate::manager::replacement_readiness_checkpoint(&readiness, true);
+                        drop(vpn);
+                        crate::manager::replacement_readiness_checkpoint(&readiness, true);
+                    }
                 }
                 (Some(mut base), Some(_)) => {
                     // A grouped member keeps no per-family record of its
@@ -178,10 +250,21 @@ impl RibManager {
                     if self.dirty_peers.contains(&peer)
                         && let Some(prev) = self.pending_regroup_baseline.remove(&peer)
                     {
-                        base.unicast.extend(prev.unicast);
-                        base.vpn.extend(prev.vpn);
+                        base.merge_prior(prev, &mut checkpoint);
                     }
-                    self.pending_regroup_baseline.insert(peer, base);
+                    self.replacement_capacity(
+                        "transient_baseline_unicast",
+                        base.unicast.len(),
+                        base.unicast.capacity(),
+                    );
+                    self.replacement_capacity(
+                        "transient_baseline_vpn",
+                        base.vpn.len(),
+                        base.vpn.capacity(),
+                    );
+                    if let Some(mut replaced) = self.pending_regroup_baseline.insert(peer, base) {
+                        replaced.retire_with(&mut checkpoint);
+                    }
                 }
                 (Some(mut base), None) => {
                     // Back on the per-peer path: seed Adj-RIB-Out with
@@ -196,20 +279,41 @@ impl RibManager {
                     if self.dirty_peers.contains(&peer)
                         && let Some(prev) = self.pending_regroup_baseline.remove(&peer)
                     {
-                        base.unicast.extend(prev.unicast);
-                        base.vpn.extend(prev.vpn);
+                        base.merge_prior(prev, &mut checkpoint);
                     }
-                    let loc_rib_len = self.loc_rib.len();
+                    self.replacement_capacity(
+                        "transient_baseline_unicast",
+                        base.unicast.len(),
+                        base.unicast.capacity(),
+                    );
+                    self.replacement_capacity(
+                        "transient_baseline_vpn",
+                        base.vpn.len(),
+                        base.vpn.capacity(),
+                    );
+                    let loc_rib_len = self.loc_rib.len().max(base.unicast.len());
                     let rib_out = self
                         .adj_ribs_out
                         .entry(peer)
                         .or_insert_with(|| AdjRibOut::with_capacity(peer, loc_rib_len));
-                    for route in base.unicast.into_values() {
-                        rib_out.insert(route);
+                    rib_out.reserve_unicast_with(base.unicast.len(), &mut checkpoint);
+                    rib_out.reserve_vpn_with(base.vpn.len(), &mut checkpoint);
+                    let mut unicast = base.unicast.into_values();
+                    for route in unicast.by_ref() {
+                        checkpoint();
+                        rib_out.insert_with(route, &mut checkpoint);
                     }
-                    for route in base.vpn.into_values() {
+                    crate::manager::replacement_readiness_checkpoint(&readiness, true);
+                    drop(unicast);
+                    crate::manager::replacement_readiness_checkpoint(&readiness, true);
+                    let mut vpn = base.vpn.into_values();
+                    for route in vpn.by_ref() {
+                        checkpoint();
                         rib_out.insert_vpn(route);
                     }
+                    crate::manager::replacement_readiness_checkpoint(&readiness, true);
+                    drop(vpn);
+                    crate::manager::replacement_readiness_checkpoint(&readiness, true);
                 }
                 (None, _) => {}
             }
@@ -242,7 +346,10 @@ impl RibManager {
     /// correct only while the group is memberless). `peer` is the
     /// exemplar whose group-uniform staging inputs seed the profile.
     pub(in crate::manager) fn ensure_group_table(&mut self, gid: usize, peer: IpAddr) {
+        let readiness = self.replacement_readiness.clone();
+        let checkpoint = || crate::manager::replacement_readiness_checkpoint(&readiness, false);
         if !self.group_ribs.contains_key(&gid) {
+            self.replacement_checkpoint(true);
             let group = GroupRibOut::new(
                 // `share()`, not `clone()`: the snapshot must keep
                 // feeding the installed chain's ADR-0096 hit counters.
@@ -266,24 +373,57 @@ impl RibManager {
                     .is_some_and(|key| key.per_client_best),
                 self.loc_rib.len(),
             );
+            self.replacement_checkpoint(true);
             self.group_ribs.insert(gid, group);
-            let prefixes: HashSet<Prefix> = self.loc_rib.iter().map(|r| r.prefix).collect();
+            self.replacement_checkpoint(true);
+            let mut prefixes = HashSet::with_capacity(self.loc_rib.len());
+            self.replacement_checkpoint(true);
+            prefixes.extend(
+                self.loc_rib
+                    .iter()
+                    .inspect(|_| checkpoint())
+                    .map(|r| r.prefix),
+            );
             let mut memo = crate::manager::distribution::ExportMemo::default();
             // Deltas of the build passes are discarded: there are no
             // members yet, and the joining member replays the whole
             // table anyway.
-            let _ = self.stage_group_prefixes(gid, &prefixes, &mut memo);
+            let mut staged = self.stage_group_prefixes(gid, &prefixes, &mut memo);
+            staged.retire_with(&mut |force| self.replacement_checkpoint(force));
+            drop(staged);
+            self.replacement_checkpoint(true);
             if self
                 .group_ribs
                 .get(&gid)
                 .is_some_and(GroupRibOut::stages_vpn)
             {
-                let keys: HashSet<VpnRouteKey> =
-                    self.loc_rib.iter_vpn().map(|r| r.nlri.key()).collect();
+                self.replacement_checkpoint(true);
+                let mut keys = HashSet::with_capacity(self.loc_rib.vpn_len());
+                self.replacement_checkpoint(true);
+                keys.extend(
+                    self.loc_rib
+                        .iter_vpn()
+                        .inspect(|_| checkpoint())
+                        .map(|r| r.nlri.key()),
+                );
                 if !keys.is_empty() {
-                    let _ = self.stage_group_vpn_keys(gid, &keys);
+                    let mut staged = self.stage_group_vpn_keys(gid, &keys);
+                    staged.retire_with(&mut |force| self.replacement_checkpoint(force));
                 }
+                self.replacement_checkpoint(true);
+                crate::manager::retire_hash_set(&mut keys, &mut || checkpoint());
+                self.replacement_checkpoint(true);
             }
+            self.replacement_checkpoint(true);
+            #[cfg(feature = "bench-internals")]
+            memo.record_replacement_capacities(self);
+            memo.retire_with(&mut || checkpoint());
+            self.replacement_checkpoint(true);
+            crate::manager::retire_hash_set(&mut prefixes, &mut || checkpoint());
+            self.replacement_checkpoint(true);
+            drop(memo);
+            drop(prefixes);
+            self.replacement_checkpoint(true);
         }
     }
 
@@ -314,12 +454,22 @@ impl RibManager {
         // The joining member's advertised-count seed (RTC groups only):
         // the O(table) walk rides the join replay's existing cost.
         let filter = self.member_rt_filter(peer);
+        let readiness = self.replacement_readiness.clone();
+        #[cfg(feature = "bench-internals")]
+        if let Some(group) = self.group_ribs.get(&gid) {
+            let (len, slots, capacity) = group.table.bench_unicast_storage_shape();
+            self.replacement_storage_shape("group_before_shrink", len, capacity, slots);
+        }
         if let Some(group) = self.group_ribs.get_mut(&gid) {
             if group.members.is_empty() {
+                super::super::replacement_readiness_checkpoint(&readiness, true);
                 group.table.shrink_unicast_to_fit();
+                super::super::replacement_readiness_checkpoint(&readiness, true);
             }
             group.members.insert(peer);
-            group.recompute_vpn_member_counts(peer, filter.as_ref());
+            group.recompute_vpn_member_counts(peer, filter.as_ref(), &mut || {
+                super::super::replacement_readiness_checkpoint(&readiness, false);
+            });
         }
     }
 }
