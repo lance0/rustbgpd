@@ -298,11 +298,20 @@ memory-safe-language row refers to.
 | Prometheus metrics | Yes | Via exporter[^prom-frr] | Via exporter[^prom-bird] | Yes | OpenMetrics[^prom-openbgpd] |
 | Structured logging (JSON) | Yes | No | No | Yes[^log-gobgp] | No |
 | BMP (RFC 7854) | Yes | Yes | Yes | Yes | No |
-| BMP full trio (7854 + 8671 Adj-RIB-Out + 9069 Loc-RIB) | Yes | No | No | No | No |
+| BMP full trio (7854 + 8671 Adj-RIB-Out + 9069 Loc-RIB)[^bmp-views] | Yes | No | No | No | No |
 | BMPv4 TLV framing (draft-21; Path Marking awaiting a non-colliding assignment) | Yes | No | No | No | No |
 | MRT dump (RFC 6396) | Yes | Yes | Yes | Yes | Yes |
 | Streaming route events | Yes | No | No | Yes | No |
 | OpenConfig/gNMI telemetry | Subset[^gnmi] | Partial | No | No | No |
+
+[^bmp-views]: Checked 2026-09-09: FRR 10.7.1 and GoBGP 4.9.0 both emit
+    Loc-RIB Route Monitoring with peer type 3
+    ([FRR](https://github.com/FRRouting/frr/blob/f8c0b08dcb0c78f9e42b9b86ae70b049e4e617c1/bgpd/bgp_bmp.c#L1519-L1527),
+    [GoBGP](https://github.com/osrg/gobgp/blob/01c5c4c27f9a1ac3b5927f433b5115f9b0eee791/pkg/server/bmp.go#L248-L265)).
+    Neither reviewed BMP exporter implements RFC 8671 Adj-RIB-Out
+    ([FRR header flags](https://github.com/FRRouting/frr/blob/f8c0b08dcb0c78f9e42b9b86ae70b049e4e617c1/bgpd/bgp_bmp.c#L318-L338),
+    [GoBGP route header](https://github.com/osrg/gobgp/blob/01c5c4c27f9a1ac3b5927f433b5115f9b0eee791/pkg/server/bmp.go#L441-L453));
+    that missing view determines their **No** verdicts for the full trio.
 
 ## API & Programmability
 
