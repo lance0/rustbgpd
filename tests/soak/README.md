@@ -51,6 +51,37 @@ exits `75` (`EX_TEMPFAIL`, "host busy") so an unattended caller (a cron
 wrapper around `bench/compare-criterion.sh`) can skip cleanly rather than
 fail.
 
+Do not unlink the lock path to clear contention: the kernel lock is held by a
+file descriptor, so unlinking can create a second, uncoordinated lock file.
+Wait for the holder to exit, or stop a flagship runner through its verified
+run directory as described below.
+
+## Stopping and archiving a flagship run
+
+The route-server and route-reflector flagship runners record their actual Bash
+PID, boot ID, and `/proc` start time in `runner.identity`. If a launch wrapper
+was backgrounded, do not signal that wrapper; stop the verified runner instead:
+
+```bash
+bash tests/soak/flagship-lifecycle.sh stop \
+    tests/soak/runs/soak-rs-flagship-<UTC>
+```
+
+The command returns only after the runner has stopped its owned processes,
+drained `soak.log`, and written `cleanup.complete`. A signal-interrupted run
+has `status=interrupted`; interruption before analysis produces no verdict.
+Retain any existing verdict alongside the interruption marker. A completed run whose analyzer rejects its gates has
+`status=failed` and retains its failing `verdict.json`.
+If the marker says `status=log_write_failed`, do not treat the directory as a
+quiesced archive: preserve it for diagnosis and repair the host write failure.
+After the stop command succeeds, copy the entire quiesced directory to the
+archive location without pruning files. For a run that finishes naturally,
+wait for the runner to exit and check its cleanup marker before copying:
+
+```bash
+cp -a tests/soak/runs/soak-rs-flagship-<UTC> /path/to/soak-archive/
+```
+
 ---
 
 # M33 24-Hour Soak Harness
@@ -1023,7 +1054,7 @@ lands in `tests/soak/runs/soak-rs-flagship-<UTC>/` (`samples.csv`,
 `cycles.log`, `reloadstall.log`, `rustbgpd.log`,
 `management-plane-load.jsonl`, `management-plane-load.log`,
 `doctor-bundle.tar.gz`, `run.json`,
-`verdict.json`); the analyzer is `analyze-soak-rs-flagship.py` and the
+`verdict.json`, `runner.identity`, `cleanup.complete`); the analyzer is `analyze-soak-rs-flagship.py` and the
 precommitted gates are scenario 10 in
 `docs/soaks/soak-acceptance-gates.md`. Note the short scenario
 directory under `/tmp` is required by the gRPC UDS `sun_path` cap; the
@@ -1065,8 +1096,8 @@ Requires host ports 1790 (BGP) and 9179 (metrics) free — the runner
 refuses to start otherwise and never kills unknown processes — and
 file-descriptor headroom (see below). Output
 lands in `tests/soak/runs/soak-rr-flagship-<UTC>/` (`samples.csv`,
-`cycles.log`, `reloadstall.log`, `rustbgpd.log`, `run.json`,
-`verdict.json`); the analyzer is `analyze-soak-rr-flagship.py` and the
+`cycles.log`, `reloadstall.log`, `rustbgpd.log`, `run.json`, `verdict.json`,
+`runner.identity`, `cleanup.complete`); the analyzer is `analyze-soak-rr-flagship.py` and the
 precommitted gates are scenario 11 in
 `docs/soaks/soak-acceptance-gates.md`. The same short-`/tmp`-scenario
 and fresh-per-run rules as the route-server flagship soak apply.

@@ -148,6 +148,8 @@ PROM_TMP="$RUN_DIR/.metrics.prom"
 source "$SOAK_SCRIPT_DIR/host-lock.sh"
 # shellcheck source=tests/soak/fd-headroom.sh
 source "$SOAK_SCRIPT_DIR/fd-headroom.sh"
+# shellcheck source=tests/soak/flagship-lifecycle.sh
+source "$SOAK_SCRIPT_DIR/flagship-lifecycle.sh"
 
 log() {
     printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
@@ -185,6 +187,7 @@ DAEMON_PID=""
 SCEN=""
 MEASURED_START_MONOTONIC=""
 MEASURED_END_MONOTONIC=""
+RUN_INTERRUPTED=0
 
 monotonic_now() {
     python3 -c 'import time; print(f"{time.monotonic():.9f}")'
@@ -237,6 +240,9 @@ stop_management_load() {
 cleanup() {
     local rc=$?
     trap - EXIT
+    # Owned children already have their signal handlers. Ignore repeated
+    # stop requests here so child and log-writer waits finish before marking.
+    trap '' INT TERM
     set +e
     stop_management_load
     terminate "$H_PID"
@@ -247,6 +253,12 @@ cleanup() {
     rm -f "$PROM_TMP"
     if ((rc != 0)); then
         log "FAILED rc=$rc — artifacts preserved in $RUN_DIR"
+    else
+        log "owned processes stopped; draining soak log"
+    fi
+    if ! finish_flagship_cleanup "$rc" "$RUN_INTERRUPTED"; then
+        echo "ERROR: could not finish soak evidence; inspect the log and cleanup marker" >&2
+        ((rc == 0)) && rc=1
     fi
     exit "$rc"
 }
@@ -434,15 +446,26 @@ sample_row() {
     fi
     SCRAPE_FAILS=0
     pid_running "$H_PID" || return 0
+    # Keep each command substitution in its own command. Bash 5.2 can fail
+    # to parse a signal trap while expanding several substitutions in one
+    # printf; a stop request must still run the ordered cleanup below.
+    local timestamp rss_mb intern_size established flaps messages_sent max_prefix
+    timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ) || :
+    rss_mb=$(tree_rss_mb) || :
+    intern_size=$(prom_get bgp_rib_attr_intern_global_size) || :
+    established=$(prom_sum bgp_peer_session_established) || :
+    flaps=$(prom_sum bgp_session_flaps_total) || :
+    messages_sent=$(prom_sum bgp_messages_sent_total) || :
+    max_prefix=$(prom_sum bgp_max_prefix_exceeded_total) || :
     printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        "$timestamp" \
         "$elapsed" \
-        "$(tree_rss_mb)" \
-        "$(prom_get bgp_rib_attr_intern_global_size)" \
-        "$(prom_sum bgp_peer_session_established)" \
-        "$(prom_sum bgp_session_flaps_total)" \
-        "$(prom_sum bgp_messages_sent_total)" \
-        "$(prom_sum bgp_max_prefix_exceeded_total)" \
+        "$rss_mb" \
+        "$intern_size" \
+        "$established" \
+        "$flaps" \
+        "$messages_sent" \
+        "$max_prefix" \
         "$code" \
         "$ms" \
         >>"$SAMPLES_CSV"
@@ -536,11 +559,11 @@ write_run_json() {
 
 main() {
     mkdir -p "$RUN_DIR"
-    exec > >(tee -a "$SOAK_LOG") 2>&1
-    acquire_rustbgpd_host_lock
     trap cleanup EXIT
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
+    trap 'RUN_INTERRUPTED=1; exit 130' INT
+    trap 'RUN_INTERRUPTED=1; exit 143' TERM
+    start_flagship_lifecycle
+    acquire_rustbgpd_host_lock
     for tool in cargo curl awk python3 ss flock git ps df mktemp timeout; do
         require_tool "$tool"
     done
