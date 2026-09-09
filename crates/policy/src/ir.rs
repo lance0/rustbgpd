@@ -1166,6 +1166,14 @@ impl CompiledChain {
         None
     }
 
+    /// Whether a resolved literal prepend uses AS 0, including inside loops.
+    /// The daemon rejects such chains at attachment after policy parameters
+    /// have been substituted; AS 0 is prohibited in `AS_PATH` by RFC 7607.
+    #[must_use]
+    pub fn has_zero_as_path_prepend(&self) -> bool {
+        self.any_action_mods(&|mods| matches!(mods.as_path_prepend, Some((0, _))))
+    }
+
     /// Does any term across all policies — recursing into
     /// [`TermAction::ForEach`] bodies (LAN-303) — satisfy `pred`?
     fn any_term_node(&self, pred: &impl Fn(&Term) -> bool) -> bool {

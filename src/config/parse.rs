@@ -451,6 +451,11 @@ fn resolve_rpol_chain_ref(
             // as a real error for direct callers.
             reason: format!("chain reference {reference:?}: {missing}"),
         })?;
+    if compiled.has_zero_as_path_prepend() {
+        return Err(ConfigError::InvalidPolicyEntry {
+            reason: format!("chain reference {reference:?}: AS 0 cannot be prepended (RFC 7607)"),
+        });
+    }
     // Attach-time stamp backing `prepend as self` (LAN-296): the
     // daemon's `[global] asn`. Deterministic from config, so reloads
     // of an unchanged file still diff as no-ops.

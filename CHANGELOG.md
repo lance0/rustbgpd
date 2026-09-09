@@ -86,6 +86,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- AS_PATH prepend policy validation now rejects AS 0 in TOML and literal
+  `.rpol` actions, and rejects `.rpol` parameters resolving to AS 0 when a
+  chain is attached. Invalid policies previously reached evaluation before
+  the existing wire encoder rejected the resulting AS_PATH.
+
 - NOTIFICATION diagnostics now describe the maintained registered code/subcode
   table, including Connection Rejected and Other Configuration Change. Unknown
   pairs retain numeric values as `unassigned(code/subcode)` or
