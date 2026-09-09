@@ -8,18 +8,29 @@ use super::{
 pub(super) fn notification_description(
     notification: &rustbgpd_wire::NotificationMessage,
 ) -> String {
+    let describe = |code: NotificationCode, subcode| match rustbgpd_wire::notification::description(
+        code, subcode,
+    ) {
+        "Unknown" | "Unknown Error Code" => {
+            let raw = code.as_u8();
+            let status = if raw == 0 || (matches!(raw, 6 | 7) && subcode == 0) {
+                "reserved"
+            } else {
+                "unassigned"
+            };
+            format!("{status}({raw}/{subcode})")
+        }
+        description => description.to_string(),
+    };
     if notification.code == NotificationCode::Cease
         && notification.subcode == cease_subcode::HARD_RESET
         && notification.data.len() >= 2
     {
         let inner_code = NotificationCode::from_u8(notification.data[0]);
         let inner_subcode = notification.data[1];
-        return format!(
-            "Hard Reset: {}",
-            rustbgpd_wire::notification::description(inner_code, inner_subcode)
-        );
+        return format!("Hard Reset: {}", describe(inner_code, inner_subcode));
     }
-    rustbgpd_wire::notification::description(notification.code, notification.subcode).to_string()
+    describe(notification.code, notification.subcode)
 }
 
 fn sanitized_notification_reason(reason: &str) -> String {

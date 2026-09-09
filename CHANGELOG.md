@@ -86,6 +86,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- NOTIFICATION diagnostics now describe the maintained registered code/subcode
+  table, including Connection Rejected and Other Configuration Change. Unknown
+  pairs retain numeric values as `unassigned(code/subcode)` or
+  `reserved(code/subcode)`, including inside Hard Reset notifications.
+
 - `rbgp doctor` attributes local process limits and config freshness to the
   connected Unix-socket peer, with process-start verification and reconnect
   updates. Co-resident daemons no longer contribute unrelated low-limit
