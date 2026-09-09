@@ -156,6 +156,12 @@ start_gobgpd() {
         'nohup gobgpd -f /config/gobgp.toml >/tmp/gobgpd.log 2>&1'
 }
 
+start_m81_rustbgpd() {
+    # Detached exec output is not part of docker logs (PID 1 is sleep).
+    # Truncate on every launch so a retry cannot report an older attempt.
+    start_rustbgpd 'exec /usr/local/bin/rustbgpd /tmp/config.toml >/tmp/rustbgpd-m81.log 2>&1'
+}
+
 gobgp() {
     local container=${1:?}
     shift
@@ -201,8 +207,10 @@ dump_m81_startup_diagnostics() {
         2>&1 | head -n 120 >&2 || true
 
     printf '%s\n' '--- M81 startup diagnostics: rustbgpd log (tail 120) ---' >&2
-    timeout 5 docker logs --tail 120 "$RUSTBGPD" \
-        2>&1 | head -n 120 >&2 || true
+    {
+        timeout 5 docker exec "$RUSTBGPD" tail -n 120 /tmp/rustbgpd-m81.log \
+            || printf '%s\n' 'rustbgpd startup log unavailable'
+    } 2>&1 | head -n 120 >&2 || true
 
     printf '%s\n' \
         '--- M81 startup diagnostics: rustbgpd neighbor snapshot ---' >&2
@@ -624,7 +632,7 @@ main() {
     resolve_grpc_addr
     patch_runtime_addrs
     start_sink
-    start_rustbgpd "/usr/local/bin/rustbgpd /tmp/config.toml"
+    start_m81_rustbgpd
     wait_rpki_vrps || exit 1
     start_gobgpd "$PE1"
     start_gobgpd "$PE2"
@@ -646,7 +654,30 @@ main() {
 }
 
 self_test_startup_diagnostics() {
-    local output status needle
+    local output status needle fixture_dir
+    fixture_dir=$(mktemp -d)
+    trap 'rm -rf "$fixture_dir"' RETURN
+    cat >"$fixture_dir/daemon" <<'EOF'
+#!/bin/sh
+printf 'fixture daemon stdout\n'
+printf 'fixture daemon stderr\n' >&2
+EOF
+    chmod +x "$fixture_dir/daemon"
+    start_rustbgpd() {
+        local start_cmd=$1
+        start_cmd=${start_cmd/\/usr\/local\/bin\/rustbgpd/\"$fixture_dir/daemon\"}
+        start_cmd=${start_cmd/\/tmp\/rustbgpd-m81.log/\"$fixture_dir/rustbgpd.log\"}
+        sh -c "$start_cmd"
+    }
+    printf 'stale previous attempt\n' >"$fixture_dir/rustbgpd.log"
+    start_m81_rustbgpd
+    output=$(cat "$fixture_dir/rustbgpd.log")
+    if [[ "$output" != *'fixture daemon stdout'* ]] \
+        || [[ "$output" != *'fixture daemon stderr'* ]] \
+        || [[ "$output" == *'stale previous attempt'* ]]; then
+        printf 'daemon launch did not capture both streams in a fresh log\n' >&2
+        return 1
+    fi
     local -a expected=(
         "FAIL pe-test session did not reach Established within 90s"
         "--- M81 startup diagnostics: gobgpd log (/tmp/gobgpd.log; tail 120) ---"
@@ -660,12 +691,12 @@ self_test_startup_diagnostics() {
         "fixture gobgpd log" "fixture gobgpd process"
         "fixture gobgp neighbor" "fixture peer address"
         "fixture peer link" "fixture peer routes"
-        "fixture rustbgpd log" "fixture rustbgpd neighbor"
+        "fixture daemon stdout" "fixture daemon stderr" "fixture rustbgpd neighbor"
     )
 
     seq() { printf '1\n'; }
     sleep() { :; }
-    gobgp() { return 1; }
+    gobgp() { printf '10.0.0.1 Established\n'; }
     timeout() { shift; "$@"; }
     docker() {
         case "$*" in
@@ -675,11 +706,15 @@ self_test_startup_diagnostics() {
             *"ip -brief"*) printf 'fixture peer address\n' ;;
             *"ip -details link"*) printf 'fixture peer link\n' ;;
             *"ip route get"*) printf 'fixture peer routes\n' ;;
-            *"logs --tail 120"*) printf 'fixture rustbgpd log\n' ;;
+            *"tail -n 120 /tmp/rustbgpd-m81.log"*) tail -n 120 "$fixture_dir/rustbgpd.log" ;;
             *) return 1 ;;
         esac
     }
     grpcurl_call() { printf 'fixture rustbgpd neighbor\n'; }
+
+    output=$(wait_gobgp_established fixture-pe 10.0.0.1 pe-test 10.0.0.2 2>&1)
+    [[ "$output" == *'PASS pe-test session established'* ]] || return 1
+    gobgp() { return 1; }
 
     set +e
     output=$(wait_gobgp_established fixture-pe 10.0.0.1 pe-test 10.0.0.2 2>&1)
@@ -696,6 +731,10 @@ self_test_startup_diagnostics() {
         }
     done
 
+    rm "$fixture_dir/rustbgpd.log"
+    output=$(dump_m81_startup_diagnostics fixture-pe 10.0.0.1 10.0.0.2 2>&1)
+    [[ "$output" == *'rustbgpd startup log unavailable'* ]] || return 1
+
     docker() { return 127; }
     grpcurl_call() { return 127; }
     set +e
@@ -704,7 +743,8 @@ self_test_startup_diagnostics() {
     set -e
     if [ "$status" -ne 1 ] \
         || [[ "$output" != *"${expected[0]}"* ]] \
-        || [[ "$output" != *"${expected[8]}"* ]]; then
+        || [[ "$output" != *"${expected[8]}"* ]] \
+        || [[ "$output" != *'rustbgpd startup log unavailable'* ]]; then
         printf 'unavailable-tools self-test masked the primary failure:\n%s\n' \
             "$output" >&2
         return 1
