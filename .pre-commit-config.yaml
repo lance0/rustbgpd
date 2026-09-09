@@ -3,7 +3,7 @@
 # invocations adapted to this workspace's CI flags from
 # `.github/workflows/ci.yml` (cargo clippy --workspace --all-targets
 # -- -D warnings; cargo test --workspace; cargo doc --workspace --lib
-# --no-deps --document-private-items plus the rustbgpd and rbgp binaries).
+# --bin rustbgpd --bin rbgp --no-deps --document-private-items).
 #
 # `cargo test --lib` + rustdoc are at pre-push (not pre-commit) so commits
 # stay fast; Rust hooks run only when their inputs change.
@@ -55,27 +55,9 @@ repos:
 
       - id: cargo-doc
         name: cargo doc
-        entry: bash scripts/build-lock.sh cargo doc --locked --workspace --lib --no-deps --document-private-items
+        entry: bash scripts/build-lock.sh cargo doc --locked --workspace --lib --bin rustbgpd --bin rbgp --no-deps --document-private-items
         language: system
-        files: &rustdoc-inputs '(^|/)([^/]+\.rs|Cargo\.toml|Cargo\.lock)$|^(\.cargo/config(\.toml)?|rust-toolchain(\.toml)?|proto/.*\.proto|examples/route-server/hygiene\.rpol)$'
-        types: [file]
-        pass_filenames: false
-        stages: [pre-push]
-
-      - id: cargo-doc-rustbgpd-bin
-        name: cargo doc (rustbgpd binary)
-        entry: bash scripts/build-lock.sh cargo doc --locked -p rustbgpd --bin rustbgpd --no-deps
-        language: system
-        files: *rustdoc-inputs
-        types: [file]
-        pass_filenames: false
-        stages: [pre-push]
-
-      - id: cargo-doc-rbgp-bin
-        name: cargo doc (rbgp binary)
-        entry: bash scripts/build-lock.sh cargo doc --locked -p rustbgpctl --bin rbgp --no-deps
-        language: system
-        files: *rustdoc-inputs
+        files: '(^|/)([^/]+\.rs|Cargo\.toml|Cargo\.lock)$|^(\.cargo/config(\.toml)?|rust-toolchain(\.toml)?|proto/.*\.proto|examples/route-server/hygiene\.rpol)$'
         types: [file]
         pass_filenames: false
         stages: [pre-push]
