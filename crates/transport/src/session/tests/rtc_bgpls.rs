@@ -11,6 +11,7 @@ async fn send_route_update_emits_bgpls_reach_and_unreach() {
     let route = make_bgpls_route(0xcc);
     let key = route.key();
     session.send_route_update(OutboundRouteUpdate {
+        replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
         announce_source_exclusion: None,
         otc_blocked: vec![],
@@ -51,6 +52,7 @@ async fn send_route_update_emits_bgpls_reach_and_unreach() {
     assert_eq!(mp.next_hop, route.next_hop);
     assert_eq!(mp.bgpls_announced, vec![route.nlri.clone()]);
     session.send_route_update(OutboundRouteUpdate {
+        replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
         announce_source_exclusion: None,
         otc_blocked: vec![],
@@ -108,6 +110,7 @@ async fn oversized_bgpls_output_tears_down_session() {
     )
     .expect("oversize-for-peer fixture still fits BGP-LS NLRI length");
     session.send_route_update(OutboundRouteUpdate {
+        replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
         announce_source_exclusion: None,
         otc_blocked: vec![],
@@ -569,6 +572,7 @@ async fn send_route_update_emits_rtc_reach_and_unreach() {
         path_id: 0,
     };
     session.send_route_update(OutboundRouteUpdate {
+        replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
         announce_source_exclusion: None,
         otc_blocked: vec![],
@@ -630,6 +634,7 @@ async fn send_route_update_emits_rtc_reach_and_unreach() {
         "local default must be emitted with the session-local address, got {seen_next_hops:?}"
     );
     session.send_route_update(OutboundRouteUpdate {
+        replay: None,
         exact_export_snapshot: Some(session.publish_export_profile()),
         announce_source_exclusion: None,
         otc_blocked: vec![],

@@ -1147,6 +1147,10 @@ enum NeighborAction {
     },
     /// Re-send this peer's current exportable outbound routes
     RefreshOut,
+    /// Replay this peer's negotiated IPv4/IPv6 unicast routes with terminal UPDATE EoRs
+    ///
+    /// Reports scheduling only. Terminal BMP EoRs mark replay completion.
+    ReplayOut,
 }
 
 #[derive(Subcommand)]
@@ -3466,6 +3470,9 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             (Some(addr), Some(NeighborAction::RefreshOut)) => {
                 commands::neighbor::refresh_outbound(connection, &addr, json).await
             }
+            (Some(addr), Some(NeighborAction::ReplayOut)) => {
+                commands::neighbor::replay_outbound(connection, &addr, json).await
+            }
             (None, Some(_)) => Err(CliError::Argument(
                 "neighbor address required for this action".into(),
             )),
@@ -5383,6 +5390,33 @@ printf '%s\n' "${COMPREPLY[@]}"
             Cli::try_parse_from(["rbgp", "doctor", "--pre-upgrade"]).is_err(),
             "--pre-upgrade names the config the upgraded daemon will boot"
         );
+    }
+
+    #[test]
+    fn test_parse_neighbor_replay_out_is_single_peer_without_family_flags() {
+        let cli = Cli::try_parse_from(["rbgp", "neighbor", "fe80::2%eth1", "replay-out"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Neighbor {
+                address: Some(address),
+                action: Some(NeighborAction::ReplayOut),
+                ..
+            } if address == "fe80::2%eth1"
+        ));
+        for arguments in [
+            vec!["rbgp", "neighbor", "192.0.2.1", "replay-out", "--all"],
+            vec![
+                "rbgp",
+                "neighbor",
+                "192.0.2.1",
+                "replay-out",
+                "--family",
+                "ipv4_unicast",
+            ],
+            vec!["rbgp", "neighbor", "192.0.2.1", "replay-out", "192.0.2.2"],
+        ] {
+            assert!(Cli::try_parse_from(arguments).is_err());
+        }
     }
 
     #[test]

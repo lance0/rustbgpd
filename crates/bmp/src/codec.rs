@@ -314,7 +314,7 @@ pub fn encode_peer_down(info: &BmpPeerInfo, reason: &PeerDownReason, version: Bm
             1 + pdu.len()
         }
         PeerDownReason::LocalNoNotification(_) => 1 + 2,
-        PeerDownReason::RemoteNoNotification => 1,
+        PeerDownReason::RemoteNoNotification | PeerDownReason::MonitoringStopped => 1,
     };
     let total = BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN + reason_len;
 
@@ -334,6 +334,9 @@ pub fn encode_peer_down(info: &BmpPeerInfo, reason: &PeerDownReason, version: Bm
         PeerDownReason::RemoteNotification(pdu) => {
             buf.put_u8(3);
             buf.put_slice(pdu);
+        }
+        PeerDownReason::MonitoringStopped => {
+            buf.put_u8(5);
         }
         PeerDownReason::RemoteNoNotification => {
             buf.put_u8(4);

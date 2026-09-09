@@ -2194,6 +2194,40 @@ impl PeerManager {
         }
     }
 
+    /// Schedule replay on the exact managed session, including scoped identity.
+    pub(super) async fn replay_outbound(&self, peer: PeerKey) -> Result<(), OutboundRefreshError> {
+        let managed = self
+            .peers
+            .get(&peer)
+            .ok_or_else(|| OutboundRefreshError::PeerNotFound(peer.clone()))?;
+        // BMP's peer cache is keyed by IP address. Refuse ambiguity before
+        // dispatch, so enrollment cannot reset another scoped peer's view.
+        if self
+            .peers
+            .keys()
+            .any(|other| other.address == peer.address && other != &peer)
+        {
+            return Err(OutboundRefreshError::ReplayUnavailable(
+                "outbound replay requires a unique peer IP address among managed peers".into(),
+            ));
+        }
+        managed
+            .handle
+            .replay_outbound_timeout(super::RIB_REPLY_TIMEOUT)
+            .await
+            .map_err(|error| match error {
+                PeerCommandError::NotEstablished | PeerCommandError::SessionExited => {
+                    OutboundRefreshError::PeerUnavailable(peer)
+                }
+                PeerCommandError::ReplayUnavailable(message) => {
+                    OutboundRefreshError::ReplayUnavailable(message)
+                }
+                error => OutboundRefreshError::Internal(format!(
+                    "failed to schedule outbound replay for peer {peer}: {error}"
+                )),
+            })
+    }
+
     /// [`Self::soft_reset_in`], additionally reporting whether the peer's
     /// `AdjRibIn` may already have started moving when the refresh failed.
     ///

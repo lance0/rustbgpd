@@ -20,6 +20,8 @@ pub(super) enum FamilyReplayKind {
     PeerRefresh { suppress_eor: bool },
     /// Internal ADR-0113 capacity recovery.
     PrefixLimitRecovery,
+    /// Explicit operator replay; observes gates and adds no protocol refresh markers.
+    OperatorReplay,
 }
 
 /// Whether the shared family replay reached the outbound commit boundary.
@@ -614,6 +616,65 @@ impl RibManager {
         self.finish_route_refresh(peer, afi, safi, false);
     }
 
+    /// Schedule a complete explicit unicast replay without changing protocol gates.
+    pub(super) fn handle_replay_peer_outbound(
+        &mut self,
+        peer: IpAddr,
+        session_id: u64,
+        families: Vec<(Afi, Safi)>,
+        replay: &std::sync::Arc<rustbgpd_bmp::BmpReplay>,
+    ) -> Result<(), crate::RibCommandError> {
+        use crate::RibCommandError;
+        if self.outbound_session_ids.get(&peer) != Some(&session_id) {
+            return Err(RibCommandError::not_found(
+                "outbound session changed before replay",
+            ));
+        }
+        if families.is_empty()
+            || !replay.is_valid()
+            || families.iter().any(|&(afi, safi)| {
+                !matches!((afi, safi), (Afi::Ipv4 | Afi::Ipv6, Safi::Unicast))
+                    || self.selection_convergence_held((afi, safi))
+                    || self
+                        .peer_orf_pending
+                        .get(&peer)
+                        .is_some_and(|pending| pending.contains(&(afi, safi)))
+            })
+        {
+            return Err(RibCommandError::internal(
+                "outbound replay unavailable while a family is gated or the operation expired",
+            ));
+        }
+        for &(afi, safi) in &families {
+            if !replay.is_valid()
+                || self.send_route_refresh_response_inner(
+                    peer,
+                    afi,
+                    safi,
+                    FamilyReplayKind::OperatorReplay,
+                ) != FamilyReplayOutcome::Committed
+            {
+                return Err(RibCommandError::internal(
+                    "outbound replay could not admit a complete family",
+                ));
+            }
+        }
+        let sender = self
+            .outbound_peers
+            .get(&peer)
+            .ok_or_else(|| RibCommandError::not_found("outbound session disappeared"))?;
+        sender
+            .try_send(OutboundRouteUpdate {
+                end_of_rib: families,
+                replay: Some(std::sync::Arc::clone(replay)),
+                ..OutboundRouteUpdate::default()
+            })
+            .map_err(|_| {
+                RibCommandError::internal("outbound replay terminal envelope could not be admitted")
+            })?;
+        Ok(())
+    }
+
     /// Re-advertise the Loc-RIB for a given family to a peer, followed by `EoR`.
     /// Called when a peer sends ROUTE-REFRESH (RFC 2918).
     pub(super) fn send_route_refresh_response(&mut self, peer: IpAddr, afi: Afi, safi: Safi) {
@@ -670,7 +731,7 @@ impl RibManager {
                     .is_some_and(|families| families.contains(&family));
                 (suppress_eor, deferred_eor)
             }
-            FamilyReplayKind::PrefixLimitRecovery => {
+            FamilyReplayKind::PrefixLimitRecovery | FamilyReplayKind::OperatorReplay => {
                 let orf_pending = self
                     .peer_orf_pending
                     .get(&peer)
@@ -1296,7 +1357,9 @@ impl RibManager {
                     (afi, safi, RouteRefreshSubtype::EoRR),
                 ],
             ),
-            FamilyReplayKind::PrefixLimitRecovery => (vec![], vec![]),
+            FamilyReplayKind::PrefixLimitRecovery | FamilyReplayKind::OperatorReplay => {
+                (vec![], vec![])
+            }
         };
         if !self.try_send_and_commit_outbound_update_with_group_prior_and_otc_scope(
             peer,
@@ -1337,6 +1400,9 @@ impl RibManager {
                 }
                 FamilyReplayKind::PrefixLimitRecovery => {
                     warn!(%peer, ?family, "outbound channel full during prefix-limit recovery");
+                }
+                FamilyReplayKind::OperatorReplay => {
+                    warn!(%peer, ?family, "outbound channel full during explicit outbound replay");
                 }
             }
             return FamilyReplayOutcome::Failed;

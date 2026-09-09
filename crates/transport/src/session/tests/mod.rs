@@ -1050,6 +1050,7 @@ async fn initial_dump_announcements(peer_group: Option<&str>) -> Vec<Prefix> {
 /// All-empty `OutboundRouteUpdate` for the rib-out BMP tap tests.
 fn empty_outbound_update() -> OutboundRouteUpdate {
     OutboundRouteUpdate {
+        replay: None,
         exact_export_snapshot: None,
         announce_source_exclusion: None,
         otc_blocked: vec![],
@@ -2085,3 +2086,5 @@ mod state_query;
 mod tcp_ao;
 mod tcp_mss;
 mod vpn;
+
+mod replay;

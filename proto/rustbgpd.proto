@@ -476,6 +476,9 @@ service NeighborService {
   rpc DisableNeighbor(DisableNeighborRequest) returns (DisableNeighborResponse);
   rpc SoftResetIn(SoftResetInRequest) returns (SoftResetInResponse);
   rpc RefreshOutbound(RefreshOutboundRequest) returns (RefreshOutboundResponse);
+  // Schedule one Established peer's negotiated IPv4/IPv6 unicast replay.
+  // The reply reports scheduling only; terminal BMP UPDATE EoRs mark completion.
+  rpc ReplayOutbound(ReplayOutboundRequest) returns (ReplayOutboundResponse);
   // Administratively reset one enabled neighbor's session: send Cease /
   // Administrative Reset (RFC 4486 subcode 4) carrying the optional RFC 9003
   // shutdown communication and close the TCP connection. Static active-open
@@ -1031,6 +1034,16 @@ message RefreshOutboundRequest {
 }
 
 message RefreshOutboundResponse {
+  bool scheduled = 1;
+}
+
+message ReplayOutboundRequest {
+  string address = 1;
+  string interface = 2;
+}
+
+message ReplayOutboundResponse {
+  // Acceptance for scheduling, not writer drain, collector receipt, or remote processing.
   bool scheduled = 1;
 }
 

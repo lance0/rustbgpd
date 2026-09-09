@@ -938,6 +938,8 @@ pub struct OutboundRouteUpdate {
     pub withdraw: Vec<(Prefix, u32)>,
     /// End-of-RIB markers to send for these families after the route updates.
     pub end_of_rib: Vec<(Afi, Safi)>,
+    /// Explicit one-peer replay completion; present only on its terminal envelope.
+    pub replay: Option<Arc<rustbgpd_bmp::BmpReplay>>,
     /// RFC 7313 route-refresh demarcation markers to emit around the update.
     /// `BoRR` markers are sent before route payloads; `EoRR` markers after.
     pub refresh_markers: Vec<(Afi, Safi, RouteRefreshSubtype)>,
@@ -2552,6 +2554,19 @@ pub enum RibUpdate {
         peers: Vec<IpAddr>,
         /// Response channel for success/failure.
         reply: oneshot::Sender<Result<(), RibCommandError>>,
+    },
+    /// Explicit, bounded unicast wire replay for the named live session.
+    ReplayPeerOutbound {
+        /// Target peer address.
+        peer: IpAddr,
+        /// Exact outbound registration that accepted the operator command.
+        session_id: u64,
+        /// Complete negotiated unicast set, including unsendable empty families.
+        families: Vec<(Afi, Safi)>,
+        /// Metadata-only operation token; cancellation suppresses completion.
+        replay: Arc<rustbgpd_bmp::BmpReplay>,
+        /// Acknowledges scheduling, not socket or collector completion.
+        reply: tokio::sync::oneshot::Sender<Result<(), RibCommandError>>,
     },
     /// Force re-emission of all currently-advertised routes to a peer
     /// without changing policy. Used when an outbound *attribute*

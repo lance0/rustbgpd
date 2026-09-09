@@ -447,6 +447,20 @@ _arguments "${_arguments_options[@]}" : \
 '--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
+(replay-out)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
+'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
 (help)
 _arguments "${_arguments_options[@]}" : \
 ":: :_rbgp__subcmd__neighbor__subcmd__help_commands" \
@@ -484,6 +498,10 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (refresh-out)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(replay-out)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -649,6 +667,20 @@ _arguments "${_arguments_options[@]}" : \
 '--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
+(replay-out)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
+'(--json-lines)-j[Output in JSON format]' \
+'(--json-lines)--json[Output in JSON format]' \
+'(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
 (help)
 _arguments "${_arguments_options[@]}" : \
 ":: :_rbgp__subcmd__neighbor__subcmd__help_commands" \
@@ -686,6 +718,10 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (refresh-out)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(replay-out)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -3742,6 +3778,10 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(replay-out)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
         esac
     ;;
 esac
@@ -5830,6 +5870,7 @@ _rbgp__subcmd__help__subcmd__neighbor_commands() {
 'reset:Reset this neighbor'\''s session (static peers retry; dynamic peers reconnect inbound)' \
 'softreset:Trigger soft reset (inbound)' \
 'refresh-out:Re-send this peer'\''s current exportable outbound routes' \
+'replay-out:Replay this peer'\''s negotiated IPv4/IPv6 unicast routes with terminal UPDATE EoRs' \
     )
     _describe -t commands 'rbgp help neighbor commands' commands "$@"
 }
@@ -5857,6 +5898,11 @@ _rbgp__subcmd__help__subcmd__neighbor__subcmd__enable_commands() {
 _rbgp__subcmd__help__subcmd__neighbor__subcmd__refresh-out_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp help neighbor refresh-out commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__help__subcmd__neighbor__subcmd__replay-out_commands] )) ||
+_rbgp__subcmd__help__subcmd__neighbor__subcmd__replay-out_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp help neighbor replay-out commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__help__subcmd__neighbor__subcmd__reset_commands] )) ||
 _rbgp__subcmd__help__subcmd__neighbor__subcmd__reset_commands() {
@@ -6190,6 +6236,7 @@ _rbgp__subcmd__neighbor_commands() {
 'reset:Reset this neighbor'\''s session (static peers retry; dynamic peers reconnect inbound)' \
 'softreset:Trigger soft reset (inbound)' \
 'refresh-out:Re-send this peer'\''s current exportable outbound routes' \
+'replay-out:Replay this peer'\''s negotiated IPv4/IPv6 unicast routes with terminal UPDATE EoRs' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'rbgp neighbor commands' commands "$@"
@@ -6224,6 +6271,7 @@ _rbgp__subcmd__neighbor__subcmd__help_commands() {
 'reset:Reset this neighbor'\''s session (static peers retry; dynamic peers reconnect inbound)' \
 'softreset:Trigger soft reset (inbound)' \
 'refresh-out:Re-send this peer'\''s current exportable outbound routes' \
+'replay-out:Replay this peer'\''s negotiated IPv4/IPv6 unicast routes with terminal UPDATE EoRs' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'rbgp neighbor help commands' commands "$@"
@@ -6258,6 +6306,11 @@ _rbgp__subcmd__neighbor__subcmd__help__subcmd__refresh-out_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp neighbor help refresh-out commands' commands "$@"
 }
+(( $+functions[_rbgp__subcmd__neighbor__subcmd__help__subcmd__replay-out_commands] )) ||
+_rbgp__subcmd__neighbor__subcmd__help__subcmd__replay-out_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp neighbor help replay-out commands' commands "$@"
+}
 (( $+functions[_rbgp__subcmd__neighbor__subcmd__help__subcmd__reset_commands] )) ||
 _rbgp__subcmd__neighbor__subcmd__help__subcmd__reset_commands() {
     local commands; commands=()
@@ -6272,6 +6325,11 @@ _rbgp__subcmd__neighbor__subcmd__help__subcmd__softreset_commands() {
 _rbgp__subcmd__neighbor__subcmd__refresh-out_commands() {
     local commands; commands=()
     _describe -t commands 'rbgp neighbor refresh-out commands' commands "$@"
+}
+(( $+functions[_rbgp__subcmd__neighbor__subcmd__replay-out_commands] )) ||
+_rbgp__subcmd__neighbor__subcmd__replay-out_commands() {
+    local commands; commands=()
+    _describe -t commands 'rbgp neighbor replay-out commands' commands "$@"
 }
 (( $+functions[_rbgp__subcmd__neighbor__subcmd__reset_commands] )) ||
 _rbgp__subcmd__neighbor__subcmd__reset_commands() {

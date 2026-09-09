@@ -107,7 +107,7 @@ shape itself does not raise the tier.
 | `ListConfigHistory` | `sensitive_read` | Lists bounded mixed v2/v3 config history, newest row first: per-entry index, timestamp, normalized-TOML SHA-256, config-source SHA-256 over that TOML digest plus the canonical accepted rpol/dataset source roster, explicit provenance status, and a one-line identity/count summary. Retired TOML files are ignored and retained; unreadable rows withhold both digests and use a constant summary. Metadata-only v3 rows expose accepted byte count and reason, omit payloads/source rosters, and are permanently rollback-ineligible. Index 0 is not a claim about running or persisted state. Never returns config documents, but discloses change cadence and identity facts — full-config-adjacent read. |
 | `RollbackConfigTransaction` | `operator_only` | Junos-style `rollback N`: a provenance-verified v2 row routes through the same transaction executor as `ApplyConfigTransaction` (same plan/impact classification and receipts). Metadata-only rows refuse before payload/source access, planning, confirm authority, or mutation. Unreadable rows and provenance mismatches fail closed before planning or mutation. Same tier as apply because it is an apply. Comment is audit-redacted (presence only). |
 
-### NeighborService (13 RPCs)
+### NeighborService (14 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
@@ -119,6 +119,7 @@ shape itself does not raise the tier.
 | `DisableNeighbor` | `mutating` | Single-peer; causes one session flap. |
 | `SoftResetIn` | `mutating` | Triggers RFC 7313 Route Refresh on one peer — heavy CPU + RIB churn but bounded. |
 | `RefreshOutbound` | `mutating` | Re-emits one peer's current exportable outbound inventory across its negotiated families. The reply confirms scheduling, not writer drain or remote receipt; full-table use is an O(table) burst and should be serialized. |
+| `ReplayOutbound` | `mutating` | Schedules one Established peer's negotiated IPv4/IPv6 unicast replay with terminal UPDATE EoRs. The reply confirms scheduling only; terminal BMP EoRs mark completion. Outside the v1 contract. |
 | `ResetNeighbor` | `mutating` | Single-peer; causes one session flap (Cease/Administrative Reset) without changing enable/disable state. Static active-open sessions retry on their normal schedule; accepted dynamic peers are removed on Idle and must reconnect inbound. Same tier as `DisableNeighbor`. |
 | `ListDynamicNeighbors` | `sensitive_read` | Topology disclosure for the dynamic-prefix accepted peers. |
 | `AddDynamicNeighbor` | `mutating` | Adds an accept-prefix range. Wider than `AddNeighbor` (multi-peer effective), but still per-prefix scope. |
@@ -266,13 +267,13 @@ shape itself does not raise the tier.
 | Tier | Count | % |
 |------|------:|--:|
 | `read` | 0 | 0.0% |
-| `sensitive_read` | 66 | 59.5% |
-| `mutating` | 21 | 18.9% |
-| `operator_only` | 24 | 21.6% |
-| **Total** | **111** | **100%** |
+| `sensitive_read` | 66 | 58.9% |
+| `mutating` | 22 | 19.6% |
+| `operator_only` | 24 | 21.4% |
+| **Total** | **112** | **100%** |
 
-(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 111
-total is 107 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
+(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 112
+total is 108 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
 
 ## Notes for ADR-0064
 

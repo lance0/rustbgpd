@@ -12,8 +12,8 @@ use crate::proto::neighbor_service_client::NeighborServiceClient;
 use crate::proto::{
     AddNeighborRequest, DeleteNeighborRequest, DisableNeighborRequest, EnableNeighborRequest,
     GetNeighborStateRequest, ListDynamicNeighborsRequest, ListNeighborsRequest, NeighborConfig,
-    NeighborCreateIntent, RefreshOutboundRequest, ResetNeighborRequest, SetGracefulShutdownRequest,
-    SoftResetInRequest,
+    NeighborCreateIntent, RefreshOutboundRequest, ReplayOutboundRequest, ResetNeighborRequest,
+    SetGracefulShutdownRequest, SoftResetInRequest,
 };
 
 pub(super) fn bare_ip_rpc_address(address: &str) -> &str {
@@ -1385,6 +1385,47 @@ pub async fn refresh_outbound(
     }
 }
 
+fn replay_outbound_json(address: &str, scheduled: bool) -> serde_json::Value {
+    serde_json::json!({
+        "ok": true,
+        "action": "replay_outbound",
+        "target": address,
+        "scheduled": scheduled,
+    })
+}
+
+fn replay_outbound_message(address: &str) -> String {
+    format!("Outbound replay scheduled for {address}")
+}
+
+pub async fn replay_outbound(
+    connection: Connection,
+    address: &str,
+    json: bool,
+) -> Result<(), CliError> {
+    let mut client =
+        NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let (address_only, interface) = split_scoped_address(address);
+    let response = client
+        .replay_outbound(ReplayOutboundRequest {
+            address: address_only,
+            interface,
+        })
+        .await?
+        .into_inner();
+    if !response.scheduled {
+        return Err(CliError::Rpc(
+            "daemon did not schedule the outbound replay".into(),
+        ));
+    }
+    if json {
+        output::print_json_pretty(&replay_outbound_json(address, response.scheduled))
+    } else {
+        outln!("{}", replay_outbound_message(address))?;
+        Ok(())
+    }
+}
+
 /// Toggle the RFC 8326 GRACEFUL_SHUTDOWN community on outbound updates.
 /// `peer = None` applies to every currently-managed peer (operator
 /// running planned maintenance on the whole router).
@@ -2286,6 +2327,89 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "daemon did not schedule the outbound refresh"
+        );
+    }
+    /// Load-bearing CLI proof: removing scoped-address splitting, duplicating
+    /// the RPC, or changing the exact human/JSON receipt makes this test red.
+    #[tokio::test]
+    async fn replay_outbound_sends_scoped_peer_and_has_explicit_json_receipt() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        replay_outbound(connection, "fe80::2%eth1", true)
+            .await
+            .unwrap();
+
+        let request = server
+            .state
+            .last_replay_outbound
+            .lock()
+            .await
+            .clone()
+            .unwrap();
+        assert_eq!(request.address, "fe80::2");
+        assert_eq!(request.interface, "eth1");
+        assert_eq!(
+            server
+                .state
+                .replay_outbound_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "one CLI invocation must issue exactly one RPC"
+        );
+        assert_eq!(
+            replay_outbound_message("fe80::2%eth1"),
+            "Outbound replay scheduled for fe80::2%eth1"
+        );
+        assert_eq!(
+            replay_outbound_json("fe80::2%eth1", true),
+            serde_json::json!({
+                "ok": true,
+                "action": "replay_outbound",
+                "target": "fe80::2%eth1",
+                "scheduled": true,
+            })
+        );
+    }
+
+    /// Removing the fail-closed `scheduled` check makes this test return
+    /// success against a daemon that explicitly declined the operation.
+    #[tokio::test]
+    async fn replay_outbound_rejects_unscheduled_response() {
+        let server = spawn_mock_server(None).await;
+        server
+            .state
+            .replay_outbound_declined
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        let error = replay_outbound(connection, "192.0.2.1", false)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "daemon did not schedule the outbound replay"
+        );
+    }
+    #[tokio::test]
+    async fn replay_outbound_does_not_fallback_when_old_server_is_unimplemented() {
+        let server = spawn_mock_server(None).await;
+        *server.state.replay_outbound_error.lock().await = Some((
+            tonic::Code::Unimplemented,
+            "unknown method ReplayOutbound".into(),
+        ));
+        let connection = connect(&server.addr, None).await.unwrap();
+        let error = replay_outbound(connection, "192.0.2.1", true)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("unknown method ReplayOutbound"));
+        assert_eq!(
+            server
+                .state
+                .refresh_outbound_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "an older server must never silently schedule ordinary refresh"
         );
     }
 }

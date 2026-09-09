@@ -138,6 +138,10 @@ pub(crate) struct MockState {
         Mutex<Option<server_proto::AcceptedDynamicNeighborRange>>,
     pub(crate) last_softreset: Mutex<Option<server_proto::SoftResetInRequest>>,
     pub(crate) last_refresh_outbound: Mutex<Option<server_proto::RefreshOutboundRequest>>,
+    pub(crate) last_replay_outbound: Mutex<Option<server_proto::ReplayOutboundRequest>>,
+    pub(crate) replay_outbound_calls: AtomicUsize,
+    pub(crate) replay_outbound_declined: AtomicBool,
+    pub(crate) replay_outbound_error: Mutex<Option<(Code, String)>>,
     pub(crate) last_reset_neighbor: Mutex<Option<server_proto::ResetNeighborRequest>>,
     pub(crate) refresh_outbound_calls: AtomicUsize,
     pub(crate) refresh_outbound_declined: AtomicBool,
@@ -1229,6 +1233,22 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
         *self.state.last_refresh_outbound.lock().await = Some(request.into_inner());
         Ok(Response::new(server_proto::RefreshOutboundResponse {
             scheduled: !self.state.refresh_outbound_declined.load(Ordering::SeqCst),
+        }))
+    }
+
+    async fn replay_outbound(
+        &self,
+        request: Request<server_proto::ReplayOutboundRequest>,
+    ) -> Result<Response<server_proto::ReplayOutboundResponse>, Status> {
+        self.state
+            .replay_outbound_calls
+            .fetch_add(1, Ordering::SeqCst);
+        *self.state.last_replay_outbound.lock().await = Some(request.into_inner());
+        if let Some((code, message)) = self.state.replay_outbound_error.lock().await.clone() {
+            return Err(Status::new(code, message));
+        }
+        Ok(Response::new(server_proto::ReplayOutboundResponse {
+            scheduled: !self.state.replay_outbound_declined.load(Ordering::SeqCst),
         }))
     }
 

@@ -108,6 +108,7 @@ rbgp neighbor <addr> disable --reason "maintenance"
 rbgp neighbor <addr> reset [--reason "maintenance"]   # Cease/Administrative Reset; static peers retry, dynamic peers reconnect inbound
 rbgp neighbor <addr> softreset
 rbgp neighbor <addr> refresh-out            # re-send this peer's current exportable outbound routes
+rbgp neighbor <addr> replay-out             # explicit unicast replay; scheduling acknowledgement only
 rbgp neighbor <addr> delete
 
 rbgp dynamic-neighbor list
@@ -130,6 +131,12 @@ rbgp rpki caches                             # configured caches + accepted RTR 
 Neighbor addresses accept IPv4, IPv6, and scoped link-local IPv6 such as
 `fe80::1%eth0` or `fe80::1%7`. Omit the address to list neighbors; `list` is
 not a neighbor subcommand.
+
+Experimental `replay-out` targets one Established peer that negotiates only
+IPv4/IPv6 unicast, with a unique IP address among managed peers. It requires a
+connected BMP collector with `rib_out_post = true` and `rib_in_pre = false`. Its response confirms scheduling only. See the
+[replay contract](../../docs/reference/api.md#replay-one-peers-unicast-routes-with-terminal-eors)
+for monitoring reset behavior, completion evidence, and the five-second bound.
 
 `rpki validate` requires the daemon's first authoritative VRP snapshot. Before
 that snapshot it fails with `FAILED_PRECONDITION`; an authoritative empty

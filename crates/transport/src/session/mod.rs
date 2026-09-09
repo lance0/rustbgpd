@@ -7,6 +7,7 @@ mod io;
 mod outbound;
 mod refresh_accounting;
 pub mod rejected_routes;
+mod replay;
 mod shared_group;
 mod writer;
 
@@ -259,6 +260,10 @@ pub(crate) struct PeerSession {
     /// saturation signal that triggers `Cease/8` (Out of Resources,
     /// RFC 4486 §4 subcode 8) + session teardown.
     writer_bulk_tx: Option<mpsc::Sender<Bytes>>,
+    writer_completed: Option<watch::Receiver<u64>>,
+    writer_bulk_admitted: u64,
+    pending_replay: Option<replay::PendingReplay>,
+    replay_eor_suppressed: bool,
     /// Unbounded priority channel handed to the writer task. Carries
     /// OPEN, KEEPALIVE, NOTIFICATION, operator ROUTE-REFRESH commands,
     /// and the `Cease/8` we emit on a local Out-of-Resources teardown.
@@ -1811,6 +1816,7 @@ impl PeerSession {
         let (
             read_half,
             writer_bulk_tx,
+            writer_completed,
             writer_priority_tx,
             writer_keepalive_tx,
             writer_teardown_tx,
@@ -1828,23 +1834,28 @@ impl PeerSession {
                 (
                     Some(read_half),
                     Some(writer_handle.bulk_tx),
+                    Some(writer_handle.completed),
                     Some(writer_handle.priority_tx),
                     Some(writer_handle.keepalive_tx),
                     Some(writer_handle.teardown_tx),
                     Some(writer_handle.join),
                 )
             }
-            None => (None, None, None, None, None, None),
+            None => (None, None, None, None, None, None, None),
         };
         Self {
             config,
             fsm,
             read_half,
             writer_bulk_tx,
+            writer_completed,
             writer_priority_tx,
             writer_keepalive_tx,
             writer_teardown_tx,
             writer_join,
+            writer_bulk_admitted: 0,
+            pending_replay: None,
+            replay_eor_suppressed: false,
             read_buf: ReadBuffer::new(),
             timers: Timers::default(),
             metrics,
@@ -2086,6 +2097,7 @@ impl PeerSession {
     /// Latch the divergence flag after a dropped `RouteMonitoring` and
     /// arm the bounded-latency repair timer.
     fn mark_bmp_stream_diverged(&mut self) {
+        self.cancel_outbound_replay();
         if !self.bmp_stream_diverged {
             warn!(
                 peer = %self.peer_label,
@@ -2368,6 +2380,10 @@ impl PeerSession {
             // outbound read.
             let read_active = self.read_half.is_some() && self.fsm.state() != SessionState::Idle;
 
+            let replay_waiting = self
+                .pending_replay
+                .as_ref()
+                .is_some_and(|pending| pending.target.is_some());
             // Destructure to split borrows for tokio::select!
             let Self {
                 read_half,
@@ -2381,6 +2397,8 @@ impl PeerSession {
                 bmp_repair_timer,
                 refresh_accounting_timer,
                 slow_peer_timer,
+                pending_replay,
+                writer_completed,
                 ..
             } = self;
 
@@ -2485,6 +2503,10 @@ impl PeerSession {
                             self.tcp_ao_selected_owner = None;
                             self.tcp_ao_successor_pkt_good_baseline = None;
                             self.tcp_ao_selection_observed = false;
+                            self.cancel_outbound_replay();
+                            self.writer_bulk_admitted = 0;
+                            self.replay_eor_suppressed = false;
+                            self.writer_completed = Some(handle.completed);
                             self.writer_bulk_tx = Some(handle.bulk_tx);
                             self.writer_priority_tx = Some(handle.priority_tx);
                             self.writer_keepalive_tx = Some(handle.keepalive_tx);
@@ -2515,9 +2537,13 @@ impl PeerSession {
                     self.handle_writer_exit(join_result).await;
                 }
 
+                completed = replay::poll_completion(pending_replay, writer_completed), if pending_replay.is_some() => {
+                    self.finish_outbound_replay(completed);
+                }
+
                 // Outbound route updates from RIB manager
                 Some(update) = outbound_rx.recv(),
-                    if self.fsm.state() == SessionState::Established => {
+                    if self.fsm.state() == SessionState::Established && !replay_waiting => {
                     self.handle_outbound_route_update(update).await;
                 }
             }
@@ -2541,6 +2567,10 @@ impl PeerSession {
             send_hold_duration(&self.config),
         );
         self.read_half = Some(rh);
+        self.cancel_outbound_replay();
+        self.writer_bulk_admitted = 0;
+        self.replay_eor_suppressed = false;
+        self.writer_completed = Some(handle.completed);
         self.writer_bulk_tx = Some(handle.bulk_tx);
         self.writer_priority_tx = Some(handle.priority_tx);
         self.writer_keepalive_tx = Some(handle.keepalive_tx);

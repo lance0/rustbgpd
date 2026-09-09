@@ -1416,6 +1416,10 @@ impl PeerSession {
                 let _ = reply.send(state);
                 ControlFlow::Continue(())
             }
+            PeerCommand::ReplayOutbound { reply } => {
+                self.start_outbound_replay(reply).await;
+                ControlFlow::Continue(())
+            }
             PeerCommand::SendRouteRefresh { afi, safi, reply } => {
                 if self.fsm.state() != SessionState::Established {
                     let _ = reply.send(Err(PeerCommandError::NotEstablished));

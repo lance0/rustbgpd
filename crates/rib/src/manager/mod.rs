@@ -1824,7 +1824,8 @@ impl RibManager {
             | RibUpdate::RestorePeerExportPoliciesAuthoritatively { .. }
             | RibUpdate::ApplyOutboundPrefixLimits { .. }
             | RibUpdate::ReevaluatePeerExportPolicies { .. }
-            | RibUpdate::RefreshPeerOutbound { .. } => self.advance_advertised_pages(),
+            | RibUpdate::RefreshPeerOutbound { .. }
+            | RibUpdate::ReplayPeerOutbound { .. } => self.advance_advertised_pages(),
             RibUpdate::PeerUp { .. }
             | RibUpdate::PeerDeleted { .. }
             | RibUpdate::InjectRoute { .. }
@@ -2699,6 +2700,21 @@ impl RibManager {
             } => self.begin_destination_prestage(peer, export_policy.as_ref(), reply),
             RibUpdate::DiscardPreparedExportPolicyDestination { .. } => {
                 self.discard_prepared_export_destination();
+            }
+            RibUpdate::ReplayPeerOutbound {
+                peer,
+                session_id,
+                families,
+                replay,
+                reply,
+            } => {
+                let result = self.handle_replay_peer_outbound(peer, session_id, families, &replay);
+                if result.is_err() {
+                    replay.cancel();
+                }
+                if reply.send(result).is_err() {
+                    replay.cancel();
+                }
             }
             RibUpdate::RefreshPeerOutbound { peer, reply } => {
                 self.handle_refresh_peer_outbound(peer, reply);

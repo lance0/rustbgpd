@@ -1330,6 +1330,7 @@ mod paged_query;
 mod per_client_best;
 mod policy;
 mod refresh;
+mod replay;
 mod rpki;
 mod rs_control;
 mod rtc;

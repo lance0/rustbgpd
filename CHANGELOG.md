@@ -13,6 +13,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Experimental `rbgp neighbor PEER replay-out` schedules one peer's IPv4/IPv6
+  unicast replay for eligible outbound-only BMP collectors. It requires a
+  unicast-only negotiated session and a unique address among managed peers. The new
+  `ReplayOutbound` RPC acknowledges scheduling; terminal BMP EoRs follow local
+  writer completion. See the [bounded replay contract](docs/reference/api.md#replay-one-peers-unicast-routes-with-terminal-eors).
+
 - Added `bgp_update_malformed_causes_total{peer,type_code,reason,disposition}`
   with bounded reported cause labels, including typed RFC 9774 prohibited
   AS sets, and the final applied disposition. The existing malformed-UPDATE

@@ -2995,6 +2995,7 @@ impl RibManager {
                 announce,
                 withdraw,
                 end_of_rib,
+                replay: None,
                 refresh_markers,
                 next_hop_override,
                 flowspec_announce,

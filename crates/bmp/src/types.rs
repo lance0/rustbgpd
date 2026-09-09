@@ -18,9 +18,78 @@ pub struct BmpRpkiValidationCounts {
     pub not_found: u64,
 }
 
+/// One bounded, explicit outbound replay. This retains only cancellation and
+/// enrollment metadata; it never retains routes or historical advertisements.
+#[derive(Debug)]
+pub struct BmpReplay {
+    deadline: std::time::Instant,
+    canceled: std::sync::atomic::AtomicBool,
+    enrollment: std::sync::Mutex<Option<oneshot::Sender<bool>>>,
+}
+
+impl BmpReplay {
+    /// Create a replay whose completion expires after `timeout`.
+    #[must_use]
+    pub fn new(timeout: std::time::Duration) -> (std::sync::Arc<Self>, oneshot::Receiver<bool>) {
+        let (reply, enrolled) = oneshot::channel();
+        (
+            std::sync::Arc::new(Self {
+                deadline: std::time::Instant::now() + timeout,
+                canceled: std::sync::atomic::AtomicBool::new(false),
+                enrollment: std::sync::Mutex::new(Some(reply)),
+            }),
+            enrolled,
+        )
+    }
+
+    /// Permanently invalidate this operation, including after source repair.
+    pub fn cancel(&self) {
+        self.canceled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether this operation may still certify completion.
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        !self.canceled.load(std::sync::atomic::Ordering::SeqCst)
+            && std::time::Instant::now() < self.deadline
+    }
+
+    pub(crate) fn acknowledge(&self, accepted: bool) {
+        if !accepted {
+            self.cancel();
+        }
+        if let Some(reply) = self
+            .enrollment
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            && reply.send(accepted).is_err()
+        {
+            self.cancel();
+        }
+    }
+}
+
 /// BMP event sent from transport to BMP manager.
 #[derive(Debug)]
 pub enum BmpEvent {
+    /// Enroll current outbound-monitoring collector generations before replay.
+    OutboundReplayBegin {
+        /// Target session identity.
+        peer_info: BmpPeerInfo,
+        /// Bounded operation cancellation and enrollment token.
+        replay: std::sync::Arc<BmpReplay>,
+    },
+    /// Terminal UPDATE `EoRs` after the replay's local writer completion fence.
+    OutboundReplayComplete {
+        /// Target session identity, with outbound/post-policy flags.
+        peer_info: BmpPeerInfo,
+        /// The same operation enrolled before any replay route was emitted.
+        replay: std::sync::Arc<BmpReplay>,
+        /// Exact terminal UPDATE PDUs successfully written to the BGP socket.
+        end_of_rib: Vec<Bytes>,
+    },
     /// Peer session established.
     PeerUp {
         /// Per-peer header data.
@@ -308,6 +377,8 @@ pub enum PeerDownReason {
     RemoteNotification(Bytes),
     /// Type 4: Remote system closed TCP without NOTIFICATION.
     RemoteNoNotification,
+    /// Type 5: monitoring for this peer stopped while its BGP session remains up.
+    MonitoringStopped,
 }
 
 /// BMP wire version a collector receives.

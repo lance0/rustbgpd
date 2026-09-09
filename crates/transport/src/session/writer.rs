@@ -170,6 +170,8 @@ pub(super) struct WriterHandle {
     /// `try_send` returning `Full` is the saturation signal that
     /// triggers session teardown.
     pub(super) bulk_tx: mpsc::Sender<Bytes>,
+    /// Successful FIFO bulk-write byte watermark, excluding priority traffic.
+    pub(super) completed: watch::Receiver<u64>,
     /// Unbounded channel — `OPEN`, `KEEPALIVE`, `NOTIFICATION`, operator
     /// `ROUTE-REFRESH` commands, collision `Cease`. Unbounded is safe
     /// because each of these is bounded by session lifetime or timer
@@ -217,12 +219,14 @@ pub(super) fn spawn(
     send_hold_time: Option<Duration>,
 ) -> WriterHandle {
     let (bulk_tx, bulk_rx) = mpsc::channel::<Bytes>(bulk_buffer);
+    let (completed_tx, completed) = watch::channel(0);
     let (priority_tx, priority_rx) = mpsc::unbounded_channel::<Bytes>();
     let (keepalive_tx, keepalive_rx) = watch::channel(None);
     let (teardown_tx, teardown_rx) = watch::channel(false);
     let task = WriterTask {
         write_half,
         bulk_rx,
+        completed_tx,
         priority_rx,
         keepalive_rx,
         teardown_rx,
@@ -233,6 +237,7 @@ pub(super) fn spawn(
     let join = tokio::spawn(task.run());
     WriterHandle {
         bulk_tx,
+        completed,
         priority_tx,
         keepalive_tx,
         teardown_tx,
@@ -243,6 +248,7 @@ pub(super) fn spawn(
 struct WriterTask {
     write_half: OwnedWriteHalf,
     bulk_rx: mpsc::Receiver<Bytes>,
+    completed_tx: watch::Sender<u64>,
     priority_rx: mpsc::UnboundedReceiver<Bytes>,
     keepalive_rx: watch::Receiver<Option<Duration>>,
     teardown_rx: watch::Receiver<bool>,
@@ -373,6 +379,14 @@ impl WriterTask {
                 bytes
             };
             self.write_message(&bytes).await?;
+            if from_bulk {
+                let next = (*self.completed_tx.borrow())
+                    .checked_add(bytes.len() as u64)
+                    .ok_or_else(|| {
+                        WriterExit::Io(std::io::Error::other("bulk completion counter exhausted"))
+                    })?;
+                self.completed_tx.send_replace(next);
+            }
         }
     }
 
@@ -490,6 +504,82 @@ mod tests {
         let (server, _) = listener.accept().await.unwrap();
         let client = connect.await.unwrap();
         (server, client)
+    }
+
+    #[tokio::test]
+    async fn replay_watermark_excludes_priority_and_counts_flushed_bulk_bytes() {
+        let (server, mut client) = tcp_pair().await;
+        let (_read, write) = server.into_split();
+        let handle = spawn(write, 8, BgpMetrics::new(), "replay-peer".into(), None);
+        handle
+            .priority_tx
+            .send(Bytes::from_static(b"priority"))
+            .unwrap();
+        let mut priority = [0; 8];
+        client.read_exact(&mut priority).await.unwrap();
+        assert_eq!(&priority, b"priority");
+        assert_eq!(*handle.completed.borrow(), 0);
+        handle
+            .bulk_tx
+            .send(Bytes::from_static(b"row"))
+            .await
+            .unwrap();
+        handle
+            .bulk_tx
+            .send(Bytes::from_static(b"end"))
+            .await
+            .unwrap();
+        let mut bulk = [0; 6];
+        client.read_exact(&mut bulk).await.unwrap();
+        assert_eq!(&bulk, b"rowend");
+        let mut completed = handle.completed.clone();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while *completed.borrow_and_update() != 6 {
+                completed.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        drop(handle.bulk_tx);
+        drop(handle.priority_tx);
+        handle.join.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn replay_partial_bulk_write_failure_never_advances_watermark() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connect = tokio::spawn(async move {
+            let socket = tokio::net::TcpSocket::new_v4().unwrap();
+            socket.set_recv_buffer_size(4096).unwrap();
+            socket.connect(addr).await.unwrap()
+        });
+        let (server, _) = listener.accept().await.unwrap();
+        socket2::SockRef::from(&server)
+            .set_send_buffer_size(4096)
+            .unwrap();
+        let peer = connect.await.unwrap();
+        let (_read, write) = server.into_split();
+        let handle = spawn(
+            write,
+            2,
+            BgpMetrics::new(),
+            "replay-peer".into(),
+            Some(Duration::from_millis(100)),
+        );
+        handle
+            .bulk_tx
+            .send(Bytes::from(vec![0; 4 * 1024 * 1024]))
+            .await
+            .unwrap();
+        let completed = handle.completed.clone();
+        let result = tokio::time::timeout(Duration::from_secs(3), handle.join)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(result, Err(WriterExit::SendHoldExpired { .. })));
+        assert_eq!(*completed.borrow(), 0);
+        drop(peer);
     }
 
     /// Bulk messages preserve FIFO order over the wire.

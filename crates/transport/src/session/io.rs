@@ -235,7 +235,15 @@ impl PeerSession {
             );
             return Err(TransportError::WriterClosed);
         }
-        self.enqueue_bulk_encoded(Bytes::from(encoded), matches!(msg, Message::Update(_)))
+        let ordinary_eor = matches!(msg, Message::Update(update)
+            if update.withdrawn_routes.is_empty() && update.nlri.is_empty()
+                && (update.path_attributes.is_empty()
+                    || matches!(update.path_attributes.as_ref(), [0x80, 15, 3, 0, 1 | 2, 1])));
+        // Initial-table or peer-refresh EoRs queued before an explicit replay
+        // must not certify that operation before its own writer fence.
+        let mirror =
+            matches!(msg, Message::Update(_)) && !(self.replay_eor_suppressed && ordinary_eor);
+        self.enqueue_bulk_encoded(Bytes::from(encoded), mirror)
     }
 
     /// Enqueue an already-encoded wire message on the writer's **bulk**
@@ -274,8 +282,15 @@ impl PeerSession {
         //   never keep a silently incomplete rib-out view.
         let bmp_rib_out_pdu = (self.config.bmp_rib_out && self.bmp_tx.is_some() && is_update)
             .then(|| encoded.clone());
+        let admitted = self
+            .writer_bulk_admitted
+            .checked_add(encoded.len() as u64)
+            .ok_or_else(|| {
+                TransportError::Io(std::io::Error::other("bulk admission counter exhausted"))
+            })?;
         match tx.try_send(encoded) {
             Ok(()) => {
+                self.writer_bulk_admitted = admitted;
                 if let Some(update_pdu) = bmp_rib_out_pdu {
                     // Peer identity stays the REMOTE peer's; only the
                     // direction flips (O=1), and L=1 marks post-policy.
@@ -545,6 +560,8 @@ impl PeerSession {
     /// exit cleanly; the `JoinHandle` then resolves and the session's
     /// own select observes it via the writer-exit arm.
     pub(super) fn close_tcp(&mut self) {
+        self.cancel_outbound_replay();
+        self.writer_completed = None;
         if let Some(task) = self.connect_task.take() {
             task.abort();
         }
@@ -572,6 +589,8 @@ impl PeerSession {
     /// Clear TCP state after disconnect or error. Same writer-channel
     /// drop pattern as `close_tcp`.
     pub(super) fn handle_tcp_disconnect(&mut self) {
+        self.cancel_outbound_replay();
+        self.writer_completed = None;
         debug!(peer = %self.peer_label, "TCP disconnected");
         if let Some(task) = self.connect_task.take() {
             task.abort();

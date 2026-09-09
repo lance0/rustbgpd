@@ -91,26 +91,38 @@ address = "192.0.2.100:11019"          # your capture/collector host
 monitor = ["rib_out_post"]
 ```
 
-The capture has to contain each member's initial Adj-RIB-Out dump,
-and RS2 sends that dump only when the member's session establishes. A
-collector that connects later gets the Peer Ups and live updates only
-(`rib_out_post` has no reconnect dump), and `from-bmp` refuses such a
-capture (exit 2, `End-of-RIB not seen`) rather than emit an incomplete
-peer. Nothing run from RS2 fills that gap: `rbgp neighbor <member> refresh-out` reports the refresh as scheduled and re-sends the routes
-without an End-of-RIB, and a member's own ROUTE-REFRESH is answered
-with an End-of-RIB-Refresh marker instead when the member negotiated
-enhanced route refresh (FRR 10.7.1 does) — a ROUTE-REFRESH message,
-which BMP route monitoring never carries. So start the listener before
-RS2's member sessions establish — before RS2 starts (in practice its
-maintenance-window restart) or before its member sessions are cleared —
-and leave it running: the live updates fold into the same capture, and
-a dropped BMP connection ends its usefulness until the next
-establishment.
+The capture has to contain a complete Adj-RIB-Out boundary for each member.
+RS2 sends an automatic initial dump when the member's session establishes.
+A collector that connects later gets the Peer Ups and live updates only
+(`rib_out_post` has no automatic reconnect dump), and `from-bmp` refuses
+such a capture (exit 2, `End-of-RIB not seen`) rather than emit an incomplete
+peer. `rbgp neighbor <member> refresh-out` reports scheduling and re-sends
+routes without an End-of-RIB. A member's own ROUTE-REFRESH is answered
+with an End-of-RIB-Refresh marker instead when it negotiated enhanced
+route refresh (FRR 10.7.1 does) — a ROUTE-REFRESH message, which BMP route
+monitoring never carries.
+
+For automatic capture, start the listener before RS2's member sessions
+establish — before RS2 starts (in practice its maintenance-window restart)
+or before its member sessions are cleared — and leave it running. Live
+updates fold into the same capture. After a dropped BMP connection, a new
+capture needs another complete boundary from establishment or explicit
+replay below.
 
 ```bash
 # Terminal 1: start before RS2's member sessions come up; leave running.
 nc -l 11019 > rs2-adjout.bmp
 ```
+
+A late collector can instead use the experimental
+[`replay-out` operation](../reference/api.md#replay-one-peers-unicast-routes-with-terminal-eors)
+on RS2, one member at a time, after this outbound-only collector connects:
+`rbgp neighbor <member> replay-out`. Each selected session must be Established,
+negotiate only IPv4/IPv6 unicast with at least one family, and have an IP
+address unique among managed peers. Replay resets that collector's cached
+peer inventory and reannounces the selected member's routes on its live BGP
+session. The CLI confirms scheduling only; require terminal BMP EoRs for
+every negotiated family before conversion, and reject partial captures.
 
 Once the members have converged, take a fixed copy in another terminal.
 A copy can end inside a BMP message while the listener appends; if conversion

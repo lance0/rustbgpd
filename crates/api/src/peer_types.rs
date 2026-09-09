@@ -270,7 +270,7 @@ impl std::fmt::Display for SetGshutError {
 
 impl std::error::Error for SetGshutError {}
 
-/// Failure modes for an operator-requested outbound refresh.
+/// Failure modes for an operator-requested outbound refresh or replay.
 ///
 /// The distinction between an unknown peer and a managed peer without an
 /// active outbound RIB registration is operator-visible through gRPC.
@@ -278,8 +278,10 @@ impl std::error::Error for SetGshutError {}
 pub enum OutboundRefreshError {
     /// Operator addressed a peer that is not currently managed.
     PeerNotFound(PeerKey),
-    /// The peer is managed but has no active outbound RIB registration.
+    /// The peer is managed but has no active outbound session or RIB registration.
     PeerUnavailable(PeerKey),
+    /// The active session cannot admit an explicit replay.
+    ReplayUnavailable(String),
     /// Peer-manager/RIB dispatch or reply failure.
     Internal(String),
 }
@@ -291,7 +293,7 @@ impl std::fmt::Display for OutboundRefreshError {
             Self::PeerUnavailable(peer) => {
                 write!(f, "peer {peer} has no active outbound session")
             }
-            Self::Internal(message) => f.write_str(message),
+            Self::ReplayUnavailable(message) | Self::Internal(message) => f.write_str(message),
         }
     }
 }
@@ -1026,6 +1028,13 @@ pub enum PeerManagerCommand {
         /// Peer identity.
         peer: PeerKey,
         /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), OutboundRefreshError>>,
+    },
+    /// Schedule one session's negotiated IPv4/IPv6 unicast replay with terminal `EoRs`.
+    ReplayOutbound {
+        /// Peer identity, including the interface for scoped peers.
+        peer: PeerKey,
+        /// Scheduling acknowledgement; does not wait for replay completion.
         reply: oneshot::Sender<Result<(), OutboundRefreshError>>,
     },
     /// Trigger soft inbound reset for established peers whose resolved import
