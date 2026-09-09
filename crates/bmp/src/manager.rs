@@ -65,6 +65,8 @@ const LOC_RIB_DUMP_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from
 /// certifying a snapshot that omitted live deltas.
 const LOC_RIB_DUMP_LIVE_BUFFER_CAP: usize = 8192;
 
+type OutboundReplayEnrollment = (Arc<crate::BmpReplay>, Vec<(usize, u64)>);
+
 /// One in-flight Loc-RIB dump — or a post-dump flush round of its
 /// held-back live messages — for a collector connection generation.
 struct ActiveDump {
@@ -216,6 +218,8 @@ pub struct BmpManager {
     /// Latest encoded `PeerUp` message per peer address, one encoding
     /// per BMP version (indexed by [`BmpVersion::idx`]).
     peer_up_cache: std::collections::HashMap<std::net::IpAddr, [Bytes; 2]>,
+    /// One metadata-only explicit replay per peer; generation enrollment is fixed.
+    outbound_replays: std::collections::HashMap<std::net::IpAddr, OutboundReplayEnrollment>,
     /// RFC 9069 Loc-RIB instance-peer identity. `None` = no collector
     /// monitors `loc_rib`; Loc-RIB events are dropped.
     loc_rib: Option<BmpLocRibConfig>,
@@ -319,6 +323,7 @@ impl BmpManager {
             control_rx,
             collectors,
             peer_up_cache: std::collections::HashMap::new(),
+            outbound_replays: std::collections::HashMap::new(),
             loc_rib: None,
             dump_tx: None,
             loc_rib_suppressed: std::collections::HashSet::new(),
@@ -387,8 +392,11 @@ impl BmpManager {
 
     fn encode_event(event: &BmpEvent, version: BmpVersion) -> Bytes {
         match event {
-            BmpEvent::LocRibRouteMonitoring { .. } | BmpEvent::LocRibStats { .. } => {
-                unreachable!("Loc-RIB events are encoded in handle_loc_rib_event")
+            BmpEvent::OutboundReplayBegin { .. }
+            | BmpEvent::OutboundReplayComplete { .. }
+            | BmpEvent::LocRibRouteMonitoring { .. }
+            | BmpEvent::LocRibStats { .. } => {
+                unreachable!("special events are handled separately")
             }
             BmpEvent::PeerUp {
                 peer_info,
@@ -648,12 +656,119 @@ impl BmpManager {
         }
     }
 
+    async fn handle_outbound_replay_event(&mut self, event: &BmpEvent) {
+        match event {
+            BmpEvent::OutboundReplayBegin { peer_info, replay } => {
+                let peer = peer_info.peer_addr;
+                let active = self
+                    .outbound_replays
+                    .get(&peer)
+                    .is_some_and(|(old, _)| old.is_valid());
+                let mut collectors: Vec<_> = self
+                    .collectors
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(idx, collector)| {
+                        if collector.filter.rib_out_post
+                            && !collector.filter.rib_in_pre
+                            && let CollectorPhase::Active { generation, .. } = collector.phase
+                        {
+                            Some((idx, generation))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                let mut accepted = replay.is_valid()
+                    && !active
+                    && self.peer_up_cache.contains_key(&peer)
+                    && !collectors.is_empty();
+                if accepted {
+                    let cached = self.peer_up_cache[&peer].clone();
+                    let mut down_info = peer_info.clone();
+                    down_info.is_rib_out = false;
+                    down_info.is_post_policy = false;
+                    let down = BmpEvent::PeerDown {
+                        peer_info: down_info,
+                        reason: crate::PeerDownReason::MonitoringStopped,
+                    };
+                    self.fan_out_filtered(
+                        |idx, _| collectors.iter().any(|(enrolled, _)| *enrolled == idx),
+                        |version| Self::encode_event(&down, version),
+                    )
+                    .await;
+                    self.fan_out_filtered(
+                        |idx, _| collectors.iter().any(|(enrolled, _)| *enrolled == idx),
+                        |version| cached[version.idx()].clone(),
+                    )
+                    .await;
+                    collectors.retain(|&(idx, generation)| matches!(
+                        self.collectors[idx].phase,
+                        CollectorPhase::Active { generation: current, .. } if current == generation
+                    ));
+                    accepted = replay.is_valid() && !collectors.is_empty();
+                    if accepted {
+                        self.outbound_replays
+                            .insert(peer, (Arc::clone(replay), collectors));
+                    }
+                }
+                replay.acknowledge(accepted);
+            }
+            BmpEvent::OutboundReplayComplete {
+                peer_info,
+                replay,
+                end_of_rib,
+            } => {
+                let peer = peer_info.peer_addr;
+                let matches = self
+                    .outbound_replays
+                    .get(&peer)
+                    .is_some_and(|(current, _)| Arc::ptr_eq(current, replay));
+                if !matches {
+                    return;
+                }
+                let (_, enrolled) = self
+                    .outbound_replays
+                    .remove(&peer)
+                    .expect("matched replay exists");
+                if !replay.is_valid() {
+                    return;
+                }
+                let eligible: Vec<_> = enrolled
+                    .into_iter()
+                    .filter_map(|(idx, generation)| {
+                        (self.collectors[idx].phase.generation() == Some(generation)).then_some(idx)
+                    })
+                    .collect();
+                for pdu in end_of_rib {
+                    if !replay.is_valid() {
+                        return;
+                    }
+                    self.fan_out_filtered(
+                        |idx, filter| filter.rib_out_post && eligible.contains(&idx),
+                        |version| codec::encode_route_monitoring(peer_info, pdu, None, version),
+                    )
+                    .await;
+                }
+            }
+
+            _ => unreachable!("outbound replay events only"),
+        }
+    }
+
     async fn handle_event(&mut self, event: &BmpEvent) {
         match event {
+            BmpEvent::OutboundReplayBegin { .. } | BmpEvent::OutboundReplayComplete { .. } => {
+                self.handle_outbound_replay_event(event).await;
+            }
             BmpEvent::LocRibRouteMonitoring { .. } | BmpEvent::LocRibStats { .. } => {
                 self.handle_loc_rib_event(event).await;
             }
             BmpEvent::PeerUp { peer_info, .. } => {
+                if let Some((replay, _)) = self.outbound_replays.remove(&peer_info.peer_addr) {
+                    replay.cancel();
+                }
+
                 // Encode both versions eagerly: the cache must be able
                 // to replay to any collector version on reconnect.
                 let encoded = [
@@ -664,6 +779,10 @@ impl BmpManager {
                 self.peer_up_cache.insert(peer_info.peer_addr, encoded);
             }
             BmpEvent::PeerDown { peer_info, .. } => {
+                if let Some((replay, _)) = self.outbound_replays.remove(&peer_info.peer_addr) {
+                    replay.cancel();
+                }
+
                 self.peer_up_cache.remove(&peer_info.peer_addr);
                 self.fan_out(|version| Self::encode_event(event, version))
                     .await;
@@ -1415,6 +1534,9 @@ fn trysend_reason<T>(err: &mpsc::error::TrySendError<T>) -> &'static str {
 }
 
 #[cfg(test)]
+mod replay_tests;
+
+#[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
     use std::time::UNIX_EPOCH;
@@ -1440,11 +1562,11 @@ mod tests {
         }
     }
 
-    fn collector_addr(id: u16) -> SocketAddr {
+    pub(super) fn collector_addr(id: u16) -> SocketAddr {
         SocketAddr::from(([127, 0, 0, 1], 11000 + id))
     }
 
-    fn sample_peer_info() -> BmpPeerInfo {
+    pub(super) fn sample_peer_info() -> BmpPeerInfo {
         BmpPeerInfo {
             peer_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             peer_asn: 65002,

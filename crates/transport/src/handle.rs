@@ -41,6 +41,8 @@ pub enum PeerCommandError {
     },
     /// The command requires an Established BGP session.
     NotEstablished,
+    /// Explicit outbound replay is unavailable in the current session state.
+    ReplayUnavailable(String),
     /// The peer did not negotiate Route Refresh.
     RouteRefreshUnsupported,
     /// The requested AFI/SAFI is not negotiated on this session.
@@ -73,6 +75,7 @@ impl fmt::Display for PeerCommandError {
                 operation,
                 deadline,
             } => write!(f, "{operation} timed out after {deadline:?}"),
+            Self::ReplayUnavailable(message) => f.write_str(message),
             Self::NotEstablished => f.write_str("session not Established"),
             Self::RouteRefreshUnsupported => f.write_str("peer lacks Route Refresh capability"),
             Self::FamilyNotNegotiated { afi, safi } => write!(f, "{afi:?}/{safi:?} not negotiated"),
@@ -490,6 +493,11 @@ pub enum PeerCommand {
     QueryWarmCheckpointState {
         /// Oneshot channel to receive one actor-consistent negotiation view.
         reply: oneshot::Sender<WarmCheckpointSessionState>,
+    },
+    /// Schedule an explicit complete IPv4/IPv6 unicast wire replay.
+    ReplayOutbound {
+        /// Scheduling acknowledgement; terminal BMP `EoRs` certify completion.
+        reply: oneshot::Sender<Result<(), PeerCommandError>>,
     },
     /// Send a ROUTE-REFRESH message to the peer (RFC 2918).
     SendRouteRefresh {
@@ -1662,6 +1670,34 @@ impl PeerHandle {
             .await
             .map_err(|_| PeerCommandError::SessionExited)?;
         reply_rx.await.map_err(|_| PeerCommandError::ReplyDropped)?
+    }
+
+    /// Schedule one explicit wire replay within a bounded command deadline.
+    ///
+    /// This acknowledges scheduling only, not writer drain or collector receipt.
+    ///
+    /// # Errors
+    /// Returns a session refusal, delivery error, or scheduling timeout.
+    pub async fn replay_outbound_timeout(
+        &self,
+        deadline: Duration,
+    ) -> Result<(), PeerCommandError> {
+        match tokio::time::timeout(deadline, async {
+            let (reply, result) = oneshot::channel();
+            self.commands
+                .send(PeerCommand::ReplayOutbound { reply })
+                .await
+                .map_err(|_| PeerCommandError::SessionExited)?;
+            result.await.map_err(|_| PeerCommandError::ReplyDropped)?
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(PeerCommandError::TimedOut {
+                operation: "replay_outbound",
+                deadline,
+            }),
+        }
     }
 
     /// Send a ROUTE-REFRESH command with a bounded deadline.

@@ -522,6 +522,7 @@ fn outbound_refresh_error_status(error: OutboundRefreshError) -> Status {
         OutboundRefreshError::PeerUnavailable(peer) => {
             Status::failed_precondition(format!("peer {peer} has no active outbound session"))
         }
+        OutboundRefreshError::ReplayUnavailable(message) => Status::failed_precondition(message),
         OutboundRefreshError::Internal(message) => Status::internal(message),
     }
 }
@@ -1412,6 +1413,27 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         .map_err(outbound_refresh_error_status)?;
 
         Ok(Response::new(proto::RefreshOutboundResponse {
+            scheduled: true,
+        }))
+    }
+
+    async fn replay_outbound(
+        &self,
+        request: Request<proto::ReplayOutboundRequest>,
+    ) -> Result<Response<proto::ReplayOutboundResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
+        let req = request.into_inner();
+        let peer = peer_key(&req.address, &req.interface)?;
+
+        peer_manager_request(&self.peer_mgr_tx, |reply| {
+            PeerManagerCommand::ReplayOutbound { peer, reply }
+        })
+        .await?
+        .map_err(outbound_refresh_error_status)?;
+
+        Ok(Response::new(proto::ReplayOutboundResponse {
             scheduled: true,
         }))
     }
@@ -3005,6 +3027,15 @@ mod tests {
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
 
         let err = svc
+            .replay_outbound(Request::new(proto::ReplayOutboundRequest {
+                address: "10.0.0.2".into(),
+                interface: String::new(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+        let err = svc
             .set_graceful_shutdown(Request::new(proto::SetGracefulShutdownRequest {
                 address: "10.0.0.2".into(),
                 interface: String::new(),
@@ -3210,6 +3241,74 @@ mod tests {
             .unwrap()
             .into_inner();
         assert!(response.scheduled);
+    }
+
+    #[tokio::test]
+    async fn replay_outbound_dispatches_scoped_peer_and_confirms_scheduling() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+
+        tokio::spawn(async move {
+            let Some(PeerManagerCommand::ReplayOutbound { peer, reply }) = peer_rx.recv().await
+            else {
+                panic!("expected outbound replay command");
+            };
+            assert_eq!(peer.address, "fe80::2".parse::<IpAddr>().unwrap());
+            assert_eq!(peer.interface.as_deref(), Some("eth1"));
+            let _ = reply.send(Ok(()));
+        });
+
+        let response = svc
+            .replay_outbound(Request::new(proto::ReplayOutboundRequest {
+                address: "fe80::2".into(),
+                interface: "eth1".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(response.scheduled);
+    }
+
+    #[tokio::test]
+    async fn replay_outbound_rejects_invalid_peer_without_dispatch() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+        let error = svc
+            .replay_outbound(Request::new(proto::ReplayOutboundRequest {
+                address: String::new(),
+                interface: String::new(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert!(matches!(peer_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn replay_outbound_preserves_refusal_status_and_reason() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
+        tokio::spawn(async move {
+            let Some(PeerManagerCommand::ReplayOutbound { reply, .. }) = peer_rx.recv().await
+            else {
+                panic!("expected outbound replay command");
+            };
+            let _ = reply.send(Err(OutboundRefreshError::ReplayUnavailable(
+                "outbound replay already running".into(),
+            )));
+        });
+        let error = svc
+            .replay_outbound(Request::new(proto::ReplayOutboundRequest {
+                address: "192.0.2.1".into(),
+                interface: String::new(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(error.message(), "outbound replay already running");
     }
 
     #[test]

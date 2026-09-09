@@ -2574,6 +2574,46 @@ exportable routes through the live export path
 the session. Useful when a peer is suspected of having missed or dropped
 advertisements and you want to reconverge it without a flap.
 
+### Replay outbound unicast with a completion boundary
+
+```bash
+rbgp neighbor 10.0.0.2 replay-out
+```
+
+This experimental operation schedules one Established peer's negotiated
+IPv4/IPv6 unicast inventory through the live BGP export path and appends
+terminal UPDATE EoRs, including for empty families. It requires an eligible
+connected `rib_out_post` BMP collector. There is no all-peer or family-filter
+form; serialize full-table use because replay sends an O(table) UPDATE burst
+on the live session.
+
+The session must negotiate only IPv4/IPv6 unicast families, with at least one
+family, and its IP address must be unique among managed peers. A single scoped
+IPv6 peer is supported; repeated link-local addresses on different interfaces
+are refused. These prerequisites are checked before monitoring reset or replay
+traffic, because the reset clears the entire cached peer inventory.
+
+Eligible collectors have `rib_out_post = true` and `rib_in_pre = false`.
+Before replay, each receives a monitoring-only Peer Down (reason 5) followed
+by the current Peer Up, clearing its previous peer inventory. The BGP session
+stays established. Mixed inbound/outbound collectors are excluded because
+this operation cannot rebuild their inbound inventory. After enrollment,
+ordinary initial-table and peer-refresh unicast EoRs are not mirrored for the
+rest of this BGP writer generation, including for collectors excluded from
+enrollment. The actual BGP EoRs are still sent. Further complete BMP boundaries require
+another explicit replay; a new BGP session restores ordinary EoR mirroring.
+
+The CLI reports scheduling only. Terminal BMP EoRs mark completion after the
+session writer completes the replay and terminal wire EoRs; they do not prove
+collector receipt or remote BGP processing. A peer or collector generation
+change, writer failure, or timeout can leave a scheduled replay incomplete.
+Treat missing terminal EoRs as incomplete evidence. Older daemons return
+`UNIMPLEMENTED`; the CLI does not substitute `refresh-out`.
+
+See the [RPC contract](api.md#replay-one-peers-unicast-routes-with-terminal-eors)
+for refusal conditions and the five-second operation bound. This RPC is
+outside the v1 contract; `refresh-out` retains its existing behavior.
+
 ### Explain an import decision (ADR-0073)
 
 The task-oriented catalog of every explain surface — which question

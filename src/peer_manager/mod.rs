@@ -1677,6 +1677,12 @@ impl PeerManager {
                             let result = self.refresh_outbound(peer).await;
                             let _ = reply.send(result);
                         }
+                        PeerManagerCommand::ReplayOutbound { peer, mut reply } => {
+                            tokio::select! {
+                                result = self.replay_outbound(peer) => { let _ = reply.send(result); }
+                                () = reply.closed() => {}
+                            }
+                        }
                         PeerManagerCommand::SoftResetImportValidationDependents {
                             dependency,
                             reply,

@@ -78,6 +78,8 @@ fn architecture_lists_every_manager_event_input() {
         StatsReport,
         LocRibRouteMonitoring,
         LocRibStats,
+        OutboundReplayBegin,
+        OutboundReplayComplete,
     );
     let actual = manager_rosters[0]
         .split_whitespace()

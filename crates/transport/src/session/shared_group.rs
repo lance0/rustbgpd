@@ -421,6 +421,10 @@ impl PeerSession {
     /// Entry point for envelopes from the RIB manager: try the update-group
     /// encode-once path, fall back to the ordinary per-session encode.
     pub(super) async fn handle_outbound_route_update(&mut self, update: OutboundRouteUpdate) {
+        if update.replay.is_some() {
+            self.enqueue_replay_terminal(&update);
+            return;
+        }
         if let Some(shared) = update.shared_group_encode.clone()
             && shared_encode_eligible(&update)
             && self.try_send_shared_group(&shared, &update).await

@@ -59,7 +59,7 @@ not by itself make it v1-stable.
 |---------|------|---------|
 | `GlobalService` | `GetGlobal` | Daemon identity |
 | `ConfigService` | `DiffRuntimeConfig`, `PlanConfigTransaction`, `StreamPlanConfigTransaction`, `StreamApplyConfigTransaction`, `ApplyConfigTransaction`, `ConfirmConfigTransaction`, `AbortConfigTransaction`, `GetConfigTransactionStatus`, `GetEffectiveConfig`, `ListConfigHistory`, `RollbackConfigTransaction` | Candidate-vs-live config diff, effective running config with defaults resolved (selected default-empty policy lists omitted) and secrets redacted, plus the v1 config-transaction lifecycle: validate/plan, commit/apply (incl. commit-confirmed), confirm, abort, status, and the bounded recorded config history with Junos-style `rollback N` through the same transaction executor; the outside-v1 streams provide bounded large-candidate plan and apply ingress |
-| `NeighborService` | `AddNeighbor`, `DeleteNeighbor`, `ListNeighbors`, `GetNeighborState`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `RefreshOutbound`, `ResetNeighbor`, `SetGracefulShutdown`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `ListDynamicNeighbors` | Peer lifecycle, inbound soft reset, single-peer outbound re-advertisement, outside-v1 administrative session reset, RFC 8326 graceful-shutdown toggle, and dynamic-neighbor CRUD — `AddDynamicNeighbor` / `DeleteDynamicNeighbor` add and remove `[[dynamic_neighbors]]` prefix ranges at runtime (queued to the config file), `ListDynamicNeighbors` for visibility |
+| `NeighborService` | `AddNeighbor`, `DeleteNeighbor`, `ListNeighbors`, `GetNeighborState`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `RefreshOutbound`, `ReplayOutbound`, `ResetNeighbor`, `SetGracefulShutdown`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `ListDynamicNeighbors` | Peer lifecycle, inbound soft reset, single-peer outbound re-advertisement, outside-v1 administrative session reset, RFC 8326 graceful-shutdown toggle, and dynamic-neighbor CRUD — `AddDynamicNeighbor` / `DeleteDynamicNeighbor` add and remove `[[dynamic_neighbors]]` prefix ranges at runtime (queued to the config file), `ListDynamicNeighbors` for visibility |
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `SetPolicy`, `DeletePolicy`, `ListNeighborSets`, `GetNeighborSet`, `SetNeighborSet`, `DeleteNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain`, `ExplainImportPolicy`, `ListRejectedRoutes`, `TestPolicy`, `GetPolicyStats`, `GetValidationPolicyPosture` | Named policy CRUD, neighbor sets, global/per-neighbor chain attachment, import-policy diagnostics, read-only candidate-policy dry runs, live counters, and bounded invalid-validation disposition posture |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup`, `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` | Peer-group CRUD and neighbor membership assignment |
 | `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainAdvertisedRoute`, `ExplainBestPath`, `LookupBestPath`, `ListFlowSpecRoutes`, `ListEvpnRoutes`, `ListReceivedEvpnRoutes`, `ListAdvertisedEvpnRoutes`, `ExplainEvpnRoute`, `ListBgpLsRoutes`, `ListTopologyNodes`, `ListTopologyLinks`, `ListOrrStatus`, `ListVpnRoutes`, `ListRtcRoutes`, `ListLabeledRoutes`, `ListBlackholeDiscards`, `ListFibRoutes`, `ListFibTables`, `SetFibTable`, `DeleteFibTable`, `ListRouteEvents` | Query-only RIB route surfaces (incl. EVPN, BGP-LS, VPNv4/v6, RT-Constrain, and labeled-unicast), the RFC 9107 ORR / BGP-LS topology read surface (`ListTopologyNodes` / `ListTopologyLinks` / `ListOrrStatus`), BLACKHOLE discard status, paginated FIB status, runtime FIB-table CRUD, exact explain plus outside-v1 global LPM, and recent route-event history; live route streaming is owned by `EventService.WatchEvents` / `SubscribeFromEvent` |
@@ -232,7 +232,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 |---------|----------------|---------------------------------------|
 | `GlobalService` | `GetGlobal` | — |
 | `ConfigService` | `DiffRuntimeConfig`, `PlanConfigTransaction`, `StreamPlanConfigTransaction`, `GetConfigTransactionStatus`, `GetEffectiveConfig`, `ListConfigHistory` | `StreamApplyConfigTransaction`, `ApplyConfigTransaction` (pure `[[fib_tables]]`, pure `[[dynamic_neighbors]]`, static `[[neighbors]]` add/delete/modify, catalog-only policy/neighbor-set/peer-group/global-chain changes, pure live policy-chain impact for static neighbors and accepted dynamic peers, or peer-group/session reshape impact for static members and live dynamic sessions; mixed or unsupported candidates rejected without mutation), `ConfirmConfigTransaction`, `AbortConfigTransaction`, `RollbackConfigTransaction` |
-| `NeighborService` | `ListNeighbors`, `GetNeighborState`, `ListDynamicNeighbors` | `AddNeighbor`, `DeleteNeighbor`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `RefreshOutbound`, `ResetNeighbor`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `SetGracefulShutdown` |
+| `NeighborService` | `ListNeighbors`, `GetNeighborState`, `ListDynamicNeighbors` | `AddNeighbor`, `DeleteNeighbor`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn`, `RefreshOutbound`, `ReplayOutbound`, `ResetNeighbor`, `AddDynamicNeighbor`, `DeleteDynamicNeighbor`, `SetGracefulShutdown` |
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `ListNeighborSets`, `GetNeighborSet`, `GetGlobalPolicyChains`, `GetNeighborPolicyChains`, `ExplainImportPolicy`, `ListRejectedRoutes`, `TestPolicy`, `GetPolicyStats`, `GetValidationPolicyPosture` | `SetPolicy`, `DeletePolicy`, `SetNeighborSet`, `DeleteNeighborSet`, `SetGlobalImportChain`, `SetGlobalExportChain`, `ClearGlobalImportChain`, `ClearGlobalExportChain`, `SetNeighborImportChain`, `SetNeighborExportChain`, `ClearNeighborImportChain`, `ClearNeighborExportChain` |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup` | `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` |
 | `RibService` | All read/list/explain RPCs (incl. `ListFibTables`) | `SetFibTable`, `DeleteFibTable` |
@@ -925,6 +925,7 @@ added at runtime.
 | `DisableNeighbor` | Administratively disable a peer (sends NOTIFICATION) |
 | `SoftResetIn` | Request inbound route refresh (RFC 2918/7313) for one or more families |
 | `RefreshOutbound` | Re-emit one peer's current exportable outbound inventory across all negotiated families, without resetting the session |
+| `ReplayOutbound` | Schedule one Established peer's negotiated IPv4/IPv6 unicast replay with terminal UPDATE EoRs; outside the v1 contract |
 | `ResetNeighbor` | Administratively reset one enabled peer's session (Cease/Administrative Reset with an optional shutdown communication); outside v1 |
 | `AddDynamicNeighbor` | Add a `[[dynamic_neighbors]]` prefix range at runtime; persists the accepted change atomically before returning and rolls back runtime on persistence failure |
 | `DeleteDynamicNeighbor` | Remove a dynamic-neighbor range at runtime (stops future accepts; established peers drain on Idle); waits for the atomic config-file update and rolls runtime back on persistence failure |
@@ -1111,6 +1112,60 @@ registration return `FAILED_PRECONDITION`.
 This is an O(table) operation for the selected peer and can create a full-table
 UPDATE burst on a production session. Serialize operational use; the API
 intentionally has no all-peer or batch form.
+
+### Replay one peer's unicast routes with terminal EoRs
+
+```bash
+rbgp neighbor 10.0.0.2 replay-out
+
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"address": "10.0.0.2"}' \
+  localhost:50051 rustbgpd.v1.NeighborService/ReplayOutbound
+```
+
+`ReplayOutbound` is an experimental, mutating RPC outside the v1 contract.
+It schedules wire reannouncement of one Established peer's current exportable
+IPv4/IPv6 unicast routes through the canonical export and transport paths.
+Every negotiated unicast family receives a terminal UPDATE End-of-RIB (EoR),
+including empty families. The request has `address` and optional `interface`;
+there is no family filter or all-peer form. Existing `RefreshOutbound` behavior
+is unchanged. An older daemon returns `UNIMPLEMENTED` for the new RPC.
+
+The session must negotiate only IPv4/IPv6 unicast families, with at least one
+family, and its IP address must be unique among managed peers. A single scoped
+IPv6 peer is supported; repeated link-local addresses on different interfaces
+are refused. These prerequisites are checked before monitoring reset or replay
+traffic, because the reset clears the entire cached peer inventory.
+
+Eligible collectors have `rib_out_post = true` and `rib_in_pre = false`.
+Before replay, each receives a monitoring-only Peer Down (reason 5) followed
+by the current Peer Up, clearing its previous peer inventory. The BGP session
+stays established. Mixed inbound/outbound collectors are excluded because
+this operation cannot rebuild their inbound inventory. After enrollment,
+ordinary initial-table and peer-refresh unicast EoRs are not mirrored for the
+rest of this BGP writer generation, including for collectors excluded from
+enrollment. The actual BGP EoRs are still sent. Further complete BMP boundaries require
+another explicit replay; a new BGP session restores ordinary EoR mirroring.
+
+The response contains only `scheduled`. A true value confirms admission for
+scheduling; it does not confirm completion, collector receipt, or remote BGP
+processing. Terminal BMP EoRs mark replay completion only after the session
+writer completes the preceding replay bytes and terminal wire EoRs. A caller
+disconnecting after scheduling does not cancel traffic already admitted.
+
+Unknown peers return `NOT_FOUND`. Unavailable sessions, another active replay,
+an empty or mixed-family session, a duplicate managed peer IP address,
+no eligible connected `rib_out_post` collector,
+or an export gate that prevents complete replay return `FAILED_PRECONDITION`.
+Dispatch, timeout, or lost acknowledgement failures return an error rather
+than a successful scheduling response. Later writer, peer, or collector
+generation failures suppress terminal BMP completion for affected streams.
+The operation is bounded to five seconds; absence of terminal BMP EoRs is
+incomplete evidence, even if scheduling succeeded.
+
+This operation reannounces the selected peer's table on its live BGP session.
+Serialize full-table use and collect the complete BMP stream through its
+terminal EoRs when using the result as replay evidence.
 
 ---
 

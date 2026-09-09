@@ -1625,3 +1625,196 @@ async fn stale_query_state_re_arms_pending_refresh() {
          The retry-on-next-call path is what fires refresh once the query unblocks."
     );
 }
+
+/// A single scoped peer selects the exact managed handle and preserves refusals.
+#[tokio::test]
+async fn replay_outbound_uses_exact_managed_handle_and_classifies_refusals() {
+    use rustbgpd_api::peer_types::OutboundRefreshError;
+    use rustbgpd_transport::PeerCommandError;
+
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(4);
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let address = "fe80::2".parse().unwrap();
+    let peer = scoped_key(address, "eth1");
+    assert!(matches!(
+        mgr.replay_outbound(peer.clone()).await,
+        Err(OutboundRefreshError::PeerNotFound(ref target)) if target == &peer
+    ));
+    let (commands, mut command_rx) = mpsc::channel(4);
+    let task = tokio::spawn(async move {
+        for response in [
+            Ok(()),
+            Err(PeerCommandError::NotEstablished),
+            Err(PeerCommandError::ReplayUnavailable(
+                "outbound replay already running".into(),
+            )),
+            Err(PeerCommandError::CommandFailed("writer unavailable".into())),
+        ] {
+            let Some(PeerCommand::ReplayOutbound { reply, .. }) = command_rx.recv().await else {
+                panic!("expected outbound replay on scoped handle");
+            };
+            let _ = reply.send(response);
+        }
+        Ok(())
+    });
+    insert_test_managed_peer_for_key(
+        &mut mgr,
+        &peer,
+        65002,
+        PeerHandle::from_parts(commands, task),
+        false,
+    );
+    mgr.replay_outbound(peer.clone()).await.unwrap();
+    assert!(matches!(
+        mgr.replay_outbound(peer.clone()).await,
+        Err(OutboundRefreshError::PeerUnavailable(ref target)) if target == &peer
+    ));
+    assert!(matches!(
+        mgr.replay_outbound(peer.clone()).await,
+        Err(OutboundRefreshError::ReplayUnavailable(message))
+            if message == "outbound replay already running"
+    ));
+    assert!(matches!(
+        mgr.replay_outbound(peer).await,
+        Err(OutboundRefreshError::Internal(message)) if message.contains("writer unavailable")
+    ));
+    assert!(
+        rib_rx.try_recv().is_err(),
+        "replay dispatch belongs to the exact session"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn replay_outbound_scheduling_reply_is_bounded() {
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, _rib_rx) = mpsc::channel(4);
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let address = "192.0.2.1".parse().unwrap();
+    insert_test_managed_peer(&mut mgr, address, stalled_policy_query_handle(), false);
+    let error = mgr.replay_outbound(key(address)).await.unwrap_err();
+    assert!(error.to_string().contains("timed out"), "{error}");
+}
+
+/// Dropping the API acknowledgement before scheduling must reach the exact
+/// session's in-flight reply, rather than waiting for the five-second timeout.
+#[tokio::test(start_paused = true)]
+async fn replay_outbound_api_cancellation_closes_session_reply_before_deadline() {
+    let (commands, mut session_rx) = mpsc::channel(4);
+    let (forwarded_tx, forwarded_rx) = oneshot::channel();
+    let (canceled_tx, canceled_rx) = oneshot::channel();
+    let session_task = tokio::spawn(async move {
+        let Some(PeerCommand::ReplayOutbound { mut reply }) = session_rx.recv().await else {
+            panic!("expected the replay scheduling request");
+        };
+        forwarded_tx.send(()).unwrap();
+        reply.closed().await;
+        canceled_tx.send(()).unwrap();
+        Ok(())
+    });
+    let (command_tx, command_rx) = mpsc::channel(4);
+    let (rib_tx, _rib_rx) = mpsc::channel(4);
+    let mut manager = PeerManager::new(
+        command_rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let address = "192.0.2.1".parse().unwrap();
+    insert_test_managed_peer(
+        &mut manager,
+        address,
+        PeerHandle::from_parts(commands, session_task),
+        false,
+    );
+    let manager_task = tokio::spawn(manager.run());
+    let (reply, response) = oneshot::channel();
+    command_tx
+        .send(PeerManagerCommand::ReplayOutbound {
+            peer: key(address),
+            reply,
+        })
+        .await
+        .unwrap();
+    forwarded_rx.await.unwrap();
+    drop(response);
+    tokio::time::timeout(Duration::from_secs(1), canceled_rx)
+        .await
+        .expect("API cancellation must propagate before the scheduling deadline")
+        .unwrap();
+
+    let (reply, pong) = oneshot::channel();
+    command_tx
+        .send(PeerManagerCommand::Ping { reply })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), pong)
+        .await
+        .expect("canceled replay must release the manager actor")
+        .unwrap();
+    drop(command_tx);
+    manager_task.await.unwrap();
+}
+
+#[tokio::test]
+async fn replay_outbound_rejects_duplicate_addresses_before_session_dispatch() {
+    use rustbgpd_api::peer_types::OutboundRefreshError;
+    let (_tx, rx) = mpsc::channel(16);
+    let (rib_tx, mut rib_rx) = mpsc::channel(4);
+    let mut mgr = PeerManager::new(
+        rx,
+        65001,
+        Ipv4Addr::new(10, 0, 0, 1),
+        None,
+        None,
+        BgpMetrics::new(),
+        rib_tx,
+        None,
+    );
+    let address = "fe80::2".parse().unwrap();
+    let (commands, mut command_rx) = mpsc::channel(4);
+    for interface in ["eth0", "eth1"] {
+        let task = tokio::spawn(async { Ok(()) });
+        insert_test_managed_peer_for_key(
+            &mut mgr,
+            &scoped_key(address, interface),
+            65002,
+            PeerHandle::from_parts(commands.clone(), task),
+            false,
+        );
+    }
+    let error = mgr
+        .replay_outbound(scoped_key(address, "eth1"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, OutboundRefreshError::ReplayUnavailable(message) if message.contains("unique peer IP address"))
+    );
+    assert!(matches!(
+        command_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    assert!(rib_rx.try_recv().is_err());
+}

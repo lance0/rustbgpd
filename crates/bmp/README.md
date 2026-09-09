@@ -38,10 +38,12 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 
 `BmpManager` receives every `BmpEvent` variant through an `mpsc` channel:
 `PeerUp`, `PeerDown`, `RouteMonitoring`, `StatsReport`,
-`LocRibRouteMonitoring`, and `LocRibStats`.
+`LocRibRouteMonitoring`, `LocRibStats`, `OutboundReplayBegin`, and
+`OutboundReplayComplete`.
 
 `BmpManager` encodes events and distributes to per-collector `BmpClient`
-tasks. Zero overhead when no collectors are configured.
+tasks. Explicit outbound replay retains only bounded operation metadata,
+without a historical route inventory.
 
 ## License
 
