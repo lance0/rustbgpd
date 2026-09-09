@@ -15,6 +15,12 @@ updates from the RIB, and outbound-connect completion. The KEEPALIVE
 cadence is owned by the writer task (ADR-0078), so it keeps running
 while the session task is parked on a blocking RIB delivery.
 
+Grouped unicast output services session-state and import-counter queries
+between encoding slices, between bounded chunk batches, and while waiting for
+shared chunks. A queued mutation keeps its place before later reads and waits
+for the current envelope to finish. This does not impose a wall-clock bound on
+initial sorting, an individual encoding slice, or other session work.
+
 The transport layer intercepts UPDATEs (parse, validate, apply policy)
 before forwarding to the RIB — the FSM sees only payloadless events.
 

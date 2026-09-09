@@ -288,6 +288,9 @@ pub(crate) struct PeerSession {
     timers: Timers,
     metrics: BgpMetrics,
     commands: mpsc::Receiver<PeerCommand>,
+    /// First command that cannot interleave a shared envelope. Later
+    /// commands stay queued until this one runs after the envelope finishes.
+    deferred_command: Option<PeerCommand>,
     rib_tx: mpsc::Sender<RibUpdate>,
     /// Canonical `peer` metric/log label — the bare neighbor address
     /// from [`rustbgpd_telemetry::peer_label`], never the transport
@@ -1860,6 +1863,7 @@ impl PeerSession {
             timers: Timers::default(),
             metrics,
             commands,
+            deferred_command: None,
             rib_tx,
             peer_label,
             peer_ip,
@@ -2357,6 +2361,11 @@ impl PeerSession {
     )]
     pub(crate) async fn run(&mut self) -> Result<(), TransportError> {
         loop {
+            if let Some(command) = self.deferred_command.take()
+                && self.handle_command(command).await == ControlFlow::Break(())
+            {
+                return Ok(());
+            }
             // Gate the TCP read arm closed while the FSM is still in `Idle`.
             // An inbound session is constructed with `read_half` already set
             // (the peer connected to us), so without this guard the `read_tcp`
