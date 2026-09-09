@@ -2066,10 +2066,13 @@ async fn malformed_causes_as_sets_do_not_hide_independent_errors() {
                     assert_eq!(session.fsm.state(), SessionState::Established);
                     assert_single_malformed_disposition(&session, "treat_as_withdraw");
                     let rows = malformed_cause_rows(&session);
+                    let prohibited = rows
+                        .iter()
+                        .find(|row| row.0 == type_code.to_string() && row.1 == "as_set_prohibited")
+                        .expect("prohibited segment cause");
                     assert!(
-                        rows.iter()
-                            .any(|row| row.0 == type_code.to_string()
-                                && row.1 == "as_set_prohibited")
+                        (prohibited.3 - 1.0).abs() < f64::EPSILON,
+                        "one AS-set cause per attribute occurrence: {rows:?}"
                     );
                     assert!(rows.iter().all(|row| row.2 == "treat_as_withdraw"));
                     let novel: Vec<_> = rows

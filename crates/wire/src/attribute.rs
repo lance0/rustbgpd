@@ -1277,6 +1277,14 @@ pub(crate) fn decode_path_attributes_revised_observed(
         ) {
             Ok(attr) => attrs.push(attr),
             Err(error) => {
+                // The raw occurrence was already classified above. Preserve
+                // independent framing/AS-zero errors, but not a second report
+                // of the same prohibited segment from semantic decoding.
+                if prohibited_segment.is_some()
+                    && matches!(error, DecodeError::ProhibitedAsSet { .. })
+                {
+                    continue;
+                }
                 // RFC 7606 §3 (c): an Optional/Transitive flag conflict is
                 // treat-as-withdraw for every attribute — the §7.6/§7.7
                 // attribute-discard covers length malformations only. A
@@ -1324,7 +1332,13 @@ pub(crate) fn decode_path_attributes_revised_observed(
             }
         }
     }
-    malformed.extend(normalize_as4_attributes(&mut attrs, four_octet_as, true));
+    malformed.extend(
+        normalize_as4_attributes(&mut attrs, four_octet_as, true)
+            .into_iter()
+            // Every raw AS4_PATH occurrence was inspected above, including
+            // duplicates; normalization must not report its set again.
+            .filter(|cause| !matches!(cause.error, DecodeError::ProhibitedAsSet { .. })),
+    );
     Ok((
         RevisedAttributeDecode {
             attributes: attrs,
@@ -7426,6 +7440,33 @@ mod tests {
             panic!("expected RFC 9774 attribute error");
         };
         assert_eq!(data, &bytes);
+    }
+    #[test]
+    fn revised_prohibited_as_sets_count_each_occurrence_once() {
+        for (type_code, flags) in [(attr_type::AS_PATH, 0x40), (attr_type::AS4_PATH, 0xC0)] {
+            for segment_type in [1, 4] {
+                for copies in [1, 2] {
+                    let attribute = [flags, type_code, 6, segment_type, 1, 0, 0, 0xFD, 0xEA];
+                    let bytes = attribute.repeat(copies);
+                    let decoded = decode_path_attributes_revised(&bytes, true, false, &[]).unwrap();
+                    let causes: Vec<_> = decoded
+                        .malformed
+                        .iter()
+                        .filter(|cause| matches!(cause.error, DecodeError::ProhibitedAsSet { .. }))
+                        .collect();
+                    assert_eq!(
+                        causes.len(),
+                        copies,
+                        "{type_code}/{segment_type}: {causes:?}"
+                    );
+                    assert!(
+                        causes
+                            .iter()
+                            .all(|cause| cause.disposition == ErrorDisposition::TreatAsWithdraw)
+                    );
+                }
+            }
+        }
     }
     #[test]
     fn revised_flag_conflict_on_aggregator_is_treat_as_withdraw() {
