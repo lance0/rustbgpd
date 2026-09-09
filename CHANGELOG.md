@@ -66,6 +66,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   entries, and API/CLI listings explicitly mark them rollback-ineligible.
   History listing rejects an over-cap directory before decoding any final.
 
+- Policy stats audit records retain per-stage elapsed time, remaining budget at
+  entry, and gRPC outcome for peer validation, export, import, and datasets.
+  Debug tracing exposes the same stage timings for reload diagnostics.
+
 ### Changed
 
 - gRPC credential rotation on SIGHUP now runs after the runtime generation is
