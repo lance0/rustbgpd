@@ -291,9 +291,10 @@ class FlagshipLifecycleContracts(unittest.TestCase):
                     if runner.startswith("run-soak-rs"):
                         self.assertIn("clean_sigterm", (run_dir / "management-plane-load.jsonl").read_text())
                     self.assertFalse((run_dir / "verdict.json").exists())
-                    self.assertIn(
+                    self.assertEqual(
                         (run_dir / "cleanup.complete").read_text().splitlines()[0],
-                        {"status=interrupted", "status=failed"},
+                        "status=interrupted",
+                        (run_dir / "soak.log").read_text(),
                     )
                     first_log = (run_dir / "soak.log").read_bytes()
                     time.sleep(0.1)
@@ -350,6 +351,44 @@ class FlagshipLifecycleContracts(unittest.TestCase):
                         check=False,
                     ).returncode,
                     0,
+                )
+            finally:
+                terminate_group(process.pid, process)
+
+    def test_repeated_stop_waits_for_a_slow_log_writer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            fake_bin = directory / "bin"
+            fake_bin.mkdir()
+            tee = fake_bin / "tee"
+            tee.write_text(
+                "#!/usr/bin/env bash\n"
+                "output=${!#}\n"
+                "cat >>\"$output\"\n"
+                "sleep 0.5\n"
+            )
+            tee.chmod(0o755)
+            script, port, environment = self.write_stub(directory)
+            environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
+            process = subprocess.Popen(
+                ["bash", str(script), str(HERE / "run-soak-rs-flagship.sh"),
+                 str(directory / "run"), str(port), "interrupt"],
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment,
+                start_new_session=True,
+            )
+            try:
+                identity = directory / "run" / "runner.identity"
+                wait_for(identity)
+                wait_for(directory / "run" / "children")
+                process.send_signal(signal.SIGTERM)
+                time.sleep(0.05)
+                process.send_signal(signal.SIGTERM)
+                time.sleep(0.1)
+                self.assertFalse((directory / "run" / "cleanup.complete").exists())
+                self.assertEqual(process.wait(timeout=5), 143)
+                self.assertEqual(
+                    (directory / "run" / "cleanup.complete").read_text().splitlines()[0],
+                    "status=interrupted",
                 )
             finally:
                 terminate_group(process.pid, process)

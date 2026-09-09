@@ -122,7 +122,9 @@ RUN_INTERRUPTED=0
 cleanup() {
     local rc=$?
     trap - EXIT
-    trap ':' INT TERM
+    # Owned children already have their signal handlers. Ignore repeated
+    # stop requests here so child and log-writer waits finish before marking.
+    trap '' INT TERM
     set +e
     terminate "$H_PID"
     H_PID=""
@@ -136,7 +138,7 @@ cleanup() {
         log "owned processes stopped; draining soak log"
     fi
     if ! finish_flagship_cleanup "$rc" "$RUN_INTERRUPTED"; then
-        echo "ERROR: soak log writer failed; see cleanup.complete" >&2
+        echo "ERROR: could not finish soak evidence; inspect the log and cleanup marker" >&2
         ((rc == 0)) && rc=1
     fi
     exit "$rc"
@@ -146,11 +148,6 @@ abort() {
     cycle_log "ABORT: $*"
     log "ABORT: $*"
     exit 1
-}
-
-interrupt_run() {
-    RUN_INTERRUPTED=1
-    exit 143
 }
 
 ports_free() {
@@ -231,18 +228,29 @@ sample_row() {
     fi
     SCRAPE_FAILS=0
     pid_running "$H_PID" || return 0
-    # Same column set as the RS flagship sampler; this scenario
-    # configures no max-prefix bounds, so max_prefix_exceeded_total must
-    # stay 0 on every row (the analyzer gates it exactly).
+    # Keep each command substitution in its own command. Bash 5.2 can fail
+    # to parse a signal trap while expanding several substitutions in one
+    # printf; a stop request must still run the ordered cleanup below.
+    local timestamp rss_mb intern_size established flaps messages_sent max_prefix
+    timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ) || :
+    rss_mb=$(tree_rss_mb) || :
+    intern_size=$(prom_get bgp_rib_attr_intern_global_size) || :
+    established=$(prom_sum bgp_peer_session_established) || :
+    flaps=$(prom_sum bgp_session_flaps_total) || :
+    messages_sent=$(prom_sum bgp_messages_sent_total) || :
+    max_prefix=$(prom_sum bgp_max_prefix_exceeded_total) || :
+    # Same column set as the RS flagship sampler; this scenario configures
+    # no max-prefix bounds, so max_prefix_exceeded_total must stay 0 on every
+    # row (the analyzer gates it exactly).
     printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        "$timestamp" \
         "$elapsed" \
-        "$(tree_rss_mb)" \
-        "$(prom_get bgp_rib_attr_intern_global_size)" \
-        "$(prom_sum bgp_peer_session_established)" \
-        "$(prom_sum bgp_session_flaps_total)" \
-        "$(prom_sum bgp_messages_sent_total)" \
-        "$(prom_sum bgp_max_prefix_exceeded_total)" \
+        "$rss_mb" \
+        "$intern_size" \
+        "$established" \
+        "$flaps" \
+        "$messages_sent" \
+        "$max_prefix" \
         "$code" \
         "$ms" \
         >>"$SAMPLES_CSV"
@@ -278,7 +286,8 @@ write_run_json() {
 main() {
     mkdir -p "$RUN_DIR"
     trap cleanup EXIT
-    trap interrupt_run INT TERM
+    trap 'RUN_INTERRUPTED=1; exit 130' INT
+    trap 'RUN_INTERRUPTED=1; exit 143' TERM
     start_flagship_lifecycle
     acquire_rustbgpd_host_lock
     for tool in cargo curl awk python3 ss flock git ps df mktemp timeout; do

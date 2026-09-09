@@ -69,13 +69,14 @@ bash tests/soak/flagship-lifecycle.sh stop \
 
 The command returns only after the runner has stopped its owned processes,
 drained `soak.log`, and written `cleanup.complete`. A signal-interrupted run
-has `status=interrupted` and no analyzer verdict; retain it as interrupted
-evidence. A completed run whose analyzer rejects its gates has
+has `status=interrupted`; interruption before analysis produces no verdict.
+Retain any existing verdict alongside the interruption marker. A completed run whose analyzer rejects its gates has
 `status=failed` and retains its failing `verdict.json`.
 If the marker says `status=log_write_failed`, do not treat the directory as a
 quiesced archive: preserve it for diagnosis and repair the host write failure.
 After the stop command succeeds, copy the entire quiesced directory to the
-archive location without pruning files:
+archive location without pruning files. For a run that finishes naturally,
+wait for the runner to exit and check its cleanup marker before copying:
 
 ```bash
 cp -a tests/soak/runs/soak-rs-flagship-<UTC> /path/to/soak-archive/

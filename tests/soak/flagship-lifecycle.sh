@@ -26,7 +26,7 @@ flagship_identity_matches() {
 }
 
 start_flagship_lifecycle() {
-    local boot start identity_tmp runner_pid=$BASHPID
+    local boot start identity_tmp coproc_input runner_pid=$BASHPID
     # shellcheck disable=SC2153 # both flagship runners assign RUN_DIR.
     FLAGSHIP_IDENTITY_FILE="$RUN_DIR/runner.identity"
     FLAGSHIP_CLEANUP_MARKER="$RUN_DIR/cleanup.complete"
@@ -34,8 +34,13 @@ start_flagship_lifecycle() {
     exec {FLAGSHIP_STDOUT_FD}>&1
     exec {FLAGSHIP_STDERR_FD}>&2
     # Keep the file writer alive if a launch wrapper closes its output pipe.
-    exec > >(tee -p -a "$SOAK_LOG") 2>&1
+    coproc FLAGSHIP_LOG_WRITER { exec tee -p -a "$SOAK_LOG" >&"$FLAGSHIP_STDOUT_FD"; }
     FLAGSHIP_TEE_PID=$!
+    coproc_input=${FLAGSHIP_LOG_WRITER[1]}
+    exec {FLAGSHIP_TEE_INPUT_FD}>&"$coproc_input"
+    exec {coproc_input}>&-
+    exec 1>&"$FLAGSHIP_TEE_INPUT_FD"
+    exec 2>&"$FLAGSHIP_TEE_INPUT_FD"
     IFS= read -r boot </proc/sys/kernel/random/boot_id
     start=$(flagship_proc_start_ticks "$runner_pid") || return 1
     identity_tmp="${FLAGSHIP_IDENTITY_FILE}.tmp"
@@ -44,7 +49,7 @@ start_flagship_lifecycle() {
 }
 
 finish_flagship_cleanup() {
-    local rc=$1 interrupted=${2:-0} status tee_rc
+    local rc=$1 interrupted=${2:-0} status tee_rc fd_path fd
     [[ -n ${FLAGSHIP_TEE_PID:-} ]] || return 0
     if ((interrupted != 0)); then
         status=interrupted
@@ -55,12 +60,26 @@ finish_flagship_cleanup() {
     fi
     exec 1>&"$FLAGSHIP_STDOUT_FD"
     exec 2>&"$FLAGSHIP_STDERR_FD"
+    # An EXIT trap inside a redirected command can retain Bash's saved
+    # stdout on an internal descriptor. We are exiting, so close every
+    # remaining descriptor for this owned writer's input pipe as well.
+    for fd_path in /proc/"$BASHPID"/fd/*; do
+        fd=${fd_path##*/}
+        [[ $fd == "$FLAGSHIP_TEE_INPUT_FD" ]] && continue
+        [[ $fd_path -ef /proc/$BASHPID/fd/$FLAGSHIP_TEE_INPUT_FD ]] || continue
+        exec {fd}>&-
+    done
+    exec {FLAGSHIP_TEE_INPUT_FD}>&-
+    # Always collect the exit status, even if Bash has already reaped the
+    # process. The callers ignore INT/TERM throughout cleanup so this wait
+    # cannot return early because of a repeated stop request.
     wait "$FLAGSHIP_TEE_PID" || tee_rc=$?
     if [[ -n ${tee_rc:-} ]]; then
         status=log_write_failed
         ((rc == 0)) && rc=1
     fi
-    printf 'status=%s\nexit_status=%s\n' "$status" "$rc" >"$FLAGSHIP_CLEANUP_MARKER"
+    printf 'status=%s\nexit_status=%s\n' "$status" "$rc" >"${FLAGSHIP_CLEANUP_MARKER}.tmp" || return 1
+    mv "${FLAGSHIP_CLEANUP_MARKER}.tmp" "$FLAGSHIP_CLEANUP_MARKER" || return 1
     exec {FLAGSHIP_STDOUT_FD}>&-
     exec {FLAGSHIP_STDERR_FD}>&-
     [[ -z ${tee_rc:-} ]]
