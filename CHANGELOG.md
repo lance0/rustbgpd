@@ -86,6 +86,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Policy-statistics reads can proceed while a normal neighbor inventory or
+  detail read waits for session state. Additional neighbor reads remain bounded,
+  and peer mutations wait for the active snapshot to finish or be canceled.
+  Request deadlines and policy-transaction fences are unchanged.
+
 - NOTIFICATION diagnostics now describe the maintained registered code/subcode
   table, including Connection Rejected and Other Configuration Change. Unknown
   pairs retain numeric values as `unassigned(code/subcode)` or

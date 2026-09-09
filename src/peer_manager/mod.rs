@@ -393,6 +393,9 @@ pub struct PeerManager {
     /// Operator snapshots are admitted only outside mutations or before a forward
     /// reload has applied any session policy or published its candidate datasets.
     operator_rx: Option<mpsc::Receiver<PeerManagerOperatorQuery>>,
+    /// Neighbor snapshots deferred while another normal snapshot services
+    /// lightweight reads. Bounded by the operator channel's capacity.
+    deferred_operator_queries: VecDeque<PeerManagerOperatorQuery>,
     internal_rx: Option<mpsc::Receiver<InternalCommand>>,
     local_asn: u32,
     router_id: Ipv4Addr,
@@ -631,12 +634,30 @@ impl PeerManager {
         query: PeerManagerOperatorQuery,
         during_prestage: bool,
     ) {
+        if during_prestage {
+            // Finish the admitted snapshot before a prestage ACK can let
+            // the reload advance any session's installed policy.
+            if let Some(task) = self.answer_operator_query(query).await {
+                let _ = self.await_with_readiness(task).await;
+            }
+        } else {
+            self.answer_normal_operator_query(query).await;
+        }
+    }
+
+    async fn answer_operator_query(
+        &self,
+        query: PeerManagerOperatorQuery,
+    ) -> Option<tokio::task::JoinHandle<()>> {
         match query {
             PeerManagerOperatorQuery::ListPeers { reply } => self.answer_list_peers(reply).await,
-            PeerManagerOperatorQuery::GetPeerState { peer, reply } => {
-                if !reply.is_closed() {
-                    let _ = reply.send(self.get_peer_info(&peer).await);
-                }
+            PeerManagerOperatorQuery::GetPeerState { peer, mut reply } => {
+                let info = tokio::select! {
+                    biased;
+                    () = reply.closed() => return None,
+                    info = self.get_peer_info(&peer) => info,
+                };
+                let _ = reply.send(info);
             }
             PeerManagerOperatorQuery::HasPeerAddress { address, reply } => {
                 let _ = reply.send(self.unique_peer_key_for_address(address).is_some());
@@ -646,13 +667,7 @@ impl PeerManager {
                 deadline,
                 reply,
             } => {
-                // Finish the admitted snapshot before a prestage ACK can let
-                // the reload advance any session's installed policy.
-                if let Some(task) = self.dispatch_import_policy_term_hits(peer, deadline, reply)
-                    && during_prestage
-                {
-                    let _ = self.await_with_readiness(task).await;
-                }
+                return self.dispatch_import_policy_term_hits(peer, deadline, reply);
             }
             PeerManagerOperatorQuery::QueryPolicyDatasets { reply } => {
                 if !reply.is_closed() {
@@ -660,6 +675,58 @@ impl PeerManager {
                 }
             }
         }
+        None
+    }
+
+    /// A normal neighbor snapshot keeps mutations fenced while allowing a
+    /// bounded number of lightweight operator reads to use their own deadlines.
+    /// Further neighbor snapshots wait without starting another session fan-out.
+    async fn answer_normal_operator_query(&mut self, query: PeerManagerOperatorQuery) {
+        let Some(mut operator_rx) = self.operator_rx.take() else {
+            drop(self.answer_operator_query(query).await);
+            return;
+        };
+        let capacity = operator_rx.max_capacity();
+        let mut remaining = capacity;
+        let mut deferred = std::mem::take(&mut self.deferred_operator_queries);
+        let mut disconnected = false;
+        {
+            // The receiver is local so the snapshot can keep borrowing all
+            // manager metadata until its complete reply or cancellation.
+            let snapshot = self.answer_operator_query(query);
+            tokio::pin!(snapshot);
+            loop {
+                tokio::select! {
+                    biased;
+                    // Completion/cancellation wins over a ready read flood.
+                    // Normal import collectors retain their detached lifetime.
+                    task = &mut snapshot => {
+                        drop(task);
+                        break;
+                    }
+                    query = operator_rx.recv(),
+                        if !disconnected && remaining > 0 && deferred.len() < capacity => {
+                        match query {
+                            Some(query) => {
+                                remaining -= 1;
+                                match query {
+                                    query @ (PeerManagerOperatorQuery::ListPeers { .. }
+                                        | PeerManagerOperatorQuery::GetPeerState { .. }) => {
+                                        deferred.push_back(query);
+                                    }
+                                    query => drop(self.answer_operator_query(query).await),
+                                }
+                            }
+                            None => disconnected = true,
+                        }
+                    }
+                }
+            }
+        }
+        self.operator_rx = (!disconnected).then_some(operator_rx);
+        self.deferred_operator_queries = deferred;
+        // Return to the normal select before starting another snapshot, so
+        // queued mutations remain eligible even when reads keep arriving.
     }
 
     fn dispatch_import_policy_term_hits(
@@ -765,7 +832,11 @@ impl PeerManager {
 
     async fn receive_operator_query(
         operator_rx: &mut Option<mpsc::Receiver<PeerManagerOperatorQuery>>,
+        deferred: &mut VecDeque<PeerManagerOperatorQuery>,
     ) -> Option<PeerManagerOperatorQuery> {
+        if let Some(query) = deferred.pop_front() {
+            return Some(query);
+        }
         match operator_rx {
             Some(rx) => rx.recv().await,
             None => std::future::pending().await,
@@ -879,7 +950,7 @@ impl PeerManager {
                         return None;
                     }
                 }
-                query = Self::receive_operator_query(&mut self.operator_rx), if allow_operator_reads => {
+                query = Self::receive_operator_query(&mut self.operator_rx, &mut self.deferred_operator_queries), if allow_operator_reads => {
                     remaining = remaining.saturating_sub(attended.elapsed());
                     match query {
                         Some(query) => self.handle_operator_query(query, true).await,
@@ -958,6 +1029,7 @@ impl PeerManager {
             rx,
             readiness_rx: None,
             operator_rx: None,
+            deferred_operator_queries: VecDeque::new(),
             internal_rx: Some(internal_rx),
             local_asn,
             router_id,
@@ -1230,11 +1302,14 @@ impl PeerManager {
             tokio::select! {
                 query = Self::receive_readiness_query(&mut self.readiness_rx) => {
                     match query {
+                        Some(PeerManagerReadinessQuery::ListPeers { reply }) => {
+                            self.answer_normal_operator_query(PeerManagerOperatorQuery::ListPeers { reply }).await;
+                        }
                         Some(query) => self.handle_readiness_query(query).await,
                         None => self.readiness_rx = None,
                     }
                 }
-                query = Self::receive_operator_query(&mut self.operator_rx) => {
+                query = Self::receive_operator_query(&mut self.operator_rx, &mut self.deferred_operator_queries) => {
                     match query {
                         Some(query) => self.handle_operator_query(query, false).await,
                         None => self.operator_rx = None,
@@ -1456,7 +1531,7 @@ impl PeerManager {
                             let _ = reply.send(result);
                         }
                         PeerManagerCommand::ListPeers { reply } => {
-                            self.answer_list_peers(reply).await;
+                            self.answer_normal_operator_query(PeerManagerOperatorQuery::ListPeers { reply }).await;
                         }
                         PeerManagerCommand::QueryWarmCheckpointCapture { reply } => {
                             self.answer_warm_checkpoint_capture(reply).await;
@@ -1577,8 +1652,7 @@ impl PeerManager {
                             let _ = reply.send(result);
                         }
                         PeerManagerCommand::GetPeerState { peer, reply } => {
-                            let info = self.get_peer_info(&peer).await;
-                            let _ = reply.send(info);
+                            self.answer_normal_operator_query(PeerManagerOperatorQuery::GetPeerState { peer, reply }).await;
                         }
                         PeerManagerCommand::HasPeerAddress { address, reply } => {
                             let _ = reply.send(self.unique_peer_key_for_address(address).is_some());

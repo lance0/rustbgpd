@@ -599,6 +599,12 @@ What happens:
    `AdjRibIn` get re-evaluated against the new policy. Operators no
    longer need to run `softreset` manually after a chain swap.
 
+Outside configuration transactions, a pending neighbor inventory or detail
+snapshot allows a bounded batch of policy-statistics reads to proceed while
+session-state replies are outstanding. Additional neighbor snapshots wait their
+turn; peer mutations wait for the active snapshot to complete or be canceled.
+The existing request deadlines still apply under sustained read load.
+
 During a forward generation's export-destination prestaging, neighbor inventory
 and policy-statistics reads can inspect the installed generation while the RIB
 prepares the candidate destination. These reads retain their existing deadlines.
