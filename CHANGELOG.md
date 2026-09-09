@@ -13,6 +13,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Added `bgp_update_malformed_causes_total{peer,type_code,reason,disposition}`
+  with bounded reported cause labels, including typed RFC 9774 prohibited
+  AS sets, and the final applied disposition. The existing malformed-UPDATE
+  counter keeps one increment per message; mixed attribute-discard and ASPA
+  first-AS failures now increment only the final treat-as-withdraw row.
+
 - SIGHUP reloads of static neighbors, peer groups, inline policy, changed
   `.rpol` content, and dataset contents with unchanged bindings now settle as one owned
   runtime generation. The daemon

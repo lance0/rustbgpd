@@ -214,6 +214,35 @@ impl UpdateMessage {
         ),
         DecodeError,
     > {
+        self.parse_revised_observed_with_error_context(
+            four_octet_as,
+            is_ibgp,
+            add_path_ipv4,
+            add_path_families,
+        )
+        .map_err(|context| context.error)
+    }
+
+    /// Decode with the same recovery and observations as [`Self::parse_revised_observed`],
+    /// retaining the offending attribute type for fatal errors when known.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fatal decode error and optional attribute type. Body NLRI errors
+    /// have no attribute type.
+    pub fn parse_revised_observed_with_error_context(
+        &self,
+        four_octet_as: bool,
+        is_ibgp: bool,
+        add_path_ipv4: bool,
+        add_path_families: &[(Afi, Safi)],
+    ) -> Result<
+        (
+            RevisedParsedUpdate,
+            crate::evpn::EvpnNlriDiscardObservations,
+        ),
+        crate::UpdateDecodeError,
+    > {
         let withdrawn = if add_path_ipv4 {
             crate::nlri::decode_nlri_addpath(&self.withdrawn_routes)?
         } else {
@@ -1017,6 +1046,40 @@ mod tests {
         let (observed, observations) = msg.parse_revised_observed(true, false, false, &[]).unwrap();
         assert_eq!(observed, legacy);
         assert_eq!(observations, vec![(42, 2), (99, 2), (255, 1)]);
+    }
+
+    #[test]
+    fn revised_fatal_context_preserves_type_and_notification_data() {
+        for (attributes, nlri, type_code) in [
+            (
+                vec![0x80, 14, 9, 0, 1, 1, 4, 10, 0, 0, 2, 0, 0x80, 14, 0],
+                vec![],
+                Some(14),
+            ),
+            (vec![0x80, 15, 3, 0, 1, 1, 0x80, 15, 0], vec![], Some(15)),
+            (vec![], vec![33], None),
+        ] {
+            let msg = UpdateMessage {
+                withdrawn_routes: Bytes::new(),
+                path_attributes: Bytes::from(attributes),
+                nlri: Bytes::from(nlri),
+            };
+            let legacy = msg
+                .parse_revised_observed(true, false, false, &[])
+                .unwrap_err();
+            let context = msg
+                .parse_revised_observed_with_error_context(true, false, false, &[])
+                .unwrap_err();
+            assert_eq!(context.type_code, type_code);
+            assert_eq!(context.error, legacy);
+            assert_eq!(context.error.to_notification(), legacy.to_notification());
+            if type_code.is_some() {
+                assert!(
+                    context.error.to_notification().2.is_empty(),
+                    "duplicate MP data remains empty"
+                );
+            }
+        }
     }
 
     #[test]

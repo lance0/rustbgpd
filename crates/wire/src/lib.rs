@@ -117,7 +117,7 @@ pub use capability::{
     parse_family,
 };
 pub use constants::{EXTENDED_MAX_MESSAGE_LEN, MAX_MESSAGE_LEN};
-pub use error::{DecodeError, EncodeError};
+pub use error::{DecodeError, EncodeError, UpdateDecodeError};
 pub use header::{BgpHeader, MessageType, peek_message_length};
 pub use labeled::{
     LabeledAddressFamily, LabeledNlri, LabeledNlriEntry, decode_labeled_nlri,

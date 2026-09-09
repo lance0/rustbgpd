@@ -404,6 +404,15 @@ async fn rfc9774_as_set_without_reachable_nlri_resets_session() {
         assert!(!matches!(update, RibUpdate::RoutesReceived { .. }));
     }
     assert_single_malformed_disposition(&session, "session_reset");
+    assert_eq!(
+        malformed_cause_rows(&session),
+        vec![(
+            "2".into(),
+            "as_set_prohibited".into(),
+            "session_reset".into(),
+            1.0
+        )]
+    );
 }
 
 /// RFC 7606 §7.7: a malformed AGGREGATOR is attribute-discard — the UPDATE
@@ -1280,6 +1289,15 @@ async fn rfc7606_semantic_mp_next_hop_error_withdraws_without_reset() {
         "the live transport must stay up"
     );
     assert_single_malformed_disposition(&session, "treat_as_withdraw");
+    assert_eq!(
+        malformed_cause_rows(&session),
+        vec![(
+            "14".into(),
+            "invalid_next_hop".into(),
+            "treat_as_withdraw".into(),
+            1.0
+        )]
+    );
 }
 
 /// An UPDATE whose only attributes were discarded as malformed must not be
@@ -1763,6 +1781,15 @@ async fn as_path_ceiling_withdraws_route_and_keeps_session() {
         "the ceiling must keep the session Established"
     );
     assert_single_malformed_disposition(&session, "treat_as_withdraw");
+    assert_eq!(
+        malformed_cause_rows(&session),
+        vec![(
+            "2".into(),
+            "as_path_limit".into(),
+            "treat_as_withdraw".into(),
+            1.0
+        )]
+    );
 }
 
 #[tokio::test]
@@ -1913,4 +1940,291 @@ async fn srv6_service_generic_prefix_sid_failure_still_discards_only_attribute()
     );
     assert_eq!(session.fsm.state(), SessionState::Established);
     assert_single_malformed_disposition(&session, "attribute_discard");
+}
+
+fn malformed_cause_rows(session: &PeerSession) -> Vec<(String, String, String, f64)> {
+    let mut rows: Vec<_> = counter_samples(&session.metrics, "bgp_update_malformed_causes_total")
+        .into_iter()
+        .filter(|(labels, _)| labels.get("peer") == Some(&session.peer_label))
+        .map(|(labels, value)| {
+            (
+                labels["type_code"].clone(),
+                labels["reason"].clone(),
+                labels["disposition"].clone(),
+                value,
+            )
+        })
+        .collect();
+    rows.sort_by(|a, b| (&a.0, &a.1, &a.2).cmp(&(&b.0, &b.1, &b.2)));
+    rows
+}
+
+#[tokio::test]
+async fn malformed_causes_aggregator_and_first_as_use_one_final_disposition() {
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    rfc7606_drain(&mut rib_rx);
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    session
+        .process_update(aspa_first_as_update(prefix, 65002, true))
+        .await;
+    assert!(malformed_cause_rows(&session).is_empty());
+    rfc7606_drain(&mut rib_rx);
+    let mut replacement = aspa_first_as_update(prefix, 65003, true);
+    let mut attributes = replacement.path_attributes.to_vec();
+    attributes.extend([0xC0, 7, 5, 0, 0, 0xFD, 0xEA, 1]);
+    replacement.path_attributes = Bytes::from(attributes);
+    session.process_update(replacement).await;
+    let RibUpdate::RoutesReceived {
+        announced,
+        withdrawn,
+        ..
+    } = rib_rx.try_recv().unwrap()
+    else {
+        panic!("expected replacement withdrawal");
+    };
+    assert!(announced.is_empty());
+    assert_eq!(withdrawn, vec![(Prefix::V4(prefix), 0)]);
+    assert!(rib_rx.try_recv().is_err());
+    assert_eq!(session.known_prefix_count(), 0);
+    assert_eq!(session.fsm.state(), SessionState::Established);
+    assert_single_malformed_disposition(&session, "treat_as_withdraw");
+    assert_eq!(
+        malformed_cause_rows(&session),
+        vec![
+            (
+                "2".into(),
+                "aspa_first_as_mismatch".into(),
+                "treat_as_withdraw".into(),
+                1.0
+            ),
+            (
+                "7".into(),
+                "attribute_length".into(),
+                "treat_as_withdraw".into(),
+                1.0
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn malformed_causes_as_sets_do_not_hide_independent_errors() {
+    for four_octet_as in [false, true] {
+        for type_code in [2, 17] {
+            for segment_type in [1, 4] {
+                for extra_error in [0, 1, 2, 3] {
+                    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+                    let (client, _server) = connected_stream_pair().await;
+                    session.test_install_stream(client);
+                    establish_test_session(&mut session, 65002).await;
+                    rfc7606_drain(&mut rib_rx);
+                    let mut negotiated = negotiated_session(65002, false);
+                    negotiated.four_octet_as = four_octet_as;
+                    install_test_negotiated_session(&mut session, negotiated);
+                    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+                    let mut update = aspa_first_as_update(prefix, 65002, four_octet_as);
+                    let mut attributes = if type_code == 2 {
+                        vec![0x40, 1, 1, 0, 0x40, 3, 4, 10, 0, 0, 2]
+                    } else {
+                        update.path_attributes.to_vec()
+                    };
+                    let wide = four_octet_as || type_code == 17;
+                    let segment_len = if wide { 6 } else { 4 };
+                    let extra_len = match extra_error {
+                        2 => 2,
+                        3 => segment_len,
+                        _ => 0,
+                    };
+                    attributes.extend([
+                        if type_code == 2 { 0x40 } else { 0xC0 },
+                        type_code,
+                        segment_len + extra_len,
+                        segment_type,
+                        1,
+                    ]);
+                    if wide {
+                        attributes.extend([0, 0]);
+                    }
+                    attributes.extend([0xFD, 0xEA]);
+                    if extra_error == 2 {
+                        attributes.extend([2, 1]); // Truncated following AS_SEQUENCE.
+                    }
+                    if extra_error == 3 {
+                        attributes.extend([2, 1, 0, 0]); // Following AS_SEQUENCE with AS 0.
+                        if wide {
+                            attributes.extend([0, 0]);
+                        }
+                    }
+                    if extra_error == 1 {
+                        attributes.extend([0x80, 4, 3, 0, 0, 1]);
+                    }
+                    update.path_attributes = Bytes::from(attributes);
+                    session.process_update(update).await;
+                    assert_eq!(session.fsm.state(), SessionState::Established);
+                    assert_single_malformed_disposition(&session, "treat_as_withdraw");
+                    let rows = malformed_cause_rows(&session);
+                    let prohibited = rows
+                        .iter()
+                        .find(|row| row.0 == type_code.to_string() && row.1 == "as_set_prohibited")
+                        .expect("prohibited segment cause");
+                    assert!(
+                        (prohibited.3 - 1.0).abs() < f64::EPSILON,
+                        "one AS-set cause per attribute occurrence: {rows:?}"
+                    );
+                    assert!(rows.iter().all(|row| row.2 == "treat_as_withdraw"));
+                    let novel: Vec<_> = rows
+                        .iter()
+                        .filter(|row| row.1 != "as_set_prohibited")
+                        .collect();
+                    if extra_error != 0 {
+                        assert_eq!(
+                            novel.len(),
+                            1,
+                            "{four_octet_as}/{type_code}/{segment_type}: {rows:?}"
+                        );
+                        let expected_type = if extra_error == 1 { 4 } else { type_code };
+                        let expected_reason = if extra_error == 1 {
+                            "attribute_length"
+                        } else {
+                            "malformed_as_path"
+                        };
+                        assert_eq!(novel[0].0, expected_type.to_string());
+                        assert_eq!(novel[0].1, expected_reason);
+                    } else {
+                        assert!(
+                            novel.is_empty(),
+                            "{four_octet_as}/{type_code}/{segment_type}: {rows:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn malformed_causes_cover_fatal_and_semantic_context() {
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    for (attributes, nlri, type_code, reason, disposition) in [
+        (
+            rfc7606_attr_bytes(&[0xC0, 7, 5, 0, 0, 0xFD, 0xEA, 1]),
+            vec![prefix],
+            "7",
+            "attribute_length",
+            "attribute_discard",
+        ),
+        (
+            rfc7606_attr_bytes(&[0x80, 4, 3, 0, 0, 1]),
+            vec![],
+            "4",
+            "attribute_length",
+            "session_reset",
+        ),
+        (
+            rfc7606_attr_bytes(&[0x80, 14]),
+            vec![prefix],
+            "14",
+            "optional_attribute",
+            "session_reset",
+        ),
+        (
+            rfc7606_attr_bytes(&[0x80, 15]),
+            vec![prefix],
+            "15",
+            "optional_attribute",
+            "session_reset",
+        ),
+        (
+            rfc7606_attr_bytes(&[0x80]),
+            vec![prefix],
+            "none",
+            "attribute_list",
+            "treat_as_withdraw",
+        ),
+        (
+            vec![0x40, 2, 6, 2, 1, 0, 0, 0xFD, 0xEA, 0x40, 3, 4, 10, 0, 0, 2],
+            vec![prefix],
+            "1",
+            "missing_well_known",
+            "treat_as_withdraw",
+        ),
+        (
+            vec![
+                0x40, 1, 1, 0, 0x40, 2, 6, 2, 1, 0, 0, 0xFD, 0xEA, 0x40, 3, 4, 0, 0, 0, 0,
+            ],
+            vec![prefix],
+            "3",
+            "invalid_next_hop",
+            "treat_as_withdraw",
+        ),
+    ] {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        let (client, _server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        establish_test_session(&mut session, 65002).await;
+        rfc7606_drain(&mut rib_rx);
+        session
+            .process_update(rfc7606_update(attributes, &nlri))
+            .await;
+        assert_single_malformed_disposition(&session, disposition);
+        assert_eq!(
+            malformed_cause_rows(&session),
+            vec![(type_code.into(), reason.into(), disposition.into(), 1.0)]
+        );
+    }
+}
+
+#[tokio::test]
+async fn malformed_causes_preserve_novel_as_path_errors_and_type_zero() {
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    for (path, expected_reason) in [
+        (vec![0xC0, 2, 6, 1, 1, 0, 0, 0xFD, 0xEA], "attribute_flags"),
+        (vec![0x40, 2, 6, 1, 1, 0, 0, 0, 0], "malformed_as_path"),
+        (
+            vec![0x40, 2, 8, 1, 1, 0, 0, 0xFD, 0xEA, 2, 1],
+            "malformed_as_path",
+        ),
+    ] {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        let (client, _server) = connected_stream_pair().await;
+        session.test_install_stream(client);
+        establish_test_session(&mut session, 65002).await;
+        rfc7606_drain(&mut rib_rx);
+        let mut attributes = vec![0x40, 1, 1, 0, 0x40, 3, 4, 10, 0, 0, 2];
+        attributes.extend(path);
+        session
+            .process_update(rfc7606_update(attributes, &[prefix]))
+            .await;
+        let rows = malformed_cause_rows(&session);
+        assert!(
+            rows.iter()
+                .any(|row| row.0 == "2" && row.1 == "as_set_prohibited")
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.0 == "2" && row.1 == expected_reason),
+            "{rows:?}"
+        );
+        assert_single_malformed_disposition(&session, "treat_as_withdraw");
+    }
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+    establish_test_session(&mut session, 65002).await;
+    rfc7606_drain(&mut rib_rx);
+    session
+        .process_update(rfc7606_update(rfc7606_attr_bytes(&[0x40, 0, 0]), &[prefix]))
+        .await;
+    assert_eq!(
+        malformed_cause_rows(&session),
+        vec![(
+            "0".into(),
+            "unrecognized_well_known".into(),
+            "treat_as_withdraw".into(),
+            1.0
+        )]
+    );
 }

@@ -1375,12 +1375,37 @@ without a `reason` label encode the mechanism in the metric name.
 | `bgp_bgpls_nlri_discarded_total{peer}` | Known BGP-LS NLRIs dropped for out-of-order descriptor TLVs (RFC 9552 fault management). The affected NLRI is isolated and the session is preserved; each increment carries a `family=bgp_ls` debug log line. Fatal BGP-LS framing/length errors are not counted here — they still reset the session |
 | `bgp_evpn_nlri_discarded_total{peer}` | Unrecognized or unsupported EVPN typed NLRIs discarded under RFC 7606 §5.4 while supported routes in the same MP attribute and the session are preserved. This existing counter remains the peer aggregate across announcements and withdrawals. Malformed EVPN framing and malformed payloads for supported types are not counted here and retain their existing decode-error handling. |
 | `bgp_evpn_nlri_discarded_by_type_total{peer,route_type}` | The same discards separated by decimal wire route type (bounded to one octet). One WARN per type per TCP connection identifies the peer, `family=evpn`, `route_type`, and initial `discarded` count; DEBUG records retain every per-type count per UPDATE. Repeated discards continue incrementing both counters. Ordinary reconnects preserve counters and re-arm warnings; configured-peer deletion reaps all type series. Use this counter to identify unsupported routes sent by a peer, such as multicast types 6–8; these routes do not enter the RIB or get reflected. |
-| `bgp_path_attribute_discarded_total{peer,type_code}` | Surviving decoded attributes removed by effective `discard_path_attributes`; `type_code` is the decimal wire type. Increments once per removed attribute occurrence in an UPDATE, not once per NLRI, and each peer/type/update produces one bounded DEBUG record. RFC 7606-removed malformed attributes do not increment it. Ordinary session resets preserve the counter; configured-peer deletion reaps all of its type-code series. |
+| `bgp_path_attribute_discarded_total{peer,type_code}` | Surviving decoded attributes removed by effective `discard_path_attributes`; `type_code` is the decimal wire type. Increments once per removed attribute occurrence in an UPDATE, not once per NLRI, and each peer/type/update produces one bounded DEBUG record. RFC 7606-removed malformed attributes do not increment it; their reported causes appear in `bgp_update_malformed_causes_total`. Ordinary session resets preserve the counter; configured-peer deletion reaps all of its type-code series. |
 | `bgp_update_malformed_total{peer,disposition}` | Malformed UPDATE messages by the RFC 7606 disposition applied: `attribute_discard` (offending attribute dropped, UPDATE proceeds), `treat_as_withdraw` (every route in the UPDATE handled as withdrawn, session stays Established), or `session_reset` (NOTIFICATION + teardown, retained where the NLRI cannot be trusted — including the §5.2 escalation when a treat-as-withdraw-class error arrives with no reachable NLRI). One increment per malformed UPDATE, labeled with the strongest-action disposition that governed it (§3 (h)). Each increment is accompanied by a warn log line per malformed attribute and, at DEBUG, the §6 full-message hex capture |
+| `bgp_update_malformed_causes_total{peer,type_code,reason,disposition}` | Causes reported while processing malformed UPDATEs, with the final applied disposition on every cause. `type_code` is decimal 0–255 or `none` when no attribute type is attributable. Multiple independent causes can occur in one UPDATE or attribute; this is neither an UPDATE nor an NLRI count. Each prohibited AS-set attribute occurrence contributes one `as_set_prohibited` cause. A missing mandatory attribute caused by the decoder removing that same malformed attribute adds no second cause. Counters survive session resets; configured-peer deletion reaps them. |
 | `bgp_exact_export_rejections_total{peer,family,reason}` | Post-policy announcements rejected before Adj-RIB-Out commit because the session's exact one-route encoder could not produce a legal wire message. `family` is a bounded OpenConfig AFI/SAFI label; `reason` is `encoding`, `missing_ipv6_next_hop`, `ipv4_requires_extended_next_hop`, or `message_too_long`. Alert on a sustained increase, then correlate the peer/family with the warning log's bounded route identity and detail. Series are reaped only when the configured peer is deleted. |
 | `bgp_max_prefix_exceeded_total{peer}` | `max_prefixes` ceiling breaches; each increment is followed by max-prefix teardown: bare Cease/1 without Notification GR, or RFC 8538 Hard Reset encapsulating Cease/1 when the N-bit was negotiated (see "Peer max-prefix exceeded" above) |
 | `bgp_max_prefix_blocked_total{peer,scope}` | Blocking episodes opened for a scope under `max_prefix_action = "block"`, counted once when the first net-new prefix is withheld by a full bound — not once per withheld prefix. Each increment marks a `bgp_max_prefix_blocking{peer,scope}` transition to 1; the scope must recover to 0 before another withheld prefix increments the counter again. Read it as how often a peer has driven a bound to full, never as how much it sent: a `rate()` over it measures episode frequency, the gauge answers whether prefixes are being withheld right now, and the peer's replay after recovery, or `rbgp rib received <addr>`, shows what is installed. Carries no prefix label: the withheld set is exactly the unbounded quantity the limit exists to contain |
 | `bgp_max_prefix_warning_total{peer,scope}` | `max_prefix_warning_percent` (or the bound itself under `max_prefix_action = "warning"`) crossings, one per crossing per scope; each is paired with one warn log line and one `max_prefix_warning` session event |
+
+Malformed UPDATE cause reasons are bounded to `attribute_list`,
+`unrecognized_well_known`, `missing_well_known`, `attribute_flags`,
+`attribute_length`, `invalid_origin`, `invalid_next_hop`, `optional_attribute`,
+`invalid_network`, `malformed_as_path`, `as_set_prohibited`, `as_path_limit`,
+`aspa_first_as_mismatch`, `srv6_service_tlv`, and `other`. Only typed RFC 9774
+AS_SET / AS_CONFED_SET findings use `as_set_prohibited`; separate malformed
+path, flag, length, or other-attribute findings remain visible. Reasons and type
+codes never contain raw diagnostic text, ASNs, or prefixes. The theoretical
+bound is 257 types × 15 reasons × 3 dispositions = 11,565 series per peer;
+only observed combinations are created.
+
+For a cumulative inventory excluding the known prohibited-set cause:
+
+```promql
+bgp_update_malformed_causes_total{reason!="as_set_prohibited"} > 0
+```
+
+This query covers the counter lifetime, not a recent time window. A new cause
+series first appears at one: `increase()` alone can miss that first event until
+another increment is observed. Keep the existing `BgpMalformedUpdate` aggregate
+alert for complete recent malformed-message detection; its three disposition
+series are initialized at zero. Use the detail counter and warning logs to
+identify causes and tune local alert policy.
 
 The shipped `BgpMaxPrefixNearLimit` example alert warns after a finite scope
 has remained at or above 80% usage for ten minutes. This threshold lives in the

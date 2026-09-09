@@ -12,6 +12,15 @@ and workspace changes remain in the repository-level `CHANGELOG.md`.
   including positive infinity, are preserved. Raw extended-community
   attribute decoding and re-encoding remain unchanged.
 
+- Added `UpdateMessage::parse_revised_observed_with_error_context`,
+  `UpdateDecodeError`, and `validate::validate_update_attributes_with_context`
+  with `UpdateValidationError` to retain offending attribute types without
+  changing existing parse and validation signatures or protocol dispositions.
+- Added typed `DecodeError::ProhibitedAsSet` and
+  `DecodeError::TruncatedAttributeHeader` variants for bounded diagnostics.
+  Prohibited sets retain the malformed-AS_PATH NOTIFICATION code and data.
+  A truncated attribute header now maps to UPDATE Malformed Attribute List
+  instead of the generic malformed-field OPEN error.
 - Complete the registered NOTIFICATION descriptions, including deprecated
   allocations and FSM state-specific errors, and add Cease constants for
   Connection Rejected and Other Configuration Change. A documentation-driven
