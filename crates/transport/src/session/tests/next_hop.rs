@@ -475,6 +475,35 @@ async fn unnumbered_ipv4_without_extended_nexthop_does_not_fallback_to_body_nlri
 }
 
 #[tokio::test]
+async fn ipv4_route_with_ipv6_next_hop_without_extended_nexthop_rejects_export() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65001);
+    let negotiated = negotiated_session(65001, false);
+    session.negotiated = Some(Arc::new(negotiated));
+    let profile = session.publish_export_profile();
+    let mut route = make_route(100);
+    route.next_hop = IpAddr::V6("2001:db8::1".parse().unwrap());
+    let Err(error) = profile.probe_announcement(ExportCandidate::Unicast {
+        route: &route,
+        next_hop_override: None,
+    }) else {
+        panic!("expected ExportProbeError::Ipv4RequiresExtendedNextHop");
+    };
+    assert_eq!(error, ExportProbeError::Ipv4RequiresExtendedNextHop);
+
+    let (mut ebgp_session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let negotiated = negotiated_session(65002, false);
+    ebgp_session.negotiated = Some(Arc::new(negotiated));
+    let profile = ebgp_session.publish_export_profile();
+    let Err(error) = profile.probe_announcement(ExportCandidate::Unicast {
+        route: &route,
+        next_hop_override: None,
+    }) else {
+        panic!("expected ExportProbeError::Ipv4RequiresExtendedNextHop");
+    };
+    assert_eq!(error, ExportProbeError::Ipv4RequiresExtendedNextHop);
+}
+
+#[tokio::test]
 async fn route_server_client_ipv6_preserves_next_hop() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     let (client, mut server) = connected_stream_pair().await;

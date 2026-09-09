@@ -1,7 +1,7 @@
 // Sibling modules reach the session's own submodules with `super::`, which for
 // them resolves to `session::tests`. Bind the names they path-qualify here so
 // those paths keep resolving to `session::*`.
-use super::export::{ExportCandidate, ExportWithdrawal};
+use super::export::{ExportCandidate, ExportProbeError, ExportWithdrawal};
 use super::*;
 use super::{export, import_decision_cache, io, shared_group, tcp_ao_key_metadata, writer};
 use crate::PeerCommandError;
