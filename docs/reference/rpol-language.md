@@ -1053,8 +1053,13 @@ Two consequences worth internalizing:
 | `add large-community 65000:1:2` / `remove ...` | large communities |
 | `remove large-community 65000:*:*` | every arrived large community with global administrator 65000 |
 | `add ext-community RT:65001:100` / `remove ...` | extended communities (RT/RO, or well-known: `add ext-community OV_INVALID`) |
-| `prepend as <asn> <count>` | prepend `<count>` copies of `<asn>` (count: literal 1–255) |
+| `prepend as <asn> <count>` | prepend `<count>` copies of `<asn>` (ASN: 1–4294967295; count: literal 1–255) |
 | `prepend as self\|peer\|origin\|path-first <count>` | prepend a computed ASN (see below) |
+
+Literal AS 0 is a compile error. A parameter that resolves to AS 0 in a
+prepend action is rejected when the daemon attaches the policy chain,
+including prepends inside loops. These checks reject invalid policy before
+evaluation; the wire encoder also rejects AS 0 under RFC 7607.
 
 The kind keyword must match the literal's kind (`add community
 RT:...` is a compile error pointing at `add ext-community`). Within a

@@ -2972,7 +2972,7 @@ These fields modify matching routes. Only valid with `action = "permit"`.
 | `set_next_hop`         | string      | `"self"` or an IP address                          |
 | `set_community_add`    | [string]    | Communities to add (standard, EC, or LC format)    |
 | `set_community_remove` | [string]    | Communities to remove                              |
-| `set_as_path_prepend`  | table       | `{ asn = 65001, count = 3 }` (count 1-10)         |
+| `set_as_path_prepend`  | table       | `{ asn = 65001, count = 3 }` (ASN 1–4294967295, count 1–10) |
 
 ### Community formats
 

@@ -32,6 +32,11 @@ compilation pipeline:
 - **`datasets`** / **`sets`** — named prefix-set / community-set /
   AS-set datasets referenced from policy terms
 
+The frontend rejects literal AS 0 in prepend actions. Parameterized policies
+resolve their arguments at instantiation; the daemon checks the resulting
+chain at attachment with `CompiledChain::has_zero_as_path_prepend`, including
+loop bodies. The wire encoder independently rejects AS 0 under RFC 7607.
+
 ## Key types
 
 - **`RouteContext<'a>`** — borrowed match context (prefix, communities, AS_PATH, RPKI state)

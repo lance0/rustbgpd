@@ -536,6 +536,51 @@ fn rpol_max_graph_bytes_out_of_range_is_a_load_error() {
     }
 }
 
+#[test]
+fn rpol_parameterized_as0_prepend_rejected_at_attachment() {
+    for action in [
+        "prepend as n 1;",
+        "for value in route.as-path { prepend as n 1; }",
+    ] {
+        let source = format!("policy p(n: u32) {{ term t {{ {action} accept }} }}");
+        for (import, export) in [(r#""p(0)""#, ""), ("", r#""p(0)""#)] {
+            let dir = rpol_directional_config_dir(&source, import, export);
+            let error = load_dir(&dir).expect_err("AS 0 prepend must reject attachment");
+            assert!(error.contains("p(0)"), "{error}");
+            assert!(
+                error.contains("AS 0 cannot be prepended (RFC 7607)"),
+                "{error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn rpol_parameterized_prepend_accepts_valid_asns_and_zero_med() {
+    let source = "policy p(asn: u32, metric: u32) {
+        term t { set med metric; prepend as asn 1; accept }
+    }";
+    for asn in [1, u32::MAX] {
+        let reference = format!("\"p({asn}, 0)\"");
+        let dir = rpol_directional_config_dir(source, &reference, &reference);
+        let config = load_dir(&dir).expect("nonzero ASN and zero MED are valid");
+        let (import, export) = config
+            .effective_policy_chains_for_neighbor(&config.neighbors[0])
+            .expect("valid parameterized chains resolve");
+        let ctx = route_server_test_context(
+            route_server_test_prefix("192.0.2.0/24"),
+            rustbgpd_wire::RpkiValidation::NotFound,
+            rustbgpd_wire::AspaValidation::Unknown,
+        );
+        for chain in [import, export] {
+            let result = chain.expect("configured chain").evaluate(&ctx);
+            assert_eq!(result.action, rustbgpd_policy::PolicyAction::Permit);
+            assert_eq!(result.modifications.as_path_prepend, Some((asn, 1)));
+            assert_eq!(result.modifications.set_med, Some(0));
+        }
+    }
+}
+
 /// Direction legality is enforced when the chain is attached: a
 /// `prepend as peer` member is import-only, and binding it as an
 /// export chain fails the config load with the exact diagnostic.
