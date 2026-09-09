@@ -3,6 +3,16 @@
 This changelog covers the independently published `rustbgpd-wire` crate. Daemon
 and workspace changes remain in the repository-level `CHANGELOG.md`.
 
+## Unreleased
+
+- Added `UpdateMessage::parse_revised_observed_with_error_context`,
+  `UpdateDecodeError`, and `validate::validate_update_attributes_with_context`
+  with `UpdateValidationError` to retain offending attribute types without
+  changing existing parse and validation signatures or protocol dispositions.
+- Added typed `DecodeError::ProhibitedAsSet` and
+  `DecodeError::TruncatedAttributeHeader` variants for bounded diagnostics.
+  Their NOTIFICATION codes and data retain the existing behavior.
+
 ## 0.20.0 - 2026-09-07
 
 - Added `decode_prefix_sid_services` and the `Srv6Service`,

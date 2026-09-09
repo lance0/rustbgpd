@@ -25,23 +25,9 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
 
         added, removed = check.validate_release_notes(baseline, current, section)
 
-        self.assertEqual(len(baseline), 204)
-        self.assertEqual(
-            added,
-            {
-                "bgp_evpn_nlri_discarded_by_type_total",
-                "bgp_grpc_tls_handshake_failures_total",
-                "bgp_grpc_tls_certificate_not_after_seconds",
-                "bgp_max_prefix_blocked_total",
-                "bgp_max_prefix_blocking",
-                "bgp_max_prefix_warning_total",
-                "bgp_peer_info",
-                "bgp_session_event_source_dropped_total",
-                "evpn_duplicate_ip_moves_total",
-                "evpn_duplicate_ip_threshold_exceeded_total",
-            },
-        )
-        self.assertEqual(removed, {"bgp_session_lifecycle_source_dropped_total"})
+        self.assertEqual(len(baseline), 213)
+        self.assertEqual(added, {"bgp_update_malformed_causes_total"})
+        self.assertEqual(removed, set())
 
     def test_consumed_new_family_without_release_note_fails(self):
         baseline = {"bgp_existing_total"}
@@ -116,11 +102,11 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
     def test_released_section_cannot_satisfy_unreleased_metric_changes(self):
         changelog = """# Changelog
 
-## [0.69.0]
+## [Unreleased]
 
 - Other change.
 
-## [0.68.0] - 2026-08-30
+## [0.69.0] - 2026-09-07
 
 - Rename `bgp_old_name` to `bgp_new_name`; remove `bgp_removed`.
 """
@@ -184,17 +170,17 @@ class MetricReleaseNoteContractTests(unittest.TestCase):
                 "release must be",
             ),
             (
-                '{"release":"v0.68.0","source_commit":"x","families":["bgp_a"]}',
+                '{"release":"v0.69.0","source_commit":"x","families":["bgp_a"]}',
                 "commit must be",
             ),
             (
-                '{"release":"v0.68.0","source_commit":"'
+                '{"release":"v0.69.0","source_commit":"'
                 + check.BASELINE_COMMIT
                 + '","families":["bgp_b","bgp_a"]}',
                 "sorted and unique",
             ),
             (
-                '{"release":"v0.68.0","source_commit":"'
+                '{"release":"v0.69.0","source_commit":"'
                 + check.BASELINE_COMMIT
                 + '","families":["not a metric"]}',
                 "invalid family name",
