@@ -12,7 +12,7 @@ description = "BGP message codec — encode/decode OPEN, KEEPALIVE, UPDATE, NOTI
 readme = "README.md"
 # Repository governance audit: it reads the workspace-level canonical registry
 # document, which is intentionally outside this published crate package.
-exclude = ["tests/path_attribute_registry.rs"]
+exclude = ["tests/path_attribute_registry.rs", "tests/notification_registry.rs"]
 
 [features]
 # Enables allocation counters in the codec diagnostic binary. The ordinary

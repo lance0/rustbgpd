@@ -79,6 +79,7 @@ Look up commands, configuration, and compatibility boundaries.
 | [Format and version namespaces](reference/format-version-namespaces.md) | Independent versions for stored and exchanged formats. |
 | [RFC implementation notes](reference/rfc-notes.md) | Protocol interpretations and deviations. |
 | [ASPA conformance](reference/aspa-conformance.md) | Verification procedures and route-server scope. |
+| [NOTIFICATION registry](reference/notification-registry.md) | Error code and subcode descriptions for session diagnostics. |
 | [Path-attribute registry](reference/path-attribute-registry.md) | Implementation, propagation, and evidence by attribute. |
 | [Familiar command map](../crates/cli/README.md#familiar-command-map) | Translate FRR and BIRD commands to the CLI. |
 

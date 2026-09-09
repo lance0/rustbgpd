@@ -1484,3 +1484,52 @@ fn evpn_discard_warnings_are_bounded_per_type_and_connection() {
             < f64::EPSILON
     );
 }
+
+#[test]
+fn notification_descriptions_preserve_registered_and_numeric_inner_causes() {
+    for (code, subcode, expected) in [
+        (6, cease_subcode::CONNECTION_REJECTED, "Connection Rejected"),
+        (
+            6,
+            cease_subcode::OTHER_CONFIGURATION_CHANGE,
+            "Other Configuration Change",
+        ),
+        (5, 3, "Receive Unexpected Message in Established State"),
+        (7, 1, "Invalid Message Length"),
+        (9, 0, "Loss of LSDB Synchronization"),
+        (2, 5, "Deprecated OPEN Message Error Subcode 5"),
+        (6, 42, "unassigned(6/42)"),
+        (5, 42, "unassigned(5/42)"),
+        (4, 42, "unassigned(4/42)"),
+        (8, 42, "unassigned(8/42)"),
+        (255, 255, "unassigned(255/255)"),
+        (0, 0, "reserved(0/0)"),
+        (6, 0, "reserved(6/0)"),
+        (7, 0, "reserved(7/0)"),
+    ] {
+        let direct =
+            NotificationMessage::new(NotificationCode::from_u8(code), subcode, Bytes::new());
+        assert_eq!(
+            super::super::fsm::notification_description(&direct),
+            expected
+        );
+        let nested = NotificationMessage::new(
+            NotificationCode::Cease,
+            cease_subcode::HARD_RESET,
+            Bytes::copy_from_slice(&[code, subcode]),
+        );
+        assert_eq!(
+            super::super::fsm::notification_description(&nested),
+            format!("Hard Reset: {expected}")
+        );
+    }
+    // A short Hard Reset envelope has no inner pair to render.
+    for data in [Bytes::new(), Bytes::from_static(&[6])] {
+        let notification =
+            NotificationMessage::new(NotificationCode::Cease, cease_subcode::HARD_RESET, data);
+        assert_eq!(
+            super::super::fsm::notification_description(&notification),
+            "Hard Reset"
+        );
+    }
+}
