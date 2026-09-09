@@ -2,7 +2,9 @@ use crate::connection::{Connection, read_rpc};
 use crate::error::CliError;
 use crate::output::{self, JsonHealth, outln};
 use crate::proto::control_service_client::ControlServiceClient;
-use crate::proto::{HealthRequest, MetricsRequest, ShutdownRequest, TriggerMrtDumpRequest};
+use crate::proto::{
+    CheckLivenessRequest, HealthRequest, MetricsRequest, ShutdownRequest, TriggerMrtDumpRequest,
+};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 
@@ -90,9 +92,22 @@ pub(crate) fn rpki_cache_end_of_data_readiness(
     Some(readiness)
 }
 
-pub async fn health(connection: Connection, json: bool) -> Result<(), CliError> {
+pub async fn health(connection: Connection, json: bool, liveness: bool) -> Result<(), CliError> {
     let mut client =
         ControlServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    if liveness {
+        read_rpc(
+            "CheckLiveness",
+            client.check_liveness(CheckLivenessRequest {}),
+        )
+        .await?;
+        if json {
+            output::print_json_pretty(&serde_json::json!({"alive": true}))?;
+        } else {
+            outln!("alive")?;
+        }
+        return Ok(());
+    }
     let resp = read_rpc("GetHealth", client.get_health(HealthRequest {}))
         .await?
         .into_inner();
@@ -172,7 +187,7 @@ mod tests {
             .await
             .unwrap();
 
-        health(connection, true).await.unwrap();
+        health(connection, true, false).await.unwrap();
 
         assert_eq!(server.state.health_calls.load(Ordering::SeqCst), 1);
     }
@@ -184,9 +199,19 @@ mod tests {
         let server = spawn_mock_uds_server(&socket_path, None).await;
         let connection = connect(&server.addr, None).await.unwrap();
 
-        health(connection, true).await.unwrap();
+        health(connection, true, false).await.unwrap();
 
         assert_eq!(server.state.health_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn liveness_calls_only_liveness_rpc_over_uds() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = spawn_mock_uds_server(&dir.path().join("grpc.sock"), None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+        health(connection, true, true).await.unwrap();
+        assert_eq!(server.state.liveness_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(server.state.health_calls.load(Ordering::SeqCst), 0);
     }
 
     /// Red proof: the old unprefixed, single-sample parser fails this aggregate.

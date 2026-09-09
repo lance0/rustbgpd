@@ -80,15 +80,18 @@ fn declared_paths_are_unique() {
 }
 
 #[test]
-fn the_inventory_publishes_no_read_tier_to_bind_to() {
-    // Documented in the ADR and the how-to: there is no tier below
-    // `sensitive_read` to constrain a listener with, which is why the
-    // deployment control alone cannot make this server read-only.
-    let parsed: Value = serde_json::from_str(INVENTORY).expect("valid JSON");
-    assert_eq!(
-        parsed["tier_counts"]["read"].as_u64(),
-        Some(0),
-        "a `read` tier now exists; the safety model's claim that `sensitive_read` is the \
-         lowest bindable tier needs revisiting in the ADR and how-to"
+fn read_tier_serves_liveness_but_none_of_the_mcp_tools() {
+    let inventory = inventory_tiers();
+    let read_paths: Vec<&str> = inventory
+        .iter()
+        .filter(|(_, tier)| tier == "read")
+        .map(|(path, _)| path.as_str())
+        .collect();
+    assert_eq!(read_paths, ["/rustbgpd.v1.ControlService/CheckLiveness"]);
+    assert!(
+        TOOL_METHOD_PATHS
+            .iter()
+            .all(|(_, path)| !read_paths.contains(path)),
+        "the MCP tools still require a sensitive_read listener cap"
     );
 }

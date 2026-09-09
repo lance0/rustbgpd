@@ -81,6 +81,13 @@ impl ControlService {
 
 #[tonic::async_trait]
 impl proto::control_service_server::ControlService for ControlService {
+    async fn check_liveness(
+        &self,
+        _request: Request<proto::CheckLivenessRequest>,
+    ) -> Result<Response<proto::CheckLivenessResponse>, Status> {
+        Ok(Response::new(proto::CheckLivenessResponse {}))
+    }
+
     async fn get_health(
         &self,
         _request: Request<proto::HealthRequest>,
@@ -205,6 +212,23 @@ mod tests {
             shutdown_tx,
             None,
         )
+    }
+
+    #[tokio::test]
+    async fn liveness_succeeds_with_closed_actor_channels() {
+        use prost::Message as _;
+        let svc = make_service();
+        let response = svc
+            .check_liveness(Request::new(proto::CheckLivenessRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(response.encode_to_vec().is_empty());
+        assert!(
+            svc.get_health(Request::new(proto::HealthRequest {}))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

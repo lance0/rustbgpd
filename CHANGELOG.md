@@ -13,6 +13,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Authenticated `ControlService.CheckLiveness` and `rbgp health --liveness`
+  answer without topology disclosure using the `read` authorization tier.
+  The new RPC is outside the narrow v1 contract. Ordinary `rbgp health`
+  retains its actor-readiness checks and detailed output.
+
 - Experimental `rbgp neighbor PEER replay-out` schedules one peer's IPv4/IPv6
   unicast replay for eligible outbound-only BMP collectors. It requires a
   unicast-only negotiated session and a unique address among managed peers. The new
@@ -71,6 +76,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Debug tracing exposes the same stage timings for reload diagnostics.
 
 ### Changed
+
+- The container healthcheck now uses `rbgp health --liveness`: it checks gRPC
+  responsiveness rather than core-actor readiness. Override it with
+  `--health-cmd='rbgp health'` to retain the previous probe. Successful `read`
+  authorization audits now log at DEBUG; counters and other audit levels
+  are unchanged. Deployment guidance includes bounded container log retention.
 
 - gRPC credential rotation on SIGHUP now runs after the runtime generation is
   acknowledged, so a candidate rejected at preflight or restored after a

@@ -2597,6 +2597,7 @@ _arguments "${_arguments_options[@]}" : \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '--pager=[Page complete human unicast RIB listings]:PAGER:(auto always never)' \
+'--liveness[Check only authenticated gRPC responsiveness, without actor readiness or topology]' \
 '(--json-lines)-j[Output in JSON format]' \
 '(--json-lines)--json[Output in JSON format]' \
 '(-j --json)--json-lines[Stream accepted unicast RIB routes as versioned JSON lines]' \

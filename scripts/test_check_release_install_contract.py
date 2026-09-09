@@ -456,8 +456,14 @@ MUTATIONS = (
     ),
     (
         "Dockerfile",
-        "CMD rbgp health",
+        "CMD rbgp health --liveness",
         "CMD rbgp --json health | grep -q '\"healthy\": true' || exit 1",
+        "container image contract",
+    ),
+    (
+        "Dockerfile",
+        "CMD rbgp health --liveness",
+        "CMD rbgp health",
         "container image contract",
     ),
     (

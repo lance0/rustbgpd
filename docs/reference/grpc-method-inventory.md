@@ -74,7 +74,7 @@ nominal use.
 
 | Tier | Definition | Worst-case if compromised |
 |------|------------|---------------------------|
-| `read` | Pure observability. No state change. No sensitive data exposed beyond what a peer in the same BGP mesh would already see. | Health-check spam. |
+| `read` | Pure liveness. No state change, topology disclosure, or actor readiness check. | Health-check spam. |
 | `sensitive_read` | Read-only, but exposes operational topology, RIB contents, policy structure, metrics shape, or other data a defender would not want a tenant or untrusted automation to see. | Reconnaissance: peer addresses, AS topology, policy structure, route counts, RIB content, MAC tables. |
 | `mutating` | Changes daemon config, peer state, or routing decisions. Reversible. Per-peer or per-object scope. | Route policy tampering, single-peer disable/flap, individual route injection. |
 | `operator_only` | High-blast-radius operation: network-wide impact, process lifecycle, dataplane-affecting injection at scale, or persistent side effects (disk I/O, drain-all-peers). | Network-wide outage, traffic-filter installation at line rate, blackhole community injection, daemon shutdown. |
@@ -228,12 +228,13 @@ shape itself does not raise the tier.
 | `AddEvpnRoute` | `operator_only` | Originates EVPN Type 2/3/5; can blackhole an L2 segment by hijacking a MAC, or steer Type 5 traffic. |
 | `DeleteEvpnRoute` | `operator_only` | Same risk class. |
 
-### ControlService (4 RPCs)
+### ControlService (5 RPCs)
 
 | RPC | Tier | Notes |
 |-----|------|-------|
 | `Shutdown` | `operator_only` | Process termination. Worst-case outage primitive on the daemon. |
-| `GetHealth` | `sensitive_read` | Liveness plus `active_peers` and `total_routes`; the counts reveal operational state and route volume. |
+| `CheckLiveness` | `read` | Empty authenticated response: only the gRPC handler answered. No actor readiness or topology; outside the narrow v1 contract. |
+| `GetHealth` | `sensitive_read` | Core-actor readiness plus `active_peers` and `total_routes`; the counts reveal operational state and route volume. |
 | `GetMetrics` | `sensitive_read` | Returns Prometheus-shaped counters; volumetric metadata leaks RIB size, peer count, churn rate. |
 | `TriggerMrtDump` | `operator_only` | Writes a TABLE_DUMP_V2 snapshot to disk. Disk-I/O burst, potentially very large; also exposes RIB content to whoever can read the dump file later. |
 
@@ -266,14 +267,14 @@ shape itself does not raise the tier.
 
 | Tier | Count | % |
 |------|------:|--:|
-| `read` | 0 | 0.0% |
-| `sensitive_read` | 66 | 58.9% |
-| `mutating` | 22 | 19.6% |
-| `operator_only` | 24 | 21.4% |
-| **Total** | **112** | **100%** |
+| `read` | 1 | 0.9% |
+| `sensitive_read` | 66 | 58.4% |
+| `mutating` | 22 | 19.5% |
+| `operator_only` | 24 | 21.2% |
+| **Total** | **113** | **100%** |
 
-(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 112
-total is 108 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
+(Counts include `SetGracefulShutdown` as one `NeighborService` RPC; the 113
+total is 109 native `rustbgpd.v1` RPCs plus 4 `gnmi.gNMI` RPCs.)
 
 ## Notes for ADR-0064
 
@@ -283,8 +284,8 @@ in doubt, raise the tier") so the ADR can negotiate a lower tier for a
 specific method if the model warrants it.
 
 1. **Tier vs. service granularity.** Every service has at least one
-   `sensitive_read` method, and there are currently no true `read`
-   methods because even `GetHealth` returns peer and route counts.
+   `sensitive_read` method. `CheckLiveness` is a `read` method;
+   `GetHealth` remains sensitive because it returns peer and route counts.
    `EventService` is pure observability (no mutations at all);
    `RibService` is read-only apart from the mutating `SetFibTable` /
    `DeleteFibTable` FIB-table CRUD pair (ADR-0074). The minimum-viable

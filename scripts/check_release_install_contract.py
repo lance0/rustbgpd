@@ -412,7 +412,7 @@ def check_container_deployment_docs(
         "USER 999:999",
         # Exit status, not stdout text: the probe must not depend on the
         # JSON formatter's whitespace.
-        "CMD rbgp health",
+        "CMD rbgp health --liveness",
         'CMD ["rustbgpd", "/etc/rustbgpd/config.toml"]',
     ):
         if statement not in runtime:

@@ -39,6 +39,7 @@ pub(crate) enum MockSubscribeFromEventPlan {
 #[derive(Default)]
 pub(crate) struct MockState {
     pub(crate) bfd_calls: AtomicUsize,
+    pub(crate) liveness_calls: AtomicUsize,
     pub(crate) health_calls: AtomicUsize,
     pub(crate) health_failures_remaining: AtomicUsize,
     pub(crate) metrics_calls: AtomicUsize,
@@ -949,6 +950,14 @@ impl rustbgpd_api::proto::bfd_service_server::BfdService for MockBfdService {
 
 #[tonic::async_trait]
 impl rustbgpd_api::proto::control_service_server::ControlService for MockControlService {
+    async fn check_liveness(
+        &self,
+        _request: Request<server_proto::CheckLivenessRequest>,
+    ) -> Result<Response<server_proto::CheckLivenessResponse>, Status> {
+        self.state.liveness_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(Response::new(server_proto::CheckLivenessResponse {}))
+    }
+
     async fn get_health(
         &self,
         _request: Request<server_proto::HealthRequest>,

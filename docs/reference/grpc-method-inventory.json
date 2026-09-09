@@ -6,9 +6,9 @@
   "additional_protos": [
     "proto/github.com/openconfig/gnmi/proto/gnmi/gnmi.proto"
   ],
-  "method_count": 112,
+  "method_count": 113,
   "tier_counts": {
-    "read": 0,
+    "read": 1,
     "sensitive_read": 66,
     "mutating": 22,
     "operator_only": 24
@@ -112,6 +112,7 @@
     { "service": "rustbgpd.v1.InjectionService", "method": "AddEvpnRoute", "path": "/rustbgpd.v1.InjectionService/AddEvpnRoute", "tier": "operator_only" },
     { "service": "rustbgpd.v1.InjectionService", "method": "DeleteEvpnRoute", "path": "/rustbgpd.v1.InjectionService/DeleteEvpnRoute", "tier": "operator_only" },
     { "service": "rustbgpd.v1.ControlService", "method": "Shutdown", "path": "/rustbgpd.v1.ControlService/Shutdown", "tier": "operator_only" },
+    { "service": "rustbgpd.v1.ControlService", "method": "CheckLiveness", "path": "/rustbgpd.v1.ControlService/CheckLiveness", "tier": "read" },
     { "service": "rustbgpd.v1.ControlService", "method": "GetHealth", "path": "/rustbgpd.v1.ControlService/GetHealth", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.ControlService", "method": "GetMetrics", "path": "/rustbgpd.v1.ControlService/GetMetrics", "tier": "sensitive_read" },
     { "service": "rustbgpd.v1.ControlService", "method": "TriggerMrtDump", "path": "/rustbgpd.v1.ControlService/TriggerMrtDump", "tier": "operator_only" },

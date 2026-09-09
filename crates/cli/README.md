@@ -32,7 +32,8 @@ existing definition. Existing bare commands such as `rbgp neighbor` and
 
 ```bash
 rbgp global       # ASN, router ID, listen port, TCP-AO support
-rbgp health       # daemon health check
+rbgp health       # core-actor readiness and operational counts
+rbgp health --liveness # authenticated gRPC responsiveness only
 rbgp doctor       # triage checks + redacted support bundle (tar.gz)
 rbgp metrics      # Prometheus metrics snapshot
 rbgp top          # live terminal dashboard

@@ -278,7 +278,8 @@ Mitigations, in preference order:
   `sensitive_read`-tier methods — the same tier the adapter's other reads
   need — so no `max_tier` value denies the filtered and noexport views while
   leaving the rest of the adapter working. `max_tier = "read"` denies every
-  RPC, because no method carries the `read` tier (see
+  RPC this adapter uses. That tier serves only `CheckLiveness`, which the
+  adapter does not call (see
   [`grpc-method-inventory.md`](grpc-method-inventory.md)); even `GetHealth`
   is `sensitive_read`. A dedicated listener is still worth having, but for
   the network isolation and separate credentials, not for tier filtering.

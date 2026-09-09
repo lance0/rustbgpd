@@ -163,16 +163,10 @@ USER 999:999
 
 EXPOSE 179 9179
 
-# Liveness via the local gRPC control socket. `rbgp health` exits
-# non-zero unless the daemon answers the Health RPC, which it does only
-# after the peer-manager and RIB readiness probe returns; that exit
-# status is the whole signal. The former `grep '"healthy": true'` added
-# nothing — the response field is a constant — while making the probe
-# depend on serde_json's pretty-printer emitting a space after the
-# colon. rbgp's default address is the default UDS
-# (`unix:///var/lib/rustbgpd/grpc.sock`); configs that move the socket
-# set RUSTBGPD_ADDR on the container to match.
+# Authenticated gRPC responsiveness only; core actor readiness is available
+# through an explicit `rbgp health` override. The default endpoint is the
+# local socket; set RUSTBGPD_ADDR if configuration moves it.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD rbgp health
+  CMD rbgp health --liveness
 
 CMD ["rustbgpd", "/etc/rustbgpd/config.toml"]

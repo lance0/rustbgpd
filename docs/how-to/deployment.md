@@ -868,20 +868,30 @@ systemd's `Restart=on-failure`. If the config moves the socket, set
   seconds later. This standalone command has no restart policy; use bounded
   supervisor retries and inspect durable config authority before recovery.
 
-- **Health**: the image declares a `HEALTHCHECK` that runs `rbgp health`
-  against the daemon's local gRPC socket and uses that command's exit
-  status — `rbgp` exits non-zero when the Health RPC is unreachable, is
-  refused, or does not complete its readiness probe. `docker ps` /
-  orchestrators see the container flip `healthy` once the daemon answers.
-  The probe deliberately does not match on response text: the response's
-  `healthy` field is a constant, so grepping it added no signal the exit
-  status did not already carry, while tying liveness to the JSON
-  formatter's whitespace. It probes rbgp's default endpoint
-  (`unix:///var/lib/rustbgpd/grpc.sock`, the daemon default); if your
-  config moves the socket, set `RUSTBGPD_ADDR` on the container to match.
+- **Health**: the image runs `rbgp health --liveness` every 30 seconds.
+  Success means only that the authenticated gRPC handler answered; it does
+  not check core-actor readiness, BGP convergence, or forwarding. This is an
+  intentional change from the previous image probe, which used `GetHealth`
+  and checked core actors. To retain that behavior, start the container with
+  `--health-cmd='rbgp health'`. Ordinary `rbgp health` keeps its detailed
+  output and readiness behavior. The liveness RPC requires only the `read`
+  listener tier; credentials and principal-role checks still apply. Failed,
+  refused, or unreachable probes exit non-zero. The default endpoint is
+  `unix:///var/lib/rustbgpd/grpc.sock`; set `RUSTBGPD_ADDR` on the container
+  if configuration moves it. HTTP `/livez` is also available on the metrics
+  listener; `/readyz` retains core-actor readiness checks.
 
-- **Logs**: `[global.telemetry] log_format = "json"` is required and emits
-  structured JSON; pipe it to your log aggregator.
+- **Logs**: `[global.telemetry] log_format = "json"` emits structured JSON.
+  Bound retention when creating the container, for example with
+  `--log-driver=json-file --log-opt max-size=10m --log-opt max-file=3`
+  on `docker run`. Add these flags to the container systemd unit's `docker run`
+  command too. For Compose, set `logging.driver: json-file` and
+  `logging.options: {max-size: "10m", max-file: "3"}` on the service.
+  These limits keep approximately 30 MB per container; recreate existing
+  containers to apply them. The image cannot configure the host logging
+  driver. Forward logs to an aggregator when longer retention is needed.
+  Successful `read` authorization audits are DEBUG; counters and existing
+  denied, error, sensitive-read, and mutation audit levels are unchanged.
 
 - **Networking**: Linux FIB integration and BFD require access to the network
   namespace they operate on. For host addresses, use the [root host-network
