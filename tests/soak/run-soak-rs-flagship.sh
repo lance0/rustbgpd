@@ -148,6 +148,8 @@ PROM_TMP="$RUN_DIR/.metrics.prom"
 source "$SOAK_SCRIPT_DIR/host-lock.sh"
 # shellcheck source=tests/soak/fd-headroom.sh
 source "$SOAK_SCRIPT_DIR/fd-headroom.sh"
+# shellcheck source=tests/soak/flagship-lifecycle.sh
+source "$SOAK_SCRIPT_DIR/flagship-lifecycle.sh"
 
 log() {
     printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
@@ -185,6 +187,7 @@ DAEMON_PID=""
 SCEN=""
 MEASURED_START_MONOTONIC=""
 MEASURED_END_MONOTONIC=""
+RUN_INTERRUPTED=0
 
 monotonic_now() {
     python3 -c 'import time; print(f"{time.monotonic():.9f}")'
@@ -237,6 +240,7 @@ stop_management_load() {
 cleanup() {
     local rc=$?
     trap - EXIT
+    trap ':' INT TERM
     set +e
     stop_management_load
     terminate "$H_PID"
@@ -247,6 +251,12 @@ cleanup() {
     rm -f "$PROM_TMP"
     if ((rc != 0)); then
         log "FAILED rc=$rc — artifacts preserved in $RUN_DIR"
+    else
+        log "owned processes stopped; draining soak log"
+    fi
+    if ! finish_flagship_cleanup "$rc" "$RUN_INTERRUPTED"; then
+        echo "ERROR: soak log writer failed; see cleanup.complete" >&2
+        ((rc == 0)) && rc=1
     fi
     exit "$rc"
 }
@@ -255,6 +265,11 @@ abort() {
     cycle_log "ABORT: $*"
     log "ABORT: $*"
     exit 1
+}
+
+interrupt_run() {
+    RUN_INTERRUPTED=1
+    exit 143
 }
 
 ports_free() {
@@ -536,11 +551,10 @@ write_run_json() {
 
 main() {
     mkdir -p "$RUN_DIR"
-    exec > >(tee -a "$SOAK_LOG") 2>&1
-    acquire_rustbgpd_host_lock
     trap cleanup EXIT
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
+    trap interrupt_run INT TERM
+    start_flagship_lifecycle
+    acquire_rustbgpd_host_lock
     for tool in cargo curl awk python3 ss flock git ps df mktemp timeout; do
         require_tool "$tool"
     done

@@ -54,7 +54,7 @@ acquire_rustbgpd_host_lock() {
     exec {RUSTBGPD_HOST_LOCK_FD}>"$host_lock"
     if ! flock -n "$RUSTBGPD_HOST_LOCK_FD"; then
         echo "error: ${host_lock} is held by another process (soak or bench)" >&2
-        echo "       wait for it to finish or remove the lock if stale" >&2
+        echo "       wait for its holder to finish; do not unlink a held lock file" >&2
         return 75 # EX_TEMPFAIL — host busy, retry later
     fi
     echo "acquired host lock: ${host_lock}"
