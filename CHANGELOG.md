@@ -86,11 +86,6 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- AS_PATH prepend policy validation now rejects AS 0 in TOML and literal
-  `.rpol` actions, and rejects `.rpol` parameters resolving to AS 0 when a
-  chain is attached. Invalid policies previously reached evaluation before
-  the existing wire encoder rejected the resulting AS_PATH.
-
 - NOTIFICATION diagnostics now describe the maintained registered code/subcode
   table, including Connection Rejected and Other Configuration Change. Unknown
   pairs retain numeric values as `unassigned(code/subcode)` or
@@ -107,6 +102,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   inventory, and End-of-RIB before stopping packet capture. Incomplete capture
   snapshots remain pending within a bounded wait, and timeout retains diagnostics;
   the final closed-file and wire-attribute checks remain mandatory.
+
+- AS_PATH prepend policy validation now rejects AS 0 in TOML and literal
+  `.rpol` actions, and rejects `.rpol` parameters resolving to AS 0 when a
+  chain is attached. Invalid policies previously reached evaluation before
+  the existing wire encoder rejected the resulting AS_PATH.
 
 - SIGHUP generations no longer reinstall unchanged RPOL chains solely because
   an unreferenced literal set changed in the same source file. The runtime keeps
