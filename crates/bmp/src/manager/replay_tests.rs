@@ -87,8 +87,8 @@ async fn explicit_replay_resets_only_outbound_collectors_and_preserves_v3_v4_fra
     };
     let (mut manager, mut receivers) = manager(&[
         (outbound_filter(), BmpVersion::V3),
-        (outbound_filter(), BmpVersion::V4),
         (mixed, BmpVersion::V3),
+        (outbound_filter(), BmpVersion::V4),
     ]);
     manager.handle_event(&peer_up()).await;
     let cached: Vec<_> = receivers
@@ -98,7 +98,7 @@ async fn explicit_replay_resets_only_outbound_collectors_and_preserves_v3_v4_fra
     let (replay, enrolled) = BmpReplay::new(Duration::from_secs(5));
     begin(&mut manager, &replay).await;
     assert!(enrolled.await.unwrap());
-    for index in 0..2 {
+    for index in [0, 2] {
         let reset = receivers[index].try_recv().unwrap();
         assert_eq!(reset[0], if index == 0 { 3 } else { 4 });
         assert_eq!(reset[5], 2, "Peer Down precedes cached Peer Up");
@@ -118,19 +118,19 @@ async fn explicit_replay_resets_only_outbound_collectors_and_preserves_v3_v4_fra
         );
     }
     assert!(
-        receivers[2].try_recv().is_err(),
+        receivers[1].try_recv().is_err(),
         "mixed input/output baseline must not reset"
     );
     complete(&mut manager, &replay).await;
     let v3 = receivers[0].try_recv().unwrap();
-    let v4 = receivers[1].try_recv().unwrap();
+    let v4 = receivers[2].try_recv().unwrap();
     assert_eq!((v3[0], v3[5], v3[7] & 0x50), (3, 0, 0x50));
     assert_eq!(&v3[48..], eor().as_ref());
     assert_eq!((v4[0], v4[5], v4[7] & 0x50), (4, 0, 0x50));
     assert_eq!(&v4[48..54], &[0, 4, 0, 23, 0, 0], "v4 BGP Message TLV");
     assert_eq!(&v4[54..], eor().as_ref());
     assert!(
-        receivers[2].try_recv().is_err(),
+        receivers[1].try_recv().is_err(),
         "mixed collector was never enrolled"
     );
 }

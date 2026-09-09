@@ -664,6 +664,7 @@ impl BmpManager {
                     .outbound_replays
                     .get(&peer)
                     .is_some_and(|(old, _)| old.is_valid());
+                // enumerate, filtering, and retention preserve ordered collector indices.
                 let mut collectors: Vec<_> = self
                     .collectors
                     .iter()
@@ -693,12 +694,12 @@ impl BmpManager {
                         reason: crate::PeerDownReason::MonitoringStopped,
                     };
                     self.fan_out_filtered(
-                        |idx, _| collectors.iter().any(|(enrolled, _)| *enrolled == idx),
+                        |idx, _| collectors.binary_search_by_key(&idx, |e| e.0).is_ok(),
                         |version| Self::encode_event(&down, version),
                     )
                     .await;
                     self.fan_out_filtered(
-                        |idx, _| collectors.iter().any(|(enrolled, _)| *enrolled == idx),
+                        |idx, _| collectors.binary_search_by_key(&idx, |e| e.0).is_ok(),
                         |version| cached[version.idx()].clone(),
                     )
                     .await;
@@ -745,7 +746,7 @@ impl BmpManager {
                         return;
                     }
                     self.fan_out_filtered(
-                        |idx, filter| filter.rib_out_post && eligible.contains(&idx),
+                        |idx, filter| filter.rib_out_post && eligible.binary_search(&idx).is_ok(),
                         |version| codec::encode_route_monitoring(peer_info, pdu, None, version),
                     )
                     .await;
