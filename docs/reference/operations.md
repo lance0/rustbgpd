@@ -938,9 +938,15 @@ matchability, or a startup gate.
 Each BMP client reconnects independently with backoff (default
 `reconnect_interval` = 30s). During disconnection, BMP events for that
 collector are dropped. No routing state is affected — BMP is purely
-observational. On reconnect, the client sends a fresh Initiation message;
-the collector rebuilds state from subsequent Peer Up and Route Monitoring
-messages.
+observational. On reconnect, the client sends a fresh Initiation message and
+the manager replays cached Peer Up state. A configured Loc-RIB view then gets
+a fresh table dump closed by End-of-RIB. Adj-RIB-In and Adj-RIB-Out resume
+live updates without an automatic reconnect dump. For established IPv4/IPv6
+unicast sessions, the experimental
+[`replay-out` operation](api.md#replay-one-peers-unicast-routes-with-terminal-eors)
+can rebuild an eligible collector's outbound inventory by reannouncing routes
+on the live BGP session. The CLI confirms scheduling; terminal BMP EoRs are
+required for a complete capture.
 
 During coordinated shutdown, the BMP manager first queues final Peer Down
 messages. Connected clients drain that queue, send BMP Termination, and flush.
