@@ -571,7 +571,12 @@ fn parse_modifications(
     };
 
     // Parse AS_PATH prepend
-    let as_path_prepend = if let Some(ref pp) = e.set_as_path_prepend {
+    let as_path_prepend = if let Some(pp) = &e.set_as_path_prepend {
+        if pp.asn == 0 {
+            return Err(ConfigError::InvalidPolicyEntry {
+                reason: "set_as_path_prepend ASN cannot be 0 (RFC 7607)".into(),
+            });
+        }
         if pp.count == 0 || pp.count > 10 {
             return Err(ConfigError::InvalidPolicyEntry {
                 reason: format!("set_as_path_prepend count must be 1-10, got {}", pp.count),

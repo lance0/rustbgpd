@@ -2576,6 +2576,16 @@ fn fixed_prepend_forms_unchanged() {
     }
 }
 
+#[test]
+fn prepend_literal_as_zero_is_rejected_per_rfc7607() {
+    let (_, rendered) = diagnostics_of("policy p { term t { prepend as 0 3; accept } }");
+    assert!(
+        rendered.contains("AS 0 cannot be prepended (RFC 7607)"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("ASN cannot be 0"), "{rendered}");
+}
+
 fn path_first_ctx(segments: Vec<rustbgpd_wire::AsPathSegment>) -> RouteContext<'static> {
     let path = Box::leak(Box::new(rustbgpd_wire::AsPath { segments }));
     RouteContext {

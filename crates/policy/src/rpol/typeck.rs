@@ -1042,6 +1042,15 @@ impl<'a> Checker<'a> {
                     && let PrependAsArg::Value(arg) = asn
                 {
                     self.check_u32_arg(arg, scope);
+                    if let U32Arg::Lit(asn, span) = arg
+                        && *asn == 0
+                    {
+                        self.diags.push(Diagnostic::new(
+                            *span,
+                            "AS 0 cannot be prepended (RFC 7607)",
+                            "ASN cannot be 0",
+                        ));
+                    }
                 }
                 match count {
                     U32Arg::Lit(value, span) => {

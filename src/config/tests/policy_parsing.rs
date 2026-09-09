@@ -570,6 +570,19 @@ fn set_route_community_rejects_ipv4_local_that_exceeds_u16() {
 }
 
 #[test]
+fn set_as_path_prepend_rejects_as0_per_rfc7607() {
+    let toml = community_toml(
+        r#"action = "permit"
+            prefix = "10.0.0.0/8"
+            set_as_path_prepend = { asn = 0, count = 2 }"#,
+    );
+    let ConfigError::InvalidPolicyEntry { reason } = parse(&toml).unwrap_err() else {
+        panic!("expected invalid policy entry");
+    };
+    assert_eq!(reason, "set_as_path_prepend ASN cannot be 0 (RFC 7607)");
+}
+
+#[test]
 fn ov_well_known_ext_community_names_in_toml_policy() {
     // RFC 8097 origin-validation states ride the well-known-name path
     // in match and set positions.
