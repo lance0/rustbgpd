@@ -266,25 +266,25 @@ while [ "$(date +%s)" -lt "$alice_deadline" ]; do
   sleep 1
 done
 alice_ready || exit 1
-# Alice's routes store (prefix lookup) refreshes on its own interval with
-# random jitter, so every lookup assertion waits for a refresh that already
-# saw the expected accepted and filtered totals.
-alice_store_ready() {
-  curl --fail --silent --max-time 2 "$alice_api/status" | python3 -c \
-    'import json,sys; totals=json.load(sys.stdin)["routes"]["total_routes"]; expected={"imported": int(sys.argv[1]), "filtered": int(sys.argv[2])}; raise SystemExit(totals != expected)' \
-    "$1" "$2" >/dev/null 2>&1
-}
+# Alice refreshes route and neighbor caches independently. Correct route
+# totals can coexist with an earlier snapshot of down BGP neighbors.
 wait_alice_store() {
   store_deadline=$(($(date +%s) + 180))
-  while [ "$(date +%s)" -lt "$store_deadline" ]; do
-    if alice_store_ready "$1" "$2"; then return 0; fi
+  while :; do
+    store_remaining=$((store_deadline - $(date +%s)))
+    [ "$store_remaining" -gt 0 ] || break
+    [ "$store_remaining" -le 5 ] || store_remaining=5
+    if timeout "${store_remaining}s" python3 "$root/alice-consumer.py" \
+      "$alice_api" "$alice_version" --stores-ready "$@" \
+      >"$tmp/alice-store-readiness.log" 2>&1; then return 0; fi
     kill -0 "$daemon_pid" 2>/dev/null \
       && kill -0 "$adapter_pid" 2>/dev/null \
       && topology_containers_running \
       && container_running "$alice" || return 1
     sleep 1
   done
-  echo "Alice routes store did not reach imported=$1 filtered=$2: $(curl --silent --max-time 2 "$alice_api/status")" >&2
+  echo 'Alice route and neighbor stores did not become ready:' >&2
+  cat "$tmp/alice-store-readiness.log" >&2
   return 1
 }
 # Alice's logged refresh duration starts at its refresh lock, before its
@@ -332,7 +332,7 @@ fi
 # stable snapshot before reading.
 sleep 3
 
-wait_alice_store 7 0 || exit 1
+wait_alice_store || exit 1
 alice_refresh_cost 'four peers, 7 accepted, 0 filtered' || exit 1
 alice_proof="alice consumer proof: Alice-LG $alice_version read rs0 with 4 up neighbors, 7 accepted routes, 0 filtered routes, the labeled split-horizon noexport route, and one accepted prefix-lookup hit"
 timeout 60s python3 "$root/alice-consumer.py" "$alice_api" "$alice_version" >"$tmp/alice-consumer.out"
@@ -537,7 +537,7 @@ while [ "$(date +%s)" -lt "$alice_deadline" ]; do
 done
 alice_ready || exit 1
 
-wait_alice_store 7 2 || exit 1
+wait_alice_store --filtered-peer || exit 1
 alice_refresh_cost 'five peers, 7 accepted, 2 filtered' || exit 1
 filtered_alice_proof="alice filtered proof: Alice-LG $alice_version read rs0 with 5 up neighbors, preserved 7 accepted routes and 4 empty baseline filtered views, joined an AS-path-loop and an import-policy rejection to their exact labels, and found both through prefix lookup"
 timeout 60s python3 "$root/alice-consumer.py" \

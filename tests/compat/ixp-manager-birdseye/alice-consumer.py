@@ -60,12 +60,16 @@ def nested_label(document, section, community):
 
 
 def main():
-    filtered_flag_invalid = len(sys.argv) == 4 and sys.argv[3] != "--filtered-peer"
-    if len(sys.argv) not in (3, 4) or filtered_flag_invalid:
-        fail("usage: alice-consumer.py BASE_URL EXPECTED_VERSION [--filtered-peer]")
+    flags = sys.argv[3:]
+    if (
+        len(sys.argv) < 3
+        or len(flags) != len(set(flags))
+        or set(flags) - {"--filtered-peer", "--stores-ready"}
+    ):
+        fail("usage: alice-consumer.py BASE_URL EXPECTED_VERSION [--filtered-peer] [--stores-ready]")
     base = sys.argv[1].rstrip("/")
     expected_version = sys.argv[2]
-    filtered_peer = len(sys.argv) == 4
+    filtered_peer = "--filtered-peer" in flags
 
     status = get_json(base, "/status")
     if status.get("version") != expected_version:
@@ -74,6 +78,27 @@ def main():
     expected_totals = {"imported": 7, "filtered": 2 if filtered_peer else 0}
     if store_totals != expected_totals:
         fail(f"routes store totals drifted: {store_totals!r}")
+
+    neighbors = get_json(base, "/routeservers/rs0/neighbors").get("neighbors")
+    if not isinstance(neighbors, list):
+        fail("neighbors is not an array")
+    expected_peers = {
+        "pb_as64496",
+        "pb6_as64496",
+        "pb_as64497",
+        "pb6_as64497",
+    }
+    if filtered_peer:
+        expected_peers.add("pb_as64498")
+    by_id = {neighbor.get("id"): neighbor for neighbor in neighbors}
+    if len(neighbors) != len(expected_peers) or set(by_id) != expected_peers:
+        fail(f"neighbor IDs drifted: {[neighbor.get('id') for neighbor in neighbors]}")
+    down = sorted(peer for peer, neighbor in by_id.items() if neighbor.get("state") != "up")
+    if down:
+        fail(f"neighbors not up: {down}")
+
+    if "--stores-ready" in flags:
+        return
 
     config = get_json(base, "/config")
     if config.get("prefix_lookup_enabled") is not True:
@@ -113,24 +138,6 @@ def main():
         fail(f"expected exactly route server rs0, got {route_servers!r}")
     if route_servers[0].get("group") != "rustbgpd-contract":
         fail(f"route server group drifted: {route_servers[0]!r}")
-
-    neighbors = get_json(base, "/routeservers/rs0/neighbors").get("neighbors")
-    if not isinstance(neighbors, list):
-        fail("neighbors is not an array")
-    expected_peers = {
-        "pb_as64496",
-        "pb6_as64496",
-        "pb_as64497",
-        "pb6_as64497",
-    }
-    if filtered_peer:
-        expected_peers.add("pb_as64498")
-    by_id = {neighbor.get("id"): neighbor for neighbor in neighbors}
-    if set(by_id) != expected_peers:
-        fail(f"neighbor IDs drifted: {sorted(str(value) for value in by_id)}")
-    down = sorted(peer for peer, neighbor in by_id.items() if neighbor.get("state") != "up")
-    if down:
-        fail(f"neighbors not up: {down}")
 
     expected_routes = {
         "pb_as64496": {
