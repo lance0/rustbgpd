@@ -346,7 +346,13 @@ impl crate::attribute::ExtendedCommunity {
             // Traffic-rate bytes (transitive): 0x80, 0x06
             (0x80, 0x06) => {
                 let asn = u16::from_be_bytes([bytes[2], bytes[3]]);
-                let rate = f32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+                let raw_rate = f32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+                // RFC 8955 §7.1: "On decoding, negative values MUST be treated as zero (discard all traffic)."
+                let rate = if raw_rate <= 0.0 || raw_rate.is_nan() {
+                    0.0
+                } else {
+                    raw_rate
+                };
                 Some(FlowSpecAction::TrafficRateBytes { asn, rate })
             }
             // Traffic-action: 0x80, 0x07
@@ -371,7 +377,13 @@ impl crate::attribute::ExtendedCommunity {
             // Traffic-rate packets: 0x80, 0x0c
             (0x80, 0x0c) => {
                 let asn = u16::from_be_bytes([bytes[2], bytes[3]]);
-                let rate = f32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+                let raw_rate = f32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+                // RFC 8955 §7.2: "On decoding, negative values MUST be treated as zero (discard all traffic)."
+                let rate = if raw_rate <= 0.0 || raw_rate.is_nan() {
+                    0.0
+                } else {
+                    raw_rate
+                };
                 Some(FlowSpecAction::TrafficRatePackets { asn, rate })
             }
             // Redirect IPv4: 0x81, 0x08
@@ -399,13 +411,25 @@ impl crate::attribute::ExtendedCommunity {
                 bytes[0] = 0x80;
                 bytes[1] = 0x06;
                 bytes[2..4].copy_from_slice(&asn.to_be_bytes());
-                bytes[4..8].copy_from_slice(&rate.to_be_bytes());
+                // RFC 8955 §7.1: "On encoding, the traffic-rate MUST NOT be negative."
+                let safe_rate = if *rate <= 0.0 || rate.is_nan() {
+                    0.0
+                } else {
+                    *rate
+                };
+                bytes[4..8].copy_from_slice(&safe_rate.to_be_bytes());
             }
             FlowSpecAction::TrafficRatePackets { asn, rate } => {
                 bytes[0] = 0x80;
                 bytes[1] = 0x0c;
                 bytes[2..4].copy_from_slice(&asn.to_be_bytes());
-                bytes[4..8].copy_from_slice(&rate.to_be_bytes());
+                // RFC 8955 §7.2: "On encoding, the traffic-rate-packets MUST NOT be negative."
+                let safe_rate = if *rate <= 0.0 || rate.is_nan() {
+                    0.0
+                } else {
+                    *rate
+                };
+                bytes[4..8].copy_from_slice(&safe_rate.to_be_bytes());
             }
             FlowSpecAction::TrafficAction { sample, terminal } => {
                 bytes[0] = 0x80;
@@ -1490,6 +1514,61 @@ mod tests {
         }
     }
 
+    #[test]
+    fn traffic_rate_negative_values_clamped_to_zero() {
+        // RFC 8955 §7.1 / §7.2: "On decoding, negative values MUST be treated as zero (discard all traffic)."
+        let mut raw_bytes = [0u8; 8];
+        raw_bytes[0] = 0x80;
+        raw_bytes[1] = 0x06;
+        raw_bytes[2..4].copy_from_slice(&65000u16.to_be_bytes());
+        raw_bytes[4..8].copy_from_slice(&(-100.0f32).to_be_bytes());
+        let ec = crate::attribute::ExtendedCommunity::new(u64::from_be_bytes(raw_bytes));
+        let decoded = ec.as_flowspec_action().unwrap();
+        match decoded {
+            FlowSpecAction::TrafficRateBytes { asn, rate } => {
+                assert_eq!(asn, 65000);
+                assert_eq!(rate.to_bits(), 0.0f32.to_bits());
+                assert!(!rate.is_sign_negative());
+            }
+            _ => panic!("wrong action type"),
+        }
+
+        raw_bytes[1] = 0x0c;
+        raw_bytes[4..8].copy_from_slice(&(-50.0f32).to_be_bytes());
+        let ec = crate::attribute::ExtendedCommunity::new(u64::from_be_bytes(raw_bytes));
+        let decoded = ec.as_flowspec_action().unwrap();
+        match decoded {
+            FlowSpecAction::TrafficRatePackets { asn, rate } => {
+                assert_eq!(asn, 65000);
+                assert_eq!(rate.to_bits(), 0.0f32.to_bits());
+                assert!(!rate.is_sign_negative());
+            }
+            _ => panic!("wrong action type"),
+        }
+
+        // -0.0 decodes to positive 0.0
+        raw_bytes[4..8].copy_from_slice(&(-0.0f32).to_be_bytes());
+        let ec = crate::attribute::ExtendedCommunity::new(u64::from_be_bytes(raw_bytes));
+        let decoded = ec.as_flowspec_action().unwrap();
+        match decoded {
+            FlowSpecAction::TrafficRatePackets { rate, .. } => {
+                assert_eq!(rate.to_bits(), 0.0f32.to_bits());
+                assert!(!rate.is_sign_negative());
+            }
+            _ => panic!("wrong action type"),
+        }
+
+        // Encoding negative rate clamps to 0.0 on the wire (RFC 8955 §7.1)
+        let action = FlowSpecAction::TrafficRateBytes {
+            asn: 65000,
+            rate: -100.0,
+        };
+        let ec = crate::attribute::ExtendedCommunity::from_flowspec_action(&action);
+        let bytes = ec.as_u64().to_be_bytes();
+        let encoded_rate = f32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+        assert_eq!(encoded_rate.to_bits(), 0.0f32.to_bits());
+        assert!(!encoded_rate.is_sign_negative());
+    }
     #[test]
     fn traffic_action_roundtrip() {
         let action = FlowSpecAction::TrafficAction {
