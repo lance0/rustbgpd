@@ -871,3 +871,543 @@ async fn normal_operator_import_snapshot_does_not_block_other_operator_reads() {
     task.abort();
     let _ = task.await;
 }
+
+/// A neighbor snapshot must not consume the remaining stats budget while its
+/// session is free to answer counters. Ordinary mutations still wait until
+/// the snapshot completes or its caller cancels it.
+fn held_neighbor_query_handle(
+    address: IpAddr,
+    state_admitted: mpsc::UnboundedSender<oneshot::Sender<PeerSessionState>>,
+    imports: Arc<AtomicUsize>,
+) -> PeerHandle {
+    let (commands, mut commands_rx) = mpsc::channel(4);
+    let session = tokio::spawn(async move {
+        while let Some(command) = commands_rx.recv().await {
+            match command {
+                PeerCommand::QueryState { reply } => {
+                    // Hold only this reply; the session keeps receiving and
+                    // can answer import counters immediately.
+                    let _ = state_admitted.send(reply);
+                }
+                PeerCommand::QueryImportPolicyTermHits { reply } => {
+                    imports.fetch_add(1, Ordering::SeqCst);
+                    let _ = reply.send(Some(controlled_policy_snapshot(address)));
+                }
+                PeerCommand::Stop { .. } => {}
+                PeerCommand::Shutdown => break,
+                other => panic!("unexpected peer command: {other:?}"),
+            }
+        }
+        Ok(())
+    });
+    PeerHandle::from_parts(commands, session)
+}
+
+#[tokio::test(start_paused = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one actor scenario checks five read routes, both caller outcomes, and mutation ordering"
+)]
+async fn normal_operator_neighbor_snapshot_does_not_exhaust_import_stats_deadline() {
+    use rustbgpd_api::peer_types::{PeerManagerOperatorQuery, PeerManagerReadinessQuery};
+
+    let mut outcomes = Vec::new();
+    for (lane, cancel_snapshot) in [
+        "operator_list",
+        "ordinary_list",
+        "readiness_list",
+        "operator_get",
+        "ordinary_get",
+    ]
+    .into_iter()
+    .flat_map(|lane| [false, true].map(|cancel| (lane, cancel)))
+    {
+        let (command_tx, command_rx) = mpsc::channel(4);
+        let (operator_tx, operator_rx) = mpsc::channel(4);
+        let (readiness_tx, readiness_rx) = mpsc::channel(4);
+        let mut manager = test_peer_manager()
+            .with_operator_queries(operator_rx)
+            .with_readiness_queries(readiness_rx);
+        manager.rx = command_rx;
+        let address: IpAddr = "192.0.2.1".parse().unwrap();
+        let (state_admitted, mut state_replies) = mpsc::unbounded_channel();
+        let imports = Arc::new(AtomicUsize::new(0));
+        insert_test_managed_peer(
+            &mut manager,
+            address,
+            held_neighbor_query_handle(address, state_admitted, imports.clone()),
+            false,
+        );
+        let actor = tokio::spawn(manager.run());
+        let (reply, mut snapshot) = oneshot::channel();
+        let (single_reply, mut single_snapshot) = oneshot::channel();
+        match lane {
+            "operator_list" => operator_tx
+                .send(PeerManagerOperatorQuery::ListPeers { reply })
+                .await
+                .unwrap(),
+            "ordinary_list" => command_tx
+                .send(PeerManagerCommand::ListPeers { reply })
+                .await
+                .unwrap(),
+            "readiness_list" => readiness_tx
+                .send(PeerManagerReadinessQuery::ListPeers { reply })
+                .await
+                .unwrap(),
+            "operator_get" => operator_tx
+                .send(PeerManagerOperatorQuery::GetPeerState {
+                    peer: key(address),
+                    reply: single_reply,
+                })
+                .await
+                .unwrap(),
+            "ordinary_get" => command_tx
+                .send(PeerManagerCommand::GetPeerState {
+                    peer: key(address),
+                    reply: single_reply,
+                })
+                .await
+                .unwrap(),
+            _ => unreachable!(),
+        }
+        let state_reply = tokio::time::timeout(Duration::from_secs(1), state_replies.recv())
+            .await
+            .expect("neighbor query must reach the session")
+            .unwrap();
+
+        // Further neighbor reads ahead of stats must stay deferred, without
+        // starting another state-query cohort or hiding the import request.
+        let (reply, deferred_list) = oneshot::channel();
+        operator_tx
+            .send(PeerManagerOperatorQuery::ListPeers { reply })
+            .await
+            .unwrap();
+        let (reply, deferred_get) = oneshot::channel();
+        operator_tx
+            .send(PeerManagerOperatorQuery::GetPeerState {
+                peer: key(address),
+                reply,
+            })
+            .await
+            .unwrap();
+
+        // Model the last 50 ms of the existing absolute RPC budget after
+        // earlier stages. This changes no production timeout constant.
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(50);
+        let (reply, mut stats) = oneshot::channel();
+        operator_tx
+            .send(PeerManagerOperatorQuery::QueryImportPolicyTermHits {
+                peer: None,
+                deadline,
+                reply,
+            })
+            .await
+            .unwrap();
+        let (reply, mut mutation) = oneshot::channel();
+        command_tx
+            .send(PeerManagerCommand::DisablePeer {
+                peer: key(address),
+                reason: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        let timely = tokio::time::timeout_at(deadline, &mut stats).await;
+        assert!(matches!(
+            mutation.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        if lane.ends_with("_get") {
+            assert!(matches!(
+                single_snapshot.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+        } else {
+            assert!(matches!(
+                snapshot.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+        }
+        assert!(
+            state_replies.try_recv().is_err(),
+            "deferred neighbors must not fan out"
+        );
+        drop((deferred_list, deferred_get));
+        assert!(!state_reply.is_closed());
+
+        let canceled_state_reply = if cancel_snapshot {
+            drop((snapshot, single_snapshot));
+            Some(state_reply)
+        } else {
+            state_reply
+                .send(policy_test_peer_state(address, SessionState::Established))
+                .unwrap();
+            let peers = if lane.ends_with("_get") {
+                vec![single_snapshot.await.unwrap().unwrap()]
+            } else {
+                snapshot.await.unwrap()
+            };
+            assert_eq!(peers.len(), 1);
+            assert_eq!(peers[0].address, address);
+            assert!(peers[0].enabled && !peers[0].stale);
+            None
+        };
+        let (on_time, outcome) = match timely {
+            Ok(result) => (true, result.unwrap()),
+            Err(_) => (false, stats.await.unwrap()),
+        };
+        mutation.await.unwrap().unwrap();
+        if let Some(state_reply) = canceled_state_reply {
+            assert!(
+                state_reply.is_closed(),
+                "cancellation closes the state query"
+            );
+        }
+        command_tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+        actor.await.unwrap();
+        assert!(
+            state_replies.try_recv().is_err(),
+            "canceled deferred reads must not query sessions"
+        );
+        outcomes.push((
+            lane,
+            cancel_snapshot,
+            on_time,
+            imports.load(Ordering::SeqCst),
+            outcome,
+        ));
+    }
+
+    // Check after cleanup, retaining both the completion and cancellation
+    // cases when the current inline ListPeers handler exhausts the deadline.
+    for (lane, cancel_snapshot, on_time, dispatched, outcome) in outcomes {
+        assert!(
+            on_time,
+            "{lane} cancellation={cancel_snapshot}: import missed its remaining deadline; \
+             dispatched={dispatched}, outcome={outcome:?}"
+        );
+        assert_eq!(dispatched, 1);
+        assert!(matches!(outcome, SessionQueryOutcome::Reply(rows)
+            if rows.len() == 1 && rows[0].0 == "192.0.2.1".parse::<IpAddr>().unwrap()
+                && rows[0].1.generation == 1 && rows[0].1.evals == 1));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn normal_snapshot_admission_budget_yields_to_completion_and_cancellation() {
+    use rustbgpd_api::peer_types::PeerManagerOperatorQuery;
+
+    for (cancel, exhaust_budget) in [(false, true), (true, true), (true, false)] {
+        let (operator_tx, operator_rx) = mpsc::channel(2);
+        let mut manager = test_peer_manager().with_operator_queries(operator_rx);
+        let address: IpAddr = "192.0.2.1".parse().unwrap();
+        let (state_admitted, mut state_replies) = mpsc::unbounded_channel();
+        insert_test_managed_peer(
+            &mut manager,
+            address,
+            held_neighbor_query_handle(address, state_admitted, Arc::new(AtomicUsize::new(0))),
+            false,
+        );
+        let (reply, response) = oneshot::channel();
+        let worker = tokio::spawn(async move {
+            manager
+                .answer_normal_operator_query(PeerManagerOperatorQuery::ListPeers { reply })
+                .await;
+            manager
+        });
+        let state_reply = state_replies.recv().await.unwrap();
+        let started = tokio::time::Instant::now();
+        // Refill after each reply: limiting just the deferred queue would
+        // admit these lightweight reads forever while the snapshot is held.
+        for _ in 0..if exhaust_budget { 2 } else { 1 } {
+            let (reply, response) = oneshot::channel();
+            operator_tx
+                .send(PeerManagerOperatorQuery::HasPeerAddress { address, reply })
+                .await
+                .unwrap();
+            assert!(response.await.unwrap());
+        }
+        let (reply, mut excess) = oneshot::channel();
+        operator_tx
+            .try_send(PeerManagerOperatorQuery::HasPeerAddress { address, reply })
+            .unwrap();
+        let (reply, mut datasets) = oneshot::channel();
+        operator_tx
+            .try_send(PeerManagerOperatorQuery::QueryPolicyDatasets { reply })
+            .unwrap();
+        // With an open slot, close the snapshot before yielding so its
+        // cancellation and the queued read are ready in the same poll.
+        if exhaust_budget {
+            for _ in 0..5 {
+                tokio::task::yield_now().await;
+            }
+        }
+        assert!(matches!(
+            excess.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            datasets.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert_eq!(
+            operator_tx.capacity(),
+            0,
+            "the admission cap leaves excess reads queued"
+        );
+        if cancel {
+            drop(response);
+        } else {
+            state_reply
+                .send(policy_test_peer_state(address, SessionState::Established))
+                .unwrap();
+            assert_eq!(response.await.unwrap().len(), 1);
+        }
+        let mut manager = worker.await.unwrap();
+        assert_eq!(
+            tokio::time::Instant::now(),
+            started,
+            "a ready read flood cannot delay snapshot release"
+        );
+        assert_eq!(
+            operator_tx.capacity(),
+            0,
+            "snapshot completion wins before another read is consumed"
+        );
+        for _ in 0..2 {
+            let query = PeerManager::receive_operator_query(
+                &mut manager.operator_rx,
+                &mut manager.deferred_operator_queries,
+            )
+            .await
+            .unwrap();
+            manager.handle_operator_query(query, false).await;
+        }
+        assert!(excess.await.unwrap());
+        assert!(datasets.await.unwrap().is_empty());
+        assert_eq!(
+            operator_tx.capacity(),
+            2,
+            "the original receiver is restored and remains usable"
+        );
+        assert!(state_replies.try_recv().is_err());
+        for (_, managed) in manager.peers.drain() {
+            managed.handle.shutdown().await.unwrap().unwrap();
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "two consecutive snapshots share one deferred queue to prove its bound and ordering"
+)]
+async fn normal_snapshot_deferred_limit_and_order_survive_repeated_reads() {
+    use rustbgpd_api::peer_types::PeerManagerOperatorQuery;
+
+    let (operator_tx, operator_rx) = mpsc::channel(2);
+    let mut manager = test_peer_manager().with_operator_queries(operator_rx);
+    let address: IpAddr = "192.0.2.1".parse().unwrap();
+    let (state_admitted, mut state_replies) = mpsc::unbounded_channel();
+    insert_test_managed_peer(
+        &mut manager,
+        address,
+        held_neighbor_query_handle(address, state_admitted, Arc::new(AtomicUsize::new(0))),
+        false,
+    );
+    let (reply, response) = oneshot::channel();
+    let worker = tokio::spawn(async move {
+        manager
+            .answer_normal_operator_query(PeerManagerOperatorQuery::ListPeers { reply })
+            .await;
+        manager
+    });
+    let state_reply = state_replies.recv().await.unwrap();
+    let (reply, first_list) = oneshot::channel();
+    operator_tx
+        .send(PeerManagerOperatorQuery::ListPeers { reply })
+        .await
+        .unwrap();
+    let (reply, first_get) = oneshot::channel();
+    operator_tx
+        .send(PeerManagerOperatorQuery::GetPeerState {
+            peer: key(address),
+            reply,
+        })
+        .await
+        .unwrap();
+    for _ in 0..5 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(operator_tx.capacity(), 2);
+    let (reply, second_list) = oneshot::channel();
+    operator_tx
+        .send(PeerManagerOperatorQuery::ListPeers { reply })
+        .await
+        .unwrap();
+    let (reply, second_get) = oneshot::channel();
+    operator_tx
+        .send(PeerManagerOperatorQuery::GetPeerState {
+            peer: key(address),
+            reply,
+        })
+        .await
+        .unwrap();
+    state_reply
+        .send(policy_test_peer_state(address, SessionState::Established))
+        .unwrap();
+    assert_eq!(response.await.unwrap().len(), 1);
+    let mut manager = worker.await.unwrap();
+    assert_eq!(manager.deferred_operator_queries.len(), 2);
+    assert_eq!(operator_tx.capacity(), 0);
+    assert!(
+        state_replies.try_recv().is_err(),
+        "only one neighbor cohort may run"
+    );
+    let first = PeerManager::receive_operator_query(
+        &mut manager.operator_rx,
+        &mut manager.deferred_operator_queries,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(first, PeerManagerOperatorQuery::ListPeers { .. }));
+    let worker = tokio::spawn(async move {
+        manager.answer_normal_operator_query(first).await;
+        manager
+    });
+    let state_reply = state_replies.recv().await.unwrap();
+    for _ in 0..5 {
+        tokio::task::yield_now().await;
+    }
+    // One old deferred request plus one new request fills the same cap.
+    assert_eq!(
+        operator_tx.capacity(),
+        1,
+        "the deferred bound spans successive snapshots"
+    );
+    assert!(state_replies.try_recv().is_err());
+    drop(first_list);
+    let mut manager = worker.await.unwrap();
+    for _ in 0..5 {
+        tokio::task::yield_now().await;
+    }
+    assert!(state_reply.is_closed());
+    assert_eq!(manager.deferred_operator_queries.len(), 2);
+    drop((first_get, second_list, second_get));
+    for expected_get in [true, false, true] {
+        let query = PeerManager::receive_operator_query(
+            &mut manager.operator_rx,
+            &mut manager.deferred_operator_queries,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            matches!(query, PeerManagerOperatorQuery::GetPeerState { .. }),
+            expected_get
+        );
+        manager.handle_operator_query(query, false).await;
+    }
+    assert!(manager.deferred_operator_queries.is_empty());
+    assert_eq!(operator_tx.capacity(), 2);
+    assert!(
+        state_replies.try_recv().is_err(),
+        "preclosed deferred requests never start drivers"
+    );
+    for (_, managed) in manager.peers.drain() {
+        managed.handle.shutdown().await.unwrap().unwrap();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn deferred_neighbor_read_survives_receiver_close_and_fences_prestage_ack() {
+    use rustbgpd_api::peer_types::PeerManagerOperatorQuery;
+
+    for cancel in [false, true] {
+        let (operator_tx, operator_rx) = mpsc::channel(4);
+        let mut manager = test_peer_manager().with_operator_queries(operator_rx);
+        let address: IpAddr = "192.0.2.1".parse().unwrap();
+        let (state_admitted, mut state_replies) = mpsc::unbounded_channel();
+        insert_test_managed_peer(
+            &mut manager,
+            address,
+            held_neighbor_query_handle(address, state_admitted, Arc::new(AtomicUsize::new(0))),
+            false,
+        );
+        let (reply, response) = oneshot::channel();
+        let worker = tokio::spawn(async move {
+            manager
+                .answer_normal_operator_query(PeerManagerOperatorQuery::ListPeers { reply })
+                .await;
+            manager
+        });
+        let state_reply = state_replies.recv().await.unwrap();
+        let (reply, deferred_response) = oneshot::channel();
+        operator_tx
+            .send(PeerManagerOperatorQuery::ListPeers { reply })
+            .await
+            .unwrap();
+        let (reply, marker) = oneshot::channel();
+        operator_tx
+            .send(PeerManagerOperatorQuery::HasPeerAddress { address, reply })
+            .await
+            .unwrap();
+        assert!(
+            marker.await.unwrap(),
+            "the preceding neighbor read has been deferred"
+        );
+        drop(operator_tx);
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+        state_reply
+            .send(policy_test_peer_state(address, SessionState::Established))
+            .unwrap();
+        assert_eq!(response.await.unwrap().len(), 1);
+        let mut manager = worker.await.unwrap();
+        assert!(
+            manager.operator_rx.is_none(),
+            "closed receiver must not become a ready-loop source"
+        );
+        assert_eq!(manager.deferred_operator_queries.len(), 1);
+        let (ack, ack_rx) = oneshot::channel();
+        let worker = tokio::spawn(async move {
+            let result = manager
+                .await_with_readiness_and_operator_budget(ack_rx, Duration::from_secs(1), true)
+                .await;
+            assert!(matches!(result, Some(Ok(()))));
+            manager
+        });
+        let state_reply = state_replies.recv().await.unwrap();
+        ack.send(()).unwrap();
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !worker.is_finished(),
+            "an admitted deferred read must finish before prestage advances"
+        );
+        if cancel {
+            drop(deferred_response);
+        } else {
+            state_reply
+                .send(policy_test_peer_state(address, SessionState::Established))
+                .unwrap();
+            assert_eq!(deferred_response.await.unwrap().len(), 1);
+        }
+        let mut manager = worker.await.unwrap();
+        assert!(manager.deferred_operator_queries.is_empty());
+        assert!(manager.operator_rx.is_none());
+        let mut receive = Box::pin(PeerManager::receive_operator_query(
+            &mut manager.operator_rx,
+            &mut manager.deferred_operator_queries,
+        ));
+        assert!(matches!(
+            futures::poll!(receive.as_mut()),
+            std::task::Poll::Pending
+        ));
+        drop(receive);
+        for (_, managed) in manager.peers.drain() {
+            managed.handle.shutdown().await.unwrap().unwrap();
+        }
+    }
+}

@@ -195,6 +195,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Local failed binds remain red; default wildcard probes tolerate one unavailable
   address family, and remote listener probes identify their CLI vantage.
 
+- Policy-statistics reads can proceed while a normal neighbor inventory or
+  detail read waits for session state. Additional neighbor reads remain bounded,
+  and peer mutations wait for the active snapshot to finish or be canceled.
+  Request deadlines and policy-transaction fences are unchanged.
+
 - Neighbor and policy-statistics reads can complete during a forward SIGHUP
   generation's export-destination prestaging, before installed policies or
   datasets change. Later policy application, rollback, and standalone mutations
