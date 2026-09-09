@@ -237,9 +237,11 @@ remain responsible for shell scripts.
 
 We ship a `.pre-commit-config.yaml` that runs `cargo fmt --all` and
 `cargo clippy --locked --workspace --all-targets -- -D warnings` on relevant
-commits, workspace library tests on relevant pushes, and rustdoc on every push. The
-hooks are a fast local subset, not an exact CI mirror or a guarantee that a
-pull request is ready. `cargo test` is gated to pre-push (not pre-commit) so
+commits, workspace library tests on relevant pushes, and rustdoc when Rust
+sources, manifests, lockfiles, protobuf schemas, embedded policy, or Cargo/toolchain
+configuration change. Prose-only pushes skip Rust builds; run `just links` and
+the relevant documentation contracts for those changes. The hooks are a local
+subset, not an exact CI mirror or a guarantee that a pull request is ready. `cargo test` is gated to pre-push (not pre-commit) so
 commits stay fast.
 
 Set it up once:

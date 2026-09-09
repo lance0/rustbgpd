@@ -6,7 +6,7 @@
 # --no-deps --document-private-items plus the rustbgpd and rbgp binaries).
 #
 # `cargo test --lib` + rustdoc are at pre-push (not pre-commit) so commits
-# stay fast; cargo fmt + clippy run on every commit.
+# stay fast; Rust hooks run only when their inputs change.
 #
 # Rustdoc warning denial comes from `.cargo/config.toml`
 # (build.rustdocflags), NOT an inline RUSTDOCFLAGS env: setting the env
@@ -57,7 +57,8 @@ repos:
         name: cargo doc
         entry: bash scripts/build-lock.sh cargo doc --locked --workspace --lib --no-deps --document-private-items
         language: system
-        always_run: true
+        files: &rustdoc-inputs '(^|/)([^/]+\.rs|Cargo\.toml|Cargo\.lock)$|^(\.cargo/config(\.toml)?|rust-toolchain(\.toml)?|proto/.*\.proto|examples/route-server/hygiene\.rpol)$'
+        types: [file]
         pass_filenames: false
         stages: [pre-push]
 
@@ -65,7 +66,8 @@ repos:
         name: cargo doc (rustbgpd binary)
         entry: bash scripts/build-lock.sh cargo doc --locked -p rustbgpd --bin rustbgpd --no-deps
         language: system
-        always_run: true
+        files: *rustdoc-inputs
+        types: [file]
         pass_filenames: false
         stages: [pre-push]
 
@@ -73,6 +75,7 @@ repos:
         name: cargo doc (rbgp binary)
         entry: bash scripts/build-lock.sh cargo doc --locked -p rustbgpctl --bin rbgp --no-deps
         language: system
-        always_run: true
+        files: *rustdoc-inputs
+        types: [file]
         pass_filenames: false
         stages: [pre-push]
