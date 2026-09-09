@@ -475,32 +475,78 @@ async fn unnumbered_ipv4_without_extended_nexthop_does_not_fallback_to_body_nlri
 }
 
 #[tokio::test]
-async fn ipv4_route_with_ipv6_next_hop_without_extended_nexthop_rejects_export() {
-    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65001);
-    let negotiated = negotiated_session(65001, false);
-    session.negotiated = Some(Arc::new(negotiated));
-    let profile = session.publish_export_profile();
+async fn ipv4_route_with_ipv6_next_hop_gates_reflection_on_extended_nexthop() {
     let mut route = make_route(100);
-    route.next_hop = IpAddr::V6("2001:db8::1".parse().unwrap());
-    let Err(error) = profile.probe_announcement(ExportCandidate::Unicast {
-        route: &route,
-        next_hop_override: None,
-    }) else {
-        panic!("expected ExportProbeError::Ipv4RequiresExtendedNextHop");
-    };
-    assert_eq!(error, ExportProbeError::Ipv4RequiresExtendedNextHop);
+    route.next_hop = "2001:db8::1".parse().unwrap();
+    Arc::make_mut(&mut route.attributes).retain(|attr| !matches!(attr, PathAttribute::NextHop(_)));
 
-    let (mut ebgp_session, _rib_rx) = make_test_session_with_rib(65001, 65002);
-    let negotiated = negotiated_session(65002, false);
-    ebgp_session.negotiated = Some(Arc::new(negotiated));
-    let profile = ebgp_session.publish_export_profile();
-    let Err(error) = profile.probe_announcement(ExportCandidate::Unicast {
-        route: &route,
-        next_hop_override: None,
-    }) else {
-        panic!("expected ExportProbeError::Ipv4RequiresExtendedNextHop");
-    };
-    assert_eq!(error, ExportProbeError::Ipv4RequiresExtendedNextHop);
+    for (remote_asn, route_server_client) in [(65001, false), (65002, true)] {
+        for extended_nexthop in [false, true] {
+            let (mut session, _rib_rx) = make_test_session_with_rib(65001, remote_asn);
+            session.config.route_server_client = route_server_client;
+            session.negotiated = Some(Arc::new(negotiated_session(remote_asn, extended_nexthop)));
+            let profile = session.publish_export_profile();
+            let result = profile.probe_announcement(ExportCandidate::Unicast {
+                route: &route,
+                next_hop_override: None,
+            });
+            if extended_nexthop {
+                result.unwrap();
+                let export::PreparedUnicastCandidate::Mp { next_hop, .. } =
+                    profile.prepare_unicast_candidate(&route, None).unwrap()
+                else {
+                    panic!("IPv6 next-hop reflection must use MP_REACH");
+                };
+                assert_eq!(next_hop, route.next_hop);
+            } else {
+                let Err(error) = result else {
+                    panic!("unchanged IPv6 next-hop requires Extended Next Hop");
+                };
+                assert_eq!(error, ExportProbeError::Ipv4RequiresExtendedNextHop);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn ipv4_route_with_ipv6_next_hop_allows_ipv4_rewrite_without_extended_nexthop() {
+    use rustbgpd_policy::NextHopAction;
+
+    let mut route = make_route(100);
+    route.next_hop = "2001:db8::1".parse().unwrap();
+    Arc::make_mut(&mut route.attributes).retain(|attr| !matches!(attr, PathAttribute::NextHop(_)));
+    let local_ipv4 = Ipv4Addr::new(10, 0, 0, 1);
+    let specific_ipv4 = Ipv4Addr::new(192, 0, 2, 99);
+
+    for (remote_asn, route_server_client, nh_override, expected) in [
+        (65002, false, None, local_ipv4),
+        (65001, false, Some(NextHopAction::Self_), local_ipv4),
+        (65002, true, Some(NextHopAction::Self_), local_ipv4),
+        (
+            65001,
+            false,
+            Some(NextHopAction::Specific(IpAddr::V4(specific_ipv4))),
+            specific_ipv4,
+        ),
+    ] {
+        let (mut session, _rib_rx) = make_test_session_with_rib(65001, remote_asn);
+        session.config.route_server_client = route_server_client;
+        session.negotiated = Some(Arc::new(negotiated_session(remote_asn, false)));
+        let profile = session.publish_export_profile();
+        profile
+            .probe_announcement(ExportCandidate::Unicast {
+                route: &route,
+                next_hop_override: nh_override.as_ref(),
+            })
+            .unwrap();
+        let export::PreparedUnicastCandidate::Ipv4Body { attrs, .. } = profile
+            .prepare_unicast_candidate(&route, nh_override.as_ref())
+            .unwrap()
+        else {
+            panic!("IPv4 rewrite without Extended Next Hop must use body NLRI");
+        };
+        assert!(attrs.contains(&PathAttribute::NextHop(expected)));
+    }
 }
 
 #[tokio::test]

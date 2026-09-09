@@ -965,7 +965,12 @@ impl SessionExportProfile {
                 })
             }
             Prefix::V4(prefix) => {
-                if self.scoped_link_local_peer || route.next_hop.is_ipv6() {
+                if self.scoped_link_local_peer
+                    || !attrs
+                        .with_next_hop
+                        .iter()
+                        .any(|attr| matches!(attr, PathAttribute::NextHop(_)))
+                {
                     return Err(ExportProbeError::Ipv4RequiresExtendedNextHop);
                 }
                 Ok(PreparedUnicastCandidate::Ipv4Body {
@@ -1649,8 +1654,9 @@ impl std::fmt::Display for ExportProbeError {
         match self {
             Self::Encode(error) => error.fmt(formatter),
             Self::MissingIpv6NextHop => formatter.write_str("no usable local IPv6 next-hop"),
-            Self::Ipv4RequiresExtendedNextHop => formatter
-                .write_str("IPv4 with an IPv6 next-hop requires peer Extended Next Hop support"),
+            Self::Ipv4RequiresExtendedNextHop => {
+                formatter.write_str("IPv4 export requires peer Extended Next Hop support")
+            }
             Self::Vpnv4RequiresExtendedNextHop => formatter
                 .write_str("VPNv4 with an IPv6 next-hop requires peer Extended Next Hop support"),
             Self::UnmodeledEvpnRouteType => {

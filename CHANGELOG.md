@@ -86,6 +86,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- IPv4-unicast reflection with an unchanged IPv6 next hop now suppresses
+  export to peers without Extended Next Hop support, instead of emitting
+  classic IPv4 NLRI without NEXT_HOP. Ordinary eBGP and export-policy rewrites
+  that supply an IPv4 next hop remain eligible.
+
 - NOTIFICATION diagnostics now describe the maintained registered code/subcode
   table, including Connection Rejected and Other Configuration Change. Unknown
   pairs retain numeric values as `unassigned(code/subcode)` or
