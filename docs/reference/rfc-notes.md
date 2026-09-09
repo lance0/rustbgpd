@@ -1099,6 +1099,11 @@ carries inactive (absent), unlimited (zero), or finite.
 - Negotiation: exact 6-byte tuple matching (NLRI AFI, NLRI SAFI, NH AFI).
 - When negotiated, IPv4 unicast uses `MP_REACH_NLRI` / `MP_UNREACH_NLRI`
   with IPv6 next hop instead of body NLRI.
+- IPv4-unicast reflection with an unchanged IPv6 next hop requires the
+  recipient's Extended Next Hop receive capability (§5). Without it, export
+  is suppressed rather than sending classic IPv4 NLRI without NEXT_HOP.
+  Ordinary eBGP, next-hop-self, and explicit IPv4 export-policy rewrites
+  remain eligible when they supply a classic IPv4 NEXT_HOP.
 - VPNv4 reflection preserves the 24- or 48-octet next-hop encoding (§3/§5)
   and requires the recipient's VPNv4 IPv6-next-hop receive capability. A
   rejected replacement withdraws any previously advertised route; ordinary
