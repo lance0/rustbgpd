@@ -564,6 +564,7 @@ struct BgpMetricsInner {
     evpn_nlri_discarded: IntCounterVec,
     evpn_nlri_discarded_by_type: IntCounterVec,
     update_malformed: IntCounterVec,
+    update_malformed_causes: IntCounterVec,
     otc_routes_blocked: IntCounterVec,
     role_mismatch: IntCounterVec,
 
@@ -1801,6 +1802,14 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let update_malformed_causes = IntCounterVec::new(
+            Opts::new(
+                "bgp_update_malformed_causes_total",
+                "Reported malformed UPDATE causes by attribute type, bounded reason, and final applied disposition. Multiple causes may be reported per UPDATE.",
+            ),
+            &["peer", "type_code", "reason", "disposition"],
+        ).expect("valid metric definition");
+
         let otc_routes_blocked = IntCounterVec::new(
             Opts::new(
                 "bgp_otc_routes_blocked_total",
@@ -2858,6 +2867,9 @@ impl BgpMetrics {
             .register(Box::new(update_malformed.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(update_malformed_causes.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(otc_routes_blocked.clone()))
             .expect("metric not already registered");
         registry
@@ -3233,6 +3245,7 @@ impl BgpMetrics {
             evpn_nlri_discarded,
             evpn_nlri_discarded_by_type,
             update_malformed,
+            update_malformed_causes,
             otc_routes_blocked,
             role_mismatch,
             policy_routes,
@@ -3452,6 +3465,7 @@ impl BgpMetrics {
         Self::reap_peer_series_from_vec(&self.0.evpn_nlri_discarded, peer);
         Self::reap_peer_series_from_vec(&self.0.evpn_nlri_discarded_by_type, peer);
         Self::reap_peer_series_from_vec(&self.0.update_malformed, peer);
+        Self::reap_peer_series_from_vec(&self.0.update_malformed_causes, peer);
         Self::reap_peer_series_from_vec(&self.0.otc_routes_blocked, peer);
         Self::reap_peer_series_from_vec(&self.0.role_mismatch, peer);
         let policy_routes_removed = Self::reap_peer_series_from_vec(&self.0.policy_routes, peer);
@@ -4877,6 +4891,25 @@ impl BgpMetrics {
         self.0
             .update_malformed
             .with_label_values(&[peer, disposition.as_str()])
+            .inc();
+    }
+
+    /// Record one reported cause using the UPDATE's final applied disposition.
+    ///
+    /// Type labels are decimal 0..255 or `none` for unattributable failures.
+    /// Children are created only on observation; session resets retain them,
+    /// and configured peer removal reaps them with the other peer counters.
+    pub fn record_update_malformed_cause(
+        &self,
+        peer: &str,
+        type_code: Option<u8>,
+        reason: crate::reason_labels::MalformedUpdateReason,
+        disposition: crate::reason_labels::MalformedUpdateDisposition,
+    ) {
+        let type_code = type_code.map_or_else(|| "none".to_owned(), |code| code.to_string());
+        self.0
+            .update_malformed_causes
+            .with_label_values(&[peer, &type_code, reason.as_str(), disposition.as_str()])
             .inc();
     }
 
@@ -8121,6 +8154,51 @@ mod tests {
     }
 
     #[test]
+    fn malformed_causes_are_lazy_bounded_and_reaped() {
+        use crate::reason_labels::{MalformedUpdateDisposition, MalformedUpdateReason};
+        let _reap_guard = POLICY_ROUTES_REAP_TEST_LOCK.lock().unwrap();
+        let m = BgpMetrics::new();
+        m.initialize_update_malformed_series("10.0.0.1");
+        assert!(
+            !m.registry()
+                .gather()
+                .iter()
+                .any(|family| family.name() == "bgp_update_malformed_causes_total")
+        );
+        for type_code in [None, Some(0), Some(255)] {
+            for reason in MalformedUpdateReason::ALL {
+                for disposition in MalformedUpdateDisposition::ALL {
+                    m.record_update_malformed_cause("10.0.0.1", type_code, reason, disposition);
+                }
+            }
+        }
+        let families = m.registry().gather();
+        let family = families
+            .iter()
+            .find(|family| family.name() == "bgp_update_malformed_causes_total")
+            .unwrap();
+        assert_eq!(family.get_metric().len(), 3 * 15 * 3);
+        for metric in family.get_metric() {
+            assert!((metric.get_counter().value() - 1.0).abs() < f64::EPSILON);
+        }
+        m.record_state_transition("10.0.0.1", "established", "idle");
+        m.initialize_update_malformed_series("10.0.0.1");
+        assert_eq!(
+            m.0.update_malformed_causes
+                .with_label_values(&["10.0.0.1", "none", "other", "session_reset"])
+                .get(),
+            1
+        );
+        m.reap_peer_series("10.0.0.1");
+        assert!(
+            !m.registry()
+                .gather()
+                .iter()
+                .any(|family| family.name() == "bgp_update_malformed_causes_total")
+        );
+    }
+
+    #[test]
     fn update_malformed_counter_tracks_each_disposition_separately() {
         let m = BgpMetrics::new();
         for disposition in crate::reason_labels::MalformedUpdateDisposition::ALL {
@@ -8526,6 +8604,12 @@ mod tests {
         m.record_path_attribute_discarded(peer, 4, 1);
         m.record_evpn_nlri_discarded_by_type(peer, 0, 1);
         m.record_evpn_nlri_discarded_by_type(peer, 255, 2);
+        m.record_update_malformed_cause(
+            peer,
+            Some(2),
+            crate::reason_labels::MalformedUpdateReason::AsSetProhibited,
+            crate::reason_labels::MalformedUpdateDisposition::TreatAsWithdraw,
+        );
         m.record_update_malformed(
             peer,
             crate::reason_labels::MalformedUpdateDisposition::TreatAsWithdraw,
@@ -8574,10 +8658,10 @@ mod tests {
         let m = BgpMetrics::new();
         populate_all_peer_families(&m, "10.0.0.1");
         populate_all_peer_families(&m, "10.0.0.2");
-        // 71 peer-labeled series; state transitions and EVPN discard types
+        // 72 peer-labeled series; state transitions and EVPN discard types
         // hold two each, while exact
         // state and down-reason vocabularies materialize six rows each.
-        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 71);
+        assert_eq!(series_for_peer(&m, "10.0.0.1").len(), 72);
 
         m.reap_peer_series("10.0.0.1");
 
@@ -8587,7 +8671,7 @@ mod tests {
             "peer-labeled families not reaped: {leftovers:?}"
         );
         // The other peer's series are untouched.
-        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 71);
+        assert_eq!(series_for_peer(&m, "10.0.0.2").len(), 72);
     }
 
     /// Load-bearing finite/unlimited proof: removing either finite gauge
@@ -8833,7 +8917,7 @@ mod tests {
     // `gather()`, so no runtime check can catch one that is added and
     // left unpopulated; this list plus the struct doc comment is the
     // practical ceiling.
-    const PEER_LABELED_FAMILIES: [&str; 59] = [
+    const PEER_LABELED_FAMILIES: [&str; 60] = [
         "bfd_session_flaps_total",
         "bfd_session_up",
         "bgp_as_path_loop_detected_total",
@@ -8890,6 +8974,7 @@ mod tests {
         "bgp_session_established_total",
         "bgp_session_flaps_total",
         "bgp_session_state_transitions_total",
+        "bgp_update_malformed_causes_total",
         "bgp_update_malformed_total",
         "bmp_source_drops_total",
         "bmp_stream_diverged",

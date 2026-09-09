@@ -980,10 +980,7 @@ pub fn decode_path_attributes_counted(
 fn split_next_attribute<'a>(buf: &mut &'a [u8]) -> Result<(u8, u8, &'a [u8]), DecodeError> {
     // Need at least flags(1) + type(1) = 2
     if buf.len() < 2 {
-        return Err(DecodeError::MalformedField {
-            message_type: "UPDATE",
-            detail: "truncated attribute header".to_string(),
-        });
+        return Err(DecodeError::TruncatedAttributeHeader);
     }
     let flags = buf[0];
     let type_code = buf[1];
@@ -1120,6 +1117,7 @@ pub fn decode_path_attributes_revised(
 ) -> Result<RevisedAttributeDecode, DecodeError> {
     decode_path_attributes_revised_observed(buf, four_octet_as, is_ibgp, add_path_families)
         .map(|(decoded, _observations)| decoded)
+        .map_err(|context| context.error)
 }
 
 #[expect(
@@ -1136,7 +1134,7 @@ pub(crate) fn decode_path_attributes_revised_observed(
         RevisedAttributeDecode,
         crate::evpn::EvpnNlriDiscardObservations,
     ),
-    DecodeError,
+    crate::UpdateDecodeError,
 > {
     let mut attrs = Vec::new();
     let mut bgpls_discarded = 0_u32;
@@ -1155,7 +1153,10 @@ pub(crate) fn decode_path_attributes_revised_observed(
                         ..
                     }
                 ) {
-                    return Err(error);
+                    return Err(crate::UpdateDecodeError {
+                        error,
+                        type_code: Some(type_code),
+                    });
                 }
                 // RFC 7606 §4: framing overrun/underrun inside the attribute
                 // section is treat-as-withdraw — the section boundaries (and
@@ -1182,12 +1183,9 @@ pub(crate) fn decode_path_attributes_revised_observed(
             malformed.push(MalformedAttribute {
                 type_code,
                 disposition: ErrorDisposition::TreatAsWithdraw,
-                error: DecodeError::UpdateAttributeError {
-                    subcode: update_subcode::MALFORMED_AS_PATH,
+                error: DecodeError::ProhibitedAsSet {
+                    segment_type,
                     data: attr_error_data(flags, type_code, value),
-                    detail: format!(
-                        "RFC 9774 prohibits AS path segment type {segment_type} in attribute type {type_code}"
-                    ),
                 },
             });
         }
@@ -1207,7 +1205,10 @@ pub(crate) fn decode_path_attributes_revised_observed(
                 type_code,
                 attr_type::MP_REACH_NLRI | attr_type::MP_UNREACH_NLRI
             ) {
-                return Err(error);
+                return Err(crate::UpdateDecodeError {
+                    error,
+                    type_code: Some(type_code),
+                });
             }
             // RFC 7607: a later AS_PATH containing AS 0 still contributes
             // treat-as-withdraw before RFC 7606 discards the duplicate.
@@ -1276,6 +1277,14 @@ pub(crate) fn decode_path_attributes_revised_observed(
         ) {
             Ok(attr) => attrs.push(attr),
             Err(error) => {
+                // The raw occurrence was already classified above. Preserve
+                // independent framing/AS-zero errors, but not a second report
+                // of the same prohibited segment from semantic decoding.
+                if prohibited_segment.is_some()
+                    && matches!(error, DecodeError::ProhibitedAsSet { .. })
+                {
+                    continue;
+                }
                 // RFC 7606 §3 (c): an Optional/Transitive flag conflict is
                 // treat-as-withdraw for every attribute — the §7.6/§7.7
                 // attribute-discard covers length malformations only. A
@@ -1310,7 +1319,10 @@ pub(crate) fn decode_path_attributes_revised_observed(
                     disposition = disposition.max(ErrorDisposition::TreatAsWithdraw);
                 }
                 if disposition == ErrorDisposition::SessionReset {
-                    return Err(error);
+                    return Err(crate::UpdateDecodeError {
+                        error,
+                        type_code: Some(type_code),
+                    });
                 }
                 malformed.push(MalformedAttribute {
                     type_code,
@@ -1320,7 +1332,13 @@ pub(crate) fn decode_path_attributes_revised_observed(
             }
         }
     }
-    malformed.extend(normalize_as4_attributes(&mut attrs, four_octet_as, true));
+    malformed.extend(
+        normalize_as4_attributes(&mut attrs, four_octet_as, true)
+            .into_iter()
+            // Every raw AS4_PATH occurrence was inspected above, including
+            // duplicates; normalization must not report its set again.
+            .filter(|cause| !matches!(cause.error, DecodeError::ProhibitedAsSet { .. })),
+    );
     Ok((
         RevisedAttributeDecode {
             attributes: attrs,
@@ -1541,6 +1559,7 @@ fn decode_as4_path(raw: &RawAttribute) -> Result<(AsPath, bool), DecodeError> {
     let mut value = raw.data.as_ref();
     let mut segments = Vec::new();
     let mut confed_sequence_removed = false;
+    let mut prohibited_segment = None;
     while !value.is_empty() {
         if value.len() < 2 {
             return Err(malformed("truncated AS4_PATH segment header".to_string()));
@@ -1575,9 +1594,7 @@ fn decode_as4_path(raw: &RawAttribute) -> Result<(AsPath, bool), DecodeError> {
         value = &value[needed..];
         match segment_type {
             1 | 4 => {
-                return Err(malformed(format!(
-                    "RFC 9774 prohibits AS4_PATH segment type {segment_type}"
-                )));
+                prohibited_segment.get_or_insert(segment_type);
             }
             2 => segments.push(AsPathSegment::AsSequence(asns)),
             // RFC 6793 requires AS_CONFED_SEQUENCE to be removed from the
@@ -1589,6 +1606,12 @@ fn decode_as4_path(raw: &RawAttribute) -> Result<(AsPath, bool), DecodeError> {
                 )));
             }
         }
+    }
+    if let Some(segment_type) = prohibited_segment {
+        return Err(DecodeError::ProhibitedAsSet {
+            segment_type,
+            data: attr_error_data(raw.flags, raw.type_code, &raw.data),
+        });
     }
     Ok((AsPath { segments }, confed_sequence_removed))
 }
@@ -1801,12 +1824,16 @@ fn decode_attribute_value(
             }
         }
         attr_type::AS_PATH => {
-            let segments = decode_as_path(value, four_octet_as).map_err(|e| {
-                DecodeError::UpdateAttributeError {
+            let segments = decode_as_path(value, four_octet_as).map_err(|error| match error {
+                DecodeError::ProhibitedAsSet { segment_type, .. } => DecodeError::ProhibitedAsSet {
+                    segment_type,
+                    data: attr_error_data(flags, type_code, value),
+                },
+                error => DecodeError::UpdateAttributeError {
                     subcode: update_subcode::MALFORMED_AS_PATH,
                     data: attr_error_data(flags, type_code, value),
-                    detail: e.to_string(),
-                }
+                    detail: error.to_string(),
+                },
             })?;
             if segments.iter().any(|segment| match segment {
                 AsPathSegment::AsSequence(asns) | AsPathSegment::AsSet(asns) => asns.contains(&0),
@@ -2696,8 +2723,10 @@ fn decode_rtc_mp_unreach(
 }
 /// Decode `AS_PATH` segments from the attribute value bytes.
 fn decode_as_path(mut buf: &[u8], four_octet_as: bool) -> Result<Vec<AsPathSegment>, DecodeError> {
+    let original = buf;
     let as_size: usize = if four_octet_as { 4 } else { 2 };
     let mut segments = Vec::new();
+    let mut prohibited_confed_set = false;
     while !buf.is_empty() {
         if buf.len() < 2 {
             return Err(DecodeError::MalformedField {
@@ -2734,6 +2763,9 @@ fn decode_as_path(mut buf: &[u8], four_octet_as: bool) -> Result<Vec<AsPathSegme
         match seg_type {
             as_path_segment::AS_SET => segments.push(AsPathSegment::AsSet(asns)),
             as_path_segment::AS_SEQUENCE => segments.push(AsPathSegment::AsSequence(asns)),
+            4 if seg_count != 0 && !asns.contains(&0) => {
+                prohibited_confed_set = true;
+            }
             _ => {
                 return Err(DecodeError::MalformedField {
                     message_type: "UPDATE",
@@ -2741,6 +2773,18 @@ fn decode_as_path(mut buf: &[u8], four_octet_as: bool) -> Result<Vec<AsPathSegme
                 });
             }
         }
+    }
+    if prohibited_confed_set {
+        if as_path_contains_zero(original, as_size) {
+            return Err(DecodeError::MalformedField {
+                message_type: "UPDATE",
+                detail: "RFC 7607 prohibits AS 0 in AS_PATH".to_string(),
+            });
+        }
+        return Err(DecodeError::ProhibitedAsSet {
+            segment_type: 4,
+            data: Vec::new(),
+        });
     }
     Ok(segments)
 }
@@ -7392,10 +7436,37 @@ mod tests {
             0xE9,
         ];
         let decoded = decode_path_attributes_revised(&bytes, true, false, &[]).unwrap();
-        let DecodeError::UpdateAttributeError { data, .. } = &decoded.malformed[0].error else {
+        let DecodeError::ProhibitedAsSet { data, .. } = &decoded.malformed[0].error else {
             panic!("expected RFC 9774 attribute error");
         };
         assert_eq!(data, &bytes);
+    }
+    #[test]
+    fn revised_prohibited_as_sets_count_each_occurrence_once() {
+        for (type_code, flags) in [(attr_type::AS_PATH, 0x40), (attr_type::AS4_PATH, 0xC0)] {
+            for segment_type in [1, 4] {
+                for copies in [1, 2] {
+                    let attribute = [flags, type_code, 6, segment_type, 1, 0, 0, 0xFD, 0xEA];
+                    let bytes = attribute.repeat(copies);
+                    let decoded = decode_path_attributes_revised(&bytes, true, false, &[]).unwrap();
+                    let causes: Vec<_> = decoded
+                        .malformed
+                        .iter()
+                        .filter(|cause| matches!(cause.error, DecodeError::ProhibitedAsSet { .. }))
+                        .collect();
+                    assert_eq!(
+                        causes.len(),
+                        copies,
+                        "{type_code}/{segment_type}: {causes:?}"
+                    );
+                    assert!(
+                        causes
+                            .iter()
+                            .all(|cause| cause.disposition == ErrorDisposition::TreatAsWithdraw)
+                    );
+                }
+            }
+        }
     }
     #[test]
     fn revised_flag_conflict_on_aggregator_is_treat_as_withdraw() {
@@ -7793,7 +7864,7 @@ mod tests {
         assert_eq!(malformed.disposition, ErrorDisposition::TreatAsWithdraw);
         assert!(matches!(
             malformed.error,
-            DecodeError::MalformedField { .. }
+            DecodeError::TruncatedAttributeHeader
         ));
     }
     #[test]

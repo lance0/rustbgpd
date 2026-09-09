@@ -91,6 +91,19 @@ pub enum DecodeError {
         detail: String,
     },
 
+    /// An attribute header ends before its type code can be read.
+    #[error("malformed UPDATE field: truncated attribute header")]
+    TruncatedAttributeHeader,
+
+    /// RFC 9774 prohibits an `AS_SET` or `AS_CONFED_SET` segment in an AS path.
+    #[error("UPDATE prohibited AS path segment type {segment_type}")]
+    ProhibitedAsSet {
+        /// Prohibited segment type (1 or 4).
+        segment_type: u8,
+        /// Raw attribute bytes for the NOTIFICATION data field.
+        data: Vec<u8>,
+    },
+
     /// A recognized `SRv6` L3/L2 Service TLV in Prefix-SID is structurally
     /// malformed. Revised UPDATE decoding uses treat-as-withdraw (RFC 9252 §7),
     /// unlike generic Prefix-SID framing errors (RFC 8669 §6).
@@ -185,7 +198,7 @@ impl DecodeError {
             Self::MalformedField { .. } | Self::MalformedOptionalParameter { .. } => {
                 (NotificationCode::OpenMessage, 0, Bytes::new())
             }
-            Self::UpdateLengthMismatch { .. } => (
+            Self::UpdateLengthMismatch { .. } | Self::TruncatedAttributeHeader => (
                 NotificationCode::UpdateMessage,
                 1, // Malformed Attribute List
                 Bytes::new(),
@@ -193,6 +206,11 @@ impl DecodeError {
             Self::UpdateAttributeError { subcode, data, .. } => (
                 NotificationCode::UpdateMessage,
                 *subcode,
+                Bytes::from(data.clone()),
+            ),
+            Self::ProhibitedAsSet { data, .. } => (
+                NotificationCode::UpdateMessage,
+                11, // Malformed AS_PATH
                 Bytes::from(data.clone()),
             ),
             Self::MalformedSrv6ServiceTlv { data, .. } => (
@@ -205,6 +223,25 @@ impl DecodeError {
                 10, // Invalid Network Field
                 Bytes::from(data.clone()),
             ),
+        }
+    }
+}
+
+/// A fatal revised UPDATE decode error with attribute attribution when known.
+#[derive(Error, Debug, Clone, PartialEq, Eq)]
+#[error("{error}")]
+pub struct UpdateDecodeError {
+    /// The original decode error, including unchanged NOTIFICATION data.
+    pub error: DecodeError,
+    /// Attribute type, or `None` for errors outside an attributable attribute.
+    pub type_code: Option<u8>,
+}
+
+impl From<DecodeError> for UpdateDecodeError {
+    fn from(error: DecodeError) -> Self {
+        Self {
+            error,
+            type_code: None,
         }
     }
 }
@@ -279,6 +316,25 @@ mod tests {
         assert_eq!(code, NotificationCode::UpdateMessage);
         assert_eq!(subcode, 6);
         assert_eq!(data.as_ref(), &[0x40, 0x01, 0x01, 0x05]);
+    }
+
+    #[test]
+    fn typed_update_causes_preserve_notification_codes_and_data() {
+        assert_eq!(
+            DecodeError::TruncatedAttributeHeader.to_notification(),
+            (NotificationCode::UpdateMessage, 1, Bytes::new())
+        );
+        for segment_type in [1, 4] {
+            let data = vec![0x40, 2, 6, segment_type, 1, 0, 0, 0xFD, 0xEA];
+            assert_eq!(
+                DecodeError::ProhibitedAsSet {
+                    segment_type,
+                    data: data.clone()
+                }
+                .to_notification(),
+                (NotificationCode::UpdateMessage, 11, Bytes::from(data))
+            );
+        }
     }
 
     #[test]
