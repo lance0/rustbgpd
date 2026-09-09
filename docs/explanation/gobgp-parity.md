@@ -150,13 +150,19 @@ releases rather than carried forward from older measurements.
 | Prometheus metrics | Yes | Yes | rustbgpd has more granular RIB metrics |
 | Structured logging | Yes | Yes | GoBGP v4.9.0 `gobgpd` logs JSON by default and `--log-plain` opts out (`cmd/gobgpd/main.go`); rustbgpd emits JSON via tracing-subscriber |
 | BMP exporter (RFC 7854) | Yes | Yes | Per-collector TCP client, Initiation/PeerUp/PeerDown/RouteMonitoring/StatsReport/Termination; per-collector view selection (`rib_in_pre` / `rib_out_post` / `loc_rib`) |
-| BMP Adj-RIB-Out (RFC 8671) | No | **Yes** | Post-policy, byte-exact wire PDUs; with RFC 9069 Loc-RIB (collector-connect dump + EoR) this completes the trio no other open-source daemon ships (ADR-0097, M81) |
+| BMP Adj-RIB-Out (RFC 8671) | No | **Yes** | rustbgpd exports post-policy, byte-exact wire PDUs ([ADR-0097](../adr/0097-bmp-monitoring.md)). GoBGP 4.9.0 already exports Loc-RIB; RFC 8671 Adj-RIB-Out is the differentiator in this comparison[^bmp-views] |
 | BMPv4 framing (draft, pre-IANA) | No | **Yes** | Per-collector `version = 4` opt-in follows draft-ietf-grow-bmp-tlv-21; Path Marking is temporarily unavailable because its draft type 5 collides with Sequence Number (ADR-0097) |
 | MRT dump (RFC 6396) | Yes | Yes | `TABLE_DUMP_V2` periodic + on-demand; gzip optional (ADR-0044) |
 | WatchEvent streaming | Yes | Yes | `WatchEvents` (live broadcast) plus `SubscribeFromEvent` with a durable monotonic-`event_id` cursor that survives daemon restart and post-incident reconnect; backed by the SQLite-WAL event outbox (ADR-0072). `rbgp events watch --from-event-id N` and the `examples/event-bridge` reference binary consume the cursor. |
 | Durable event history / cursor replay | No | Yes | ADR-0072: producers across RIB, EVPN, PeerManager session lifecycle, policy, BFD, and dataplane FIB / blackhole all enqueue durable events; the `[event_history]` config block controls retention by count + bytes. `bgp_event_outbox_cursor_gap_total` counts subscribe requests where the requested cursor was older than the retention floor. |
 | gNMI / OpenConfig telemetry | No | Yes | Native `gnmi.gNMI` target for a strict OpenConfig BGP state subset (`Capabilities`, `Get`, `Subscribe` ONCE / POLL / STREAM SAMPLE, plus STREAM ON_CHANGE v1 for neighbor `session-state` when `[event_history]` is enabled). `Set` commits a transaction-backed OpenConfig subset (static numbered-neighbor create/update/delete + commit-confirmed via ADR-0076; unsupported paths `Unimplemented`). Served on mTLS TCP or local UDS; M54 + M56 validate with `gnmic` |
 | Sentry integration | Yes | No | |
+
+[^bmp-views]: Checked 2026-09-09: GoBGP 4.9.0's
+    [best-path event handler](https://github.com/osrg/gobgp/blob/01c5c4c27f9a1ac3b5927f433b5115f9b0eee791/pkg/server/bmp.go#L248-L265)
+    emits peer-type-3 Loc-RIB Route Monitoring, while its
+    [route header builder](https://github.com/osrg/gobgp/blob/01c5c4c27f9a1ac3b5927f433b5115f9b0eee791/pkg/server/bmp.go#L441-L453)
+    does not set the RFC 8671 O flag for Adj-RIB-Out.
 
 ## Security
 
