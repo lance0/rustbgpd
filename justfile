@@ -88,10 +88,9 @@ test-integration:
     cargo test --locked -p rustbgpd --tests
 
 # Build the library docs (private items included) and both binary docs.
+# Select them together so binary docs reuse the same private library docs.
 docs:
-    cargo doc --locked --workspace --lib --no-deps --document-private-items
-    cargo doc --locked -p rustbgpd --bin rustbgpd --no-deps
-    cargo doc --locked -p rustbgpctl --bin rbgp --no-deps
+    cargo doc --locked --workspace --lib --bin rustbgpd --bin rbgp --no-deps --document-private-items
 
 # Check links between tracked Markdown files without making network requests.
 links:

@@ -124,7 +124,7 @@ Useful commands and entry points:
 ```bash
 cargo test --workspace --no-fail-fast
 cargo clippy --workspace --all-targets -- -D warnings
-cargo doc --workspace --no-deps  # -D warnings pinned in .cargo/config.toml
+just docs  # Workspace private library docs and both binaries; warnings denied
 cargo test -p rustbgpd-rib deterministic_fault_corpus
 
 bench/compare-criterion.sh --package rustbgpd-rib --bench rib_ops

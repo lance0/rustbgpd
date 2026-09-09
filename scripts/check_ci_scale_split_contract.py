@@ -25,7 +25,7 @@ WORKFLOWS = tuple(
                  "release-install-contract", "release", "update-group-fault")
 )
 EXPECTED_ROOT_COMMANDS = {
-    WORKFLOWS[0]: Counter(build=1, check=7, clippy=2, doc=4, test=7),
+    WORKFLOWS[0]: Counter(build=1, check=7, clippy=2, doc=2, test=7),
     WORKFLOWS[1]: Counter(test=1),
     WORKFLOWS[2]: Counter(test=6),
     WORKFLOWS[3]: Counter(build=1, test=2),
@@ -156,13 +156,11 @@ def check(root: Path) -> list[str]:
     core_tests = jobs.get("core_tests", "")
     for command in (
         "cargo test --locked --workspace",
-        "cargo doc --locked --workspace --lib --no-deps --document-private-items",
-        "cargo doc --locked -p rustbgpd --bin rustbgpd --no-deps",
-        "cargo doc --locked -p rustbgpctl --bin rbgp --no-deps",
+        "cargo doc --locked --workspace --lib --bin rustbgpd --bin rbgp --no-deps --document-private-items",
     ):
         if text.count(command) != 1 or command not in core_tests:
             errors.append(f"{command} must exist exactly once in core_tests")
-    if core_tests.count('RUSTDOCFLAGS: "-D warnings"') != 4:
+    if core_tests.count('RUSTDOCFLAGS: "-D warnings"') != 2:
         errors.append("core_tests rustdoc warnings contract drifted")
 
     feature_commands = (
