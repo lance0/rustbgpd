@@ -213,10 +213,21 @@ IPv4/IPv6 `Prefix` routes.
 | Privilege separation | No | No | No | No | Yes |
 | Memory-safe language | Yes | No | No | Yes | No |
 
-CVE-2026-49943, a stack-based buffer overflow in BIRD's AS-path filter
-matching reachable when RFC 8654 extended messages are enabled (affected
-through 2.19.0), is a recent example of the vulnerability class the
-memory-safe-language row refers to.
+[CVE-2026-49943](https://security-tracker.debian.org/tracker/CVE-2026-49943)
+describes a stack-based buffer overflow in BIRD's AS-path mask matching
+when RFC 8654 extended messages are enabled and a filter evaluates an
+AS-path mask against a path with more than 2048 expanded ASNs. As checked
+on 2026-09-09, Debian tracks `bird2` 2.19.2-1 and `bird3` 3.3.2-1 as
+vulnerable, with no fixed version recorded for either
+source package. The CVE's original "through 2.19.0" range does not establish
+that later releases are fixed.
+
+rustbgpd bounds received AS_PATH before import-policy evaluation with
+[`max_as_path_length`](../reference/configuration.md#global):
+[750 by default](../../crates/transport/src/config.rs), with `0` disabling
+the ceiling. The [wire validator](../../crates/wire/src/validate.rs)
+counts every sequence occurrence, including prepends, and each AS_SET
+member individually.
 
 [^gtsm-distance]: Both GTSM speakers must transmit TTL / Hop Limit 255. On each
     side, a maximum distance of `hops` sets that side's inbound floor to
