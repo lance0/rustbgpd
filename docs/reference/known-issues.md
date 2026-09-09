@@ -9,6 +9,25 @@ resolved.
 
 ---
 
+## Open issues
+
+- **Fleet policy stats can time out during reload.** The daemon's
+  `GetPolicyStats` RPC shares one absolute 2 s deadline across peer validation,
+  export counters, import counters, and dataset reads. Fleet calls such as
+  `rbgp policy stats --direction both` can return `DEADLINE_EXCEEDED` during
+  reload activity, with no partial rows. Check reload settlement before
+  retrying the read. Fleet stats responsiveness during reload remains under
+  investigation.
+  See the [policy stats contract](api.md#policyservice).
+
+- **700-member dual-stack reload acceptance remains open.** The
+  [post-change filtering run](../perf/ixp-dualstack-policy-noops-2026-09.md#700-member-follow-through)
+  completed all four reloads but failed the health and warning checks. Its
+  passing 200-member cell and the older IPv4-only receipts do not establish
+  the full dual-stack operating shape. The
+  [earlier stopped campaign](../perf/ixp-dualstack-2026-09-08.md) retains its
+  separate incomplete-reload and health failures.
+
 ## Resolved
 
 - **Add-Path export explain covers exact candidates (resolved).** For
@@ -208,7 +227,7 @@ resolved.
   §4.3; the socket is by definition not draining). Details in
   `docs/reference/rfc-notes.md` (RFC 9687 section).
 
-- **BMP Adj-RIB-In/Adj-RIB-Out streams are live-only — no table dump on
+- **BMP Adj-RIB-In/Adj-RIB-Out streams have no automatic table dump on
   collector (re)connect.** A collector that connects mid-life receives
   the cached Peer Up replay but no synthesized Route Monitoring dump of
   those views: the RFC 8671 post-policy Adj-RIB-Out stream
@@ -234,10 +253,13 @@ resolved.
   the session-side attribute rewrites (`ORIGINATOR_ID`/`CLUSTER_LIST`
   on reflection, GShut community, LLGR §4.6 form) and not be
   byte-faithful to what was advertised; pre-policy Adj-RIB-In is
-  unreconstructable post-import. Collectors needing those exact views
-  should connect before sessions establish (or trigger a route
-  refresh). Because these streams are live-only, a Route Monitoring
-  event lost to BMP-channel saturation can never be replayed — so the
+  unreconstructable post-import. Connect before BGP sessions establish for
+  automatic complete boundaries. For established IPv4/IPv6 unicast sessions,
+  [explicit outbound replay](api.md#replay-one-peers-unicast-routes-with-terminal-eors)
+  can create a new outbound boundary for eligible collectors. It reannounces
+  routes on the live BGP session; require terminal BMP EoRs, not just a
+  successful scheduling response. An individual Route Monitoring event lost
+  to BMP-channel saturation cannot be recovered from history, so the
   daemon guarantees such a loss is collector-detectable, never silent:
   per-peer `PeerUp`/`PeerDown` delivery from sessions to the BMP
   manager is reliable, and a Route Monitoring event dropped on a full

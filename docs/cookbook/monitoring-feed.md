@@ -186,7 +186,7 @@ configured. Key series:
 | Metric | Meaning |
 |--------|---------|
 | `bgp_event_outbox_degraded` | 1 = latched durability-impacting loss, committed-event delivery skip, or DB open/recovery/quarantine failure; expected shutdown `reason=closed` drops are excluded. Inspect the drop reason and daemon log: replay can remain available |
-| `bmp_collector_drops_total` | per-collector queue/dump failures; live fan-out Full/Closed automatically resets only that collector generation and replays state after the one-second reconnect |
+| `bmp_collector_drops_total` | per-collector queue/dump failures; live fan-out Full/Closed automatically resets only that collector generation, replays cached Peer Up state, and rebuilds configured Loc-RIB state after the one-second reconnect |
 | `bmp_source_drops_total` | per-peer BMP events dropped at the source tap, including a periodic stats report whose session-state query timed out |
 | `bmp_replay_attempts_total` | PeerUp-cache replays on collector reconnect |
 | `bgp_rib_outbound_registered_peers` | feed coverage: peers whose routes the views carry |
@@ -204,11 +204,16 @@ slow consumer. That is the signal to resume via the durable cursor
 (`--from-event-id <last-processed>`) rather than the live ring.
 
 **A BMP collector shows nothing after a network blip.** The daemon
-redials with backoff capped by `reconnect_interval`, replays cached Peer Up
-state, and performs a fresh EoR-closed table dump only for collectors with
-`monitor = ["loc_rib"]`. Adj-RIB-In and Adj-RIB-Out remain live-only after a
-reconnect; see [Known issues](../reference/known-issues.md). Check the collector-side
-listener first, then the daemon log for connection and bootstrap failures.
+redials with backoff capped by `reconnect_interval` and replays cached Peer Up
+state. It performs a fresh EoR-closed table dump only for collectors with
+`monitor = ["loc_rib"]`. Adj-RIB-In and Adj-RIB-Out have no automatic
+reconnect dump. For a late outbound collector, follow the
+[outbound capture procedure](paired-route-servers.md#inter-rs-consistency-rbgp-diff-advertised).
+Its experimental `replay-out` operation reannounces the selected peer's routes
+on the live BGP session; successful scheduling alone does not prove a complete
+capture. See [Known issues](../reference/known-issues.md). Check the
+collector-side listener first, then the daemon log for connection and
+bootstrap failures.
 
 **pmacct rejects the v4 stream (`BMPv4 BGP PDU TLV != 1`).** Known and
 expected — see the caveat in the config above. Move that collector to

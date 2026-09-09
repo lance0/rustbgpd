@@ -106,8 +106,9 @@ For automatic capture, start the listener before RS2's member sessions
 establish — before RS2 starts (in practice its maintenance-window restart)
 or before its member sessions are cleared — and leave it running. Live
 updates fold into the same capture. After a dropped BMP connection, a new
-capture needs another complete boundary from establishment or explicit
-replay below.
+capture needs another complete boundary from establishment or the explicit
+outbound replay below. Reconnect does not automatically reconstruct the prior
+`rib_out_post` stream.
 
 ```bash
 # Terminal 1: start before RS2's member sessions come up; leave running.
