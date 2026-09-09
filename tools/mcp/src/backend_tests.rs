@@ -129,6 +129,13 @@ struct Health;
 
 #[tonic::async_trait]
 impl proto::control_service_server::ControlService for Health {
+    async fn check_liveness(
+        &self,
+        _: Request<proto::CheckLivenessRequest>,
+    ) -> Result<Response<proto::CheckLivenessResponse>, Status> {
+        Err(Status::unimplemented("unused"))
+    }
+
     async fn get_health(
         &self,
         request: Request<proto::HealthRequest>,

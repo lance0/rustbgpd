@@ -1209,7 +1209,14 @@ minutes. It therefore covers never-established and previously-down peers
 without paging on disabled peers. Flap-rate alerting remains based on
 `bgp_session_flaps_total`. Aggregate Established counts and daemon uptime are
 also available via `ControlService.GetHealth` / `rbgp health`; that RPC uses
-the same 200 ms core-actor deadline as `/readyz`.
+the same 200 ms core-actor deadline as `/readyz`. `rbgp health --liveness`
+uses the Read-tier `ControlService.CheckLiveness` instead: it proves only that
+an authenticated gRPC handler answered and prints `alive` (JSON: `{"alive":true}`).
+HTTP `/livez` is the corresponding non-disclosing HTTP alternative when the
+metrics listener is configured. Neither liveness path checks actor readiness,
+BGP convergence, or forwarding. Successful Read authorization audits are DEBUG;
+authorization counters still include every request, and sensitive reads,
+mutations, denials, and errors retain their existing audit levels.
 
 For a current state view that also catches a broken one-hot invariant:
 

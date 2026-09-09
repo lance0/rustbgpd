@@ -408,7 +408,11 @@ enum Command {
     },
 
     /// Check daemon health
-    Health,
+    Health {
+        /// Check only authenticated gRPC responsiveness, without actor readiness or topology
+        #[arg(long)]
+        liveness: bool,
+    },
 
     /// Run red/green triage checks and write a redacted support bundle
     ///
@@ -4247,7 +4251,7 @@ async fn run(cli: Cli, binary_name: &'static str) -> Result<(), CliError> {
             }
         }
 
-        Command::Health => commands::control::health(connection, json).await,
+        Command::Health { liveness } => commands::control::health(connection, json, liveness).await,
         Command::Doctor { .. } => unreachable!("handled before connect"),
         Command::Metrics => {
             if json {
@@ -5339,7 +5343,9 @@ printf '%s\n' "${COMPREPLY[@]}"
     #[test]
     fn test_parse_health() {
         let cli = Cli::try_parse_from(["rbgp", "health"]).unwrap();
-        assert!(matches!(cli.command, Command::Health));
+        assert!(matches!(cli.command, Command::Health { liveness: false }));
+        let cli = Cli::try_parse_from(["rbgp", "health", "--liveness"]).unwrap();
+        assert!(matches!(cli.command, Command::Health { liveness: true }));
     }
 
     #[test]

@@ -709,6 +709,12 @@ pub const METHODS: &[GrpcMethodAuthz] = &[
     ),
     method(
         "rustbgpd.v1.ControlService",
+        "CheckLiveness",
+        "/rustbgpd.v1.ControlService/CheckLiveness",
+        AuthTier::Read,
+    ),
+    method(
+        "rustbgpd.v1.ControlService",
         "GetHealth",
         "/rustbgpd.v1.ControlService/GetHealth",
         AuthTier::SensitiveRead,
@@ -824,8 +830,8 @@ mod tests {
         include_str!("../../../proto/github.com/openconfig/gnmi/proto/gnmi/gnmi.proto");
     const INVENTORY_JSON: &str = include_str!("../../../docs/reference/grpc-method-inventory.json");
     const INVENTORY_MD: &str = include_str!("../../../docs/reference/grpc-method-inventory.md");
-    const READ_TOTAL: &str = "| `read` | 0 | 0.0% |";
-    const SENSITIVE_TOTAL: &str = "| `sensitive_read` | 66 | 58.9% |";
+    const READ_TOTAL: &str = "| `read` | 1 | 0.9% |";
+    const SENSITIVE_TOTAL: &str = "| `sensitive_read` | 66 | 58.4% |";
     const AUTHZ_SOURCE_PATH: &str = "crates/api/src/authz.rs";
     const PRIMARY_PROTO_PATH: &str = "proto/rustbgpd.proto";
     const ADDITIONAL_PROTO_PATHS: &[&str] =
@@ -1057,7 +1063,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert_eq!(matrix_methods, proto_methods);
-        assert_eq!(METHODS.len(), 112);
+        assert_eq!(METHODS.len(), 113);
     }
 
     #[test]
@@ -1097,7 +1103,7 @@ mod tests {
 
     #[test]
     fn method_matrix_tier_counts_match_inventory() {
-        assert_eq!(method_count_by_tier(AuthTier::Read), 0);
+        assert_eq!(method_count_by_tier(AuthTier::Read), 1);
         assert_eq!(method_count_by_tier(AuthTier::SensitiveRead), 66);
         assert_eq!(method_count_by_tier(AuthTier::Mutating), 22);
         assert_eq!(method_count_by_tier(AuthTier::OperatorOnly), 24);

@@ -1283,6 +1283,7 @@ complete -c rbgp -n "__fish_rbgp_using_subcommand health" -l token-file -d 'Bear
 complete -c rbgp -n "__fish_rbgp_using_subcommand health" -l pager -d 'Page complete human unicast RIB listings' -r -f -a "auto\t''
 always\t''
 never\t''"
+complete -c rbgp -n "__fish_rbgp_using_subcommand health" -l liveness -d 'Check only authenticated gRPC responsiveness, without actor readiness or topology'
 complete -c rbgp -n "__fish_rbgp_using_subcommand health" -s j -l json -d 'Output in JSON format'
 complete -c rbgp -n "__fish_rbgp_using_subcommand health" -l json-lines -d 'Stream accepted unicast RIB routes as versioned JSON lines'
 complete -c rbgp -n "__fish_rbgp_using_subcommand health" -l no-color -d 'Disable colored output'

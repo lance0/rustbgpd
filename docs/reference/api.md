@@ -67,7 +67,7 @@ not by itself make it v1-stable.
 | `RpkiService` | `ValidateRouteOrigin`, `ListCaches` | Bounded point validation and configured RTR-cache accepted-epoch inventory |
 | `EventService` | `WatchEvents`, `SubscribeFromEvent`, `ListEvpnEvents`, `ListSessionEvents`, `ListPolicyEvents` | Unified live stream for route, session lifecycle, BGP NOTIFICATION metadata, policy mutation, EVPN route events, BFD session events, and FIB / BLACKHOLE dataplane status-row summary events, with `stream_lagged` warnings for bounded-source backpressure; durable cursor replay via `SubscribeFromEvent` when `[event_history].enabled = true`; plus bounded after-the-fact EVPN, session-lifecycle, and policy-mutation history. Per-MAC EVPN dataplane categories remain follow-up work |
 | `InjectionService` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddEvpnRoute`, `DeleteEvpnRoute` | Programmatic route, FlowSpec, and EVPN injection |
-| `ControlService` | `GetHealth`, `GetMetrics`, `Shutdown`, `TriggerMrtDump` | Health, metrics, lifecycle, MRT dumps |
+| `ControlService` | `CheckLiveness`, `GetHealth`, `GetMetrics`, `Shutdown`, `TriggerMrtDump` | Health, metrics, lifecycle, MRT dumps |
 | `EvpnService` | `GetEvpnRuntime`, `ListEvpnInstances`, `ListEvpnNexthops`, `ListEthernetSegments`, `ListIpVrfs`, `ListManagedNetdevs`, `GetIpVrf`, `ListDuplicateMacQuarantines`, `ClearDuplicateMacQuarantine`, `SetEthernetSegmentDrain`, `ApplyEvpnRuntime` | Local EVPN VTEP instance state, ADR-0059 FDB-nexthop ownership, ADR-0083/0085 Ethernet Segment multi-homing diagnose state, symmetric IRB (Type-5 / L3VNI) IP-VRF readiness / route counters, ADR-0091 managed-netdev lifecycle/status, duplicate-MAC quarantine status and clear, ADR-0084 Ethernet Segment drain for access-circuit maintenance, and ADR-0063 runtime model status / apply |
 | `gnmi.gNMI` | `Capabilities`, `Get`, `Set`, `Subscribe` | OpenConfig BGP telemetry subset (`Get` / `Subscribe`) plus a transaction-backed `Set` subset (static numbered-neighbor create/update/delete + commit-confirmed via ADR-0076; unsupported paths `UNIMPLEMENTED`); served on UDS and mTLS TCP listeners |
 
@@ -242,7 +242,7 @@ for `grpc_authz` logs and the related Prometheus metrics live in
 | `RpkiService` | `ValidateRouteOrigin`, `ListCaches` | None |
 | `gnmi.gNMI` | `Capabilities`, `Get`, `Subscribe` | `Set` (operator-only; transaction-backed OpenConfig subset — static numbered-neighbor `neighbor-address`/`peer-as`/`description`/`peer-group` create/update/delete, peer-group catalog entries, dynamic-neighbor prefixes, and the commit-confirmed extension via ADR-0076; unsupported paths return `UNIMPLEMENTED`) |
 | `InjectionService` | None | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddEvpnRoute`, `DeleteEvpnRoute` |
-| `ControlService` | `GetHealth`, `GetMetrics` | `Shutdown`, `TriggerMrtDump` |
+| `ControlService` | `CheckLiveness`, `GetHealth`, `GetMetrics` | `Shutdown`, `TriggerMrtDump` |
 
 ## Error Taxonomy
 
@@ -2573,6 +2573,7 @@ Daemon lifecycle, health checks, and metrics.
 
 | RPC | Description |
 |-----|-------------|
+| `CheckLiveness` | Empty authenticated request/response; Read tier. A response means only the gRPC handler answered, without actor readiness or topology. Outside the narrow v1 contract; older servers return `UNIMPLEMENTED`. |
 | `GetHealth` | Returns health status, uptime, active peers, total routes; core actor probes are bounded by the same 200 ms deadline as HTTP `/readyz` |
 | `GetMetrics` | Returns Prometheus metrics as text |
 | `Shutdown` | Initiates graceful shutdown |

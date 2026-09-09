@@ -5210,7 +5210,7 @@ _rbgp() {
             return 0
             ;;
         rbgp__subcmd__health)
-            opts="-s -j -h --addr --token-file --json --json-lines --no-color --pager --help"
+            opts="-s -j -h --liveness --addr --token-file --json --json-lines --no-color --pager --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0

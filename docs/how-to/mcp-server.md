@@ -239,11 +239,12 @@ Control 2 is simply not present in that configuration, and control 1 — the
 absence of any write tool in this binary — is the only thing standing between
 those credentials and a write.
 
-There is no lower tier to fall back to. The daemon publishes **zero**
-`read`-tier methods; `sensitive_read` is the lowest cap a listener can carry,
-and every explain RPC sits in it. Capping a UDS listener at `sensitive_read`
-and giving it an explicit `principal` mapped to `observer` restores control 2
-if colocation is unavoidable.
+The `read` tier was empty when [ADR-0131](../adr/0131-read-only-mcp-server.md)
+recorded the original inventory; it now serves only `CheckLiveness`, which
+returns no topology. Every MCP tool still calls a `sensitive_read` method,
+including `GetHealth`, so a `read` listener cap denies all of this server's
+tools. Capping a UDS listener at `sensitive_read` and giving it an explicit
+`principal` mapped to `observer` restores control 2 if colocation is unavoidable.
 
 ## Integration coverage
 

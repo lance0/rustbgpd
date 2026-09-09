@@ -2,7 +2,7 @@ use rustbgpd_telemetry::BgpMetrics;
 use tonic::Status;
 use tonic::body::Body;
 use tonic::codegen::http;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::audit::GrpcRequestSummary;
 use crate::authz::{AuthTier, GrpcMethodAuthz, PrincipalRole, method_authz};
@@ -127,6 +127,24 @@ pub(super) fn record_audit_decision(
 
     if decision.tier == AuthTier::OperatorOnly {
         warn!(
+            target: "grpc_authz",
+            path,
+            service,
+            method = method_name,
+            tier,
+            known_method,
+            result,
+            listener,
+            access_mode,
+            max_tier,
+            authn,
+            role,
+            principal,
+            request_summary,
+            "gRPC authorization audit decision"
+        );
+    } else if decision.tier == AuthTier::Read && result == "handler_ok" {
+        debug!(
             target: "grpc_authz",
             path,
             service,

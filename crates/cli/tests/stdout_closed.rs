@@ -118,3 +118,10 @@ fn connected_human_output_quietly_handles_closed_stdout() {
     let addr = spawn_global_service();
     run_with_closed_stdout(&["--addr", &addr, "global"]);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn health_liveness_quietly_handles_closed_stdout() {
+    let server = test_support::spawn_mock_server(None).await;
+    run_with_closed_stdout(&["--addr", &server.addr, "health", "--liveness"]);
+    run_with_closed_stdout(&["--addr", &server.addr, "--json", "health", "--liveness"]);
+}

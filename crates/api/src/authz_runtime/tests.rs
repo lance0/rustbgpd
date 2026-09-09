@@ -971,3 +971,195 @@ async fn mtls_principal_resolution_uses_rustbgpd_connection_cache() {
         "rustbgpd://operator/alice"
     );
 }
+
+#[tokio::test]
+async fn liveness_rpc_authenticates_and_respects_read_listener_cap() {
+    use crate::proto::control_service_client::ControlServiceClient;
+    use crate::proto::control_service_server::ControlServiceServer;
+    use crate::proto::{CheckLivenessRequest, HealthRequest};
+    use tokio::sync::{mpsc, oneshot, watch};
+
+    let metrics = BgpMetrics::new();
+    let context = tier_test_context(
+        "tcp://127.0.0.1",
+        "read_only",
+        AuthTier::Read,
+        GrpcAuthnKind::BearerToken,
+        "probe",
+        PrincipalRole::Observer,
+    )
+    .with_bearer_token(Some("secret"));
+    // Closed actor channels: liveness must not consult either actor.
+    let (peer_tx, _) = mpsc::channel(1);
+    let (rib_tx, _) = mpsc::channel(1);
+    let (shutdown_tx, _) = watch::channel(false);
+    let control = crate::control_service::ControlService::new(
+        crate::server::AccessMode::ReadOnly,
+        tokio::time::Instant::now(),
+        metrics.clone(),
+        peer_tx,
+        rib_tx,
+        shutdown_tx,
+        None,
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (stop_tx, stop_rx) = oneshot::channel();
+    let server = tokio::spawn(
+        tonic::transport::Server::builder()
+            .layer(GrpcAuthzLayer::new(context, metrics.clone()))
+            .add_service(ControlServiceServer::new(control))
+            .serve_with_incoming_shutdown(
+                tokio_stream::wrappers::TcpListenerStream::new(listener),
+                async {
+                    let _ = stop_rx.await;
+                },
+            ),
+    );
+    let mut client = ControlServiceClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap();
+    assert_eq!(
+        client
+            .check_liveness(CheckLivenessRequest {})
+            .await
+            .unwrap_err()
+            .code(),
+        tonic::Code::Unauthenticated
+    );
+    let mut request = tonic::Request::new(CheckLivenessRequest {});
+    request
+        .metadata_mut()
+        .insert("authorization", "Bearer secret".parse().unwrap());
+    let response = client.check_liveness(request).await.unwrap().into_inner();
+    assert_eq!(prost::Message::encoded_len(&response), 0);
+    let mut request = tonic::Request::new(HealthRequest {});
+    request
+        .metadata_mut()
+        .insert("authorization", "Bearer secret".parse().unwrap());
+    assert_eq!(
+        client.get_health(request).await.unwrap_err().code(),
+        tonic::Code::PermissionDenied
+    );
+    let text = gather_text(&metrics);
+    for (tier, result) in [
+        ("read", "handler_ok"),
+        ("read", "authn_failed"),
+        ("sensitive_read", "listener_tier_denied"),
+    ] {
+        assert!(
+            text.lines()
+                .any(|line| line.starts_with("bgp_grpc_authz_decisions_total{")
+                    && line.contains(&format!("tier=\"{tier}\""))
+                    && line.contains(&format!("result=\"{result}\""))
+                    && line.ends_with(" 1")),
+            "{text}"
+        );
+    }
+    stop_tx.send(()).unwrap();
+    server.await.unwrap().unwrap();
+}
+
+#[test]
+fn only_successful_read_audits_are_debug_and_all_are_counted() {
+    use tracing::{Event, Level, Metadata, Subscriber, span};
+    struct Levels(Arc<Mutex<Vec<Level>>>);
+    impl Subscriber for Levels {
+        fn register_callsite(
+            &self,
+            _: &'static Metadata<'static>,
+        ) -> tracing::subscriber::Interest {
+            tracing::subscriber::Interest::sometimes()
+        }
+        fn enabled(&self, _: &Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &span::Attributes<'_>) -> span::Id {
+            span::Id::from_u64(1)
+        }
+        fn record(&self, _: &span::Id, _: &span::Record<'_>) {}
+        fn record_follows_from(&self, _: &span::Id, _: &span::Id) {}
+        fn event(&self, event: &Event<'_>) {
+            self.0.lock().unwrap().push(*event.metadata().level());
+        }
+        fn enter(&self, _: &span::Id) {}
+        fn exit(&self, _: &span::Id) {}
+    }
+    let levels = Arc::new(Mutex::new(Vec::new()));
+    let metrics = BgpMetrics::new();
+    let context = tier_test_context(
+        "uds",
+        "read_write",
+        AuthTier::OperatorOnly,
+        GrpcAuthnKind::UdsOwner,
+        LOCAL_OPERATOR_PRINCIPAL,
+        PrincipalRole::Operator,
+    );
+    let cases = [
+        (
+            "/rustbgpd.v1.ControlService/CheckLiveness",
+            "handler_ok",
+            Level::DEBUG,
+        ),
+        (
+            "/rustbgpd.v1.ControlService/CheckLiveness",
+            "authn_failed",
+            Level::INFO,
+        ),
+        (
+            "/rustbgpd.v1.ControlService/CheckLiveness",
+            "principal_unmapped",
+            Level::INFO,
+        ),
+        (
+            "/rustbgpd.v1.ControlService/CheckLiveness",
+            "handler_invalid_argument",
+            Level::INFO,
+        ),
+        (
+            "/rustbgpd.v1.ControlService/CheckLiveness",
+            "handler_service_error",
+            Level::INFO,
+        ),
+        (
+            "/rustbgpd.v1.ControlService/GetHealth",
+            "handler_ok",
+            Level::INFO,
+        ),
+        (
+            "/rustbgpd.v1.NeighborService/AddNeighbor",
+            "handler_ok",
+            Level::INFO,
+        ),
+        (
+            "/rustbgpd.v1.ControlService/Shutdown",
+            "handler_ok",
+            Level::WARN,
+        ),
+    ];
+    let record = |metrics: &BgpMetrics| {
+        for (path, result, _) in cases {
+            super::decision::record_audit_decision(
+                path,
+                &super::decision::audit_lookup_for_path(path),
+                &context,
+                LOCAL_OPERATOR_PRINCIPAL,
+                metrics,
+                result,
+                None,
+            );
+        }
+    };
+    // Initialize callsites before installing the scoped subscriber; another
+    // parallel test may otherwise register one under its default dispatcher.
+    record(&BgpMetrics::new());
+    tracing::subscriber::with_default(Levels(levels.clone()), || record(&metrics));
+    assert_eq!(*levels.lock().unwrap(), cases.map(|(_, _, level)| level));
+    assert_eq!(
+        gather_text(&metrics)
+            .lines()
+            .filter(|line| line.starts_with("bgp_grpc_authz_decisions_total{"))
+            .count(),
+        cases.len()
+    );
+}
