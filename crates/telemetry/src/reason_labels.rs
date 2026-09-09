@@ -31,6 +31,84 @@
 //! distinguishes the two RFC 4456 §8 loop signals via
 //! [`RrLoopReason`].
 
+/// Bounded causes reported while processing a malformed UPDATE.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MalformedUpdateReason {
+    /// Malformed attribute list or framing.
+    AttributeList,
+    /// Unrecognized well-known attribute.
+    UnrecognizedWellKnown,
+    /// Missing mandatory attribute.
+    MissingWellKnown,
+    /// Invalid attribute flags.
+    AttributeFlags,
+    /// Invalid attribute length.
+    AttributeLength,
+    /// Invalid ORIGIN value.
+    InvalidOrigin,
+    /// Invalid next-hop address.
+    InvalidNextHop,
+    /// Malformed optional attribute.
+    OptionalAttribute,
+    /// Invalid NLRI encoding.
+    InvalidNetwork,
+    /// Malformed AS path other than a typed prohibited set.
+    MalformedAsPath,
+    /// RFC 9774 prohibited `AS_SET` or `AS_CONFED_SET`.
+    AsSetProhibited,
+    /// Configured AS-path length ceiling exceeded.
+    AsPathLimit,
+    /// ASPA first-AS precondition failed.
+    AspaFirstAsMismatch,
+    /// Malformed recognized `SRv6` Service TLV.
+    Srv6ServiceTlv,
+    /// Another typed decode failure.
+    Other,
+}
+
+impl MalformedUpdateReason {
+    /// Every stable cause label.
+    pub const ALL: [Self; 15] = [
+        Self::AttributeList,
+        Self::UnrecognizedWellKnown,
+        Self::MissingWellKnown,
+        Self::AttributeFlags,
+        Self::AttributeLength,
+        Self::InvalidOrigin,
+        Self::InvalidNextHop,
+        Self::OptionalAttribute,
+        Self::InvalidNetwork,
+        Self::MalformedAsPath,
+        Self::AsSetProhibited,
+        Self::AsPathLimit,
+        Self::AspaFirstAsMismatch,
+        Self::Srv6ServiceTlv,
+        Self::Other,
+    ];
+
+    /// Canonical bounded Prometheus label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AttributeList => "attribute_list",
+            Self::UnrecognizedWellKnown => "unrecognized_well_known",
+            Self::MissingWellKnown => "missing_well_known",
+            Self::AttributeFlags => "attribute_flags",
+            Self::AttributeLength => "attribute_length",
+            Self::InvalidOrigin => "invalid_origin",
+            Self::InvalidNextHop => "invalid_next_hop",
+            Self::OptionalAttribute => "optional_attribute",
+            Self::InvalidNetwork => "invalid_network",
+            Self::MalformedAsPath => "malformed_as_path",
+            Self::AsSetProhibited => "as_set_prohibited",
+            Self::AsPathLimit => "as_path_limit",
+            Self::AspaFirstAsMismatch => "aspa_first_as_mismatch",
+            Self::Srv6ServiceTlv => "srv6_service_tlv",
+            Self::Other => "other",
+        }
+    }
+}
+
 /// Bounded reasons for a failed inbound management-plane TLS handshake.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GrpcTlsHandshakeFailureReason {
@@ -501,7 +579,7 @@ impl std::fmt::Display for ExactExportReason {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExactExportReason, ImportRejectReason, MalformedUpdateDisposition,
+        ExactExportReason, ImportRejectReason, MalformedUpdateDisposition, MalformedUpdateReason,
         NextHopOwnershipBlockReason, OtcBlockReason, RrLoopReason, SessionDownReason,
     };
 
@@ -561,6 +639,42 @@ mod tests {
         for reason in ImportRejectReason::ALL {
             assert_snake_case(reason.as_str());
             assert!(seen.insert(reason.as_str()), "duplicate label");
+        }
+    }
+
+    #[test]
+    fn malformed_update_reasons_are_pinned_and_documented() {
+        let labels: Vec<_> = MalformedUpdateReason::ALL
+            .into_iter()
+            .map(MalformedUpdateReason::as_str)
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "attribute_list",
+                "unrecognized_well_known",
+                "missing_well_known",
+                "attribute_flags",
+                "attribute_length",
+                "invalid_origin",
+                "invalid_next_hop",
+                "optional_attribute",
+                "invalid_network",
+                "malformed_as_path",
+                "as_set_prohibited",
+                "as_path_limit",
+                "aspa_first_as_mismatch",
+                "srv6_service_tlv",
+                "other",
+            ]
+        );
+        let operations = include_str!("../../../docs/reference/operations.md");
+        for label in labels {
+            assert_snake_case(label);
+            assert!(
+                operations.contains(&format!("`{label}`")),
+                "undocumented reason {label}"
+            );
         }
     }
 

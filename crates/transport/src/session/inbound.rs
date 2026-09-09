@@ -12,8 +12,8 @@ use rustbgpd_policy::{
     RouteType,
 };
 use rustbgpd_telemetry::reason_labels::{
-    ImportRejectReason, MalformedUpdateDisposition, NextHopOwnershipBlockReason, OtcBlockReason,
-    RrLoopReason,
+    ImportRejectReason, MalformedUpdateDisposition, MalformedUpdateReason,
+    NextHopOwnershipBlockReason, OtcBlockReason, RrLoopReason,
 };
 use rustbgpd_wire::{AspaValidationContext, ErrorDisposition, ParsedUpdate};
 use std::sync::Arc;
@@ -27,6 +27,50 @@ fn malformed_disposition_label(disposition: ErrorDisposition) -> MalformedUpdate
         ErrorDisposition::SessionReset => MalformedUpdateDisposition::SessionReset,
     }
 }
+/// Classify the typed protocol error; diagnostic text never becomes a label.
+fn malformed_decode_reason(error: &rustbgpd_wire::DecodeError) -> MalformedUpdateReason {
+    use rustbgpd_wire::DecodeError;
+    match error {
+        DecodeError::UpdateAttributeError { subcode, .. } => malformed_subcode_reason(*subcode),
+        DecodeError::ProhibitedAsSet { .. } => MalformedUpdateReason::AsSetProhibited,
+        DecodeError::MalformedSrv6ServiceTlv { .. } => MalformedUpdateReason::Srv6ServiceTlv,
+        DecodeError::InvalidNetworkField { .. } => MalformedUpdateReason::InvalidNetwork,
+        DecodeError::UpdateLengthMismatch { .. } | DecodeError::TruncatedAttributeHeader => {
+            MalformedUpdateReason::AttributeList
+        }
+        _ => MalformedUpdateReason::Other,
+    }
+}
+
+fn malformed_subcode_reason(subcode: u8) -> MalformedUpdateReason {
+    use rustbgpd_wire::notification::update_subcode;
+    match subcode {
+        update_subcode::MALFORMED_ATTRIBUTE_LIST => MalformedUpdateReason::AttributeList,
+        update_subcode::UNRECOGNIZED_WELLKNOWN => MalformedUpdateReason::UnrecognizedWellKnown,
+        update_subcode::MISSING_WELLKNOWN => MalformedUpdateReason::MissingWellKnown,
+        update_subcode::ATTRIBUTE_FLAGS_ERROR => MalformedUpdateReason::AttributeFlags,
+        update_subcode::ATTRIBUTE_LENGTH_ERROR => MalformedUpdateReason::AttributeLength,
+        update_subcode::INVALID_ORIGIN => MalformedUpdateReason::InvalidOrigin,
+        update_subcode::INVALID_NEXT_HOP => MalformedUpdateReason::InvalidNextHop,
+        update_subcode::OPTIONAL_ATTRIBUTE_ERROR => MalformedUpdateReason::OptionalAttribute,
+        update_subcode::INVALID_NETWORK_FIELD => MalformedUpdateReason::InvalidNetwork,
+        update_subcode::MALFORMED_AS_PATH => MalformedUpdateReason::MalformedAsPath,
+        _ => MalformedUpdateReason::Other,
+    }
+}
+
+fn record_malformed_update(
+    metrics: &rustbgpd_telemetry::BgpMetrics,
+    peer: &str,
+    causes: &[(Option<u8>, MalformedUpdateReason)],
+    disposition: MalformedUpdateDisposition,
+) {
+    metrics.record_update_malformed(peer, disposition);
+    for &(type_code, reason) in causes {
+        metrics.record_update_malformed_cause(peer, type_code, reason, disposition);
+    }
+}
+
 /// Increment `bgp_policy_routes_total{peer, policy, direction=import,
 /// action}` for one import-side chain evaluation. Policy uses the configured
 /// denying member, the shared nonempty-chain Permit label, or `"inline"` for
@@ -1295,7 +1339,7 @@ impl PeerSession {
             .negotiated
             .as_ref()
             .is_some_and(|n| n.peer_asn != self.config.peer.local_asn);
-        let (revised, evpn_discarded) = match update.parse_revised_observed(
+        let (revised, evpn_discarded) = match update.parse_revised_observed_with_error_context(
             four_octet_as,
             !is_ebgp,
             add_path_ipv4,
@@ -1306,15 +1350,33 @@ impl PeerSession {
                 warn!(peer = %self.peer_label, error = %e, "UPDATE decode error");
                 // parse_revised reserves Err for session-reset-class
                 // malformations (RFC 7606 §3 (j), §5.3).
-                self.metrics.record_update_malformed(
+                record_malformed_update(
+                    &self.metrics,
                     &self.peer_label,
+                    &[(e.type_code, malformed_decode_reason(&e.error))],
                     MalformedUpdateDisposition::SessionReset,
                 );
-                self.drive_fsm(Event::DecodeError(e)).await;
+                self.drive_fsm(Event::DecodeError(e.error)).await;
                 return;
             }
         };
         let malformed = revised.malformed;
+        let mut causes: Vec<_> = malformed
+            .iter()
+            .map(|m| {
+                (
+                    if matches!(
+                        m.error,
+                        rustbgpd_wire::DecodeError::TruncatedAttributeHeader
+                    ) {
+                        None
+                    } else {
+                        Some(m.type_code)
+                    },
+                    malformed_decode_reason(&m.error),
+                )
+            })
+            .collect();
         let parsed = revised.update;
         for (route_type, discarded) in evpn_discarded {
             self.record_evpn_discard(route_type, discarded);
@@ -1400,20 +1462,39 @@ impl PeerSession {
                 && self.use_extended_nexthop_ipv4(),
         };
         let mut validation_payload: Option<(u8, Vec<u8>)> = None;
-        let validation = rustbgpd_wire::validate::validate_update_attributes_with_options(
+        let validation = rustbgpd_wire::validate::validate_update_attributes_with_context(
             &parsed.attributes,
             has_nlri,
             has_body_nlri,
             is_ebgp,
             validation_options,
         )
+        .map_err(|context| {
+            let reason = malformed_subcode_reason(context.error.subcode);
+            (context.error, context.type_code, reason)
+        })
         .and_then(|()| {
             rustbgpd_wire::validate::validate_as_path_ceiling(
                 &parsed.attributes,
                 self.config.max_as_path_length,
             )
+            .map_err(|error| {
+                (
+                    error,
+                    rustbgpd_wire::constants::attr_type::AS_PATH,
+                    MalformedUpdateReason::AsPathLimit,
+                )
+            })
         });
-        if let Err(update_err) = validation {
+        if let Err((update_err, type_code, reason)) = validation {
+            // A decoder-removed mandatory attribute already has its primary
+            // cause. Do not label the resulting absence as a second independent
+            // failure; retain the validator's protocol disposition below.
+            if reason != MalformedUpdateReason::MissingWellKnown
+                || !malformed.iter().any(|m| m.type_code == type_code)
+            {
+                causes.push((Some(type_code), reason));
+            }
             warn!(
                 peer = %self.peer_label,
                 subcode = update_err.subcode,
@@ -1423,8 +1504,10 @@ impl PeerSession {
             );
             self.debug_dump_malformed_update(&update, &parsed);
             if update_err.disposition == ErrorDisposition::SessionReset {
-                self.metrics.record_update_malformed(
+                record_malformed_update(
+                    &self.metrics,
                     &self.peer_label,
+                    &causes,
                     MalformedUpdateDisposition::SessionReset,
                 );
                 let notif = NotificationMessage::new(
@@ -1455,8 +1538,10 @@ impl PeerSession {
                     peer = %self.peer_label,
                     "treat-as-withdraw with no reachable NLRI — session reset (RFC 7606 §5.2)"
                 );
-                self.metrics.record_update_malformed(
+                record_malformed_update(
+                    &self.metrics,
                     &self.peer_label,
+                    &causes,
                     MalformedUpdateDisposition::SessionReset,
                 );
                 if let Some(m) = malformed
@@ -1483,20 +1568,15 @@ impl PeerSession {
                 announced = parsed.announced.len(),
                 "treat-as-withdraw — withdrawing the routes carried in the malformed UPDATE"
             );
-            self.metrics.record_update_malformed(
+            record_malformed_update(
+                &self.metrics,
                 &self.peer_label,
+                &causes,
                 MalformedUpdateDisposition::TreatAsWithdraw,
             );
             self.treat_update_as_withdraw(&parsed, ImportRejectReason::TreatAsWithdraw, None)
                 .await;
             return;
-        }
-        // Weaker than treat-as-withdraw: the only remaining non-clean
-        // disposition is attribute-discard — the offending attributes were
-        // dropped and the UPDATE proceeds without them.
-        if let Some(applied) = disposition {
-            self.metrics
-                .record_update_malformed(&self.peer_label, malformed_disposition_label(applied));
         }
         // draft-ietf-sidrops-aspa-verification-28 §5.1: an AS_PATH whose most
         // recently added AS is not the negotiated eBGP neighbor AS is
@@ -1525,8 +1605,14 @@ impl PeerSession {
                 neighbor_asn,
                 "ASPA first-AS precondition failed; treating UPDATE as withdraw"
             );
-            self.metrics.record_update_malformed(
+            causes.push((
+                Some(rustbgpd_wire::constants::attr_type::AS_PATH),
+                MalformedUpdateReason::AspaFirstAsMismatch,
+            ));
+            record_malformed_update(
+                &self.metrics,
                 &self.peer_label,
+                &causes,
                 MalformedUpdateDisposition::TreatAsWithdraw,
             );
             self.treat_update_as_withdraw(
@@ -1536,6 +1622,17 @@ impl PeerSession {
             )
             .await;
             return;
+        }
+        // Weaker than treat-as-withdraw: the only remaining non-clean
+        // disposition is attribute-discard — the offending attributes were
+        // dropped and the UPDATE proceeds without them.
+        if let Some(applied) = disposition {
+            record_malformed_update(
+                &self.metrics,
+                &self.peer_label,
+                &causes,
+                malformed_disposition_label(applied),
+            );
         }
         // 3. End-of-RIB detection (RFC 4724 §2). An UPDATE that only became
         // empty because malformed attributes were discarded is junk, not an

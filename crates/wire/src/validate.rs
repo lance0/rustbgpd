@@ -80,6 +80,15 @@ pub struct UpdateError {
     /// RFC 7606 disposition for this error.
     pub disposition: ErrorDisposition,
 }
+/// A semantic UPDATE validation error with its offending attribute type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateValidationError {
+    /// Original validation error, including unchanged NOTIFICATION data.
+    pub error: UpdateError,
+    /// Attribute type responsible for the error.
+    pub type_code: u8,
+}
+
 /// Context-dependent UPDATE validation knobs.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct UpdateValidationOptions {
@@ -132,6 +141,23 @@ pub fn validate_update_attributes_with_options(
     is_ebgp: bool,
     options: UpdateValidationOptions,
 ) -> Result<(), UpdateError> {
+    validate_update_attributes_with_context(attrs, has_nlri, has_body_nlri, is_ebgp, options)
+        .map_err(|context| context.error)
+}
+
+/// Validate UPDATE attributes while retaining the offending attribute type.
+///
+/// # Errors
+///
+/// Returns the same validation error as [`validate_update_attributes_with_options`]
+/// together with its attribute type.
+pub fn validate_update_attributes_with_context(
+    attrs: &[PathAttribute],
+    has_nlri: bool,
+    has_body_nlri: bool,
+    is_ebgp: bool,
+    options: UpdateValidationOptions,
+) -> Result<(), UpdateValidationError> {
     let present = check_duplicate_types(attrs)?;
     check_unrecognized_wellknown(attrs)?;
     if has_nlri {
@@ -139,8 +165,8 @@ pub fn validate_update_attributes_with_options(
     }
     for attr in attrs {
         match attr {
-            PathAttribute::NextHop(addr) => check_next_hop(*addr)?,
-            PathAttribute::AsPath(path) => check_as_path(path)?,
+            PathAttribute::NextHop(addr) => check_next_hop(*addr),
+            PathAttribute::AsPath(path) => check_as_path(path),
             // RFC 8955 §4: for FlowSpec (SAFI 133), the NEXT_HOP
             // attribute value is "irrelevant" and is recommended
             // to be 0 when advertising. The on-wire NH-Len for
@@ -159,23 +185,30 @@ pub fn validate_update_attributes_with_options(
                     mp.next_hop,
                     mp.link_local_next_hop,
                     allow_link_local_primary,
-                )?;
+                )
             }
-            _ => {}
+            _ => Ok(()),
         }
+        .map_err(|error| UpdateValidationError {
+            error,
+            type_code: attr.type_code(),
+        })?;
     }
     Ok(())
 }
 /// (3,1) Duplicate attribute type codes.
-fn check_duplicate_types(attrs: &[PathAttribute]) -> Result<[bool; 256], UpdateError> {
+fn check_duplicate_types(attrs: &[PathAttribute]) -> Result<[bool; 256], UpdateValidationError> {
     let mut present = [false; 256];
     for attr in attrs {
         let tc = attr.type_code();
         if present[usize::from(tc)] {
-            return Err(UpdateError {
-                subcode: update_subcode::MALFORMED_ATTRIBUTE_LIST,
-                data: vec![],
-                disposition: ErrorDisposition::SessionReset,
+            return Err(UpdateValidationError {
+                type_code: tc,
+                error: UpdateError {
+                    subcode: update_subcode::MALFORMED_ATTRIBUTE_LIST,
+                    data: vec![],
+                    disposition: ErrorDisposition::SessionReset,
+                },
             });
         }
         present[usize::from(tc)] = true;
@@ -183,15 +216,18 @@ fn check_duplicate_types(attrs: &[PathAttribute]) -> Result<[bool; 256], UpdateE
     Ok(present)
 }
 /// (3,2) Unrecognized well-known attribute: Optional=0 and type code unknown.
-fn check_unrecognized_wellknown(attrs: &[PathAttribute]) -> Result<(), UpdateError> {
+fn check_unrecognized_wellknown(attrs: &[PathAttribute]) -> Result<(), UpdateValidationError> {
     for attr in attrs {
         if let PathAttribute::Unknown(raw) = attr {
             // If Optional bit is NOT set, it claims to be well-known
             if (raw.flags & attr_flags::OPTIONAL) == 0 {
-                return Err(UpdateError {
-                    subcode: update_subcode::UNRECOGNIZED_WELLKNOWN,
-                    data: attr_error_data(raw.flags, raw.type_code, &raw.data),
-                    disposition: ErrorDisposition::TreatAsWithdraw,
+                return Err(UpdateValidationError {
+                    type_code: raw.type_code,
+                    error: UpdateError {
+                        subcode: update_subcode::UNRECOGNIZED_WELLKNOWN,
+                        data: attr_error_data(raw.flags, raw.type_code, &raw.data),
+                        disposition: ErrorDisposition::TreatAsWithdraw,
+                    },
                 });
             }
         }
@@ -208,23 +244,29 @@ fn check_mandatory_present(
     present: &[bool; 256],
     has_body_nlri: bool,
     is_ebgp: bool,
-) -> Result<(), UpdateError> {
+) -> Result<(), UpdateValidationError> {
     for &tc in MANDATORY_ATTRS {
         if !present[usize::from(tc)] {
-            return Err(UpdateError {
-                subcode: update_subcode::MISSING_WELLKNOWN,
-                data: vec![tc],
-                disposition: ErrorDisposition::TreatAsWithdraw,
+            return Err(UpdateValidationError {
+                type_code: tc,
+                error: UpdateError {
+                    subcode: update_subcode::MISSING_WELLKNOWN,
+                    data: vec![tc],
+                    disposition: ErrorDisposition::TreatAsWithdraw,
+                },
             });
         }
     }
     // NEXT_HOP mandatory for eBGP when body NLRI is present. When only MP_REACH
     // carries NLRI, the next-hop is inside the MP attribute (RFC 4760 §3).
     if is_ebgp && has_body_nlri && !present[usize::from(attr_type::NEXT_HOP)] {
-        return Err(UpdateError {
-            subcode: update_subcode::MISSING_WELLKNOWN,
-            data: vec![attr_type::NEXT_HOP],
-            disposition: ErrorDisposition::TreatAsWithdraw,
+        return Err(UpdateValidationError {
+            type_code: attr_type::NEXT_HOP,
+            error: UpdateError {
+                subcode: update_subcode::MISSING_WELLKNOWN,
+                data: vec![attr_type::NEXT_HOP],
+                disposition: ErrorDisposition::TreatAsWithdraw,
+            },
         });
     }
     Ok(())
@@ -411,6 +453,36 @@ mod tests {
         // No NLRI → no mandatory attributes required
         assert!(validate_update_attributes(&[], false, false, true).is_ok());
     }
+    #[test]
+    fn validation_context_attributes_duplicate_missing_and_next_hop_errors() {
+        for (attrs, has_nlri, type_code) in [
+            (
+                vec![
+                    PathAttribute::Origin(Origin::Igp),
+                    PathAttribute::Origin(Origin::Igp),
+                ],
+                false,
+                1,
+            ),
+            (vec![], true, 1),
+            (
+                vec![PathAttribute::NextHop(Ipv4Addr::UNSPECIFIED)],
+                false,
+                3,
+            ),
+        ] {
+            let options = UpdateValidationOptions::default();
+            let legacy =
+                validate_update_attributes_with_options(&attrs, has_nlri, has_nlri, true, options)
+                    .unwrap_err();
+            let context =
+                validate_update_attributes_with_context(&attrs, has_nlri, has_nlri, true, options)
+                    .unwrap_err();
+            assert_eq!(context.type_code, type_code);
+            assert_eq!(context.error, legacy);
+        }
+    }
+
     #[test]
     fn reject_duplicate_type() {
         let attrs = vec![
