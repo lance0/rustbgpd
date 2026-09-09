@@ -147,8 +147,9 @@ synthetic ROAs and must report exactly one deliberate mismatch: the covering
 `203.0.113.0/24` originated by AS64520. Alice runs with
 `enable_prefix_lookup = true` and one-minute store refresh intervals, so its
 routes store reads the adapter's `/routes/table/<table>` and
-`/routes/table/<table>/filtered` dumps; the harness waits for a refresh that
-saw the expected accepted and filtered totals, prints the refresh duration
+`/routes/table/<table>/filtered` dumps. Before either consumer phase, the
+harness waits for the expected accepted/filtered totals and the exact set of
+up neighbors in Alice's separate caches. It prints the refresh duration
 Alice logged, and the consumer proves one accepted prefix-lookup hit. Only
 after that baseline and both populated captures are frozen, the same live
 leg adds a fifth route-server client through the runtime API into a peer

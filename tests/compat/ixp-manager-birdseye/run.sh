@@ -3,6 +3,7 @@ set -eu
 
 root=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 repo=$(CDPATH='' cd -- "$root/../../.." && pwd)
+python3 "$root/test_alice_consumer.py"
 tmp=$(mktemp -d)
 network=rustbgpd-ixp-contract-$$
 mysql=rustbgpd-ixp-mysql-$$
