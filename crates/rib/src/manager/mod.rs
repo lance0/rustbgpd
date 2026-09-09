@@ -45,9 +45,11 @@ use tracing::{debug, info, warn};
 /// Release owned temporary elements while the actor still owns readiness.
 fn retire_vec<T>(values: &mut Vec<T>, checkpoint: &mut impl FnMut()) {
     checkpoint();
-    while let Some(value) = values.pop() {
-        drop(value);
-        checkpoint();
+    if std::mem::needs_drop::<T>() {
+        while let Some(value) = values.pop() {
+            drop(value);
+            checkpoint();
+        }
     }
     drop(std::mem::take(values));
     checkpoint();
@@ -58,9 +60,11 @@ fn retire_hash_set<T, S: BuildHasher + Default>(
     checkpoint: &mut impl FnMut(),
 ) {
     checkpoint();
-    for value in values.drain() {
-        drop(value);
-        checkpoint();
+    if std::mem::needs_drop::<T>() {
+        for value in values.drain() {
+            drop(value);
+            checkpoint();
+        }
     }
     drop(std::mem::take(values));
     checkpoint();

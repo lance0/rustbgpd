@@ -6732,6 +6732,46 @@ fn batched_pcb_fleet(export_policy: Option<&PolicyChain>) -> BatchedPcbFleet {
     batched_pcb_fleet_n(export_policy, 4)
 }
 
+#[test]
+fn replacement_cleanup_skips_scalar_walks_and_interleaves_owned_drops() {
+    for len in [0, 1, 4_096] {
+        let mut values: Vec<usize> = (0..len).collect();
+        let mut checkpoints = 0;
+        super::super::retire_vec(&mut values, &mut || checkpoints += 1);
+        assert!(values.is_empty());
+        assert_eq!(values.capacity(), 0);
+        assert_eq!(checkpoints, 2, "scalar cleanup only needs allocation edges");
+
+        let mut values: HashSet<usize> = (0..len).collect();
+        let mut checkpoints = 0;
+        super::super::retire_hash_set(&mut values, &mut || checkpoints += 1);
+        assert!(values.is_empty());
+        assert_eq!(values.capacity(), 0);
+        assert_eq!(checkpoints, 2, "scalar cleanup only needs allocation edges");
+    }
+
+    let owners: Vec<_> = (0..8).map(Arc::new).collect();
+    let retired = || {
+        owners
+            .iter()
+            .filter(|value| Arc::strong_count(value) == 1)
+            .count()
+    };
+    let mut progress = Vec::new();
+    let mut values = owners.clone();
+    super::super::retire_vec(&mut values, &mut || progress.push(retired()));
+    assert!(values.is_empty());
+    assert_eq!(retired(), owners.len());
+    assert!((0..=owners.len()).all(|count| progress.contains(&count)));
+
+    progress.clear();
+    let mut values: HashSet<_> = owners.iter().cloned().collect();
+    super::super::retire_hash_set(&mut values, &mut || progress.push(retired()));
+    assert!(values.is_empty());
+    assert_eq!(retired(), owners.len());
+    assert!((0..=owners.len()).all(|count| progress.contains(&count)));
+}
+
 /// Four routes across both unicast families keep readiness counts distinct
 /// from either family's count without depending on scheduler timing.
 fn replacement_readiness_fleet(export_policy: &PolicyChain) -> BatchedPcbFleet {
