@@ -97,7 +97,7 @@ pid, boot, start = sys.argv[1:]
 try:
     fd = os.pidfd_open(int(pid))
 except OSError as error:
-    raise SystemExit(f"runner is gone: {error}")
+    raise SystemExit(f"cannot open runner pidfd: {error}")
 try:
     if open("/proc/sys/kernel/random/boot_id", encoding="utf-8").read().strip() != boot:
         raise SystemExit("runner boot identity changed")
@@ -121,7 +121,7 @@ stop_flagship_runner() {
         return 1
     fi
     if ! flagship_send_term "$run_dir"; then
-        echo "error: runner identity changed before it could be signalled: $run_dir" >&2
+        echo "error: could not signal the verified runner: $run_dir" >&2
         return 1
     fi
     for ((i = 0; i < 600; i++)); do
