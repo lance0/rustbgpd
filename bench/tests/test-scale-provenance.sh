@@ -285,4 +285,217 @@ resume_rc=0
 RELOADSTALL_IPV4_PREFIXES=200200 run_resume_check || resume_rc=$?
 [[ $resume_rc == 10 ]]
 RELOADSTALL_IPV4_PREFIXES=360360 reject_resume
+
+# Exercise the real probe functions and teardown block without a daemon or
+# benchmark. FIFOs hold each foreground CLI until both loop owners are stopped.
+python3 - "$root" "$tmp" <<'PY'
+import csv
+import os
+from pathlib import Path
+import selectors
+import signal
+import subprocess
+import sys
+
+root, tmp = map(Path, sys.argv[1:])
+source = (root / "bench/scale/matrix/run-matrix.sh").read_text()
+probes = source.split("probe_health_loop() {", 1)[1].split("\n# run_cell ", 1)[0]
+cleanup = source.split("    # Collect artifacts, then teardown.\n", 1)[1].split(
+    "\n}\n\nfor cell ", 1
+)[0]
+library = tmp / "matrix-lifecycle.sh"
+library.write_text("probe_health_loop() {" + probes + "\nfinish_cell() {\n" + cleanup + "\n}\n")
+fake = tmp / "fake-rbgp"
+fake.write_text('''#!/usr/bin/env python3
+import os
+from pathlib import Path
+import signal
+import sys
+
+root = Path(os.environ["PROBE_FIXTURE"])
+mode = sys.argv[1] if sys.argv[1] == "daemon" else sys.argv[3]
+if mode == "daemon":
+    def stop(_signal, _frame):
+        for name in ("health", "rib"):
+            assert (root / (name + ".done")).exists(), name + " did not finish"
+            try:
+                os.kill(int((root / (name + ".pid")).read_text()), 0)
+            except ProcessLookupError:
+                pass
+            else:
+                raise AssertionError(name + " child survived its loop")
+        (root / "daemon.stopped").write_text("stopped\\n")
+        raise SystemExit(int(os.environ["DAEMON_EXIT"]))
+    signal.signal(signal.SIGTERM, stop)
+else:
+    (root / (mode + ".pid")).write_text(str(os.getpid()))
+    with (root / (mode + ".starts")).open("a") as stream:
+        stream.write("started\\n")
+    print(mode + " stderr started", file=sys.stderr, flush=True)
+with (root / "events").open("w") as events:
+    events.write("ready " + mode + "\\n")
+if mode == "daemon":
+    while True:
+        signal.pause()
+with (root / (mode + ".release")).open() as release:
+    release.readline()
+print(mode + " stderr finished", file=sys.stderr, flush=True)
+(root / (mode + ".done")).write_text("done\\n")
+raise SystemExit(7 if mode == "health" else 0)
+''')
+fake.chmod(0o755)
+driver = tmp / "matrix-lifecycle-driver.sh"
+driver.write_text('''#!/usr/bin/env bash
+set -u
+source "$1"
+cell=rustbgpd
+cdir=$PROBE_FIXTURE
+run=$cdir/run
+container=""
+rc=0
+hrc=0
+recheck_cell_provenance() { return 0; }
+"$RBGP" daemon >"$cdir/daemon.log" 2>&1 &
+daemon_pid=$!
+sleep 60 &
+sampler_pid=$!
+probe_health_loop fixture "$cdir/probes.csv" &
+probe_pids=($!)
+probe_query_loop fixture "$cdir/queries.csv" first-prefix second-prefix &
+probe_pids+=($!)
+printf '%s\\n' "${probe_pids[@]}" >"$cdir/loops"
+kill() {
+    builtin kill "$@"
+    local status=$?
+    printf 'signaled %s\\n' "$1" >"$cdir/events"
+    return "$status"
+}
+wait() {
+    printf 'waiting %s\\n' "$1" >"$cdir/events"
+    builtin wait "$1"
+}
+printf 'ready driver\\n' >"$cdir/events"
+read -r _ <"$cdir/cleanup"
+if [ "$FAIL_PROBE_OWNER" = 1 ]; then
+    (exit 23) &
+    probe_pids+=($!)
+fi
+finish_cell
+''')
+
+for case, daemon_exit, failed_owner in [("normal", 0, 0), ("daemon-failure", 9, 0), ("owner-failure", 0, 1)]:
+    fixture = tmp / case
+    (fixture / "run").mkdir(parents=True)
+    for name in ("events", "cleanup", "health.release", "rib.release"):
+        os.mkfifo(fixture / name)
+    events_fd = os.open(fixture / "events", os.O_RDWR | os.O_NONBLOCK)
+    selector = selectors.DefaultSelector()
+    selector.register(events_fd, selectors.EVENT_READ)
+    buffered = bytearray()
+
+    def event():
+        while b"\n" not in buffered:
+            assert selector.select(5), f"{case}: missing lifecycle event"
+            buffered.extend(os.read(events_fd, 4096))
+        line, _, rest = buffered.partition(b"\n")
+        buffered[:] = rest
+        return line.decode()
+
+    environment = dict(os.environ, RBGP=str(fake), PROBE_FIXTURE=str(fixture),
+                       DAEMON_EXIT=str(daemon_exit), FAIL_PROBE_OWNER=str(failed_owner))
+    process = subprocess.Popen(["bash", str(driver), str(library)], env=environment,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               start_new_session=True)
+    try:
+        assert {event() for _ in range(4)} == {
+            "ready health", "ready rib", "ready daemon", "ready driver"
+        }
+        loops = (fixture / "loops").read_text().splitlines()
+        with (fixture / "cleanup").open("w") as start:
+            start.write("stop\n")
+        signaled = []
+        while True:
+            next_event = event()
+            if next_event.startswith("waiting "):
+                assert next_event == "waiting " + loops[0]
+                break
+            signaled.append(next_event.removeprefix("signaled "))
+        assert all(pid in signaled for pid in loops), "must signal both loops before waiting"
+        assert not (fixture / "daemon.stopped").exists(), "daemon stopped during an active RPC"
+        for name, filename in [("health", "probes.csv"), ("rib", "queries.csv")]:
+            assert len((fixture / filename).read_text().splitlines()) == 1
+            os.kill(int((fixture / (name + ".pid")).read_text()), 0)
+            with (fixture / (name + ".release")).open("w") as release:
+                release.write("complete\n")
+        stdout, stderr = process.communicate(timeout=5)
+        assert process.returncode == (1 if daemon_exit or failed_owner else 0), (case, stdout, stderr)
+        expected_cleanup = 1 if daemon_exit or failed_owner else 0
+        assert f"harness rc=0 cleanup rc={expected_cleanup} cell rc={expected_cleanup}" in stdout.decode()
+        assert (fixture / "daemon.exit").read_text() == str(daemon_exit) + "\n"
+        assert (fixture / "daemon.stopped").exists(), (fixture / "daemon.log").read_text()
+        for name, filename, expected_exit in [("health", "probes.csv", "7"), ("rib", "queries.csv", "0")]:
+            with (fixture / filename).open() as stream:
+                rows = list(csv.DictReader(stream))
+            assert len(rows) == 1 and rows[0]["exit"] == expected_exit, (case, rows)
+            assert float(rows[0]["latency_ms"]) >= 0
+            assert (fixture / (name + ".starts")).read_text() == "started\n"
+        assert rows[0]["prefix"] == "first-prefix", "query loop started another prefix after stop"
+        health_stderr = (fixture / "probes.csv.stderr.log").read_text()
+        assert health_stderr.count("probe_start epoch_s=") == 1
+        assert "health stderr started\nhealth stderr finished\n" in health_stderr
+    finally:
+        # Only this fixture's session: leave no fake child behind on assertion failure.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+        selector.close()
+        os.close(events_fd)
+
+# A process that deliberately ignores TERM must still be killed and reaped.
+# Pass the short bound directly to the production helper, not an env knob.
+fixture = tmp / "daemon-timeout"
+fixture.mkdir()
+stubborn = fixture / "daemon.py"
+stubborn.write_text("""import signal
+import sys
+from pathlib import Path
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+Path(sys.argv[1]).write_text("ready\\n")
+while True:
+    signal.pause()
+""")
+timeout_driver = fixture / "driver.sh"
+timeout_driver.write_text('''#!/usr/bin/env bash
+set -u
+source "$1"
+python3 "$2/daemon.py" "$2/ready" &
+pid=$!
+printf '%s\\n' "$pid" >"$2/pid"
+while [ ! -e "$2/ready" ]; do sleep 0.01; done
+stop_native_daemon "$pid" "$2/daemon.exit" 1
+exit "$?"
+''')
+process = subprocess.Popen(["bash", str(timeout_driver), str(library), str(fixture)],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           start_new_session=True)
+try:
+    stdout, stderr = process.communicate(timeout=5)
+    assert process.returncode == 1, (stdout, stderr)
+    assert (fixture / "daemon.exit").read_text() == "137\n"
+    assert "did not exit within 1s after SIGTERM; sending SIGKILL" in stderr.decode()
+    try:
+        os.kill(int((fixture / "pid").read_text()), 0)
+    except ProcessLookupError:
+        pass
+    else:
+        raise AssertionError("TERM-ignoring daemon survived bounded cleanup")
+finally:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait()
+PY
 echo "scale provenance tests pass"

@@ -141,11 +141,12 @@ use rustbgpd_wire::constants::{AS_TRANS, HEADER_LEN, MAX_MESSAGE_LEN};
 use rustbgpd_wire::header::peek_message_length;
 use rustbgpd_wire::message::{decode_message, encode_message, Message};
 use rustbgpd_wire::nlri::{NlriEntry, Prefix};
+use rustbgpd_wire::notification::cease_subcode;
 use rustbgpd_wire::open::OpenMessage;
 use rustbgpd_wire::update::{Ipv4UnicastMode, ParsedUpdate, UpdateMessage};
 use rustbgpd_wire::{
     AsPath, AsPathSegment, Ipv4NlriEntry, Ipv4Prefix, Ipv6Prefix, MpReachNlri, MpUnreachNlri,
-    Origin, PathAttribute, RouteRefreshMessage,
+    NotificationCode, NotificationMessage, Origin, PathAttribute, RouteRefreshMessage,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpSocket, TcpStream};
@@ -202,6 +203,7 @@ const TRIP_TEARDOWN_WINDOW: Duration = Duration::from_secs(60);
 /// accepts and then silently holds the socket must not wedge the retry
 /// loop (the loop itself runs until the configured re-establish deadline).
 const TRIP_ATTEMPT_WINDOW: Duration = Duration::from_secs(30);
+const FLEET_FINISH_TIMEOUT: Duration = Duration::from_secs(15);
 const EVIDENCE_TIMEOUT: Duration = Duration::from_secs(15);
 const PRE_CHURN_EVIDENCE_TIMEOUT: Duration = Duration::from_secs(60);
 const METRICS_DEADLINE: Duration = Duration::from_secs(5);
@@ -459,8 +461,97 @@ impl Obs {
 /// (dropping both split halves closes the fd).
 struct Stub {
     tx: mpsc::Sender<Message>,
-    reader: tokio::task::JoinHandle<()>,
-    writer: tokio::task::JoinHandle<()>,
+    reader: tokio::task::JoinHandle<Result<(), String>>,
+    writer: tokio::task::JoinHandle<Result<(), String>>,
+    refreshes: Arc<Mutex<tokio::task::JoinSet<()>>>,
+}
+
+/// Finish only after measurement/evidence has completed. Every peer receives
+/// Cease before any reader is joined, so slow drain cannot strand another
+/// peer's live writer. A single deadline bounds the entire fleet.
+async fn finish_fleet(
+    stubs: Vec<Stub>,
+    churn_tasks: Vec<tokio::task::JoinHandle<()>>,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut errors = Vec::new();
+    for task in &churn_tasks {
+        task.abort();
+    }
+    for task in churn_tasks {
+        if let Err(error) = task.await {
+            if !error.is_cancelled() {
+                errors.push(format!("churn task: {error}"));
+            }
+        }
+    }
+    for (i, stub) in stubs.iter().enumerate() {
+        let cease = Message::Notification(NotificationMessage::new(
+            NotificationCode::Cease,
+            cease_subcode::ADMINISTRATIVE_SHUTDOWN,
+            bytes::Bytes::new(),
+        ));
+        match tokio::time::timeout_at(deadline, stub.tx.send(cease)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => errors.push(format!("stub {i} writer channel closed")),
+            Err(_) => {
+                errors.push(format!("fleet finish timed out sending Cease to stub {i}"));
+                break;
+            }
+        }
+    }
+    let mut tasks = Vec::new();
+    let mut refreshes = Vec::new();
+    for (i, stub) in stubs.into_iter().enumerate() {
+        tasks.push((i, "reader", stub.reader));
+        tasks.push((i, "writer", stub.writer));
+        refreshes.push(stub.refreshes);
+    }
+    while let Some((i, kind, mut task)) = tasks.pop() {
+        match tokio::time::timeout_at(deadline, &mut task).await {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(error))) => errors.push(format!("stub {i} {kind}: {error}")),
+            Ok(Err(error)) => errors.push(format!("stub {i} {kind} task: {error}")),
+            Err(_) => {
+                errors.push(format!("fleet finish timed out draining stub {i} {kind}"));
+                task.abort();
+                for (_, _, remaining) in &tasks {
+                    remaining.abort();
+                }
+                let _ = task.await;
+                for (_, _, remaining) in tasks.drain(..) {
+                    let _ = remaining.await;
+                }
+                break;
+            }
+        }
+    }
+    // Readers can no longer spawn responses. Take ownership before awaiting;
+    // channel closure/abort ends every remaining refresh sender.
+    for refreshes in refreshes {
+        let mut refreshes = std::mem::take(&mut *refreshes.lock().unwrap());
+        refreshes.abort_all();
+        while let Some(result) = refreshes.join_next().await {
+            if let Err(error) = result {
+                if !error.is_cancelled() {
+                    errors.push(format!("refresh task: {error}"));
+                }
+            }
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+async fn finish_or_exit(stubs: Vec<Stub>, churn_tasks: Vec<tokio::task::JoinHandle<()>>) {
+    if let Err(error) = finish_fleet(stubs, churn_tasks, FLEET_FINISH_TIMEOUT).await {
+        eprintln!("FAIL: final BGP fleet cleanup failed: {error}");
+        std::process::exit(1);
+    }
 }
 
 #[derive(Default)]
@@ -1386,56 +1477,80 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<(Stub, u32), String> {
         .established
         .store(true, Ordering::Relaxed);
 
+    Ok((start_stub(ctx, i, stream), retries))
+}
+
+fn start_stub(ctx: Arc<Ctx>, i: u32, stream: TcpStream) -> Stub {
     let (tx, mut tx_rx) = mpsc::channel::<Message>(256);
     let (mut reader, mut writer) = stream.into_split();
+    let refreshes = Arc::new(Mutex::new(tokio::task::JoinSet::new()));
 
-    // Writer task: outbound messages + periodic keepalive.
+    // Writer task: outbound messages + periodic keepalive. A final Cease
+    // drains queued messages, half-closes TCP, and stops keepalives while
+    // the reader continues consuming the daemon's pending output to EOF.
     let writer_ctx = Arc::clone(&ctx);
     let writer_handle = tokio::spawn(async move {
-        let mut ka_tick = tokio::time::interval(Duration::from_secs(u64::from(HOLD_TIME) / 3));
-        ka_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        ka_tick.tick().await;
-        loop {
-            tokio::select! {
-                Some(msg) = tx_rx.recv() => {
-                    let Ok(bytes) = encode_message(&msg) else { break };
-                    if writer.write_all(&bytes).await.is_err() { break; }
-                    if dualstack() && i >= writer_ctx.n_peers - CHURNERS {
-                        let written_at = now_us(&writer_ctx);
-                        let family = churn_family(&msg, i - (writer_ctx.n_peers - CHURNERS));
-                        if family != 0 {
-                            if let Some(writes) = writer_ctx.churn_writes.lock().unwrap().as_mut() {
-                                writes.push((written_at, family));
+        let result = async {
+            let mut ka_tick = tokio::time::interval(Duration::from_secs(u64::from(HOLD_TIME) / 3));
+            ka_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            ka_tick.tick().await;
+            loop {
+                tokio::select! {
+                    Some(msg) = tx_rx.recv() => {
+                        let bytes = encode_message(&msg).map_err(|e| format!("encode: {e}"))?;
+                        writer.write_all(&bytes).await.map_err(|e| format!("write: {e}"))?;
+                        if matches!(msg, Message::Notification(_)) {
+                            writer.shutdown().await.map_err(|e| format!("shutdown: {e}"))?;
+                            return Ok(());
+                        }
+                        if dualstack() && i >= writer_ctx.n_peers - CHURNERS {
+                            let written_at = now_us(&writer_ctx);
+                            let family = churn_family(&msg, i - (writer_ctx.n_peers - CHURNERS));
+                            if family != 0 {
+                                if let Some(writes) = writer_ctx.churn_writes.lock().unwrap().as_mut() {
+                                    writes.push((written_at, family));
+                                }
                             }
                         }
                     }
+                    _ = ka_tick.tick() => {
+                        let bytes = encode_message(&Message::Keepalive).unwrap();
+                        writer.write_all(&bytes).await.map_err(|e| format!("keepalive write: {e}"))?;
+                    }
                 }
-                _ = ka_tick.tick() => {
-                    let bytes = encode_message(&Message::Keepalive).unwrap();
-                    if writer.write_all(&bytes).await.is_err() { break; }
-                }
-                else => break,
             }
-        }
+        }.await;
         writer_ctx.obs[i as usize]
             .established
             .store(false, Ordering::Relaxed);
+        result
     });
 
     // Reader task: frame, decode, record UPDATE arrivals, answer
     // ROUTE_REFRESH by re-sending the base slice.
     let tx_for_reader = tx.clone();
     let rctx = Arc::clone(&ctx);
+    let reader_refreshes = Arc::clone(&refreshes);
     let reader_handle = tokio::spawn(async move {
         let mut frame = BytesMut::with_capacity(1 << 16);
         let mut tmp = vec![0u8; 1 << 16];
         loop {
             let n = match reader.read(&mut tmp).await {
-                Ok(0) | Err(_) => {
+                Ok(0) => {
                     rctx.obs[i as usize]
                         .established
                         .store(false, Ordering::Relaxed);
-                    return;
+                    return if frame.is_empty() {
+                        Ok(())
+                    } else {
+                        Err("EOF in daemon frame".into())
+                    };
+                }
+                Err(error) => {
+                    rctx.obs[i as usize]
+                        .established
+                        .store(false, Ordering::Relaxed);
+                    return Err(format!("read: {error}"));
                 }
                 Ok(n) => n,
             };
@@ -1453,7 +1568,7 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<(Stub, u32), String> {
                         rctx.obs[i as usize]
                             .established
                             .store(false, Ordering::Relaxed);
-                        return;
+                        return Err(error.to_string());
                     }
                 };
                 if frame.len() < total {
@@ -1468,7 +1583,7 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<(Stub, u32), String> {
                         rctx.obs[i as usize]
                             .established
                             .store(false, Ordering::Relaxed);
-                        return;
+                        return Err(error.to_string());
                     }
                 };
                 match msg {
@@ -1647,7 +1762,16 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<(Stub, u32), String> {
                         }
                         let tx = tx_for_reader.clone();
                         let rc = Arc::clone(&rctx);
-                        tokio::spawn(async move {
+                        let mut refresh_tasks = reader_refreshes.lock().unwrap();
+                        while let Some(result) = refresh_tasks.try_join_next() {
+                            if let Err(error) = result {
+                                rctx.obs[i as usize]
+                                    .established
+                                    .store(false, Ordering::Relaxed);
+                                return Err(format!("refresh task: {error}"));
+                            }
+                        }
+                        refresh_tasks.spawn(async move {
                             let messages = if ipv6 {
                                 announce6_msgs(i, &own_slice6(&rc, i))
                             } else {
@@ -1668,14 +1792,12 @@ async fn establish_stub(ctx: Arc<Ctx>, i: u32) -> Result<(Stub, u32), String> {
         }
     });
 
-    Ok((
-        Stub {
-            tx,
-            reader: reader_handle,
-            writer: writer_handle,
-        },
-        retries,
-    ))
+    Stub {
+        tx,
+        reader: reader_handle,
+        writer: writer_handle,
+        refreshes,
+    }
 }
 
 /// Percentile over a sorted slice.
@@ -3063,6 +3185,7 @@ fn main() {
             println!(
                 "convergence_only_receipt,peers={n_peers},prefixes={total},per_peer={per_peer},expected={expected},min_unique={min_unique},max_unique={max_unique},sessions_up={up},parse_errors={parse_errors}"
             );
+            finish_or_exit(stubs, Vec::new()).await;
             std::process::exit(0);
         }
 
@@ -3075,6 +3198,7 @@ fn main() {
             }
         }
 
+        let mut churn_tasks = Vec::new();
         // --- Start churn: last CHURNERS stubs flap a dedicated block. ---
         for c in 0..CHURNERS {
             let i = n_peers - CHURNERS + c;
@@ -3082,7 +3206,7 @@ fn main() {
             let block: Vec<Ipv4Prefix> = (0..CHURN_BLOCK).map(|j| churn_prefix(c, j)).collect();
             let block6: Vec<Ipv6Prefix> = (0..CHURN_BLOCK).map(|j| churn_prefix6(c, j)).collect();
             let cctx = Arc::clone(&ctx);
-            tokio::spawn(async move {
+            churn_tasks.push(tokio::spawn(async move {
                 // Stagger churners across the interval.
                 tokio::time::sleep(Duration::from_millis(
                     u64::from(c) * CHURN_MS / u64::from(CHURNERS),
@@ -3116,7 +3240,7 @@ fn main() {
                     cctx.churn_cycles.fetch_add(1, Ordering::Relaxed);
                     tokio::time::sleep(Duration::from_millis(CHURN_MS)).await;
                 }
-            });
+            }));
         }
         // Let churn reach steady state.
         tokio::time::sleep(Duration::from_secs(3)).await;
@@ -3162,6 +3286,7 @@ fn main() {
                 );
                 std::process::exit(1);
             }
+            finish_or_exit(stubs, churn_tasks).await;
             std::process::exit(0);
         }
 
@@ -3176,6 +3301,7 @@ fn main() {
                 );
                 std::process::exit(1);
             }
+            finish_or_exit(stubs, churn_tasks).await;
             std::process::exit(0);
         }
 
@@ -3676,6 +3802,7 @@ fn main() {
                 );
                 std::process::exit(1);
             }
+            finish_or_exit(stubs, churn_tasks).await;
             std::process::exit(0);
         };
         let up = ctx
@@ -3701,6 +3828,7 @@ fn main() {
             std::process::exit(1);
         }
         println!("done rss_mib={}", rss_mib(pid));
+        finish_or_exit(stubs, churn_tasks).await;
         std::process::exit(0);
     });
 }
@@ -3708,6 +3836,224 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn finish_test_ctx() -> Arc<Ctx> {
+        Arc::new(Ctx {
+            t0: Instant::now(),
+            n_peers: CHURNERS,
+            per_peer: 1,
+            totals: [CHURNERS, CHURNERS],
+            churn_writes: Mutex::new(None),
+            daemon: SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1),
+            obs: (0..CHURNERS).map(|_| Obs::new()).collect(),
+            extras: vec![Vec::new(); CHURNERS as usize],
+            parse_errors: AtomicU64::new(0),
+            churn_cycles: AtomicU64::new(0),
+            record_events: AtomicBool::new(true),
+        })
+    }
+
+    async fn finish_test_connection() -> (TcpStream, TcpStream) {
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let (client, server) = tokio::join!(
+            TcpStream::connect(listener.local_addr().unwrap()),
+            listener.accept()
+        );
+        (client.unwrap(), server.unwrap().0)
+    }
+
+    #[tokio::test]
+    async fn fleet_finish_writes_queued_updates_and_cease_then_drains_to_eof() {
+        let (client, mut server) = finish_test_connection().await;
+        let stub = start_stub(finish_test_ctx(), 0, client);
+        let update = announce_msgs(0, &[base_prefix(0)]).pop().unwrap();
+        stub.tx.send(update.clone()).await.unwrap();
+        stub.tx.send(update).await.unwrap();
+        let peer = tokio::spawn(async move {
+            let mut sent = Vec::new();
+            server.read_to_end(&mut sent).await.unwrap();
+            let mut sent = bytes::Bytes::from(sent);
+            let mut updates = 0;
+            let mut ceased = false;
+            while !sent.is_empty() {
+                assert!(!ceased, "no messages may follow final Cease");
+                match decode_message(&mut sent, MAX_MESSAGE_LEN).unwrap() {
+                    Message::Update(_) => updates += 1,
+                    Message::Notification(notification) => {
+                        assert_eq!(notification.code, NotificationCode::Cease);
+                        assert_eq!(notification.subcode, cease_subcode::ADMINISTRATIVE_SHUTDOWN);
+                        ceased = true;
+                    }
+                    Message::Keepalive => {}
+                    other => panic!("unexpected message: {other:?}"),
+                }
+            }
+            assert_eq!(updates, 2);
+            assert!(ceased);
+            // The stub's write EOF must leave its reader alive to consume
+            // pending daemon output before the daemon closes its half.
+            server
+                .write_all(&encode_message(&Message::Keepalive).unwrap())
+                .await
+                .unwrap();
+            server.shutdown().await.unwrap();
+        });
+        finish_fleet(vec![stub], Vec::new(), Duration::from_secs(2))
+            .await
+            .unwrap();
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fleet_finish_rejects_truncated_daemon_eof() {
+        let (client, mut server) = finish_test_connection().await;
+        let stub = start_stub(finish_test_ctx(), 0, client);
+        let peer = tokio::spawn(async move {
+            let mut sent = Vec::new();
+            server.read_to_end(&mut sent).await.unwrap();
+            server.write_all(&[0xff]).await.unwrap();
+            server.shutdown().await.unwrap();
+        });
+        let error = finish_fleet(vec![stub], Vec::new(), Duration::from_secs(2))
+            .await
+            .unwrap_err();
+        assert!(error.contains("EOF in daemon frame"), "{error}");
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_refresh_task_marks_the_actual_reader_session_down() {
+        let (client, mut server) = finish_test_connection().await;
+        let ctx = finish_test_ctx();
+        ctx.obs[0].established.store(true, Ordering::Relaxed);
+        let stub = start_stub(Arc::clone(&ctx), 0, client);
+        let failed = stub.refreshes.lock().unwrap().spawn(async {
+            panic!("fixture refresh failure");
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !failed.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        server
+            .write_all(
+                &encode_message(&Message::RouteRefresh(RouteRefreshMessage::new(
+                    Afi::Ipv4,
+                    Safi::Unicast,
+                )))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(2), stub.reader)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(error.contains("fixture refresh failure"), "{error}");
+        assert!(!ctx.obs[0].established.load(Ordering::Relaxed));
+        assert!(stub.refreshes.lock().unwrap().is_empty());
+        stub.writer.abort();
+        assert!(stub.writer.await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn fleet_finish_reports_read_write_and_join_failures() {
+        for failure in ["read: fixture error", "write: fixture error", "join"] {
+            let (tx, mut rx) = mpsc::channel(1);
+            let reader = tokio::spawn(async move {
+                if failure == "join" {
+                    panic!("fixture task failure");
+                }
+                if failure.starts_with("read") {
+                    Err(failure.into())
+                } else {
+                    Ok(())
+                }
+            });
+            let writer = tokio::spawn(async move {
+                rx.recv().await.unwrap();
+                if failure.starts_with("write") {
+                    Err(failure.into())
+                } else {
+                    Ok(())
+                }
+            });
+            let stub = Stub {
+                tx,
+                reader,
+                writer,
+                refreshes: Arc::new(Mutex::new(tokio::task::JoinSet::new())),
+            };
+            let error = finish_fleet(vec![stub], Vec::new(), Duration::from_secs(2))
+                .await
+                .unwrap_err();
+            assert!(
+                error.contains(if failure == "join" {
+                    "fixture task failure"
+                } else {
+                    failure
+                }),
+                "{error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fleet_finish_timeout_aborts_and_reaps_every_owned_task() {
+        struct TaskGuard(Arc<AtomicU32>);
+        impl Drop for TaskGuard {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        let live = Arc::new(AtomicU32::new(4));
+        let reader_guard = TaskGuard(Arc::clone(&live));
+        let reader = tokio::spawn(async move {
+            let _guard = reader_guard;
+            std::future::pending::<Result<(), String>>().await
+        });
+        let (tx, mut rx) = mpsc::channel(1);
+        let writer_guard = TaskGuard(Arc::clone(&live));
+        let writer = tokio::spawn(async move {
+            let _guard = writer_guard;
+            rx.recv().await.unwrap();
+            std::future::pending::<Result<(), String>>().await
+        });
+        let refreshes = Arc::new(Mutex::new(tokio::task::JoinSet::new()));
+        let refresh_guard = TaskGuard(Arc::clone(&live));
+        refreshes.lock().unwrap().spawn(async move {
+            let _guard = refresh_guard;
+            std::future::pending::<()>().await;
+        });
+        let churn_guard = TaskGuard(Arc::clone(&live));
+        let churn = tokio::spawn(async move {
+            let _guard = churn_guard;
+            std::future::pending::<()>().await;
+        });
+        let error = finish_fleet(
+            vec![Stub {
+                tx,
+                reader,
+                writer,
+                refreshes,
+            }],
+            vec![churn],
+            Duration::from_millis(10),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("timed out"), "{error}");
+        assert_eq!(
+            live.load(Ordering::SeqCst),
+            0,
+            "all task futures must be dropped before cleanup returns"
+        );
+    }
 
     fn test_open(asn: u32) -> Vec<u8> {
         encode_message(&Message::Open(OpenMessage {

@@ -40,6 +40,12 @@ evidence barrier and churn begin; convergence-only keeps it armed through the
 ready/ack evidence boundary and rechecks it before exiting. One
 `first_exact_bitmap` receipt records the mode and fleet coverage.
 
+After all measurements and any final evidence acknowledgment, successful runs
+stop and join churn tasks, send each stub a final Cease, and keep receiving
+daemon output until EOF. One 15-second deadline bounds the fleet cleanup.
+Read, write, or task failures and cleanup timeouts fail the run; remaining
+reader, writer, and refresh tasks are canceled and joined before exit.
+
 Depends only on `crates/wire` (wire encode/decode for the stub sessions).
 
 ## Backs
