@@ -11,6 +11,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.70.0] — YYYY-MM-DD
+
 ### Added
 
 - Authenticated `ControlService.CheckLiveness` and `rbgp health --liveness`
@@ -254,6 +256,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   exact Loc-RIB count and the existing transition-age limit.
 
 ### Upgrade notes
+
+- The container healthcheck now checks gRPC liveness with `rbgp health
+  --liveness`. Deployments that require core-actor readiness should override
+  it with `--health-cmd='rbgp health'`. Ordinary `rbgp health` retains its
+  readiness checks.
 
 - Consumers of `GetPolicyStats` or `rbgp policy stats` should use the installed
   peer rows. The daemon no longer reports a `global` export fallback row.

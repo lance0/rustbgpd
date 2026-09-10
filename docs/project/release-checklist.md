@@ -156,10 +156,9 @@ release:
       forgotten regeneration fails the build instead of drifting
       silently.
 - [ ] **No method sits at `read` unless it is pure liveness with zero
-      topology / route / policy / state disclosure.** The tier is
-      currently empty by design — anything read-only that exposes the
-      network belongs at `sensitive_read`. A new method landing at
-      `read` is the most likely under-tiering mistake; scrutinize it.
+      topology / route / policy / state disclosure.** `CheckLiveness`
+      occupies this tier. Read-only methods that expose the network belong
+      at `sensitive_read`; scrutinize every new method assigned `read`.
 - [ ] **Every event / explain / route-listing surface is
       `sensitive_read`+** — `WatchEvents`, `SubscribeFromEvent`,
       `List*Events`, `Explain*`, `List*Routes`, gNMI `Subscribe`. These
@@ -700,7 +699,9 @@ Before rolling any versions:
 - [ ] Preview the release workflow's extracted and reflowed GitHub release body
       and confirm it preserves the `### Upgrade notes` heading and its entries.
 
-1. Update `CHANGELOG.md` with the new version section
+1. Update `CHANGELOG.md` with the new version section (`## [X.Y.Z]`, without
+   a leading `v`) and the actual release date in UTC. Leave a fresh
+   `[Unreleased]` section above it.
 2. **Verify changelog completeness**: run `git log <prev-tag>..HEAD --oneline`
    and confirm every user-visible change (features, fixes, interop suites) is
    listed under the new version — not misattributed to a prior release. Check
@@ -716,6 +717,15 @@ Before rolling any versions:
      selected by their own crate manifests and release steps; never align them
      to the daemon workspace bump. Retain both `path` and `version` so
      downstream publish dry-runs resolve from crates.io.
+   - Refresh root `Cargo.lock` and `bench/scale/Cargo.lock` for the new
+     workspace package versions without updating unrelated dependencies.
+   - Move `docs/reference/v1-stable-surface.json` `baseline_release` with
+     the workspace version. For a new release line, append the consecutive
+     upgrade exercise using the previous release's immutable fixture and
+     parser test. Keep the README baseline aligned; preserve older exercises.
+   - Update the workspace release and target changelog section in
+     `scripts/check_metric_release_notes.py` and its companion test. Keep
+     the released metric baseline until a newer release has actually shipped.
    - `crates/wire/Cargo.toml`: bump **only** if `crates/wire/src/` changed
      since the last wire publish (see semver rules in the next section).
      Land the wire bump in its **own commit** before the workspace bump so
@@ -723,9 +733,11 @@ Before rolling any versions:
 4. Run the full checklist above (fmt, clippy `-D warnings`, test, doc
    `-D warnings`, release build)
 5. Commit the final release candidate (workspace):
-   `release: prep vX.Y.Z — bump workspace, roll CHANGELOG`
+   `chore(release): prepare vX.Y.Z`
 6. Push the final release candidate to `main`: `git push origin main`.
-7. Wait for every applicable gate to pass on that exact final `main` SHA.
+7. Wait for every applicable gate to pass on that exact final `main` SHA,
+   including the stable-surface and metric release-note checks. The
+   tag-triggered publication workflows do not run those Python checks.
    When an independently published crate changed, manually dispatch
    `semver-checks.yml` at the release commit because it has no push trigger.
    - If this cycle touched `.github/workflows/release.yml`, run the
