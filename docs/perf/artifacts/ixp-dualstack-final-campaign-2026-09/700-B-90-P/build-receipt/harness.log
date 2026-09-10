@@ -1,0 +1,3 @@
+   Compiling rustbgpd-wire v0.20.0 (/tmp/campaign-source/crates/wire)
+   Compiling reloadstall v0.1.0 (/tmp/campaign-source/bench/scale/reloadstall)
+    Finished `release` profile [optimized + debuginfo] target(s) in 3.55s
