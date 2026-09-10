@@ -260,10 +260,13 @@ recheck_cell_provenance() {
 # `epoch_s,[prefix,]latency_ms,exit`. They measure responsiveness of the
 # management plane while the fleet reloads; they never gate the cell.
 probe_health_loop() {
-    local addr=$1 out=$2
+    local addr=$1 out=$2 stopping=0
+    # Bash runs this trap after the foreground CLI returns. Preserve that
+    # command's complete measurement before stopping; never orphan its RPC.
+    trap 'stopping=1' INT TERM
     echo "epoch_s,latency_ms,exit" >"$out"
     : >"$out.stderr.log"
-    while :; do
+    while [ "$stopping" -eq 0 ]; do
         local t0 t1 rc
         t0=$(date +%s.%N)
         printf "probe_start epoch_s=%s\n" "$t0" >>"$out.stderr.log"
@@ -272,16 +275,20 @@ probe_health_loop() {
         t1=$(date +%s.%N)
         awk -v a="$t0" -v b="$t1" -v rc="$rc" \
             'BEGIN {printf "%s,%.1f,%d\n", a, (b - a) * 1000, rc}' >>"$out"
+        [ "$stopping" -eq 0 ] || break
         sleep 0.05
     done
+    return 0
 }
 probe_query_loop() {
-    local addr=$1 out=$2
+    local addr=$1 out=$2 stopping=0
+    trap 'stopping=1' INT TERM
     shift 2
     echo "epoch_s,prefix,latency_ms,exit" >"$out"
-    while :; do
+    while [ "$stopping" -eq 0 ]; do
         local prefix t0 t1 rc
         for prefix in "$@"; do
+            [ "$stopping" -eq 0 ] || break
             t0=$(date +%s.%N)
             "$RBGP" --addr "$addr" rib --prefix "$prefix" >/dev/null 2>&1
             rc=$?
@@ -289,8 +296,10 @@ probe_query_loop() {
             awk -v a="$t0" -v p="$prefix" -v b="$t1" -v rc="$rc" \
                 'BEGIN {printf "%s,%s,%.1f,%d\n", a, p, (b - a) * 1000, rc}' >>"$out"
         done
+        [ "$stopping" -eq 0 ] || break
         sleep 0.25
     done
+    return 0
 }
 
 # run_cell <cell>: everything for one matrix cell. Nonzero return = cell
@@ -424,21 +433,46 @@ run_cell() {
     [ -z "$rc" ] && rc=$hrc
 
     # Collect artifacts, then teardown.
-    kill "$sampler_pid" 2>/dev/null
+    local cleanup_rc=0 child_rc p
+    kill "$sampler_pid" 2>/dev/null || true
     for p in "${probe_pids[@]}"; do
-        kill "$p" 2>/dev/null
+        kill "$p" 2>/dev/null || true
     done
+    # Signal every probe before waiting. Each loop owns its current CLI until
+    # the response and CSV row finish, so no client survives daemon shutdown.
+    for p in "${probe_pids[@]}"; do
+        wait "$p"
+        child_rc=$?
+        if [ "$child_rc" -ne 0 ]; then
+            echo "cell $cell: probe loop $p exited $child_rc during cleanup" >&2
+            cleanup_rc=1
+        fi
+    done
+    wait "$sampler_pid"
+    child_rc=$?
+    if [ "$child_rc" -ne 0 ] && [ "$child_rc" -ne 143 ]; then
+        echo "cell $cell: RSS sampler exited $child_rc during cleanup" >&2
+        cleanup_rc=1
+    fi
     if [ -n "$container" ]; then
-        docker logs "$container" >"$cdir/daemon.log" 2>&1
-        docker rm -f "$container" >/dev/null 2>&1
+        docker logs "$container" >"$cdir/daemon.log" 2>&1 || cleanup_rc=1
+        docker rm -f "$container" >/dev/null 2>&1 || cleanup_rc=1
     else
         # Peak resident set over the whole cell, from the kernel's own
         # high-water mark, before the daemon goes away.
-        grep -E '^(VmHWM|VmRSS):' "/proc/$daemon_pid/status" >"$cdir/vmhwm" 2>/dev/null
-        kill "$daemon_pid" 2>/dev/null
+        grep -E '^(VmHWM|VmRSS):' "/proc/$daemon_pid/status" >"$cdir/vmhwm" 2>/dev/null || cleanup_rc=1
+        kill "$daemon_pid" 2>/dev/null || true
+        wait "$daemon_pid"
+        child_rc=$?
+        printf '%s\n' "$child_rc" >"$cdir/daemon.exit" || cleanup_rc=1
+        if [ "$child_rc" -ne 0 ]; then
+            echo "cell $cell: daemon exited $child_rc during cleanup" >&2
+            cleanup_rc=1
+        fi
     fi
-    cp -r "$run" "$cdir/scenario"
-    echo "cell $cell: harness rc=$rc (artifacts: $cdir)"
+    cp -r "$run" "$cdir/scenario" || cleanup_rc=1
+    [ "$rc" -ne 0 ] || rc=$cleanup_rc
+    echo "cell $cell: harness rc=$hrc cleanup rc=$cleanup_rc cell rc=$rc (artifacts: $cdir)"
     [ "$rc" -ne 0 ] || recheck_cell_provenance "$cell" || return 1
     return "$rc"
 }
