@@ -1,0 +1,8 @@
+acquired host lock: /tmp/measurement-user/.local/state/rustbgpd-host.lock
+host quiet: retained two accepted samples in /tmp/campaign-700-A-90-P/rustbgpd/quiet.tsv
+=== cell rustbgpd start 2026-09-10T13:01:46-04:00 ===
+wrote /tmp/ixp-rustbgpd/config.toml (700 neighbors), member.rpol, gen-a.rpol, gen-b.rpol; listen_port=1790, changed_peers=600, stable_peers=100, grpc_uds=/tmp/ixp-rustbgpd/grpc.sock, dualstack(ipv4_unicast+ipv6_unicast)
+cell rustbgpd: harness rc=0 cleanup rc=0 cell rc=0 (artifacts: /tmp/campaign-700-A-90-P/rustbgpd)
+=== cell rustbgpd PASS 2026-09-10T13:04:05-04:00 ===
+cool-down 300s
+matrix done; per-cell status under /tmp/campaign-700-A-90-P/*/status
