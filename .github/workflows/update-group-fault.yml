@@ -26,7 +26,6 @@ jobs:
           toolchain: stable
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
           key: update-group-fault
       - name: Verify exact ignored corpus test exists
         shell: bash
