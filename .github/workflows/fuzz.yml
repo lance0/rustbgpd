@@ -41,6 +41,8 @@ jobs:
         with:
           toolchain: ${{ steps.nightly.outputs.toolchain }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo install cargo-fuzz --version 0.13.2 --locked
       - name: Restore bounded wire corpus cache
         id: wire-corpus-restore

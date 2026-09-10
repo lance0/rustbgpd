@@ -49,6 +49,8 @@ jobs:
           toolchain: stable
       - uses: ./.github/actions/install-protobuf
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo test --locked --workspace
 
   build:

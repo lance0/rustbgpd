@@ -77,6 +77,8 @@ jobs:
           toolchain: stable
       - uses: ./.github/actions/install-protobuf
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Test release install contract
         run: python3 scripts/test_check_release_install_contract.py
       - name: Check repository release install contract

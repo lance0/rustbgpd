@@ -135,7 +135,10 @@ jobs:
           toolchain: stable
           components: rustfmt, clippy
       - uses: ./.github/actions/install-protobuf
+      # PRs restore main caches; only main saves Rust artifacts to limit duplication.
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Prove exact fail-closed fuzz target inventory
         run: |
           python3 -m unittest -v scripts/test_check_fuzz_target_inventory.py
@@ -373,6 +376,8 @@ jobs:
           toolchain: stable
       - uses: ./.github/actions/install-protobuf
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Download verified v0.64 validator archive
         uses: actions/download-artifact@v8
         with:
@@ -411,6 +416,8 @@ jobs:
           components: rustfmt, clippy
       - uses: ./.github/actions/install-protobuf
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install receipt-tool dependencies
         run: |
           sudo apt-get update
@@ -570,6 +577,7 @@ jobs:
       - uses: ./.github/actions/install-protobuf
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           # Distinct cache key from the `check` job so MSRV builds don't
           # share artifacts compiled by stable rustc.
           key: msrv-1.95
