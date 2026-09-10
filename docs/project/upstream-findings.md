@@ -1,4 +1,4 @@
-# Upstream findings (GoBGP, pmacct, SR Linux)
+# Upstream findings (GoBGP, pmacct, SR Linux, FRRouting)
 
 > **Document class: HISTORICAL.** This page preserves a dated decision or observation; its age and scope are part of the evidence.
 
@@ -155,6 +155,45 @@ Found while validating the M81 BMP trio receipt against
 
 ---
 
-*Last updated alongside the M82 SR Linux VLAN-aware-bundle interop
+# Upstream findings (FRRouting)
+
+Found while validating the M110 EVPN symmetric-IRB leg over an IPv6-only
+VXLAN underlay.
+
+## 8. EVPN `advertise-pip` emits the IPv4 router-id as an IPv6 next hop, and the wrong value latches
+
+- **Version:** `quay.io/frrouting/frr:10.7.1` (the pinned interop image) and
+  FRR master at `7f6e92ece0`; no released version carries a fix.
+- **Behavior:** with `advertise-pip` active (the default), the Type 5 next hop
+  is sometimes emitted as `a6e:2::` — the IPv4 `bgp router-id 10.110.0.2`
+  (`0a 6e 00 02`) zero-padded into the 16-octet IPv6 field. FRRouting/frr#23268
+  confirms two causes: the IPv4 router-id is used as an IPv6 next hop with no
+  address-family check, and the PIP system IP is never recalculated on state
+  change. The wrong value persists on re-read; it does not converge late. The
+  originator IP is correct on every run, latched or not, so the tunnel source
+  is available and simply unused.
+- **Repro sketch:** fresh deploy with the kernel VRF, L3VNI, bridge, SVI and
+  tenant loopback present before FRR boots and the peer coming up about 1.7 s
+  later — 64 of 300 deploys on 10.7.1, 25 of 150 on master. The fault appears
+  only when `show bgp l2vpn evpn vni <vni>` reports a System-MAC differing
+  from the Router-MAC (89 of 89 affected runs across both builds, no
+  exceptions), which marks a session that took the anycast-MAC PIP path.
+- **Fix status:** proposed in FRRouting/frr#23299, open and unmerged. Against
+  the same reproduction it produced the wrong next hop in 0 of 150 deploys,
+  30 of which still entered the affected path by the MAC-divergence signal, so
+  the path was exercised. System-IP recalculation on a loopback address change
+  was confirmed with no L3VNI or VXLAN flap required. SVI Type 2 routes were
+  not exercised.
+- **Workaround:** `tests/interop/configs/frr-bgpd-m110-pe2.conf` carries
+  `no advertise-pip`, which selects the IPv6 originator IP and avoids the path
+  entirely. This is the current workaround, to revisit when the image pin
+  moves past a release containing the fix.
+- **Severity:** correctness — the wrong next hop is advertised to peers and
+  latches, so a fabric can carry an unreachable next hop until the session or
+  interface is bounced.
+
+---
+
+*Last updated alongside the M110 FRR EVPN IPv6-underlay interop
 work. See `tests/interop/` fixture comments for the in-place
 documentation of each workaround.*
