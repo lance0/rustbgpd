@@ -452,5 +452,50 @@ for case, daemon_exit, failed_owner in [("normal", 0, 0), ("daemon-failure", 9, 
         process.wait()
         selector.close()
         os.close(events_fd)
+
+# A process that deliberately ignores TERM must still be killed and reaped.
+# Pass the short bound directly to the production helper, not an env knob.
+fixture = tmp / "daemon-timeout"
+fixture.mkdir()
+stubborn = fixture / "daemon.py"
+stubborn.write_text("""import signal
+import sys
+from pathlib import Path
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+Path(sys.argv[1]).write_text("ready\\n")
+while True:
+    signal.pause()
+""")
+timeout_driver = fixture / "driver.sh"
+timeout_driver.write_text('''#!/usr/bin/env bash
+set -u
+source "$1"
+python3 "$2/daemon.py" "$2/ready" &
+pid=$!
+printf '%s\\n' "$pid" >"$2/pid"
+while [ ! -e "$2/ready" ]; do sleep 0.01; done
+stop_native_daemon "$pid" "$2/daemon.exit" 1
+exit "$?"
+''')
+process = subprocess.Popen(["bash", str(timeout_driver), str(library), str(fixture)],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           start_new_session=True)
+try:
+    stdout, stderr = process.communicate(timeout=5)
+    assert process.returncode == 1, (stdout, stderr)
+    assert (fixture / "daemon.exit").read_text() == "137\n"
+    assert "did not exit within 1s after SIGTERM; sending SIGKILL" in stderr.decode()
+    try:
+        os.kill(int((fixture / "pid").read_text()), 0)
+    except ProcessLookupError:
+        pass
+    else:
+        raise AssertionError("TERM-ignoring daemon survived bounded cleanup")
+finally:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait()
 PY
 echo "scale provenance tests pass"

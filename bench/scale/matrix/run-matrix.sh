@@ -302,6 +302,31 @@ probe_query_loop() {
     return 0
 }
 
+# Bound native process teardown independently of the daemon's actor deadlines.
+# The optional duration is for short companion fixtures; cells always use 60s.
+stop_native_daemon() {
+    local pid=$1 exit_file=$2 timeout_secs=${3:-60}
+    local deadline=$((SECONDS + timeout_secs)) timed_out=0 child_rc
+    kill "$pid" 2>/dev/null || true
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            echo "daemon $pid did not exit within ${timeout_secs}s after SIGTERM; sending SIGKILL" >&2
+            timed_out=1
+            kill -KILL "$pid" 2>/dev/null || true
+            break
+        fi
+        sleep 0.1
+    done
+    wait "$pid"
+    child_rc=$?
+    printf '%s\n' "$child_rc" >"$exit_file" || return 1
+    if [ "$child_rc" -ne 0 ]; then
+        echo "daemon $pid exited $child_rc during cleanup" >&2
+        return 1
+    fi
+    [ "$timed_out" -eq 0 ]
+}
+
 # run_cell <cell>: everything for one matrix cell. Nonzero return = cell
 # failed; the campaign moves on.
 run_cell() {
@@ -461,14 +486,7 @@ run_cell() {
         # Peak resident set over the whole cell, from the kernel's own
         # high-water mark, before the daemon goes away.
         grep -E '^(VmHWM|VmRSS):' "/proc/$daemon_pid/status" >"$cdir/vmhwm" 2>/dev/null || cleanup_rc=1
-        kill "$daemon_pid" 2>/dev/null || true
-        wait "$daemon_pid"
-        child_rc=$?
-        printf '%s\n' "$child_rc" >"$cdir/daemon.exit" || cleanup_rc=1
-        if [ "$child_rc" -ne 0 ]; then
-            echo "cell $cell: daemon exited $child_rc during cleanup" >&2
-            cleanup_rc=1
-        fi
+        stop_native_daemon "$daemon_pid" "$cdir/daemon.exit" || cleanup_rc=1
     fi
     cp -r "$run" "$cdir/scenario" || cleanup_rc=1
     [ "$rc" -ne 0 ] || rc=$cleanup_rc
