@@ -825,6 +825,20 @@ python3 -m unittest -v scripts/test_check_embedding_versions.py
 python3 scripts/check_embedding_versions.py
 ```
 
+For a coordinated wire compatibility-line change, validate all three prepared
+packages together before publishing:
+
+```bash
+cargo publish --locked --dry-run --all-features \
+  -p rustbgpd-wire -p rustbgpd-fsm -p rustbgpd-rpki
+```
+
+Cargo's multi-package dry-run verifies the normalized packages against a
+temporary local registry, so FSM and RPKI can resolve the prepared wire version
+without uploading it. Actual publication still follows wire, then FSM and RPKI;
+an individual dependent-only package or dry-run needs the new wire version in
+the registry. Run these checks from the final committed source.
+
 ### rustbgpd-wire crate release
 
 The wire crate has its own version in `crates/wire/Cargo.toml`, decoupled

@@ -79,6 +79,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Prepare the independently versioned `rustbgpd-wire` 0.21.0 crate with
+  additive UPDATE error-context APIs and diagnostic refinements, alongside
+  `rustbgpd-fsm` 0.8.0 and `rustbgpd-rpki` 0.3.0 for the matching public
+  wire-type boundary. Registry examples remain on the last verified
+  published versions until those releases are published.
+
 - The container healthcheck now uses `rbgp health --liveness`: it checks gRPC
   responsiveness rather than core-actor readiness. Override it with
   `--health-cmd='rbgp health'` to retain the previous probe. Successful `read`
@@ -256,6 +262,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   exact Loc-RIB count and the existing transition-age limit.
 
 ### Upgrade notes
+
+- Embedders using the prepared wire 0.21, FSM 0.8, or RPKI 0.3 source
+  versions must upgrade dependencies that exchange public wire types together.
+  The wire additions preserve existing parse and validation signatures, but
+  the new 0.x dependency line gives those types a different crate identity.
 
 - The container healthcheck now checks gRPC liveness with `rbgp health
   --liveness`. Deployments that require core-actor readiness should override

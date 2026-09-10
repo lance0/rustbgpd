@@ -7,8 +7,9 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd). Requires Rust 1.95 or
 newer. Release-by-release crate changes are recorded in the
 [changelog](CHANGELOG.md).
 
-The `0.2.0` compatibility line uses wire `0.20.0`. Its public wire types
-belong to that compatibility line; upgrade dependencies that exchange those types together.
+The source checkout prepares the `0.3.0` compatibility line with wire `0.21.0`.
+Upgrade dependencies that exchange public wire types together. This dependency
+move introduces no direct RPKI API or runtime behavior changes.
 
 ## What this crate provides
 
@@ -60,8 +61,8 @@ from one rustbgpd checkout:
 
 ```toml
 [dependencies]
-rustbgpd-rpki = { version = "0.2.0", path = "../rustbgpd/crates/rpki" }
-rustbgpd-wire = { version = "0.20.0", path = "../rustbgpd/crates/wire" }
+rustbgpd-rpki = { version = "0.3.0", path = "../rustbgpd/crates/rpki" }
+rustbgpd-wire = { version = "0.21.0", path = "../rustbgpd/crates/wire" }
 ```
 
 ```rust

@@ -597,9 +597,9 @@ does not mean no newer individual crate exists on the registry.
 <!-- published-crate-versions:start -->
 | Crate | Published examples | Working tree |
 |---|---|---|
-| `rustbgpd-wire` | `0.20.0` | `0.20.0` |
-| `rustbgpd-fsm` | `0.7.0` | `0.7.0` |
-| `rustbgpd-rpki` | `0.2.0` | `0.2.0` |
+| `rustbgpd-wire` | `0.20.0` | `0.21.0` |
+| `rustbgpd-fsm` | `0.7.0` | `0.8.0` |
+| `rustbgpd-rpki` | `0.2.0` | `0.3.0` |
 <!-- published-crate-versions:end -->
 
 After changing manifests, run `python3 scripts/check_embedding_versions.py --write`
@@ -612,15 +612,17 @@ The checker without either flag is read-only and offline.
 
 The ordering rules that govern these publishes are:
 
-- Publish `rustbgpd-wire` first, then verify it is registry-visible. Only then
-  run the fully verified package/dry-run gates for `rustbgpd-fsm` and
-  `rustbgpd-rpki`. Cargo normalizes their path dependencies to a caret
-  requirement on the wire version, so either full package verify may fail to
-  resolve before that wire release is present in the registry.
+- Before publishing a coordinated set, select all three crates in one
+  `cargo publish --locked --dry-run --all-features` command. Cargo verifies
+  the normalized packages against a temporary local registry, including the
+  prepared wire dependency. The release checklist gives the full command.
+- Publish `rustbgpd-wire` first, then verify it is registry-visible before
+  publishing FSM or RPKI. An individual dependent-only package/dry-run needs
+  that wire version in the registry because Cargo normalizes its path
+  dependency to a version requirement.
 - Keep the dependency examples in §3 pinned to the versions actually available
   from crates.io — never to a version not yet published.
-- Publish a changed wire compatibility line before packaging either FSM or RPKI
-  against it. FSM and RPKI do not depend on each other.
+- FSM and RPKI do not depend on each other.
 - All three crates keep their package metadata and README; the README is the
   rendered crates.io landing page and carries the compatibility boundary.
 - Treat any additional crate publish as separate, demand-gated work.
