@@ -4,7 +4,8 @@
 #
 # Injections (both serialized by the engine, churn running throughout):
 #   - a real SIGHUP policy-file reload every RELOAD_INTERVAL_SEC, each one
-#     verified by the engine's generation-marker completion barriers;
+#     verified by the engine's generation-marker barriers and terminal
+#     daemon SIGHUP outcome;
 #   - a max-prefix trip/timed-restart cycle every TRIP_INTERVAL_SEC on the
 #     designated member (stub 0, 127.1.0.1): announce over the configured
 #     max_prefixes bound -> Cease teardown -> hold-down countdown -> the
@@ -390,6 +391,8 @@ handle_line() {
         cycle_log "reload ${BASH_REMATCH[1]} issued"
     elif [[ $line =~ ^reloadstall_csv,([0-9]+), ]]; then
         cycle_log "reload ${BASH_REMATCH[1]} complete"
+    elif [[ $line =~ ^FAIL:\ reload\ ([0-9]+)\ (.*)$ ]]; then
+        abort "reload ${BASH_REMATCH[1]} failed: ${BASH_REMATCH[2]}"
     elif [[ $line =~ ^trip\ ([0-9]+)\ announce_over\  ]]; then
         trip_begin "${BASH_REMATCH[1]}"
     elif [[ $line =~ ^trip\ ([0-9]+)\ torn_down\  ]]; then
@@ -624,6 +627,7 @@ main() {
     log "daemon ready"
 
     RELOADSTALL_CYCLE_QUIESCE_SECS=$RELOAD_INTERVAL_SEC \
+        RELOADSTALL_RELOAD_METRICS_ADDR="127.0.0.1:${METRICS_PORT}" \
         RELOADSTALL_TRIP_EVERY=$TRIP_EVERY \
         RELOADSTALL_TRIP_PREFIXES=$TRIP_PREFIXES \
         RELOADSTALL_TRIP_REESTABLISH_SECS=$TRIP_REESTABLISH_SEC \
